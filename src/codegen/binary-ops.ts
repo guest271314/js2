@@ -1777,8 +1777,10 @@ export function compileBinaryExpression(
       addUnionImports(ctx);
       const typeofNum = ctx.funcMap.get("__typeof_number")!;
       const typeofBool = ctx.funcMap.get("__typeof_boolean")!;
+      const typeofBigint = ctx.funcMap.get("__typeof_bigint")!;
       const unboxNum = ctx.funcMap.get("__unbox_number")!;
       const unboxBool = ctx.funcMap.get("__unbox_boolean")!;
+      const toBigint = ctx.funcMap.get("__to_bigint")!;
 
       // Coerce both operands to externref temps (right is on top of stack).
       const rTmp = allocTempLocal(fctx, { kind: "externref" });
@@ -1827,39 +1829,58 @@ export function compileBinaryExpression(
                 { op: "i32.eq" } as Instr,
               ],
               else: [
-                // ── reference identity ──
-                // Both must be WasmGC eqref for ref.eq; otherwise unequal.
+                // ── bigint? ──
                 { op: "local.get", index: lTmp },
-                { op: "any.convert_extern" } as Instr,
+                { op: "call", funcIdx: typeofBigint } as Instr,
                 { op: "local.get", index: rTmp },
-                { op: "any.convert_extern" } as Instr,
-                ...(() => {
-                  const lAny = allocTempLocal(fctx, { kind: "anyref" });
-                  const rAny = allocTempLocal(fctx, { kind: "anyref" });
-                  const seq: Instr[] = [
-                    { op: "local.set", index: rAny },
-                    { op: "local.tee", index: lAny },
-                    { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
-                    { op: "local.get", index: rAny },
-                    { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
-                    { op: "i32.and" } as Instr,
-                    {
-                      op: "if",
-                      blockType: { kind: "val", type: { kind: "i32" } },
-                      then: [
-                        { op: "local.get", index: lAny },
-                        { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+                { op: "call", funcIdx: typeofBigint } as Instr,
+                { op: "i32.and" } as Instr,
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: { kind: "i32" } },
+                  then: [
+                    { op: "local.get", index: lTmp },
+                    { op: "call", funcIdx: toBigint },
+                    { op: "local.get", index: rTmp },
+                    { op: "call", funcIdx: toBigint },
+                    { op: "i64.eq" } as Instr,
+                  ],
+                  else: [
+                    // ── reference identity ──
+                    // Both must be WasmGC eqref for ref.eq; otherwise unequal.
+                    { op: "local.get", index: lTmp },
+                    { op: "any.convert_extern" } as Instr,
+                    { op: "local.get", index: rTmp },
+                    { op: "any.convert_extern" } as Instr,
+                    ...(() => {
+                      const lAny = allocTempLocal(fctx, { kind: "anyref" });
+                      const rAny = allocTempLocal(fctx, { kind: "anyref" });
+                      const seq: Instr[] = [
+                        { op: "local.set", index: rAny },
+                        { op: "local.tee", index: lAny },
+                        { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
                         { op: "local.get", index: rAny },
-                        { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
-                        { op: "ref.eq" } as Instr,
-                      ],
-                      else: [{ op: "i32.const", value: 0 }],
-                    } as Instr,
-                  ];
-                  releaseTempLocal(fctx, lAny);
-                  releaseTempLocal(fctx, rAny);
-                  return seq;
-                })(),
+                        { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+                        { op: "i32.and" } as Instr,
+                        {
+                          op: "if",
+                          blockType: { kind: "val", type: { kind: "i32" } },
+                          then: [
+                            { op: "local.get", index: lAny },
+                            { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+                            { op: "local.get", index: rAny },
+                            { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+                            { op: "ref.eq" } as Instr,
+                          ],
+                          else: [{ op: "i32.const", value: 0 }],
+                        } as Instr,
+                      ];
+                      releaseTempLocal(fctx, lAny);
+                      releaseTempLocal(fctx, rAny);
+                      return seq;
+                    })(),
+                  ],
+                } as Instr,
               ],
             } as Instr,
           ],
