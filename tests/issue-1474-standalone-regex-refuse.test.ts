@@ -31,8 +31,8 @@ async function expectRefused(src: string): Promise<ReturnType<typeof compile>> {
 // #1539 Phase 2a narrowed these refusals: a static-pattern `RegExp.prototype.
 // test` now compiles to the pure-WasmGC backtracking VM (see
 // tests/issue-1539-standalone-regex.test.ts). The cases below are the residual
-// forms that are STILL refused — dynamic patterns, the String.prototype
-// regex-coercing methods (Phase 2c), and out-of-subset pattern features.
+// forms that are STILL refused — dynamic patterns, capture-materializing
+// String.prototype regex methods, and out-of-subset pattern features.
 describe("#1474/#1539 --target standalone still refuses (narrowed)", () => {
   it("rejects new RegExp(dynamicPattern, ...)", async () => {
     await expectRefused(`export function f(p: string): boolean { return new RegExp(p, "g").test("x"); }`);
@@ -60,12 +60,18 @@ describe("#1474/#1539 --target standalone still refuses (narrowed)", () => {
     expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   });
 
-  it("rejects s.split(regexArg) — Phase 2c", async () => {
-    await expectRefused(`export function f(s: string): number { const r = /,/; return s.split(r).length; }`);
+  it("compiles s.split(regexArg) — non-capturing Phase 2c slice", async () => {
+    const r = await compile(`export function f(s: string): number { const r = /,/; return s.split(r).length; }`, {
+      target: "standalone",
+    });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   });
 
-  it("rejects s.replace(regexArg, ...) — Phase 2c", async () => {
-    await expectRefused(`export function f(s: string): string { const r = /a/g; return s.replace(r, "b"); }`);
+  it("compiles s.replace(regexArg, literal) — Phase 2c slice", async () => {
+    const r = await compile(`export function f(s: string): string { const r = /a/g; return s.replace(r, "b"); }`, {
+      target: "standalone",
+    });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   });
 
   it("emits no env::RegExp_new import when refused", async () => {

@@ -1,9 +1,9 @@
 ---
 id: 1539
 title: "Standalone Wasm RegExp engine via regress (Phase 2 of #1474)"
-status: in-progress
+status: in-review
 created: 2026-05-20
-updated: 2026-06-03
+updated: 2026-06-06
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -14,6 +14,9 @@ goal: standalone-wasm
 sprint: 60
 depends_on: [1474]
 related: [1474, 682, 1535]
+claimed_by: codex-developer
+claimed_at: 2026-06-06T09:09:50.202Z
+pr: 1247
 ---
 # #1539 — Standalone Wasm RegExp engine via regress (Phase 2 of #1474)
 
@@ -542,3 +545,29 @@ Tests: `tests/issue-1539-standalone-regex.test.ts` (75 dual-run `.search`
 cases vs native + var-bound/`new RegExp` arg forms), narrowed the `s.search`
 refusal in `tests/issue-1474-standalone-regex-refuse.test.ts` to a
 compiles-OK assertion.
+
+## Implementation Notes (codex-developer, 2026-06-06) — Phase 2c non-capturing `String.prototype.split`
+
+Landed `String.prototype.split(/re/)` in standalone mode for backend-created
+static RegExp separators on the existing pure-WasmGC VM. The helper
+`__regex_split` mirrors the native string split vec shape (`ref_<AnyString>`)
+and uses `__regex_search` to find separator spans, returning a native
+`string[]` without `env.RegExp_new`, `env.string_split`, or `env.__make_iterable`
+imports.
+
+- Scope: regex literal / trusted var-bound RegExp / `new RegExp("static")`,
+  non-capturing separators only, no `limit` argument, and separators that cannot
+  match the empty string. This avoids silently mis-modeling capture interleaving
+  and zero-width split edge cases until the capture-array follow-up lands.
+- Refactor: consolidated standalone regex flag/subset validation so literal
+  struct emission and string-method routing share the same `g/i/y/m/s` support
+  and `u/v/d` refusal diagnostics.
+- Tests: extended `tests/issue-1539-standalone-regex.test.ts` with split
+  equivalence cases vs native RegExp plus var-bound / constructor forms and
+  narrowed refusals for capture groups, `limit`, and empty-match separators.
+  Updated `tests/issue-1474-standalone-regex-refuse.test.ts` so the now-supported
+  `split` and literal-replacement `replace` paths compile.
+
+Still open for #1539: capture-array materialization for `.exec`/`.match` and
+capture-interleaved `split`, `$`/function replacement semantics, `matchAll`, and
+the `d`/`u`/`v` plus lookaround/backreference/property-escape work.

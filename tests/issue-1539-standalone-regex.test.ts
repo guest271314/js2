@@ -133,6 +133,69 @@ describe("#1539 standalone String.prototype.search — no JS host, matches nativ
   });
 });
 
+async function standaloneSplit(pattern: string, flags: string, input: string): Promise<string[]> {
+  const inLit = JSON.stringify(input);
+  const src = `
+    const __parts: string[] = ${inLit}.split(/${pattern}/${flags});
+    export function count(): number { return __parts.length; }
+    export function len(i: number): number { return __parts[i]!.length; }
+    export function at(i: number, j: number): number { return __parts[i]!.charCodeAt(j); }
+  `;
+  const r = await compile(src, { fileName: "test.ts", target: "standalone" });
+  expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+  const mod = await WebAssembly.compile(r.binary);
+  const hostRegex = WebAssembly.Module.imports(mod).filter((i) => /RegExp|string_split|__make_iterable/.test(i.name));
+  expect(hostRegex, "no RegExp/string_split/iterable host import in standalone").toEqual([]);
+  const { instance } = await WebAssembly.instantiate(r.binary, {});
+  const ex = instance.exports as { count(): number; len(i: number): number; at(i: number, j: number): number };
+  const out: string[] = [];
+  for (let i = 0; i < ex.count(); i++) {
+    let part = "";
+    for (let j = 0; j < ex.len(i); j++) part += String.fromCharCode(ex.at(i, j));
+    out.push(part);
+  }
+  return out;
+}
+
+describe("#1539 standalone String.prototype.split — no JS host, matches native", () => {
+  const splitCases: Array<{ p: string; f: string; input: string }> = [
+    { p: ",", f: "", input: "a,b,c" },
+    { p: "[;,] *", f: "", input: "a, b; c" },
+    { p: "-+", f: "", input: "one--two---three" },
+    { p: "\\d+", f: "", input: "abc123def45" },
+    { p: "x", f: "i", input: "startXmidXend" },
+    { p: "^b$", f: "m", input: "a\nb\nc" },
+  ];
+  for (const { p, f, input } of splitCases) {
+    it(`${JSON.stringify(input)}.split(/${p}/${f})`, async () => {
+      expect(await standaloneSplit(p, f, input)).toEqual(input.split(new RegExp(p, f)));
+    });
+  }
+
+  it("var-bound RegExp argument", async () => {
+    const src = `
+      const re = /,+/;
+      const __parts: string[] = "a,,b,c".split(re);
+      export function run(): number { return __parts.length * 10 + __parts[1]!.length; }
+    `;
+    const r = await compile(src, { fileName: "test.ts", target: "standalone" });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as { run(): number }).run()).toBe(31);
+  });
+
+  it("new RegExp(...) argument", async () => {
+    const src = `
+      const __parts: string[] = "a--b-c".split(new RegExp("-+"));
+      export function run(): number { return __parts.length * 10 + __parts[2]!.length; }
+    `;
+    const r = await compile(src, { fileName: "test.ts", target: "standalone" });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as { run(): number }).run()).toBe(31);
+  });
+});
+
 describe("#1539 standalone narrowed refusals (Phase 2a)", () => {
   async function expectRefused(src: string): Promise<void> {
     const r = await compile(src, { target: "standalone" });
@@ -158,5 +221,14 @@ describe("#1539 standalone narrowed refusals (Phase 2a)", () => {
   });
   it("refuses indices flag (d, Phase 2d)", async () => {
     await expectRefused(`export function f(s: string): boolean { return /^a/d.test(s); }`);
+  });
+  it("refuses regex split with capturing groups", async () => {
+    await expectRefused(`export function f(s: string): number { return s.split(/(,)/).length; }`);
+  });
+  it("refuses regex split with a limit argument", async () => {
+    await expectRefused(`export function f(s: string): number { return s.split(/,/, 2).length; }`);
+  });
+  it("refuses regex split with empty-match separators", async () => {
+    await expectRefused(`export function f(s: string): number { return s.split(/a*/).length; }`);
   });
 });
