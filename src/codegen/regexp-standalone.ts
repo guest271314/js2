@@ -10,10 +10,11 @@
  * degenerate path of the VM. See the issue's "Implementation Notes (sd-1539)".
  *
  * Current slice: `RegExp` literals / `new RegExp(staticPattern, staticFlags)`,
- * `RegExp.prototype.test`, `String.prototype.search`, literal-string
+ * `RegExp.prototype.test`/non-global `.exec`, non-global
+ * `String.prototype.match`, `String.prototype.search`, literal-string
  * `replace`/`replaceAll`, and non-capturing regex `split`. Dynamic patterns,
- * `.exec`/`.match`/`matchAll`, capture-materializing string methods, and fancy
- * features stay narrowed refusals citing the later phase.
+ * global/sticky capture-array methods, `matchAll`, replacement substitutions,
+ * and fancy features stay narrowed refusals citing the later phase.
  */
 import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
@@ -22,6 +23,7 @@ import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
 import { ensureNativeStringHelpers, nativeStringType } from "./native-strings.js";
 import {
+  ensureRegexCaptureArray,
   ensureRegexReplace,
   ensureRegexSearch,
   ensureRegexSplit,
@@ -536,6 +538,8 @@ function isStandaloneRegExpValue(
 interface RegexSearchEmission {
   /** Local holding the (non-null) `$NativeRegExp` struct ref. */
   regexpLocal: number;
+  /** Local holding the flattened subject string. */
+  inputLocal: number;
   /** Local holding the populated caps array (length `2 * nGroups`). */
   capsLocal: number;
   /** The `$NativeRegExp` struct type index (== `ctx.structMap` entry). */
@@ -667,7 +671,7 @@ function emitRegexSearchCall(
   fctx.body.push({ op: "local.get", index: stickyLocal });
   fctx.body.push({ op: "local.get", index: capsLocal });
   fctx.body.push({ op: "call", funcIdx: searchIdx });
-  return { regexpLocal, capsLocal, structTypeIdx };
+  return { regexpLocal, inputLocal, capsLocal, structTypeIdx };
 }
 
 /** True when `argExpr`'s static type is string-like (or a String wrapper). */
@@ -709,6 +713,95 @@ export function tryCompileStandaloneRegExpTest(
   const emitted = emitRegexSearchCall(ctx, fctx, propAccess.expression, expr.arguments[0]!);
   if (emitted === null) return null;
   return { kind: "i32" };
+}
+
+function flagsHaveGlobalOrSticky(flags: string): boolean {
+  return flags.includes("g") || flags.includes("y");
+}
+
+/**
+ * Emit a call to `__regex_exec_array`, returning a nullable native string vec:
+ * `null` on no match, otherwise `[fullMatch, cap1, cap2, ...]` with unmatched
+ * captures represented as null native strings (the compiler's `undefined` for
+ * nullable native string slots).
+ */
+function emitRegexExecArrayCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  regexpExpr: ts.Expression,
+  inputExpr: ts.Expression,
+): ValType | null {
+  const emitted = emitRegexSearchCall(ctx, fctx, regexpExpr, inputExpr);
+  if (emitted === null) return null;
+
+  const captureArrayIdx = ensureRegexCaptureArray(ctx);
+  const nstrVecTypeIdx = ctx.vecTypeMap.get(`ref_${ctx.anyStrTypeIdx}`);
+  if (nstrVecTypeIdx === undefined) {
+    reportError(ctx, regexpExpr, "Codegen error: standalone RegExp exec missing native string vec type (#1539).");
+    return null;
+  }
+
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "ref_null", typeIdx: nstrVecTypeIdx } },
+    then: [
+      { op: "local.get", index: emitted.regexpLocal } as Instr,
+      { op: "struct.get", typeIdx: emitted.structTypeIdx, fieldIdx: RE_FIELD_NGROUPS } as Instr,
+      { op: "local.get", index: emitted.inputLocal } as Instr,
+      { op: "local.get", index: emitted.capsLocal } as Instr,
+      { op: "call", funcIdx: captureArrayIdx } as Instr,
+    ],
+    else: [{ op: "ref.null", typeIdx: nstrVecTypeIdx } as Instr],
+  } as Instr);
+  return { kind: "ref_null", typeIdx: nstrVecTypeIdx };
+}
+
+/**
+ * `RegExp.prototype.exec(str)` in standalone mode (#1539 Phase 2b).
+ *
+ * This slice materializes the capture array for backend-created static RegExp
+ * values with non-global/non-sticky flags. `g`/`y` require observable
+ * `lastIndex` mutation and stay refused until the dedicated lastIndex slice.
+ */
+export function tryCompileStandaloneRegExpExec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  propAccess: ts.PropertyAccessExpression,
+): InnerResult | undefined {
+  if (!ctx.standalone || propAccess.name.text !== "exec") return undefined;
+
+  const receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
+  if (!isGlobalRegExpType(receiverType)) return undefined;
+
+  if (!hasStandaloneRegExpEngine(ctx)) {
+    reportStandaloneRegExpUnsupported(ctx, expr, "RegExp.prototype.exec without an enabled standalone engine");
+    return null;
+  }
+  if (expr.arguments.length !== 1) {
+    reportStandaloneRegExpUnsupported(ctx, expr, "RegExp.prototype.exec arities other than one string argument");
+    return null;
+  }
+  if (!isStringLikeArg(ctx, expr.arguments[0]!)) {
+    reportStandaloneRegExpUnsupported(ctx, expr.arguments[0]!, "RegExp.prototype.exec argument coercion");
+    return null;
+  }
+
+  const flags = staticRegExpFlags(ctx, propAccess.expression);
+  if (flags === null) {
+    reportStandaloneRegExpUnsupported(ctx, propAccess.expression, "RegExp.prototype.exec with dynamic flags");
+    return null;
+  }
+  if (flagsHaveGlobalOrSticky(flags)) {
+    reportStandaloneRegExpUnsupported(
+      ctx,
+      propAccess.expression,
+      "RegExp.prototype.exec with g/y lastIndex semantics (#1539 Phase 2b)",
+    );
+    return null;
+  }
+
+  return emitRegexExecArrayCall(ctx, fctx, propAccess.expression, expr.arguments[0]!);
 }
 
 /**
@@ -778,6 +871,51 @@ export function tryCompileStandaloneStringSearch(
  */
 function staticRegExpFlags(ctx: CodegenContext, expr: ts.Expression): string | null {
   return staticRegExpPatternFlags(ctx, expr)?.flags ?? null;
+}
+
+/**
+ * `String.prototype.match(regexp)` in standalone mode (#1539 Phase 2b).
+ *
+ * Non-global static RegExp arguments share the same result shape as `.exec`.
+ * Global `match` returns an all-matches array and sticky/global lastIndex
+ * details are intentionally left to the next capture-array slice.
+ */
+export function tryCompileStandaloneStringMatch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  propAccess: ts.PropertyAccessExpression,
+): ValType | null | undefined {
+  if (!ctx.standalone || propAccess.name.text !== "match") return undefined;
+
+  if (!isStringLikeArg(ctx, propAccess.expression)) return undefined;
+  if (expr.arguments.length !== 1) return undefined;
+  const argExpr = expr.arguments[0]!;
+  const argType = ctx.checker.getTypeAtLocation(argExpr);
+  if (!isGlobalRegExpType(argType) && !isKnownBackendCreatedRegExpReceiver(ctx, argExpr)) {
+    return undefined;
+  }
+
+  const flags = staticRegExpFlags(ctx, argExpr);
+  if (flags === null) {
+    reportStandaloneRegExpUnsupported(ctx, argExpr, "String.prototype.match with dynamic RegExp flags");
+    return null;
+  }
+  if (flagsHaveGlobalOrSticky(flags)) {
+    reportStandaloneRegExpUnsupported(
+      ctx,
+      argExpr,
+      "String.prototype.match with g/y all-match or lastIndex semantics (#1539 Phase 2b/2c)",
+    );
+    return null;
+  }
+
+  if (!hasStandaloneRegExpEngine(ctx)) {
+    reportStandaloneRegExpUnsupported(ctx, expr, "String.prototype.match without an enabled standalone engine");
+    return null;
+  }
+
+  return emitRegexExecArrayCall(ctx, fctx, argExpr, propAccess.expression);
 }
 
 /**

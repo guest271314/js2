@@ -1197,11 +1197,16 @@ function compileClassBodiesInner(
       }
     }
 
-    // Compile field initializers from property declarations (e.g., x: number = 42, #x: number = 42)
-    // (#1366a) Skip for externref-backed classes — they have no WasmGC struct
-    // fields; user `prop = ...` declarations inside `class Sub extends Error`
-    // would need to be installed via host setters, which is out of scope.
-    if (!isExternrefBacked) {
+    const isDerivedClass = ctx.classParentMap.has(className) || ctx.classBuiltinParentMap.has(className);
+    let ownFieldInitializersEmitted = false;
+    const emitOwnInstanceFieldInitializers = (): void => {
+      // Compile field initializers from property declarations
+      // (e.g., x: number = 42, #x: number = 42). (#1366a) Skip for
+      // externref-backed classes — they have no WasmGC struct fields; user
+      // `prop = ...` declarations inside `class Sub extends Error` would need
+      // to be installed via host setters, which is out of scope.
+      if (isExternrefBacked || ownFieldInitializersEmitted) return;
+      ownFieldInitializersEmitted = true;
       for (const member of decl.members) {
         if (ts.isPropertyDeclaration(member) && member.name && member.initializer && !hasStaticModifier(member)) {
           const fieldName = resolveClassMemberName(ctx, member.name);
@@ -1214,6 +1219,13 @@ function compileClassBodiesInner(
           }
         }
       }
+    };
+
+    // Base classes and implicit derived constructors run own fields at the
+    // original constructor-initialization point. Explicit derived constructors
+    // must wait until `super()` returns (§13.3.7.1).
+    if (!isDerivedClass || !ctor) {
+      emitOwnInstanceFieldInitializers();
     }
 
     // (#846h) A derived class with an explicit constructor that never calls
@@ -1223,7 +1235,6 @@ function compileClassBodiesInner(
     // case (no lexical `super()` anywhere in the constructor body) and emit an
     // unconditional throw at the constructor entry, skipping the (now dead)
     // body compilation.
-    const isDerivedClass = ctx.classParentMap.has(className) || ctx.classBuiltinParentMap.has(className);
     const ctorMissingSuper = isDerivedClass && ctor?.body !== undefined && !constructorBodyHasSuperCall(ctor.body);
 
     if (ctorMissingSuper) {
@@ -1245,6 +1256,9 @@ function compileClassBodiesInner(
           stmt.expression.expression.kind === ts.SyntaxKind.SuperKeyword
         ) {
           compileSuperCall(ctx, fctx, className, selfLocal, stmt.expression, fields);
+          if (isDerivedClass) {
+            emitOwnInstanceFieldInitializers();
+          }
           continue;
         }
         compileStatement(ctx, fctx, stmt);
@@ -1922,6 +1936,36 @@ export function compileSuperCall(
 
   const parentFields = ctx.structFields.get(parentClassName) ?? [];
   const structTypeIdx = ctx.structMap.get(childClassName)!;
+
+  // ECMA-262 §13.3.7.1 SuperCall constructs the superclass first. That
+  // construction initializes superclass fields before the derived class runs
+  // its own fields, so parent field initializer side effects must occur even
+  // when the child declares the same public/private field name.
+  const ancestors: string[] = [];
+  const visitedAncestors = new Set<string>();
+  let ancestor: string | undefined = parentClassName;
+  while (ancestor && !visitedAncestors.has(ancestor)) {
+    visitedAncestors.add(ancestor);
+    ancestors.unshift(ancestor);
+    ancestor = ctx.classParentMap.get(ancestor);
+  }
+  const childFields = ctx.structFields.get(childClassName) ?? [];
+  for (const ancestorName of ancestors) {
+    const ancestorDecl = ctx.classDeclarationMap.get(ancestorName);
+    if (!ancestorDecl) continue;
+    for (const member of ancestorDecl.members) {
+      if (!ts.isPropertyDeclaration(member) || !member.name || !member.initializer || hasStaticModifier(member)) {
+        continue;
+      }
+      const fieldName = resolveClassMemberName(ctx, member.name);
+      if (fieldName === undefined) continue;
+      const fieldIdx = childFields.findIndex((f) => f.name === fieldName);
+      if (fieldIdx < 0) continue;
+      fctx.body.push({ op: "local.get", index: selfLocal });
+      compileExpression(ctx, fctx, member.initializer, childFields[fieldIdx]!.type);
+      fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
+    }
+  }
 
   // Evaluate super(args) and assign to parent fields on the child struct.
   // Skip __tag (immutable, already set by struct.new) and map arguments to

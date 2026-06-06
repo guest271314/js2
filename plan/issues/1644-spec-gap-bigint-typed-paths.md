@@ -1,9 +1,9 @@
 ---
 id: 1644
 title: "spec gap: BigInt typed-path eager f64 assumptions (47 test262 fails, 4 illegal_cast + 13 runtime)"
-status: ready
+status: in-review
 created: 2026-05-08
-updated: 2026-05-27
+updated: 2026-06-06
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -14,6 +14,9 @@ goal: spec-completeness
 sprint: 60
 renumbered_from: 1350
 parent: 1328
+pr: 1249
+claimed_by: codex-developer
+claimed_at: 2026-06-06T09:10:20.967Z
 ---
 # #1350 — BigInt: typed paths assume f64 too eagerly
 
@@ -501,3 +504,36 @@ WASI-mode BigInt fails clear. Residual host-class items
 (`is-a-constructor`, wrapper-object) stay with #1568 (BigInt extern wrapper
 class) — explicitly out of #1644 scope per the Slice-B residual note above.
 
+## Implementation 2026-06-06 (codex-developer) — Slice E1 standalone carrier
+
+Landed the load-bearing standalone `$BigInt` carrier in the native union-helper
+path:
+
+- No-JS-host `__box_bigint(i64) -> externref`, `__to_bigint(externref) -> i64`,
+  `__bigint_ctor(externref) -> i64`, and `__typeof_bigint(externref) -> i32`
+  are registered as native funcs instead of env imports under WASI/standalone.
+- Native `typeof`, truthiness, object-type exclusion, and dynamic strict
+  equality now recognize the `$BigInt` struct, so a bigint can round-trip
+  through `any`/`externref` without falling back to boxed number semantics.
+- `BigInt("...")` string/no-substitution-template literal calls fold to
+  bigint-branded `i64.const` for decimal and prefixed numeric strings that fit
+  signed i64; malformed strings stay on the runtime path.
+
+Validation:
+
+- `npm test -- tests/issue-1644.test.ts` — pass (11 tests).
+- `npm test -- tests/issue-1644.test.ts tests/issue-1644-sliceb.test.ts tests/issue-1644-slice-d.test.ts` — pass (24 tests).
+- `pnpm run typecheck` — pass.
+- Scoped standalone test262 only:
+  `TEST262_TARGET=standalone TEST262_REPORTER=basic TEST262_LOCAL_SHARD_GLOB='tests/test262-local-shard[1-6].test.ts' TEST262_PATH_FILTER='built-ins/BigInt/constructor-from-hex-string.js|built-ins/BigInt/constructor-from-decimal-string.js|built-ins/BigInt/constructor-from-string-syntax-errors.js|built-ins/BigInt/non-integer-rangeerror.js|built-ins/BigInt/asIntN/bigint-tobigint.js|built-ins/BigInt/asUintN/bigint-tobigint.js' pnpm run test:262 -- --official-scope-only`
+  — report `2 pass / 6 total`. Passing: `constructor-from-string-syntax-errors.js`,
+  `non-integer-rangeerror.js`. Residual compile errors are the pre-existing
+  standalone dynamic built-in/property gap (`__get_builtin`, #1472) for
+  `asIntN`/`asUintN` harness access and object-to-primitive conversion for the
+  decimal/hex constructor harness assertions.
+
+Residual Slice E work after this PR:
+
+- Native standalone dynamic string parser for non-literal `BigInt(string)` inputs.
+- Native standalone `BigInt.prototype.toString(radix)` helper parity with Slice D
+  host imports.

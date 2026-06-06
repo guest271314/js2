@@ -22,6 +22,7 @@ import {
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
 import {
+  tryCompileStandaloneStringMatch,
   tryCompileStandaloneStringReplace,
   tryCompileStandaloneStringSearch,
   tryCompileStandaloneStringSplit,
@@ -136,11 +137,15 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
       compileStringLiteral(ctx, fctx, "undefined", operand);
       return true;
     }
-    // Dynamic externref (boxed string / any) → bridge to anyref, then the
-    // in-module ToString dispatcher.
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    const anyToStrIdx = ensureAnyToStringHelper(ctx);
-    fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+    // Dynamic externref (boxed string / any / $Object) → runtime ToString.
+    // For standalone $Object values this routes through native
+    // OrdinaryToPrimitive("string") before the native-string concat helper.
+    const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (toStrIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    }
+    emitNativeStringRefFromExternref(ctx, fctx);
     return true;
   }
 
@@ -396,9 +401,12 @@ export function compileNativeTemplateExpression(
           fctx.body.push({ op: "drop" });
           compileStringLiteral(ctx, fctx, "undefined", span.expression);
         } else {
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
-          const anyToStrIdx = ensureAnyToStringHelper(ctx);
-          fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+          const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (toStrIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: toStrIdx });
+          }
+          emitNativeStringRefFromExternref(ctx, fctx);
         }
       } else {
         coerceType(ctx, fctx, spanType, { kind: "externref" }, "string");
@@ -2453,6 +2461,14 @@ export function compileNativeStringMethodCall(
   //   - replace / replaceAll / split: only when the first argument needs
   //     RegExp/symbol-protocol dispatch (string-arg forms use the native helpers
   //     above and never reach this fall-through).
+  // #1539 Phase 2b — `String.prototype.match(/re/)` for non-global
+  // backend-created static RegExp materializes the same native capture vec as
+  // `.exec`. Global/all-match semantics stay refused below.
+  if (ctx.standalone && method === "match") {
+    const matchResult = tryCompileStandaloneStringMatch(ctx, fctx, expr, propAccess);
+    if (matchResult !== undefined) return matchResult;
+  }
+
   // #1539 Phase 2b — `String.prototype.search(/re/)` against a backend-created
   // static RegExp routes to the pure-WasmGC matcher (returns the match index or
   // -1) instead of the host regex engine. The string-coercion form (string

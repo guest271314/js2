@@ -10,7 +10,7 @@ import type { ArrayTypeDef, Instr, StructTypeDef, TypeDef, ValType } from "../ir
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { addUnionImports, ensureAnyHelpers, isAnyValue } from "./index.js";
-import { ensureAnyToStringHelper } from "./native-strings.js";
+import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { getArrTypeIdxFromVec } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts, registerCoerceType } from "./shared.js";
@@ -79,10 +79,7 @@ export type CompileStringLiteralFn = (ctx: CodegenContext, fctx: FunctionContext
  */
 function pushStringHint(ctx: CodegenContext, fctx: FunctionContext, hint: string): void {
   addStringConstantGlobal(ctx, hint);
-  const globalIdx = ctx.stringGlobalMap.get(hint);
-  if (globalIdx !== undefined) {
-    fctx.body.push({ op: "global.get", index: globalIdx });
-  }
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, hint));
 }
 
 /**
@@ -1351,6 +1348,29 @@ export function coerceType(
   }
   // externref → f64 (unbox number)
   if (from.kind === "externref" && to.kind === "f64") {
+    if (ctx.standalone) {
+      const hint = toPrimitiveHint ?? "number";
+      pushStringHint(ctx, fctx, hint);
+      const toPrimIdx = ensureLateImport(
+        ctx,
+        "__to_primitive",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (toPrimIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: toPrimIdx });
+      }
+      addUnionImports(ctx);
+      const funcIdx = ctx.funcMap.get("__unbox_number");
+      if (funcIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx });
+        return;
+      }
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "f64.const", value: NaN });
+      return;
+    }
     addUnionImports(ctx);
     const funcIdx = ctx.funcMap.get("__unbox_number");
     if (funcIdx !== undefined) {

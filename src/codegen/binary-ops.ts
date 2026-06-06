@@ -24,7 +24,11 @@ import {
   compileLogicalAssignment,
   isCompoundAssignment,
 } from "./expressions/assignment.js";
-import { emitThrowTypeError, resolveDeclaringClassForPrivateName } from "./expressions/helpers.js";
+import {
+  emitPrivateBrandPredicate,
+  emitThrowTypeError,
+  resolveDeclaringClassForPrivateName,
+} from "./expressions/helpers.js";
 import { ensureExternIsUndefinedImport, ensureLateImport } from "./expressions/late-imports.js";
 import { compileLogicalAnd, compileLogicalOr, compileNullishCoalescing } from "./expressions/logical-ops.js";
 import { tryStaticToNumber } from "./expressions/misc.js";
@@ -295,9 +299,7 @@ export function compileBinaryExpression(
       if (pfIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx: pfIdx });
       } else {
-        addUnionImports(ctx);
-        const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-        fctx.body.push({ op: "call", funcIdx: unboxIdx });
+        coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
       }
       emitToInt32(fctx);
       return { kind: "i32" };
@@ -498,16 +500,17 @@ export function compileBinaryExpression(
     if (ts.isPrivateIdentifier(expr.left)) {
       const declared = resolveDeclaringClassForPrivateName(ctx, expr.left);
       if (declared) {
-        // Compile the receiver. Coerce externref → anyref so ref.test sees
-        // a concrete heap-typed value. Class refs are already eqref-rooted.
+        // Compile the receiver. Coerce externref → anyref and save it so
+        // the brand predicate can combine structural ref.test with class-tag
+        // ancestry.
         const objResult = compileExpression(ctx, fctx, expr.right);
         if (objResult?.kind === "externref") {
           fctx.body.push({ op: "any.convert_extern" } as Instr);
         }
-        // Note: ref.test against the struct typeIdx returns 0 even for
-        // null refs (per Wasm GC spec), matching the spec's "no throw,
-        // returns false" behavior.
-        fctx.body.push({ op: "ref.test", typeIdx: declared.structTypeIdx } as Instr);
+        const tmpAny = allocTempLocal(fctx, { kind: "anyref" });
+        fctx.body.push({ op: "local.set", index: tmpAny });
+        emitPrivateBrandPredicate(ctx, fctx, tmpAny, declared.className, declared.structTypeIdx);
+        releaseTempLocal(fctx, tmpAny);
         return { kind: "i32" };
       }
       // No declaring class found — fall through to the legacy compile-time
@@ -1069,9 +1072,7 @@ export function compileBinaryExpression(
           if (pfIdx !== undefined) {
             fctx.body.push({ op: "call", funcIdx: pfIdx });
           } else {
-            addUnionImports(ctx);
-            const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-            fctx.body.push({ op: "call", funcIdx: unboxIdx });
+            coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
           }
         } else if (leftType.kind === "i32") {
           fctx.body.push({ op: "f64.convert_i32_s" });
@@ -1092,9 +1093,7 @@ export function compileBinaryExpression(
           if (pfIdx !== undefined) {
             fctx.body.push({ op: "call", funcIdx: pfIdx });
           } else {
-            addUnionImports(ctx);
-            const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-            fctx.body.push({ op: "call", funcIdx: unboxIdx });
+            coerceType(ctx, fctx, rightType, { kind: "f64" }, "number");
           }
         } else if (rightType.kind === "i32") {
           fctx.body.push({ op: "f64.convert_i32_s" });
@@ -1720,15 +1719,13 @@ export function compileBinaryExpression(
 
   // Externref in numeric context: unbox externref operands to f64
   if ((leftType.kind === "externref" || rightType.kind === "externref") && isNumericOp) {
-    addUnionImports(ctx);
-    const unboxIdx = ctx.funcMap.get("__unbox_number")!;
     if (rightType.kind === "externref") {
-      fctx.body.push({ op: "call", funcIdx: unboxIdx });
+      coerceType(ctx, fctx, rightType, { kind: "f64" }, "number");
     }
     if (leftType.kind === "externref") {
       const tmpR = allocTempLocal(fctx, { kind: "f64" });
       fctx.body.push({ op: "local.set", index: tmpR });
-      fctx.body.push({ op: "call", funcIdx: unboxIdx });
+      coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
       fctx.body.push({ op: "local.get", index: tmpR });
       releaseTempLocal(fctx, tmpR);
     }
@@ -1777,8 +1774,10 @@ export function compileBinaryExpression(
       addUnionImports(ctx);
       const typeofNum = ctx.funcMap.get("__typeof_number")!;
       const typeofBool = ctx.funcMap.get("__typeof_boolean")!;
+      const typeofBigint = ctx.funcMap.get("__typeof_bigint")!;
       const unboxNum = ctx.funcMap.get("__unbox_number")!;
       const unboxBool = ctx.funcMap.get("__unbox_boolean")!;
+      const toBigint = ctx.funcMap.get("__to_bigint")!;
 
       // Coerce both operands to externref temps (right is on top of stack).
       const rTmp = allocTempLocal(fctx, { kind: "externref" });
@@ -1827,39 +1826,58 @@ export function compileBinaryExpression(
                 { op: "i32.eq" } as Instr,
               ],
               else: [
-                // ── reference identity ──
-                // Both must be WasmGC eqref for ref.eq; otherwise unequal.
+                // ── bigint? ──
                 { op: "local.get", index: lTmp },
-                { op: "any.convert_extern" } as Instr,
+                { op: "call", funcIdx: typeofBigint } as Instr,
                 { op: "local.get", index: rTmp },
-                { op: "any.convert_extern" } as Instr,
-                ...(() => {
-                  const lAny = allocTempLocal(fctx, { kind: "anyref" });
-                  const rAny = allocTempLocal(fctx, { kind: "anyref" });
-                  const seq: Instr[] = [
-                    { op: "local.set", index: rAny },
-                    { op: "local.tee", index: lAny },
-                    { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
-                    { op: "local.get", index: rAny },
-                    { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
-                    { op: "i32.and" } as Instr,
-                    {
-                      op: "if",
-                      blockType: { kind: "val", type: { kind: "i32" } },
-                      then: [
-                        { op: "local.get", index: lAny },
-                        { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+                { op: "call", funcIdx: typeofBigint } as Instr,
+                { op: "i32.and" } as Instr,
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: { kind: "i32" } },
+                  then: [
+                    { op: "local.get", index: lTmp },
+                    { op: "call", funcIdx: toBigint },
+                    { op: "local.get", index: rTmp },
+                    { op: "call", funcIdx: toBigint },
+                    { op: "i64.eq" } as Instr,
+                  ],
+                  else: [
+                    // ── reference identity ──
+                    // Both must be WasmGC eqref for ref.eq; otherwise unequal.
+                    { op: "local.get", index: lTmp },
+                    { op: "any.convert_extern" } as Instr,
+                    { op: "local.get", index: rTmp },
+                    { op: "any.convert_extern" } as Instr,
+                    ...(() => {
+                      const lAny = allocTempLocal(fctx, { kind: "anyref" });
+                      const rAny = allocTempLocal(fctx, { kind: "anyref" });
+                      const seq: Instr[] = [
+                        { op: "local.set", index: rAny },
+                        { op: "local.tee", index: lAny },
+                        { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
                         { op: "local.get", index: rAny },
-                        { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
-                        { op: "ref.eq" } as Instr,
-                      ],
-                      else: [{ op: "i32.const", value: 0 }],
-                    } as Instr,
-                  ];
-                  releaseTempLocal(fctx, lAny);
-                  releaseTempLocal(fctx, rAny);
-                  return seq;
-                })(),
+                        { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+                        { op: "i32.and" } as Instr,
+                        {
+                          op: "if",
+                          blockType: { kind: "val", type: { kind: "i32" } },
+                          then: [
+                            { op: "local.get", index: lAny },
+                            { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+                            { op: "local.get", index: rAny },
+                            { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+                            { op: "ref.eq" } as Instr,
+                          ],
+                          else: [{ op: "i32.const", value: 0 }],
+                        } as Instr,
+                      ];
+                      releaseTempLocal(fctx, lAny);
+                      releaseTempLocal(fctx, rAny);
+                      return seq;
+                    })(),
+                  ],
+                } as Instr,
               ],
             } as Instr,
           ],
@@ -2195,9 +2213,7 @@ export function compileBinaryExpression(
   if (isNumericOp) {
     // Coerce right operand (top of stack) to f64
     if (rightType.kind === "externref") {
-      addUnionImports(ctx);
-      const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-      fctx.body.push({ op: "call", funcIdx: unboxIdx });
+      coerceType(ctx, fctx, rightType, { kind: "f64" }, "number");
     } else if (rightType.kind === "i32") {
       fctx.body.push({ op: "f64.convert_i32_s" });
     } else if (rightType.kind === "i64") {
@@ -2216,9 +2232,7 @@ export function compileBinaryExpression(
       const tmpR = allocTempLocal(fctx, { kind: "f64" });
       fctx.body.push({ op: "local.set", index: tmpR });
       if (leftType.kind === "externref") {
-        addUnionImports(ctx);
-        const unboxIdx = ctx.funcMap.get("__unbox_number")!;
-        fctx.body.push({ op: "call", funcIdx: unboxIdx });
+        coerceType(ctx, fctx, leftType, { kind: "f64" }, "number");
       } else if (leftType.kind === "i32") {
         fctx.body.push({ op: "f64.convert_i32_s" });
       } else if (leftType.kind === "i64") {

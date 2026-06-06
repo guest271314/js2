@@ -49,17 +49,25 @@ import {
 import { emitInlineMathFunctions } from "./math-helpers.js";
 import { finalizeMethodTrampolines } from "./closures.js";
 import { peepholeOptimize } from "./peephole.js";
-import { addImport, addStringConstantGlobal, localGlobalIdx, nextModuleGlobalIdx } from "./registry/imports.js";
+import {
+  addImport,
+  addStringConstantGlobal,
+  ensureExnTag,
+  localGlobalIdx,
+  nextModuleGlobalIdx,
+} from "./registry/imports.js";
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   addFuncType,
   getArrTypeIdxFromVec,
+  getOrRegisterArrayType,
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";
 import { exportDrainMicrotasksIfRegistered, getDrainFuncIdxForWasiStart } from "./async-scheduler.js";
 import { registerAddStringImports, registerAddUnionImports } from "./shared.js";
 import { stackBalance } from "./stack-balance.js";
+import { emitNativeParseNumber } from "./parse-number-native.js";
 
 // ── Extracted sub-modules ──────────────────────────────────────────────────
 import {
@@ -97,6 +105,7 @@ import {
   flatStringType,
   nativeStringType,
   nativeStringTypeNullable,
+  stringConstantExternrefInstrs,
 } from "./native-strings.js";
 import { emitJsonQuoteString } from "./json-runtime.js";
 
@@ -7796,6 +7805,10 @@ export function addUnionImports(ctx: CodegenContext): void {
     kind: "func",
     typeIdx: typeofType,
   });
+  addImport(ctx, "env", "__typeof_bigint", {
+    kind: "func",
+    typeIdx: typeofType,
+  });
   addImport(ctx, "env", "__typeof_undefined", {
     kind: "func",
     typeIdx: typeofType,
@@ -7871,6 +7884,7 @@ export function addUnionImports(ctx: CodegenContext): void {
       "__typeof_number",
       "__typeof_string",
       "__typeof_boolean",
+      "__typeof_bigint",
       "__typeof_undefined",
       "__typeof_object",
       "__typeof_function",
@@ -8077,13 +8091,27 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     fields: [{ name: "value", type: { kind: "i32" }, mutable: false }],
   });
 
+  const bigIntStructIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: "$BigInt",
+    fields: [{ name: "value", type: { kind: "i64", bigint: true }, mutable: false }],
+  });
+
   // 2. Pre-compute func types — addFuncType de-dupes by signature so
   //    repeated calls return the same typeIdx.
   const externrefToI32 = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }]);
   const externrefToF64 = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }]);
+  const externrefToI64 = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i64", bigint: true }]);
   const f64ToExternref = addFuncType(ctx, [{ kind: "f64" }], [{ kind: "externref" }]);
   const i32ToExternref = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "externref" }]);
+  const i64ToExternref = addFuncType(ctx, [{ kind: "i64", bigint: true }], [{ kind: "externref" }]);
   const externrefToExternref = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+
+  if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0 && !ctx.funcMap.has("__str_to_number")) {
+    emitNativeParseNumber(ctx, new Set(["__str_to_number"]));
+  }
+  const strToNumberIdx = ctx.funcMap.get("__str_to_number");
 
   /**
    * Synthesize a native helper function. The funcIdx is allocated as
@@ -8099,6 +8127,18 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     ctx.funcMap.set(name, funcIdx);
     ctx.mod.functions.push({ name, typeIdx, locals, body, exported: false });
+  };
+
+  const throwNativeError = (errorName: "TypeError" | "RangeError" | "SyntaxError", message: string): Instr[] => {
+    emitWasiErrorConstructor(ctx, errorName, 1);
+    addStringConstantGlobal(ctx, message);
+    const ctorIdx = ctx.funcMap.get(`__new_${errorName}`)!;
+    const tagIdx = ensureExnTag(ctx);
+    return [
+      ...stringConstantExternrefInstrs(ctx, message),
+      { op: "call", funcIdx: ctorIdx },
+      { op: "throw", tagIdx } as Instr,
+    ];
   };
 
   // 3. __box_number(f64) -> externref
@@ -8140,6 +8180,20 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
           { op: "return" },
         ],
       },
+      ...(strToNumberIdx !== undefined && ctx.anyStrTypeIdx >= 0
+        ? ([
+            // StringToNumber (§7.1.4.1): object ToPrimitive can yield a native
+            // string; parse it with the existing pure-Wasm scanner before the
+            // opaque-ref NaN fallback.
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: strToNumberIdx }, { op: "return" }],
+            },
+          ] as Instr[])
+        : []),
       // not a recognized boxed number → NaN (matches Number(opaque))
       { op: "f64.const", value: NaN },
     ],
@@ -8150,6 +8204,15 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   registerNative("__box_boolean", i32ToExternref, [
     { op: "local.get", index: 0 },
     { op: "struct.new", typeIdx: boxBoolStructIdx },
+    { op: "extern.convert_any" },
+  ]);
+
+  // #1644 Slice E1 — __box_bigint(i64) -> externref. In no-JS-host mode a
+  // bigint-branded i64 needs a WasmGC carrier so it cannot fall through to the
+  // number-box path and lose its BigInt identity at the externref frontier.
+  registerNative("__box_bigint", i64ToExternref, [
+    { op: "local.get", index: 0 },
+    { op: "struct.new", typeIdx: bigIntStructIdx },
     { op: "extern.convert_any" },
   ]);
 
@@ -8190,6 +8253,141 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
       { op: "i32.const", value: 0 },
     ],
     [{ name: "$any_temp", type: { kind: "anyref" } as ValType }],
+  );
+
+  // #1644 Slice E1 — __to_bigint(externref) -> i64. This is the native
+  // ToBigInt frontier for values already represented by the standalone
+  // BigInt struct, plus boolean -> 0n/1n. Boxed numbers throw TypeError per
+  // ECMA-262 §7.1.13; native string parsing is deferred to the constructor
+  // slice, so unsupported non-BigInt refs also throw instead of becoming 0.
+  registerNative(
+    "__to_bigint",
+    externrefToI64,
+    [
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: throwNativeError("TypeError", "Cannot convert null or undefined to a BigInt"),
+      },
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: bigIntStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: bigIntStructIdx },
+          { op: "struct.get", typeIdx: bigIntStructIdx, fieldIdx: 0 },
+          { op: "return" },
+        ],
+      },
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: boxBoolStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: boxBoolStructIdx },
+          { op: "struct.get", typeIdx: boxBoolStructIdx, fieldIdx: 0 },
+          { op: "i64.extend_i32_u" },
+          { op: "return" },
+        ],
+      },
+      ...throwNativeError("TypeError", "Cannot convert value to a BigInt"),
+    ],
+    [{ name: "$any_temp", type: { kind: "anyref" } as ValType }],
+  );
+
+  // #1644 Slice E1/E2 bridge — minimal no-JS-host BigInt(value). Handles the
+  // standalone carriers that can be represented without a string parser:
+  // bigint identity, boolean -> 0n/1n, and integral finite boxed numbers.
+  registerNative(
+    "__bigint_ctor",
+    externrefToI64,
+    [
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: throwNativeError("TypeError", "Cannot convert null or undefined to a BigInt"),
+      },
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: bigIntStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: bigIntStructIdx },
+          { op: "struct.get", typeIdx: bigIntStructIdx, fieldIdx: 0 },
+          { op: "return" },
+        ],
+      },
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: boxBoolStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: boxBoolStructIdx },
+          { op: "struct.get", typeIdx: boxBoolStructIdx, fieldIdx: 0 },
+          { op: "i64.extend_i32_u" },
+          { op: "return" },
+        ],
+      },
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: boxNumStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: boxNumStructIdx },
+          { op: "struct.get", typeIdx: boxNumStructIdx, fieldIdx: 0 },
+          { op: "local.tee", index: 2 },
+          { op: "local.get", index: 2 },
+          { op: "f64.ne" },
+          { op: "local.get", index: 2 },
+          { op: "f64.floor" },
+          { op: "local.get", index: 2 },
+          { op: "f64.ne" },
+          { op: "i32.or" },
+          { op: "local.get", index: 2 },
+          { op: "f64.const", value: 2 ** 63 },
+          { op: "f64.ge" },
+          { op: "i32.or" },
+          { op: "local.get", index: 2 },
+          { op: "f64.const", value: -(2 ** 63) },
+          { op: "f64.lt" },
+          { op: "i32.or" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: throwNativeError(
+              "RangeError",
+              "The number cannot be converted to a BigInt because it is not an integer",
+            ),
+          },
+          { op: "local.get", index: 2 },
+          { op: "i64.trunc_sat_f64_s" },
+          { op: "return" },
+        ],
+      },
+      ...throwNativeError("SyntaxError", "Cannot convert string to a BigInt in standalone mode"),
+    ],
+    [
+      { name: "$any_temp", type: { kind: "anyref" } as ValType },
+      { name: "$num_temp", type: { kind: "f64" } },
+    ],
   );
 
   // 7. __is_truthy(externref) -> i32
@@ -8245,6 +8443,21 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
           { op: "return" },
         ],
       },
+      // boxed bigint? → value !== 0n
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: bigIntStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: bigIntStructIdx },
+          { op: "struct.get", typeIdx: bigIntStructIdx, fieldIdx: 0 },
+          { op: "i64.eqz" },
+          { op: "i32.eqz" },
+          { op: "return" },
+        ],
+      },
       // any other non-null ref → truthy
       { op: "i32.const", value: 1 },
     ],
@@ -8282,7 +8495,21 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     { op: "ref.test", typeIdx: boxBoolStructIdx },
   ]);
 
-  // 10. __typeof_string(externref) -> i32. Under nativeStrings (auto-on
+  // 10. __typeof_bigint(externref) -> i32 — `ref.test $BigInt`.
+  registerNative("__typeof_bigint", externrefToI32, [
+    { op: "local.get", index: 0 },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+    },
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.test", typeIdx: bigIntStructIdx },
+  ]);
+
+  // 11. __typeof_string(externref) -> i32. Under nativeStrings (auto-on
   //     for wasi) strings are NativeString structs at `ctx.anyStrTypeIdx`.
   //     If that type isn't registered, return 0 (no string in scope).
   if (ctx.anyStrTypeIdx >= 0) {
@@ -8303,11 +8530,11 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     registerNative("__typeof_string", externrefToI32, [{ op: "i32.const", value: 0 }]);
   }
 
-  // 11. __typeof_undefined(externref) -> i32 — `ref.is_null`.
+  // 12. __typeof_undefined(externref) -> i32 — `ref.is_null`.
   registerNative("__typeof_undefined", externrefToI32, [{ op: "local.get", index: 0 }, { op: "ref.is_null" }]);
 
-  // 12. __typeof_object(externref) -> i32 — non-null AND not number AND
-  //     not boolean AND not function. We approximate as "non-null and
+  // 13. __typeof_object(externref) -> i32 — non-null AND not number AND
+  //     not boolean AND not bigint AND not function. We approximate as "non-null and
   //     not a boxed primitive" — sufficient for the common typeof
   //     dispatch use cases. Returns 0 conservatively for boxed numbers
   //     and boxed booleans.
@@ -8338,17 +8565,24 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: bigIntStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
       // non-null, not a boxed primitive → object
       { op: "i32.const", value: 1 },
     ],
     [{ name: "$any_temp", type: { kind: "anyref" } as ValType }],
   );
 
-  // 13. __typeof_function(externref) -> i32 — wasi binaries don't expose
+  // 14. __typeof_function(externref) -> i32 — wasi binaries don't expose
   //     callable JS functions to the outside, so this is conservatively 0.
   registerNative("__typeof_function", externrefToI32, [{ op: "i32.const", value: 0 }]);
 
-  // 14. __typeof(externref) -> externref — returns null externref under
+  // 15. __typeof(externref) -> externref — returns null externref under
   //     wasi. Producing real type-tag strings would require a NativeString
   //     per tag; defer until a wasi caller needs the typeof RESULT as a
   //     string (today's callers compare against literal tags via the
@@ -10158,6 +10392,8 @@ function collectUsedExternImports(ctx: CodegenContext, sourceFile: ts.SourceFile
       // Skip when element access is the callee of a call expression (e.g. obj['method']())
       // — the call handler compiles this as a direct method call, not a property read
       const isCallCallee = node.parent && ts.isCallExpression(node.parent) && node.parent.expression === node;
+      const isNativeStandaloneRegExpMatchArray =
+        ctx.standalone && isStandaloneRegExpMatchArrayValue(ctx, node.expression);
       const objType = ctx.checker.getTypeAtLocation(node.expression);
       const sym = objType.getSymbol();
       // Skip Array and tuple types — those use Wasm GC struct/array ops, not host import
@@ -10165,6 +10401,7 @@ function collectUsedExternImports(ctx: CodegenContext, sourceFile: ts.SourceFile
       const isWidenedVar = ts.isIdentifier(node.expression) && ctx.widenedVarStructMap.has(node.expression.text);
       if (
         !isCallCallee &&
+        !isNativeStandaloneRegExpMatchArray &&
         sym?.name !== "Array" &&
         sym?.name !== "__type" &&
         sym?.name !== "__object" &&
@@ -11032,18 +11269,113 @@ function isVecStructType(ctx: CodegenContext, type: ValType | undefined): type i
   return def?.kind === "struct" && def.fields[0]?.name === "length" && def.fields[1]?.name === "data";
 }
 
+function stripRegExpInferenceWrapper(expr: ts.Expression): ts.Expression {
+  while (
+    ts.isParenthesizedExpression(expr) ||
+    ts.isAsExpression(expr) ||
+    ts.isTypeAssertionExpression(expr) ||
+    ts.isSatisfiesExpression(expr) ||
+    ts.isNonNullExpression(expr)
+  ) {
+    expr = (
+      expr as
+        | ts.ParenthesizedExpression
+        | ts.AsExpression
+        | ts.TypeAssertion
+        | ts.SatisfiesExpression
+        | ts.NonNullExpression
+    ).expression;
+  }
+  return expr;
+}
+
+function isStaticRegExpExpressionForInference(ctx: CodegenContext, expr: ts.Expression): boolean {
+  const unwrapped = stripRegExpInferenceWrapper(expr);
+  if (unwrapped.kind === ts.SyntaxKind.RegularExpressionLiteral) return true;
+  if (ts.isNewExpression(unwrapped) || (ts.isCallExpression(unwrapped) && !unwrapped.questionDotToken)) {
+    const callee = stripRegExpInferenceWrapper(unwrapped.expression);
+    return ts.isIdentifier(callee) && callee.text === "RegExp";
+  }
+  if (ts.isIdentifier(unwrapped)) {
+    const sym = ctx.checker.getSymbolAtLocation(unwrapped);
+    const decl = sym?.getDeclarations()?.find((d) => ts.isVariableDeclaration(d)) as ts.VariableDeclaration | undefined;
+    return decl?.initializer !== undefined && isStaticRegExpExpressionForInference(ctx, decl.initializer);
+  }
+  return false;
+}
+
+function nativeStringVecTypeForStandaloneRegExp(ctx: CodegenContext): ValType | null {
+  if (!ctx.nativeStrings || ctx.anyStrTypeIdx < 0) return null;
+  const elemKey = `ref_${ctx.anyStrTypeIdx}`;
+  const elemType: ValType = { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
+  getOrRegisterArrayType(ctx, elemKey, elemType);
+  const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
+  return { kind: "ref_null", typeIdx: vecTypeIdx };
+}
+
+function inferStandaloneRegExpMatchArrayType(
+  ctx: CodegenContext,
+  initializer: ts.Expression | undefined,
+): ValType | null {
+  if (!ctx.standalone || !initializer) return null;
+  const unwrapped = stripRegExpInferenceWrapper(initializer);
+  if (!ts.isCallExpression(unwrapped)) return null;
+  if (!ts.isPropertyAccessExpression(unwrapped.expression)) return null;
+  const method = unwrapped.expression.name.text;
+  if (method === "exec") {
+    return isStaticRegExpExpressionForInference(ctx, unwrapped.expression.expression)
+      ? nativeStringVecTypeForStandaloneRegExp(ctx)
+      : null;
+  }
+  if (method === "match" && unwrapped.arguments.length === 1) {
+    return isStaticRegExpExpressionForInference(ctx, unwrapped.arguments[0]!)
+      ? nativeStringVecTypeForStandaloneRegExp(ctx)
+      : null;
+  }
+  return null;
+}
+
+function isStaticRegExpMatchArrayCallForImportScan(ctx: CodegenContext, call: ts.CallExpression): boolean {
+  const callee = stripRegExpInferenceWrapper(call.expression);
+  if (!ts.isPropertyAccessExpression(callee)) return false;
+  const method = callee.name.text;
+  if (method === "exec") return isStaticRegExpExpressionForInference(ctx, callee.expression);
+  if (method === "match" && call.arguments.length === 1) {
+    return isStaticRegExpExpressionForInference(ctx, call.arguments[0]!);
+  }
+  return false;
+}
+
+function isStandaloneRegExpMatchArrayValue(ctx: CodegenContext, expr: ts.Expression): boolean {
+  const unwrapped = stripRegExpInferenceWrapper(expr);
+  if (ts.isCallExpression(unwrapped)) return isStaticRegExpMatchArrayCallForImportScan(ctx, unwrapped);
+  if (!ts.isIdentifier(unwrapped)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(unwrapped);
+  const decl = sym?.getDeclarations()?.find((d) => ts.isVariableDeclaration(d)) as ts.VariableDeclaration | undefined;
+  const initializer = decl?.initializer ? stripRegExpInferenceWrapper(decl.initializer) : undefined;
+  return initializer !== undefined && ts.isCallExpression(initializer)
+    ? isStaticRegExpMatchArrayCallForImportScan(ctx, initializer)
+    : false;
+}
+
 function inferLetConstInitializerWasmType(
   ctx: CodegenContext,
   fctx: FunctionContext,
   initializer: ts.Expression | undefined,
 ): ValType | null {
-  if (!initializer || !ts.isCallExpression(initializer) || !ts.isPropertyAccessExpression(initializer.expression)) {
+  if (!initializer) return null;
+  const standaloneRegExpMatchArrayType = inferStandaloneRegExpMatchArrayType(ctx, initializer);
+  if (standaloneRegExpMatchArrayType !== null) return standaloneRegExpMatchArrayType;
+
+  const unwrapped = stripRegExpInferenceWrapper(initializer);
+  if (!ts.isCallExpression(unwrapped) || !ts.isPropertyAccessExpression(unwrapped.expression)) {
     return null;
   }
-  const methodName = initializer.expression.name.text;
+
+  const methodName = unwrapped.expression.name.text;
   if (methodName !== "subarray" && methodName !== "slice") return null;
 
-  const receiver = initializer.expression.expression;
+  const receiver = unwrapped.expression.expression;
   let receiverType: ValType | undefined;
   if (ts.isIdentifier(receiver)) {
     const localIdx = fctx.localMap.get(receiver.text);

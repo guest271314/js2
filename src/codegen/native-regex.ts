@@ -1156,6 +1156,141 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
 }
 
 /**
+ * Emit `__regex_capture_array(nGroups, subject, caps) -> ref $vec_nstr`
+ * (#1539 Phase 2b).
+ *
+ * Materializes capture slots from a populated caps array as a native string
+ * vec: element 0 is the full match, element N is capture N, and unmatched
+ * captures are null `(ref null $AnyString)`, which the standalone compiler
+ * already treats as `undefined` for native-string values.
+ */
+export function ensureRegexCaptureArray(ctx: CodegenContext): number {
+  const existing = ctx.nativeRegexHelpers.get("__regex_capture_array");
+  if (existing !== undefined) return existing;
+
+  const i32Arr = regexI32ArrayType(ctx);
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
+  const i32ArrRef: ValType = { kind: "ref", typeIdx: i32Arr };
+
+  const nstrElemKey = `ref_${anyStrTypeIdx}`;
+  const nstrElemType: ValType = { kind: "ref_null", typeIdx: anyStrTypeIdx };
+  const nstrArrTypeIdx = getOrRegisterArrayType(ctx, nstrElemKey, nstrElemType);
+  const nstrVecTypeIdx = getOrRegisterVecType(ctx, nstrElemKey, nstrElemType);
+  const nstrVecRef: ValType = { kind: "ref", typeIdx: nstrVecTypeIdx };
+
+  const substringIdx = ctx.nativeStrHelpers.get("__str_substring");
+  if (substringIdx === undefined) {
+    throw new Error("__regex_capture_array requires __str_substring (#682 native string helpers)");
+  }
+
+  const typeIdx = addFuncType(
+    ctx,
+    [
+      { kind: "i32" }, // nGroups
+      strRef, // subject (flattened)
+      i32ArrRef, // caps
+    ],
+    [nstrVecRef],
+  );
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.nativeRegexHelpers.set("__regex_capture_array", funcIdx);
+
+  // params
+  const NGROUPS = 0,
+    SUBJ = 1,
+    CAPS = 2;
+  // locals
+  const RARR = 3;
+  const I = 4;
+  const CSTART = 5;
+  const CEND = 6;
+
+  const body: Instr[] = [
+    // result array length is nGroups (group 0 + captures).
+    { op: "local.get", index: NGROUPS },
+    { op: "array.new_default", typeIdx: nstrArrTypeIdx },
+    { op: "local.set", index: RARR },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: I },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: I },
+            { op: "local.get", index: NGROUPS },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            // cstart = caps[2*i]; cend = caps[2*i+1]
+            { op: "local.get", index: CAPS },
+            { op: "local.get", index: I },
+            { op: "i32.const", value: 2 },
+            { op: "i32.mul" },
+            { op: "array.get", typeIdx: i32Arr },
+            { op: "local.set", index: CSTART },
+            { op: "local.get", index: CAPS },
+            { op: "local.get", index: I },
+            { op: "i32.const", value: 2 },
+            { op: "i32.mul" },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "array.get", typeIdx: i32Arr },
+            { op: "local.set", index: CEND },
+            // result[i] = cstart < 0 ? undefined : substring(subject, cstart, cend)
+            { op: "local.get", index: RARR },
+            { op: "local.get", index: I },
+            { op: "local.get", index: CSTART },
+            { op: "i32.const", value: 0 },
+            { op: "i32.lt_s" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: nstrElemType },
+              then: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr],
+              else: [
+                { op: "local.get", index: SUBJ },
+                { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+                { op: "local.get", index: CSTART },
+                { op: "local.get", index: CEND },
+                { op: "call", funcIdx: substringIdx },
+              ],
+            },
+            { op: "array.set", typeIdx: nstrArrTypeIdx },
+            { op: "local.get", index: I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: I },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    { op: "local.get", index: NGROUPS },
+    { op: "local.get", index: RARR },
+    { op: "ref.as_non_null" },
+    { op: "struct.new", typeIdx: nstrVecTypeIdx },
+  ];
+
+  ctx.mod.functions.push({
+    name: "__regex_capture_array",
+    typeIdx,
+    locals: [
+      { name: "resultArr", type: { kind: "ref_null", typeIdx: nstrArrTypeIdx } },
+      { name: "i", type: { kind: "i32" } },
+      { name: "cstart", type: { kind: "i32" } },
+      { name: "cend", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
+/**
  * Emit `__regex_split(prog, classTable, nGroups, strData, strOff, strLen,
  * subject) -> ref $vec_nstr` (#1539 Phase 2c).
  *
