@@ -46,6 +46,7 @@ export function buildImports(result: CompileResult): WebAssembly.Imports {
     __typeof_number: (v: unknown) => (typeof v === "number" ? 1 : 0),
     __typeof_string: (v: unknown) => (typeof v === "string" ? 1 : 0),
     __typeof_boolean: (v: unknown) => (typeof v === "boolean" ? 1 : 0),
+    __typeof_bigint: (v: unknown) => (typeof v === "bigint" ? 1 : 0),
     __typeof: (v: unknown) => typeof v,
     __instanceof: (v: any, ctorName: string) => {
       try {

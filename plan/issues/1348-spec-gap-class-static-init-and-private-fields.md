@@ -1,9 +1,9 @@
 ---
 id: 1348
 title: "spec gap: class static initialization order + private field semantics (significant share of 1500+ class fails)"
-status: ready
+status: in-review
 created: 2026-05-08
-updated: 2026-05-24
+updated: 2026-06-06
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -13,6 +13,9 @@ language_feature: class
 goal: spec-completeness
 sprint: 60
 parent: 1328
+claimed_by: codex-developer
+claimed_at: 2026-06-06T09:51:22.932Z
+pr: 1250
 ---
 # #1348 — Class: static block order, private field exotics, super-class field shadow
 
@@ -218,3 +221,49 @@ field order/identity.
   `language/statements/class/elements/static-*` as the guard.
 - No new host imports — codegen ordering + `ref.test` brand checks + native
   throws (#1473, standalone-safe). Dual-mode clean. ✓
+
+## Codex implementation notes (2026-06-06)
+
+Implemented the residual class/private semantics that still reproduced locally:
+
+- Private brand checks now combine the existing `ref.test` with the hidden class
+  tag and descendant-tag ancestry. This rejects unrelated classes that declare
+  the same private name and compile to an equivalent WasmGC struct shape, while
+  preserving subclass instances as valid receivers for ancestor private names.
+  The shared predicate is used by both `#x in obj` and `obj.#x` reads.
+- Explicit derived constructors now defer their own instance field initializers
+  until the handled `super()` call returns. `compileSuperCall` also replays
+  superclass field declaration initializers before child initializers, so
+  same-named child fields overwrite after parent side effects run.
+- Static field/static-block source order was already mostly implemented on this
+  branch; added focused regression coverage for public static fields/blocks and
+  static blocks reading earlier private static fields.
+
+Spec references checked before implementation:
+
+- ECMA-262 §15.7.14 ClassDefinitionEvaluation: class elements are evaluated and
+  static field/block records execute during class evaluation.
+- ECMA-262 §13.3.7.1 SuperCall: after constructing the super constructor,
+  `InitializeInstanceElements(result, funcObj)` runs for the derived constructor.
+- ECMA-262 §7.3.26 PrivateElementFind / §7.3.30 PrivateGet: private membership
+  is keyed by the declaring private name, not by structural field shape.
+
+Validation:
+
+- `node node_modules/vitest/dist/cli.js run tests/issue-1348.test.ts` — pass
+  (10 tests).
+- `node node_modules/vitest/dist/cli.js run tests/issue-1348.test.ts
+  tests/issue-1643.test.ts tests/issue-846h.test.ts tests/issue-1682.test.ts
+  tests/class-static-private-this.test.ts` — pass (29 tests).
+- `pnpm exec tsc --noEmit --pretty false` — pass.
+- Rechecked after merging `origin/main` on 2026-06-06 with the same scoped
+  vitest set and `pnpm exec tsc --noEmit --pretty false` — pass.
+
+Notes:
+
+- The local `test262/` checkout is absent in this worktree, so no local
+  test262 path-filter run was possible.
+- An accidental broad `pnpm test -- tests/issue-1348.test.ts` invocation expanded
+  into a partial full-suite run, surfaced unrelated existing failures, and ended
+  with a vitest worker OOM. Scoped direct vitest runs above are the validation
+  used for this issue.

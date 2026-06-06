@@ -1,9 +1,9 @@
 ---
 id: 1891
 title: "standalone: generator-method destructuring param emits invalid Wasm (array.set externref vs (ref null N)) — over-shifted funcIdx after generator-body late imports"
-status: ready
+status: in-review
 created: 2026-06-05
-updated: 2026-06-05
+updated: 2026-06-06
 priority: high
 feasibility: medium
 task_type: bugfix
@@ -12,6 +12,9 @@ language_feature: generators, destructuring-params, late-imports
 goal: standalone-mode
 sprint: 60
 related: [1890, 1839, 1602, 1886, 1530]
+claimed_by: codex-developer
+claimed_at: 2026-06-06T09:09:55.112Z
+pr: 1248
 ---
 # #1891 — generator-method dstr param uses an over-shifted funcIdx → invalid Wasm
 
@@ -79,3 +82,30 @@ catches a `call` whose resolved target type mismatches the consuming op.
   module and run.
 - No regression in non-generator dstr / dstr-param suites.
 - A standalone unit test for `*gen([a, ...rest])` and `*gen([a, b])`.
+
+## Final findings
+
+Implemented in branch `symphony/1891`; review PR: #1248.
+
+The local repro refined the stale-index shape: in the array externref conversion
+path, `destructureParamArray` built fallback calls to `__extern_length` /
+`__extern_get_idx`, then recursively entered the typed vec destructuring path.
+That typed path manually swapped into a detached `destructInstrs` buffer and
+kept the new buffer visible to late-import fixups, but it did not keep the
+previous body visible. When `emitBoundsCheckedArrayGetUndef` later added the
+`__get_undefined` import, the real native object-runtime helper slots shifted,
+but the fallback calls in the previous body stayed stale-low and landed on the
+adjacent object helper slots.
+
+Fix: route both nullable tuple and vec destructuring body swaps through the
+existing `pushBody` / `popBody` helper so the active destructuring buffer and the
+saved previous body are both reachable to `shiftLateImportIndices`.
+
+Validation:
+- `node node_modules/vitest/dist/cli.js run tests/issue-1891.test.ts`
+- `node node_modules/vitest/dist/cli.js run tests/issue-1891.test.ts tests/issue-1314.test.ts tests/issue-1553d.test.ts tests/equivalence/basic-destructuring.test.ts tests/equivalence/destructuring-type-coercion.test.ts tests/generator-method-destructuring.test.ts`
+
+Note: an accidental broad `pnpm test -- tests/issue-1891.test.ts` invocation
+expanded beyond the target file and eventually OOMed after reporting unrelated
+baseline failures. The scoped direct Vitest commands above are the relevant
+validation for this issue.

@@ -9,10 +9,12 @@
  * (`native-regex.ts`). The literal-substring case is now the `CHAR`-only
  * degenerate path of the VM. See the issue's "Implementation Notes (sd-1539)".
  *
- * Phase 2a slice: `RegExp` literals / `new RegExp(staticPattern, staticFlags)`
- * and `RegExp.prototype.test`. Dynamic patterns, `.exec`/`.match`/`.search`/
- * `.replace`/`.split`, and fancy features stay narrowed refusals citing the
- * later phase.
+ * Current slice: `RegExp` literals / `new RegExp(staticPattern, staticFlags)`,
+ * `RegExp.prototype.test`/non-global `.exec`, non-global
+ * `String.prototype.match`, `String.prototype.search`, literal-string
+ * `replace`/`replaceAll`, and non-capturing regex `split`. Dynamic patterns,
+ * global/sticky capture-array methods, `matchAll`, replacement substitutions,
+ * and fancy features stay narrowed refusals citing the later phase.
  */
 import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
@@ -20,8 +22,16 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
 import { ensureNativeStringHelpers, nativeStringType } from "./native-strings.js";
-import { ensureRegexReplace, ensureRegexSearch, i32ArrayLiteralInstrs, regexI32ArrayType } from "./native-regex.js";
 import {
+  ensureRegexCaptureArray,
+  ensureRegexReplace,
+  ensureRegexSearch,
+  ensureRegexSplit,
+  i32ArrayLiteralInstrs,
+  regexI32ArrayType,
+} from "./native-regex.js";
+import {
+  type CompiledRegex,
   parseFlags,
   RegexUnsupportedError,
   RE_FLAG_G,
@@ -31,6 +41,7 @@ import {
   RE_FLAG_Y,
 } from "./regex/bytecode.js";
 import { compilePattern, RepeatTooLargeError } from "./regex/compile.js";
+import { search as regexSearch } from "./regex/vm.js";
 import type { InnerResult } from "./shared.js";
 import { compileExpression } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
@@ -123,6 +134,10 @@ export function hasStandaloneRegExpEngine(state: StandaloneRegExpEngineState): b
 }
 
 const STANDALONE_REGEXP_STRUCT_NAME = "__StandaloneRegExp";
+// Supported standalone flags for the current pure-WasmGC VM slice: g/i/y from
+// Phase 2a plus m/s from Phase 2c. u/v/d remain code-point/indices follow-ups.
+const SUPPORTED_STANDALONE_FLAGS = RE_FLAG_G | RE_FLAG_I | RE_FLAG_Y | RE_FLAG_M | RE_FLAG_S;
+
 function reportStandaloneRegExpUnsupported(ctx: CodegenContext, node: ts.Node, detail: string): void {
   reportError(
     ctx,
@@ -306,6 +321,77 @@ function staticStringValue(ctx: CodegenContext, expr: ts.Expression): string | n
   return null;
 }
 
+interface StaticRegExpPatternFlags {
+  pattern: string;
+  flags: string;
+}
+
+/**
+ * Recover the pattern+flags of a static / backend-created RegExp expression:
+ * `/…/flags`, `new RegExp("…", "flags")`, `RegExp("…", "flags")`, or a
+ * trusted binding initialized to one of those forms.
+ */
+function staticRegExpPatternFlags(ctx: CodegenContext, expr: ts.Expression): StaticRegExpPatternFlags | null {
+  const unwrapped = stripStaticWrapper(expr);
+  if (unwrapped.kind === ts.SyntaxKind.RegularExpressionLiteral) {
+    const text = (unwrapped as ts.RegularExpressionLiteral).text;
+    const lastSlash = text.lastIndexOf("/");
+    return {
+      pattern: lastSlash >= 0 ? text.slice(1, lastSlash) : text,
+      flags: lastSlash >= 0 ? text.slice(lastSlash + 1) : "",
+    };
+  }
+  if (ts.isNewExpression(unwrapped) || (ts.isCallExpression(unwrapped) && !unwrapped.questionDotToken)) {
+    const callee = stripStaticWrapper(unwrapped.expression);
+    if (!ts.isIdentifier(callee) || !isGlobalRegExpIdentifier(ctx, callee)) return null;
+    const patternArg = unwrapped.arguments?.[0];
+    const flagsArg = unwrapped.arguments?.[1];
+    const pattern = patternArg === undefined ? "" : staticStringValue(ctx, patternArg);
+    const flags = flagsArg === undefined ? "" : staticStringValue(ctx, flagsArg);
+    if (pattern === null || flags === null) return null;
+    return { pattern: pattern ?? "", flags: flags ?? "" };
+  }
+  if (ts.isIdentifier(unwrapped)) {
+    const sym = ctx.checker.getSymbolAtLocation(unwrapped);
+    if (!sym) return null;
+    const decl = sym.getDeclarations()?.find((d) => ts.isVariableDeclaration(d)) as ts.VariableDeclaration | undefined;
+    if (!decl?.initializer || !isTrustedBackendCreatedRegExpBinding(ctx, decl, sym)) return null;
+    return staticRegExpPatternFlags(ctx, decl.initializer);
+  }
+  return null;
+}
+
+function compileStaticStandaloneRegExp(
+  ctx: CodegenContext,
+  pattern: string,
+  flags: string,
+  node: ts.Node,
+): CompiledRegex | null {
+  let flagBits: number;
+  try {
+    flagBits = parseFlags(flags);
+  } catch (e) {
+    reportStandaloneRegExpUnsupported(ctx, node, describeRegexError(e, `flags ${JSON.stringify(flags)}`));
+    return null;
+  }
+
+  const refusedFlags = flagBits & ~SUPPORTED_STANDALONE_FLAGS;
+  if (refusedFlags !== 0) {
+    reportStandaloneRegExpUnsupported(ctx, node, `flags ${JSON.stringify(flags)} (u/v/d are #1539 Phase 2d)`);
+    return null;
+  }
+
+  try {
+    return compilePattern(pattern, flagBits);
+  } catch (e) {
+    if (e instanceof RegexUnsupportedError || e instanceof RepeatTooLargeError) {
+      reportStandaloneRegExpUnsupported(ctx, node, e.message);
+      return null;
+    }
+    throw e;
+  }
+}
+
 /**
  * The `$NativeRegExp` struct (#1539). Holds the flags bitfield, the
  * capture-group count, the compiled bytecode program, the class table, and the
@@ -363,34 +449,8 @@ function emitStandaloneRegExpStruct(
   flags: string,
   node: ts.Node,
 ): ValType | null {
-  let flagBits: number;
-  try {
-    flagBits = parseFlags(flags);
-  } catch (e) {
-    reportStandaloneRegExpUnsupported(ctx, node, describeRegexError(e, `flags ${JSON.stringify(flags)}`));
-    return null;
-  }
-  // Supported flags: g (global), i (case-insensitive, ASCII fold), y (sticky),
-  // m (multiline — `^`/`$` at line boundaries, #1539 Phase 2c), and s (dotAll —
-  // `.` matches line terminators, #1539 Phase 2c). The unicode `u`/`v`
-  // (code-point semantics) and indices `d` flags remain deferred (Phase 2d).
-  const SUPPORTED_FLAGS = RE_FLAG_G | RE_FLAG_I | RE_FLAG_Y | RE_FLAG_M | RE_FLAG_S;
-  const refusedFlags = flagBits & ~SUPPORTED_FLAGS;
-  if (refusedFlags !== 0) {
-    reportStandaloneRegExpUnsupported(ctx, node, `flags ${JSON.stringify(flags)} (u/v/d are #1539 Phase 2d)`);
-    return null;
-  }
-
-  let compiled;
-  try {
-    compiled = compilePattern(pattern, flagBits);
-  } catch (e) {
-    if (e instanceof RegexUnsupportedError || e instanceof RepeatTooLargeError) {
-      reportStandaloneRegExpUnsupported(ctx, node, e.message);
-      return null;
-    }
-    throw e;
-  }
+  const compiled = compileStaticStandaloneRegExp(ctx, pattern, flags, node);
+  if (compiled === null) return null;
 
   const typeIdx = ensureStandaloneRegExpStruct(ctx);
   // field 0: flags
@@ -478,6 +538,8 @@ function isStandaloneRegExpValue(
 interface RegexSearchEmission {
   /** Local holding the (non-null) `$NativeRegExp` struct ref. */
   regexpLocal: number;
+  /** Local holding the flattened subject string. */
+  inputLocal: number;
   /** Local holding the populated caps array (length `2 * nGroups`). */
   capsLocal: number;
   /** The `$NativeRegExp` struct type index (== `ctx.structMap` entry). */
@@ -609,7 +671,7 @@ function emitRegexSearchCall(
   fctx.body.push({ op: "local.get", index: stickyLocal });
   fctx.body.push({ op: "local.get", index: capsLocal });
   fctx.body.push({ op: "call", funcIdx: searchIdx });
-  return { regexpLocal, capsLocal, structTypeIdx };
+  return { regexpLocal, inputLocal, capsLocal, structTypeIdx };
 }
 
 /** True when `argExpr`'s static type is string-like (or a String wrapper). */
@@ -651,6 +713,95 @@ export function tryCompileStandaloneRegExpTest(
   const emitted = emitRegexSearchCall(ctx, fctx, propAccess.expression, expr.arguments[0]!);
   if (emitted === null) return null;
   return { kind: "i32" };
+}
+
+function flagsHaveGlobalOrSticky(flags: string): boolean {
+  return flags.includes("g") || flags.includes("y");
+}
+
+/**
+ * Emit a call to `__regex_exec_array`, returning a nullable native string vec:
+ * `null` on no match, otherwise `[fullMatch, cap1, cap2, ...]` with unmatched
+ * captures represented as null native strings (the compiler's `undefined` for
+ * nullable native string slots).
+ */
+function emitRegexExecArrayCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  regexpExpr: ts.Expression,
+  inputExpr: ts.Expression,
+): ValType | null {
+  const emitted = emitRegexSearchCall(ctx, fctx, regexpExpr, inputExpr);
+  if (emitted === null) return null;
+
+  const captureArrayIdx = ensureRegexCaptureArray(ctx);
+  const nstrVecTypeIdx = ctx.vecTypeMap.get(`ref_${ctx.anyStrTypeIdx}`);
+  if (nstrVecTypeIdx === undefined) {
+    reportError(ctx, regexpExpr, "Codegen error: standalone RegExp exec missing native string vec type (#1539).");
+    return null;
+  }
+
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "ref_null", typeIdx: nstrVecTypeIdx } },
+    then: [
+      { op: "local.get", index: emitted.regexpLocal } as Instr,
+      { op: "struct.get", typeIdx: emitted.structTypeIdx, fieldIdx: RE_FIELD_NGROUPS } as Instr,
+      { op: "local.get", index: emitted.inputLocal } as Instr,
+      { op: "local.get", index: emitted.capsLocal } as Instr,
+      { op: "call", funcIdx: captureArrayIdx } as Instr,
+    ],
+    else: [{ op: "ref.null", typeIdx: nstrVecTypeIdx } as Instr],
+  } as Instr);
+  return { kind: "ref_null", typeIdx: nstrVecTypeIdx };
+}
+
+/**
+ * `RegExp.prototype.exec(str)` in standalone mode (#1539 Phase 2b).
+ *
+ * This slice materializes the capture array for backend-created static RegExp
+ * values with non-global/non-sticky flags. `g`/`y` require observable
+ * `lastIndex` mutation and stay refused until the dedicated lastIndex slice.
+ */
+export function tryCompileStandaloneRegExpExec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  propAccess: ts.PropertyAccessExpression,
+): InnerResult | undefined {
+  if (!ctx.standalone || propAccess.name.text !== "exec") return undefined;
+
+  const receiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
+  if (!isGlobalRegExpType(receiverType)) return undefined;
+
+  if (!hasStandaloneRegExpEngine(ctx)) {
+    reportStandaloneRegExpUnsupported(ctx, expr, "RegExp.prototype.exec without an enabled standalone engine");
+    return null;
+  }
+  if (expr.arguments.length !== 1) {
+    reportStandaloneRegExpUnsupported(ctx, expr, "RegExp.prototype.exec arities other than one string argument");
+    return null;
+  }
+  if (!isStringLikeArg(ctx, expr.arguments[0]!)) {
+    reportStandaloneRegExpUnsupported(ctx, expr.arguments[0]!, "RegExp.prototype.exec argument coercion");
+    return null;
+  }
+
+  const flags = staticRegExpFlags(ctx, propAccess.expression);
+  if (flags === null) {
+    reportStandaloneRegExpUnsupported(ctx, propAccess.expression, "RegExp.prototype.exec with dynamic flags");
+    return null;
+  }
+  if (flagsHaveGlobalOrSticky(flags)) {
+    reportStandaloneRegExpUnsupported(
+      ctx,
+      propAccess.expression,
+      "RegExp.prototype.exec with g/y lastIndex semantics (#1539 Phase 2b)",
+    );
+    return null;
+  }
+
+  return emitRegexExecArrayCall(ctx, fctx, propAccess.expression, expr.arguments[0]!);
 }
 
 /**
@@ -719,26 +870,52 @@ export function tryCompileStandaloneStringSearch(
  * Returns `null` when the flags can't be statically determined.
  */
 function staticRegExpFlags(ctx: CodegenContext, expr: ts.Expression): string | null {
-  const unwrapped = stripStaticWrapper(expr);
-  if (unwrapped.kind === ts.SyntaxKind.RegularExpressionLiteral) {
-    const text = (unwrapped as ts.RegularExpressionLiteral).text;
-    const lastSlash = text.lastIndexOf("/");
-    return lastSlash >= 0 ? text.slice(lastSlash + 1) : "";
+  return staticRegExpPatternFlags(ctx, expr)?.flags ?? null;
+}
+
+/**
+ * `String.prototype.match(regexp)` in standalone mode (#1539 Phase 2b).
+ *
+ * Non-global static RegExp arguments share the same result shape as `.exec`.
+ * Global `match` returns an all-matches array and sticky/global lastIndex
+ * details are intentionally left to the next capture-array slice.
+ */
+export function tryCompileStandaloneStringMatch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  propAccess: ts.PropertyAccessExpression,
+): ValType | null | undefined {
+  if (!ctx.standalone || propAccess.name.text !== "match") return undefined;
+
+  if (!isStringLikeArg(ctx, propAccess.expression)) return undefined;
+  if (expr.arguments.length !== 1) return undefined;
+  const argExpr = expr.arguments[0]!;
+  const argType = ctx.checker.getTypeAtLocation(argExpr);
+  if (!isGlobalRegExpType(argType) && !isKnownBackendCreatedRegExpReceiver(ctx, argExpr)) {
+    return undefined;
   }
-  if (ts.isNewExpression(unwrapped) || (ts.isCallExpression(unwrapped) && !unwrapped.questionDotToken)) {
-    const callee = stripStaticWrapper(unwrapped.expression);
-    if (!ts.isIdentifier(callee) || !isGlobalRegExpIdentifier(ctx, callee)) return null;
-    const flagsArg = unwrapped.arguments?.[1];
-    if (flagsArg === undefined) return "";
-    const flags = staticStringValue(ctx, flagsArg);
-    return flags === null ? null : (flags ?? "");
+
+  const flags = staticRegExpFlags(ctx, argExpr);
+  if (flags === null) {
+    reportStandaloneRegExpUnsupported(ctx, argExpr, "String.prototype.match with dynamic RegExp flags");
+    return null;
   }
-  if (ts.isIdentifier(unwrapped)) {
-    const sym = ctx.checker.getSymbolAtLocation(unwrapped);
-    const decl = sym?.getDeclarations()?.find((d) => ts.isVariableDeclaration(d)) as ts.VariableDeclaration | undefined;
-    if (decl?.initializer) return staticRegExpFlags(ctx, decl.initializer);
+  if (flagsHaveGlobalOrSticky(flags)) {
+    reportStandaloneRegExpUnsupported(
+      ctx,
+      argExpr,
+      "String.prototype.match with g/y all-match or lastIndex semantics (#1539 Phase 2b/2c)",
+    );
+    return null;
   }
-  return null;
+
+  if (!hasStandaloneRegExpEngine(ctx)) {
+    reportStandaloneRegExpUnsupported(ctx, expr, "String.prototype.match without an enabled standalone engine");
+    return null;
+  }
+
+  return emitRegexExecArrayCall(ctx, fctx, argExpr, propAccess.expression);
 }
 
 /**
@@ -852,4 +1029,106 @@ export function tryCompileStandaloneStringReplace(
   fctx.body.push({ op: "i32.const", value: globalReplace ? 1 : 0 });
   fctx.body.push({ op: "call", funcIdx: replaceIdx });
   return nativeStringType(ctx);
+}
+
+function regexCanMatchEmpty(compiled: CompiledRegex): boolean {
+  return regexSearch(compiled.prog, compiled.classTable, compiled.nGroups, "", 0, false) !== null;
+}
+
+/**
+ * `String.prototype.split(re)` in standalone mode (#1539 Phase 2c) —
+ * non-capturing, non-nullable static RegExp separator only.
+ *
+ * Capturing-group split has extra result interleaving semantics, and nullable
+ * separators need the full SplitMatch/AdvanceStringIndex edge-case handling.
+ * Both stay narrowed refusals until the capture-array/string-method follow-up.
+ */
+export function tryCompileStandaloneStringSplit(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  propAccess: ts.PropertyAccessExpression,
+): ValType | null | undefined {
+  if (!ctx.standalone || propAccess.name.text !== "split") return undefined;
+
+  if (!isStringLikeArg(ctx, propAccess.expression)) return undefined;
+  if (expr.arguments.length === 0) return undefined;
+  const reExpr = expr.arguments[0]!;
+  const reType = ctx.checker.getTypeAtLocation(reExpr);
+  if (!isGlobalRegExpType(reType) && !isKnownBackendCreatedRegExpReceiver(ctx, reExpr)) {
+    return undefined; // not a RegExp arg -> native string split / generic path
+  }
+
+  if (expr.arguments.length !== 1) {
+    reportStandaloneRegExpUnsupported(ctx, expr.arguments[1] ?? expr, "String.prototype.split(RegExp, limit)");
+    return null;
+  }
+
+  const meta = staticRegExpPatternFlags(ctx, reExpr);
+  if (meta === null) {
+    reportStandaloneRegExpUnsupported(ctx, reExpr, "String.prototype.split with dynamic RegExp separators");
+    return null;
+  }
+
+  const compiled = compileStaticStandaloneRegExp(ctx, meta.pattern, meta.flags, reExpr);
+  if (compiled === null) return null;
+  if (compiled.nGroups !== 1) {
+    reportStandaloneRegExpUnsupported(ctx, reExpr, "String.prototype.split with capturing groups (#1539 Phase 2b/2c)");
+    return null;
+  }
+  if (regexCanMatchEmpty(compiled)) {
+    reportStandaloneRegExpUnsupported(
+      ctx,
+      reExpr,
+      "String.prototype.split with empty-match separators (#1539 Phase 2c)",
+    );
+    return null;
+  }
+
+  if (!hasStandaloneRegExpEngine(ctx)) {
+    reportStandaloneRegExpUnsupported(ctx, expr, "String.prototype.split without an enabled standalone engine");
+    return null;
+  }
+
+  ensureNativeStringHelpers(ctx);
+  const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+  if (flattenIdx === undefined) {
+    reportError(ctx, expr, "Codegen error: standalone RegExp backend missing native string helpers (#682).");
+    return null;
+  }
+  const splitIdx = ensureRegexSplit(ctx);
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+
+  const loaded = loadStandaloneRegExpStruct(ctx, fctx, reExpr);
+  if (loaded === null) return null;
+  const { regexpLocal, structTypeIdx } = loaded;
+
+  const subjType = compileExpression(ctx, fctx, propAccess.expression, nativeStringType(ctx));
+  if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  fctx.body.push({ op: "call", funcIdx: flattenIdx });
+  const subjLocal = allocLocal(fctx, `__re_split_subj_${fctx.locals.length}`, { kind: "ref", typeIdx: strTypeIdx });
+  fctx.body.push({ op: "local.set", index: subjLocal });
+
+  // __regex_split(prog, classTable, nGroups, subjData, subjOff, subjLen, subject)
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_PROG });
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_CLASS_TABLE });
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_NGROUPS });
+  fctx.body.push({ op: "local.get", index: subjLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }); // data
+  fctx.body.push({ op: "local.get", index: subjLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }); // off
+  fctx.body.push({ op: "local.get", index: subjLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }); // len
+  fctx.body.push({ op: "local.get", index: subjLocal });
+  fctx.body.push({ op: "call", funcIdx: splitIdx });
+
+  const nstrVecTypeIdx = ctx.vecTypeMap.get(`ref_${ctx.anyStrTypeIdx}`);
+  if (nstrVecTypeIdx === undefined) {
+    reportError(ctx, expr, "Codegen error: standalone RegExp split missing native string vec type (#1539).");
+    return null;
+  }
+  return { kind: "ref", typeIdx: nstrVecTypeIdx };
 }

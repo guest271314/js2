@@ -98,6 +98,7 @@ import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from
 import {
   compileStandaloneRegExpConstructor,
   isGlobalRegExpIdentifier,
+  tryCompileStandaloneRegExpExec,
   tryCompileStandaloneRegExpTest,
 } from "../regexp-standalone.js";
 import {
@@ -2429,6 +2430,9 @@ function compileCallExpression(
   if (ts.isPropertyAccessExpression(expr.expression)) {
     const propAccess = expr.expression;
 
+    const standaloneRegExpExec = tryCompileStandaloneRegExpExec(ctx, fctx, expr, propAccess);
+    if (standaloneRegExpExec !== undefined) return standaloneRegExpExec;
+
     const standaloneRegExpTest = tryCompileStandaloneRegExpTest(ctx, fctx, expr, propAccess);
     if (standaloneRegExpTest !== undefined) return standaloneRegExpTest;
 
@@ -2836,9 +2840,9 @@ function compileCallExpression(
           const typeName = objExpr.expression.text;
           const isBuiltinRegExpPrototype = typeName === "RegExp" && isGlobalRegExpIdentifier(ctx, objExpr.expression);
           if (ctx.standalone && isBuiltinRegExpPrototype) {
-            if (methodName === "test") {
+            if (methodName === "test" || methodName === "exec") {
               const receiverArg = expr.arguments[0]!;
-              const syntheticProp = ts.factory.createPropertyAccessExpression(receiverArg, "test");
+              const syntheticProp = ts.factory.createPropertyAccessExpression(receiverArg, methodName);
               ts.setTextRange(syntheticProp, innerExpr);
               const syntheticCall = ts.factory.createCallExpression(
                 syntheticProp,
@@ -2847,14 +2851,17 @@ function compileCallExpression(
               );
               ts.setTextRange(syntheticCall, expr);
               (syntheticCall as any).parent = expr.parent;
-              const standaloneRegExpTest = tryCompileStandaloneRegExpTest(ctx, fctx, syntheticCall, syntheticProp);
-              if (standaloneRegExpTest !== undefined) return standaloneRegExpTest;
+              const standaloneRegExpMethod =
+                methodName === "exec"
+                  ? tryCompileStandaloneRegExpExec(ctx, fctx, syntheticCall, syntheticProp)
+                  : tryCompileStandaloneRegExpTest(ctx, fctx, syntheticCall, syntheticProp);
+              if (standaloneRegExpMethod !== undefined) return standaloneRegExpMethod;
             }
             reportError(
               ctx,
               expr,
               `Codegen error: standalone RegExp literal-substring backend does not support ` +
-                `RegExp.prototype.${methodName}.call(...) (#682/#1474). Use RegExp.prototype.test ` +
+                `RegExp.prototype.${methodName}.call(...) (#682/#1474). Use RegExp.prototype.test/exec ` +
                 `with a plain static pattern and no flags, or recompile without --target standalone.`,
             );
             return null;
@@ -7796,6 +7803,10 @@ function compileCallExpression(
         return { kind: "f64" };
       }
       if (argType?.kind === "externref") {
+        if (ctx.standalone) {
+          coerceType(ctx, fctx, argType, { kind: "f64" }, "number");
+          return { kind: "f64" };
+        }
         // Number(x) uses ToNumber semantics — __unbox_number calls Number(v) in JS.
         // parseFloat is wrong here: Number(null)=0 but parseFloat(null)=NaN,
         // Number("")=0 but parseFloat("")=NaN, Number("0x1F")=31 but parseFloat gives 0.
@@ -7864,6 +7875,20 @@ function compileCallExpression(
       if (litNum !== undefined && Number.isSafeInteger(litNum)) {
         fctx.body.push({ op: "i64.const", value: BigInt(litNum) } as Instr);
         return { kind: "i64", bigint: true };
+      }
+      if (ts.isStringLiteral(litArg) || ts.isNoSubstitutionTemplateLiteral(litArg)) {
+        try {
+          const litBig = BigInt(litArg.text);
+          const minI64 = -(1n << 63n);
+          const maxI64 = (1n << 63n) - 1n;
+          if (litBig >= minI64 && litBig <= maxI64) {
+            fctx.body.push({ op: "i64.const", value: litBig } as Instr);
+            return { kind: "i64", bigint: true };
+          }
+        } catch {
+          // Keep malformed strings on the runtime path so JS-host mode throws
+          // the native SyntaxError and no-JS-host mode uses its native throw.
+        }
       }
 
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
