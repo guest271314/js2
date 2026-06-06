@@ -1281,13 +1281,15 @@ export function destructureParamArray(
       if (isNullable && pattern.elements.length > 0) {
         addStringConstantGlobal(ctx, "Cannot destructure 'null' or 'undefined'");
       }
-      const savedBody = fctx.body;
-      const destructInstrs: Instr[] = [];
+      let savedBody: Instr[] | undefined;
+      let destructInstrs: Instr[] = [];
       if (isNullable) {
-        // Keep `destructInstrs` reachable to index fixups while it is the
-        // active emission buffer (#1553d — see vec path note below).
-        fctx.savedBodies.push(destructInstrs);
-        fctx.body = destructInstrs;
+        // Keep both sides of the body swap reachable to index fixups. Late
+        // imports can be triggered while emitting `destructInstrs`; callers such
+        // as the externref conversion path have already populated the previous
+        // body with call indices that must shift too (#1891).
+        savedBody = pushBody(fctx);
+        destructInstrs = fctx.body;
       }
 
       for (let i = 0; i < pattern.elements.length; i++) {
@@ -1348,8 +1350,7 @@ export function destructureParamArray(
 
       // Close null guard — throw TypeError when null (JS spec)
       if (isNullable) {
-        fctx.savedBodies.pop();
-        fctx.body = savedBody;
+        popBody(fctx, savedBody!);
         if (destructInstrs.length > 0) {
           // When param is null (e.g. empty array cast failed), apply element defaults
           const nullDefaultInstrs: Instr[] = [];
@@ -1420,17 +1421,15 @@ export function destructureParamArray(
   if (isNullable && pattern.elements.length > 0) {
     addStringConstantGlobal(ctx, "Cannot destructure 'null' or 'undefined'");
   }
-  const savedBody = fctx.body;
-  const destructInstrs: Instr[] = [];
+  let savedBody: Instr[] | undefined;
+  let destructInstrs: Instr[] = [];
   if (isNullable) {
-    // Keep `destructInstrs` reachable to global/late-import index fixups while
-    // it is the active emission buffer. `fixupModuleGlobalIndices` and
-    // `shiftLateImportIndices` walk `ctx.currentFunc.body` (= the restored
-    // outer `savedBody`) plus `savedBodies`; a raw `fctx.body = destructInstrs`
-    // swap leaves the new buffer invisible to those walks, so a function-call
-    // default (`[x = f()]`, where `f` adds a late import) corrupts indices.
-    fctx.savedBodies.push(destructInstrs);
-    fctx.body = destructInstrs;
+    // Keep both sides of the body swap reachable to global/late-import index
+    // fixups. `destructInstrs` is the active body, while the saved body may
+    // already contain call indices emitted by the externref conversion fallback
+    // before this recursive typed destructure runs (#1891).
+    savedBody = pushBody(fctx);
+    destructInstrs = fctx.body;
   }
 
   for (let i = 0; i < pattern.elements.length; i++) {
@@ -1664,8 +1663,7 @@ export function destructureParamArray(
   // Close null guard — throw TypeError when null (JS spec)
   // Skip for empty `[]` patterns (#225).
   if (isNullable) {
-    fctx.savedBodies.pop();
-    fctx.body = savedBody;
+    popBody(fctx, savedBody!);
     if (destructInstrs.length > 0 && pattern.elements.length > 0) {
       fctx.body.push({ op: "local.get", index: paramIdx });
       fctx.body.push({ op: "ref.is_null" } as Instr);
