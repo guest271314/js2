@@ -1,7 +1,7 @@
 ---
 id: 1891
 title: "standalone: generator-method destructuring param emits invalid Wasm (array.set externref vs (ref null N)) — over-shifted funcIdx after generator-body late imports"
-status: in-progress
+status: in-review
 created: 2026-06-05
 updated: 2026-06-06
 priority: high
@@ -14,6 +14,7 @@ sprint: 60
 related: [1890, 1839, 1602, 1886, 1530]
 claimed_by: codex-developer
 claimed_at: 2026-06-06T09:09:55.112Z
+pr: 1248
 ---
 # #1891 — generator-method dstr param uses an over-shifted funcIdx → invalid Wasm
 
@@ -84,7 +85,7 @@ catches a `call` whose resolved target type mismatches the consuming op.
 
 ## Final findings
 
-Implemented in branch `symphony/1891`.
+Implemented in branch `symphony/1891`; review PR: #1248.
 
 The local repro refined the stale-index shape: in the array externref conversion
 path, `destructureParamArray` built fallback calls to `__extern_length` /
