@@ -17,7 +17,7 @@ related: [1472, 1629, 1631, 1888]
 test262_bucket: object-property-semantics
 test262_count: 748
 claimed_by: codex-developer
-claimed_at: 2026-06-07T00:36:02.031Z
+claimed_at: 2026-06-07T01:07:24.115Z
 pr: 1264
 ---
 # #1906 — Standalone native `Object.defineProperties`
@@ -71,3 +71,5 @@ caught by the broad dynamic object/property refusal.
 - `pnpm test tests/issue-1906.test.ts`
 - `pnpm test tests/issue-1629-S6.test.ts tests/issue-1629-S3.test.ts tests/issue-1629-S2.test.ts`
 - `pnpm exec tsc --noEmit --incremental false`
+
+Revalidated on branch `symphony/1906` with PR #1264 open against `main`.
