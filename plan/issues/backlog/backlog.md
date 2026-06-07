@@ -22,6 +22,14 @@ them directly into sprint 61 so Symphony can dispatch them:
   `isSameValue` bucket split/fix.
 - [#1909](../1909-standalone-regexp-residual-bucket.md) — residual standalone
   RegExp bucket split/fix.
+- [#1911](../1911-standalone-regexp-phase-2d-unicode-lookaround.md) —
+  standalone RegExp Phase 2d: `u/v/d`, Unicode, lookaround, modifiers.
+- [#1912](../1912-standalone-regexp-phase-2b-boundaries-backrefs-classes.md) —
+  standalone RegExp Phase 2b: boundaries, backrefs, class compatibility.
+- [#1913](../1913-standalone-regexp-string-protocol-lastindex.md) —
+  standalone RegExp string protocol, `matchAll`, split/replace, lastIndex.
+- [#1914](../1914-standalone-regexp-native-engine-reflection-result-shape.md) —
+  standalone RegExp native-engine reflection and result-shape gaps.
 - [#1910](../1910-standalone-toprimitive-residual-bucket.md) — residual
   ToPrimitive bucket split/fix.
 

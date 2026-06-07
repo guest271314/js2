@@ -106,6 +106,14 @@ function pathHas(record, patterns) {
   return hasAny(path, patterns);
 }
 
+function isStandaloneRegExpRecord(record, text) {
+  return (
+    record.host_import_leak_class === "regexp" ||
+    pathHas(record, ["built-ins/regexp", "regexpstringiteratorprototype"]) ||
+    hasAny(text, ["regexp", "regular expression"])
+  );
+}
+
 const STANDALONE_ROOT_CAUSE_BUCKETS = [
   {
     id: "binary-emit-u32-out-of-range",
@@ -164,13 +172,104 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
       hasAny(text, ["json_parse", "json_stringify"]),
   },
   {
-    id: "standalone-regexp",
-    issues: ["#1909", "#682", "#1474", "#1539"],
-    label: "RegExp literals/constructor/String-RegExp paths still refused or missing native engine",
+    id: "standalone-regexp-phase-2d",
+    issues: ["#1911", "#1909", "#1539"],
+    label: "Standalone RegExp Phase 2d: u/v/d flags, Unicode escapes, lookaround, modifiers",
     match: (record, text) =>
-      record.host_import_leak_class === "regexp" ||
-      pathHas(record, ["built-ins/regexp", "regexpstringiteratorprototype"]) ||
-      hasAny(text, ["regexp", "regular expression"]),
+      isStandaloneRegExpRecord(record, text) &&
+      (pathHas(record, [
+        "built-ins/regexp/lookbehind",
+        "built-ins/regexp/property-escapes",
+        "built-ins/regexp/unicodesets",
+        "built-ins/regexp/regexp-modifiers",
+      ]) ||
+        hasAny(text, [
+          /flags "[uvd]"/,
+          "u/v/d are",
+          "phase 2d",
+          "lookahead",
+          "lookbehind",
+          "unicode property escape",
+          "code-point escape",
+          "unicode sets",
+          "unsupported group form '(?-",
+          "unsupported group form '(?i",
+          "unsupported group form '(?m",
+          "unsupported group form '(?s",
+        ])),
+  },
+  {
+    id: "standalone-regexp-phase-2b",
+    issues: ["#1912", "#1909", "#1539"],
+    label: "Standalone RegExp Phase 2b: word boundaries, backrefs, and character-class compatibility",
+    match: (record, text) =>
+      isStandaloneRegExpRecord(record, text) &&
+      hasAny(text, [
+        "word-boundary",
+        "backreference",
+        "named backreference",
+        "negated shorthand",
+        "class range out of order",
+        "class shorthand as range endpoint",
+      ]),
+  },
+  {
+    id: "standalone-regexp-string-protocol",
+    issues: ["#1913", "#1909", "#1539"],
+    label: "Standalone RegExp string protocol, global/sticky lastIndex, split, replace, and matchAll",
+    match: (record, text) =>
+      isStandaloneRegExpRecord(record, text) &&
+      (pathHas(record, [
+        "built-ins/regexp/prototype/symbol.",
+        "built-ins/regexpstringiteratorprototype",
+        "built-ins/string/prototype/match",
+        "built-ins/string/prototype/matchall",
+        "built-ins/string/prototype/replace",
+        "built-ins/string/prototype/split",
+      ]) ||
+        hasAny(text, [
+          "@@match",
+          "@@matchall",
+          "@@replace",
+          "@@search",
+          "@@split",
+          "symbol protocol",
+          "matchall",
+          "regexpstringiterator",
+          "lastindex",
+          "all-match",
+          "split(regexp, limit)",
+          "split with capturing",
+          "split with empty-match",
+          "$-substitution",
+          "function replacer",
+        ])),
+  },
+  {
+    id: "standalone-regexp-native-engine",
+    issues: ["#1914", "#1909", "#682"],
+    label: "Standalone RegExp native-engine/runtime gaps: source, constructors, prototype access, result shape",
+    match: (record, text) =>
+      isStandaloneRegExpRecord(record, text) &&
+      (["assertion_fail", "runtime_error", "null_deref", "wasm_compile", "illegal_cast", "oob"].includes(
+        record.error_category,
+      ) ||
+        hasAny(text, [
+          "__get_builtin",
+          "dynamic constructor patterns",
+          "pattern.source",
+          "__executed.input",
+          "__executed.index",
+          "source",
+          "flags accessor",
+          "regexp.prototype",
+        ])),
+  },
+  {
+    id: "standalone-regexp",
+    issues: ["#1909", "#1911", "#1912", "#1913", "#1914"],
+    label: "Residual standalone RegExp failures not matched by the narrower RegExp sub-buckets",
+    match: isStandaloneRegExpRecord,
   },
   {
     id: "issamevalue-invalid-wasm",
