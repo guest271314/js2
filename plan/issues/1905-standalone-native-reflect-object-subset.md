@@ -17,9 +17,10 @@ related: [1472, 1466, 1629, 1888]
 test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
-claimed_at: 2026-06-07T03:10:53.997Z
+claimed_at: 2026-06-07T03:18:53.962Z
 pr: 1266
 ---
+
 # #1905 — Standalone native Reflect object subset
 
 ## Problem
@@ -97,3 +98,5 @@ machinery and are out of scope here.
 - Current redispatch pass: fetched `origin/main`, reran the scoped validation
   above successfully, confirmed implementation PR `#1261` is already merged,
   and opened ready/non-draft follow-up PR `#1266` for this issue-file update.
+- Latest Codex pass: confirmed PR `#1266` is open, ready/non-draft, targets
+  `main`, and remains the tracked review PR for this issue-file update.
