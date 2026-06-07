@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T00:36:12.529Z
+claimed_at: 2026-06-07T01:23:23.970Z
 pr: 1257
 ---
 
@@ -106,3 +106,12 @@ Focused regression: `tests/issue-1908.test.ts` pins both sides of the split:
 a real `isSameValue` validator failure remains in `issamevalue-invalid-wasm`,
 while a class `assert.sameValue(...)` assertion failure reclassifies to
 `class-prototype-private-descriptor`.
+
+## Revalidation — 2026-06-07
+
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed.
+- Rebuilt the standalone report from
+  `.test262-cache/test262-standalone-current.jsonl` against current
+  `origin/main` (`9c25e310c4b31caa4f502cfbceb975016fb50663`); the
+  `issamevalue-invalid-wasm` bucket remained absent, classified stayed
+  `30,733`, and unclassified stayed `0`.
