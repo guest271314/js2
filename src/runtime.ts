@@ -3577,6 +3577,22 @@ function _readOwnDescriptor(
   return undefined; // not an own property
 }
 
+function _wasmStructPropertyIsEnumerable(obj: any, key: any, exports: Record<string, Function> | undefined): number {
+  const prop = typeof key === "symbol" ? key : String(key);
+  const tomb = _wasmStructDeletedKeys.get(obj);
+  if (tomb && tomb.has(prop)) return 0;
+
+  const descs = _wasmPropDescs.get(obj);
+  const flags = descs?.get(_normalizeDescKey(prop));
+  if (flags !== undefined) return flags & _SC_ENUMERABLE ? 1 : 0;
+
+  const sc = _wasmStructProps.get(obj);
+  if (sc && prop in sc) return 1;
+
+  const desc = _readOwnDescriptor(obj, prop, exports);
+  return desc?.enumerable ? 1 : 0;
+}
+
 /**
  * (#1629 S1) Own-key enumeration for a WasmGC struct, mirroring the union of
  * `__getOwnPropertyNames` (string keys) and `__getOwnPropertySymbols`. Used by
@@ -7472,21 +7488,7 @@ assert._isSameValue = isSameValue;
       if (name === "Object_propertyIsEnumerable")
         return (obj: any, key: any) => {
           if (_isWasmStruct(obj)) {
-            const descs = _wasmPropDescs.get(obj);
-            if (descs) {
-              const flags = descs.get(String(key));
-              if (flags !== undefined) return flags & _SC_ENUMERABLE ? 1 : 0;
-            }
-            const sc = _wasmStructProps.get(obj);
-            if (sc && String(key) in sc) return 1;
-            // #1047 — registered class prototype: only allowlisted methods
-            const protoMethods = _prototypeMethodNames.get(obj);
-            if (protoMethods !== undefined) {
-              return protoMethods.includes(String(key)) ? 1 : 0;
-            }
-            const exports = callbackState?.getExports();
-            const fieldNames = _getStructFieldNames(obj, exports) ?? [];
-            return fieldNames.includes(String(key)) ? 1 : 0;
+            return _wasmStructPropertyIsEnumerable(obj, key, callbackState?.getExports());
           }
           return Object.prototype.propertyIsEnumerable.call(obj, key) ? 1 : 0;
         };
@@ -7613,7 +7615,13 @@ assert._isSameValue = isSameValue;
           // #1047 — registered class prototype: only allowlisted methods qualify
           const protoMethods = _prototypeMethodNames.get(obj);
           if (protoMethods !== undefined) {
-            return protoMethods.includes(String(key)) ? 1 : 0;
+            const prop = String(key);
+            return protoMethods.includes(prop) && !_isDeletedClassProp(obj, prop) ? 1 : 0;
+          }
+          const staticMethods = _staticMethodNames.get(obj);
+          if (staticMethods !== undefined) {
+            const prop = String(key);
+            return staticMethods.includes(prop) && !_isDeletedClassProp(obj, prop) ? 1 : 0;
           }
           // Check struct field names via exported helpers
           const exports = callbackState?.getExports();
@@ -7632,26 +7640,7 @@ assert._isSameValue = isSameValue;
             }
           }
           // (#1334) Deleted property — not own, hence not enumerable.
-          const tomb = _wasmStructDeletedKeys.get(obj);
-          if (tomb && tomb.has(typeof key === "symbol" ? key : String(key))) return 0;
-          // WasmGC struct: check sidecar descriptor flags
-          const descs = _wasmPropDescs.get(obj);
-          if (descs) {
-            const flags = descs.get(String(key));
-            if (flags !== undefined) return flags & _SC_ENUMERABLE ? 1 : 0;
-          }
-          // Sidecar props without explicit descriptor are enumerable
-          const sc = _wasmStructProps.get(obj);
-          if (sc && String(key) in sc) return 1;
-          // #1047 — registered class prototype: only allowlisted methods
-          const protoMethods = _prototypeMethodNames.get(obj);
-          if (protoMethods !== undefined) {
-            return protoMethods.includes(String(key)) ? 1 : 0;
-          }
-          // Check struct field names (always enumerable)
-          const exports = callbackState?.getExports();
-          const fieldNames = _getStructFieldNames(obj, exports) ?? [];
-          return fieldNames.includes(String(key)) ? 1 : 0;
+          return _wasmStructPropertyIsEnumerable(obj, key, callbackState?.getExports());
         };
       // for-in key enumeration: returns a JS array of enumerable string keys
       if (name === "__for_in_keys")

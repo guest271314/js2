@@ -1,7 +1,7 @@
 ---
 id: 1591
 title: "class/elements: WasmGC-struct ↔ host own-property/identity reconciliation gaps (~294 fails)"
-status: ready
+status: in-progress
 created: 2026-05-24
 updated: 2026-06-07
 depends_on: [1472]
@@ -17,6 +17,8 @@ renumbered_from: 779b
 parent: 779
 test262_fail: 294
 test262_category: language/statements/class/elements, language/expressions/class/elements
+claimed_by: codex-developer
+claimed_at: 2026-06-07T05:32:55.920Z
 ---
 # #1591 — `class/elements` WasmGC-struct ↔ host own-property / method-identity reconciliation gaps
 
@@ -366,3 +368,39 @@ layer. **Recommend keeping #1591 `blocked` on #1472 Phase C** rather than cuttin
   The 294 host-mode `class/elements` count predates the descriptor-infra
   (#1364/#1629) landings and should be re-measured; the 1,660 standalone rows
   are the load-bearing number and are Phase-C-gated.
+
+## 2026-06-07 codex attempt 22 — borrowed Object.prototype routing + enumerability slice
+
+Implemented the actionable Phase-C slice identified in the 2026-06-03
+re-profile:
+
+- `Object.prototype.propertyIsEnumerable.call(receiver, key)` now follows the
+  same standalone borrowed-call synthesis as `hasOwnProperty`, so closed
+  class-struct receivers keep compile-time field/method semantics while open
+  `any` receivers route to the native `__propertyIsEnumerable` helper.
+- `Object.prototype.isPrototypeOf.call(proto, value)` now routes to the native
+  standalone `__isPrototypeOf` prototype-chain helper instead of refusing via
+  the `__proto_method_call` gate.
+- `propertyIsEnumerable` over registered WasmGC class prototypes/class objects
+  now reuses descriptor truth: prototype/static methods are own but
+  non-enumerable, while instance fields remain enumerable.
+- Runtime `__hasOwnProperty` now also consults `_staticMethodNames`, matching
+  the existing static-method descriptor support from #1395.
+
+Focused coverage added in `tests/issue-1591.test.ts`; the older #1888 Slice 3
+guard in `tests/issue-1472.test.ts` was updated from refuse-loud to the new
+native `isPrototypeOf` behavior.
+
+Validation:
+
+- `pnpm exec vitest run tests/issue-1591.test.ts --reporter=dot` — pass
+- `pnpm exec vitest run tests/issue-1472.test.ts -t "#1888 Slice 3" --reporter=dot` — pass
+- `pnpm exec vitest run tests/issue-1364a-class-method-descriptors.test.ts tests/issue-1364b-class-method-delete.test.ts tests/issue-1047.test.ts tests/issue-1395-phase1.test.ts tests/issue-341.test.ts tests/equivalence/issue-1334.test.ts --reporter=dot` — pass
+- `pnpm exec prettier --check src/codegen/object-ops.ts src/codegen/expressions/calls.ts src/runtime.ts tests/issue-1591.test.ts tests/issue-1472.test.ts` — pass
+- `pnpm exec biome lint src/codegen/object-ops.ts src/codegen/expressions/calls.ts src/runtime.ts tests/issue-1591.test.ts tests/issue-1472.test.ts --diagnostic-level=error` — exit 0; Biome still prints its existing diagnostic-cap notice.
+
+Broad `tests/issue-1472.test.ts` was sampled once and still has six unrelated
+pre-existing runtime expectation failures in earlier Phase C / Slice 2 cases
+(`Object.create`/`Object.setPrototypeOf` identity projections and open-any
+method arity projections). The touched #1888 Slice 3 borrowed-dispatch block
+passes in isolation.
