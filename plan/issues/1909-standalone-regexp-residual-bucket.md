@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1291
 claimed_by: codex-developer
-claimed_at: 2026-06-07T10:21:45.332Z
+claimed_at: 2026-06-07T10:45:58.984Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -548,3 +548,19 @@ The implementation and earlier issue-state refresh are present on current
 `origin/main`. Follow-up PR #1291 now carries this final merged-state metadata
 refresh. This issue remains `in-review` with `pr: 1291`; the PR-status poller
 owns the eventual `done` transition.
+
+## 2026-06-07 live PR #1291 refresh after reassignment
+
+Current GitHub state for PR #1291:
+
+- URL: `https://github.com/loopdive/js2/pull/1291`
+- State: open, ready/non-draft
+- Head: `symphony/1909` at `6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+- Base: `main`
+- Merge state: `CLEAN` / mergeable
+- Checks: all reported PR checks succeeded
+
+The branch is based on current `origin/main`, and its net diff versus
+`origin/main` is limited to this issue-state refresh. This issue remains
+`in-review` with `pr: 1291`; the PR-status poller owns the eventual `done`
+transition after merge.
