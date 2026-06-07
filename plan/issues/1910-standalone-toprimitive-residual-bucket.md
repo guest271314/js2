@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T12:59:59.726Z
+claimed_at: 2026-06-07T13:13:59.677Z
 pr: 1295
 ---
 
@@ -338,5 +338,15 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
   - After the metadata refresh push, GitHub started fresh required checks and
     auto-merge/merge-queue entry is enabled for PR #1295 to queue once those
     checks pass.
+  - The issue remains `in-review` with `pr: 1295`; the PR-status poller owns
+    the eventual transition to `done` after merge.
+- Current Codex verification on current `origin/main` (`767e64754`):
+  - Confirmed `origin/main` is an ancestor of both the local branch and
+    `origin/symphony/1910`; the branch remains synced with the remote PR head.
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the touched issue file (passed).
+  - GraphQL confirmed PR #1295 is open, ready, non-draft, clean/mergeable,
+    passing checks, and already in the merge queue at position 11.
   - The issue remains `in-review` with `pr: 1295`; the PR-status poller owns
     the eventual transition to `done` after merge.
