@@ -44,6 +44,12 @@ import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
 import { compileNativeGeneratorFunction } from "./generators-native.js";
 import { ASYNC_CPS_ENABLED, analyzeAsyncBody, splitBodyAtAwait, emitAsyncStateMachine } from "./async-cps.js";
+import {
+  functionHasLinearU8Params,
+  getLinearU8ParamIndicesForDeclaration,
+  registerLinearU8Buffer,
+} from "./linear-uint8-signatures.js";
+import { containsLinearU8Allocation, emitLinearU8ArenaMark, emitLinearU8ArenaReset } from "./linear-uint8-arena.js";
 
 /** Maximum number of instructions for a function body to be considered inlinable */
 export const INLINE_MAX_INSTRS = 10;
@@ -531,6 +537,7 @@ export function registerInlinableFunction(ctx: CodegenContext, funcName: string,
   // Skip functions with rest params or captures
   if (ctx.funcRestParams.has(funcName)) return;
   if (ctx.nestedFuncCaptures.has(funcName)) return;
+  if (functionHasLinearU8Params(ctx, funcName)) return;
 
   const body = func.body;
   if (body.length === 0 || body.length > INLINE_MAX_INSTRS) return;
@@ -590,23 +597,43 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
 
   const restInfo = ctx.funcRestParams.get(func.name);
   const params: { name: string; type: ValType }[] = [];
+  const linearParams = getLinearU8ParamIndicesForDeclaration(ctx, decl);
+  const linearParamBuffers: { name: string; ptrLocalIdx: number; lenLocalIdx: number }[] = [];
+  const funcType = ctx.mod.types[func.typeIdx];
+  const sigParamTypes = funcType?.kind === "func" ? funcType.params : undefined;
+  let wasmParamCursor = 0;
   for (let i = 0; i < decl.parameters.length; i++) {
     const param = decl.parameters[i]!;
     const paramName = ts.isIdentifier(param.name) ? param.name.text : `__param${i}`;
-    if (restInfo && i === restInfo.restIndex) {
+    if (linearParams?.has(i) && ts.isIdentifier(param.name)) {
+      const ptrLocalIdx = wasmParamCursor++;
+      const lenLocalIdx = wasmParamCursor++;
+      params.push(
+        {
+          name: `__linu8_ptr_${paramName}_${i}`,
+          type: sigParamTypes?.[ptrLocalIdx] ?? { kind: "i32" },
+        },
+        {
+          name: `__linu8_len_${paramName}_${i}`,
+          type: sigParamTypes?.[lenLocalIdx] ?? { kind: "i32" },
+        },
+      );
+      linearParamBuffers.push({ name: paramName, ptrLocalIdx, lenLocalIdx });
+    } else if (restInfo && i === restInfo.restIndex) {
       // Rest parameter — use the vec struct ref type from the function signature
       params.push({
         name: paramName,
         type: { kind: "ref_null", typeIdx: restInfo.vecTypeIdx },
       });
+      wasmParamCursor++;
     } else {
       // Prefer the type already established in the function signature (which
       // may have been inferred from call sites for untyped params).
-      const funcType = ctx.mod.types[func.typeIdx];
-      const sigParamType = funcType?.kind === "func" ? funcType.params[i] : undefined;
+      const sigParamType = sigParamTypes?.[wasmParamCursor];
       const paramType =
         resolved?.params[i] ?? sigParamType ?? resolveWasmType(ctx, ctx.checker.getTypeAtLocation(param));
       params.push({ name: paramName, type: paramType });
+      wasmParamCursor++;
     }
   }
 
@@ -660,6 +687,9 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   for (let i = 0; i < params.length; i++) {
     fctx.localMap.set(params[i]!.name, i);
   }
+  for (const buf of linearParamBuffers) {
+    registerLinearU8Buffer(fctx, buf.name, buf.ptrLocalIdx, buf.lenLocalIdx);
+  }
 
   ctx.currentFunc = fctx;
 
@@ -669,6 +699,9 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     const nop: Instr = { op: "nop" };
     attachSourcePos(nop, funcPos);
     fctx.body.push(nop);
+  }
+  if (containsLinearU8Allocation(ctx, decl.body)) {
+    fctx.linearU8ArenaMarkLocalIdx = emitLinearU8ArenaMark(ctx, fctx, "__linu8_fn_mark");
   }
 
   // Emit default-value initialization for parameters with initializers.
@@ -1011,11 +1044,12 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       }
     }
 
-    // Ensure there's always a valid return value at the end for non-void functions
-    if (fctx.returnType) {
-      // Check if the last instruction is already a return
-      const lastInstr = fctx.body[fctx.body.length - 1];
-      if (!lastInstr || lastInstr.op !== "return") {
+    // Reset short-lived linear-U8 function allocations on fallthrough, then
+    // ensure there's always a valid return value at the end for non-void funcs.
+    const lastInstr = fctx.body[fctx.body.length - 1];
+    if (!lastInstr || lastInstr.op !== "return") {
+      emitLinearU8ArenaReset(ctx, fctx, fctx.linearU8ArenaMarkLocalIdx);
+      if (fctx.returnType) {
         // Add a default return value
         if (fctx.returnType.kind === "f64") {
           fctx.body.push({ op: "f64.const", value: 0 });
