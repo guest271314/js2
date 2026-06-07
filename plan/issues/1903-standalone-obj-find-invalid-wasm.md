@@ -18,7 +18,7 @@ test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 pr: 1262
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:25:23.683Z
+claimed_at: 2026-06-07T01:31:23.744Z
 ---
 
 # #1903 — Standalone object runtime: `__obj_find` invalid Wasm
