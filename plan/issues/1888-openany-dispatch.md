@@ -1,8 +1,10 @@
 ---
 id: 1888
 title: "standalone open-any method dispatch + built-ins-as-static-globals (prototype vtable)"
-status: in-progress
+status: in-review
+pr: 1273
 created: 2026-06-05
+updated: 2026-06-07
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -10,7 +12,7 @@ task_type: feat
 area: codegen, runtime
 language_feature: objects, prototype chain, method dispatch, built-ins
 goal: host-independence
-sprint: Backlog
+sprint: 61
 related: [1472, 6407, 1629, 1104, 1539, 1103]
 parent: 1472
 claimed_by: codex-developer
