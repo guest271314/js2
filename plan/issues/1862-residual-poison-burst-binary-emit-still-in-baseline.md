@@ -1,7 +1,7 @@
 ---
 id: 1862
 title: "residual poisoned-worker 'Binary emit error' burst still in published baseline (~269) despite #1808 cap"
-status: in-progress
+status: in-review
 created: 2026-06-04
 updated: 2026-06-07
 priority: high
@@ -11,6 +11,7 @@ area: ci-infra, tests
 goal: compiler-correctness
 sprint: 61
 related: [1808, 1154, 1221, 1080]
+pr: 1285
 claimed_by: codex-developer
 claimed_at: 2026-06-07T05:55:23.349Z
 ---
