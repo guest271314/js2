@@ -17,7 +17,7 @@ related: [1472, 1629, 1631, 1888]
 test262_bucket: object-property-semantics
 test262_count: 748
 claimed_by: codex-developer
-claimed_at: 2026-06-07T02:02:24.645Z
+claimed_at: 2026-06-07T02:12:23.959Z
 pr: 1264
 ---
 # #1906 — Standalone native `Object.defineProperties`
