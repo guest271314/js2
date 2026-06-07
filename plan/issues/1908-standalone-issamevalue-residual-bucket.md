@@ -527,9 +527,9 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   (`28c668ab4e636011d08ac4e518acc4353097f5f1`) is already an ancestor of
   `symphony/1908`.
 - PR #1257 is open, non-draft, targets `main`, and is recorded in frontmatter.
-- GraphQL reports PR #1257 is back in the merge queue at head
-  `199b0dce71df5285ba989b61b86936643d230b12` with
-  `mergeQueueEntry.state: QUEUED`, `position: 20`, and
-  `enqueuedAt: 2026-06-07T11:12:07Z`.
+- Dequeued PR #1257 to publish the issue metadata update because GitHub blocks
+  branch updates while a PR is already in the merge queue.
+- After publishing the metadata update, re-enabled auto-merge/merge-queue entry
+  for PR #1257 so GitHub can queue it when the required checks pass.
 - Frontmatter status is `in-review` so the PR-status poller can flip the issue
   after GitHub reports the PR merged.
