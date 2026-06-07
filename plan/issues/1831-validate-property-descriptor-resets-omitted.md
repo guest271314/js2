@@ -13,7 +13,7 @@ sprint: 61
 parent: 1334
 pr: 1282
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:44:59.449Z
+claimed_at: 2026-06-07T10:12:25.359Z
 ---
 # #1831 — partial redefine clears previously-set descriptor flags
 
