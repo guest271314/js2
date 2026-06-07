@@ -137,6 +137,9 @@ This PR completes the remaining hard-contract pieces:
 - `pnpm exec vitest run tests/issue-1850.test.ts` — 10 tests passed.
 - `pnpm exec vitest run tests/ir-bytecode-proof.test.ts` — 23 tests passed.
 - `pnpm exec tsc --noEmit --pretty false` — passed.
+- Attempt 30 refresh after merging current `origin/main`: tightened the focused
+  successor-defined-value dominance test, then reran the same scoped validation
+  successfully (`issue-1850`, `ir-bytecode-proof`, `tsc --noEmit`).
 - Accidental broad `pnpm test -- tests/issue-1850.test.ts` expanded beyond the
   scoped file, hit unrelated existing suite failures, and eventually exited
   with Node OOM; not used as acceptance validation.
