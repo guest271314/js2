@@ -18,7 +18,7 @@ test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 pr: 1262
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:20:05.727Z
+claimed_at: 2026-06-07T07:27:04.931Z
 ---
 
 # #1903 — Standalone object runtime: `__obj_find` invalid Wasm
@@ -181,6 +181,10 @@ remaining semantic failures.
   explicit no-op `git merge --no-edit origin/main`, reran scoped validation,
   and confirmed PR #1262 is open, non-draft, clean, mergeable, and green before
   republishing the in-review issue status.
+- Final handoff 17 (2026-06-07): fetched current refs, confirmed
+  `origin/main` (`d6957d5d`) is still an ancestor of `symphony/1903`, reran
+  scoped validation, and found no additional #1903 source changes needed before
+  republishing the in-review issue status for PR #1262.
 
 ## Validation
 
@@ -281,3 +285,5 @@ remaining semantic failures.
   "#1903|dynamic property add/read"` (final handoff 15 on 2026-06-07)
 - `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
   "#1903|dynamic property add/read"` (final handoff 16 on 2026-06-07)
+- `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
+  "#1903|dynamic property add/read"` (final handoff 17 on 2026-06-07)
