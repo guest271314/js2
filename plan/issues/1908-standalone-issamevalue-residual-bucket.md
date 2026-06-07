@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T12:21:29.617Z
+claimed_at: 2026-06-07T12:48:59.586Z
 pr: 1257
 ---
 
@@ -634,3 +634,20 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
 - `pnpm exec vitest run tests/issue-1908.test.ts` passed after the merge.
 - Frontmatter status remains `in-review` for the PR-status poller; PR #1257
   remains the ready review PR for this issue.
+
+## Codex Attempt 45 Queue Confirmation — 2026-06-07
+
+- Fetched `origin/main` and `origin/symphony/1908`; current `origin/main`
+  (`767e647548cad3c799f0af573afc752abd41dd29`) is already an ancestor of both
+  local `symphony/1908` and the published PR head.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed.
+- PR #1257 is open, non-draft, targets `main`, and the published branch points
+  at `dc0329b64079c36cfc40b4b1992e6d60cdf6fdc4`.
+- GraphQL reports `mergeStateStatus: BLOCKED`, `mergeable: MERGEABLE`, and
+  `mergeQueueEntry.state: QUEUED`, `position: 13`, `enqueuedAt:
+  2026-06-07T12:34:54Z`.
+- The visible PR check rollup shows the issue-specific CI and all Test262 shard
+  jobs successful; the remaining failed check is the final `merge shard
+  reports` job, consistent with the previously documented external
+  stale-baseline blocker rather than a #1908 classifier/test regression.
+- Frontmatter status remains `in-review` for the PR-status poller.
