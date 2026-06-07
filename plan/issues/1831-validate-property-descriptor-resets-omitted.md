@@ -1,7 +1,7 @@
 ---
 id: 1831
 title: "_validatePropertyDescriptor resets omitted attributes to false on redefine (residual #1334)"
-status: in-progress
+status: in-review
 created: 2026-06-04
 updated: 2026-06-07
 priority: medium
@@ -11,6 +11,7 @@ area: runtime
 goal: correctness
 sprint: 61
 parent: 1334
+pr: 1282
 claimed_by: codex-developer
 claimed_at: 2026-06-07T05:44:59.449Z
 ---
