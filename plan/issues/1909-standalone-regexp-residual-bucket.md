@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1289
 claimed_by: codex-developer
-claimed_at: 2026-06-07T06:34:35.205Z
+claimed_at: 2026-06-07T06:49:05.075Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -201,3 +201,17 @@ non-skip rows. The RegExp split is unchanged: `833` Phase 2d rows, `104` Phase
 fallback rows.
 
 Opened ready follow-up PR #1289 for this issue-state refresh.
+
+## 2026-06-07 final PR refresh
+
+Current GitHub state for PR #1289:
+
+- URL: `https://github.com/loopdive/js2/pull/1289`
+- State: open, ready/non-draft
+- Head: `symphony/1909` at `19540cd895d2e9a2331cff3a52b976657f2c85a0`
+- Base: `main`
+- Merge state: `CLEAN`
+- Checks: all reported PR checks succeeded
+
+The issue remains `in-review` with `pr: 1289`; the PR-status poller owns the
+eventual `done` transition after merge.
