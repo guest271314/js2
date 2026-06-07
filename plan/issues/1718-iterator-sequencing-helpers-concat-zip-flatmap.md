@@ -1,7 +1,7 @@
 ---
 id: 1718
 title: "Iterator sequencing helpers (Iterator.concat / zip / zipKeyed) + Iterator.prototype.flatMap not implemented (101 fails)"
-status: in-progress
+status: in-review
 created: 2026-05-29
 updated: 2026-06-07
 priority: high
@@ -216,11 +216,11 @@ Scoped validation:
 - `pnpm exec tsc --noEmit --pretty false`
   - passed.
 
-PR #1279 is open and ready for review, but merge-queue entry is currently
-blocked by CI state outside this iterator patch: the Test262 Sharded
-`merge shard reports` job failed its stale-baseline guard because the external
-`loopdive/js2wasm-baselines` JSONL was 114 commits behind `origin/main`
-(threshold 50; see #1668). All individual js-host and standalone shards passed;
-the standalone guard reported net 0. Issue remains `in-progress` until the
-branch is resynced with current `origin/main` and the PR can be queued or
-auto-queued.
+PR #1279 is open and ready for review. The branch was resynced with current
+`origin/main`, pushed, and auto-merge was enabled so GitHub can enqueue it as
+soon as required checks pass. The previous Test262 Sharded run failed in
+`merge shard reports` only because the external `loopdive/js2wasm-baselines`
+JSONL was 114 commits behind `origin/main` (threshold 50; see #1668); all
+individual js-host and standalone shards passed, and the standalone guard
+reported net 0. If the stale-baseline guard recurs on the refreshed run, that is
+an external baseline-promotion blocker rather than an iterator helper regression.
