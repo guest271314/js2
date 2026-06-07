@@ -1,7 +1,7 @@
 ---
 id: 1908
 title: "standalone: re-split and fix residual isSameValue bucket after #1776/#1807"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T10:55:30.340Z
+claimed_at: 2026-06-07T11:11:59.275Z
 pr: 1257
 ---
 
@@ -520,3 +520,16 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
 - This local issue copy remains `in-progress` per the publish/enqueue blocker
   rule until the baseline promotion is refreshed and PR #1257 can be queued
   successfully again.
+
+## Codex Attempt 37 Queue Confirmation — 2026-06-07
+
+- Fetched `origin/main` and `origin/symphony/1908`; current `origin/main`
+  (`28c668ab4e636011d08ac4e518acc4353097f5f1`) is already an ancestor of
+  `symphony/1908`.
+- PR #1257 is open, non-draft, targets `main`, and is recorded in frontmatter.
+- GraphQL reports PR #1257 is back in the merge queue at head
+  `199b0dce71df5285ba989b61b86936643d230b12` with
+  `mergeQueueEntry.state: QUEUED`, `position: 20`, and
+  `enqueuedAt: 2026-06-07T11:12:07Z`.
+- Frontmatter status is `in-review` so the PR-status poller can flip the issue
+  after GitHub reports the PR merged.
