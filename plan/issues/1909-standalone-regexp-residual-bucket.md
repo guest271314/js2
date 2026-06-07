@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1260
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:01:30.049Z
+claimed_at: 2026-06-07T06:34:35.205Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -176,3 +176,13 @@ PR #1260 merged via the GitHub merge queue at `2026-06-07T03:16:41Z`:
 After the merge, this branch was merged with current `origin/main` so the local
 issue metadata is based on the merged PR state. The issue remains `in-review`
 with `pr: 1260`; the PR-status poller owns the eventual `done` transition.
+
+## 2026-06-07 follow-up metadata refresh
+
+This issue was reassigned after PR #1260 had already merged. Current GitHub
+state confirms PR #1260 is `MERGED`, ready/non-draft, with merge commit
+`d4492156fbb45e50954700f8c1f3ca6b6e3970ef`.
+
+The implementation remains complete and present on `origin/main`; this branch is
+now carrying only the #1909 issue-state refresh so the plan metadata stays in
+sync with the merged PR state.
