@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:31:05.107Z
+claimed_at: 2026-06-07T07:40:05.567Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -123,3 +123,10 @@ standalone refusal.
   merge queue. The remote PR remains queued on `ab1d8c19d`; this local issue
   file intentionally stays `in-progress` until the queue lock is gone or the PR
   merges.
+- Codex redispatch verification on 2026-06-07T09:42+02:00 reran the same
+  scoped validation successfully, confirmed `origin/main` remains an ancestor of
+  both local `symphony/1907` and remote `origin/symphony/1907`, and found PR
+  #1287 open, ready/non-draft, mergeable, green, and queued at position 11 on
+  remote head `ab1d8c19d`. The local handoff remains `in-progress` because
+  prior unpublished issue-file commits are still blocked by the queued branch
+  protection.
