@@ -13,7 +13,7 @@ area: codegen
 goal: correctness
 sprint: 61
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:09:42.127Z
+claimed_at: 2026-06-07T10:03:41.716Z
 ---
 # #1818 — i32/boolean parameter default fires on `0` / `false`
 
@@ -431,3 +431,28 @@ Validation:
   Slices 1/2 i32/boolean/f64 regressions are covered by `tests/issue-1818.test.ts`;
   the remaining official-file failures need the broader representation work
   described by Slice 3 / follow-up default-parameter conformance work.
+
+## Refresh (2026-06-07, codex-developer attempt 30)
+
+PR #1275 was open and ready, but the sharded standalone guard reported 21
+`dflt-params-trailing-comma` method/class regressions. The common pattern was an
+explicit `undefined` f64 argument in a defaulted parameter slot; the stricter
+sNaN default check preserved explicit `NaN` correctly, but generic
+`compileExpression(..., expected f64)` still emitted an ordinary NaN for literal
+`undefined`.
+
+Adjusted numeric-context `undefined`/`void` lowering to emit the existing f64
+sNaN default sentinel. This keeps arithmetic behavior as NaN while allowing
+default-param receive checks to distinguish explicit `undefined` from explicit
+`NaN`.
+
+Additional validation:
+
+- `pnpm test tests/issue-1818.test.ts` passed: 6 tests.
+- `pnpm exec prettier --check src/codegen/expressions.ts src/codegen/literals.ts tests/issue-1818.test.ts`
+  passed.
+- `git diff --check` passed.
+- `TEST262_PATH_FILTER='language/expressions/class/method/dflt-params-trailing-comma.js|language/statements/class/method/dflt-params-trailing-comma.js|language/expressions/object/method-definition/meth-dflt-params-trailing-comma.js' TEST262_REPORTER=dot pnpm run test:262 -- --official-scope-only`
+  completed with a 3/3 pass report for the selected paths. Vitest still printed
+  `No test suite found` diagnostics for empty generated local shards, but the
+  runner exited 0 and wrote `3 pass / 3 total`.

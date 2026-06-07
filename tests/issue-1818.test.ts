@@ -94,4 +94,24 @@ describe("#1818 - primitive parameter defaults do not fire for falsy arguments",
       `),
     ).toBe(75);
   });
+
+  it("explicit undefined still fires f64 defaults without treating NaN as missing", async () => {
+    expect(
+      await run(`
+        function defaultNumber(): number { return 39; }
+        function plain(a: number, b: number = defaultNumber()): number {
+          return a + b;
+        }
+        class C {
+          method(a: number, b: number = defaultNumber()): number {
+            return a + b;
+          }
+        }
+        const arrow = (x: number = defaultNumber()): number => x !== x ? 7 : x;
+        export function test(): number {
+          return plain(3, undefined, 1) * 1000 + new C().method(4, undefined, 1) * 10 + arrow(NaN);
+        }
+      `),
+    ).toBe(42437);
+  });
 });
