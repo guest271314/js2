@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:57:53.797Z
+claimed_at: 2026-06-07T02:04:23.827Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -74,3 +74,5 @@ a native brand predicate.
 Final Codex verification on 2026-06-07: the scoped issue test, related regression set, and typecheck passed after refreshing the branch against current main. PR #1259's earlier test262 gate failure was on the stale published head and reported baseline drift; the branch was refreshed again against `origin/main` before republishing.
 
 Codex rerun on 2026-06-07: `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. The PR remains ready and non-draft with issue status `in-review`.
+
+Codex final publish check on 2026-06-07: refreshed `origin/main`, confirmed it is already included in `symphony/1904` (`git merge --ff-only origin/main` was already up to date), reran the scoped issue test, related regression set, and typecheck successfully. PR #1259 is open, ready/non-draft, and targets `main`.
