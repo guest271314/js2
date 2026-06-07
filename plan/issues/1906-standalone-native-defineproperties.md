@@ -72,8 +72,8 @@ caught by the broad dynamic object/property refusal.
 - `pnpm test tests/issue-1629-S6.test.ts tests/issue-1629-S3.test.ts tests/issue-1629-S2.test.ts`
 - `pnpm exec tsc --noEmit --incremental false`
 
-Revalidated by `codex-developer` on branch `symphony/1906` after fetching
-current `origin/main` at `f4dd784d4f1960a8c759b51f0cff23e8f4ed4f34`;
+Revalidated by `codex-developer` on branch `symphony/1906` after merging
+current `origin/main` at `d4492156fbb45e50954700f8c1f3ca6b6e3970ef`;
 checks above pass locally on 2026-06-07.
 
 PR #1264 is open against `main` and the issue remains `in-review` for the
