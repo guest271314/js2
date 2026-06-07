@@ -207,6 +207,13 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
     }
   }
 
+  for (const lb of ctx.liveBodies) {
+    if (!shifted.has(lb)) {
+      shiftGlobalIndices(lb);
+      shifted.add(lb);
+    }
+  }
+
   if (ctx.pendingInitBody && !shifted.has(ctx.pendingInitBody)) {
     shiftGlobalIndices(ctx.pendingInitBody);
     shifted.add(ctx.pendingInitBody);

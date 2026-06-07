@@ -900,7 +900,7 @@ function compileExpressionInner(
     // restricts the global read to exactly the lifted-closure / anonymous-
     // callback bodies that the host can dispatch, leaving direct-call `this`
     // to fall through to `undefined` as before.
-    if (fctx.readsCurrentThis && ctx.currentThisGlobalIdx >= 0) {
+    if (ctx.currentThisGlobalIdx >= 0) {
       // (#1702) Null-guard the `__current_this` read. A lifted closure body can
       // be reached two ways:
       //   (a) host dispatch via `__call_fn_method_N` — installs a real receiver

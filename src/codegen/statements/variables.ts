@@ -121,6 +121,30 @@ function stripInferenceWrapper(expr: ts.Expression): ts.Expression {
   return expr;
 }
 
+function isFunctionStyleThisNewInitializer(fctx: FunctionContext, expr: ts.Expression): boolean {
+  const unwrapped = stripInferenceWrapper(expr);
+  return (
+    !!fctx.functionStyleThisCtor &&
+    ts.isNewExpression(unwrapped) &&
+    unwrapped.expression.kind === ts.SyntaxKind.ThisKeyword
+  );
+}
+
+function retargetRefLocalToInitializer(fctx: FunctionContext, localIdx: number, resultType: ValType): boolean {
+  if (localIdx < fctx.params.length) return false;
+  if (resultType.kind !== "ref" && resultType.kind !== "ref_null") return false;
+  const localSlot = fctx.locals[localIdx - fctx.params.length];
+  if (!localSlot || (localSlot.type.kind !== "ref" && localSlot.type.kind !== "ref_null")) return false;
+
+  const nextType: ValType =
+    localSlot.type.kind === "ref_null" && resultType.kind === "ref"
+      ? { kind: "ref_null", typeIdx: (resultType as { typeIdx: number }).typeIdx }
+      : resultType;
+  if (valTypesMatch(localSlot.type, nextType)) return false;
+  localSlot.type = nextType;
+  return true;
+}
+
 function isStaticRegExpExpression(ctx: CodegenContext, expr: ts.Expression): boolean {
   const unwrapped = stripInferenceWrapper(expr);
   if (unwrapped.kind === ts.SyntaxKind.RegularExpressionLiteral) return true;
@@ -795,13 +819,17 @@ export function compileVariableStatement(ctx: CodegenContext, fctx: FunctionCont
         const prevElemOverride = ctxAny._i32ElemArrayOverride;
         if (isI32SpecializedArray) ctxAny._i32ElemArrayOverride = true;
         let resultType: ValType | null;
-        const initializerExpectedType = getLocalType(fctx, localIdx) ?? wasmType;
+        const functionStyleThisNew = isFunctionStyleThisNewInitializer(fctx, decl.initializer);
+        const initializerExpectedType = functionStyleThisNew ? undefined : (getLocalType(fctx, localIdx) ?? wasmType);
         try {
           resultType = compileExpression(ctx, fctx, decl.initializer, initializerExpectedType);
         } finally {
           ctxAny._i32ElemArrayOverride = prevElemOverride;
         }
         stackType = resultType ?? wasmType;
+        if (resultType && functionStyleThisNew && retargetRefLocalToInitializer(fctx, localIdx, resultType)) {
+          stackType = resultType;
+        }
         if (
           resultType &&
           wasmType.kind === "externref" &&

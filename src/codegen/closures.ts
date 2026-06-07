@@ -74,6 +74,99 @@ function isFunctionScopeBoundary(node: ts.Node): boolean {
   );
 }
 
+function unwrapParens(expr: ts.Expression): ts.Expression {
+  let current = expr;
+  while (ts.isParenthesizedExpression(current)) current = current.expression;
+  return current;
+}
+
+function isPlainFunctionConstructor(fn: ts.FunctionDeclaration | ts.FunctionExpression): boolean {
+  return !fn.asteriskToken && fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) !== true;
+}
+
+function functionConstructorDeclFromSymbolDecl(
+  decl: ts.Declaration,
+): ts.FunctionDeclaration | ts.FunctionExpression | undefined {
+  if (
+    (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl)) &&
+    decl.body &&
+    isPlainFunctionConstructor(decl)
+  ) {
+    return decl;
+  }
+  if (ts.isVariableDeclaration(decl) && decl.initializer) {
+    const init = unwrapParens(decl.initializer);
+    if (ts.isFunctionExpression(init) && init.body && isPlainFunctionConstructor(init)) {
+      return init;
+    }
+  }
+  return undefined;
+}
+
+function findFunctionConstructorDeclInSource(
+  ownerName: string,
+  sourceFile: ts.SourceFile,
+): ts.FunctionDeclaration | ts.FunctionExpression | undefined {
+  for (const stmt of sourceFile.statements) {
+    if (
+      ts.isFunctionDeclaration(stmt) &&
+      stmt.name?.text === ownerName &&
+      stmt.body &&
+      isPlainFunctionConstructor(stmt)
+    ) {
+      return stmt;
+    }
+    if (ts.isVariableStatement(stmt)) {
+      for (const decl of stmt.declarationList.declarations) {
+        if (!ts.isIdentifier(decl.name) || decl.name.text !== ownerName || !decl.initializer) continue;
+        const init = unwrapParens(decl.initializer);
+        if (ts.isFunctionExpression(init) && init.body && isPlainFunctionConstructor(init)) {
+          return init;
+        }
+      }
+    }
+  }
+  return undefined;
+}
+
+export function resolveFunctionStyleThisCtor(
+  ctx: CodegenContext,
+  arrow: ts.ArrowFunction | ts.FunctionExpression,
+): FunctionContext["functionStyleThisCtor"] | undefined {
+  // Arrow functions have lexical `this`; only function expressions assigned as
+  // static members receive the constructor as the dynamic receiver.
+  if (!ts.isFunctionExpression(arrow)) return undefined;
+
+  const parent = arrow.parent;
+  if (
+    !parent ||
+    !ts.isBinaryExpression(parent) ||
+    parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
+    parent.right !== arrow ||
+    !ts.isPropertyAccessExpression(parent.left) ||
+    !ts.isIdentifier(parent.left.expression)
+  ) {
+    return undefined;
+  }
+
+  const owner = parent.left.expression;
+  const ownerName = owner.text;
+  if (ctx.classSet.has(ownerName)) return undefined;
+
+  const sym = ctx.checker.getSymbolAtLocation(owner);
+  const decls = sym?.getDeclarations();
+  if (decls) {
+    for (const decl of decls) {
+      const ctorDecl = functionConstructorDeclFromSymbolDecl(decl);
+      if (ctorDecl) return { name: ownerName, decl: ctorDecl };
+    }
+  }
+
+  const sourceDecl = findFunctionConstructorDeclInSource(ownerName, arrow.getSourceFile());
+  if (sourceDecl) return { name: ownerName, decl: sourceDecl };
+  return undefined;
+}
+
 /**
  * Collect names that are LOCALLY DECLARED inside a function-like node's scope.
  * Used to compute the shadow set for free-variable analysis.
@@ -1646,6 +1739,7 @@ export function compileArrowAsClosure(
   const selfTypeIdx = usesWrapperFuncType
     ? getOrCreateFuncRefWrapperTypes(ctx, arrowParams, closureResults)!.structTypeIdx
     : structTypeIdx;
+  const functionStyleThisCtor = resolveFunctionStyleThisCtor(ctx, arrow);
   const liftedFctx: FunctionContext = {
     name: closureName,
     params: [
@@ -1676,6 +1770,7 @@ export function compileArrowAsClosure(
     // (with no other binding) to read that global. Named functions / methods
     // are NOT lifted here and keep `undefined`/globalObject `this`.
     readsCurrentThis: true,
+    functionStyleThisCtor,
   };
 
   // (#1384) Track liftedFctx.body in liveBodies BEFORE any emission so

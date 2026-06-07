@@ -30,6 +30,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 
 import { compile } from "../../src/index.ts";
+import { buildImports, wrapExports } from "../../src/runtime.ts";
 import { setupAcorn } from "./setup-acorn.mjs";
 import { diffAst } from "./ast-diff.mjs";
 
@@ -168,17 +169,19 @@ export async function runHarness({ quiet = false } = {}) {
     .sort()
     .map((f) => ({ name: f, src: readFileSync(join(INPUTS_DIR, f), "utf-8") }));
 
-  // Attempt to obtain a callable compiled-acorn parse. The compiled module is a
-  // raw Wasm instance; acorn's parse() returns a deep object graph that we'd
-  // need marshalled back across the JS-host boundary as an externref. The first
-  // lap simply attempts instantiation + a `parse` export and records what it
-  // finds; when the binary does not validate this is skipped (and RECORDED),
-  // which is the expected state until #1690 is resolved.
+  // Attempt to obtain a callable compiled-acorn parse through the normal
+  // runtime path. buildImports().setExports wires closure sidecars back to the
+  // instance exports, and wrapExports() marshals returned WasmGC AST structs
+  // into plain JS objects for the differential comparison.
   let compiledParse = null;
   if (validates) {
     try {
-      const { instance } = await WebAssembly.instantiate(result.binary, result.importObject ?? {});
-      const exp = instance.exports;
+      const imports = buildImports(result.imports ?? [], undefined, result.stringPool ?? []);
+      const { instance } = await WebAssembly.instantiate(result.binary, imports);
+      if (typeof imports.setExports === "function") {
+        imports.setExports(instance.exports);
+      }
+      const exp = wrapExports(instance.exports, { signatures: result.exportSignatures });
       report.diff.exports = Object.keys(exp).slice(0, 40);
       if (typeof exp.parse === "function") {
         compiledParse = (src, opts) => exp.parse(src, opts);

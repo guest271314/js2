@@ -57,6 +57,8 @@ const STANDALONE_REFUSED_IMPORT = (name: string): boolean =>
   name.startsWith("__defineProperties") ||
   name.startsWith("__getOwn") ||
   name.startsWith("__getPrototypeOf") ||
+  name === "__get_function_prototype" ||
+  name === "__set_function_instance_prototype" ||
   name.startsWith("__proto_method_call") ||
   name.startsWith("__get_builtin") ||
   name.startsWith("__register_prototype") ||

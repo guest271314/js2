@@ -2425,10 +2425,14 @@ function compilePropertyAssignment(
 
   const structTypeIdx = ctx.structMap.get(typeName);
   const fields = ctx.structFields.get(typeName);
-  if (structTypeIdx === undefined || !fields) return null;
+  if (structTypeIdx === undefined || !fields) {
+    return compilePropertyAssignmentExternSet(ctx, fctx, target, value, fieldName);
+  }
 
   const fieldIdx = fields.findIndex((f) => f.name === fieldName);
-  if (fieldIdx === -1) return null;
+  if (fieldIdx === -1) {
+    return compilePropertyAssignmentExternSet(ctx, fctx, target, value, fieldName);
+  }
 
   const structSelfType: ValType = { kind: "ref_null", typeIdx: structTypeIdx };
   const structObjResult = compileExpression(ctx, fctx, target.expression, structSelfType);
@@ -2436,7 +2440,18 @@ function compilePropertyAssignment(
     reportError(ctx, target, "Failed to compile struct field receiver");
     return null;
   }
-  const valType = compileExpression(ctx, fctx, value, fields[fieldIdx]!.type);
+  const fieldType = fields[fieldIdx]!.type;
+  const forceHostArrayLiteral =
+    !ctx.standalone && !ctx.strictNoHostImports && fieldType.kind === "externref" && ts.isArrayLiteralExpression(value);
+  const ctxAny = ctx as unknown as { _forceHostArrayLiteral?: boolean };
+  const prevForceHostArrayLiteral = ctxAny._forceHostArrayLiteral;
+  if (forceHostArrayLiteral) ctxAny._forceHostArrayLiteral = true;
+  let valType: ValType | null;
+  try {
+    valType = compileExpression(ctx, fctx, value, fieldType);
+  } finally {
+    ctxAny._forceHostArrayLiteral = prevForceHostArrayLiteral;
+  }
   if (!valType) return null;
   // Save value so assignment expression returns the RHS
   const tmpVal = allocLocal(fctx, `__prop_assign_${fctx.locals.length}`, valType);

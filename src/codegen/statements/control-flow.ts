@@ -20,6 +20,41 @@ import {
 } from "../shared.js";
 import { adjustRethrowDepth } from "./shared.js";
 
+const EQ_HEAP_TYPE = -19;
+
+function emitExternrefIdentityEq(fctx: FunctionContext): void {
+  const rightLocal = allocLocal(fctx, `__sw_ref_r_${fctx.locals.length}`, { kind: "externref" });
+  const leftLocal = allocLocal(fctx, `__sw_ref_l_${fctx.locals.length}`, { kind: "externref" });
+  const rightAnyLocal = allocLocal(fctx, `__sw_any_r_${fctx.locals.length}`, { kind: "anyref" });
+  const leftAnyLocal = allocLocal(fctx, `__sw_any_l_${fctx.locals.length}`, { kind: "anyref" });
+
+  fctx.body.push({ op: "local.set", index: rightLocal } as Instr);
+  fctx.body.push({ op: "local.set", index: leftLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: leftLocal } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: leftAnyLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: rightLocal } as Instr);
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: rightAnyLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: leftAnyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr);
+  fctx.body.push({ op: "local.get", index: rightAnyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: EQ_HEAP_TYPE } as Instr);
+  fctx.body.push({ op: "i32.and" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [
+      { op: "local.get", index: leftAnyLocal } as Instr,
+      { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
+      { op: "local.get", index: rightAnyLocal } as Instr,
+      { op: "ref.cast", typeIdx: EQ_HEAP_TYPE } as Instr,
+      { op: "ref.eq" } as Instr,
+    ],
+    else: [{ op: "i32.const", value: 0 } as Instr],
+  } as Instr);
+}
+
 function canTailCall(ctx: CodegenContext, fctx: FunctionContext, calleeIdx: number): boolean {
   let calleeTypeIdx: number | undefined;
   if (calleeIdx < ctx.numImportFuncs) {
@@ -472,6 +507,12 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
     fctx.localMap.set(typeofNarrowing!.varName, typeofNarrowResult.originalLocalIdx);
   }
 
+  // Keep the detached then-branch reachable while the else branch compiles.
+  // Late string-constant imports in the else branch shift module-global
+  // absolute indices; without this, globals already emitted into thenInstrs
+  // keep stale indices until the final if instruction is attached.
+  ctx.liveBodies.add(thenInstrs);
+
   // Restore narrowing before compiling else branch
   fctx.narrowedNonNull = savedNarrowedNonNull ? new Set(savedNarrowedNonNull) : undefined;
   fctx.aliasedNullGuardNonNull = savedAliasedNullGuardNonNull ? new Set(savedAliasedNullGuardNonNull) : undefined;
@@ -530,6 +571,7 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
     then: thenInstrs,
     else: elseInstrs,
   });
+  ctx.liveBodies.delete(thenInstrs);
 }
 
 export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.SwitchStatement): void {
@@ -555,6 +597,7 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
 
   // For string switch: use the appropriate string type and comparison
   let strEqFuncIdx: number | undefined;
+  let switchIsExternrefIdentity = false;
   if (switchIsString) {
     if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
       // Fast mode: native string comparison
@@ -570,8 +613,7 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
       wasmType = { kind: "externref" };
     }
   } else if (wasmType.kind === "externref") {
-    // Externref discriminant (non-string): unbox to f64 for numeric comparison
-    wasmType = { kind: "f64" };
+    switchIsExternrefIdentity = true;
   }
 
   const tmpLocalIdx = allocLocal(fctx, `__sw_${fctx.locals.length}`, wasmType);
@@ -619,6 +661,8 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
     }
     if (switchIsString && strEqFuncIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: strEqFuncIdx });
+    } else if (switchIsExternrefIdentity) {
+      emitExternrefIdentityEq(fctx);
     } else {
       fctx.body.push({ op: eqOp });
     }

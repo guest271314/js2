@@ -46,6 +46,44 @@ function _getNodeRequire(): ((id: string) => any) | undefined {
  * the subset of operations test262 (and user code) requires.
  */
 const _wasmStructProps = new WeakMap<object, Record<string | symbol, any>>();
+const _functionInstancePrototypes = new WeakMap<object, object>();
+const _wasmVecViews = new WeakMap<object, any[]>();
+
+function _safeGetFunctionInstancePrototype(
+  obj: any,
+  key: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
+  if (obj == null || typeof obj !== "object") return undefined;
+  const proto = _functionInstancePrototypes.get(obj);
+  if (!proto) return undefined;
+  return _safeGet(proto, key, callbackState);
+}
+
+function _getWasmVecView(obj: any, exports: Record<string, Function> | undefined): any[] | undefined {
+  if (obj == null || typeof obj !== "object" || !_isWasmStruct(obj) || !exports) return undefined;
+  const cached = _wasmVecViews.get(obj);
+  if (cached) return cached;
+  if (_getStructFieldNames(obj, exports) != null) return undefined;
+  const vecLen = exports.__vec_len;
+  const vecGet = exports.__vec_get;
+  if (typeof vecLen !== "function" || typeof vecGet !== "function") return undefined;
+  try {
+    const len = vecLen(obj);
+    if (typeof len !== "number" || len < 0) return undefined;
+    const view = new Array(len);
+    for (let i = 0; i < len; i++) view[i] = vecGet(obj, i);
+    _wasmVecViews.set(obj, view);
+    return view;
+  } catch {
+    return undefined;
+  }
+}
+
+function _getArrayViewProperty(view: any[], key: any): any {
+  const value = view[key as keyof any[]];
+  return typeof value === "function" ? (value as Function).bind(view) : value;
+}
 
 /**
  * (#1516) Per-generator-instance state: `{buf, index, pendingThrow}`.
@@ -1471,11 +1509,19 @@ function _wrapWasmClosure(
   // for as long as the JS Function is reachable from the host. JS Function
   // identity is preserved across multiple invocations (host may capture a
   // reference, e.g. callbacks stored on plain objects).
-  return function wasmClosureBridge(...args: any[]): any {
+  return function wasmClosureBridge(this: any, ...args: any[]): any {
     // Pad with undefined to exactly `arity` positional args. Extra args
     // dropped (JS spec for fewer/more args than declared params).
     const padded: any[] = [];
     for (let i = 0; i < arity; i++) padded.push(args[i]);
+    const thisVal = _unwrapForHost(this);
+    if (thisVal !== undefined) {
+      const exports = callbackState.getExports();
+      const methodCallFn = exports?.[`__call_fn_method_${arity}`];
+      if (typeof methodCallFn === "function") {
+        return methodCallFn(thisVal, closure, ...padded);
+      }
+    }
     return callFn(closure, ...padded);
   };
 }
@@ -1507,6 +1553,26 @@ function _maybeWrapCallable(
   return wrapped ?? val;
 }
 
+function _isWasmClosureCandidate(val: any, exports: Record<string, Function> | undefined): boolean {
+  if (val == null || typeof val !== "object" || !_isWasmStruct(val) || !exports) return false;
+  const fieldNamesFn = exports.__struct_field_names as ((v: any) => string | null | undefined) | undefined;
+  if (typeof fieldNamesFn === "function") {
+    try {
+      const csv = fieldNamesFn(val);
+      if (typeof csv === "string" && csv !== "" && csv.split(",")[0] !== "func") return false;
+    } catch {
+      // Fall through to the closure discriminator below.
+    }
+  }
+  const isClosureFn = exports.__is_closure as ((v: any) => number) | undefined;
+  if (typeof isClosureFn !== "function") return false;
+  try {
+    return isClosureFn(val) === 1;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * (#860) Wrap a Wasm closure stored as a property value so JS callers can
  * invoke it. Unlike `_maybeWrapCallable`, the arity is not known from
@@ -1533,13 +1599,7 @@ function _maybeWrapCallableUnknownArity(
   if (!callbackState) return val;
   const exports = callbackState.getExports();
   if (!exports) return val;
-  const isClosureFn = exports.__is_closure as ((v: any) => number) | undefined;
-  if (typeof isClosureFn !== "function") return val;
-  try {
-    if (isClosureFn(val) !== 1) return val;
-  } catch {
-    return val;
-  }
+  if (!_isWasmClosureCandidate(val, exports)) return val;
   for (let arity = 4; arity >= 0; arity--) {
     if (typeof exports[`__call_fn_${arity}`] === "function") {
       const wrapped = _wrapWasmClosure(val, arity, callbackState);
@@ -2425,7 +2485,12 @@ function _structToPlainObject(
   const fieldNames = _getStructFieldNames(obj, exports);
   if (!fieldNames) return undefined;
   const result: Record<string, any> = {};
+  const sc = _wasmStructProps.get(obj);
   for (const key of fieldNames) {
+    if (sc && key in sc) {
+      result[key] = _wasmToPlain(sc[key], exports);
+      continue;
+    }
     const getter = exports?.[`__sget_${key}`];
     if (typeof getter === "function") {
       let val = getter(obj);
@@ -2435,10 +2500,9 @@ function _structToPlainObject(
     }
   }
   // Also include sidecar properties
-  const sc = _wasmStructProps.get(obj);
   if (sc) {
     for (const key of Object.keys(sc)) {
-      if (!(key in result)) result[key] = sc[key];
+      if (!(key in result)) result[key] = _wasmToPlain(sc[key], exports);
     }
   }
   return result;
@@ -3176,6 +3240,25 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
         if (sc2 !== undefined) return sc2;
       }
     }
+    const vecView = _getWasmVecView(obj, callbackState?.getExports());
+    if (vecView) {
+      const vecValue = _getArrayViewProperty(vecView, key);
+      if (vecValue !== undefined) return vecValue;
+    }
+    const protoValue = _safeGetFunctionInstancePrototype(obj, key, callbackState);
+    if (protoValue !== undefined) return protoValue;
+    if (typeof key === "string") {
+      const exports = callbackState?.getExports();
+      const getter = exports?.[`__sget_${key}`];
+      if (typeof getter === "function") {
+        try {
+          const fieldValue = getter(obj);
+          if (fieldValue !== undefined) return fieldValue;
+        } catch {
+          /* wrong struct shape */
+        }
+      }
+    }
     // Fall back to native access (e.g. Symbol.iterator set directly on the struct)
     return obj[key];
   }
@@ -3210,6 +3293,7 @@ function _safeSet(
   callbackState?: { getExports: () => Record<string, Function> | undefined },
 ): void {
   if (obj == null) return;
+  val = _unwrapForHost(val);
   // Coerce WasmGC struct keys to primitives via ToPrimitive (#1090, #1716).
   // Prefer the explicit callbackState; fall back to wrapping `exports` so a
   // WasmGC-closure key method can still be dispatched when only exports is in
@@ -3672,6 +3756,20 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
     // Sidecar first (handles both string and symbol keys)
     const sc = _sidecarGet(obj, key);
     if (sc !== undefined) return sc;
+    const vecView = _getWasmVecView(obj, exports);
+    if (vecView) {
+      const vecValue = _getArrayViewProperty(vecView, key);
+      if (vecValue !== undefined) return vecValue;
+    }
+    const keyIsOwnStructField = typeof key === "string" && (_getStructFieldNames(obj, exports) ?? []).includes(key);
+    if (!keyIsOwnStructField) {
+      const protoValue = _safeGetFunctionInstancePrototype(
+        obj,
+        key,
+        exports ? { getExports: () => exports } : undefined,
+      );
+      if (protoValue !== undefined) return protoValue;
+    }
     // Wasm struct field getter
     if (exports && (typeof key === "string" || typeof key === "number")) {
       const getter = exports[`__sget_${String(key)}`];
@@ -3682,6 +3780,14 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
           /* not a field of this struct type */
         }
       }
+    }
+    if (keyIsOwnStructField) {
+      const protoValue = _safeGetFunctionInstancePrototype(
+        obj,
+        key,
+        exports ? { getExports: () => exports } : undefined,
+      );
+      if (protoValue !== undefined) return protoValue;
     }
     // Well-known symbol → @@name sidecar fallback. Object literals like
     // `{ [Symbol.replace]: fn }` mostly arrive as dynamic property
@@ -3748,6 +3854,7 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // can invoke it. Without this, JS sees `typeof val === "object"` and
       // ToPrimitive fails with "Cannot convert object to primitive value".
       if (val != null && typeof val === "object" && _isWasmStruct(val) && exports) {
+        if (!_isWasmClosureCandidate(val, exports)) return _wrapForHost(val, exports);
         // Resolve the export key — for string keys use directly, for well-known
         // symbols use the @@name form (e.g. Symbol.toPrimitive → "@@toPrimitive") (#1090)
         const exportKey = typeof key === "string" ? key : typeof key === "symbol" ? _symbolToWasm.get(key) : undefined;
@@ -3770,16 +3877,43 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
         const callFn0 = exports["__call_fn_0"];
         const callFn1 = exports["__call_fn_1"];
         const callFn2 = exports["__call_fn_2"];
-        if (typeof callFn0 === "function" || typeof callFn1 === "function" || typeof callFn2 === "function") {
+        const callFn3 = exports["__call_fn_3"];
+        const callFn4 = exports["__call_fn_4"];
+        if (
+          typeof callFn0 === "function" ||
+          typeof callFn1 === "function" ||
+          typeof callFn2 === "function" ||
+          typeof callFn3 === "function" ||
+          typeof callFn4 === "function"
+        ) {
           return function closureBridge(this: any, ...args: any[]) {
+            const thisVal = _unwrapForHost(this);
+            if (thisVal !== undefined) {
+              const methodCallFn = exports[`__call_fn_method_${Math.min(args.length, 4)}`];
+              if (typeof methodCallFn === "function") {
+                const padded: any[] = [];
+                for (let i = 0; i < Math.min(args.length, 4); i++) padded.push(_unwrapForHost(args[i]));
+                return methodCallFn(thisVal, val, ...padded);
+              }
+            }
+            const unwrappedArgs = args.map((a) => _unwrapForHost(a));
             if (args.length === 0 && typeof callFn0 === "function") return callFn0(val);
-            if (args.length === 1 && typeof callFn1 === "function") return callFn1(val, args[0]);
-            if (args.length >= 2 && typeof callFn2 === "function") return callFn2(val, args[0], args[1]);
+            if (args.length === 1 && typeof callFn1 === "function") return callFn1(val, unwrappedArgs[0]);
+            if (args.length >= 4 && typeof callFn4 === "function")
+              return callFn4(val, unwrappedArgs[0], unwrappedArgs[1], unwrappedArgs[2], unwrappedArgs[3]);
+            if (args.length >= 3 && typeof callFn3 === "function")
+              return callFn3(val, unwrappedArgs[0], unwrappedArgs[1], unwrappedArgs[2]);
+            if (args.length >= 2 && typeof callFn2 === "function")
+              return callFn2(val, unwrappedArgs[0], unwrappedArgs[1]);
             // Fallback: try the highest-arity dispatcher available, padding
             // missing args with undefined or dropping extras.
-            if (typeof callFn1 === "function") return callFn1(val, args[0]);
+            if (typeof callFn4 === "function")
+              return callFn4(val, unwrappedArgs[0], unwrappedArgs[1], unwrappedArgs[2], unwrappedArgs[3]);
+            if (typeof callFn3 === "function")
+              return callFn3(val, unwrappedArgs[0], unwrappedArgs[1], unwrappedArgs[2]);
+            if (typeof callFn1 === "function") return callFn1(val, unwrappedArgs[0]);
             if (typeof callFn0 === "function") return callFn0(val);
-            if (typeof callFn2 === "function") return callFn2(val, args[0], args[1]);
+            if (typeof callFn2 === "function") return callFn2(val, unwrappedArgs[0], unwrappedArgs[1]);
             return undefined;
           };
         }
@@ -4809,6 +4943,30 @@ function resolveImport(
           return BigInt(prim);
         };
       }
+      if (name === "__get_function_prototype") {
+        return (fn: any): any => {
+          const existing = _safeGet(fn, "prototype", callbackState);
+          if (existing !== undefined) return existing;
+          const proto = Object.create(Object.prototype);
+          Object.defineProperty(proto, "constructor", {
+            value: fn,
+            writable: true,
+            enumerable: false,
+            configurable: true,
+          });
+          _safeSet(fn, "prototype", proto, undefined, callbackState);
+          return proto;
+        };
+      }
+      if (name === "__set_function_instance_prototype") {
+        return (instance: any, fn: any): void => {
+          if (instance == null || typeof instance !== "object") return;
+          const proto = _safeGet(fn, "prototype", callbackState);
+          if (proto != null && (typeof proto === "object" || typeof proto === "function")) {
+            _functionInstancePrototypes.set(instance, proto as object);
+          }
+        };
+      }
       // Batched string concat: __concat_3, __concat_4, ... (#958)
       if (name.startsWith("__concat_")) {
         return (...args: any[]) => {
@@ -5146,8 +5304,8 @@ assert._isSameValue = isSameValue;
           // struct — `p1.then = fn; Promise.race([p1])` traps with
           // "object is not a function". Wrap it via __call_fn_<arity> so
           // host-driven invocation reaches the closure body.
-          const wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
-          _safeSet(obj, key, wrappedVal, undefined, callbackState);
+          const wrappedVal = _maybeWrapCallableUnknownArity(_unwrapForHost(val), callbackState);
+          _safeSet(obj, key, wrappedVal, callbackState?.getExports(), callbackState);
         };
       if (name === "__extern_length")
         return (obj: any) => {
@@ -6486,6 +6644,26 @@ assert._isSameValue = isSameValue;
               if (drained !== null) wrappedArgs[1] = [drained, ...wrappedArgs[1].slice(1)];
             }
           }
+          if ((method === "call" || method === "apply") && _isWasmStruct(obj) && exports) {
+            const invokeWithThis = (thisArg: any, callArgs: any[]): any => {
+              const unwrappedThis = _unwrapForHost(thisArg);
+              const unwrappedCallArgs = callArgs.map((a) => _unwrapForHost(a));
+              const arity = Math.min(unwrappedCallArgs.length, 4);
+              const methodCallFn = exports[`__call_fn_method_${arity}`];
+              if (typeof methodCallFn === "function") {
+                return methodCallFn(unwrappedThis, obj, ...unwrappedCallArgs.slice(0, arity));
+              }
+              const callFn = exports[`__call_fn_${arity}`];
+              if (typeof callFn === "function") return callFn(obj, ...unwrappedCallArgs.slice(0, arity));
+              throw new TypeError(method + " is not a function");
+            };
+            if (method === "call") {
+              return invokeWithThis(wrappedArgs[0], wrappedArgs.slice(1));
+            }
+            const appliedArgs =
+              wrappedArgs.length > 1 && wrappedArgs[1] != null ? Array.from(wrappedArgs[1] as any) : [];
+            return invokeWithThis(wrappedArgs[0], appliedArgs);
+          }
           const fn = wrappedObj[method];
           if (typeof fn !== "function") {
             // (#837) Map/WeakMap upsert proposal polyfill — Node 25 / V8
@@ -7085,17 +7263,23 @@ assert._isSameValue = isSameValue;
       // already carry [[BoundThis]]; for plain functions `thisArg` is used).
       if (name === "__call_function")
         return (fn: any, thisArg: any, argsArray: any): any => {
+          const args: any[] = Array.isArray(argsArray) ? argsArray : [];
           if (typeof fn !== "function") {
             // Unwrap a wasm-struct closure if one slipped through.
             if (_isWasmStruct(fn)) {
-              const wrapped = _wrapWasmClosure(fn, 0, callbackState);
-              if (wrapped) fn = wrapped;
+              const maxArity = Math.min(args.length, 4);
+              for (let arity = maxArity; arity >= 0; arity--) {
+                const wrapped = _wrapWasmClosure(fn, arity, callbackState);
+                if (wrapped) {
+                  fn = wrapped;
+                  break;
+                }
+              }
             }
           }
           if (typeof fn !== "function") {
             throw new TypeError(String(fn) + " is not a function");
           }
-          const args: any[] = Array.isArray(argsArray) ? argsArray : [];
           return Reflect.apply(fn, thisArg, args);
         };
       if (name === "__reflect_construct")
@@ -8544,6 +8728,8 @@ assert._isSameValue = isSameValue;
       if (name === "__call_2_f64") return (fn: Function, a: number, b: number) => fn(a, b);
       if (name === "__call_1_i32") return (fn: Function, a: number) => fn(a);
       if (name === "__call_2_i32") return (fn: Function, a: number, b: number) => fn(a, b);
+      if (name === "__host_eq") return (a: any, b: any) => (a === b ? 1 : 0);
+      if (name === "__host_loose_eq") return (a: any, b: any) => (a == b ? 1 : 0);
       if (name === "__typeof")
         return (v: any) => {
           // (#1594A) Closure structs report `typeof === "object"` in JS, but the
@@ -9030,8 +9216,8 @@ assert._isSameValue = isSameValue;
       return (obj: any, key: any, val: any) => {
         // (#860) Wrap closure-as-value before storing — see __extern_set
         // binding above. Mirrors the by-name path.
-        const wrappedVal = _maybeWrapCallableUnknownArity(val, callbackState);
-        _safeSet(obj, key, wrappedVal, undefined, callbackState);
+        const wrappedVal = _maybeWrapCallableUnknownArity(_unwrapForHost(val), callbackState);
+        _safeSet(obj, key, wrappedVal, callbackState?.getExports(), callbackState);
       };
     case "host_eq":
       // #1065 — strict equality for two externref operands that the GC path

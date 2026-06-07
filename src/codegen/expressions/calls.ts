@@ -67,7 +67,12 @@ import { emitArrayIsArrayExternrefPredicate, emitNullCheckThrow, typeErrorThrowI
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
-import { emitSetExtrasArgv, ensureArgcGlobal, ensureExtrasArgvGlobal } from "../statements/nested-declarations.js";
+import {
+  emitSetExtrasArgv,
+  ensureArgcGlobal,
+  ensureCurrentThisGlobal,
+  ensureExtrasArgvGlobal,
+} from "../statements/nested-declarations.js";
 import { compileNativeStringMethodCall, compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { tryCompileNodeProcessCall } from "../node-process-api.js";
 import {
@@ -312,6 +317,44 @@ function resolveClosureInfoFromLocal(
     return ctx.closureInfoByTypeIdx.get(localType.typeIdx);
   }
   return undefined;
+}
+
+function functionLikeUsesThis(fn: ts.FunctionLikeDeclarationBase | undefined): boolean {
+  if (!fn?.body) return false;
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (node.kind === ts.SyntaxKind.ThisKeyword) {
+      found = true;
+      return;
+    }
+    const nestedNonArrowFunction =
+      node !== fn &&
+      !ts.isArrowFunction(node) &&
+      (ts.isFunctionDeclaration(node) ||
+        ts.isFunctionExpression(node) ||
+        ts.isMethodDeclaration(node) ||
+        ts.isConstructorDeclaration(node) ||
+        ts.isGetAccessorDeclaration(node) ||
+        ts.isSetAccessorDeclaration(node));
+    if (nestedNonArrowFunction) {
+      return;
+    }
+    forEachChild(node, visit);
+  };
+  forEachChild(fn.body, visit);
+  return found;
+}
+
+function identifierTargetUsesThis(ctx: CodegenContext, id: ts.Identifier): boolean {
+  const sym = ctx.checker.getSymbolAtLocation(id);
+  const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+  if (decl && ts.isFunctionDeclaration(decl)) return functionLikeUsesThis(decl);
+  if (decl && ts.isVariableDeclaration(decl)) {
+    const init = decl.initializer;
+    if (init && ts.isFunctionExpression(init)) return functionLikeUsesThis(init);
+  }
+  return false;
 }
 
 /**
@@ -1068,12 +1111,32 @@ function emitWrapperDynamicMethodCall(
   recvExpr: ts.Expression,
   methodName: string,
 ): ValType | null {
+  return emitDynamicMethodCall(ctx, fctx, recvExpr, methodName, []);
+}
+
+function emitDynamicMethodCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  recvExpr: ts.Expression,
+  methodName: string,
+  args: readonly ts.Expression[],
+): ValType | null {
   // (#1888 Slice 2) Standalone routes __extern_method_call native, which reads
-  // its args over a $ObjVec — build the (empty) args list with the native
+  // its args over a $ObjVec — build the args list with the native
   // $ObjVec builder, not the host __js_array_new. JS-host keeps the host import.
-  const arrNewIdx = ctx.standalone
-    ? ensureObjVecBuilders(ctx).newIdx
-    : ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+  let arrNewIdx: number | undefined;
+  let arrPushIdx: number | undefined;
+  if (ctx.standalone) {
+    const builders = ensureObjVecBuilders(ctx);
+    arrNewIdx = builders.newIdx;
+    arrPushIdx = builders.pushIdx;
+  } else {
+    arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+    arrPushIdx =
+      args.length > 0
+        ? ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], [])
+        : undefined;
+  }
   const methodCallIdx = ensureLateImport(
     ctx,
     "__extern_method_call",
@@ -1081,7 +1144,9 @@ function emitWrapperDynamicMethodCall(
     [{ kind: "externref" }],
   );
   flushLateImportShifts(ctx, fctx);
-  if (arrNewIdx === undefined || methodCallIdx === undefined) return null;
+  if (arrNewIdx === undefined || methodCallIdx === undefined || (args.length > 0 && arrPushIdx === undefined)) {
+    return null;
+  }
 
   // Compile receiver as externref.
   const recvType = compileExpression(ctx, fctx, recvExpr, { kind: "externref" });
@@ -1096,13 +1161,62 @@ function emitWrapperDynamicMethodCall(
   addStringConstantGlobal(ctx, methodName);
   fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
 
-  // Empty args array: __js_array_new() → externref.
+  // Args array / native ObjVec.
   fctx.body.push({ op: "call", funcIdx: arrNewIdx });
+  if (args.length > 0) {
+    const argsLocal = allocLocal(fctx, `__dyn_args_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: argsLocal });
+    for (const arg of args) {
+      fctx.body.push({ op: "local.get", index: argsLocal });
+      const argType = compileExpression(ctx, fctx, arg, { kind: "externref" });
+      if (argType && argType.kind !== "externref") {
+        fctx.body.push({ op: "extern.convert_any" });
+      }
+      if (argType === null) {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      const finalPushIdx = ctx.standalone
+        ? (ctx.funcMap.get("__objvec_push") ?? arrPushIdx!)
+        : (ctx.funcMap.get("__js_array_push") ?? arrPushIdx!);
+      fctx.body.push({ op: "call", funcIdx: finalPushIdx });
+    }
+    fctx.body.push({ op: "local.get", index: argsLocal });
+  }
 
   // Re-lookup methodCallIdx in case args compilation triggered shifts.
   const finalMcIdx = ctx.funcMap.get("__extern_method_call") ?? methodCallIdx;
   fctx.body.push({ op: "call", funcIdx: finalMcIdx });
   return { kind: "externref" };
+}
+
+function localTypeForReceiverExpression(fctx: FunctionContext, expr: ts.Expression): ValType | undefined {
+  let receiver = expr;
+  while (
+    ts.isParenthesizedExpression(receiver) ||
+    ts.isAsExpression(receiver) ||
+    ts.isTypeAssertionExpression(receiver) ||
+    ts.isNonNullExpression(receiver)
+  ) {
+    receiver = ts.isParenthesizedExpression(receiver)
+      ? receiver.expression
+      : ts.isAsExpression(receiver)
+        ? receiver.expression
+        : ts.isTypeAssertionExpression(receiver)
+          ? receiver.expression
+          : (receiver as ts.NonNullExpression).expression;
+  }
+  if (!ts.isIdentifier(receiver)) return undefined;
+  const localIdx = fctx.localMap.get(receiver.text);
+  return localIdx === undefined ? undefined : getLocalType(fctx, localIdx);
+}
+
+function isFunctionConstructorInstanceType(ctx: CodegenContext, valType: ValType | undefined): boolean {
+  if (!valType || (valType.kind !== "ref" && valType.kind !== "ref_null")) return false;
+  const typeIdx = (valType as { typeIdx: number }).typeIdx;
+  for (const info of ctx.funcConstructorMap.values()) {
+    if (info.structTypeIdx === typeIdx) return true;
+  }
+  return false;
 }
 
 /**
@@ -2610,13 +2724,67 @@ function compileCallExpression(
         }
 
         if (closureInfo || funcIdx !== undefined) {
-          // Evaluate and drop thisArg (first argument) if present
+          const bindThisForDirectFuncCall =
+            isCall &&
+            !closureInfo &&
+            funcIdx !== undefined &&
+            expr.arguments.length > 0 &&
+            identifierTargetUsesThis(ctx, innerExpr);
+          let boundThisGlobalIdx: number | undefined;
+          let boundPrevThisLocal: number | undefined;
+
+          // Evaluate thisArg (first argument) if present. Standalone functions
+          // usually ignore it, but plain functions that read `this` and are
+          // invoked through Function.prototype.call need it threaded through the
+          // same __current_this slot used by host-dispatched closures.
           if (expr.arguments.length > 0) {
-            const thisType = compileExpression(ctx, fctx, expr.arguments[0]!);
-            if (thisType) {
-              fctx.body.push({ op: "drop" });
+            if (bindThisForDirectFuncCall) {
+              boundThisGlobalIdx = ensureCurrentThisGlobal(ctx);
+              boundPrevThisLocal = allocLocal(fctx, `__prev_this_${fctx.locals.length}`, { kind: "externref" });
+              fctx.body.push({ op: "global.get", index: boundThisGlobalIdx } as Instr);
+              fctx.body.push({ op: "local.set", index: boundPrevThisLocal } as Instr);
+              const thisType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+              if (thisType && thisType.kind !== "externref") {
+                fctx.body.push({ op: "extern.convert_any" } as Instr);
+              }
+              if (thisType === null) {
+                fctx.body.push({ op: "ref.null.extern" } as Instr);
+              }
+              fctx.body.push({ op: "global.set", index: ctx.currentThisGlobalIdx } as Instr);
+            } else {
+              const thisType = compileExpression(ctx, fctx, expr.arguments[0]!);
+              if (thisType) {
+                fctx.body.push({ op: "drop" });
+              }
             }
           }
+
+          const restoreBoundThis = () => {
+            if (boundThisGlobalIdx !== undefined && boundPrevThisLocal !== undefined) {
+              fctx.body.push({ op: "local.get", index: boundPrevThisLocal } as Instr);
+              fctx.body.push({ op: "global.set", index: ctx.currentThisGlobalIdx } as Instr);
+            }
+          };
+
+          const emitCallAndRestoreThis = (callFuncIdx: number): ValType | typeof VOID_RESULT => {
+            fctx.body.push({ op: "call", funcIdx: callFuncIdx });
+            if (wasmFuncReturnsVoid(ctx, callFuncIdx)) {
+              restoreBoundThis();
+              return VOID_RESULT;
+            }
+            const retType = getWasmFuncReturnType(ctx, callFuncIdx);
+            if (!retType) {
+              restoreBoundThis();
+              return VOID_RESULT;
+            }
+            if (boundThisGlobalIdx !== undefined && boundPrevThisLocal !== undefined) {
+              const retLocal = allocLocal(fctx, `__call_ret_${fctx.locals.length}`, retType);
+              fctx.body.push({ op: "local.set", index: retLocal } as Instr);
+              restoreBoundThis();
+              fctx.body.push({ op: "local.get", index: retLocal } as Instr);
+            }
+            return retType;
+          };
 
           if (isCall) {
             // .call(thisArg, arg1, arg2, ...) — remaining args are positional
@@ -2695,12 +2863,9 @@ function compileCallExpression(
             }
 
             const finalFuncIdx = ctx.funcMap.get(funcName) ?? funcIdx!;
-            fctx.body.push({ op: "call", funcIdx: finalFuncIdx });
-
             // Use actual Wasm return type — TS checker reports `any` for .call()/.apply()
             // which resolves to externref, but the actual function may return f64/i32/ref.
-            if (wasmFuncReturnsVoid(ctx, finalFuncIdx)) return VOID_RESULT;
-            return getWasmFuncReturnType(ctx, finalFuncIdx) ?? VOID_RESULT;
+            return emitCallAndRestoreThis(finalFuncIdx);
           }
           // .apply(thisArg, argsArray) — spread array literal elements as positional args
           if (!isCall && expr.arguments.length >= 2) {
@@ -6083,6 +6248,23 @@ function compileCallExpression(
       }
     }
 
+    // Function-style constructor instances (for example Acorn's
+    // `function Parser(...) {}` plus `Parser.prototype` methods) keep their
+    // prototype methods in the JS-host sidecar. When an instance is first
+    // stored in a local, there is no native `Parser_method` function to call,
+    // so dispatch through the same prototype-aware runtime path used for
+    // `new this(...).method()`.
+    if (!ctx.standalone && !ctx.strictNoHostImports) {
+      const functionCtorReceiverType = localTypeForReceiverExpression(fctx, propAccess.expression);
+      if (isFunctionConstructorInstanceType(ctx, functionCtorReceiverType)) {
+        const methodName = ts.isPrivateIdentifier(propAccess.name)
+          ? "__priv_" + propAccess.name.text.slice(1)
+          : propAccess.name.text;
+        const dynResult = emitDynamicMethodCall(ctx, fctx, propAccess.expression, methodName, expr.arguments);
+        if (dynResult) return dynResult;
+      }
+    }
+
     // Handle wrapper type method calls: new Number(x).valueOf(), etc.
     // Since wrapper constructors now return primitives, valueOf() is a no-op identity.
     {
@@ -8253,6 +8435,10 @@ function compileCallExpression(
       // [[BoundThis]]/[[BoundArguments]]). JS-host mode only; standalone
       // degrades bind to identity so the normal path applies.
       if (isKnownVariable && !ctx.standalone && !noJsHost(ctx) && calleeIsBoundFunctionVar(ctx, expr.expression)) {
+        const hostCall = emitBoundFunctionCall(ctx, fctx, expr);
+        if (hostCall !== null) return hostCall;
+      }
+      if (calleeModGlobal !== undefined && callSigs && callSigs.length > 0 && !ctx.standalone && !noJsHost(ctx)) {
         const hostCall = emitBoundFunctionCall(ctx, fctx, expr);
         if (hostCall !== null) return hostCall;
       }

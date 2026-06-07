@@ -48,10 +48,11 @@ import {
   resolveThisStructName,
   valTypesMatch,
 } from "./shared.js";
-import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
+import { coercionInstrs, defaultValueInstrs, emitGuardedRefCast } from "./type-coercion.js";
 import { tryEmitJsonParseElementAccess, tryEmitJsonParsePropertyAccess } from "./json-standalone.js";
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
+import { ensureCurrentThisGlobal } from "./statements/nested-declarations.js";
 
 const BUILTIN_CTOR_NAMES = new Set([
   "Object",
@@ -1267,6 +1268,46 @@ export function compilePropertyAccess(
 
   const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
+
+  // FunctionDeclaration.prototype — top-level legacy constructor functions
+  // (acorn's `function Parser(...) {}` shape) need a stable, mutable prototype
+  // object even though the compiled function value is a Wasm closure struct.
+  if (propName === "prototype" && ts.isIdentifier(expr.expression)) {
+    const objName = expr.expression.text;
+    const sym = ctx.checker.getSymbolAtLocation(expr.expression);
+    const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+    const isPlainFunctionDecl =
+      !!decl &&
+      !ctx.generatorFunctions.has(objName) &&
+      ((ts.isFunctionDeclaration(decl) &&
+        !decl.asteriskToken &&
+        decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) !== true) ||
+        (ts.isVariableDeclaration(decl) &&
+          !!decl.initializer &&
+          ts.isFunctionExpression(decl.initializer) &&
+          !decl.initializer.asteriskToken &&
+          decl.initializer.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) !== true));
+    if (isPlainFunctionDecl) {
+      const protoIdx = ensureLateImport(
+        ctx,
+        "__get_function_prototype",
+        [{ kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      const recvType = compileExpression(ctx, fctx, expr.expression);
+      if (!recvType) return null;
+      if (recvType.kind === "ref" || recvType.kind === "ref_null") {
+        fctx.body.push({ op: "extern.convert_any" } as Instr);
+      } else if (recvType.kind !== "externref") {
+        coerceType(ctx, fctx, recvType, { kind: "externref" });
+      }
+      if (protoIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: protoIdx } as Instr);
+      }
+      return { kind: "externref" };
+    }
+  }
 
   const jsonParsePropertyType = tryEmitJsonParsePropertyAccess(ctx, fctx, expr);
   if (jsonParsePropertyType !== undefined) return jsonParsePropertyType;
@@ -3039,6 +3080,71 @@ export function compilePropertyAccess(
   const accessType = ctx.checker.getTypeAtLocation(expr);
   const accessWasm = resolveWasmType(ctx, accessType);
 
+  // Host-dispatched closure bodies receive their method receiver through the
+  // __current_this externref global. Prefer the dynamic/prototype-aware host
+  // lookup before the static struct field path below can synthesize a missing
+  // field and return its default value. Acorn stores parser methods on
+  // Parser.prototype, so `this.parseMaybeAssign` must consult the runtime
+  // prototype sidecar rather than the parser instance's struct fields.
+  if (expr.expression.kind === ts.SyntaxKind.ThisKeyword && !fctx.localMap.has("this")) {
+    ensureCurrentThisGlobal(ctx);
+    const getIdx = ensureLateImport(
+      ctx,
+      "__extern_get",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    let unboxIdx: number | undefined;
+    if (accessWasm.kind === "f64" || accessWasm.kind === "i32") {
+      unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+    }
+    flushLateImportShifts(ctx, fctx);
+    if (getIdx !== undefined) {
+      const objExprType = compileExpression(ctx, fctx, expr.expression);
+      if (objExprType && objExprType.kind !== "externref") {
+        coerceType(ctx, fctx, objExprType, { kind: "externref" });
+      }
+      const objTmp = allocLocal(fctx, `__thisget_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.tee", index: objTmp });
+      fctx.body.push({ op: "ref.is_null" });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: typeErrorThrowInstrs(ctx, expr),
+        else: [],
+      });
+      fctx.body.push({ op: "local.get", index: objTmp });
+      addStringConstantGlobal(ctx, propName);
+      fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+      fctx.body.push({ op: "call", funcIdx: getIdx });
+      if (propName === "type") {
+        return { kind: "externref" };
+      }
+      if (accessWasm.kind === "f64") {
+        if (unboxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: unboxIdx });
+        return { kind: "f64" };
+      }
+      if (accessWasm.kind === "i32") {
+        if (unboxIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: unboxIdx });
+          fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+        }
+        return { kind: "i32" };
+      }
+      if (accessWasm.kind === "ref" || accessWasm.kind === "ref_null") {
+        const typeIdx = accessWasm.typeIdx;
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        emitGuardedRefCast(fctx, typeIdx);
+        if (accessWasm.kind === "ref") {
+          emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx });
+          fctx.body.push({ op: "ref.as_non_null" } as Instr);
+        }
+        return accessWasm;
+      }
+      return { kind: "externref" };
+    }
+  }
+
   // For struct types with the property, try to compile the object and do struct.get
   // but NEVER for class struct types — their fields are fixed at collection time
   if (typeName && !ctx.classSet.has(typeName)) {
@@ -3109,8 +3215,14 @@ export function compilePropertyAccess(
   // use __extern_get(obj, key) to dynamically read the property at runtime.
   {
     const objWasmType = resolveWasmType(ctx, objType);
+    const isCurrentThisExternObj =
+      expr.expression.kind === ts.SyntaxKind.ThisKeyword &&
+      fctx.readsCurrentThis &&
+      ctx.currentThisGlobalIdx >= 0 &&
+      !fctx.localMap.has("this");
     const isExternObj =
       objWasmType.kind === "externref" ||
+      isCurrentThisExternObj ||
       (ts.isIdentifier(expr.expression) &&
         (() => {
           const localIdx = fctx.localMap.get(expr.expression.text);
@@ -3134,6 +3246,37 @@ export function compilePropertyAccess(
       }
       flushLateImportShifts(ctx, fctx);
       if (getIdx !== undefined) {
+        if (isCurrentThisExternObj) {
+          const objExprType = compileExpression(ctx, fctx, expr.expression);
+          if (objExprType && objExprType.kind !== "externref") {
+            coerceType(ctx, fctx, objExprType, { kind: "externref" });
+          }
+          const objTmp = allocLocal(fctx, `__thisget_${fctx.locals.length}`, { kind: "externref" });
+          fctx.body.push({ op: "local.tee", index: objTmp });
+          fctx.body.push({ op: "ref.is_null" });
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: typeErrorThrowInstrs(ctx, expr),
+            else: [],
+          });
+          fctx.body.push({ op: "local.get", index: objTmp });
+          addStringConstantGlobal(ctx, propName);
+          fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+          fctx.body.push({ op: "call", funcIdx: getIdx });
+          if (accessWasm.kind === "f64") {
+            if (unboxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: unboxIdx });
+            return { kind: "f64" };
+          }
+          if (accessWasm.kind === "i32") {
+            if (unboxIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: unboxIdx });
+              fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+            }
+            return { kind: "i32" };
+          }
+          return { kind: "externref" };
+        }
         const objExprType = compileExpression(ctx, fctx, expr.expression);
         // If the expression produced a ref/ref_null (struct), convert to externref
         // so that __extern_get (which expects externref) can be used.

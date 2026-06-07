@@ -35,7 +35,7 @@ import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { ensureNativeIteratorRuntime } from "./iterator-native.js";
-import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
+import { emitUndefined, reconcileNativeStrFinalizeShift, shiftLateImportIndices } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
 import { fillApplyClosure, fillExternIsArray } from "./object-runtime.js";
@@ -1134,6 +1134,8 @@ export function generateModule(
       ctx.arrayIteratorMaybeOverridden = true;
     }
 
+    preRegisterObjectLiteralStructs(ctx, ast.sourceFile);
+
     collectDeclarations(ctx, ast.sourceFile);
 
     // Shape inference: detect array-like variables and override their types
@@ -1717,6 +1719,43 @@ function emitStructFieldGetters(ctx: CodegenContext): void {
   }
 }
 
+function ensureStructGetterUndefinedImport(ctx: CodegenContext): number | undefined {
+  if (ctx.nativeStrings) return undefined;
+  const existing = ctx.funcMap.get("__get_undefined");
+  if (existing !== undefined) return existing;
+
+  const importsBefore = ctx.numImportFuncs;
+  const typeIdx = addFuncType(ctx, [], [{ kind: "externref" }]);
+  addImport(ctx, "env", "__get_undefined", { kind: "func", typeIdx });
+  const added = ctx.numImportFuncs - importsBefore;
+  if (added > 0) {
+    shiftLateImportIndices(ctx, { body: [], savedBodies: [] } as unknown as FunctionContext, importsBefore, added);
+  }
+  return ctx.funcMap.get("__get_undefined");
+}
+
+function preRegisterObjectLiteralStructs(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
+  const visit = (node: ts.Node): void => {
+    if (ts.isObjectLiteralExpression(node)) {
+      if (!node.properties.some((p) => ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p))) {
+        try {
+          const contextual = ctx.checker.getContextualType(node);
+          if (contextual) ensureStructForType(ctx, contextual);
+        } catch {
+          /* best-effort shape pre-registration */
+        }
+        try {
+          ensureStructForType(ctx, ctx.checker.getTypeAtLocation(node));
+        } catch {
+          /* best-effort shape pre-registration */
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+}
+
 function _emitStructFieldGettersInner(ctx: CodegenContext): void {
   const mod = ctx.mod;
 
@@ -1799,6 +1838,7 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
   const getterExternTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$sget_extern_type");
   const getterF64TypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }], "$sget_f64_type");
   const getterI32TypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$sget_i32_type");
+  const getUndefinedIdx = ensureStructGetterUndefinedImport(ctx);
 
   for (const [fieldName, entries] of fieldMap) {
     // Determine the "best" return type — if all entries for this field are
@@ -1831,7 +1871,7 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const anyLocal = 1; // first local after params (local 0 = externref param)
 
-    const funcBody = buildNestedIfElse(entries, anyLocal, boxNumIdx, returnMode, boxBoolIdx);
+    const funcBody = buildNestedIfElse(entries, anyLocal, boxNumIdx, returnMode, boxBoolIdx, getUndefinedIdx);
 
     mod.functions.push({
       name: funcName,
@@ -1935,20 +1975,29 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
     const allF64 = entries.every((e) => e.fieldType.kind === "f64");
     const allI32 = entries.every((e) => e.fieldType.kind === "i32");
     const allRef = entries.every((e) => isRefKind(e.fieldType.kind));
+    const mixedRefF64 =
+      !allF64 && !allRef && entries.every((e) => e.fieldType.kind === "f64" || isRefKind(e.fieldType.kind));
 
     // Skip mixed-kind buckets or any bucket containing kinds we can't
     // route through one of the three setter signatures (i64 / f32 / v128
     // / packed i8/i16). The sidecar still carries those writes.
-    if (!allF64 && !allI32 && !allRef) continue;
+    if (!allF64 && !allI32 && !allRef && !mixedRefF64) continue;
 
     let setterTypeIdx: number;
-    let valMode: "extern" | "f64" | "i32";
+    let valMode: "extern" | "f64" | "i32" | "extern_mixed_f64";
+    let unboxNumberIdx: number | undefined;
     if (allF64) {
       setterTypeIdx = setterF64TypeIdx;
       valMode = "f64";
     } else if (allI32) {
       setterTypeIdx = setterI32TypeIdx;
       valMode = "i32";
+    } else if (mixedRefF64) {
+      if (!ctx.funcMap.has("__unbox_number")) addUnionImports(ctx);
+      unboxNumberIdx = ctx.funcMap.get("__unbox_number");
+      if (unboxNumberIdx === undefined) continue;
+      setterTypeIdx = setterExternTypeIdx;
+      valMode = "extern_mixed_f64";
     } else {
       setterTypeIdx = setterExternTypeIdx;
       valMode = "extern";
@@ -1958,7 +2007,7 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
     const funcIdx = ctx.numImportFuncs + mod.functions.length;
     const anyLocal = 2; // locals after the two params (local 0 = obj, local 1 = val)
 
-    const funcBody = buildSetterNestedIfElse(entries, anyLocal, valMode);
+    const funcBody = buildSetterNestedIfElse(entries, anyLocal, valMode, unboxNumberIdx);
 
     mod.functions.push({
       name: funcName,
@@ -1979,7 +2028,8 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
 function buildSetterNestedIfElse(
   entries: { typeIdx: number; fieldIdx: number; fieldType: ValType }[],
   anyLocal: number,
-  valMode: "extern" | "f64" | "i32",
+  valMode: "extern" | "f64" | "i32" | "extern_mixed_f64",
+  unboxNumberIdx?: number,
 ): Instr[] {
   const body: Instr[] = [];
 
@@ -1993,7 +2043,7 @@ function buildSetterNestedIfElse(
 
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i]!;
-    const thenBranch = buildSetterStore(entry, anyLocal, valMode);
+    const thenBranch = buildSetterStore(entry, anyLocal, valMode, unboxNumberIdx);
 
     const ifInstr: Instr = {
       op: "if",
@@ -2017,7 +2067,8 @@ function buildSetterNestedIfElse(
 function buildSetterStore(
   entry: { typeIdx: number; fieldIdx: number; fieldType: ValType },
   anyLocal: number,
-  valMode: "extern" | "f64" | "i32",
+  valMode: "extern" | "f64" | "i32" | "extern_mixed_f64",
+  unboxNumberIdx?: number,
 ): Instr[] {
   const then: Instr[] = [];
   const ft = entry.fieldType;
@@ -2030,7 +2081,10 @@ function buildSetterStore(
   // for homogeneous-kind buckets, valMode and ft.kind line up.
   then.push({ op: "local.get", index: 1 } as Instr);
 
-  if (valMode === "extern") {
+  if (valMode === "extern_mixed_f64" && ft.kind === "f64") {
+    if (unboxNumberIdx === undefined) return [];
+    then.push({ op: "call", funcIdx: unboxNumberIdx } as Instr);
+  } else if (valMode === "extern" || valMode === "extern_mixed_f64") {
     // Field kinds are restricted by isRefKind above to: ref / ref_null /
     // anyref / externref / ref_extern. externref & ref_extern need no
     // conversion; everything else converts externref → anyref first, then
@@ -2468,16 +2522,20 @@ function emitClosureCallExport(ctx: CodegenContext): void {
   const exportFuncTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$call_fn_0_type");
   const funcIdx = ctx.numImportFuncs + mod.functions.length;
   const bwIdx = baseWrapperIdx; // final for closures
+  const directTypeIdxs = directClosureStructTypes(ctx, 0, bwIdx, true);
 
   // Body:
   //   local 0: externref (param)
   //   local 1: anyref (__any)
   //   local 2: (ref null $baseWrapper) (__struct) — after initial struct test+cast
   //   local 3: funcref (__funcref) — extracted from field 0
+  //   local 4: i32 (__matched) — extraction succeeded
   const body: Instr[] = [];
   body.push({ op: "local.get", index: 0 });
   body.push({ op: "any.convert_extern" } as Instr);
   body.push({ op: "local.set", index: 1 } as Instr);
+  body.push({ op: "i32.const", value: 0 } as Instr);
+  body.push({ op: "local.set", index: 4 } as Instr);
 
   // Phase 2: build funcref-type dispatch chain (innermost = last entry, outermost = first)
   let funcrefDispatch: Instr[] = [{ op: "ref.null.extern" } as Instr];
@@ -2544,22 +2602,19 @@ function emitClosureCallExport(ctx: CodegenContext): void {
   // Outer: if the value is a closure struct, extract funcref and dispatch.
   // ref.test uses the representative base wrapper; concrete subtypes (with captures)
   // also pass since they're subtypes of the base wrapper.
-  const structExtractAndDispatch: Instr[] = [
-    // Cast to base wrapper, tee to local 2, struct.get 0 → funcref, store in local 3
-    { op: "local.get", index: 1 } as Instr,
-    { op: "ref.cast", typeIdx: bwIdx } as Instr,
-    { op: "local.tee", index: 2 } as Instr,
-    { op: "struct.get", typeIdx: bwIdx, fieldIdx: 0 } as Instr,
-    { op: "local.set", index: 3 } as Instr,
-    ...funcrefDispatch,
-  ];
-
   body.push({ op: "local.get", index: 1 } as Instr);
   body.push({ op: "ref.test", typeIdx: bwIdx } as Instr);
   body.push({
     op: "if",
+    blockType: { kind: "empty" },
+    then: closureExtractBody(bwIdx, 1, 3, 4, 2),
+    else: buildDirectClosureExtractChain(directTypeIdxs, 1, 3, 4),
+  } as Instr);
+  body.push({ op: "local.get", index: 4 } as Instr);
+  body.push({
+    op: "if",
     blockType: { kind: "val", type: { kind: "externref" } },
-    then: structExtractAndDispatch,
+    then: funcrefDispatch,
     else: [{ op: "ref.null.extern" } as Instr],
   } as Instr);
 
@@ -2570,6 +2625,7 @@ function emitClosureCallExport(ctx: CodegenContext): void {
       { name: "__any", type: { kind: "anyref" } },
       { name: "__struct", type: { kind: "ref_null", typeIdx: bwIdx } },
       { name: "__funcref", type: { kind: "funcref" } },
+      { name: "__matched", type: { kind: "i32" } },
     ],
     body,
     exported: true,
@@ -2651,12 +2707,15 @@ function emitClosureCallExport1(ctx: CodegenContext): void {
   );
   const funcIdx = ctx.numImportFuncs + mod.functions.length;
   const bwIdx = baseWrapperIdx;
+  const directTypeIdxs = directClosureStructTypes(ctx, 1, bwIdx, true);
 
-  // Locals: 0=closure externref, 1=arg externref, 2=anyref, 3=struct ref, 4=funcref
+  // Locals: 0=closure externref, 1=arg externref, 2=anyref, 3=struct ref, 4=funcref, 5=matched
   const body: Instr[] = [];
   body.push({ op: "local.get", index: 0 });
   body.push({ op: "any.convert_extern" } as Instr);
   body.push({ op: "local.set", index: 2 } as Instr);
+  body.push({ op: "i32.const", value: 0 } as Instr);
+  body.push({ op: "local.set", index: 5 } as Instr);
 
   let funcrefDispatch: Instr[] = [{ op: "ref.null.extern" } as Instr];
 
@@ -2739,21 +2798,19 @@ function emitClosureCallExport1(ctx: CodegenContext): void {
     ];
   }
 
-  const structExtractAndDispatch: Instr[] = [
-    { op: "local.get", index: 2 } as Instr,
-    { op: "ref.cast", typeIdx: bwIdx } as Instr,
-    { op: "local.tee", index: 3 } as Instr,
-    { op: "struct.get", typeIdx: bwIdx, fieldIdx: 0 } as Instr,
-    { op: "local.set", index: 4 } as Instr,
-    ...funcrefDispatch,
-  ];
-
   body.push({ op: "local.get", index: 2 } as Instr);
   body.push({ op: "ref.test", typeIdx: bwIdx } as Instr);
   body.push({
     op: "if",
+    blockType: { kind: "empty" },
+    then: closureExtractBody(bwIdx, 2, 4, 5, 3),
+    else: buildDirectClosureExtractChain(directTypeIdxs, 2, 4, 5),
+  } as Instr);
+  body.push({ op: "local.get", index: 5 } as Instr);
+  body.push({
+    op: "if",
     blockType: { kind: "val", type: { kind: "externref" } },
-    then: structExtractAndDispatch,
+    then: funcrefDispatch,
     else: [{ op: "ref.null.extern" } as Instr],
   } as Instr);
 
@@ -2764,6 +2821,7 @@ function emitClosureCallExport1(ctx: CodegenContext): void {
       { name: "__any", type: { kind: "anyref" } },
       { name: "__struct", type: { kind: "ref_null", typeIdx: bwIdx } },
       { name: "__funcref", type: { kind: "funcref" } },
+      { name: "__matched", type: { kind: "i32" } },
     ],
     body,
     exported: true,
@@ -2851,18 +2909,100 @@ function externToClosureParamRef(paramType: ValType): Instr[] {
   return ops;
 }
 
+function missingClosureArgInstrs(paramType: ValType | undefined): Instr[] {
+  if (!paramType || paramType.kind === "externref" || paramType.kind === "ref_extern") {
+    return [{ op: "ref.null.extern" } as Instr];
+  }
+  if (paramType.kind === "f64") return [{ op: "f64.const", value: NaN } as Instr];
+  if (paramType.kind === "i32") return [{ op: "i32.const", value: 0 } as Instr];
+  if (paramType.kind === "i64") return [{ op: "i64.const", value: 0n } as Instr];
+  if (paramType.kind === "ref" || paramType.kind === "ref_null") {
+    const ops: Instr[] = [{ op: "ref.null.extern" } as Instr, ...externToClosureParamRef(paramType)];
+    if (paramType.kind === "ref") ops.push({ op: "ref.as_non_null" } as Instr);
+    return ops;
+  }
+  if (paramType.kind === "anyref" || paramType.kind === "eqref") {
+    return [{ op: "ref.null.extern" } as Instr, { op: "any.convert_extern" } as Instr];
+  }
+  return [{ op: "ref.null.extern" } as Instr];
+}
+
+function directClosureStructTypes(
+  ctx: CodegenContext,
+  arity: number,
+  baseWrapperIdx: number,
+  exactArity: boolean,
+): number[] {
+  const out: number[] = [];
+  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
+    if (exactArity && info.paramTypes.length !== arity) continue;
+    if (typeIdx === baseWrapperIdx) continue;
+    const typeDef = ctx.mod.types[typeIdx];
+    if (!typeDef || typeDef.kind !== "struct") continue;
+    // Named function expressions cannot always subtype the shared wrapper
+    // because their `__self` binding is nullable for self-reference. Dispatch
+    // them by concrete struct type after the representative wrapper misses.
+    if (typeDef.superTypeIdx === -1) out.push(typeIdx);
+  }
+  return out;
+}
+
+function closureExtractBody(
+  typeIdx: number,
+  anyLocal: number,
+  funcLocal: number,
+  matchedLocal: number,
+  structLocal?: number,
+): Instr[] {
+  const body: Instr[] = [{ op: "local.get", index: anyLocal } as Instr, { op: "ref.cast", typeIdx } as Instr];
+  if (structLocal !== undefined) {
+    body.push({ op: "local.tee", index: structLocal } as Instr);
+  }
+  body.push(
+    { op: "struct.get", typeIdx, fieldIdx: 0 } as Instr,
+    { op: "local.set", index: funcLocal } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "local.set", index: matchedLocal } as Instr,
+  );
+  return body;
+}
+
+function buildDirectClosureExtractChain(
+  typeIdxs: number[],
+  anyLocal: number,
+  funcLocal: number,
+  matchedLocal: number,
+): Instr[] {
+  let chain: Instr[] = [];
+  for (let i = typeIdxs.length - 1; i >= 0; i--) {
+    const typeIdx = typeIdxs[i]!;
+    chain = [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.test", typeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: closureExtractBody(typeIdx, anyLocal, funcLocal, matchedLocal),
+        else: chain,
+      } as Instr,
+    ];
+  }
+  return chain;
+}
+
 /**
  * Emit __call_fn_<arity> export (#1382): call an N-arg WasmGC closure from
  * JS. Takes (externref closure, externref arg0, ..., externref arg<arity-1>)
  * and returns externref. Used by `__array_from`, `__proto_method_call`, and
  * other host shims that pass Wasm closures as JS callbacks.
  *
- * Dispatch: iterate ALL closure types whose user arity ≤ N. For each
- * matching closure, push only as many args as it declared (matches JS
- * spec's "extra args ignored" semantics for over-arity calls). Funcref-
- * type dispatch is required because V8 isorecursive canonicalization
- * collapses base wrapper struct types — only funcref types remain
- * distinct per signature.
+ * Dispatch: iterate ALL closure types. For each matching closure, push the
+ * supplied args it declared and synthesize missing args when the host supplied
+ * fewer than the closure's formal count. This matches JS call semantics:
+ * extra args are ignored, missing args are undefined-like sentinels.
+ * Funcref-type dispatch is required because V8 isorecursive canonicalization
+ * collapses base wrapper struct types — only funcref types remain distinct per
+ * signature.
  *
  * Locals layout:
  *   0..arity-1 = positional externref params (closure + user args)
@@ -2885,17 +3025,17 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
   //   anyLocal    = anyref (closure-as-anyref after extern.convert_any)
   //   structLocal = (ref null $baseWrapper) for the cast struct
   //   funcLocal   = funcref extracted from struct field 0
+  //   matchedLocal = i32 flag set when extraction found a closure struct
   const anyLocal = arity + 1;
   const structLocal = arity + 2;
   const funcLocal = arity + 3;
+  const matchedLocal = arity + 4;
 
   let baseWrapperIdx: number | undefined;
   const seenFuncTypeIdx = new Set<number>();
-  // Each entry tracks how many user args the closure declared
-  // (closureArity ≤ arity). The host always invokes the dispatcher with
-  // `arity` user args; when a closure declared fewer, the dispatch arm
-  // drops the extra args. Matches JS spec's "extra args ignored at call
-  // time" semantics.
+  // Each entry tracks how many user args the closure declared. The host invokes
+  // this dispatcher with `arity` supplied args; dispatch arms drop extras and
+  // synthesize missing formals.
   const entries: {
     funcTypeIdx: number;
     returnType: ValType | null;
@@ -2904,8 +3044,6 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
   }[] = [];
 
   for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
-    if (info.paramTypes.length > arity) continue;
-
     const typeDef = mod.types[typeIdx];
     if (!typeDef || typeDef.kind !== "struct") continue;
 
@@ -2932,7 +3070,7 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
 
   if (entries.length === 0) return;
 
-  // Fallback to any base wrapper if none was found at the target arity.
+  // Fallback to any base wrapper if none was found.
   // V8 isorecursive canonicalization collapses single-funcref-field
   // base structs to the same type regardless of arity, so any base
   // wrapper works for the initial ref.test + struct.get.
@@ -2972,11 +3110,14 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
   const exportFuncTypeIdx = addFuncType(ctx, params, [{ kind: "externref" }], `$${exportName}_type`);
   const funcIdx = ctx.numImportFuncs + mod.functions.length;
   const bwIdx = baseWrapperIdx;
+  const directTypeIdxs = directClosureStructTypes(ctx, arity, bwIdx, false);
 
   const body: Instr[] = [];
   body.push({ op: "local.get", index: 0 });
   body.push({ op: "any.convert_extern" } as Instr);
   body.push({ op: "local.set", index: anyLocal } as Instr);
+  body.push({ op: "i32.const", value: 0 } as Instr);
+  body.push({ op: "local.set", index: matchedLocal } as Instr);
 
   let funcrefDispatch: Instr[] = [{ op: "ref.null.extern" } as Instr];
 
@@ -2984,6 +3125,7 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
     const funcTypeDef = mod.types[entry.funcTypeIdx];
 
     const buildArgConversion = (argLocalIdx: number, paramType: ValType | undefined): Instr[] => {
+      if (argLocalIdx < 0) return missingClosureArgInstrs(paramType);
       const ops: Instr[] = [{ op: "local.get", index: argLocalIdx } as Instr];
       if (paramType) {
         if (paramType.kind === "f64") {
@@ -3013,12 +3155,12 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
     };
 
     // Push self + user args 0..closureArity-1. Args beyond the closure's
-    // declared arity are dropped (no `local.get` emitted for them).
+    // declared arity are dropped; missing formals are synthesized.
     const argInstrs: Instr[] = [];
     for (let i = 0; i < entry.closureArity; i++) {
       const paramType =
         funcTypeDef?.kind === "func" && funcTypeDef.params.length >= i + 2 ? funcTypeDef.params[i + 1] : undefined;
-      argInstrs.push(...buildArgConversion(i + 1, paramType));
+      argInstrs.push(...buildArgConversion(i < arity ? i + 1 : -1, paramType));
     }
 
     // #820l — argc/extras-argv plumbing so the callee's `arguments` object
@@ -3101,21 +3243,19 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
     ];
   }
 
-  const structExtractAndDispatch: Instr[] = [
-    { op: "local.get", index: anyLocal } as Instr,
-    { op: "ref.cast", typeIdx: bwIdx } as Instr,
-    { op: "local.tee", index: structLocal } as Instr,
-    { op: "struct.get", typeIdx: bwIdx, fieldIdx: 0 } as Instr,
-    { op: "local.set", index: funcLocal } as Instr,
-    ...funcrefDispatch,
-  ];
-
   body.push({ op: "local.get", index: anyLocal } as Instr);
   body.push({ op: "ref.test", typeIdx: bwIdx } as Instr);
   body.push({
     op: "if",
+    blockType: { kind: "empty" },
+    then: closureExtractBody(bwIdx, anyLocal, funcLocal, matchedLocal, structLocal),
+    else: buildDirectClosureExtractChain(directTypeIdxs, anyLocal, funcLocal, matchedLocal),
+  } as Instr);
+  body.push({ op: "local.get", index: matchedLocal } as Instr);
+  body.push({
+    op: "if",
     blockType: { kind: "val", type: { kind: "externref" } },
-    then: structExtractAndDispatch,
+    then: funcrefDispatch,
     else: [{ op: "ref.null.extern" } as Instr],
   } as Instr);
 
@@ -3126,6 +3266,7 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
       { name: "__any", type: { kind: "anyref" } },
       { name: "__struct", type: { kind: "ref_null", typeIdx: bwIdx } },
       { name: "__funcref", type: { kind: "funcref" } },
+      { name: "__matched", type: { kind: "i32" } },
     ],
     body,
     exported: true,
@@ -3162,12 +3303,14 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
   //   anyLocal    = anyref (closure-as-anyref after extern.convert_any)
   //   structLocal = (ref null $baseWrapper) for the cast struct
   //   funcLocal   = funcref extracted from struct field 0
+  //   matchedLocal = i32 flag set when extraction found a closure struct
   //   prevThis    = externref save slot for nested invocations
   const totalParams = arity + 2; // thisVal + closure + N user args
   const anyLocal = totalParams;
   const structLocal = totalParams + 1;
   const funcLocal = totalParams + 2;
-  const prevThisLocal = totalParams + 3;
+  const matchedLocal = totalParams + 3;
+  const prevThisLocal = totalParams + 4;
 
   let baseWrapperIdx: number | undefined;
   const seenFuncTypeIdx = new Set<number>();
@@ -3179,7 +3322,6 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
   }[] = [];
 
   for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
-    if (info.paramTypes.length > arity) continue;
     const typeDef = mod.types[typeIdx];
     if (!typeDef || typeDef.kind !== "struct") continue;
     if (typeDef.superTypeIdx === -1 && baseWrapperIdx === undefined) {
@@ -3231,12 +3373,15 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
   const exportFuncTypeIdx = addFuncType(ctx, params, [{ kind: "externref" }], `$${exportName}_type`);
   const funcIdx = ctx.numImportFuncs + mod.functions.length;
   const bwIdx = baseWrapperIdx;
+  const directTypeIdxs = directClosureStructTypes(ctx, arity, bwIdx, false);
 
   // Convert closure externref → anyref (closure is at local index 1).
   const body: Instr[] = [];
   body.push({ op: "local.get", index: 1 } as Instr);
   body.push({ op: "any.convert_extern" } as Instr);
   body.push({ op: "local.set", index: anyLocal } as Instr);
+  body.push({ op: "i32.const", value: 0 } as Instr);
+  body.push({ op: "local.set", index: matchedLocal } as Instr);
 
   // Save previous __current_this for nesting safety, then install thisVal.
   body.push({ op: "global.get", index: currentThisGlobalIdx } as Instr);
@@ -3250,6 +3395,7 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
     const funcTypeDef = mod.types[entry.funcTypeIdx];
 
     const buildArgConversion = (argLocalIdx: number, paramType: ValType | undefined): Instr[] => {
+      if (argLocalIdx < 0) return missingClosureArgInstrs(paramType);
       const ops: Instr[] = [{ op: "local.get", index: argLocalIdx } as Instr];
       if (paramType) {
         if (paramType.kind === "f64") {
@@ -3275,12 +3421,12 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
     };
 
     // User args occupy locals [2..arity+1]. Push only as many as the
-    // closure declared.
+    // closure declared; synthesize missing formals when JS supplied fewer.
     const argInstrs: Instr[] = [];
     for (let i = 0; i < entry.closureArity; i++) {
       const paramType =
         funcTypeDef?.kind === "func" && funcTypeDef.params.length >= i + 2 ? funcTypeDef.params[i + 1] : undefined;
-      argInstrs.push(...buildArgConversion(i + 2, paramType));
+      argInstrs.push(...buildArgConversion(i < arity ? i + 2 : -1, paramType));
     }
 
     const callBody: Instr[] = [
@@ -3335,22 +3481,21 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
     ];
   }
 
-  const structExtractAndDispatch: Instr[] = [
-    { op: "local.get", index: anyLocal } as Instr,
-    { op: "ref.cast", typeIdx: bwIdx } as Instr,
-    { op: "local.tee", index: structLocal } as Instr,
-    { op: "struct.get", typeIdx: bwIdx, fieldIdx: 0 } as Instr,
-    { op: "local.set", index: funcLocal } as Instr,
-    ...funcrefDispatch,
-  ];
-
-  // Result of the if-block stays on the stack as externref.
   body.push({ op: "local.get", index: anyLocal } as Instr);
   body.push({ op: "ref.test", typeIdx: bwIdx } as Instr);
   body.push({
     op: "if",
+    blockType: { kind: "empty" },
+    then: closureExtractBody(bwIdx, anyLocal, funcLocal, matchedLocal, structLocal),
+    else: buildDirectClosureExtractChain(directTypeIdxs, anyLocal, funcLocal, matchedLocal),
+  } as Instr);
+
+  // Result of the if-block stays on the stack as externref.
+  body.push({ op: "local.get", index: matchedLocal } as Instr);
+  body.push({
+    op: "if",
     blockType: { kind: "val", type: { kind: "externref" } },
-    then: structExtractAndDispatch,
+    then: funcrefDispatch,
     else: [{ op: "ref.null.extern" } as Instr],
   } as Instr);
 
@@ -3375,6 +3520,7 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
       { name: "__any", type: { kind: "anyref" } },
       { name: "__struct", type: { kind: "ref_null", typeIdx: bwIdx } },
       { name: "__funcref", type: { kind: "funcref" } },
+      { name: "__matched", type: { kind: "i32" } },
       { name: "__prev_this", type: { kind: "externref" } },
       { name: "__result", type: { kind: "externref" } },
     ],
@@ -3402,46 +3548,35 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
  * (#1504). No-op when the module has no closures.
  */
 /**
- * Collect the deduped set of closure base-wrapper struct type indices from
- * `ctx.closureInfoByTypeIdx`. Concrete closure subtypes (with captures) share
- * their funcref signature with the base wrapper post-V8 canonicalisation, so a
- * `ref.test` against the base catches all of them. Walks each registered
- * closure struct up to its root (superTypeIdx === -1). (#1896 — shared by
- * `emitIsClosureExport` and the standalone `__typeof_function`/`__typeof_object`
- * closure-recognition arms.)
+ * Collect the deduped set of registered closure struct type indices from
+ * `ctx.closureInfoByTypeIdx`. Closure structs all carry their callable funcref
+ * in field 0; testing broad root supertypes can catch unrelated WasmGC structs
+ * that share a nominal root through other codegen paths.
  */
 function collectClosureBaseWrapperTypeIdxs(ctx: CodegenContext): number[] {
   const mod = ctx.mod;
-  const baseTypeIdxs: number[] = [];
-  const seenBase = new Set<number>();
+  const closureTypeIdxs: number[] = [];
+  const seen = new Set<number>();
   for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
     if (!info) continue;
     const typeDef = mod.types[typeIdx];
     if (!typeDef || typeDef.kind !== "struct") continue;
-    // Walk up to the root struct in the chain.
-    let root = typeIdx;
-    let cur = typeDef;
-    while (cur && cur.kind === "struct" && cur.superTypeIdx !== undefined && cur.superTypeIdx >= 0) {
-      const superIdx: number = cur.superTypeIdx;
-      const parent = mod.types[superIdx];
-      if (!parent || parent.kind !== "struct") break;
-      root = superIdx;
-      cur = parent;
-    }
-    if (!seenBase.has(root)) {
-      seenBase.add(root);
-      baseTypeIdxs.push(root);
+    const firstField = typeDef.fields[0];
+    if (!firstField || firstField.name !== "func" || firstField.type.kind !== "funcref") continue;
+    if (!seen.has(typeIdx)) {
+      seen.add(typeIdx);
+      closureTypeIdxs.push(typeIdx);
     }
   }
-  return baseTypeIdxs;
+  return closureTypeIdxs;
 }
 
 function emitIsClosureExport(ctx: CodegenContext): void {
   const mod = ctx.mod;
 
-  // Collect base wrapper struct types (deduped). Concrete closure subtypes
-  // share their funcref signature with the base wrapper post-V8 canonicalisation,
-  // so ref.test against the base catches all of them.
+  // Collect registered closure struct types (deduped). Each concrete closure
+  // subtype is registered in closureInfoByTypeIdx, so exact type tests avoid
+  // treating unrelated structs as callable values.
   const baseTypeIdxs = collectClosureBaseWrapperTypeIdxs(ctx);
   if (baseTypeIdxs.length === 0) return;
 
@@ -4324,6 +4459,7 @@ function buildNestedIfElse(
   boxNumIdx: number | undefined,
   returnMode: "extern" | "f64" | "i32" = "extern",
   boxBoolIdx?: number,
+  getUndefinedIdx?: number,
 ): Instr[] {
   const body: Instr[] = [];
 
@@ -4342,7 +4478,10 @@ function buildNestedIfElse(
     defaultVal = { op: "i32.const", value: 0 } as Instr;
     blockRetType = { kind: "i32" };
   } else {
-    defaultVal = { op: "ref.null.extern" } as Instr;
+    defaultVal =
+      getUndefinedIdx !== undefined
+        ? ({ op: "call", funcIdx: getUndefinedIdx } as Instr)
+        : ({ op: "ref.null.extern" } as Instr);
     blockRetType = { kind: "externref" };
   }
 
