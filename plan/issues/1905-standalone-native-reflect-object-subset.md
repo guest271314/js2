@@ -11,13 +11,14 @@ reasoning_effort: high
 task_type: feature
 area: codegen, runtime
 language_feature: reflection, objects
+es_edition: ES2015
 goal: standalone-mode
 parent: 1472
 related: [1472, 1466, 1629, 1888]
 test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:21:34.997Z
+claimed_at: 2026-06-07T07:30:05.050Z
 pr: 1284
 ---
 
@@ -137,3 +138,7 @@ machinery and are out of scope here.
   `symphony/1905` branch containing current `origin/main`, and re-enabled
   GitHub auto-merge so the refreshed head can enter the merge queue after
   required checks pass.
+- Current Codex pass: fetched current `origin/main`, confirmed it remains an
+  ancestor of `symphony/1905`, reran the scoped validation above successfully,
+  and confirmed ready PR `#1284` is open/non-draft, green, and queued in the
+  merge queue at position 12.
