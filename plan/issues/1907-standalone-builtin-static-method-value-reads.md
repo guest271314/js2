@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T10:26:46.497Z
+claimed_at: 2026-06-07T10:38:30.028Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -148,3 +148,7 @@ standalone refusal.
   implementation changes are needed for #1907.
 - Follow-up handoff PR #1292 was opened ready/non-draft against `main` to
   publish the final #1907 redispatch findings after PR #1287 merged.
+- Codex redispatch verification on 2026-06-07T12:41+02:00 confirmed
+  `origin/main` is still an ancestor of `symphony/1907`, reran the scoped
+  validation successfully, and found PR #1292 open, ready/non-draft,
+  mergeable, and waiting on queued GitHub checks on remote head `749580d52`.
