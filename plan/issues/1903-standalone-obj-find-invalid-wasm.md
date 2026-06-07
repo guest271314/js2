@@ -195,6 +195,9 @@ remaining semantic failures.
   scoped validation, and confirmed PR #1262 is open, non-draft, and mergeable
   with required GitHub checks still pending before republishing the in-review
   issue status.
+- Publish follow-up 12: merged current `origin/main` (`28c668ab4`) after the
+  base advanced again, with no #1903 conflicts, reran scoped validation, and
+  kept PR #1262 recorded as the ready in-review PR for this issue.
 
 ## Validation
 
@@ -301,3 +304,6 @@ remaining semantic failures.
   "#1903|dynamic property add/read"` (final handoff 18 on 2026-06-07)
 - `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
   "#1903|dynamic property add/read"` (final handoff 19 on 2026-06-07)
+- `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
+  "#1903|dynamic property add/read"` (after merging `origin/main` at
+  `28c668ab4`)
