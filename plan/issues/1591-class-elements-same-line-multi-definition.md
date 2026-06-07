@@ -1,9 +1,9 @@
 ---
 id: 1591
 title: "class/elements: WasmGC-struct ↔ host own-property/identity reconciliation gaps (~294 fails)"
-status: ready
+status: blocked
 created: 2026-05-24
-updated: 2026-06-07
+updated: 2026-06-03
 depends_on: [1472]
 priority: high
 feasibility: hard
@@ -12,20 +12,13 @@ task_type: bugfix
 area: codegen
 language_feature: classes, class-elements
 goal: spec-completeness
-sprint: 61
+sprint: Backlog
 renumbered_from: 779b
 parent: 779
 test262_fail: 294
 test262_category: language/statements/class/elements, language/expressions/class/elements
 ---
 # #1591 — `class/elements` WasmGC-struct ↔ host own-property / method-identity reconciliation gaps
-
-## Sprint 61 unblock
-
-`#1472` is now marked done. The 2026-06-06 standalone report still assigns
-`3,226` failures to the class/prototype/private/descriptor bucket, with `#1591`
-as the live non-completed owner after older class descriptor issues were closed.
-This issue is ready for a fresh current-main split and implementation slice.
 
 > **MIS-SCOPE CORRECTION (2026-05-27).** The original framing of this issue —
 > "same-line / stacked member definitions are *dropped or reordered* by the

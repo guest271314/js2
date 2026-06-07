@@ -2,26 +2,13 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
-## Sprint 61 standalone root-cause promotion (2026-06-07)
+## RegExp residual split (2026-06-07)
 
-The current standalone report has no unclassified failures, but several large
-buckets still pointed at completed umbrellas. Filed focused follow-ups and moved
-them directly into sprint 61 so Symphony can dispatch them:
+The standalone RegExp residual bucket was split under #1909 so the report no
+longer points the whole cluster at completed umbrellas:
 
-- [#1903](../1903-standalone-obj-find-invalid-wasm.md) — `__obj_find` invalid
-  Wasm inside the standalone object runtime.
-- [#1904](../1904-standalone-native-extern-is-array.md) — native
-  `__extern_is_array`.
-- [#1905](../1905-standalone-native-reflect-object-subset.md) — native
-  standalone Reflect object subset.
-- [#1906](../1906-standalone-native-defineproperties.md) — native
-  `Object.defineProperties`.
-- [#1907](../1907-standalone-builtin-static-method-value-reads.md) — built-in
-  static method value reads without `__get_builtin`.
-- [#1908](../1908-standalone-issamevalue-residual-bucket.md) — residual
-  `isSameValue` bucket split/fix.
 - [#1909](../1909-standalone-regexp-residual-bucket.md) — residual standalone
-  RegExp bucket split/fix.
+  RegExp bucket split/fix, in review.
 - [#1911](../1911-standalone-regexp-phase-2d-unicode-lookaround.md) —
   standalone RegExp Phase 2d: `u/v/d`, Unicode, lookaround, modifiers.
 - [#1912](../1912-standalone-regexp-phase-2b-boundaries-backrefs-classes.md) —
@@ -30,8 +17,6 @@ them directly into sprint 61 so Symphony can dispatch them:
   standalone RegExp string protocol, `matchAll`, split/replace, lastIndex.
 - [#1914](../1914-standalone-regexp-native-engine-reflection-result-shape.md) —
   standalone RegExp native-engine reflection and result-shape gaps.
-- [#1910](../1910-standalone-toprimitive-residual-bucket.md) — residual
-  ToPrimitive bucket split/fix.
 
 ## Harvest re-run 2026-06-04 (post sprint-58/59 merge)
 
@@ -47,12 +32,14 @@ Architectural sprint (no pass-count target; zero-regression guard). Goals:
 [sprints/57.md](../sprints/57.md).
 
 Track 1 — acorn dogfood:
+
 - [#1710](../1710-acorn-dogfood-harness.md) — acorn harness: compile + validate + diff-AST vs node-acorn — high, medium, **ready (s57)**.
 - [#1711](../1711-acorn-failure-surface-triage.md) — triage harness surface → file sized child issues — high, medium, **ready (s57)**, depends on #1710.
 - [#1712](../1712-acorn-acceptance-differential-ast.md) — acceptance: compiled acorn AST == node-acorn — high, hard, **carried to sprint 59** (#1710/#1711 done; unblocked by #1745).
 - Prior blockers #1679/#1690/#1690b are **done**.
 
 Track 2 — backend-agnostic IR (all need architect spec; #1713 blocking):
+
 - [#1713](../1713-ir-backend-emitter-trait-seam.md) — BackendEmitter trait + WasmGC bias audit + WasmGcEmitter (pure refactor, zero conformance delta) — high, hard, **ready (s57), needs arch spec**.
 - [#1714](../1714-ir-two-backend-proof-linear.md) — lower one IR node kind to BOTH WasmGC + linear via the trait (primary proof) — high, hard, **backlog→ready** after #1713.
 - [#1715](../1715-ir-bytecode-proof-point.md) — minimal bytecode emitter + dispatch loop for an IR subset (stretch proof) — medium, hard, **backlog→ready** after #1713.
@@ -63,7 +50,7 @@ Track 2 — backend-agnostic IR (all need architect spec; #1713 blocking):
 Empirical per-construct audit of remaining JS-host (`env.*`) leaks under `--target wasi`. Audit record: [#1662](../1662-standalone-host-import-audit.md) (done). Each genuine remaining leak is owned by a tracking issue; new gaps filed where the cited issue was closed without coverage or no native-engine issue existed. Already-tracked: Map/Set → #1103, number→string → #1335, RegExp → #682/#1474, closures/callbacks → #1470, JSON Phase 2 → #1599. Expected/wont-fix (not filed): eval, Proxy, with, dynamic import, full Intl collation.
 
 - [#1662](../1662-standalone-host-import-audit.md) — Audit record + findings table (done) — high, easy.
-- [#1666](../1666-standalone-invalid-wasm-native-string-number-lowering.md) — **Bug**: `--target wasi` emits *invalid* (non-instantiable) wasm for class/closure/callback-array-methods/number→string/regex/generator/typed-array — `__str_flatten`/`__str_to_extern` type mismatch + unbound late global (`0xffffffff`). More severe than a leak (won't instantiate even with a host). Fix first — masks #1664. — high, hard, ready.
+- [#1666](../1666-standalone-invalid-wasm-native-string-number-lowering.md) — **Bug**: `--target wasi` emits _invalid_ (non-instantiable) wasm for class/closure/callback-array-methods/number→string/regex/generator/typed-array — `__str_flatten`/`__str_to_extern` type mismatch + unbound late global (`0xffffffff`). More severe than a leak (won't instantiate even with a host). Fix first — masks #1664. — high, hard, ready.
 - [#1663](../1663-standalone-parseint-parsefloat-native.md) — Pure-Wasm `parseInt`/`parseFloat`/`Number(string)`. `env.parseInt`/`env.parseFloat` still leak; #1471 (the cited owner) closed without implementing them. — medium, medium, ready.
 - [#1664](../1664-standalone-extern-object-iterator-residual.md) — Residual `__extern_*`/`__register_*`/`__iterator*`/`__array_*`/`__get_undefined` leaks after #1472 landed partial. class/super, typed-array `.set`/`.subarray`, Map/Set. — medium, hard, ready (after #1666).
 - [#1665](../1665-standalone-native-generators.md) — Wasm-native generators (state-machine lowering) to retire `__gen_*`/`__create_generator*`/`__iterator*` host scheduler. Currently only owned by the #1376 IR telemetry gate, not a native-engine issue. — medium, hard, **ready (sprint 58; after #1666)**.
@@ -73,6 +60,7 @@ Empirical per-construct audit of remaining JS-host (`env.*`) leaks under `--targ
 Decomposed the 1,367 `compile_error` results in `test262-current.jsonl`. The
 528 `invalid Wasm binary` CEs were sub-clustered by validator error; sub-causes
 already enumerated in #1522 / #1543 / #1556 are not re-filed.
+
 ## Harvest 2026-05-24 (new issues from test262 error analysis)
 
 - [#1591](1591-class-elements-same-line-multi-definition.md) — class/elements same-line / stacked member definitions lost or reordered — **~294 fails**, high priority (formerly 779b)
@@ -116,9 +104,11 @@ only one new root-cause issue was needed.
 ## Harvest 2026-06-04 (cross-lane error analysis, baselines-repo sha f692249d)
 
 Default lane:
+
 - [#1805](../1805-negative-test-fail-early-error-enforcement-gaps.md) — 75 `negative_test_fail` tests: early-error enforcement gaps (parse/TDZ/TypeError) not covered by done #774/#927 — medium, medium, **ready (sprint 59)**.
 
 Standalone lane:
+
 - [#1806](../1806-standalone-toprimitive-cannot-convert-object.md) — standalone `Cannot convert object to primitive value`: **2,136 tests** — `__toPrimitive` host import refused in standalone; needs Wasm-native ToPrimitive or a proper refusal cite — high, medium, **ready (sprint 59)**.
 - [#1807](../1807-standalone-issamevalue-async-gen-wasm-type-mismatch.md) — standalone isSameValue Wasm call type mismatch for async-generator parameters: **277 tests** — #1776 fixed the externref case but async-generator ref types produce a different call mismatch — medium, medium, **ready (sprint 59)**.
 
@@ -152,7 +142,7 @@ both others); #1653 is the keystone for the read side + continuous loop.
 
 ## Governance / legal — CLA gate (2026-05-24)
 
-- [#1660](../1660-real-cla-gate.md) — Replace the placeholder `cla-check` workflow with a real CLA signature/approval gate — **DONE**. Self-hosted in-repo gate: signatures recorded in `.github/cla/signatures.json` via an affirmative PR comment; internal authors (org members / maintainer / `*[bot]`) exempt, external humans sign by comment. CLA version tied to `CLA.md` hash for re-acceptance. Promotion to a *required* branch-protection check is deferred to an admin (documented follow-up in the issue) so the gate can't deadlock the internal merge queue before exemption is proven. Related: #1530.
+- [#1660](../1660-real-cla-gate.md) — Replace the placeholder `cla-check` workflow with a real CLA signature/approval gate — **DONE**. Self-hosted in-repo gate: signatures recorded in `.github/cla/signatures.json` via an affirmative PR comment; internal authors (org members / maintainer / `*[bot]`) exempt, external humans sign by comment. CLA version tied to `CLA.md` hash for re-acceptance. Promotion to a _required_ branch-protection check is deferred to an admin (documented follow-up in the issue) so the gate can't deadlock the internal merge queue before exemption is proven. Related: #1530.
 
 ## Spec-compliance easy wins (from #1563 gap analysis, 2026-05-21)
 

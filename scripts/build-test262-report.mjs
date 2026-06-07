@@ -273,13 +273,13 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "issamevalue-invalid-wasm",
-    issues: ["#1908", "#1776", "#1807"],
+    issues: ["#1776"],
     label: "Residual standalone isSameValue invalid-Wasm validator failures",
     match: (record, text) => hasAny(text, ["issamevalue", "samevalue"]),
   },
   {
     id: "standalone-dynamic-object-property",
-    issues: ["#1903", "#1904", "#1907", "#1472"],
+    issues: ["#1472"],
     label: "Standalone dynamic object/property operation gate",
     match: (record, text) =>
       record.host_import_leak_class === "dynamic_object_property" ||
@@ -300,7 +300,7 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "standalone-reflect-refusal",
-    issues: ["#1905", "#1472"],
+    issues: ["#1472"],
     label: "Reflect.* refused in standalone mode (#1472 Phase C)",
     match: (record, text) =>
       pathHas(record, ["built-ins/reflect"]) ||
@@ -347,7 +347,7 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "object-to-primitive",
-    issues: ["#1910", "#1525b", "#1900", "#1525", "#1759"],
+    issues: ["#1525", "#1525b", "#1759"],
     label: "ToPrimitive / object-to-string dispatch residuals",
     match: (record, text) => hasAny(text, ["toprimitive", "to primitive", "valueof", "tostring", "symbol.toprimitive"]),
   },
@@ -370,7 +370,7 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "object-property-semantics",
-    issues: ["#1905", "#1906", "#1629", "#1472", "#1466", "#176", "#281"],
+    issues: ["#1472", "#176", "#281", "#1466"],
     label: "Object/property/destructuring semantic mismatches behind the object model",
     match: (record, text) =>
       pathHas(record, ["built-ins/object", "language/destructuring", "object-"]) ||

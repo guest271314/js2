@@ -1,9 +1,9 @@
 ---
 id: 680
 title: "Wasm-native generators (state machines) with optional JS host fallback"
-status: done
+status: in-review
 created: 2026-03-20
-updated: 2026-06-06
+updated: 2026-06-03
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -19,8 +19,6 @@ files:
       - "yield compiles to state save + return, next() resumes from saved state"
 claimed_by: codex-developer
 claimed_at: 2026-06-02T22:52:32.748Z
-pr: 1052
-completed: 2026-06-02
 ---
 # #680 — Wasm-native generators (state machines) with optional JS host fallback
 
@@ -32,7 +30,7 @@ completed: 2026-06-02
 - [§15.5.2 Runtime Semantics: EvaluateGeneratorBody](https://tc39.es/ecma262/#sec-runtime-semantics-evaluategeneratorbody) — creates generator object and starts execution
 
 
-## Status: done
+## Status: open
 
 Generators currently use 10+ JS host imports (__gen_create_buffer, __gen_push_f64, __gen_result_done, etc). In standalone/WASI mode there is no JS host, so a pure Wasm implementation is required. In JS host mode, the existing host imports remain available as an option.
 

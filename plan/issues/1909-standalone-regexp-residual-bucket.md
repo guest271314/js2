@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1260
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:03:23.804Z
+claimed_at: 2026-06-07T01:12:53.651Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -84,6 +84,8 @@ Implementation:
 - Added `tests/issue-1909.test.ts` to lock representative classifier routing.
 - Updated the older #1781 root-cause smoke test to expect the new
   native-engine sub-bucket for assertion/runtime RegExp rows.
+- Before publishing, trimmed the PR net diff back to this issue's classifier,
+  test, and RegExp child-issue files after syncing with current `origin/main`.
 
 Validation:
 

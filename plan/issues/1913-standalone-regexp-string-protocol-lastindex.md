@@ -16,6 +16,7 @@ related: [1909, 1539, 1439, 1328, 1329, 1330, 1331]
 test262_bucket: standalone-regexp-string-protocol
 test262_count: 452
 ---
+
 # #1913 — Standalone RegExp string protocol and lastIndex residuals
 
 ## Problem
