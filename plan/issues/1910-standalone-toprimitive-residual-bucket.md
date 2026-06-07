@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T03:17:54.225Z
+claimed_at: 2026-06-07T10:46:28.975Z
 pr: 1268
 ---
 
@@ -125,6 +125,9 @@ Implementation landed in PR #1258. PR #1265 published the first issue-record
 validation update, then merged before the final branch updates were pushed.
 PR #1268 publishes the active issue-record validation after syncing the assigned
 branch with current `origin/main`.
+PR #1268 has since merged; this refresh preserves the active issue metadata
+after the 2026-06-07 Symphony re-dispatch while leaving poller ownership of the
+eventual `done` transition.
 
 ## Validation - 2026-06-07
 
@@ -155,3 +158,8 @@ branch with current `origin/main`.
   - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
     (8 tests passed).
   - `npx prettier --check` on the issue file (passed).
+- After merging current `origin/main` (`28c668ab4`):
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the touched script, test, and issue files
+    (passed).
