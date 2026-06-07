@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T02:54:23.892Z
+claimed_at: 2026-06-07T03:00:54.176Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -92,3 +92,5 @@ Codex stale redispatch check on 2026-06-07: fetched current `origin/main`, confi
 Codex redispatch verification on 2026-06-07: `git merge --ff-only origin/main` was already up to date, `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub reports PR #1259 is merged; issue status is kept `in-review` per Symphony handoff rules, with no remaining merge-queue or auto-merge action.
 
 Codex stale dispatch verification on 2026-06-07: fetched current `origin/main`, confirmed `origin/main` is already included in `symphony/1904`, and `git merge --ff-only origin/main` was already up to date. `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub reports PR #1259 is already merged, so there is no remaining PR creation, merge-queue, or auto-merge action for this issue.
+
+Codex stale dispatch closeout on 2026-06-07: verified PR #1259 is merged, ready/non-draft history exists, and `origin/main` is an ancestor of `symphony/1904`. Reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully. Issue status remains `in-review` per Symphony handoff rules; no merge-queue or auto-merge action remains after merge.
