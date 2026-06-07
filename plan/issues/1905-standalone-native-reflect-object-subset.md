@@ -18,7 +18,7 @@ related: [1472, 1466, 1629, 1888]
 test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
-claimed_at: 2026-06-07T10:43:59.334Z
+claimed_at: 2026-06-07T10:51:59.647Z
 pr: 1290
 ---
 
@@ -165,3 +165,7 @@ machinery and are out of scope here.
   remains based on it, reran the scoped validation above successfully, and
   confirmed ready PR `#1290` is open/non-draft and mergeable with required
   checks still completing before this issue-state refresh is published.
+- Current Codex pass: fetched current `origin/main`, confirmed it remains an
+  ancestor of `symphony/1905`, reran the scoped validation above successfully,
+  and confirmed ready PR `#1290` is open/non-draft, clean, mergeable, and queued
+  in the merge queue at position 17 before publishing this issue-state refresh.
