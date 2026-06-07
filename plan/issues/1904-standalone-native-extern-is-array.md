@@ -2,7 +2,7 @@
 id: 1904
 title: "standalone: native __extern_is_array predicate for Array.isArray over Wasm carriers"
 status: in-review
-pr: 1259
+pr: 1286
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -107,4 +107,4 @@ Codex attempt 22 closeout on 2026-06-07: merged current `origin/main` into `symp
 
 Codex current verification on 2026-06-07: merged current `origin/main` into `symphony/1904`, reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully. GitHub reports PR #1259 is already merged and non-draft, so there is no merge-queue or auto-merge action remaining for this issue.
 
-Codex final dispatch check on 2026-06-07: fetched current `origin`, confirmed `origin/main` is an ancestor of `symphony/1904`, reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully. GitHub reports PR #1259 is merged and was ready/non-draft, so no PR creation, merge-queue, or auto-merge action remains; issue status stays `in-review` for the poller.
+Codex final dispatch check on 2026-06-07: fetched current `origin`, confirmed `origin/main` is an ancestor of `symphony/1904`, reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully. GitHub reports implementation PR #1259 is merged and was ready/non-draft; follow-up closeout PR #1286 is open and ready/non-draft, so issue status stays `in-review` for the poller.
