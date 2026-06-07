@@ -456,3 +456,16 @@ Additional validation:
   completed with a 3/3 pass report for the selected paths. Vitest still printed
   `No test suite found` diagnostics for empty generated local shards, but the
   runner exited 0 and wrote `3 pass / 3 total`.
+
+Post-merge validation after merging `origin/main` at `28c668ab4`:
+
+- `pnpm test tests/issue-1818.test.ts` passed: 6 tests.
+- `pnpm test tests/default-params.test.ts tests/issue-1025-param-default-null.test.ts tests/issue-1224.test.ts tests/issue-1818.test.ts`
+  passed: 27 tests across 4 files.
+- `pnpm exec prettier --check src/codegen/context/types.ts src/codegen/statements/nested-declarations.ts src/codegen/function-body.ts src/codegen/closures.ts src/codegen/class-bodies.ts src/codegen/expressions/calls.ts src/codegen/expressions/new-super.ts src/codegen/expressions.ts src/codegen/literals.ts tests/issue-1818.test.ts`
+  passed.
+- `git diff --check` passed.
+- `TEST262_TARGET=standalone TEST262_PATH_FILTER='language/expressions/class/method/dflt-params-trailing-comma.js|language/statements/class/method/dflt-params-trailing-comma.js|language/expressions/object/method-definition/meth-dflt-params-trailing-comma.js' TEST262_REPORTER=dot pnpm run test:262 -- --official-scope-only`
+  completed with a 3/3 pass report for representative standalone method/class
+  forms from the CI regression cluster. The runner still printed empty-shard
+  `No test suite found` diagnostics, but exited 0 and wrote `3 pass / 3 total`.
