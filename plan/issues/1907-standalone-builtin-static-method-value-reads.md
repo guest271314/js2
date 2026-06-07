@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T02:56:54.160Z
+claimed_at: 2026-06-07T03:02:54.204Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
