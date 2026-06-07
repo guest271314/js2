@@ -16,7 +16,7 @@ language_feature: typed-arrays
 goal: performance
 related: [1863, 1527, 389]
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:54:24.407Z
+claimed_at: 2026-06-07T10:10:06.150Z
 ---
 # #1886 — Linear-backed `Uint8Array` for WASI I/O buffers
 
@@ -485,6 +485,21 @@ Observed during expanded validation: full `tests/issue-1767.test.ts` still has
 the existing large-JSON-string expectation failure (`invalidStringFrames = 65`);
 the native-messaging source and that test are unchanged from `origin/main`, and
 the #1886-affected bounded-memory/null-array cases pass after the arena reset.
+
+Attempt 30 closeout on 2026-06-07: merged current `origin/main` into
+`symphony/1886` after PR #1288's prior CI was blocked only by the
+stale-baseline guard, then reran scoped validation successfully:
+`pnpm exec tsc --noEmit`, `pnpm exec vitest run tests/issue-1886.test.ts
+tests/issue-1886-slice-b.test.ts` (24/24), `pnpm exec vitest run
+tests/wasi.test.ts tests/wasi-stdin.test.ts
+tests/issue-1653-wasi-process-stdin-read.test.ts
+tests/issue-1654-wasi-dataview-arraybuffer.test.ts
+tests/issue-1655-wasi-arraybuffer-write.test.ts tests/issue-1856.test.ts
+tests/issue-1618-1651-wasi-stdout.test.ts` (59/59), `pnpm exec vitest run
+tests/issue-1753.test.ts` (3/3), `pnpm exec vitest run tests/issue-1767.test.ts
+-t "completes the reported 64x Chrome null-array workload with bounded memory"`
+(1 passed, 3 skipped), and `bash examples/native-messaging/smoke-test.sh`.
+Issue stays `in-review` with ready PR #1288 for the PR-status poller.
 
 ## Slice D — zero-copy direct-slice write (follow-on, banked)
 
