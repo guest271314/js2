@@ -1,7 +1,7 @@
 ---
 id: 1909
 title: "standalone RegExp residual bucket after #1474/#682: split Phase 2d and native-engine gaps"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1260
 claimed_by: codex-developer
-claimed_at: 2026-06-07T03:00:54.182Z
+claimed_at: 2026-06-07T03:08:24.842Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -108,20 +108,16 @@ rows classified with `0` unclassified. The RegExp residual remains split into
 `833` Phase 2d rows, `104` Phase 2b rows, `452` string-protocol rows, `546`
 native-engine rows, and `62` fallback rows.
 
-## 2026-06-07 publish blocker
+## 2026-06-07 PR status refresh
 
-PR #1260 exists and is ready, but GitHub rejected the latest branch push because
-the PR is already in the merge queue:
+PR #1260 is open, ready for review, and still points at this issue branch. The
+previous queue push blocker cleared after GitHub dropped the temporary merge
+queue refs, but the remote PR head `a3fe42c32` now shows a failed
+`check for test262 regressions` job:
 
-- Remote PR head: `a3fe42c32`
-- Local attempted head: `09402eef4`
-- Push result:
+- run: `https://github.com/loopdive/js2/actions/runs/27080559423/job/79926321031`
+- summary: `62` pass-to-other transitions, `27` improvements, net `-35` pass
+- baseline note in the failed log: baseline age `1h 20m` at commit `99b58e6`
 
-```text
-GH006: Protected branch update failed ...
-A pull request for this branch has been added to a merge queue.
-Branches that are queued for merging cannot be updated.
-```
-
-Per the publish rule, this issue is left `in-progress` locally until the queued
-PR merges or the PR is dequeued and the local metadata refresh can be pushed.
+Before the final push, this branch is being resynced with current `origin/main`
+so the PR reruns against the latest committed baseline.
