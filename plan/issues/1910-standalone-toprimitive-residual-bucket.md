@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T12:03:29.303Z
+claimed_at: 2026-06-07T12:09:29.234Z
 pr: 1295
 ---
 
@@ -227,6 +227,15 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
     (passed).
   - GraphQL confirmed PR #1295 is open, ready, clean/mergeable, and already in
     the merge queue at position 15.
+- Codex-developer stale-claim refresh on current `origin/main`
+  (`28c668ab4e`):
+  - Confirmed `origin/main` remains an ancestor of the local branch, with PR
+    #1295 still open, ready, clean/mergeable, passing checks, and already in the
+    merge queue at position 15.
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the touched script, test, and issue file
+    (passed).
 
 ## Publish Blocker - 2026-06-07
 
@@ -237,3 +246,6 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
   `isInMergeQueue: true`, queue state `QUEUED`, position 15. Leaving this issue
   `in-progress` per the failed-publish rule unless the PR is explicitly
   dequeued for another metadata push.
+- The current stale-claim refresh confirms the same blocker: local metadata
+  commits are ahead of `origin/symphony/1910`, while the remote PR head remains
+  queued and cannot be updated without dequeuing PR #1295.
