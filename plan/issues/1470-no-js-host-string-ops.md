@@ -556,3 +556,17 @@ Validation:
 - `pnpm exec prettier --check src/codegen/index.ts tests/issue-1470.test.ts`
 - `pnpm exec biome lint src/codegen/index.ts tests/issue-1470.test.ts --diagnostic-level=error`
 - `pnpm exec tsc --noEmit --pretty false`
+
+### 2026-06-07 — Attempt 30 publish refresh
+
+PR #1283 is open and ready against `main`. Merged current `origin/main`
+(`28c668ab4`) into `symphony/1470` after the previous PR head had a failed
+Test262 Sharded `merge shard reports` job, leaving the diff scoped to
+`src/codegen/index.ts`, `tests/issue-1470.test.ts`, and this issue file.
+
+Post-merge validation:
+- `pnpm exec vitest run tests/issue-1470.test.ts`
+- `pnpm exec vitest run tests/issue-1470-standalone-string-imports.test.ts tests/issue-1470-string-coercion-standalone.test.ts tests/issue-1759.test.ts tests/issue-1618-1651-wasi-stdout.test.ts`
+- `pnpm exec prettier --check src/codegen/index.ts tests/issue-1470.test.ts`
+- `pnpm exec biome lint src/codegen/index.ts tests/issue-1470.test.ts --diagnostic-level=error`
+- `pnpm exec tsc --noEmit --pretty false`
