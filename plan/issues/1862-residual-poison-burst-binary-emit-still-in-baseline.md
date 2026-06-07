@@ -13,7 +13,7 @@ sprint: 61
 related: [1808, 1154, 1221, 1080]
 pr: 1285
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:55:23.349Z
+claimed_at: 2026-06-07T10:28:52.179Z
 ---
 # #1862 — residual poisoned-worker emit-error burst still in the baseline
 
