@@ -236,3 +236,7 @@ machinery and are out of scope here.
   successfully including the focused Prettier check, and confirmed ready PR
   `#1290` is open/non-draft and mergeable with required checks still completing
   before publishing this issue-state refresh.
+- Post-merge Codex pass: merged current `origin/main` (`767e64754`) into
+  `symphony/1905`, reran the scoped validation above successfully including the
+  focused Prettier check, and kept ready PR `#1290` as the tracked in-review PR
+  before publishing this refreshed branch.
