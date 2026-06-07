@@ -18,7 +18,7 @@ related: [1472, 1466, 1629, 1888]
 test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
-claimed_at: 2026-06-07T10:58:59.062Z
+claimed_at: 2026-06-07T11:05:59.366Z
 pr: 1290
 ---
 
@@ -173,3 +173,12 @@ machinery and are out of scope here.
   ancestor of `symphony/1905`, reran the scoped validation above successfully,
   and confirmed ready PR `#1290` is open/non-draft, clean, mergeable, and queued
   in the merge queue at position 19 before publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main`, confirmed it remains an
+  ancestor of `symphony/1905`, reran the scoped validation above successfully
+  including the focused Prettier check, and confirmed ready PR `#1290` is
+  open/non-draft, clean, mergeable, and queued in the merge queue at position 18
+  before publishing this issue-state refresh.
+- Final Codex publish pass: dequeued PR `#1290`, pushed this refreshed issue
+  state to `symphony/1905`, and re-enabled GitHub auto-merge for the refreshed
+  head while required checks are pending so GitHub can queue it after checks
+  pass.
