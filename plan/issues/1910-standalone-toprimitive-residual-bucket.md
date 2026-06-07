@@ -16,8 +16,8 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:04:54.010Z
-pr: 1258
+claimed_at: 2026-06-07T02:59:53.891Z
+pr: 1265
 ---
 
 # #1910 — Standalone ToPrimitive residual bucket
@@ -121,6 +121,27 @@ follow-up buckets:
 No contained compiler semantics residual was obvious from this pass; this PR
 is the classifier/reporting split requested by the issue.
 
+Implementation landed in PR #1258; PR #1265 publishes the final issue-record
+validation after syncing the assigned branch with current `origin/main`.
+
 ## Validation - 2026-06-07
 
 - `npm test -- tests/issue-1910.test.ts` (2 tests passed).
+- After merging current `origin/main` (`5bef49a5a`):
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the touched script, test, and issue files
+    (passed).
+- After merging current `origin/main` (`3827daa96`):
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the touched script, test, and issue files
+    (passed).
+- After merging current `origin/main` (`ff02d2011`):
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the issue file (passed).
+- After merging current `origin/main` (`f4dd784d4`):
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the issue file (passed).
