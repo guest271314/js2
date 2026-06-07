@@ -2,7 +2,7 @@
 id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
 status: in-review
-pr: 1267
+pr: 1287
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -85,8 +85,8 @@ standalone refusal.
 ## Final Findings
 
 - Implementation PR #1263 exists, was ready/non-draft, and is now merged into
-  `main` at `3827daa96`; follow-up PR #1267 tracks this final issue-status
-  verification update.
+  `main` at `3827daa96`; follow-up PR #1267 also merged, and PR #1287 tracks
+  this redispatch verification update.
 - Final codex-developer verification on this branch found no additional
   implementation work outstanding; the scoped validation commands above passed
   again on 2026-06-07 after merging current `origin/main`.
@@ -97,7 +97,7 @@ standalone refusal.
   #1907/#1888 tests, typecheck, #1678 Array.isArray regression tests, the
   targeted #1472 Reflect.ownKeys standalone route, and formatting.
 - Redispatch verification on 2026-06-07T08:19+02:00 found the implementation
-  already merged, branch synced with `origin/main`, and the same scoped
-  validation still passing.
-- The issue remains `in-review` with `pr: 1267` so the PR-status poller can
+  already merged, branch synced with `origin/main`, PR #1287 opened
+  ready/non-draft, and the same scoped validation still passing.
+- The issue remains `in-review` with `pr: 1287` so the PR-status poller can
   perform the normal post-merge status transition.
