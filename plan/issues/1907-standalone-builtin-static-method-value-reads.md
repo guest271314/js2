@@ -118,3 +118,8 @@ standalone refusal.
   queued at position 11 on remote head `ab1d8c19d`. The local handoff remains
   `in-progress` because the queued branch cannot accept the unpublished docs
   commits.
+- Publishing the local handoff history was rejected again on
+  2026-06-07T09:37+02:00 with GitHub GH006 because PR #1287 is still in the
+  merge queue. The remote PR remains queued on `ab1d8c19d`; this local issue
+  file intentionally stays `in-progress` until the queue lock is gone or the PR
+  merges.
