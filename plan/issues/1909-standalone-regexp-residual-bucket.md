@@ -19,6 +19,7 @@ pr: 1260
 claimed_by: codex-developer
 claimed_at: 2026-06-07T00:56:23.952Z
 ---
+
 # #1909 — Standalone RegExp residual bucket
 
 ## Problem
@@ -67,13 +68,13 @@ The previous single `standalone-regexp` bucket had `1,997` rows:
 
 After this change, the rebuilt report splits those same `1,997` rows:
 
-| Count | Bucket | Owner | Representative signatures |
-| ---: | --- | --- | --- |
-| 833 | `standalone-regexp-phase-2d` | #1911 | `flags "u"`, `flags "v"`, lookahead/lookbehind, regexp modifiers, Unicode/property escapes |
-| 104 | `standalone-regexp-phase-2b` | #1912 | word-boundary `\b`/`\B`, backreferences, negated shorthand in classes, class range compatibility |
-| 452 | `standalone-regexp-string-protocol` | #1913 | `@@match`, `@@matchAll`, `@@replace`, `@@split`, `lastIndex`, split limit, replacement substitutions |
-| 546 | `standalone-regexp-native-engine` | #1914 | `pattern.source`, result `input/index`, `RegExp.prototype` descriptors, dynamic constructor/reflection/object access |
-| 62 | `standalone-regexp` fallback | #1909 + child issues | duplicate flags, syntax refusals, generic String.search/Reflect residuals needing later reassignment |
+| Count | Bucket                              | Owner                | Representative signatures                                                                                            |
+| ----: | ----------------------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------- |
+|   833 | `standalone-regexp-phase-2d`        | #1911                | `flags "u"`, `flags "v"`, lookahead/lookbehind, regexp modifiers, Unicode/property escapes                           |
+|   104 | `standalone-regexp-phase-2b`        | #1912                | word-boundary `\b`/`\B`, backreferences, negated shorthand in classes, class range compatibility                     |
+|   452 | `standalone-regexp-string-protocol` | #1913                | `@@match`, `@@matchAll`, `@@replace`, `@@split`, `lastIndex`, split limit, replacement substitutions                 |
+|   546 | `standalone-regexp-native-engine`   | #1914                | `pattern.source`, result `input/index`, `RegExp.prototype` descriptors, dynamic constructor/reflection/object access |
+|    62 | `standalone-regexp` fallback        | #1909 + child issues | duplicate flags, syntax refusals, generic String.search/Reflect residuals needing later reassignment                 |
 
 Implementation:
 
