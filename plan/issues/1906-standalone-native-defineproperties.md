@@ -1,7 +1,7 @@
 ---
 id: 1906
 title: "standalone: native Object.defineProperties over $Object descriptors"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -78,3 +78,17 @@ checks above pass locally on 2026-06-07.
 
 PR #1264 is open against `main` and the issue remains `in-review` for the
 PR-status poller.
+
+## Publish Blocker
+
+`codex-developer` revalidated locally and committed a validation refresh, but
+`git push origin symphony/1906` was rejected because PR #1264 is already in the
+merge queue and queued branches cannot be updated. The queued remote head is
+`0ea14d5a0`; local head is ahead at `daa96ab7c`.
+
+GitHub has PR #1264 queued at position 13, but the PR check rollup is failing
+because `Test262 Sharded / merge shard reports` hit the stale-baseline guard:
+the `js2wasm-baselines` JSONL baseline main SHA
+`ff02d201152dc8777d3e8151ed05dddd47d75ecf` is 114 commits behind
+`origin/main`, exceeding the max 50 commit threshold. This is an infrastructure
+blocker tracked by #1668, not a scoped #1906 local validation failure.
