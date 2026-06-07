@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:10:23.877Z
+claimed_at: 2026-06-07T01:29:54.017Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -71,4 +71,4 @@ a native brand predicate.
 - `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts`
 - `npm run typecheck`
 
-Final Codex rerun on 2026-06-07: all scoped validation passed.
+Final Codex verification on 2026-06-07: all scoped validation passed.
