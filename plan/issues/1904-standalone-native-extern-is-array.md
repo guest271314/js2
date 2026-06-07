@@ -2,7 +2,7 @@
 id: 1904
 title: "standalone: native __extern_is_array predicate for Array.isArray over Wasm carriers"
 status: in-review
-pr: 1259
+pr: 1286
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:43:24.047Z
+claimed_at: 2026-06-07T06:12:05.399Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -72,3 +72,39 @@ a native brand predicate.
 - `npm run typecheck`
 
 Final Codex verification on 2026-06-07: the scoped issue test, related regression set, and typecheck passed after refreshing the branch against current main. PR #1259's earlier test262 gate failure was on the stale published head and reported baseline drift; the branch was refreshed again against `origin/main` before republishing.
+
+Codex rerun on 2026-06-07: `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. The PR remains ready and non-draft with issue status `in-review`.
+
+Codex final publish check on 2026-06-07: refreshed `origin/main`, confirmed it is already included in `symphony/1904` (`git merge --ff-only origin/main` was already up to date), reran the scoped issue test, related regression set, and typecheck successfully. PR #1259 is open, ready/non-draft, and targets `main`.
+
+Codex final rerun on 2026-06-07: after fetching current `origin/main`, confirmed it is an ancestor of `symphony/1904`; `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. PR #1259 remains open, ready/non-draft, and targets `main`.
+
+Codex post-merge rerun on 2026-06-07: merged the latest `origin/main` into `symphony/1904`, then reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully before republishing PR #1259.
+
+Codex final check on 2026-06-07: merged current `origin/main` into `symphony/1904`, reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully. GitHub reports PR #1259 is already merged, so there is no remaining merge-queue action.
+
+Codex verification on 2026-06-07: after fetching current `origin/main`, confirmed it is an ancestor of `symphony/1904`; `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub reports PR #1259 is merged; no merge-queue or auto-merge action remains.
+
+Codex dispatch check on 2026-06-07: revalidated the already-merged implementation from PR #1259 on `symphony/1904`; `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub reports PR #1259 is merged, so no merge-queue or auto-merge action remains.
+
+Codex stale redispatch check on 2026-06-07: fetched current `origin/main`, confirmed it is an ancestor of `symphony/1904`, reran the scoped issue test (4/4), related regression set (17/17), and typecheck successfully. GitHub reports PR #1259 is already merged and ready/non-draft history exists, so there is no remaining PR creation, merge-queue, or auto-merge action for this issue.
+
+Codex redispatch verification on 2026-06-07: `git merge --ff-only origin/main` was already up to date, `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub reports PR #1259 is merged; issue status is kept `in-review` per Symphony handoff rules, with no remaining merge-queue or auto-merge action.
+
+Codex stale dispatch verification on 2026-06-07: fetched current `origin/main`, confirmed `origin/main` is already included in `symphony/1904`, and `git merge --ff-only origin/main` was already up to date. `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub reports PR #1259 is already merged, so there is no remaining PR creation, merge-queue, or auto-merge action for this issue.
+
+Codex stale dispatch closeout on 2026-06-07: verified PR #1259 is merged, ready/non-draft history exists, and `origin/main` is an ancestor of `symphony/1904`. Reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully. Issue status remains `in-review` per Symphony handoff rules; no merge-queue or auto-merge action remains after merge.
+
+Codex redispatch closeout on 2026-06-07: merged current `origin/main` into `symphony/1904` and reran scoped validation on the refreshed branch. `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub reports PR #1259 is already merged and was ready/non-draft, so no merge-queue or auto-merge action remains; issue status stays `in-review` for the poller.
+
+Codex stale dispatch final check on 2026-06-07: fetched `origin`, confirmed `origin/main` is included in `symphony/1904`, and `git merge --ff-only origin/main` was already up to date. `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub reports PR #1259 is merged and non-draft; no merge-queue or auto-merge action remains after merge.
+
+Codex current dispatch closeout on 2026-06-07: merged current `origin/main` into `symphony/1904`, then reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully. GitHub reports PR #1259 is already merged and non-draft, so no merge-queue or auto-merge action remains; issue status stays `in-review` for the poller.
+
+Codex latest-main closeout on 2026-06-07: after `origin/main` advanced again, merged the new tip into `symphony/1904` and reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully. PR #1259 is already merged and non-draft; no merge-queue or auto-merge action remains.
+
+Codex attempt 22 closeout on 2026-06-07: merged current `origin/main` into `symphony/1904` and reran scoped validation successfully: `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck`. GitHub reports PR #1259 is already merged and was ready/non-draft, so no merge-queue or auto-merge action remains for this branch.
+
+Codex current verification on 2026-06-07: merged current `origin/main` into `symphony/1904`, reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully. GitHub reports PR #1259 is already merged and non-draft, so there is no merge-queue or auto-merge action remaining for this issue.
+
+Codex final dispatch check on 2026-06-07: fetched current `origin`, confirmed `origin/main` is an ancestor of `symphony/1904`, reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully. GitHub reports implementation PR #1259 is merged and was ready/non-draft; follow-up closeout PR #1286 is open and ready/non-draft, so issue status stays `in-review` for the poller.
