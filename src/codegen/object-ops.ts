@@ -2034,8 +2034,7 @@ function emitExternDefinePropertyNoValue(
   const _fieldIdx = _fields && _propName ? _fields.findIndex((f) => f.name === _propName) : -1;
   const isKnownStructField =
     _staticStructName !== undefined && _structTypeIdx !== undefined && _fields !== undefined && _fieldIdx >= 0;
-  const shouldUseRuntimeDescriptorPath = (!isKnownStructField || isAccessorDesc) && propLocal !== undefined;
-  if (shouldUseRuntimeDescriptorPath) {
+  if ((!isKnownStructField || isAccessorDesc) && propLocal !== undefined) {
     markRuntimeDefinedProperty(ctx, objArg, propArg);
     const propName = ts.isStringLiteral(propArg) ? propArg.text : undefined;
 
