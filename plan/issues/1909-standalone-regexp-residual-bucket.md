@@ -1,7 +1,7 @@
 ---
 id: 1909
 title: "standalone RegExp residual bucket after #1474/#682: split Phase 2d and native-engine gaps"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -1017,3 +1017,27 @@ ready/non-draft, and accepted into the merge queue:
 carrying only issue-state metadata relative to its merge base. The next step is
 to temporarily release the queued PR, merge current `origin/main`, push the
 refreshed issue metadata, and enqueue PR #1291 again.
+
+## 2026-06-07 Codex main-refresh validation
+
+PR #1291 was temporarily dequeued and converted to draft so the branch could be
+updated without the merge queue locking the PR head again. The branch now
+contains current `origin/main`, and the net diff versus `origin/main` remains
+limited to this issue-state refresh.
+
+Scoped validation after the main refresh:
+
+- `pnpm test tests/issue-1909.test.ts tests/issue-1781.test.ts`
+- `node --check scripts/build-test262-report.mjs`
+- `node scripts/check-issue-ids.mjs`
+- `pnpm exec prettier --check scripts/build-test262-report.mjs tests/issue-1909.test.ts tests/issue-1781.test.ts plan/issues/1909-standalone-regexp-residual-bucket.md`
+- `node scripts/build-test262-report.mjs --input .test262-cache/test262-standalone-current.jsonl --output .test262-cache/test262-standalone-report-1909-validate.json --target standalone --include-proposals --max-unclassified-root-causes 0`
+
+All scoped checks passed. The rebuilt standalone report still classifies
+`30,733 / 30,733` standalone non-pass/non-skip rows with `0` unclassified and
+`0` stale rows. The RegExp split remains `833` Phase 2d rows, `104` Phase 2b
+rows, `452` string-protocol rows, `546` native-engine rows, and `62` fallback
+rows.
+
+This issue is back to `in-review` with `pr: 1291`; after the refreshed branch
+is pushed, PR #1291 should be marked ready and re-entered into the merge queue.
