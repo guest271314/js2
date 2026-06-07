@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #1886 Slice B — codegen for linear-backed `Uint8Array` buffers.
+ * #1886 — codegen for linear-backed `Uint8Array` buffers.
  *
  * A buffer proven linear-safe by the #1886 analysis (`ctx.linearUint8`, Slice A)
  * is represented as a `(ptr, len)` pair of i32 locals rather than a WasmGC vec
@@ -16,73 +16,39 @@
  *
  * All entry points are **additive guards**: they return `false`/`null` unless
  * the receiver is a registered linear-safe buffer, so any other `Uint8Array`
- * (escaping, non-WASI, or not yet bound here) falls through to the existing GC
- * path unchanged. Slice B is intraprocedural-only — buffers threaded through
- * function *parameters* keep the GC path until the Slice C signature rewrite.
+ * (escaping, non-WASI, or not bound here) falls through to the existing GC path
+ * unchanged.
  */
 import type { Instr, ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { ensureLinearU8AllocHelper } from "./index.js";
+import {
+  getLinearU8Buffer as lookupLinearU8Buffer,
+  isLinearU8SafeBinding,
+  isLinearU8RepresentableNew,
+  registerLinearU8Buffer,
+} from "./linear-uint8-signatures.js";
 import { compileExpression, VOID_RESULT } from "./shared.js";
 import type { InnerResult } from "./shared.js";
 
 /**
- * True when this `Uint8Array` binding is **Slice-B-eligible**: a `new
- * Uint8Array(...)` local whose every use stays inside its function (element
- * load/store, `.length`, `process.std*.{read,write}` I/O) and which is never
- * threaded into a user function. Consults `ctx.linearUint8.localOnlyBindings`
- * (the intraprocedural subset of `safeBindings`) — NOT `safeBindings` itself,
- * which also contains param-threaded buffers that need the Slice-C signature
- * rewrite before their `(ptr,len)` form is valid at a call boundary. Returns
- * false outside WASI or when the analysis didn't run.
+ * True when this `Uint8Array` binding is proven linear-safe by the #1886
+ * analysis. Slice C rewrites matching function params to `(ptr,len)`, so the
+ * codegen can consume the full safe set rather than Slice B's local-only
+ * subset. Returns false outside WASI or when the analysis did not run.
  */
 export function isLinearSafeBinding(ctx: CodegenContext, node: ts.Node): boolean {
-  if (!ctx.linearUint8) return false;
-  if (!ts.isIdentifier(node)) return false;
-  const sym = ctx.checker.getSymbolAtLocation(node);
-  return !!sym && ctx.linearUint8.localOnlyBindings.has(sym);
-}
-
-/** Look up the (ptr, len) locals for a linear-backed buffer identifier, if bound. */
-function lookupBuffer(fctx: FunctionContext, node: ts.Node): { ptrLocalIdx: number; lenLocalIdx: number } | undefined {
-  if (!fctx.linearU8Buffers || !ts.isIdentifier(node)) return undefined;
-  return fctx.linearU8Buffers.get(node.text);
+  return isLinearU8SafeBinding(ctx, node);
 }
 
 /**
- * Slice B only knows how to back the **length** and **array-literal** forms of
- * `new Uint8Array(...)` — `new Uint8Array(n)` (allocate `n` zero bytes) and
- * `new Uint8Array([a, b, …])` (allocate + store the literal). The
- * `new Uint8Array(arrayBuffer)` / `new Uint8Array(typedArray)` *view/copy*
- * forms are NOT length forms: their single argument is an object, not a byte
- * count, so treating it as a length would call `__lin_u8_alloc(<object>)` and
- * produce garbage (#1654). Those forms must stay on the GC path, which models
- * the ArrayBuffer-view aliasing correctly. Returns true only for the two forms
- * the linear codegen can faithfully represent.
- */
-function isLengthOrLiteralNewUint8(ctx: CodegenContext, newExpr: ts.NewExpression): boolean {
-  const args = newExpr.arguments;
-  if (!args || args.length === 0) return true; // `new Uint8Array()` ⇒ length 0
-  if (args.length > 1) return false; // (start, length) overloads aren't length-form
-  const arg = args[0]!;
-  if (ts.isArrayLiteralExpression(arg)) return true; // literal form
-  // Single-arg: only the numeric length form is linear-representable. Reject
-  // when the argument's static type is an object (ArrayBuffer / ArrayBufferLike
-  // / a TypedArray / array-like) — that's a view/copy, not a length.
-  const t = ctx.checker.getTypeAtLocation(arg);
-  if (t.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.Any)) return true;
-  // Anything object-typed (ArrayBuffer, Uint8Array, number[], …) is a view/copy.
-  return false;
-}
-
-/**
- * Slice B is intraprocedural: a binding qualifies for linear backing here only
- * if it is a `new Uint8Array(...)` *local* (not a parameter — params stay GC
- * until the Slice C signature rewrite). The Slice-A set includes params, so we
- * additionally require the declaration to be a `VariableDeclaration` whose
- * initializer is a length-or-literal `new Uint8Array(...)` (not a buffer view).
+ * Local allocation is still tied to `new Uint8Array(...)` bindings. Parameters
+ * become linear-backed when Slice C registers their source name as a `(ptr,len)`
+ * pair in the function body. For locals we additionally require the declaration
+ * to be a `VariableDeclaration` whose initializer is a length-or-literal
+ * `new Uint8Array(...)` (not a buffer view).
  */
 function isLocalLinearNewBinding(ctx: CodegenContext, nameNode: ts.Identifier): boolean {
   if (!isLinearSafeBinding(ctx, nameNode)) return false;
@@ -95,7 +61,7 @@ function isLocalLinearNewBinding(ctx: CodegenContext, nameNode: ts.Identifier): 
       ts.isNewExpression(d.initializer) &&
       ts.isIdentifier(d.initializer.expression) &&
       d.initializer.expression.text === "Uint8Array" &&
-      isLengthOrLiteralNewUint8(ctx, d.initializer),
+      isLinearU8RepresentableNew(ctx, d.initializer),
   );
 }
 
@@ -166,8 +132,7 @@ export function tryEmitLinearU8New(
 }
 
 function registerBuffer(fctx: FunctionContext, name: string, ptrLocalIdx: number, lenLocalIdx: number): void {
-  if (!fctx.linearU8Buffers) fctx.linearU8Buffers = new Map();
-  fctx.linearU8Buffers.set(name, { ptrLocalIdx, lenLocalIdx });
+  registerLinearU8Buffer(fctx, name, ptrLocalIdx, lenLocalIdx);
 }
 
 /**
@@ -180,7 +145,7 @@ export function tryEmitLinearU8ElementGet(
   fctx: FunctionContext,
   expr: ts.ElementAccessExpression,
 ): ValType | null {
-  const buf = lookupBuffer(fctx, expr.expression);
+  const buf = lookupLinearU8Buffer(fctx, expr.expression);
   if (!buf) return null;
   // address = ptr + trunc(index)
   fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
@@ -216,7 +181,7 @@ export function tryEmitLinearU8ElementSet(
   target: ts.ElementAccessExpression,
   valueExpr: ts.Expression,
 ): InnerResult {
-  const buf = lookupBuffer(fctx, target.expression);
+  const buf = lookupLinearU8Buffer(fctx, target.expression);
   if (!buf) return null;
   // Allocate the result/addr temps up-front so their slot indices are fixed
   // before the nested index/value sub-expressions compile (those allocate their
@@ -256,7 +221,7 @@ export function tryEmitLinearU8ElementSet(
 /** `b.length` for a linear-backed buffer → `len` widened to f64. */
 export function tryEmitLinearU8Length(fctx: FunctionContext, expr: ts.PropertyAccessExpression): ValType | null {
   if (expr.name.text !== "length") return null;
-  const buf = lookupBuffer(fctx, expr.expression);
+  const buf = lookupLinearU8Buffer(fctx, expr.expression);
   if (!buf) return null;
   fctx.body.push({ op: "local.get", index: buf.lenLocalIdx } as Instr);
   fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
@@ -268,7 +233,7 @@ export function getLinearU8Buffer(
   fctx: FunctionContext,
   node: ts.Node,
 ): { ptrLocalIdx: number; lenLocalIdx: number } | undefined {
-  return lookupBuffer(fctx, node);
+  return lookupLinearU8Buffer(fctx, node);
 }
 
 /**
@@ -286,7 +251,7 @@ export function tryEmitLinearU8StdinRead(
   expr: ts.CallExpression,
   fdReadIdx: number,
 ): ValType | null {
-  const buf = lookupBuffer(fctx, expr.arguments[0]!);
+  const buf = getLinearU8Buffer(fctx, expr.arguments[0]!);
   if (!buf) return null;
 
   // off = arg1 (trunc) or 0
@@ -338,7 +303,7 @@ export function tryEmitLinearU8StdWrite(
   fdWriteIdx: number,
   useStderr: boolean,
 ): boolean {
-  const buf = lookupBuffer(fctx, bufArg);
+  const buf = getLinearU8Buffer(fctx, bufArg);
   if (!buf) return false;
   const fd = useStderr ? 2 : 1;
   // iovec.buf = ptr (memory[0])
