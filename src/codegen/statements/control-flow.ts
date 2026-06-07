@@ -18,6 +18,7 @@ import {
   isAnyValue,
   valTypesMatch,
 } from "../shared.js";
+import { emitLinearU8ArenaReset } from "../linear-uint8-arena.js";
 import { adjustRethrowDepth } from "./shared.js";
 
 const EQ_HEAP_TYPE = -19;
@@ -121,6 +122,19 @@ function canTailCallRef(ctx: CodegenContext, fctx: FunctionContext, typeIdx: num
   return false;
 }
 
+function emitLinearU8ArenaResetBeforeReturn(ctx: CodegenContext, fctx: FunctionContext): boolean {
+  if (fctx.linearU8ArenaMarkLocalIdx === undefined || ctx.linearU8ArenaGlobalIdx === undefined) return false;
+  if (fctx.returnType) {
+    const retTmp = allocLocal(fctx, `__linu8_ret_${fctx.locals.length}`, fctx.returnType);
+    fctx.body.push({ op: "local.set", index: retTmp });
+    emitLinearU8ArenaReset(ctx, fctx, fctx.linearU8ArenaMarkLocalIdx);
+    fctx.body.push({ op: "local.get", index: retTmp });
+  } else {
+    emitLinearU8ArenaReset(ctx, fctx, fctx.linearU8ArenaMarkLocalIdx);
+  }
+  return true;
+}
+
 export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ReturnStatement): void {
   // Inside a generator function, `return expr` should push the return value
   // into the generator buffer (so .next().value sees it), then break out of
@@ -216,6 +230,7 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
     for (let i = fctx.finallyStack!.length - 1; i >= 0; i--) {
       fctx.body.push(...fctx.finallyStack![i]!.cloneFinally());
     }
+    emitLinearU8ArenaReset(ctx, fctx, fctx.linearU8ArenaMarkLocalIdx);
     // Restore return value and emit return
     if (retTmpIdx !== undefined) {
       fctx.body.push({ op: "local.get", index: retTmpIdx });
@@ -236,14 +251,15 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
   // Guard: only apply when the callee's return type matches the caller's,
   // otherwise return_call produces a type mismatch (#839).
   const lastInstr = fctx.body[fctx.body.length - 1];
-  if (lastInstr && lastInstr.op === "call") {
+  const resetBeforeReturn = emitLinearU8ArenaResetBeforeReturn(ctx, fctx);
+  if (!resetBeforeReturn && lastInstr && lastInstr.op === "call") {
     const calleeIdx = (lastInstr as any).funcIdx as number;
     if (canTailCall(ctx, fctx, calleeIdx)) {
       (lastInstr as any).op = "return_call";
       return; // return_call implicitly returns — no need for explicit return
     }
   }
-  if (lastInstr && lastInstr.op === "call_ref") {
+  if (!resetBeforeReturn && lastInstr && lastInstr.op === "call_ref") {
     const typeIdx = (lastInstr as any).typeIdx as number | undefined;
     if (typeIdx !== undefined && canTailCallRef(ctx, fctx, typeIdx)) {
       (lastInstr as any).op = "return_call_ref";

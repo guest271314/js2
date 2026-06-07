@@ -427,6 +427,8 @@ export interface FunctionContext {
       lenLocalIdx: number; // i32 — element length (== byte length for Uint8Array)
     }
   >;
+  /** #1886 — function-entry arena mark for rewinding short-lived linear-U8 locals. */
+  linearU8ArenaMarkLocalIdx?: number;
 }
 
 /** Context shared across all codegen. */
