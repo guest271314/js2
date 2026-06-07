@@ -415,7 +415,9 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   `ff02d201152dc8777d3e8151ed05dddd47d75ecf` is 114 commits behind current
   `origin/main` (max 50). The `loopdive/js2wasm-baselines` `main` ref remains
   `d084289b27be91e1fbea8199e5e916431cc9c8b3`.
-- This local issue copy remains `in-progress` because publishing the local
-  metadata/current-main merge would require dequeuing PR #1257 before pushing;
-  the published issue file on `origin/symphony/1908` remains `in-review` with
-  `pr: 1257`.
+- Attempted `git push origin symphony/1908`; the pre-push typecheck/lint,
+  format check, and issue-integrity hook passed, but GitHub rejected the branch
+  update because PR #1257 is already queued and queued branches cannot be
+  updated without dequeueing the PR. This local issue copy remains
+  `in-progress`; the published issue file on `origin/symphony/1908` remains
+  `in-review` with `pr: 1257`.
