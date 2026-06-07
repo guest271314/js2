@@ -15,8 +15,14 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { ts } from "../src/ts-api.js";
 import { analyzeLinearUint8 } from "../src/codegen/linear-uint8-analysis.js";
+import { compile } from "../src/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+const STDIN_DECL = `declare const process: {
+  stdin: { read(b: Uint8Array, off?: number): number };
+  stdout: { write(b: Uint8Array): void };
+};`;
 
 /** Compile `src` to a Program in-memory and run the analysis on it. */
 function analyze(src: string): {
@@ -50,6 +56,85 @@ function analyze(src: string): {
   const localOnlyNames = new Set<string>();
   for (const sym of result.localOnlyBindings) localOnlyNames.add(sym.name);
   return { safeNames, linearParamFns, localOnlyNames };
+}
+
+async function compileWasi(source: string): Promise<Uint8Array> {
+  const result = await compile(source, { fileName: "test.ts", target: "wasi" });
+  if (!result.success) {
+    throw new Error(`compile failed: ${result.errors?.map((e) => e.message).join("; ") ?? "unknown"}`);
+  }
+  return result.binary;
+}
+
+async function compileWat(source: string): Promise<string> {
+  const result = await compile(source, { fileName: "test.ts", target: "wasi", emitText: true } as never);
+  if (!result.success) {
+    throw new Error(`compile failed: ${result.errors?.map((e) => e.message).join("; ") ?? "unknown"}`);
+  }
+  return (result as unknown as { wat?: string }).wat ?? "";
+}
+
+async function runStdinStdoutWithMemory(
+  binary: Uint8Array,
+  input: Uint8Array,
+): Promise<{ stdout: Uint8Array; memoryBytes: number }> {
+  const module = await WebAssembly.compile(binary);
+  const memRef: { value?: WebAssembly.Memory } = {};
+  const out: number[] = [];
+  let inPos = 0;
+
+  const mem = () => new Uint8Array(memRef.value!.buffer);
+  const view = () => new DataView(memRef.value!.buffer);
+
+  const wasi = {
+    fd_read(_fd: number, iovsPtr: number, iovsLen: number, nreadPtr: number): number {
+      const dv = view();
+      let total = 0;
+      for (let i = 0; i < iovsLen; i++) {
+        const base = iovsPtr + i * 8;
+        const bufPtr = dv.getUint32(base, true);
+        const bufLen = dv.getUint32(base + 4, true);
+        const n = Math.min(bufLen, input.length - inPos);
+        mem().set(input.subarray(inPos, inPos + n), bufPtr);
+        inPos += n;
+        total += n;
+      }
+      dv.setUint32(nreadPtr, total, true);
+      return 0;
+    },
+    fd_write(_fd: number, iovsPtr: number, iovsLen: number, nwrittenPtr: number): number {
+      const dv = view();
+      let total = 0;
+      for (let i = 0; i < iovsLen; i++) {
+        const base = iovsPtr + i * 8;
+        const bufPtr = dv.getUint32(base, true);
+        const bufLen = dv.getUint32(base + 4, true);
+        for (const b of mem().subarray(bufPtr, bufPtr + bufLen)) out.push(b);
+        total += bufLen;
+      }
+      dv.setUint32(nwrittenPtr, total, true);
+      return 0;
+    },
+    proc_exit(_code: number): void {
+      throw new Error("__proc_exit");
+    },
+  };
+
+  const instance = await WebAssembly.instantiate(module, { wasi_snapshot_preview1: wasi });
+  const exports = instance.exports as Record<string, unknown>;
+  memRef.value = exports.memory as WebAssembly.Memory;
+  const entry = (exports.main ?? exports._start) as undefined | (() => void);
+  if (!entry) throw new Error("no main/_start export");
+  try {
+    entry();
+  } catch (e) {
+    if (!(e instanceof Error) || e.message !== "__proc_exit") throw e;
+  }
+  return { stdout: Uint8Array.from(out), memoryBytes: memRef.value!.buffer.byteLength };
+}
+
+async function runStdinStdout(binary: Uint8Array, input: Uint8Array): Promise<Uint8Array> {
+  return (await runStdinStdoutWithMemory(binary, input)).stdout;
 }
 
 describe("#1886 linear-safe Uint8Array analysis", () => {
@@ -190,6 +275,77 @@ describe("#1886 linear-safe Uint8Array analysis", () => {
     expect(linearParamFns.get("readAt")).toContain(0);
     expect(linearParamFns.get("decodeLength")).toContain(0);
     expect(linearParamFns.get("emitRun")).toContain(0);
+  });
+});
+
+describe("#1886 Slice C interprocedural linear Uint8Array params", () => {
+  it("passes a linear-backed buffer into a helper as ptr/len and mutates it in place", async () => {
+    const src = `${STDIN_DECL}
+      function bump(b: Uint8Array): void {
+        b[0] = (b[0] + 1) & 255;
+      }
+      export function main(): void {
+        const buf = new Uint8Array(4);
+        process.stdin.read(buf, 0);
+        bump(buf);
+        process.stdout.write(buf);
+      }`;
+    const wat = await compileWat(src);
+    if (wat) {
+      expect(wat).toContain("__lin_u8_alloc");
+      expect(wat).toMatch(/i32\.load8_u/);
+      expect(wat).toMatch(/i32\.store8/);
+    }
+    const got = await runStdinStdout(await compileWasi(src), Uint8Array.from([10, 20, 30, 40]));
+    expect(Array.from(got)).toEqual([11, 20, 30, 40]);
+  });
+
+  it("uses the ptr/len helper param for zero-copy stdin reads with an offset", async () => {
+    const src = `${STDIN_DECL}
+      function readAt(b: Uint8Array, off: number): void {
+        process.stdin.read(b, off);
+      }
+      export function main(): void {
+        const buf = new Uint8Array(4);
+        readAt(buf, 1);
+        process.stdout.write(buf);
+      }`;
+    const got = await runStdinStdout(await compileWasi(src), Uint8Array.from([7, 8, 9, 10]));
+    expect(Array.from(got)).toEqual([0, 7, 8, 9]);
+  });
+
+  it("keeps helpers that read arguments on the GC ABI", () => {
+    const { safeNames, linearParamFns } = analyze(`${STDIN_DECL}
+      function writeIt(buf: Uint8Array): void {
+        const n = arguments.length;
+        process.stdout.write(buf);
+      }
+      export function main(): void {
+        const buf = new Uint8Array(4);
+        writeIt(buf);
+      }`);
+    expect(safeNames.has("buf")).toBe(false);
+    expect(linearParamFns.has("writeIt")).toBe(false);
+  });
+
+  it("rewinds loop-local linear allocations instead of growing per iteration", async () => {
+    const src = `${STDIN_DECL}
+      export function main(): void {
+        let i = 0;
+        while (i < 12) {
+          const buf = new Uint8Array(256 * 1024);
+          buf[0] = 65 + i;
+          process.stdout.write(buf);
+          i = i + 1;
+        }
+      }`;
+    const run = await runStdinStdoutWithMemory(await compileWasi(src), new Uint8Array());
+    expect(run.memoryBytes).toBeLessThanOrEqual(10 * 64 * 1024);
+    expect(run.stdout.length).toBe(12 * 256 * 1024);
+    for (let i = 0; i < 12; i++) {
+      expect(run.stdout[i * 256 * 1024]).toBe(65 + i);
+      expect(run.stdout[i * 256 * 1024 + 1]).toBe(0);
+    }
   });
 });
 
