@@ -1,7 +1,7 @@
 ---
 id: 1908
 title: "standalone: re-split and fix residual isSameValue bucket after #1776/#1807"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -155,6 +155,13 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   (`ff02d201152dc8777d3e8151ed05dddd47d75ecf`) is still an ancestor of
   `symphony/1908`; no additional main merge was needed.
 - `pnpm exec vitest run tests/issue-1908.test.ts` passed.
-- PR #1257 is open, ready for review, and auto-merge is enabled while GitHub
-  waits for pending required checks; the issue remains `in-review` for the
-  PR-status poller.
+- PR #1257 was open, ready for review, and auto-merge was enabled while GitHub
+  waited for pending required checks.
+
+## Publish Blocker — 2026-06-07
+
+- `git push origin symphony/1908` passed the local pre-push typecheck, lint,
+  format, and issue-integrity hooks, then GitHub rejected the branch update
+  with `GH006` because PR #1257 had been added to the merge queue.
+- Per issue workflow, leaving the local issue status `in-progress`; publishing
+  additional metadata would require dequeueing PR #1257 first.
