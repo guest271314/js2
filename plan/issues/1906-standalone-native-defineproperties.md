@@ -73,7 +73,7 @@ caught by the broad dynamic object/property refusal.
 - `pnpm exec tsc --noEmit --incremental false`
 
 Revalidated by `codex-developer` on branch `symphony/1906` after merging
-`origin/main` at `3827daa96e6b7147a30474c85a065e8b35bafed2`; checks above
+`origin/main` at `ff02d201152dc8777d3e8151ed05dddd47d75ecf`; checks above
 pass locally on 2026-06-07.
 
 PR #1264 is open against `main` and the issue remains `in-review` for the
