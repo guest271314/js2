@@ -150,3 +150,6 @@ machinery and are out of scope here.
   ancestor of `symphony/1905`, reran the scoped validation above successfully,
   and confirmed ready PR `#1284` is open/non-draft with GitHub checks still
   completing before the final publish refresh.
+- Final Codex publish pass: dequeued PR `#1284`, pushed the refreshed issue
+  state to `symphony/1905`, and re-enabled GitHub auto-merge for the refreshed
+  head while required checks are pending.
