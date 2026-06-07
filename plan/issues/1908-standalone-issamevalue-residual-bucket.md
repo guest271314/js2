@@ -122,10 +122,11 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   (`5bef49a5abaae3e0ae65d41cfda6844d06197d06`) into `symphony/1908` and
   resolved the report-builder conflict by keeping both the #1908
   `isSameValue` validator matcher and main's #1910 `ToPrimitive` matcher.
-- Rebuilt `public/benchmarks/results/test262-standalone-report.json` from
-  `.test262-cache/test262-standalone-current.jsonl` with
-  `--max-unclassified-root-causes 0`; `issamevalue-invalid-wasm` remains
-  absent (`0` rows), `root_cause_map.classified` is `30,733`, and
+- Rebuilt `public/benchmarks/results/test262-standalone-report.json` from the
+  current `loopdive/js2wasm-baselines` `test262-standalone-current.jsonl`
+  snapshot cached as `.test262-cache/test262-standalone-current-main.jsonl`;
+  `issamevalue-invalid-wasm` drops from the current main report's `5,567`
+  rows to `0`, `root_cause_map.classified` is `30,688`, and
   `root_cause_map.unclassified.count` is `0`.
 - `pnpm exec vitest run tests/issue-1908.test.ts tests/issue-1910.test.ts`
   passed.
