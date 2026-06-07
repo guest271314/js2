@@ -1,7 +1,8 @@
 ---
 id: 1828
 title: "Array-like find/findIndex skip holes; map compacts holes (sparse .call receivers)"
-status: in-progress
+status: in-review
+pr: 1271
 created: 2026-06-04
 updated: 2026-06-07
 priority: medium
