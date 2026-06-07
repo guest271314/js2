@@ -1,7 +1,7 @@
 ---
 id: 1905
 title: "standalone: native Reflect.get/set/has/deleteProperty over $Object"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -18,6 +18,7 @@ test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
 claimed_at: 2026-06-07T00:35:56.934Z
+pr: 1261
 ---
 # #1905 — Standalone native Reflect object subset
 
