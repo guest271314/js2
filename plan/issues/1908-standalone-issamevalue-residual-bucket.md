@@ -1,7 +1,7 @@
 ---
 id: 1908
 title: "standalone: re-split and fix residual isSameValue bucket after #1776/#1807"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:30:05.055Z
+claimed_at: 2026-06-07T10:02:46.318Z
 pr: 1257
 ---
 
