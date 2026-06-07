@@ -1,7 +1,7 @@
 ---
 id: 1591
 title: "class/elements: WasmGC-struct ↔ host own-property/identity reconciliation gaps (~294 fails)"
-status: in-progress
+status: in-review
 created: 2026-05-24
 updated: 2026-06-07
 depends_on: [1472]
@@ -19,6 +19,7 @@ test262_fail: 294
 test262_category: language/statements/class/elements, language/expressions/class/elements
 claimed_by: codex-developer
 claimed_at: 2026-06-07T05:32:55.920Z
+pr: 1278
 ---
 # #1591 — `class/elements` WasmGC-struct ↔ host own-property / method-identity reconciliation gaps
 
