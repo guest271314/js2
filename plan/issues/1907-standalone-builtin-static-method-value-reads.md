@@ -85,8 +85,8 @@ standalone refusal.
 ## Final Findings
 
 - PR #1263 exists and remains the review vehicle for this issue.
-- `origin/main` was fetched and merged before publishing; the branch was already
-  up to date with current `origin/main`.
-- Scoped validation passed again on the implementation branch after re-checking the
-  focused #1907/#1888 tests, typecheck, #1678 Array.isArray regression tests,
-  the targeted #1472 Reflect.ownKeys standalone route, and formatting.
+- `origin/main` was fetched and merged before publishing; this handoff pulled in
+  the latest `main` changes, including #1905, without conflicts.
+- Scoped validation passed again after the merge: the focused #1907/#1888 tests,
+  typecheck, #1678 Array.isArray regression tests, the targeted #1472
+  Reflect.ownKeys standalone route, and formatting.
