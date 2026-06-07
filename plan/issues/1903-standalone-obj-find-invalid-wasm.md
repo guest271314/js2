@@ -18,7 +18,7 @@ test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 pr: 1262
 claimed_by: codex-developer
-claimed_at: 2026-06-07T02:08:54.150Z
+claimed_at: 2026-06-07T02:20:24.105Z
 ---
 
 # #1903 — Standalone object runtime: `__obj_find` invalid Wasm
@@ -86,6 +86,10 @@ remaining semantic failures.
 - Final handoff (2026-06-07): refreshed the local checkout against
   `origin/main` (`3827daa96`), confirmed PR #1262 is open and non-draft, and
   found no additional #1903 source changes needed.
+- Final handoff 2 (2026-06-07): fetched `origin/main`/`origin/symphony/1903`,
+  confirmed `origin/main` is still an ancestor of the branch, reran scoped
+  validation, and found no additional source changes needed before re-pushing
+  PR #1262.
 
 ## Validation
 
@@ -116,6 +120,10 @@ remaining semantic failures.
   `3827daa96`)
 - `npx vitest run tests/issue-1472.test.ts -t "dynamic property add/read"`
   (after merging `origin/main` at `3827daa96`)
+- `npx vitest run tests/issue-1903.test.ts` (final revalidation before
+  re-pushing PR #1262)
+- `npx vitest run tests/issue-1472.test.ts -t "dynamic property add/read"`
+  (final revalidation before re-pushing PR #1262)
 - Rebuilt the PR #1262 `test262-standalone-results-merged.jsonl` artifact with
   `--max-unclassified-root-causes 0` after classifying
   `language/expressions/object/dstr` under the existing object-property bucket.
