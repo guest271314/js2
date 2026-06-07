@@ -17,7 +17,7 @@ related: [1472, 1466, 1629, 1888]
 test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
-claimed_at: 2026-06-07T03:18:53.962Z
+claimed_at: 2026-06-07T03:26:24.844Z
 pr: 1266
 ---
 
@@ -98,5 +98,6 @@ machinery and are out of scope here.
 - Current redispatch pass: fetched `origin/main`, reran the scoped validation
   above successfully, confirmed implementation PR `#1261` is already merged,
   and opened ready/non-draft follow-up PR `#1266` for this issue-file update.
-- Latest Codex pass: confirmed PR `#1266` is open, ready/non-draft, targets
-  `main`, and remains the tracked review PR for this issue-file update.
+- Latest Codex pass: reran the scoped validation above successfully and
+  confirmed GitHub reports PR `#1266` as merged with successful checks, so no
+  merge-queue action remains for that tracked PR.
