@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T02:45:23.929Z
+claimed_at: 2026-06-07T02:57:54.055Z
 pr: 1257
 ---
 
@@ -158,3 +158,12 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   workspace after the final PR-state check.
 - PR #1257 is open, ready for review, recorded in frontmatter, and #1908 stays
   `in-review` for the PR-status poller.
+
+## Codex Retry Finalization — 2026-06-07
+
+- Fetched `origin/main` and `origin/symphony/1908`; `origin/main`
+  (`ff02d201152dc8777d3e8151ed05dddd47d75ecf`) is still an ancestor of
+  `symphony/1908`, so no additional main merge was needed.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed.
+- PR #1257 is open, non-draft, targets `main`, and remains recorded in
+  frontmatter while #1908 stays `in-review` for the PR-status poller.
