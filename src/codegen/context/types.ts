@@ -835,6 +835,8 @@ export interface CodegenContext {
   widenedTypeProperties: Map<string, { name: string; type: ValType }[]>;
   /** Map from widened variable name to its registered struct name */
   widenedVarStructMap: Map<string, string>;
+  /** Widened empty-object fields introduced by Object.defineProperty rather than assignment. */
+  widenedDefinePropertyKeys: Set<string>;
   /**
    * (#1239) Variable names whose initializer is an object literal carrying
    * `get`/`set` accessors. Such variables are stored as plain JS host
