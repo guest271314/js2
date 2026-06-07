@@ -124,6 +124,8 @@ remaining semantic failures.
   `origin/main` (`d4492156f`, #1260), kept the #1903 issue record on this
   implementation branch, and resolved the report/script conflicts by combining
   main's RegExp bucket split with the #1903 object-destructuring classifier.
+- Publish follow-up 8: merged current `origin/main` (`12c0e1429`, #1265) after
+  the base advanced again, with no #1903 conflicts, and reran scoped validation.
 
 ## Validation
 
@@ -190,3 +192,6 @@ remaining semantic failures.
 - `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
   "#1903|dynamic property add/read"` (after merging `origin/main` at
   `d4492156f`)
+- `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
+  "#1903|dynamic property add/read"` (after merging `origin/main` at
+  `12c0e1429`)
