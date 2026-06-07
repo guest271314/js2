@@ -17,7 +17,7 @@ related: [1472, 1466, 1629, 1888]
 test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:36:53.662Z
+claimed_at: 2026-06-07T02:44:53.840Z
 pr: 1261
 ---
 # #1905 — Standalone native Reflect object subset
@@ -82,3 +82,13 @@ machinery and are out of scope here.
   pre-existing failures in Object prototype and open-any method-dispatch cases,
   so validation for this issue stayed scoped to the changed Reflect refusal
   regression.
+
+## Redispatch Verification
+
+- 2026-06-07: confirmed PR `#1261` is already merged and `origin/main`
+  contains the standalone Reflect object subset implementation and
+  `tests/issue-1905.test.ts`.
+- Reran scoped validation on this worktree:
+  `pnpm test tests/issue-1905.test.ts`,
+  `pnpm test tests/issue-1472.test.ts -t "unsupported Reflect"`, and
+  `pnpm exec prettier --check src/codegen/object-runtime.ts src/codegen/expressions/calls.ts tests/issue-1472.test.ts tests/issue-1905.test.ts`.
