@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T12:13:59.552Z
+claimed_at: 2026-06-07T12:18:59.232Z
 pr: 1295
 ---
 
@@ -236,6 +236,14 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
     (8 tests passed).
   - `npx prettier --check` on the touched script, test, and issue file
     (passed).
+- Current codex-developer queue verification on current `origin/main`
+  (`28c668ab4e`):
+  - Confirmed the classifier implementation and focused tests remain present,
+    `origin/main` is still an ancestor of the local branch and the remote PR
+    head, and PR #1295 is open, ready, non-draft, clean/mergeable, passing
+    checks, and already in the merge queue at position 15.
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
 
 ## Publish Blocker - 2026-06-07
 
@@ -256,3 +264,7 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
   at position 15. The local branch remains ahead of `origin/symphony/1910` with
   metadata-only issue refresh commits that cannot be published unless PR #1295
   is dequeued.
+- Current queue verification confirms the same blocker remains active: PR
+  #1295 is already queued, the remote head is still `ef9dfbd79`, and the local
+  branch is ahead of `origin/symphony/1910` with metadata-only issue refresh
+  commits that cannot be published while the queued branch is locked.
