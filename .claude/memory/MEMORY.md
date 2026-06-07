@@ -26,8 +26,6 @@
 - [project_team_setup.md](project_team_setup.md) — All agents as teammates via TeamCreate; details in plan/method/team-setup.md
 - [project_next_session.md](project_next_session.md) — Session state: 16,013 pass, honest baseline after exception tag fix
 - [project_bigint_i64_brand_gate.md](project_bigint_i64_brand_gate.md) — #1349/#1644 BigInt fixes gated on architect i64-bigint-brand ValType decision; not a dev codegen guard
-- [project_1901_standalone_object_runtime_gate.md](project_1901_standalone_object_runtime_gate.md) — open-object runtime is ctx.standalone-only (NOT wasi); #1901 construction-time $Object routing + wasi-extension & #124 ToPrimitive follow-ons
-- [project-native-generator-iterator-shapes.md](project_native_generator_iterator_shapes.md) — standalone generators = pure-WasmGC state machine (f64 yields); no shared $Iterator ABI yet
 
 ### Team & agents (rules not in plan/method/team-setup.md)
 - [feedback_architect_worktree_isolation.md](feedback_architect_worktree_isolation.md) — Always spawn architects with isolation:worktree — they stall and request respawn without it
@@ -53,8 +51,6 @@
 - [feedback_diary_and_sprints_before_compact.md](feedback_diary_and_sprints_before_compact.md) — Update plan/diary.md and plan/issues/sprints/N/sprint.md (+ retrospective) BEFORE /compact — never discard learnings with the conversation
 - [feedback_tasklist_sync_unreliable.md](feedback_tasklist_sync_unreliable.md) — DISPATCH MODEL (2026-05-23): native TaskList auto-dispatch is canonical; tech lead reconciles (mark merged done immediately), doesn't route manually; SendMessage dispatch is break-glass only
 - [feedback_ignore_unreliable_autodispatch.md](feedback_ignore_unreliable_autodispatch.md) — SUPERSEDED 2026-05-23 by native auto-dispatch switch. Devs now trust auto-dispatch; only verify live state (is it merged/owned?) before claiming. Ignoring auto-dispatch wholesale is break-glass only.
-- [feedback_reduce_teammate_message_fanout.md](feedback_reduce_teammate_message_fanout.md) — Teammate msgs are point-to-point (not broadcast); idle_notifications non-suppressible (bug #28627); cut rate-limiting via ≤4 teammates + subagents for one-shot work
-- [feedback_architect_subagent_commit_output.md](feedback_architect_subagent_commit_output.md) — isolation:worktree subagent docs are LOST on shutdown unless committed/merged first; require commit+push (or return full content) before terminating
 - [feedback_sendmessage_discipline.md](feedback_sendmessage_discipline.md) — SendMessage = blockers/decisions/completions only; status/idle/ack → TaskUpdate or silence
 - [feedback_dev_silence_protocol.md](feedback_dev_silence_protocol.md) — No idle_notification messages ever; devs silent during CI-wait; TL keeps queue full, devs escalate only
 - [feedback_idle_notification_silence.md](feedback_idle_notification_silence.md) — Don't respond to idle notifications unless CI landed or work to assign; silence breaks the ping loop
@@ -69,7 +65,6 @@
 - [feedback_issue_completion.md](feedback_issue_completion.md) — Completion procedure: move, frontmatter, summary, log, unblock
 - [feedback_unblock_on_completion.md](feedback_unblock_on_completion.md) — After marking done: grep depends_on for completed ID, flip blocked/backlog→ready
 - [feedback_document_findings.md](feedback_document_findings.md) — Document agent findings in issue files before closing
-- [feedback_issue_id_integrity_checker.md](feedback_issue_id_integrity_checker.md) — New plan/issues files need a FRESH numeric id matching the filename prefix; suffixed slice ids (1888-s6c) collide + block push (check-issue-ids.mjs)
 - [feedback_update_backlog.md](feedback_update_backlog.md) — Always update backlog.md when creating/completing issues
 - [feedback_po_boundary.md](feedback_po_boundary.md) — PO only writes to plan/
 - [feedback_bare_numbers_are_plan_tasks.md](feedback_bare_numbers_are_plan_tasks.md) — Bare numbers refer to local plan issues/tasks unless user explicitly says GitHub issue or PR

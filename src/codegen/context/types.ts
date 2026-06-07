@@ -602,6 +602,13 @@ export interface CodegenContext {
    */
   applyClosureReserved?: boolean;
   /**
+   * (#1904) True once the standalone `__extern_is_array(externref) -> i32`
+   * helper placeholder has been emitted by the object runtime. Its body is
+   * filled in post-processing after all Wasm array carrier types (`__vec_*`
+   * plus `$ObjVec`) are known.
+   */
+  externIsArrayReserved?: boolean;
+  /**
    * Static property initializer expressions to compile into __module_init.
    * `className` (#1395) is the owning class name — used to set
    * `enclosingClassName` + `isStaticContext` on the initFctx so `this`

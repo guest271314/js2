@@ -1,7 +1,8 @@
 ---
 id: 1904
 title: "standalone: native __extern_is_array predicate for Array.isArray over Wasm carriers"
-status: ready
+status: in-review
+pr: 1259
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -16,6 +17,8 @@ parent: 1472
 related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
+claimed_by: codex-developer
+claimed_at: 2026-06-07T01:43:24.047Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -51,3 +54,21 @@ a native brand predicate.
   with no `env::__extern_is_array` import.
 - JS-host/default behavior is unchanged.
 
+## Implementation Notes
+
+- Routed `__extern_is_array` through the standalone object-runtime native helper
+  path before the broad `__extern_*` refusal.
+- Reserved the helper with `ensureObjectRuntime`, then filled its body during
+  finalize after all Wasm array carriers are known.
+- The native predicate recognizes `$ObjVec`, `__vec_*`, and template vector
+  carriers; primitives, `$Object`, and other externrefs return false.
+- Proxy/host exotic recursion from ES §7.2.2 is intentionally out of scope for
+  standalone because those carriers cannot exist without a JS host.
+
+## Validation
+
+- `npm test -- tests/issue-1904.test.ts`
+- `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts`
+- `npm run typecheck`
+
+Final Codex verification on 2026-06-07: the scoped issue test, related regression set, and typecheck passed after refreshing the branch against current main. PR #1259's earlier test262 gate failure was on the stale published head and reported baseline drift; the branch was refreshed again against `origin/main` before republishing.
