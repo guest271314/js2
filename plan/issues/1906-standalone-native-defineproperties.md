@@ -79,13 +79,14 @@ issue-bookkeeping refresh. The focused #1906 suite, the existing #1629
 defineProperty suites, and `tsc --noEmit` all passed in this worktree.
 
 PR #1264 is open, ready for review, and targets `main`:
-`https://github.com/loopdive/js2/pull/1264`. GitHub reports the PR is in the
-merge queue. The remote check rollup is blocked by
-`Test262 Sharded / merge shard reports` hitting the stale-baseline guard: the
-`js2wasm-baselines` JSONL baseline main SHA
-`ff02d201152dc8777d3e8151ed05dddd47d75ecf` is 114 commits behind `origin/main`,
-exceeding the max 50 commit threshold. The standalone guard itself reports
-`improvements=24`, `wasm-change regressions=0`, `net=24`. This is an
-infrastructure blocker tracked by #1668, not a scoped #1906 implementation or
-local validation failure. The issue remains `in-review` for the PR-status
+`https://github.com/loopdive/js2/pull/1264`. Direct merge-queue enqueue for the
+current head is waiting on required checks; auto-merge is enabled so GitHub can
+queue the PR after those checks pass. The previous queued check rollup was
+blocked by `Test262 Sharded / merge shard reports` hitting the stale-baseline
+guard: the `js2wasm-baselines` JSONL baseline main SHA
+`ff02d201152dc8777d3e8151ed05dddd47d75ecf` was 114 commits behind
+`origin/main`, exceeding the max 50 commit threshold. The standalone guard
+itself reported `improvements=24`, `wasm-change regressions=0`, `net=24`. This
+is an infrastructure blocker tracked by #1668, not a scoped #1906 implementation
+or local validation failure. The issue remains `in-review` for the PR-status
 poller.
