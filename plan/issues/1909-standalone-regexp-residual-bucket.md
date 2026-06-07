@@ -1,7 +1,7 @@
 ---
 id: 1909
 title: "standalone RegExp residual bucket after #1474/#682: split Phase 2d and native-engine gaps"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -107,3 +107,12 @@ The final rebuilt report keeps `30,733 / 30,733` standalone non-pass/non-skip
 rows classified with `0` unclassified. The RegExp residual remains split into
 `833` Phase 2d rows, `104` Phase 2b rows, `452` string-protocol rows, `546`
 native-engine rows, and `62` fallback rows.
+
+Publish blocker:
+
+- PR #1260 is already queued to merge at remote head `d0cbff27c`, so GitHub
+  rejected a later push with `GH006: Protected branch update failed` because
+  queued PR branches cannot be updated without dequeueing the PR.
+- Local post-queue commits merge `origin/main` at `ff02d2011` and record the
+  final validation above, but they are not published while the PR remains
+  queued.
