@@ -15,7 +15,7 @@ sprint: 61
 related: []
 pr: 1283
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:57:34.200Z
+claimed_at: 2026-06-07T10:02:25.296Z
 ---
 # #1470 — Eliminate JS host string ops for standalone Wasm
 
