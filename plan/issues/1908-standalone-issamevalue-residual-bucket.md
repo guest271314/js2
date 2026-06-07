@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T06:59:05.172Z
+claimed_at: 2026-06-07T07:07:04.993Z
 pr: 1257
 ---
 
@@ -378,3 +378,23 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   update because queued PR branches cannot be updated without dequeueing the
   PR. This local issue copy remains `in-progress`; the published issue file on
   `origin/symphony/1908` remains `in-review` with `pr: 1257`.
+
+## Codex Attempt 30 Queue Blocker — 2026-06-07
+
+- Fetched current `origin/main`
+  (`d6957d5dcdd238fc53bf6fc58a58ef4c6d44f172`) and merged it locally into
+  `symphony/1908`; the merge only brought in #1832 issue/test updates.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed after the merge.
+- PR #1257 is open, non-draft, targets `main`, and the published branch still
+  points at `06e0a904ce757c972a8052e4b00c07a4abf8427c`.
+- GraphQL confirms `mergeQueueEntry.state: QUEUED`, `position: 2`, and
+  `enqueuedAt: 2026-06-07T05:58:56Z`.
+- The latest `merge shard reports` failure is still only the stale-baseline
+  guard: `loopdive/js2wasm-baselines` `main`
+  (`d084289b27be91e1fbea8199e5e916431cc9c8b3`) is still generated from
+  `ff02d201152dc8777d3e8151ed05dddd47d75ecf`; that run's standalone guard was
+  clean (`improvements=0`, `wasm-change regressions=0`, `net=0`).
+- This local issue copy remains `in-progress` because publishing the local
+  metadata/current-main merge would require updating a branch that is already
+  queued; the published issue file on `origin/symphony/1908` remains
+  `in-review` with `pr: 1257`.
