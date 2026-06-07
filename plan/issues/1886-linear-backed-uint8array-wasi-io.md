@@ -4,7 +4,7 @@ title: "Linear-backed Uint8Array for WASI I/O buffers (escape analysis) — avoi
 status: in-progress
 sprint: 61
 created: 2026-06-04
-updated: 2026-06-05
+updated: 2026-06-07
 slice_b_status: done
 priority: medium
 feasibility: hard
@@ -14,6 +14,8 @@ area: codegen
 language_feature: typed-arrays
 goal: performance
 related: [1863, 1527, 389]
+claimed_by: codex-developer
+claimed_at: 2026-06-07T05:54:24.407Z
 ---
 # #1886 — Linear-backed `Uint8Array` for WASI I/O buffers
 
@@ -448,25 +450,40 @@ never admits a buffer read as a bare identifier anyway).
 - No new failures vs `origin/main` in the targeted suites above; CI runs the
   full conformance gate on the PR.
 
-## Slice C — interprocedural signature rewrite (PR #3, next)
+## Slice C — interprocedural signature rewrite (attempt 22)
 
-Rewrite every function in `linearParams` so its `Uint8Array` parameter becomes a
-`(ptr: i32, len: i32)` pair, and lower every call site that passes a linear
-buffer to push the two i32s instead of a GC ref. Once this lands, codegen can
-consume the full `safeBindings` set (drop the `localOnlyBindings` narrowing) and
-the nm host's read window (`buf`, the 1 MiB streaming buffer) becomes linear →
-`fd_read` fills it zero-copy. This is where the headline number lands: 64 MiB
-round-trip → ~0.15–0.25 s at flat ~24–31 MB, beating AssemblyScript on memory.
+Implemented on `symphony/1886`:
+- `linearParams` functions now register wasm signatures with each proven-safe
+  `Uint8Array` param expanded to `(ptr: i32, len: i32)`.
+- Function-body lowering registers the original source param name in
+  `fctx.linearU8Buffers` while exposing only synthetic ptr/len locals in the
+  actual wasm param list.
+- Direct identifier calls to linear-param helpers pass the caller's registered
+  `(ptr,len)` pair for matching source arg positions; non-linear args keep the
+  existing path and exported/unsupported helper signatures stay GC.
+- The linear codegen now consumes `safeBindings` for locals threaded through
+  helpers, while constructor representability still rejects ArrayBuffer/view
+  forms so #1654 stays on the GC path.
+- Added function and loop arena marks/resets for short-lived linear `Uint8Array`
+  locals. This prevents `emitRun`/loop-local buffers from growing linear memory
+  per call/iteration once Slice C starts backing the native-messaging read
+  window linearly.
 
-Key risks for C (call them out in PR #3):
-- Call-arg lowering must push `(ptr,len)` in the right order and only for the
-  proven-linear parameter indices (other args unchanged).
-- Recursion / mutual recursion through `readExact`→`process.stdin.read` and
-  `readAt` — the signature change must be applied to the callee's wasm type
-  *before* any caller bakes the `call` (same late-index discipline as the
-  allocator).
-- Exported functions keep their observable GC ABI (Slice A already excludes
-  exported-fn params from `linearParams`).
+Validation on 2026-06-07:
+- `pnpm exec tsc --noEmit`
+- `pnpm exec vitest run tests/issue-1886.test.ts tests/issue-1886-slice-b.test.ts`
+  (24 tests; includes helper ptr/len execution, stdin offset, conservative
+  `arguments` demotion, and loop arena reset memory cap)
+- `pnpm exec vitest run tests/wasi.test.ts tests/wasi-stdin.test.ts tests/issue-1653-wasi-process-stdin-read.test.ts tests/issue-1654-wasi-dataview-arraybuffer.test.ts tests/issue-1655-wasi-arraybuffer-write.test.ts tests/issue-1856.test.ts tests/issue-1618-1651-wasi-stdout.test.ts`
+  (59 tests)
+- `pnpm exec vitest run tests/issue-1753.test.ts` (64 MiB bounded native
+  messaging pattern workload stays <=8 MiB linear memory)
+- `pnpm exec vitest run tests/issue-1767.test.ts -t "completes the reported 64x Chrome null-array workload with bounded memory"`
+
+Observed during expanded validation: full `tests/issue-1767.test.ts` still has
+the existing large-JSON-string expectation failure (`invalidStringFrames = 65`);
+the native-messaging source and that test are unchanged from `origin/main`, and
+the #1886-affected bounded-memory/null-array cases pass after the arena reset.
 
 ## Slice D — zero-copy direct-slice write (follow-on, banked)
 

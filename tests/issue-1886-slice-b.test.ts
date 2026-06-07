@@ -234,23 +234,19 @@ describe("#1886 Slice B — linear-backed Uint8Array execution", () => {
   });
 });
 
-describe("#1886 Slice B — param-threaded buffer stays GC (Slice-C territory)", () => {
-  // A buffer that Slice A proves safe but which is THREADED through a user
-  // function parameter must NOT be linear-backed by Slice B (no signature
-  // rewrite yet) — backing it linearly would pass a (ptr,len) to a callee that
-  // still expects a GC array, an invalid-Wasm type mismatch. This is the exact
-  // shape that broke the native-messaging host before `localOnlyBindings`.
-  it("a buffer passed to a user function compiles VALID + round-trips on the GC path", async () => {
+describe("#1886 Slice C — param-threaded buffer codegen", () => {
+  // Slice C rewrites safe helper params to `(ptr,len)`, so the same shape that
+  // Slice B had to defer can now stay linear across the user-function call.
+  it("a buffer passed to a user function compiles VALID + round-trips", async () => {
     const src = `${STDIN_DECL}
       function bump(b: Uint8Array): void { b[0] = (b[0] + 1) & 255; }
       export function main(): void {
         const buf = new Uint8Array(4);
         process.stdin.read(buf, 0);
-        bump(buf);           // threaded into a user fn → Slice B leaves it GC
+        bump(buf);
         process.stdout.write(buf);
       }`;
     const binary = await compileWasi(src);
-    // Must be valid: the threaded buffer stays a GC array on both sides.
     await expect(WebAssembly.compile(binary)).resolves.toBeDefined();
     const got = await runStdinStdout(binary, Uint8Array.from([10, 20, 30, 40]));
     expect(Array.from(got)).toEqual([11, 20, 30, 40]);
