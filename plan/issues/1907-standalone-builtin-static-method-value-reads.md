@@ -1,7 +1,7 @@
 ---
 id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
-status: in-review
+status: in-progress
 pr: 1287
 sprint: 61
 created: 2026-06-07
@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:08:34.903Z
+claimed_at: 2026-06-07T07:19:04.867Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -97,6 +97,14 @@ standalone refusal.
   main merge: the focused #1907/#1888 tests, typecheck, #1678 Array.isArray
   regression tests, the targeted #1472 Reflect.ownKeys standalone route, and
   formatting.
+- Codex redispatch verification on 2026-06-07T09:20+02:00 confirmed
+  `origin/main` is still an ancestor of `symphony/1907`, reran the same scoped
+  validation successfully, and found PR #1287 open, ready/non-draft,
+  mergeable, and green on remote head `ab1d8c19d`.
+- Publishing the refreshed issue handoff commit was rejected on
+  2026-06-07T09:23+02:00 with GitHub GH006 because PR #1287 is already in the
+  merge queue and queued branch heads cannot be updated. This local handoff is
+  left `in-progress`; the remote PR remains queued at `ab1d8c19d`.
 - Redispatch verification on 2026-06-07T08:19+02:00 found the implementation
   already merged, branch synced with `origin/main`, PR #1287 opened
   ready/non-draft, and the same scoped validation still passing.
