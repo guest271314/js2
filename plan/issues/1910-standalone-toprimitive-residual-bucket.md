@@ -17,7 +17,7 @@ test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
 claimed_at: 2026-06-07T10:46:28.975Z
-pr: 1268
+pr: 1295
 ---
 
 # #1910 — Standalone ToPrimitive residual bucket
@@ -128,6 +128,7 @@ branch with current `origin/main`.
 PR #1268 has since merged; this refresh preserves the active issue metadata
 after the 2026-06-07 Symphony re-dispatch while leaving poller ownership of the
 eventual `done` transition.
+PR #1295 is the active review PR for this re-dispatch metadata refresh.
 
 ## Validation - 2026-06-07
 
