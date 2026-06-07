@@ -92,3 +92,10 @@ Validation:
 - `pnpm vitest run tests/issue-1831.test.ts`
 - `pnpm vitest run tests/issue-1831.test.ts tests/issue-1629-S1.test.ts tests/issue-1629b.test.ts tests/issue-1629-S2.test.ts tests/issue-856.test.ts tests/issue-1460.test.ts`
 - `pnpm typecheck`
+
+## Final refresh (2026-06-07, codex-developer attempt 30)
+
+PR #1282 already exists and remains ready for review. Merged current
+`origin/main` into `symphony/1831` after GitHub reported the branch behind
+`main`, then reran the scoped validation above successfully. Status remains
+`in-review` until the PR-status poller observes the merge.
