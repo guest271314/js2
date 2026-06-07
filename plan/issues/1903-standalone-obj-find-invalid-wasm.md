@@ -213,6 +213,11 @@ remaining semantic failures.
   and confirmed PR #1262 is open, non-draft, mergeable, and in the merge queue
   with GitHub checks still pending before publishing this in-review issue
   update.
+- Final handoff 23 (2026-06-07): publishing the handoff commit required
+  dequeuing PR #1262, pushing the updated issue record, and re-enabling
+  auto-merge for the pushed head because required checks are still pending. The
+  PR remains open, non-draft, mergeable, and recorded as the ready in-review PR
+  for this issue.
 
 ## Validation
 
