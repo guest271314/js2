@@ -1,7 +1,7 @@
 ---
 id: 1903
 title: "standalone object runtime: __obj_find emits invalid Wasm in dynamic-property bucket"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -74,6 +74,9 @@ remaining semantic failures.
 - Publish follow-up: the first ready PR run reached a stale standalone baseline
   guard after `#1905` landed on `main`. Merged `origin/main` into this branch
   before republishing so `#1262` is evaluated against the current main payload.
+- Publish follow-up 2: re-merged current `origin/main` (`3fc48711b`, #1910)
+  into this branch, kept the #1903 object-destructuring classifier addition,
+  and left generated standalone report artifacts aligned with current main.
 
 ## Validation
 
@@ -87,6 +90,11 @@ remaining semantic failures.
   `origin/main`)
 - `npx vitest run tests/issue-1905.test.ts` (post-merge integration check for
   the current-main payload)
+- `npx vitest run tests/issue-1903.test.ts tests/issue-1781.test.ts
+  tests/issue-1807.test.ts tests/issue-1905.test.ts tests/issue-1910.test.ts
+  tests/issue-1472.test.ts -t
+  "dynamic property add/read|#1903|#1781|#1807|#1905|#1910"` (after merging
+  `origin/main` at `3fc48711b`)
 - Rebuilt the PR #1262 `test262-standalone-results-merged.jsonl` artifact with
   `--max-unclassified-root-causes 0` after classifying
   `language/expressions/object/dstr` under the existing object-property bucket.
