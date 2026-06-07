@@ -609,6 +609,27 @@ GitHub still has PR #1291 open and ready/non-draft for `symphony/1909`:
 merge, and queued branches cannot be updated with the latest local metadata
 refresh.
 
+## 2026-06-07 queue push blocker after reassignment recheck
+
+The attempted push after the reassignment queue recheck was rejected because
+GitHub reports PR #1291 as queued:
+
+- Remote PR head: `6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+- Local attempted head: `73b2d54b4`
+- PR URL: `https://github.com/loopdive/js2/pull/1291`
+- Push preflight: local pre-push typecheck, lint, format, and issue integrity
+  checks passed
+- Push result:
+
+```text
+GH006: Protected branch update failed ...
+A pull request for this branch has been added to a merge queue.
+Branches that are queued for merging cannot be updated.
+```
+
+Per the publish rule, this issue is left `in-progress` locally until PR #1291
+merges or is dequeued so the latest metadata refresh can be pushed.
+
 ## 2026-06-07 live PR #1291 refresh after latest queue release
 
 GitHub still has PR #1291 open and ready/non-draft for `symphony/1909`:
