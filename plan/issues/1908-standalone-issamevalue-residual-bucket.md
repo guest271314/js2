@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T12:48:59.586Z
+claimed_at: 2026-06-07T13:10:29.348Z
 pr: 1257
 ---
 
@@ -651,3 +651,24 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   reports` job, consistent with the previously documented external
   stale-baseline blocker rather than a #1908 classifier/test regression.
 - Frontmatter status remains `in-review` for the PR-status poller.
+
+## Codex Attempt 46 Queue Blocker — 2026-06-07
+
+- Fetched `origin/main` and `origin/symphony/1908`; current `origin/main`
+  (`767e647548cad3c799f0af573afc752abd41dd29`) is already an ancestor of
+  `symphony/1908`, so no additional main merge was needed.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed.
+- PR #1257 is open, non-draft, targets `main`, and the published branch points
+  at `83fbc0cb26d428abff1d639c21319552f8212335`.
+- GraphQL reports `mergeStateStatus: BLOCKED`, `mergeable: MERGEABLE`, and
+  `mergeQueueEntry.state: QUEUED`, `position: 11`, `enqueuedAt:
+  2026-06-07T12:57:01Z`.
+- The latest `merge shard reports` failure is still only the external
+  stale-baseline guard: catastrophic guard stayed below threshold (`53`
+  wasm-change regressions vs `200` threshold), the standalone guard was clean
+  (`improvements=0`, `wasm-change regressions=0`, `net=0`), and the baseline
+  main-sha `ff02d201152dc8777d3e8151ed05dddd47d75ecf` is `210` commits behind
+  `origin/main` (max `50`).
+- Frontmatter status remains `in-review` for the PR-status poller; the
+  remaining blocker is baseline promotion freshness, not #1908's
+  classifier/test changes.
