@@ -223,8 +223,10 @@ remaining semantic failures.
   explicit no-op `git merge --no-edit origin/main`, reran scoped validation,
   and confirmed PR #1262 is open, non-draft, mergeable, and in the merge queue
   before publishing this in-review issue update. Because the PR was already
-  queued, publishing the issue-status commit requires dequeuing and re-enabling
-  merge queue entry on the pushed head.
+  queued, publishing the issue-status commit required dequeuing it first; after
+  the push, GitHub rejected explicit enqueue while required checks were
+  pending, so auto-merge is enabled on the pushed head to queue it when checks
+  pass.
 
 ## Validation
 
