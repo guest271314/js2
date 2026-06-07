@@ -129,27 +129,30 @@ describe("#1850 — IR verifier cross-block dominance", () => {
     expect(verifyIrFunction(fn)).toEqual([]);
   });
 
-  it("rejects a cross-block use of a value defined in a successor (use before def)", () => {
-    // b0: br b1 then return v2 — but v2 is defined in b1 (a successor), so the
-    // use in b0's terminator is not dominated by its def.
+  it("rejects a terminator use of a value defined only in a successor", () => {
+    // b0 branches on v2, but v2 is defined only after taking the b1 successor.
+    // A successor never dominates its predecessor, so the terminator use is
+    // rejected as a cross-block dominance violation.
     const v2 = asValueId(2);
     const fn: IrFunction = {
       name: "useFromSuccessor",
       params: [],
-      resultTypes: [I32],
+      resultTypes: [],
       blocks: [
-        // b0 terminates by branching to b1, but first (illegally) a return path
-        // is modeled by routing the value through b2 which reads v2 from b1.
-        block(0, [], { kind: "br", branch: { target: asBlockId(1), args: [] } }),
-        block(1, [constI32(2, 3)], { kind: "br", branch: { target: asBlockId(2), args: [] } }),
-        // b2 is reachable only via b1, so v2 (def in b1) DOES dominate b2 — OK.
-        block(2, [], { kind: "return", values: [v2] }),
+        block(0, [], {
+          kind: "br_if",
+          condition: v2,
+          ifTrue: { target: asBlockId(1), args: [] },
+          ifFalse: { target: asBlockId(2), args: [] },
+        }),
+        block(1, [constI32(2, 3)], { kind: "return", values: [] }),
+        block(2, [], { kind: "return", values: [] }),
       ],
       exported: false,
       valueCount: 8,
     };
-    // This particular shape is actually valid (b1 dominates b2), so it verifies.
-    expect(verifyIrFunction(fn)).toEqual([]);
+    const errors = verifyIrFunction(fn);
+    expect(errors.some((e) => /not dominated by its def/.test(e.message) && e.block === 0)).toBe(true);
   });
 
   it("leaves single-block functions unaffected (no false dominance errors)", () => {

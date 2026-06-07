@@ -15,7 +15,7 @@ language_feature: compiler-internals
 goal: correctness
 related: [1844, 1798, 1131, 1376, 1530]
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:12:09.524Z
+claimed_at: 2026-06-07T10:28:20.444Z
 ---
 # #1850 — Harden the IR verifier into a hard between-pass contract
 
