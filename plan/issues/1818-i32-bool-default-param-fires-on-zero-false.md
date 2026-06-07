@@ -1,10 +1,11 @@
 ---
 id: 1818
 title: "i32/boolean parameter default fires on a legitimate 0 / false argument"
-status: in-progress
+status: in-review
 escalation: architect-spec-written
 created: 2026-06-04
 updated: 2026-06-07
+pr: 1275
 priority: high
 feasibility: hard
 task_type: bugfix
@@ -397,6 +398,8 @@ end
 ## Implementation (2026-06-07, codex-developer)
 
 Implemented Slices 1 and 2 of the architect plan.
+
+PR: https://github.com/loopdive/js2/pull/1275
 
 - Added a cached `__argc` local for default-parameter prologues and reused it
   when building `arguments`, so initializer calls cannot clobber the call-site
