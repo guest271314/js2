@@ -114,6 +114,7 @@ Validation:
 
 - PASS: `pnpm vitest run tests/issue-1828.test.ts`
 - PASS: `pnpm vitest run tests/issue-1828.test.ts tests/issue-array-call-arraylike.test.ts tests/issue-1358.test.ts tests/issue-1461.test.ts tests/equivalence/issue-6407.test.ts` (5 files, 59 tests)
+- PASS after merging `origin/main` (attempt 30): `pnpm vitest run tests/issue-1828.test.ts tests/issue-array-call-arraylike.test.ts tests/issue-1358.test.ts tests/issue-1461.test.ts tests/equivalence/issue-6407.test.ts` (5 files, 59 tests)
 
 Notes from expanded-but-out-of-scope validation:
 
