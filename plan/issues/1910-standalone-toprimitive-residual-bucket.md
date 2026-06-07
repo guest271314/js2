@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:59:23.959Z
+claimed_at: 2026-06-07T02:33:24.728Z
 pr: 1265
 ---
 
@@ -140,3 +140,4 @@ validation after syncing the assigned branch with current `origin/main`.
 - After merging current `origin/main` (`ff02d2011`):
   - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
     (8 tests passed).
+  - `npx prettier --check` on the issue file (passed).
