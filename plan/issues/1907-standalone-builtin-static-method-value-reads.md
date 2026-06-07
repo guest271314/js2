@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T03:15:24.162Z
+claimed_at: 2026-06-07T06:17:34.732Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -91,10 +91,13 @@ standalone refusal.
   implementation work outstanding; the scoped validation commands above passed
   again on 2026-06-07 after merging current `origin/main`.
 - `origin/main` was fetched and merged into `symphony/1907` through
-  `c871fe467` before the final branch push. The merge brought in later sprint
+  `5b495ba47` before the final branch push. The merge brought in later sprint
   issue/report updates without #1907 conflicts.
 - Scoped validation passed again after that final main merge: the focused
   #1907/#1888 tests, typecheck, #1678 Array.isArray regression tests, the
   targeted #1472 Reflect.ownKeys standalone route, and formatting.
+- Redispatch verification on 2026-06-07T08:19+02:00 found the implementation
+  already merged, branch synced with `origin/main`, and the same scoped
+  validation still passing.
 - The issue remains `in-review` with `pr: 1267` so the PR-status poller can
   perform the normal post-merge status transition.
