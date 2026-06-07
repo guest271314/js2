@@ -1257,8 +1257,15 @@ function _validatePropertyDescriptor(
   prop: string | symbol,
   desc: PropertyDescriptor,
   existingValue?: any,
+  existingDesc?: PropertyDescriptor,
 ): number {
   const existing = descs.get(_normalizeDescKey(prop));
+  const hasValue = Object.prototype.hasOwnProperty.call(desc, "value");
+  const hasWritable = Object.prototype.hasOwnProperty.call(desc, "writable");
+  const hasEnumerable = Object.prototype.hasOwnProperty.call(desc, "enumerable");
+  const hasConfigurable = Object.prototype.hasOwnProperty.call(desc, "configurable");
+  const hasGet = Object.prototype.hasOwnProperty.call(desc, "get");
+  const hasSet = Object.prototype.hasOwnProperty.call(desc, "set");
 
   // Compute new flags. ECMA-262 §10.1.6.3 ValidateAndApplyPropertyDescriptor:
   // a *redefine* keeps every attribute the descriptor omits — only fields
@@ -1277,14 +1284,14 @@ function _validatePropertyDescriptor(
       newFlags &= ~bit;
     }
   };
-  applyFlag(desc.writable !== undefined, desc.writable, _SC_WRITABLE);
-  applyFlag(desc.enumerable !== undefined, desc.enumerable, _SC_ENUMERABLE);
-  applyFlag(desc.configurable !== undefined, desc.configurable, _SC_CONFIGURABLE);
+  applyFlag(hasWritable, desc.writable, _SC_WRITABLE);
+  applyFlag(hasEnumerable, desc.enumerable, _SC_ENUMERABLE);
+  applyFlag(hasConfigurable, desc.configurable, _SC_CONFIGURABLE);
   // Data<->accessor kind: explicit get/set ⇒ accessor; explicit value/writable
   // ⇒ data; otherwise keep the existing kind (or default data on first def).
-  if (desc.get !== undefined || desc.set !== undefined) {
+  if (hasGet || hasSet) {
     newFlags |= _SC_ACCESSOR;
-  } else if (desc.value !== undefined || desc.writable !== undefined) {
+  } else if (hasValue || hasWritable) {
     newFlags &= ~_SC_ACCESSOR;
   } else if (existing === undefined) {
     newFlags &= ~_SC_ACCESSOR;
@@ -1299,7 +1306,7 @@ function _validatePropertyDescriptor(
   if (desc.configurable === true) {
     throw new TypeError("Cannot redefine property: " + String(prop));
   }
-  if (desc.enumerable !== undefined) {
+  if (hasEnumerable) {
     const wasEnumerable = !!(existing & _SC_ENUMERABLE);
     if (desc.enumerable !== wasEnumerable) {
       throw new TypeError("Cannot redefine property: " + String(prop));
@@ -1307,12 +1314,20 @@ function _validatePropertyDescriptor(
   }
   // Cannot change data<->accessor on non-configurable
   const wasAccessor = !!(existing & _SC_ACCESSOR);
-  const isAccessor = desc.get !== undefined || desc.set !== undefined;
+  const isAccessor = hasGet || hasSet;
   if (isAccessor && !wasAccessor) {
     throw new TypeError("Cannot redefine property: " + String(prop));
   }
-  if (!isAccessor && wasAccessor && (desc.value !== undefined || desc.writable !== undefined)) {
+  if (!isAccessor && wasAccessor && (hasValue || hasWritable)) {
     throw new TypeError("Cannot redefine property: " + String(prop));
+  }
+  if (wasAccessor && isAccessor) {
+    if (hasGet && !Object.is(desc.get, existingDesc?.get)) {
+      throw new TypeError("Cannot redefine property: " + String(prop));
+    }
+    if (hasSet && !Object.is(desc.set, existingDesc?.set)) {
+      throw new TypeError("Cannot redefine property: " + String(prop));
+    }
   }
   // Data property: writable checks
   if (!wasAccessor && !isAccessor) {
@@ -1323,7 +1338,7 @@ function _validatePropertyDescriptor(
       }
       // ES spec 9.1.6.3: can set value only if SameValue(desc.value, existing.value).
       // Use Object.is for SameValue semantics (distinguishes +0/-0, NaN===NaN).
-      if (desc.value !== undefined && !Object.is(desc.value, existingValue)) {
+      if (hasValue && !Object.is(desc.value, existingValue)) {
         throw new TypeError("Cannot redefine property: " + String(prop));
       }
     }
@@ -1339,6 +1354,7 @@ function _toPropertyDescriptorValidate(
   rawDesc: any,
   getField: (o: any, f: string) => any,
   wrapCallable?: (v: any, arity: number) => any,
+  hasField?: (o: any, f: string) => boolean,
 ): PropertyDescriptor {
   // Primitive rawDesc (number/string/boolean/symbol/bigint) violates
   // ECMA-262 10.1 step 1 — throw TypeError. We intentionally allow null/undefined
@@ -1352,12 +1368,22 @@ function _toPropertyDescriptorValidate(
   }
   const desc: PropertyDescriptor = {};
   if (rawDesc == null) return desc;
-  const val = getField(rawDesc, "value");
-  const wr = getField(rawDesc, "writable");
-  const en = getField(rawDesc, "enumerable");
-  const conf = getField(rawDesc, "configurable");
-  let getFn = getField(rawDesc, "get");
-  let setFn = getField(rawDesc, "set");
+  const has = (field: string): boolean => {
+    if (hasField) return hasField(rawDesc, field);
+    return field in Object(rawDesc);
+  };
+  const hasEnumerable = has("enumerable");
+  const hasConfigurable = has("configurable");
+  const hasValue = has("value");
+  const hasWritable = has("writable");
+  const hasGet = has("get");
+  const hasSet = has("set");
+  const val = hasValue ? getField(rawDesc, "value") : undefined;
+  const wr = hasWritable ? getField(rawDesc, "writable") : undefined;
+  const en = hasEnumerable ? getField(rawDesc, "enumerable") : undefined;
+  const conf = hasConfigurable ? getField(rawDesc, "configurable") : undefined;
+  let getFn = hasGet ? getField(rawDesc, "get") : undefined;
+  let setFn = hasSet ? getField(rawDesc, "set") : undefined;
   // (#1629a) When the source descriptor is a WasmGC struct, `get`/`set` arrive
   // as Wasm-closure structs (not JS callables). Wrap them into JS Functions so
   // the spec-mandated `typeof === "function"` checks below pass and so that the
@@ -1366,29 +1392,23 @@ function _toPropertyDescriptorValidate(
     if (getFn != null && typeof getFn !== "function") getFn = wrapCallable(getFn, 0);
     if (setFn != null && typeof setFn !== "function") setFn = wrapCallable(setFn, 1);
   }
-  // Treat null getter/setter as "field absent" — reading a WasmGC struct field
-  // whose accessor source read out to null (no value stored) is functionally
-  // identical to the field being missing. The spec only throws for present
-  // non-callable values, and our caller path uses null as the "unset" sentinel.
-  const hasGet = getFn !== undefined && getFn !== null;
-  const hasSet = setFn !== undefined && setFn !== null;
-  const hasData = val !== undefined || wr !== undefined;
+  const hasData = hasValue || hasWritable;
   const hasAccessor = hasGet || hasSet;
   if (hasData && hasAccessor) {
     throw new TypeError(
       "TypeError: Invalid property descriptor. Cannot both specify accessors and a value or writable attribute",
     );
   }
-  if (hasGet && typeof getFn !== "function") {
+  if (hasGet && getFn !== undefined && typeof getFn !== "function") {
     throw new TypeError("TypeError: Getter must be a function: " + String(getFn));
   }
-  if (hasSet && typeof setFn !== "function") {
+  if (hasSet && setFn !== undefined && typeof setFn !== "function") {
     throw new TypeError("TypeError: Setter must be a function: " + String(setFn));
   }
-  if (val !== undefined) desc.value = val;
-  if (wr !== undefined) desc.writable = !!wr;
-  if (en !== undefined) desc.enumerable = !!en;
-  if (conf !== undefined) desc.configurable = !!conf;
+  if (hasValue) desc.value = val;
+  if (hasWritable) desc.writable = !!wr;
+  if (hasEnumerable) desc.enumerable = !!en;
+  if (hasConfigurable) desc.configurable = !!conf;
   if (hasGet) desc.get = getFn;
   if (hasSet) desc.set = setFn;
   return desc;
@@ -1502,6 +1522,20 @@ function _maybeWrapCallable(
 ): any {
   if (val == null) return val;
   if (typeof val === "function") return val;
+  if (typeof val === "object" && callbackState) {
+    const exports = callbackState.getExports();
+    const isClosureFn = exports?.__is_closure as ((v: any) => number) | undefined;
+    if (typeof isClosureFn === "function") {
+      try {
+        if (isClosureFn(val) === 1) {
+          const wrapped = _wrapWasmClosure(val, arity, callbackState);
+          return wrapped ?? val;
+        }
+      } catch {
+        // Fall through to the older opaque-struct heuristic below.
+      }
+    }
+  }
   if (!_isWasmStruct(val)) return val;
   const wrapped = _wrapWasmClosure(val, arity, callbackState);
   return wrapped ?? val;
@@ -3509,9 +3543,11 @@ function _readOwnDescriptor(
 ): PropertyDescriptor | undefined {
   // 1. Sidecar (dynamically added / defineProperty'd props).
   const sc = _wasmStructProps.get(obj);
-  if (sc && prop in sc) {
-    const descs = _wasmPropDescs.get(obj);
-    const flags = descs?.get(_normalizeDescKey(prop)) ?? _SC_WRITABLE | _SC_ENUMERABLE | _SC_CONFIGURABLE | _SC_DEFINED;
+  const descs = _wasmPropDescs.get(obj);
+  const flagsFromTable = descs?.get(_normalizeDescKey(prop));
+  const hasSidecarValue = !!sc && prop in sc;
+  if (hasSidecarValue || flagsFromTable !== undefined) {
+    const flags = flagsFromTable ?? _SC_WRITABLE | _SC_ENUMERABLE | _SC_CONFIGURABLE | _SC_DEFINED;
     if (flags & _SC_ACCESSOR) {
       if (typeof prop === "symbol") {
         const accessor = _wasmStructAccessors.get(obj)?.get(prop) as
@@ -3531,8 +3567,19 @@ function _readOwnDescriptor(
         configurable: !!(flags & _SC_CONFIGURABLE),
       };
     }
+    let value = hasSidecarValue ? (sc as any)[prop as any] : undefined;
+    if (!hasSidecarValue && typeof prop === "string") {
+      const getter = exports?.[`__sget_${prop}`];
+      if (typeof getter === "function") {
+        try {
+          value = getter(obj);
+        } catch {
+          value = undefined;
+        }
+      }
+    }
     return {
-      value: (sc as any)[prop as any],
+      value,
       writable: !!(flags & _SC_WRITABLE),
       enumerable: !!(flags & _SC_ENUMERABLE),
       configurable: !!(flags & _SC_CONFIGURABLE),
@@ -5129,10 +5176,28 @@ assert._isSameValue = isSameValue;
       }
       if (name === "__extern_get")
         return (obj: any, key: any) => {
+          if (obj != null && typeof obj === "object") {
+            try {
+              if (Object.getPrototypeOf(obj) !== null && key in Object(obj)) return obj[key];
+            } catch {
+              /* fall through to the generic path */
+            }
+          }
           const val = _safeGet(obj, key, callbackState);
           if (val !== undefined) return val;
           // Try struct getter exports as fallback for WasmGC opaque fields
-          if (typeof key === "string") {
+          if (obj == null || typeof obj !== "object") return undefined;
+          try {
+            if (Object.getPrototypeOf(obj) !== null) return undefined;
+          } catch {
+            return undefined;
+          }
+          if (_isWasmStruct(obj)) {
+            const sc = _wasmStructProps.get(obj);
+            const descs = _wasmPropDescs.get(obj);
+            if ((sc && key in sc) || descs?.has(_normalizeDescKey(key))) return undefined;
+          }
+          if (_isWasmStruct(obj) && typeof key === "string") {
             const exports = callbackState?.getExports();
             const getter = exports?.[`__sget_${key}`];
             if (typeof getter === "function") return getter(obj);
@@ -5980,6 +6045,8 @@ assert._isSameValue = isSameValue;
           // never reach the sidecar). Mirrors the reader in __defineProperties.
           const getField = (o: any, f: string): any => {
             if (!_isWasmStruct(o)) return o[f];
+            const sc = _wasmStructProps.get(o);
+            if (sc && f in sc) return sc[f];
             // _safeGet fires struct accessor getters (__get_<f>) and the
             // sidecar; fall back to the compiled module's __sget_<field>
             // export for typed struct fields that never reach the sidecar.
@@ -5989,6 +6056,19 @@ assert._isSameValue = isSameValue;
               if (typeof g === "function") v = g(o);
             }
             return v;
+          };
+          const hasField = (o: any, f: string): boolean => {
+            if (!_isWasmStruct(o)) return f in Object(o);
+            const sc = _wasmStructProps.get(o);
+            if (sc && f in sc) return true;
+            const getter = callbackState?.getExports()?.[`__sget_${f}`];
+            if (typeof getter !== "function") return false;
+            try {
+              getter(o);
+              return true;
+            } catch {
+              return false;
+            }
           };
           // (#1629a) When the descriptor is a WasmGC struct, its get/set fields
           // are Wasm-closure structs, not JS callables. Wrap them so the spec
@@ -6006,18 +6086,51 @@ assert._isSameValue = isSameValue;
           // Object.defineProperty sees it as null-proto/no-keys and drops every
           // attribute. Materialize a plain descriptor via getField first.
           if (!_isWasmStruct(obj)) {
-            const d2 = _toPropertyDescriptorValidate(desc, getField, wrap);
+            const d2 = _toPropertyDescriptorValidate(desc, getField, wrap, hasField);
             Object.defineProperty(obj, key, d2);
             return obj;
           }
           // WasmGC struct obj: apply via sidecar
-          const d = _toPropertyDescriptorValidate(desc, getField, wrap);
+          const d = _toPropertyDescriptorValidate(desc, getField, wrap, hasField);
           const sDescs = _getSidecarDescs(obj);
           const nKey = _normalizeDescKey(key);
+          const existingDesc = _readOwnDescriptor(obj, nKey, callbackState?.getExports());
           const existingVal = _sidecarGet(obj, key);
-          const newFlags = _validatePropertyDescriptor(sDescs, nKey, d, existingVal);
+          const newFlags = _validatePropertyDescriptor(sDescs, nKey, d, existingVal, existingDesc);
           sDescs.set(nKey, newFlags);
-          if (d.value !== undefined) _sidecarSet(obj, key, d.value);
+          const hasValue = Object.prototype.hasOwnProperty.call(d, "value");
+          const hasGet = Object.prototype.hasOwnProperty.call(d, "get");
+          const hasSet = Object.prototype.hasOwnProperty.call(d, "set");
+          if (hasValue) _sidecarSet(obj, key, d.value);
+          else if (!(newFlags & _SC_ACCESSOR) && existingDesc === undefined) _sidecarSet(obj, key, undefined);
+          if (hasGet || hasSet) {
+            const sc = _wasmStructProps.get(obj) ?? {};
+            _wasmStructProps.set(obj, sc);
+            if (typeof key === "symbol") {
+              let accMap = _wasmStructAccessors.get(obj);
+              if (!accMap) {
+                accMap = new Map();
+                _wasmStructAccessors.set(obj, accMap);
+              }
+              const prev = accMap.get(key) ?? {};
+              accMap.set(key, {
+                get: hasGet ? d.get : prev.get,
+                set: hasSet ? d.set : prev.set,
+              });
+              _sidecarSet(obj, key, undefined);
+            } else {
+              if (key in sc && typeof sc[key] !== "function") delete sc[key];
+              if (hasGet) {
+                if (d.get === undefined) delete sc[`__get_${key}`];
+                else sc[`__get_${key}`] = d.get;
+              }
+              if (hasSet) {
+                if (d.set === undefined) delete sc[`__set_${key}`];
+                else sc[`__set_${key}`] = d.set;
+              }
+              if (!(key in sc)) sc[key] = undefined;
+            }
+          }
           return obj;
         };
       if (name === "__defineProperty_value")
@@ -6042,10 +6155,12 @@ assert._isSameValue = isSameValue;
                 // Pass existing sidecar value for SameValue check on non-writable props.
                 const sDescs = _getSidecarDescs(obj);
                 const nProp = _normalizeDescKey(prop);
+                const existingDesc = _readOwnDescriptor(obj, nProp, callbackState?.getExports());
                 const existingVal = _sidecarGet(obj, prop);
-                const newFlags = _validatePropertyDescriptor(sDescs, nProp, desc, existingVal);
+                const newFlags = _validatePropertyDescriptor(sDescs, nProp, desc, existingVal, existingDesc);
                 sDescs.set(nProp, newFlags);
-                if (desc.value !== undefined) _sidecarSet(obj, prop, desc.value);
+                if (Object.prototype.hasOwnProperty.call(desc, "value")) _sidecarSet(obj, prop, desc.value);
+                else if (!(newFlags & _SC_ACCESSOR) && existingDesc === undefined) _sidecarSet(obj, prop, undefined);
               } else {
                 // Spec-mandated TypeError (non-configurable redefinition on real JS objects)
                 throw e;
@@ -6091,7 +6206,8 @@ assert._isSameValue = isSameValue;
                 // WasmGC struct — store accessor in sidecar
                 const sDescs = _getSidecarDescs(obj);
                 const nProp = _normalizeDescKey(prop);
-                const newFlags = _validatePropertyDescriptor(sDescs, nProp, desc, undefined);
+                const existingDesc = _readOwnDescriptor(obj, nProp, callbackState?.getExports());
+                const newFlags = _validatePropertyDescriptor(sDescs, nProp, desc, undefined, existingDesc);
                 sDescs.set(nProp, newFlags);
                 const sc = _wasmStructProps.get(obj) ?? {};
                 _wasmStructProps.set(obj, sc);
@@ -6169,6 +6285,8 @@ assert._isSameValue = isSameValue;
           // spans both per §20.1.2.3 / [[OwnPropertyKeys]]).
           const getField = (o: any, field: string | symbol): any => {
             if (!_isWasmStruct(o)) return o[field];
+            const sc = _wasmStructProps.get(o);
+            if (sc && field in sc) return sc[field];
             let v = _sidecarGet(o, field);
             if (v === undefined && typeof field === "string") {
               const exps = callbackState?.getExports();
@@ -6176,6 +6294,20 @@ assert._isSameValue = isSameValue;
               if (typeof g === "function") v = g(o);
             }
             return v;
+          };
+          const hasField = (o: any, field: string | symbol): boolean => {
+            if (!_isWasmStruct(o)) return field in Object(o);
+            const sc = _wasmStructProps.get(o);
+            if (sc && field in sc) return true;
+            if (typeof field !== "string") return false;
+            const getter = callbackState?.getExports()?.[`__sget_${field}`];
+            if (typeof getter !== "function") return false;
+            try {
+              getter(o);
+              return true;
+            } catch {
+              return false;
+            }
           };
           // (#1629 S2) When a per-property descriptor is itself a WasmGC struct,
           // its `get`/`set` fields arrive as Wasm-closure structs, not JS
@@ -6201,7 +6333,7 @@ assert._isSameValue = isSameValue;
             const gathered: { key: string | symbol; desc: PropertyDescriptor }[] = [];
             for (const key of keys) {
               const rawDesc = getField(descsObj, key as string);
-              gathered.push({ key, desc: _toPropertyDescriptorValidate(rawDesc, getField, wrap) });
+              gathered.push({ key, desc: _toPropertyDescriptorValidate(rawDesc, getField, wrap, hasField) });
             }
             // Pass 2 — apply each (DefinePropertyOrThrow). Validation against an
             // existing non-configurable property may still throw here, matching
@@ -6209,10 +6341,13 @@ assert._isSameValue = isSameValue;
             for (const { key, desc } of gathered) {
               if (isObjWasm) {
                 const nKey = _normalizeDescKey(key as string);
+                const existingDesc2 = _readOwnDescriptor(obj, nKey, callbackState?.getExports());
                 const existingVal2 = _sidecarGet(obj, key as string);
-                const newFlags = _validatePropertyDescriptor(sDescs!, nKey, desc, existingVal2);
+                const newFlags = _validatePropertyDescriptor(sDescs!, nKey, desc, existingVal2, existingDesc2);
                 sDescs!.set(nKey, newFlags);
-                if (desc.value !== undefined) _sidecarSet(obj, key as string, desc.value);
+                if (Object.prototype.hasOwnProperty.call(desc, "value")) _sidecarSet(obj, key as string, desc.value);
+                else if (!(newFlags & _SC_ACCESSOR) && existingDesc2 === undefined)
+                  _sidecarSet(obj, key as string, undefined);
               } else {
                 Object.defineProperty(obj, key, desc);
               }
@@ -6232,15 +6367,17 @@ assert._isSameValue = isSameValue;
                 const validated: { key: string | symbol; desc: PropertyDescriptor }[] = [];
                 for (const key of keys) {
                   const rawDesc = getField(descsObj, key as string);
-                  const desc = _toPropertyDescriptorValidate(rawDesc, getField, wrap);
+                  const desc = _toPropertyDescriptorValidate(rawDesc, getField, wrap, hasField);
                   validated.push({ key: key as string, desc });
                 }
                 for (const { key, desc } of validated) {
                   const nKey = _normalizeDescKey(key);
+                  const existingDesc2 = _readOwnDescriptor(obj, nKey, callbackState?.getExports());
                   const existingVal2 = _sidecarGet(obj, key);
-                  const newFlags = _validatePropertyDescriptor(sDescs, nKey, desc, existingVal2);
+                  const newFlags = _validatePropertyDescriptor(sDescs, nKey, desc, existingVal2, existingDesc2);
                   sDescs.set(nKey, newFlags);
-                  if (desc.value !== undefined) _sidecarSet(obj, key, desc.value);
+                  if (Object.prototype.hasOwnProperty.call(desc, "value")) _sidecarSet(obj, key, desc.value);
+                  else if (!(newFlags & _SC_ACCESSOR) && existingDesc2 === undefined) _sidecarSet(obj, key, undefined);
                 }
               } else {
                 // Spec-mandated TypeError on real JS objects
@@ -8978,6 +9115,13 @@ assert._isSameValue = isSameValue;
       return (v: any) => (v ? 1 : 0);
     case "extern_get":
       return (obj: any, key: any) => {
+        if (obj != null && typeof obj === "object") {
+          try {
+            if (Object.getPrototypeOf(obj) !== null && key in Object(obj)) return obj[key];
+          } catch {
+            /* fall through to the generic path */
+          }
+        }
         const val = _safeGet(obj, key, callbackState);
         if (val !== undefined) {
           // (#779c) Sandbox-aware constructor identity. When a
@@ -8995,6 +9139,15 @@ assert._isSameValue = isSameValue;
           }
           return val;
         }
+        if (obj == null || typeof obj !== "object") return undefined;
+        try {
+          if (Object.getPrototypeOf(obj) !== null) return undefined;
+        } catch {
+          return undefined;
+        }
+        const sc = _wasmStructProps.get(obj);
+        const descs = _wasmPropDescs.get(obj);
+        if ((sc && key in sc) || descs?.has(_normalizeDescKey(key))) return undefined;
         if (typeof key === "string") {
           const exports = callbackState?.getExports();
           const getter = exports?.[`__sget_${key}`];

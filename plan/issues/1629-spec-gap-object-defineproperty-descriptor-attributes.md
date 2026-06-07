@@ -1,7 +1,7 @@
 ---
 id: 1629
 title: "spec gap: Object.defineProperty — descriptor attribute fidelity (664 test262 fails, biggest single bucket)"
-status: ready
+status: in-progress
 created: 2026-05-08
 updated: 2026-06-07
 priority: high
@@ -15,6 +15,8 @@ sprint: 61
 renumbered_from: 1335
 parent: 1328
 related: [1629a, 1629b, 1629c, 1630, 1631, 1130, 1364b]
+claimed_by: codex-developer
+claimed_at: 2026-06-07T05:04:42.087Z
 ---
 > **UNIFIED DESCRIPTOR-MODEL SPEC (architect, 2026-05-29).** The single
 > coherent implementation plan for the whole Object property-descriptor
@@ -199,6 +201,41 @@ arg0 is an identifier, falling back to the shape table. Tests:
 overrides + default preservation, all green). Does not address
 sub-clusters #1629a (dynamic descriptor) or #1629c (Array/Function
 exotic) — those remain open.
+
+## Attempt 22 (2026-06-07, codex-developer)
+
+Focused implementation landed for descriptor-field presence when the field's
+value is explicitly `undefined`. The previous runtime used `!== undefined` as
+both a value test and a descriptor-field presence test, which made
+`{ value: undefined }`, `{ get: undefined }`, and variable-held descriptor
+objects indistinguishable from omitted fields after lowering through WasmGC
+descriptor structs.
+
+Changes:
+- Codegen routes inline/dynamic descriptor structs with explicit `undefined`
+  descriptor fields through `__defineProperty_desc`, annotating the lowered
+  descriptor object with sidecar entries for those present fields.
+- Runtime `ToPropertyDescriptor` materialization now uses HasProperty-style
+  presence checks before reading descriptor values, so present `undefined`
+  fields remain present.
+- Runtime descriptor validation now uses field-presence bits, preserving the
+  data/accessor conflict and non-configurable accessor SameValue invariants
+  when `get`, `set`, or `value` are explicitly `undefined`.
+- `Object.getOwnPropertyDescriptor` fast paths defer to the runtime descriptor
+  table for properties known to have been defined through the sidecar path.
+- `extern_get` no longer falls through ordinary JS descriptor-object properties
+  whose value is `undefined` to Wasm struct field getters.
+
+Focused validation:
+- `pnpm exec vitest run tests/issue-1629.test.ts` — 5/5 pass.
+- `pnpm exec vitest run tests/issue-1629.test.ts tests/issue-1629*.test.ts`
+  — 42/42 pass.
+- Scoped test262 samples around `Object.defineProperty` descriptor coalescing
+  and invariants were rerun. The targeted `undefined` descriptor field behavior
+  is fixed by the local tests, but representative test262 samples still expose
+  downstream gaps outside this slice: widened-field `verifyProperty` coverage,
+  array exotic length RangeError behavior, and accessor closure identity
+  read-back.
 
 ---
 
