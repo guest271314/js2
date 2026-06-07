@@ -340,13 +340,17 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
     checks pass.
   - The issue remains `in-review` with `pr: 1295`; the PR-status poller owns
     the eventual transition to `done` after merge.
-- Current Codex verification on current `origin/main` (`767e64754`):
+- Current Codex publish refresh on current `origin/main` (`767e64754`):
   - Confirmed `origin/main` is an ancestor of both the local branch and
     `origin/symphony/1910`; the branch remains synced with the remote PR head.
   - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
     (8 tests passed).
   - `npx prettier --check` on the touched issue file (passed).
-  - GraphQL confirmed PR #1295 is open, ready, non-draft, clean/mergeable,
-    passing checks, and already in the merge queue at position 11.
+  - PR #1295 was temporarily dequeued from the merge queue so GitHub would
+    accept this issue metadata refresh push.
+  - After the push, GraphQL confirmed PR #1295 is open, ready, non-draft, and
+    mergeable; fresh required checks are pending on the new head, and
+    auto-merge/merge-queue entry is enabled so GitHub queues the PR once checks
+    pass.
   - The issue remains `in-review` with `pr: 1295`; the PR-status poller owns
     the eventual transition to `done` after merge.
