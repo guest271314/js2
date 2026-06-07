@@ -1053,6 +1053,137 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── __reflect_set(externref obj, externref key, externref value) -> i32 ──
+  //
+  // Reflect.set's supported standalone subset shares the existing __extern_set
+  // data-write machinery, but it must return the [[Set]] boolean instead of
+  // void. Keep __extern_set's ABI stable for ordinary assignment call sites and
+  // preflight the object-runtime refusal cases here:
+  //   - non-$Object receiver → false (standalone has no host TypeError bridge)
+  //   - own accessor with no setter → false
+  //   - own data property with !writable → false
+  //   - frozen object data write → false
+  //   - missing own property on a non-extensible object → false
+  // Otherwise delegate to __extern_set and return true.
+  {
+    const reflectSetExternSetIdx = ctx.funcMap.get("__extern_set")!;
+    const body: Instr[] = [
+      // any = any.convert_extern(obj); if !ref.test $Object → false
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 3 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      // o = cast<$Object>(any); e = __obj_find(o, key)
+      { op: "local.get", index: 3 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.set", index: 4 },
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: objFindIdx },
+      { op: "local.tee", index: 5 },
+      { op: "ref.is_null" },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // Own accessor: true iff a setter exists; __extern_set invokes it.
+          { op: "local.get", index: 5 },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+          { op: "i32.const", value: FLAG_ACCESSOR },
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 5 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 5 },
+              { op: "extern.convert_any" },
+              { op: "ref.is_null" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+              },
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: 1 },
+              { op: "local.get", index: 2 },
+              { op: "call", funcIdx: reflectSetExternSetIdx },
+              { op: "i32.const", value: 1 },
+              { op: "return" },
+            ],
+          },
+          // Own data: false if non-writable.
+          { op: "local.get", index: 5 },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+          { op: "i32.const", value: FLAG_WRITABLE },
+          { op: "i32.and" },
+          { op: "i32.eqz" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+          },
+          // Frozen data write: false. __extern_set would no-op; Reflect.set
+          // exposes that refusal as its boolean result.
+          { op: "local.get", index: 4 },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+          { op: "i32.const", value: OBJ_FLAG_FROZEN },
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+          },
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 2 },
+          { op: "call", funcIdx: reflectSetExternSetIdx },
+          { op: "i32.const", value: 1 },
+          { op: "return" },
+        ],
+      },
+      // Missing own property: non-extensible objects refuse the new key.
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+      { op: "i32.const", value: OBJ_FLAG_NONEXTENSIBLE },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      { op: "local.get", index: 0 },
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: 2 },
+      { op: "call", funcIdx: reflectSetExternSetIdx },
+      { op: "i32.const", value: 1 },
+    ];
+    registerNative(
+      "__reflect_set",
+      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "o", type: objRefNull },
+        { name: "e", type: entryRefNull },
+      ],
+      body,
+    );
+  }
+
   // ── __delete_property(externref obj, externref key) -> i32 ───────────────
   //
   // ES §13.5.1 delete operator on an own data property. Finds the live entry;
@@ -3879,6 +4010,7 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__extern_is_array",
   "__extern_get",
   "__extern_set",
+  "__reflect_set",
   "__to_primitive",
   "__extern_toString",
   "__delete_property",
