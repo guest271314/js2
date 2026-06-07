@@ -112,6 +112,9 @@ remaining semantic failures.
 - Added a second #1903 regression in `tests/issue-1903.test.ts` covering the
   standalone private-accessor/Test262 shape that previously compiled to an
   invalid `__str_flatten` call after dead-import elimination.
+- Publish follow-up 6: merged current `origin/main` (`f4dd784d4`) after the base
+  advanced again, resolved the generated standalone Test262 report conflict to
+  main's refreshed payload, and kept the #1903 runtime/test changes intact.
 
 ## Validation
 
@@ -167,6 +170,9 @@ remaining semantic failures.
   "./scripts/test262/runner.ts"; ...'` for
   `/workspace/test262/test/language/statements/class/elements/set-access-of-missing-private-setter.js`
   returned `status: "pass"`.
+- `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
+  "#1903|dynamic property add/read"` (after merging `origin/main` at
+  `f4dd784d4`)
 - Rebuilt the PR #1262 `test262-standalone-results-merged.jsonl` artifact with
   `--max-unclassified-root-causes 0` after classifying
   `language/expressions/object/dstr` under the existing object-property bucket.
