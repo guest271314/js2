@@ -80,8 +80,11 @@ remaining semantic failures.
 - Publish follow-up 3: re-merged the later `origin/main` baseline refresh
   (`5bef49a5`) and kept the generated standalone report artifact on main's
   refreshed payload.
+- Publish follow-up 4: merged current `origin/main` (`3827daa96`, #1263) into
+  this branch after GitHub reported PR #1262 as conflicting; the only conflict
+  was unrelated #1907 issue metadata, resolved to main's in-review PR record.
 - Final handoff (2026-06-07): refreshed the local checkout against
-  `origin/main` (`5bef49a5`), confirmed PR #1262 is open and non-draft, and
+  `origin/main` (`3827daa96`), confirmed PR #1262 is open and non-draft, and
   found no additional #1903 source changes needed.
 
 ## Validation
@@ -109,6 +112,10 @@ remaining semantic failures.
 - `npx vitest run tests/issue-1903.test.ts` (final handoff on 2026-06-07)
 - `npx vitest run tests/issue-1472.test.ts -t "dynamic property add/read"`
   (final handoff on 2026-06-07)
+- `npx vitest run tests/issue-1903.test.ts` (after merging `origin/main` at
+  `3827daa96`)
+- `npx vitest run tests/issue-1472.test.ts -t "dynamic property add/read"`
+  (after merging `origin/main` at `3827daa96`)
 - Rebuilt the PR #1262 `test262-standalone-results-merged.jsonl` artifact with
   `--max-unclassified-root-causes 0` after classifying
   `language/expressions/object/dstr` under the existing object-property bucket.
