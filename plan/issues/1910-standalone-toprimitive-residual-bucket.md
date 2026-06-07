@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T11:14:00.095Z
+claimed_at: 2026-06-07T11:19:29.743Z
 pr: 1295
 ---
 
@@ -178,3 +178,11 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
   - `npx prettier --check` on the touched script, test, and issue files
     (passed).
   - Confirmed PR #1295 is open, ready, clean/mergeable, and passing checks.
+- Final Symphony publish refresh on current `origin/main` (`28c668ab4e`):
+  - Confirmed the local branch is a fast-forward of `origin/symphony/1910`
+    and remains based on current `origin/main`.
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the touched script, test, and issue files
+    (passed).
+  - PR #1295 remains the active ready review PR for this issue.
