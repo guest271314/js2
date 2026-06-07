@@ -1,7 +1,7 @@
 ---
 id: 1906
 title: "standalone: native Object.defineProperties over $Object descriptors"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -17,7 +17,7 @@ related: [1472, 1629, 1631, 1888]
 test262_bucket: object-property-semantics
 test262_count: 748
 claimed_by: codex-developer
-claimed_at: 2026-06-07T10:44:29.480Z
+claimed_at: 2026-06-07T10:51:59.654Z
 pr: 1264
 ---
 # #1906 — Standalone native `Object.defineProperties`
@@ -72,16 +72,16 @@ caught by the broad dynamic object/property refusal.
 - `pnpm test tests/issue-1629-S6.test.ts tests/issue-1629-S3.test.ts tests/issue-1629-S2.test.ts`
 - `pnpm exec tsc --noEmit --incremental false`
 
-Revalidated by `codex-developer` on branch `symphony/1906` after confirming
-`origin/main` is still at `28c668ab4`; checks above pass locally on
-2026-06-07T12:48:09+02:00 at pre-refresh local head `2ee59448d`. The focused
-#1906 suite, the existing #1629 defineProperty suites, and `tsc --noEmit` all
-passed in this worktree.
+Revalidated by `codex-developer` on branch `symphony/1906` after fetching
+`origin` and confirming the branch is based on current `origin/main`
+`28c668ab4`. Checks above pass locally on 2026-06-07T12:55:59+02:00 in this
+worktree. The focused #1906 suite, the existing #1629 defineProperty suites,
+and `tsc --noEmit` all passed.
 
 PR #1264 is open, ready for review, and targets `main`:
-`https://github.com/loopdive/js2/pull/1264`. GraphQL reports
-`mergeQueueEntry.state=AWAITING_CHECKS`, position 1, for head
-`376140c2b`, while `mergeStateStatus=BLOCKED` because the required
+`https://github.com/loopdive/js2/pull/1264`. Before this validation refresh is
+published, GraphQL reports remote head `376140c2b`, `mergeQueueEntry=null`,
+`autoMergeRequest=null`, and `mergeStateStatus=BLOCKED` because the required
 `Test262 Sharded / merge shard reports` check is failed from the stale-baseline
 guard: the `js2wasm-baselines` JSONL baseline main SHA
 `ff02d201152dc8777d3e8151ed05dddd47d75ecf` was 202 commits behind
@@ -89,16 +89,3 @@ guard: the `js2wasm-baselines` JSONL baseline main SHA
 itself reported `improvements=24`, `wasm-change regressions=0`, `net=24`. This
 is an infrastructure blocker tracked by #1668, not a scoped #1906 implementation
 or local validation failure.
-
-Follow-up publish note: the validation/queue refresh commit could not be pushed
-because GitHub rejects updates to branches that already have a pull request in
-the merge queue:
-
-```text
-GH006: Protected branch update failed for refs/heads/symphony/1906.
-A pull request for this branch has been added to a merge queue. Branches that
-are queued for merging cannot be updated.
-```
-
-The issue remains `in-progress` locally until the bookkeeping update can be
-published without disrupting PR #1264's existing merge-queue entry.
