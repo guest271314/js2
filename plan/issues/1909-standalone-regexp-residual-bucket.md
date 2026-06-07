@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1291
 claimed_by: codex-developer
-claimed_at: 2026-06-07T11:31:29.343Z
+claimed_at: 2026-06-07T11:37:59.219Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -590,6 +590,24 @@ Branches that are queued for merging cannot be updated.
 
 Per the publish rule, this issue is left `in-progress` locally until PR #1291
 merges or is dequeued so the latest metadata refresh can be pushed.
+
+## 2026-06-07 queue recheck after reassignment
+
+GitHub still has PR #1291 open and ready/non-draft for `symphony/1909`:
+
+- URL: `https://github.com/loopdive/js2/pull/1291`
+- Remote PR head: `6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+- Base: `main`
+- Merge state: `CLEAN` / mergeable
+- Checks: all reported PR checks succeeded
+- Merge queue entry: `QUEUED`, position `7`, estimated time to merge `2818`
+  seconds
+- Auto-merge request: none reported; queue entry is active
+
+`origin/main` remains an ancestor of the local branch. This issue remains
+`in-progress` locally because GitHub reports PR #1291 is already queued to
+merge, and queued branches cannot be updated with the latest local metadata
+refresh.
 
 ## 2026-06-07 live PR #1291 refresh after latest queue release
 
