@@ -186,3 +186,16 @@ state confirms PR #1260 is `MERGED`, ready/non-draft, with merge commit
 The implementation remains complete and present on `origin/main`; this branch is
 now carrying only the #1909 issue-state refresh so the plan metadata stays in
 sync with the merged PR state.
+
+Follow-up validation after merging current `origin/main`:
+
+- `pnpm test tests/issue-1909.test.ts tests/issue-1781.test.ts`
+- `node --check scripts/build-test262-report.mjs`
+- `node scripts/check-issue-ids.mjs`
+- `pnpm exec prettier --check scripts/build-test262-report.mjs tests/issue-1909.test.ts tests/issue-1781.test.ts plan/issues/1909-standalone-regexp-residual-bucket.md`
+- `node scripts/build-test262-report.mjs --input .test262-cache/test262-standalone-current.jsonl --output .test262-cache/test262-standalone-report-1909-validate.json --target standalone --include-proposals --max-unclassified-root-causes 0`
+
+The rebuilt report still classifies `30,733 / 30,733` standalone non-pass
+non-skip rows. The RegExp split is unchanged: `833` Phase 2d rows, `104` Phase
+2b rows, `452` string-protocol rows, `546` native-engine rows, and `62`
+fallback rows.
