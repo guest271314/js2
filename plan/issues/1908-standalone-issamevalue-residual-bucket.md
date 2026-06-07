@@ -1,7 +1,7 @@
 ---
 id: 1908
 title: "standalone: re-split and fix residual isSameValue bucket after #1776/#1807"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -488,3 +488,13 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   metadata/current-main merge would require updating a branch that is already
   queued; the published issue file on `origin/symphony/1908` remains
   `in-review` with `pr: 1257`.
+
+## Codex Attempt 35 Current-Main Refresh — 2026-06-07
+
+- Fetched current `origin/main`
+  (`28c668ab4e636011d08ac4e518acc4353097f5f1`) and merged it into
+  `symphony/1908` after PR #1257 left the merge queue; the merge brought in
+  other issue metadata updates only.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed after the merge.
+- PR #1257 remains open, non-draft, targets `main`, and stays recorded in
+  frontmatter while #1908 remains `in-review` for the PR-status poller.
