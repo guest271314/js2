@@ -1,7 +1,7 @@
 ---
 id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
-status: in-progress
+status: in-review
 pr: 1287
 sprint: 61
 created: 2026-06-07
@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T06:50:35.215Z
+claimed_at: 2026-06-07T07:08:34.903Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -99,32 +99,7 @@ standalone refusal.
 - Redispatch verification on 2026-06-07T08:19+02:00 found the implementation
   already merged, branch synced with `origin/main`, PR #1287 opened
   ready/non-draft, and the same scoped validation still passing.
-- Codex verification on 2026-06-07T08:28+02:00 reran the issue-scoped
-  validation on `symphony/1907`; all commands passed, PR #1287 was still open
-  and ready/non-draft, and the branch remained current with `origin/main`.
-- Codex verification on 2026-06-07T08:34+02:00 reran the same scoped validation
-  on the current branch; all commands passed, PR #1287 remained open and
-  ready/non-draft, and `origin/main` was still an ancestor of `HEAD`.
-- Codex verification on 2026-06-07T08:40+02:00 reran the issue-scoped
-  validation on the current branch; all commands passed, PR #1287 was open,
-  ready/non-draft, mergeable, and its remote-head checks were green.
-- Final push of local verification commit `a110392e8` was rejected by GitHub
-  with GH006 because PR #1287 is already in the merge queue. The queue entry was
-  `QUEUED` at position 15, enqueued at `2026-06-07T06:26:03Z`; leave this issue
-  `in-progress` until the queued PR lands or the branch is intentionally
-  dequeued for another update.
-- The remote PR branch still has `pr: 1287` and was already queued, but this
-  local handoff leaves the issue `in-progress` because the final publish update
-  could not be pushed while the branch is queue-protected.
-- Codex verification on 2026-06-07T08:47+02:00 reran the same issue-scoped
-  validation on the current local branch; all commands passed, `origin/main`
-  remains an ancestor of `HEAD`, and PR #1287 is still open, ready/non-draft,
-  mergeable, green on the remote head, and queued at position 14. The local
-  branch still contains unpublished issue-doc verification commits because the
-  queued PR head is protected from further pushes.
-- Codex verification on 2026-06-07T08:54+02:00 reran the issue-scoped
-  validation again; all commands passed, `origin/main` remains an ancestor of
-  `HEAD`, and PR #1287 is still open, ready/non-draft, mergeable, green on the
-  remote head, and queued at position 14. The local branch still contains
-  unpublished issue-doc verification commits because the queued PR head is
-  protected from further pushes.
+- Codex verification on 2026-06-07T09:11+02:00 found PR #1287 still open,
+  ready/non-draft, green on the remote head, and accepted in the merge queue at
+  position 11. This handoff keeps the issue `in-review` with `pr: 1287` while
+  syncing the local branch with current `origin/main`.
