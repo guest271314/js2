@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T12:49:29.596Z
+claimed_at: 2026-06-07T12:59:59.726Z
 pr: 1295
 ---
 
@@ -329,3 +329,12 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
     GitHub required fresh checks on the new head before queue entry, so
     auto-merge/merge-queue entry is enabled for PR #1295 to queue once required
     checks pass.
+
+## Current Publish State - 2026-06-07
+
+- Current codex-developer verification on current `origin/main` (`767e64754`):
+  - Confirmed `origin/main` is an ancestor of the branch and PR #1295 is open,
+    ready, non-draft, clean/mergeable, passing checks, and already in the merge
+    queue at position 13.
+  - The issue remains `in-review` with `pr: 1295`; the PR-status poller owns
+    the eventual transition to `done` after merge.
