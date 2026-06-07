@@ -893,12 +893,12 @@ runtime `globalThis` map.
 What changed:
 - New `src/codegen/builtin-static-globals.ts`: emits cached closure values for
   `Array.isArray` and `Object.keys`; emits lazy `$Object` singleton globals for
-  bare `Array` / `Object` value reads; unsupported built-in property value reads
-  refuse loud with a `#1888 S6` cite.
+  bare `Array` / `Object` value reads.
 - `identifiers.ts`: standalone bare `Array` / `Object` resolve to the singleton
   before ambient lib declarations can route them to host globals.
-- `property-access.ts`: standalone `Builtin.prop` value reads use the static
-  closure path for supported pairs and no longer request `__get_builtin`.
+- `property-access.ts` direct `Builtin.prop` value reads are handled by the
+  merged #1907 static-method closure path; this branch keeps the complementary
+  namespace-object value path for `const C = Array` / `const O = Object`.
 - `calls.ts`: for aliases initialized from supported built-in namespaces, skip
   the legacy any-receiver extern-class heuristic so `const O = Object; O.keys(o)`
   reaches the open-object method dispatcher instead of importing a typed-array
@@ -909,8 +909,8 @@ What changed:
 
 Validation:
 - `pnpm exec tsc --noEmit`
-- `pnpm exec vitest run tests/issue-1888.test.ts tests/issue-1888-s6c.test.ts`
-- `pnpm exec biome lint src/codegen/builtin-static-globals.ts src/codegen/expressions/identifiers.ts src/codegen/property-access.ts src/codegen/expressions/calls.ts tests/issue-1888.test.ts tests/issue-1888-s6c.test.ts --diagnostic-level=error --max-diagnostics=50`
+- `pnpm exec vitest run tests/issue-1888.test.ts tests/issue-1888-s6c.test.ts tests/issue-1907.test.ts`
+- `pnpm exec biome lint src/codegen/builtin-static-globals.ts src/codegen/expressions/identifiers.ts src/codegen/property-access.ts src/codegen/expressions/calls.ts tests/issue-1888.test.ts tests/issue-1888-s6c.test.ts tests/issue-1907.test.ts --diagnostic-level=error --max-diagnostics=50`
 
 Observed during extra scoped checking: `pnpm exec vitest run
 tests/issue-1472.test.ts -t "#1888"` still has Slice-2 open-method arity 2/3/4
