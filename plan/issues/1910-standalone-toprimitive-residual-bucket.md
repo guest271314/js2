@@ -1,7 +1,7 @@
 ---
 id: 1910
 title: "standalone ToPrimitive residual bucket after #1900/#1525b"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -210,6 +210,7 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
     (8 tests passed).
   - `npx prettier --check` on the touched script, test, and issue file
     (passed).
+
 - Symphony publish verification on current `origin/main` (`28c668ab4e`):
   - Confirmed PR #1295 is open, ready, mergeable, and passing checks before
     this metadata refresh; `origin/main` remains an ancestor of the branch.
@@ -217,3 +218,13 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
     (8 tests passed).
   - `npx prettier --check` on the touched script, test, and issue file
     (passed).
+
+## Publish Blocker - 2026-06-07
+
+- Attempted to push the final metadata refresh, but GitHub rejected
+  `symphony/1910` because PR #1295 is already in the merge queue and queued
+  branches cannot be updated.
+- GraphQL confirmed PR #1295 is ready, open, non-draft, clean/mergeable,
+  `isInMergeQueue: true`, queue state `QUEUED`, position 15. Leaving this issue
+  `in-progress` per the failed-publish rule unless the PR is explicitly
+  dequeued for another metadata push.
