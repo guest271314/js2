@@ -1,7 +1,7 @@
 ---
 id: 1909
 title: "standalone RegExp residual bucket after #1474/#682: split Phase 2d and native-engine gaps"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1289
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:12:51Z
+claimed_at: 2026-06-07T07:15:36Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -331,3 +331,24 @@ Merged current `origin/main` into `symphony/1909` and reran scoped validation:
 
 All scoped checks passed. The implementation remains present on `origin/main`;
 this branch carries the current `in-review` issue metadata for PR #1289.
+
+## 2026-06-07 queue push blocker after third refresh
+
+The attempted push after merging current `origin/main` and rerunning scoped
+validation was rejected because GitHub reported PR #1289 as queued:
+
+- Remote PR head: `19540cd895d2e9a2331cff3a52b976657f2c85a0`
+- Local attempted head: `a08587123`
+- PR URL: `https://github.com/loopdive/js2/pull/1289`
+- Queue ref visibility: no `gh-readonly-queue/main/pr-1289*` ref was visible
+  via `git ls-remote` immediately after the rejection
+- Push result:
+
+```text
+GH006: Protected branch update failed ...
+A pull request for this branch has been added to a merge queue.
+Branches that are queued for merging cannot be updated.
+```
+
+Per the publish rule, this issue is left `in-progress` locally until PR #1289
+merges or is dequeued so the latest metadata refresh can be pushed.
