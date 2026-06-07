@@ -85,10 +85,11 @@ standalone refusal.
 ## Final Findings
 
 - PR #1263 exists, was ready/non-draft, and is now merged into `main` at
-  `3827daa96`.
-- `origin/main` was fetched before this handoff validation; it includes the
-  #1907 merge commit and the prior main sync.
-- Scoped validation passed again after confirming the PR merge: the focused
+  `3827daa96`; merge-queue/auto-merge entry is no longer applicable because the
+  PR is already merged.
+- `origin/main` was fetched and merged into `symphony/1907` before the final
+  branch push. The merge brought in later main changes without #1907 conflicts.
+- Scoped validation passed again after the final main merge: the focused
   #1907/#1888 tests, typecheck, #1678 Array.isArray regression tests, the
   targeted #1472 Reflect.ownKeys standalone route, and formatting.
 - The issue remains `in-review` with `pr: 1263` so the PR-status poller can
