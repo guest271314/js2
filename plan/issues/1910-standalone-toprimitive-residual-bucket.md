@@ -334,7 +334,9 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
 
 - Current codex-developer verification on current `origin/main` (`767e64754`):
   - Confirmed `origin/main` is an ancestor of the branch and PR #1295 is open,
-    ready, non-draft, clean/mergeable, passing checks, and already in the merge
-    queue at position 13.
+    ready, non-draft, and updated on the remote branch.
+  - After the metadata refresh push, GitHub started fresh required checks and
+    auto-merge/merge-queue entry is enabled for PR #1295 to queue once those
+    checks pass.
   - The issue remains `in-review` with `pr: 1295`; the PR-status poller owns
     the eventual transition to `done` after merge.
