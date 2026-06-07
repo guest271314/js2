@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T03:13:53.999Z
+claimed_at: 2026-06-07T03:18:53.958Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
