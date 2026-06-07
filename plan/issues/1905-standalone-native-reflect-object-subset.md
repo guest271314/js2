@@ -18,7 +18,7 @@ test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
 claimed_at: 2026-06-07T06:05:04.710Z
-pr: 1270
+pr: 1284
 ---
 
 # #1905 — Standalone native Reflect object subset
@@ -110,3 +110,4 @@ machinery and are out of scope here.
 - Current Codex pass: fast-forwarded the branch to `origin/main`, reran the
   scoped validation above successfully, and confirmed GitHub reports ready PR
   `#1270` as merged with successful checks.
+- Opened ready follow-up PR `#1284` for the current issue-state refresh.
