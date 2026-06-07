@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T12:09:29.234Z
+claimed_at: 2026-06-07T12:13:59.552Z
 pr: 1295
 ---
 
@@ -249,3 +249,10 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
 - The current stale-claim refresh confirms the same blocker: local metadata
   commits are ahead of `origin/symphony/1910`, while the remote PR head remains
   queued and cannot be updated without dequeuing PR #1295.
+- Current codex-developer verification confirms the blocker is still active:
+  `origin/main` (`28c668ab4e`) is an ancestor of both the local branch and the
+  remote PR head, the scoped tests and Prettier check pass, and PR #1295 is
+  open, ready, clean/mergeable, passing checks, and already in the merge queue
+  at position 15. The local branch remains ahead of `origin/symphony/1910` with
+  metadata-only issue refresh commits that cannot be published unless PR #1295
+  is dequeued.
