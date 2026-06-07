@@ -114,6 +114,43 @@ function isStandaloneRegExpRecord(record, text) {
   );
 }
 
+function isObjectToPrimitiveResidual(record, text) {
+  if (!hasAny(text, ["toprimitive", "to primitive", "valueof", "tostring", "symbol.toprimitive"])) {
+    return false;
+  }
+
+  return !pathHas(record, [
+    "built-ins/array/",
+    "built-ins/arraybuffer",
+    "built-ins/bigint",
+    "built-ins/dataview",
+    "built-ins/date",
+    "built-ins/decodeuri",
+    "built-ins/decodeuricomponent",
+    "built-ins/encodeuri",
+    "built-ins/encodeuricomponent",
+    "built-ins/function",
+    "built-ins/math",
+    "built-ins/number",
+    "built-ins/object",
+    "built-ins/regexp",
+    "built-ins/string",
+    "built-ins/symbol",
+    "built-ins/typedarray",
+    "language/expressions/arrow-function",
+    "language/expressions/tagged-template",
+    "language/function",
+    "language/literals/string",
+    "parsefloat",
+    "parseint",
+    "regexpstringiteratorprototype",
+    "stringiteratorprototype",
+    "tagged-template",
+    "template",
+    "typedarrayconstructors",
+  ]);
+}
+
 const STANDALONE_ROOT_CAUSE_BUCKETS = [
   {
     id: "binary-emit-u32-out-of-range",
@@ -308,7 +345,7 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "standalone-iterator-protocol",
-    issues: ["#681", "#1718", "#1665"],
+    issues: ["#1665", "#681", "#1718"],
     label: "Generic iterator protocol still needs a pure-Wasm standalone path",
     match: (record, text) =>
       record.host_import_leak_class === "iterator_protocol" ||
@@ -347,9 +384,9 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "object-to-primitive",
-    issues: ["#1525", "#1525b", "#1759"],
+    issues: ["#1910", "#1525b", "#1900", "#1472"],
     label: "ToPrimitive / object-to-string dispatch residuals",
-    match: (record, text) => hasAny(text, ["toprimitive", "to primitive", "valueof", "tostring", "symbol.toprimitive"]),
+    match: isObjectToPrimitiveResidual,
   },
   {
     id: "array-typedarray-buffer",
@@ -369,6 +406,12 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
       ]),
   },
   {
+    id: "template-literals",
+    issues: ["#1759", "#836"],
+    label: "Template literal and tagged-template semantics",
+    match: (record) => pathHas(record, ["template", "tagged-template"]),
+  },
+  {
     id: "object-property-semantics",
     issues: ["#1472", "#176", "#281", "#1466"],
     label: "Object/property/destructuring semantic mismatches behind the object model",
@@ -378,9 +421,18 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "string-methods-coercion",
-    issues: ["#1105", "#1442", "#1381"],
-    label: "String methods and string coercion residuals in standalone",
-    match: (record) => pathHas(record, ["built-ins/string", "stringiteratorprototype", "language/literals/string"]),
+    issues: ["#1470", "#1105", "#1442", "#1381"],
+    label: "String and URI methods/coercion residuals in standalone",
+    match: (record) =>
+      pathHas(record, [
+        "built-ins/decodeuri",
+        "built-ins/decodeuricomponent",
+        "built-ins/encodeuri",
+        "built-ins/encodeuricomponent",
+        "built-ins/string",
+        "language/literals/string",
+        "stringiteratorprototype",
+      ]),
   },
   {
     id: "annex-b-function-eval",
@@ -519,12 +571,6 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
         "a class may only have one constructor",
         "class constructor may not",
       ]),
-  },
-  {
-    id: "template-literals",
-    issues: ["#1759", "#836"],
-    label: "Template literal and tagged-template semantics",
-    match: (record) => pathHas(record, ["template", "tagged-template"]),
   },
   {
     id: "unicode-identifiers",
