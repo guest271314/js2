@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:25:05.007Z
+claimed_at: 2026-06-07T07:30:05.055Z
 pr: 1257
 ---
 
@@ -457,6 +457,33 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   stale-baseline guard: baseline main-sha
   `ff02d201152dc8777d3e8151ed05dddd47d75ecf` is 114 commits behind
   `origin/main` (max 50).
+- This local issue copy remains `in-progress` because publishing the local
+  metadata/current-main merge would require updating a branch that is already
+  queued; the published issue file on `origin/symphony/1908` remains
+  `in-review` with `pr: 1257`.
+
+## Codex Attempt 34 Queue Blocker — 2026-06-07
+
+- Fetched `origin/main` and `origin/symphony/1908`; current `origin/main`
+  remains `d6957d5dcdd238fc53bf6fc58a58ef4c6d44f172`, which is included in
+  the local `symphony/1908` branch, but not in the published PR head
+  (`06e0a904ce757c972a8052e4b00c07a4abf8427c`).
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed.
+- PR #1257 is open, non-draft, targets `main`, and GraphQL reports
+  `mergeQueueEntry.state: AWAITING_CHECKS`, `position: 1`, and
+  `enqueuedAt: 2026-06-07T05:58:56Z`.
+- The merge queue ran merge-group branch
+  `gh-readonly-queue/main/pr-1257-d6957d5dcdd238fc53bf6fc58a58ef4c6d44f172`
+  at `031a74264694512c9d5a007d7d29c7174cabb0e5`; its changed paths are only
+  the #1908 report classifier, generated standalone report, issue file, and
+  focused regression test.
+- Merge-group `Test262 Sharded` failed only in `merge shard reports` job
+  `79940616124`: catastrophic guard stayed below threshold
+  (`41` wasm-change regressions vs `200` threshold), standalone guard was
+  clean (`improvements=0`, `wasm-change regressions=0`, `net=0`), and the
+  failing stale-baseline guard reported baseline main-sha
+  `ff02d201152dc8777d3e8151ed05dddd47d75ecf` is `118` commits behind
+  `origin/main` (max `50`).
 - This local issue copy remains `in-progress` because publishing the local
   metadata/current-main merge would require updating a branch that is already
   queued; the published issue file on `origin/symphony/1908` remains
