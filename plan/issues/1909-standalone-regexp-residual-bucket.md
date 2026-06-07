@@ -1,7 +1,7 @@
 ---
 id: 1909
 title: "standalone RegExp residual bucket after #1474/#682: split Phase 2d and native-engine gaps"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -152,8 +152,9 @@ Scoped validation was rerun in this worktree after the reassignment:
 - `pnpm exec prettier --check scripts/build-test262-report.mjs tests/issue-1909.test.ts tests/issue-1781.test.ts tests/issue-1910.test.ts plan/issues/1909-standalone-regexp-residual-bucket.md`
 - `node scripts/build-test262-report.mjs --input .test262-cache/test262-standalone-current.jsonl --output .test262-cache/test262-standalone-report-1909-validate.json --target standalone --include-proposals --max-unclassified-root-causes 0`
 
-All scoped checks passed. PR #1260 remains open and ready, with remote head
-`a3fe42c32`. GitHub has accepted it into the merge queue again:
+All scoped checks passed. At refresh time, PR #1260 remained open and ready,
+with remote head `a3fe42c32`. GitHub had accepted it into the merge queue
+again:
 
 - Queue ref:
   `refs/heads/gh-readonly-queue/main/pr-1260-f4dd784d4f1960a8c759b51f0cff23e8f4ed4f34`
@@ -161,7 +162,17 @@ All scoped checks passed. PR #1260 remains open and ready, with remote head
   `https://github.com/loopdive/js2/actions/runs/27081078870`
 - Current merge-group status at refresh time: `in_progress`
 
-The local branch still contains post-sync metadata commits that cannot be pushed
-while GitHub keeps the PR branch in the merge queue. This issue remains
-`in-progress` locally until either the queued PR merges or the branch is
-dequeued for another push.
+At that point the local branch still contained post-sync metadata commits that
+could not be pushed while GitHub kept the PR branch in the merge queue.
+
+## 2026-06-07 merged PR state
+
+PR #1260 merged via the GitHub merge queue at `2026-06-07T03:16:41Z`:
+
+- Merge commit: `d4492156fbb45e50954700f8c1f3ca6b6e3970ef`
+- PR URL: `https://github.com/loopdive/js2/pull/1260`
+- Final PR head included in the merge: `a3fe42c32`
+
+After the merge, this branch was merged with current `origin/main` so the local
+issue metadata is based on the merged PR state. The issue remains `in-review`
+with `pr: 1260`; the PR-status poller owns the eventual `done` transition.
