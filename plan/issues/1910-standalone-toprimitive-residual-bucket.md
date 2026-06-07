@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T12:36:59.799Z
+claimed_at: 2026-06-07T12:42:00.407Z
 pr: 1295
 ---
 
@@ -263,6 +263,16 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
     (passed).
   - GraphQL confirmed PR #1295 is open, ready, non-draft, passing checks, and
     already in the merge queue at position 13.
+- Current codex-developer publish verification on current `origin/main`
+  (`767e64754`):
+  - Confirmed `origin/main` is an ancestor of the local branch, while the
+    remote PR head remains `ef9dfbd79`.
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the touched script, test, and issue files
+    (passed).
+  - GraphQL confirmed PR #1295 is open, ready, non-draft, passing checks, and
+    already in the merge queue at position 12.
 
 ## Publish Blocker - 2026-06-07
 
@@ -300,3 +310,8 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
   with successful checks, the remote head remains `ef9dfbd79`, and the local
   branch has metadata-only refresh commits that cannot be pushed unless the PR
   is dequeued.
+- Current codex-developer publish verification confirms the same blocker on
+  `origin/main` (`767e64754`): PR #1295 is queued at position 12 with
+  successful checks, the remote head remains `ef9dfbd79`, and this local branch
+  has metadata-only issue refresh commits that cannot be pushed while GitHub
+  keeps the queued branch locked.
