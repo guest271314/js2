@@ -137,3 +137,7 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   (`3827daa96e6b7147a30474c85a065e8b35bafed2`) into `symphony/1908` before
   republishing PR #1257.
 - `pnpm exec vitest run tests/issue-1908.test.ts` passed after the merge.
+- After `origin/main` advanced again to
+  `ff02d201152dc8777d3e8151ed05dddd47d75ecf`, merged it into
+  `symphony/1908`; `pnpm exec vitest run tests/issue-1908.test.ts` still
+  passed.
