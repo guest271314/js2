@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T06:32:05.209Z
+claimed_at: 2026-06-07T06:38:05.418Z
 pr: 1257
 ---
 
@@ -283,6 +283,28 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   `enqueuedAt: 2026-06-07T05:58:56Z`; GitHub still reports
   `mergeStateStatus: BLOCKED` because the latest `merge shard reports` check
   failed.
+- This local issue copy remains `in-progress` because publishing the local
+  issue metadata would require updating a branch that is already queued; the
+  published issue file on `origin/symphony/1908` remains `in-review` with
+  `pr: 1257`.
+
+## Codex Attempt 26 Queue Confirmation — 2026-06-07
+
+- Fetched current `origin/main`
+  (`5b495ba4796f5a27fa4717b291f262e3f3232c88`) and confirmed it is still an
+  ancestor of both the local `symphony/1908` branch and the published
+  `origin/symphony/1908` PR head; no additional main merge was needed.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed.
+- PR #1257 is open, non-draft, targets `main`, and the published branch points
+  at `06e0a904ce757c972a8052e4b00c07a4abf8427c`.
+- `gh pr merge 1257 --auto --merge --match-head-commit
+  06e0a904ce757c972a8052e4b00c07a4abf8427c` reported that PR #1257 is already
+  queued to merge. GraphQL confirms `mergeQueueEntry.state: QUEUED`,
+  `position: 6`, and `enqueuedAt: 2026-06-07T05:58:56Z`.
+- GitHub still reports `mergeStateStatus: BLOCKED` because the latest
+  `merge shard reports` job failed only in the stale-baseline guard: the
+  baseline main-sha `ff02d201152dc8777d3e8151ed05dddd47d75ecf` is 114 commits
+  behind `origin/main` (max 50).
 - This local issue copy remains `in-progress` because publishing the local
   issue metadata would require updating a branch that is already queued; the
   published issue file on `origin/symphony/1908` remains `in-review` with
