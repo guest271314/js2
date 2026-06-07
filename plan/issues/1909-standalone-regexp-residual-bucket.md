@@ -900,3 +900,29 @@ fallback rows.
 `in-progress` locally because GitHub reports PR #1291 is already queued to
 merge; queued PR branches cannot be updated with the latest local metadata
 refresh.
+
+## 2026-06-07 Codex queued-branch push blocker
+
+The attempted push after the Codex queue handoff refresh was rejected because
+GitHub reports PR #1291 is queued:
+
+- Remote PR head: `6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+- Local attempted head: `9ac03e885db7fb58eb3ee2ae98754aa158daee5c`
+- PR URL: `https://github.com/loopdive/js2/pull/1291`
+- Push preflight: local pre-push typecheck, lint, format, and issue integrity
+  checks passed
+- Merge queue command:
+  `gh pr merge 1291 --repo loopdive/js2 --auto --match-head-commit 6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+  reported `Pull request #1291 is already queued to merge`
+- Queue state after the rejection: `QUEUED`, position `7`, estimated time to
+  merge `2818` seconds
+- Push result:
+
+```text
+GH006: Protected branch update failed ...
+A pull request for this branch has been added to a merge queue.
+Branches that are queued for merging cannot be updated.
+```
+
+Per the publish rule, this issue remains `in-progress` locally until PR #1291
+merges or is dequeued so the latest local metadata refresh can be pushed.
