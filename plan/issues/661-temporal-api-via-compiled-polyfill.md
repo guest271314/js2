@@ -1,9 +1,10 @@
 ---
 id: 661
 title: "Temporal API via compiled polyfill or minimal implementation"
-status: in-progress
+status: in-review
+pr: 1274
 created: 2026-03-20
-updated: 2026-04-28
+updated: 2026-06-07
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -20,7 +21,7 @@ claimed_at: 2026-06-07T05:03:52.808Z
 
 # #661 — Temporal API via compiled polyfill or minimal implementation
 
-## Status: in progress
+## Status: in review
 
 1,128 Temporal tests fail (currently skipped by safety filter). Rather than implementing the spec from scratch, try compiling the existing JS polyfill.
 
