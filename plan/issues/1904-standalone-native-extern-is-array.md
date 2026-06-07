@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:09:05.464Z
+claimed_at: 2026-06-07T07:16:37.209Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -128,3 +128,5 @@ Codex current queue verification on 2026-06-07: fetched `origin`, confirmed `ori
 Codex publish attempt on 2026-06-07: `git merge --ff-only origin/main` was already up to date, and `git push origin symphony/1904` ran pre-push typecheck, lint, prettier format check, and issue integrity successfully before GitHub rejected the update with GH006 because PR #1286 is already in the merge queue. Local issue-file commits remain unpublished, and issue status stays `in-progress` per the publish-failure rule until the queued PR merges or is dequeued.
 
 Codex current closeout on 2026-06-07: merged current `origin/main` into `symphony/1904` and reran scoped validation successfully: `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub GraphQL reports PR #1286 open, ready/non-draft, and queued at position 10 with remote head `8db25d962fb115fe1755278809a64388cc554af5`; issue status remains `in-progress` locally because queued branches reject updates until the PR merges or is dequeued.
+
+Codex latest queue check on 2026-06-07: reran scoped validation successfully: `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub GraphQL reports PR #1286 open, ready/non-draft, all visible checks successful, and queued at position 10 with remote head `8db25d962fb115fe1755278809a64388cc554af5`; issue status remains `in-progress` because the local branch has unpublished issue-file updates that cannot be pushed while the queued PR branch is locked.
