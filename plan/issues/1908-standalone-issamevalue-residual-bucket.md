@@ -115,3 +115,17 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   `origin/main` (`9c25e310c4b31caa4f502cfbceb975016fb50663`); the
   `issamevalue-invalid-wasm` bucket remained absent, classified stayed
   `30,733`, and unclassified stayed `0`.
+
+## Revalidation After Main Merge — 2026-06-07
+
+- Merged current `origin/main`
+  (`5bef49a5abaae3e0ae65d41cfda6844d06197d06`) into `symphony/1908` and
+  resolved the report-builder conflict by keeping both the #1908
+  `isSameValue` validator matcher and main's #1910 `ToPrimitive` matcher.
+- Rebuilt `public/benchmarks/results/test262-standalone-report.json` from
+  `.test262-cache/test262-standalone-current.jsonl` with
+  `--max-unclassified-root-causes 0`; `issamevalue-invalid-wasm` remains
+  absent (`0` rows), `root_cause_map.classified` is `30,733`, and
+  `root_cause_map.unclassified.count` is `0`.
+- `pnpm exec vitest run tests/issue-1908.test.ts tests/issue-1910.test.ts`
+  passed.
