@@ -268,3 +268,7 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
   #1295 is already queued, the remote head is still `ef9dfbd79`, and the local
   branch is ahead of `origin/symphony/1910` with metadata-only issue refresh
   commits that cannot be published while the queued branch is locked.
+- Push attempt after local commit `e2f6a9bf0` failed with GitHub protected
+  branch error `GH006`: PR #1295 has been added to a merge queue, and queued
+  branches cannot be updated unless the associated PR is dequeued. The issue
+  remains `in-progress` per the failed-publish rule.
