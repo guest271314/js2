@@ -119,6 +119,11 @@ remaining semantic failures.
   confirmed `origin/main` (`f4dd784d4`) is still an ancestor of the branch,
   reran scoped validation, and found PR #1262 open, ready, and mergeable with
   GitHub checks still pending.
+- Publish follow-up 7: PR #1262 had already entered the merge queue, so the
+  branch first rejected the final handoff push. Dequeued the PR, merged the new
+  `origin/main` (`d4492156f`, #1260), kept the #1903 issue record on this
+  implementation branch, and resolved the report/script conflicts by combining
+  main's RegExp bucket split with the #1903 object-destructuring classifier.
 
 ## Validation
 
@@ -182,3 +187,6 @@ remaining semantic failures.
   `language/expressions/object/dstr` under the existing object-property bucket.
 - `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
   "#1903|dynamic property add/read"` (final handoff 5 on 2026-06-07)
+- `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
+  "#1903|dynamic property add/read"` (after merging `origin/main` at
+  `d4492156f`)
