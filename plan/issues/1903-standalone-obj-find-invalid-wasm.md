@@ -164,9 +164,8 @@ remaining semantic failures.
 - Final handoff 13 (2026-06-07): fetched current refs, confirmed
   `origin/main` (`5b495ba47`) is still an ancestor of `symphony/1903`, reran
   scoped validation, and confirmed PR #1262 is open and non-draft. After
-  publishing the handoff commit, immediate merge-queue entry was blocked by one
-  expected required check on the new head, so auto-merge was enabled for PR
-  #1262.
+  publishing the handoff commits, merge-queue entry is enabled for PR #1262 on
+  the pushed head.
 
 ## Validation
 
