@@ -17,7 +17,7 @@ related: [1472, 1629, 1631, 1888]
 test262_bucket: object-property-semantics
 test262_count: 748
 claimed_by: codex-developer
-claimed_at: 2026-06-07T06:48:06Z
+claimed_at: 2026-06-07T06:55:04.920Z
 pr: 1264
 ---
 # #1906 — Standalone native `Object.defineProperties`
@@ -74,7 +74,8 @@ caught by the broad dynamic object/property refusal.
 
 Revalidated by `codex-developer` on branch `symphony/1906` after fetching
 current `origin/main` at `5b495ba47`; checks above pass locally on
-2026-06-07.
+2026-06-07. The focused #1906 suite, the existing #1629 defineProperty suites,
+and `tsc --noEmit` all passed in this worktree.
 
 PR #1264 is open against `main`; the local issue status is back to
 `in-progress` until the publish/CI blocker below is cleared.
@@ -87,9 +88,12 @@ merge queue and queued branches cannot be updated. The queued remote head is
 `0ea14d5a0`; the local branch has issue-file-only bookkeeping commits beyond
 that queued head.
 
-GitHub has PR #1264 queued at position 12, but the PR check rollup is failing
+GitHub reports PR #1264 is already queued to merge (`gh pr merge 1264 --auto
+--squash` returns "already queued to merge"), but the PR check rollup is failing
 because `Test262 Sharded / merge shard reports` hit the stale-baseline guard:
 the `js2wasm-baselines` JSONL baseline main SHA
 `ff02d201152dc8777d3e8151ed05dddd47d75ecf` is 114 commits behind
-`origin/main`, exceeding the max 50 commit threshold. This is an infrastructure
-blocker tracked by #1668, not a scoped #1906 local validation failure.
+`origin/main`, exceeding the max 50 commit threshold. The standalone guard
+itself reports `improvements=24`, `wasm-change regressions=0`, `net=24`. This
+is an infrastructure blocker tracked by #1668, not a scoped #1906 local
+validation failure.
