@@ -9,17 +9,25 @@
 //     clear dominance-violation error;
 //   - single-block functions (the common Phase-1 shape) are unaffected.
 import { describe, expect, it } from "vitest";
+import { formatIrPathFallbackDiagnostic } from "../src/codegen/index.js";
+import { BytecodeEmitter, type BytecodeSink } from "../src/ir/backend/bytecode-emitter.js";
+import { LinearEmitter } from "../src/ir/backend/linear-emitter.js";
 import {
   asBlockId,
   asValueId,
   irVal,
+  lowerIrFunctionBody,
   verifyIrFunction,
+  verifyIrBackendLegality,
   type IrBlock,
   type IrFunction,
   type IrInstr,
+  type IrLowerResolver,
+  type IrType,
 } from "../src/ir/index.js";
 
 const I32 = irVal({ kind: "i32" });
+const STRING: IrType = { kind: "string" };
 
 function constI32(id: number, value: number): IrInstr {
   return { kind: "const", value: { kind: "i32", value }, result: asValueId(id), resultType: I32 };
@@ -32,6 +40,15 @@ function block(id: number, instrs: IrInstr[], terminator: IrBlock["terminator"],
     blockArgTypes: blockArgs.map(() => I32),
     instrs,
     terminator,
+  };
+}
+
+function minimalResolver(): IrLowerResolver {
+  return {
+    resolveFunc: () => 0,
+    resolveGlobal: () => 0,
+    resolveType: () => 0,
+    internFuncType: () => 0,
   };
 }
 
@@ -166,5 +183,80 @@ describe("#1850 — IR verifier cross-block dominance", () => {
       valueCount: 8,
     };
     expect(verifyIrFunction(fn)).toEqual([]);
+  });
+});
+
+describe("#1850 — per-backend IR legality and hard verifier fallback", () => {
+  it("accepts ordinary scalar IR for the WasmGC backend", () => {
+    const v1 = asValueId(1);
+    const fn: IrFunction = {
+      name: "wasmgcLegal",
+      params: [],
+      resultTypes: [I32],
+      blocks: [block(0, [constI32(1, 4)], { kind: "return", values: [v1] })],
+      exported: false,
+      valueCount: 2,
+    };
+
+    expect(verifyIrBackendLegality(fn, "wasmgc")).toEqual([]);
+  });
+
+  it("rejects string IR before lowering through the bytecode backend", () => {
+    const v1 = asValueId(1);
+    const fn: IrFunction = {
+      name: "bytecodeString",
+      params: [],
+      resultTypes: [STRING],
+      blocks: [
+        block(0, [{ kind: "string.const", value: "x", result: v1, resultType: STRING }], {
+          kind: "return",
+          values: [v1],
+        }),
+      ],
+      exported: false,
+      valueCount: 2,
+    };
+
+    const errors = verifyIrBackendLegality(fn, "bytecode");
+    expect(errors.some((e) => /instr string\.const/.test(e.message))).toBe(true);
+    expect(() => lowerIrFunctionBody<BytecodeSink>(fn, minimalResolver(), new BytecodeEmitter())).toThrow(
+      /bytecode backend legality failed.*string\.const/,
+    );
+  });
+
+  it("rejects non-vec whole-function lowering through the linear emitter boundary", () => {
+    const v1 = asValueId(1);
+    const fn: IrFunction = {
+      name: "linearConst",
+      params: [],
+      resultTypes: [I32],
+      blocks: [block(0, [constI32(1, 1)], { kind: "return", values: [v1] })],
+      exported: false,
+      valueCount: 2,
+    };
+
+    const errors = verifyIrBackendLegality(fn, "linear");
+    expect(errors.some((e) => /linear backend does not support IR instruction 'const'/.test(e.message))).toBe(true);
+    expect(() => lowerIrFunctionBody(fn, minimalResolver(), new LinearEmitter())).toThrow(
+      /linear backend legality failed.*const/,
+    );
+  });
+
+  it("promotes verifier fallback diagnostics to hard Codegen errors in test builds only", () => {
+    const verifyDiag = formatIrPathFallbackDiagnostic({
+      func: "claimed",
+      message: "post-hygiene verify: duplicate SSA def",
+      kind: "verify",
+    });
+    expect(verifyDiag.severity).toBe("error");
+    expect(verifyDiag.message).toMatch(/^Codegen error: IR path failed for claimed:/);
+
+    const buildDiag = formatIrPathFallbackDiagnostic({
+      func: "claimed",
+      message: "ir/from-ast: feature not in slice",
+      kind: "build",
+    });
+    expect(buildDiag.severity).toBe("warning");
+    expect(buildDiag.message).toMatch(/^IR path failed for claimed:/);
   });
 });
