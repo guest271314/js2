@@ -1,7 +1,7 @@
 ---
 id: 1712
 title: "acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn"
-status: in-progress
+status: in-review
 created: 2026-05-29
 updated: 2026-06-07
 priority: high
@@ -17,6 +17,7 @@ es_edition: multi
 related: [1690, 1690b, 1584, 1058]
 claimed_by: codex-developer
 claimed_at: 2026-06-07T05:10:23.845Z
+pr: 1293
 ---
 
 # #1712 — Acceptance milestone: compiled acorn parses a representative .js with a structurally-equal AST
