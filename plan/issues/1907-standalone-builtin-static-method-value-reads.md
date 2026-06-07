@@ -2,7 +2,7 @@
 id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
 status: in-review
-pr: 1287
+pr: 1292
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -146,3 +146,5 @@ standalone refusal.
   merged into `main`, with all GitHub checks green on remote head `ab1d8c19d`.
   The same scoped validation passed locally again, and no additional
   implementation changes are needed for #1907.
+- Follow-up handoff PR #1292 was opened ready/non-draft against `main` to
+  publish the final #1907 redispatch findings after PR #1287 merged.
