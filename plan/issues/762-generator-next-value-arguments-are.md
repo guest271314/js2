@@ -1,9 +1,9 @@
 ---
 id: 762
 title: "- Generator .next(value) arguments are silently ignored"
-status: ready
+status: blocked
 created: 2026-03-22
-updated: 2026-06-06
+updated: 2026-04-28
 priority: medium
 feasibility: easy
 goal: async-model
