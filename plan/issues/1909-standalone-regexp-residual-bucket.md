@@ -1,7 +1,7 @@
 ---
 id: 1909
 title: "standalone RegExp residual bucket after #1474/#682: split Phase 2d and native-engine gaps"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -462,3 +462,22 @@ The branch is based on current `origin/main`, and its net diff versus
 `origin/main` is limited to this issue-state refresh. This issue is moved back
 to `in-review` with `pr: 1289`; the PR-status poller owns the eventual `done`
 transition after merge.
+
+## 2026-06-07 queue push blocker after sixth refresh
+
+The attempted push after merging current `origin/main` was rejected because
+GitHub reported PR #1289 as queued:
+
+- Remote PR head: `19540cd895d2e9a2331cff3a52b976657f2c85a0`
+- Local attempted head: `2d89289ce036cb9d7bcef89ba002b679e2228e8c`
+- PR URL: `https://github.com/loopdive/js2/pull/1289`
+- Push result:
+
+```text
+GH006: Protected branch update failed ...
+A pull request for this branch has been added to a merge queue.
+Branches that are queued for merging cannot be updated.
+```
+
+Per the publish rule, this issue is left `in-progress` locally until PR #1289
+merges or is dequeued so the latest metadata refresh can be pushed.
