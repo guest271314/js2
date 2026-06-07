@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T02:30:23.754Z
+claimed_at: 2026-06-07T02:36:24.563Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -84,3 +84,5 @@ Codex post-merge rerun on 2026-06-07: merged the latest `origin/main` into `symp
 Codex final check on 2026-06-07: merged current `origin/main` into `symphony/1904`, reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully. GitHub reports PR #1259 is already merged, so there is no remaining merge-queue action.
 
 Codex verification on 2026-06-07: after fetching current `origin/main`, confirmed it is an ancestor of `symphony/1904`; `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub reports PR #1259 is merged; no merge-queue or auto-merge action remains.
+
+Codex dispatch check on 2026-06-07: revalidated the already-merged implementation from PR #1259 on `symphony/1904`; `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub reports PR #1259 is merged, so no merge-queue or auto-merge action remains.
