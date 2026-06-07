@@ -17,7 +17,7 @@ related: [1472, 1466, 1629, 1888]
 test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
-claimed_at: 2026-06-07T02:44:53.840Z
+claimed_at: 2026-06-07T02:58:54.084Z
 pr: 1261
 ---
 # #1905 — Standalone native Reflect object subset
@@ -92,3 +92,5 @@ machinery and are out of scope here.
   `pnpm test tests/issue-1905.test.ts`,
   `pnpm test tests/issue-1472.test.ts -t "unsupported Reflect"`, and
   `pnpm exec prettier --check src/codegen/object-runtime.ts src/codegen/expressions/calls.ts tests/issue-1472.test.ts tests/issue-1905.test.ts`.
+- Final PR check: GitHub reports PR `#1261` as merged, so there is no
+  remaining merge-queue action for this issue.
