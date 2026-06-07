@@ -94,3 +94,16 @@ Validation:
 - `node scripts/check-issue-ids.mjs`
 - `pnpm exec prettier --check scripts/build-test262-report.mjs tests/issue-1909.test.ts tests/issue-1781.test.ts`
 - `node scripts/build-test262-report.mjs --input .test262-cache/test262-standalone-current.jsonl --output .test262-cache/test262-standalone-report-1909-validate.json --target standalone --include-proposals --max-unclassified-root-causes 0`
+
+Final publish check after merging `origin/main` on 2026-06-07:
+
+- `pnpm test tests/issue-1909.test.ts tests/issue-1781.test.ts tests/issue-1910.test.ts`
+- `node --check scripts/build-test262-report.mjs`
+- `node scripts/check-issue-ids.mjs`
+- `pnpm exec prettier --check scripts/build-test262-report.mjs tests/issue-1909.test.ts tests/issue-1781.test.ts tests/issue-1910.test.ts`
+- `node scripts/build-test262-report.mjs --input .test262-cache/test262-standalone-current.jsonl --output .test262-cache/test262-standalone-report-1909-validate.json --target standalone --include-proposals --max-unclassified-root-causes 0`
+
+The final rebuilt report keeps `30,733 / 30,733` standalone non-pass/non-skip
+rows classified with `0` unclassified. The RegExp residual remains split into
+`833` Phase 2d rows, `104` Phase 2b rows, `452` string-protocol rows, `546`
+native-engine rows, and `62` fallback rows.
