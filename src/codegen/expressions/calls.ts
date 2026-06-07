@@ -120,6 +120,12 @@ import {
   stringConstantExternrefInstrs,
 } from "../native-strings.js";
 import { emitArrayBufferSlice, emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
+import {
+  getLinearU8Buffer,
+  getLinearU8ParamIndicesForCall,
+  sourceParamCountFromExpanded,
+  wasmParamIndexForSourceParam,
+} from "../linear-uint8-signatures.js";
 
 /**
  * Known built-in global class/object names that compile to ref.null.extern
@@ -8880,8 +8886,25 @@ function compileCallExpression(
 
     // Check if any argument uses spread syntax
     const hasSpreadArg = expr.arguments.some((a) => ts.isSpreadElement(a));
+    const linearParamsForCall = getLinearU8ParamIndicesForCall(ctx, expr);
+    const hasLinearParamsForCall = !!linearParamsForCall && linearParamsForCall.size > 0;
 
-    if (restInfo && !hasSpreadArg) {
+    if (hasLinearParamsForCall && hasSpreadArg) {
+      reportError(ctx, expr, "Cannot spread arguments into a linear Uint8Array helper call (#1886)");
+      const paramTypes = getFuncParamTypes(ctx, funcIdx);
+      for (const arg of expr.arguments) {
+        const argExpr = ts.isSpreadElement(arg) ? arg.expression : arg;
+        const argType = compileExpression(ctx, fctx, argExpr);
+        if (argType !== null) {
+          fctx.body.push({ op: "drop" });
+        }
+      }
+      if (paramTypes) {
+        for (const paramType of paramTypes) {
+          pushDefaultValue(fctx, paramType, ctx);
+        }
+      }
+    } else if (restInfo && !hasSpreadArg && !hasLinearParamsForCall) {
       // Calling a rest-param function: pack trailing args into a GC array
       const paramTypes = getFuncParamTypes(ctx, funcIdx);
       // Compile non-rest arguments
@@ -8923,11 +8946,39 @@ function compileCallExpression(
         ? nestedCaptures.length + nestedCaptures.filter((c) => c.hasTdzFlag).length
         : 0;
       // User-visible param count excludes capture params (which are prepended internally)
-      const paramCount = paramTypes ? paramTypes.length - captureCount : expr.arguments.length;
+      const paramCount =
+        hasLinearParamsForCall && paramTypes
+          ? sourceParamCountFromExpanded(paramTypes.length, linearParamsForCall, captureCount)
+          : paramTypes
+            ? paramTypes.length - captureCount
+            : expr.arguments.length;
       const calleeReadsArgsDirect = ctx.funcUsesArguments.has(funcName);
+      let pushedUserWasmArgCount = 0;
       for (let i = 0; i < Math.min(expr.arguments.length, paramCount); i++) {
-        // Offset into paramTypes by captureCount since captures are the leading params
-        compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[i + captureCount]);
+        if (hasLinearParamsForCall && linearParamsForCall.has(i)) {
+          const arg = expr.arguments[i]!;
+          const buf = getLinearU8Buffer(fctx, arg);
+          if (!buf) {
+            reportError(
+              ctx,
+              arg,
+              "Codegen error: linear Uint8Array helper argument is not backed by linear memory (#1886)",
+            );
+            fctx.body.push({ op: "i32.const", value: 0 });
+            fctx.body.push({ op: "i32.const", value: 0 });
+          } else {
+            fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx });
+            fctx.body.push({ op: "local.get", index: buf.lenLocalIdx });
+          }
+          pushedUserWasmArgCount += 2;
+          continue;
+        }
+        const wasmParamIndex =
+          hasLinearParamsForCall && paramTypes
+            ? wasmParamIndexForSourceParam(i, linearParamsForCall, captureCount)
+            : i + captureCount;
+        compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[wasmParamIndex]);
+        pushedUserWasmArgCount++;
       }
       if (expr.arguments.length > paramCount) {
         if (calleeReadsArgsDirect) {
@@ -8959,7 +9010,9 @@ function compileCallExpression(
         // Count how many args were actually pushed: provided args (capped at paramCount)
         // plus optional param defaults already pushed
         // plus capture params already pushed by nestedCaptures loop above
-        const providedCount = Math.min(expr.arguments.length, paramCount) + captureCount;
+        const providedCount =
+          (hasLinearParamsForCall ? pushedUserWasmArgCount : Math.min(expr.arguments.length, paramCount)) +
+          captureCount;
         const optFilledCount = optInfo ? optInfo.filter((o) => o.index >= expr.arguments.length).length : 0;
         const totalPushed = providedCount + optFilledCount;
         for (let i = totalPushed; i < paramTypes.length; i++) {
