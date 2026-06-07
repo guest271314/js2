@@ -1,7 +1,7 @@
 ---
 id: 1908
 title: "standalone: re-split and fix residual isSameValue bucket after #1776/#1807"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T10:02:46.318Z
+claimed_at: 2026-06-07T10:55:30.340Z
 pr: 1257
 ---
 
@@ -498,3 +498,25 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
 - `pnpm exec vitest run tests/issue-1908.test.ts` passed after the merge.
 - PR #1257 remains open, non-draft, targets `main`, and stays recorded in
   frontmatter while #1908 remains `in-review` for the PR-status poller.
+
+## Codex Attempt 36 Queue Blocker — 2026-06-07
+
+- Fetched `origin/main` and `origin/symphony/1908`; current `origin/main`
+  (`28c668ab4e636011d08ac4e518acc4353097f5f1`) is already an ancestor of
+  `symphony/1908`, so no additional main merge was needed before publishing.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed.
+- PR #1257 is open, non-draft, targets `main`, and remains recorded in
+  frontmatter.
+- GitHub accepted PR #1257 into the merge queue and ran merge-group branch
+  `gh-readonly-queue/main/pr-1257-28c668ab4e636011d08ac4e518acc4353097f5f1`
+  at `72fe08dd20fae54f69d46dcf8e0eefa9240b4d54`, but the final
+  `merge shard reports` job failed and GitHub removed the PR from the queue.
+- The merge-group failure was only the stale-baseline guard: catastrophic guard
+  stayed below threshold (`62` wasm-change regressions vs `200` threshold),
+  the standalone guard was clean (`improvements=0`, `wasm-change
+  regressions=0`, `net=0`), and `js2wasm-baselines` is still generated from
+  `ff02d201152dc8777d3e8151ed05dddd47d75ecf`, which CI reports as `202`
+  commits behind current `origin/main` (max `50`).
+- This local issue copy remains `in-progress` per the publish/enqueue blocker
+  rule until the baseline promotion is refreshed and PR #1257 can be queued
+  successfully again.
