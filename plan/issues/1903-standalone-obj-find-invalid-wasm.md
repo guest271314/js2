@@ -71,13 +71,22 @@ remaining semantic failures.
 - Added `tests/issue-1903.test.ts`, a standalone dynamic computed-property
   lookup with native strings that validates, instantiates with `{}`, and asserts
   no `env::__extern_*`, `env::__object_*`, or `env::__new_plain_object` imports.
+- Publish follow-up: the first ready PR run reached a stale standalone baseline
+  guard after `#1905` landed on `main`. Merged `origin/main` into this branch
+  before republishing so `#1262` is evaluated against the current main payload.
 
 ## Validation
 
-- `npx vitest run tests/issue-1903.test.ts`
+- `npx vitest run tests/issue-1903.test.ts` (before and after merging
+  `origin/main`)
 - `npx vitest run tests/issue-1472.test.ts -t "dynamic property add/read"`
-- `npx vitest run tests/issue-1807.test.ts`
-- `npx vitest run tests/issue-1781.test.ts`
+  (before and after merging `origin/main`)
+- `npx vitest run tests/issue-1807.test.ts` (before and after merging
+  `origin/main`)
+- `npx vitest run tests/issue-1781.test.ts` (before and after merging
+  `origin/main`)
+- `npx vitest run tests/issue-1905.test.ts` (post-merge integration check for
+  the current-main payload)
 - Rebuilt the PR #1262 `test262-standalone-results-merged.jsonl` artifact with
   `--max-unclassified-root-causes 0` after classifying
   `language/expressions/object/dstr` under the existing object-property bucket.
