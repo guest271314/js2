@@ -1,7 +1,7 @@
 ---
 id: 1525b
 title: "ToPrimitive residuals: object-method trampoline invalid Wasm + §7.1.1.1 step-6 TypeError"
-status: in-progress
+status: in-review
 created: 2026-05-27
 updated: 2026-06-06
 priority: medium
@@ -15,7 +15,8 @@ sprint: 60
 related: [1525, 1602, 1669, 1130, 983, 1253]
 test262_fail: 142
 claimed_by: codex-developer
-claimed_at: 2026-06-06T18:07:10.515Z
+claimed_at: 2026-06-06T18:07:15.311Z
+pr: 1254
 ---
 # #1525b — ToPrimitive residuals carved from #1525
 
@@ -91,3 +92,25 @@ The current artifact shows this is no longer just the original `new Object()`
 null-prototype bug; that was fixed in #1525. The remaining standalone root
 cause still points at dynamic object method dispatch, user `toString` /
 `valueOf` trampoline paths, and native number/string bridge behavior.
+
+## Implementation Summary - 2026-06-06
+
+Current `main` already contains the #1525b implementation from PR #871
+(`fix(#1525b): ToPrimitive residuals — trampoline shift + ref→f64 step-6`).
+This issue file had been reset to `ready`, so this branch reconciles the
+stale metadata and records the final validation status.
+
+What landed in PR #871:
+- `pendingMethodTrampolines` side-channel indices are shifted with late import
+  insertion, with a defensive `finalizeMethodTrampolines` guard for missed
+  shifts.
+- Ref-returning `valueOf` paths now route through the existing
+  `emitToPrimitiveHostCall` helper so OrdinaryToPrimitive can fall through to
+  `toString` and throw TypeError when both methods return objects, matching
+  ECMA-262 §7.1.1.1.
+- The skipped #1525 cases were unskipped, and focused coverage was added in
+  `tests/issue-1525b.test.ts`.
+
+Validation on this branch:
+- `pnpm test tests/issue-1525b.test.ts tests/issue-1525.test.ts` — 15 tests
+  passed.

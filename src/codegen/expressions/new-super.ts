@@ -65,6 +65,32 @@ function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
   return undefined;
 }
 
+function valTypeMatches(a: ValType, b: ValType): boolean {
+  if (a.kind !== b.kind) return false;
+  if ((a.kind === "ref" || a.kind === "ref_null") && (b.kind === "ref" || b.kind === "ref_null")) {
+    return a.typeIdx === b.typeIdx;
+  }
+  return true;
+}
+
+function compileCtorArgument(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression, expected?: ValType): void {
+  const result = compileExpression(ctx, fctx, arg, expected);
+  if (result === null) {
+    if (expected) pushDefaultValue(fctx, expected, ctx);
+    return;
+  }
+  if (expected && !valTypeMatches(result, expected)) {
+    coerceType(ctx, fctx, result, expected);
+  }
+}
+
+function evaluateCtorExtraArgument(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
+  const result = compileExpression(ctx, fctx, arg);
+  if (result !== null) {
+    fctx.body.push({ op: "drop" });
+  }
+}
+
 /**
  * (#1732 S1) Decide whether a `new <id>` callee identifier resolves to a value
  * that is PROVABLY not a constructor — so the runtime `__construct` brand check
@@ -2928,7 +2954,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const flatCtorArgs = flattenCallArgs(args);
       if (flatCtorArgs) {
         for (let i = 0; i < flatCtorArgs.length && i < paramTypes.length; i++) {
-          compileExpression(ctx, fctx, flatCtorArgs[i]!, paramTypes[i]);
+          compileCtorArgument(ctx, fctx, flatCtorArgs[i]!, paramTypes[i]);
+        }
+        for (let i = paramTypes.length; i < flatCtorArgs.length; i++) {
+          evaluateCtorExtraArgument(ctx, fctx, flatCtorArgs[i]!);
         }
         // Pad missing args
         for (let i = flatCtorArgs.length; i < paramTypes.length; i++) {
@@ -2942,7 +2971,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Calling a rest-param constructor: pack trailing args into a GC array
       for (let i = 0; i < ctorRestInfo.restIndex; i++) {
         if (i < args.length) {
-          compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
+          compileCtorArgument(ctx, fctx, args[i]!, paramTypes?.[i]);
         } else {
           pushDefaultValue(fctx, paramTypes?.[i] ?? { kind: "f64" }, ctx);
         }
@@ -2951,7 +2980,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const restArgCount = Math.max(0, args.length - ctorRestInfo.restIndex);
       fctx.body.push({ op: "i32.const", value: restArgCount });
       for (let i = ctorRestInfo.restIndex; i < args.length; i++) {
-        compileExpression(ctx, fctx, args[i]!, ctorRestInfo.elemType);
+        compileCtorArgument(ctx, fctx, args[i]!, ctorRestInfo.elemType);
       }
       fctx.body.push({
         op: "array.new_fixed",
@@ -2960,8 +2989,12 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       });
       fctx.body.push({ op: "struct.new", typeIdx: ctorRestInfo.vecTypeIdx });
     } else {
-      for (let i = 0; i < args.length; i++) {
-        compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
+      const positionalParamCount = paramTypes?.length ?? args.length;
+      for (let i = 0; i < args.length && i < positionalParamCount; i++) {
+        compileCtorArgument(ctx, fctx, args[i]!, paramTypes?.[i]);
+      }
+      for (let i = positionalParamCount; i < args.length; i++) {
+        evaluateCtorExtraArgument(ctx, fctx, args[i]!);
       }
       // Pad missing constructor arguments with defaults (arity mismatch)
       if (paramTypes) {
