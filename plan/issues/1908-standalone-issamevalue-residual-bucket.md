@@ -1,7 +1,7 @@
 ---
 id: 1908
 title: "standalone: re-split and fix residual isSameValue bucket after #1776/#1807"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T02:57:54.055Z
+claimed_at: 2026-06-07T03:10:24.359Z
 pr: 1257
 ---
 
@@ -178,3 +178,19 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
 - Per the publish-failure workflow, this local issue copy is left
   `in-progress`; the published issue file on `origin/symphony/1908` remains
   `in-review` with `pr: 1257`.
+
+## Codex Requeue Prep — 2026-06-07
+
+- PR #1257 was removed from the merge queue after `origin/main` advanced to
+  `d4492156fbb45e50954700f8c1f3ca6b6e3970ef` via PR #1260; GitHub now reports
+  the PR as conflicting (`mergeStateStatus: DIRTY`).
+- The failing `check for test262 regressions` job on PR #1257 reports a broad
+  48-test pass-to-other drift cluster dominated by `oob`, while the PR diff
+  still only touches report classification, generated report data, this issue
+  file, and `tests/issue-1908.test.ts`.
+- Cross-checks against unrelated PR #1260 / merge-group Test262 runs showed the
+  same broad `oob` regression-gate pattern, consistent with baseline/run drift
+  rather than a #1908 codegen regression.
+- Next step is merging current `origin/main`, preserving #1908's narrowed
+  `isSameValue` validator classifier alongside main's RegExp bucket split, then
+  rerunning the focused regression and requeueing PR #1257.
