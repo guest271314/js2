@@ -1,7 +1,7 @@
 ---
 id: 1908
 title: "standalone: re-split and fix residual isSameValue bucket after #1776/#1807"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -130,3 +130,10 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   `root_cause_map.unclassified.count` is `0`.
 - `pnpm exec vitest run tests/issue-1908.test.ts tests/issue-1910.test.ts`
   passed.
+
+## Final Revalidation — 2026-06-07
+
+- Merged current `origin/main`
+  (`3827daa96e6b7147a30474c85a065e8b35bafed2`) into `symphony/1908` before
+  republishing PR #1257.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed after the merge.
