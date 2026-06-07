@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T11:43:59.332Z
+claimed_at: 2026-06-07T11:50:59.253Z
 pr: 1257
 ---
 
@@ -566,3 +566,17 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
 - Frontmatter status remains `in-review` for the PR-status poller; the
   remaining blocker is external baseline promotion rather than #1908's
   classifier/test changes.
+
+## Codex Attempt 40 Queue Confirmation — 2026-06-07
+
+- Fetched `origin/main` and `origin/symphony/1908`; current `origin/main`
+  (`28c668ab4e636011d08ac4e518acc4353097f5f1`) is still an ancestor of both
+  local `symphony/1908` and the published PR head.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed.
+- PR #1257 is open, non-draft, targets `main`, and the published branch points
+  at `dcc4280453590fc196804dd1bf1fd9cc1d277ee4`.
+- GraphQL reports `mergeStateStatus: UNSTABLE`, `mergeable: MERGEABLE`, and
+  `mergeQueueEntry.state: QUEUED`, `position: 18`, `enqueuedAt:
+  2026-06-07T11:50:57Z`; visible Test262 checks are still running on the
+  queued head.
+- Frontmatter status remains `in-review` for the PR-status poller.
