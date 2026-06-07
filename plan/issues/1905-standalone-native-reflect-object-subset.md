@@ -1,7 +1,7 @@
 ---
 id: 1905
 title: "standalone: native Reflect.get/set/has/deleteProperty over $Object"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -18,7 +18,7 @@ related: [1472, 1466, 1629, 1888]
 test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:41:35.010Z
+claimed_at: 2026-06-07T10:11:35.413Z
 pr: 1284
 ---
 
@@ -153,3 +153,6 @@ machinery and are out of scope here.
 - Final Codex publish pass: dequeued PR `#1284`, pushed the refreshed issue
   state to `symphony/1905`, and re-enabled GitHub auto-merge for the refreshed
   head while required checks are pending.
+- Attempt 30: fetched current `origin/main`, fast-forwarded `symphony/1905` to
+  current main (`28c668ab4`), reran the scoped validation above successfully,
+  and confirmed the previously tracked ready PR `#1284` is already merged.
