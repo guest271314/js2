@@ -1,7 +1,7 @@
 ---
 id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
-status: in-review
+status: in-progress
 pr: 1263
 sprint: 61
 created: 2026-06-07
@@ -90,3 +90,6 @@ standalone refusal.
 - Scoped validation passed again after the merge: the focused #1907/#1888 tests,
   typecheck, #1678 Array.isArray regression tests, the targeted #1472
   Reflect.ownKeys standalone route, and formatting.
+- Publishing the local sync commits is blocked because GitHub already has PR
+  #1263 in the merge queue; queued branches cannot be updated without
+  dequeuing the PR.
