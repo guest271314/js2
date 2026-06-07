@@ -2,6 +2,7 @@
 import { ts, forEachChild } from "../ts-api.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
+import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
   isBigIntType,
@@ -951,13 +952,10 @@ export function generateModule(
       // baked `call $__lin_u8_alloc` index correct. Splitting type (early) from
       // function (late) is what resolves the dual constraint that defeated both
       // the all-early and all-late single-shot emission points.
-      // Reserve the allocator's func type exactly when a Slice-B-eligible
-      // (intraprocedural, never param-threaded) buffer exists — that is the
-      // only case where `ensureLinearU8AllocHelper` actually emits the helper
-      // and bakes a `call $__lin_u8_alloc`. Gating on `localOnlyBindings`
-      // rather than `safeBindings` avoids reserving a dead func type for a
-      // source whose only safe buffers are param-threaded (Slice-C targets).
-      if (ctx.linearUint8.localOnlyBindings.size > 0) {
+      // Reserve the allocator's func type whenever the #1886 analysis found a
+      // safe binding. Slice C can back locals that are threaded through helper
+      // params, so `localOnlyBindings` is too narrow here.
+      if (ctx.linearUint8.safeBindings.size > 0) {
         reserveLinearU8AllocType(ctx);
       }
     }
@@ -1087,7 +1085,7 @@ export function generateModule(
     // native-string type-table prefix is unperturbed. Any import added DURING
     // the compilation phase that follows goes through the proper late-import
     // shift path, which moves both `funcMap` and the baked `call` indices.
-    if (ctx.wasi && ctx.linearUint8 && ctx.linearUint8.localOnlyBindings.size > 0) {
+    if (ctx.wasi && ctx.linearUint8 && ctx.linearUint8.safeBindings.size > 0) {
       ensureLinearU8AllocHelper(ctx);
     }
 
@@ -11632,10 +11630,9 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
         decl.initializer.expression.text === "Uint8Array"
       ) {
         const sym = ctx.checker.getSymbolAtLocation(decl.name);
-        // Consult `localOnlyBindings` (the Slice-B intraprocedural subset), not
-        // `safeBindings` — only those bindings are actually linear-backed by
-        // tryEmitLinearU8New, so only those must have their GC hoist skipped.
-        if (sym && ctx.linearUint8.localOnlyBindings.has(sym)) continue;
+        if (sym && ctx.linearUint8.safeBindings.has(sym) && isLinearU8RepresentableNew(ctx, decl.initializer)) {
+          continue;
+        }
       }
       if (ts.isIdentifier(decl.name)) {
         const name = decl.name.text;
