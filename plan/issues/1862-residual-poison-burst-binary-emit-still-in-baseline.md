@@ -127,6 +127,9 @@ Validation:
 Fresh full-baseline confirmation is intentionally left to CI/main promotion per
 the scoped-validation rule; local full test262 was not run.
 
+Attempt 30 re-ran the same scoped validation after merging current `origin/main`
+on 2026-06-07; all commands passed.
+
 ## Notes
 
 Surfaced re-running `/harvest-errors` after pulling 346 commits of sprint-58/59
