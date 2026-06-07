@@ -194,6 +194,72 @@ export function flatStringType(ctx: CodegenContext): ValType {
 }
 
 /**
+ * #1677/#1903: reconcile native-string helper function indices at import
+ * finalize boundaries.
+ *
+ * The native-string runtime helpers (`__str_flatten` & co.) are emitted as
+ * DEFINED functions mid-finalize, recording `ctx.nativeStrHelperImportBase` =
+ * the import count at that instant. Finalize can then continue to add imports
+ * via raw `addImport`, which shifts every defined function's true index without
+ * updating helper bodies or maps.
+ *
+ * This applies the single import delta to every already-emitted defined
+ * function whose baked `call`/`ref.func` index is at or above that base, leaves
+ * calls to pre-helper imports untouched, and rebases the snapshot so later
+ * helper groups can be registered under a consistent index base.
+ */
+export function reconcileNativeStrFinalizeShift(ctx: CodegenContext): void {
+  const base = ctx.nativeStrHelperImportBase;
+  if (base < 0) return;
+  const added = ctx.numImportFuncs - base;
+  ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
+  if (added <= 0) return;
+
+  const seen = new Set<Instr[]>();
+  function shiftBody(instrs: Instr[]): void {
+    if (seen.has(instrs)) return;
+    seen.add(instrs);
+    for (const instr of instrs) {
+      const a = instr as any;
+      if (
+        (instr.op === "call" || instr.op === "return_call" || instr.op === "ref.func") &&
+        typeof a.funcIdx === "number" &&
+        a.funcIdx >= base
+      ) {
+        a.funcIdx += added;
+      }
+      if (Array.isArray(a.body)) shiftBody(a.body);
+      if (Array.isArray(a.then)) shiftBody(a.then);
+      if (Array.isArray(a.else)) shiftBody(a.else);
+      if (Array.isArray(a.catches)) {
+        for (const c of a.catches) if (Array.isArray(c.body)) shiftBody(c.body);
+      }
+      if (Array.isArray(a.catchAll)) shiftBody(a.catchAll);
+    }
+  }
+  for (const fn of ctx.mod.functions) {
+    shiftBody(fn.body);
+  }
+
+  const definedNames = new Set<string>();
+  for (const fn of ctx.mod.functions) {
+    const n = (fn as { name?: string }).name;
+    if (n) definedNames.add(n);
+  }
+  for (const [name, idx] of ctx.funcMap) {
+    if (idx >= base && definedNames.has(name)) ctx.funcMap.set(name, idx + added);
+  }
+  for (const [name, idx] of ctx.nativeStrHelpers) {
+    if (idx >= base) ctx.nativeStrHelpers.set(name, idx + added);
+  }
+  for (const exp of ctx.mod.exports) {
+    if (exp.desc.kind === "func" && exp.desc.index >= base) {
+      exp.desc.index += added;
+    }
+  }
+}
+
+/**
  * Emit native string helper functions into the module.
  * Called lazily when string operations are first encountered in fast mode.
  *

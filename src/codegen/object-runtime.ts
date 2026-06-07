@@ -62,6 +62,7 @@ import {
   ensureAnyToStringHelper,
   ensureNativeStringHelpers,
   nativeStringLiteralInstrs,
+  reconcileNativeStrFinalizeShift,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
@@ -125,16 +126,21 @@ export interface ObjectRuntimeTypes {
  *
  * MUST run after `ensureNativeStringHelpers` (it depends on `__str_flatten` /
  * `__str_equals` and the `$NativeString` type indices) — we call it here to
- * guarantee that. Because this path adds only DEFINED functions (no imports),
- * the freshly-allocated func indices sit above every existing function and no
- * index shift is required (same invariant as `addUnionImportsAsNativeFuncs`).
+ * guarantee that, then reconcile any imports that were added after the string
+ * helper snapshot before object-runtime bodies bake sibling `call` indices.
+ * Because this path adds only DEFINED functions (no imports), the
+ * freshly-allocated func indices sit above every existing function and no
+ * extra object-runtime shift is required.
  */
 export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   if (ctx.objectRuntimeTypes) return ctx.objectRuntimeTypes;
 
   // Dependencies: native string helpers (flatten + equals) and the string type
-  // indices they populate.
+  // indices they populate. Settle any native-string import drift before
+  // registering object-runtime helpers so a later uniform reconcile cannot
+  // over-shift helpers registered at a newer import base (#1903).
   ensureNativeStringHelpers(ctx);
+  reconcileNativeStrFinalizeShift(ctx);
 
   const anyStrTypeIdx = ctx.anyStrTypeIdx;
   const nativeStrTypeIdx = ctx.nativeStrTypeIdx;

@@ -1,7 +1,7 @@
 ---
 id: 1903
 title: "standalone object runtime: __obj_find emits invalid Wasm in dynamic-property bucket"
-status: ready
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -16,6 +16,8 @@ parent: 1472
 related: [1472, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
+claimed_by: codex-developer
+claimed_at: 2026-06-07T00:35:45.680Z
 ---
 # #1903 — Standalone object runtime: `__obj_find` invalid Wasm
 
@@ -52,3 +54,24 @@ remaining semantic failures.
   `env::__new_plain_object` imports.
 - No broad refactor of the object runtime.
 
+## Implementation Notes
+
+- Root cause: `ensureObjectRuntime` could register object helper bodies after
+  native-string helpers had snapshotted an older import base. A later uniform
+  native-string finalize reconciliation could then over-shift the freshly
+  registered object-runtime call indices, so `__obj_find`'s hash call could land
+  on an externref-producing helper before `i32.and`.
+- Moved `reconcileNativeStrFinalizeShift` to `src/codegen/native-strings.ts`
+  and re-exported it from `expressions/late-imports.ts` for existing callers.
+- `ensureObjectRuntime` now reconciles native-string import drift immediately
+  after `ensureNativeStringHelpers(ctx)` and before registering `$Object`
+  helpers, matching the existing union-helper base-settling invariant.
+- Added `tests/issue-1903.test.ts`, a standalone dynamic computed-property
+  lookup with native strings that validates, instantiates with `{}`, and asserts
+  no `env::__extern_*`, `env::__object_*`, or `env::__new_plain_object` imports.
+
+## Validation
+
+- `npx vitest run tests/issue-1903.test.ts`
+- `npx vitest run tests/issue-1472.test.ts -t "dynamic property add/read"`
+- `npx vitest run tests/issue-1807.test.ts`
