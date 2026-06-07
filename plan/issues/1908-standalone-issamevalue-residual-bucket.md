@@ -1,7 +1,7 @@
 ---
 id: 1908
 title: "standalone: re-split and fix residual isSameValue bucket after #1776/#1807"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T03:10:24.359Z
+claimed_at: 2026-06-07T06:19:34.776Z
 pr: 1257
 ---
 
@@ -221,3 +221,33 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
 - `pnpm exec vitest run tests/issue-1908.test.ts` passed after the merge.
 - PR #1257 remains open, non-draft, targets `main`, and stays recorded in
   frontmatter while #1908 remains `in-review` for the PR-status poller.
+
+## Codex Attempt 23 Publish Blocker — 2026-06-07
+
+- Fetched current `origin/main`
+  (`5b495ba4796f5a27fa4717b291f262e3f3232c88`) and confirmed it is still an
+  ancestor of `symphony/1908`; no additional main merge was needed.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed.
+- PR #1257 is open, non-draft, targets `main`, and the published branch points
+  at `06e0a904ce757c972a8052e4b00c07a4abf8427c`.
+- `gh pr merge 1257 --auto --merge --match-head-commit
+  06e0a904ce757c972a8052e4b00c07a4abf8427c` reported that PR #1257 is already
+  queued to merge. GraphQL confirms `mergeQueueEntry.state: QUEUED` with
+  `enqueuedAt: 2026-06-07T05:58:56Z`.
+- GitHub also reports `mergeStateStatus: BLOCKED`: the latest `merge shard
+  reports` job failed only in the stale-baseline guard. The standalone
+  regression guard was clean (`improvements=0`, `wasm-change regressions=0`,
+  `net=0`), but `js2wasm-baselines` is still generated from
+  `ff02d201152dc8777d3e8151ed05dddd47d75ecf`, which CI reported as 114 commits
+  behind `origin/main` (max 50).
+- Current `loopdive/js2wasm-baselines` `main`
+  (`d084289b27be91e1fbea8199e5e916431cc9c8b3`) still has commit subject
+  `chore(test262): refresh baselines — 30601/43135 host, 16358/43132
+  standalone (ff02d201152dc8777d3e8151ed05dddd47d75ecf)`, so the queued PR may
+  not advance until the baseline promotion is refreshed or the check is rerun
+  against a current baseline.
+- Attempted to push the local metadata commit, but GitHub rejected the update
+  because PR #1257 is already in the merge queue and queued branches cannot be
+  updated without dequeueing the PR. Per the publish-failure workflow, this
+  local issue copy is left `in-progress`; the published issue file on
+  `origin/symphony/1908` remains `in-review` with `pr: 1257`.
