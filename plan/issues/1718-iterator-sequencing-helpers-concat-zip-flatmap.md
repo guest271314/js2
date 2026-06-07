@@ -1,22 +1,23 @@
 ---
 id: 1718
 title: "Iterator sequencing helpers (Iterator.concat / zip / zipKeyed) + Iterator.prototype.flatMap not implemented (101 fails)"
-status: in-progress
+status: in-review
 created: 2026-05-29
-updated: 2026-05-29
-priority: medium
+updated: 2026-06-07
+priority: high
 feasibility: hard
 task_type: bugfix
 area: codegen
 language_feature: iterator-helpers
 goal: test262-conformance
-sprint: Backlog
+sprint: 61
 es_edition: 2025
 test262_fail: 101
 test262_category: built-ins/Iterator
 related: [1340, 1320]
 claimed_by: codex-developer
 claimed_at: 2026-06-07T05:36:21.912Z
+pr: 1279
 ---
 # #1718 — Iterator sequencing helpers + Iterator.prototype.flatMap (101 fails)
 
@@ -91,14 +92,14 @@ Two-part fix:
 1. **Runtime** (`src/runtime.ts`, `_installIteratorHelperPolyfills`): added an
    `Iterator.prototype.flatMap` polyfill mirroring the existing zip/concat
    helpers (`_makeHelperIterator` + `_getFlattenable`). Implements §27.1.4.x:
-   for each outer value, `mapper(value, counter)` → GetIteratorFlattenable
-   (reject non-object/non-string primitives) → yield every inner value before
-   advancing the outer; closes the outer on abrupt mapper/inner completion.
+   for each outer value, `mapper(value, counter)` →
+   GetIteratorFlattenable(..., reject-primitives) → yield every inner value
+   before advancing the outer; closes the outer on abrupt mapper/inner
+   completion.
 
 Result: the flatMap test262 CE bucket → 0 (was 4); runtime pass 0 → 13/44
-locally. `tests/issue-1718-flatmap.test.ts` (5 cases) green: flatten arrays +
-strings, skip empty inner, and both type-check assertions (flatMap + the wider
-map/filter/take family).
+locally. `tests/issue-1718-flatmap.test.ts` green: flatten arrays, reject
+primitive strings, and skip empty inner values.
 
 The residual `flatMap is not a function` failures are a **prototype-chain
 identity** matter: a *compiled* iterator's proto must resolve to the polyfilled
