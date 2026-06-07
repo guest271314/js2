@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1260
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:31:54.022Z
+claimed_at: 2026-06-07T01:37:23.753Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
