@@ -46,10 +46,10 @@ and any environment without a JS runtime. This follows the pattern of
 | **594** | Mark WasmGC struct types as final for V8 devirtualization | 0 | done | medium |
 | **644** | Integrate conformance report as playground panel | Backlog | ready | critical |
 | **652** | Compile-time ARC: static lifetime analysis for linear memory mode | Backlog | ready | low |
-| **680** | Wasm-native generators (state machines) with optional JS host fallback | Backlog | done | high |
+| **680** | Wasm-native generators (state machines) with optional JS host fallback | Backlog | ready | high |
 | **682** | RegExp standalone mode: native engine or embedded library for non-JS targets | 58 | done | high |
 | **788** | Architecture: modularize src/ into focused subfolder structure | 39 | done | medium |
-| **809** | Extract native string helpers from index.ts → native-strings.ts | 59 | done | medium |
+| **809** | Extract native string helpers from index.ts → native-strings.ts | Backlog | ready | medium |
 | **814** | - ArrayBuffer 'no dependency provided for extern class' (413 tests) | 0 | done | high |
 | **877** | Agile criteria — Definition of Ready, Definition of Done, velocity tracking | 31 | done | medium |
 | **933** | Migrate report.html charts to shared t262-charts.js web components | 37 | done | medium |
@@ -60,8 +60,8 @@ and any environment without a JS runtime. This follows the pattern of
 | **1030** | Array.prototype method dispatch long tail — 372 'object is not a function' | 40 | done | critical |
 | **1062** | compileProject emits invalid Wasm for lodash-es/clamp.js (toNumber type mismatch) | 41 | done | high |
 | **1070** | codegen: unsupported new expression for Intl.ListFormat (and other Intl builtins) | 41 | done | medium |
-| **1104** | Wasm-native Error construction and stack traces without JS host | Backlog | done | medium |
-| **1105** | Wasm-native String method implementations for standalone mode | 58 | done | high |
+| **1104** | Wasm-native Error construction and stack traces without JS host | Backlog | ready | medium |
+| **1105** | Wasm-native String method implementations for standalone mode | Backlog | ready | high |
 | **1169p** | IR Phase 4 Slice 13 — String + Array prototype methods through IR | 47 | done | medium |
 | **1232** | IR Phase 4 Slice 13c — String fixed-signature methods through IR | 47 | done | high |
 | **1321** | Number.prototype formatting methods (toString/toFixed/toPrecision/toExponential) rely on JS host unnecessarily | 50 | done | medium |
@@ -71,27 +71,16 @@ and any environment without a JS runtime. This follows the pattern of
 | **1325** | instanceof against built-in types: compile-time type-tag registry eliminates JS host for common cases | 50 | in-progress | medium |
 | **1326** | Async standalone: implement microtask queue + CPS scheduler in Wasm for Promise/async without JS host | 58 | in-review | low |
 | **1326c** | Async standalone Phase 1C: microtask queue + Promise.then chained-resolution (follow-up to #1326 Phase 1B) | 52 | in-progress | medium |
-| **1335** | Number.prototype formatting in pure Wasm: integer toString(radix), then Ryu for floats (standalone) | 58 | done | medium |
+| **1335** | Number.prototype formatting in pure Wasm: integer toString(radix), then Ryu for floats (standalone) | 50 | ready | medium |
 | **1353** | JSON.stringify (objects/arrays) + JSON.parse: architect spec for Wasm shape-walking and recursive-descent parser | 50 | ready | medium |
 | **1662** | audit: standalone (--target wasi) host-import leaks per construct + remaining-gap map | Backlog | done | high |
 | **1663** | host-indep: pure-Wasm parseInt / parseFloat / Number(string) in standalone mode | Backlog | done | medium |
 | **1664** | host-indep: residual __extern_* / __register_* / __iterator* / __array_* leaks after #1472 | Backlog | done | medium |
-| **1665** | host-indep: Wasm-native generators (retire __gen_* / __create_generator host scheduler) | 58 | done | medium |
+| **1665** | host-indep: Wasm-native generators (retire __gen_* / __create_generator host scheduler) | Backlog | ready | medium |
 | **1666** | bug: --target wasi emits INVALID wasm for class/closure/callback/number→string/regex/generator/typed-array (native helper type mismatch + unbound late global) | Backlog | done | high |
 | **1677** | Signature A: native string helper func-index shift unification (__str_flatten/__str_to_extern call[k] type mismatch under --target wasi) | Backlog | done | high |
 | **1689** | Number(string) returns 0 under --target wasi — missing native StringToNumber | Backlog | done | medium |
 | **1776** | standalone test262 isSameValue emits invalid Wasm for externref operands | 58 | done | high |
-| **1781** | standalone test262 run must publish full JSONL and root-cause issue map | 58 | in-review | high |
-| **1789** | standalone/WASI module-level const/let initializers never run before exported functions → TDZ trap on any module-const object access | 58 | done | high |
-| **1806** | standalone: 2,136 tests fail with 'Cannot convert object to primitive value' | 60 | done | high |
-| **1807** | standalone: 277 async-generator tests emit invalid Wasm in isSameValue (#1776 residual) | 59 | done | medium |
-| **1856** | Bump/arena allocator mode for short-lived linear-memory programs (allocate-and-exit), plus commit to one fixed linear-GC strategy | 59 | done | medium |
-| **1891** | standalone: generator-method destructuring param emits invalid Wasm (array.set externref vs (ref null N)) — over-shifted funcIdx after generator-body late imports | 60 | done | high |
-| **1896** | Standalone closure callable round-trip through open-$Object (#1888 S2 prerequisite) | Backlog | ready |  |
-| **1897** | Gate merges on standalone test262 regression | 60 | done | high |
-| **1899** | finalize funcIdx-authority contract: reconcile↔dead-elim native-string helper sibling-call mismatch (late-shift class recurrence-proofing) |  | ready | medium |
-| **1900** | standalone native ToPrimitive (Phase 1): Wasm-native OrdinaryToPrimitive over $Object (~2,136 ceiling) | 60 | done | high |
-| **1902** | Math/Number constant reads refuse under --target standalone (__get_builtin pre-empts native f64.const) [#1888 S6-c] | 61 | done | high |
 
 <!-- AUTOGENERATED:GOAL-ISSUES-END -->
 

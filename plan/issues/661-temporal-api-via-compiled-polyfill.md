@@ -3,12 +3,12 @@ id: 661
 title: "Temporal API via compiled polyfill or minimal implementation"
 status: in-progress
 created: 2026-03-20
-updated: 2026-06-07
-priority: high
+updated: 2026-04-28
+priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: spec-completeness
-sprint: 61
+sprint: Backlog
 test262_fail: 1128
 files:
   src/codegen/expressions.ts:
@@ -22,12 +22,6 @@ claimed_at: 2026-06-07T05:03:52.808Z
 ## Status: in progress
 
 1,128 Temporal tests fail (currently skipped by safety filter). Rather than implementing the spec from scratch, try compiling the existing JS polyfill.
-
-## Sprint 61 note
-
-The 2026-06-06 standalone report now classifies `3,748` failures under the
-Temporal proposal bucket. This is a large standalone root-cause bucket and has
-been promoted into sprint 61 for active investigation.
 
 ### Approach 1: Compile @js-temporal/polyfill
 
