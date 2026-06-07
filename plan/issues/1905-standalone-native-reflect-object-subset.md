@@ -18,7 +18,7 @@ test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
 claimed_at: 2026-06-07T03:10:53.997Z
-pr: 1261
+pr: 1266
 ---
 # #1905 — Standalone native Reflect object subset
 
@@ -95,5 +95,5 @@ machinery and are out of scope here.
 - Final PR check: GitHub reports PR `#1261` as merged, so there is no
   remaining merge-queue action for this issue.
 - Current redispatch pass: fetched `origin/main`, reran the scoped validation
-  above successfully, and confirmed the only GitHub PR for `symphony/1905` is
-  ready/non-draft PR `#1261`, already merged on 2026-06-07.
+  above successfully, confirmed implementation PR `#1261` is already merged,
+  and opened ready/non-draft follow-up PR `#1266` for this issue-file update.
