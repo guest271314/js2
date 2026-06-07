@@ -239,9 +239,10 @@ remaining semantic failures.
   PR for this issue.
 - Final handoff 27 (2026-06-07): fetched current refs, confirmed
   `origin/main` (`28c668ab4`) is still an ancestor of `symphony/1903`, reran
-  scoped validation, and confirmed PR #1262 is open, non-draft, mergeable, and
-  already in the merge queue with several GitHub checks still in progress before
-  publishing this in-review issue update.
+  scoped validation, and confirmed PR #1262 is open, non-draft, and mergeable.
+  Publishing this issue update required dequeuing the queued PR; after the push,
+  auto-merge was re-enabled for the pushed head because required GitHub checks
+  were still pending.
 
 ## Validation
 
