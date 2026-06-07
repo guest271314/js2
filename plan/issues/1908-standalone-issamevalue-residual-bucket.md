@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T11:11:59.275Z
+claimed_at: 2026-06-07T11:21:30.069Z
 pr: 1257
 ---
 
@@ -533,3 +533,14 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   for PR #1257 so GitHub can queue it when the required checks pass.
 - Frontmatter status is `in-review` so the PR-status poller can flip the issue
   after GitHub reports the PR merged.
+
+## Codex Attempt 38 Queue Confirmation — 2026-06-07
+
+- Fetched `origin/main` and `origin/symphony/1908`; current `origin/main`
+  (`28c668ab4e636011d08ac4e518acc4353097f5f1`) is already an ancestor of
+  `symphony/1908`.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed.
+- PR #1257 is open, non-draft, targets `main`, and is recorded in frontmatter.
+- GraphQL reported `mergeStateStatus: CLEAN`, all visible PR checks successful,
+  and `mergeQueueEntry.state: QUEUED` before this metadata refresh.
+- Frontmatter status remains `in-review` for the PR-status poller.
