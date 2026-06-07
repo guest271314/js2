@@ -286,6 +286,10 @@ remaining semantic failures.
   #1262 is open, non-draft, mergeable, and was queued on the pre-handoff head;
   publishing this issue-status update requires re-enabling queue/auto-merge on
   the pushed head.
+- Publish follow-up 13: merged current `origin/main` (`767e64754`, #1288) after
+  the base advanced during final publish, with no #1903 conflicts, reran scoped
+  validation, and kept PR #1262 recorded as the ready in-review PR for this
+  issue.
 
 ## Validation
 
@@ -423,3 +427,6 @@ remaining semantic failures.
   "#1903|dynamic property add/read"` (final handoff 33 on 2026-06-07)
 - `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
   "#1903|dynamic property add/read"` (final handoff 34 on 2026-06-07)
+- `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
+  "#1903|dynamic property add/read"` (after merging `origin/main` at
+  `767e64754`)
