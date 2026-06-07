@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T06:30:34.952Z
+claimed_at: 2026-06-07T06:40:35.245Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -112,3 +112,5 @@ Codex final dispatch check on 2026-06-07: fetched current `origin`, confirmed `o
 Codex current closeout on 2026-06-07: PR #1286 is open, ready/non-draft, clean, and queued in the merge queue at position 14. Local scoped validation passed again: `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck`. The queued-closeout commit would keep issue status `in-review` for the Symphony poller once publishable.
 
 Codex publish blocker on 2026-06-07: after the local queued-closeout commit `ead6c0fb2`, `git push origin symphony/1904` was rejected with GH006 because PR #1286 is already in the merge queue and queued branches cannot be updated. Issue status is left `in-progress` until the queued PR merges or is dequeued for a follow-up push.
+
+Codex current blocker on 2026-06-07: fetched current `origin`, confirmed `origin/main` is an ancestor of `symphony/1904`, and reran scoped validation successfully: `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck`. GitHub GraphQL reports PR #1286 is open, ready/non-draft, clean, and queued at position 14; local branch updates remain unpublished because queued branches reject pushes, so issue status stays `in-progress` per the publish-blocker rule.
