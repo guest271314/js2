@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T10:59:59.064Z
+claimed_at: 2026-06-07T11:08:29.313Z
 pr: 1295
 ---
 
