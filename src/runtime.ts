@@ -4382,6 +4382,203 @@ function _formatDate(ts: bigint, mode: number): string {
   }
 }
 
+function _temporalTrunc(v: any): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.trunc(n);
+}
+
+function _temporalPad(n: number, width: number): string {
+  return String(Math.abs(Math.trunc(n))).padStart(width, "0");
+}
+
+function _temporalYearString(yearRaw: any): string {
+  const year = _temporalTrunc(yearRaw);
+  if (year >= 0 && year <= 9999) return _temporalPad(year, 4);
+  return (year < 0 ? "-" : "+") + _temporalPad(year, 6);
+}
+
+function _temporalPlainDateToString(year: any, month: any, day: any): string {
+  return `${_temporalYearString(year)}-${_temporalPad(_temporalTrunc(month), 2)}-${_temporalPad(_temporalTrunc(day), 2)}`;
+}
+
+function _temporalPlainDateMonthCode(month: any): string {
+  return `M${_temporalPad(_temporalTrunc(month), 2)}`;
+}
+
+function _temporalPlainTimeToString(
+  hour: any,
+  minute: any,
+  second: any,
+  millisecond: any,
+  microsecond: any,
+  nanosecond: any,
+): string {
+  const base = `${_temporalPad(_temporalTrunc(hour), 2)}:${_temporalPad(_temporalTrunc(minute), 2)}:${_temporalPad(
+    _temporalTrunc(second),
+    2,
+  )}`;
+  const fraction =
+    _temporalPad(_temporalTrunc(millisecond), 3) +
+    _temporalPad(_temporalTrunc(microsecond), 3) +
+    _temporalPad(_temporalTrunc(nanosecond), 3);
+  const trimmed = fraction.replace(/0+$/, "");
+  return trimmed.length > 0 ? `${base}.${trimmed}` : base;
+}
+
+function _temporalParsePlainDate(item: any): [number, number, number] {
+  const text = String(item);
+  const match = /^([+-]?\d{4,6})-(\d{2})-(\d{2})/.exec(text);
+  if (!match) throw new RangeError("invalid Temporal.PlainDate string");
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function _temporalPlainDateFromStringField(item: any, field: any): number {
+  return _temporalParsePlainDate(item)[_temporalTrunc(field)] ?? 0;
+}
+
+function _temporalParsePlainTime(item: any): [number, number, number, number, number, number] {
+  const text = String(item);
+  const match = /^(?:T)?(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?/.exec(text);
+  if (!match) throw new RangeError("invalid Temporal.PlainTime string");
+  const fraction = (match[4] ?? "").padEnd(9, "0");
+  return [
+    Number(match[1]),
+    Number(match[2]),
+    match[3] === undefined ? 0 : Number(match[3]),
+    Number(fraction.slice(0, 3) || "0"),
+    Number(fraction.slice(3, 6) || "0"),
+    Number(fraction.slice(6, 9) || "0"),
+  ];
+}
+
+function _temporalPlainTimeFromStringField(item: any, field: any): number {
+  return _temporalParsePlainTime(item)[_temporalTrunc(field)] ?? 0;
+}
+
+function _temporalParseDuration(item: any): number[] {
+  const text = String(item);
+  const match =
+    /^([+-])?P(?:(\d+(?:\.\d+)?)Y)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)W)?(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/i.exec(
+      text,
+    );
+  if (!match) throw new RangeError("invalid Temporal.Duration string");
+  const sign = match[1] === "-" ? -1 : 1;
+  const values = match.slice(2).map((part) => (part === undefined ? 0 : Number(part) * sign));
+  const secondsWhole = Math.trunc(values[6] ?? 0);
+  const secondFraction = Math.abs((values[6] ?? 0) - secondsWhole);
+  const fractionalNs = Math.round(secondFraction * 1_000_000_000) * sign;
+  values[6] = secondsWhole;
+  values[7] = Math.trunc(fractionalNs / 1_000_000);
+  values[8] = Math.trunc((fractionalNs % 1_000_000) / 1_000);
+  values[9] = fractionalNs % 1_000;
+  return values;
+}
+
+function _temporalDurationFromStringField(item: any, field: any): number {
+  return _temporalParseDuration(item)[_temporalTrunc(field)] ?? 0;
+}
+
+function _temporalDurationSign(...fields: any[]): number {
+  for (const field of fields) {
+    const n = Number(field);
+    if (n > 0) return 1;
+    if (n < 0) return -1;
+  }
+  return 0;
+}
+
+function _temporalDurationToString(...fieldsRaw: any[]): string {
+  const fields = fieldsRaw.map(_temporalTrunc);
+  const sign = _temporalDurationSign(...fields) < 0 ? "-" : "";
+  const abs = fields.map((field) => Math.abs(field));
+  const [years, months, weeks, days, hours, minutes, seconds, milliseconds, microseconds, nanoseconds] = abs;
+  let result = `${sign}P`;
+  if (years) result += `${years}Y`;
+  if (months) result += `${months}M`;
+  if (weeks) result += `${weeks}W`;
+  if (days) result += `${days}D`;
+  const fraction =
+    _temporalPad(milliseconds ?? 0, 3) + _temporalPad(microseconds ?? 0, 3) + _temporalPad(nanoseconds ?? 0, 3);
+  const fractionTrimmed = fraction.replace(/0+$/, "");
+  const secondPart = fractionTrimmed.length > 0 ? `${seconds ?? 0}.${fractionTrimmed}` : `${seconds ?? 0}`;
+  const hasTime = !!hours || !!minutes || !!seconds || fractionTrimmed.length > 0;
+  if (hasTime) {
+    result += "T";
+    if (hours) result += `${hours}H`;
+    if (minutes) result += `${minutes}M`;
+    if (seconds || fractionTrimmed.length > 0) result += `${secondPart}S`;
+  }
+  return result === `${sign}P` ? `${sign}PT0S` : result;
+}
+
+function _temporalDateFromParts(year: number, month: number, day: number): Date {
+  const d = new Date(0);
+  d.setUTCHours(0, 0, 0, 0);
+  d.setUTCFullYear(year, month - 1, day);
+  return d;
+}
+
+function _temporalDaysInMonth(year: number, month: number): number {
+  return _temporalDateFromParts(year, month + 1, 0).getUTCDate();
+}
+
+function _temporalPlainDateAddField(
+  yearRaw: any,
+  monthRaw: any,
+  dayRaw: any,
+  yearsRaw: any,
+  monthsRaw: any,
+  weeksRaw: any,
+  daysRaw: any,
+  signRaw: any,
+  fieldRaw: any,
+): number {
+  const sign = _temporalTrunc(signRaw) < 0 ? -1 : 1;
+  let year = _temporalTrunc(yearRaw) + sign * _temporalTrunc(yearsRaw);
+  let month = _temporalTrunc(monthRaw) + sign * _temporalTrunc(monthsRaw);
+  year += Math.floor((month - 1) / 12);
+  month = ((((month - 1) % 12) + 12) % 12) + 1;
+  const constrainedDay = Math.min(_temporalTrunc(dayRaw), _temporalDaysInMonth(year, month));
+  const date = _temporalDateFromParts(
+    year,
+    month,
+    constrainedDay + sign * (_temporalTrunc(daysRaw) + 7 * _temporalTrunc(weeksRaw)),
+  );
+  const field = _temporalTrunc(fieldRaw);
+  if (field === 0) return date.getUTCFullYear();
+  if (field === 1) return date.getUTCMonth() + 1;
+  return date.getUTCDate();
+}
+
+function _temporalPlainTimeAddField(...args: any[]): number {
+  const [hour, minute, second, millisecond, microsecond, nanosecond, dh, dm, ds, dms, dus, dns, signRaw, fieldRaw] =
+    args.map(_temporalTrunc);
+  const sign = signRaw < 0 ? -1 : 1;
+  const dayNs = 86_400_000_000_000;
+  let total =
+    hour * 3_600_000_000_000 +
+    minute * 60_000_000_000 +
+    second * 1_000_000_000 +
+    millisecond * 1_000_000 +
+    microsecond * 1_000 +
+    nanosecond;
+  total +=
+    sign * (dh * 3_600_000_000_000 + dm * 60_000_000_000 + ds * 1_000_000_000 + dms * 1_000_000 + dus * 1_000 + dns);
+  total = ((total % dayNs) + dayNs) % dayNs;
+  const hourOut = Math.floor(total / 3_600_000_000_000);
+  total %= 3_600_000_000_000;
+  const minuteOut = Math.floor(total / 60_000_000_000);
+  total %= 60_000_000_000;
+  const secondOut = Math.floor(total / 1_000_000_000);
+  total %= 1_000_000_000;
+  const millisecondOut = Math.floor(total / 1_000_000);
+  total %= 1_000_000;
+  const microsecondOut = Math.floor(total / 1_000);
+  const nanosecondOut = total % 1_000;
+  return [hourOut, minuteOut, secondOut, millisecondOut, microsecondOut, nanosecondOut][_temporalTrunc(fieldRaw)] ?? 0;
+}
+
 function resolveImport(
   intent: ImportIntent,
   deps?: Record<string, any>,
@@ -5361,6 +5558,16 @@ assert._isSameValue = isSameValue;
       if (name === "__date_format") {
         return (ts: bigint, mode: number): string => _formatDate(ts, mode);
       }
+      if (name === "__temporal_plain_date_to_string") return _temporalPlainDateToString;
+      if (name === "__temporal_plain_date_month_code") return _temporalPlainDateMonthCode;
+      if (name === "__temporal_plain_date_from_string_field") return _temporalPlainDateFromStringField;
+      if (name === "__temporal_plain_date_add_field") return _temporalPlainDateAddField;
+      if (name === "__temporal_plain_time_to_string") return _temporalPlainTimeToString;
+      if (name === "__temporal_plain_time_from_string_field") return _temporalPlainTimeFromStringField;
+      if (name === "__temporal_plain_time_add_field") return _temporalPlainTimeAddField;
+      if (name === "__temporal_duration_to_string") return _temporalDurationToString;
+      if (name === "__temporal_duration_from_string_field") return _temporalDurationFromStringField;
+      if (name === "__temporal_duration_sign") return _temporalDurationSign;
       if (name === "__extern_toLocaleString")
         return (v: any) => {
           if (v == null) return String(v);

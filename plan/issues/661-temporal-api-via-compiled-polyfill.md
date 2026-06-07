@@ -1,7 +1,7 @@
 ---
 id: 661
 title: "Temporal API via compiled polyfill or minimal implementation"
-status: ready
+status: in-progress
 created: 2026-03-20
 updated: 2026-06-07
 priority: high
@@ -14,10 +14,12 @@ files:
   src/codegen/expressions.ts:
     new:
       - "Temporal namespace with PlainDate/PlainTime/Duration classes"
+claimed_by: codex-developer
+claimed_at: 2026-06-07T05:03:52.808Z
 ---
 # #661 — Temporal API via compiled polyfill or minimal implementation
 
-## Status: open
+## Status: in progress
 
 1,128 Temporal tests fail (currently skipped by safety filter). Rather than implementing the spec from scratch, try compiling the existing JS polyfill.
 
@@ -58,3 +60,24 @@ If the polyfill hits too many unsupported patterns, implement a stripped-down ve
 The polyfill attempt is valuable even if it fails — it's a real-world TypeScript library, not synthetic test262 patterns. Every CE it hits represents a real developer who can't compile their code.
 
 ## Complexity: M (polyfill attempt) or L (minimal impl)
+
+## Attempt 22 findings
+
+Implemented the minimal native subset rather than vendoring `@js-temporal/polyfill`. The shipped path adds WasmGC structs for ISO-only `Temporal.PlainDate`, `Temporal.PlainTime`, and `Temporal.Duration`, then wires:
+
+- `new Temporal.PlainDate(...)`, `new Temporal.PlainTime(...)`, `new Temporal.Duration(...)`
+- `Temporal.PlainDate.from(...)`, `Temporal.PlainTime.from(...)`, `Temporal.Duration.from(...)`
+- `Temporal.Now.plainDateISO()` as a deterministic `2026-06-07` value
+- PlainDate/PlainTime field getters, `.equals()`, `.add()`, `.subtract()`, `.toString()`, `.toJSON()`, `.toLocaleString()`
+- Duration field getters, `.add()`, `.subtract()`, `.negated()`, `.abs()`, `.toString()`, `.toJSON()`, `.toLocaleString()`, `.sign`, `.blank`
+
+The implementation follows the current TC39 Temporal proposal shape for these operations: constructors initialize internal slots, `.from()` routes through `ToTemporal*`, getters return slots, and `.toString()` delegates to the Temporal string abstract operations. This is intentionally not full Temporal: calendars beyond ISO, time zones, option bags, descriptors/prototypes, and complete test262 edge ordering remain follow-up work.
+
+Scoped validation:
+
+- `pnpm exec tsc --noEmit --pretty false`
+- `pnpm exec vitest run tests/issue-661.test.ts`
+- `pnpm exec prettier --check src/codegen/temporal-native.ts src/codegen/expressions/calls.ts src/codegen/expressions/new-super.ts src/codegen/property-access.ts src/runtime.ts tests/issue-661.test.ts`
+- `pnpm exec biome lint src/codegen/temporal-native.ts src/runtime.ts tests/issue-661.test.ts --diagnostic-level=error`
+
+Note: an accidental `pnpm test -- tests/issue-661.test.ts` invocation was not scoped by Vitest in this repo and started unrelated suites. It surfaced unrelated pre-existing failures before the intended single-file command was rerun correctly.
