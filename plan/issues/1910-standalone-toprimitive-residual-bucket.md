@@ -17,7 +17,7 @@ test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
 claimed_at: 2026-06-07T01:59:23.959Z
-pr: 1258
+pr: 1265
 ---
 
 # #1910 — Standalone ToPrimitive residual bucket
@@ -120,6 +120,9 @@ follow-up buckets:
 
 No contained compiler semantics residual was obvious from this pass; this PR
 is the classifier/reporting split requested by the issue.
+
+Implementation landed in PR #1258; PR #1265 publishes the final issue-record
+validation after syncing the assigned branch with current `origin/main`.
 
 ## Validation - 2026-06-07
 
