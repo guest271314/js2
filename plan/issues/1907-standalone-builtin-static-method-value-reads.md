@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T06:38:34.913Z
+claimed_at: 2026-06-07T06:45:05.679Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -116,3 +116,9 @@ standalone refusal.
 - The remote PR branch still has `pr: 1287` and was already queued, but this
   local handoff leaves the issue `in-progress` because the final publish update
   could not be pushed while the branch is queue-protected.
+- Codex verification on 2026-06-07T08:47+02:00 reran the same issue-scoped
+  validation on the current local branch; all commands passed, `origin/main`
+  remains an ancestor of `HEAD`, and PR #1287 is still open, ready/non-draft,
+  mergeable, green on the remote head, and queued at position 14. The local
+  branch still contains unpublished issue-doc verification commits because the
+  queued PR head is protected from further pushes.
