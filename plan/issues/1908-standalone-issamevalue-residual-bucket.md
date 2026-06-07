@@ -373,7 +373,8 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   `wasm-change regressions=0`, `net=0`), but the baseline main-sha
   `ff02d201152dc8777d3e8151ed05dddd47d75ecf` is still 114 commits behind
   `origin/main` (max 50).
-- This local issue copy remains `in-progress` because publishing the local
-  issue metadata would require updating a branch that is already queued; the
-  published issue file on `origin/symphony/1908` remains `in-review` with
-  `pr: 1257`.
+- Attempted `git push origin symphony/1908`; the pre-push typecheck/lint,
+  format check, and issue-integrity hook passed, but GitHub rejected the branch
+  update because queued PR branches cannot be updated without dequeueing the
+  PR. This local issue copy remains `in-progress`; the published issue file on
+  `origin/symphony/1908` remains `in-review` with `pr: 1257`.
