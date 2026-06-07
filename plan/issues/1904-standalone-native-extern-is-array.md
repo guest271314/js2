@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:16:37.209Z
+claimed_at: 2026-06-07T07:22:34.953Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -132,3 +132,5 @@ Codex current closeout on 2026-06-07: merged current `origin/main` into `symphon
 Codex latest queue check on 2026-06-07: reran scoped validation successfully: `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub GraphQL reports PR #1286 open, ready/non-draft, all visible checks successful, and queued at position 10 with remote head `8db25d962fb115fe1755278809a64388cc554af5`; issue status remains `in-progress` because the local branch has unpublished issue-file updates that cannot be pushed while the queued PR branch is locked.
 
 Codex publish blocker on 2026-06-07: after local commit `15d35971b`, `git merge --ff-only origin/main` was already up to date and `git push origin symphony/1904` reran pre-push typecheck, lint, prettier format check, and issue integrity successfully before GitHub rejected the update with GH006 because PR #1286 is already in the merge queue. The issue remains `in-progress` until PR #1286 merges or is dequeued for a publishable follow-up.
+
+Codex current publish check on 2026-06-07: fetched current `origin`, confirmed local `symphony/1904` includes `origin/main`, and reran scoped validation successfully: `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub GraphQL reports PR #1286 is open, ready/non-draft, all visible checks successful, and queued at position 9 with remote head `8db25d962fb115fe1755278809a64388cc554af5`; local issue-file updates remain unpublished until GitHub allows the queued branch to update or the queued PR merges.
