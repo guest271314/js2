@@ -385,6 +385,9 @@ because GitHub reported PR #1289 as queued:
 - PR URL: `https://github.com/loopdive/js2/pull/1289`
 - Queue ref visibility: no `gh-readonly-queue/main/pr-1289*` ref was visible
   via `git ls-remote` before the push attempt
+- Merge queue command:
+  `gh pr merge 1289 --auto --match-head-commit 19540cd895d2e9a2331cff3a52b976657f2c85a0`
+  reported `Pull request #1289 is already queued to merge`
 - Push result:
 
 ```text
