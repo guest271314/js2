@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:23:23.970Z
+claimed_at: 2026-06-07T01:37:53.698Z
 pr: 1257
 ---
 
