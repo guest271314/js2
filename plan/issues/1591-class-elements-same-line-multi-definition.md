@@ -1,7 +1,7 @@
 ---
 id: 1591
 title: "class/elements: WasmGC-struct ↔ host own-property/identity reconciliation gaps (~294 fails)"
-status: in-review
+status: in-progress
 created: 2026-05-24
 updated: 2026-06-07
 depends_on: [1472]
@@ -18,7 +18,7 @@ parent: 779
 test262_fail: 294
 test262_category: language/statements/class/elements, language/expressions/class/elements
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:32:55.920Z
+claimed_at: 2026-06-07T10:02:42.699Z
 pr: 1278
 ---
 # #1591 — `class/elements` WasmGC-struct ↔ host own-property / method-identity reconciliation gaps
@@ -398,3 +398,23 @@ pre-existing runtime expectation failures in earlier Phase C / Slice 2 cases
 (`Object.create`/`Object.setPrototypeOf` identity projections and open-any
 method arity projections). The touched #1888 Slice 3 borrowed-dispatch block
 passes in isolation.
+
+## 2026-06-07 codex attempt 30 — PR refresh / stale-baseline gate
+
+Resumed the already-open ready PR #1278 on `symphony/1591`. The branch contains
+the attempt 22 implementation and the PR is not draft, but the previous GitHub
+Actions run failed in `Test262 Sharded / merge shard reports` after all
+individual shards passed. The raw job log shows the failure is the global
+stale-baseline guard, not this branch's class-elements change:
+
+- `js2wasm-baselines` baseline main-sha
+  `ff02d201152dc8777d3e8151ed05dddd47d75ecf`
+- baseline was 114 commits behind `origin/main`
+- guard threshold is 50 commits
+- failure message: "STALE BASELINE ... Fix baseline promotion before merging.
+  See #1668."
+
+Current plan for this attempt: merge current `origin/main`, rerun scoped
+validation, push the refreshed branch, and try merge-queue/auto-merge again. If
+GitHub still rejects queueing because the shared baseline remains stale, leave
+this issue `in-progress` and report that external blocker.
