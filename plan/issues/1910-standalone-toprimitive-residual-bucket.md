@@ -325,5 +325,7 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
     (8 tests passed).
   - `npx prettier --check` on the touched script, test, and issue files
     (passed).
-  - Dequeueing PR #1295 temporarily to publish the current-main metadata
-    refresh, then requeueing the same PR.
+  - Dequeued PR #1295 temporarily and pushed the current-main metadata refresh.
+    GitHub required fresh checks on the new head before queue entry, so
+    auto-merge/merge-queue entry is enabled for PR #1295 to queue once required
+    checks pass.
