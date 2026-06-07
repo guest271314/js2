@@ -1,7 +1,7 @@
 ---
 id: 1909
 title: "standalone RegExp residual bucket after #1474/#682: split Phase 2d and native-engine gaps"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -15,6 +15,7 @@ goal: standalone-mode
 related: [682, 1474, 1539]
 test262_bucket: standalone-regexp
 test262_count: 1997
+pr: 1260
 claimed_by: codex-developer
 claimed_at: 2026-06-07T00:36:17.703Z
 ---
