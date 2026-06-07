@@ -1,7 +1,7 @@
 ---
 id: 1905
 title: "standalone: native Reflect.get/set/has/deleteProperty over $Object"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -133,3 +133,6 @@ machinery and are out of scope here.
   ancestor of `symphony/1905`, reran the scoped validation above successfully,
   and confirmed ready PR `#1284` is open/non-draft, mergeable, and green before
   pushing this issue-state refresh.
+- Publish blocker: pushing the local issue-state refresh was rejected because
+  GitHub reports PR `#1284` is already in the merge queue; queued branches
+  cannot be updated without dequeuing the PR.
