@@ -72,5 +72,5 @@ caught by the broad dynamic object/property refusal.
 - `pnpm test tests/issue-1629-S6.test.ts tests/issue-1629-S3.test.ts tests/issue-1629-S2.test.ts`
 - `pnpm exec tsc --noEmit --incremental false`
 
-Revalidated on branch `symphony/1906` with PR #1264 open against `main`;
-checks above pass locally on 2026-06-07.
+Revalidated on branch `symphony/1906` after merging current `origin/main`
+with PR #1264 open against `main`; checks above pass locally on 2026-06-07.
