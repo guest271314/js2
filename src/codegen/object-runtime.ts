@@ -259,6 +259,21 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     return funcIdx;
   };
 
+  // ── __extern_is_array(externref v) -> i32 ────────────────────────────────
+  //
+  // Placeholder reserved with the object runtime and filled at FINALIZE by
+  // fillExternIsArray(), after all module-local array carrier types are known.
+  // This keeps Array.isArray over a helper compiled before a later array type
+  // from baking an incomplete ref.test list.
+  registerNative(
+    "__extern_is_array",
+    [{ kind: "externref" }],
+    [{ kind: "i32" }],
+    [{ name: "any", type: { kind: "anyref" } }],
+    [{ op: "i32.const", value: 0 } as Instr],
+  );
+  ctx.externIsArrayReserved = true;
+
   // Look up an already-emitted native string helper.
   const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
   const strEqualsIdx = ctx.nativeStrHelpers.get("__str_equals")!;
@@ -3931,6 +3946,62 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   bridgeFn.locals = [{ name: "n", type: { kind: "i32" } }];
 }
 
+function collectStandaloneArrayCarrierTypeIdxs(ctx: CodegenContext): number[] {
+  const carriers = new Set<number>();
+  const objVecTypeIdx = ctx.objectRuntimeTypes?.objVecTypeIdx;
+  if (objVecTypeIdx !== undefined) carriers.add(objVecTypeIdx);
+  for (const typeIdx of ctx.vecTypeMap.values()) carriers.add(typeIdx);
+  for (let typeIdx = 0; typeIdx < ctx.mod.types.length; typeIdx++) {
+    const typeDef = ctx.mod.types[typeIdx];
+    if (typeDef?.kind !== "struct") continue;
+    const name = typeDef.name ?? "";
+    if (name.startsWith("__vec_") || name === "__template_vec_externref") carriers.add(typeIdx);
+  }
+  return Array.from(carriers).sort((a, b) => a - b);
+}
+
+/**
+ * (#1904) Fill the standalone native `__extern_is_array` predicate after all
+ * user functions and late runtime helpers have registered their WasmGC carrier
+ * types. Implements the non-Proxy subset of ES §7.2.2 IsArray that can exist in
+ * standalone: primitives/non-array objects return false, and compiler-emitted
+ * array carriers (`__vec_*`, template vectors, `$ObjVec`) return true.
+ */
+export function fillExternIsArray(ctx: CodegenContext): void {
+  if (!ctx.externIsArrayReserved) return;
+  const funcIdx = ctx.funcMap.get("__extern_is_array");
+  if (funcIdx === undefined) return;
+  const fn = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+  if (!fn) return;
+
+  const carrierTypeIdxs = collectStandaloneArrayCarrierTypeIdxs(ctx);
+  const anyLocal = 1;
+  const body: Instr[] = [
+    { op: "local.get", index: 0 } as Instr,
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.set", index: anyLocal } as Instr,
+  ];
+
+  let chain: Instr[] = [{ op: "i32.const", value: 0 } as Instr];
+  for (let i = carrierTypeIdxs.length - 1; i >= 0; i--) {
+    const typeIdx = carrierTypeIdxs[i]!;
+    chain = [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.test", typeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [{ op: "i32.const", value: 1 } as Instr],
+        else: chain,
+      } as Instr,
+    ];
+  }
+  body.push(...chain);
+
+  fn.locals = [{ name: "any", type: { kind: "anyref" } }];
+  fn.body = body;
+}
+
 /**
  * Names of the object-runtime host imports that `ensureObjectRuntime` provides
  * Wasm-native implementations for. `ensureLateImport` routes these here under
@@ -3942,6 +4013,7 @@ export function fillApplyClosure(ctx: CodegenContext): void {
  */
 export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__new_plain_object",
+  "__extern_is_array",
   "__extern_get",
   "__extern_set",
   "__reflect_set",

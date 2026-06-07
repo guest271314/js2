@@ -90,6 +90,10 @@ remaining semantic failures.
   confirmed `origin/main` is still an ancestor of the branch, reran scoped
   validation, and found no additional source changes needed before re-pushing
   PR #1262.
+- Publish follow-up 5: merged current `origin/main` (`ff02d2011`, #1259) after
+  the base advanced again, resolved the unrelated #1904 issue-file conflict to
+  main's in-review PR record, and kept the #1903 runtime fix with the merged
+  #1904 object-runtime changes.
 
 ## Validation
 
@@ -124,6 +128,10 @@ remaining semantic failures.
   re-pushing PR #1262)
 - `npx vitest run tests/issue-1472.test.ts -t "dynamic property add/read"`
   (final revalidation before re-pushing PR #1262)
+- `npx vitest run tests/issue-1903.test.ts` (after merging `origin/main` at
+  `ff02d2011`)
+- `npx vitest run tests/issue-1472.test.ts -t "dynamic property add/read"`
+  (after merging `origin/main` at `ff02d2011`)
 - Rebuilt the PR #1262 `test262-standalone-results-merged.jsonl` artifact with
   `--max-unclassified-root-causes 0` after classifying
   `language/expressions/object/dstr` under the existing object-property bucket.
