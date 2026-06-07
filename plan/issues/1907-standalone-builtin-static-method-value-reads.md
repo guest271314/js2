@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T03:02:54.204Z
+claimed_at: 2026-06-07T03:15:24.162Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -87,9 +87,9 @@ standalone refusal.
 - PR #1263 exists, was ready/non-draft, and is now merged into `main` at
   `3827daa96`; merge-queue/auto-merge entry is no longer applicable because the
   PR is already merged.
-- Redispatch verification on this branch found no additional implementation
-  work outstanding; the scoped validation commands below passed again on
-  2026-06-07 after merging current `origin/main`.
+- Final codex-developer verification on this branch found no additional
+  implementation work outstanding; the scoped validation commands above passed
+  again on 2026-06-07 after merging current `origin/main`.
 - `origin/main` was fetched and merged into `symphony/1907` through
   `f4dd784d4` before the final branch push. The merge brought in a later
   test262 baseline refresh without #1907 conflicts.
