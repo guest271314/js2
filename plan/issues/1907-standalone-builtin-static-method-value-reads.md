@@ -90,16 +90,17 @@ standalone refusal.
 - Final codex-developer verification on this branch found no additional
   implementation work outstanding; the scoped validation commands above passed
   again on 2026-06-07 after merging current `origin/main`.
-- `origin/main` was fetched and merged into `symphony/1907` through
-  `5b495ba47` before the final branch push. The merge brought in later sprint
-  issue/report updates without #1907 conflicts.
-- Scoped validation passed again after that final main merge: the focused
-  #1907/#1888 tests, typecheck, #1678 Array.isArray regression tests, the
-  targeted #1472 Reflect.ownKeys standalone route, and formatting.
+- `origin/main` was fetched at `d6957d5d` and merged into `symphony/1907` with
+  merge commit `9f350d0a`. The merge brought in later sprint issue/report
+  updates without #1907 conflicts.
+- Scoped validation passed again on 2026-06-07T09:13+02:00 after that final
+  main merge: the focused #1907/#1888 tests, typecheck, #1678 Array.isArray
+  regression tests, the targeted #1472 Reflect.ownKeys standalone route, and
+  formatting.
 - Redispatch verification on 2026-06-07T08:19+02:00 found the implementation
   already merged, branch synced with `origin/main`, PR #1287 opened
   ready/non-draft, and the same scoped validation still passing.
 - Codex verification on 2026-06-07T09:11+02:00 found PR #1287 still open,
   ready/non-draft, green on the remote head, and accepted in the merge queue at
-  position 11. This handoff keeps the issue `in-review` with `pr: 1287` while
-  syncing the local branch with current `origin/main`.
+  position 11 before the local main-sync publish. This handoff keeps the issue
+  `in-review` with `pr: 1287` for the PR-status poller.
