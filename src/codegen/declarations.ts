@@ -69,6 +69,7 @@ import {
 import { computeElidableTopLevelTdzNames } from "./expressions/identifiers.js";
 import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.js";
 import { compileExpression, compileStatement } from "./shared.js";
+import { expandLinearU8ParamTypes } from "./linear-uint8-signatures.js";
 
 /** Accumulated state for the single-pass collector */
 interface UnifiedCollectorState {
@@ -2396,6 +2397,8 @@ function registerBodylessFunctionDeclaration(
     }
   }
 
+  params = expandLinearU8ParamTypes(ctx, stmt, params);
+
   const optionalParams: OptionalParamInfo[] = [];
   for (let i = 0; i < stmt.parameters.length; i++) {
     const param = stmt.parameters[i]!;
@@ -2900,6 +2903,8 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           results = isVoidType(rUnwrapped) ? [] : [resolveWasmType(ctx, rUnwrapped)];
         }
       }
+
+      params = expandLinearU8ParamTypes(ctx, stmt, params);
 
       const optionalParams: OptionalParamInfo[] = [];
       for (let i = 0; i < stmt.parameters.length; i++) {
