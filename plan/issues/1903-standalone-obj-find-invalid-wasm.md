@@ -1,7 +1,7 @@
 ---
 id: 1903
 title: "standalone object runtime: __obj_find emits invalid Wasm in dynamic-property bucket"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -128,6 +128,10 @@ remaining semantic failures.
   the base advanced again, with no #1903 conflicts, and reran scoped validation.
 - Publish follow-up 9: merged current `origin/main` (`053ed24ef`, #1269) after
   the base advanced again, with no #1903 conflicts, and reran scoped validation.
+- Publish follow-up 10: merged current `origin/main` (`5b495ba47`, #1270)
+  after the latest PR run hit the standalone regression guard against a stale
+  baseline. The merge had no #1903 source conflicts and only brought in
+  unrelated #1905 issue metadata.
 
 ## Validation
 
@@ -200,3 +204,6 @@ remaining semantic failures.
 - `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
   "#1903|dynamic property add/read"` (after merging `origin/main` at
   `053ed24ef`)
+- `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
+  "#1903|dynamic property add/read"` (after merging `origin/main` at
+  `5b495ba47`)
