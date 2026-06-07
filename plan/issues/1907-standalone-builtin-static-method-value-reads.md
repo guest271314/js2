@@ -91,8 +91,8 @@ standalone refusal.
   implementation work outstanding; the scoped validation commands above passed
   again on 2026-06-07 after merging current `origin/main`.
 - `origin/main` was fetched and merged into `symphony/1907` through
-  `f4dd784d4` before the final branch push. The merge brought in a later
-  test262 baseline refresh without #1907 conflicts.
+  `d4492156f` before the final branch push. The merge brought in later sprint
+  issue/report updates without #1907 conflicts.
 - Scoped validation passed again after that final main merge: the focused
   #1907/#1888 tests, typecheck, #1678 Array.isArray regression tests, the
   targeted #1472 Reflect.ownKeys standalone route, and formatting.
