@@ -1,7 +1,7 @@
 ---
 id: 1910
 title: "standalone ToPrimitive residual bucket after #1900/#1525b"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -17,6 +17,7 @@ test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
 claimed_at: 2026-06-07T00:36:22.921Z
+pr: 1258
 ---
 
 # #1910 — Standalone ToPrimitive residual bucket
