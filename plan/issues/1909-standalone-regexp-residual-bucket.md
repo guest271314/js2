@@ -1,7 +1,7 @@
 ---
 id: 1909
 title: "standalone RegExp residual bucket after #1474/#682: split Phase 2d and native-engine gaps"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1291
 claimed_by: codex-developer
-claimed_at: 2026-06-07T11:00:59.113Z
+claimed_at: 2026-06-07T11:08:29.309Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -675,3 +675,27 @@ Branches that are queued for merging cannot be updated.
 
 Per the publish rule, this issue is left `in-progress` locally until PR #1291
 merges or is dequeued so the latest metadata refresh can be pushed.
+
+## 2026-06-07 live PR #1291 refresh for current handoff
+
+GitHub still has PR #1291 open and ready/non-draft for `symphony/1909`:
+
+- URL: `https://github.com/loopdive/js2/pull/1291`
+- Remote head before this refresh: `6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+- Base: `main`
+- Merge state: `CLEAN` / mergeable
+- Checks: all reported PR checks succeeded
+- Queue ref visibility: no `gh-readonly-queue/main/pr-1291*` ref was visible
+  via `git ls-remote`
+
+Scoped validation was rerun in this worktree:
+
+- `pnpm test tests/issue-1909.test.ts tests/issue-1781.test.ts`
+- `node --check scripts/build-test262-report.mjs`
+- `node scripts/check-issue-ids.mjs`
+- `pnpm exec prettier --check scripts/build-test262-report.mjs tests/issue-1909.test.ts tests/issue-1781.test.ts plan/issues/1909-standalone-regexp-residual-bucket.md`
+- `node scripts/build-test262-report.mjs --input .test262-cache/test262-standalone-current.jsonl --output .test262-cache/test262-standalone-report-1909-validate.json --target standalone --include-proposals --max-unclassified-root-causes 0`
+
+All scoped checks passed. The branch is based on current `origin/main`, and
+this issue is moved back to `in-review` with `pr: 1291`; the PR-status poller
+owns the eventual `done` transition after merge.
