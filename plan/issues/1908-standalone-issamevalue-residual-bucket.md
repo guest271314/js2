@@ -596,18 +596,30 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   `merge shard reports` job still in progress at the time of this check.
 - Frontmatter status remains `in-review` for the PR-status poller.
 
-## Codex Attempt 42 Queue Confirmation — 2026-06-07
+## Codex Attempt 42 Pre-Publish Queue Confirmation — 2026-06-07
 
 - Fetched `origin/main` and `origin/symphony/1908`; current `origin/main`
   (`28c668ab4e636011d08ac4e518acc4353097f5f1`) is already an ancestor of both
   local `symphony/1908` and the published PR head.
 - `pnpm exec vitest run tests/issue-1908.test.ts` passed.
-- PR #1257 is open, non-draft, targets `main`, and the published branch points
-  at `5a278574d0e8848255fced0b91d03fef5aa33928`.
-- GraphQL reports `mergeStateStatus: BLOCKED`, `mergeable: MERGEABLE`, and
+- Before publishing this metadata refresh, PR #1257 was open, non-draft,
+  targeted `main`, and the published branch pointed at
+  `5a278574d0e8848255fced0b91d03fef5aa33928`.
+- GraphQL reported `mergeStateStatus: BLOCKED`, `mergeable: MERGEABLE`, and
   `mergeQueueEntry.state: QUEUED`, `position: 16`, `enqueuedAt:
-  2026-06-07T12:14:54Z`.
+  2026-06-07T12:14:54Z` before the PR was dequeued for the metadata push.
 - The visible PR checks are successful except the queued Test262 Sharded
   `merge shard reports` job, which was still in progress at the time of this
   check.
+- Frontmatter status remains `in-review` for the PR-status poller.
+
+## Codex Attempt 43 Publish/Auto-Merge State — 2026-06-07
+
+- Dequeued PR #1257 so GitHub would accept the issue metadata update, then
+  pushed `symphony/1908` to `origin`.
+- Re-enabled auto-merge/merge-queue entry for the updated PR head with
+  `gh pr merge 1257 --auto --merge --match-head-commit`.
+- GraphQL reported `autoMergeRequest.mergeMethod: MERGE` and
+  `mergeQueueEntry: null` while required checks were still running, so GitHub
+  should enqueue the PR after those checks pass.
 - Frontmatter status remains `in-review` for the PR-status poller.
