@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T06:43:05.244Z
+claimed_at: 2026-06-07T06:49:05.069Z
 pr: 1257
 ---
 
@@ -328,6 +328,29 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   `ff02d201152dc8777d3e8151ed05dddd47d75ecf`, which CI reported as 114 commits
   behind `origin/main` (max 50). The standalone regression guard in that run
   was clean (`improvements=0`, `wasm-change regressions=0`, `net=0`).
+- This local issue copy remains `in-progress` because publishing the local
+  issue metadata would require updating a branch that is already queued; the
+  published issue file on `origin/symphony/1908` remains `in-review` with
+  `pr: 1257`.
+
+## Codex Attempt 28 Queue Confirmation — 2026-06-07
+
+- Fetched current `origin/main`
+  (`5b495ba4796f5a27fa4717b291f262e3f3232c88`) and confirmed the #1908 code,
+  report rebuild, and focused regression are already published on
+  `origin/symphony/1908` at
+  `06e0a904ce757c972a8052e4b00c07a4abf8427c`.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed.
+- PR #1257 is open, non-draft, targets `main`, and is still recorded in
+  frontmatter.
+- GraphQL confirms `mergeQueueEntry.state: QUEUED`, `position: 5`, and
+  `enqueuedAt: 2026-06-07T05:58:56Z`; GitHub still reports
+  `mergeStateStatus: BLOCKED`.
+- The blocker remains the stale-baseline guard in the latest
+  `merge shard reports` job: `loopdive/js2wasm-baselines` `main`
+  (`d084289b27be91e1fbea8199e5e916431cc9c8b3`) is still generated from
+  `ff02d201152dc8777d3e8151ed05dddd47d75ecf`, which CI reported as 114 commits
+  behind `origin/main` (max 50).
 - This local issue copy remains `in-progress` because publishing the local
   issue metadata would require updating a branch that is already queued; the
   published issue file on `origin/symphony/1908` remains `in-review` with
