@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1260
 claimed_by: codex-developer
-claimed_at: 2026-06-07T03:08:24.842Z
+claimed_at: 2026-06-07T03:14:54.632Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -141,3 +141,27 @@ Branches that are queued for merging cannot be updated.
 
 Per the publish rule, this issue is left `in-progress` locally until the queued
 PR merges or is dequeued so the current main-sync metadata can be pushed.
+
+## 2026-06-07 queue refresh after reassignment
+
+Scoped validation was rerun in this worktree after the reassignment:
+
+- `pnpm test tests/issue-1909.test.ts tests/issue-1781.test.ts tests/issue-1910.test.ts`
+- `node --check scripts/build-test262-report.mjs`
+- `node scripts/check-issue-ids.mjs`
+- `pnpm exec prettier --check scripts/build-test262-report.mjs tests/issue-1909.test.ts tests/issue-1781.test.ts tests/issue-1910.test.ts plan/issues/1909-standalone-regexp-residual-bucket.md`
+- `node scripts/build-test262-report.mjs --input .test262-cache/test262-standalone-current.jsonl --output .test262-cache/test262-standalone-report-1909-validate.json --target standalone --include-proposals --max-unclassified-root-causes 0`
+
+All scoped checks passed. PR #1260 remains open and ready, with remote head
+`a3fe42c32`. GitHub has accepted it into the merge queue again:
+
+- Queue ref:
+  `refs/heads/gh-readonly-queue/main/pr-1260-f4dd784d4f1960a8c759b51f0cff23e8f4ed4f34`
+- Merge-group run:
+  `https://github.com/loopdive/js2/actions/runs/27081078870`
+- Current merge-group status at refresh time: `in_progress`
+
+The local branch still contains post-sync metadata commits that cannot be pushed
+while GitHub keeps the PR branch in the merge queue. This issue remains
+`in-progress` locally until either the queued PR merges or the branch is
+dequeued for another push.
