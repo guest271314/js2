@@ -84,10 +84,11 @@ PR #1264 is open against `main`; the local issue status is back to
 ## Publish Blocker
 
 `codex-developer` revalidated locally and committed validation refreshes, but
-the 2026-06-07T09:27+02:00 `git push origin symphony/1906` attempt was rejected
-after local pre-push typecheck/lint, prettier, and issue-integrity gates passed.
-GitHub rejected the update with `GH006` because PR #1264 is already in the merge
-queue and queued branches cannot be updated without dequeuing the PR first.
+the 2026-06-07T09:27+02:00 and 2026-06-07T09:37+02:00
+`git push origin symphony/1906` attempts were rejected after local pre-push
+typecheck/lint, prettier, and issue-integrity gates passed. GitHub rejected the
+update with `GH006` because PR #1264 is already in the merge queue and queued
+branches cannot be updated without dequeuing the PR first.
 
 The queued remote head remains `0ea14d5a0`; the local branch has current-main
 merge and issue bookkeeping commits beyond that queued head. This pass rechecked
