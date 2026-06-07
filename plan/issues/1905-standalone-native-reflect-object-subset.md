@@ -17,7 +17,7 @@ related: [1472, 1466, 1629, 1888]
 test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
-claimed_at: 2026-06-07T06:57:59Z
+claimed_at: 2026-06-07T07:08:05.111Z
 pr: 1284
 ---
 
@@ -128,3 +128,7 @@ machinery and are out of scope here.
 - Publish blocker: pushing the latest local issue-state refresh was rejected
   because GitHub reports PR `#1284` is already in the merge queue; queued
   branches cannot be updated without dequeuing the PR.
+- Current Codex pass: reran the scoped validation above successfully and
+  confirmed PR `#1284` is still open/non-draft, green, and in the merge queue
+  at position 13. Local issue-state updates remain unpublished because the
+  queued branch rejects further pushes without dequeuing the PR.
