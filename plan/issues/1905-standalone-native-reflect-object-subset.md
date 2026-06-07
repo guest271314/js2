@@ -17,7 +17,7 @@ related: [1472, 1466, 1629, 1888]
 test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:28:23.923Z
+claimed_at: 2026-06-07T01:36:53.662Z
 pr: 1261
 ---
 # #1905 — Standalone native Reflect object subset
