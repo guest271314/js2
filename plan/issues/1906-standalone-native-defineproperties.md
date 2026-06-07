@@ -17,7 +17,7 @@ related: [1472, 1629, 1631, 1888]
 test262_bucket: object-property-semantics
 test262_count: 748
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:55:23.725Z
+claimed_at: 2026-06-07T02:02:24.645Z
 pr: 1264
 ---
 # #1906 — Standalone native `Object.defineProperties`
@@ -74,3 +74,5 @@ caught by the broad dynamic object/property refusal.
 
 Revalidated on branch `symphony/1906` after merging current `origin/main`
 with PR #1264 open against `main`; checks above pass locally on 2026-06-07.
+Revalidated again by `codex-developer` on 2026-06-07 before publishing the
+latest issue metadata.
