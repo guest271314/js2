@@ -1,7 +1,7 @@
 ---
 id: 1905
 title: "standalone: native Reflect.get/set/has/deleteProperty over $Object"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -19,7 +19,7 @@ test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
 claimed_at: 2026-06-07T10:11:35.413Z
-pr: 1284
+pr: 1290
 ---
 
 # #1905 — Standalone native Reflect object subset
@@ -156,3 +156,4 @@ machinery and are out of scope here.
 - Attempt 30: fetched current `origin/main`, fast-forwarded `symphony/1905` to
   current main (`28c668ab4`), reran the scoped validation above successfully,
   and confirmed the previously tracked ready PR `#1284` is already merged.
+- Opened ready follow-up PR `#1290` for the Attempt 30 issue-state refresh.
