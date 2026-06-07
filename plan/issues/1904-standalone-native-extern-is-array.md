@@ -71,4 +71,4 @@ a native brand predicate.
 - `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts`
 - `npm run typecheck`
 
-Final Codex verification on 2026-06-07: the scoped issue test, related regression set, and typecheck passed after refreshing the branch against current main.
+Final Codex verification on 2026-06-07: the scoped issue test, related regression set, and typecheck passed after refreshing the branch against current main. PR #1259's earlier test262 gate failure was on the stale published head and reported baseline drift; the branch was refreshed again against `origin/main` before republishing.
