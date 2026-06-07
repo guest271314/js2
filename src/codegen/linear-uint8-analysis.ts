@@ -196,13 +196,15 @@ export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.Sourc
       if (fnSym) {
         fnDecls.set(fnSym, node);
         const exported = isExportedFn(node);
+        const rewriteParams = canRewriteLinearParams(node, exported);
         const paramSyms: (ts.Symbol | undefined)[] = [];
         for (const p of node.parameters) {
           let pSym: ts.Symbol | undefined;
           if (ts.isIdentifier(p.name) && isUint8ArrayNode(checker, p.name)) {
             pSym = checker.getSymbolAtLocation(p.name);
-            // Exported functions: params are observable ABI — never candidates.
-            if (pSym && !exported && !p.dotDotDotToken) safe.add(pSym);
+            // Exported or otherwise unsupported signatures keep the observable
+            // GC ABI. Only simple top-level helper params enter Slice C.
+            if (pSym && rewriteParams) safe.add(pSym);
           }
           paramSyms.push(pSym);
         }
@@ -304,6 +306,41 @@ function isExportedFn(node: FnDecl): boolean {
     if (sMods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword)) return true;
   }
   return false;
+}
+
+function bodyUsesArguments(node: FnDecl): boolean {
+  const body = "body" in node ? node.body : undefined;
+  if (!body) return false;
+  let found = false;
+  const visit = (child: ts.Node): void => {
+    if (found) return;
+    if (child !== body && isFnDecl(child)) return;
+    if (ts.isIdentifier(child) && child.text === "arguments") {
+      found = true;
+      return;
+    }
+    ts.forEachChild(child, visit);
+  };
+  ts.forEachChild(body, visit);
+  return found;
+}
+
+function canRewriteLinearParams(node: FnDecl, exported: boolean): boolean {
+  // Slice C wires top-level helper FunctionDeclarations. Nested functions,
+  // methods, arrows, async/generator/generic functions, optional/default
+  // params, rest params, and functions that read `arguments` keep the GC ABI so
+  // existing call/default/arguments paths remain unchanged.
+  if (!ts.isFunctionDeclaration(node) || !node.name) return false;
+  if (!node.parent || !ts.isSourceFile(node.parent)) return false;
+  if (exported) return false;
+  if (node.asteriskToken) return false;
+  if (node.typeParameters && node.typeParameters.length > 0) return false;
+  const mods = ts.getModifiers(node);
+  if (mods?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) return false;
+  if (bodyUsesArguments(node)) return false;
+  return node.parameters.every(
+    (p) => ts.isIdentifier(p.name) && !p.dotDotDotToken && !p.questionToken && !p.initializer,
+  );
 }
 
 /** True if this identifier is its own declaration name (not a use). */
