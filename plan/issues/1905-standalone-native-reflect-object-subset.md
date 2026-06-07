@@ -18,8 +18,8 @@ related: [1472, 1466, 1629, 1888]
 test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:41:35.010Z
-pr: 1284
+claimed_at: 2026-06-07T13:19:59.758Z
+pr: 1290
 ---
 
 # #1905 — Standalone native Reflect object subset
@@ -153,3 +153,132 @@ machinery and are out of scope here.
 - Final Codex publish pass: dequeued PR `#1284`, pushed the refreshed issue
   state to `symphony/1905`, and re-enabled GitHub auto-merge for the refreshed
   head while required checks are pending.
+- Attempt 30: fetched current `origin/main`, fast-forwarded `symphony/1905` to
+  current main (`28c668ab4`), reran the scoped validation above successfully,
+  and confirmed the previously tracked ready PR `#1284` is already merged.
+- Opened ready follow-up PR `#1290` for the Attempt 30 issue-state refresh.
+- Current Codex pass: fetched current `origin/main`, confirmed it remains an
+  ancestor of `symphony/1905`, reran the scoped validation above successfully,
+  and confirmed ready PR `#1290` is open, non-draft, mergeable, and green before
+  publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main`, confirmed `symphony/1905`
+  remains based on it, reran the scoped validation above successfully, and
+  confirmed ready PR `#1290` is open/non-draft and mergeable with required
+  checks still completing before this issue-state refresh is published.
+- Current Codex pass: fetched current `origin/main`, confirmed it remains an
+  ancestor of `symphony/1905`, reran the scoped validation above successfully,
+  and confirmed ready PR `#1290` is open/non-draft, clean, mergeable, and queued
+  in the merge queue at position 17 before publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main`, confirmed it remains an
+  ancestor of `symphony/1905`, reran the scoped validation above successfully,
+  and confirmed ready PR `#1290` is open/non-draft, clean, mergeable, and queued
+  in the merge queue at position 19 before publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main`, confirmed it remains an
+  ancestor of `symphony/1905`, reran the scoped validation above successfully
+  including the focused Prettier check, and confirmed ready PR `#1290` is
+  open/non-draft, clean, mergeable, and queued in the merge queue at position 18
+  before publishing this issue-state refresh.
+- Final Codex publish pass: dequeued PR `#1290`, pushed this refreshed issue
+  state to `symphony/1905`, and re-enabled GitHub auto-merge for the refreshed
+  head while required checks are pending so GitHub can queue it after checks
+  pass.
+- Current Codex pass: fetched current `origin/main`, confirmed it remains an
+  ancestor of `symphony/1905`, reran the scoped validation above successfully,
+  and confirmed ready PR `#1290` is open/non-draft, clean, mergeable, and green
+  before publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main`, confirmed it remains an
+  ancestor of `symphony/1905`, reran the scoped validation above successfully,
+  and confirmed ready PR `#1290` is open/non-draft, clean, mergeable, green, and
+  queued in the merge queue at position 19 before publishing this issue-state
+  refresh.
+- Current Codex pass: fetched current `origin/main` (`28c668ab4`), confirmed it
+  remains an ancestor of `symphony/1905`, reran the scoped validation above
+  successfully including the focused Prettier check, and confirmed ready PR
+  `#1290` is open/non-draft, clean, mergeable, green, and queued in the merge
+  queue at position 17 before publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main` (`28c668ab4`), confirmed it
+  remains an ancestor of `symphony/1905`, reran the scoped validation above
+  successfully including the focused Prettier check, and confirmed ready PR
+  `#1290` is open/non-draft, clean, mergeable, green, and queued in the merge
+  queue at position 18 before publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main` (`28c668ab4`), confirmed it
+  remains an ancestor of `symphony/1905`, reran the scoped validation above
+  successfully including the focused Prettier check, and confirmed ready PR
+  `#1290` is open/non-draft, clean, mergeable, green, and queued in the merge
+  queue at position 17 before publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main` (`28c668ab4`), confirmed it
+  remains an ancestor of `symphony/1905`, reran the scoped validation above
+  successfully including the focused Prettier check, and confirmed ready PR
+  `#1290` is open/non-draft, clean, mergeable, green, and queued in the merge
+  queue at position 15 before publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main` (`28c668ab4`), confirmed it
+  remains an ancestor of `symphony/1905`, reran the scoped validation above
+  successfully including the focused Prettier check, and confirmed ready PR
+  `#1290` is open/non-draft, clean, mergeable, green, and queued in the merge
+  queue at position 16 before publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main` (`28c668ab4`), confirmed it
+  remains an ancestor of `symphony/1905`, reran the scoped validation above
+  successfully including the focused Prettier check, and confirmed ready PR
+  `#1290` is open/non-draft and mergeable with required checks still completing
+  before publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main` (`28c668ab4`), confirmed it
+  remains an ancestor of `symphony/1905`, reran the scoped validation above
+  successfully including the focused Prettier check, and confirmed ready PR
+  `#1290` is open/non-draft, clean, mergeable, and queued in the merge queue at
+  position 17 before publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main` (`28c668ab4`), confirmed it
+  remains an ancestor of `symphony/1905`, reran the scoped validation above
+  successfully including the focused Prettier check, and confirmed ready PR
+  `#1290` is open/non-draft, clean, mergeable, green, and queued in the merge
+  queue at position 18 before publishing this issue-state refresh.
+- Current Codex pass: fetched current `origin/main` (`28c668ab4`), confirmed it
+  remains an ancestor of `symphony/1905`, reran the scoped validation above
+  successfully including the focused Prettier check, and confirmed ready PR
+  `#1290` is open/non-draft and mergeable with required checks still completing
+  before publishing this issue-state refresh.
+- Post-merge Codex pass: merged current `origin/main` (`767e64754`) into
+  `symphony/1905`, reran the scoped validation above successfully including the
+  focused Prettier check, and kept ready PR `#1290` as the tracked in-review PR
+  before publishing this refreshed branch.
+- Current Codex pass: fetched current `origin/main` (`767e64754`), confirmed it
+  remains an ancestor of `symphony/1905`, reran the scoped validation above
+  successfully including the focused Prettier check, and confirmed ready PR
+  `#1290` is open/non-draft, clean, mergeable, green, and queued in the merge
+  queue at position 15 before publishing this issue-state refresh.
+- Current Codex pass (2026-06-07T14:50+02:00): fetched current `origin/main`
+  (`767e64754`), confirmed it remains an ancestor of `symphony/1905`, reran the
+  scoped validation above successfully including the focused Prettier check, and
+  confirmed ready PR `#1290` is open/non-draft, clean, mergeable, green, and
+  queued in the merge queue at position 16 before publishing this issue-state
+  refresh.
+- Current Codex pass (2026-06-07T14:57+02:00): fetched current `origin/main`
+  (`767e64754`), confirmed it remains an ancestor of `symphony/1905`, reran the
+  scoped validation above successfully including the focused Prettier check, and
+  confirmed ready PR `#1290` is open/non-draft, mergeable, and queued in the
+  merge queue at position 13 while the final equivalence gate is still queued.
+- Final Codex publish pass (2026-06-07T15:01+02:00): dequeued PR `#1290` to
+  allow the branch update, pushed the refreshed issue state to `symphony/1905`,
+  and re-enabled GitHub auto-merge for the refreshed head while required checks
+  are pending so GitHub can queue it after checks pass.
+- Current Codex pass (2026-06-07T15:08+02:00): fetched current `origin/main`
+  (`767e64754`), confirmed it remains an ancestor of `symphony/1905`, reran the
+  scoped validation above successfully including the focused Prettier check, and
+  confirmed ready PR `#1290` is open/non-draft, clean, mergeable, green, and
+  queued in the merge queue at position 12 before publishing this issue-state
+  refresh.
+- Current Codex pass (2026-06-07T15:15+02:00): fetched current `origin/main`
+  (`767e64754`), confirmed it remains an ancestor of `symphony/1905`, reran the
+  scoped validation above successfully including the focused Prettier check, and
+  confirmed ready PR `#1290` is open/non-draft, clean, mergeable, green, and
+  queued in the merge queue at position 12 before publishing this issue-state
+  refresh.
+- Current Codex pass (2026-06-07T15:22+02:00): fetched current `origin/main`
+  (`767e64754`), confirmed it remains an ancestor of `symphony/1905`, reran the
+  scoped validation above successfully including the focused Prettier check, and
+  confirmed ready PR `#1290` is open/non-draft, clean, mergeable, green, and
+  queued in the merge queue at position 12 before publishing this issue-state
+  refresh.
+- Final Codex publish pass (2026-06-07T15:23+02:00): dequeued PR `#1290`, pushed
+  this refreshed issue state to `symphony/1905`, and re-enabled GitHub
+  auto-merge for the refreshed head while required checks are pending so GitHub
+  can queue it after checks pass.
