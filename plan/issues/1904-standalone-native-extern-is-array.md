@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:46:11.214Z
+claimed_at: 2026-06-07T07:49:23.444Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -142,3 +142,5 @@ Codex queue check on 2026-06-07: fetched `origin`, confirmed `origin/main` is in
 Codex latest queue verification on 2026-06-07: fetched `origin`, confirmed `origin/main` is included in local `symphony/1904`, and reran scoped validation successfully: `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub GraphQL reports PR #1286 is open, ready/non-draft, all visible checks successful, and queued at position 8 with remote head `8db25d962fb115fe1755278809a64388cc554af5`; issue status remains `in-progress` because the current local issue-file updates cannot be pushed while GitHub locks the queued branch.
 
 Codex current queue check on 2026-06-07: fetched `origin`, confirmed `origin/main` is included in local `symphony/1904`, and reran scoped validation successfully: `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub GraphQL reports PR #1286 is open, ready/non-draft, all visible checks successful, and queued at position 7 with remote head `8db25d962fb115fe1755278809a64388cc554af5`; issue status remains `in-progress` locally because the queued branch rejects updates until PR #1286 merges or is dequeued.
+
+Codex publish blocker on 2026-06-07: `git merge --ff-only origin/main` was already up to date, and `git push origin symphony/1904` ran pre-push typecheck, lint, prettier format check, and issue integrity successfully before GitHub rejected the update with GH006 because PR #1286 is already in the merge queue. GitHub GraphQL still reports PR #1286 open, ready/non-draft, all visible checks successful, and queued at position 7 with remote head `8db25d962fb115fe1755278809a64388cc554af5`; issue status stays `in-progress` until the queued PR merges or is dequeued for a publishable update.
