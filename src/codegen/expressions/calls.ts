@@ -63,7 +63,7 @@ import {
   compileObjectKeysOrValues,
   compilePropertyIntrospection,
 } from "../object-ops.js";
-import { emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js";
+import { emitArrayIsArrayExternrefPredicate, emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
@@ -3452,45 +3452,7 @@ function compileCallExpression(
           fctx.body.push({ op: "i32.const", value: 0 });
           return { kind: "i32" };
         }
-        const vecTypeIdxs = Array.from(new Set(ctx.vecTypeMap.values()));
-        const isArrIdx = ensureLateImport(ctx, "__extern_is_array", [{ kind: "externref" }], [{ kind: "i32" }]);
-        if (vecTypeIdxs.length === 0 && isArrIdx === undefined) {
-          // No WasmGC array types registered and no host predicate available
-          // (e.g. standalone with no arrays in the module) — never an array.
-          fctx.body.push({ op: "drop" });
-          fctx.body.push({ op: "i32.const", value: 0 });
-          return { kind: "i32" };
-        }
-        // Keep the externref value live in a temp; both the ref.test scan
-        // (needs an anyref) and the host predicate (needs the externref)
-        // consume it, so we can't leave it on the stack.
-        const externTmp = allocLocal(fctx, `__isarr_ext_${fctx.locals.length}`, { kind: "externref" } as ValType);
-        fctx.body.push({ op: "local.set", index: externTmp });
-        let emittedTerm = false;
-        if (vecTypeIdxs.length > 0) {
-          const anyTmp = allocLocal(fctx, `__isarr_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-          fctx.body.push({ op: "local.get", index: externTmp } as Instr);
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
-          fctx.body.push({ op: "local.set", index: anyTmp });
-          // result = ref.test(t0) | ref.test(t1) | ...
-          for (let vi = 0; vi < vecTypeIdxs.length; vi++) {
-            fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
-            fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdxs[vi]! } as Instr);
-            if (vi > 0) fctx.body.push({ op: "i32.or" } as Instr);
-          }
-          emittedTerm = true;
-        }
-        if (isArrIdx !== undefined) {
-          flushLateImportShifts(ctx, fctx);
-          fctx.body.push({ op: "local.get", index: externTmp } as Instr);
-          fctx.body.push({ op: "call", funcIdx: isArrIdx });
-          if (emittedTerm) fctx.body.push({ op: "i32.or" } as Instr);
-          emittedTerm = true;
-        }
-        if (!emittedTerm) {
-          // Should be unreachable given the guard above, but stay safe.
-          fctx.body.push({ op: "i32.const", value: 0 });
-        }
+        emitArrayIsArrayExternrefPredicate(ctx, fctx);
         return { kind: "i32" };
       }
       // If the wasm type is a ref to a vec struct (array), return true; otherwise false
