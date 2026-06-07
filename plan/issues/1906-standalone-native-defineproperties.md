@@ -76,8 +76,8 @@ Revalidated by `codex-developer` on branch `symphony/1906` after fetching
 current `origin/main` at `5b495ba47` through branch head `7a22b9296`;
 checks above pass locally on 2026-06-07.
 
-PR #1264 is open against `main` and the issue remains `in-review` for the
-PR-status poller.
+PR #1264 is open against `main`; the local issue status is back to
+`in-progress` until the publish/CI blocker below is cleared.
 
 ## Publish Blocker
 
