@@ -1,7 +1,7 @@
 ---
 id: 1591
 title: "class/elements: WasmGC-struct ↔ host own-property/identity reconciliation gaps (~294 fails)"
-status: in-progress
+status: in-review
 created: 2026-05-24
 updated: 2026-06-07
 depends_on: [1472]
@@ -414,7 +414,19 @@ stale-baseline guard, not this branch's class-elements change:
 - failure message: "STALE BASELINE ... Fix baseline promotion before merging.
   See #1668."
 
-Current plan for this attempt: merge current `origin/main`, rerun scoped
-validation, push the refreshed branch, and try merge-queue/auto-merge again. If
-GitHub still rejects queueing because the shared baseline remains stale, leave
-this issue `in-progress` and report that external blocker.
+Attempt 30 refresh:
+
+- Merged current `origin/main` into `symphony/1591` cleanly.
+- Re-ran scoped local validation on the merged branch:
+  - `pnpm exec vitest run tests/issue-1591.test.ts --reporter=dot` — pass
+  - `pnpm exec vitest run tests/issue-1472.test.ts -t "#1888 Slice 3" --reporter=dot` — pass
+  - `pnpm exec vitest run tests/issue-1364a-class-method-descriptors.test.ts tests/issue-1364b-class-method-delete.test.ts tests/issue-1047.test.ts tests/issue-1395-phase1.test.ts tests/issue-341.test.ts tests/equivalence/issue-1334.test.ts --reporter=dot` — pass
+  - `pnpm exec prettier --check src/codegen/object-ops.ts src/codegen/expressions/calls.ts src/runtime.ts tests/issue-1591.test.ts tests/issue-1472.test.ts` — pass
+  - `pnpm exec biome lint src/codegen/object-ops.ts src/codegen/expressions/calls.ts src/runtime.ts tests/issue-1591.test.ts tests/issue-1472.test.ts --diagnostic-level=error` — exit 0; Biome still prints its existing diagnostic-cap notice.
+- Pushed the refreshed ready PR branch. GitHub reported PR #1278 as open,
+  non-draft, mergeable, and based on `main`; checks were pending on the refreshed
+  head when this note was written.
+
+Next step is merge-queue/auto-merge enablement. If GitHub later rejects queueing
+because the shared baseline remains stale, flip this issue back to `in-progress`
+and report that external blocker.
