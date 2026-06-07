@@ -1,7 +1,7 @@
 ---
 id: 1908
 title: "standalone: re-split and fix residual isSameValue bucket after #1776/#1807"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -167,3 +167,14 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
 - `pnpm exec vitest run tests/issue-1908.test.ts` passed.
 - PR #1257 is open, non-draft, targets `main`, and remains recorded in
   frontmatter while #1908 stays `in-review` for the PR-status poller.
+
+## Codex Retry Blocker — 2026-06-07
+
+- Attempted to push the retry metadata commit after local validation, but
+  GitHub rejected the branch update because PR #1257 is already in the merge
+  queue and queued branches cannot be updated without dequeueing the PR.
+- GraphQL confirms PR #1257 has `mergeQueueEntry.state: QUEUED` at published
+  head `b6037503df2758adca31ac96a57c364dba6e9886`.
+- Per the publish-failure workflow, this local issue copy is left
+  `in-progress`; the published issue file on `origin/symphony/1908` remains
+  `in-review` with `pr: 1257`.
