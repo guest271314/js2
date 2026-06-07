@@ -1,7 +1,7 @@
 ---
 id: 1910
 title: "standalone ToPrimitive residual bucket after #1900/#1525b"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T12:42:00.407Z
+claimed_at: 2026-06-07T12:49:29.596Z
 pr: 1295
 ---
 
@@ -315,3 +315,15 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
   successful checks, the remote head remains `ef9dfbd79`, and this local branch
   has metadata-only issue refresh commits that cannot be pushed while GitHub
   keeps the queued branch locked.
+- Current Codex dequeue/requeue refresh on current `origin/main`
+  (`767e64754`):
+  - Confirmed the classifier implementation and focused tests remain present,
+    the local branch has merged current `origin/main`, and PR #1295 is open,
+    ready, non-draft, passing checks, and queued at position 12 before the
+    refresh.
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the touched script, test, and issue files
+    (passed).
+  - Dequeueing PR #1295 temporarily to publish the current-main metadata
+    refresh, then requeueing the same PR.
