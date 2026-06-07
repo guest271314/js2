@@ -1,7 +1,7 @@
 ---
 id: 1832
 title: "compileNewFunctionExpression captures outer var shadowed by a destructured param"
-status: in-progress
+status: in-review
 created: 2026-06-04
 updated: 2026-06-07
 priority: medium
@@ -10,6 +10,7 @@ task_type: bugfix
 area: codegen
 goal: correctness
 sprint: 61
+pr: 1277
 claimed_by: codex-developer
 claimed_at: 2026-06-07T05:36:47.276Z
 ---
