@@ -88,10 +88,12 @@ standalone refusal.
   `3827daa96`; merge-queue/auto-merge entry is no longer applicable because the
   PR is already merged.
 - Redispatch verification on this branch found no additional implementation
-  work outstanding; the scoped validation commands below passed again.
-- `origin/main` was fetched and merged into `symphony/1907` before the final
-  branch push. The merge brought in later main changes without #1907 conflicts.
-- Scoped validation passed again after the final main merge: the focused
+  work outstanding; the scoped validation commands below passed again on
+  2026-06-07 after merging current `origin/main`.
+- `origin/main` was fetched and merged into `symphony/1907` through
+  `f4dd784d4` before the final branch push. The merge brought in a later
+  test262 baseline refresh without #1907 conflicts.
+- Scoped validation passed again after that final main merge: the focused
   #1907/#1888 tests, typecheck, #1678 Array.isArray regression tests, the
   targeted #1472 Reflect.ownKeys standalone route, and formatting.
 - The issue remains `in-review` with `pr: 1263` so the PR-status poller can
