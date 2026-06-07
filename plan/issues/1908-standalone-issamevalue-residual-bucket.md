@@ -212,3 +212,12 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
 - After `origin/main` advanced again to
   `c871fe467c6ce11ea89c0ce72437b9f3828c532b`, merged it into
   `symphony/1908`; that merge only brought in #1905 issue metadata.
+
+## Codex Attempt 22 Finalization — 2026-06-07
+
+- Fetched current `origin/main`
+  (`5b495ba4796f5a27fa4717b291f262e3f3232c88`) and merged it into
+  `symphony/1908`; the merge only brought in #1905 issue metadata.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed after the merge.
+- PR #1257 remains open, non-draft, targets `main`, and stays recorded in
+  frontmatter while #1908 remains `in-review` for the PR-status poller.
