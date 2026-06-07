@@ -1,7 +1,7 @@
 ---
 id: 1836
 title: "Standalone Number<->String conformance gaps (0o/0b, toFixed 1e21, exponential, fractional radix, whitespace, ToNumber) (residual #1335)"
-status: in-review
+status: in-progress
 created: 2026-06-04
 updated: 2026-06-07
 priority: high
@@ -13,7 +13,7 @@ sprint: 61
 parent: 1335
 pr: 1280
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:44:56.700Z
+claimed_at: 2026-06-07T10:19:57.814Z
 ---
 # #1836 — standalone Number↔String conformance gaps
 
