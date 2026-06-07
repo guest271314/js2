@@ -1,9 +1,9 @@
 ---
 id: 1470
 title: "host-independence: eliminate JS host string ops for standalone Wasm"
-status: ready
+status: in-progress
 created: 2026-05-20
-updated: 2026-06-04
+updated: 2026-06-07
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -13,6 +13,8 @@ language_feature: strings
 goal: host-independence
 sprint: 61
 related: []
+claimed_by: codex-developer
+claimed_at: 2026-06-07T05:57:34.200Z
 ---
 # #1470 — Eliminate JS host string ops for standalone Wasm
 
@@ -530,3 +532,26 @@ standalone + WASI + gc-default regression + explicit nativeStrings).
 `native-strings`, `native-strings-standalone`,
 `issue-1470-standalone-string-imports` (14) all green; default `gc` JS-host
 path unchanged.
+
+### 2026-06-07 — WASI runtime strings encode UTF-8 without JS-host bridge
+
+Replaced the WASI `__wasi_write_any_string` runtime-string writer's low-byte
+copy loop with an in-module WTF-16 to UTF-8 encoder. Runtime strings are still
+flattened via `__str_flatten`, but their code units are now encoded directly
+into the fd_write scratch buffer and the actual UTF-8 byte cursor is used as
+the iovec length. This keeps `process.stdout.write(str)`,
+`process.stderr.write(str)`, and `console.log(runtimeString)` on the pure-Wasm
+path without registering `__str_from_mem`, `__str_to_mem`, or
+`__str_extern_len`.
+
+Added `tests/issue-1470.test.ts` to capture raw WASI fd_write bytes for a
+runtime-built non-ASCII string (`U+00E9` plus an astral surrogate pair). The
+old writer produced truncated/invalid bytes; the new path matches UTF-8 and
+still emits no JS-host string bridge imports.
+
+Validation:
+- `pnpm exec vitest run tests/issue-1470.test.ts`
+- `pnpm exec vitest run tests/issue-1470-standalone-string-imports.test.ts tests/issue-1470-string-coercion-standalone.test.ts tests/issue-1759.test.ts tests/issue-1618-1651-wasi-stdout.test.ts`
+- `pnpm exec prettier --check src/codegen/index.ts tests/issue-1470.test.ts`
+- `pnpm exec biome lint src/codegen/index.ts tests/issue-1470.test.ts --diagnostic-level=error`
+- `pnpm exec tsc --noEmit --pretty false`
