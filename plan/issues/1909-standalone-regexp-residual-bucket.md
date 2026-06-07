@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1291
 claimed_by: codex-developer
-claimed_at: 2026-06-07T11:56:59.215Z
+claimed_at: 2026-06-07T12:02:59.201Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -866,3 +866,37 @@ rows. `origin/main` is an ancestor of the local branch, and the net diff versus
 This issue remains `in-progress` locally because GitHub reports PR #1291 is
 already queued to merge and queued branches cannot be updated with the latest
 local metadata refresh.
+
+## 2026-06-07 Codex queue handoff refresh
+
+Live GitHub state still has PR #1291 open and ready/non-draft for
+`symphony/1909`:
+
+- URL: `https://github.com/loopdive/js2/pull/1291`
+- Remote PR head: `6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+- Base: `main`
+- Merge state: `CLEAN` / mergeable
+- Check rollup: `SUCCESS`
+- Merge queue entry: `QUEUED`, position `7`, estimated time to merge `2818`
+  seconds
+- Auto-merge request: none reported; the merge queue entry is active
+
+Scoped validation was rerun in this worktree:
+
+- `pnpm test tests/issue-1909.test.ts tests/issue-1781.test.ts`
+- `node --check scripts/build-test262-report.mjs`
+- `node scripts/check-issue-ids.mjs`
+- `pnpm exec prettier --check scripts/build-test262-report.mjs tests/issue-1909.test.ts tests/issue-1781.test.ts plan/issues/1909-standalone-regexp-residual-bucket.md`
+- `node scripts/build-test262-report.mjs --input .test262-cache/test262-standalone-current.jsonl --output .test262-cache/test262-standalone-report-1909-validate.json --target standalone --include-proposals --max-unclassified-root-causes 0`
+
+All scoped checks passed. The rebuilt standalone report still classifies
+`30,733 / 30,733` standalone non-pass/non-skip rows with `0` unclassified and
+`0` stale rows. The RegExp split is unchanged: `833` Phase 2d rows, `104`
+Phase 2b rows, `452` string-protocol rows, `546` native-engine rows, and `62`
+fallback rows.
+
+`origin/main` is an ancestor of the local branch, and the net diff versus
+`origin/main` remains limited to this issue-state refresh. This issue remains
+`in-progress` locally because GitHub reports PR #1291 is already queued to
+merge; queued PR branches cannot be updated with the latest local metadata
+refresh.
