@@ -256,3 +256,7 @@ machinery and are out of scope here.
   scoped validation above successfully including the focused Prettier check, and
   confirmed ready PR `#1290` is open/non-draft, mergeable, and queued in the
   merge queue at position 13 while the final equivalence gate is still queued.
+- Final Codex publish pass (2026-06-07T15:01+02:00): dequeued PR `#1290` to
+  allow the branch update, pushed the refreshed issue state to `symphony/1905`,
+  and re-enabled GitHub auto-merge for the refreshed head while required checks
+  are pending so GitHub can queue it after checks pass.
