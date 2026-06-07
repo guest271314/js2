@@ -20,6 +20,7 @@ pr: 1262
 claimed_by: codex-developer
 claimed_at: 2026-06-07T00:35:45.680Z
 ---
+
 # #1903 — Standalone object runtime: `__obj_find` invalid Wasm
 
 ## Problem
@@ -76,3 +77,7 @@ remaining semantic failures.
 - `npx vitest run tests/issue-1903.test.ts`
 - `npx vitest run tests/issue-1472.test.ts -t "dynamic property add/read"`
 - `npx vitest run tests/issue-1807.test.ts`
+- `npx vitest run tests/issue-1781.test.ts`
+- Rebuilt the PR #1262 `test262-standalone-results-merged.jsonl` artifact with
+  `--max-unclassified-root-causes 0` after classifying
+  `language/expressions/object/dstr` under the existing object-property bucket.
