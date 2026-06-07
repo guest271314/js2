@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T10:46:28.975Z
+claimed_at: 2026-06-07T10:53:59.205Z
 pr: 1295
 ---
 
@@ -164,3 +164,7 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
     (8 tests passed).
   - `npx prettier --check` on the touched script, test, and issue files
     (passed).
+- Re-dispatch refresh on current `origin/main` (`28c668ab4`):
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the issue file (passed).
