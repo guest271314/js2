@@ -1,7 +1,8 @@
 ---
 id: 1886
 title: "Linear-backed Uint8Array for WASI I/O buffers (escape analysis) — avoid GC↔linear copies, beat AssemblyScript on memory"
-status: in-progress
+status: in-review
+pr: 1288
 sprint: 61
 created: 2026-06-04
 updated: 2026-06-07
