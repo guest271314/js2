@@ -16,7 +16,7 @@ related: [1776, 1807, 1623]
 test262_bucket: issamevalue-invalid-wasm
 test262_count: 0
 claimed_by: codex-developer
-claimed_at: 2026-06-07T06:19:34.776Z
+claimed_at: 2026-06-07T06:26:04.925Z
 pr: 1257
 ---
 
@@ -251,3 +251,21 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   updated without dequeueing the PR. Per the publish-failure workflow, this
   local issue copy is left `in-progress`; the published issue file on
   `origin/symphony/1908` remains `in-review` with `pr: 1257`.
+
+## Codex Attempt 24 Publish Blocker — 2026-06-07
+
+- Fetched current `origin/main`
+  (`5b495ba4796f5a27fa4717b291f262e3f3232c88`) and confirmed it is still an
+  ancestor of `symphony/1908`; no additional main merge was needed.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed.
+- PR #1257 is open, non-draft, targets `main`, and the published branch points
+  at `06e0a904ce757c972a8052e4b00c07a4abf8427c`.
+- `gh pr merge 1257 --auto --merge --match-head-commit
+  06e0a904ce757c972a8052e4b00c07a4abf8427c` reported that PR #1257 is already
+  queued to merge. GraphQL confirms `mergeQueueEntry.state: QUEUED`,
+  `position: 7`, and `enqueuedAt: 2026-06-07T05:58:56Z`.
+- Attempted to push the local metadata update, but GitHub rejected the branch
+  update because queued PR branches cannot be updated without dequeueing the PR.
+  Per the publish-failure workflow, this local issue copy remains
+  `in-progress`; the published issue file on `origin/symphony/1908` remains
+  `in-review` with `pr: 1257`.
