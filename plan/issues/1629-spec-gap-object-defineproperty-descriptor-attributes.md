@@ -3,7 +3,7 @@ id: 1629
 title: "spec gap: Object.defineProperty — descriptor attribute fidelity (664 test262 fails, biggest single bucket)"
 status: ready
 created: 2026-05-08
-updated: 2026-06-07
+updated: 2026-05-30
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -11,7 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: object
 goal: spec-completeness
-sprint: 61
+sprint: Backlog
 renumbered_from: 1335
 parent: 1328
 related: [1629a, 1629b, 1629c, 1630, 1631, 1130, 1364b]

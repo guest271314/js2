@@ -1,7 +1,7 @@
 ---
 id: 1900
 title: "standalone native ToPrimitive (Phase 1): Wasm-native OrdinaryToPrimitive over $Object (~2,136 ceiling)"
-status: done
+status: in-review
 created: 2026-06-05
 updated: 2026-06-06
 priority: high
@@ -18,7 +18,6 @@ needs_arch_spec: true
 claimed_by: codex-developer
 claimed_at: 2026-06-06T09:46:21.649Z
 pr: 1251
-completed: 2026-06-06
 ---
 # #1900 — Standalone native ToPrimitive (Phase 1)
 

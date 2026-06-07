@@ -38,7 +38,7 @@ import { ensureNativeIteratorRuntime } from "./iterator-native.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
-import { fillApplyClosure } from "./object-runtime.js";
+import { fillApplyClosure, fillExternIsArray } from "./object-runtime.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -1515,6 +1515,10 @@ export function generateModule(
     // `__call_fn_method_0..4` are registered. No-op when no standalone open-any
     // method-dispatch site reserved the bridge (`ctx.applyClosureReserved`).
     fillApplyClosure(ctx);
+
+    // (#1904) Fill the standalone native Array.isArray predicate after all
+    // module-local array carriers have been registered.
+    fillExternIsArray(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return
