@@ -119,5 +119,6 @@ queue refs, but the remote PR head `a3fe42c32` now shows a failed
 - summary: `62` pass-to-other transitions, `27` improvements, net `-35` pass
 - baseline note in the failed log: baseline age `1h 20m` at commit `99b58e6`
 
-Before the final push, this branch is being resynced with current `origin/main`
-so the PR reruns against the latest committed baseline.
+The branch has since been resynced with current `origin/main`, and the scoped
+local validation listed above passed again. The next push will rerun the PR
+checks against the latest committed baseline.
