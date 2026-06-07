@@ -1,7 +1,7 @@
 ---
 id: 1904
 title: "standalone: native __extern_is_array predicate for Array.isArray over Wasm carriers"
-status: in-progress
+status: in-review
 pr: 1286
 sprint: 61
 created: 2026-06-07
@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T06:21:12.851Z
+claimed_at: 2026-06-07T06:30:34.952Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -109,6 +109,4 @@ Codex current verification on 2026-06-07: merged current `origin/main` into `sym
 
 Codex final dispatch check on 2026-06-07: fetched current `origin`, confirmed `origin/main` is an ancestor of `symphony/1904`, reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully. GitHub reports implementation PR #1259 is merged and was ready/non-draft; follow-up closeout PR #1286 is open and ready/non-draft, so issue status stays `in-review` for the poller.
 
-Codex current closeout on 2026-06-07: PR #1286 is open and ready/non-draft against `main`; checks were still queued at dispatch time. Local scoped validation passed again: `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck`. Issue status remains `in-review` for the Symphony poller.
-
-Codex publish blocker on 2026-06-07: local closeout commit `f23f4c17e` could not be pushed because GitHub reports PR #1286 is already in the merge queue and queued branches cannot be updated. Issue status is left `in-progress` until the queued PR merges or is dequeued for a follow-up push.
+Codex current closeout on 2026-06-07: PR #1286 is open, ready/non-draft, clean, and queued in the merge queue at position 14. Local scoped validation passed again: `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck`. Issue status remains `in-review` for the Symphony poller.
