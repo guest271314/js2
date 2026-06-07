@@ -1,7 +1,7 @@
 ---
 id: 1909
 title: "standalone RegExp residual bucket after #1474/#682: split Phase 2d and native-engine gaps"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -119,6 +119,25 @@ queue refs, but the remote PR head `a3fe42c32` now shows a failed
 - summary: `62` pass-to-other transitions, `27` improvements, net `-35` pass
 - baseline note in the failed log: baseline age `1h 20m` at commit `99b58e6`
 
-The branch has since been resynced with current `origin/main`, and the scoped
-local validation listed above passed again. The next push will rerun the PR
-checks against the latest committed baseline.
+The branch was then resynced with current `origin/main`, and the scoped local
+validation listed above passed again.
+
+## 2026-06-07 publish blocker after main sync
+
+The final branch push was rejected because PR #1260 is back in GitHub's merge
+queue:
+
+- Remote PR head: `a3fe42c32`
+- Local attempted head: `0808e70fc`
+- Queue ref observed:
+  `refs/heads/gh-readonly-queue/main/pr-1260-f4dd784d4f1960a8c759b51f0cff23e8f4ed4f34`
+- Push result:
+
+```text
+GH006: Protected branch update failed ...
+A pull request for this branch has been added to a merge queue.
+Branches that are queued for merging cannot be updated.
+```
+
+Per the publish rule, this issue is left `in-progress` locally until the queued
+PR merges or is dequeued so the current main-sync metadata can be pushed.
