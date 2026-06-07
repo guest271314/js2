@@ -209,3 +209,6 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   `30,673`, and unclassified remains `0`.
 - `pnpm exec vitest run tests/issue-1908.test.ts tests/issue-1909.test.ts
   tests/issue-1910.test.ts` passed.
+- After `origin/main` advanced again to
+  `c871fe467c6ce11ea89c0ce72437b9f3828c532b`, merged it into
+  `symphony/1908`; that merge only brought in #1905 issue metadata.
