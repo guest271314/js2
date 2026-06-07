@@ -133,3 +133,7 @@ machinery and are out of scope here.
   `symphony/1905` contains it, reran the scoped validation above successfully,
   and confirmed ready PR `#1284` is open/non-draft, green, and queued in the
   merge queue at position 11 before the final branch refresh.
+- Final publish pass: dequeued stale PR `#1284`, pushed the refreshed
+  `symphony/1905` branch containing current `origin/main`, and re-enabled
+  GitHub auto-merge so the refreshed head can enter the merge queue after
+  required checks pass.
