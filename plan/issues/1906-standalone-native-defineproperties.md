@@ -1,7 +1,7 @@
 ---
 id: 1906
 title: "standalone: native Object.defineProperties over $Object descriptors"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -84,9 +84,21 @@ reports the pull request is already queued to merge; GraphQL shows the merge
 queue entry in `AWAITING_CHECKS` since 2026-06-07T10:13:52Z. The required
 `Test262 Sharded / merge shard reports` check is currently failed from the
 stale-baseline guard: the `js2wasm-baselines` JSONL baseline main SHA
-`ff02d201152dc8777d3e8151ed05dddd47d75ecf` was 114 commits behind
+`ff02d201152dc8777d3e8151ed05dddd47d75ecf` was 202 commits behind
 `origin/main`, exceeding the max 50 commit threshold. The standalone guard
 itself reported `improvements=24`, `wasm-change regressions=0`, `net=24`. This
 is an infrastructure blocker tracked by #1668, not a scoped #1906 implementation
-or local validation failure. The issue remains `in-review` for the PR-status
-poller.
+or local validation failure.
+
+Follow-up publish note: the validation/queue refresh commit could not be pushed
+because GitHub rejects updates to branches that already have a pull request in
+the merge queue:
+
+```text
+GH006: Protected branch update failed for refs/heads/symphony/1906.
+A pull request for this branch has been added to a merge queue. Branches that
+are queued for merging cannot be updated.
+```
+
+The issue remains `in-progress` locally until the bookkeeping update can be
+published without disrupting PR #1264's existing merge-queue entry.
