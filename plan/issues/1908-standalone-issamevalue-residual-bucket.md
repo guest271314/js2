@@ -623,3 +623,14 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   `mergeQueueEntry: null` while required checks were still running, so GitHub
   should enqueue the PR after those checks pass.
 - Frontmatter status remains `in-review` for the PR-status poller.
+
+## Codex Attempt 44 Current-Main Merge — 2026-06-07
+
+- Fetched current `origin/main`
+  (`767e647548cad3c799f0af573afc752abd41dd29`) and merged it into
+  `symphony/1908` after GitHub reported PR #1257 was behind.
+- The merge brought in #1886 changes from main and did not conflict with the
+  #1908 classifier, report, regression test, or issue metadata.
+- `pnpm exec vitest run tests/issue-1908.test.ts` passed after the merge.
+- Frontmatter status remains `in-review` for the PR-status poller; PR #1257
+  remains the ready review PR for this issue.
