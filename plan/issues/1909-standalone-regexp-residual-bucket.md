@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1289
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:10:29Z
+claimed_at: 2026-06-07T07:12:51Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -318,3 +318,16 @@ GitHub still has PR #1289 open and ready/non-draft for `symphony/1909`:
 
 This issue is moved back to `in-review` with `pr: 1289`; the PR-status poller
 owns the eventual `done` transition after merge.
+
+## 2026-06-07 final validation after main refresh
+
+Merged current `origin/main` into `symphony/1909` and reran scoped validation:
+
+- `pnpm test tests/issue-1909.test.ts tests/issue-1781.test.ts`
+- `node --check scripts/build-test262-report.mjs`
+- `node scripts/check-issue-ids.mjs`
+- `pnpm exec prettier --check scripts/build-test262-report.mjs tests/issue-1909.test.ts tests/issue-1781.test.ts plan/issues/1909-standalone-regexp-residual-bucket.md`
+- `node scripts/build-test262-report.mjs --input .test262-cache/test262-standalone-current.jsonl --output .test262-cache/test262-standalone-report-1909-validate.json --target standalone --include-proposals --max-unclassified-root-causes 0`
+
+All scoped checks passed. The implementation remains present on `origin/main`;
+this branch carries the current `in-review` issue metadata for PR #1289.
