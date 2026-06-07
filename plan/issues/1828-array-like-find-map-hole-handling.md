@@ -13,7 +13,7 @@ goal: correctness
 sprint: 61
 needs: architect-or-senior-dev
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:12:02.029Z
+claimed_at: 2026-06-07T10:27:48.839Z
 ---
 
 # #1828 — array-like find/findIndex/map hole handling
