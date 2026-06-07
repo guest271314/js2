@@ -22,13 +22,6 @@ claimed_at: 2026-06-07T05:32:55.920Z
 ---
 # #1591 — `class/elements` WasmGC-struct ↔ host own-property / method-identity reconciliation gaps
 
-## Sprint 61 unblock
-
-`#1472` is now marked done. The 2026-06-06 standalone report still assigns
-`3,226` failures to the class/prototype/private/descriptor bucket, with `#1591`
-as the live non-completed owner after older class descriptor issues were closed.
-This issue is ready for a fresh current-main split and implementation slice.
-
 > **MIS-SCOPE CORRECTION (2026-05-27).** The original framing of this issue —
 > "same-line / stacked member definitions are *dropped or reordered* by the
 > parser / class-body emitter" — is **wrong**. A dev investigation confirmed the

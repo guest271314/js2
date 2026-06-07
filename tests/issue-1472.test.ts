@@ -748,15 +748,11 @@ describe("#1472 — --target standalone object/Proxy host-import refusal", () =>
   });
 
   it("Phase C: unsupported Reflect.* methods refuse in standalone without leaking __reflect_* imports", async () => {
-    // The descriptor/prototype/integrity/has/apply/construct family has no
-    // native analog yet; each must fail at compile time with the Phase C
-    // message instead of leaking an env::__reflect_* import that traps at
-    // instantiation.
+    // The descriptor/prototype/integrity/apply/construct family has no native
+    // analog yet; each must fail at compile time with the Phase C message
+    // instead of leaking an env::__reflect_* import that traps at instantiation.
+    // Reflect.get/set/has/deleteProperty are covered by #1905.
     const cases: ReadonlyArray<[string, string]> = [
-      ["get", `export function f(o: any): any { return Reflect.get(o, "k"); }`],
-      ["set", `export function f(o: any): boolean { return Reflect.set(o, "k", 1); }`],
-      ["has", `export function f(o: any): boolean { return Reflect.has(o, "k"); }`],
-      ["deleteProperty", `export function f(o: any): boolean { return Reflect.deleteProperty(o, "k"); }`],
       ["defineProperty", `export function f(o: any): boolean { return Reflect.defineProperty(o, "k", {}); }`],
       [
         "getOwnPropertyDescriptor",
