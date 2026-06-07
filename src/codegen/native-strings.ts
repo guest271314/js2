@@ -206,13 +206,16 @@ export function flatStringType(ctx: CodegenContext): ValType {
  * This applies the single import delta to every already-emitted defined
  * function whose baked `call`/`ref.func` index is at or above that base, leaves
  * calls to pre-helper imports untouched, and rebases the snapshot so later
- * helper groups can be registered under a consistent index base.
+ * helper groups can be registered under a consistent index base. The optional
+ * target import count lets a late-import batch first settle only the drift that
+ * existed before that batch; the late-import shift then handles the batch
+ * itself without a later double-shift.
  */
-export function reconcileNativeStrFinalizeShift(ctx: CodegenContext): void {
+export function reconcileNativeStrFinalizeShift(ctx: CodegenContext, targetImportCount = ctx.numImportFuncs): void {
   const base = ctx.nativeStrHelperImportBase;
   if (base < 0) return;
-  const added = ctx.numImportFuncs - base;
-  ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
+  const added = targetImportCount - base;
+  ctx.nativeStrHelperImportBase = targetImportCount;
   if (added <= 0) return;
 
   const seen = new Set<Instr[]>();

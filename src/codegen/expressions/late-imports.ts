@@ -13,8 +13,9 @@ import { addImport } from "../registry/imports.js";
 import { addFuncType } from "../registry/types.js";
 import { addUnionImportsViaRegistry } from "../shared.js";
 import { ensureObjectRuntime, OBJECT_RUNTIME_HELPER_NAMES } from "../object-runtime.js";
+import { reconcileNativeStrFinalizeShift } from "../native-strings.js";
 
-export { reconcileNativeStrFinalizeShift } from "../native-strings.js";
+export { reconcileNativeStrFinalizeShift };
 
 /**
  * #1471: helper names that `addUnionImports` provides Wasm-native
@@ -340,10 +341,24 @@ export function ensureLateImport(
 export function flushLateImportShifts(ctx: CodegenContext, fctx: FunctionContext): void {
   const pending = ctx.pendingLateImportShift;
   if (pending === null) return;
-  const added = ctx.numImportFuncs - pending.importsBefore;
+  const importsBefore = pending.importsBefore;
+  const added = ctx.numImportFuncs - importsBefore;
   ctx.pendingLateImportShift = null;
   if (added <= 0) return;
-  shiftLateImportIndices(ctx, fctx, pending.importsBefore, added);
+
+  // If native-string helpers were emitted before this late-import batch and
+  // older raw imports are still pending, settle only the pre-batch drift first.
+  // `shiftLateImportIndices` below handles this batch; rebasing afterward keeps
+  // the final native-string reconcile from applying the same shift twice.
+  if (ctx.nativeStrHelperImportBase >= 0 && ctx.nativeStrHelperImportBase < importsBefore) {
+    reconcileNativeStrFinalizeShift(ctx, importsBefore);
+  }
+
+  shiftLateImportIndices(ctx, fctx, importsBefore, added);
+
+  if (ctx.nativeStrHelperImportBase >= 0 && ctx.nativeStrHelperImportBase === importsBefore) {
+    ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
+  }
 }
 
 /**

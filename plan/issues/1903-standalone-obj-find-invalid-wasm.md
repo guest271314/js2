@@ -102,6 +102,16 @@ remaining semantic failures.
   confirmed current `origin/main` (`ff02d2011`) is still an ancestor of the
   branch, reran scoped validation, and found no additional #1903 source changes
   needed before re-pushing PR #1262.
+- CI follow-up (2026-06-07): the ready PR run exposed a separate standalone
+  invalid-Wasm shape where late imports caused native-string helpers such as
+  `__str_flatten` to be shifted twice after the late-import flush. The fix lets
+  `reconcileNativeStrFinalizeShift` settle drift up to a target import boundary,
+  has `flushLateImportShifts` settle only pre-batch native-string drift before
+  applying the late-import batch shift, and then rebases the native-string
+  snapshot so the final reconcile does not apply the same batch again.
+- Added a second #1903 regression in `tests/issue-1903.test.ts` covering the
+  standalone private-accessor/Test262 shape that previously compiled to an
+  invalid `__str_flatten` call after dead-import elimination.
 
 ## Validation
 
@@ -144,6 +154,19 @@ remaining semantic failures.
   "#1903|dynamic property add/read"` (final handoff on 2026-06-07)
 - `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
   "#1903|dynamic property add/read"` (final handoff 4 on 2026-06-07)
+- `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
+  "#1903|dynamic property add/read"` (after fixing native-string late-import
+  double-shift)
+- `pnpm run build:compiler-bundle` (after fixing native-string late-import
+  double-shift)
+- Bundled compiler validation for
+  `/workspace/test262/test/language/statements/class/elements/set-access-of-missing-private-setter.js`
+  with `target: "standalone"` and `skipSemanticDiagnostics: true`: compile
+  succeeded and `WebAssembly.validate` returned `true`.
+- `TEST262_TARGET=standalone npx tsx -e 'import { runTest262File } from
+  "./scripts/test262/runner.ts"; ...'` for
+  `/workspace/test262/test/language/statements/class/elements/set-access-of-missing-private-setter.js`
+  returned `status: "pass"`.
 - Rebuilt the PR #1262 `test262-standalone-results-merged.jsonl` artifact with
   `--max-unclassified-root-causes 0` after classifying
   `language/expressions/object/dstr` under the existing object-property bucket.

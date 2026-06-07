@@ -39,4 +39,48 @@ describe("#1903 standalone __obj_find hash call remains type-correct", () => {
     const { instance } = await WebAssembly.instantiate(r.binary, {});
     expect((instance.exports as Record<string, () => number>).run()).toBe(42);
   });
+
+  it("does not double-shift native string helpers across late import flushes", async () => {
+    const source = `
+      class Test262Error {
+        message: string;
+        constructor(msg: string = "") {
+          this.message = msg;
+        }
+      }
+
+      function assertThrows(fn: () => void): void {
+        try {
+          fn();
+        } catch (e) {
+          return;
+        }
+      }
+
+      export function test(): number {
+        class C {
+          get #f() {
+            throw new Test262Error();
+          }
+
+          setAccess(): void {
+            this.#f = "Test262";
+          }
+        }
+
+        const c = new C();
+        assertThrows(function() {
+          c.setAccess();
+        });
+        return "abc".indexOf("b");
+      }
+    `;
+
+    const r = await compile(source, {
+      target: "standalone",
+      skipSemanticDiagnostics: true,
+    });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+  });
 });
