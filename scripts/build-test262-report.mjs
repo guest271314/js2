@@ -106,6 +106,51 @@ function pathHas(record, patterns) {
   return hasAny(path, patterns);
 }
 
+function isStandaloneRegExpRecord(record, text) {
+  return (
+    record.host_import_leak_class === "regexp" ||
+    pathHas(record, ["built-ins/regexp", "regexpstringiteratorprototype"]) ||
+    hasAny(text, ["regexp", "regular expression"])
+  );
+}
+
+function isObjectToPrimitiveResidual(record, text) {
+  if (!hasAny(text, ["toprimitive", "to primitive", "valueof", "tostring", "symbol.toprimitive"])) {
+    return false;
+  }
+
+  return !pathHas(record, [
+    "built-ins/array/",
+    "built-ins/arraybuffer",
+    "built-ins/bigint",
+    "built-ins/dataview",
+    "built-ins/date",
+    "built-ins/decodeuri",
+    "built-ins/decodeuricomponent",
+    "built-ins/encodeuri",
+    "built-ins/encodeuricomponent",
+    "built-ins/function",
+    "built-ins/math",
+    "built-ins/number",
+    "built-ins/object",
+    "built-ins/regexp",
+    "built-ins/string",
+    "built-ins/symbol",
+    "built-ins/typedarray",
+    "language/expressions/arrow-function",
+    "language/expressions/tagged-template",
+    "language/function",
+    "language/literals/string",
+    "parsefloat",
+    "parseint",
+    "regexpstringiteratorprototype",
+    "stringiteratorprototype",
+    "tagged-template",
+    "template",
+    "typedarrayconstructors",
+  ]);
+}
+
 const STANDALONE_ROOT_CAUSE_BUCKETS = [
   {
     id: "binary-emit-u32-out-of-range",
@@ -164,23 +209,114 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
       hasAny(text, ["json_parse", "json_stringify"]),
   },
   {
-    id: "standalone-regexp",
-    issues: ["#1909", "#682", "#1474", "#1539"],
-    label: "RegExp literals/constructor/String-RegExp paths still refused or missing native engine",
+    id: "standalone-regexp-phase-2d",
+    issues: ["#1911", "#1909", "#1539"],
+    label: "Standalone RegExp Phase 2d: u/v/d flags, Unicode escapes, lookaround, modifiers",
     match: (record, text) =>
-      record.host_import_leak_class === "regexp" ||
-      pathHas(record, ["built-ins/regexp", "regexpstringiteratorprototype"]) ||
-      hasAny(text, ["regexp", "regular expression"]),
+      isStandaloneRegExpRecord(record, text) &&
+      (pathHas(record, [
+        "built-ins/regexp/lookbehind",
+        "built-ins/regexp/property-escapes",
+        "built-ins/regexp/unicodesets",
+        "built-ins/regexp/regexp-modifiers",
+      ]) ||
+        hasAny(text, [
+          /flags "[uvd]"/,
+          "u/v/d are",
+          "phase 2d",
+          "lookahead",
+          "lookbehind",
+          "unicode property escape",
+          "code-point escape",
+          "unicode sets",
+          "unsupported group form '(?-",
+          "unsupported group form '(?i",
+          "unsupported group form '(?m",
+          "unsupported group form '(?s",
+        ])),
+  },
+  {
+    id: "standalone-regexp-phase-2b",
+    issues: ["#1912", "#1909", "#1539"],
+    label: "Standalone RegExp Phase 2b: word boundaries, backrefs, and character-class compatibility",
+    match: (record, text) =>
+      isStandaloneRegExpRecord(record, text) &&
+      hasAny(text, [
+        "word-boundary",
+        "backreference",
+        "named backreference",
+        "negated shorthand",
+        "class range out of order",
+        "class shorthand as range endpoint",
+      ]),
+  },
+  {
+    id: "standalone-regexp-string-protocol",
+    issues: ["#1913", "#1909", "#1539"],
+    label: "Standalone RegExp string protocol, global/sticky lastIndex, split, replace, and matchAll",
+    match: (record, text) =>
+      isStandaloneRegExpRecord(record, text) &&
+      (pathHas(record, [
+        "built-ins/regexp/prototype/symbol.",
+        "built-ins/regexpstringiteratorprototype",
+        "built-ins/string/prototype/match",
+        "built-ins/string/prototype/matchall",
+        "built-ins/string/prototype/replace",
+        "built-ins/string/prototype/split",
+      ]) ||
+        hasAny(text, [
+          "@@match",
+          "@@matchall",
+          "@@replace",
+          "@@search",
+          "@@split",
+          "symbol protocol",
+          "matchall",
+          "regexpstringiterator",
+          "lastindex",
+          "all-match",
+          "split(regexp, limit)",
+          "split with capturing",
+          "split with empty-match",
+          "$-substitution",
+          "function replacer",
+        ])),
+  },
+  {
+    id: "standalone-regexp-native-engine",
+    issues: ["#1914", "#1909", "#682"],
+    label: "Standalone RegExp native-engine/runtime gaps: source, constructors, prototype access, result shape",
+    match: (record, text) =>
+      isStandaloneRegExpRecord(record, text) &&
+      (["assertion_fail", "runtime_error", "null_deref", "wasm_compile", "illegal_cast", "oob"].includes(
+        record.error_category,
+      ) ||
+        hasAny(text, [
+          "__get_builtin",
+          "dynamic constructor patterns",
+          "pattern.source",
+          "__executed.input",
+          "__executed.index",
+          "source",
+          "flags accessor",
+          "regexp.prototype",
+        ])),
+  },
+  {
+    id: "standalone-regexp",
+    issues: ["#1909", "#1911", "#1912", "#1913", "#1914"],
+    label: "Residual standalone RegExp failures not matched by the narrower RegExp sub-buckets",
+    match: isStandaloneRegExpRecord,
   },
   {
     id: "issamevalue-invalid-wasm",
-    issues: ["#1908", "#1776", "#1807"],
+    issues: ["#1776"],
     label: "Residual standalone isSameValue invalid-Wasm validator failures",
     match: (record, text) => hasAny(text, ["issamevalue", "samevalue"]),
   },
   {
     id: "standalone-dynamic-object-property",
-    issues: ["#1903", "#1904", "#1907", "#1472"],
+    issues: ["#1472"],
     label: "Standalone dynamic object/property operation gate",
     match: (record, text) =>
       record.host_import_leak_class === "dynamic_object_property" ||
@@ -201,7 +337,7 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "standalone-reflect-refusal",
-    issues: ["#1905", "#1472"],
+    issues: ["#1472"],
     label: "Reflect.* refused in standalone mode (#1472 Phase C)",
     match: (record, text) =>
       pathHas(record, ["built-ins/reflect"]) ||
@@ -209,7 +345,7 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "standalone-iterator-protocol",
-    issues: ["#681", "#1718", "#1665"],
+    issues: ["#1665", "#681", "#1718"],
     label: "Generic iterator protocol still needs a pure-Wasm standalone path",
     match: (record, text) =>
       record.host_import_leak_class === "iterator_protocol" ||
@@ -248,9 +384,9 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "object-to-primitive",
-    issues: ["#1910", "#1525b", "#1900", "#1525", "#1759"],
+    issues: ["#1910", "#1525b", "#1900", "#1472"],
     label: "ToPrimitive / object-to-string dispatch residuals",
-    match: (record, text) => hasAny(text, ["toprimitive", "to primitive", "valueof", "tostring", "symbol.toprimitive"]),
+    match: isObjectToPrimitiveResidual,
   },
   {
     id: "array-typedarray-buffer",
@@ -270,8 +406,14 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
       ]),
   },
   {
+    id: "template-literals",
+    issues: ["#1759", "#836"],
+    label: "Template literal and tagged-template semantics",
+    match: (record) => pathHas(record, ["template", "tagged-template"]),
+  },
+  {
     id: "object-property-semantics",
-    issues: ["#1905", "#1906", "#1629", "#1472", "#1466", "#176", "#281"],
+    issues: ["#1472", "#176", "#281", "#1466"],
     label: "Object/property/destructuring semantic mismatches behind the object model",
     match: (record, text) =>
       pathHas(record, ["built-ins/object", "language/destructuring", "object-"]) ||
@@ -279,9 +421,18 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "string-methods-coercion",
-    issues: ["#1105", "#1442", "#1381"],
-    label: "String methods and string coercion residuals in standalone",
-    match: (record) => pathHas(record, ["built-ins/string", "stringiteratorprototype", "language/literals/string"]),
+    issues: ["#1470", "#1105", "#1442", "#1381"],
+    label: "String and URI methods/coercion residuals in standalone",
+    match: (record) =>
+      pathHas(record, [
+        "built-ins/decodeuri",
+        "built-ins/decodeuricomponent",
+        "built-ins/encodeuri",
+        "built-ins/encodeuricomponent",
+        "built-ins/string",
+        "language/literals/string",
+        "stringiteratorprototype",
+      ]),
   },
   {
     id: "annex-b-function-eval",
@@ -420,12 +571,6 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
         "a class may only have one constructor",
         "class constructor may not",
       ]),
-  },
-  {
-    id: "template-literals",
-    issues: ["#1759", "#836"],
-    label: "Template literal and tagged-template semantics",
-    match: (record) => pathHas(record, ["template", "tagged-template"]),
   },
   {
     id: "unicode-identifiers",

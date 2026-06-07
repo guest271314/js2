@@ -1,7 +1,8 @@
 ---
 id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
-status: ready
+status: in-review
+pr: 1267
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -16,7 +17,10 @@ parent: 1888
 related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
+claimed_by: codex-developer
+claimed_at: 2026-06-07T03:15:24.162Z
 ---
+
 # #1907 — Built-in static method value reads without `__get_builtin`
 
 ## Problem
@@ -57,3 +61,40 @@ standalone refusal.
 - `Math`/`Number` constant tests from `#1902` remain green.
 - Default/gc behavior is unchanged.
 
+## Implementation Notes
+
+- Added standalone built-in static method closure emission for `Array.isArray`,
+  `Object.keys`, and `Object.getOwnPropertyDescriptor`.
+- `Array.isArray` method values share the direct-call externref predicate:
+  WasmGC vec `ref.test` under no-host targets, with the JS host predicate only
+  in host mode.
+- `Object.keys` method values preserve the standalone object-runtime `$ObjVec`
+  `externref` return contract so `__extern_length` / `__extern_get_idx`
+  consumers remain host-free.
+- Unsupported standalone `Builtin.prop` value reads now fail with a
+  `#1907 / #1888 S6-b` diagnostic instead of falling into `__get_builtin`.
+
+## Validation
+
+- `npm test -- tests/issue-1907.test.ts tests/issue-1888-s6c.test.ts`
+- `npm run typecheck -- --pretty false`
+- `npm test -- tests/issue-1678.test.ts`
+- `npm test -- tests/issue-1472.test.ts -t "Reflect.ownKeys routes"`
+- `npx prettier --check src/codegen/property-access.ts src/codegen/expressions/calls.ts tests/issue-1907.test.ts tests/issue-1888-s6c.test.ts plan/issues/1907-standalone-builtin-static-method-value-reads.md`
+
+## Final Findings
+
+- Implementation PR #1263 exists, was ready/non-draft, and is now merged into
+  `main` at `3827daa96`; follow-up PR #1267 tracks this final issue-status
+  verification update.
+- Final codex-developer verification on this branch found no additional
+  implementation work outstanding; the scoped validation commands above passed
+  again on 2026-06-07 after merging current `origin/main`.
+- `origin/main` was fetched and merged into `symphony/1907` through
+  `c871fe467` before the final branch push. The merge brought in later sprint
+  issue/report updates without #1907 conflicts.
+- Scoped validation passed again after that final main merge: the focused
+  #1907/#1888 tests, typecheck, #1678 Array.isArray regression tests, the
+  targeted #1472 Reflect.ownKeys standalone route, and formatting.
+- The issue remains `in-review` with `pr: 1267` so the PR-status poller can
+  perform the normal post-merge status transition.
