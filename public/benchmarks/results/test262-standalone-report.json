@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-07T01:07:23.164Z",
-  "baseline_generated_at": "2026-06-06T19:01:40Z",
-  "baseline_sha": "e6eedd6821a281063fc28e768431a09cfa98f340",
+  "timestamp": "2026-06-07T01:57:39.584Z",
+  "baseline_generated_at": "2026-06-07T01:41:37Z",
+  "baseline_sha": "5bef49a5abaae3e0ae65d41cfda6844d06197d06",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -1601,21 +1601,21 @@
       },
       {
         "id": "object-to-primitive",
-        "issues": ["#1525", "#1525b", "#1759"],
+        "issues": ["#1910", "#1525b", "#1900", "#1472"],
         "label": "ToPrimitive / object-to-string dispatch residuals",
-        "count": 1248,
+        "count": 788,
         "statuses": {
           "pass": 0,
-          "fail": 911,
-          "compile_error": 337,
+          "fail": 640,
+          "compile_error": 148,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 1248
+          "total": 788
         },
         "error_categories": {
-          "runtime_error": 1216,
+          "runtime_error": 770,
           "wasm_compile": 8,
-          "assertion_fail": 24
+          "assertion_fail": 10
         },
         "sample_files": [
           "test/language/statements/for/S12.6.3_A3.js",
@@ -1628,25 +1628,26 @@
           "runtime_error:L#:## Cannot convert object to primitive value",
           "runtime_error:Cannot convert object to primitive value",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"__call_@@toPrimitive\" failed: type error in fallthru[#] (expected externref, got (ref #)) @+#) [in __call_@@toPrimitive()] [@+#] [wat: (func $__call_@@toPrimitive ",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(Test262Error, function() { String.fromCodePoint({ valueOf: function() { throw new Test262Error(); } }); });",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(x1.valueOf(), true, 'x1.valueOf() must return true');"
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(x1.valueOf(), true, 'x1.valueOf() must return true');",
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { EvalError(Symbol()) }, \"If _message_ is a Symbol, EvalError should throw a TypeError\")"
         ]
       },
       {
         "id": "array-typedarray-buffer",
         "issues": ["#1358", "#1461", "#1654"],
         "label": "Array, TypedArray, DataView, and buffer semantics",
-        "count": 164,
+        "count": 225,
         "statuses": {
           "pass": 0,
-          "fail": 135,
-          "compile_error": 29,
+          "fail": 166,
+          "compile_error": 59,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 164
+          "total": 225
         },
         "error_categories": {
           "assertion_fail": 119,
+          "runtime_error": 61,
           "other": 15,
           "oob": 8,
           "wasm_compile": 18,
@@ -1656,41 +1657,75 @@
         },
         "sample_files": [
           "test/built-ins/TypedArrayConstructors/Float32Array/is-a-constructor.js",
+          "test/built-ins/TypedArrayConstructors/internals/OwnPropertyKeys/not-enumerable-keys.js",
           "test/built-ins/DataView/return-abrupt-tonumber-bytelength.js",
           "test/built-ins/TypedArrayConstructors/Float64Array/is-a-constructor.js",
-          "test/built-ins/TypedArrayConstructors/ctors-bigint/buffer-arg/invoked-with-undefined-newtarget-sab.js",
-          "test/built-ins/Array/15.4.5.1-5-1.js"
+          "test/built-ins/TypedArrayConstructors/ctors-bigint/buffer-arg/invoked-with-undefined-newtarget-sab.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(isConstructor(Float32Array), true, 'isConstructor(Float32Array) must return true');",
+          "runtime_error:L#:## Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(isConstructor(Float64Array), true, 'isConstructor(Float64Array) must return true');",
-          "other:L#:## Unsupported new expression for class: SharedArrayBuffer",
-          "oob:L#:## array element access out of bounds [in test()]"
+          "other:L#:## Unsupported new expression for class: SharedArrayBuffer"
+        ]
+      },
+      {
+        "id": "template-literals",
+        "issues": ["#1759", "#836"],
+        "label": "Template literal and tagged-template semantics",
+        "count": 57,
+        "statuses": {
+          "pass": 0,
+          "fail": 46,
+          "compile_error": 11,
+          "compile_timeout": 0,
+          "skip": 0,
+          "total": 57
+        },
+        "error_categories": {
+          "assertion_fail": 46,
+          "wasm_compile": 8,
+          "other": 1,
+          "runtime_error": 2
+        },
+        "sample_files": [
+          "test/language/expressions/template-literal/literal-expr-obj.js",
+          "test/language/expressions/tagged-template/cache-differing-expressions-eval.js",
+          "test/language/expressions/template-literal/middle-list-many-expr-tostr-error.js",
+          "test/language/expressions/tagged-template/tco-call.js",
+          "test/language/expressions/template-literal/tv-template-head.js"
+        ],
+        "sample_signatures": [
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(`${plain}`, '[object Object]');",
+          "assertion_fail:returned # — assert ## at L#: assert(firstObject !== null);",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"__closure_3\" failed: not enough arguments on the stack for call (need #, got #) @+#) [in __closure_3()] [@+#] [wat: (func $__closure_3 (type #) (local $__self_cast",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"f\" failed: array.new_fixed[#] expected type externref, found struct.new of type (ref #) @+#) [in f()] [@+#] [wat: (func $f (type #) (local $__tmp_0 externref) (loc",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(s[#], '', 'Template value (empty)');"
         ]
       },
       {
         "id": "object-property-semantics",
         "issues": ["#1472", "#176", "#281", "#1466"],
         "label": "Object/property/destructuring semantic mismatches behind the object model",
-        "count": 1193,
+        "count": 1261,
         "statuses": {
           "pass": 0,
-          "fail": 999,
-          "compile_error": 194,
+          "fail": 1032,
+          "compile_error": 229,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 1193
+          "total": 1261
         },
         "error_categories": {
-          "assertion_fail": 977,
+          "assertion_fail": 975,
           "other": 177,
+          "runtime_error": 77,
           "null_deref": 6,
           "illegal_cast": 1,
-          "wasm_compile": 17,
+          "wasm_compile": 16,
           "negative_test_fail": 5,
-          "promise_error": 4,
-          "runtime_error": 6
+          "promise_error": 4
         },
         "sample_files": [
           "test/built-ins/Object/S15.2.1.1_A2_T6.js",
@@ -1709,37 +1744,38 @@
       },
       {
         "id": "string-methods-coercion",
-        "issues": ["#1105", "#1442", "#1381"],
-        "label": "String methods and string coercion residuals in standalone",
-        "count": 26,
+        "issues": ["#1470", "#1105", "#1442", "#1381"],
+        "label": "String and URI methods/coercion residuals in standalone",
+        "count": 212,
         "statuses": {
           "pass": 0,
-          "fail": 21,
-          "compile_error": 5,
+          "fail": 196,
+          "compile_error": 16,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 26
+          "total": 212
         },
         "error_categories": {
-          "illegal_cast": 2,
-          "assertion_fail": 15,
+          "illegal_cast": 4,
+          "wasm_compile": 21,
+          "assertion_fail": 16,
+          "runtime_error": 165,
           "null_deref": 3,
-          "wasm_compile": 3,
           "other": 3
         },
         "sample_files": [
           "test/built-ins/String/S9.1_A1_T2.js",
+          "test/built-ins/decodeURI/S15.1.3.1_A5.7.js",
           "test/built-ins/String/15.5.5.5.2-1-1.js",
-          "test/language/literals/string/mongolian-vowel-separator-eval.js",
-          "test/built-ins/String/S15.5.5.1_A5.js",
-          "test/built-ins/String/S15.5.5.1_A1.js"
+          "test/built-ins/decodeURIComponent/S15.1.3.2_A1.13_T1.js",
+          "test/built-ins/decodeURI/S15.1.3.1_A1.12_T2.js"
         ],
         "sample_signatures": [
           "illegal_cast:L#:## illegal cast [in test()]",
+          "wasm_compile:L#:## No dependency provided for extern class \"decodeURI\"",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(s[\"foo\"], #, 's[\"foo\"]');",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(eval(\"'\\u180E'\"), \"\\u180E\");",
-          "null_deref:L#:## dereferencing a null pointer [in test()]",
-          "wasm_compile:L#:## No dependency provided for extern class \"__str\""
+          "runtime_error:L#:## Cannot convert object to primitive value",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: call[#] expected type (ref null #), found f64.add of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $chars (ref null #)) (loca"
         ]
       },
       {
@@ -1749,16 +1785,16 @@
         "count": 306,
         "statuses": {
           "pass": 0,
-          "fail": 252,
-          "compile_error": 54,
+          "fail": 253,
+          "compile_error": 53,
           "compile_timeout": 0,
           "skip": 0,
           "total": 306
         },
         "error_categories": {
-          "assertion_fail": 250,
+          "assertion_fail": 251,
           "wasm_compile": 37,
-          "other": 11,
+          "other": 10,
           "runtime_error": 8
         },
         "sample_files": [
@@ -1780,18 +1816,19 @@
         "id": "date-formatting-coercion",
         "issues": ["#1343"],
         "label": "Date prototype formatting/coercion",
-        "count": 27,
+        "count": 33,
         "statuses": {
           "pass": 0,
-          "fail": 25,
-          "compile_error": 2,
+          "fail": 30,
+          "compile_error": 3,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 27
+          "total": 33
         },
         "error_categories": {
-          "assertion_fail": 25,
-          "wasm_compile": 2
+          "assertion_fail": 30,
+          "wasm_compile": 2,
+          "runtime_error": 1
         },
         "sample_files": [
           "test/built-ins/Date/UTC/overflow-make-day.js",
@@ -1812,19 +1849,20 @@
         "id": "number-parsing-formatting",
         "issues": ["#1335", "#1663", "#1689"],
         "label": "Number parsing, formatting, and coercion",
-        "count": 121,
+        "count": 130,
         "statuses": {
           "pass": 0,
-          "fail": 112,
+          "fail": 121,
           "compile_error": 9,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 121
+          "total": 130
         },
         "error_categories": {
           "illegal_cast": 39,
-          "assertion_fail": 57,
+          "assertion_fail": 60,
           "wasm_compile": 24,
+          "runtime_error": 6,
           "null_deref": 1
         },
         "sample_files": [
@@ -1846,21 +1884,21 @@
         "id": "function-object-semantics",
         "issues": ["#731", "#1732", "#1596"],
         "label": "Function object name/length/prototype/call semantics",
-        "count": 222,
+        "count": 344,
         "statuses": {
           "pass": 0,
-          "fail": 206,
-          "compile_error": 16,
+          "fail": 215,
+          "compile_error": 129,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 222
+          "total": 344
         },
         "error_categories": {
           "assertion_fail": 193,
           "wasm_compile": 12,
+          "runtime_error": 123,
           "illegal_cast": 4,
           "null_deref": 4,
-          "runtime_error": 1,
           "other": 5,
           "range_error": 2,
           "negative_test_fail": 1
@@ -1869,41 +1907,45 @@
           "test/language/expressions/arrow-function/dstr/dflt-obj-ptrn-id-init-fn-name-class.js",
           "test/language/expressions/arrow-function/dstr/obj-ptrn-prop-obj.js",
           "test/language/expressions/arrow-function/forbidden-ext/b2/arrow-function-forbidden-ext-indirect-access-prop-caller.js",
-          "test/language/function-code/10.4.3-1-48-s.js",
-          "test/built-ins/Function/S15.3.5_A3_T1.js"
+          "test/language/function-code/10.4.3-1-19gs.js",
+          "test/language/function-code/10.4.3-1-48-s.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(cls.name, 'cls');",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(x, undefined);",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"inner\" failed: call[#] expected type externref, found struct.new of type (ref #) @+#) [in inner()] [@+#] [wat: (func $inner (type #) (local $__nullchk_0 externref)",
-          "assertion_fail:returned # — assert ## at L#: assert(f1(), 'f1() !== true');",
-          "wasm_compile:L#:## No dependency provided for extern class \"FACTORY\""
+          "runtime_error:Cannot convert object to primitive value",
+          "assertion_fail:returned # — assert ## at L#: assert(f1(), 'f1() !== true');"
         ]
       },
       {
         "id": "symbol-builtin-semantics",
         "issues": ["#483", "#487", "#1564"],
         "label": "Symbol built-in semantics (keyFor/for arg validation, well-known symbols, registry)",
-        "count": 3,
+        "count": 15,
         "statuses": {
           "pass": 0,
-          "fail": 2,
+          "fail": 14,
           "compile_error": 1,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 3
+          "total": 15
         },
         "error_categories": {
           "wasm_compile": 2,
+          "runtime_error": 12,
           "other": 1
         },
         "sample_files": [
           "test/built-ins/Symbol/constructor.js",
-          "test/built-ins/Symbol/invoked-with-new.js",
-          "test/built-ins/Symbol/keyFor/arg-non-symbol.js"
+          "test/built-ins/Symbol/not-callable.js",
+          "test/built-ins/Symbol/desc-to-string-symbol.js",
+          "test/built-ins/Symbol/for/retrieve-value.js",
+          "test/built-ins/Symbol/invoked-with-new.js"
         ],
         "sample_signatures": [
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: call[#] expected type (ref null #), found local.get of type externref @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $__nullchk_0 exter",
+          "runtime_error:L#:## Cannot convert object to primitive value",
           "wasm_compile:L#:## No dependency provided for extern class \"Symbol\"",
           "other:L#:## null is not a symbol [in __closure_2() ← assert_throws ← test]"
         ]
@@ -1980,18 +2022,18 @@
         "id": "eval-new-function",
         "issues": ["#1066", "#1073", "#990"],
         "label": "Eval and `new Function` semantics",
-        "count": 793,
+        "count": 760,
         "statuses": {
           "pass": 0,
-          "fail": 730,
-          "compile_error": 63,
+          "fail": 698,
+          "compile_error": 62,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 793
+          "total": 760
         },
         "error_categories": {
-          "assertion_fail": 709,
-          "wasm_compile": 65,
+          "assertion_fail": 677,
+          "wasm_compile": 64,
           "other": 12,
           "promise_error": 3,
           "negative_test_fail": 3,
@@ -2049,50 +2091,51 @@
         "id": "bigint-typed-path",
         "issues": ["#1644", "#1535"],
         "label": "Standalone BigInt host/typed-path residual",
-        "count": 27,
+        "count": 33,
         "statuses": {
           "pass": 0,
           "fail": 27,
-          "compile_error": 0,
+          "compile_error": 6,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 27
+          "total": 33
         },
         "error_categories": {
           "wasm_compile": 22,
+          "runtime_error": 6,
           "assertion_fail": 3,
           "other": 2
         },
         "sample_files": [
           "test/language/expressions/modulus/bigint-wrapped-values.js",
           "test/language/expressions/division/bigint-wrapped-values.js",
+          "test/built-ins/BigInt/constructor-from-binary-string.js",
           "test/language/expressions/multiplication/bigint-wrapped-values.js",
-          "test/language/expressions/bitwise-and/bigint-wrapped-values.js",
-          "test/language/expressions/bitwise-or/bigint-wrapped-values.js"
+          "test/language/expressions/bitwise-and/bigint-wrapped-values.js"
         ],
         "sample_signatures": [
           "wasm_compile:L#:## No dependency provided for extern class \"BigInt\"",
+          "runtime_error:Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { 0n >>> 0n; }, \"bigint >>> bigint throws a TypeError\");",
           "assertion_fail:returned # — assert ## at L#: assert.throws(RangeError, function() { 1n ** -1n; }, '1n ** -1n throws RangeError');",
-          "other:L#:## remainder by zero",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { +0n; }, '+0n throws TypeError');"
+          "other:L#:## remainder by zero"
         ]
       },
       {
         "id": "lexical-scope-tdz-declarations",
         "issues": ["#1128", "#990", "#1726"],
         "label": "Lexical scope, TDZ, and declaration semantics",
-        "count": 187,
+        "count": 183,
         "statuses": {
           "pass": 0,
-          "fail": 129,
+          "fail": 125,
           "compile_error": 58,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 187
+          "total": 183
         },
         "error_categories": {
-          "wasm_compile": 64,
+          "wasm_compile": 60,
           "assertion_fail": 83,
           "null_deref": 9,
           "negative_test_fail": 12,
@@ -2261,38 +2304,6 @@
         ]
       },
       {
-        "id": "template-literals",
-        "issues": ["#1759", "#836"],
-        "label": "Template literal and tagged-template semantics",
-        "count": 14,
-        "statuses": {
-          "pass": 0,
-          "fail": 8,
-          "compile_error": 6,
-          "compile_timeout": 0,
-          "skip": 0,
-          "total": 14
-        },
-        "error_categories": {
-          "wasm_compile": 6,
-          "assertion_fail": 8
-        },
-        "sample_files": [
-          "test/language/expressions/template-literal/middle-list-many-expr-tostr-error.js",
-          "test/language/expressions/tagged-template/tco-call.js",
-          "test/language/expressions/template-literal/literal-expr-tostr-error.js",
-          "test/language/expressions/tagged-template/cache-differing-expressions-new-function.js",
-          "test/language/expressions/tagged-template/cache-identical-source-new-function.js"
-        ],
-        "sample_signatures": [
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"__closure_3\" failed: not enough arguments on the stack for call (need #, got #) @+#) [in __closure_3()] [@+#] [wat: (func $__closure_3 (type #) (local $__self_cast",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"f\" failed: array.new_fixed[#] expected type externref, found struct.new of type (ref #) @+#) [in f()] [@+#] [wat: (func $f (type #) (local $__tmp_0 externref) (loc",
-          "assertion_fail:returned # — assert ## at L#: assert(firstObject !== null);",
-          "assertion_fail:returned # — assert ## at L#: assert(previousObject !== null);",
-          "wasm_compile:invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"__str_flatten\" failed: call[#] expected type (ref null #), found i32.const of type i32 @+#) [in __str_flatten()] [@+#] [wat: (func $__str_flatten (param (ref null #)) (r"
-        ]
-      },
-      {
         "id": "unicode-identifiers",
         "issues": ["#832", "#270"],
         "label": "Unicode/reserved-word identifier handling",
@@ -2358,31 +2369,31 @@
         "id": "extern-class-metadata",
         "issues": ["#812", "#1559"],
         "label": "Extern class dependency metadata",
-        "count": 9,
+        "count": 5,
         "statuses": {
           "pass": 0,
-          "fail": 9,
+          "fail": 5,
           "compile_error": 0,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 9
+          "total": 5
         },
         "error_categories": {
-          "wasm_compile": 9
+          "wasm_compile": 5
         },
         "sample_files": [
-          "test/built-ins/decodeURI/S15.1.3.1_A5.7.js",
           "test/built-ins/isFinite/S15.1.2.5_A2.7.js",
           "test/built-ins/isNaN/S15.1.2.4_A2.7.js",
-          "test/built-ins/encodeURIComponent/S15.1.3.4_A5.7.js",
-          "test/built-ins/decodeURIComponent/S15.1.3.2_A5.7.js"
+          "test/language/expressions/new/S11.2.2_A3_T4.js",
+          "test/language/expressions/this/S11.1.1_A4.2.js",
+          "test/language/expressions/new/S11.2.2_A2.js"
         ],
         "sample_signatures": [
-          "wasm_compile:L#:## No dependency provided for extern class \"decodeURI\"",
           "wasm_compile:L#:## No dependency provided for extern class \"isFinite\"",
           "wasm_compile:L#:## No dependency provided for extern class \"isNaN\"",
-          "wasm_compile:L#:## No dependency provided for extern class \"encodeURIComponent\"",
-          "wasm_compile:L#:## No dependency provided for extern class \"decodeURIComponent\""
+          "wasm_compile:L#:## No dependency provided for extern class \"undefined\"",
+          "wasm_compile:L#:## No dependency provided for extern class \"MyFunction\"",
+          "wasm_compile:L#:## No dependency provided for extern class \"x\""
         ]
       },
       {
@@ -2474,28 +2485,6 @@
         "sample_signatures": ["null_deref:L#:## dereferencing a null pointer [in test()]"]
       },
       {
-        "id": "illegal-cast-boundary",
-        "issues": ["#826", "#1623"],
-        "label": "Illegal-cast/type-boundary residual",
-        "count": 2,
-        "statuses": {
-          "pass": 0,
-          "fail": 2,
-          "compile_error": 0,
-          "compile_timeout": 0,
-          "skip": 0,
-          "total": 2
-        },
-        "error_categories": {
-          "illegal_cast": 2
-        },
-        "sample_files": [
-          "test/built-ins/decodeURIComponent/S15.1.3.2_A2.2_T1.js",
-          "test/built-ins/decodeURI/S15.1.3.1_A2.2_T1.js"
-        ],
-        "sample_signatures": ["illegal_cast:L#:## illegal cast [in test()]"]
-      },
-      {
         "id": "null-undefined-typeerror",
         "issues": ["#820"],
         "label": "Null/undefined TypeError lowering residual",
@@ -2526,31 +2515,31 @@
         "id": "invalid-wasm-boundaries",
         "issues": ["#1623", "#1666", "#1525b"],
         "label": "Invalid Wasm at type/coercion boundaries, late globals, and trampolines",
-        "count": 57,
+        "count": 47,
         "statuses": {
           "pass": 0,
           "fail": 0,
-          "compile_error": 57,
+          "compile_error": 47,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 57
+          "total": 47
         },
         "error_categories": {
-          "wasm_compile": 57
+          "wasm_compile": 47
         },
         "sample_files": [
-          "test/built-ins/encodeURI/S15.1.3.3_A2.4_T1.js",
           "test/language/expressions/compound-assignment/S11.13.2_A6.9_T1.js",
-          "test/built-ins/encodeURIComponent/S15.1.3.4_A2.3_T1.js",
           "test/language/expressions/compound-assignment/S11.13.2_A6.10_T1.js",
-          "test/language/expressions/postfix-decrement/11.3.2-2-3-s.js"
+          "test/language/expressions/postfix-decrement/11.3.2-2-3-s.js",
+          "test/language/expressions/addition/S11.6.1_A3.2_T1.1.js",
+          "test/language/expressions/less-than-or-equal/S11.8.3_A3.2_T1.2.js"
         ],
         "sample_signatures": [
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: call[#] expected type (ref null #), found f64.add of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $chars (ref null #)) (loca",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"testCompoundAssignment\" failed: local.set[#] expected type externref, found f64.const of type f64 @+#) [in testCompoundAssignment()] [@+#] [wat: (func $testCompoun",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: call[#] expected type (ref null #), found f64.add of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $errorCount f64) (local $c",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"testcase\" failed: array.set[#] expected type externref, found local.get of type f64 @+#) [in testcase()] [@+#] [wat: (func $testcase (type #) (local $arguments (re",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: not enough arguments on the stack for call (need #, got #) @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $e externref) nop (try (do i3"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: not enough arguments on the stack for call (need #, got #) @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $e externref) nop (try (do i3",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: any.convert_extern[#] expected type externref, found struct.new of type (ref #) @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $e exter",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"__anon_0_method\" failed: call[#] expected type i32, found extern.convert_any of type (ref extern) @+#) [in __anon_0_method()] [@+#] [wat: (func $__anon_0_method (p"
         ]
       },
       {
