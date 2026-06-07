@@ -5064,19 +5064,84 @@ function compileCallExpression(
       // a native helper through it, and refuse the rest with a clear compile
       // error rather than emitting a half-working module.
       //
+      // - Reflect.get/has/deleteProperty(target, key) → native keyed $Object
+      //   helpers, which already perform the same own/prototype walk or delete
+      //   operation used by dynamic property access.
+      // - Reflect.set(target, key, value) → native __reflect_set, a boolean
+      //   wrapper around the supported __extern_set data-write subset.
       // - Reflect.ownKeys(target) → native __object_keys (string own keys of
       //   the $Object hash-map, insertion order). The native runtime tracks
       //   only string keys; Symbol/non-enumerable keys are out of scope for the
       //   standalone object runtime (consistent approximation across #1472
       //   Phase B). __object_keys is in OBJECT_RUNTIME_HELPER_NAMES, so
       //   ensureLateImport auto-routes it to the in-module native func.
-      // - Reflect.has needs a *keyed* HasProperty over the hash-map; the native
-      //   __extern_has_idx is an *indexed* (array-like) helper, so it cannot
-      //   stand in here without being semantically wrong — refuse instead.
-      //   Reflect.apply/construct require host call machinery with no native
-      //   analog — refuse. The descriptor/prototype/integrity methods all rely
-      //   on the JS descriptor sidecar — refuse.
+      // - Reflect.apply/construct require call/constructor machinery with no
+      //   native analog in this slice. Descriptor/prototype/integrity methods
+      //   stay refused until their native invariants are proven end-to-end.
       if (ctx.standalone) {
+        const emitAndDropOptionalArg = (index: number): void => {
+          const arg = expr.arguments[index];
+          if (arg === undefined) return;
+          const argTy = compileExpression(ctx, fctx, arg, externRef);
+          if (argTy && argTy.kind !== "externref") {
+            coerceType(ctx, fctx, argTy, externRef);
+          } else if (argTy === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "drop" });
+        };
+
+        if (reflectMethod === "get" && expr.arguments.length >= 2) {
+          emitReflectArgs(2);
+          // Evaluate the optional receiver for call argument side effects. The
+          // existing native __extern_get helper has no separate receiver slot,
+          // so this slice supports the data-property/default-receiver subset.
+          emitAndDropOptionalArg(2);
+          const funcIdx = ensureLateImport(ctx, "__extern_get", [externRef, externRef], [externRef]);
+          flushLateImportShifts(ctx, fctx);
+          if (funcIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx });
+            return { kind: "externref" };
+          }
+          return fallbackReturn(2, "extern-null");
+        }
+
+        if (reflectMethod === "set" && expr.arguments.length >= 2) {
+          emitReflectArgs(3);
+          // Evaluate the optional receiver for side effects. __extern_set writes
+          // the supported open-object data-property subset on target itself.
+          emitAndDropOptionalArg(3);
+          const funcIdx = ensureLateImport(ctx, "__reflect_set", [externRef, externRef, externRef], [i32Ty]);
+          flushLateImportShifts(ctx, fctx);
+          if (funcIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx });
+            return { kind: "i32" };
+          }
+          return fallbackReturn(3, "i32-true");
+        }
+
+        if (reflectMethod === "has" && expr.arguments.length >= 2) {
+          emitReflectArgs(2);
+          const funcIdx = ensureLateImport(ctx, "__extern_has", [externRef, externRef], [i32Ty]);
+          flushLateImportShifts(ctx, fctx);
+          if (funcIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx });
+            return { kind: "i32" };
+          }
+          return fallbackReturn(2, "i32-true");
+        }
+
+        if (reflectMethod === "deleteProperty" && expr.arguments.length >= 2) {
+          emitReflectArgs(2);
+          const funcIdx = ensureLateImport(ctx, "__delete_property", [externRef, externRef], [i32Ty]);
+          flushLateImportShifts(ctx, fctx);
+          if (funcIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx });
+            return { kind: "i32" };
+          }
+          return fallbackReturn(2, "i32-true");
+        }
+
         if (reflectMethod === "ownKeys" && expr.arguments.length >= 1) {
           emitReflectArgs(1);
           const funcIdx = ensureLateImport(ctx, "__object_keys", [externRef], [externRef]);
