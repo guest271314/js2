@@ -1,7 +1,7 @@
 ---
 id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
-status: in-review
+status: in-progress
 pr: 1263
 sprint: 61
 created: 2026-06-07
@@ -84,11 +84,15 @@ standalone refusal.
 
 ## Final Findings
 
-- PR #1263 exists, is ready/non-draft, and is the review vehicle for this issue.
+- PR #1263 exists, is ready/non-draft, and remains the review vehicle for this
+  issue.
 - `origin/main` was fetched and merged before publishing; the branch includes
   current `main` through `5bef49a5a` without conflicts.
 - Scoped validation passed again after the merge: the focused #1907/#1888 tests,
   typecheck, #1678 Array.isArray regression tests, the targeted #1472
   Reflect.ownKeys standalone route, and formatting.
-- GitHub reports PR #1263 is in the merge queue (`isInMergeQueue: true`) with
-  required checks passing.
+- Publishing the local main-sync and issue-update commits is blocked because
+  GitHub reports PR #1263 is already in the merge queue (`isInMergeQueue:
+  true`); queued branches cannot be updated without dequeuing the PR.
+- Required checks on the queued PR are passing, so the remote PR can still land
+  from the existing queued branch head.
