@@ -1,7 +1,7 @@
 ---
 id: 1905
 title: "standalone: native Reflect.get/set/has/deleteProperty over $Object"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -17,7 +17,7 @@ related: [1472, 1466, 1629, 1888]
 test262_bucket: standalone-reflect-refusal
 test262_count: 309
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:08:05.111Z
+claimed_at: 2026-06-07T07:14:35.462Z
 pr: 1284
 ---
 
@@ -121,14 +121,7 @@ machinery and are out of scope here.
   the implementation and `tests/issue-1905.test.ts` are already on `main`, and
   left ready PR `#1284` as the tracked in-review PR for this issue-state
   refresh.
-- Current Codex pass: fetched current `origin/main`, confirmed it remains an
-  ancestor of `symphony/1905`, reran the scoped validation above successfully,
-  and confirmed ready PR `#1284` is open/non-draft, mergeable, green, and in
-  the merge queue before this issue-state refresh.
-- Publish blocker: pushing the latest local issue-state refresh was rejected
-  because GitHub reports PR `#1284` is already in the merge queue; queued
-  branches cannot be updated without dequeuing the PR.
-- Current Codex pass: reran the scoped validation above successfully and
-  confirmed PR `#1284` is still open/non-draft, green, and in the merge queue
-  at position 13. Local issue-state updates remain unpublished because the
-  queued branch rejects further pushes without dequeuing the PR.
+- Current Codex pass: fetched current `origin/main`, confirmed local
+  `symphony/1905` contains it, reran the scoped validation above successfully,
+  and confirmed ready PR `#1284` is open/non-draft, green, and queued in the
+  merge queue at position 13.
