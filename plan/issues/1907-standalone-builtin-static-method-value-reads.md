@@ -91,7 +91,7 @@ standalone refusal.
   implementation work outstanding; the scoped validation commands above passed
   again on 2026-06-07 after merging current `origin/main`.
 - `origin/main` was fetched and merged into `symphony/1907` through
-  `d4492156f` before the final branch push. The merge brought in later sprint
+  `c871fe467` before the final branch push. The merge brought in later sprint
   issue/report updates without #1907 conflicts.
 - Scoped validation passed again after that final main merge: the focused
   #1907/#1888 tests, typecheck, #1678 Array.isArray regression tests, the
