@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:27:35.108Z
+claimed_at: 2026-06-07T07:33:05.406Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -136,3 +136,5 @@ Codex publish blocker on 2026-06-07: after local commit `15d35971b`, `git merge 
 Codex current publish check on 2026-06-07: fetched current `origin`, confirmed local `symphony/1904` includes `origin/main`, and reran scoped validation successfully: `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub GraphQL reports PR #1286 is open, ready/non-draft, all visible checks successful, and queued at position 9 with remote head `8db25d962fb115fe1755278809a64388cc554af5`; local issue-file updates remain unpublished until GitHub allows the queued branch to update or the queued PR merges.
 
 Codex current verification on 2026-06-07: fetched `origin`, confirmed `origin/main` is included in `symphony/1904`, and `git merge --ff-only origin/main` was already up to date. `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub GraphQL reports PR #1286 is open, ready/non-draft, all visible checks successful, and queued at position 9 with remote head `8db25d962fb115fe1755278809a64388cc554af5`; local closeout updates remain unpublished because the queued branch is locked until PR #1286 merges or is dequeued.
+
+Codex queue check on 2026-06-07: fetched `origin`, confirmed `origin/main` is included in local `symphony/1904`, and reran scoped validation successfully: `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. GitHub GraphQL reports PR #1286 is open, ready/non-draft, all visible checks successful, and queued at position 8 with remote head `8db25d962fb115fe1755278809a64388cc554af5`; issue status remains `in-progress` locally because queued branches reject updates until PR #1286 merges or is dequeued.
