@@ -1,7 +1,7 @@
 ---
 id: 1836
 title: "Standalone Number<->String conformance gaps (0o/0b, toFixed 1e21, exponential, fractional radix, whitespace, ToNumber) (residual #1335)"
-status: in-progress
+status: in-review
 created: 2026-06-04
 updated: 2026-06-07
 priority: high
@@ -129,6 +129,16 @@ coercion sites use the full-string StringNumericLiteral grammar while global
 - `""` and all-whitespace strings under unary `+` → 0
 - `"12abc" - 0` → NaN; `"0x10" - 0` → 16
 - `parseFloat("12abc")` remains 12; `parseFloat("0x10")` remains 0
+
+Validation:
+- `pnpm exec vitest run tests/issue-1836.test.ts` — 25 passed
+- `pnpm exec vitest run tests/issue-1836-exp.test.ts tests/issue-1335-standalone.test.ts tests/issue-49-number-format-nonfinite.test.ts` — 22 passed
+- `pnpm exec biome lint src/codegen/type-coercion.ts src/codegen/declarations.ts src/codegen/string-ops.ts tests/issue-1836.test.ts --diagnostic-level=error`
+
+### Attempt 30 refresh (2026-06-07)
+Revalidated the focused #1836 coverage and adjacent formatter regressions after
+PR #1280 had gone behind `origin/main`. Merged `origin/main` into
+`symphony/1836` before republishing; no additional #1836 code changes were needed.
 
 Validation:
 - `pnpm exec vitest run tests/issue-1836.test.ts` — 25 passed
