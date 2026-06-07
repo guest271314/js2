@@ -165,7 +165,7 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "standalone-regexp",
-    issues: ["#682", "#1474"],
+    issues: ["#1909", "#682", "#1474", "#1539"],
     label: "RegExp literals/constructor/String-RegExp paths still refused or missing native engine",
     match: (record, text) =>
       record.host_import_leak_class === "regexp" ||
@@ -174,13 +174,13 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "issamevalue-invalid-wasm",
-    issues: ["#1776"],
+    issues: ["#1908", "#1776", "#1807"],
     label: "Residual standalone isSameValue invalid-Wasm validator failures",
     match: (record, text) => hasAny(text, ["issamevalue", "samevalue"]),
   },
   {
     id: "standalone-dynamic-object-property",
-    issues: ["#1472"],
+    issues: ["#1903", "#1904", "#1907", "#1472"],
     label: "Standalone dynamic object/property operation gate",
     match: (record, text) =>
       record.host_import_leak_class === "dynamic_object_property" ||
@@ -201,7 +201,7 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "standalone-reflect-refusal",
-    issues: ["#1472"],
+    issues: ["#1905", "#1472"],
     label: "Reflect.* refused in standalone mode (#1472 Phase C)",
     match: (record, text) =>
       pathHas(record, ["built-ins/reflect"]) ||
@@ -209,7 +209,7 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "standalone-iterator-protocol",
-    issues: ["#1665", "#681", "#1718"],
+    issues: ["#681", "#1718", "#1665"],
     label: "Generic iterator protocol still needs a pure-Wasm standalone path",
     match: (record, text) =>
       record.host_import_leak_class === "iterator_protocol" ||
@@ -248,7 +248,7 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "object-to-primitive",
-    issues: ["#1525", "#1525b", "#1759"],
+    issues: ["#1910", "#1525b", "#1900", "#1525", "#1759"],
     label: "ToPrimitive / object-to-string dispatch residuals",
     match: (record, text) => hasAny(text, ["toprimitive", "to primitive", "valueof", "tostring", "symbol.toprimitive"]),
   },
@@ -271,7 +271,7 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "object-property-semantics",
-    issues: ["#1472", "#176", "#281", "#1466"],
+    issues: ["#1905", "#1906", "#1629", "#1472", "#1466", "#176", "#281"],
     label: "Object/property/destructuring semantic mismatches behind the object model",
     match: (record, text) =>
       pathHas(record, ["built-ins/object", "language/destructuring", "object-"]) ||

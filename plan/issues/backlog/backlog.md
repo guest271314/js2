@@ -2,6 +2,29 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## Sprint 61 standalone root-cause promotion (2026-06-07)
+
+The current standalone report has no unclassified failures, but several large
+buckets still pointed at completed umbrellas. Filed focused follow-ups and moved
+them directly into sprint 61 so Symphony can dispatch them:
+
+- [#1903](../1903-standalone-obj-find-invalid-wasm.md) — `__obj_find` invalid
+  Wasm inside the standalone object runtime.
+- [#1904](../1904-standalone-native-extern-is-array.md) — native
+  `__extern_is_array`.
+- [#1905](../1905-standalone-native-reflect-object-subset.md) — native
+  standalone Reflect object subset.
+- [#1906](../1906-standalone-native-defineproperties.md) — native
+  `Object.defineProperties`.
+- [#1907](../1907-standalone-builtin-static-method-value-reads.md) — built-in
+  static method value reads without `__get_builtin`.
+- [#1908](../1908-standalone-issamevalue-residual-bucket.md) — residual
+  `isSameValue` bucket split/fix.
+- [#1909](../1909-standalone-regexp-residual-bucket.md) — residual standalone
+  RegExp bucket split/fix.
+- [#1910](../1910-standalone-toprimitive-residual-bucket.md) — residual
+  ToPrimitive bucket split/fix.
+
 ## Harvest re-run 2026-06-04 (post sprint-58/59 merge)
 
 Re-ran `/harvest-errors` after pulling 346 commits. Both prior-harvest issues are genuinely fixed (#1809 shift-walker 157→0; #1808 emit crash per-file clean). One baseline-accounting follow-up filed:

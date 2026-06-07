@@ -3,20 +3,27 @@ id: 1718
 title: "Iterator sequencing helpers (Iterator.concat / zip / zipKeyed) + Iterator.prototype.flatMap not implemented (101 fails)"
 status: ready
 created: 2026-05-29
-updated: 2026-05-29
-priority: medium
+updated: 2026-06-07
+priority: high
 feasibility: hard
 task_type: bugfix
 area: codegen
 language_feature: iterator-helpers
 goal: test262-conformance
-sprint: Backlog
+sprint: 61
 es_edition: 2025
 test262_fail: 101
 test262_category: built-ins/Iterator
 related: [1340, 1320]
 ---
 # #1718 — Iterator sequencing helpers + Iterator.prototype.flatMap (101 fails)
+
+## Sprint 61 note
+
+The 2026-06-06 standalone report assigns `2,514` failures to the generic
+iterator-protocol bucket across `#1665`, `#681`, and `#1718`. `#1665` is done
+and `#681` is in review, so this issue is promoted as the ready follow-up for
+the remaining iterator-helper/protocol surface.
 
 ## Problem
 
