@@ -1,7 +1,7 @@
 ---
 id: 1903
 title: "standalone object runtime: __obj_find emits invalid Wasm in dynamic-property bucket"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -16,6 +16,7 @@ parent: 1472
 related: [1472, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
+pr: 1262
 claimed_by: codex-developer
 claimed_at: 2026-06-07T00:35:45.680Z
 ---
