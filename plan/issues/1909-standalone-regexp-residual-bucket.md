@@ -1,7 +1,7 @@
 ---
 id: 1909
 title: "standalone RegExp residual bucket after #1474/#682: split Phase 2d and native-engine gaps"
-status: in-progress
+status: in-review
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1289
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:00:35.084Z
+claimed_at: 2026-06-07T07:10:29Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -304,3 +304,17 @@ Branches that are queued for merging cannot be updated.
 
 Per the publish rule, this issue is left `in-progress` locally until the queued
 PR merges or is dequeued so the latest metadata refresh can be pushed.
+
+## 2026-06-07 live PR refresh after third queue release
+
+GitHub still has PR #1289 open and ready/non-draft for `symphony/1909`:
+
+- URL: `https://github.com/loopdive/js2/pull/1289`
+- Remote head before this refresh: `19540cd895d2e9a2331cff3a52b976657f2c85a0`
+- Base: `main`
+- Checks: all reported PR checks succeeded
+- Queue ref visibility: no `gh-readonly-queue/main/pr-1289*` ref was visible
+  via `git ls-remote`
+
+This issue is moved back to `in-review` with `pr: 1289`; the PR-status poller
+owns the eventual `done` transition after merge.
