@@ -17,7 +17,7 @@ related: [1472, 1629, 1631, 1888]
 test262_bucket: object-property-semantics
 test262_count: 748
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:22:34.957Z
+claimed_at: 2026-06-07T07:30:34.943Z
 pr: 1264
 ---
 # #1906 — Standalone native `Object.defineProperties`
@@ -74,9 +74,9 @@ caught by the broad dynamic object/property refusal.
 
 Revalidated by `codex-developer` on branch `symphony/1906` after fetching
 current `origin/main` at `d6957d5dc`; checks above pass locally on
-2026-06-07T09:26:53+02:00 at local head `088a97953`. The focused #1906 suite,
-the existing #1629 defineProperty suites, and `tsc --noEmit` all passed in this
-worktree.
+2026-06-07T09:34:28+02:00 at local head `a45dc1f8d` before this
+issue-bookkeeping refresh. The focused #1906 suite, the existing #1629
+defineProperty suites, and `tsc --noEmit` all passed in this worktree.
 
 PR #1264 is open against `main`; the local issue status is back to
 `in-progress` until the publish/CI blocker below is cleared.
@@ -91,12 +91,11 @@ queue and queued branches cannot be updated without dequeuing the PR first.
 
 The queued remote head remains `0ea14d5a0`; the local branch has current-main
 merge and issue bookkeeping commits beyond that queued head. This pass rechecked
-the PR after fetching `origin/main` at `d6957d5dc` and did not find a scoped
-implementation failure.
+the PR after fetching `origin/main` at `d6957d5dc` and rerunning scoped local
+validation, and did not find a scoped implementation failure.
 
-GitHub reports PR #1264 is already queued to merge (`gh pr merge 1264 --auto
---squash` returns "already queued to merge"). GraphQL reports merge queue state
-`QUEUED`, position `8`, remote head `0ea14d5a0`, and ready non-draft PR URL
+GitHub reports PR #1264 is already queued to merge. GraphQL reports merge queue
+state `QUEUED`, position `7`, remote head `0ea14d5a0`, and ready non-draft PR URL
 `https://github.com/loopdive/js2/pull/1264`. The PR check rollup is failing
 because `Test262 Sharded / merge shard reports` hit the stale-baseline guard:
 the `js2wasm-baselines` JSONL baseline main SHA
