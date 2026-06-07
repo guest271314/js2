@@ -1,7 +1,7 @@
 ---
 id: 1888
 title: "standalone open-any method dispatch + built-ins-as-static-globals (prototype vtable)"
-status: ready
+status: in-progress
 created: 2026-06-05
 updated: 2026-06-07
 priority: high
@@ -14,6 +14,8 @@ goal: host-independence
 sprint: 61
 related: [1472, 6407, 1629, 1104, 1539, 1103]
 parent: 1472
+claimed_by: codex-developer
+claimed_at: 2026-06-07T05:06:47.369Z
 ---
 # #1888 — Standalone open-any method dispatch + built-ins-as-static-globals
 
@@ -879,3 +881,39 @@ capturing-accessor bug surfaces.
 `global.get` pattern exists at the objlit string-data-prop key (literals.ts ~399)
 and the Symbol-keyed-method fallback key (literals.ts ~461) — confirmed buggy under
 standalone, same `stringConstantExternrefInstrs` fix; separate small PR after S5c.
+
+## S6 static globals — IMPLEMENTED (codex attempt 22, 2026-06-07)
+
+Implemented the first demand-driven built-ins-as-static-globals surface for
+standalone: `Array` and `Object` now materialize as lazy open-`$Object`
+singletons when read as values, populated only with supported static method
+closures. The initial supported properties are `Array.isArray` and
+`Object.keys`, both backed by existing native standalone behavior rather than a
+runtime `globalThis` map.
+
+What changed:
+- New `src/codegen/builtin-static-globals.ts`: emits cached closure values for
+  `Array.isArray` and `Object.keys`; emits lazy `$Object` singleton globals for
+  bare `Array` / `Object` value reads; unsupported built-in property value reads
+  refuse loud with a `#1888 S6` cite.
+- `identifiers.ts`: standalone bare `Array` / `Object` resolve to the singleton
+  before ambient lib declarations can route them to host globals.
+- `property-access.ts`: standalone `Builtin.prop` value reads use the static
+  closure path for supported pairs and no longer request `__get_builtin`.
+- `calls.ts`: for aliases initialized from supported built-in namespaces, skip
+  the legacy any-receiver extern-class heuristic so `const O = Object; O.keys(o)`
+  reaches the open-object method dispatcher instead of importing a typed-array
+  `keys` method.
+- Tests live in `tests/issue-1888.test.ts`; the stale S6-c guardrail in
+  `tests/issue-1888-s6c.test.ts` now asserts `Array.isArray` value reads are
+  native.
+
+Validation:
+- `pnpm exec tsc --noEmit`
+- `pnpm exec vitest run tests/issue-1888.test.ts tests/issue-1888-s6c.test.ts`
+- `pnpm exec biome lint src/codegen/builtin-static-globals.ts src/codegen/expressions/identifiers.ts src/codegen/property-access.ts src/codegen/expressions/calls.ts tests/issue-1888.test.ts tests/issue-1888-s6c.test.ts --diagnostic-level=error --max-diagnostics=50`
+
+Observed during extra scoped checking: `pnpm exec vitest run
+tests/issue-1472.test.ts -t "#1888"` still has Slice-2 open-method arity 2/3/4
+runtime failures (`NaN` instead of the expected numeric sum). The new S6
+static-global tests pass and do not touch that arity bridge path.

@@ -69,12 +69,14 @@ describe("#1888 S6-c — Math/Number constants reach native f64.const under stan
     );
   });
 
-  it("guardrail: genuine Builtin.method value-read (Array.isArray) still refuses-loud (S6-b lever, not S6-c)", async () => {
+  it("S6 follow-up: genuine Builtin.method value-read (Array.isArray) is now native", async () => {
     const r = await compile(`export function run(): number { const f: any = Array.isArray; return f([1]) ? 1 : 0; }`, {
       target: "standalone",
     });
-    // S6-c must NOT accidentally widen to non-constant builtin reads; those stay
-    // refused until S6-b lands. (A clean compile error, not invalid Wasm.)
-    expect(r.success).toBe(false);
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoHostObjectImports(r.imports);
+    expect(WebAssembly.validate(r.binary), "module must be valid Wasm").toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    expect((instance.exports as NumExports).run()).toBe(1);
   });
 });

@@ -51,6 +51,7 @@ import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 import { tryEmitJsonParseElementAccess, tryEmitJsonParsePropertyAccess } from "./json-standalone.js";
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
+import { emitBuiltinStaticMethodValue, isSupportedBuiltinStaticProperty } from "./builtin-static-globals.js";
 // Well-known Symbol IDs (inlined from literals.ts to avoid circular deps)
 const WELL_KNOWN_SYMBOLS: Record<string, number> = {
   iterator: 1,
@@ -1529,6 +1530,19 @@ export function compilePropertyAccess(
     // (`__get_builtin` is a real host import there and the early shortcut +
     // the later constant handler are observationally identical for these reads).
     const deferToNativeConstant = ctx.standalone && hasNativeBuiltinConstantHandler(builtinName, propName);
+    if (ctx.standalone && BUILTIN_CTOR_NAMES.has(builtinName) && !isShadowed && !deferToNativeConstant) {
+      if (isSupportedBuiltinStaticProperty(builtinName, propName)) {
+        const builtinStaticValue = emitBuiltinStaticMethodValue(ctx, fctx, builtinName, propName);
+        if (builtinStaticValue) return builtinStaticValue;
+      }
+      reportError(
+        ctx,
+        expr,
+        `Codegen error: ${builtinName}.${propName} as a value is not yet available in --target standalone ` +
+          `(#1888 S6 built-ins-as-static-globals).`,
+      );
+      return null;
+    }
     if (BUILTIN_CTOR_NAMES.has(builtinName) && !isShadowed && !deferToNativeConstant) {
       const getBuiltinIdx = ensureLateImport(ctx, "__get_builtin", [{ kind: "externref" }], [{ kind: "externref" }]);
       const getIdx = ensureLateImport(

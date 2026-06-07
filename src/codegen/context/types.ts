@@ -943,6 +943,9 @@ export interface CodegenContext {
   classStaticMethodNames: Map<string, string[]>;
   /** Map from class name → global idx of the static-method-name CSV string constant (#1395) */
   classStaticMethodsCsvGlobal: Map<string, number>;
+  /** #1888 S6 — lazily materialized built-in namespace singleton globals
+   *  (Array/Object static method surface under standalone). */
+  builtinObjectGlobals: Map<string, number>;
   /** (#1394) Map from `${className}_${methodName}` → global idx of the cached
    *  externref singleton closure for the method. Lazily allocated on first
    *  property-access of `C.prototype.<method>` or `instance.<method>` (as
