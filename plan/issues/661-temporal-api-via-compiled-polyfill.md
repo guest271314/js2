@@ -9,7 +9,10 @@ priority: medium
 feasibility: medium
 reasoning_effort: high
 goal: spec-completeness
-sprint: Backlog
+sprint: 61
+es_edition: n/a
+language_feature: temporal
+task_type: feature
 test262_fail: 1128
 files:
   src/codegen/expressions.ts:
@@ -78,3 +81,23 @@ Scoped validation:
 - `pnpm exec biome lint src/codegen/temporal-native.ts src/runtime.ts tests/issue-661.test.ts --diagnostic-level=error`
 
 Note: an accidental `pnpm test -- tests/issue-661.test.ts` invocation was not scoped by Vitest in this repo and started unrelated suites. It surfaced unrelated pre-existing failures before the intended single-file command was rerun correctly.
+
+## Attempt 31 refresh
+
+PR #1274 already existed for the minimal native Temporal subset, but its older
+CI run had stale baseline/report-merge failures after `origin/main` moved. The
+branch was refreshed by merging the latest `origin/main` through the updated
+`origin/symphony/661` branch, preserving the existing implementation and PR
+metadata.
+
+Scoped validation after the main-merge refresh:
+
+- `pnpm exec tsc --noEmit --pretty false`
+- `pnpm exec vitest run tests/issue-661.test.ts`
+- `pnpm exec prettier --check src/codegen/temporal-native.ts src/codegen/expressions/calls.ts src/codegen/expressions/new-super.ts src/codegen/property-access.ts src/runtime.ts tests/issue-661.test.ts plan/issues/661-temporal-api-via-compiled-polyfill.md`
+- `pnpm exec biome lint src/codegen/temporal-native.ts src/runtime.ts tests/issue-661.test.ts --diagnostic-level=error`
+- `pnpm run check:issues`
+
+Local repository note: `git fsck --connectivity-only` still reports unrelated
+corrupted reflog/commit-graph entries for `symphony/1831`; disabling
+`core.commitGraph` for the merge command avoided that local metadata issue.
