@@ -1,7 +1,7 @@
 ---
 id: 1718
 title: "Iterator sequencing helpers (Iterator.concat / zip / zipKeyed) + Iterator.prototype.flatMap not implemented (101 fails)"
-status: in-review
+status: in-progress
 created: 2026-05-29
 updated: 2026-06-07
 priority: high
@@ -16,7 +16,7 @@ test262_fail: 101
 test262_category: built-ins/Iterator
 related: [1340, 1320]
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:36:21.912Z
+claimed_at: 2026-06-07T10:03:03.373Z
 pr: 1279
 ---
 # #1718 — Iterator sequencing helpers + Iterator.prototype.flatMap (101 fails)
@@ -201,3 +201,26 @@ test was corrected to reject primitive string mapper results. Scoped validation:
 `test262/` is empty in this worktree, so no local test262 shard was run. This
 attempt improves the static helper/polyfill semantics but does not claim the
 remaining compiled-value ↔ host-iterator bridge work tracked through #1320.
+
+
+## Attempt 30 (2026-06-07) — validation and publish refresh
+
+Rechecked the existing implementation on `symphony/1718` after redispatch. No
+source changes were needed: the branch already contains the spec-tightening
+runtime patch and focused #1718 tests from the prior attempt.
+
+Scoped validation:
+
+- `pnpm exec vitest run tests/issue-1718.test.ts tests/issue-1718-static-arity.test.ts tests/issue-1718-flatmap.test.ts tests/issue-1340.test.ts`
+  - 4 files / 47 tests passed.
+- `pnpm exec tsc --noEmit --pretty false`
+  - passed.
+
+PR #1279 is open and ready for review, but merge-queue entry is currently
+blocked by CI state outside this iterator patch: the Test262 Sharded
+`merge shard reports` job failed its stale-baseline guard because the external
+`loopdive/js2wasm-baselines` JSONL was 114 commits behind `origin/main`
+(threshold 50; see #1668). All individual js-host and standalone shards passed;
+the standalone guard reported net 0. Issue remains `in-progress` until the
+branch is resynced with current `origin/main` and the PR can be queued or
+auto-queued.
