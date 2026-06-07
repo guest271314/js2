@@ -124,7 +124,7 @@ is the classifier/reporting split requested by the issue.
 ## Validation - 2026-06-07
 
 - `npm test -- tests/issue-1910.test.ts` (2 tests passed).
-- After merging `origin/main` (`3fc48711b`):
+- After merging current `origin/main` (`5bef49a5a`):
   - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
     (8 tests passed).
   - `npx prettier --check` on the touched script, test, and issue files
