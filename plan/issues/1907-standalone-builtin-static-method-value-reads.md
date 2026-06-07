@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:19:04.867Z
+claimed_at: 2026-06-07T07:31:05.107Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -112,3 +112,9 @@ standalone refusal.
   ready/non-draft, green on the remote head, and accepted in the merge queue at
   position 11 before the local main-sync publish. This handoff keeps the issue
   `in-review` with `pr: 1287` for the PR-status poller.
+- Codex verification on 2026-06-07T09:34+02:00 reran the same scoped
+  validation successfully, confirmed `origin/main` remains an ancestor of local
+  `symphony/1907`, and found PR #1287 still open, ready/non-draft, green, and
+  queued at position 11 on remote head `ab1d8c19d`. The local handoff remains
+  `in-progress` because the queued branch cannot accept the unpublished docs
+  commits.
