@@ -142,3 +142,7 @@ machinery and are out of scope here.
   ancestor of `symphony/1905`, reran the scoped validation above successfully,
   and confirmed ready PR `#1284` is open/non-draft, green, and queued in the
   merge queue at position 12.
+- Final Codex publish pass: dequeued PR `#1284`, pushed this refreshed issue
+  state to `symphony/1905`, and re-enabled GitHub auto-merge for the current
+  head while required checks are pending so GitHub can queue it after checks
+  pass.
