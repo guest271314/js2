@@ -1,7 +1,7 @@
 ---
 id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
-status: in-progress
+status: in-review
 pr: 1263
 sprint: 61
 created: 2026-06-07
@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:57:23.827Z
+claimed_at: 2026-06-07T02:13:24.006Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -84,15 +84,12 @@ standalone refusal.
 
 ## Final Findings
 
-- PR #1263 exists, is ready/non-draft, and remains the review vehicle for this
-  issue.
-- `origin/main` was fetched and merged before publishing; the branch includes
-  current `main` through `5bef49a5a` without conflicts.
-- Scoped validation passed again after the merge: the focused #1907/#1888 tests,
-  typecheck, #1678 Array.isArray regression tests, the targeted #1472
-  Reflect.ownKeys standalone route, and formatting.
-- Publishing the local main-sync and issue-update commits is blocked because
-  GitHub reports PR #1263 is already in the merge queue (`isInMergeQueue:
-  true`); queued branches cannot be updated without dequeuing the PR.
-- Required checks on the queued PR are passing, so the remote PR can still land
-  from the existing queued branch head.
+- PR #1263 exists, was ready/non-draft, and is now merged into `main` at
+  `3827daa96`.
+- `origin/main` was fetched before this handoff validation; it includes the
+  #1907 merge commit and the prior main sync.
+- Scoped validation passed again after confirming the PR merge: the focused
+  #1907/#1888 tests, typecheck, #1678 Array.isArray regression tests, the
+  targeted #1472 Reflect.ownKeys standalone route, and formatting.
+- The issue remains `in-review` with `pr: 1263` so the PR-status poller can
+  perform the normal post-merge status transition.
