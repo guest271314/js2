@@ -79,4 +79,14 @@ describe("#1888 S6-c — Math/Number constants reach native f64.const under stan
     const { instance } = await WebAssembly.instantiate(r.binary, {});
     expect((instance.exports as NumExports).run()).toBe(1);
   });
+
+  it("guardrail: unsupported Builtin.method value-read still refuses-loud (S6-b lever)", async () => {
+    const r = await compile(`export function run(): number { const f: any = Math.max; return f(1, 2); }`, {
+      target: "standalone",
+    });
+    // #1907 only enables selected static method values; unsupported pairs still
+    // refuse cleanly instead of routing through __get_builtin or invalid Wasm.
+    expect(r.success).toBe(false);
+    expect(r.errors.map((e) => e.message).join("\n")).toMatch(/#1907|#1888 S6-b/);
+  });
 });

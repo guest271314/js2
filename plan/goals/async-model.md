@@ -53,7 +53,7 @@ promise infrastructure.
 | **705** | Wasm validation: not enough arguments on the stack (361 CE) | 26 | done | medium |
 | **711** | Unsupported new expression: new Function() (106 CE) | 0 | done | medium |
 | **735** | - Async iteration correctness (329 tests) | Backlog | blocked | medium |
-| **762** | - Generator .next(value) arguments are silently ignored | Backlog | ready | medium |
+| **762** | - Generator .next(value) arguments are silently ignored | Backlog | blocked | medium |
 | **767** | - Equivalence test coverage gaps: RegExp, Promise, async iterators | 19 | done | medium |
 | **780** | - TypeError (null/undefined access) in built-in method dispatch (~9,128 tests) | 0 | done | critical |
 | **789** | - TypeError null/undefined guard over-triggering (15,630 tests) | 25 | done | critical |
@@ -94,7 +94,7 @@ promise infrastructure.
 | **1027** | Missing __make_getter_callback late-import in PR #43 accessor paths | 40 | done | high |
 | **1034** | Compile prettier to Wasm — parser + AST + printer stress test; self-format smoke test | 41 | done | high |
 | **1035** | WASI hello-world: compile console.log + node:fs write to a standalone native executable | 45 | done | high |
-| **1042** | async/await state-machine lowering (AwaitExpression is currently a no-op) | 58 | in-progress | high |
+| **1042** | async/await state-machine lowering (AwaitExpression is currently a no-op) | 58 | ready | high |
 | **1044** | Node builtin modules as host imports (NODE_HOST_IMPORT_MODULES, node: prefix normalization) | 45 | ready | high |
 | **1089** | codegen: support dynamic import() expressions — 429 test262 tests skipped | Backlog | ready | medium |
 | **1093** | Systematic ECMAScript spec conformance audit — review compiled semantics against tc39.es/ecma262 | 45 | ready | high |
