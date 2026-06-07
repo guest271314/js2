@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T00:36:22.921Z
+claimed_at: 2026-06-07T01:04:54.010Z
 pr: 1258
 ---
 
@@ -120,3 +120,7 @@ follow-up buckets:
 
 No contained compiler semantics residual was obvious from this pass; this PR
 is the classifier/reporting split requested by the issue.
+
+## Validation - 2026-06-07
+
+- `npm test -- tests/issue-1910.test.ts` (2 tests passed).
