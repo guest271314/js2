@@ -1,7 +1,7 @@
 ---
 id: 1387
 title: "feat: implement `with` statement — architect exploration of dynamic-scope compilation strategies"
-status: in-review
+status: in-progress
 created: 2026-05-08
 updated: 2026-06-07
 priority: high
@@ -14,7 +14,7 @@ goal: spec-completeness
 sprint: 61
 owner: Hooke
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:10:14.740Z
+claimed_at: 2026-06-07T10:09:57.864Z
 pr: 1272
 ---
 # #1387 — `with` statement: architect exploration
@@ -545,3 +545,20 @@ Validation:
   coverage, and abrupt-completion cases. Artifacts:
   `benchmarks/results/test262-report-20260607-072647.json` and
   `benchmarks/results/test262-results-20260607-072647.jsonl`.
+
+## Publication note — 2026-06-07 PR blocked by stale baseline
+
+PR #1272 is open and ready for review against `main`. The branch was refreshed
+with current `origin/main` by merge commit `8658a7bd5` before publication.
+
+GitHub Actions reran on the refreshed branch. The #1387 implementation checks
+passed through typecheck/lint, equivalence shards, and the sharded test262
+catastrophic and standalone regression guards. The remaining red check is the
+external stale-baseline guard in `Test262 Sharded / merge shard reports`:
+`js2wasm-baselines` currently points at baseline main SHA
+`ff02d201152dc8777d3e8151ed05dddd47d75ecf`, which the job reports as 114
+commits behind current `origin/main` (threshold: 50). This blocks merge-queue
+entry for #1272 independently of the `with` slice; see #1668 in the CI message.
+
+Status remains `in-progress` until the baseline promotion issue is resolved and
+the PR can be enqueued or auto-merged.
