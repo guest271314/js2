@@ -774,3 +774,27 @@ Scoped validation was rerun in this worktree:
 All scoped checks passed. The standalone report still shows `0` stale rows.
 This issue remains `in-progress` locally because GitHub reports PR #1291 is
 already queued to merge and queued branches cannot be updated.
+
+## 2026-06-07 queue push blocker after current recheck
+
+The attempted push after the current queue recheck was rejected because GitHub
+reports PR #1291 as queued:
+
+- Remote PR head: `6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+- Local attempted head: `6dca3929d9757cab748c2b60c9c8c1dbcf9a2ccd`
+- PR URL: `https://github.com/loopdive/js2/pull/1291`
+- Push preflight: local pre-push typecheck, lint, format, and issue integrity
+  checks passed
+- Merge queue command:
+  `gh pr merge 1291 --repo loopdive/js2wasm --auto --match-head-commit 6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+  reported `Pull request #1291 is already queued to merge`
+- Push result:
+
+```text
+GH006: Protected branch update failed ...
+A pull request for this branch has been added to a merge queue.
+Branches that are queued for merging cannot be updated.
+```
+
+Per the publish rule, this issue is left `in-progress` locally until PR #1291
+merges or is dequeued so the latest metadata refresh can be pushed.
