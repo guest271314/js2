@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T06:25:34.963Z
+claimed_at: 2026-06-07T06:31:35.825Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -102,5 +102,8 @@ standalone refusal.
 - Codex verification on 2026-06-07T08:28+02:00 reran the issue-scoped
   validation on `symphony/1907`; all commands passed, PR #1287 was still open
   and ready/non-draft, and the branch remained current with `origin/main`.
+- Codex verification on 2026-06-07T08:34+02:00 reran the same scoped validation
+  on the current branch; all commands passed, PR #1287 remained open and
+  ready/non-draft, and `origin/main` was still an ancestor of `HEAD`.
 - The issue remains `in-review` with `pr: 1287` so the PR-status poller can
   perform the normal post-merge status transition.
