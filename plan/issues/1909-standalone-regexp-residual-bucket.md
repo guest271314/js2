@@ -15,7 +15,7 @@ goal: standalone-mode
 related: [682, 1474, 1539]
 test262_bucket: standalone-regexp
 test262_count: 1997
-pr: 1289
+pr: 1291
 claimed_by: codex-developer
 claimed_at: 2026-06-07T10:21:45.332Z
 ---
@@ -544,6 +544,7 @@ GitHub now reports PR #1289 as merged:
 - Merge commit: `44e1c37f605dc96972ff31b59716a0a0562be661`
 - Merged at: `2026-06-07T09:01:31Z`
 
-The implementation and issue-state refresh are present on current
-`origin/main`. This issue remains `in-review` with `pr: 1289`; the PR-status
-poller owns the eventual `done` transition.
+The implementation and earlier issue-state refresh are present on current
+`origin/main`. Follow-up PR #1291 now carries this final merged-state metadata
+refresh. This issue remains `in-review` with `pr: 1291`; the PR-status poller
+owns the eventual `done` transition.
