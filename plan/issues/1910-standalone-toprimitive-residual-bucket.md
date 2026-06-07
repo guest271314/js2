@@ -134,3 +134,6 @@ is the classifier/reporting split requested by the issue.
     (8 tests passed).
   - `npx prettier --check` on the touched script, test, and issue files
     (passed).
+- After merging current `origin/main` (`ff02d2011`):
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
