@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1291
 claimed_by: codex-developer
-claimed_at: 2026-06-07T12:10:59.479Z
+claimed_at: 2026-06-07T12:16:59.211Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -945,3 +945,34 @@ ready/non-draft, and already accepted into the merge queue:
 `in-progress` locally because GitHub reports PR #1291 is already queued to
 merge; queued PR branches cannot be updated with the latest local metadata
 refresh.
+
+## 2026-06-07 Codex validation and queue recheck
+
+Live GitHub state at `2026-06-07T14:19:52+02:00` still has PR #1291 open,
+ready/non-draft, mergeable, and accepted into the merge queue:
+
+- URL: `https://github.com/loopdive/js2/pull/1291`
+- Remote PR head: `6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+- Base: `main`
+- Merge state: `CLEAN` / mergeable
+- Check rollup: `SUCCESS`
+- Merge queue entry: `QUEUED`, position `7`, estimated time to merge `2818`
+  seconds
+
+Scoped validation was rerun in this worktree:
+
+- `pnpm test tests/issue-1909.test.ts tests/issue-1781.test.ts`
+- `node --check scripts/build-test262-report.mjs`
+- `node scripts/check-issue-ids.mjs`
+- `pnpm exec prettier --check scripts/build-test262-report.mjs tests/issue-1909.test.ts tests/issue-1781.test.ts plan/issues/1909-standalone-regexp-residual-bucket.md`
+- `node scripts/build-test262-report.mjs --input .test262-cache/test262-standalone-current.jsonl --output .test262-cache/test262-standalone-report-1909-validate.json --target standalone --include-proposals --max-unclassified-root-causes 0`
+
+All scoped checks passed. The rebuilt standalone report still has `0`
+unclassified rows and `0` stale rows. The RegExp split remains `833` Phase 2d
+rows, `104` Phase 2b rows, `452` string-protocol rows, `546` native-engine
+rows, and `62` fallback rows.
+
+`origin/main` is an ancestor of the local branch and of the remote PR head. The
+net diff versus `origin/main` remains limited to this issue-state refresh. This
+issue remains `in-progress` locally because the active merge-queue entry blocks
+metadata pushes to the PR branch until PR #1291 merges or is dequeued.
