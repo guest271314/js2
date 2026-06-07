@@ -17,7 +17,7 @@ test262_bucket: standalone-regexp
 test262_count: 1997
 pr: 1291
 claimed_by: codex-developer
-claimed_at: 2026-06-07T11:20:58.963Z
+claimed_at: 2026-06-07T11:31:29.343Z
 ---
 
 # #1909 — Standalone RegExp residual bucket
@@ -748,4 +748,29 @@ Scoped validation was rerun in this worktree:
 All scoped checks passed. `origin/main` is an ancestor of the local branch, and
 the net diff versus `origin/main` remains limited to this issue-state refresh.
 This issue is left `in-progress` locally because GitHub reports PR #1291 is
+already queued to merge and queued branches cannot be updated.
+
+## 2026-06-07 current queue recheck
+
+GitHub still has PR #1291 open and ready/non-draft for `symphony/1909`:
+
+- URL: `https://github.com/loopdive/js2/pull/1291`
+- Remote PR head: `6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+- Base: `main`
+- Merge state: `CLEAN` / mergeable
+- Checks: all reported PR checks succeeded
+- Merge queue entry: `QUEUED`, position `8`, estimated time to merge `3189`
+  seconds
+- Auto-merge request: none reported; queue entry is active
+
+Scoped validation was rerun in this worktree:
+
+- `pnpm test tests/issue-1909.test.ts tests/issue-1781.test.ts`
+- `node --check scripts/build-test262-report.mjs`
+- `node scripts/check-issue-ids.mjs`
+- `pnpm exec prettier --check scripts/build-test262-report.mjs tests/issue-1909.test.ts tests/issue-1781.test.ts plan/issues/1909-standalone-regexp-residual-bucket.md`
+- `node scripts/build-test262-report.mjs --input .test262-cache/test262-standalone-current.jsonl --output .test262-cache/test262-standalone-report-1909-validate.json --target standalone --include-proposals --max-unclassified-root-causes 0`
+
+All scoped checks passed. The standalone report still shows `0` stale rows.
+This issue remains `in-progress` locally because GitHub reports PR #1291 is
 already queued to merge and queued branches cannot be updated.
