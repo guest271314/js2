@@ -2,7 +2,7 @@
 id: 1904
 title: "standalone: native __extern_is_array predicate for Array.isArray over Wasm carriers"
 status: in-review
-pr: 1286
+pr: 1294
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T10:37:29.615Z
+claimed_at: 2026-06-07T10:45:58.981Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
@@ -146,3 +146,5 @@ Codex current queue check on 2026-06-07: fetched `origin`, confirmed `origin/mai
 Codex publish blocker on 2026-06-07: `git merge --ff-only origin/main` was already up to date, and `git push origin symphony/1904` ran pre-push typecheck, lint, prettier format check, and issue integrity successfully before GitHub rejected the update with GH006 because PR #1286 is already in the merge queue. GitHub GraphQL still reports PR #1286 open, ready/non-draft, all visible checks successful, and queued at position 7 with remote head `8db25d962fb115fe1755278809a64388cc554af5`; issue status stays `in-progress` until the queued PR merges or is dequeued for a publishable update.
 
 Codex final publish check on 2026-06-07: merged current `origin/main` into `symphony/1904` after GitHub reported PR #1286 merged. Scoped validation passed on the refreshed branch: `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. Issue status is restored to `in-review` with `pr: 1286`; no merge-queue or auto-merge action remains after the merged PR.
+
+Codex current publish check on 2026-06-07: PR #1294 is open and ready/non-draft for the remaining issue-file closeout delta on `symphony/1904`. Scoped validation passed again: `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. Issue status is kept `in-review` for the Symphony poller.
