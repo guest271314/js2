@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T01:10:23.881Z
+claimed_at: 2026-06-07T01:19:24.010Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -80,10 +80,11 @@ standalone refusal.
 - `npm run typecheck -- --pretty false`
 - `npm test -- tests/issue-1678.test.ts`
 - `npm test -- tests/issue-1472.test.ts -t "Reflect.ownKeys routes"`
+- `npx prettier --check src/codegen/property-access.ts src/codegen/expressions/calls.ts tests/issue-1907.test.ts tests/issue-1888-s6c.test.ts plan/issues/1907-standalone-builtin-static-method-value-reads.md`
 
 ## Final Findings
 
 - PR #1263 exists and remains the review vehicle for this issue.
-- Scoped validation passed on the implementation branch after re-checking the
+- Scoped validation passed again on the implementation branch after re-checking the
   focused #1907/#1888 tests, typecheck, #1678 Array.isArray regression tests,
-  and the targeted #1472 Reflect.ownKeys standalone route.
+  the targeted #1472 Reflect.ownKeys standalone route, and formatting.
