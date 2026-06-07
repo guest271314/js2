@@ -194,3 +194,18 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
 - Next step is merging current `origin/main`, preserving #1908's narrowed
   `isSameValue` validator classifier alongside main's RegExp bucket split, then
   rerunning the focused regression and requeueing PR #1257.
+
+## Codex Requeue Merge — 2026-06-07
+
+- Merged current `origin/main`
+  (`d4492156fbb45e50954700f8c1f3ca6b6e3970ef`) into `symphony/1908` after PR
+  #1257 was removed from the merge queue.
+- Resolved the report-builder conflict by keeping #1908's validator-only
+  `isSameValue` matcher and main's #1909 RegExp sub-bucket split.
+- Rebuilt `public/benchmarks/results/test262-standalone-report.json` from the
+  current `loopdive/js2wasm-baselines` standalone JSONL
+  (`baseline_sha: ff02d201152dc8777d3e8151ed05dddd47d75ecf`); the
+  `issamevalue-invalid-wasm` bucket remains absent (`0` rows), classified is
+  `30,673`, and unclassified remains `0`.
+- `pnpm exec vitest run tests/issue-1908.test.ts tests/issue-1909.test.ts
+  tests/issue-1910.test.ts` passed.

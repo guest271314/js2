@@ -90,7 +90,7 @@ describe("#1781 standalone test262 artifact root-cause map", () => {
 
     const byId = new Map(report.root_cause_map.buckets.map((bucket: any) => [bucket.id, bucket]));
     expect(byId.get("standalone-dynamic-object-property").issues).toContain("#1472");
-    expect(byId.get("standalone-regexp").issues).toContain("#682");
+    expect(byId.get("standalone-regexp-native-engine").issues).toContain("#1914");
     expect(byId.get("standalone-dynamic-object-property").sample_signatures).toContain(
       "wasm_compile:No dependency provided for imported function env::__extern_get",
     );

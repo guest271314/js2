@@ -102,7 +102,7 @@ describe("#1910 standalone ToPrimitive residual classifier split", () => {
   it("routes string, URI, Date, RegExp, template, object, BigInt, and Function overmatches elsewhere", () => {
     expect(buckets.get("string-methods-coercion")?.count).toBe(2);
     expect(buckets.get("date-formatting-coercion")?.count).toBe(1);
-    expect(buckets.get("standalone-regexp")?.count).toBe(1);
+    expect(buckets.get("standalone-regexp-string-protocol")?.count).toBe(1);
     expect(buckets.get("template-literals")?.count).toBe(1);
     expect(buckets.get("object-property-semantics")?.count).toBe(1);
     expect(buckets.get("bigint-typed-path")?.count).toBe(1);
