@@ -17,7 +17,7 @@ related: [1472, 1629, 1631, 1888]
 test262_bucket: object-property-semantics
 test262_count: 748
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:07:04.989Z
+claimed_at: 2026-06-07T07:14:35.471Z
 pr: 1264
 ---
 # #1906 — Standalone native `Object.defineProperties`
@@ -72,22 +72,23 @@ caught by the broad dynamic object/property refusal.
 - `pnpm test tests/issue-1629-S6.test.ts tests/issue-1629-S3.test.ts tests/issue-1629-S2.test.ts`
 - `pnpm exec tsc --noEmit --incremental false`
 
-Revalidated by `codex-developer` on branch `symphony/1906` after fetching
-current `origin/main` at `d6957d5dc`; checks above pass locally on
-2026-06-07. The focused #1906 suite, the existing #1629 defineProperty suites,
-and `tsc --noEmit` all passed in this worktree.
+Revalidated by `codex-developer` on branch `symphony/1906` after fetching and
+merging current `origin/main` at `d6957d5dc`; checks above pass locally on
+2026-06-07 at local head `07c9d0c17`. The focused #1906 suite, the existing
+#1629 defineProperty suites, and `tsc --noEmit` all passed in this worktree.
 
 PR #1264 is open against `main`; the local issue status is back to
 `in-progress` until the publish/CI blocker below is cleared.
 
 ## Publish Blocker
 
-`codex-developer` revalidated locally and committed validation refreshes, but
-`git push origin symphony/1906` was rejected because PR #1264 is already in the
-merge queue and queued branches cannot be updated. The queued remote head is
-`0ea14d5a0`; the local branch has issue-file-only bookkeeping commits beyond
-that queued head. This pass rechecked the PR after fetching `origin/main` at
-`d6957d5dc` and did not find a scoped implementation failure.
+`codex-developer` revalidated locally and committed validation refreshes, but a
+previous `git push origin symphony/1906` was rejected because PR #1264 was
+already in the merge queue and queued branches cannot be updated. The queued
+remote head is `0ea14d5a0`; the local branch has current-main merge and issue
+bookkeeping commits beyond that queued head. This pass rechecked the PR after
+fetching and merging `origin/main` at `d6957d5dc` and did not find a scoped
+implementation failure.
 
 GitHub reports PR #1264 is already queued to merge (`gh pr merge 1264 --auto
 --squash` returns "already queued to merge"), but the PR check rollup is failing
