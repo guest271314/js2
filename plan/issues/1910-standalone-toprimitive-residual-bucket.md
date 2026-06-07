@@ -145,3 +145,7 @@ validation after syncing the assigned branch with current `origin/main`.
   - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
     (8 tests passed).
   - `npx prettier --check` on the issue file (passed).
+- After merging current `origin/main` (`d4492156f`):
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the issue file (passed).
