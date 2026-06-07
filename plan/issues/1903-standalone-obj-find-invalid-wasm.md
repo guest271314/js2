@@ -170,6 +170,8 @@ remaining semantic failures.
   `origin/main` (`5b495ba47`) is still an ancestor of `symphony/1903`, reran
   scoped validation, and confirmed PR #1262 is open, non-draft, mergeable, and
   queued in the merge queue before publishing this issue-only handoff update.
+- Publish follow-up 11: merged current `origin/main` (`d6957d5d`) after the
+  base advanced again, with no #1903 conflicts, and reran scoped validation.
 
 ## Validation
 
@@ -263,3 +265,6 @@ remaining semantic failures.
   "#1903|dynamic property add/read"` (final handoff 13 on 2026-06-07)
 - `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
   "#1903|dynamic property add/read"` (final handoff 14 on 2026-06-07)
+- `npx vitest run tests/issue-1903.test.ts tests/issue-1472.test.ts -t
+  "#1903|dynamic property add/read"` (after merging `origin/main` at
+  `d6957d5d`)
