@@ -167,6 +167,216 @@ export function isAnyValue(type: ValType, ctx: CodegenContext): boolean {
   );
 }
 
+export function ensureAnyFromExternHelper(ctx: CodegenContext): number | undefined {
+  if (!(ctx.standalone || ctx.wasi)) return undefined;
+  if (ctx.nativeBoxNumberTypeIdx < 0 || ctx.nativeBoxBooleanTypeIdx < 0) return undefined;
+
+  const existing = ctx.funcMap.get("__any_from_extern");
+  if (existing !== undefined) return existing;
+
+  ensureAnyValueType(ctx);
+  const anyTypeIdx = ctx.anyValueTypeIdx;
+  const anyRef: ValType = { kind: "ref", typeIdx: anyTypeIdx };
+  const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [anyRef], "__any_from_extern");
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const EQ_HEAP_TYPE = -19;
+
+  const nullAny: Instr[] = [
+    { op: "i32.const", value: 1 },
+    { op: "i32.const", value: 0 },
+    { op: "f64.const", value: NaN },
+    { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+    { op: "ref.null.extern" },
+    { op: "struct.new", typeIdx: anyTypeIdx },
+  ];
+  const fallbackStringAny: Instr[] = [
+    { op: "i32.const", value: 5 },
+    { op: "i32.const", value: 0 },
+    { op: "f64.const", value: 0 },
+    { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+    { op: "local.get", index: 0 },
+    { op: "struct.new", typeIdx: anyTypeIdx },
+  ];
+
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...nullAny, { op: "return" } as Instr],
+    },
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "local.tee", index: 1 },
+    { op: "ref.test", typeIdx: anyTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "local.get", index: 1 }, { op: "ref.cast", typeIdx: anyTypeIdx }, { op: "return" }],
+    },
+    { op: "local.get", index: 1 },
+    { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "i32.const", value: 3 },
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: 1 },
+        { op: "ref.cast", typeIdx: ctx.nativeBoxNumberTypeIdx },
+        { op: "struct.get", typeIdx: ctx.nativeBoxNumberTypeIdx, fieldIdx: 0 },
+        { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+        { op: "ref.null.extern" },
+        { op: "struct.new", typeIdx: anyTypeIdx },
+        { op: "return" },
+      ],
+    },
+    { op: "local.get", index: 1 },
+    { op: "ref.test", typeIdx: ctx.nativeBoxBooleanTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "i32.const", value: 4 },
+        { op: "local.get", index: 1 },
+        { op: "ref.cast", typeIdx: ctx.nativeBoxBooleanTypeIdx },
+        { op: "struct.get", typeIdx: ctx.nativeBoxBooleanTypeIdx, fieldIdx: 0 },
+        { op: "f64.const", value: 0 },
+        { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
+        { op: "ref.null.extern" },
+        { op: "struct.new", typeIdx: anyTypeIdx },
+        { op: "return" },
+      ],
+    },
+    ...fallbackStringAny,
+  ];
+
+  ctx.mod.functions.push({
+    name: "__any_from_extern",
+    typeIdx,
+    locals: [{ name: "any", type: { kind: "anyref" } }],
+    body,
+    exported: false,
+  });
+  ctx.funcMap.set("__any_from_extern", funcIdx);
+  ctx.anyHelpers.set("__any_from_extern", funcIdx);
+  return funcIdx;
+}
+
+export function ensureAnyToExternHelper(ctx: CodegenContext): number | undefined {
+  if (!(ctx.standalone || ctx.wasi)) return undefined;
+  if (ctx.anyValueTypeIdx < 0) return undefined;
+
+  const existing = ctx.funcMap.get("__any_to_extern");
+  if (existing !== undefined) return existing;
+
+  const boxNumberIdx = ctx.funcMap.get("__box_number");
+  const boxBooleanIdx = ctx.funcMap.get("__box_boolean");
+  if (boxNumberIdx === undefined || boxBooleanIdx === undefined) return undefined;
+
+  const anyTypeIdx = ctx.anyValueTypeIdx;
+  const anyRefNull: ValType = { kind: "ref_null", typeIdx: anyTypeIdx };
+  const typeIdx = addFuncType(ctx, [anyRefNull], [{ kind: "externref" }], "__any_to_extern");
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+
+  const body: Instr[] = [
+    { op: "local.get", index: 0 },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "ref.null.extern" }, { op: "return" }],
+    },
+    { op: "local.get", index: 0 },
+    { op: "ref.as_non_null" },
+    { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
+    { op: "local.set", index: 1 },
+    { op: "local.get", index: 1 },
+    { op: "i32.const", value: 2 },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 0 },
+        { op: "ref.as_non_null" },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
+        { op: "f64.convert_i32_s" },
+        { op: "call", funcIdx: boxNumberIdx },
+        { op: "return" },
+      ],
+    },
+    { op: "local.get", index: 1 },
+    { op: "i32.const", value: 3 },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 0 },
+        { op: "ref.as_non_null" },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
+        { op: "call", funcIdx: boxNumberIdx },
+        { op: "return" },
+      ],
+    },
+    { op: "local.get", index: 1 },
+    { op: "i32.const", value: 4 },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 0 },
+        { op: "ref.as_non_null" },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
+        { op: "call", funcIdx: boxBooleanIdx },
+        { op: "return" },
+      ],
+    },
+    { op: "local.get", index: 1 },
+    { op: "i32.const", value: 5 },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 0 },
+        { op: "ref.as_non_null" },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
+        { op: "return" },
+      ],
+    },
+    { op: "local.get", index: 1 },
+    { op: "i32.const", value: 6 },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: 0 },
+        { op: "ref.as_non_null" },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 3 },
+        { op: "extern.convert_any" },
+        { op: "return" },
+      ],
+    },
+    { op: "ref.null.extern" },
+  ];
+
+  ctx.mod.functions.push({
+    name: "__any_to_extern",
+    typeIdx,
+    locals: [{ name: "tag", type: { kind: "i32" } }],
+    body,
+    exported: false,
+  });
+  ctx.funcMap.set("__any_to_extern", funcIdx);
+  ctx.anyHelpers.set("__any_to_extern", funcIdx);
+  return funcIdx;
+}
+
 /**
  * Emit inline wasm helper functions for boxing/unboxing `any` values.
  * Called lazily when any-typed operations are first encountered.

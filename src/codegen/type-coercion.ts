@@ -9,7 +9,13 @@
 import type { ArrayTypeDef, Instr, StructTypeDef, TypeDef, ValType } from "../ir/types.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
-import { addUnionImports, ensureAnyHelpers, isAnyValue } from "./index.js";
+import {
+  addUnionImports,
+  ensureAnyFromExternHelper,
+  ensureAnyHelpers,
+  ensureAnyToExternHelper,
+  isAnyValue,
+} from "./index.js";
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { getArrTypeIdxFromVec } from "./registry/types.js";
@@ -1177,6 +1183,9 @@ export function coerceType(
 
   // ── Boxing: primitive → ref $AnyValue ──
   if (isAnyValue(to, ctx)) {
+    if (from.kind === "externref" && (ctx.standalone || ctx.wasi)) {
+      addUnionImports(ctx);
+    }
     ensureAnyHelpers(ctx);
     if (from.kind === "i32") {
       const funcIdx = ctx.funcMap.get("__any_box_i32");
@@ -1202,7 +1211,10 @@ export function coerceType(
       }
     }
     if (from.kind === "externref") {
-      const funcIdx = ctx.funcMap.get("__any_box_string");
+      const funcIdx =
+        ctx.standalone || ctx.wasi
+          ? (ensureAnyFromExternHelper(ctx) ?? ctx.funcMap.get("__any_box_string"))
+          : ctx.funcMap.get("__any_box_string");
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
         return;
@@ -1295,7 +1307,15 @@ export function coerceType(
       }
     }
     if (to.kind === "externref") {
-      // Convert GC ref (AnyValue struct) to externref via extern.convert_any
+      if (ctx.standalone || ctx.wasi) {
+        addUnionImports(ctx);
+        const anyToExternIdx = ensureAnyToExternHelper(ctx);
+        if (anyToExternIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: anyToExternIdx });
+          return;
+        }
+      }
+      // Convert GC ref (AnyValue struct) to externref via extern.convert_any.
       fctx.body.push({ op: "extern.convert_any" });
       return;
     }
@@ -2714,6 +2734,13 @@ export function coercionInstrs(ctx: CodegenContext, from: ValType, to: ValType, 
   }
   // ref/ref_null → externref: extern.convert_any
   if ((from.kind === "ref" || from.kind === "ref_null") && to.kind === "externref") {
+    if ((ctx.standalone || ctx.wasi) && isAnyValue(from, ctx)) {
+      addUnionImports(ctx);
+      const anyToExternIdx = ensureAnyToExternHelper(ctx);
+      if (anyToExternIdx !== undefined) {
+        return [{ op: "call", funcIdx: anyToExternIdx } as Instr];
+      }
+    }
     return [{ op: "extern.convert_any" } as Instr];
   }
   // externref → i32: unbox number then truncate

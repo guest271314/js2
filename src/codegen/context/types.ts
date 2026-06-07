@@ -917,6 +917,10 @@ export interface CodegenContext {
   wrapperNumberTypeIdx: number;
   wrapperStringTypeIdx: number;
   wrapperBooleanTypeIdx: number;
+  /** Native union-helper carrier type indices, present under WASI/standalone. */
+  nativeBoxNumberTypeIdx: number;
+  nativeBoxBooleanTypeIdx: number;
+  nativeBigIntTypeIdx: number;
   /** Cache for function reference wrappers: signature key → ClosureInfo */
   funcRefWrapperCache: Map<string, ClosureInfo>;
   /** Pending module-init body (not yet in mod.functions) that needs global index fixup */

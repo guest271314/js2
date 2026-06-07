@@ -16,7 +16,7 @@ sprint: 61
 related: [1472, 6407, 1629, 1104, 1539, 1103]
 parent: 1472
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:06:47.369Z
+claimed_at: 2026-06-07T10:22:55.064Z
 ---
 # #1888 — Standalone open-any method dispatch + built-ins-as-static-globals
 
@@ -914,7 +914,32 @@ Validation:
 - `pnpm exec vitest run tests/issue-1888.test.ts tests/issue-1888-s6c.test.ts tests/issue-1907.test.ts`
 - `pnpm exec biome lint src/codegen/builtin-static-globals.ts src/codegen/expressions/identifiers.ts src/codegen/property-access.ts src/codegen/expressions/calls.ts tests/issue-1888.test.ts tests/issue-1888-s6c.test.ts tests/issue-1907.test.ts --diagnostic-level=error --max-diagnostics=50`
 
-Observed during extra scoped checking: `pnpm exec vitest run
-tests/issue-1472.test.ts -t "#1888"` still has Slice-2 open-method arity 2/3/4
-runtime failures (`NaN` instead of the expected numeric sum). The new S6
-static-global tests pass and do not touch that arity bridge path.
+## Attempt 30 bridge follow-up (codex, 2026-06-07)
+
+Resolved the extra scoped Slice-2 failures observed after S6: standalone
+open-`any` method closures with 2/3/4 numeric `any` args were returning `NaN`
+because the standalone dispatch boundary boxed arguments as native externref
+carriers, while the any-typed closure body expected `$AnyValue`, then returned
+that `$AnyValue` back through raw `extern.convert_any`.
+
+What changed:
+- Added standalone-only `$AnyValue` bridge helpers:
+  `__any_from_extern` converts native boxed number/boolean externrefs into
+  `$AnyValue`; `__any_to_extern` converts `$AnyValue` numeric/boolean/string/ref
+  results back across the standalone externref boundary.
+- Recorded native boxed carrier type indices in `CodegenContext` when union
+  helpers are emitted, so the bridge can recognize `__box_number_struct` and
+  `__box_boolean_struct` without host imports.
+- Wired both `coerceType` and `coercionInstrs`; the latter is required for
+  expression-bodied closure returns, which was the actual Slice-2 NaN path.
+- Kept the closure dispatcher result bridge for direct `$AnyValue` return arms
+  and added the issue-local regression in `tests/issue-1888.test.ts`.
+
+Validation:
+- `pnpm exec vitest run tests/issue-1888.test.ts tests/issue-1888-s6c.test.ts tests/issue-1907.test.ts`
+- `pnpm exec vitest run tests/issue-1472.test.ts -t "#1888 Slice 2"`
+- `pnpm exec tsc --noEmit`
+- `pnpm exec biome lint src/codegen/any-helpers.ts src/codegen/type-coercion.ts src/codegen/index.ts src/codegen/context/types.ts src/codegen/context/create-context.ts src/codegen/builtin-static-globals.ts src/codegen/expressions/identifiers.ts src/codegen/expressions/calls.ts tests/issue-1888.test.ts tests/issue-1888-s6c.test.ts tests/issue-1907.test.ts --diagnostic-level=error --max-diagnostics=50`
+
+PR #1273 remains the review vehicle; status stays `in-review` until the PR
+status poller marks it done after merge.

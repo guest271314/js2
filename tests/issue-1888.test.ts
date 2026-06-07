@@ -26,6 +26,21 @@ async function runStandalone(source: string): Promise<number> {
   return (instance.exports as Record<string, () => number>).run();
 }
 
+describe("#1888 standalone open-any method dispatch", () => {
+  it("passes boxed any arguments through 2-4 arg method closures", async () => {
+    const value = await runStandalone(`
+      export function run(): number {
+        const o: any = {};
+        o["two"] = (a: any, b: any) => a + b;
+        o["three"] = (a: any, b: any, c: any) => a + b + c;
+        o["four"] = (a: any, b: any, c: any, d: any) => a + b + c + d;
+        return o.two(2, 3) + o.three(1, 2, 4) + o.four(1, 2, 3, 4);
+      }
+    `);
+    expect(value).toBe(22);
+  });
+});
+
 describe("#1888 S6 — standalone built-in static globals", () => {
   it("Array.isArray read as a function value stays host-free", async () => {
     const value = await runStandalone(`
