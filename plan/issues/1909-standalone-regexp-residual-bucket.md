@@ -976,3 +976,27 @@ rows, and `62` fallback rows.
 net diff versus `origin/main` remains limited to this issue-state refresh. This
 issue remains `in-progress` locally because the active merge-queue entry blocks
 metadata pushes to the PR branch until PR #1291 merges or is dequeued.
+
+## 2026-06-07 Codex final queue push blocker
+
+The attempted push after the validation and queue recheck was rejected because
+GitHub reports PR #1291 is queued:
+
+- Remote PR head: `6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+- Local attempted head: `3ca6eff8683a3d6eb70afbb48c4f5461872d9c5e`
+- PR URL: `https://github.com/loopdive/js2/pull/1291`
+- Push preflight: local pre-push typecheck, lint, format, and issue integrity
+  checks passed
+- Merge queue command:
+  `gh pr merge 1291 --repo loopdive/js2wasm --auto --match-head-commit 6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+  reported `Pull request #1291 is already queued to merge`
+- Push result:
+
+```text
+GH006: Protected branch update failed ...
+A pull request for this branch has been added to a merge queue.
+Branches that are queued for merging cannot be updated.
+```
+
+Per the publish rule, this issue remains `in-progress` locally until PR #1291
+merges or is dequeued so the latest local metadata refresh can be pushed.
