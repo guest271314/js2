@@ -78,3 +78,5 @@ Codex rerun on 2026-06-07: `npm test -- tests/issue-1904.test.ts` passed 4/4, `n
 Codex final publish check on 2026-06-07: refreshed `origin/main`, confirmed it is already included in `symphony/1904` (`git merge --ff-only origin/main` was already up to date), reran the scoped issue test, related regression set, and typecheck successfully. PR #1259 is open, ready/non-draft, and targets `main`.
 
 Codex final rerun on 2026-06-07: after fetching current `origin/main`, confirmed it is an ancestor of `symphony/1904`; `npm test -- tests/issue-1904.test.ts` passed 4/4, `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` passed 17/17, and `npm run typecheck` passed. PR #1259 remains open, ready/non-draft, and targets `main`.
+
+Codex post-merge rerun on 2026-06-07: merged the latest `origin/main` into `symphony/1904`, then reran `npm test -- tests/issue-1904.test.ts` (4/4), `npm test -- tests/issue-1904.test.ts tests/issue-1678.test.ts tests/issue-1328.test.ts tests/issue-1866.test.ts` (17/17), and `npm run typecheck` successfully before republishing PR #1259.
