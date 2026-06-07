@@ -17,6 +17,7 @@ files:
 claimed_by: codex-developer
 claimed_at: 2026-06-07T05:03:52.808Z
 ---
+
 # #661 — Temporal API via compiled polyfill or minimal implementation
 
 ## Status: in progress
@@ -26,6 +27,7 @@ claimed_at: 2026-06-07T05:03:52.808Z
 ### Approach 1: Compile @js-temporal/polyfill
 
 The polyfill is pure JS (~15,000 lines). If js2wasm can compile it:
+
 1. `npm install @js-temporal/polyfill`
 2. Write a thin TS wrapper that imports and re-exports the polyfill
 3. Compile the wrapper — the polyfill becomes native Wasm
