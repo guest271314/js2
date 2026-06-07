@@ -104,4 +104,46 @@ describe("#1629 — dynamic descriptor field presence", () => {
       `),
     ).toBe(1);
   });
+
+  it("invokes a referenced getter when a statically typed field is read with dot access", async () => {
+    expect(
+      await runHost(`
+        export function test(): number {
+          const getter = function() { return 17; };
+          const o = { x: 1 };
+          Object.defineProperty(o, "x", { get: getter });
+          return o.x;
+        }
+      `),
+    ).toBe(17);
+  });
+
+  it("invokes a referenced getter when a statically typed field is read with bracket access", async () => {
+    expect(
+      await runHost(`
+        export function test(): number {
+          function getter() { return 23; }
+          const o = { x: 1 };
+          const key = "x";
+          Object.defineProperty(o, "x", { get: getter });
+          return o[key];
+        }
+      `),
+    ).toBe(23);
+  });
+
+  it("preserves referenced getter identity in getOwnPropertyDescriptor read-back", async () => {
+    expect(
+      await runHost(`
+        export function test(): number {
+          const getter = function() { return 31; };
+          const o: any = {};
+          const desc = { get: getter, configurable: false };
+          Object.defineProperty(o, "x", desc);
+          const d: any = Object.getOwnPropertyDescriptor(o, "x");
+          return d.get === getter ? d.get() : 0;
+        }
+      `),
+    ).toBe(31);
+  });
 });

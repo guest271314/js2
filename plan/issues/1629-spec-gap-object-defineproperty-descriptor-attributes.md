@@ -17,7 +17,7 @@ renumbered_from: 1335
 parent: 1328
 related: [1629a, 1629b, 1629c, 1630, 1631, 1130, 1364b]
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:04:42.087Z
+claimed_at: 2026-06-07T10:02:45.369Z
 ---
 > **UNIFIED DESCRIPTOR-MODEL SPEC (architect, 2026-05-29).** The single
 > coherent implementation plan for the whole Object property-descriptor
@@ -237,6 +237,31 @@ Focused validation:
   downstream gaps outside this slice: widened-field `verifyProperty` coverage,
   array exotic length RangeError behavior, and accessor closure identity
   read-back.
+
+## Attempt 30 (2026-06-07, codex-developer)
+
+Focused follow-up for accessor descriptor fidelity:
+
+- `Object.defineProperty` now treats `get: identifierRef` / `set: identifierRef`
+  descriptors as accessor descriptors when the receiver key is an existing
+  struct field. Those descriptors route through the runtime descriptor sidecar
+  instead of being recorded as flag-only data descriptors.
+- Compiled dot/bracket reads for locals with accessor-backed descriptor entries
+  consult the runtime descriptor model before falling back to `struct.get`, so
+  statically typed fields redefined through accessor-reference descriptors
+  invoke the getter per ECMA-262 §10.1.8.1.
+- Wasm closure callable wrappers are cached per closure/arity and `__host_eq`
+  canonicalizes cached wrappers to their underlying closure. This preserves
+  accessor identity for `Object.getOwnPropertyDescriptor(o, k).get === getter`,
+  matching the descriptor read-back expected after §20.1.2.4 DefinePropertyOrThrow.
+
+Focused validation:
+
+- `pnpm exec vitest run tests/issue-1629.test.ts` — 8/8 pass.
+- `pnpm exec vitest run tests/issue-1629.test.ts tests/issue-1629*.test.ts`
+  — 45/45 pass.
+- `TEST262_WORKERS=2 TEST262_REPORTER=dot TEST262_LOCAL_SHARD_GLOB='tests/test262-local-shard[1-3].test.ts' TEST262_PATH_FILTER='built-ins/Object/defineProperty/15.2.3.6-4-10.js|built-ins/Object/defineProperty/15.2.3.6-4-11.js|built-ins/Object/defineProperty/15.2.3.6-3-1.js' pnpm run test:262`
+  — 3/3 pass.
 
 ---
 

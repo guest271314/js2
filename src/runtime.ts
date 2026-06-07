@@ -1457,6 +1457,16 @@ function _isConcatSpreadable(
   return v !== undefined && v !== null && !!v;
 }
 
+const _wasmClosureWrapperCache = new WeakMap<object, Map<number, Function>>();
+const _wasmClosureWrapperTargets = new WeakMap<Function, object>();
+
+function _hostEqComparableValue(v: any): any {
+  if (typeof v === "function") {
+    return _wasmClosureWrapperTargets.get(v as Function) ?? v;
+  }
+  return v;
+}
+
 /**
  * (#1382) Wrap a Wasm closure struct in a JS Function so it can be called
  * from JS host code (e.g. `Array.from(iter, mapFn)` where mapFn is a Wasm
@@ -1487,17 +1497,32 @@ function _wrapWasmClosure(
   if (!exports) return null;
   const callFn = exports[`__call_fn_${arity}`];
   if (typeof callFn !== "function") return null;
+  let byArity: Map<number, Function> | undefined;
+  if (_canBeWeakKey(closure)) {
+    byArity = _wasmClosureWrapperCache.get(closure as object);
+    const cached = byArity?.get(arity);
+    if (cached) return cached as (...args: any[]) => any;
+  }
   // Closure parameter is captured by reference; the wrapper holds it alive
   // for as long as the JS Function is reachable from the host. JS Function
   // identity is preserved across multiple invocations (host may capture a
   // reference, e.g. callbacks stored on plain objects).
-  return function wasmClosureBridge(...args: any[]): any {
+  const wrapper = function wasmClosureBridge(...args: any[]): any {
     // Pad with undefined to exactly `arity` positional args. Extra args
     // dropped (JS spec for fewer/more args than declared params).
     const padded: any[] = [];
     for (let i = 0; i < arity; i++) padded.push(args[i]);
     return callFn(closure, ...padded);
   };
+  if (_canBeWeakKey(closure)) {
+    if (!byArity) {
+      byArity = new Map();
+      _wasmClosureWrapperCache.set(closure as object, byArity);
+    }
+    byArity.set(arity, wrapper);
+    _wasmClosureWrapperTargets.set(wrapper, closure as object);
+  }
+  return wrapper;
 }
 
 /**
@@ -1507,13 +1532,11 @@ function _wrapWasmClosure(
  * check that the per-host-import call sites need before handing the value
  * to the native engine. Returns the value unchanged when it's already
  * JS-callable, null/undefined (caller-side TypeError is correct), or any
- * non-struct value. Returns a freshly-allocated JS Function bridging into
+ * non-struct value. Returns a cached JS Function bridging into
  * `__call_fn_<arity>` for Wasm closure structs.
  *
- * The returned wrapper is **fresh per call** — callers must not rely on
- * identity (`p.then(cb) === p.then(cb)` is not preserved). This matches
- * how `__array_from` mapFn wrapping already behaves and is benign in spec
- * terms (no protocol observes callback identity across host roundtrips).
+ * The wrapper is cached per (closure, arity), which preserves accessor
+ * descriptor identity for `Object.getOwnPropertyDescriptor(...).get`.
  */
 function _maybeWrapCallable(
   val: any,
@@ -9189,7 +9212,7 @@ assert._isSameValue = isSameValue;
     case "host_eq":
       // #1065 — strict equality for two externref operands that the GC path
       // could not compare via ref.eq (e.g. host functions like `Array === Array`).
-      return (a: any, b: any) => (a === b ? 1 : 0);
+      return (a: any, b: any) => (_hostEqComparableValue(a) === _hostEqComparableValue(b) ? 1 : 0);
     case "host_loose_eq":
       // #1134 — loose equality for two externref operands (§7.2.15).
       // Handles null == undefined → true and other JS coercion rules.

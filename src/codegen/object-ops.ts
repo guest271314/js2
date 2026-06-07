@@ -2010,33 +2010,20 @@ function emitExternDefinePropertyNoValue(
   // For accessor descriptors (get/set), skip compiling descArg for side effects —
   // we'll compile getter/setter directly as JS-callable callbacks below.
   const isAccessorDesc = !!(getNode || setNode || getExpr || setExpr);
-  // Early compute isKnownStructField to decide descriptor side effects.
-  // For struct fields, the accessor path below is skipped, so we must still
-  // compile the descriptor for side effects even when isAccessorDesc=true.
-  const _earlyObjTsType = ctx.checker.getTypeAtLocation(objArg);
-  const _earlyStaticStructName = resolveStructName(ctx, _earlyObjTsType);
-  const _earlyStructName =
-    _earlyStaticStructName || (ts.isIdentifier(objArg) ? ctx.widenedVarStructMap.get(objArg.text) : undefined);
-  const _earlyPropName = ts.isStringLiteral(propArg) ? propArg.text : undefined;
-  const _earlyStructTypeIdx = _earlyStructName ? ctx.structMap.get(_earlyStructName) : undefined;
-  const _earlyFields = _earlyStructName ? ctx.structFields.get(_earlyStructName) : undefined;
-  const _earlyFieldIdx = _earlyFields && _earlyPropName ? _earlyFields.findIndex((f) => f.name === _earlyPropName) : -1;
-  const _earlyIsKnownStructField =
-    _earlyStaticStructName !== undefined &&
-    _earlyStructTypeIdx !== undefined &&
-    _earlyFields !== undefined &&
-    _earlyFieldIdx >= 0;
-  if (!isAccessorDesc || _earlyIsKnownStructField) {
+  if (!isAccessorDesc) {
     // Compile descriptor for side effects:
-    // - always for non-accessor descriptors
-    // - also for accessor descriptors on struct fields (accessor path is skipped for structs)
+    // - non-accessor descriptors are applied through the flag-only runtime
+    //   helper or compile-time flag table after descriptor evaluation.
+    // - accessor descriptors compile their getter/setter operands directly in
+    //   the accessor runtime branch below.
     const descType = compileExpression(ctx, fctx, descArg);
     if (descType) fctx.body.push({ op: "drop" });
   }
 
-  // For externref objects (or non-struct GC types like arrays), call __defineProperty_value
-  // with no value (flags without bit 7). This ensures runtime validation of property descriptors.
-  // We check if the object is a known struct type — if not, delegate to runtime (#856).
+  // For externref objects (or non-struct GC types like arrays), call the runtime
+  // helper. Accessor descriptors also need the runtime path even when the key is
+  // a known struct field: the sidecar is the only store that compiled reads can
+  // consult for `get: identifierRef` / `set: identifierRef` descriptors.
   const objTsType = ctx.checker.getTypeAtLocation(objArg);
   const _staticStructName = resolveStructName(ctx, objTsType);
   const _structName =
@@ -2047,7 +2034,8 @@ function emitExternDefinePropertyNoValue(
   const _fieldIdx = _fields && _propName ? _fields.findIndex((f) => f.name === _propName) : -1;
   const isKnownStructField =
     _staticStructName !== undefined && _structTypeIdx !== undefined && _fields !== undefined && _fieldIdx >= 0;
-  if (!isKnownStructField && propLocal !== undefined) {
+  const shouldUseRuntimeDescriptorPath = (!isKnownStructField || isAccessorDesc) && propLocal !== undefined;
+  if (shouldUseRuntimeDescriptorPath) {
     markRuntimeDefinedProperty(ctx, objArg, propArg);
     const propName = ts.isStringLiteral(propArg) ? propArg.text : undefined;
 
@@ -2217,7 +2205,7 @@ function emitExternDefinePropertyNoValue(
   // (struct fields don't support property attributes)
   const propName = ts.isStringLiteral(propArg) ? propArg.text : undefined;
   if (propName && ts.isObjectLiteralExpression(descArg)) {
-    const isAccessor = !!(getNode || setNode);
+    const isAccessor = isAccessorDesc;
     const newFlags = computeDescriptorFlags(descWritable, descEnumerable, descConfigurable, isAccessor);
     const varName = ts.isIdentifier(objArg) ? objArg.text : undefined;
     if (varName) {
