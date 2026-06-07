@@ -16,7 +16,7 @@ related: [1806, 1900, 1525, 1525b, 1759]
 test262_bucket: object-to-primitive
 test262_count: 784
 claimed_by: codex-developer
-claimed_at: 2026-06-07T11:19:29.743Z
+claimed_at: 2026-06-07T11:26:29.626Z
 pr: 1295
 ---
 
@@ -186,3 +186,11 @@ PR #1295 is the active review PR for this re-dispatch metadata refresh.
   - `npx prettier --check` on the touched script, test, and issue files
     (passed).
   - PR #1295 remains the active ready review PR for this issue.
+- Symphony re-dispatch verification on current `origin/main` (`28c668ab4e`):
+  - Confirmed the classifier implementation and focused test coverage remain
+    present; this branch continues to carry only issue metadata for active PR
+    #1295.
+  - `npm test -- tests/issue-1910.test.ts tests/build-test262-report.test.ts`
+    (8 tests passed).
+  - `npx prettier --check` on the touched script, test, and issue file
+    (passed).
