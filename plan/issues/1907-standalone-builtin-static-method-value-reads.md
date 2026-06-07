@@ -1,7 +1,7 @@
 ---
 id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
-status: in-review
+status: in-progress
 pr: 1287
 sprint: 61
 created: 2026-06-07
@@ -108,5 +108,11 @@ standalone refusal.
 - Codex verification on 2026-06-07T08:40+02:00 reran the issue-scoped
   validation on the current branch; all commands passed, PR #1287 was open,
   ready/non-draft, mergeable, and its remote-head checks were green.
-- The issue remains `in-review` with `pr: 1287` so the PR-status poller can
-  perform the normal post-merge status transition.
+- Final push of local verification commit `a110392e8` was rejected by GitHub
+  with GH006 because PR #1287 is already in the merge queue. The queue entry was
+  `QUEUED` at position 15, enqueued at `2026-06-07T06:26:03Z`; leave this issue
+  `in-progress` until the queued PR lands or the branch is intentionally
+  dequeued for another update.
+- The remote PR branch still has `pr: 1287` and was already queued, but this
+  local handoff leaves the issue `in-progress` because the final publish update
+  could not be pushed while the branch is queue-protected.
