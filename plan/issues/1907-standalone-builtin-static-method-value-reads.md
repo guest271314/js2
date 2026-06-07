@@ -137,3 +137,8 @@ standalone refusal.
   `symphony/1907` and remote `origin/symphony/1907`; PR #1287 is open,
   ready/non-draft, mergeable, green, and queued at position 10 on remote head
   `ab1d8c19d`.
+- Publishing the local handoff history was rejected again on
+  2026-06-07T09:51+02:00 with GitHub GH006 because PR #1287 is in the merge
+  queue and queued branch heads cannot be updated. The remote PR remains queued
+  on `ab1d8c19d`; the local issue file remains `in-progress` until the queue
+  lock clears or the PR merges.
