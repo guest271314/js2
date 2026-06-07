@@ -1,7 +1,7 @@
 ---
 id: 1718
 title: "Iterator sequencing helpers (Iterator.concat / zip / zipKeyed) + Iterator.prototype.flatMap not implemented (101 fails)"
-status: ready
+status: in-progress
 created: 2026-05-29
 updated: 2026-06-07
 priority: high
@@ -15,6 +15,8 @@ es_edition: 2025
 test262_fail: 101
 test262_category: built-ins/Iterator
 related: [1340, 1320]
+claimed_by: codex-developer
+claimed_at: 2026-06-07T05:36:21.912Z
 ---
 # #1718 — Iterator sequencing helpers + Iterator.prototype.flatMap (101 fails)
 
@@ -172,3 +174,36 @@ broad a blast radius for this localized flatMap slice. The lib was DROPPED from
 this PR; the type-check half is a separate follow-up that must land together
 with the codegen changes to handle the new iterator types (coordinate with the
 #1320 / $ArrayObj iterator-representation work).
+
+
+## Attempt 22 (2026-06-07) — iterator sequencing spec tightening
+
+Localized runtime follow-up in `src/runtime.ts` against the fetched current
+ECMA-262 / Stage 4 iterator sequencing text:
+
+- Added shared `IteratorZip`-style plumbing for `Iterator.zip` and
+  `Iterator.zipKeyed`: `mode` is read with `undefined` defaulting only,
+  longest-mode `padding` is validated only when relevant, strict mismatches now
+  throw `TypeError`, and open iterators are closed on abrupt setup/iteration.
+- Applied `GetIteratorFlattenable(..., reject-primitives)` where the algorithms
+  require it (`zip` inner values, `zipKeyed` property values, and
+  `Iterator.prototype.flatMap` mapper results), so iterable string primitives no
+  longer get flattened by the polyfill.
+- Reworked `Iterator.zipKeyed` to follow `[[OwnPropertyKeys]]` order, include
+  enumerable symbol keys, skip enumerable keys whose value is `undefined`, use
+  keyed padding objects for longest mode, and yield null-prototype result
+  objects.
+- Reworked `Iterator.concat` to fetch each argument's `@@iterator` method once at
+  helper creation, open each iterator lazily from the stored method, reject
+  primitive arguments per `Iterator.concat`, and return fresh helper iterator
+  result objects instead of forwarding the inner iterator result object.
+
+Focused coverage added in `tests/issue-1718.test.ts`; the older flatMap slice
+test was corrected to reject primitive string mapper results. Scoped validation:
+
+- `pnpm exec vitest run tests/issue-1718.test.ts tests/issue-1718-static-arity.test.ts tests/issue-1718-flatmap.test.ts tests/issue-1340.test.ts`
+- `pnpm exec tsc --noEmit --pretty false`
+
+`test262/` is empty in this worktree, so no local test262 shard was run. This
+attempt improves the static helper/polyfill semantics but does not claim the
+remaining compiled-value ↔ host-iterator bridge work tracked through #1320.
