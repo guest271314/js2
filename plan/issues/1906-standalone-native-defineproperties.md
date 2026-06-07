@@ -17,7 +17,7 @@ related: [1472, 1629, 1631, 1888]
 test262_bucket: object-property-semantics
 test262_count: 748
 claimed_by: codex-developer
-claimed_at: 2026-06-07T03:12:24.164Z
+claimed_at: 2026-06-07T05:03:51.937Z
 pr: 1264
 ---
 # #1906 — Standalone native `Object.defineProperties`
@@ -73,7 +73,7 @@ caught by the broad dynamic object/property refusal.
 - `pnpm exec tsc --noEmit --incremental false`
 
 Revalidated by `codex-developer` on branch `symphony/1906` after merging
-current `origin/main` at `c871fe467c6ce11ea89c0ce72437b9f3828c532b`;
+current `origin/main` at `053ed24ef` through branch head `108650e50`;
 checks above pass locally on 2026-06-07.
 
 PR #1264 is open against `main` and the issue remains `in-review` for the
