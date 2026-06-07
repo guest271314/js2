@@ -17,7 +17,7 @@ related: [1472, 1629, 1631, 1888]
 test262_bucket: object-property-semantics
 test262_count: 748
 claimed_by: codex-developer
-claimed_at: 2026-06-07T10:34:59.361Z
+claimed_at: 2026-06-07T10:44:29.480Z
 pr: 1264
 ---
 # #1906 — Standalone native `Object.defineProperties`
@@ -74,16 +74,16 @@ caught by the broad dynamic object/property refusal.
 
 Revalidated by `codex-developer` on branch `symphony/1906` after confirming
 `origin/main` is still at `28c668ab4`; checks above pass locally on
-2026-06-07T12:39:08+02:00 at local head `376140c2b` before this
-issue-bookkeeping refresh. The focused #1906 suite, the existing #1629
-defineProperty suites, and `tsc --noEmit` all passed in this worktree.
+2026-06-07T12:48:09+02:00 at pre-refresh local head `2ee59448d`. The focused
+#1906 suite, the existing #1629 defineProperty suites, and `tsc --noEmit` all
+passed in this worktree.
 
 PR #1264 is open, ready for review, and targets `main`:
-`https://github.com/loopdive/js2/pull/1264`. `gh pr merge 1264 --auto --merge`
-reports the pull request is already queued to merge; GraphQL shows the merge
-queue entry in `AWAITING_CHECKS` since 2026-06-07T10:13:52Z. The required
-`Test262 Sharded / merge shard reports` check is currently failed from the
-stale-baseline guard: the `js2wasm-baselines` JSONL baseline main SHA
+`https://github.com/loopdive/js2/pull/1264`. GraphQL reports
+`mergeQueueEntry.state=AWAITING_CHECKS`, position 1, for head
+`376140c2b`, while `mergeStateStatus=BLOCKED` because the required
+`Test262 Sharded / merge shard reports` check is failed from the stale-baseline
+guard: the `js2wasm-baselines` JSONL baseline main SHA
 `ff02d201152dc8777d3e8151ed05dddd47d75ecf` was 202 commits behind
 `origin/main`, exceeding the max 50 commit threshold. The standalone guard
 itself reported `improvements=24`, `wasm-change regressions=0`, `net=24`. This
