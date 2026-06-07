@@ -2,7 +2,7 @@
 id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
 status: in-review
-pr: 1267
+pr: 1287
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T03:15:24.162Z
+claimed_at: 2026-06-07T07:08:34.903Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -85,16 +85,22 @@ standalone refusal.
 ## Final Findings
 
 - Implementation PR #1263 exists, was ready/non-draft, and is now merged into
-  `main` at `3827daa96`; follow-up PR #1267 tracks this final issue-status
-  verification update.
+  `main` at `3827daa96`; follow-up PR #1267 also merged, and PR #1287 tracks
+  this redispatch verification update.
 - Final codex-developer verification on this branch found no additional
   implementation work outstanding; the scoped validation commands above passed
   again on 2026-06-07 after merging current `origin/main`.
-- `origin/main` was fetched and merged into `symphony/1907` through
-  `c871fe467` before the final branch push. The merge brought in later sprint
-  issue/report updates without #1907 conflicts.
-- Scoped validation passed again after that final main merge: the focused
-  #1907/#1888 tests, typecheck, #1678 Array.isArray regression tests, the
-  targeted #1472 Reflect.ownKeys standalone route, and formatting.
-- The issue remains `in-review` with `pr: 1267` so the PR-status poller can
-  perform the normal post-merge status transition.
+- `origin/main` was fetched at `d6957d5d` and merged into `symphony/1907` with
+  merge commit `9f350d0a`. The merge brought in later sprint issue/report
+  updates without #1907 conflicts.
+- Scoped validation passed again on 2026-06-07T09:13+02:00 after that final
+  main merge: the focused #1907/#1888 tests, typecheck, #1678 Array.isArray
+  regression tests, the targeted #1472 Reflect.ownKeys standalone route, and
+  formatting.
+- Redispatch verification on 2026-06-07T08:19+02:00 found the implementation
+  already merged, branch synced with `origin/main`, PR #1287 opened
+  ready/non-draft, and the same scoped validation still passing.
+- Codex verification on 2026-06-07T09:11+02:00 found PR #1287 still open,
+  ready/non-draft, green on the remote head, and accepted in the merge queue at
+  position 11 before the local main-sync publish. This handoff keeps the issue
+  `in-review` with `pr: 1287` for the PR-status poller.
