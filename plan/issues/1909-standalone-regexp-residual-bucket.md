@@ -1,7 +1,7 @@
 ---
 id: 1909
 title: "standalone RegExp residual bucket after #1474/#682: split Phase 2d and native-engine gaps"
-status: in-review
+status: in-progress
 sprint: 61
 created: 2026-06-07
 updated: 2026-06-07
@@ -560,7 +560,33 @@ Current GitHub state for PR #1291:
 - Merge state: `CLEAN` / mergeable
 - Checks: all reported PR checks succeeded
 
-The branch is based on current `origin/main`, and its net diff versus
-`origin/main` is limited to this issue-state refresh. This issue remains
-`in-review` with `pr: 1291`; the PR-status poller owns the eventual `done`
-transition after merge.
+The branch was based on current `origin/main`, and its net diff versus
+`origin/main` was limited to this issue-state refresh. At that point this issue
+was moved back to `in-review` with `pr: 1291`; the queue push blocker below
+supersedes that local state.
+
+## 2026-06-07 queue push blocker after reassignment refresh
+
+The attempted push after the live PR refresh and scoped validation was rejected
+because GitHub reported PR #1291 as queued:
+
+- Remote PR head: `6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+- Local attempted head: `c223fdd467eefea5924f476bc67083398780ef05`
+- PR URL: `https://github.com/loopdive/js2/pull/1291`
+- Queue ref visibility: no `gh-readonly-queue/main/pr-1291*` ref was visible
+  via `git ls-remote`
+- Merge queue command:
+  `gh pr merge 1291 --repo loopdive/js2 --auto --match-head-commit 6f35f0230b118fefe6e7437ffc672626e4ecbd91`
+  reported `Pull request #1291 is already queued to merge`
+- Push preflight: local pre-push typecheck, lint, format, and issue integrity
+  checks passed
+- Push result:
+
+```text
+GH006: Protected branch update failed ...
+A pull request for this branch has been added to a merge queue.
+Branches that are queued for merging cannot be updated.
+```
+
+Per the publish rule, this issue is left `in-progress` locally until PR #1291
+merges or is dequeued so the latest metadata refresh can be pushed.
