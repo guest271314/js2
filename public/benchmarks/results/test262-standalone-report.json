@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-06T19:01:40.647Z",
-  "baseline_generated_at": "2026-06-06T19:01:40Z",
-  "baseline_sha": "e6eedd6821a281063fc28e768431a09cfa98f340",
+  "timestamp": "2026-06-07T01:41:38.350Z",
+  "baseline_generated_at": "2026-06-07T01:41:37Z",
+  "baseline_sha": "99b58e6486d41cec0db0717bfbacf9f0f5a82b0a",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,22 +9,22 @@
   },
   "summary": {
     "total": 43132,
-    "pass": 16298,
-    "fail": 12471,
-    "compile_error": 14341,
+    "pass": 16343,
+    "fail": 12521,
+    "compile_error": 14246,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 28769,
+    "compilable": 28864,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42046,
-        "pass": 15901,
-        "fail": 12040,
-        "compile_error": 14083,
+        "pass": 15946,
+        "fail": 12090,
+        "compile_error": 13988,
         "compile_timeout": 4,
         "skip": 18,
-        "compilable": 27941,
+        "compilable": 28036,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -52,23 +52,23 @@
       },
       "official": {
         "total": 43132,
-        "pass": 16298,
-        "fail": 12471,
-        "compile_error": 14341,
+        "pass": 16343,
+        "fail": 12521,
+        "compile_error": 14246,
         "compile_timeout": 4,
         "skip": 18,
-        "compilable": 28769,
+        "compilable": 28864,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48114,
-        "pass": 17267,
-        "fail": 13514,
-        "compile_error": 17215,
+        "pass": 17312,
+        "fail": 13564,
+        "compile_error": 17120,
         "compile_timeout": 4,
         "skip": 114,
-        "compilable": 30781,
+        "compilable": 30876,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -76,32 +76,32 @@
   },
   "official_summary": {
     "total": 43132,
-    "pass": 16298,
-    "fail": 12471,
-    "compile_error": 14341,
+    "pass": 16343,
+    "fail": 12521,
+    "compile_error": 14246,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 28769,
+    "compilable": 28864,
     "stale": 0
   },
   "full_summary": {
     "total": 48114,
-    "pass": 17267,
-    "fail": 13514,
-    "compile_error": 17215,
+    "pass": 17312,
+    "fail": 13564,
+    "compile_error": 17120,
     "compile_timeout": 4,
     "skip": 114,
-    "compilable": 30781,
+    "compilable": 30876,
     "stale": 0
   },
   "strict_summary": {
     "total": 40623,
-    "pass": 15465,
-    "fail": 11562,
-    "compile_error": 13574,
+    "pass": 15509,
+    "fail": 11611,
+    "compile_error": 13481,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 27027,
+    "compilable": 27120,
     "stale": 0
   },
   "scope_summaries": {
@@ -127,12 +127,12 @@
     },
     "standard": {
       "total": 42046,
-      "pass": 15901,
-      "fail": 12040,
-      "compile_error": 14083,
+      "pass": 15946,
+      "fail": 12090,
+      "compile_error": 13988,
       "compile_timeout": 4,
       "skip": 18,
-      "compilable": 27941,
+      "compilable": 28036,
       "stale": 0
     }
   },
@@ -601,8 +601,8 @@
       "name": "built-ins/Reflect",
       "path": "built-ins/Reflect",
       "pass": 15,
-      "fail": 20,
-      "compile_error": 118,
+      "fail": 48,
+      "compile_error": 90,
       "compile_timeout": 0,
       "skip": 0,
       "total": 153
@@ -730,9 +730,9 @@
     {
       "name": "built-ins/TypedArray",
       "path": "built-ins/TypedArray",
-      "pass": 680,
+      "pass": 694,
       "fail": 45,
-      "compile_error": 713,
+      "compile_error": 699,
       "compile_timeout": 0,
       "skip": 0,
       "total": 1438
@@ -740,9 +740,9 @@
     {
       "name": "built-ins/TypedArrayConstructors",
       "path": "built-ins/TypedArrayConstructors",
-      "pass": 306,
-      "fail": 46,
-      "compile_error": 384,
+      "pass": 333,
+      "fail": 56,
+      "compile_error": 347,
       "compile_timeout": 0,
       "skip": 0,
       "total": 736
@@ -890,9 +890,9 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 5536,
-      "fail": 3550,
-      "compile_error": 1931,
+      "pass": 5540,
+      "fail": 3556,
+      "compile_error": 1921,
       "compile_timeout": 1,
       "skip": 18,
       "total": 11036
@@ -991,8 +991,8 @@
       "name": "language/module-code",
       "path": "language/module-code",
       "pass": 421,
-      "fail": 149,
-      "compile_error": 48,
+      "fail": 155,
+      "compile_error": 42,
       "compile_timeout": 0,
       "skip": 0,
       "total": 618
@@ -1079,18 +1079,18 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 9943,
-    "illegal_cast": 772,
+    "assertion_fail": 9971,
+    "illegal_cast": 776,
     "negative_test_fail": 77,
     "null_deref": 496,
     "oob": 154,
-    "other": 11556,
+    "other": 11429,
     "promise_error": 56,
     "range_error": 29,
-    "runtime_error": 5109,
+    "runtime_error": 5131,
     "type_error": 9,
     "unreachable": 27,
-    "wasm_compile": 2501
+    "wasm_compile": 2529
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1098,8 +1098,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 30733,
-    "classified": 30733,
+    "total_non_pass_non_skip": 30688,
+    "classified": 30688,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1225,10 +1225,10 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Duration/compare/builtin.js",
-          "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
-          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js",
-          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
+          "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
+          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js",
+          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Object.prototype.toString.call(...) is not yet supported in --target standalone (## Slice #/#) — only Object.prototype.hasOwnProperty.call is wired (isPrototypeOf/propertyIsEnumerable/valueOf are a follow-on). Recompile",
@@ -1274,7 +1274,7 @@
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "wasm_compile:L#:## Symbol(Symbol.dispose) is not a function",
           "assertion_fail:returned # — assert ## at L#: verifyProperty(DisposableStack.prototype.adopt, 'name', { value: 'adopt', writable: false, enumerable: false, configurable: true });",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(stack2.disposed, false);"
+          "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone"
         ]
       },
       {
@@ -1284,23 +1284,23 @@
           "#1512"
         ],
         "label": "Dynamic import unsupported / early errors",
-        "count": 135,
+        "count": 131,
         "statuses": {
           "pass": 0,
-          "fail": 43,
-          "compile_error": 92,
+          "fail": 49,
+          "compile_error": 82,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 135
+          "total": 131
         },
         "error_categories": {
-          "other": 49,
-          "runtime_error": 23,
-          "wasm_compile": 20,
+          "assertion_fail": 32,
+          "runtime_error": 25,
+          "other": 32,
+          "wasm_compile": 27,
           "range_error": 3,
           "oob": 4,
           "promise_error": 1,
-          "assertion_fail": 28,
           "negative_test_fail": 1,
           "null_deref": 6
         },
@@ -1312,7 +1312,7 @@
           "test/language/expressions/dynamic-import/namespace/promise-then-ns-Symbol-toStringTag.js"
         ],
         "sample_signatures": [
-          "other:L#:## Codegen error: Reflect.deleteProperty not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.deleteProperty not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.deleteProperty not supporte",
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { delete ns.default; }, 'delete: default');",
           "runtime_error:L#:## Cannot redeclare block-scoped variable 'smoosh'",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "other:L#:## ##: with statement requires a proven closed object-literal shape before codegen; target CallExpression is not a closed object literal. ECMA-# #.# creates an Object Environment Record, #.#.# checks HasProperty plus @@unscopables, and #",
@@ -1411,10 +1411,10 @@
         },
         "error_categories": {
           "assertion_fail": 206,
-          "other": 1709,
+          "other": 1703,
           "null_deref": 23,
           "runtime_error": 37,
-          "wasm_compile": 16,
+          "wasm_compile": 22,
           "illegal_cast": 5,
           "oob": 1
         },
@@ -1439,17 +1439,17 @@
           "#1776"
         ],
         "label": "Residual standalone isSameValue invalid-Wasm validator failures",
-        "count": 5556,
+        "count": 5567,
         "statuses": {
           "pass": 0,
-          "fail": 5555,
+          "fail": 5566,
           "compile_error": 1,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 5556
+          "total": 5567
         },
         "error_categories": {
-          "assertion_fail": 5550,
+          "assertion_fail": 5561,
           "unreachable": 2,
           "runtime_error": 1,
           "promise_error": 3
@@ -1475,21 +1475,21 @@
           "#1472"
         ],
         "label": "Standalone dynamic object/property operation gate",
-        "count": 8163,
+        "count": 8168,
         "statuses": {
           "pass": 0,
-          "fail": 1222,
-          "compile_error": 6941,
+          "fail": 1225,
+          "compile_error": 6943,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 8163
+          "total": 8168
         },
         "error_categories": {
-          "other": 6535,
-          "runtime_error": 508,
-          "wasm_compile": 212,
+          "other": 6536,
+          "runtime_error": 509,
+          "wasm_compile": 213,
           "assertion_fail": 751,
-          "illegal_cast": 128,
+          "illegal_cast": 130,
           "promise_error": 11,
           "null_deref": 13,
           "type_error": 1,
@@ -1517,33 +1517,34 @@
           "#1472"
         ],
         "label": "Reflect.* refused in standalone mode (#1472 Phase C)",
-        "count": 309,
+        "count": 226,
         "statuses": {
           "pass": 0,
-          "fail": 7,
-          "compile_error": 302,
+          "fail": 26,
+          "compile_error": 200,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 309
+          "total": 226
         },
         "error_categories": {
-          "other": 302,
-          "assertion_fail": 3,
-          "runtime_error": 4
+          "other": 197,
+          "assertion_fail": 13,
+          "runtime_error": 15,
+          "illegal_cast": 1
         },
         "sample_files": [
           "test/built-ins/ArrayBuffer/options-maxbytelength-data-allocation-after-object-creation.js",
           "test/built-ins/Reflect/get/return-abrupt-from-property-key.js",
           "test/built-ins/Reflect/ownKeys/return-non-enumerable-keys.js",
-          "test/built-ins/TypedArrayConstructors/internals/Delete/BigInt/key-is-symbol.js",
-          "test/built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js"
+          "test/built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js",
+          "test/built-ins/Reflect/getOwnPropertyDescriptor/return-abrupt-from-property-key.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
-          "other:L#:## Codegen error: Reflect.get not supported in standalone mode (## Phase C).",
+          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.compareArray( Reflect.ownKeys([]), ['length'], 'return non enumerable `length` from empty array' );",
-          "other:L#:## Codegen error: Reflect.has not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.has not supported in standalone mode (## Phase C).",
-          "other:L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Ph"
+          "other:L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Ph",
+          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C)."
         ]
       },
       {
@@ -1554,18 +1555,18 @@
           "#1718"
         ],
         "label": "Generic iterator protocol still needs a pure-Wasm standalone path",
-        "count": 2514,
+        "count": 2518,
         "statuses": {
           "pass": 0,
           "fail": 1416,
-          "compile_error": 1098,
+          "compile_error": 1102,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 2514
+          "total": 2518
         },
         "error_categories": {
           "assertion_fail": 560,
-          "wasm_compile": 870,
+          "wasm_compile": 874,
           "null_deref": 33,
           "other": 228,
           "illegal_cast": 499,
@@ -1637,17 +1638,17 @@
           "#1364"
         ],
         "label": "Class element, prototype, private-name, and descriptor reconciliation gaps",
-        "count": 3226,
+        "count": 3232,
         "statuses": {
           "pass": 0,
           "fail": 1400,
-          "compile_error": 1823,
+          "compile_error": 1829,
           "compile_timeout": 3,
           "skip": 0,
-          "total": 3226
+          "total": 3232
         },
         "error_categories": {
-          "wasm_compile": 779,
+          "wasm_compile": 785,
           "assertion_fail": 803,
           "negative_test_fail": 13,
           "runtime_error": 546,
@@ -1681,25 +1682,25 @@
           "#1759"
         ],
         "label": "ToPrimitive / object-to-string dispatch residuals",
-        "count": 1237,
+        "count": 1245,
         "statuses": {
           "pass": 0,
-          "fail": 900,
-          "compile_error": 337,
+          "fail": 907,
+          "compile_error": 338,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 1237
+          "total": 1245
         },
         "error_categories": {
-          "runtime_error": 1216,
+          "runtime_error": 1224,
           "wasm_compile": 8,
           "assertion_fail": 13
         },
         "sample_files": [
           "test/language/statements/for/S12.6.3_A3.js",
           "test/language/statements/throw/S12.13_A2_T6.js",
-          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/statements/try/S12.14_A18_T3.js",
+          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/expressions/assignment/dstr/array-rest-yield-ident-valid.js"
         ],
         "sample_signatures": [
@@ -1718,21 +1719,21 @@
           "#1654"
         ],
         "label": "Array, TypedArray, DataView, and buffer semantics",
-        "count": 102,
+        "count": 107,
         "statuses": {
           "pass": 0,
-          "fail": 73,
-          "compile_error": 29,
+          "fail": 74,
+          "compile_error": 33,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 102
+          "total": 107
         },
         "error_categories": {
           "assertion_fail": 57,
           "other": 15,
           "oob": 8,
-          "wasm_compile": 18,
-          "illegal_cast": 2,
+          "wasm_compile": 22,
+          "illegal_cast": 3,
           "null_deref": 1,
           "promise_error": 1
         },
@@ -1760,17 +1761,17 @@
           "#1466"
         ],
         "label": "Object/property/destructuring semantic mismatches behind the object model",
-        "count": 748,
+        "count": 750,
         "statuses": {
           "pass": 0,
-          "fail": 554,
+          "fail": 556,
           "compile_error": 194,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 748
+          "total": 750
         },
         "error_categories": {
-          "assertion_fail": 532,
+          "assertion_fail": 534,
           "other": 177,
           "null_deref": 6,
           "illegal_cast": 1,
@@ -1783,8 +1784,8 @@
           "test/built-ins/Object/S15.2.1.1_A2_T6.js",
           "test/built-ins/Object/create/15.2.3.5-4-13.js",
           "test/built-ins/Object/defineProperties/15.2.3.7-2-10.js",
-          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-220.js",
-          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-40.js"
+          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-40.js",
+          "test/built-ins/Object/defineProperties/15.2.3.7-5-b-220.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(obj == Infinity, 'The result of evaluating (obj == Infinity) is expected to be true');",
@@ -2206,18 +2207,18 @@
           "#1726"
         ],
         "label": "Lexical scope, TDZ, and declaration semantics",
-        "count": 187,
+        "count": 188,
         "statuses": {
           "pass": 0,
-          "fail": 129,
+          "fail": 130,
           "compile_error": 58,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 187
+          "total": 188
         },
         "error_categories": {
           "wasm_compile": 64,
-          "assertion_fail": 83,
+          "assertion_fail": 84,
           "null_deref": 9,
           "negative_test_fail": 12,
           "other": 9,
