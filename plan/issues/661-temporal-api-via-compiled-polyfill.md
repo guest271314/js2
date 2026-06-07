@@ -16,7 +16,7 @@ files:
     new:
       - "Temporal namespace with PlainDate/PlainTime/Duration classes"
 claimed_by: codex-developer
-claimed_at: 2026-06-07T05:03:52.808Z
+claimed_at: 2026-06-07T10:10:20.796Z
 ---
 
 # #661 — Temporal API via compiled polyfill or minimal implementation
