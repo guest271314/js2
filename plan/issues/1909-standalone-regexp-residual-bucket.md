@@ -15,7 +15,7 @@ goal: standalone-mode
 related: [682, 1474, 1539]
 test262_bucket: standalone-regexp
 test262_count: 1997
-pr: 1260
+pr: 1289
 claimed_by: codex-developer
 claimed_at: 2026-06-07T06:34:35.205Z
 ---
@@ -199,3 +199,5 @@ The rebuilt report still classifies `30,733 / 30,733` standalone non-pass
 non-skip rows. The RegExp split is unchanged: `833` Phase 2d rows, `104` Phase
 2b rows, `452` string-protocol rows, `546` native-engine rows, and `62`
 fallback rows.
+
+Opened ready follow-up PR #1289 for this issue-state refresh.
