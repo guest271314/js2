@@ -1,7 +1,7 @@
 ---
 id: 1904
 title: "standalone: native __extern_is_array predicate for Array.isArray over Wasm carriers"
-status: in-progress
+status: in-review
 pr: 1286
 sprint: 61
 created: 2026-06-07
@@ -18,7 +18,7 @@ related: [1328, 1678, 1888]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:49:23.444Z
+claimed_at: 2026-06-07T10:37:29.615Z
 ---
 # #1904 — Native `__extern_is_array` for standalone
 
