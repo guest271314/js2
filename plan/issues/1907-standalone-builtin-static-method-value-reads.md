@@ -1,7 +1,7 @@
 ---
 id: 1907
 title: "standalone: built-in static method value reads without __get_builtin (#1888 S6-b)"
-status: in-progress
+status: in-review
 pr: 1287
 sprint: 61
 created: 2026-06-07
@@ -18,7 +18,7 @@ related: [1888, 1902, 1472]
 test262_bucket: standalone-dynamic-object-property
 test262_count: 8163
 claimed_by: codex-developer
-claimed_at: 2026-06-07T07:46:05.263Z
+claimed_at: 2026-06-07T10:26:46.497Z
 ---
 
 # #1907 — Built-in static method value reads without `__get_builtin`
@@ -142,3 +142,7 @@ standalone refusal.
   queue and queued branch heads cannot be updated. The remote PR remains queued
   on `ab1d8c19d`; the local issue file remains `in-progress` until the queue
   lock clears or the PR merges.
+- Codex redispatch verification on 2026-06-07T12:29+02:00 found PR #1287
+  merged into `main`, with all GitHub checks green on remote head `ab1d8c19d`.
+  The same scoped validation passed locally again, and no additional
+  implementation changes are needed for #1907.
