@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-07T02:49:14.416Z",
-  "baseline_generated_at": "2026-06-07T02:49:14Z",
-  "baseline_sha": "ff02d201152dc8777d3e8151ed05dddd47d75ecf",
+  "timestamp": "2026-06-08T23:23:38.969Z",
+  "baseline_generated_at": "2026-06-08T23:23:38Z",
+  "baseline_sha": "766c62cfa2e3f1a042e763ced0bec38a0d8248cd",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,22 +9,22 @@
   },
   "summary": {
     "total": 43132,
-    "pass": 16358,
-    "fail": 12718,
-    "compile_error": 14034,
+    "pass": 16381,
+    "fail": 12694,
+    "compile_error": 14035,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 29076,
+    "compilable": 29075,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42046,
-        "pass": 15961,
-        "fail": 12287,
-        "compile_error": 13776,
+        "pass": 15984,
+        "fail": 12263,
+        "compile_error": 13777,
         "compile_timeout": 4,
         "skip": 18,
-        "compilable": 28248,
+        "compilable": 28247,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -52,23 +52,23 @@
       },
       "official": {
         "total": 43132,
-        "pass": 16358,
-        "fail": 12718,
-        "compile_error": 14034,
+        "pass": 16381,
+        "fail": 12694,
+        "compile_error": 14035,
         "compile_timeout": 4,
         "skip": 18,
-        "compilable": 29076,
+        "compilable": 29075,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48114,
-        "pass": 17327,
-        "fail": 13761,
-        "compile_error": 16908,
+        "pass": 17350,
+        "fail": 13737,
+        "compile_error": 16909,
         "compile_timeout": 4,
         "skip": 114,
-        "compilable": 31088,
+        "compilable": 31087,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -76,28 +76,28 @@
   },
   "official_summary": {
     "total": 43132,
-    "pass": 16358,
-    "fail": 12718,
-    "compile_error": 14034,
+    "pass": 16381,
+    "fail": 12694,
+    "compile_error": 14035,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 29076,
+    "compilable": 29075,
     "stale": 0
   },
   "full_summary": {
     "total": 48114,
-    "pass": 17327,
-    "fail": 13761,
-    "compile_error": 16908,
+    "pass": 17350,
+    "fail": 13737,
+    "compile_error": 16909,
     "compile_timeout": 4,
     "skip": 114,
-    "compilable": 31088,
+    "compilable": 31087,
     "stale": 0
   },
   "strict_summary": {
     "total": 40623,
-    "pass": 15524,
-    "fail": 11808,
+    "pass": 15547,
+    "fail": 11785,
     "compile_error": 13269,
     "compile_timeout": 4,
     "skip": 18,
@@ -127,12 +127,12 @@
     },
     "standard": {
       "total": 42046,
-      "pass": 15961,
-      "fail": 12287,
-      "compile_error": 13776,
+      "pass": 15984,
+      "fail": 12263,
+      "compile_error": 13777,
       "compile_timeout": 4,
       "skip": 18,
-      "compilable": 28248,
+      "compilable": 28247,
       "stale": 0
     }
   },
@@ -890,8 +890,8 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 5541,
-      "fail": 3641,
+      "pass": 5552,
+      "fail": 3630,
       "compile_error": 1835,
       "compile_timeout": 1,
       "skip": 18,
@@ -1050,9 +1050,9 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 4623,
-      "fail": 2932,
-      "compile_error": 1782,
+      "pass": 4635,
+      "fail": 2919,
+      "compile_error": 1783,
       "compile_timeout": 0,
       "skip": 0,
       "total": 9337
@@ -1079,8 +1079,8 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 10135,
-    "illegal_cast": 776,
+    "assertion_fail": 10112,
+    "illegal_cast": 775,
     "negative_test_fail": 77,
     "null_deref": 496,
     "oob": 169,
@@ -1090,7 +1090,7 @@
     "runtime_error": 5137,
     "type_error": 8,
     "unreachable": 27,
-    "wasm_compile": 2537
+    "wasm_compile": 2538
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1098,8 +1098,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 30673,
-    "classified": 30673,
+    "total_non_pass_non_skip": 30650,
+    "classified": 30650,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1392,42 +1392,190 @@
         ]
       },
       {
-        "id": "standalone-regexp",
+        "id": "standalone-regexp-phase-2d",
         "issues": [
-          "#682",
-          "#1474"
+          "#1911",
+          "#1909",
+          "#1539"
         ],
-        "label": "RegExp literals/constructor/String-RegExp paths still refused or missing native engine",
-        "count": 2023,
+        "label": "Standalone RegExp Phase 2d: u/v/d flags, Unicode escapes, lookaround, modifiers",
+        "count": 833,
         "statuses": {
           "pass": 0,
-          "fail": 268,
-          "compile_error": 1755,
+          "fail": 0,
+          "compile_error": 833,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 2023
+          "total": 833
         },
         "error_categories": {
-          "assertion_fail": 207,
-          "other": 1728,
-          "null_deref": 23,
-          "runtime_error": 37,
-          "wasm_compile": 23,
-          "illegal_cast": 5
+          "other": 833
+        },
+        "sample_files": [
+          "test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js",
+          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
+          "test/built-ins/RegExp/early-err-modifiers-other-code-point-g.js",
+          "test/built-ins/RegExp/lookBehind/sticky.js",
+          "test/built-ins/RegExp/property-escapes/generated/Script_-_Brahmi.js"
+        ],
+        "sample_signatures": [
+          "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
+          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support unsupported group form '(?g' — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support lookbehind (?<= / ?<!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine do",
+          "other:L#:## Codegen error: standalone RegExp engine does not support unsupported group form '(?m' — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
+        ]
+      },
+      {
+        "id": "standalone-regexp-phase-2b",
+        "issues": [
+          "#1912",
+          "#1909",
+          "#1539"
+        ],
+        "label": "Standalone RegExp Phase 2b: word boundaries, backrefs, and character-class compatibility",
+        "count": 104,
+        "statuses": {
+          "pass": 0,
+          "fail": 0,
+          "compile_error": 104,
+          "compile_timeout": 0,
+          "skip": 0,
+          "total": 104
+        },
+        "error_categories": {
+          "other": 104
+        },
+        "sample_files": [
+          "test/built-ins/RegExp/S15.10.2.15_A1_T8.js",
+          "test/built-ins/RegExp/S15.10.2.6_A4_T4.js",
+          "test/annexB/built-ins/RegExp/RegExp-decimal-escape-not-capturing.js",
+          "test/annexB/language/literals/regexp/non-empty-class-ranges-no-dash.js",
+          "test/built-ins/RegExp/S15.10.2.15_A1_T21.js"
+        ],
+        "sample_signatures": [
+          "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\b — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support class shorthand as range endpoint (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
+          "other:L#:## Codegen error: standalone RegExp engine does not support class range out of order (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
+        ]
+      },
+      {
+        "id": "standalone-regexp-string-protocol",
+        "issues": [
+          "#1913",
+          "#1909",
+          "#1539"
+        ],
+        "label": "Standalone RegExp string protocol, global/sticky lastIndex, split, replace, and matchAll",
+        "count": 453,
+        "statuses": {
+          "pass": 0,
+          "fail": 29,
+          "compile_error": 424,
+          "compile_timeout": 0,
+          "skip": 0,
+          "total": 453
+        },
+        "error_categories": {
+          "other": 419,
+          "wasm_compile": 5,
+          "assertion_fail": 20,
+          "runtime_error": 1,
+          "null_deref": 7,
+          "illegal_cast": 1
+        },
+        "sample_files": [
+          "test/built-ins/RegExp/prototype/Symbol.matchAll/species-constructor-is-not-object-throws.js",
+          "test/built-ins/RegExp/prototype/Symbol.match/builtin-failure-y-set-lastindex-err.js",
+          "test/built-ins/RegExp/prototype/Symbol.replace/result-coerce-groups-prop.js",
+          "test/built-ins/RegExp/prototype/Symbol.split/coerce-string-err.js",
+          "test/built-ins/RegExpStringIteratorPrototype/next/next-iteration-global.js"
+        ],
+        "sample_signatures": [
+          "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@matchAll symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@match symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@replace symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.; L#:## ",
+          "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@split symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.; L#:## Co",
+          "other:L#:## Codegen error: String.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.; L#:## Codegen error: Symbol.match built-in static propert"
+        ]
+      },
+      {
+        "id": "standalone-regexp-native-engine",
+        "issues": [
+          "#1914",
+          "#1909",
+          "#682"
+        ],
+        "label": "Standalone RegExp native-engine/runtime gaps: source, constructors, prototype access, result shape",
+        "count": 555,
+        "statuses": {
+          "pass": 0,
+          "fail": 239,
+          "compile_error": 316,
+          "compile_timeout": 0,
+          "skip": 0,
+          "total": 555
+        },
+        "error_categories": {
+          "assertion_fail": 187,
+          "null_deref": 16,
+          "other": 294,
+          "runtime_error": 36,
+          "wasm_compile": 18,
+          "illegal_cast": 4
         },
         "sample_files": [
           "test/language/literals/regexp/S7.8.5_A2.4_T2.js",
-          "test/built-ins/RegExp/CharacterClassEscapes/character-class-non-digit-class-escape-positive-cases.js",
-          "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
-          "test/built-ins/RegExp/S15.10.2.6_A4_T4.js",
-          "test/built-ins/RegExp/S15.10.2.15_A1_T8.js"
+          "test/built-ins/RegExp/S15.10.2.7_A4_T5.js",
+          "test/built-ins/RegExp/S15.10.2.8_A3_T26.js",
+          "test/built-ins/RegExp/prototype/exec/S15.10.6.2_A1_T14.js",
+          "test/built-ins/RegExp/prototype/exec/name.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(pattern.source, xx, \"Code unit: \" + cu.toString(#));",
-          "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
-          "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
-          "other:L#:## Codegen error: standalone RegExp engine does not support word-boundary \\B — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
-          "other:L#:## Codegen error: standalone RegExp engine does not support negated shorthand \\W inside [...] — ## Phase 2b (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue( __executed.input, __expected.input, 'The value of __executed.input is expected to equal the value of __expected.input' );",
+          "null_deref:L#:## dereferencing a null pointer [in test()]",
+          "other:L#:## Codegen error: standalone RegExp engine does not support RegExp.prototype.exec argument coercion (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "assertion_fail:returned # — assert ## at L#: verifyProperty(RegExp.prototype.exec, \"name\", { value: \"exec\", writable: false, enumerable: false, configurable: true });"
+        ]
+      },
+      {
+        "id": "standalone-regexp",
+        "issues": [
+          "#1909",
+          "#1911",
+          "#1912",
+          "#1913",
+          "#1914"
+        ],
+        "label": "Residual standalone RegExp failures not matched by the narrower RegExp sub-buckets",
+        "count": 78,
+        "statuses": {
+          "pass": 0,
+          "fail": 0,
+          "compile_error": 78,
+          "compile_timeout": 0,
+          "skip": 0,
+          "total": 78
+        },
+        "error_categories": {
+          "other": 78
+        },
+        "sample_files": [
+          "test/built-ins/RegExp/S15.10.4.1_A5_T1.js",
+          "test/built-ins/String/prototype/endsWith/return-abrupt-from-searchstring-regexp-test.js",
+          "test/built-ins/RegExp/S15.10.1_A1_T11.js",
+          "test/built-ins/String/prototype/search/S15.5.4.12_A2_T1.js",
+          "test/built-ins/RegExp/named-groups/groups-object-subclass.js"
+        ],
+        "sample_signatures": [
+          "other:L#:## Codegen error: standalone RegExp engine does not support duplicate flag 'i' (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: Symbol.match built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
+          "other:L#:## Codegen error: standalone RegExp engine does not support nothing to repeat at index # (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
+          "other:L#:## Codegen error: String.prototype.search(...) with a RegExp or symbol-protocol search value is not supported in --target standalone (##). Pass a string pattern instead, or recompile without --target standalone.; L#:## Codegen error: Str",
+          "other:L#:## Codegen error: Array.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.; L#:## Codegen error: String.prototype.replace(...) with a "
         ]
       },
       {
@@ -1436,17 +1584,17 @@
           "#1776"
         ],
         "label": "Residual standalone isSameValue invalid-Wasm validator failures",
-        "count": 5717,
+        "count": 5694,
         "statuses": {
           "pass": 0,
-          "fail": 5716,
+          "fail": 5693,
           "compile_error": 1,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 5717
+          "total": 5694
         },
         "error_categories": {
-          "assertion_fail": 5711,
+          "assertion_fail": 5688,
           "unreachable": 2,
           "runtime_error": 1,
           "promise_error": 3
@@ -1455,15 +1603,15 @@
           "test/language/statements/class/accessor-name-static/literal-string-empty.js",
           "test/language/statements/class/cpn-class-decl-accessors-computed-property-name-from-assignment-expression-assignment.js",
           "test/language/statements/class/cpn-class-decl-computed-property-name-from-string-literal.js",
-          "test/language/statements/class/definition/methods-gen-yield-as-generator-method-binding-identifier.js",
-          "test/language/statements/class/cpn-class-decl-fields-methods-computed-property-name-from-math.js"
+          "test/language/statements/class/cpn-class-decl-fields-methods-computed-property-name-from-math.js",
+          "test/language/statements/class/definition/methods-gen-yield-as-generator-method-binding-identifier.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(C[''], 'get string');",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(x, #);",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( c['#'](), '#' );",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(result.done, false, 'First result `done` flag');",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue( c[# + # - # * # / # ** #](), # );"
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue( c[# + # - # * # / # ** #](), # );",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(result.done, false, 'First result `done` flag');"
         ]
       },
       {
@@ -1554,18 +1702,18 @@
         "count": 3563,
         "statuses": {
           "pass": 0,
-          "fail": 1440,
-          "compile_error": 2123,
+          "fail": 1439,
+          "compile_error": 2124,
           "compile_timeout": 0,
           "skip": 0,
           "total": 3563
         },
         "error_categories": {
           "assertion_fail": 560,
-          "wasm_compile": 883,
+          "wasm_compile": 884,
           "null_deref": 33,
           "other": 1233,
-          "illegal_cast": 499,
+          "illegal_cast": 498,
           "promise_error": 16,
           "oob": 87,
           "runtime_error": 237,
@@ -1668,7 +1816,7 @@
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { innerB.method(innerB); }, '[[Get]] operation of an accessor without getter');",
           "negative_test_fail:expected parse/early SyntaxError but compiled and instantiated successfully",
           "other:L#:## Codegen error: Function.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "runtime_error:Cannot convert object to primitive value"
+          "other:L#:## Codegen error: Array.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair."
         ]
       },
       {
@@ -1697,9 +1845,9 @@
         },
         "sample_files": [
           "test/language/statements/for/S12.6.3_A3.js",
+          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/statements/throw/S12.13_A2_T6.js",
           "test/language/statements/try/S12.14_A18_T3.js",
-          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/expressions/assignment/dstr/array-rest-yield-ident-valid.js"
         ],
         "sample_signatures": [
@@ -1861,8 +2009,8 @@
         "sample_files": [
           "test/built-ins/String/S9.1_A1_T2.js",
           "test/built-ins/decodeURI/S15.1.3.1_A5.7.js",
-          "test/built-ins/decodeURI/S15.1.3.1_A1.12_T2.js",
           "test/built-ins/decodeURIComponent/S15.1.3.2_A1.13_T1.js",
+          "test/built-ins/decodeURI/S15.1.3.1_A1.12_T2.js",
           "test/built-ins/encodeURI/S15.1.3.3_A2.4_T1.js"
         ],
         "sample_signatures": [
