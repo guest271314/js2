@@ -67,7 +67,12 @@ import { emitArrayIsArrayExternrefPredicate, emitNullCheckThrow, typeErrorThrowI
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
-import { emitSetExtrasArgv, ensureArgcGlobal, ensureExtrasArgvGlobal } from "../statements/nested-declarations.js";
+import {
+  emitSetExtrasArgv,
+  ensureArgcGlobal,
+  ensureExtrasArgvGlobal,
+  maybeSetArgcForKnownCall,
+} from "../statements/nested-declarations.js";
 import { compileNativeStringMethodCall, compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { tryCompileNodeProcessCall } from "../node-process-api.js";
 import {
@@ -1298,9 +1303,16 @@ function compileOptionalDirectCall(ctx: CodegenContext, fctx: FunctionContext, e
       compileExpression(ctx, fctx, expr.arguments[i]!, paramTypes?.[i]);
     }
     if (paramTypes) {
+      const optInfo = ctx.funcOptionalParams.get(funcName);
       for (let i = expr.arguments.length; i < paramTypes.length; i++) {
-        pushDefaultValue(fctx, paramTypes[i]!, ctx);
+        const opt = optInfo?.find((o) => o.index === i);
+        if (opt) {
+          pushParamSentinel(fctx, paramTypes[i]!, ctx, opt);
+        } else {
+          pushDefaultValue(fctx, paramTypes[i]!, ctx);
+        }
       }
+      maybeSetArgcForKnownCall(ctx, fctx, funcName, expr.arguments.length, paramTypes.length);
     }
     fctx.body.push({ op: "call", funcIdx });
     resolved = true;
@@ -2700,6 +2712,13 @@ function compileCallExpression(
               }
             }
 
+            maybeSetArgcForKnownCall(
+              ctx,
+              fctx,
+              funcName,
+              remainingArgs.length,
+              getFuncParamTypes(ctx, funcIdx!)?.length ?? remainingArgs.length,
+            );
             const finalFuncIdx = ctx.funcMap.get(funcName) ?? funcIdx!;
             fctx.body.push({ op: "call", funcIdx: finalFuncIdx });
 
@@ -2771,6 +2790,13 @@ function compileCallExpression(
                 }
               }
               const finalFuncIdx = ctx.funcMap.get(funcName) ?? funcIdx!;
+              maybeSetArgcForKnownCall(
+                ctx,
+                fctx,
+                funcName,
+                elements.length,
+                getFuncParamTypes(ctx, finalFuncIdx)?.length ?? elements.length,
+              );
               fctx.body.push({ op: "call", funcIdx: finalFuncIdx });
               // Use actual Wasm return type for .apply()
               if (wasmFuncReturnsVoid(ctx, finalFuncIdx)) return VOID_RESULT;
@@ -2818,6 +2844,7 @@ function compileCallExpression(
               }
             }
             const finalFuncIdx = ctx.funcMap.get(funcName) ?? funcIdx!;
+            maybeSetArgcForKnownCall(ctx, fctx, funcName, 0, getFuncParamTypes(ctx, finalFuncIdx)?.length ?? 0);
             fctx.body.push({ op: "call", funcIdx: finalFuncIdx });
             // Use actual Wasm return type for .apply() with no args
             if (wasmFuncReturnsVoid(ctx, finalFuncIdx)) return VOID_RESULT;
@@ -5798,9 +5825,7 @@ function compileCallExpression(
             }
           }
           // Set __argc before the call so the callee knows the actual arg count
-          if (calleeReadsArgsEarly) {
-            emitSetArgc(ctx, fctx, expr.arguments.length, staticParamCount);
-          }
+          maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, staticParamCount);
           // Re-lookup funcIdx: argument compilation may trigger addUnionImports
           const finalStaticIdx = ctx.funcMap.get(fullName) ?? funcIdx;
           fctx.body.push({ op: "call", funcIdx: finalStaticIdx });
@@ -6374,9 +6399,7 @@ function compileCallExpression(
             }
           }
           // Set __argc before the call so the callee knows the actual arg count
-          if (calleeReadsArgsStatic) {
-            emitSetArgc(ctx, fctx, expr.arguments.length, paramCount);
-          }
+          maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, paramCount);
           const finalMethodIdx = ctx.funcMap.get(fullName) ?? resolvedStaticIdx;
           fctx.body.push({ op: "call", funcIdx: finalMethodIdx });
           const sig = ctx.checker.getResolvedSignature(expr);
@@ -6457,9 +6480,7 @@ function compileCallExpression(
             }
           }
           // Set __argc before the call so the callee knows the actual arg count
-          if (calleeReadsArgsNg) {
-            emitSetArgc(ctx, fctx, expr.arguments.length, ngParamCount);
-          }
+          maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, ngParamCount);
           const finalMethodIdx = ctx.funcMap.get(fullName) ?? funcIdx;
           fctx.body.push({ op: "call", funcIdx: finalMethodIdx });
           const elseInstrs = fctx.body;
@@ -6522,9 +6543,7 @@ function compileCallExpression(
           }
         }
         // Set __argc before the call so the callee knows the actual arg count
-        if (calleeReadsArgsNn) {
-          emitSetArgc(ctx, fctx, expr.arguments.length, methodParamCount);
-        }
+        maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, methodParamCount);
         // Re-lookup funcIdx: argument compilation may trigger addUnionImports
         const finalMethodIdx = ctx.funcMap.get(fullName) ?? funcIdx;
         fctx.body.push({ op: "call", funcIdx: finalMethodIdx });
@@ -6607,9 +6626,7 @@ function compileCallExpression(
               }
             }
             // Set __argc before the call so the callee knows the actual arg count
-            if (calleeReadsArgsSm) {
-              emitSetArgc(ctx, fctx, expr.arguments.length, smMethodParamCount);
-            }
+            maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, smMethodParamCount);
             const finalStructMethodIdx = ctx.funcMap.get(fullName) ?? funcIdx;
             fctx.body.push({ op: "call", funcIdx: finalStructMethodIdx });
             const elseInstrs = fctx.body;
@@ -6668,9 +6685,7 @@ function compileCallExpression(
             }
           }
           // Set __argc before the call so the callee knows the actual arg count
-          if (calleeReadsArgsNns) {
-            emitSetArgc(ctx, fctx, expr.arguments.length, nnMethodParamCount);
-          }
+          maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, nnMethodParamCount);
           // Re-lookup funcIdx: argument compilation may trigger addUnionImports
           const finalStructMethodIdx = ctx.funcMap.get(fullName) ?? funcIdx;
           fctx.body.push({ op: "call", funcIdx: finalStructMethodIdx });
@@ -9016,9 +9031,7 @@ function compileCallExpression(
         }
       }
       // Set __argc before the call so the callee knows the actual arg count
-      if (calleeReadsArgsDirect) {
-        emitSetArgc(ctx, fctx, expr.arguments.length, paramCount);
-      }
+      maybeSetArgcForKnownCall(ctx, fctx, funcName, expr.arguments.length, paramCount);
     }
 
     // Re-lookup funcIdx: argument compilation may trigger addUnionImports
@@ -10099,6 +10112,13 @@ function compileCallExpression(
           }
 
           const finalFuncIdx = ctx.funcMap.get(funcName) ?? funcIdx!;
+          maybeSetArgcForKnownCall(
+            ctx,
+            fctx,
+            funcName,
+            allArgs.length,
+            getFuncParamTypes(ctx, finalFuncIdx)?.length ?? allArgs.length,
+          );
           fctx.body.push({ op: "call", funcIdx: finalFuncIdx });
 
           const sig = ctx.checker.getResolvedSignature(expr);
@@ -10697,6 +10717,7 @@ function compileConditionalCallee(
           }
         }
         const finalFuncIdx = ctx.funcMap.get(funcName) ?? funcIdx;
+        maybeSetArgcForKnownCall(ctx, fctx, funcName, expr.arguments.length, ccParamCount);
         fctx.body.push({ op: "call", funcIdx: finalFuncIdx });
         if (callRetType) return callRetType;
         // Try to determine return type from the branch function's signature

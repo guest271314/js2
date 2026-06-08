@@ -1942,9 +1942,8 @@ export function compileTupleLiteral(
     if (i < expr.elements.length) {
       const el = expr.elements[i]!;
       // For holes (OmittedExpression) and explicit `undefined` in f64 context,
-      // emit the sNaN sentinel so destructuring default checks trigger correctly.
-      // compileExpression emits regular NaN for undefined, which doesn't match
-      // the sNaN sentinel that emitDefaultValueCheck looks for (#1024).
+      // emit the sNaN sentinel so destructuring default checks trigger correctly
+      // (#1024).
       if (expectedType.kind === "f64" && _isUndefinedLike(el)) {
         fctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den });
         fctx.body.push({ op: "f64.reinterpret_i64" });
