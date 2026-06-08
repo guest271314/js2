@@ -56,7 +56,13 @@ import {
 } from "./statements.js";
 import { coercionInstrs, emitGuardedRefCast } from "./type-coercion.js";
 import { buildDestructureNullThrow, isNullOrUndefinedLiteral } from "./destructuring-params.js";
-import { emitArgumentsVecBody } from "./statements/nested-declarations.js";
+import {
+  cacheParamDefaultArgc,
+  emitF64ParamSentinelCheck,
+  emitArgumentsVecBody,
+  emitParamDefaultArgMissingCheck,
+  paramDefaultNeedsArgc,
+} from "./statements/nested-declarations.js";
 import { detectStringBuilders, type StringBuilderPresizeInfo } from "./string-builder.js";
 
 // ── Arrow function callbacks ──────────────────────────────────────────
@@ -788,6 +794,8 @@ function emitParamDefaultCheckInline(
   paramIdx: number,
   paramType: ValType,
   thenInstrs: Instr[],
+  argIndex: number,
+  argcLocal: number | undefined,
 ): void {
   if (paramType.kind === "externref") {
     // Per JS spec, parameter defaults fire ONLY when the arg is `undefined`
@@ -812,13 +820,12 @@ function emitParamDefaultCheckInline(
     fctx.body.push({ op: "ref.is_null" });
     fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenInstrs });
   } else if (paramType.kind === "i32") {
-    fctx.body.push({ op: "local.get", index: paramIdx });
-    fctx.body.push({ op: "i32.eqz" });
+    emitParamDefaultArgMissingCheck(fctx, argcLocal!, argIndex);
     fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenInstrs });
   } else if (paramType.kind === "f64") {
-    fctx.body.push({ op: "local.get", index: paramIdx });
-    fctx.body.push({ op: "local.get", index: paramIdx });
-    fctx.body.push({ op: "f64.ne" });
+    emitParamDefaultArgMissingCheck(fctx, argcLocal!, argIndex);
+    emitF64ParamSentinelCheck(fctx, paramIdx);
+    fctx.body.push({ op: "i32.or" });
     fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenInstrs });
   }
 }
@@ -847,6 +854,14 @@ export function emitArrowParamDefaults(
       fctx.tdzFlagLocals.set(paramName, flagIdx);
     }
   }
+  const defaultArgcLocal =
+    hasDefaults &&
+    arrow.parameters.some((param, i) => {
+      if (!param.initializer) return false;
+      return paramDefaultNeedsArgc(fctx.params[paramOffset + i]?.type);
+    })
+      ? cacheParamDefaultArgc(ctx, fctx)
+      : undefined;
 
   for (let i = 0; i < arrow.parameters.length; i++) {
     const param = arrow.parameters[i]!;
@@ -903,7 +918,7 @@ export function emitArrowParamDefaults(
     fctx.body = savedBody;
 
     // Emit the null/zero check + conditional assignment
-    emitParamDefaultCheckInline(ctx, fctx, paramIdx, paramType, thenInstrs);
+    emitParamDefaultCheckInline(ctx, fctx, paramIdx, paramType, thenInstrs, i, defaultArgcLocal);
     // Mark param as initialized after the if
     if (tdzFlags) {
       fctx.body.push({ op: "i32.const", value: 1 });
@@ -948,6 +963,14 @@ export function emitMethodParamDefaults(
       fctx.tdzFlagLocals.set(paramName, flagIdx);
     }
   }
+  const defaultArgcLocal =
+    hasDefaults &&
+    params.some((param, i) => {
+      if (!param.initializer) return false;
+      return paramDefaultNeedsArgc(fctx.params[paramOffset + i]?.type);
+    })
+      ? cacheParamDefaultArgc(ctx, fctx)
+      : undefined;
 
   for (let i = 0; i < params.length; i++) {
     const param = params[i]!;
@@ -998,7 +1021,7 @@ export function emitMethodParamDefaults(
     const thenInstrs = fctx.body;
     fctx.body = savedBody;
 
-    emitParamDefaultCheckInline(ctx, fctx, paramIdx, paramType, thenInstrs);
+    emitParamDefaultCheckInline(ctx, fctx, paramIdx, paramType, thenInstrs, i, defaultArgcLocal);
     if (tdzFlags) {
       fctx.body.push({ op: "i32.const", value: 1 });
       fctx.body.push({ op: "local.set", index: tdzFlags[i]! });
