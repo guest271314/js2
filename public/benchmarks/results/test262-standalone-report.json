@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-08T22:50:37.683Z",
-  "baseline_generated_at": "2026-06-08T22:50:37Z",
-  "baseline_sha": "875b53638c99b14f5dfde1811b00300a7dd689b2",
+  "timestamp": "2026-06-08T23:12:36.115Z",
+  "baseline_generated_at": "2026-06-08T23:12:35Z",
+  "baseline_sha": "6eef62d02436d3b6b5f441149554d6e71ee0cef8",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,22 +9,22 @@
   },
   "summary": {
     "total": 43132,
-    "pass": 16358,
-    "fail": 12718,
-    "compile_error": 14034,
+    "pass": 16381,
+    "fail": 12694,
+    "compile_error": 14035,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 29076,
+    "compilable": 29075,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42046,
-        "pass": 15961,
-        "fail": 12287,
-        "compile_error": 13776,
+        "pass": 15984,
+        "fail": 12263,
+        "compile_error": 13777,
         "compile_timeout": 4,
         "skip": 18,
-        "compilable": 28248,
+        "compilable": 28247,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -52,23 +52,23 @@
       },
       "official": {
         "total": 43132,
-        "pass": 16358,
-        "fail": 12718,
-        "compile_error": 14034,
+        "pass": 16381,
+        "fail": 12694,
+        "compile_error": 14035,
         "compile_timeout": 4,
         "skip": 18,
-        "compilable": 29076,
+        "compilable": 29075,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48114,
-        "pass": 17327,
-        "fail": 13761,
-        "compile_error": 16908,
+        "pass": 17350,
+        "fail": 13737,
+        "compile_error": 16909,
         "compile_timeout": 4,
         "skip": 114,
-        "compilable": 31088,
+        "compilable": 31087,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -76,28 +76,28 @@
   },
   "official_summary": {
     "total": 43132,
-    "pass": 16358,
-    "fail": 12718,
-    "compile_error": 14034,
+    "pass": 16381,
+    "fail": 12694,
+    "compile_error": 14035,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 29076,
+    "compilable": 29075,
     "stale": 0
   },
   "full_summary": {
     "total": 48114,
-    "pass": 17327,
-    "fail": 13761,
-    "compile_error": 16908,
+    "pass": 17350,
+    "fail": 13737,
+    "compile_error": 16909,
     "compile_timeout": 4,
     "skip": 114,
-    "compilable": 31088,
+    "compilable": 31087,
     "stale": 0
   },
   "strict_summary": {
     "total": 40623,
-    "pass": 15524,
-    "fail": 11808,
+    "pass": 15547,
+    "fail": 11785,
     "compile_error": 13269,
     "compile_timeout": 4,
     "skip": 18,
@@ -127,12 +127,12 @@
     },
     "standard": {
       "total": 42046,
-      "pass": 15961,
-      "fail": 12287,
-      "compile_error": 13776,
+      "pass": 15984,
+      "fail": 12263,
+      "compile_error": 13777,
       "compile_timeout": 4,
       "skip": 18,
-      "compilable": 28248,
+      "compilable": 28247,
       "stale": 0
     }
   },
@@ -890,8 +890,8 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 5541,
-      "fail": 3641,
+      "pass": 5552,
+      "fail": 3630,
       "compile_error": 1835,
       "compile_timeout": 1,
       "skip": 18,
@@ -1050,9 +1050,9 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 4623,
-      "fail": 2932,
-      "compile_error": 1782,
+      "pass": 4635,
+      "fail": 2919,
+      "compile_error": 1783,
       "compile_timeout": 0,
       "skip": 0,
       "total": 9337
@@ -1079,8 +1079,8 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 10135,
-    "illegal_cast": 776,
+    "assertion_fail": 10112,
+    "illegal_cast": 775,
     "negative_test_fail": 77,
     "null_deref": 496,
     "oob": 169,
@@ -1090,7 +1090,7 @@
     "runtime_error": 5137,
     "type_error": 8,
     "unreachable": 27,
-    "wasm_compile": 2537
+    "wasm_compile": 2538
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1098,8 +1098,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 30673,
-    "classified": 30673,
+    "total_non_pass_non_skip": 30650,
+    "classified": 30650,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1225,10 +1225,10 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Duration/compare/builtin.js",
-          "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
           "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
-          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js",
-          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
+          "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
+          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js",
+          "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Object.prototype.toString.call(...) is not yet supported in --target standalone (## Slice #/#) — only Object.prototype.hasOwnProperty.call is wired (isPrototypeOf/propertyIsEnumerable/valueOf are a follow-on). Recompile",
@@ -1371,21 +1371,21 @@
           "total": 147
         },
         "error_categories": {
-          "unreachable": 25,
           "other": 97,
+          "unreachable": 25,
           "assertion_fail": 22,
           "wasm_compile": 3
         },
         "sample_files": [
-          "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
+          "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/stringify/space-string-range.js",
           "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
           "test/built-ins/JSON/parse/text-object-abrupt.js"
         ],
         "sample_signatures": [
-          "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
+          "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
           "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
@@ -1487,15 +1487,15 @@
           "illegal_cast": 1
         },
         "sample_files": [
-          "test/built-ins/RegExp/prototype/Symbol.matchAll/species-constructor-is-not-object-throws.js",
           "test/built-ins/RegExp/prototype/Symbol.match/builtin-failure-y-set-lastindex-err.js",
+          "test/built-ins/RegExp/prototype/Symbol.matchAll/species-constructor-is-not-object-throws.js",
           "test/built-ins/RegExp/prototype/Symbol.replace/result-coerce-groups-prop.js",
           "test/built-ins/RegExp/prototype/Symbol.split/coerce-string-err.js",
           "test/built-ins/RegExpStringIteratorPrototype/next/next-iteration-global.js"
         ],
         "sample_signatures": [
-          "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@matchAll symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@match symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.",
+          "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@matchAll symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@replace symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.; L#:## ",
           "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@split symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.; L#:## Co",
           "other:L#:## Codegen error: String.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.; L#:## Codegen error: Symbol.match built-in static propert"
@@ -1584,17 +1584,17 @@
           "#1776"
         ],
         "label": "Residual standalone isSameValue invalid-Wasm validator failures",
-        "count": 5717,
+        "count": 5694,
         "statuses": {
           "pass": 0,
-          "fail": 5716,
+          "fail": 5693,
           "compile_error": 1,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 5717
+          "total": 5694
         },
         "error_categories": {
-          "assertion_fail": 5711,
+          "assertion_fail": 5688,
           "unreachable": 2,
           "runtime_error": 1,
           "promise_error": 3
@@ -1680,15 +1680,15 @@
           "test/built-ins/ArrayBuffer/options-maxbytelength-data-allocation-after-object-creation.js",
           "test/built-ins/Reflect/get/return-abrupt-from-property-key.js",
           "test/built-ins/Reflect/ownKeys/return-non-enumerable-keys.js",
-          "test/built-ins/Reflect/getOwnPropertyDescriptor/return-abrupt-from-property-key.js",
-          "test/built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js"
+          "test/built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js",
+          "test/built-ins/Reflect/getOwnPropertyDescriptor/return-abrupt-from-property-key.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.compareArray( Reflect.ownKeys([]), ['length'], 'return non enumerable `length` from empty array' );",
-          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C).",
-          "other:L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Ph"
+          "other:L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Ph",
+          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C)."
         ]
       },
       {
@@ -1702,18 +1702,18 @@
         "count": 3563,
         "statuses": {
           "pass": 0,
-          "fail": 1440,
-          "compile_error": 2123,
+          "fail": 1439,
+          "compile_error": 2124,
           "compile_timeout": 0,
           "skip": 0,
           "total": 3563
         },
         "error_categories": {
           "assertion_fail": 560,
-          "wasm_compile": 883,
+          "wasm_compile": 884,
           "null_deref": 33,
           "other": 1233,
-          "illegal_cast": 499,
+          "illegal_cast": 498,
           "promise_error": 16,
           "oob": 87,
           "runtime_error": 237,
@@ -1845,9 +1845,9 @@
         },
         "sample_files": [
           "test/language/statements/for/S12.6.3_A3.js",
-          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/statements/throw/S12.13_A2_T6.js",
           "test/language/statements/try/S12.14_A18_T3.js",
+          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/expressions/assignment/dstr/array-rest-yield-ident-valid.js"
         ],
         "sample_signatures": [
@@ -2009,8 +2009,8 @@
         "sample_files": [
           "test/built-ins/String/S9.1_A1_T2.js",
           "test/built-ins/decodeURI/S15.1.3.1_A5.7.js",
-          "test/built-ins/decodeURIComponent/S15.1.3.2_A1.13_T1.js",
           "test/built-ins/decodeURI/S15.1.3.1_A1.12_T2.js",
+          "test/built-ins/decodeURIComponent/S15.1.3.2_A1.13_T1.js",
           "test/built-ins/encodeURI/S15.1.3.3_A2.4_T1.js"
         ],
         "sample_signatures": [
@@ -2045,8 +2045,8 @@
         },
         "sample_files": [
           "test/annexB/language/expressions/assignment/dstr/array-pattern-emulates-undefined.js",
-          "test/annexB/language/global-code/if-stmt-else-decl-global-existing-global-init.js",
           "test/annexB/language/global-code/if-decl-else-decl-b-global-existing-global-init.js",
+          "test/annexB/language/global-code/if-stmt-else-decl-global-existing-global-init.js",
           "test/annexB/language/global-code/if-decl-else-decl-b-global-skip-early-err-try.js",
           "test/annexB/language/global-code/if-stmt-else-decl-global-skip-early-err-try.js"
         ],
