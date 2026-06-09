@@ -3280,6 +3280,7 @@ export function compilePropertyIntrospection(
   // Collect own properties from the TypeScript type system.
   // Filtering depends on what kind of object the receiver is.
   const tsProps = new Set<string>();
+  const nonEnumerableTsProps = new Set<string>();
   for (const prop of receiverType.getProperties()) {
     // Skip private identifiers — they start with '#' and can't be matched by string keys
     if (prop.name.startsWith("#")) continue;
@@ -3294,6 +3295,7 @@ export function compilePropertyIntrospection(
       // On C.prototype: only methods and accessors are own properties.
       // Instance data fields are NOT on the prototype (set in constructor).
       if (!isMethod && !isAccessor) continue;
+      nonEnumerableTsProps.add(prop.name);
     } else if (isConstructorReceiver) {
       // On the constructor (typeof C): only static members are own.
       if (decls && decls.length > 0) {
@@ -3304,6 +3306,7 @@ export function compilePropertyIntrospection(
         );
         if (!hasStatic) continue;
       }
+      if (isMethod || isAccessor) nonEnumerableTsProps.add(prop.name);
     } else {
       // On an instance: skip methods and accessors — they live on the prototype.
       if (isMethod || isAccessor) continue;
@@ -3428,7 +3431,11 @@ export function compilePropertyIntrospection(
         const flags = ctx.definedPropertyFlags.get(key);
         if (flags !== undefined) {
           result = flags & PROP_FLAG_ENUMERABLE ? 1 : 0;
+        } else if (nonEnumerableTsProps.has(staticKey)) {
+          result = 0;
         }
+      } else if (nonEnumerableTsProps.has(staticKey)) {
+        result = 0;
       }
     }
 
@@ -3452,9 +3459,13 @@ export function compilePropertyIntrospection(
   }
   for (const p of tsProps) allFieldNames.add(p);
 
-  if (allFieldNames.size > 0) {
+  const comparableFieldNames = isPropertyIsEnumerable
+    ? new Set([...allFieldNames].filter((name) => !nonEnumerableTsProps.has(name)))
+    : allFieldNames;
+
+  if (comparableFieldNames.size > 0) {
     // Ensure all field name strings are registered as globals
-    for (const fieldName of allFieldNames) {
+    for (const fieldName of comparableFieldNames) {
       if (!ctx.stringGlobalMap.has(fieldName)) {
         addStringConstantGlobal(ctx, fieldName);
       }
@@ -3477,7 +3488,7 @@ export function compilePropertyIntrospection(
         fctx.body.push({ op: "local.set", index: keyLocal });
         // Start with false (0)
         fctx.body.push({ op: "i32.const", value: 0 });
-        for (const fieldName of allFieldNames) {
+        for (const fieldName of comparableFieldNames) {
           const strGlobal = ctx.stringGlobalMap.get(fieldName);
           if (strGlobal !== undefined) {
             fctx.body.push({ op: "local.get", index: keyLocal });
