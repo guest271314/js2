@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-08T23:23:38.969Z",
-  "baseline_generated_at": "2026-06-08T23:23:38Z",
-  "baseline_sha": "766c62cfa2e3f1a042e763ced0bec38a0d8248cd",
+  "timestamp": "2026-06-09T01:14:08.022Z",
+  "baseline_generated_at": "2026-06-09T01:14:07Z",
+  "baseline_sha": "468185426c9758f904dbe936615fca5d48df6eb1",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,22 +9,22 @@
   },
   "summary": {
     "total": 43132,
-    "pass": 16381,
-    "fail": 12694,
-    "compile_error": 14035,
+    "pass": 16405,
+    "fail": 12700,
+    "compile_error": 14005,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 29075,
+    "compilable": 29105,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42046,
-        "pass": 15984,
-        "fail": 12263,
-        "compile_error": 13777,
+        "pass": 16008,
+        "fail": 12269,
+        "compile_error": 13747,
         "compile_timeout": 4,
         "skip": 18,
-        "compilable": 28247,
+        "compilable": 28277,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -52,23 +52,23 @@
       },
       "official": {
         "total": 43132,
-        "pass": 16381,
-        "fail": 12694,
-        "compile_error": 14035,
+        "pass": 16405,
+        "fail": 12700,
+        "compile_error": 14005,
         "compile_timeout": 4,
         "skip": 18,
-        "compilable": 29075,
+        "compilable": 29105,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48114,
-        "pass": 17350,
-        "fail": 13737,
-        "compile_error": 16909,
+        "pass": 17374,
+        "fail": 13743,
+        "compile_error": 16879,
         "compile_timeout": 4,
         "skip": 114,
-        "compilable": 31087,
+        "compilable": 31117,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -76,32 +76,32 @@
   },
   "official_summary": {
     "total": 43132,
-    "pass": 16381,
-    "fail": 12694,
-    "compile_error": 14035,
+    "pass": 16405,
+    "fail": 12700,
+    "compile_error": 14005,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 29075,
+    "compilable": 29105,
     "stale": 0
   },
   "full_summary": {
     "total": 48114,
-    "pass": 17350,
-    "fail": 13737,
-    "compile_error": 16909,
+    "pass": 17374,
+    "fail": 13743,
+    "compile_error": 16879,
     "compile_timeout": 4,
     "skip": 114,
-    "compilable": 31087,
+    "compilable": 31117,
     "stale": 0
   },
   "strict_summary": {
     "total": 40623,
-    "pass": 15547,
-    "fail": 11785,
-    "compile_error": 13269,
+    "pass": 15571,
+    "fail": 11791,
+    "compile_error": 13239,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 27332,
+    "compilable": 27362,
     "stale": 0
   },
   "scope_summaries": {
@@ -127,12 +127,12 @@
     },
     "standard": {
       "total": 42046,
-      "pass": 15984,
-      "fail": 12263,
-      "compile_error": 13777,
+      "pass": 16008,
+      "fail": 12269,
+      "compile_error": 13747,
       "compile_timeout": 4,
       "skip": 18,
-      "compilable": 28247,
+      "compilable": 28277,
       "stale": 0
     }
   },
@@ -550,9 +550,9 @@
     {
       "name": "built-ins/Object",
       "path": "built-ins/Object",
-      "pass": 566,
-      "fail": 1369,
-      "compile_error": 1476,
+      "pass": 590,
+      "fail": 1375,
+      "compile_error": 1446,
       "compile_timeout": 0,
       "skip": 0,
       "total": 3411
@@ -1079,18 +1079,18 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 10112,
+    "assertion_fail": 10117,
     "illegal_cast": 775,
     "negative_test_fail": 77,
     "null_deref": 496,
     "oob": 169,
-    "other": 11094,
+    "other": 10996,
     "promise_error": 184,
     "range_error": 29,
-    "runtime_error": 5137,
+    "runtime_error": 5207,
     "type_error": 8,
     "unreachable": 27,
-    "wasm_compile": 2538
+    "wasm_compile": 2537
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1098,8 +1098,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 30650,
-    "classified": 30650,
+    "total_non_pass_non_skip": 30626,
+    "classified": 30626,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1109,17 +1109,17 @@
           "#1862"
         ],
         "label": "Binary emit u32 out of range (negative index/count emitted as u32) — instanceof / Error.isError fail-loud",
-        "count": 918,
+        "count": 934,
         "statuses": {
           "pass": 0,
           "fail": 0,
-          "compile_error": 918,
+          "compile_error": 934,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 918
+          "total": 934
         },
         "error_categories": {
-          "other": 918
+          "other": 934
         },
         "sample_files": [
           "test/language/statements/await-using/Symbol.asyncDispose-method-called-with-correct-this.js",
@@ -1416,14 +1416,14 @@
           "test/built-ins/RegExp/S15.10.2.13_A1_T4.js",
           "test/built-ins/RegExp/early-err-modifiers-other-code-point-g.js",
           "test/built-ins/RegExp/lookBehind/sticky.js",
-          "test/built-ins/RegExp/property-escapes/generated/Script_-_Brahmi.js"
+          "test/built-ins/RegExp/property-escapes/generated/General_Category_-_Line_Separator.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: standalone RegExp engine does not support flags \"u\" (u/v/d are ## Phase 2d) (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine does ",
           "other:L#:## Codegen error: standalone RegExp engine does not support lookahead (?= / ?!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support unsupported group form '(?g' — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp engine does not support lookbehind (?<= / ?<!) — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp engine do",
-          "other:L#:## Codegen error: standalone RegExp engine does not support unsupported group form '(?m' — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
+          "other:L#:## Codegen error: standalone RegExp engine does not support unsupported group form '(?-' — ## Phase 2d (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.; L#:## Codegen error: standalone RegExp eng"
         ]
       },
       {
@@ -1509,20 +1509,20 @@
           "#682"
         ],
         "label": "Standalone RegExp native-engine/runtime gaps: source, constructors, prototype access, result shape",
-        "count": 555,
+        "count": 556,
         "statuses": {
           "pass": 0,
           "fail": 239,
-          "compile_error": 316,
+          "compile_error": 317,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 555
+          "total": 556
         },
         "error_categories": {
           "assertion_fail": 187,
           "null_deref": 16,
           "other": 294,
-          "runtime_error": 36,
+          "runtime_error": 37,
           "wasm_compile": 18,
           "illegal_cast": 4
         },
@@ -1551,31 +1551,31 @@
           "#1914"
         ],
         "label": "Residual standalone RegExp failures not matched by the narrower RegExp sub-buckets",
-        "count": 78,
+        "count": 77,
         "statuses": {
           "pass": 0,
           "fail": 0,
-          "compile_error": 78,
+          "compile_error": 77,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 78
+          "total": 77
         },
         "error_categories": {
-          "other": 78
+          "other": 77
         },
         "sample_files": [
           "test/built-ins/RegExp/S15.10.4.1_A5_T1.js",
           "test/built-ins/String/prototype/endsWith/return-abrupt-from-searchstring-regexp-test.js",
           "test/built-ins/RegExp/S15.10.1_A1_T11.js",
           "test/built-ins/String/prototype/search/S15.5.4.12_A2_T1.js",
-          "test/built-ins/RegExp/named-groups/groups-object-subclass.js"
+          "test/built-ins/RegExp/escape/not-a-constructor.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: standalone RegExp engine does not support duplicate flag 'i' (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: Symbol.match built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
           "other:L#:## Codegen error: standalone RegExp engine does not support nothing to repeat at index # (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
           "other:L#:## Codegen error: String.prototype.search(...) with a RegExp or symbol-protocol search value is not supported in --target standalone (##). Pass a string pattern instead, or recompile without --target standalone.; L#:## Codegen error: Str",
-          "other:L#:## Codegen error: Array.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.; L#:## Codegen error: String.prototype.replace(...) with a "
+          "other:L#:## Codegen error: RegExp.escape built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair."
         ]
       },
       {
@@ -1584,17 +1584,17 @@
           "#1776"
         ],
         "label": "Residual standalone isSameValue invalid-Wasm validator failures",
-        "count": 5694,
+        "count": 5699,
         "statuses": {
           "pass": 0,
-          "fail": 5693,
+          "fail": 5698,
           "compile_error": 1,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 5694
+          "total": 5699
         },
         "error_categories": {
-          "assertion_fail": 5688,
+          "assertion_fail": 5693,
           "unreachable": 2,
           "runtime_error": 1,
           "promise_error": 3
@@ -1620,17 +1620,17 @@
           "#1472"
         ],
         "label": "Standalone dynamic object/property operation gate",
-        "count": 3271,
+        "count": 3273,
         "statuses": {
           "pass": 0,
           "fail": 1229,
-          "compile_error": 2042,
+          "compile_error": 2044,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 3271
+          "total": 3273
         },
         "error_categories": {
-          "runtime_error": 510,
+          "runtime_error": 512,
           "wasm_compile": 211,
           "other": 1642,
           "assertion_fail": 752,
@@ -1678,17 +1678,17 @@
         },
         "sample_files": [
           "test/built-ins/ArrayBuffer/options-maxbytelength-data-allocation-after-object-creation.js",
-          "test/built-ins/Reflect/get/return-abrupt-from-property-key.js",
           "test/built-ins/Reflect/ownKeys/return-non-enumerable-keys.js",
-          "test/built-ins/Reflect/getOwnPropertyDescriptor/return-abrupt-from-property-key.js",
-          "test/built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js"
+          "test/built-ins/Reflect/get/return-abrupt-from-property-key.js",
+          "test/built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js",
+          "test/built-ins/Reflect/getOwnPropertyDescriptor/return-abrupt-from-property-key.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
-          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.compareArray( Reflect.ownKeys([]), ['length'], 'return non enumerable `length` from empty array' );",
-          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C).",
-          "other:L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Ph"
+          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
+          "other:L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Ph",
+          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C)."
         ]
       },
       {
@@ -1845,9 +1845,9 @@
         },
         "sample_files": [
           "test/language/statements/for/S12.6.3_A3.js",
-          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/statements/throw/S12.13_A2_T6.js",
           "test/language/statements/try/S12.14_A18_T3.js",
+          "test/language/statements/switch/S12.11_A1_T4.js",
           "test/language/expressions/assignment/dstr/array-rest-yield-ident-valid.js"
         ],
         "sample_signatures": [
@@ -1946,23 +1946,23 @@
           "#1466"
         ],
         "label": "Object/property/destructuring semantic mismatches behind the object model",
-        "count": 1172,
+        "count": 1125,
         "statuses": {
           "pass": 0,
-          "fail": 595,
-          "compile_error": 577,
+          "fail": 596,
+          "compile_error": 529,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 1172
+          "total": 1125
         },
         "error_categories": {
-          "other": 437,
+          "other": 324,
           "assertion_fail": 538,
-          "runtime_error": 77,
+          "runtime_error": 144,
           "promise_error": 91,
           "null_deref": 6,
           "illegal_cast": 1,
-          "wasm_compile": 17,
+          "wasm_compile": 16,
           "negative_test_fail": 5
         },
         "sample_files": [
