@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-09T01:14:08.022Z",
-  "baseline_generated_at": "2026-06-09T01:14:07Z",
-  "baseline_sha": "468185426c9758f904dbe936615fca5d48df6eb1",
+  "timestamp": "2026-06-09T01:40:43.484Z",
+  "baseline_generated_at": "2026-06-09T01:40:43Z",
+  "baseline_sha": "adfb6df2765b421030b14695e5c9c903c69e4ab2",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -10,21 +10,21 @@
   "summary": {
     "total": 43132,
     "pass": 16405,
-    "fail": 12700,
-    "compile_error": 14005,
+    "fail": 12702,
+    "compile_error": 14003,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 29105,
+    "compilable": 29107,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42046,
         "pass": 16008,
-        "fail": 12269,
-        "compile_error": 13747,
+        "fail": 12271,
+        "compile_error": 13745,
         "compile_timeout": 4,
         "skip": 18,
-        "compilable": 28277,
+        "compilable": 28279,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -53,22 +53,22 @@
       "official": {
         "total": 43132,
         "pass": 16405,
-        "fail": 12700,
-        "compile_error": 14005,
+        "fail": 12702,
+        "compile_error": 14003,
         "compile_timeout": 4,
         "skip": 18,
-        "compilable": 29105,
+        "compilable": 29107,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48114,
         "pass": 17374,
-        "fail": 13743,
-        "compile_error": 16879,
+        "fail": 13745,
+        "compile_error": 16877,
         "compile_timeout": 4,
         "skip": 114,
-        "compilable": 31117,
+        "compilable": 31119,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -77,31 +77,31 @@
   "official_summary": {
     "total": 43132,
     "pass": 16405,
-    "fail": 12700,
-    "compile_error": 14005,
+    "fail": 12702,
+    "compile_error": 14003,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 29105,
+    "compilable": 29107,
     "stale": 0
   },
   "full_summary": {
     "total": 48114,
     "pass": 17374,
-    "fail": 13743,
-    "compile_error": 16879,
+    "fail": 13745,
+    "compile_error": 16877,
     "compile_timeout": 4,
     "skip": 114,
-    "compilable": 31117,
+    "compilable": 31119,
     "stale": 0
   },
   "strict_summary": {
     "total": 40623,
     "pass": 15571,
-    "fail": 11791,
-    "compile_error": 13239,
+    "fail": 11793,
+    "compile_error": 13237,
     "compile_timeout": 4,
     "skip": 18,
-    "compilable": 27362,
+    "compilable": 27364,
     "stale": 0
   },
   "scope_summaries": {
@@ -128,11 +128,11 @@
     "standard": {
       "total": 42046,
       "pass": 16008,
-      "fail": 12269,
-      "compile_error": 13747,
+      "fail": 12271,
+      "compile_error": 13745,
       "compile_timeout": 4,
       "skip": 18,
-      "compilable": 28277,
+      "compilable": 28279,
       "stale": 0
     }
   },
@@ -551,8 +551,8 @@
       "name": "built-ins/Object",
       "path": "built-ins/Object",
       "pass": 590,
-      "fail": 1375,
-      "compile_error": 1446,
+      "fail": 1377,
+      "compile_error": 1444,
       "compile_timeout": 0,
       "skip": 0,
       "total": 3411
@@ -1079,18 +1079,18 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 10117,
+    "assertion_fail": 10119,
     "illegal_cast": 775,
     "negative_test_fail": 77,
     "null_deref": 496,
     "oob": 169,
-    "other": 10996,
+    "other": 10992,
     "promise_error": 184,
     "range_error": 29,
     "runtime_error": 5207,
     "type_error": 8,
     "unreachable": 27,
-    "wasm_compile": 2537
+    "wasm_compile": 2539
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1231,7 +1231,7 @@
           "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
         ],
         "sample_signatures": [
-          "other:L#:## Codegen error: Object.prototype.toString.call(...) is not yet supported in --target standalone (## Slice #/#) — only Object.prototype.hasOwnProperty.call is wired (isPrototypeOf/propertyIsEnumerable/valueOf are a follow-on). Recompile",
+          "other:L#:## Codegen error: Object.prototype.toString.call(...) is not yet supported in --target standalone (## Slice #/#) — only Object.prototype hasOwnProperty/propertyIsEnumerable/isPrototypeOf borrowed calls are wired (valueOf is a follow-on).",
           "runtime_error:Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert.throws(RangeError, () => d.round({ smallestUnit: \"seconds\", relativeTo: \"#-#-01T00:#+#:#[-#:#:#]\" }));",
           "assertion_fail:returned # — assert ## at L#: assert.throws(RangeError, () => duration.total(totalOf));",
@@ -1378,15 +1378,15 @@
         },
         "sample_files": [
           "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
-          "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/stringify/space-string-range.js",
+          "test/built-ins/JSON/parse/15.12.1.1-0-9.js",
           "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
           "test/built-ins/JSON/parse/text-object-abrupt.js"
         ],
         "sample_signatures": [
           "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
-          "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
+          "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
           "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
         ]
@@ -1487,17 +1487,17 @@
           "illegal_cast": 1
         },
         "sample_files": [
-          "test/built-ins/RegExp/prototype/Symbol.matchAll/species-constructor-is-not-object-throws.js",
           "test/built-ins/RegExp/prototype/Symbol.match/builtin-failure-y-set-lastindex-err.js",
-          "test/built-ins/RegExp/prototype/Symbol.replace/result-coerce-groups-prop.js",
+          "test/built-ins/RegExp/prototype/Symbol.matchAll/species-constructor-is-not-object-throws.js",
           "test/built-ins/RegExp/prototype/Symbol.split/coerce-string-err.js",
+          "test/built-ins/RegExp/prototype/Symbol.replace/result-coerce-groups-prop.js",
           "test/built-ins/RegExpStringIteratorPrototype/next/next-iteration-global.js"
         ],
         "sample_signatures": [
-          "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@matchAll symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@match symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.",
-          "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@replace symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.; L#:## ",
+          "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@matchAll symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.",
           "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@split symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.; L#:## Co",
+          "other:L#:## Codegen error: standalone RegExp literal-substring backend does not support @@replace symbol protocol calls (##/##). Use RegExp.prototype.test with a plain static pattern and no flags, or recompile without --target standalone.; L#:## ",
           "other:L#:## Codegen error: String.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.; L#:## Codegen error: Symbol.match built-in static propert"
         ]
       },
@@ -1530,15 +1530,15 @@
           "test/language/literals/regexp/S7.8.5_A2.4_T2.js",
           "test/built-ins/RegExp/S15.10.2.7_A4_T5.js",
           "test/built-ins/RegExp/S15.10.2.8_A3_T26.js",
-          "test/built-ins/RegExp/prototype/exec/S15.10.6.2_A1_T14.js",
-          "test/built-ins/RegExp/prototype/exec/name.js"
+          "test/built-ins/RegExp/prototype/exec/name.js",
+          "test/built-ins/RegExp/prototype/exec/S15.10.6.2_A1_T14.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(pattern.source, xx, \"Code unit: \" + cu.toString(#));",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( __executed.input, __expected.input, 'The value of __executed.input is expected to equal the value of __expected.input' );",
           "null_deref:L#:## dereferencing a null pointer [in test()]",
-          "other:L#:## Codegen error: standalone RegExp engine does not support RegExp.prototype.exec argument coercion (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone.",
-          "assertion_fail:returned # — assert ## at L#: verifyProperty(RegExp.prototype.exec, \"name\", { value: \"exec\", writable: false, enumerable: false, configurable: true });"
+          "assertion_fail:returned # — assert ## at L#: verifyProperty(RegExp.prototype.exec, \"name\", { value: \"exec\", writable: false, enumerable: false, configurable: true });",
+          "other:L#:## Codegen error: standalone RegExp engine does not support RegExp.prototype.exec argument coercion (## Phase 2a). Use a supported pattern/flag set, or recompile without --target standalone."
         ]
       },
       {
@@ -1602,15 +1602,15 @@
         "sample_files": [
           "test/language/statements/class/accessor-name-static/literal-string-empty.js",
           "test/language/statements/class/cpn-class-decl-accessors-computed-property-name-from-assignment-expression-assignment.js",
-          "test/language/statements/class/cpn-class-decl-computed-property-name-from-string-literal.js",
           "test/language/statements/class/cpn-class-decl-fields-methods-computed-property-name-from-math.js",
+          "test/language/statements/class/cpn-class-decl-computed-property-name-from-string-literal.js",
           "test/language/statements/class/definition/methods-gen-yield-as-generator-method-binding-identifier.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(C[''], 'get string');",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(x, #);",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue( c['#'](), '#' );",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( c[# + # - # * # / # ** #](), # );",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue( c['#'](), '#' );",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(result.done, false, 'First result `done` flag');"
         ]
       },
@@ -1678,15 +1678,15 @@
         },
         "sample_files": [
           "test/built-ins/ArrayBuffer/options-maxbytelength-data-allocation-after-object-creation.js",
-          "test/built-ins/Reflect/ownKeys/return-non-enumerable-keys.js",
           "test/built-ins/Reflect/get/return-abrupt-from-property-key.js",
+          "test/built-ins/Reflect/ownKeys/return-non-enumerable-keys.js",
           "test/built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js",
           "test/built-ins/Reflect/getOwnPropertyDescriptor/return-abrupt-from-property-key.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
-          "assertion_fail:returned # — assert ## at L#: assert.compareArray( Reflect.ownKeys([]), ['length'], 'return non enumerable `length` from empty array' );",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
+          "assertion_fail:returned # — assert ## at L#: assert.compareArray( Reflect.ownKeys([]), ['length'], 'return non enumerable `length` from empty array' );",
           "other:L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Ph",
           "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C)."
         ]
@@ -1786,17 +1786,17 @@
         "count": 6351,
         "statuses": {
           "pass": 0,
-          "fail": 1409,
-          "compile_error": 4939,
+          "fail": 1411,
+          "compile_error": 4937,
           "compile_timeout": 3,
           "skip": 0,
           "total": 6351
         },
         "error_categories": {
-          "wasm_compile": 787,
-          "assertion_fail": 812,
+          "wasm_compile": 789,
+          "assertion_fail": 814,
           "negative_test_fail": 13,
-          "other": 3847,
+          "other": 3843,
           "runtime_error": 547,
           "null_deref": 136,
           "oob": 73,
