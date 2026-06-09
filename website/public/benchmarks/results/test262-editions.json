@@ -1,30 +1,30 @@
 [
   {
     "edition": "≤ ES3",
-    "pass": 241,
-    "fail": 31,
-    "ce": 2,
+    "pass": 242,
+    "fail": 32,
+    "ce": 0,
     "skip": 0,
     "total": 274,
     "pct": 88
   },
   {
     "edition": "ES5",
-    "pass": 9365,
-    "fail": 3317,
-    "ce": 404,
+    "pass": 9396,
+    "fail": 3333,
+    "ce": 357,
     "skip": 0,
     "total": 13086,
     "pct": 72
   },
   {
     "edition": "ES2015",
-    "pass": 10490,
-    "fail": 4559,
-    "ce": 348,
+    "pass": 10581,
+    "fail": 4590,
+    "ce": 226,
     "skip": 0,
     "total": 15397,
-    "pct": 68
+    "pct": 69
   },
   {
     "edition": "ES2016",
@@ -37,99 +37,99 @@
   },
   {
     "edition": "ES2017",
-    "pass": 447,
-    "fail": 168,
-    "ce": 52,
+    "pass": 449,
+    "fail": 169,
+    "ce": 49,
     "skip": 0,
     "total": 667,
     "pct": 67
   },
   {
     "edition": "ES2018",
-    "pass": 3403,
-    "fail": 762,
-    "ce": 86,
+    "pass": 3412,
+    "fail": 765,
+    "ce": 74,
     "skip": 0,
     "total": 4251,
     "pct": 80
   },
   {
     "edition": "ES2019",
-    "pass": 82,
-    "fail": 50,
-    "ce": 4,
+    "pass": 83,
+    "fail": 51,
+    "ce": 2,
     "skip": 0,
     "total": 136,
-    "pct": 60
+    "pct": 61
   },
   {
     "edition": "ES2020",
-    "pass": 1417,
-    "fail": 379,
-    "ce": 87,
+    "pass": 1425,
+    "fail": 381,
+    "ce": 77,
     "skip": 18,
     "total": 1901,
     "pct": 75
   },
   {
     "edition": "ES2021",
-    "pass": 313,
+    "pass": 319,
     "fail": 136,
-    "ce": 14,
+    "ce": 8,
     "skip": 0,
     "total": 463,
-    "pct": 68
+    "pct": 69
   },
   {
     "edition": "ES2022",
-    "pass": 3058,
-    "fail": 1081,
-    "ce": 95,
+    "pass": 3066,
+    "fail": 1082,
+    "ce": 86,
     "skip": 0,
     "total": 4234,
     "pct": 72
   },
   {
     "edition": "ES2023",
-    "pass": 207,
+    "pass": 212,
     "fail": 108,
-    "ce": 19,
+    "ce": 14,
     "skip": 0,
     "total": 334,
-    "pct": 62
+    "pct": 63
   },
   {
     "edition": "ES2024",
-    "pass": 434,
-    "fail": 179,
-    "ce": 32,
+    "pass": 441,
+    "fail": 180,
+    "ce": 24,
     "skip": 0,
     "total": 645,
-    "pct": 67
+    "pct": 68
   },
   {
     "edition": "ES2025",
-    "pass": 913,
-    "fail": 346,
-    "ce": 16,
+    "pass": 921,
+    "fail": 350,
+    "ce": 4,
     "skip": 0,
     "total": 1275,
     "pct": 72
   },
   {
     "edition": "ES2026",
-    "pass": 157,
-    "fail": 184,
-    "ce": 8,
+    "pass": 158,
+    "fail": 186,
+    "ce": 5,
     "skip": 0,
     "total": 349,
     "pct": 45
   },
   {
     "edition": "Proposals",
-    "pass": 1380,
-    "fail": 3222,
-    "ce": 284,
+    "pass": 1392,
+    "fail": 3265,
+    "ce": 229,
     "skip": 96,
     "total": 4982,
     "pct": 28
