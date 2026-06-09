@@ -2911,13 +2911,15 @@ function compileCallExpression(
           //     the borrowed receiver to a native string ($NativeString brand)
           //     and emits the __str_* fast path. The covered method set is the
           //     ones whose native helper round-trips correctly (see below).
-          //   - Object.hasOwnProperty: synthesise the bare call, which already
-          //     has a clean native standalone path (compilePropertyIntrospection
-          //     → __hasOwnProperty). Other Object methods (isPrototypeOf /
-          //     propertyIsEnumerable / valueOf) and Array/Number/Boolean/Function
-          //     have no clean native borrowed path yet → refuse-loud below
-          //     (Array brand arm rides on #6407; isPrototypeOf bare-path leak is
-          //     a separate follow-on). Never a silent-wrong answer.
+          //   - Object.hasOwnProperty/propertyIsEnumerable: synthesise the bare
+          //     call, which already has a clean native standalone path
+          //     (compilePropertyIntrospection → __hasOwnProperty /
+          //     __propertyIsEnumerable) while preserving closed class-struct
+          //     field/method semantics.
+          //   - Object.isPrototypeOf: route directly to the native open-object
+          //     prototype-chain helper. Array/Number/Boolean/Function have no
+          //     clean native borrowed path yet → refuse-loud below (Array brand
+          //     arm rides on #6407). Never a silent-wrong answer.
           if (ctx.standalone && expr.arguments.length >= 1 && !isBuiltinRegExpPrototype) {
             // Native String methods whose __str_* helper + return marshaling
             // round-trip correctly standalone (verified end-to-end). Methods
@@ -2962,12 +2964,39 @@ function compileCallExpression(
               if (strResult !== null) return strResult;
               // Native string path declined (unexpected shape) — fall through
               // to the refuse-loud below rather than the host import.
-            } else if (typeName === "Object" && methodName === "hasOwnProperty") {
-              // Object.prototype.hasOwnProperty.call(o, k) → o.hasOwnProperty(k),
-              // which routes to the native __hasOwnProperty (own-only presence).
+            } else if (
+              typeName === "Object" &&
+              (methodName === "hasOwnProperty" || methodName === "propertyIsEnumerable")
+            ) {
+              // Object.prototype.{hasOwnProperty,propertyIsEnumerable}.call(o, k)
+              // → o.<method>(k), which routes through compilePropertyIntrospection.
               const { prop, call } = synthesizeBorrowedCall();
-              const hasOwnResult = compilePropertyIntrospection(ctx, fctx, prop, call);
-              if (hasOwnResult !== null) return hasOwnResult;
+              const introspectionResult = compilePropertyIntrospection(ctx, fctx, prop, call);
+              if (introspectionResult !== null) return introspectionResult;
+            } else if (typeName === "Object" && methodName === "isPrototypeOf") {
+              const protoIdx = ensureLateImport(
+                ctx,
+                "__isPrototypeOf",
+                [{ kind: "externref" }, { kind: "externref" }],
+                [{ kind: "i32" }],
+              );
+              flushLateImportShifts(ctx, fctx);
+              if (protoIdx !== undefined) {
+                const receiverType = compileExpression(ctx, fctx, expr.arguments[0]!);
+                if (receiverType && receiverType.kind !== "externref") {
+                  coerceType(ctx, fctx, receiverType, { kind: "externref" });
+                }
+                if (expr.arguments[1]) {
+                  const candidateType = compileExpression(ctx, fctx, expr.arguments[1]!);
+                  if (candidateType && candidateType.kind !== "externref") {
+                    coerceType(ctx, fctx, candidateType, { kind: "externref" });
+                  }
+                } else {
+                  fctx.body.push({ op: "ref.null.extern" });
+                }
+                fctx.body.push({ op: "call", funcIdx: protoIdx });
+                return { kind: "i32" };
+              }
             }
 
             // Unsupported (typeName, methodName) under standalone: refuse-loud,
@@ -2976,7 +3005,7 @@ function compileCallExpression(
               typeName === "Array"
                 ? "the Array brand arm rides on #6407 ($Vec element retrieval)"
                 : typeName === "Object"
-                  ? "only Object.prototype.hasOwnProperty.call is wired (isPrototypeOf/propertyIsEnumerable/valueOf are a follow-on)"
+                  ? "only Object.prototype hasOwnProperty/propertyIsEnumerable/isPrototypeOf borrowed calls are wired (valueOf is a follow-on)"
                   : "this prototype's borrowed-method brand arm is not yet native";
             reportError(
               ctx,
