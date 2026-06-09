@@ -10,8 +10,8 @@
   },
   {
     "edition": "ES5",
-    "pass": 9396,
-    "fail": 3333,
+    "pass": 9394,
+    "fail": 3335,
     "ce": 357,
     "skip": 0,
     "total": 13086,
@@ -83,8 +83,8 @@
   {
     "edition": "ES2022",
     "pass": 3066,
-    "fail": 1082,
-    "ce": 86,
+    "fail": 1083,
+    "ce": 85,
     "skip": 0,
     "total": 4234,
     "pct": 72
@@ -118,12 +118,12 @@
   },
   {
     "edition": "ES2026",
-    "pass": 158,
-    "fail": 186,
+    "pass": 161,
+    "fail": 183,
     "ce": 5,
     "skip": 0,
     "total": 349,
-    "pct": 45
+    "pct": 46
   },
   {
     "edition": "Proposals",
