@@ -57,11 +57,23 @@ describe("issue #661 - minimal native Temporal API", () => {
         return Temporal.Duration.from("P1Y2M3W4DT5H6M7.00800901S").toString();
       }
       export function added(): string {
-        return new Temporal.Duration(1, 0, 0, 2).add({ months: 3, days: 4 }).toString();
+        // Duration.add/subtract reject calendar units (years/months/weeks)
+        // per the spec (no relativeTo support) — test262
+        // built-ins/Temporal/Duration/prototype/subtract/no-calendar-units.
+        return new Temporal.Duration(0, 0, 0, 2).add({ hours: 3, days: 4 }).toString();
+      }
+      export function calendarUnitsThrow(): number {
+        try {
+          new Temporal.Duration(1, 0, 0, 2).add({ months: 3, days: 4 });
+        } catch (e) {
+          return 1;
+        }
+        return 0;
       }
     `);
     expect(exports.parsed!()).toBe("P1Y2M3W4DT5H6M7.00800901S");
-    expect(exports.added!()).toBe("P1Y3M6D");
+    expect(exports.added!()).toBe("P6DT3H");
+    expect(exports.calendarUnitsThrow!()).toBe(1);
   });
 
   it("provides deterministic Temporal.Now.plainDateISO", async () => {

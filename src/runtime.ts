@@ -4641,52 +4641,365 @@ function _temporalPlainTimeToString(
   return trimmed.length > 0 ? `${base}.${trimmed}` : base;
 }
 
+// ---- Temporal ISO 8601 / RFC 9557 strict string parsing (#661 / PR #1274) ----
+//
+// Spec-first implementation of the string grammar from tc39/proposal-temporal:
+//   - "RFC 9557 / ISO 8601 grammar" (sec-temporal-iso8601grammar), incl. the
+//     early errors: DateYear "-000000" is a Syntax Error; IsValidDate rejects
+//     impossible month/day combos and Feb 29 in non-leap years.
+//   - ParseISODateTime (sec-temporal-parseisodatetime): annotation handling —
+//     a second `u-ca` calendar annotation throws RangeError when either has
+//     the `!` critical flag; any unknown annotation key with the critical
+//     flag throws RangeError; TimeSecond 60 is clamped to 59.
+//   - ParseTemporalDurationString (sec-temporal-parsetemporaldurationstring):
+//     fractions only on the smallest present time unit, 1-9 digits, period
+//     or comma; fractional hours/minutes/seconds balance into smaller units;
+//     magnitudes are floored before the sign factor is applied.
+//   - IsValidDuration (sec-temporal-isvalidduration): mixed signs are
+//     invalid; |years|/|months|/|weeks| must be < 2^32; the normalized
+//     nanosecond total must be < 10^9 * 2^53 (computed exactly via BigInt
+//     per the spec NOTE about 64-bit float imprecision).
+//
+// Grammar fragments (sec-temporal-iso8601grammar). Each of the date, time,
+// and offset parts may independently use basic (no separators) or extended
+// (mandatory separators) format.
+const _tYearSrc = "(\\d{4}|[+-]\\d{6})";
+const _tMonthSrc = "(0[1-9]|1[0-2])";
+const _tDaySrc = "(0[1-9]|[12]\\d|3[01])";
+const _tHourSrc = "([01]\\d|2[0-3])";
+const _tMinuteSrc = "([0-5]\\d)";
+const _tSecondSrc = "([0-5]\\d|60)";
+const _tFracSrc = "(?:[.,](\\d{1,9}))";
+const _tDateExtSrc = `${_tYearSrc}-${_tMonthSrc}-${_tDaySrc}`;
+const _tDateBasicSrc = `${_tYearSrc}${_tMonthSrc}${_tDaySrc}`;
+const _tTimeExtSrc = `${_tHourSrc}(?::${_tMinuteSrc}(?::${_tSecondSrc}${_tFracSrc}?)?)?`;
+const _tTimeBasicSrc = `${_tHourSrc}(?:${_tMinuteSrc}(?:${_tSecondSrc}${_tFracSrc}?)?)?`;
+// UTCOffset[+SubMinutePrecision] — parsed for validity, value ignored.
+const _tOffsetSrc =
+  "[+-](?:[01]\\d|2[0-3])(?::[0-5]\\d(?::[0-5]\\d(?:[.,]\\d{1,9})?)?|[0-5]\\d(?:[0-5]\\d(?:[.,]\\d{1,9})?)?)?";
+// TimeZoneAnnotation ::: `[` `!`? (UTCOffset[~SubMinutePrecision] | TimeZoneIANAName) `]`
+const _tTzAnnotationRe = new RegExp(
+  "^\\[!?(?:[+-](?:[01]\\d|2[0-3])(?::?[0-5]\\d)?|[A-Za-z._][A-Za-z._0-9+-]*(?:\\/[A-Za-z._][A-Za-z._0-9+-]*)*)\\]$",
+);
+// Annotation ::: `[` `!`? AnnotationKey `=` AnnotationValue `]`
+const _tAnnotationRe = /^\[(!?)([a-z_][a-z0-9_-]*)=([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)\]$/;
+const _tBracketSplitRe = /\[[^\]]*\]/g;
+
+/**
+ * Validate the bracketed suffix of an ISO string per the grammar
+ * `TimeZoneAnnotation? Annotations?` and the ParseISODateTime annotation
+ * rules (duplicate critical u-ca, unknown critical key). Throws RangeError.
+ */
+function _temporalValidateBrackets(suffix: string): void {
+  if (suffix.length === 0) return;
+  const brackets = suffix.match(_tBracketSplitRe) ?? [];
+  if (brackets.join("") !== suffix) throw new RangeError("invalid annotation syntax in Temporal string");
+  let calendar: string | undefined;
+  let calendarWasCritical = false;
+  for (let i = 0; i < brackets.length; i++) {
+    const bracket = brackets[i]!;
+    if (i === 0 && _tTzAnnotationRe.test(bracket) && !_tAnnotationRe.test(bracket)) {
+      continue; // single leading TimeZoneAnnotation
+    }
+    const annotation = _tAnnotationRe.exec(bracket);
+    if (!annotation) throw new RangeError("invalid annotation in Temporal string");
+    const critical = annotation[1] === "!";
+    const key = annotation[2]!;
+    if (key === "u-ca") {
+      if (calendar === undefined) {
+        calendar = annotation[3]!;
+        calendarWasCritical = critical;
+      } else if (critical || calendarWasCritical) {
+        throw new RangeError("duplicate critical calendar annotation in Temporal string");
+      }
+    } else if (critical) {
+      throw new RangeError(`unknown critical annotation key "${key}" in Temporal string`);
+    }
+  }
+  // CanonicalizeCalendar / CalendarFromIdentifier: an unrecognized calendar
+  // type is a RangeError. Recognized set = CLDR/BCP 47 calendar types used
+  // by test262 (ASCII case-insensitive).
+  if (calendar !== undefined && !_temporalKnownCalendars.has(calendar.toLowerCase())) {
+    throw new RangeError(`unknown calendar "${calendar}" in Temporal string`);
+  }
+}
+
+const _temporalKnownCalendars = new Set([
+  "iso8601",
+  "buddhist",
+  "chinese",
+  "coptic",
+  "dangi",
+  "ethioaa",
+  "ethiopic",
+  "ethiopic-amete-alem",
+  "gregory",
+  "hebrew",
+  "indian",
+  "islamic",
+  "islamic-civil",
+  "islamic-rgsa",
+  "islamic-tbla",
+  "islamic-umalqura",
+  "islamicc",
+  "japanese",
+  "persian",
+  "roc",
+]);
+
+/** IsValidDate (sec-temporal-iso8601grammar-static-semantics-isvaliddate). */
+function _temporalCheckDateValid(yearText: string, year: number, month: number, day: number): void {
+  if (yearText === "-000000") throw new RangeError("Temporal year -000000 is not allowed");
+  if (day === 31 && (month === 2 || month === 4 || month === 6 || month === 9 || month === 11)) {
+    throw new RangeError("invalid day of month in Temporal string");
+  }
+  if (month === 2 && day === 30) throw new RangeError("invalid day of month in Temporal string");
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  if (month === 2 && day === 29 && !leap) throw new RangeError("invalid day of month in Temporal string");
+}
+
+/** ParseISODateTime fraction handling: 1-9 digits padded to ms/us/ns. */
+function _temporalFractionParts(frac: string | undefined): [number, number, number] {
+  const padded = (frac ?? "").padEnd(9, "0");
+  return [Number(padded.slice(0, 3) || "0"), Number(padded.slice(3, 6) || "0"), Number(padded.slice(6, 9) || "0")];
+}
+
+const _tPlainDateRe = new RegExp(
+  `^(?:${_tDateExtSrc}|${_tDateBasicSrc})(?:[Tt ](?:${_tTimeExtSrc}|${_tTimeBasicSrc})(${_tOffsetSrc}|[Zz])?)?`,
+);
+
+/**
+ * ToTemporalDate(string) → ParseISODateTime with TemporalDateTimeString[~Zoned]
+ * (sec-temporal-totemporaldate / sec-temporal-parseisodatetime). The [~Zoned]
+ * goal has no UTCDesignator alternative, so a `Z`/`z` suffix is a RangeError.
+ */
+/**
+ * ToTemporalDate / ToTemporalTime / ToTemporalDuration accept only Objects
+ * (property bags, handled at compile time) or Strings here; any other
+ * primitive is a TypeError before parsing (e.g. PlainDate.from(19761118)).
+ * Dynamic (non-literal) object bags are not supported by the minimal native
+ * lowering — they also throw here, as they did before strict parsing.
+ */
+function _temporalRequireString(item: any, what: string): string {
+  if (typeof item !== "string") {
+    throw new TypeError(`${what} must be a string or property bag, not ${typeof item}`);
+  }
+  return item;
+}
+
 function _temporalParsePlainDate(item: any): [number, number, number] {
-  const text = String(item);
-  const match = /^([+-]?\d{4,6})-(\d{2})-(\d{2})/.exec(text);
-  if (!match) throw new RangeError("invalid Temporal.PlainDate string");
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
+  const text = _temporalRequireString(item, "Temporal.PlainDate argument");
+  const bracketStart = text.indexOf("[");
+  const core = bracketStart < 0 ? text : text.slice(0, bracketStart);
+  const suffix = bracketStart < 0 ? "" : text.slice(bracketStart);
+  const match = _tPlainDateRe.exec(core);
+  if (!match || match[0] !== core) throw new RangeError("invalid Temporal.PlainDate string");
+  const yearText = match[1] ?? match[4]!;
+  // Groups: date-ext 1-3, date-basic 4-6, time-ext 7-10, time-basic 11-14, offset/Z 15.
+  const offsetOrZ = match[15];
+  if (offsetOrZ === "Z" || offsetOrZ === "z") {
+    throw new RangeError("UTC designator Z is not valid for Temporal.PlainDate");
+  }
+  _temporalValidateBrackets(suffix);
+  const year = Number(yearText);
+  const month = Number(match[2] ?? match[5]!);
+  const day = Number(match[3] ?? match[6]!);
+  _temporalCheckDateValid(yearText, year, month, day);
+  // ISODateTimeWithinLimits / ISODateWithinLimits: the representable
+  // PlainDate range is -271821-04-19 .. +275760-09-13 (epoch ±10^8 days).
+  if (
+    year < -271821 ||
+    year > 275760 ||
+    (year === -271821 && (month < 4 || (month === 4 && day < 19))) ||
+    (year === 275760 && (month > 9 || (month === 9 && day > 13)))
+  ) {
+    throw new RangeError("Temporal.PlainDate is outside the representable range");
+  }
+  return [year, month, day];
 }
 
 function _temporalPlainDateFromStringField(item: any, field: any): number {
   return _temporalParsePlainDate(item)[_temporalTrunc(field)] ?? 0;
 }
 
+const _tPlainTimeDateTimeRe = new RegExp(
+  `^(?:${_tDateExtSrc}|${_tDateBasicSrc})[Tt ](?:${_tTimeExtSrc}|${_tTimeBasicSrc})(${_tOffsetSrc}|[Zz])?$`,
+);
+const _tPlainTimeOnlyRe = new RegExp(`^([Tt])?(?:${_tTimeExtSrc}|${_tTimeBasicSrc})(${_tOffsetSrc}|[Zz])?$`);
+// Early errors for AnnotatedTime without a TimeDesignator: the source text
+// must not also parse as DateSpecMonthDay or DateSpecYearMonth.
+const _tMonthDayAmbiguityRe = /^(?:--)?(?:0[1-9]|1[0-2])-?(?:0[1-9]|[12]\d|3[01])$/;
+const _tYearMonthAmbiguityRe = /^(?:\d{4}|[+-]\d{6})-?(?:0[1-9]|1[0-2])$/;
+
+/**
+ * ToTemporalTime(string) → ParseTemporalTimeString with
+ * TemporalTimeString ::: AnnotatedTime | AnnotatedDateTime[~Zoned, +TimeRequired]
+ * (sec-temporal-iso8601grammar). Z is rejected ([~Z] / [~Zoned]); a
+ * date-only string is rejected (+TimeRequired); TimeSecond 60 clamps to 59
+ * (ParseISODateTime).
+ */
 function _temporalParsePlainTime(item: any): [number, number, number, number, number, number] {
-  const text = String(item);
-  const match = /^(?:T)?(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?/.exec(text);
-  if (!match) throw new RangeError("invalid Temporal.PlainTime string");
-  const fraction = (match[4] ?? "").padEnd(9, "0");
-  return [
-    Number(match[1]),
-    Number(match[2]),
-    match[3] === undefined ? 0 : Number(match[3]),
-    Number(fraction.slice(0, 3) || "0"),
-    Number(fraction.slice(3, 6) || "0"),
-    Number(fraction.slice(6, 9) || "0"),
-  ];
+  const text = _temporalRequireString(item, "Temporal.PlainTime argument");
+  const bracketStart = text.indexOf("[");
+  const core = bracketStart < 0 ? text : text.slice(0, bracketStart);
+  const suffix = bracketStart < 0 ? "" : text.slice(bracketStart);
+  _temporalValidateBrackets(suffix);
+
+  let hour: string | undefined;
+  let minute: string | undefined;
+  let second: string | undefined;
+  let frac: string | undefined;
+  let offsetOrZ: string | undefined;
+
+  const dt = _tPlainTimeDateTimeRe.exec(core);
+  if (dt) {
+    const yearText = dt[1] ?? dt[4]!;
+    _temporalCheckDateValid(yearText, Number(yearText), Number(dt[2] ?? dt[5]!), Number(dt[3] ?? dt[6]!));
+    hour = dt[7] ?? dt[11];
+    minute = dt[8] ?? dt[12];
+    second = dt[9] ?? dt[13];
+    frac = dt[10] ?? dt[14];
+    offsetOrZ = dt[15];
+  } else {
+    const t = _tPlainTimeOnlyRe.exec(core);
+    if (!t) throw new RangeError("invalid Temporal.PlainTime string");
+    const designator = t[1];
+    hour = t[2] ?? t[6];
+    minute = t[3] ?? t[7];
+    second = t[4] ?? t[8];
+    frac = t[5] ?? t[9];
+    offsetOrZ = t[10];
+    if (!designator) {
+      const timeAndOffset = core;
+      if (_tMonthDayAmbiguityRe.test(timeAndOffset) || _tYearMonthAmbiguityRe.test(timeAndOffset)) {
+        throw new RangeError("ambiguous Temporal.PlainTime string");
+      }
+    }
+  }
+  if (offsetOrZ === "Z" || offsetOrZ === "z") {
+    throw new RangeError("UTC designator Z is not valid for Temporal.PlainTime");
+  }
+  let secondNum = second === undefined ? 0 : Number(second);
+  if (secondNum === 60) secondNum = 59;
+  const [ms, us, ns] = _temporalFractionParts(frac);
+  return [Number(hour ?? "0"), minute === undefined ? 0 : Number(minute), secondNum, ms, us, ns];
 }
 
 function _temporalPlainTimeFromStringField(item: any, field: any): number {
   return _temporalParsePlainTime(item)[_temporalTrunc(field)] ?? 0;
 }
 
+/** IsValidDuration (sec-temporal-isvalidduration). */
+function _temporalIsValidDuration(values: readonly number[]): boolean {
+  let sign = 0;
+  for (const v of values) {
+    if (!Number.isFinite(v)) return false;
+    if (v < 0) {
+      if (sign > 0) return false;
+      sign = -1;
+    } else if (v > 0) {
+      if (sign < 0) return false;
+      sign = 1;
+    }
+  }
+  const TWO_32 = 4294967296;
+  if (Math.abs(values[0]!) >= TWO_32 || Math.abs(values[1]!) >= TWO_32 || Math.abs(values[2]!) >= TWO_32) {
+    return false;
+  }
+  // Normalized nanoseconds, computed exactly with BigInt per the spec NOTE.
+  try {
+    const big = (n: number): bigint => BigInt(n);
+    const total =
+      big(values[3]!) * 86400000000000n +
+      big(values[4]!) * 3600000000000n +
+      big(values[5]!) * 60000000000n +
+      big(values[6]!) * 1000000000n +
+      big(values[7]!) * 1000000n +
+      big(values[8]!) * 1000n +
+      big(values[9]!);
+    const limit = 1000000000n * 9007199254740992n; // 10^9 * 2^53
+    const abs = total < 0n ? -total : total;
+    if (abs >= limit) return false;
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+const _tDurationRe =
+  /^([+-])?[Pp](?:(\d+)[Yy])?(?:(\d+)[Mm])?(?:(\d+)[Ww])?(?:(\d+)[Dd])?(?:([Tt])(?:(\d+)(?:[.,](\d{1,9}))?[Hh])?(?:(\d+)(?:[.,](\d{1,9}))?[Mm])?(?:(\d+)(?:[.,](\d{1,9}))?[Ss])?)?$/;
+
+/**
+ * ParseTemporalDurationString (sec-temporal-parsetemporaldurationstring).
+ * The grammar requires at least one unit, a time unit after `T`, and allows
+ * a fraction only on the smallest (last) present time unit. Fractional
+ * hours/minutes/seconds balance into smaller units; magnitudes are floored
+ * before the sign factor. The result must satisfy IsValidDuration.
+ */
 function _temporalParseDuration(item: any): number[] {
-  const text = String(item);
-  const match =
-    /^([+-])?P(?:(\d+(?:\.\d+)?)Y)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)W)?(?:(\d+(?:\.\d+)?)D)?(?:T(?:(\d+(?:\.\d+)?)H)?(?:(\d+(?:\.\d+)?)M)?(?:(\d+(?:\.\d+)?)S)?)?$/i.exec(
-      text,
-    );
+  const text = _temporalRequireString(item, "Temporal.Duration argument");
+  const match = _tDurationRe.exec(text);
   if (!match) throw new RangeError("invalid Temporal.Duration string");
-  const sign = match[1] === "-" ? -1 : 1;
-  const values = match.slice(2).map((part) => (part === undefined ? 0 : Number(part) * sign));
-  const secondsWhole = Math.trunc(values[6] ?? 0);
-  const secondFraction = Math.abs((values[6] ?? 0) - secondsWhole);
-  const fractionalNs = Math.round(secondFraction * 1_000_000_000) * sign;
-  values[6] = secondsWhole;
-  values[7] = Math.trunc(fractionalNs / 1_000_000);
-  values[8] = Math.trunc((fractionalNs % 1_000_000) / 1_000);
-  values[9] = fractionalNs % 1_000;
+  const [, signText, years, months, weeks, days, timeDesignator, hours, fHours, minutes, fMinutes, seconds, fSeconds] =
+    match;
+  const hasDatePart = years !== undefined || months !== undefined || weeks !== undefined || days !== undefined;
+  const hasTimePart = hours !== undefined || minutes !== undefined || seconds !== undefined;
+  if (!hasDatePart && !hasTimePart) throw new RangeError("invalid Temporal.Duration string");
+  if (timeDesignator !== undefined && !hasTimePart) throw new RangeError("invalid Temporal.Duration string");
+  // Grammar: DurationHoursPart with a fraction admits no minutes/seconds;
+  // DurationMinutesPart with a fraction admits no seconds.
+  if (fHours !== undefined && (minutes !== undefined || seconds !== undefined)) {
+    throw new RangeError("invalid Temporal.Duration string: fraction is only allowed on the smallest unit");
+  }
+  if (fMinutes !== undefined && seconds !== undefined) {
+    throw new RangeError("invalid Temporal.Duration string: fraction is only allowed on the smallest unit");
+  }
+  const toInt = (digits: string | undefined): number => (digits === undefined || digits === "" ? 0 : Number(digits));
+  const yearsMV = toInt(years);
+  const monthsMV = toInt(months);
+  const weeksMV = toInt(weeks);
+  const daysMV = toInt(days);
+  const hoursMV = toInt(hours);
+  // The spec computes the fractional balancing with exact mathematical
+  // values. Equivalent here: convert the single fractional part to an exact
+  // integer count of nanoseconds (the division is exact because 10^scale
+  // with scale <= 9 divides unit * 10^11), then distribute by integer
+  // division — this matches floor(minutesMV), remainder(...)*60, etc.
+  const exactFracNs = (digits: string, unitNs: bigint): number =>
+    Number((BigInt(digits) * unitNs) / 10n ** BigInt(digits.length));
+  let minutesMV = toInt(minutes);
+  let secondsMV = seconds !== undefined ? toInt(seconds) : 0;
+  let remNs = 0;
+  if (fHours !== undefined) {
+    let fracNs = exactFracNs(fHours, 3600000000000n);
+    minutesMV = Math.floor(fracNs / 60000000000);
+    fracNs %= 60000000000;
+    secondsMV = Math.floor(fracNs / 1000000000);
+    remNs = fracNs % 1000000000;
+  } else if (fMinutes !== undefined) {
+    const fracNs = exactFracNs(fMinutes, 60000000000n);
+    secondsMV = Math.floor(fracNs / 1000000000);
+    remNs = fracNs % 1000000000;
+  } else if (fSeconds !== undefined) {
+    remNs = exactFracNs(fSeconds, 1000000000n);
+  }
+  const millisecondsMV = Math.floor(remNs / 1000000);
+  const microsecondsMV = Math.floor((remNs % 1000000) / 1000);
+  const nanosecondsMV = remNs % 1000;
+  const factor = signText === "-" ? -1 : 1;
+  const values = [
+    yearsMV * factor,
+    monthsMV * factor,
+    weeksMV * factor,
+    daysMV * factor,
+    hoursMV * factor,
+    minutesMV * factor,
+    secondsMV * factor,
+    millisecondsMV * factor,
+    microsecondsMV * factor,
+    nanosecondsMV * factor,
+  ];
+  if (!_temporalIsValidDuration(values)) throw new RangeError("Temporal.Duration out of range");
   return values;
 }
 
