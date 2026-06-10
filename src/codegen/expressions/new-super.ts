@@ -42,6 +42,7 @@ import {
   registerCompileSuperPropertyAccess,
   registerResolveEnclosingClassName,
 } from "../shared.js";
+import { maybeSetArgcForKnownCall } from "../statements/nested-declarations.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { coerceType as coerceTypeImpl, pushDefaultValue } from "../type-coercion.js";
 import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
@@ -63,6 +64,32 @@ function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
   const underscoreIdx = fctx.name.indexOf("_");
   if (underscoreIdx > 0) return fctx.name.substring(0, underscoreIdx);
   return undefined;
+}
+
+function valTypeMatches(a: ValType, b: ValType): boolean {
+  if (a.kind !== b.kind) return false;
+  if ((a.kind === "ref" || a.kind === "ref_null") && (b.kind === "ref" || b.kind === "ref_null")) {
+    return a.typeIdx === b.typeIdx;
+  }
+  return true;
+}
+
+function compileCtorArgument(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression, expected?: ValType): void {
+  const result = compileExpression(ctx, fctx, arg, expected);
+  if (result === null) {
+    if (expected) pushDefaultValue(fctx, expected, ctx);
+    return;
+  }
+  if (expected && !valTypeMatches(result, expected)) {
+    coerceType(ctx, fctx, result, expected);
+  }
+}
+
+function evaluateCtorExtraArgument(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
+  const result = compileExpression(ctx, fctx, arg);
+  if (result !== null) {
+    fctx.body.push({ op: "drop" });
+  }
 }
 
 /**
@@ -307,6 +334,7 @@ function compileSuperMethodCall(ctx: CodegenContext, fctx: FunctionContext, expr
   // Re-lookup funcIdx: argument compilation may trigger addUnionImports
   const resolvedName = `${ancestor}_${methodName}`;
   const finalSuperIdx = ctx.funcMap.get(resolvedName) ?? funcIdx;
+  maybeSetArgcForKnownCall(ctx, fctx, resolvedName, expr.arguments.length, superParamCount);
   fctx.body.push({ op: "call", funcIdx: finalSuperIdx });
 
   // Determine return type
@@ -400,6 +428,7 @@ function compileSuperElementMethodCall(
   // Re-lookup funcIdx: argument compilation may trigger addUnionImports
   const resolvedName = `${ancestor}_${methodName}`;
   const finalSuperIdx = ctx.funcMap.get(resolvedName) ?? funcIdx;
+  maybeSetArgcForKnownCall(ctx, fctx, resolvedName, expr.arguments.length, superElemParamCount);
   fctx.body.push({ op: "call", funcIdx: finalSuperIdx });
 
   // Determine return type
@@ -1016,6 +1045,7 @@ function compileNewFunctionDeclaration(
   }
   // Re-lookup funcIdx in case addUnionImports shifted indices
   const finalCtorIdx = ctx.funcMap.get(ctorName) ?? ctorFuncIdx;
+  maybeSetArgcForKnownCall(ctx, fctx, ctorName, args.length, paramTypes?.length ?? args.length);
   fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
   return { kind: "ref", typeIdx: structTypeIdx };
 }
@@ -2554,6 +2584,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
             pushDefaultValue(fctx, paramTypes[i]!, ctx);
           }
         }
+        maybeSetArgcForKnownCall(ctx, fctx, cachedFnCtor.ctorFuncName, args.length, paramTypes?.length ?? args.length);
         fctx.body.push({ op: "call", funcIdx: ctorFuncIdx });
         return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
       }
@@ -2621,6 +2652,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           }
         }
         const finalIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName) ?? ctorFuncIdx;
+        maybeSetArgcForKnownCall(ctx, fctx, cachedFnCtor.ctorFuncName, args.length, paramTypes?.length ?? args.length);
         fctx.body.push({ op: "call", funcIdx: finalIdx });
         return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
       }
@@ -2920,6 +2952,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const paramTypes = getFuncParamTypes(ctx, funcIdx);
     const args = expr.arguments ?? [];
     const ctorRestInfo = ctx.funcRestParams.get(ctorName);
+    let ctorActualArgCount = args.length;
 
     // Check for spread arguments
     const hasSpreadCtorArg = args.some((a) => ts.isSpreadElement(a));
@@ -2927,8 +2960,12 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Flatten spread arguments for constructor call
       const flatCtorArgs = flattenCallArgs(args);
       if (flatCtorArgs) {
+        ctorActualArgCount = flatCtorArgs.length;
         for (let i = 0; i < flatCtorArgs.length && i < paramTypes.length; i++) {
-          compileExpression(ctx, fctx, flatCtorArgs[i]!, paramTypes[i]);
+          compileCtorArgument(ctx, fctx, flatCtorArgs[i]!, paramTypes[i]);
+        }
+        for (let i = paramTypes.length; i < flatCtorArgs.length; i++) {
+          evaluateCtorExtraArgument(ctx, fctx, flatCtorArgs[i]!);
         }
         // Pad missing args
         for (let i = flatCtorArgs.length; i < paramTypes.length; i++) {
@@ -2942,7 +2979,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Calling a rest-param constructor: pack trailing args into a GC array
       for (let i = 0; i < ctorRestInfo.restIndex; i++) {
         if (i < args.length) {
-          compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
+          compileCtorArgument(ctx, fctx, args[i]!, paramTypes?.[i]);
         } else {
           pushDefaultValue(fctx, paramTypes?.[i] ?? { kind: "f64" }, ctx);
         }
@@ -2951,7 +2988,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const restArgCount = Math.max(0, args.length - ctorRestInfo.restIndex);
       fctx.body.push({ op: "i32.const", value: restArgCount });
       for (let i = ctorRestInfo.restIndex; i < args.length; i++) {
-        compileExpression(ctx, fctx, args[i]!, ctorRestInfo.elemType);
+        compileCtorArgument(ctx, fctx, args[i]!, ctorRestInfo.elemType);
       }
       fctx.body.push({
         op: "array.new_fixed",
@@ -2960,8 +2997,12 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       });
       fctx.body.push({ op: "struct.new", typeIdx: ctorRestInfo.vecTypeIdx });
     } else {
-      for (let i = 0; i < args.length; i++) {
-        compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
+      const positionalParamCount = paramTypes?.length ?? args.length;
+      for (let i = 0; i < args.length && i < positionalParamCount; i++) {
+        compileCtorArgument(ctx, fctx, args[i]!, paramTypes?.[i]);
+      }
+      for (let i = positionalParamCount; i < args.length; i++) {
+        evaluateCtorExtraArgument(ctx, fctx, args[i]!);
       }
       // Pad missing constructor arguments with defaults (arity mismatch)
       if (paramTypes) {
@@ -2974,6 +3015,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // Re-lookup funcIdx: argument compilation may trigger addUnionImports
     // which shifts defined-function indices, making the earlier lookup stale.
     const finalCtorIdx = ctx.funcMap.get(ctorName) ?? funcIdx;
+    maybeSetArgcForKnownCall(ctx, fctx, ctorName, ctorActualArgCount, paramTypes?.length ?? ctorActualArgCount);
     fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
     // (#1366a) Externref-backed subclass instances (extends Error / TypeError
     // / ...) bubble up as externref, NOT as (ref $struct).

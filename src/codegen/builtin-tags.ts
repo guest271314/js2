@@ -178,14 +178,9 @@ export function getBuiltinParent(name: string): BuiltinTypeName | undefined {
  *     impls automatically (since the instance IS a real Array/Map/etc.), but
  *     methods that return "a new instance of the same kind" return the
  *     parent type, not Sub.
- *   - Default constructor `class Sub extends Array {}` does not forward
- *     `new Sub(5)`'s `5` argument to `super(5)` (Sub has 0 declared params,
- *     so callers truncate args to match). Explicit `constructor(x){super(x)}`
- *     is the supported pattern.
- *   - Multi-arg `super(a, b)` only passes the first arg today (the existing
- *     #1366a `compileSuperCall` builtin branch is single-arg). DataView's
- *     3-arg and RegExp's 2-arg forms thus don't fully work; deferred to a
- *     follow-up that pre-scans super arities.
+ *   - Dynamic spread (`super(...args)` or `new Sub(...args)`) only forwards up
+ *     to the parent constructor's statically known import arity. Array-literal
+ *     spread is flattened, but arbitrary iterable spreading is still deferred.
  */
 export const BUILTIN_PARENTS_HOST_CONSTRUCTIBLE: ReadonlySet<BuiltinTypeName> = new Set<BuiltinTypeName>([
   // #1366a — Error family

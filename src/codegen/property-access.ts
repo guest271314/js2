@@ -15,11 +15,13 @@ import { popBody } from "./context/bodies.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { emitCachedMethodClosureAccess, emitFuncRefAsClosure } from "./closures.js";
+import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
 import { emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
 import {
   classifyPrivateMember,
+  emitPrivateBrandPredicate,
   emitThrowTypeError,
+  noJsHost,
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
 import { patchStructNewForAddedField } from "./expressions/late-imports.js";
@@ -50,6 +52,54 @@ import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 import { tryEmitJsonParseElementAccess, tryEmitJsonParsePropertyAccess } from "./json-standalone.js";
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
+
+const BUILTIN_CTOR_NAMES = new Set([
+  "Object",
+  "Array",
+  "Function",
+  "Symbol",
+  "Proxy",
+  "Reflect",
+  "Math",
+  "BigInt",
+  "JSON",
+  "Date",
+  "RegExp",
+  "ArrayBuffer",
+  "SharedArrayBuffer",
+  "DataView",
+  "Promise",
+  "WeakMap",
+  "WeakSet",
+  "WeakRef",
+  "FinalizationRegistry",
+  "Atomics",
+  "Iterator",
+  "Map",
+  "Set",
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "URIError",
+  "EvalError",
+  "ReferenceError",
+  "String",
+  "Number",
+  "Boolean",
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+  "BigInt64Array",
+  "BigUint64Array",
+]);
+
 // Well-known Symbol IDs (inlined from literals.ts to avoid circular deps)
 const WELL_KNOWN_SYMBOLS: Record<string, number> = {
   iterator: 1,
@@ -130,6 +180,172 @@ function hasNativeBuiltinConstantHandler(builtinName: string, propName: string):
   if (builtinName === "Math") return MATH_CONSTANT_PROPS.has(propName);
   if (builtinName === "Number") return NUMBER_CONSTANT_PROPS.has(propName);
   return false;
+}
+
+/**
+ * Consume an externref value and push the Array.isArray boolean result.
+ *
+ * Spec basis: ECMA-262 §23.1.2.3 delegates to IsArray (§7.2.2). In no-host
+ * targets we can only decide compiled WasmGC array values, so the predicate is
+ * a ref.test over every registered vec type; host mode ORs that with the real
+ * JS Array.isArray predicate for foreign JS arrays.
+ */
+export function emitArrayIsArrayExternrefPredicate(ctx: CodegenContext, fctx: FunctionContext): void {
+  const vecTypeIdxs = Array.from(new Set(ctx.vecTypeMap.values()));
+  const isArrIdx =
+    !noJsHost(ctx) && !ctx.strictNoHostImports
+      ? ensureLateImport(ctx, "__extern_is_array", [{ kind: "externref" }], [{ kind: "i32" }])
+      : undefined;
+
+  if (vecTypeIdxs.length === 0 && isArrIdx === undefined) {
+    fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    return;
+  }
+
+  const externTmp = allocLocal(fctx, `__isarr_ext_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: externTmp });
+  let emittedTerm = false;
+
+  if (vecTypeIdxs.length > 0) {
+    const anyTmp = allocLocal(fctx, `__isarr_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+    fctx.body.push({ op: "local.get", index: externTmp } as Instr);
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "local.set", index: anyTmp });
+    for (let vi = 0; vi < vecTypeIdxs.length; vi++) {
+      fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
+      fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdxs[vi]! } as Instr);
+      if (vi > 0) fctx.body.push({ op: "i32.or" } as Instr);
+    }
+    emittedTerm = true;
+  }
+
+  if (isArrIdx !== undefined) {
+    flushLateImportShifts(ctx, fctx);
+    fctx.body.push({ op: "local.get", index: externTmp } as Instr);
+    fctx.body.push({ op: "call", funcIdx: isArrIdx });
+    if (emittedTerm) fctx.body.push({ op: "i32.or" } as Instr);
+    emittedTerm = true;
+  }
+
+  if (!emittedTerm) {
+    fctx.body.push({ op: "i32.const", value: 0 });
+  }
+}
+
+function reportUnsupportedStandaloneBuiltinValueRead(ctx: CodegenContext, builtinName: string, propName: string): void {
+  if (!ctx.standaloneRefusedImports) ctx.standaloneRefusedImports = new Set<string>();
+  const key = `#1907:${builtinName}.${propName}`;
+  if (ctx.standaloneRefusedImports.has(key)) return;
+  ctx.standaloneRefusedImports.add(key);
+  reportErrorNoNode(
+    ctx,
+    `Codegen error: ${builtinName}.${propName} built-in static property value read is not supported ` +
+      `in --target standalone (#1907 / #1888 S6-b). Add a native built-in method closure for this pair.`,
+  );
+}
+
+function makeBuiltinClosureFctx(
+  name: string,
+  selfType: ValType,
+  paramTypes: ValType[],
+  returnType: ValType | null,
+): FunctionContext {
+  const fctx: FunctionContext = {
+    name,
+    params: [{ name: "__self", type: selfType }, ...paramTypes.map((type, i) => ({ name: `arg${i}`, type }))],
+    locals: [],
+    localMap: new Map(),
+    returnType,
+    body: [],
+    blockDepth: 0,
+    breakStack: [],
+    continueStack: [],
+    labelMap: new Map(),
+    savedBodies: [],
+  };
+  for (let i = 0; i < fctx.params.length; i++) {
+    fctx.localMap.set(fctx.params[i]!.name, i);
+  }
+  return fctx;
+}
+
+function ensureStandaloneBuiltinStaticMethodClosure(
+  ctx: CodegenContext,
+  builtinName: string,
+  propName: string,
+  _expr: ts.PropertyAccessExpression,
+): { type: { kind: "ref"; typeIdx: number }; funcIdx: number } | null {
+  const key = `${builtinName}.${propName}`;
+  let paramTypes: ValType[];
+  let returnType: ValType | null;
+
+  switch (key) {
+    case "Array.isArray":
+      paramTypes = [{ kind: "externref" }];
+      returnType = { kind: "i32" };
+      break;
+    case "Object.keys":
+      paramTypes = [{ kind: "externref" }];
+      // Standalone Object.keys returns the object-runtime `$ObjVec` as an
+      // externref; consumers read it back through native __extern_length /
+      // __extern_get_idx. Preserve that contract for method values.
+      returnType = { kind: "externref" };
+      break;
+    case "Object.getOwnPropertyDescriptor":
+      paramTypes = [{ kind: "externref" }, { kind: "externref" }];
+      returnType = { kind: "externref" };
+      break;
+    default:
+      return null;
+  }
+
+  const resultTypes = returnType ? [returnType] : [];
+  const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, paramTypes, resultTypes);
+  if (!wrapperTypes) return null;
+
+  const funcName = `__builtin_static_${builtinName}_${propName}`;
+  let funcIdx = ctx.funcMap.get(funcName);
+  if (funcIdx === undefined) {
+    const selfType: ValType = { kind: "ref", typeIdx: wrapperTypes.structTypeIdx };
+    const closureFctx = makeBuiltinClosureFctx(funcName, selfType, paramTypes, returnType);
+
+    if (key === "Array.isArray") {
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      emitArrayIsArrayExternrefPredicate(ctx, closureFctx);
+    } else if (key === "Object.keys") {
+      const keysIdx = ensureLateImport(ctx, "__object_keys", [{ kind: "externref" }], [{ kind: "externref" }]);
+      if (keysIdx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "call", funcIdx: keysIdx });
+      if (returnType && !valTypesMatch({ kind: "externref" }, returnType)) {
+        coerceType(ctx, closureFctx, { kind: "externref" }, returnType);
+      }
+    } else if (key === "Object.getOwnPropertyDescriptor") {
+      const gopdIdx = ensureLateImport(
+        ctx,
+        "__getOwnPropertyDescriptor",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      if (gopdIdx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "local.get", index: 2 });
+      closureFctx.body.push({ op: "call", funcIdx: gopdIdx });
+    }
+
+    funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.mod.functions.push({
+      name: funcName,
+      typeIdx: wrapperTypes.liftedFuncTypeIdx,
+      locals: closureFctx.locals,
+      body: closureFctx.body,
+      exported: false,
+    });
+    ctx.funcMap.set(funcName, funcIdx);
+  }
+
+  return { type: { kind: "ref", typeIdx: wrapperTypes.structTypeIdx }, funcIdx };
 }
 
 /**
@@ -1239,9 +1455,7 @@ export function compilePropertyAccess(
           fctx.body.push({ op: "any.convert_extern" } as Instr);
         }
         fctx.body.push({ op: "local.set", index: tmpAny });
-        // Brand check: ref.test against the declaring class's struct.
-        fctx.body.push({ op: "local.get", index: tmpAny });
-        fctx.body.push({ op: "ref.test", typeIdx: declared.structTypeIdx } as Instr);
+        emitPrivateBrandPredicate(ctx, fctx, tmpAny, declared.className, declared.structTypeIdx);
         // result-type block: on success, return the field value; on
         // failure, throw TypeError (which doesn't return).
         const successInstrs: Instr[] = [
@@ -1301,8 +1515,7 @@ export function compilePropertyAccess(
           fctx.body.push({ op: "any.convert_extern" } as Instr);
         }
         fctx.body.push({ op: "local.set", index: tmpAny });
-        fctx.body.push({ op: "local.get", index: tmpAny });
-        fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx! } as Instr);
+        emitPrivateBrandPredicate(ctx, fctx, tmpAny, cls.className, structTypeIdx!);
 
         // Build the failure (throw) branch FIRST. emitThrowTypeError may
         // register late imports, which shift every funcMap index (the
@@ -1474,52 +1687,6 @@ export function compilePropertyAccess(
   // Skip if the name is shadowed by a local variable.
   if (ts.isIdentifier(expr.expression)) {
     const builtinName = expr.expression.text;
-    const BUILTIN_CTOR_NAMES = new Set([
-      "Object",
-      "Array",
-      "Function",
-      "Symbol",
-      "Proxy",
-      "Reflect",
-      "Math",
-      "BigInt",
-      "JSON",
-      "Date",
-      "RegExp",
-      "ArrayBuffer",
-      "SharedArrayBuffer",
-      "DataView",
-      "Promise",
-      "WeakMap",
-      "WeakSet",
-      "WeakRef",
-      "FinalizationRegistry",
-      "Atomics",
-      "Iterator",
-      "Map",
-      "Set",
-      "Error",
-      "TypeError",
-      "RangeError",
-      "SyntaxError",
-      "URIError",
-      "EvalError",
-      "ReferenceError",
-      "String",
-      "Number",
-      "Boolean",
-      "Int8Array",
-      "Uint8Array",
-      "Uint8ClampedArray",
-      "Int16Array",
-      "Uint16Array",
-      "Int32Array",
-      "Uint32Array",
-      "Float32Array",
-      "Float64Array",
-      "BigInt64Array",
-      "BigUint64Array",
-    ]);
     const isShadowed = fctx.localMap.has(builtinName) || (fctx.boxedCaptures?.has(builtinName) ?? false);
     // (#1888 S6-c) Under --target standalone, `__get_builtin` refuses-loud (the
     // open-object runtime does not expose it). For builtin constant reads that
@@ -1531,6 +1698,17 @@ export function compilePropertyAccess(
     // (`__get_builtin` is a real host import there and the early shortcut +
     // the later constant handler are observationally identical for these reads).
     const deferToNativeConstant = ctx.standalone && hasNativeBuiltinConstantHandler(builtinName, propName);
+    if (ctx.standalone && BUILTIN_CTOR_NAMES.has(builtinName) && !isShadowed && !deferToNativeConstant) {
+      const closure = ensureStandaloneBuiltinStaticMethodClosure(ctx, builtinName, propName, expr);
+      if (closure) {
+        fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx });
+        fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx });
+        return closure.type;
+      }
+      reportUnsupportedStandaloneBuiltinValueRead(ctx, builtinName, propName);
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
     if (BUILTIN_CTOR_NAMES.has(builtinName) && !isShadowed && !deferToNativeConstant) {
       const getBuiltinIdx = ensureLateImport(ctx, "__get_builtin", [{ kind: "externref" }], [{ kind: "externref" }]);
       const getIdx = ensureLateImport(

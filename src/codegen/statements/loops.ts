@@ -35,6 +35,7 @@ import {
   emitBoundsCheckedArrayGet,
   valTypesMatch,
 } from "../shared.js";
+import { containsLinearU8Allocation, emitLinearU8ArenaMark, linearU8ArenaResetInstrs } from "../linear-uint8-arena.js";
 import { nativeGeneratorInfoForForOfSubject, tryCompileNativeGeneratorForOf } from "../generators-native.js";
 import { ensureNativeIteratorRuntime } from "../iterator-native.js";
 import {
@@ -60,29 +61,39 @@ export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext
   //     <condition>
   //     i32.eqz
   //     br_if $break (depth to block)
-  //     <body>
+  //     block $continue_body { <body> }
+  //     <linear-u8 arena reset, if needed>
   //     br $continue (depth to loop)
   //   end
   // end
 
+  const arenaMark = containsLinearU8Allocation(ctx, stmt.statement)
+    ? emitLinearU8ArenaMark(ctx, fctx, "__linu8_loop_mark")
+    : undefined;
+  const arenaReset = linearU8ArenaResetInstrs(ctx, arenaMark);
   const savedBody = pushBody(fctx);
 
-  // Adjust existing break/continue depths: block+loop adds 2 nesting levels
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 2;
-  adjustRethrowDepth(fctx, 2);
+  // Adjust existing break/continue depths: block+loop+body-block adds 3 levels
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
+  adjustRethrowDepth(fctx, 3);
 
   // Track break/continue depths
-  // Inside the generated structure, br 1 = break, br 0 = continue
-  fctx.breakStack.push(1); // break: exit the outer block
-  fctx.continueStack.push(0); // continue: restart the loop
+  // From body inside $continue_body: break = br 2, continue = br 0.
+  fctx.breakStack.push(2); // break: exit the outer block
+  fctx.continueStack.push(0); // continue: exit body block, then reset/restart
 
   // Compile condition
+  const condInstrs: Instr[] = [];
+  ctx.liveBodies.add(condInstrs);
+  const condBody = fctx.body;
+  fctx.body = condInstrs;
   const condType = compileExpression(ctx, fctx, stmt.expression);
   ensureI32Condition(fctx, condType, ctx);
   fctx.body.push({ op: "i32.eqz" });
   fctx.body.push({ op: "br_if", depth: 1 }); // break out of block
+  fctx.body = condBody;
 
   // Compile body — must save/restore block-scoped shadows so that let/const
   // declarations inside the loop body do not leak into the outer scope (#817).
@@ -96,20 +107,25 @@ export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext
     compileStatement(ctx, fctx, stmt.statement);
   }
 
-  fctx.body.push({ op: "br", depth: 0 }); // continue loop
-  const loopBody = fctx.body;
+  const bodyInstrs = fctx.body;
 
   fctx.breakStack.pop();
   fctx.continueStack.pop();
 
   // Restore existing break/continue depths
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 2;
-  adjustRethrowDepth(fctx, -2);
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
+  adjustRethrowDepth(fctx, -3);
 
   popBody(fctx, savedBody);
 
+  const loopBody: Instr[] = [
+    ...condInstrs,
+    { op: "block", blockType: { kind: "empty" }, body: bodyInstrs },
+    ...arenaReset,
+    { op: "br", depth: 0 },
+  ];
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
@@ -121,6 +137,7 @@ export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext
       },
     ],
   });
+  ctx.liveBodies.delete(condInstrs);
 }
 
 /**
@@ -748,10 +765,15 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
   //     block $continue {             ; continue target (depth 0 from body)
   //       body
   //     }
+  //     <linear-u8 arena reset, if needed>
   //     incrementor
   //     br $loop
   //   }
   // }
+  const arenaMark = containsLinearU8Allocation(ctx, stmt.statement)
+    ? emitLinearU8ArenaMark(ctx, fctx, "__linu8_loop_mark")
+    : undefined;
+  const arenaReset = linearU8ArenaResetInstrs(ctx, arenaMark);
   const savedBody = pushBody(fctx);
 
   // Adjust existing break/continue depths: block+loop+block adds 3 nesting levels
@@ -904,6 +926,7 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
       blockType: { kind: "empty" },
       body: bodyInstrs,
     },
+    ...arenaReset,
     ...freshCellInstrs,
     ...incrInstrs,
     { op: "br", depth: 0 }, // restart $loop
@@ -992,11 +1015,16 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
   //     block $continue {             ; continue target (depth 0 from body)
   //       <body>
   //     }
+  //     <linear-u8 arena reset, if needed>
   //     <condition>
   //     br_if $loop                   ; true → restart loop (depth 0 from loop level)
   //   }
   // }
 
+  const arenaMark = containsLinearU8Allocation(ctx, stmt.statement)
+    ? emitLinearU8ArenaMark(ctx, fctx, "__linu8_loop_mark")
+    : undefined;
+  const arenaReset = linearU8ArenaResetInstrs(ctx, arenaMark);
   const savedBody = pushBody(fctx);
 
   // Adjust existing break/continue depths: block+loop+block adds 3 nesting levels
@@ -1051,6 +1079,7 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
       blockType: { kind: "empty" },
       body: bodyInstrs,
     },
+    ...arenaReset,
     ...condInstrs,
   ];
 
@@ -2731,14 +2760,15 @@ function compileForOfArray(
   // Build loop body
   const savedBody = pushBody(fctx);
 
-  // Adjust existing break/continue depths: block+loop adds 2 nesting levels
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 2;
-  adjustRethrowDepth(fctx, 2);
+  // Structure: block { loop { guard/bind; block { body }; i++; br loop } }.
+  // `continue` exits the inner body block so the increment still runs.
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
+  adjustRethrowDepth(fctx, 3);
 
-  fctx.breakStack.push(1); // break = depth 1 (exit block)
-  fctx.continueStack.push(0); // continue = depth 0 (restart loop)
+  fctx.breakStack.push(2); // break = depth 2 (exit outer block)
+  fctx.continueStack.push(0); // continue = depth 0 (exit body block, then increment)
 
   // Condition: i >= length → break
   fctx.body.push({ op: "local.get", index: iLocal });
@@ -2766,6 +2796,8 @@ function compileForOfArray(
     compileForOfAssignDestructuring(ctx, fctx, assignDestructExpr, elemLocal, elemType, vecTypeIdx, arrTypeIdx, stmt);
   }
 
+  const savedLoopBody = pushBody(fctx);
+
   // Compile body — save/restore block-scoped shadows for let/const (#817).
   if (ts.isBlock(stmt.statement)) {
     const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
@@ -2776,6 +2808,14 @@ function compileForOfArray(
   } else {
     compileStatement(ctx, fctx, stmt.statement);
   }
+  const bodyInstrs = fctx.body;
+  popBody(fctx, savedLoopBody);
+
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: bodyInstrs,
+  });
 
   // Increment i
   fctx.body.push({ op: "local.get", index: iLocal });
@@ -2790,10 +2830,10 @@ function compileForOfArray(
   fctx.continueStack.pop();
 
   // Restore existing break/continue depths
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 2;
-  adjustRethrowDepth(fctx, -2);
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
+  adjustRethrowDepth(fctx, -3);
 
   popBody(fctx, savedBody);
 
@@ -3065,14 +3105,16 @@ function emitArrayKeysEntriesLoop(
   // Build loop body
   const savedBody = pushBody(fctx);
 
-  // block+loop adds 2 nesting levels
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 2;
-  adjustRethrowDepth(fctx, 2);
+  // block+loop+body-block adds 3 nesting levels. The inner body block makes
+  // `continue` fall through to the index increment instead of re-reading the
+  // same element forever.
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
+  adjustRethrowDepth(fctx, 3);
 
-  fctx.breakStack.push(1); // break = exit block
-  fctx.continueStack.push(0); // continue = restart loop
+  fctx.breakStack.push(2); // break = exit outer block
+  fctx.continueStack.push(0); // continue = exit body block, then increment
 
   // i >= len → break
   fctx.body.push({ op: "local.get", index: iLocal });
@@ -3082,6 +3124,8 @@ function emitArrayKeysEntriesLoop(
 
   // Project the per-iteration binding(s).
   bindIteration(lenLocal, iLocal, dataLocal, arrTypeIdx);
+
+  const savedLoopBody = pushBody(fctx);
 
   // Compile body — save/restore block-scoped shadows for let/const (#817).
   if (ts.isBlock(stmt.statement)) {
@@ -3093,6 +3137,14 @@ function emitArrayKeysEntriesLoop(
   } else {
     compileStatement(ctx, fctx, stmt.statement);
   }
+  const bodyInstrs = fctx.body;
+  popBody(fctx, savedLoopBody);
+
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: bodyInstrs,
+  });
 
   // i += 1
   fctx.body.push({ op: "local.get", index: iLocal });
@@ -3106,10 +3158,10 @@ function emitArrayKeysEntriesLoop(
   fctx.breakStack.pop();
   fctx.continueStack.pop();
 
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 2;
-  adjustRethrowDepth(fctx, -2);
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
+  adjustRethrowDepth(fctx, -3);
 
   popBody(fctx, savedBody);
 

@@ -1,9 +1,9 @@
 ---
 id: 1900
 title: "standalone native ToPrimitive (Phase 1): Wasm-native OrdinaryToPrimitive over $Object (~2,136 ceiling)"
-status: ready
+status: in-review
 created: 2026-06-05
-updated: 2026-06-05
+updated: 2026-06-06
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -11,10 +11,13 @@ task_type: feature
 area: codegen, type-coercion, standalone
 language_feature: to-primitive, symbol-toprimitive, abstract-operations
 goal: standalone-mode
-sprint: 60
+sprint: 61
 parent: 1806
 related: [1806, 1525b, 1472, 850, 1253, 1716]
 needs_arch_spec: true
+claimed_by: codex-developer
+claimed_at: 2026-06-06T09:46:21.649Z
+pr: 1251
 ---
 # #1900 — Standalone native ToPrimitive (Phase 1)
 
@@ -125,3 +128,35 @@ Before dev dispatch the architect must pin down:
 3. **Primitive-test predicate** — the exact `$Object` discriminants for
    "is primitive" in standalone (number/string/boolean/bigint/symbol/undefined
    /null) without a host roundtrip.
+
+## Implementation Notes
+
+- Implemented Slice 1 as native `__to_primitive(externref, hint)` over the
+  standalone `$Object` runtime, following fetched ECMA-262 §7.1.1 and
+  §7.1.1.1 text: non-objects return unchanged, `"string"` hint tries
+  `toString` then `valueOf`, and `"number"`/`"default"` try `valueOf` then
+  `toString`.
+- Method dispatch reuses the existing zero-arg accessor/closure driver after a
+  `__typeof_function` guard, so non-callable properties are skipped instead of
+  being treated as successful undefined returns.
+- Primitive results are accepted for null/undefined sentinel, boxed number,
+  boxed boolean, and native strings. Unknown non-null refs are treated as
+  objects for this slice.
+- The no-primitive path constructs and throws native `TypeError`, so
+  `e instanceof TypeError` works in standalone catches.
+- Added native `__extern_toString` routing for `String(obj)` and native-string
+  template substitutions over dynamic `$Object` values.
+- Extended standalone `__unbox_number` to parse native string primitives through
+  the existing `__str_to_number` scanner, so `valueOf` object then `toString`
+  string fallback feeds ToNumber correctly.
+- Slice 2 remains deferred: dynamic `Symbol.toPrimitive` still hits the
+  existing `#1472` `__get_builtin` standalone refusal because symbol-keyed
+  lookup in the `$Object` property map is not available yet.
+
+## Validation
+
+- `pnpm exec vitest run tests/issue-1900.test.ts`
+- `pnpm exec vitest run tests/issue-1900.test.ts tests/issue-1806.test.ts tests/issue-1806-string-hint.test.ts`
+- `pnpm exec tsc --noEmit --pretty false`
+- `pnpm exec vitest run tests/issue-1472.test.ts --testNamePattern "Phase B: dynamic property add/read|Phase B: property update"`
+- `pnpm exec prettier --check src/codegen/binary-ops.ts src/codegen/expressions/calls.ts src/codegen/index.ts src/codegen/object-runtime.ts src/codegen/string-ops.ts src/codegen/type-coercion.ts tests/issue-1806.test.ts tests/issue-1900.test.ts`

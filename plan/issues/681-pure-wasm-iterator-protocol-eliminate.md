@@ -1,14 +1,14 @@
 ---
 id: 681
 title: "Pure Wasm iterator protocol (eliminate 5 host imports)"
-status: in-progress
+status: in-review
 created: 2026-03-20
-updated: 2026-06-03
+updated: 2026-06-06
 priority: high
 feasibility: medium
 reasoning_effort: high
 goal: iterator-protocol
-sprint: 60
+sprint: 61
 depends_on: [680]
 required_by: [735]
 files:
@@ -18,6 +18,9 @@ files:
   src/codegen/expressions.ts:
     breaking:
       - "for-of uses struct-based iterators instead of host imports"
+claimed_by: codex-developer
+claimed_at: 2026-06-06T18:07:10.511Z
+pr: 1256
 ---
 # #681 — Pure Wasm iterator protocol (eliminate 5 host imports)
 
@@ -28,7 +31,7 @@ files:
 - [§7.4.7 IteratorClose](https://tc39.es/ecma262/#sec-iteratorclose) — calls .return() if it exists
 
 
-## Status: open
+## Status: in-progress
 
 Iterator protocol uses 5 host imports (__iterator, __iterator_next, __iterator_done, __iterator_value, __iterator_return). Should be pure Wasm.
 
@@ -149,3 +152,28 @@ Generic for-of over an opaque externref `any` (a runtime `GetIterator` →
 standalone — the genuinely-hard residual called out in the 2026-06-03 profile.
 Non-destructured `for (pair of arr.entries())` (needs a materialized 2-tuple)
 is also a deliberate fall-through, not yet native.
+
+## 2026-06-06 codex slice: continue-safe native Array iterator loops
+
+Fixed the direct pure-Wasm array iterator loops so `continue` advances the
+native index before re-entering the loop. The previous `block { loop { ... } }`
+shape bound `continue` to the loop header while the increment sat after the
+user body, so `for (... of arr.entries()) { if (...) continue; }` could repeat
+the same `[index, value]` pair forever.
+
+The array value loop used by direct array for-of and `arr.values()` now wraps
+the user body in an inner block and places `i += 1` after that block. The
+`.keys()` / `.entries()` projection loop uses the same structure. `break`
+still exits the outer block, while `continue` exits only the inner body block
+and falls through to the increment. No iterator or array-iterator host imports
+are introduced.
+
+Scoped validation:
+
+- `pnpm vitest run tests/issue-681.test.ts tests/issue-681-standalone-iterators.test.ts tests/issue-1320-standalone.test.ts --reporter verbose` — 21 passing.
+- `pnpm vitest run tests/issue-1665-standalone-generator-forof.test.ts --reporter verbose` — 3 passing.
+- `pnpm exec prettier --check src/codegen/statements/loops.ts tests/issue-681.test.ts` — passing.
+
+Remaining #681 gap stays open: fully generic for-of over an opaque externref
+`any` in standalone/WASI still refuses at the IR gate unless the iterable is a
+known native shape handled by earlier slices.

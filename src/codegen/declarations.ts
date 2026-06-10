@@ -69,6 +69,7 @@ import {
 import { computeElidableTopLevelTdzNames } from "./expressions/identifiers.js";
 import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.js";
 import { compileExpression, compileStatement } from "./shared.js";
+import { expandLinearU8ParamTypes } from "./linear-uint8-signatures.js";
 
 /** Accumulated state for the single-pass collector */
 interface UnifiedCollectorState {
@@ -492,7 +493,7 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   ) {
     const operandType = ctx.checker.getTypeAtLocation(node.operand);
     if (operandType.flags & ts.TypeFlags.StringLike) {
-      state.parseNeeded.add("parseFloat");
+      state.parseNeeded.add(ctx.nativeStrings ? "__str_to_number" : "parseFloat");
     }
   }
   if (
@@ -533,7 +534,7 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
         const leftType = ctx.checker.getTypeAtLocation(node.left);
         const rightType = ctx.checker.getTypeAtLocation(node.right);
         if (isStringType(leftType) || isStringType(rightType)) {
-          state.parseNeeded.add("parseFloat");
+          state.parseNeeded.add(ctx.nativeStrings ? "__str_to_number" : "parseFloat");
         }
       } catch {
         // Type resolution may fail
@@ -2044,6 +2045,7 @@ export function collectPropsFromStatements(
               }
             }
             extraProps.push({ name: propName, type: wasmType });
+            ctx.widenedDefinePropertyKeys.add(`${varName}:${propName}`);
           }
         }
       }
@@ -2079,6 +2081,7 @@ export function collectPropsFromStatements(
                   }
                 }
                 extraProps.push({ name: propName, type: wasmType });
+                ctx.widenedDefinePropertyKeys.add(`${varName}:${propName}`);
               }
             }
           }
@@ -2395,6 +2398,8 @@ function registerBodylessFunctionDeclaration(
       results = isVoidType(rUnwrapped) ? [] : [resolveWasmType(ctx, rUnwrapped)];
     }
   }
+
+  params = expandLinearU8ParamTypes(ctx, stmt, params);
 
   const optionalParams: OptionalParamInfo[] = [];
   for (let i = 0; i < stmt.parameters.length; i++) {
@@ -2900,6 +2905,8 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           results = isVoidType(rUnwrapped) ? [] : [resolveWasmType(ctx, rUnwrapped)];
         }
       }
+
+      params = expandLinearU8ParamTypes(ctx, stmt, params);
 
       const optionalParams: OptionalParamInfo[] = [];
       for (let i = 0; i < stmt.parameters.length; i++) {

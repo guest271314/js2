@@ -10,7 +10,7 @@ import type { ArrayTypeDef, Instr, StructTypeDef, TypeDef, ValType } from "../ir
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import { addUnionImports, ensureAnyHelpers, isAnyValue } from "./index.js";
-import { ensureAnyToStringHelper } from "./native-strings.js";
+import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { getArrTypeIdxFromVec } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts, registerCoerceType } from "./shared.js";
@@ -79,10 +79,7 @@ export type CompileStringLiteralFn = (ctx: CodegenContext, fctx: FunctionContext
  */
 function pushStringHint(ctx: CodegenContext, fctx: FunctionContext, hint: string): void {
   addStringConstantGlobal(ctx, hint);
-  const globalIdx = ctx.stringGlobalMap.get(hint);
-  if (globalIdx !== undefined) {
-    fctx.body.push({ op: "global.get", index: globalIdx });
-  }
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, hint));
 }
 
 /**
@@ -1351,46 +1348,33 @@ export function coerceType(
   }
   // externref → f64 (unbox number)
   if (from.kind === "externref" && to.kind === "f64") {
+    if (ctx.standalone) {
+      const hint = toPrimitiveHint ?? "number";
+      pushStringHint(ctx, fctx, hint);
+      const toPrimIdx = ensureLateImport(
+        ctx,
+        "__to_primitive",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (toPrimIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: toPrimIdx });
+      }
+      addUnionImports(ctx);
+      const funcIdx = ctx.funcMap.get("__unbox_number");
+      if (funcIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx });
+        return;
+      }
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "f64.const", value: NaN });
+      return;
+    }
     addUnionImports(ctx);
     const funcIdx = ctx.funcMap.get("__unbox_number");
     if (funcIdx !== undefined) {
-      // (#124 co-land with #1901) Under --target standalone the externref may be
-      // an open `$Object` carrying its own `valueOf`/`toString` (§7.1.1
-      // ToPrimitive). `__unbox_number` alone returns NaN for a `$Object` — it
-      // doesn't run OrdinaryToPrimitive. Route through the native
-      // `__to_primitive(recv, "number")` first: it dispatches the own method via
-      // `__extern_method_call` and returns the boxed primitive, OR returns recv
-      // UNCHANGED for any non-`$Object` externref (boxed numbers, strings, host
-      // values) so the existing `__unbox_number` behaviour is byte-identical for
-      // every non-object operand. (JS-host mode already wires `__to_primitive` as
-      // an import where appropriate; this branch only adds the call under
-      // standalone, where it resolves natively from OBJECT_RUNTIME_HELPER_NAMES.)
-      if (ctx.standalone) {
-        const toPrimIdx = ensureLateImport(
-          ctx,
-          "__to_primitive",
-          [{ kind: "externref" }, { kind: "externref" }],
-          [{ kind: "externref" }],
-        );
-        flushLateImportShifts(ctx, fctx);
-        if (toPrimIdx !== undefined) {
-          // hint: the native helper ignores its value (number/default order is
-          // its only mode today), so push a null externref rather than a string
-          // constant. Avoids `addStringConstantGlobal`, whose late global/import
-          // registration could shift the freshly-resolved funcIdxs here.
-          // `__to_primitive` always returns a PRIMITIVE externref — a boxed
-          // number/string from the dispatched own valueOf/toString, or the
-          // default "[object Object]" string for a plain `$Object` — and never a
-          // `$Object`. So `__unbox_number` below is always applied to a primitive
-          // (NaN for "[object Object]", per spec for `{a:1} - 0`), needing no
-          // `$Object`-guard or TypeError throw here. The genuine §7.1.1.1 step-6
-          // TypeError (own valueOf AND toString both returning objects) is a
-          // tracked #124 follow-on; today it degrades to the pre-#124 NaN.
-          fctx.body.push({ op: "ref.null.extern" });
-          fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__to_primitive") ?? toPrimIdx });
-        }
-      }
-      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__unbox_number") ?? funcIdx });
+      fctx.body.push({ op: "call", funcIdx });
       return;
     }
     // Fallback: drop and push default
@@ -1729,6 +1713,32 @@ export function coerceType(
   // ref (struct) → f64: JS ToNumber semantics — check @@toPrimitive("number") first, then valueOf
   // Re-entrancy guard: prevent infinite recursion when valueOf itself returns a struct.
   if ((from.kind === "ref" || from.kind === "ref_null") && to.kind === "f64") {
+    const typeIdx = (from as { typeIdx: number }).typeIdx;
+    if (
+      ctx.nativeStrings &&
+      (typeIdx === ctx.anyStrTypeIdx || (ctx.nativeStrTypeIdx >= 0 && typeIdx === ctx.nativeStrTypeIdx))
+    ) {
+      let strToNumberIdx = ctx.funcMap.get("__str_to_number");
+      if (strToNumberIdx === undefined) {
+        addUnionImports(ctx);
+        strToNumberIdx = ctx.funcMap.get("__str_to_number");
+      }
+      if (strToNumberIdx !== undefined) {
+        fctx.body.push({ op: "extern.convert_any" });
+        fctx.body.push({ op: "call", funcIdx: strToNumberIdx });
+        return;
+      }
+      addUnionImports(ctx);
+      const unboxIdx = ctx.funcMap.get("__unbox_number");
+      if (unboxIdx !== undefined) {
+        fctx.body.push({ op: "extern.convert_any" });
+        fctx.body.push({ op: "call", funcIdx: unboxIdx });
+        return;
+      }
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "f64.const", value: NaN });
+      return;
+    }
     const wasInsideValueOf = (ctx as any).__insideValueOfCoercion ?? false;
     if (wasInsideValueOf) {
       // Already inside a valueOf coercion — don't recurse, return NaN
@@ -1742,7 +1752,6 @@ export function coerceType(
     const cleanup = () => {
       (ctx as any).__insideValueOfCoercion = wasInsideValueOf;
     };
-    const typeIdx = (from as { typeIdx: number }).typeIdx;
     const name = ctx.typeIdxToStructName.get(typeIdx);
     if (name !== undefined) {
       // Check for [Symbol.toPrimitive] method first — takes precedence over valueOf

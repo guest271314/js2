@@ -13,7 +13,7 @@ import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
 import { emitThrowTypeError, getFuncParamTypes, noJsHost } from "./expressions/helpers.js";
-import { addStringImports, addUnionImports, flatStringType, nativeStringType, resolveWasmType } from "./index.js";
+import { addStringImports, flatStringType, nativeStringType, resolveWasmType } from "./index.js";
 import {
   ensureAnyToStringHelper,
   ensureNativeStringExternBridge,
@@ -21,7 +21,12 @@ import {
   nativeStringTypeNullable,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
-import { tryCompileStandaloneStringReplace, tryCompileStandaloneStringSearch } from "./regexp-standalone.js";
+import {
+  tryCompileStandaloneStringMatch,
+  tryCompileStandaloneStringReplace,
+  tryCompileStandaloneStringSearch,
+  tryCompileStandaloneStringSplit,
+} from "./regexp-standalone.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
@@ -132,11 +137,15 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
       compileStringLiteral(ctx, fctx, "undefined", operand);
       return true;
     }
-    // Dynamic externref (boxed string / any) → bridge to anyref, then the
-    // in-module ToString dispatcher.
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    const anyToStrIdx = ensureAnyToStringHelper(ctx);
-    fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+    // Dynamic externref (boxed string / any / $Object) → runtime ToString.
+    // For standalone $Object values this routes through native
+    // OrdinaryToPrimitive("string") before the native-string concat helper.
+    const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (toStrIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    }
+    emitNativeStringRefFromExternref(ctx, fctx);
     return true;
   }
 
@@ -392,9 +401,12 @@ export function compileNativeTemplateExpression(
           fctx.body.push({ op: "drop" });
           compileStringLiteral(ctx, fctx, "undefined", span.expression);
         } else {
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
-          const anyToStrIdx = ensureAnyToStringHelper(ctx);
-          fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+          const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (toStrIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: toStrIdx });
+          }
+          emitNativeStringRefFromExternref(ctx, fctx);
         }
       } else {
         coerceType(ctx, fctx, spanType, { kind: "externref" }, "string");
@@ -1162,6 +1174,19 @@ function compileBatchedConcat(ctx: CodegenContext, fctx: FunctionContext, operan
   return { kind: "externref" };
 }
 
+function coerceCompiledValueToNumber(ctx: CodegenContext, fctx: FunctionContext, valueType: ValType | null): void {
+  if (!valueType) {
+    fctx.body.push({ op: "f64.const", value: NaN });
+    return;
+  }
+  if (valueType.kind === "f64") return;
+  if (valueType.kind === "i32") {
+    fctx.body.push({ op: "f64.convert_i32_s" });
+    return;
+  }
+  coerceType(ctx, fctx, valueType, { kind: "f64" }, "number");
+}
+
 export function compileStringBinaryOp(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1275,67 +1300,9 @@ export function compileStringBinaryOp(
         // Arithmetic/bitwise operators on strings: coerce both operands to f64 via ToNumber
         // This matches JS semantics: "5" - "2" === 3, "6" * "7" === 42
         const leftType = compileExpression(ctx, fctx, expr.left);
-        // Convert to f64 based on actual result type
-        if (leftType && leftType.kind === "f64") {
-          // Already f64 — no conversion needed
-        } else if (leftType && leftType.kind === "i32") {
-          fctx.body.push({ op: "f64.convert_i32_s" });
-        } else if (leftType && (leftType.kind === "ref" || leftType.kind === "ref_null")) {
-          // Native string ref → externref → f64
-          fctx.body.push({ op: "extern.convert_any" });
-          const pfIdx1 = ctx.funcMap.get("parseFloat");
-          if (pfIdx1 !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: pfIdx1 });
-          } else {
-            addUnionImports(ctx);
-            fctx.body.push({
-              op: "call",
-              funcIdx: ctx.funcMap.get("__unbox_number")!,
-            });
-          }
-        } else {
-          // externref or other — parseFloat/unbox
-          const pfIdx1 = ctx.funcMap.get("parseFloat");
-          if (pfIdx1 !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: pfIdx1 });
-          } else {
-            addUnionImports(ctx);
-            fctx.body.push({
-              op: "call",
-              funcIdx: ctx.funcMap.get("__unbox_number")!,
-            });
-          }
-        }
+        coerceCompiledValueToNumber(ctx, fctx, leftType);
         const rightType = compileExpression(ctx, fctx, expr.right);
-        // Convert to f64 based on actual result type
-        if (rightType && rightType.kind === "f64") {
-          // Already f64 — no conversion needed
-        } else if (rightType && rightType.kind === "i32") {
-          fctx.body.push({ op: "f64.convert_i32_s" });
-        } else if (rightType && (rightType.kind === "ref" || rightType.kind === "ref_null")) {
-          fctx.body.push({ op: "extern.convert_any" });
-          const pfIdx2 = ctx.funcMap.get("parseFloat");
-          if (pfIdx2 !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: pfIdx2 });
-          } else {
-            addUnionImports(ctx);
-            fctx.body.push({
-              op: "call",
-              funcIdx: ctx.funcMap.get("__unbox_number")!,
-            });
-          }
-        } else {
-          const pfIdx2 = ctx.funcMap.get("parseFloat");
-          if (pfIdx2 !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: pfIdx2 });
-          } else {
-            addUnionImports(ctx);
-            fctx.body.push({
-              op: "call",
-              funcIdx: ctx.funcMap.get("__unbox_number")!,
-            });
-          }
-        }
+        coerceCompiledValueToNumber(ctx, fctx, rightType);
         return compileNumericBinaryOp(ctx, fctx, op, expr);
       }
     }
@@ -1391,42 +1358,10 @@ export function compileStringBinaryOp(
   if (isArithmeticOrBitwise) {
     // Compile left operand and convert to f64
     const leftArithType = compileExpression(ctx, fctx, expr.left);
-    if (leftArithType && leftArithType.kind === "f64") {
-      // Already f64 — no conversion needed
-    } else if (leftArithType && leftArithType.kind === "i32") {
-      fctx.body.push({ op: "f64.convert_i32_s" });
-    } else {
-      // externref (string) — convert to number via parseFloat
-      const pfIdx = ctx.funcMap.get("parseFloat");
-      if (pfIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: pfIdx });
-      } else {
-        addUnionImports(ctx);
-        fctx.body.push({
-          op: "call",
-          funcIdx: ctx.funcMap.get("__unbox_number")!,
-        });
-      }
-    }
+    coerceCompiledValueToNumber(ctx, fctx, leftArithType);
     // Compile right operand and convert to f64
     const rightArithType = compileExpression(ctx, fctx, expr.right);
-    if (rightArithType && rightArithType.kind === "f64") {
-      // Already f64 — no conversion needed
-    } else if (rightArithType && rightArithType.kind === "i32") {
-      fctx.body.push({ op: "f64.convert_i32_s" });
-    } else {
-      // externref (string) — convert to number via parseFloat
-      const pfIdx2 = ctx.funcMap.get("parseFloat");
-      if (pfIdx2 !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: pfIdx2 });
-      } else {
-        addUnionImports(ctx);
-        fctx.body.push({
-          op: "call",
-          funcIdx: ctx.funcMap.get("__unbox_number")!,
-        });
-      }
-    }
+    coerceCompiledValueToNumber(ctx, fctx, rightArithType);
     return compileNumericBinaryOp(ctx, fctx, op, expr);
   }
 
@@ -2440,14 +2375,23 @@ export function compileNativeStringMethodCall(
     return compileExpression(ctx, fctx, propAccess.expression);
   }
 
-  // #1474 — These host-routed string methods build/consume a JS RegExp under
-  // the hood. There is no Wasm-native regex engine yet, so refuse in
-  // --target standalone (Phase 1: refuse-and-document).
+  // #1474/#1539 — These host-routed string methods build/consume a JS RegExp
+  // under the hood. In --target standalone, route the supported static RegExp
+  // slices through the pure-WasmGC matcher first, then refuse the remaining
+  // host/symbol-protocol forms with a clean diagnostic.
   //   - match / matchAll / search: the spec coerces the (string) argument to a
   //     RegExp, so they always route through the host regex engine.
   //   - replace / replaceAll / split: only when the first argument needs
   //     RegExp/symbol-protocol dispatch (string-arg forms use the native helpers
   //     above and never reach this fall-through).
+  // #1539 Phase 2b — `String.prototype.match(/re/)` for non-global
+  // backend-created static RegExp materializes the same native capture vec as
+  // `.exec`. Global/all-match semantics stay refused below.
+  if (ctx.standalone && method === "match") {
+    const matchResult = tryCompileStandaloneStringMatch(ctx, fctx, expr, propAccess);
+    if (matchResult !== undefined) return matchResult;
+  }
+
   // #1539 Phase 2b — `String.prototype.search(/re/)` against a backend-created
   // static RegExp routes to the pure-WasmGC matcher (returns the match index or
   // -1) instead of the host regex engine. The string-coercion form (string
@@ -2464,6 +2408,14 @@ export function compileNativeStringMethodCall(
   if (ctx.standalone && (method === "replace" || method === "replaceAll")) {
     const replaceResult = tryCompileStandaloneStringReplace(ctx, fctx, expr, propAccess);
     if (replaceResult !== undefined) return replaceResult;
+  }
+
+  // #1539 Phase 2c — `String.prototype.split(/re/)` against a backend-created
+  // static, non-capturing, non-nullable RegExp routes through the pure-WasmGC
+  // matcher and returns the same native string vec shape as string split.
+  if (ctx.standalone && method === "split") {
+    const splitResult = tryCompileStandaloneStringSplit(ctx, fctx, expr, propAccess);
+    if (splitResult !== undefined) return splitResult;
   }
 
   if (ctx.standalone) {

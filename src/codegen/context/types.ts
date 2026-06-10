@@ -144,6 +144,16 @@ export interface NativeGeneratorInfo {
   paramTypes: ValType[];
   /** Field index where captured params start in the state struct. */
   paramFieldOffset: number;
+  /** Field index for the value passed to `.next(value)`. */
+  sentFieldIdx: number;
+  /** Field index for resume mode: 0 = next, 1 = return. */
+  modeFieldIdx: number;
+  /** Field index for the value passed to `.return(value)`. */
+  abruptFieldIdx: number;
+  /** Function-local names spilled into the state struct across suspensions. */
+  spillNames: string[];
+  /** Field index where spilled locals start in the state struct. */
+  spillFieldOffset: number;
   /** Number of top-level yield suspension points. */
   yieldCount: number;
   /** Terminal state value. */
@@ -208,6 +218,12 @@ export interface FunctionContext {
   constBindings?: Set<string>;
   /** Stack of saved body arrays for addUnionImports index shifting */
   savedBodies: Instr[][];
+  /**
+   * Raw `__argc` cached at function entry for parameter defaults. Defaults need
+   * to clear the global before initializer expressions can make nested calls;
+   * `arguments` construction reuses this local when both features are present.
+   */
+  argcCachedLocal?: number;
   /** Set of function names successfully hoisted during THIS function body's hoisting pass */
   hoistedFuncs?: Set<string>;
   /** Enclosing class name — propagated to closures for super keyword resolution */
@@ -406,6 +422,8 @@ export interface FunctionContext {
       lenLocalIdx: number; // i32 — element length (== byte length for Uint8Array)
     }
   >;
+  /** #1886 — function-entry arena mark for rewinding short-lived linear-U8 locals. */
+  linearU8ArenaMarkLocalIdx?: number;
 }
 
 /** Context shared across all codegen. */
@@ -590,20 +608,12 @@ export interface CodegenContext {
    */
   applyClosureReserved?: boolean;
   /**
-   * (#124) Set when a standalone ToPrimitive coercion site registers the native
-   * `__to_primitive` helper. Its body calls `__extern_method_call`, whose funcIdx
-   * must be re-resolved at FINALIZE (it goes stale across later import additions
-   * — the #1839/#1899 late-shift class). The body is registered as a placeholder
-   * and rebuilt by `fillToPrimitive` via `fillToPrimitiveBody`. Only set under
-   * `--target standalone`.
+   * (#1904) True once the standalone `__extern_is_array(externref) -> i32`
+   * helper placeholder has been emitted by the object runtime. Its body is
+   * filled in post-processing after all Wasm array carrier types (`__vec_*`
+   * plus `$ObjVec`) are known.
    */
-  toPrimitiveReserved?: boolean;
-  /**
-   * (#124) Closure that rebuilds the real `__to_primitive` body at finalize,
-   * re-resolving `__extern_method_call` by name. Set alongside
-   * `toPrimitiveReserved` in `ensureObjectRuntime`; consumed by `fillToPrimitive`.
-   */
-  fillToPrimitiveBody?: () => Instr[];
+  externIsArrayReserved?: boolean;
   /**
    * Static property initializer expressions to compile into __module_init.
    * `className` (#1395) is the owning class name — used to set
@@ -840,6 +850,8 @@ export interface CodegenContext {
   widenedTypeProperties: Map<string, { name: string; type: ValType }[]>;
   /** Map from widened variable name to its registered struct name */
   widenedVarStructMap: Map<string, string>;
+  /** Widened empty-object fields introduced by Object.defineProperty rather than assignment. */
+  widenedDefinePropertyKeys: Set<string>;
   /**
    * (#1239) Variable names whose initializer is an object literal carrying
    * `get`/`set` accessors. Such variables are stored as plain JS host

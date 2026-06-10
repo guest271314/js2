@@ -727,11 +727,23 @@ export function compileObjectLiteral(
     expr.properties.every((p) => ts.isSpreadAssignment(p) || resolvePropertyNameText(ctx, p) !== undefined)
   ) {
     const ctxTypeNonEmpty = ctx.checker.getContextualType(expr);
-    const isAnyContextNonEmpty =
-      !ctxTypeNonEmpty ||
-      (ctxTypeNonEmpty.flags & ts.TypeFlags.Any) !== 0 ||
-      (ctxTypeNonEmpty.flags & ts.TypeFlags.Unknown) !== 0 ||
-      (ctxTypeNonEmpty.flags & ts.TypeFlags.NonPrimitive) !== 0;
+    // An ABSENT contextual type normally means "any context" (e.g. a nested
+    // object-literal property value `{x: {y: 5}}`, or an array element) and
+    // should route to `$Object` so string-key reads work. The ONE exception is
+    // an un-annotated variable initializer (`const o = {a: 1}`): TypeScript
+    // infers a concrete *struct* type for `o`, and routing it to `$Object`
+    // makes a later numeric coercion (`(o as any) - 0`) flow through
+    // `__to_primitive` → `__unbox_number(undefined)` → 0 instead of the
+    // spec-correct NaN — the #1806/#1900 closed-struct ToPrimitive contract.
+    // Such a literal keeps the closed-struct fast path. (`const o: any = {...}`
+    // carries an explicit `any` contextual type, so it still routes.)
+    const isUnannotatedVarInit =
+      ts.isVariableDeclaration(expr.parent) && expr.parent.initializer === expr && expr.parent.type === undefined;
+    const isAnyContextNonEmpty = ctxTypeNonEmpty
+      ? (ctxTypeNonEmpty.flags & ts.TypeFlags.Any) !== 0 ||
+        (ctxTypeNonEmpty.flags & ts.TypeFlags.Unknown) !== 0 ||
+        (ctxTypeNonEmpty.flags & ts.TypeFlags.NonPrimitive) !== 0
+      : !isUnannotatedVarInit;
     if (isAnyContextNonEmpty) {
       const objResult = compileObjectLiteralAsExternref(ctx, fctx, expr);
       if (objResult) return objResult;
@@ -2038,9 +2050,8 @@ export function compileTupleLiteral(
     if (i < expr.elements.length) {
       const el = expr.elements[i]!;
       // For holes (OmittedExpression) and explicit `undefined` in f64 context,
-      // emit the sNaN sentinel so destructuring default checks trigger correctly.
-      // compileExpression emits regular NaN for undefined, which doesn't match
-      // the sNaN sentinel that emitDefaultValueCheck looks for (#1024).
+      // emit the sNaN sentinel so destructuring default checks trigger correctly
+      // (#1024).
       if (expectedType.kind === "f64" && _isUndefinedLike(el)) {
         fctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den });
         fctx.body.push({ op: "f64.reinterpret_i64" });
