@@ -9,13 +9,7 @@
 import type { ArrayTypeDef, Instr, StructTypeDef, TypeDef, ValType } from "../ir/types.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
-import {
-  addUnionImports,
-  ensureAnyFromExternHelper,
-  ensureAnyHelpers,
-  ensureAnyToExternHelper,
-  isAnyValue,
-} from "./index.js";
+import { addUnionImports, ensureAnyHelpers, ensureAnyToExternHelper, isAnyValue } from "./index.js";
 import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { getArrTypeIdxFromVec } from "./registry/types.js";
@@ -1211,10 +1205,14 @@ export function coerceType(
       }
     }
     if (from.kind === "externref") {
-      const funcIdx =
-        ctx.standalone || ctx.wasi
-          ? (ensureAnyFromExternHelper(ctx) ?? ctx.funcMap.get("__any_box_string"))
-          : ctx.funcMap.get("__any_box_string");
+      // NOTE (#1888 regression −788): do NOT route this generic boxing through
+      // __any_from_extern. The test262 harness comparator (`isSameValue` with
+      // `any` params over the externref ABI) depends on main's tag-5
+      // box-the-externref behavior; honest tag recovery here flipped ~794
+      // baseline standalone passes. Numeric honesty for the open-any dispatch
+      // is provided downstream by the $BoxedNumber recovery arm in
+      // __any_to_f64 (any-helpers.ts) instead.
+      const funcIdx = ctx.funcMap.get("__any_box_string");
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
         return;

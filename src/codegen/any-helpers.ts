@@ -692,15 +692,66 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
               { op: "f64.convert_i32_s" },
             ],
             else: [
-              // tag 0 (null) → f64val (0.0), tag 3 (f64) → f64val
-              { op: "local.get", index: 0 },
-              { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
+              // #1888 — $BoxedNumber recovery for tag 5 (standalone/WASI).
+              // The generic externref→AnyValue boxing wraps EVERY externref as
+              // a tag-5 box (externval = the raw externref) — including native
+              // __box_number carriers crossing the open-any closure-dispatch
+              // boundary. Reading f64val (0) for those silently turns every
+              // dispatched number into 0. Recover the honest value when the
+              // externval is a $BoxedNumber struct; everything else (genuine
+              // strings, null externval, wrapped $AnyValue) keeps the f64val
+              // read, bit-compatible with the host baseline. Comparison
+              // helpers stay BoxedNumber-blind on purpose — see the NOTE in
+              // type-coercion.ts (#1888 regression −788).
+              ...(ctx.nativeBoxNumberTypeIdx >= 0
+                ? ([
+                    { op: "local.get", index: 1 },
+                    { op: "i32.const", value: 5 },
+                    { op: "i32.eq" },
+                    {
+                      op: "if",
+                      blockType: { kind: "val", type: { kind: "f64" } },
+                      then: [
+                        { op: "local.get", index: 0 },
+                        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 }, // externval
+                        { op: "any.convert_extern" },
+                        { op: "local.tee", index: 2 },
+                        { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx },
+                        {
+                          op: "if",
+                          blockType: { kind: "val", type: { kind: "f64" } },
+                          then: [
+                            { op: "local.get", index: 2 },
+                            { op: "ref.cast", typeIdx: ctx.nativeBoxNumberTypeIdx },
+                            { op: "struct.get", typeIdx: ctx.nativeBoxNumberTypeIdx, fieldIdx: 0 },
+                          ],
+                          else: [
+                            { op: "local.get", index: 0 },
+                            { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
+                          ],
+                        },
+                      ],
+                      else: [
+                        // tag 0 (null) → f64val (0.0), tag 3 (f64) → f64val
+                        { op: "local.get", index: 0 },
+                        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
+                      ],
+                    },
+                  ] as Instr[])
+                : ([
+                    // tag 0 (null) → f64val (0.0), tag 3 (f64) → f64val
+                    { op: "local.get", index: 0 },
+                    { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 2 },
+                  ] as Instr[])),
             ],
           },
         ],
       },
     ],
-    [{ name: "tag", type: { kind: "i32" } }],
+    [
+      { name: "tag", type: { kind: "i32" } },
+      { name: "boxAny", type: { kind: "anyref" } },
+    ],
   );
 
   const toF64Idx = ctx.funcMap.get("__any_to_f64")!;
@@ -1102,6 +1153,39 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
           { op: "local.get", index: 1 },
           { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 },
           { op: "local.set", index: 3 },
+          // Numeric class first: tags 2 (i32) and 3 (f64) are ONE JS type
+          // ("number") split only by internal representation. `23 === 23.0`
+          // must be true even when one side is a tag-2 box and the other a
+          // tag-3 box (e.g. a value recovered via __any_from_extern from a
+          // __box_number carrier vs a directly boxed i32 literal). Compare
+          // numerically as f64 whenever BOTH tags are in {2, 3}.
+          { op: "local.get", index: 2 },
+          { op: "i32.const", value: 2 },
+          { op: "i32.ge_s" },
+          { op: "local.get", index: 2 },
+          { op: "i32.const", value: 3 },
+          { op: "i32.le_s" },
+          { op: "i32.and" },
+          { op: "local.get", index: 3 },
+          { op: "i32.const", value: 2 },
+          { op: "i32.ge_s" },
+          { op: "local.get", index: 3 },
+          { op: "i32.const", value: 3 },
+          { op: "i32.le_s" },
+          { op: "i32.and" },
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 0 },
+              { op: "call", funcIdx: toF64Idx },
+              { op: "local.get", index: 1 },
+              { op: "call", funcIdx: toF64Idx },
+              { op: "f64.eq" },
+              { op: "return" },
+            ],
+          },
           // if tagA != tagB → 0 (strict: no cross-type coercion)
           { op: "local.get", index: 2 },
           { op: "local.get", index: 3 },
@@ -1119,7 +1203,8 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                 op: "if",
                 blockType: { kind: "val", type: { kind: "i32" } },
                 then: [
-                  // i32 eq
+                  // i32 eq (unreachable in practice — the numeric-class arm
+                  // above already handled tag2/tag2 — kept as a safe fallback)
                   { op: "local.get", index: 0 },
                   { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
                   { op: "local.get", index: 1 },
