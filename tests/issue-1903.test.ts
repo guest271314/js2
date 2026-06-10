@@ -83,4 +83,42 @@ describe("#1903 standalone __obj_find hash call remains type-correct", () => {
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     expect(WebAssembly.validate(r.binary)).toBe(true);
   });
+
+  // #1903 (fix): `ensureObjectRuntime` is reached via `ensureLateImport`'s
+  // object-runtime route DURING user-function body compilation, where a
+  // string-method late-import batch may still be OPEN. The eager
+  // `reconcileNativeStrFinalizeShift` it runs must cap its target at the open
+  // batch boundary — defaulting to `ctx.numImportFuncs` folded the unflushed
+  // batch into the helper base, so the subsequent batch flush double-shifted
+  // every native-string helper's baked sibling-call index. That produced
+  // structurally invalid wasm (the −468 standalone / 508 `wasm_compile` flip
+  // regression). This program mixes string-method late imports (`String(...)`,
+  // `.toUpperCase`, `Array.map`, `Array.reduce`) with dynamic computed-key
+  // object access in a single function so the object-runtime route fires while
+  // a string late-import batch is in flight.
+  it("emits valid wasm when the object-runtime route fires mid string-late-import batch", async () => {
+    const source = `
+      export function run(): number {
+        const o: any = {};
+        const k: any = "key" + String(1);
+        o[k] = 10;
+        const s: string = "hello world".slice(0, 5).toUpperCase();
+        const arr = [1, 2, 3].map((x: number) => x * 2);
+        o["sum"] = arr.reduce((a: number, b: number) => a + b, 0);
+        return (o[k] as number) + (o["sum"] as number) + s.length;
+      }
+    `;
+
+    const r = await compile(source, {
+      target: "standalone",
+      skipSemanticDiagnostics: true,
+    });
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(WebAssembly.validate(r.binary)).toBe(true);
+    assertNoBannedObjectImports(r.imports);
+
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    // o[k] = 10, sum = 2+4+6 = 12, "HELLO".length = 5 → 10 + 12 + 5 = 27
+    expect((instance.exports as Record<string, () => number>).run()).toBe(27);
+  });
 });
