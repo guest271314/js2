@@ -118,8 +118,8 @@
   },
   {
     "edition": "ES2026",
-    "pass": 161,
-    "fail": 183,
+    "pass": 159,
+    "fail": 185,
     "ce": 5,
     "skip": 0,
     "total": 349,

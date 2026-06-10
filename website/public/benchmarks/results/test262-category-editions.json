@@ -523,6 +523,14 @@
       "skip": 0
     }
   },
+  "built-ins/AsyncGeneratorPrototype": {
+    "ES2018": {
+      "pass": 46,
+      "fail": 2,
+      "ce": 0,
+      "skip": 0
+    }
+  },
   "built-ins/AsyncFromSyncIteratorPrototype": {
     "ES5": {
       "pass": 0,
@@ -565,14 +573,6 @@
     "ES2026": {
       "pass": 5,
       "fail": 1,
-      "ce": 0,
-      "skip": 0
-    }
-  },
-  "built-ins/AsyncGeneratorPrototype": {
-    "ES2018": {
-      "pass": 46,
-      "fail": 2,
       "ce": 0,
       "skip": 0
     }
@@ -1077,16 +1077,8 @@
       "skip": 0
     },
     "ES2026": {
-      "pass": 15,
-      "fail": 5,
-      "ce": 0,
-      "skip": 0
-    }
-  },
-  "built-ins/RegExpStringIteratorPrototype": {
-    "ES2020": {
-      "pass": 6,
-      "fail": 11,
+      "pass": 14,
+      "fail": 6,
       "ce": 0,
       "skip": 0
     }
@@ -1113,6 +1105,14 @@
     "ES2025": {
       "pass": 141,
       "fail": 45,
+      "ce": 0,
+      "skip": 0
+    }
+  },
+  "built-ins/RegExpStringIteratorPrototype": {
+    "ES2020": {
+      "pass": 6,
+      "fail": 11,
       "ce": 0,
       "skip": 0
     }
@@ -1451,8 +1451,8 @@
       "skip": 0
     },
     "ES2026": {
-      "pass": 12,
-      "fail": 23,
+      "pass": 11,
+      "fail": 24,
       "ce": 0,
       "skip": 0
     }
