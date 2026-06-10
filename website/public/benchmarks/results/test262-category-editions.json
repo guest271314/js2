@@ -523,14 +523,6 @@
       "skip": 0
     }
   },
-  "built-ins/AsyncGeneratorPrototype": {
-    "ES2018": {
-      "pass": 46,
-      "fail": 2,
-      "ce": 0,
-      "skip": 0
-    }
-  },
   "built-ins/AsyncFromSyncIteratorPrototype": {
     "ES5": {
       "pass": 0,
@@ -542,6 +534,14 @@
       "pass": 23,
       "fail": 13,
       "ce": 1,
+      "skip": 0
+    }
+  },
+  "built-ins/AsyncGeneratorPrototype": {
+    "ES2018": {
+      "pass": 46,
+      "fail": 2,
+      "ce": 0,
       "skip": 0
     }
   },
@@ -657,29 +657,11 @@
       "skip": 0
     }
   },
-  "built-ins/Error": {
-    "ES5": {
-      "pass": 15,
-      "fail": 2,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2015": {
-      "pass": 14,
-      "fail": 12,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2022": {
-      "pass": 0,
-      "fail": 3,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2026": {
-      "pass": 9,
-      "fail": 3,
-      "ce": 0,
+  "built-ins/FinalizationRegistry": {
+    "ES2021": {
+      "pass": 20,
+      "fail": 25,
+      "ce": 2,
       "skip": 0
     }
   },
@@ -721,11 +703,29 @@
       "skip": 0
     }
   },
-  "built-ins/FinalizationRegistry": {
-    "ES2021": {
-      "pass": 20,
-      "fail": 25,
-      "ce": 2,
+  "built-ins/Error": {
+    "ES5": {
+      "pass": 15,
+      "fail": 2,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2015": {
+      "pass": 14,
+      "fail": 12,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2022": {
+      "pass": 0,
+      "fail": 3,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2026": {
+      "pass": 9,
+      "fail": 3,
+      "ce": 0,
       "skip": 0
     }
   },
@@ -765,8 +765,8 @@
       "skip": 0
     },
     "ES2025": {
-      "pass": 211,
-      "fail": 184,
+      "pass": 210,
+      "fail": 185,
       "ce": 0,
       "skip": 0
     },
@@ -1327,10 +1327,10 @@
       "skip": 0
     }
   },
-  "built-ins/WeakSet": {
+  "built-ins/decodeURI": {
     "ES2015": {
-      "pass": 77,
-      "fail": 8,
+      "pass": 40,
+      "fail": 15,
       "ce": 0,
       "skip": 0
     }
@@ -1343,10 +1343,10 @@
       "skip": 0
     }
   },
-  "built-ins/decodeURI": {
+  "built-ins/WeakSet": {
     "ES2015": {
-      "pass": 40,
-      "fail": 15,
+      "pass": 77,
+      "fail": 8,
       "ce": 0,
       "skip": 0
     }
@@ -1459,8 +1459,8 @@
   },
   "annexB/language": {
     "ES5": {
-      "pass": 403,
-      "fail": 387,
+      "pass": 405,
+      "fail": 385,
       "ce": 15,
       "skip": 0
     },
