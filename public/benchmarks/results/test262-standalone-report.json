@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-10T21:36:25.945Z",
-  "baseline_generated_at": "2026-06-10T21:36:25Z",
-  "baseline_sha": "88bd228e5420754d11a7abc7607d04eab4ad0842",
+  "timestamp": "2026-06-10T22:17:28.626Z",
+  "baseline_generated_at": "2026-06-10T22:17:28Z",
+  "baseline_sha": "329898bbd4880785f7178ca6cce7915e230ecaf3",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,33 +9,33 @@
   },
   "summary": {
     "total": 43132,
-    "pass": 16533,
-    "fail": 12684,
-    "compile_error": 13893,
-    "compile_timeout": 4,
+    "pass": 16591,
+    "fail": 12717,
+    "compile_error": 13801,
+    "compile_timeout": 5,
     "skip": 18,
-    "compilable": 29217,
+    "compilable": 29308,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42046,
-        "pass": 16136,
-        "fail": 12246,
-        "compile_error": 13642,
-        "compile_timeout": 4,
+        "pass": 16184,
+        "fail": 12266,
+        "compile_error": 13573,
+        "compile_timeout": 5,
         "skip": 18,
-        "compilable": 28382,
+        "compilable": 28450,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
       "annex_b": {
         "total": 1086,
-        "pass": 397,
-        "fail": 438,
-        "compile_error": 251,
+        "pass": 407,
+        "fail": 451,
+        "compile_error": 228,
         "compile_timeout": 0,
         "skip": 0,
-        "compilable": 835,
+        "compilable": 858,
         "stale": 0,
         "label": "Annex B (legacy web compat)"
       },
@@ -52,23 +52,23 @@
       },
       "official": {
         "total": 43132,
-        "pass": 16533,
-        "fail": 12684,
-        "compile_error": 13893,
-        "compile_timeout": 4,
+        "pass": 16591,
+        "fail": 12717,
+        "compile_error": 13801,
+        "compile_timeout": 5,
         "skip": 18,
-        "compilable": 29217,
+        "compilable": 29308,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48114,
-        "pass": 17502,
-        "fail": 13719,
-        "compile_error": 16775,
-        "compile_timeout": 4,
+        "pass": 17560,
+        "fail": 13752,
+        "compile_error": 16683,
+        "compile_timeout": 5,
         "skip": 114,
-        "compilable": 31221,
+        "compilable": 31312,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -76,43 +76,43 @@
   },
   "official_summary": {
     "total": 43132,
-    "pass": 16533,
-    "fail": 12684,
-    "compile_error": 13893,
-    "compile_timeout": 4,
+    "pass": 16591,
+    "fail": 12717,
+    "compile_error": 13801,
+    "compile_timeout": 5,
     "skip": 18,
-    "compilable": 29217,
+    "compilable": 29308,
     "stale": 0
   },
   "full_summary": {
     "total": 48114,
-    "pass": 17502,
-    "fail": 13719,
-    "compile_error": 16775,
-    "compile_timeout": 4,
+    "pass": 17560,
+    "fail": 13752,
+    "compile_error": 16683,
+    "compile_timeout": 5,
     "skip": 114,
-    "compilable": 31221,
+    "compilable": 31312,
     "stale": 0
   },
   "strict_summary": {
     "total": 40623,
-    "pass": 15693,
-    "fail": 11780,
-    "compile_error": 13128,
-    "compile_timeout": 4,
+    "pass": 15751,
+    "fail": 11806,
+    "compile_error": 13043,
+    "compile_timeout": 5,
     "skip": 18,
-    "compilable": 27473,
+    "compilable": 27557,
     "stale": 0
   },
   "scope_summaries": {
     "annex_b": {
       "total": 1086,
-      "pass": 397,
-      "fail": 438,
-      "compile_error": 251,
+      "pass": 407,
+      "fail": 451,
+      "compile_error": 228,
       "compile_timeout": 0,
       "skip": 0,
-      "compilable": 835,
+      "compilable": 858,
       "stale": 0
     },
     "proposal": {
@@ -127,12 +127,12 @@
     },
     "standard": {
       "total": 42046,
-      "pass": 16136,
-      "fail": 12246,
-      "compile_error": 13642,
-      "compile_timeout": 4,
+      "pass": 16184,
+      "fail": 12266,
+      "compile_error": 13573,
+      "compile_timeout": 5,
       "skip": 18,
-      "compilable": 28382,
+      "compilable": 28450,
       "stale": 0
     }
   },
@@ -141,8 +141,8 @@
       "name": "annexB/built-ins",
       "path": "annexB/built-ins",
       "pass": 30,
-      "fail": 73,
-      "compile_error": 138,
+      "fail": 79,
+      "compile_error": 132,
       "compile_timeout": 0,
       "skip": 0,
       "total": 241
@@ -150,9 +150,9 @@
     {
       "name": "annexB/language",
       "path": "annexB/language",
-      "pass": 367,
-      "fail": 365,
-      "compile_error": 113,
+      "pass": 377,
+      "fail": 372,
+      "compile_error": 96,
       "compile_timeout": 0,
       "skip": 0,
       "total": 845
@@ -181,8 +181,8 @@
       "name": "built-ins/Array",
       "path": "built-ins/Array",
       "pass": 461,
-      "fail": 1043,
-      "compile_error": 1574,
+      "fail": 1044,
+      "compile_error": 1573,
       "compile_timeout": 3,
       "skip": 0,
       "total": 3081
@@ -272,8 +272,8 @@
       "path": "built-ins/Atomics",
       "pass": 30,
       "fail": 13,
-      "compile_error": 339,
-      "compile_timeout": 0,
+      "compile_error": 338,
+      "compile_timeout": 1,
       "skip": 0,
       "total": 382
     },
@@ -370,9 +370,9 @@
     {
       "name": "built-ins/Error",
       "path": "built-ins/Error",
-      "pass": 7,
-      "fail": 16,
-      "compile_error": 35,
+      "pass": 8,
+      "fail": 17,
+      "compile_error": 33,
       "compile_timeout": 0,
       "skip": 0,
       "total": 58
@@ -400,9 +400,9 @@
     {
       "name": "built-ins/Function",
       "path": "built-ins/Function",
-      "pass": 127,
-      "fail": 154,
-      "compile_error": 228,
+      "pass": 128,
+      "fail": 158,
+      "compile_error": 223,
       "compile_timeout": 0,
       "skip": 0,
       "total": 509
@@ -590,9 +590,9 @@
     {
       "name": "built-ins/Proxy",
       "path": "built-ins/Proxy",
-      "pass": 3,
-      "fail": 2,
-      "compile_error": 306,
+      "pass": 4,
+      "fail": 30,
+      "compile_error": 277,
       "compile_timeout": 0,
       "skip": 0,
       "total": 311
@@ -740,9 +740,9 @@
     {
       "name": "built-ins/TypedArrayConstructors",
       "path": "built-ins/TypedArrayConstructors",
-      "pass": 333,
+      "pass": 337,
       "fail": 56,
-      "compile_error": 347,
+      "compile_error": 343,
       "compile_timeout": 0,
       "skip": 0,
       "total": 736
@@ -751,8 +751,8 @@
       "name": "built-ins/Uint8Array",
       "path": "built-ins/Uint8Array",
       "pass": 8,
-      "fail": 10,
-      "compile_error": 50,
+      "fail": 9,
+      "compile_error": 51,
       "compile_timeout": 0,
       "skip": 0,
       "total": 68
@@ -870,9 +870,9 @@
     {
       "name": "language/eval-code",
       "path": "language/eval-code",
-      "pass": 89,
+      "pass": 90,
       "fail": 146,
-      "compile_error": 112,
+      "compile_error": 111,
       "compile_timeout": 0,
       "skip": 0,
       "total": 347
@@ -890,9 +890,9 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 5550,
-      "fail": 3643,
-      "compile_error": 1824,
+      "pass": 5588,
+      "fail": 3624,
+      "compile_error": 1805,
       "compile_timeout": 1,
       "skip": 18,
       "total": 11036
@@ -920,9 +920,9 @@
     {
       "name": "language/global-code",
       "path": "language/global-code",
-      "pass": 15,
-      "fail": 8,
-      "compile_error": 19,
+      "pass": 16,
+      "fail": 13,
+      "compile_error": 13,
       "compile_timeout": 0,
       "skip": 0,
       "total": 42
@@ -1050,9 +1050,9 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 4624,
-      "fail": 2931,
-      "compile_error": 1782,
+      "pass": 4625,
+      "fail": 2932,
+      "compile_error": 1780,
       "compile_timeout": 0,
       "skip": 0,
       "total": 9337
@@ -1079,7 +1079,7 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 10069,
+    "assertion_fail": 10071,
     "illegal_cast": 753,
     "negative_test_fail": 77,
     "null_deref": 505,
@@ -1087,10 +1087,10 @@
     "other": 10743,
     "promise_error": 184,
     "range_error": 26,
-    "runtime_error": 5381,
+    "runtime_error": 5417,
     "type_error": 8,
     "unreachable": 27,
-    "wasm_compile": 2543
+    "wasm_compile": 2446
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1098,8 +1098,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 30498,
-    "classified": 30498,
+    "total_non_pass_non_skip": 30440,
+    "classified": 30440,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1225,10 +1225,10 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Duration/compare/builtin.js",
-          "test/built-ins/Temporal/Duration/prototype/add/balance-negative-time-units.js",
           "test/built-ins/Temporal/Duration/prototype/round/balance-subseconds.js",
           "test/built-ins/Temporal/Duration/prototype/round/relativeto-propertybag-optional-properties.js",
-          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js"
+          "test/built-ins/Temporal/Duration/prototype/round/throws-on-wrong-offset-for-zoned-date-time-relative-to.js",
+          "test/built-ins/Temporal/Duration/prototype/toLocaleString/branding.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Object.prototype.toString.call(...) is not yet supported in --target standalone (## Slice #/#) — only Object.prototype hasOwnProperty/propertyIsEnumerable/isPrototypeOf borrowed calls are wired (valueOf is a follow-on).",
@@ -1382,14 +1382,14 @@
           "test/built-ins/JSON/stringify/space-string-range.js",
           "test/built-ins/JSON/parse/reviver-forward-modifies-object.js",
           "test/built-ins/JSON/parse/15.12.1.1-g4-2.js",
-          "test/built-ins/JSON/stringify/value-bigint-tojson.js"
+          "test/built-ins/JSON/parse/text-object-abrupt.js"
         ],
         "sample_signatures": [
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← test]",
           "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "other:L#:## Duplicate identifier 'assertOnlyOwnProperties'",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
-          "other:L#:## Codegen error: BigInt.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.; L#:## Codegen error: JSON.stringify of this value is not "
+          "other:L#:## Codegen error: JSON.parse of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phase # "
         ]
       },
       {
@@ -1478,18 +1478,18 @@
         "count": 657,
         "statuses": {
           "pass": 0,
-          "fail": 336,
-          "compile_error": 321,
+          "fail": 342,
+          "compile_error": 315,
           "compile_timeout": 0,
           "skip": 0,
           "total": 657
         },
         "error_categories": {
-          "assertion_fail": 284,
+          "assertion_fail": 290,
           "null_deref": 20,
           "other": 296,
           "runtime_error": 34,
-          "wasm_compile": 19,
+          "wasm_compile": 13,
           "illegal_cast": 4
         },
         "sample_files": [
@@ -1550,20 +1550,20 @@
           "#1472"
         ],
         "label": "Standalone dynamic object/property operation gate",
-        "count": 4005,
+        "count": 4002,
         "statuses": {
           "pass": 0,
-          "fail": 1961,
-          "compile_error": 2044,
+          "fail": 1992,
+          "compile_error": 2010,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 4005
+          "total": 4002
         },
         "error_categories": {
-          "runtime_error": 516,
-          "assertion_fail": 1479,
+          "runtime_error": 520,
+          "assertion_fail": 1487,
+          "wasm_compile": 199,
           "other": 1638,
-          "wasm_compile": 214,
           "illegal_cast": 132,
           "promise_error": 11,
           "null_deref": 13,
@@ -1573,16 +1573,16 @@
         "sample_files": [
           "test/language/statements/class/dstr/private-gen-meth-obj-ptrn-rest-getter.js",
           "test/language/statements/class/elements/after-same-line-static-gen-private-field-usage.js",
-          "test/language/statements/class/elements/class-field-is-observable-by-proxy.js",
+          "test/language/statements/class/elements/after-same-line-static-method-rs-static-async-generator-method-privatename-identifier.js",
           "test/language/statements/class/elements/multiple-definitions-rs-static-method-privatename-identifier.js",
-          "test/language/statements/class/elements/new-no-sc-line-method-literal-names.js"
+          "test/language/statements/class/elements/class-field-is-observable-by-proxy.js"
         ],
         "sample_signatures": [
           "runtime_error:L#:## Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(C.m().next().value, #);",
-          "other:L#:## Codegen error: Proxy not supported in standalone mode (## Phase C).",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"__obj_find\" failed: i32.and[#] expected type i32, found call of type externref @+#) [in __obj_find()] [@+#] [wat: (func $__obj_find (param (ref null #) externref) ",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(c.m2, C.prototype.m2);",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(c.m, C.prototype.m);"
+          "other:L#:## Codegen error: Proxy not supported in standalone mode (## Phase C)."
         ]
       },
       {
@@ -1610,15 +1610,15 @@
           "test/built-ins/ArrayBuffer/options-maxbytelength-data-allocation-after-object-creation.js",
           "test/built-ins/Reflect/get/return-abrupt-from-property-key.js",
           "test/built-ins/Reflect/ownKeys/return-non-enumerable-keys.js",
-          "test/built-ins/Reflect/getOwnPropertyDescriptor/return-abrupt-from-property-key.js",
-          "test/built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js"
+          "test/built-ins/Reflect/apply/arguments-list-is-not-array-like-but-still-valid.js",
+          "test/built-ins/Reflect/getOwnPropertyDescriptor/return-abrupt-from-property-key.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "assertion_fail:returned # — assert ## at L#: assert.compareArray( Reflect.ownKeys([]), ['length'], 'return non enumerable `length` from empty array' );",
-          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C).",
-          "other:L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Ph"
+          "other:L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.apply not supported in standalone mode (## Ph",
+          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C)."
         ]
       },
       {
@@ -1629,23 +1629,23 @@
           "#1718"
         ],
         "label": "Generic iterator protocol still needs a pure-Wasm standalone path",
-        "count": 5451,
+        "count": 5429,
         "statuses": {
           "pass": 0,
-          "fail": 3326,
-          "compile_error": 2125,
+          "fail": 3309,
+          "compile_error": 2120,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 5451
+          "total": 5429
         },
         "error_categories": {
-          "assertion_fail": 2436,
+          "assertion_fail": 2419,
           "wasm_compile": 883,
           "other": 1233,
           "illegal_cast": 500,
           "promise_error": 16,
           "oob": 87,
-          "runtime_error": 239,
+          "runtime_error": 234,
           "unreachable": 2,
           "null_deref": 40,
           "range_error": 3,
@@ -1684,9 +1684,9 @@
           "total": 135
         },
         "error_categories": {
-          "runtime_error": 9,
+          "runtime_error": 11,
           "assertion_fail": 82,
-          "wasm_compile": 20,
+          "wasm_compile": 18,
           "other": 19,
           "null_deref": 4,
           "promise_error": 1
@@ -1717,18 +1717,18 @@
         "count": 7822,
         "statuses": {
           "pass": 0,
-          "fail": 2888,
-          "compile_error": 4931,
+          "fail": 2898,
+          "compile_error": 4921,
           "compile_timeout": 3,
           "skip": 0,
           "total": 7822
         },
         "error_categories": {
-          "assertion_fail": 2284,
-          "wasm_compile": 790,
+          "assertion_fail": 2290,
+          "wasm_compile": 777,
           "negative_test_fail": 13,
           "other": 3829,
-          "runtime_error": 555,
+          "runtime_error": 562,
           "oob": 80,
           "promise_error": 50,
           "null_deref": 139,
@@ -1758,17 +1758,17 @@
           "#1472"
         ],
         "label": "ToPrimitive / object-to-string dispatch residuals",
-        "count": 861,
+        "count": 883,
         "statuses": {
           "pass": 0,
           "fail": 679,
-          "compile_error": 182,
+          "compile_error": 204,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 861
+          "total": 883
         },
         "error_categories": {
-          "runtime_error": 812,
+          "runtime_error": 834,
           "other": 31,
           "wasm_compile": 8,
           "assertion_fail": 10
@@ -1776,8 +1776,8 @@
         "sample_files": [
           "test/language/statements/for/S12.6.3_A3.js",
           "test/language/statements/throw/S12.13_A2_T6.js",
-          "test/language/statements/try/S12.14_A18_T3.js",
           "test/language/statements/switch/S12.11_A1_T4.js",
+          "test/language/statements/try/S12.14_A18_T3.js",
           "test/language/expressions/assignment/dstr/array-rest-yield-ident-valid.js"
         ],
         "sample_signatures": [
@@ -1796,36 +1796,36 @@
           "#1654"
         ],
         "label": "Array, TypedArray, DataView, and buffer semantics",
-        "count": 341,
+        "count": 337,
         "statuses": {
           "pass": 0,
-          "fail": 187,
-          "compile_error": 154,
+          "fail": 188,
+          "compile_error": 149,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 341
+          "total": 337
         },
         "error_categories": {
           "other": 107,
           "assertion_fail": 131,
-          "runtime_error": 66,
+          "runtime_error": 72,
           "oob": 8,
-          "wasm_compile": 22,
+          "wasm_compile": 12,
           "illegal_cast": 4,
           "null_deref": 1,
           "promise_error": 2
         },
         "sample_files": [
           "test/built-ins/Array/from/Array.from_forwards-length-for-array-likes.js",
-          "test/built-ins/TypedArrayConstructors/Float32Array/is-a-constructor.js",
           "test/built-ins/TypedArrayConstructors/Uint16Array/name.js",
+          "test/built-ins/TypedArrayConstructors/Float32Array/is-a-constructor.js",
           "test/built-ins/TypedArrayConstructors/internals/OwnPropertyKeys/not-enumerable-keys.js",
           "test/built-ins/Array/isArray/15.4.3.2-1-4.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Array.from built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(isConstructor(Float32Array), true, 'isConstructor(Float32Array) must return true');",
           "other:L#:## Codegen error: Uint16Array.name built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(isConstructor(Float32Array), true, 'isConstructor(Float32Array) must return true');",
           "runtime_error:L#:## Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(Array.isArray(new Number(-#)), false, 'Array.isArray(new Number(-#)) must return false');"
         ]
@@ -1876,22 +1876,22 @@
           "#1466"
         ],
         "label": "Object/property/destructuring semantic mismatches behind the object model",
-        "count": 1577,
+        "count": 1575,
         "statuses": {
           "pass": 0,
-          "fail": 927,
-          "compile_error": 650,
+          "fail": 926,
+          "compile_error": 649,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 1577
+          "total": 1575
         },
         "error_categories": {
           "other": 324,
-          "assertion_fail": 873,
           "runtime_error": 264,
+          "assertion_fail": 872,
           "promise_error": 91,
           "illegal_cast": 1,
-          "wasm_compile": 16,
+          "wasm_compile": 15,
           "negative_test_fail": 5,
           "null_deref": 3
         },
@@ -1900,14 +1900,14 @@
           "test/built-ins/Math/acosh/not-a-constructor.js",
           "test/built-ins/Math/fround/not-a-constructor.js",
           "test/built-ins/Math/trunc/not-a-constructor.js",
-          "test/built-ins/Object/S15.2.1.1_A2_T6.js"
+          "test/built-ins/Object/create/15.2.3.5-4-13.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: BigInt.length built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
           "other:L#:## Codegen error: Math.acosh built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
           "other:L#:## Codegen error: Math.fround built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
           "other:L#:## Codegen error: Math.trunc built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "assertion_fail:returned # — assert ## at L#: assert(obj == Infinity, 'The result of evaluating (obj == Infinity) is expected to be true');"
+          "runtime_error:Cannot convert object to primitive value"
         ]
       },
       {
@@ -1958,31 +1958,31 @@
           "#1050"
         ],
         "label": "Annex B function/eval semantics",
-        "count": 306,
+        "count": 278,
         "statuses": {
           "pass": 0,
-          "fail": 253,
-          "compile_error": 53,
+          "fail": 259,
+          "compile_error": 19,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 306
+          "total": 278
         },
         "error_categories": {
-          "assertion_fail": 251,
-          "wasm_compile": 37,
+          "assertion_fail": 257,
           "other": 10,
-          "runtime_error": 8
+          "runtime_error": 8,
+          "wasm_compile": 3
         },
         "sample_files": [
           "test/annexB/language/function-code/if-decl-else-decl-a-func-init.js",
           "test/annexB/language/function-code/if-decl-no-else-func-init.js",
-          "test/annexB/language/expressions/assignment/dstr/array-pattern-emulates-undefined.js",
-          "test/annexB/language/global-code/if-decl-else-decl-b-global-existing-global-init.js",
-          "test/annexB/language/global-code/if-stmt-else-decl-global-existing-global-init.js"
+          "test/annexB/language/expressions/does-not-equals/emulates-undefined.js",
+          "test/annexB/language/function-code/if-decl-else-decl-a-func-update.js",
+          "test/annexB/language/function-code/if-decl-no-else-func-update.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(changed, #, 'binding is mutable');",
-          "wasm_compile:invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"__str_flatten\" failed: call[#] expected type (ref null #), found i32.const of type i32 @+#) [in __str_flatten()] [@+#] [wat: (func $__str_flatten (param (ref null #)) (r",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(IsHTMLDDA != undefined, false, \"!= with `undefined`\");",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(after(), 'declaration');",
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();"
@@ -2031,18 +2031,18 @@
           "#1689"
         ],
         "label": "Number parsing, formatting, and coercion",
-        "count": 96,
+        "count": 97,
         "statuses": {
           "pass": 0,
-          "fail": 87,
+          "fail": 88,
           "compile_error": 9,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 96
+          "total": 97
         },
         "error_categories": {
           "assertion_fail": 57,
-          "wasm_compile": 24,
+          "wasm_compile": 25,
           "illegal_cast": 8,
           "runtime_error": 6,
           "null_deref": 1
@@ -2070,18 +2070,18 @@
           "#1596"
         ],
         "label": "Function object name/length/prototype/call semantics",
-        "count": 338,
+        "count": 333,
         "statuses": {
           "pass": 0,
-          "fail": 209,
-          "compile_error": 129,
+          "fail": 208,
+          "compile_error": 125,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 338
+          "total": 333
         },
         "error_categories": {
-          "assertion_fail": 187,
-          "wasm_compile": 12,
+          "assertion_fail": 184,
+          "wasm_compile": 10,
           "runtime_error": 123,
           "illegal_cast": 4,
           "null_deref": 5,
@@ -2091,17 +2091,17 @@
         },
         "sample_files": [
           "test/language/expressions/arrow-function/dstr/dflt-obj-ptrn-id-init-fn-name-class.js",
-          "test/language/expressions/arrow-function/dstr/obj-ptrn-prop-obj.js",
           "test/language/expressions/arrow-function/forbidden-ext/b2/arrow-function-forbidden-ext-indirect-access-prop-caller.js",
           "test/language/function-code/10.4.3-1-19gs.js",
-          "test/language/function-code/10.4.3-1-48-s.js"
+          "test/language/function-code/10.4.3-1-48-s.js",
+          "test/built-ins/Function/S15.3.5_A3_T1.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(cls.name, 'cls');",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(x, undefined);",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"inner\" failed: call[#] expected type externref, found struct.new of type (ref #) @+#) [in inner()] [@+#] [wat: (func $inner (type #) (local $__nullchk_0 externref)",
           "runtime_error:Cannot convert object to primitive value",
-          "assertion_fail:returned # — assert ## at L#: assert(f1(), 'f1() !== true');"
+          "assertion_fail:returned # — assert ## at L#: assert(f1(), 'f1() !== true');",
+          "wasm_compile:L#:## No dependency provided for extern class \"FACTORY\""
         ]
       },
       {
@@ -2222,18 +2222,18 @@
           "#990"
         ],
         "label": "Eval and `new Function` semantics",
-        "count": 741,
+        "count": 737,
         "statuses": {
           "pass": 0,
-          "fail": 679,
-          "compile_error": 62,
+          "fail": 676,
+          "compile_error": 61,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 741
+          "total": 737
         },
         "error_categories": {
-          "assertion_fail": 658,
-          "wasm_compile": 64,
+          "assertion_fail": 655,
+          "wasm_compile": 63,
           "other": 12,
           "promise_error": 3,
           "negative_test_fail": 3,
@@ -2336,17 +2336,17 @@
           "#1726"
         ],
         "label": "Lexical scope, TDZ, and declaration semantics",
-        "count": 180,
+        "count": 169,
         "statuses": {
           "pass": 0,
           "fail": 124,
-          "compile_error": 56,
+          "compile_error": 45,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 180
+          "total": 169
         },
         "error_categories": {
-          "wasm_compile": 58,
+          "wasm_compile": 47,
           "assertion_fail": 84,
           "null_deref": 7,
           "negative_test_fail": 12,
@@ -2455,17 +2455,17 @@
           "#787"
         ],
         "label": "Tail-call/control-flow loop semantics, including compile timeouts",
-        "count": 124,
+        "count": 127,
         "statuses": {
           "pass": 0,
           "fail": 67,
-          "compile_error": 56,
-          "compile_timeout": 1,
+          "compile_error": 58,
+          "compile_timeout": 2,
           "skip": 0,
-          "total": 124
+          "total": 127
         },
         "error_categories": {
-          "wasm_compile": 53,
+          "wasm_compile": 55,
           "null_deref": 20,
           "assertion_fail": 36,
           "illegal_cast": 2,
@@ -2565,17 +2565,17 @@
           "#1378"
         ],
         "label": "Completion values and control-flow semantics",
-        "count": 12,
+        "count": 11,
         "statuses": {
           "pass": 0,
           "fail": 6,
-          "compile_error": 6,
+          "compile_error": 5,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 12
+          "total": 11
         },
         "error_categories": {
-          "wasm_compile": 4,
+          "wasm_compile": 3,
           "assertion_fail": 4,
           "other": 3,
           "runtime_error": 1
@@ -2583,16 +2583,16 @@
         "sample_files": [
           "test/language/expressions/object/dstr/meth-obj-ptrn-id-init-throws.js",
           "test/language/expressions/object/dstr/meth-obj-ptrn-prop-id-init-throws.js",
-          "test/built-ins/ThrowTypeError/distinct-cross-realm.js",
           "test/built-ins/SharedArrayBuffer/undefined-newtarget-throws.js",
-          "test/built-ins/SharedArrayBuffer/return-abrupt-from-length-symbol.js"
+          "test/built-ins/SharedArrayBuffer/return-abrupt-from-length-symbol.js",
+          "test/built-ins/FinalizationRegistry/undefined-newtarget-throws.js"
         ],
         "sample_signatures": [
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"__anon_0_method\" failed: call[#] expected type i32, found extern.convert_any of type (ref extern) @+#) [in __anon_0_method()] [@+#] [wat: (func $__anon_0_method (p",
-          "wasm_compile:invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"__str_flatten\" failed: call[#] expected type (ref null #), found i32.const of type i32 @+#) [in __str_flatten()] [@+#] [wat: (func $__str_flatten (param (ref null #)) (r",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { SharedArrayBuffer(); });",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { new SharedArrayBuffer(s); }, \"`length` parameter is a Symbol\");",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { FinalizationRegistry(); });"
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { FinalizationRegistry(); });",
+          "other:L#:## Unsupported new expression for class: SharedArrayBuffer; L#:## Unsupported new expression for class: SharedArrayBuffer"
         ]
       },
       {
@@ -2636,17 +2636,17 @@
           "#1551"
         ],
         "label": "`super`, spread, and receiver-evaluation semantics",
-        "count": 13,
+        "count": 11,
         "statuses": {
           "pass": 0,
           "fail": 0,
-          "compile_error": 13,
+          "compile_error": 11,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 13
+          "total": 11
         },
         "error_categories": {
-          "wasm_compile": 10,
+          "wasm_compile": 8,
           "range_error": 1,
           "other": 2
         },
@@ -2662,7 +2662,7 @@
           "range_error:L#:## Internal error compiling expression: Maximum call stack size exceeded; L#:## Internal error compiling expression: Maximum call stack size exceeded",
           "other:L#:## ';' expected.",
           "other:L#:## Unsupported compound assignment on element access",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: call[#] expected type externref, found local.get of type (ref null #) @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $o (ref null #)) ("
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: call_ref[#] expected type (ref null #), found f64.const of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $arr (ref null #)) ("
         ]
       },
       {
@@ -2672,18 +2672,17 @@
           "#1354"
         ],
         "label": "SharedArrayBuffer / Atomics backlog",
-        "count": 14,
+        "count": 13,
         "statuses": {
           "pass": 0,
           "fail": 1,
-          "compile_error": 13,
+          "compile_error": 12,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 14
+          "total": 13
         },
         "error_categories": {
           "other": 12,
-          "wasm_compile": 1,
           "illegal_cast": 1
         },
         "sample_files": [
@@ -2697,7 +2696,6 @@
           "other:L#:## Unsupported new expression for class: SharedArrayBuffer",
           "other:L#:## Unsupported new expression for class: SharedArrayBuffer; L#:## Unsupported new expression for class: SharedArrayBuffer; L#:## Unsupported new expression for class: SharedArrayBuffer; L#:## Unsupported new expression for class: SharedA",
           "other:L#:## Unsupported new expression for class: SharedArrayBuffer; L#:## Unsupported new expression for class: SharedArrayBuffer",
-          "wasm_compile:invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"__str_flatten\" failed: call[#] expected type (ref null #), found i32.const of type i32 @+#) [in __str_flatten()] [@+#] [wat: (func $__str_flatten (param (ref null #)) (r",
           "illegal_cast:L#:## illegal cast [in test()]"
         ]
       },
@@ -2795,17 +2793,17 @@
           "#1525b"
         ],
         "label": "Invalid Wasm at type/coercion boundaries, late globals, and trampolines",
-        "count": 47,
+        "count": 46,
         "statuses": {
           "pass": 0,
           "fail": 0,
-          "compile_error": 47,
+          "compile_error": 46,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 47
+          "total": 46
         },
         "error_categories": {
-          "wasm_compile": 47
+          "wasm_compile": 46
         },
         "sample_files": [
           "test/language/expressions/compound-assignment/S11.13.2_A6.9_T1.js",

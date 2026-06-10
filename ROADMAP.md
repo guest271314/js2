@@ -15,7 +15,7 @@ Over 31 development sprints and **784 closed issues**, js2wasm has grown from a 
 ### Conformance
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 30,969 / 43,135 (71.8 %) — baseline 88bd228e, 2026-06-10T21:36:25Z
+**test262 conformance**: 30,974 / 43,135 (71.8 %) — baseline 329898bb, 2026-06-10T22:17:27Z
 <!-- AUTO:conformance-end -->
 
 - Automated conformance tracking with historical trend data and a public [conformance report](https://loopdive.github.io/js2wasm/benchmarks/report.html)
