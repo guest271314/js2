@@ -4476,8 +4476,10 @@ function compileCallExpression(
             .map((f, idx) => ({ field: f, fieldIdx: idx }))
             .filter((e) => !e.field.name.startsWith("__"));
           const entry = userFields.find((e) => e.field.name === propLiteral);
+          const sidecarDefinedKey =
+            ts.isIdentifier(arg0) && ctx.sidecarDefinedPropertyKeys.has(`${arg0.text}:${propLiteral}`);
 
-          if (entry) {
+          if (entry && !sidecarDefinedKey) {
             // #1629b: Object.defineProperty updates `definedPropertyFlags`
             // (keyed `varName:propName`) but `shapePropFlags` is built AFTER
             // body compilation finishes, so per-variable updates made during
@@ -4629,21 +4631,23 @@ function compileCallExpression(
           // (#1395) Same logic for static methods on the class object —
           // `verifyProperty(C, "m", {...})` lookups need the runtime arm to
           // fire instead of returning `ref.null.extern` here.
-          const methodNames = ctx.classMethodNames.get(structName);
-          const staticMethodNames = ctx.classStaticMethodNames.get(structName);
-          const isMethodLookup =
-            (methodNames && methodNames.includes(propLiteral)) ||
-            (staticMethodNames && staticMethodNames.includes(propLiteral));
-          if (isMethodLookup) {
-            // Skip the fast-path null-return; let the dynamic fallback below
-            // handle the method case via the host import.
-          } else {
-            // Property not found in struct — return undefined
-            // (own property doesn't exist on this shape)
-            const argResult = compileExpression(ctx, fctx, arg0);
-            if (argResult) fctx.body.push({ op: "drop" });
-            fctx.body.push({ op: "ref.null.extern" });
-            return { kind: "externref" };
+          if (!sidecarDefinedKey) {
+            const methodNames = ctx.classMethodNames.get(structName);
+            const staticMethodNames = ctx.classStaticMethodNames.get(structName);
+            const isMethodLookup =
+              (methodNames && methodNames.includes(propLiteral)) ||
+              (staticMethodNames && staticMethodNames.includes(propLiteral));
+            if (isMethodLookup) {
+              // Skip the fast-path null-return; let the dynamic fallback below
+              // handle the method case via the host import.
+            } else {
+              // Property not found in struct — return undefined
+              // (own property doesn't exist on this shape)
+              const argResult = compileExpression(ctx, fctx, arg0);
+              if (argResult) fctx.body.push({ op: "drop" });
+              fctx.body.push({ op: "ref.null.extern" });
+              return { kind: "externref" };
+            }
           }
         }
       }
