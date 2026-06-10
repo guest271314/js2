@@ -44,6 +44,7 @@
 // historically declared now live in `backend/handles.js` and are re-exported
 // below for backwards compatibility.
 import type { BackendEmitter } from "./backend/emitter.js";
+import { verifyIrBackendLegality } from "./backend/legality.js";
 import type {
   IrBoxedLowering,
   IrClassLowering,
@@ -297,6 +298,15 @@ export function lowerIrFunctionBody<S>(
   // explicit emitter (e.g. BytecodeEmitter) selected by compile target.
   emitter: BackendEmitter<S> = new WasmGcEmitter() as unknown as BackendEmitter<S>,
 ): IrLoweredBody<S> {
+  const legalityErrors = verifyIrBackendLegality(func, emitter.backend);
+  if (legalityErrors.length > 0) {
+    const shown = legalityErrors.slice(0, 3).map((err) => err.message);
+    throw new Error(
+      `ir/lower: ${emitter.backend} backend legality failed for ${func.name}: ${shown.join("; ")}` +
+        (legalityErrors.length > shown.length ? ` (+${legalityErrors.length - shown.length} more)` : ""),
+    );
+  }
+
   // #1584 (a0-tail): guard for op families that build nested `Instr[]`
   // sub-buffers and EMBED them into a raw WasmGC `Instr` (`{op:"loop", body:
   // loopBody}`, `{op:"try", body: tryBody}`, the `await` `if` arms). That

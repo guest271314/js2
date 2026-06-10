@@ -218,6 +218,12 @@ export interface FunctionContext {
   constBindings?: Set<string>;
   /** Stack of saved body arrays for addUnionImports index shifting */
   savedBodies: Instr[][];
+  /**
+   * Raw `__argc` cached at function entry for parameter defaults. Defaults need
+   * to clear the global before initializer expressions can make nested calls;
+   * `arguments` construction reuses this local when both features are present.
+   */
+  argcCachedLocal?: number;
   /** Set of function names successfully hoisted during THIS function body's hoisting pass */
   hoistedFuncs?: Set<string>;
   /** Enclosing class name — propagated to closures for super keyword resolution */
@@ -855,6 +861,8 @@ export interface CodegenContext {
   widenedTypeProperties: Map<string, { name: string; type: ValType }[]>;
   /** Map from widened variable name to its registered struct name */
   widenedVarStructMap: Map<string, string>;
+  /** Widened empty-object fields introduced by Object.defineProperty rather than assignment. */
+  widenedDefinePropertyKeys: Set<string>;
   /**
    * (#1239) Variable names whose initializer is an object literal carrying
    * `get`/`set` accessors. Such variables are stored as plain JS host

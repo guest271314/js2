@@ -3,6 +3,7 @@ id: 1912
 title: "standalone RegExp Phase 2b: word boundaries, backrefs, and character-class compatibility"
 status: ready
 sprint: 61
+model: fable
 created: 2026-06-07
 updated: 2026-06-07
 priority: critical

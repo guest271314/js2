@@ -44,6 +44,7 @@ import {
   registerCompileSuperPropertyAccess,
   registerResolveEnclosingClassName,
 } from "../shared.js";
+import { maybeSetArgcForKnownCall } from "../statements/nested-declarations.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { coerceType as coerceTypeImpl, pushDefaultValue } from "../type-coercion.js";
 import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
@@ -357,6 +358,7 @@ function compileSuperMethodCall(ctx: CodegenContext, fctx: FunctionContext, expr
   // Re-lookup funcIdx: argument compilation may trigger addUnionImports
   const resolvedName = `${ancestor}_${methodName}`;
   const finalSuperIdx = ctx.funcMap.get(resolvedName) ?? funcIdx;
+  maybeSetArgcForKnownCall(ctx, fctx, resolvedName, expr.arguments.length, superParamCount);
   fctx.body.push({ op: "call", funcIdx: finalSuperIdx });
 
   // Determine return type
@@ -450,6 +452,7 @@ function compileSuperElementMethodCall(
   // Re-lookup funcIdx: argument compilation may trigger addUnionImports
   const resolvedName = `${ancestor}_${methodName}`;
   const finalSuperIdx = ctx.funcMap.get(resolvedName) ?? funcIdx;
+  maybeSetArgcForKnownCall(ctx, fctx, resolvedName, expr.arguments.length, superElemParamCount);
   fctx.body.push({ op: "call", funcIdx: finalSuperIdx });
 
   // Determine return type
@@ -1093,6 +1096,7 @@ function compileNewFunctionDeclaration(
   }
   // Re-lookup funcIdx in case addUnionImports shifted indices
   const finalCtorIdx = ctx.funcMap.get(ctorName) ?? finalCtorIdxForArgs;
+  maybeSetArgcForKnownCall(ctx, fctx, ctorName, args.length, paramTypes?.length ?? args.length);
   fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
   return { kind: "ref", typeIdx: structTypeIdx };
 }
@@ -2672,6 +2676,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
             pushDefaultValue(fctx, paramTypes[i]!, ctx);
           }
         }
+        maybeSetArgcForKnownCall(ctx, fctx, cachedFnCtor.ctorFuncName, args.length, paramTypes?.length ?? args.length);
         fctx.body.push({ op: "call", funcIdx: ctorFuncIdx });
         return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
       }
@@ -2739,6 +2744,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           }
         }
         const finalIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName) ?? ctorFuncIdx;
+        maybeSetArgcForKnownCall(ctx, fctx, cachedFnCtor.ctorFuncName, args.length, paramTypes?.length ?? args.length);
         fctx.body.push({ op: "call", funcIdx: finalIdx });
         return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
       }
@@ -3038,6 +3044,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const paramTypes = getFuncParamTypes(ctx, funcIdx);
     const args = expr.arguments ?? [];
     const ctorRestInfo = ctx.funcRestParams.get(ctorName);
+    let ctorActualArgCount = args.length;
 
     // Check for spread arguments
     const hasSpreadCtorArg = args.some((a) => ts.isSpreadElement(a));
@@ -3045,6 +3052,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Flatten spread arguments for constructor call
       const flatCtorArgs = flattenCallArgs(args);
       if (flatCtorArgs) {
+        ctorActualArgCount = flatCtorArgs.length;
         for (let i = 0; i < flatCtorArgs.length && i < paramTypes.length; i++) {
           compileCtorArgument(ctx, fctx, flatCtorArgs[i]!, paramTypes[i]);
         }
@@ -3099,6 +3107,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // Re-lookup funcIdx: argument compilation may trigger addUnionImports
     // which shifts defined-function indices, making the earlier lookup stale.
     const finalCtorIdx = ctx.funcMap.get(ctorName) ?? funcIdx;
+    maybeSetArgcForKnownCall(ctx, fctx, ctorName, ctorActualArgCount, paramTypes?.length ?? ctorActualArgCount);
     fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
     // (#1366a) Externref-backed subclass instances (extends Error / TypeError
     // / ...) bubble up as externref, NOT as (ref $struct).

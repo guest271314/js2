@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen+runtime
 language_feature: bigint
 goal: spec-completeness
-sprint: 60
+sprint: 61
 renumbered_from: 1350
 parent: 1328
 pr: 1249
