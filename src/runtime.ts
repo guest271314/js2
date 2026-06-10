@@ -545,6 +545,40 @@ function _installIteratorHelperPolyfills(): void {
     }
   }
 
+  function _isObject(value: any): boolean {
+    return (typeof value === "object" && value !== null) || typeof value === "function";
+  }
+
+  function _getIteratorDirect(iter: any): any {
+    if (!_isObject(iter)) {
+      throw new TypeError("Iterator helper: iterator is not an object");
+    }
+    if (typeof iter.next !== "function") {
+      throw new TypeError("Iterator helper: iterator has no next()");
+    }
+    return iter;
+  }
+
+  function _getIterator(iterable: any): any {
+    if (!_isObject(iterable)) {
+      throw new TypeError("Iterator helper: argument is not iterable");
+    }
+    const method = iterable[Symbol.iterator];
+    if (typeof method !== "function") {
+      throw new TypeError("Iterator helper: argument is not iterable");
+    }
+    return _getIteratorDirect(method.call(iterable));
+  }
+
+  function _iteratorStepValue(iter: any): { done: true; value?: undefined } | { done: false; value: any } {
+    const result = iter.next();
+    if (!_isObject(result)) {
+      throw new TypeError("Iterator result is not an object");
+    }
+    if (result.done) return { done: true };
+    return { value: result.value, done: false };
+  }
+
   // ES2025 GetIteratorFlattenable — accepts an iterable OR a raw iterator.
   // `Iterator.from` uses iterate-string-primitives; iterator helper flattening
   // (e.g. flatMap) uses reject-primitives.
@@ -571,10 +605,7 @@ function _installIteratorHelperPolyfills(): void {
     } else {
       throw new TypeError("Iterator helper: argument is not iterable");
     }
-    if (it == null || typeof it.next !== "function") {
-      throw new TypeError("Iterator helper: iterator has no next()");
-    }
-    return it;
+    return _getIteratorDirect(it);
   }
 
   // ES2025 GetOptionsObject (iterator-sequencing / joint-iteration proposal):
@@ -608,6 +639,113 @@ function _installIteratorHelperPolyfills(): void {
     try {
       iter?.return?.();
     } catch {}
+  }
+
+  function _closeIterators(iters: any[], open?: boolean[], except = -1): void {
+    for (let i = 0; i < iters.length; i++) {
+      if (i === except) continue;
+      if (open && !open[i]) continue;
+      if (open) open[i] = false;
+      _closeIterator(iters[i]);
+    }
+  }
+
+  function _readZipOptions(options: any): { mode: "shortest" | "longest" | "strict"; paddingOption: any } {
+    options = _getOptionsObject(options);
+    let mode = options.mode;
+    if (mode === undefined) mode = "shortest";
+    if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
+      throw new TypeError("Iterator.zip: invalid mode " + String(mode));
+    }
+    let paddingOption: any = undefined;
+    if (mode === "longest") {
+      paddingOption = options.padding;
+      if (paddingOption !== undefined && !_isObject(paddingOption)) {
+        throw new TypeError("Iterator.zip: padding must be an object");
+      }
+    }
+    return { mode, paddingOption };
+  }
+
+  function _makeIteratorZip(
+    iters: any[],
+    mode: "shortest" | "longest" | "strict",
+    padding: any[],
+    finishResults: (results: any[]) => any,
+  ): any {
+    const open = iters.map(() => true);
+    let exhausted = false;
+
+    return _makeHelperIterator(
+      function next() {
+        if (exhausted || iters.length === 0) return { value: undefined, done: true };
+        const results: any[] = [];
+        for (let i = 0; i < iters.length; i++) {
+          let result: any;
+          if (!open[i]) {
+            result = padding[i];
+          } else {
+            let step: { done: true; value?: undefined } | { done: false; value: any };
+            try {
+              step = _iteratorStepValue(iters[i]);
+            } catch (e) {
+              exhausted = true;
+              open[i] = false;
+              _closeIterators(iters, open);
+              throw e;
+            }
+
+            if (step.done) {
+              open[i] = false;
+              if (mode === "shortest") {
+                exhausted = true;
+                _closeIterators(iters, open);
+                return { value: undefined, done: true };
+              }
+              if (mode === "strict") {
+                exhausted = true;
+                if (i !== 0) {
+                  _closeIterators(iters, open);
+                  throw new TypeError("Iterator.zip strict mode: length mismatch");
+                }
+                for (let k = 1; k < iters.length; k++) {
+                  let openStep: { done: true; value?: undefined } | { done: false; value: any };
+                  try {
+                    openStep = _iteratorStepValue(iters[k]);
+                  } catch (e) {
+                    open[k] = false;
+                    _closeIterators(iters, open);
+                    throw e;
+                  }
+                  if (openStep.done) {
+                    open[k] = false;
+                  } else {
+                    _closeIterators(iters, open);
+                    throw new TypeError("Iterator.zip strict mode: length mismatch");
+                  }
+                }
+                return { value: undefined, done: true };
+              }
+
+              if (!open.some(Boolean)) {
+                exhausted = true;
+                return { value: undefined, done: true };
+              }
+              result = padding[i];
+            } else {
+              result = step.value;
+            }
+          }
+          results.push(result);
+        }
+        return { value: finishResults(results), done: false };
+      },
+      function returnFn() {
+        exhausted = true;
+        _closeIterators(iters, open);
+        return { value: undefined, done: true };
+      },
+    );
   }
 
   // (#1320) Always route Iterator.from through the bridge implementation. Host
@@ -885,146 +1023,135 @@ function _installIteratorHelperPolyfills(): void {
 
   if (typeof I.zip !== "function") {
     _installStaticHelper(I, "zip", 1, function zip(iterables: any, options?: any) {
-      if (iterables == null) {
-        throw new TypeError("Iterator.zip: iterables required");
+      if (!_isObject(iterables)) {
+        throw new TypeError("Iterator.zip: iterables must be an object");
       }
-      options = _getOptionsObject(options);
-      const mode: string = options.mode || "shortest";
-      if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
-        throw new TypeError("Iterator.zip: invalid mode " + String(mode));
-      }
-      const padding: any[] = options && options.padding ? Array.from(options.padding) : [];
+      const { mode, paddingOption } = _readZipOptions(options);
       const iters: any[] = [];
-      // Open all iterators eagerly; on failure, close already-opened ones.
+      let inputIter: any;
       try {
-        for (const iterable of iterables) {
-          iters.push(_getFlattenable(iterable, "reject-primitives"));
+        inputIter = _getIterator(iterables);
+        for (;;) {
+          const next = _iteratorStepValue(inputIter);
+          if (next.done) break;
+          try {
+            iters.push(_getFlattenable(next.value, "reject-primitives"));
+          } catch (e) {
+            _closeIterator(inputIter);
+            _closeIterators(iters);
+            throw e;
+          }
         }
       } catch (e) {
-        for (const it of iters) {
-          try {
-            it.return?.();
-          } catch {}
-        }
+        _closeIterators(iters);
         throw e;
       }
-      const closed: boolean[] = iters.map(() => false);
-      let exhausted = false;
 
-      function closeAllExcept(except: number): void {
-        for (let i = 0; i < iters.length; i++) {
-          if (i !== except && !closed[i]) {
-            closed[i] = true;
-            try {
-              iters[i].return?.();
-            } catch {}
+      const padding: any[] = [];
+      if (mode === "longest") {
+        if (paddingOption === undefined) {
+          for (let i = 0; i < iters.length; i++) padding.push(undefined);
+        } else {
+          let paddingIter: any;
+          try {
+            paddingIter = _getIterator(paddingOption);
+            let usingIterator = true;
+            for (let i = 0; i < iters.length; i++) {
+              if (usingIterator) {
+                const next = _iteratorStepValue(paddingIter);
+                if (next.done) {
+                  usingIterator = false;
+                } else {
+                  padding.push(next.value);
+                  continue;
+                }
+              }
+              padding.push(undefined);
+            }
+            if (usingIterator) {
+              paddingIter.return?.();
+            }
+          } catch (e) {
+            _closeIterators(iters);
+            throw e;
           }
         }
       }
 
-      return _makeHelperIterator(
-        function next() {
-          if (exhausted || iters.length === 0) return { value: undefined, done: true };
-          const tuple: any[] = new Array(iters.length);
-          let liveCount = 0;
-          for (let i = 0; i < iters.length; i++) {
-            if (closed[i]) {
-              tuple[i] = padding[i];
-              continue;
-            }
-            let r: any;
-            try {
-              r = iters[i].next();
-            } catch (e) {
-              exhausted = true;
-              closeAllExcept(i);
-              throw e;
-            }
-            if (r && r.done) {
-              closed[i] = true;
-              if (mode === "shortest") {
-                exhausted = true;
-                closeAllExcept(i);
-                return { value: undefined, done: true };
-              }
-              if (mode === "strict") {
-                // Strict: every other iterator must also be done.
-                for (let j = 0; j < iters.length; j++) {
-                  if (j === i || closed[j]) continue;
-                  let r2: any;
-                  try {
-                    r2 = iters[j].next();
-                  } catch (e) {
-                    closeAllExcept(-1);
-                    throw e;
-                  }
-                  if (r2 && !r2.done) {
-                    closeAllExcept(-1);
-                    throw new RangeError("Iterator.zip strict mode: length mismatch");
-                  }
-                  closed[j] = true;
-                }
-                exhausted = true;
-                return { value: undefined, done: true };
-              }
-              tuple[i] = padding[i];
-            } else {
-              tuple[i] = r.value;
-              liveCount++;
-            }
-          }
-          if (mode === "longest" && liveCount === 0) {
-            exhausted = true;
-            return { value: undefined, done: true };
-          }
-          return { value: tuple, done: false };
-        },
-        function returnFn() {
-          exhausted = true;
-          closeAllExcept(-1);
-          return { value: undefined, done: true };
-        },
-      );
+      return _makeIteratorZip(iters, mode, padding, (results) => results.slice());
     });
   }
 
   if (typeof I.zipKeyed !== "function") {
     _installStaticHelper(I, "zipKeyed", 1, function zipKeyed(iterables: any, options?: any) {
-      if (iterables == null || typeof iterables !== "object") {
+      if (!_isObject(iterables)) {
         throw new TypeError("Iterator.zipKeyed: iterables must be an object");
       }
-      const keys = Object.keys(iterables);
-      const iterArr: any[] = keys.map((k) => iterables[k]);
-      const zipped = (I as any).zip(iterArr, options);
-      return _makeHelperIterator(
-        function next() {
-          const r = zipped.next();
-          if (r.done) return { value: undefined, done: true };
-          const out: any = {};
-          for (let i = 0; i < keys.length; i++) out[keys[i]!] = r.value[i];
-          return { value: out, done: false };
-        },
-        function returnFn() {
+      const { mode, paddingOption } = _readZipOptions(options);
+      const keys: PropertyKey[] = [];
+      const iters: any[] = [];
+      try {
+        for (const key of Reflect.ownKeys(iterables)) {
+          const desc = Object.getOwnPropertyDescriptor(iterables, key);
+          if (desc && desc.enumerable) {
+            const value = iterables[key];
+            if (value !== undefined) {
+              keys.push(key);
+              iters.push(_getFlattenable(value, "reject-primitives"));
+            }
+          }
+        }
+      } catch (e) {
+        _closeIterators(iters);
+        throw e;
+      }
+
+      const padding: any[] = [];
+      if (mode === "longest") {
+        if (paddingOption === undefined) {
+          for (let i = 0; i < iters.length; i++) padding.push(undefined);
+        } else {
           try {
-            zipped.return?.();
-          } catch {}
-          return { value: undefined, done: true };
-        },
-      );
+            for (const key of keys) {
+              padding.push(paddingOption[key]);
+            }
+          } catch (e) {
+            _closeIterators(iters);
+            throw e;
+          }
+        }
+      }
+
+      return _makeIteratorZip(iters, mode, padding, (results) => {
+        const out: any = Object.create(null);
+        for (let i = 0; i < keys.length; i++) {
+          Object.defineProperty(out, keys[i]!, {
+            value: results[i],
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          });
+        }
+        return out;
+      });
     });
   }
 
   if (typeof I.concat !== "function") {
     _installStaticHelper(I, "concat", 0, function concat(...iterables: any[]) {
-      // Eagerly validate the iterable-ness of each argument; open lazily.
+      const records: { iterable: any; method: any }[] = [];
       for (const iterable of iterables) {
-        if (iterable == null) {
-          throw new TypeError("Iterator.concat: argument is null or undefined");
+        if (!_isObject(iterable)) {
+          throw new TypeError("Iterator.concat: argument is not an object");
         }
-        const sym = iterable[Symbol.iterator];
-        if (typeof sym !== "function" && typeof iterable.next !== "function") {
+        const method = iterable[Symbol.iterator];
+        if (method === undefined) {
           throw new TypeError("Iterator.concat: argument is not iterable");
         }
+        if (typeof method !== "function") {
+          throw new TypeError("Iterator.concat: argument is not iterable");
+        }
+        records.push({ iterable, method });
       }
       let idx = 0;
       let current: any = null;
@@ -1032,22 +1159,28 @@ function _installIteratorHelperPolyfills(): void {
         function next() {
           while (true) {
             if (current == null) {
-              if (idx >= iterables.length) return { value: undefined, done: true };
-              current = _getFlattenable(iterables[idx++], "reject-primitives");
+              if (idx >= records.length) return { value: undefined, done: true };
+              const record = records[idx++]!;
+              current = _getIteratorDirect(record.method.call(record.iterable));
             }
             let r: any;
             try {
               r = current.next();
             } catch (e) {
               current = null;
-              idx = iterables.length;
+              idx = records.length;
               throw e;
             }
-            if (r && r.done) {
+            if (!_isObject(r)) {
+              current = null;
+              idx = records.length;
+              throw new TypeError("Iterator result is not an object");
+            }
+            if (r.done) {
               current = null;
               continue;
             }
-            return r;
+            return { value: r.value, done: false };
           }
         },
         function returnFn() {
@@ -1126,16 +1259,6 @@ function _installIteratorHelperPolyfills(): void {
                   throw e;
                 }
                 counter++;
-                // GetIteratorFlattenable(mapped, reject-primitives): a primitive
-                // (incl. strings? — no, strings ARE iterable and accepted) — but
-                // a non-object non-string primitive rejects.
-                if (mapped == null || (typeof mapped !== "object" && typeof mapped !== "function")) {
-                  done = true;
-                  try {
-                    outer.return?.();
-                  } catch {}
-                  throw new TypeError("Iterator.prototype.flatMap: mapper result is not an object");
-                }
                 try {
                   inner = _getFlattenable(mapped, "reject-primitives");
                 } catch (e) {

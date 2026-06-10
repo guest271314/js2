@@ -4,7 +4,7 @@ title: "Runtime bridge: Array.from(externref) / Iterator.from(externref) doesn't
 status: in-review
 pr: 1253
 created: 2026-05-07
-updated: 2026-06-06
+updated: 2026-06-10
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -241,6 +241,26 @@ npm run typecheck
 
 Results: `tests/issue-1320.test.ts` passes all 6 focused tests; the four listed
 test262 files pass; typecheck passes.
+
+## Merge refresh (2026-06-10, codex-developer)
+
+Merged current `origin/main` into `symphony/1320` for PR #1253. The only
+implementation conflict was in `src/runtime.ts`, where the #1320
+`Iterator.from` bridge had to be kept unconditional while current main's
+Iterator.zip / zipKeyed / concat closing helpers were retained. The resolved
+helper keeps the explicit spec modes: `Iterator.from` uses
+`iterate-string-primitives`; helper flattening paths use `reject-primitives`.
+
+Scoped validation after the merge:
+
+```bash
+npm test -- tests/issue-1320.test.ts
+npx tsx <four-file runTest262File loop>
+npm run typecheck
+```
+
+Results: focused issue tests pass (6/6), the four listed test262 files pass,
+and typecheck passes. PR remains ready for review as #1253.
 
 ## Architect Spec — standalone (no-JS-host) GetIterator / IteratorStep / IteratorClose bridge (2026-06-04)
 
