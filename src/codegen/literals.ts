@@ -254,7 +254,23 @@ function compileObjectLiteralAsExternref(
       const valueExpr = ts.isShorthandPropertyAssignment(prop)
         ? prop.name
         : (prop as ts.PropertyAssignment).initializer;
-      const valType = compileExpression(ctx, fctx, valueExpr);
+      // Nested object-literal value (`{x: {y: 5}}`): the inner literal has NO
+      // contextual type, so the any-context gate in compileObjectLiteral would
+      // route it to the closed-struct path — but it is being stored INTO a
+      // `$Object`, so its reads come back through __extern_get and must be a
+      // `$Object` too. Recurse at the construction site (where we KNOW the
+      // destination representation) instead of widening the contextual-type
+      // gate (which mis-fires on struct-consumed literals — the #1897 -45).
+      const valType =
+        ts.isObjectLiteralExpression(valueExpr) &&
+        valueExpr.properties.length > 0 &&
+        valueExpr.properties.every(
+          (p) =>
+            (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) &&
+            resolvePropertyNameText(ctx, p) !== undefined,
+        )
+          ? compileObjectLiteralAsExternref(ctx, fctx, valueExpr)
+          : compileExpression(ctx, fctx, valueExpr);
       if (valType === null) continue;
       if (valType.kind !== "externref") {
         coerceType(ctx, fctx, valType, { kind: "externref" });
@@ -727,23 +743,25 @@ export function compileObjectLiteral(
     expr.properties.every((p) => ts.isSpreadAssignment(p) || resolvePropertyNameText(ctx, p) !== undefined)
   ) {
     const ctxTypeNonEmpty = ctx.checker.getContextualType(expr);
-    // An ABSENT contextual type normally means "any context" (e.g. a nested
-    // object-literal property value `{x: {y: 5}}`, or an array element) and
-    // should route to `$Object` so string-key reads work. The ONE exception is
-    // an un-annotated variable initializer (`const o = {a: 1}`): TypeScript
-    // infers a concrete *struct* type for `o`, and routing it to `$Object`
-    // makes a later numeric coercion (`(o as any) - 0`) flow through
-    // `__to_primitive` → `__unbox_number(undefined)` → 0 instead of the
-    // spec-correct NaN — the #1806/#1900 closed-struct ToPrimitive contract.
-    // Such a literal keeps the closed-struct fast path. (`const o: any = {...}`
-    // carries an explicit `any` contextual type, so it still routes.)
-    const isUnannotatedVarInit =
-      ts.isVariableDeclaration(expr.parent) && expr.parent.initializer === expr && expr.parent.type === undefined;
-    const isAnyContextNonEmpty = ctxTypeNonEmpty
-      ? (ctxTypeNonEmpty.flags & ts.TypeFlags.Any) !== 0 ||
+    // Require an EXPLICIT any / unknown / `object` contextual type to divert to
+    // the open-`$Object` path. An ABSENT contextual type means TypeScript
+    // infers a concrete *struct* type for the literal — and every downstream
+    // consumer (member reads off the inferred-typed local, destructuring
+    // patterns, numeric coercion) compiles against that struct type. Routing
+    // such a literal to `$Object` makes the consumers null-deref (struct.get on
+    // a `$Object`) or mis-coerce (`(o as any) - 0` → 0 instead of NaN, the
+    // #1806/#1900 contract). This bit the -45 standalone gate (#1897): 116
+    // regressions across language/expressions/object (parenthesized literals,
+    // `var obj = ({var: 42})`) and for-of/for-await-of destructuring sources —
+    // all shapes with NO contextual type whose consumers use the struct path.
+    // The nested-property-value case (`g({x: {y: 5}})` inner `{y: 5}`, also no
+    // contextual type) is handled separately by construction-site recursion in
+    // compileObjectLiteralAsExternref, NOT by this gate.
+    const isAnyContextNonEmpty =
+      !!ctxTypeNonEmpty &&
+      ((ctxTypeNonEmpty.flags & ts.TypeFlags.Any) !== 0 ||
         (ctxTypeNonEmpty.flags & ts.TypeFlags.Unknown) !== 0 ||
-        (ctxTypeNonEmpty.flags & ts.TypeFlags.NonPrimitive) !== 0
-      : !isUnannotatedVarInit;
+        (ctxTypeNonEmpty.flags & ts.TypeFlags.NonPrimitive) !== 0);
     if (isAnyContextNonEmpty) {
       const objResult = compileObjectLiteralAsExternref(ctx, fctx, expr);
       if (objResult) return objResult;
