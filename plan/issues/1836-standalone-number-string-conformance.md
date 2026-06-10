@@ -10,6 +10,7 @@ task_type: bugfix
 area: codegen
 goal: correctness
 sprint: 61
+model: fable
 parent: 1335
 pr: 1280
 claimed_by: codex-developer
