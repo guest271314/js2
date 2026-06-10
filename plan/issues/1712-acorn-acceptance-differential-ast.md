@@ -194,9 +194,34 @@ Open items for the next session:
   node graphs marshal to plain JS for diffing (raw exports are opaque).
 - NEW first triage target after the dispatch fix: all 5 fixtures moved
   null→**trap "dereferencing a null pointer"** inside compiled `parse`
-  execution. Minimal repro candidates: E3 (`.tmp/dbg9.mts` — proto method
-  returning `new <self-fnctor>(...)` instance traps; returning a field of
-  it works, G4) and G3 (`.tmp/dbg15.mts` — `new`-via-alias loses ctor
-  field writes, returns undefined).
+  execution. ROOT-CAUSED (not yet fixed): **fnctor instances have TWO
+  irreconcilable struct shapes.**
+  - `compileFnctorNew` (`src/codegen/expressions/new-super.ts:~850`)
+    synthesizes the instance struct from the ctor body's `this.*` writes
+    only (E3: `$8 = {input}`) and registers it as `__fnctor_<name>` /
+    `funcConstructorMap`.
+  - Consumer sites resolve the receiver via the TS checker; in JS mode the
+    checker models `Parser.prototype.parse = fn` as an instance member, so
+    the anonymous-struct fallback in `resolveWasmType`
+    (`src/codegen/index.ts:~8741`, structMap miss because the fnctor
+    registered under `__fnctor_Parser`, not `Parser`) synthesizes a WIDER
+    shape (E3: `$3 = {input, parse}`).
+  - `ref.test (ref $3)` on a `$8` instance always fails → guarded-cast
+    else-arm `ref.null none` → `struct.get $3 1` / `ref.as_non_null` →
+    trap. See `.tmp/e3.wat` `$parse` + `$__closure_1`.
+  - **Attempted fix that did NOT work** (do not repeat naively): resolving
+    fnctor names to the ctor struct inside `resolveWasmType` (consult
+    `funcConstructorMap` before the anonymous fallback). It regressed G4/G5
+    (probe `.tmp/dbg15.mts`) from working→null — `resolveWasmType` feeds
+    params/locals/fields everywhere and the member-call path's
+    static-vs-dynamic split needs to be steered TOGETHER with the type
+    change (when the receiver is the ctor struct, `.method()` must compile
+    to the dynamic host-bridge call, and the checker-shape struct must stop
+    being synthesized at all). Suggest handling in the member-access /
+    call-expression resolution layer (where receiver typeIdx is chosen),
+    not in resolveWasmType alone — or unify by making compileFnctorNew
+    emit the checker shape with prototype-method fields POPULATED from the
+    module-init closures (compile-away-the-prototype strategy; needs the
+    proto-method closure values to be reachable as globals at ctor time).
 - Probes live in `.tmp/repro2.mts` / `.tmp/dbg1.mts`–`.tmp/dbg15.mts`
   (dbg4–15 are the #1712b dispatch-bisection series).
