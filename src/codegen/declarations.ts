@@ -2045,6 +2045,7 @@ export function collectPropsFromStatements(
               }
             }
             extraProps.push({ name: propName, type: wasmType });
+            ctx.widenedDefinePropertyKeys.add(`${varName}:${propName}`);
           }
         }
       }
@@ -2080,6 +2081,7 @@ export function collectPropsFromStatements(
                   }
                 }
                 extraProps.push({ name: propName, type: wasmType });
+                ctx.widenedDefinePropertyKeys.add(`${varName}:${propName}`);
               }
             }
           }
