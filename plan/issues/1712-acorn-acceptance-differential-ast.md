@@ -138,3 +138,40 @@ functor instances → ctor closure at `new`-site codegen; `_wrapForHost` get
 trap falls back to the ctor's vivified proto and threads `this` via
 `__call_fn_method_N` (#1636-S1). Acorn's `var pp$N = Parser.prototype;
 pp$N.method = fn` aliasing is satisfied by the vivified object's identity.
+
+### Blocker 2 progress — fnctor prototype bridge (WIP, branch issue-1712-proto-bridge)
+
+Implemented (this branch, stacked on issue-1712-acorn-acceptance / PR #1301):
+1. `__extern_get(closure, "prototype")` auto-vivifies an identity-stable JS
+   object in the closure's sidecar (`_getOrVivifyFnPrototype`, runtime.ts) —
+   wired in BOTH resolution regimes (intent `case "extern_get"` AND the
+   by-name builtin chain; they are different handlers).
+2. Synthesized fnctor ctors emit `__register_fnctor_instance(inst, ctor)`
+   (new-super.ts; ensureLateImport + flushLateImportShifts discipline; JS-host
+   only, gated off for standalone/wasi). Instance property misses resolve via
+   `_fnctorProtoLookup` hooks in `_safeGet` + `_wrapForHost.safeGetField`.
+3. `_wrapWasmClosure` is this-aware (dispatches `__call_fn_method_N` when the
+   receiver unwraps to a Wasm struct) and resolves dispatcher exports at CALL
+   time, fixing the start-window wrap no-op. Arity-5 method export added.
+4. **`withImportObject` (#1667) now exposes `__setExports`** — previously the
+   convenience importObject path NEVER wired exports, permanently disabling
+   closure wrapping/__sget_ on it. Harness updated to call it.
+5. Start-window `Object.defineProperties(proto, structDescs)` defers to a
+   `pendingExportsDeferred` queue drained by `setExports`.
+
+**Result: compiled acorn now compiles + validates + instantiates + RUNS** —
+`parse` callable, ASTs produced for all 5 fixtures. Surface: 0 equal /
+5 divergent / 0 errored — the runtime-divergence phase is reachable for the
+first time.
+
+Open items for the next session:
+- Probe C (`Object.defineProperties` accessors at module scope) still loses
+  the accessor: the executing __defineProperties handler did NOT take the
+  deferral branch (dbg3 showed it running eagerly with zero keys). Verify
+  which handler instance executes for intent vs name, and that callbackState
+  there carries `deferToExports`.
+- Root AST divergence: `exports.parse(...)` diffs as null at `$` for every
+  fixture — first triage target (likely `Parser.parse` static dispatch or
+  result marshaling of the returned Node struct).
+- Probes live in `.tmp/repro2.mts` / `.tmp/dbg1.mts` / `.tmp/dbg2.mts` /
+  `.tmp/dbg3.mts` (A/B pass; C returns -1).

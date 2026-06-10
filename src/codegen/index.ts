@@ -1492,6 +1492,12 @@ export function generateModule(
     // are refused-loud in `__apply_closure`.
     emitClosureMethodCallExportN(ctx, 3);
     emitClosureMethodCallExportN(ctx, 4);
+    // (#1712) Arity 5 for the fnctor prototype bridge: acorn-style prototype
+    // methods (e.g. `Parser.prototype.parseFunction(node, statement,
+    // allowExpressionBody, isAsync, forInit)`) are dispatched from the host
+    // with a receiver via `wasmClosureBridge` → `__call_fn_method_5`. No-op
+    // when no arity-5 closure exists.
+    emitClosureMethodCallExportN(ctx, 5);
 
     // (#1719 CPR read-drive) Fill the reserved `__drive_proto_iterator` driver
     // body now that `__call_fn_method_0` is registered. No-op when no read-drive

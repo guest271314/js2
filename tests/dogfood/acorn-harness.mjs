@@ -177,7 +177,12 @@ export async function runHarness({ quiet = false } = {}) {
   let compiledParse = null;
   if (validates) {
     try {
-      const { instance } = await WebAssembly.instantiate(result.binary, result.importObject ?? {});
+      const importObject = result.importObject ?? {};
+      const { instance } = await WebAssembly.instantiate(result.binary, importObject);
+      // (#1712) Wire the host runtime's exports hook so exports-backed
+      // capabilities (closure wrapping, __sget_* struct reads, deferred
+      // start-window Object.defineProperties) work on this convenience path.
+      importObject.__setExports?.(instance.exports);
       const exp = instance.exports;
       report.diff.exports = Object.keys(exp).slice(0, 40);
       if (typeof exp.parse === "function") {
