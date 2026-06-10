@@ -585,6 +585,7 @@ const _wasmStructAccessors = new WeakMap<object, Map<string | symbol, { get?: Fu
  * when the method is missing.
  */
 let _iteratorHelpersInstalled = false;
+const _intrinsicStringIterator = String.prototype[Symbol.iterator];
 function _installIteratorHelperPolyfills(): void {
   if (_iteratorHelpersInstalled) return;
   _iteratorHelpersInstalled = true;
@@ -652,15 +653,24 @@ function _installIteratorHelperPolyfills(): void {
   }
 
   // ES2025 GetIteratorFlattenable — accepts an iterable OR a raw iterator.
-  function _getFlattenable(obj: any, rejectPrimitives = false): any {
+  // `Iterator.from` uses iterate-string-primitives; iterator helper flattening
+  // (e.g. flatMap) uses reject-primitives.
+  function _getFlattenable(obj: any, primitiveHandling: "iterate-string-primitives" | "reject-primitives"): any {
     if (obj == null) {
       throw new TypeError("Iterator helper: argument is null or undefined");
     }
-    if (rejectPrimitives && !_isObject(obj)) {
-      throw new TypeError("Iterator helper: argument is not an object");
+    const primitive = typeof obj !== "object" && typeof obj !== "function";
+    if (primitive) {
+      if (primitiveHandling === "reject-primitives" || typeof obj !== "string") {
+        throw new TypeError("Iterator helper: argument is not iterable");
+      }
     }
     let it: any;
-    const sym = obj[Symbol.iterator];
+    const stringLike = typeof obj === "string" || obj instanceof String;
+    let sym = primitive ? Reflect.get(Object(obj), Symbol.iterator, obj) : obj[Symbol.iterator];
+    if (typeof sym !== "function" && stringLike && typeof _intrinsicStringIterator === "function") {
+      sym = _intrinsicStringIterator;
+    }
     if (typeof sym === "function") {
       it = sym.call(obj);
     } else if (typeof obj.next === "function") {
@@ -811,11 +821,12 @@ function _installIteratorHelperPolyfills(): void {
     );
   }
 
-  if (typeof I.from !== "function") {
-    _installStaticHelper(I, "from", 1, function from(iterable: any) {
-      return _getFlattenable(iterable);
-    });
-  }
+  // (#1320) Always route Iterator.from through the bridge implementation. Host
+  // natives cannot call compiled accessor closures installed on primitive
+  // prototypes reliably after the Wasm closure crosses externref.
+  _installStaticHelper(I, "from", 1, function from(iterable: any) {
+    return _getFlattenable(iterable, "iterate-string-primitives");
+  });
 
   if (typeof Iproto.map !== "function") {
     _installBuiltinMethod(Iproto, "map", 1, function (this: any, mapper: any) {
@@ -1097,7 +1108,7 @@ function _installIteratorHelperPolyfills(): void {
           const next = _iteratorStepValue(inputIter);
           if (next.done) break;
           try {
-            iters.push(_getFlattenable(next.value, true));
+            iters.push(_getFlattenable(next.value, "reject-primitives"));
           } catch (e) {
             _closeIterator(inputIter);
             _closeIterators(iters);
@@ -1159,7 +1170,7 @@ function _installIteratorHelperPolyfills(): void {
             const value = iterables[key];
             if (value !== undefined) {
               keys.push(key);
-              iters.push(_getFlattenable(value, true));
+              iters.push(_getFlattenable(value, "reject-primitives"));
             }
           }
         }
@@ -1322,7 +1333,7 @@ function _installIteratorHelperPolyfills(): void {
                 }
                 counter++;
                 try {
-                  inner = _getFlattenable(mapped, true);
+                  inner = _getFlattenable(mapped, "reject-primitives");
                 } catch (e) {
                   done = true;
                   try {
@@ -1653,6 +1664,8 @@ function _isConcatSpreadable(
   return v !== undefined && v !== null && !!v;
 }
 
+const _wasmClosureWrapperSource = new WeakMap<Function, { closure: any; arity: number }>();
+const _wasmClosureDynamicWrapperCache = new WeakMap<object, Function>();
 const _wasmClosureWrapperCache = new WeakMap<object, Map<number, Function>>();
 const _wasmClosureWrapperTargets = new WeakMap<Function, object>();
 
@@ -1681,7 +1694,9 @@ function _hostEqComparableValue(v: any): any {
  *
  * Arity matches the number of JS args the host will pass; the JS wrapper
  * forwards exactly that count to `__call_fn_N`. Args beyond `arity` are
- * dropped, matching JS's "extra args ignored" semantics.
+ * dropped, matching JS's "extra args ignored" semantics. If the wrapper is
+ * invoked as a method, prefer `__call_fn_method_N` so prototype-installed
+ * methods such as `Number.prototype[Symbol.iterator]` observe the receiver.
  */
 function _wrapWasmClosure(
   closure: any,
@@ -1711,15 +1726,17 @@ function _wrapWasmClosure(
   // identity is preserved across multiple invocations (host may capture a
   // reference, e.g. callbacks stored on plain objects).
   //
-  // (#1712) Method-call `this` threading: when the wrapper is invoked with a
-  // receiver that is (or proxies) a Wasm struct — e.g. `fn.apply(wrappedObj,…)`
-  // in `__extern_method_call`, or a getter installed on a vivified fnctor
-  // prototype — dispatch through `__call_fn_method_<arity>` so the closure
-  // body's `ThisKeyword` (via the `__current_this` global, #1636-S1) observes
-  // the receiver. Receivers that aren't Wasm structs (undefined / globals /
-  // plain JS objects) keep the prior `__call_fn_<arity>` path, so plain
+  // (#1712 / #1320) Method-call `this` threading: when the wrapper is
+  // invoked with a meaningful receiver — a Wasm struct (or its proxy, e.g.
+  // `fn.apply(wrappedObj,…)` in `__extern_method_call` or a vivified fnctor
+  // prototype method), or a plain JS object holder (#1320 iterator objects
+  // whose `next` is a Wasm closure) — dispatch through
+  // `__call_fn_method_<arity>` so the closure body's `ThisKeyword` (via the
+  // `__current_this` global, #1636-S1) observes the receiver. Wasm-struct
+  // proxies are unwrapped so the body sees the raw struct. Undefined /
+  // globalThis receivers keep the plain `__call_fn_<arity>` path, so bare
   // callback invocations are byte-for-byte unchanged.
-  const wrapper = function wasmClosureBridge(this: any, ...args: any[]): any {
+  const wrapped = function wasmClosureBridge(this: any, ...args: any[]): any {
     const exports = callbackState.getExports();
     const callFn = exports?.[`__call_fn_${arity}`];
     if (typeof callFn !== "function") {
@@ -1729,24 +1746,73 @@ function _wrapWasmClosure(
     // dropped (JS spec for fewer/more args than declared params).
     const padded: any[] = [];
     for (let i = 0; i < arity; i++) padded.push(args[i]);
-    const callFnMethod = exports?.[`__call_fn_method_${arity}`];
-    if (typeof callFnMethod === "function" && this != null && typeof this === "object") {
-      const rawThis = _unwrapForHost(this);
-      if (_isWasmStruct(rawThis)) {
-        return callFnMethod(rawThis, closure, ...padded);
-      }
+    const methodCallFn = exports?.[`__call_fn_method_${arity}`];
+    if (typeof methodCallFn === "function" && this !== undefined && this !== globalThis) {
+      const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
+      return methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...padded);
     }
     return callFn(closure, ...padded);
   };
+  _wasmClosureWrapperSource.set(wrapped, { closure, arity });
   if (_canBeWeakKey(closure)) {
     if (!byArity) {
       byArity = new Map();
       _wasmClosureWrapperCache.set(closure as object, byArity);
     }
-    byArity.set(arity, wrapper);
-    _wasmClosureWrapperTargets.set(wrapper, closure as object);
+    byArity.set(arity, wrapped);
+    _wasmClosureWrapperTargets.set(wrapped, closure as object);
   }
-  return wrapper;
+  return wrapped;
+}
+
+function _wrapWasmClosureUnknownArity(
+  closure: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): ((...args: any[]) => any) | null {
+  if (closure != null && typeof closure === "object") {
+    const cached = _wasmClosureDynamicWrapperCache.get(closure);
+    if (cached) return cached as (...args: any[]) => any;
+  }
+  if (!callbackState) return null;
+  const exports = callbackState.getExports();
+  if (!exports) return null;
+  const available: number[] = [];
+  for (let arity = 0; arity <= 4; arity++) {
+    if (typeof exports[`__call_fn_${arity}`] === "function") available.push(arity);
+  }
+  if (available.length === 0) return null;
+  const maxArity = available[available.length - 1]!;
+  const wrapped = function wasmClosureDynamicBridge(this: any, ...args: any[]): any {
+    let arity = Math.min(args.length, maxArity);
+    while (arity > 0 && typeof exports[`__call_fn_${arity}`] !== "function") arity--;
+    const callFn = exports[`__call_fn_${arity}`];
+    if (typeof callFn !== "function") return undefined;
+    const padded: any[] = [];
+    for (let i = 0; i < arity; i++) padded.push(args[i]);
+    const methodCallFn = exports[`__call_fn_method_${arity}`];
+    if (typeof methodCallFn === "function" && this !== undefined && this !== globalThis) {
+      return methodCallFn(this, closure, ...padded);
+    }
+    return callFn(closure, ...padded);
+  };
+  try {
+    if (wrapped.prototype && closure != null) {
+      Object.defineProperty(wrapped.prototype, "constructor", {
+        value: closure,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+    }
+  } catch {
+    /* best-effort constructor identity for function-expression wrappers */
+  }
+  _wasmClosureWrapperSource.set(wrapped, { closure, arity: -1 });
+  if (closure != null && typeof closure === "object") {
+    _wasmClosureDynamicWrapperCache.set(closure, wrapped);
+    _wasmClosureWrapperTargets.set(wrapped, closure);
+  }
+  return wrapped;
 }
 
 /**
@@ -1821,13 +1887,7 @@ function _maybeWrapCallableUnknownArity(
   } catch {
     return val;
   }
-  for (let arity = 4; arity >= 0; arity--) {
-    if (typeof exports[`__call_fn_${arity}`] === "function") {
-      const wrapped = _wrapWasmClosure(val, arity, callbackState);
-      if (wrapped) return wrapped;
-    }
-  }
-  return val;
+  return _wrapWasmClosureUnknownArity(val, callbackState) ?? val;
 }
 
 /**
@@ -2006,17 +2066,16 @@ function _materializeIterable(
 
 /**
  * (#1320) Drain a plain JS object whose own `[Symbol.iterator]` is a compiled
- * **Wasm closure struct** (typeof "object", not a JS function). Native
- * `Array.from` / `Iterator.from` reject such an object with
- * `items[Symbol.iterator] … must be a function`, because V8 sees a non-callable
- * iterator method. We invoke the closure (and its returned iterator's `.next`,
- * which is typically also a Wasm closure) through the `__call_fn_0` export and
- * collect the yielded values into a real JS array.
+ * Wasm closure. Depending on the assignment path, the property may hold either
+ * the raw closure struct or a JS wrapper produced by `_wrapWasmClosure`. Native
+ * `Array.from` / `Iterator.from` cannot drive the raw Wasm iterator/result
+ * structs, so we invoke the closure-backed protocol manually and collect the
+ * yielded values into a real JS array.
  *
  * Returns `null` when this path does not apply — caller falls back to native
  * `Array.from`:
  *   - the value has no own/inherited `@@iterator`, OR
- *   - the `@@iterator` is already a real JS function (native path is correct), OR
+ *   - the `@@iterator` is already a real non-Wasm-wrapper JS function, OR
  *   - the closure-call export is unavailable.
  *
  * Throws from the user's `@@iterator()` / `.next()` propagate unchanged (a
@@ -2033,20 +2092,34 @@ function _drainWasmClosureIterable(
   } catch {
     return null;
   }
-  // Only handle the broken case: an @@iterator that exists but is a Wasm
-  // closure struct (non-function object). Real JS functions / generators take
-  // the native path.
-  if (iterFn == null || typeof iterFn === "function" || !_isWasmStruct(iterFn)) return null;
+  const iterWrapper = typeof iterFn === "function" ? _wasmClosureWrapperSource.get(iterFn) : undefined;
+  const iterIsRawClosure = iterFn != null && typeof iterFn === "object" && _isWasmStruct(iterFn);
+  // Only handle the broken case: an @@iterator that came from a Wasm closure.
+  // Real JS functions / generators take the native path.
+  if (iterFn == null || (!iterWrapper && !iterIsRawClosure)) return null;
   const exports = callbackState?.getExports();
   const callFn0 = exports?.["__call_fn_0"];
-  if (typeof callFn0 !== "function") return null;
-  const iteratorObj = callFn0(iterFn);
+  if (iterIsRawClosure && typeof callFn0 !== "function") return null;
+  let iteratorObj = iterWrapper ? iterFn.call(obj) : callFn0!(iterFn);
+  if ((iteratorObj == null || typeof iteratorObj !== "object") && iterWrapper && typeof callFn0 === "function") {
+    try {
+      const fallbackIterator = callFn0(iterWrapper.closure);
+      if (fallbackIterator != null && typeof fallbackIterator === "object") iteratorObj = fallbackIterator;
+    } catch {
+      // Preserve the native failure path below when the fallback also fails.
+    }
+  }
   if (iteratorObj == null || typeof iteratorObj !== "object") return null;
   const out: any[] = [];
   const MAX_ITER = 1 << 16;
   let iterCount = 0;
   const resolveProp = (target: any, key: string): any => {
-    const direct = target?.[key];
+    let direct: any;
+    try {
+      direct = target?.[key];
+    } catch {
+      direct = undefined;
+    }
     if (direct !== undefined) return direct;
     const safe = _safeGet(target, key);
     if (safe !== undefined) return safe;
@@ -2060,6 +2133,7 @@ function _drainWasmClosureIterable(
     if (typeof nextFn === "function") {
       result = nextFn.call(iteratorObj);
     } else if (nextFn != null && typeof nextFn === "object" && _isWasmStruct(nextFn)) {
+      if (typeof callFn0 !== "function") return null;
       result = callFn0(nextFn);
     } else {
       break;
@@ -6902,8 +6976,13 @@ assert._isSameValue = isSameValue;
           // callable JS functions, so JS ToPrimitive / Array built-ins can
           // invoke poisoned valueOf/toString and let errors propagate.
           const exports = callbackState?.getExports();
-          const wrappedObj = _isWasmStruct(obj) ? _wrapForHost(obj, exports) : obj;
-          const wrappedArgs = (args ?? []).map((a) => (_isWasmStruct(a) ? _wrapForHost(a, exports) : a));
+          const wrapHostValue = (v: any): any => {
+            if (!_isWasmStruct(v)) return v;
+            const callable = _maybeWrapCallableUnknownArity(v, callbackState);
+            return callable !== v ? callable : _wrapForHost(v, exports);
+          };
+          const wrappedObj = wrapHostValue(obj);
+          const wrappedArgs = (args ?? []).map(wrapHostValue);
           // (#1382) Wrap a Wasm-closure callback arg into a JS Function
           // before the native engine dispatches. Looks up the same slot
           // table as `__proto_method_call` so Array.prototype.map.call
@@ -6956,6 +7035,17 @@ assert._isSameValue = isSameValue;
             }
           }
           const fn = wrappedObj[method];
+          // (#1320) Some chained `Array.from.call(C, items)` shapes lower as a
+          // generic `method="from"` dispatch on `Array`. Drain Wasm-closure
+          // iterables before the native Array.from performs GetMethod(items,
+          // @@iterator), while preserving the native receiver.
+          if (method === "from" && fn === Array.from && wrappedArgs.length > 0) {
+            const callArgs = wrappedArgs.slice();
+            const drained = _drainWasmClosureIterable(callArgs[0], callbackState);
+            if (drained !== null) callArgs[0] = drained;
+            const ret = (Array.from as (...xs: any[]) => any).apply(wrappedObj, callArgs);
+            return ret === wrappedObj ? obj : _unwrapForHost(ret);
+          }
           if (typeof fn !== "function") {
             // (#837) Map/WeakMap upsert proposal polyfill — Node 25 / V8
             // currently don't ship `getOrInsert` / `getOrInsertComputed`
@@ -9046,6 +9136,17 @@ assert._isSameValue = isSameValue;
           // never reach this branch as wasm structs.
           if (ctorName === "Object" && v != null && _isWasmStruct(v)) {
             return 1;
+          }
+          return 0;
+        };
+      if (name === "__instanceof_dyn")
+        return (v: any, ctor: any) => {
+          try {
+            const wrappedCtor = _maybeWrapCallableUnknownArity(ctor, callbackState);
+            if (typeof wrappedCtor === "function") return v instanceof wrappedCtor ? 1 : 0;
+            if (typeof ctor === "function") return v instanceof ctor ? 1 : 0;
+          } catch {
+            return 0;
           }
           return 0;
         };
