@@ -3,7 +3,7 @@
  * Control flow statement lowering: return, if, switch, break, continue, labeled.
  */
 import { ts } from "../../ts-api.js";
-import { isStringType } from "../../checker/type-mapper.js";
+import { isStringType, isNumberType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { allocLocal, getLocalType } from "../context/locals.js";
@@ -629,7 +629,30 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
       wasmType = { kind: "externref" };
     }
   } else if (wasmType.kind === "externref") {
-    switchIsExternrefIdentity = true;
+    // (#1712) A non-string externref discriminant can be either a boxed number
+    // (a `number` value stored as `any`/externref via __box_number) or a genuine
+    // reference (object/symbol). Reference identity (`ref.test`+`ref.eq`) is
+    // correct ONLY for the reference case: for a boxed f64 the `ref.test`
+    // against the eqref-shaped EQ_HEAP_TYPE returns 0, so NO case ever matches.
+    // When every non-default case expression is numeric-typed, keep main's
+    // proven unbox-to-f64 numeric comparison. Only fall back to identity when
+    // the cases are genuine references.
+    let allCasesNumeric = true;
+    let sawCase = false;
+    for (const clause of stmt.caseBlock.clauses) {
+      if (!ts.isCaseClause(clause)) continue;
+      sawCase = true;
+      if (!isNumberType(ctx.checker.getTypeAtLocation(clause.expression))) {
+        allCasesNumeric = false;
+        break;
+      }
+    }
+    if (sawCase && allCasesNumeric) {
+      // Numeric discriminant carried as externref: unbox to f64 and compare.
+      wasmType = { kind: "f64" };
+    } else {
+      switchIsExternrefIdentity = true;
+    }
   }
 
   const tmpLocalIdx = allocLocal(fctx, `__sw_${fctx.locals.length}`, wasmType);
