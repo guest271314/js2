@@ -4092,7 +4092,13 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       const nKey = _normalizeDescKey(key);
       const sDescs = _getSidecarDescs(obj);
       const existingVal = _sidecarGet(obj, key);
-      const newFlags = _validatePropertyDescriptor(sDescs, nKey, descriptor, existingVal);
+      // (#1629) Pass the current descriptor so the same-getter/setter identity
+      // exception (§10.1.6.3) can recognise an idempotent redefine of a
+      // non-configurable accessor through the proxy. Omitting it made
+      // `Object.is(desc.get, undefined)` always false → spurious "Cannot
+      // redefine property" when redefining with the SAME getter/setter.
+      const existingDesc = _readOwnDescriptor(obj, nKey, exports);
+      const newFlags = _validatePropertyDescriptor(sDescs, nKey, descriptor, existingVal, existingDesc);
       sDescs.set(nKey, newFlags);
       if (descriptor.value !== undefined) _sidecarSet(obj, key, descriptor.value);
       if (descriptor.get !== undefined || descriptor.set !== undefined) {
@@ -6223,14 +6229,16 @@ assert._isSameValue = isSameValue;
             if (!_isWasmStruct(o)) return f in Object(o);
             const sc = _wasmStructProps.get(o);
             if (sc && f in sc) return true;
-            const getter = callbackState?.getExports()?.[`__sget_${f}`];
-            if (typeof getter !== "function") return false;
-            try {
-              getter(o);
-              return true;
-            } catch {
-              return false;
-            }
+            // (#1629) Presence MUST consult the struct's real shape, not a probe
+            // through `__sget_${f}`. A `__sget_*` getter is module-global (one per
+            // field NAME across all struct types) and DOES NOT trap on a struct
+            // that lacks the field — it falls through to ref.null/0. So a try/catch
+            // probe returns `true` for every ubiquitous descriptor name (value/get
+            // /set/writable) on any struct, producing spurious ToPropertyDescriptor
+            // data⇄accessor conflicts. `__struct_field_names(o)` returns the field
+            // names of THIS instance's concrete type — the precise membership test.
+            const names = _getStructFieldNames(o, callbackState?.getExports());
+            return names !== null && names.includes(f);
           };
           // (#1629a) When the descriptor is a WasmGC struct, its get/set fields
           // are Wasm-closure structs, not JS callables. Wrap them so the spec
@@ -6462,14 +6470,12 @@ assert._isSameValue = isSameValue;
             const sc = _wasmStructProps.get(o);
             if (sc && field in sc) return true;
             if (typeof field !== "string") return false;
-            const getter = callbackState?.getExports()?.[`__sget_${field}`];
-            if (typeof getter !== "function") return false;
-            try {
-              getter(o);
-              return true;
-            } catch {
-              return false;
-            }
+            // (#1629) See the matching probe in __defineProperty_desc: `__sget_*`
+            // getters are global per field-name and don't trap on a struct missing
+            // the field, so a try/catch probe falsely reports presence. Use the
+            // concrete struct shape via __struct_field_names instead.
+            const names = _getStructFieldNames(o, callbackState?.getExports());
+            return names !== null && names.includes(field);
           };
           // (#1629 S2) When a per-property descriptor is itself a WasmGC struct,
           // its `get`/`set` fields arrive as Wasm-closure structs, not JS

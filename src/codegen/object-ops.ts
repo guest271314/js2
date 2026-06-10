@@ -506,6 +506,7 @@ export const PROP_FLAG_ENUMERABLE = 1 << 1; // 2
 export const PROP_FLAG_CONFIGURABLE = 1 << 2; // 4
 export const PROP_FLAG_DEFINED = 1 << 3; // 8
 export const PROP_FLAG_ACCESSOR = 1 << 4; // 16
+const PROP_FLAGS_DEFAULT_DATA = PROP_FLAG_WRITABLE | PROP_FLAG_ENUMERABLE | PROP_FLAG_CONFIGURABLE | PROP_FLAG_DEFINED;
 
 /**
  * Compute a compile-time flags integer from parsed descriptor booleans.
@@ -522,6 +523,32 @@ export function computeDescriptorFlags(
   if (enumerable) flags |= PROP_FLAG_ENUMERABLE;
   if (configurable) flags |= PROP_FLAG_CONFIGURABLE;
   if (isAccessor) flags |= PROP_FLAG_ACCESSOR;
+  return flags;
+}
+
+function applyDescriptorFlags(
+  currentFlags: number | undefined,
+  writable: boolean | undefined,
+  enumerable: boolean | undefined,
+  configurable: boolean | undefined,
+  isAccessor: boolean,
+  hasData: boolean,
+): number {
+  let flags = currentFlags ?? PROP_FLAG_DEFINED;
+  flags |= PROP_FLAG_DEFINED;
+
+  if (writable !== undefined) flags = writable ? flags | PROP_FLAG_WRITABLE : flags & ~PROP_FLAG_WRITABLE;
+  if (enumerable !== undefined) flags = enumerable ? flags | PROP_FLAG_ENUMERABLE : flags & ~PROP_FLAG_ENUMERABLE;
+  if (configurable !== undefined) {
+    flags = configurable ? flags | PROP_FLAG_CONFIGURABLE : flags & ~PROP_FLAG_CONFIGURABLE;
+  }
+
+  if (isAccessor) {
+    flags |= PROP_FLAG_ACCESSOR;
+  } else if (hasData) {
+    flags &= ~PROP_FLAG_ACCESSOR;
+  }
+
   return flags;
 }
 
@@ -1375,23 +1402,44 @@ export function compileObjectDefineProperty(
     // Save existing flags BEFORE updating (needed for value comparison below)
     let priorExistingFlags: number | undefined;
     const isKnownExistingField = structTypeIdx !== undefined && fields && fieldIdx >= 0;
+    let appliedStructFlags = applyDescriptorFlags(
+      isKnownExistingField ? PROP_FLAGS_DEFAULT_DATA : undefined,
+      descWritable,
+      descEnumerable,
+      descConfigurable,
+      false,
+      true,
+    );
     if (propName) {
       const varName = ts.isIdentifier(objArg) ? objArg.text : undefined;
       if (varName) {
         const isAccessor = !!(getNode || setNode);
-        const newFlags = computeDescriptorFlags(descWritable, descEnumerable, descConfigurable, isAccessor);
         const key = `${varName}:${propName}`;
-        priorExistingFlags = ctx.definedPropertyFlags.get(key);
+        const trackedExistingFlags = ctx.definedPropertyFlags.get(key);
+        const isDefinePropertyWidenedField = ctx.widenedDefinePropertyKeys.has(key);
+        const currentFlags =
+          trackedExistingFlags ??
+          (isKnownExistingField && !isDefinePropertyWidenedField ? PROP_FLAGS_DEFAULT_DATA : undefined);
+        const newFlags = applyDescriptorFlags(
+          currentFlags,
+          descWritable,
+          descEnumerable,
+          descConfigurable,
+          isAccessor,
+          descWritable !== undefined,
+        );
+        appliedStructFlags = newFlags;
+        priorExistingFlags = currentFlags;
 
         // Check non-extensibility — but only for genuinely new properties.
         // If the property is a known struct field (fieldIdx >= 0), it already
         // exists on the object, so redefining it is not "adding a new property".
-        if (ctx.nonExtensibleVars.has(varName) && !ctx.definedPropertyFlags.has(key) && !isKnownExistingField) {
+        if (ctx.nonExtensibleVars.has(varName) && currentFlags === undefined) {
           emitThrowString(ctx, fctx, "TypeError: Cannot define property, object is not extensible");
         }
 
         // Check existing flags
-        const existingFlags = ctx.definedPropertyFlags.get(key);
+        const existingFlags = currentFlags;
         if (existingFlags !== undefined) {
           const isExistingConfigurable = !!(existingFlags & PROP_FLAG_CONFIGURABLE);
           if (!isExistingConfigurable) {
@@ -1457,6 +1505,11 @@ export function compileObjectDefineProperty(
     // even if they weren't explicitly set via defineProperty (i.e. original struct fields).
     const varName2 = ts.isIdentifier(objArg) ? objArg.text : undefined;
     const isFrozenProperty = varName2 !== undefined && ctx.frozenVars.has(varName2) && isKnownExistingField;
+    const shouldStoreDescriptorDefaults =
+      varName2 !== undefined &&
+      propName !== undefined &&
+      ctx.widenedDefinePropertyKeys.has(`${varName2}:${propName}`) &&
+      priorExistingFlags === undefined;
     const needsValueCompare =
       isFrozenProperty ||
       (priorExistingFlags !== undefined &&
@@ -1579,7 +1632,7 @@ export function compileObjectDefineProperty(
     // host import sees the same externref identity used by every other sidecar
     // lookup. Value bit (1<<7) is left unset so the host doesn't overwrite the
     // value we just struct.set above.
-    if (anyFlagSpecified) {
+    if (anyFlagSpecified || shouldStoreDescriptorDefaults) {
       fctx.body.push({ op: "local.get", index: objLocal });
       if (objType.kind === "ref" || objType.kind === "ref_null") {
         fctx.body.push({ op: "extern.convert_any" } as Instr);
@@ -1593,18 +1646,10 @@ export function compileObjectDefineProperty(
       }
       // null value (hasValue=false ensures runtime won't overwrite struct.set)
       fctx.body.push({ op: "ref.null.extern" });
-      const dynForStruct = extractDynamicFlagExprs(descArg);
-      emitRuntimeFlagsF64(
-        ctx,
-        fctx,
-        descWritable,
-        descEnumerable,
-        descConfigurable,
-        false,
-        dynForStruct.writableDyn,
-        dynForStruct.enumerableDyn,
-        dynForStruct.configurableDyn,
-      );
+      fctx.body.push({
+        op: "f64.const",
+        value: (1 << 3) | (1 << 4) | (1 << 5) | (appliedStructFlags & 0x07),
+      });
       const sideFuncIdx = ensureLateImport(
         ctx,
         "__defineProperty_value",
@@ -2041,10 +2086,17 @@ function emitExternDefinePropertyNoValue(
     // Compile-time tracking
     if (propName && ts.isObjectLiteralExpression(descArg)) {
       const isAccessor = isAccessorDesc;
-      const newFlags = computeDescriptorFlags(descWritable, descEnumerable, descConfigurable, isAccessor);
       const varName = ts.isIdentifier(objArg) ? objArg.text : undefined;
       if (varName) {
         const key = `${varName}:${propName}`;
+        const newFlags = applyDescriptorFlags(
+          ctx.definedPropertyFlags.get(key),
+          descWritable,
+          descEnumerable,
+          descConfigurable,
+          isAccessor,
+          descWritable !== undefined,
+        );
         ctx.definedPropertyFlags.set(key, newFlags);
       }
     }
@@ -2204,15 +2256,31 @@ function emitExternDefinePropertyNoValue(
   // (struct fields don't support property attributes)
   const propName = ts.isStringLiteral(propArg) ? propArg.text : undefined;
   if (propName && ts.isObjectLiteralExpression(descArg)) {
+    // #1629: treat identifier-reference accessors (get/set: fnRef) as accessor
+    // descriptors too, not just inline get/set methods — `isAccessorDesc`
+    // includes getExpr/setExpr. #1718's applyDescriptorFlags below preserves
+    // omitted writable/enumerable/configurable on partial redefine.
     const isAccessor = isAccessorDesc;
-    const newFlags = computeDescriptorFlags(descWritable, descEnumerable, descConfigurable, isAccessor);
     const varName = ts.isIdentifier(objArg) ? objArg.text : undefined;
     if (varName) {
       const key = `${varName}:${propName}`;
-      if (ctx.nonExtensibleVars.has(varName) && !ctx.definedPropertyFlags.has(key)) {
+      const trackedExistingFlags = ctx.definedPropertyFlags.get(key);
+      const isDefinePropertyWidenedField = ctx.widenedDefinePropertyKeys.has(key);
+      const currentFlags =
+        trackedExistingFlags ??
+        (isKnownStructField && !isDefinePropertyWidenedField ? PROP_FLAGS_DEFAULT_DATA : undefined);
+      const newFlags = applyDescriptorFlags(
+        currentFlags,
+        descWritable,
+        descEnumerable,
+        descConfigurable,
+        isAccessor,
+        descWritable !== undefined,
+      );
+      if (ctx.nonExtensibleVars.has(varName) && currentFlags === undefined) {
         emitThrowString(ctx, fctx, "TypeError: Cannot define property, object is not extensible");
       }
-      const existingFlags = ctx.definedPropertyFlags.get(key);
+      const existingFlags = currentFlags;
       if (existingFlags !== undefined) {
         const isExistingConfigurable = !!(existingFlags & PROP_FLAG_CONFIGURABLE);
         if (!isExistingConfigurable) {
@@ -2449,13 +2517,33 @@ export function compileObjectDefineProperties(
 
           // ── Compile-time flag checking for struct path (#856) ──
           let priorExistingFlags: number | undefined;
+          let newFlagsForStructField = applyDescriptorFlags(
+            PROP_FLAGS_DEFAULT_DATA,
+            descWritable,
+            descEnumerable,
+            descConfigurable,
+            false,
+            valueExpr !== undefined || descWritable !== undefined,
+          );
           if (ts.isIdentifier(objArg)) {
             const isAccessor = false;
-            const newFlags = computeDescriptorFlags(descWritable, descEnumerable, descConfigurable, isAccessor);
             const key = `${objArg.text}:${propName}`;
-            priorExistingFlags = ctx.definedPropertyFlags.get(key);
+            const trackedExistingFlags = ctx.definedPropertyFlags.get(key);
+            const isDefinePropertyWidenedField = ctx.widenedDefinePropertyKeys.has(key);
+            const currentFlags =
+              trackedExistingFlags ?? (!isDefinePropertyWidenedField ? PROP_FLAGS_DEFAULT_DATA : undefined);
+            const newFlags = applyDescriptorFlags(
+              currentFlags,
+              descWritable,
+              descEnumerable,
+              descConfigurable,
+              isAccessor,
+              valueExpr !== undefined || descWritable !== undefined,
+            );
+            newFlagsForStructField = newFlags;
+            priorExistingFlags = currentFlags;
 
-            const existingFlags = ctx.definedPropertyFlags.get(key);
+            const existingFlags = currentFlags;
             if (existingFlags !== undefined) {
               const isExistingConfigurable = !!(existingFlags & PROP_FLAG_CONFIGURABLE);
               if (!isExistingConfigurable) {
@@ -2684,10 +2772,8 @@ export function compileObjectDefineProperties(
 
           // Update compile-time flags
           if (ts.isIdentifier(objArg)) {
-            const isAccessor = false;
-            const newFlags = computeDescriptorFlags(descWritable, descEnumerable, descConfigurable, isAccessor);
             const key = `${objArg.text}:${propName}`;
-            ctx.definedPropertyFlags.set(key, newFlags);
+            ctx.definedPropertyFlags.set(key, newFlagsForStructField);
           }
 
           // Update shapePropFlags
@@ -2698,9 +2784,7 @@ export function compileObjectDefineProperties(
           if (userFieldIdx >= 0) {
             const flagsArr = ctx.shapePropFlags.get(structTypeIdx);
             if (flagsArr && userFieldIdx < flagsArr.length) {
-              const isAccessor = false;
-              const newFlags = computeDescriptorFlags(descWritable, descEnumerable, descConfigurable, isAccessor);
-              flagsArr[userFieldIdx] = newFlags & 0x07; // Only store WEC bits
+              flagsArr[userFieldIdx] = newFlagsForStructField & 0x07; // Only store WEC bits
             }
           }
 
@@ -2792,8 +2876,15 @@ export function compileObjectDefineProperties(
 
           if (ts.isIdentifier(objArg)) {
             const isAccessor = true;
-            const newFlags = computeDescriptorFlags(descWritable, descEnumerable, descConfigurable, isAccessor);
             const key = `${objArg.text}:${propName}`;
+            const newFlags = applyDescriptorFlags(
+              ctx.definedPropertyFlags.get(key),
+              descWritable,
+              descEnumerable,
+              descConfigurable,
+              isAccessor,
+              false,
+            );
             ctx.definedPropertyFlags.set(key, newFlags);
           }
         } else {
@@ -2845,8 +2936,15 @@ export function compileObjectDefineProperties(
           // Update compile-time flags for externref path
           if (ts.isIdentifier(objArg)) {
             const isAccessor = false;
-            const newFlags = computeDescriptorFlags(descWritable, descEnumerable, descConfigurable, isAccessor);
             const key = `${objArg.text}:${propName}`;
+            const newFlags = applyDescriptorFlags(
+              ctx.definedPropertyFlags.get(key),
+              descWritable,
+              descEnumerable,
+              descConfigurable,
+              isAccessor,
+              valueExpr !== undefined || descWritable !== undefined,
+            );
             ctx.definedPropertyFlags.set(key, newFlags);
           }
         }
