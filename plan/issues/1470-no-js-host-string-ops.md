@@ -12,6 +12,7 @@ area: codegen, runtime
 language_feature: strings
 goal: host-independence
 sprint: 61
+model: fable
 related: []
 pr: 1283
 claimed_by: codex-developer
