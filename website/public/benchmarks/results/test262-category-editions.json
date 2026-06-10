@@ -665,6 +665,32 @@
       "skip": 0
     }
   },
+  "built-ins/Error": {
+    "ES5": {
+      "pass": 15,
+      "fail": 2,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2015": {
+      "pass": 14,
+      "fail": 12,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2022": {
+      "pass": 0,
+      "fail": 3,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2026": {
+      "pass": 8,
+      "fail": 4,
+      "ce": 0,
+      "skip": 0
+    }
+  },
   "built-ins/Function": {
     "ES5": {
       "pass": 166,
@@ -699,32 +725,6 @@
     "ES2022": {
       "pass": 4,
       "fail": 2,
-      "ce": 0,
-      "skip": 0
-    }
-  },
-  "built-ins/Error": {
-    "ES5": {
-      "pass": 15,
-      "fail": 2,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2015": {
-      "pass": 14,
-      "fail": 12,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2022": {
-      "pass": 0,
-      "fail": 3,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2026": {
-      "pass": 8,
-      "fail": 4,
       "ce": 0,
       "skip": 0
     }
@@ -765,8 +765,8 @@
       "skip": 0
     },
     "ES2025": {
-      "pass": 210,
-      "fail": 185,
+      "pass": 211,
+      "fail": 184,
       "ce": 0,
       "skip": 0
     },
@@ -1083,6 +1083,14 @@
       "skip": 0
     }
   },
+  "built-ins/RegExpStringIteratorPrototype": {
+    "ES2020": {
+      "pass": 6,
+      "fail": 11,
+      "ce": 0,
+      "skip": 0
+    }
+  },
   "built-ins/Set": {
     "ES2015": {
       "pass": 187,
@@ -1105,14 +1113,6 @@
     "ES2025": {
       "pass": 141,
       "fail": 45,
-      "ce": 0,
-      "skip": 0
-    }
-  },
-  "built-ins/RegExpStringIteratorPrototype": {
-    "ES2020": {
-      "pass": 6,
-      "fail": 11,
       "ce": 0,
       "skip": 0
     }
@@ -1459,8 +1459,8 @@
   },
   "annexB/language": {
     "ES5": {
-      "pass": 405,
-      "fail": 385,
+      "pass": 406,
+      "fail": 384,
       "ce": 15,
       "skip": 0
     },
