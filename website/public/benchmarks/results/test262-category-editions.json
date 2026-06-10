@@ -765,8 +765,8 @@
       "skip": 0
     },
     "ES2025": {
-      "pass": 210,
-      "fail": 185,
+      "pass": 211,
+      "fail": 184,
       "ce": 0,
       "skip": 0
     },
@@ -1229,9 +1229,9 @@
   },
   "built-ins/TypedArray": {
     "ES2015": {
-      "pass": 632,
+      "pass": 633,
       "fail": 50,
-      "ce": 3,
+      "ce": 2,
       "skip": 0
     },
     "ES2017": {
@@ -1451,8 +1451,8 @@
       "skip": 0
     },
     "ES2026": {
-      "pass": 12,
-      "fail": 23,
+      "pass": 11,
+      "fail": 24,
       "ce": 0,
       "skip": 0
     }
