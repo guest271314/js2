@@ -77,9 +77,9 @@
   },
   "language/expressions": {
     "ES5": {
-      "pass": 2787,
-      "fail": 581,
-      "ce": 113,
+      "pass": 2789,
+      "fail": 583,
+      "ce": 109,
       "skip": 0
     },
     "ES2015": {
@@ -102,8 +102,8 @@
     },
     "ES2018": {
       "pass": 1092,
-      "fail": 253,
-      "ce": 35,
+      "fail": 255,
+      "ce": 33,
       "skip": 0
     },
     "ES2020": {
@@ -339,9 +339,9 @@
   },
   "language/statements": {
     "ES5": {
-      "pass": 1918,
-      "fail": 513,
-      "ce": 199,
+      "pass": 1920,
+      "fail": 515,
+      "ce": 195,
       "skip": 0
     },
     "ES2015": {
@@ -364,8 +364,8 @@
     },
     "ES2018": {
       "pass": 1511,
-      "fail": 409,
-      "ce": 36,
+      "fail": 411,
+      "ce": 34,
       "skip": 0
     },
     "ES2019": {
@@ -537,14 +537,6 @@
       "skip": 0
     }
   },
-  "built-ins/AsyncGeneratorPrototype": {
-    "ES2018": {
-      "pass": 46,
-      "fail": 2,
-      "ce": 0,
-      "skip": 0
-    }
-  },
   "built-ins/Atomics": {
     "ES2017": {
       "pass": 105,
@@ -573,6 +565,14 @@
     "ES2026": {
       "pass": 5,
       "fail": 1,
+      "ce": 0,
+      "skip": 0
+    }
+  },
+  "built-ins/AsyncGeneratorPrototype": {
+    "ES2018": {
+      "pass": 46,
+      "fail": 2,
       "ce": 0,
       "skip": 0
     }
@@ -657,11 +657,29 @@
       "skip": 0
     }
   },
-  "built-ins/FinalizationRegistry": {
-    "ES2021": {
-      "pass": 20,
-      "fail": 25,
-      "ce": 2,
+  "built-ins/Error": {
+    "ES5": {
+      "pass": 15,
+      "fail": 2,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2015": {
+      "pass": 14,
+      "fail": 12,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2022": {
+      "pass": 0,
+      "fail": 3,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2026": {
+      "pass": 9,
+      "fail": 3,
+      "ce": 0,
       "skip": 0
     }
   },
@@ -703,29 +721,11 @@
       "skip": 0
     }
   },
-  "built-ins/Error": {
-    "ES5": {
-      "pass": 15,
-      "fail": 2,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2015": {
-      "pass": 14,
-      "fail": 12,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2022": {
-      "pass": 0,
-      "fail": 3,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2026": {
-      "pass": 9,
-      "fail": 3,
-      "ce": 0,
+  "built-ins/FinalizationRegistry": {
+    "ES2021": {
+      "pass": 20,
+      "fail": 25,
+      "ce": 2,
       "skip": 0
     }
   },
@@ -1451,8 +1451,8 @@
       "skip": 0
     },
     "ES2026": {
-      "pass": 11,
-      "fail": 24,
+      "pass": 12,
+      "fail": 23,
       "ce": 0,
       "skip": 0
     }
