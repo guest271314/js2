@@ -335,34 +335,19 @@ export function ensureAnyToExternHelper(ctx: CodegenContext): number | undefined
         { op: "return" },
       ],
     },
-    { op: "local.get", index: 1 },
-    { op: "i32.const", value: 5 },
-    { op: "i32.eq" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        { op: "local.get", index: 0 },
-        { op: "ref.as_non_null" },
-        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
-        { op: "return" },
-      ],
-    },
-    { op: "local.get", index: 1 },
-    { op: "i32.const", value: 6 },
-    { op: "i32.eq" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        { op: "local.get", index: 0 },
-        { op: "ref.as_non_null" },
-        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 3 },
-        { op: "extern.convert_any" },
-        { op: "return" },
-      ],
-    },
-    { op: "ref.null.extern" },
+    // Tags 0 (null), 1 (undefined), 5 (string), 6 (GC ref): keep the WHOLE
+    // $AnyValue box wrapped via extern.convert_any. Standalone/WASI has no host
+    // that needs unwrapped values, and __any_from_extern recovers the wrapped
+    // box exactly via its `ref.test $AnyValue` arm — preserving the tag and
+    // reference identity. Unwrapping these here was NOT round-trip-safe:
+    //   - tag 0 came back as tag 1 (null → undefined across every boundary),
+    //   - tag 6 (raw struct) was mis-tagged as tag 5 (string) by the
+    //     __any_from_extern fallback.
+    // Only the numeric/boolean carriers (tags 2/3/4 above) are unwrapped into
+    // __box_number / __box_boolean — the NaN/number fix this helper exists for.
+    { op: "local.get", index: 0 },
+    { op: "ref.as_non_null" },
+    { op: "extern.convert_any" },
   ];
 
   ctx.mod.functions.push({
