@@ -201,6 +201,7 @@ export function createCodegenContext(
     tdzGlobals: new Map(),
     tdzLetConstNames: new Set(),
     definedPropertyFlags: new Map(),
+    sidecarDefinedPropertyKeys: new Set(),
     nonExtensibleVars: new Set(),
     frozenVars: new Set(),
     sealedVars: new Set(),
