@@ -62,7 +62,6 @@ import {
   ensureAnyToStringHelper,
   ensureNativeStringHelpers,
   nativeStringLiteralInstrs,
-  reconcileNativeStrFinalizeShift,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
@@ -126,45 +125,16 @@ export interface ObjectRuntimeTypes {
  *
  * MUST run after `ensureNativeStringHelpers` (it depends on `__str_flatten` /
  * `__str_equals` and the `$NativeString` type indices) — we call it here to
- * guarantee that, then reconcile any imports that were added after the string
- * helper snapshot before object-runtime bodies bake sibling `call` indices.
- * Because this path adds only DEFINED functions (no imports), the
- * freshly-allocated func indices sit above every existing function and no
- * extra object-runtime shift is required.
- *
- * #1903 (fix): the reconcile must NOT consume an in-flight late-import batch.
- * `ensureObjectRuntime` is reached exclusively via `ensureLateImport`'s
- * object-runtime route DURING USER-FUNCTION BODY COMPILATION (it is never
- * called from the finalize phase — the index.ts:1141 finalize reconcile
- * already settled all pre-compilation drift). At body-compile time a late
- * import batch may be OPEN (`ctx.pendingLateImportShift` set): those batch
- * imports have NOT yet been shifted by `flushLateImportShifts`. The
- * finalize-only walker `reconcileNativeStrFinalizeShift` does not touch
- * `fctx.body` / `ctx.currentFunc` / `funcStack` / `liveBodies` / table
- * `elements` / `declaredFuncRefs` / `pendingMethodTrampolines` — only the
- * full `shiftLateImportIndices` (run by the batch flush) does. So we cap the
- * reconcile target at the OPEN BATCH BOUNDARY: it settles only drift that
- * existed before the batch and leaves the batch itself for the later flush
- * (which then rebases the helper base and shifts everything correctly,
- * single-shift). With no batch open this is the prior `ctx.numImportFuncs`
- * behaviour, which by this point is a no-op (drift already settled by
- * index.ts:1141 + prior flushes). Defaulting to `ctx.numImportFuncs` here is
- * what caused the −468 standalone regression (508 invalid-wasm flips): it
- * folded the unflushed batch into the base, so the batch flush double-shifted.
+ * guarantee that. Because this path adds only DEFINED functions (no imports),
+ * the freshly-allocated func indices sit above every existing function and no
+ * index shift is required (same invariant as `addUnionImportsAsNativeFuncs`).
  */
 export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   if (ctx.objectRuntimeTypes) return ctx.objectRuntimeTypes;
 
   // Dependencies: native string helpers (flatten + equals) and the string type
-  // indices they populate. Settle any native-string import drift before
-  // registering object-runtime helpers so a later uniform reconcile cannot
-  // over-shift helpers registered at a newer import base (#1903).
-  //
-  // Cap the reconcile at the open late-import batch boundary (if any) so the
-  // walker never consumes an unflushed batch into the helper base — the batch
-  // flush owns that shift (see the doc comment above for the full rationale).
+  // indices they populate.
   ensureNativeStringHelpers(ctx);
-  reconcileNativeStrFinalizeShift(ctx, ctx.pendingLateImportShift?.importsBefore ?? ctx.numImportFuncs);
 
   const anyStrTypeIdx = ctx.anyStrTypeIdx;
   const nativeStrTypeIdx = ctx.nativeStrTypeIdx;
