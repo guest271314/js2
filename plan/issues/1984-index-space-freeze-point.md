@@ -13,7 +13,7 @@ area: codegen
 language_feature: compiler-internals
 goal: compiler-correctness
 parent: 1923
-related: [1923, 1915, 1809, 1839, 1677]
+related: [1923, 2029, 1809, 1839, 1677]
 origin: "Child slice of #1923 (ratified Implementation Plan, Option 3). Emit-time range validation (landed) catches out-of-range indices at the symptom site; this catches the PRODUCER that mutates the import space after it should be final."
 ---
 

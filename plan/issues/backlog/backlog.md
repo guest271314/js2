@@ -27,7 +27,7 @@ ToPrimitive 1,292 (#1910), RegExp ~1,190 (#1911–#1914), `__get_builtin`/
 eval ~180 (#1066). New issues for the unowned remainder (all repro-confirmed on
 main @ 936d1ac51):
 
-- [#1915](../1915-standalone-u32-out-of-range-binary-emit.md) — `Binary emit error: u32 out of range: -1` on builtin subclassing / await-using / Object.create / Iterator.prototype (497 tests; minimal repro `class A extends Uint8Array {}`) — critical, medium, **ready (backlog)**.
+- [#2029](../2029-standalone-u32-out-of-range-binary-emit.md) — `Binary emit error: u32 out of range: -1` on builtin subclassing / await-using / Object.create / Iterator.prototype (497 tests; minimal repro `class A extends Uint8Array {}`) — critical, medium, **ready (backlog)**.
 - [#1916](../1916-standalone-array-generics-arraylike-invalid-wasm.md) — Array.prototype generics over array-like receivers: invalid Wasm + null-deref + silently wrong results instead of loud refusal (~500 tests) — high, medium, **ready (backlog)**.
 - [#1917](../1917-standalone-fn-name-destructuring-defaults.md) — NamedEvaluation `.name` wrong for destructuring-default-bound functions (683 tests) — high, medium, **ready (backlog)**.
 - [#1918](../1918-standalone-iterator-next-illegal-cast-async-dstr.md) — `illegal cast` in `__iterator_next` / async destructuring & `yield*` (~470 tests) — high, medium, **ready (backlog)**.
@@ -45,10 +45,10 @@ after those land.
 
 `model: fable` frontmatter marks issues whose spec/decision work should run on
 Claude Fable 5 (spawn the architect/senior-dev with `model: "fable"`); the
-implementation slices they produce stay Opus-tier. Annotated: #1888, #1915,
+implementation slices they produce stay Opus-tier. Annotated: #1888, #2029,
 #1919, #1851, #1852, plus two new decision issues:
 
-- [#1923](../1923-retire-late-import-index-shift-class.md) — retire the late-import function-index-shift bug class structurally (always-on total emit-time index validation + stale-proof func references); 6th+ recurrence as #1915 — high, hard, **ready (backlog)**.
+- [#1923](../1923-retire-late-import-index-shift-class.md) — retire the late-import function-index-shift bug class structurally (always-on total emit-time index validation + stale-proof func references); 6th+ recurrence as #2029 — high, hard, **ready (backlog)**.
 - [#1924](../1924-bigint-i64-brand-valtype-decision.md) — architect decision: BigInt i64-bigint-brand ValType vs TS-type-driven boxing; gates #1644 slices, must attribute the #1919 i64/extern.convert_any bucket — high, hard, **ready (backlog)**.
 
 ## RegExp residual split (2026-06-07)
