@@ -6643,6 +6643,13 @@ export function addStringImports(ctx: CodegenContext): void {
         ctx.nativeStrHelpers.set(name, idx + delta);
       }
     }
+    // (#1913) Regex helper map moves in lockstep too — regexp-standalone call
+    // sites bake `call` indices straight from this map.
+    for (const [name, idx] of ctx.nativeRegexHelpers) {
+      if (idx >= importsBefore) {
+        ctx.nativeRegexHelpers.set(name, idx + delta);
+      }
+    }
     // (#1839) The module start function index also moves if it was a defined
     // function at or above the insertion point. Matches addUnionImports.
     if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
@@ -8033,6 +8040,10 @@ export function addUnionImports(ctx: CodegenContext): void {
     if (ctx.nativeStrHelperImportBase >= 0) {
       for (const [name, idx] of ctx.nativeStrHelpers) {
         if (idx >= importsBefore) ctx.nativeStrHelpers.set(name, idx + delta);
+      }
+      // (#1913) Regex helper map shares the same lifecycle.
+      for (const [name, idx] of ctx.nativeRegexHelpers) {
+        if (idx >= importsBefore) ctx.nativeRegexHelpers.set(name, idx + delta);
       }
       ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
     }
