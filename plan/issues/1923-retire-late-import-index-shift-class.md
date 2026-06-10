@@ -165,18 +165,18 @@ Range checks cannot see an **in-range stale** index (captured before a
 +delta shift, still pointing at a real-but-wrong slot — the wasmtime
 "expected externref, found i32" flavor). Two child slices close that:
 
-- **#1955 (Option 3, freeze-point discipline)** — small, next.
+- **#1984 (Option 3, freeze-point discipline)** — small, next.
   `ctx.indexSpaceFrozen` set after the last legitimate flush in
   `generateModule`/`generateMultiModule` finalize; `addImport`/
   `ensureLateImport` throw at the *producer* call site afterwards. Converts
   "wrong index emitted later" into "illegal import added HERE".
-- **#1956 (Option 2(b), stale-proof index cells)** — incremental.
+- **#1985 (Option 2(b), stale-proof index cells)** — incremental.
   Replace raw captured `funcIdx: number` with a shared `{ idx }` cell the
   shift walker updates in place, starting with the recurring offenders:
   `pendingMethodTrampolines.methodFuncIdx` (#1809), `nativeStrHelpers`
   (#1839/#1677), late-import bridge captures. Option 2(a) (fully symbolic
   references resolved at emit) remains the end-state for NEW emission paths
-  but is not worth a big-bang migration: with #1923 + #1955 landed, every
+  but is not worth a big-bang migration: with #1923 + #1984 landed, every
   instance is a located compile error instead of silent corruption, so the
   cells can migrate site-by-site at low risk (the #618 lesson: big-bang
   shift-regime changes regress thousands of tests).
@@ -185,7 +185,7 @@ Range checks cannot see an **in-range stale** index (captured before a
 
 1. **This PR** — inline always-on validation + named errors + regression
    tests (`tests/issue-1923.test.ts`, `tests/funcref-emit-guard.test.ts`).
-2. **#1955** freeze-point (cheap; catches producers at the cause site).
+2. **#1984** freeze-point (cheap; catches producers at the cause site).
 3. **fix(#1915)** producer fixes using the new named errors (497 tests).
-4. **#1956** index cells for the three recurring capture sites, then
+4. **#1985** index cells for the three recurring capture sites, then
    opportunistically as sites are touched.
