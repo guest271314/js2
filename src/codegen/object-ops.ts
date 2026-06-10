@@ -1007,9 +1007,21 @@ export function compileObjectDefineProperty(
     );
   }
 
-  const explicitUndefinedFields = descriptorUndefinedFields(descArg);
-  if (explicitUndefinedFields.length > 0) {
-    return emitDefinePropertyDescRuntime(ctx, fctx, objArg, propArg, descArg, explicitUndefinedFields);
+  // (#1629) Explicit-`undefined` descriptor fields (e.g. `{ value: undefined }`,
+  // `{ get: undefined }`) need the runtime __defineProperty_desc path so the
+  // field is recorded as PRESENT (not omitted) per ToPropertyDescriptor. That
+  // path emits the `__defineProperty_desc` / `__extern_set` JS-host imports,
+  // which are refused in `--target standalone` (#1472 Phase B) and would turn
+  // every such inline literal into a compile_error. The standalone fast path
+  // (struct.set + flag table) already compiles these correctly — origin/main
+  // passed all of test/built-ins/Object/define*({value:undefined}) in
+  // standalone via that path — so only take the host-runtime branch when a JS
+  // host is available. JS-host mode keeps the precise presence-bit behavior.
+  if (!ctx.standalone) {
+    const explicitUndefinedFields = descriptorUndefinedFields(descArg);
+    if (explicitUndefinedFields.length > 0) {
+      return emitDefinePropertyDescRuntime(ctx, fctx, objArg, propArg, descArg, explicitUndefinedFields);
+    }
   }
 
   // Check if obj is a struct type with the given field
