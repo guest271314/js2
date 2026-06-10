@@ -121,6 +121,7 @@ import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-sup
 import { tryCompileNativeGeneratorMethodCall } from "../generators-native.js";
 import {
   ensureNativeStringExternBridge,
+  ensureStrToCharVecHelper,
   ensureTextEncodingHelpers,
   stringConstantExternrefInstrs,
 } from "../native-strings.js";
@@ -3678,6 +3679,31 @@ function compileCallExpression(
       // `_wrapWasmClosure`. The fast path's `array.copy` would silently
       // drop the mapFn.
       const hasMapFn = expr.arguments.length >= 2;
+      // (#1470) Array.from(string) without a mapFn — the string iterable
+      // yields code points (§23.1.2.1 via §22.1.5.1). In native-strings mode
+      // materialize the char vec in pure Wasm. Without this the string fell
+      // into the host `__array_from` fallback below, which both leaks a JS
+      // host import and (post late-import shift) emitted an invalid module
+      // under --target standalone. Tentatively compile and only commit when
+      // the argument genuinely lowers to a native string ref (#1610 pattern).
+      if (!hasMapFn && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0 && isStringType(argTsType)) {
+        const bodyLenBefore = fctx.body.length;
+        const t = compileExpression(ctx, fctx, expr.arguments[0]!);
+        if (
+          t &&
+          (t.kind === "ref" || t.kind === "ref_null") &&
+          (t.typeIdx === ctx.anyStrTypeIdx || t.typeIdx === ctx.nativeStrTypeIdx)
+        ) {
+          if (t.kind === "ref_null") {
+            fctx.body.push({ op: "ref.as_non_null" } as Instr);
+          }
+          const { funcIdx: toCharVecIdx, vecTypeIdx: nstrVecTypeIdx } = ensureStrToCharVecHelper(ctx);
+          fctx.body.push({ op: "call", funcIdx: toCharVecIdx });
+          return { kind: "ref", typeIdx: nstrVecTypeIdx };
+        }
+        // Didn't lower as a native string — roll back and use the paths below.
+        fctx.body.length = bodyLenBefore;
+      }
       // Only handle array arguments — create a shallow copy
       if (!hasMapFn && (argWasmType.kind === "ref" || argWasmType.kind === "ref_null")) {
         const arrInfo = resolveArrayInfo(ctx, argTsType);
