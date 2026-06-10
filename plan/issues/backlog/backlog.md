@@ -260,3 +260,7 @@ Found while adding `tests/real-world-*.test.ts` (real-world code patterns
 test262 doesn't cover: ESM, Web/WASI/Node/Deno APIs, Hono/React/Express):
 
 - [#1801](../1801-wasi-process-exit-invalid-binary.md) — WASI `process.exit(code)` emits an invalid binary: the exit code is compiled as i32 but an `i32.trunc_sat_f64_s` (expects f64) is pushed on top (`calls.ts:3180-3186`); `wasi-target.test.ts` only checks WAT so missed it. Sentinel via `it.fails` in `real-world-wasi.test.ts` — medium, easy, **sprint 60, DONE** (2026-06-05). _(Was mistakenly cited as phantom "#6407" — corrected.)_
+
+### Fable-team findings (2026-06-10)
+
+- [#1915](../1915-gc-host-string-spread-empty-array.md) — gc JS-host mode: `[...str]` / `Array.from(str)` returns an empty array (externref-spread gap; pre-existing, verified independent of #1470's standalone fix) — medium, medium, **backlog**
