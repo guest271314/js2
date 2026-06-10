@@ -170,8 +170,33 @@ Open items for the next session:
   deferral branch (dbg3 showed it running eagerly with zero keys). Verify
   which handler instance executes for intent vs name, and that callbackState
   there carries `deferToExports`.
-- Root AST divergence: `exports.parse(...)` diffs as null at `$` for every
-  fixture — first triage target (likely `Parser.parse` static dispatch or
-  result marshaling of the returned Node struct).
-- Probes live in `.tmp/repro2.mts` / `.tmp/dbg1.mts` / `.tmp/dbg2.mts` /
-  `.tmp/dbg3.mts` (A/B pass; C returns -1).
+- ~~Root AST divergence: `exports.parse(...)` diffs as null at `$`~~ —
+  ROOT-CAUSED + FIXED (2026-06-10, fable-1712b). Two stacked defects:
+  1. **Capture-struct dispatch exclusion** (`src/codegen/index.ts`): the
+     `__call_fn_<N>` / `__call_fn_method_<N>` dispatchers tested ONE
+     representative base-wrapper struct type for funcref extraction, but
+     capture-carrying closure structs are standalone Wasm types with NO
+     subtype relation to the 1-field base wrapper — `ref.test <base>` fails
+     for them and the dispatcher silently yields `ref.null.extern`. Acorn's
+     prototype methods all capture their fnctor (`Node`, `Parser`, …) so
+     every host-bridge method call returned null. Fixed by per-shape
+     extraction (`buildFuncrefExtraction`, mirrors `__is_closure`'s
+     root-walking). Minimal repro: a proto method whose body merely does
+     `typeof <other-fnctor>` returned null (F3, `.tmp/dbg10.mts`).
+  2. **`__call_fn_1` covered exactly-arity-1 only**, violating the
+     `_maybeWrapCallableUnknownArity` contract (it wraps with the HIGHEST
+     available dispatcher, so fn_1 must invoke arity-0 closures). Fixed by
+     delegating the legacy `emitClosureCallExport`/`...Export1` to the
+     generic `emitClosureCallExportN` (arity ≤ N coverage + #820l argc
+     plumbing + #1896 arg coercion for free).
+  Regression pin: `tests/issue-1712-capture-closure-dispatch.test.ts`.
+  The harness now also routes through `wrapExports` (#1504) so returned
+  node graphs marshal to plain JS for diffing (raw exports are opaque).
+- NEW first triage target after the dispatch fix: all 5 fixtures moved
+  null→**trap "dereferencing a null pointer"** inside compiled `parse`
+  execution. Minimal repro candidates: E3 (`.tmp/dbg9.mts` — proto method
+  returning `new <self-fnctor>(...)` instance traps; returning a field of
+  it works, G4) and G3 (`.tmp/dbg15.mts` — `new`-via-alias loses ctor
+  field writes, returns undefined).
+- Probes live in `.tmp/repro2.mts` / `.tmp/dbg1.mts`–`.tmp/dbg15.mts`
+  (dbg4–15 are the #1712b dispatch-bisection series).
