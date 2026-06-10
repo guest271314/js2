@@ -138,8 +138,17 @@ function temporalKindForExpression(
 ): TemporalKind | undefined {
   const target = unwrapExpression(expr);
   if (ts.isIdentifier(target)) {
-    const localKind = kindFromValType(ctx, getLocalType(fctx, fctx.localMap.get(target.text) ?? -1));
-    if (localKind) return localKind;
+    // Only probe the local slot when the identifier actually resolves to a
+    // local. Passing -1 to getLocalType throws (`fctx.params[-1].type`), which
+    // surfaces as a generic codegen failure and corrupts ordinary member
+    // access on non-Temporal identifiers (e.g. Number.POSITIVE_INFINITY,
+    // Math.PI). Builtin namespaces have no local slot, so we must decline
+    // cheaply and side-effect-free. (#661 / #1274)
+    const localIdx = fctx.localMap.get(target.text);
+    if (localIdx !== undefined) {
+      const localKind = kindFromValType(ctx, getLocalType(fctx, localIdx));
+      if (localKind) return localKind;
+    }
     const sym = ctx.checker.getSymbolAtLocation(target);
     const decls = sym?.getDeclarations() ?? [];
     for (const decl of decls) {
