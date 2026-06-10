@@ -12,6 +12,7 @@ area: codegen, runtime
 language_feature: strings
 goal: host-independence
 sprint: 61
+model: fable
 related: []
 ---
 # #1470 — Eliminate JS host string ops for standalone Wasm
