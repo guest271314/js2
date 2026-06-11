@@ -4798,7 +4798,7 @@ export function compileCompoundAssignment(
         fctx.body.push({ op: "f64.div" });
         break;
       case ts.SyntaxKind.PercentEqualsToken:
-        emitModulo(fctx);
+        emitModulo(ctx, fctx);
         break;
       case ts.SyntaxKind.AsteriskAsteriskEqualsToken: {
         const fi = ctx.funcMap.get("Math_pow");
@@ -4932,7 +4932,7 @@ function emitCompoundOp(ctx: CodegenContext, fctx: FunctionContext, op: ts.Synta
       fctx.body.push({ op: "f64.div" });
       break;
     case ts.SyntaxKind.PercentEqualsToken:
-      emitModulo(fctx);
+      emitModulo(ctx, fctx);
       break;
     case ts.SyntaxKind.AmpersandEqualsToken:
     case ts.SyntaxKind.BarEqualsToken:
