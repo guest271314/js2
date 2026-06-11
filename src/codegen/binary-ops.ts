@@ -6,6 +6,7 @@
  */
 import { ts } from "../ts-api.js";
 import {
+  getNullablePrimitiveInfo,
   isBigIntType,
   isBooleanType,
   isNumberType,
@@ -981,6 +982,30 @@ export function compileBinaryExpression(
   const leftIsWrapperObj = isWrapperObjectType(leftTsType);
   const rightIsWrapperObj = isWrapperObjectType(rightTsType);
   const wrapperEquality = isEqualityOp && (leftIsWrapperObj || rightIsWrapperObj);
+
+  // (#1961) In nativeStrings mode a `string | undefined` / `string | null`
+  // operand (e.g. `"x".at(i)`, optional chains/params) lowers to a NULLABLE
+  // `$AnyString` ref. `isStringType` returns false for the union, so an equality
+  // like `"hello".at(1) === "e"` fell through to generic struct ref-equality
+  // (always false for equal content). Treat a nullable-string operand as a
+  // string operand for equality so it routes to `__str_equals` (content compare,
+  // null-tolerant). Only for equality ops — relational/`+` on nullable strings
+  // keep their existing handling.
+  const isStringOrNullableString = (t: ts.Type): boolean =>
+    isStringType(t) || getNullablePrimitiveInfo(t)?.primitiveKind === "string";
+  if (
+    ctx.nativeStrings &&
+    ctx.nativeStrTypeIdx >= 0 &&
+    isEqualityOp &&
+    !wrapperEquality &&
+    isStringOrNullableString(leftTsType) &&
+    isStringOrNullableString(rightTsType) &&
+    // At least one side is the union form (else the plain-string path below handles it)
+    (!isStringType(leftTsType) || !isStringType(rightTsType))
+  ) {
+    return compileStringBinaryOp(ctx, fctx, expr, op);
+  }
+
   if (
     !wrapperEquality &&
     isStringType(leftTsType) &&
