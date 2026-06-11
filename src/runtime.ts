@@ -8907,6 +8907,30 @@ assert._isSameValue = isSameValue;
           if (keys == null || !Array.isArray(keys)) return undefined;
           return keys[i];
         };
+      // Per-visit liveness check for for-in (#2066). The key set is snapshotted
+      // up front (spec-permitted), but §14.7.5.10 requires that a property
+      // deleted before it is visited is skipped. This re-tests, at visit time,
+      // whether `key` still exists on the (own-or-inherited) live object — the
+      // `in`-operator semantics that match for-in's enumeration set. Returns 1
+      // if still present, 0 if it has since been deleted.
+      if (name === "__for_in_has")
+        return (obj: any, key: any): number => {
+          if (obj == null) return 0;
+          const k = typeof key === "symbol" ? key : String(key);
+          if (!_isWasmStruct(obj)) {
+            try {
+              return k in (obj as object) ? 1 : 0;
+            } catch {
+              return 0;
+            }
+          }
+          // WasmGC struct: an explicit delete records a tombstone — honor it.
+          const tomb = _wasmStructDeletedKeys.get(obj);
+          if (tomb && tomb.has(k)) return 0;
+          // Otherwise the key was enumerated from the live shape and has not been
+          // deleted, so it is still present.
+          return 1;
+        };
       // Promise combinators and constructors
       // Helper: convert WasmGC vec struct to JS array (vec structs are opaque
       // from JS; Promise.all/race/etc. need an iterable).

@@ -4394,6 +4394,7 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   const keysIdx = ctx.funcMap.get("__for_in_keys");
   const lenIdx = ctx.funcMap.get("__for_in_len");
   const getIdx = ctx.funcMap.get("__for_in_get");
+  const hasIdx = ctx.funcMap.get("__for_in_has");
 
   if (keysIdx === undefined || lenIdx === undefined || getIdx === undefined) {
     // Fallback: static unrolling when host imports are not available (standalone mode)
@@ -4410,11 +4411,17 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
     return;
   }
 
-  // Compile the object expression and coerce to externref for the host import
+  // Compile the object expression and coerce to externref for the host import.
+  // Retain the object ref in a local so the per-visit liveness check (#2066) can
+  // re-query whether a key deleted during the loop body should be skipped.
+  const objLocal = allocLocal(fctx, `__forin_obj_${fctx.locals.length}`, {
+    kind: "externref",
+  });
   const exprType = compileExpression(ctx, fctx, stmt.expression);
   if (exprType && exprType.kind !== "externref") {
     coerceType(ctx, fctx, exprType, { kind: "externref" });
   }
+  fctx.body.push({ op: "local.tee", index: objLocal });
   fctx.body.push({ op: "call", funcIdx: keysIdx }); // __for_in_keys(obj) -> keys array
 
   // Store keys array in a local
@@ -4512,11 +4519,34 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   loopBody.push({ op: "call", funcIdx: getIdx }); // __for_in_get(keys, i) -> externref
   loopBody.push({ op: "local.set", index: keyLocal });
 
+  // Per-visit liveness guard (#2066): if the key was deleted earlier in this
+  // enumeration, skip it. Emitted at the START of the $continue block so the
+  // `br 0` lands on the increment (same path as a user `continue`), never
+  // re-running the loop without advancing. Only when the host check is
+  // available (it always is when the snapshot imports are).
+  const guardedBody: Instr[] = userBody;
+  if (hasIdx !== undefined) {
+    // The guard sits inside `block $continue { … }`. From inside the `if`'s
+    // `then`, the enclosing labels are: if(0) → $continue(1). Skipping a deleted
+    // key means exiting $continue (which falls through to the increment), so the
+    // br target is depth 1, not 0 (br 0 would only exit the `if` and fall into
+    // the user body — re-visiting the deleted key).
+    guardedBody.unshift({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "br", depth: 1 } as Instr],
+    } as Instr);
+    guardedBody.unshift({ op: "i32.eqz" } as Instr);
+    guardedBody.unshift({ op: "call", funcIdx: hasIdx } as Instr);
+    guardedBody.unshift({ op: "local.get", index: keyLocal } as Instr);
+    guardedBody.unshift({ op: "local.get", index: objLocal } as Instr);
+  }
+
   // Wrap user body in block $continue so `continue` exits here
   loopBody.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: userBody,
+    body: guardedBody,
   });
 
   // Increment counter (reached after user body OR after continue)
