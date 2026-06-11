@@ -480,8 +480,7 @@ function compileSpreadCallArgs(
   const trailingPositionalAfter: number[] = new Array(args.length).fill(0);
   for (let i = args.length - 2; i >= 0; i--) {
     const next = args[i + 1]!;
-    trailingPositionalAfter[i] =
-      trailingPositionalAfter[i + 1]! + (ts.isSpreadElement(next) ? 0 : 1);
+    trailingPositionalAfter[i] = trailingPositionalAfter[i + 1]! + (ts.isSpreadElement(next) ? 0 : 1);
   }
 
   // Collect all arguments, resolving spreads

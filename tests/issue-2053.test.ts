@@ -8,10 +8,9 @@ import { compile } from "../src/index.js";
 
 async function compileAndRun(source: string) {
   const result = await compile(source);
-  expect(
-    result.success,
-    `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`,
-  ).toBe(true);
+  expect(result.success, `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`).toBe(
+    true,
+  );
   const { instance } = await WebAssembly.instantiate(result.binary, result.importObject!);
   return instance.exports as Record<string, Function>;
 }
