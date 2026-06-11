@@ -181,7 +181,35 @@ jobs:
       (github.event_name == 'push' && github.actor != 'github-actions[bot]')
     outputs:
       run_shards: ${{ steps.detect.outputs.run_shards }}
+      # #1954 — opt-in PR scope directive (empty for all other events and for
+      # PRs without a directive). Consumed by the shard matrix (as
+      # TEST262_PATH_FILTER) and by every diff-based gate (as --path-filter)
+      # so a scoped candidate JSONL is never diffed against the full baseline.
+      test262_scope: ${{ steps.scope.outputs.scope }}
     steps:
+      # #1954 — resolve the opt-in `test262-scope:` directive from the PR
+      # body. pull_request only: merge_group/push/dispatch ALWAYS validate the
+      # full corpus, so a scoped PR can never merge an out-of-scope regression
+      # — the queue catches it and bounces the PR. The body is passed via env
+      # (never interpolated into the script) so a malicious body cannot inject
+      # shell. The directive value is pipe-separated path substrings, e.g.:
+      #   test262-scope: built-ins/RegExp|language/statements/for-of
+      - name: Resolve PR test262 scope (#1954)
+        id: scope
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          SCOPE=$(printf '%s' "$PR_BODY" | tr -d '\r' \
+            | grep -iE '^[[:space:]]*test262-scope:' | head -1 \
+            | sed -E 's/^[[:space:]]*[Tt]est262-[Ss]cope:[[:space:]]*//' || true)
+          if [ -n "$SCOPE" ]; then
+            echo "PR-scoped test262 run (#1954): '$SCOPE'"
+            echo "scope=$SCOPE" >> "$GITHUB_OUTPUT"
+          else
+            echo "No test262-scope directive in PR body — full run."
+            echo "scope=" >> "$GITHUB_OUTPUT"
+          fi
       # The checkout (full history, ~20-25s) is only needed for the
       # merge_group base..head diff below. On pull_request/push/dispatch the
       # detect step exits immediately with run_shards=true, and since every
@@ -388,6 +416,10 @@ jobs:
       RUN_TIMESTAMP: ${{ github.run_id }}-${{ matrix.target.name }}-chunk${{ matrix.chunk }}
       TEST262_TARGET: ${{ matrix.target.test262_target }}
       TEST262_RESULT_PREFIX: ${{ matrix.target.result_prefix }}
+      # #1954 — empty (= run everything) unless the PR body opts into a scope.
+      # Applied in runTest262Chunk BEFORE source read/compile, so out-of-scope
+      # tests cost nothing. Only ever non-empty on pull_request events.
+      TEST262_PATH_FILTER: ${{ needs.changes.outputs.test262_scope }}
 
     steps:
       - name: Checkout
@@ -583,6 +615,11 @@ jobs:
         if: env.SHARDS_RAN == 'true'
         env:
           CATASTROPHIC_REGRESSION_THRESHOLD: "200"
+          # #1954 — on a scoped PR run the merged JSONL only covers the scope;
+          # restrict the baseline the same way or every out-of-scope baseline
+          # pass counts as a pass→absent "regression". Empty on merge_group/
+          # push/dispatch (always full corpus there).
+          TEST262_SCOPE: ${{ needs.changes.outputs.test262_scope }}
         run: |
           # Sparse + blob-filtered clone: the baselines repo carries a large
           # runs/ history (~500 MB cap), so a plain --depth=1 clone took
@@ -596,7 +633,8 @@ jobs:
           fi
           set +e
           npx tsx scripts/diff-test262.ts /tmp/cat-baselines/test262-current.jsonl \
-            merged-reports/test262-results-merged.jsonl --quiet > /tmp/cat-diff.txt 2>&1
+            merged-reports/test262-results-merged.jsonl --quiet \
+            ${TEST262_SCOPE:+--path-filter "$TEST262_SCOPE"} > /tmp/cat-diff.txt 2>&1
           diff_exit=$?
           set -e
           if [ "$diff_exit" -gt 1 ]; then
@@ -651,6 +689,8 @@ jobs:
         if: env.SHARDS_RAN == 'true'
         env:
           STANDALONE_REGRESSION_TOLERANCE: "15"
+          # #1954 — see the catastrophic guard above.
+          TEST262_SCOPE: ${{ needs.changes.outputs.test262_scope }}
         run: |
           # Reuse the baselines clone from the catastrophic guard above (same
           # job, same runner). Re-clone defensively (sparse + blob-filtered,
@@ -670,7 +710,8 @@ jobs:
           fi
           set +e
           npx tsx scripts/diff-test262.ts /tmp/cat-baselines/test262-standalone-current.jsonl \
-            merged-reports/test262-standalone-results-merged.jsonl --quiet > /tmp/standalone-diff.txt 2>&1
+            merged-reports/test262-standalone-results-merged.jsonl --quiet \
+            ${TEST262_SCOPE:+--path-filter "$TEST262_SCOPE"} > /tmp/standalone-diff.txt 2>&1
           diff_exit=$?
           set -e
           if [ "$diff_exit" -gt 1 ]; then
@@ -934,6 +975,10 @@ jobs:
       - name: Compare against current main baseline
         id: regression_diff
         if: env.SHARDS_RAN == 'true'
+        env:
+          # #1954 — scoped PR runs: restrict the baseline to the scope or
+          # every out-of-scope baseline pass reads as a pass→absent regression.
+          TEST262_SCOPE: ${{ needs.changes.outputs.test262_scope }}
         run: |
           BASELINE="benchmarks/results/test262-current.jsonl"
           if [ ! -f "$BASELINE" ]; then
@@ -954,6 +999,7 @@ jobs:
           fi
           set +e
           npx tsx scripts/diff-test262.ts "$BASELINE" merged-reports/test262-results-merged.jsonl --quiet $META_ARGS \
+            ${TEST262_SCOPE:+--path-filter "$TEST262_SCOPE"} \
             > merged-reports/test262-regressions.txt
           exit_code=$?
           set -e
@@ -1258,8 +1304,31 @@ jobs:
       - name: Commit refreshed summary JSON to main repo
         env:
           MAIN_DEPLOY_KEY: ${{ secrets.MAIN_DEPLOY_KEY }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
+          # #1951 — DEFER this commit while the merge queue is non-empty. Any
+          # push to main (even [skip ci]) makes GitHub rebuild EVERY queued
+          # merge group: each rebuild costs a full 114-job validation per
+          # queued PR plus ~10 min of added queue latency (observed 2026-06-10:
+          # PR #1283 validated 3× because baseline pushes kept landing under
+          # it). The baselines-REPO push above is unaffected — it doesn't move
+          # main and the regression gates need it fresh per merge. The deferred
+          # summary lands via the next promote run that sees an empty queue, or
+          # via the hourly baseline-summary-sync.yml fallback (6h staleness
+          # floor). Fail-open: if the queue query errors, keep the old
+          # always-push behavior rather than silently freezing the summary.
+          OWNER="${GITHUB_REPOSITORY%/*}"; NAME="${GITHUB_REPOSITORY#*/}"
+          QUEUE_LEN=$(gh api graphql \
+            -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){mergeQueue{entries(first:1){totalCount}}}}' \
+            -f owner="$OWNER" -f name="$NAME" \
+            --jq '.data.repository.mergeQueue.entries.totalCount' 2>/dev/null || echo "")
+          if [ -n "$QUEUE_LEN" ] && [ "$QUEUE_LEN" -gt 0 ] 2>/dev/null; then
+            echo "Merge queue has ${QUEUE_LEN} entrie(s) — deferring main-repo baseline summary commit (#1951)."
+            echo "It will land via the next promote on an empty queue or the hourly baseline-summary-sync."
+            exit 0
+          fi
+          echo "Merge queue empty (len='${QUEUE_LEN:-unknown}') — proceeding with main-repo summary commit."
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # --- Set up the SSH deploy key for the main-repo push so it bypasses
