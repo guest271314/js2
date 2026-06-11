@@ -47,3 +47,8 @@ the actionable part.
 ## Dupe check
 
 #86 is the old "new Array" feature issue (done). New.
+
+## Addendum (2026-06-11 standalone audit, fable agent)
+
+Confirmed in standalone mode too: `new Array(-1)` does not throw
+RangeError (returns normally). Fix should cover both backends.
