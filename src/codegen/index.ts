@@ -75,7 +75,9 @@ import { STANDALONE_REGEXP_REFLECTION_PROPS } from "./regexp-standalone.js";
 // ── Extracted sub-modules ──────────────────────────────────────────────────
 import {
   emitWrapperValueOfFunctions,
+  ensureAnyFromExternHelper,
   ensureAnyHelpers,
+  ensureAnyToExternHelper,
   ensureAnyValueType,
   ensureWrapperTypes,
   isAnyValue,
@@ -119,7 +121,9 @@ export {
   destructureParamArray,
   destructureParamObject,
   destructureParamObjectExternref,
+  ensureAnyFromExternHelper,
   ensureAnyHelpers,
+  ensureAnyToExternHelper,
   ensureAnyValueType,
   ensureNativeStringExternBridge,
   ensureNativeStringHelpers,
@@ -2717,7 +2721,14 @@ function emitClosureCallExportN(ctx: CodegenContext, arity: number): void {
 
     // Coerce result to externref.
     if (entry.returnType) {
-      if (entry.returnType.kind === "ref" || entry.returnType.kind === "ref_null") {
+      if ((ctx.standalone || ctx.wasi) && isAnyValue(entry.returnType, ctx)) {
+        const anyToExternIdx = ensureAnyToExternHelper(ctx);
+        if (anyToExternIdx !== undefined) {
+          callBody.push({ op: "call", funcIdx: anyToExternIdx } as Instr);
+        } else {
+          callBody.push({ op: "extern.convert_any" } as Instr);
+        }
+      } else if (entry.returnType.kind === "ref" || entry.returnType.kind === "ref_null") {
         callBody.push({ op: "extern.convert_any" } as Instr);
       } else if (entry.returnType.kind === "f64") {
         if (boxNumberIdx !== undefined) {
@@ -2981,7 +2992,14 @@ function emitClosureMethodCallExportN(ctx: CodegenContext, arity: number): void 
     ];
 
     if (entry.returnType) {
-      if (entry.returnType.kind === "ref" || entry.returnType.kind === "ref_null") {
+      if ((ctx.standalone || ctx.wasi) && isAnyValue(entry.returnType, ctx)) {
+        const anyToExternIdx = ensureAnyToExternHelper(ctx);
+        if (anyToExternIdx !== undefined) {
+          callBody.push({ op: "call", funcIdx: anyToExternIdx } as Instr);
+        } else {
+          callBody.push({ op: "extern.convert_any" } as Instr);
+        }
+      } else if (entry.returnType.kind === "ref" || entry.returnType.kind === "ref_null") {
         callBody.push({ op: "extern.convert_any" } as Instr);
       } else if (entry.returnType.kind === "f64") {
         if (boxNumberIdx !== undefined) {
@@ -7991,6 +8009,9 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     name: "$BigInt",
     fields: [{ name: "value", type: { kind: "i64", bigint: true }, mutable: false }],
   });
+  ctx.nativeBoxNumberTypeIdx = boxNumStructIdx;
+  ctx.nativeBoxBooleanTypeIdx = boxBoolStructIdx;
+  ctx.nativeBigIntTypeIdx = bigIntStructIdx;
 
   // 2. Pre-compute func types — addFuncType de-dupes by signature so
   //    repeated calls return the same typeIdx.
