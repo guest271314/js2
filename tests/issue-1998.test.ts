@@ -33,7 +33,7 @@ describe("#1998 Array.prototype.join element coercion", () => {
     expect(await evalStr(`[1,,3].join(",")`)).toBe("1,,3");
   });
 
-  it("renders a genuine NaN element as \"NaN\", not empty", async () => {
+  it('renders a genuine NaN element as "NaN", not empty', async () => {
     expect(await evalStr(`[1,NaN,2].join("-")`)).toBe("1-NaN-2");
   });
 
@@ -47,7 +47,7 @@ describe("#1998 Array.prototype.join element coercion", () => {
     expect(await evalStr(`["a","b"].join("-")`)).toBe("a-b");
   });
 
-  it("uses the default \",\" separator when join is called with no argument", async () => {
+  it('uses the default "," separator when join is called with no argument', async () => {
     expect(await evalStr(`[1,2,3].join()`)).toBe("1,2,3");
   });
 
@@ -57,7 +57,7 @@ describe("#1998 Array.prototype.join element coercion", () => {
 });
 
 describe("#1997 Array.prototype.toString", () => {
-  it("returns the comma-joined elements, not \"[object Array]\"", async () => {
+  it('returns the comma-joined elements, not "[object Array]"', async () => {
     expect(await evalStr(`[1,2,3].toString()`)).toBe("1,2,3");
     expect(await evalStr(`["a","b"].toString()`)).toBe("a,b");
   });
@@ -75,7 +75,7 @@ describe("#1997 Array.prototype.toString", () => {
     expect(await evalStr(`[].toString()`)).toBe("");
   });
 
-  it("renders a genuine NaN element as \"NaN\"", async () => {
+  it('renders a genuine NaN element as "NaN"', async () => {
     expect(await evalStr(`[1,NaN,2].toString()`)).toBe("1,NaN,2");
   });
 });

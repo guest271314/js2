@@ -4874,8 +4874,7 @@ function compileArrayJoin(
   // can only repair indices already baked into instruction bodies, not the
   // raw `concatIdx`/`toStrIdx` values we capture below. Hoisting the import +
   // flush ahead of those captures keeps them correct.
-  const needsExternJoinStr =
-    elemType.kind === "externref" || elemType.kind === "ref" || elemType.kind === "ref_null";
+  const needsExternJoinStr = elemType.kind === "externref" || elemType.kind === "ref" || elemType.kind === "ref_null";
   let joinStrIdx: number | undefined;
   if (needsExternJoinStr) {
     joinStrIdx = ensureLateImport(ctx, "__extern_join_str", [{ kind: "externref" }], [{ kind: "externref" }]);
@@ -4983,7 +4982,10 @@ function compileArrayJoin(
       op: "if",
       blockType: { kind: "val", type: { kind: "externref" } },
       then: stringConstantExternrefInstrs(ctx, ""),
-      else: [{ op: "local.get", index: elemF64Tmp }, { op: "call", funcIdx: toStrIdx }],
+      else: [
+        { op: "local.get", index: elemF64Tmp },
+        { op: "call", funcIdx: toStrIdx },
+      ],
     } as Instr);
   } else if (elemType.kind === "i32" && toStrIdx !== undefined) {
     elemToStr.push({ op: "f64.convert_i32_s" });
