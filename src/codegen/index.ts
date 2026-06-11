@@ -8722,6 +8722,11 @@ export function addForInImports(ctx: CodegenContext): void {
   // __for_in_get: (externref, i32) -> externref — returns keys[i]
   const extI32ToExt = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "externref" }]);
   addImport(ctx, "env", "__for_in_get", { kind: "func", typeIdx: extI32ToExt });
+
+  // __for_in_has: (externref obj, externref key) -> i32 — per-visit liveness
+  // check so a property deleted mid-enumeration is skipped (#2066).
+  const extExtToI32 = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+  addImport(ctx, "env", "__for_in_has", { kind: "func", typeIdx: extExtToI32 });
 }
 
 /**
