@@ -267,9 +267,30 @@ export function compileTemplateExpression(
   for (let i = 0; i < expr.templateSpans.length; i++) {
     const span = expr.templateSpans[i]!;
 
-    // Compile the substitution expression and coerce to string if needed
+    // Compile the substitution expression and coerce to string if needed.
+    // Mirrors the binary `+` concat path (compileStringBinaryExpression) so
+    // booleans stringify to "true"/"false" (#2005) and null/undefined spans
+    // produce "null"/"undefined" rather than tripping the js-string concat
+    // cast (#2006).
+    const spanTsType = ctx.checker.getTypeAtLocation(span.expression);
+    // #1931: `undefined`/`null` literals lower to a type-default scalar (i32 0)
+    // rather than an externref, so detect them by static type before codegen
+    // and substitute the spec stringification instead of running the scalar
+    // through number_toString (which would print "0").
+    const spanIsUndefType = (spanTsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+    const spanIsNullType = (spanTsType.flags & ts.TypeFlags.Null) !== 0;
     const spanType = compileExpression(ctx, fctx, span.expression);
-    if (spanType && spanType.kind === "f64" && toStrIdx !== undefined) {
+    if ((spanIsUndefType || spanIsNullType) && spanType && spanType.kind !== "externref") {
+      // Scalar-lowered null/undefined → drop the placeholder value and push the
+      // matching string constant (#2005 undefined, #2006 null).
+      fctx.body.push({ op: "drop" });
+      const word = spanIsNullType ? "null" : "undefined";
+      addStringConstantGlobal(ctx, word);
+      fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get(word)! });
+    } else if (spanType && spanType.kind === "i32" && isBooleanType(spanTsType)) {
+      // boolean i32 → "true"/"false" (#2005)
+      emitBoolToString(ctx, fctx);
+    } else if (spanType && spanType.kind === "f64" && toStrIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: toStrIdx });
     } else if (spanType && spanType.kind === "i32" && toStrIdx !== undefined) {
       fctx.body.push({ op: "f64.convert_i32_s" });
@@ -278,11 +299,37 @@ export function compileTemplateExpression(
       // BigInt → f64 → string
       fctx.body.push({ op: "f64.convert_i64_s" });
       fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    } else if (spanType && spanType.kind === "externref") {
+      // null/undefined externref spans must become "null"/"undefined" strings;
+      // a raw ref.null extern trips the js-string concat cast (#2006). Opaque
+      // externrefs route through __extern_toString so wasmGC structs run their
+      // ToPrimitive walker before reaching concat.
+      const spanIsNull = (spanTsType.flags & ts.TypeFlags.Null) !== 0;
+      const spanIsUndef = (spanTsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+      if (spanIsNull) {
+        fctx.body.push({ op: "drop" });
+        addStringConstantGlobal(ctx, "null");
+        fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get("null")! });
+      } else if (spanIsUndef) {
+        fctx.body.push({ op: "drop" });
+        addStringConstantGlobal(ctx, "undefined");
+        fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get("undefined")! });
+      } else if (!isStringType(spanTsType)) {
+        const externToStrIdx = ensureLateImport(
+          ctx,
+          "__extern_toString",
+          [{ kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+        flushLateImportShifts(ctx, fctx);
+        const finalIdx = ctx.funcMap.get("__extern_toString") ?? externToStrIdx;
+        if (finalIdx !== undefined) fctx.body.push({ op: "call", funcIdx: finalIdx });
+      }
+      // otherwise a real string externref — already concat-ready
     } else if (spanType && (spanType.kind === "ref" || spanType.kind === "ref_null")) {
       // Struct ref → externref: use coerceType which checks @@toPrimitive("string") first
       coerceType(ctx, fctx, spanType, { kind: "externref" }, "string");
     }
-    // externref assumed to be string already
 
     // If we had a head (or previous spans), concat with accumulated string
     if (i === 0 && !expr.head.text) {
@@ -344,12 +391,34 @@ export function compileNativeTemplateExpression(
   for (let i = 0; i < expr.templateSpans.length; i++) {
     const span = expr.templateSpans[i]!;
 
+    const spanNativeTsType = ctx.checker.getTypeAtLocation(span.expression);
+    // #1931: `undefined`/`null` lower to a type-default scalar (i32 0), so
+    // resolve them from the static type before codegen and emit the spec
+    // stringification rather than "0" (parallels the JS-host path).
+    const spanNativeIsUndef = (spanNativeTsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+    const spanNativeIsNull = (spanNativeTsType.flags & ts.TypeFlags.Null) !== 0;
     const spanType = compileExpression(ctx, fctx, span.expression);
+    const spanIsScalarNullish = (spanNativeIsUndef || spanNativeIsNull) && spanType && spanType.kind !== "externref";
+    const spanIsBool = spanType && spanType.kind === "i32" && isBooleanType(spanNativeTsType);
+    if (spanIsScalarNullish) {
+      // Scalar-lowered null/undefined → drop the placeholder, build the native
+      // string constant inline (#2005/#2006). Leaves the native string ref on
+      // the stack for the shared concat tail below.
+      fctx.body.push({ op: "drop" } as Instr);
+      compileStringLiteral(ctx, fctx, spanNativeIsNull ? "null" : "undefined", span.expression);
+    } else if (spanIsBool) {
+      // boolean i32 → native "true"/"false" (#2005)
+      emitBoolToString(ctx, fctx);
+    }
     const spanIsString =
+      !spanIsScalarNullish &&
+      !spanIsBool &&
       spanType &&
       (spanType.kind === "ref" || spanType.kind === "ref_null") &&
       isStringType(ctx.checker.getTypeAtLocation(span.expression));
-    if (spanIsString) {
+    if (spanIsScalarNullish || spanIsBool) {
+      // value already on stack — fall through to the concat tail
+    } else if (spanIsString) {
       // #1618: a string-typed substitution is ALREADY a native string ref
       // (AnyString / NativeString). Concat it directly — do NOT round-trip
       // through externref via __str_to_extern/__str_from_extern. That bridge is
