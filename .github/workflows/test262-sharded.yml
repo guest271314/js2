@@ -25,6 +25,10 @@ on:
       - "tests/test262-runner.ts"
       - "tests/test262-scope-classification.test.ts"
       - "tests/test262-shared.ts"
+      # Weight maps change shard ASSIGNMENT (which tests share a fork/chunk),
+      # so a refresh must be validated by the full matrix even though it
+      # cannot change individual results (#1953).
+      - "tests/test262-slow-tests*.json"
   push:
     branches: [main]
     paths: *test262-paths
@@ -737,6 +741,63 @@ jobs:
             exit 1
           fi
 
+      # #1942 — compile-time regression guard. `pass → compile_timeout` is
+      # excluded from every regression gate above (it's runner-load flake —
+      # see #1192), which leaves compile-perf regressions invisible: a PR that
+      # pathologically slows compilation (exponential type inference, O(n²)
+      # pass) converts passes to timeouts and trips no gate. Two cheap signals
+      # — both already EMITTED by diff-test262.ts (#1942) into the catastrophic
+      # guard's /tmp/cat-diff.txt — gate that surface:
+      #   1. count: pass→compile_timeout above COMPILE_TIMEOUT_THRESHOLD
+      #      (N=25, calibrated above the observed contention-flake floor; the
+      #      #1589 serial retry already absorbs most CT flake, and the
+      #      test262-canary separates non-determinism).
+      #   2. aggregate: sum(compile_ms) over the shared both-compiled set, fail
+      #      when it rises > AGG_COMPILE_TIME_PCT_THRESHOLD (20%). Immune to
+      #      single-test flake and set churn — it measures the same population
+      #      on both sides, so a 20% jump is a real systemic slowdown.
+      # Reuses /tmp/cat-diff.txt from the catastrophic guard (same job, same
+      # merged report) so this adds no extra diff run.
+      - name: Compile-time regression guard (#1942)
+        if: env.SHARDS_RAN == 'true'
+        env:
+          COMPILE_TIMEOUT_THRESHOLD: "25"
+          AGG_COMPILE_TIME_PCT_THRESHOLD: "20"
+        run: |
+          if [ ! -f /tmp/cat-diff.txt ]; then
+            echo "::warning::No /tmp/cat-diff.txt (catastrophic guard skipped — first seed?) — skipping compile-time guard."
+            exit 0
+          fi
+          # pass→compile_timeout count (already split out by diff-test262.ts).
+          CT=$(grep -oE 'Compile timeouts \(pass → compile_timeout\): [0-9]+' /tmp/cat-diff.txt | grep -oE '[0-9]+' | head -1)
+          CT="${CT:-0}"
+          # Aggregate compile-time delta percentage (signed, one decimal).
+          # Line shape: "=== Aggregate compile time (shared N tests): baseline Xms → current Yms (Δ +Z.Z%) ==="
+          AGG_LINE=$(grep -F 'Aggregate compile time (shared' /tmp/cat-diff.txt | head -1)
+          AGG_PCT=$(echo "$AGG_LINE" | grep -oE 'Δ [+-]?[0-9]+\.[0-9]+%' | grep -oE '[-]?[0-9]+\.[0-9]+' | head -1)
+          AGG_PCT="${AGG_PCT:-0.0}"
+          echo "Compile-time guard: pass→compile_timeout=${CT} (threshold ${COMPILE_TIMEOUT_THRESHOLD}); aggregate compile-time Δ=${AGG_PCT}% (threshold +${AGG_COMPILE_TIME_PCT_THRESHOLD}%)."
+          echo "  ${AGG_LINE}"
+          fail=0
+          if [ "$CT" -gt "$COMPILE_TIMEOUT_THRESHOLD" ]; then
+            echo "::error::COMPILE-TIME regression: ${CT} tests went pass→compile_timeout, exceeding the ${COMPILE_TIMEOUT_THRESHOLD} flake threshold. A spike this large is a real compile-perf regression (compilation got slow enough to cross the 30s per-test timeout), not runner-load noise. See #1942."
+            fail=1
+          fi
+          # Integer-compare the percentage (floor): strip the fractional part
+          # for the shell -gt comparison, so +20.x stays under a 20% threshold
+          # and only +21%+ trips.
+          AGG_INT=$(echo "$AGG_PCT" | grep -oE '^-?[0-9]+')
+          AGG_INT="${AGG_INT:-0}"
+          if [ "$AGG_INT" -gt "$AGG_COMPILE_TIME_PCT_THRESHOLD" ]; then
+            echo "::error::COMPILE-TIME regression: aggregate compile time rose ${AGG_PCT}% over the shared both-compiled test set, exceeding the +${AGG_COMPILE_TIME_PCT_THRESHOLD}% threshold. This is a systemic compilation slowdown (the same tests take materially longer to compile). See #1942."
+            fail=1
+          fi
+          if [ "$fail" -ne 0 ]; then
+            echo "----- compile-time signals (from /tmp/cat-diff.txt) -----"
+            grep -E 'Compile timeouts|Aggregate compile time' /tmp/cat-diff.txt || true
+            exit 1
+          fi
+
       # #1668 — HARD stale-baseline guard. The catastrophic guard above (and the
       # full regression gate) are only as trustworthy as the baseline they
       # diff against. The baseline is refreshed per-merge by the promote-baseline
@@ -799,6 +860,25 @@ jobs:
             merged-reports/**
           if-no-files-found: warn
 
+      # #1956 — publish this group's merged JSONLs keyed by the GROUP HEAD
+      # SHA. The merge queue builds groups incrementally, so the NEXT queued
+      # group's head commit has THIS group's head as its first parent — its
+      # regression-gate can therefore download this artifact and diff against
+      # its exact predecessor, isolating only its own PR's delta (no cross-PR
+      # drift, no ALLGREEN masking once the queue batches >1). 3-day
+      # retention comfortably covers queue lifetimes; an expired/missing
+      # artifact just falls back to the runs-cache / latest-main baseline.
+      - name: Publish group results for predecessor diffing (#1956)
+        if: env.SHARDS_RAN == 'true' && github.event_name == 'merge_group'
+        uses: actions/upload-artifact@v6
+        with:
+          retention-days: 3
+          name: test262-group-${{ github.event.merge_group.head_sha }}
+          path: |
+            merged-reports/test262-results-merged.jsonl
+            merged-reports/test262-standalone-results-merged.jsonl
+          if-no-files-found: warn
+
   regression-gate:
     # Runs after merge-report in all gate-relevant contexts and compares the
     # branch report against the current baseline when shards produced artifacts.
@@ -817,6 +897,13 @@ jobs:
     # of serially after it) cuts ~3 min off every run's tail.
     needs: [changes, test262-shard]
     runs-on: ubuntu-latest
+    # actions:read — the #1956 predecessor-group baseline is an artifact from
+    # ANOTHER workflow run, downloaded via the artifacts API. The workflow's
+    # top-level `permissions: contents: write` would otherwise leave actions
+    # at `none` for this job.
+    permissions:
+      contents: read
+      actions: read
     env:
       SHARDS_RAN: ${{ needs.test262-shard.result == 'success' && 'true' || 'false' }}
 
@@ -924,6 +1011,57 @@ jobs:
             --test262-version "$TEST262_VERSION" \
             --dest benchmarks/results/test262-current.jsonl || \
             echo "::warning::#1081 merge-base resolution errored (non-fatal); keeping latest-main baseline."
+
+      # #1956 — exact predecessor-group baseline for merge_group runs. The
+      # queue builds groups incrementally: this group's head is a merge
+      # commit whose FIRST PARENT is the predecessor group's head (or the
+      # main tip when this PR is the queue head). If a recent merge_group run
+      # published `test262-group-<HEAD^1>` (see merge-report), diffing
+      # against it isolates ONLY this PR's delta — no cross-PR drift and no
+      # ALLGREEN masking inside multi-entry queue windows, which is the
+      # precondition for raising the queue's batch size past 1 (see
+      # docs/ci-policy.md). Resolution order, last writer wins:
+      #   a. predecessor-group artifact (this step — strongest)
+      #   b. #1081 runs/<merge-base> cache (previous step)
+      #   c. latest-main baseline (fetch step, default)
+      # Every failure mode falls through to (b)/(c) with a log line; this
+      # step never fails the build.
+      - name: Resolve predecessor-group baseline (#1956)
+        id: pred_group
+        if: env.SHARDS_RAN == 'true' && github.event_name == 'merge_group'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          PRED=$(git rev-parse HEAD^1 2>/dev/null || echo "")
+          if [ -z "$PRED" ]; then
+            echo "pred_path=none" >> "$GITHUB_OUTPUT"
+            echo "No first parent resolvable — keeping baseline from (b)/(c)."
+            exit 0
+          fi
+          ART_NAME="test262-group-${PRED}"
+          ART_ID=$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ART_NAME}&per_page=1" --jq '.artifacts[0].id // empty' 2>/dev/null || echo "")
+          if [ -z "$ART_ID" ]; then
+            echo "pred_path=miss" >> "$GITHUB_OUTPUT"
+            echo "Predecessor artifact ${ART_NAME} not found (queue head, expired, or non-incremental rebuild) — keeping baseline from (b)/(c)."
+            exit 0
+          fi
+          mkdir -p /tmp/pred-group
+          if ! gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ART_ID}/zip" > /tmp/pred-group/art.zip 2>/dev/null; then
+            echo "pred_path=download-failed" >> "$GITHUB_OUTPUT"
+            echo "::warning::#1956 predecessor artifact download failed — keeping baseline from (b)/(c)."
+            exit 0
+          fi
+          unzip -o /tmp/pred-group/art.zip -d /tmp/pred-group >/dev/null 2>&1 || true
+          if [ -s /tmp/pred-group/test262-results-merged.jsonl ]; then
+            mkdir -p benchmarks/results
+            cp /tmp/pred-group/test262-results-merged.jsonl benchmarks/results/test262-current.jsonl
+            echo "pred_path=hit" >> "$GITHUB_OUTPUT"
+            echo "Using predecessor-group baseline ${ART_NAME} (path a): this diff isolates only this PR's delta."
+          else
+            echo "pred_path=empty" >> "$GITHUB_OUTPUT"
+            echo "::warning::#1956 predecessor artifact missing host JSONL — keeping baseline from (b)/(c)."
+          fi
 
       - name: Check baseline staleness (#1235)
         id: staleness
