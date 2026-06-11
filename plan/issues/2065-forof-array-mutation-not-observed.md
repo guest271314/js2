@@ -1,10 +1,11 @@
 ---
 id: 2065
 title: "for-of over an array hoists length and data once — mutation during iteration not observed (push invisible, pop over-iterates)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -74,3 +75,33 @@ bounds-check elimination and can gate this.
 Grepped `mutat` + `for-of`, `stale length`, `collection mutation`: #365 (done —
 only removed runner skip filters), #1130 (getter-observing array methods,
 different). Not covered.
+
+## Resolution (2026-06-11)
+
+Fixed in `src/codegen/statements/loops.ts` (`compileForOfArray`). Added a
+`reReadLive` gate: when the iterable is a plain identifier and the existing
+`loopBodyMutatesIndexOrArray` analysis (reused with an empty index name) reports
+the body may mutate that array, the loop now re-reads `length` (struct field 0)
+and `data` (field 1) from the vec local at the top of every iteration — in both
+the `i >= length` break test and the `data[i]` element read — instead of using
+the hoisted `lenLocal`/`dataLocal`. The vec ref itself is still captured once, so
+reassigning the *binding* mid-loop correctly keeps iterating the original array
+(matches JS: the iterator is bound to the original object). Non-mutating loops
+keep the hoisted fast path (no perf regression).
+
+### Test Results
+
+`tests/issue-2065.test.ts` (6 cases, all PASS), expected values cross-checked
+against Node:
+
+| case | result |
+|------|--------|
+| push during iteration visited | 1234 ✓ |
+| pop stops early | 12 ✓ |
+| growth past capacity (reallocation) | 6 ✓ |
+| `arr.length = 2` shrink | 12 ✓ |
+| binding reassignment iterates original | 123 ✓ |
+| non-mutating loop (unregressed) | 18 ✓ |
+
+`tsc --noEmit` clean; `tests/iterators.test.ts` + `tests/symbol-iterator-protocol.test.ts`
+green (10/10, incl. the for-of array regression check).

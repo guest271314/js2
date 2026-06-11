@@ -2770,6 +2770,17 @@ function compileForOfArray(
   const vecLocal = allocLocal(fctx, `__forof_vec_${fctx.locals.length}`, vecType);
   fctx.body.push({ op: "local.set", index: vecLocal });
 
+  // #2065: Array iterators re-read the live length each step (§23.1.5.1), so a
+  // body that mutates the array (push/pop/splice/length=…/reassignment, or a
+  // closure that captures it) must observe the change. Hoisting `length`/`data`
+  // once before the loop misses pushes and over-iterates after pops (and a
+  // reallocated backing array leaves `data` stale). When the iterable is a plain
+  // identifier and the body may mutate it, re-read both fields from the vec local
+  // at the top of every iteration. Non-mutating loops keep the hoisted fast path.
+  const iterableSource = iterableOverride ?? stmt.expression;
+  const reReadLive =
+    ts.isIdentifier(iterableSource) && loopBodyMutatesIndexOrArray(stmt.statement, "", iterableSource.text);
+
   // Mark position for null guard wrapping (struct.get on null ref traps)
   const nullGuardStart = fctx.body.length;
 
@@ -2850,14 +2861,28 @@ function compileForOfArray(
   fctx.breakStack.push(2); // break = depth 2 (exit outer block)
   fctx.continueStack.push(0); // continue = depth 0 (exit body block, then increment)
 
-  // Condition: i >= length → break
+  // Condition: i >= length → break. When the array may be mutated mid-loop
+  // (#2065), read the live length from the vec each iteration rather than the
+  // hoisted `lenLocal`.
   fctx.body.push({ op: "local.get", index: iLocal });
-  fctx.body.push({ op: "local.get", index: lenLocal });
+  if (reReadLive) {
+    fctx.body.push({ op: "local.get", index: vecLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  } else {
+    fctx.body.push({ op: "local.get", index: lenLocal });
+  }
   fctx.body.push({ op: "i32.ge_s" });
   fctx.body.push({ op: "br_if", depth: 1 }); // break
 
-  // Get element: x = data[i]
-  fctx.body.push({ op: "local.get", index: dataLocal });
+  // Get element: x = data[i]. Re-read the live data array when mutating (#2065):
+  // a growth that reallocated the backing array leaves the hoisted `dataLocal`
+  // stale.
+  if (reReadLive) {
+    fctx.body.push({ op: "local.get", index: vecLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  } else {
+    fctx.body.push({ op: "local.get", index: dataLocal });
+  }
   fctx.body.push({ op: "local.get", index: iLocal });
   fctx.body.push({ op: "array.get", typeIdx: arrTypeIdx });
   // Coerce from Wasm array element type to the local's declared type
