@@ -50,3 +50,36 @@ numeric fields).
 
 #140 (done, computed property names); #1971 item 1 covers computed-key
 *creation*. New.
+
+## Investigation (2026-06-11, dev-spec-b2) — harder than rated; runtime line ref is stale
+
+The issue's `src/runtime.ts:5217` line ref is stale (that's Temporal code now).
+`__extern_get`'s `__sget_<key>` fallback is at ~`runtime.ts:6093` and IS
+string-only, but **fixing it there does NOT fix the repro** — and the
+`__sget_` fallback is never even reached for the working `o["2"]` either.
+
+Traced behaviour (all three accesses have `objType === externref` and
+`compileElementAccessBody` emits a `__extern_get` call):
+- `o["2"]` → `__extern_get(struct, "2")` → returns "two" via the handler's TOP
+  guard (`getPrototypeOf(obj) !== null && "2" in Object(obj)` → `obj["2"]`).
+- `o[2]` / `o[i]` → key boxes as a JS **number** 2. **`__extern_get` is never
+  called with the struct receiver** for the numeric key (instrumenting the
+  handler's top guard logged nothing for `number:2`). Yet `_safeGet` DOES see
+  `number:2` — but with `_isWasmStruct(obj) === false`, i.e. a *different*,
+  non-struct receiver.
+
+So the numeric-key path transforms the receiver before the host call (a numeric
+element-access fast path appears to box/convert the any-struct receiver to a
+non-struct value, so the struct field is unreachable). The string-key path
+keeps the struct receiver and resolves via the host `in`/`obj[key]` guard.
+
+Root cause is therefore in the **numeric element-access codegen routing**
+(`compileElementAccessBody` / a numeric-index fast path), NOT a one-line
+runtime `__sget_` tweak. Needs a codegen-side investigation of how `o[<number>]`
+on an externref/any receiver differs from `o[<string>]`. **Recommend treating
+as medium-hard codegen, not an easy runtime patch.**
+
+(Note: the paired #2010 is essentially fixed upstream — only `{ x, ...null }`
+with a *leading shorthand* + error-typed spread still drops `x`, because that
+shape routes to `compileObjectLiteralForStruct` via inferred-type, not the
+externref fallback. See #2010 file.)

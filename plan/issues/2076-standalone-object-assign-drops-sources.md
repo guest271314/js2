@@ -48,3 +48,27 @@ Populate the sources vec at the call site and iterate it in
 
 #1905 (Reflect/Object subset), #2046 (standalone Reflect gaps) — neither
 claims assign merge. New.
+
+## Investigation (2026-06-11, dev-spec-b2) — entangled with struct-field writeback (#2009 in flight)
+
+The `Object.assign` CALL SITE is correct: `calls.ts:4845` builds the sources
+`$ObjVec` via `__objvec_new`/`__objvec_push` in standalone and calls
+`__object_assign`. So sources ARE populated. The bug is that
+`__object_assign`'s per-prop `__extern_set` writes **never land on the target
+$Object/struct** in standalone — confirmed by probe:
+
+| call | result | want |
+|---|---|---|
+| `Object.assign({a:1}, {a:3}).a` | 1 | 3 (override existing field fails) |
+| `Object.assign({a:1,b:9}, {b:2}).b` | 9 | 2 (override existing field fails) |
+| `Object.assign({a:1}, {b:2}).b` | 1/0 | 2 (new field fails) |
+
+Even overriding an EXISTING target field fails, so this is NOT a struct-grow
+issue — it's that `__extern_set` (or `__object_assign`'s iteration of source
+own-props) doesn't write back into the standalone struct field. That is the
+same standalone struct-field-writeback machinery (`__sset_*` / the open-$Object
+shape) that **senior-dev's #2009 instance-shape rework (#22/#25, in flight)**
+touches. **Recommend holding #2076 until #2009 PR-1 lands**, then re-evaluating
+whether `__object_assign`'s writeback works against the new $shape.
+
+(The paired #2077 `.name` half also intersects #2072 boxing per the task note.)
