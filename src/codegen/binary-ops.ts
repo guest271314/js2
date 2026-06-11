@@ -1266,7 +1266,13 @@ export function compileBinaryExpression(
         : (entry as ValType | undefined);
     return type?.kind === "i32";
   };
-  const hasI32LocalOperand = isRelational && !isDivOrPow && (isI32LocalRef(expr.left) || isI32LocalRef(expr.right));
+  // Whether a relational op may use the i32 fast path. Computed below, once
+  // `isI32PureExpr` is in scope: it is only safe when BOTH operands are
+  // provably i32-pure. If only one side is an i32 local and the other is a
+  // fractional / non-integral f64 (e.g. `i < 2.5`, `i < n/2`), forcing the i32
+  // hint truncates that operand via i32.trunc_sat_f64_s before the compare,
+  // silently producing the wrong result (#2055).
+  let hasI32LocalOperand = false;
   // #1120: when an arithmetic expression is the operand of `expr | 0`
   // (ToInt32 coercion), AND both operands are already i32 locals, hint
   // i32 so we emit native i32 arithmetic. The i32-overflow wrap is
@@ -1405,6 +1411,19 @@ export function compileBinaryExpression(
     }
     return false;
   };
+  // #2055: a relational op only takes the i32 fast path when BOTH operands are
+  // provably i32-pure (the for-header fast path `i < N` with integer literal N,
+  // or two i32 locals). When one side is a fractional/derived f64 the i32 hint
+  // would truncate it before the compare, so we fall back to f64 comparison
+  // (promoting the i32 local via f64.convert_i32_s, which is cheap and exact).
+  // `isI32PureExpr` already treats an i32 local as a pure leaf, so this still
+  // covers the original `i < 10000` loop-condition optimisation.
+  hasI32LocalOperand =
+    isRelational &&
+    !isDivOrPow &&
+    (isI32LocalRef(expr.left) || isI32LocalRef(expr.right)) &&
+    isI32PureExpr(expr.left) &&
+    isI32PureExpr(expr.right);
   // #1746: emit a *proven-i32-pure* expression directly as an i32 instruction
   // chain, leaving the result as i32 on the stack. The caller MUST have verified
   // `isI32PureExpr(e)` first — this mirrors that predicate's structure exactly.
