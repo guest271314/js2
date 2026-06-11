@@ -51,12 +51,9 @@ describe("modulo is true IEEE fmod (#2056)", () => {
   });
 
   it("compound %= assignment uses fmod too", async () => {
-    await assertEquivalent(
-      `export function modAssign(a: number, b: number): number { a %= b; return a; }`,
-      [
-        { fn: "modAssign", args: [1e16, 0.0001] },
-        { fn: "modAssign", args: [0.7, 0.1] },
-      ],
-    );
+    await assertEquivalent(`export function modAssign(a: number, b: number): number { a %= b; return a; }`, [
+      { fn: "modAssign", args: [1e16, 0.0001] },
+      { fn: "modAssign", args: [0.7, 0.1] },
+    ]);
   });
 });

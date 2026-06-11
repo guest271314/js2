@@ -138,12 +138,7 @@ export function ensureFmod(ctx: CodegenContext): number {
     {
       op: "if",
       blockType: { kind: "empty" },
-      then: [
-        { op: "local.get", index: X },
-        { op: "local.get", index: A },
-        { op: "f64.copysign" },
-        { op: "return" },
-      ],
+      then: [{ op: "local.get", index: X }, { op: "local.get", index: A }, { op: "f64.copysign" }, { op: "return" }],
     },
 
     // ── t = y; while (t * 2 <= x) t *= 2 ───────────────────────────────────
