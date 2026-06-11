@@ -351,3 +351,16 @@ instance field WRITES through dynamic dispatch (`this.pos = ...` /
 advances), or a loop-condition coercion. Probe direction: minimal
 `Parser.prototype.step = function(){ this.pos = this.pos + 1 }` write-back
 check, then bisect acorn's nextToken loop.
+
+**Correction (same session): the field-write-back hypothesis is DISPROVEN.**
+`.tmp/dbg27.mts` N-probes all pass: `this.pos = this.pos + 1` through a
+prototype method writes back (N1=2), a bounded `while (this.pos <
+this.input.length)` terminates correctly (N2), and compound `this.pos += n`
+works (N3). The acorn tokenizer infinite loop must be bisected INSIDE the
+loop instead — likely candidates: `charCodeAt`/`fullCharCodeAtPos` results
+through the dynamic path (NaN making no scanner branch match so `pos` never
+moves), `skipSpace` semantics, or a context/type-token comparison that
+never becomes true. Suggested approach: instrument the host bridge with an
+invocation counter per method name (env-gated) and run one fixture to see
+which method spins; or precompile acorn once to .tmp and drive
+`parse` with a 1-char input under a watchdog.
