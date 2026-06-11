@@ -6,7 +6,7 @@ import { ts } from "../../ts-api.js";
 import { isStringType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { popBody, pushBody } from "../context/bodies.js";
-import { allocLocal, getLocalType } from "../context/locals.js";
+import { allocLocal, allocTempLocal, getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext, NullGuardFact, NullishExclusion } from "../context/types.js";
 import { emitThrowString } from "../expressions/helpers.js";
 import { addStringImports, ensureI32Condition, ensureNativeStringHelpers, resolveWasmType } from "../index.js";
@@ -159,6 +159,93 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
     }
   }
 
+  // §10.2.1.3 [[Construct]] step 13: a `return` inside a constructor never
+  // yields the raw operand. A returned Object overrides `this`; a returned
+  // primitive (or `undefined`, i.e. bare `return;`) is discarded and the
+  // constructor result is `this` (`__self`). Without this arm a constructor
+  // fell through to the generic value-return path below, which pushed a
+  // `ref.null <struct>` for bare/primitive returns and `ref.cast`-coerced an
+  // object operand to the struct return type — both producing a null/illegal
+  // struct ref that traps "dereferencing a null pointer" at the `new` site
+  // (#2018). The derived-ctor `return <primitive>` TypeError is handled
+  // statically above (#825); here we only reach base-class / object / bare
+  // returns, plus derived returns the static check let through.
+  // Scope to BASE (non-derived) constructors: a derived ctor's `__self` is
+  // produced by `super(...)` and the post-super `this` aliasing is handled on a
+  // separate path, so we leave derived returns to the existing logic (the
+  // static derived-ctor return-primitive TypeError above still applies). This
+  // matches the issue scope (#2018, "base-class constructor").
+  if (
+    fctx.isConstructor &&
+    !fctx.isDerivedConstructor &&
+    fctx.returnType &&
+    fctx.returnType.kind === "ref" &&
+    fctx.localMap.has("this")
+  ) {
+    const selfIdx = fctx.localMap.get("this")!;
+    const structTypeIdx = fctx.returnType.typeIdx;
+    if (!stmt.expression) {
+      // Bare `return;` → return `this` (the guard-clause idiom). #2018
+      fctx.body.push({ op: "local.get", index: selfIdx });
+    } else {
+      const tsType = ctx.checker.getTypeAtLocation(stmt.expression);
+      const primitiveFlags =
+        ts.TypeFlags.NumberLike |
+        ts.TypeFlags.BooleanLike |
+        ts.TypeFlags.BigIntLike |
+        ts.TypeFlags.StringLike |
+        ts.TypeFlags.ESSymbolLike |
+        ts.TypeFlags.Null |
+        ts.TypeFlags.Undefined |
+        ts.TypeFlags.Void;
+      // Compile WITHOUT the struct return-type hint: a struct hint would make
+      // `compileExpression` ref.cast the operand to `(ref $Struct)` (trapping
+      // for a primitive / foreign object) before we can apply the §10.2.1.3
+      // override/discard logic. Let it yield its natural type instead.
+      const exprType = compileExpression(ctx, fctx, stmt.expression, undefined);
+      if (tsType.flags & primitiveFlags) {
+        // Statically a primitive / null / undefined → discard, return `this`.
+        if (exprType) fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "local.get", index: selfIdx });
+      } else if (exprType && exprType.kind === "ref" && exprType.typeIdx === structTypeIdx) {
+        // Already the struct return type (e.g. `return this` / `return new Same()`)
+        // — pass it through as the override object.
+      } else if (exprType && (exprType.kind === "externref" || exprType.kind === "ref" || exprType.kind === "ref_null")) {
+        // Object-typed or `any` operand. The override object is only
+        // representable as the constructor's `(ref $Struct)` result when it is
+        // a runtime instance of that struct, so guard the cast: if the operand
+        // is the struct, return it (the spec override); otherwise fall back to
+        // `this` rather than trapping with an illegal cast. A foreign plain
+        // object via `as any` cannot be represented by the struct-typed `new`
+        // result and so resolves to `this` (the non-trapping behaviour).
+        if (exprType.kind === "externref") {
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+        }
+        const overrideTmp = allocTempLocal(fctx, { kind: "anyref" } as ValType);
+        fctx.body.push({ op: "local.tee", index: overrideTmp });
+        fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx } as Instr);
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: fctx.returnType as ValType },
+          then: [
+            { op: "local.get", index: overrideTmp } as Instr,
+            { op: "ref.cast", typeIdx: structTypeIdx } as Instr,
+          ],
+          else: [{ op: "local.get", index: selfIdx } as Instr],
+        } as Instr);
+      } else {
+        // A non-ref operand slipped through (e.g. f64/i32 from `as any`) —
+        // discard and return `this`.
+        if (exprType) fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "local.get", index: selfIdx });
+      }
+    }
+    // Emit the shared finally / tail-call / `return` tail with the constructor
+    // result already on the stack.
+    emitReturnTail(ctx, fctx, hasPendingFinally);
+    return;
+  }
+
   if (stmt.expression) {
     const exprType = compileExpression(ctx, fctx, stmt.expression, fctx.returnType ?? undefined);
     // Coerce expression result to match function return type if they differ
@@ -180,6 +267,16 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
     else if (fctx.returnType.kind === "ref") fctx.body.push({ op: "ref.null", typeIdx: fctx.returnType.typeIdx });
   }
 
+  emitReturnTail(ctx, fctx, hasPendingFinally);
+}
+
+/**
+ * Shared tail for `return` lowering once the return value is on the stack:
+ * inline any pending `finally` blocks, then apply tail-call optimization, then
+ * emit the `return`. Factored out so the constructor return arm (#2018) and the
+ * generic value/void return paths share one implementation.
+ */
+function emitReturnTail(ctx: CodegenContext, fctx: FunctionContext, hasPendingFinally: boolean | undefined): void {
   // If inside a try block with a finally clause, save the return value to a
   // temp local, inline the finally instructions, then restore and return.
   // This ensures finally always runs, and if finally contains its own return,
@@ -204,12 +301,6 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
     return;
   }
 
-  // Tail call optimization: if the last instruction is a call or call_ref,
-  // replace it with return_call / return_call_ref to eliminate stack growth
-  // for recursive and tail-position calls.
-  // Guard: only apply when the callee's return type matches the caller's,
-  // otherwise return_call produces a type mismatch (e.g., class constructors
-  // calling methods with different return types — #839).
   // Tail call optimization: if the last instruction is a call or call_ref,
   // replace it with return_call / return_call_ref to eliminate stack growth
   // for recursive and tail-position calls.
