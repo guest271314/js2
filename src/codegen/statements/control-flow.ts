@@ -210,7 +210,10 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
       } else if (exprType && exprType.kind === "ref" && exprType.typeIdx === structTypeIdx) {
         // Already the struct return type (e.g. `return this` / `return new Same()`)
         // — pass it through as the override object.
-      } else if (exprType && (exprType.kind === "externref" || exprType.kind === "ref" || exprType.kind === "ref_null")) {
+      } else if (
+        exprType &&
+        (exprType.kind === "externref" || exprType.kind === "ref" || exprType.kind === "ref_null")
+      ) {
         // Object-typed or `any` operand. The override object is only
         // representable as the constructor's `(ref $Struct)` result when it is
         // a runtime instance of that struct, so guard the cast: if the operand
@@ -227,10 +230,7 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
         fctx.body.push({
           op: "if",
           blockType: { kind: "val", type: fctx.returnType as ValType },
-          then: [
-            { op: "local.get", index: overrideTmp } as Instr,
-            { op: "ref.cast", typeIdx: structTypeIdx } as Instr,
-          ],
+          then: [{ op: "local.get", index: overrideTmp } as Instr, { op: "ref.cast", typeIdx: structTypeIdx } as Instr],
           else: [{ op: "local.get", index: selfIdx } as Instr],
         } as Instr);
       } else {
