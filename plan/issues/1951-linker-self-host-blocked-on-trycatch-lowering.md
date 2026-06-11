@@ -8,9 +8,9 @@ priority: medium
 feasibility: hard
 task_type: feature
 area: codegen-linear
-goal: self-host
+goal: self-hosting-dogfood
 sprint: Backlog
-depends_on: [1838]
+depends_on: [1838, 1712]
 ---
 # #1951 — linker self-host blocked on linear-backend try/catch lowering
 
