@@ -2710,7 +2710,13 @@ export function compilePropertyAccess(
     if (nativeResult !== undefined) return nativeResult;
     if (propName === "value") {
       compileExpression(ctx, fctx, expr.expression);
-      // Check the expected value type from the IteratorResult<T>
+      // Check the expected value type from the IteratorResult<T>. NOTE (#2030):
+      // an exhausted result's `.value` is `undefined`; the f64 fast path below
+      // runs `Number(undefined)` → NaN, so a string context of the
+      // value-after-done prints "NaN". Making that survive as "undefined"
+      // requires the value-buffer representation work tracked by #2035 and is
+      // intentionally NOT changed here — routing `.value` through externref
+      // breaks numeric consumers (illegal cast on the raw-f64 iteration path).
       const valueType = getIteratorResultValueType(ctx, objType);
       if (valueType && valueType.kind === "f64") {
         const funcIdx = ctx.funcMap.get("__gen_result_value_f64");
@@ -2730,7 +2736,9 @@ export function compilePropertyAccess(
       const funcIdx = ctx.funcMap.get("__gen_result_done");
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
-        return { kind: "i32" };
+        // #2030: `.done` is a boolean — brand it so string contexts render
+        // "true"/"false" rather than the raw i32 "1"/"0".
+        return { kind: "i32", boolean: true };
       }
     }
   }
