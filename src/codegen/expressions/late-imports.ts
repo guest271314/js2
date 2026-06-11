@@ -242,6 +242,17 @@ export function shiftLateImportIndices(
       ctx.nativeStrHelpers.set(name, idx + added);
     }
   }
+  // (#1913) Same lockstep for `nativeRegexHelpers` — the regex lowering call
+  // sites (exec/test/match/split/replace in regexp-standalone.ts) read this
+  // map directly when baking `call` funcIdx. Leaving it stale-low meant any
+  // late import landing BETWEEN two regex call sites made the second site
+  // call one function too early; stack-balance then "fixed" the args against
+  // the wrong callee signature and emitted invalid ref.casts.
+  for (const [name, idx] of ctx.nativeRegexHelpers) {
+    if (idx >= importsBefore) {
+      ctx.nativeRegexHelpers.set(name, idx + added);
+    }
+  }
   // (#2039 slice 2) Re-base the native-string finalize-shift regime. The loop
   // above plus the mod.functions body walk fully repaired the helpers for the
   // `added` imports of this batch, so the helpers are now consistent with the
@@ -465,6 +476,11 @@ export function reconcileNativeStrFinalizeShift(ctx: CodegenContext): void {
   // every entry is a defined function by construction.
   for (const [name, idx] of ctx.nativeStrHelpers) {
     if (idx >= base) ctx.nativeStrHelpers.set(name, idx + added);
+  }
+  // (#1913) Regex helper map moves in lockstep too — see the comment in
+  // addLateImportBatch above.
+  for (const [name, idx] of ctx.nativeRegexHelpers) {
+    if (idx >= base) ctx.nativeRegexHelpers.set(name, idx + added);
   }
   // Shift export descriptors. Exports only ever reference defined functions in
   // this regime (helpers/runtime exports like `__vec_get`); a func export with

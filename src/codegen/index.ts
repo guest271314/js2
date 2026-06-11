@@ -6510,6 +6510,13 @@ export function addStringImports(ctx: CodegenContext): void {
         ctx.nativeStrHelpers.set(name, idx + delta);
       }
     }
+    // (#1913) Regex helper map moves in lockstep too — regexp-standalone call
+    // sites bake `call` indices straight from this map.
+    for (const [name, idx] of ctx.nativeRegexHelpers) {
+      if (idx >= importsBefore) {
+        ctx.nativeRegexHelpers.set(name, idx + delta);
+      }
+    }
     // (#2039 slice 2) Re-base so reconcileNativeStrFinalizeShift doesn't apply
     // the same `delta` a second time — this inline shift already repaired the
     // helper bodies and the map. Matches addUnionImports (#1677-fast-path) and
@@ -7916,6 +7923,10 @@ export function addUnionImports(ctx: CodegenContext): void {
     if (ctx.nativeStrHelperImportBase >= 0) {
       for (const [name, idx] of ctx.nativeStrHelpers) {
         if (idx >= importsBefore) ctx.nativeStrHelpers.set(name, idx + delta);
+      }
+      // (#1913) Regex helper map shares the same lifecycle.
+      for (const [name, idx] of ctx.nativeRegexHelpers) {
+        if (idx >= importsBefore) ctx.nativeRegexHelpers.set(name, idx + delta);
       }
       ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
     }
