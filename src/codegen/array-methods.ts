@@ -2627,8 +2627,18 @@ export function compileArrayMethodCall(
       result = compileArrayLastIndexOf(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     case "sort":
+      // #1967 — the gate previously excluded externref (string, JS-host mode)
+      // and ref (struct) element arrays, so `["b","a"].sort()` and
+      // `objs.sort((x,y)=>…)` silently no-op'd via the generic fallback. The
+      // internal compileArraySort ALREADY routes non-numeric elements through
+      // tryCompileComparatorSort (comparator) and compileArrayDefaultToStringSort
+      // (default ToString order, #1993) — only this gate kept it unreachable.
       result =
-        elemType.kind === "f64" || elemType.kind === "i32"
+        elemType.kind === "f64" ||
+        elemType.kind === "i32" ||
+        elemType.kind === "externref" ||
+        elemType.kind === "ref" ||
+        elemType.kind === "ref_null"
           ? compileArraySort(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
           : undefined;
       break;
