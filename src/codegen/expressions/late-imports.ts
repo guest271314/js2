@@ -285,6 +285,18 @@ export function shiftLateImportIndices(
   if (ctx.mod.declaredFuncRefs.length > 0) {
     ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + added : idx));
   }
+  // (#1712) The module start function index also moves if it was a defined
+  // function at or above the insertion point. Mirrors the startFuncIdx shift
+  // in addStringImports / addUnionImports (index.ts) — without it, a late
+  // import added through ensureLateImport / flushLateImportShifts (e.g.
+  // __box_number for a boxed numeric struct field) shifts every defined-func
+  // index up by one but leaves `(start N)` pointing at the function that USED
+  // to live at __module_init's index (now an exported user function with a
+  // result type), producing "invalid start function: non-zero parameter or
+  // return count".
+  if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+    ctx.mod.startFuncIdx += added;
+  }
 }
 
 /**
