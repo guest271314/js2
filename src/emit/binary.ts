@@ -87,7 +87,7 @@ export function computeRecGroups(types: TypeDef[]): Array<[number, number]> {
 }
 
 /**
- * #1923 — always-on emit-time index validation (the durable safety net for
+ * #2043 — always-on emit-time index validation (the durable safety net for
  * the late-import index-shift class; instances #1809/#1839/#1602/#1886/
  * #1666/#1677/#2029).
  *
@@ -126,7 +126,7 @@ export function computeRecGroups(types: TypeDef[]): Array<[number, number]> {
  * Pure read-only validation — when it does not throw, the emitted bytes are
  * identical to an unvalidated emit. Sound by construction: every in-range
  * index is accepted, so it cannot reject a module the encoder would have
- * serialized into a structurally valid binary. Always-on since #1923; set
+ * serialized into a structurally valid binary. Always-on since #2043; set
  * JS2WASM_SKIP_INDEX_VALIDATION=1 to bypass (escape hatch only).
  */
 interface EmitValidationCtx {
@@ -191,7 +191,7 @@ function failIndex(space: string, value: unknown, max: number): never {
   throw new RangeError(
     `Codegen error: ${space} index out of range — ${String(value)} ` +
       `(valid: [0, ${max})) at ${valCtx ? valCtx.where : "?"}. This is the late-import index-shift ` +
-      `class (#1923): a captured index went stale across a deferred ` +
+      `class (#2043): a captured index went stale across a deferred ` +
       `flushLateImportShifts/addUnionImports/addStringImports shift, or a map ` +
       `lookup failed and baked -1/undefined. Re-resolve the index by name ` +
       `AFTER the last shift, or make the producer refuse loudly.`,
@@ -257,7 +257,7 @@ export function emitBinary(mod: WasmModule): Uint8Array {
 /**
  * Emit a Wasm binary and collect source map entries.
  *
- * Arms the #1923 always-on index validation (see `EmitValidationCtx` above)
+ * Arms the #2043 always-on index validation (see `EmitValidationCtx` above)
  * for the duration of this emit and disarms it in a finally, so the encode
  * helpers run unchecked for other callers (the relocatable object emitter).
  * JS2WASM_SKIP_INDEX_VALIDATION=1 is an escape hatch only.
