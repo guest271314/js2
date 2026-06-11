@@ -3495,6 +3495,16 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
   // (e.g. getOwnPropertyNames conversion loop uses __extern_get with integer indices).
   // #1830 — the range must cover every id in `_symbolIdToKeys` (1-15, 15 =
   // @@matchAll); `<= 14` silently dropped Symbol.matchAll on WasmGC structs.
+  // #2014: a small integer key (1-15) collides with the well-known-symbol ID
+  // range below. A genuine numeric data property (`o[2]` on `{ 2: "two" }`) is
+  // stored under the string field name "2" and exposed as `__sget_2`, so try
+  // that real-property getter BEFORE interpreting the key as a symbol ID —
+  // otherwise `o[2]` is mis-resolved as Symbol(2) and returns undefined.
+  if (_isWasmStruct(obj) && typeof key === "number" && Number.isInteger(key) && key >= 0) {
+    const exports = callbackState?.getExports();
+    const getter = exports?.[`__sget_${String(key)}`];
+    if (typeof getter === "function") return getter(obj);
+  }
   if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 15) {
     const symKeys = _symbolIdToKeys.get(key);
     if (symKeys) {
