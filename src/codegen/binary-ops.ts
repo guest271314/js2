@@ -32,6 +32,7 @@ import {
 import { ensureExternIsUndefinedImport, ensureLateImport } from "./expressions/late-imports.js";
 import { compileLogicalAnd, compileLogicalOr, compileNullishCoalescing } from "./expressions/logical-ops.js";
 import { tryStaticToNumber } from "./expressions/misc.js";
+import { emitNativeParseNumber } from "./parse-number-native.js";
 import { addStringImports, addUnionImports, resolveNativeTypeAnnotation, resolveWasmType } from "./index.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts } from "./shared.js";
@@ -864,6 +865,47 @@ export function compileBinaryExpression(
       (leftIsStr && rightIsBool) ||
       (leftIsBool && rightIsStr)
     ) {
+      // (#2073) Standalone / WASI has no JS host, so the `__host_loose_eq`
+      // delegation below leaks an unsatisfiable `env::__host_loose_eq` import
+      // and the module fails to instantiate. Compile these mixed string⇄number
+      // and string⇄boolean `==` comparisons to a pure-Wasm numeric compare:
+      // per §7.2.15 IsLooselyEqual, a string-vs-Number/Boolean comparison
+      // applies ToNumber to BOTH sides (Number→Number, Boolean→ToNumber, and
+      // §7.2.15 step 4/6 ToNumber the string), then compares numerically. The
+      // native `__str_to_number` scanner is §7.1.4.1 StringToNumber (NaN for a
+      // non-numeric string, 0 for empty), and `f64.eq` reproduces +0===-0 and
+      // NaN≠NaN — so `"1"==1`, `0==""`, `false==""`, `"x"==1` all match Node.
+      const noJsHost = ctx.standalone === true || ctx.wasi === true;
+      if (noJsHost && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+        // Ensure the native StringToNumber scanner exists. Its signature is
+        // `(externref) -> f64`; it converts the externref back to ref $AnyString
+        // internally (any.convert_extern + ref.cast).
+        if (!ctx.funcMap.has("__str_to_number")) {
+          emitNativeParseNumber(ctx, new Set(["__str_to_number"]));
+        }
+        const strToNumIdx = ctx.funcMap.get("__str_to_number");
+        if (strToNumIdx !== undefined) {
+          // Emit ToNumber(operand) as f64 for a string / number / boolean side.
+          const emitToNumber = (operand: ts.Expression, isStr: boolean, isBool: boolean): void => {
+            if (isStr) {
+              // native string ref → externref → __str_to_number → f64
+              compileExpression(ctx, fctx, operand);
+              fctx.body.push({ op: "extern.convert_any" } as Instr);
+              fctx.body.push({ op: "call", funcIdx: strToNumIdx });
+            } else if (isBool) {
+              compileExpression(ctx, fctx, operand);
+              fctx.body.push({ op: "f64.convert_i32_s" });
+            } else {
+              compileExpression(ctx, fctx, operand, { kind: "f64" });
+            }
+          };
+          emitToNumber(expr.left, leftIsStr, leftIsBool);
+          emitToNumber(expr.right, rightIsStr, rightIsBool);
+          fctx.body.push({ op: isLooseEq ? "f64.eq" : "f64.ne" });
+          return { kind: "i32" };
+        }
+      }
+
       compileExpression(ctx, fctx, expr.left);
       if (!leftIsStr) {
         coerceType(ctx, fctx, leftIsBool ? { kind: "i32" } : { kind: "f64" }, { kind: "externref" });
