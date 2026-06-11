@@ -1403,6 +1403,25 @@ const _wasmNonExtensibleObjs = new WeakSet<object>();
 const _userClassTags = new WeakMap<object, string>();
 const _userClassParents = new Map<string, string | null>();
 
+// (#1991) Object.prototype's own enumerable+non-enumerable data/accessor keys.
+// `key in obj` walks to Object.prototype (§13.10.1 → §7.3.12), so every object
+// value has these regardless of own properties — used by `__extern_has` to
+// answer e.g. `"toString" in ({} as any)` for opaque WasmGC-struct receivers.
+const _OBJECT_PROTO_KEYS: ReadonlySet<string> = new Set([
+  "constructor",
+  "hasOwnProperty",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  "toLocaleString",
+  "toString",
+  "valueOf",
+  "__proto__",
+  "__defineGetter__",
+  "__defineSetter__",
+  "__lookupGetter__",
+  "__lookupSetter__",
+]);
+
 /**
  * DataView subview metadata (#1064).
  *
@@ -6334,6 +6353,17 @@ assert._isSameValue = isSameValue;
               }
             }
           }
+          // (#1991) `in` walks the [[Prototype]] chain (§13.10.1 → §7.3.12), so
+          // EVERY object value inherits the Object.prototype members. A WasmGC
+          // struct (object literal / class instance / array) arrives here as an
+          // opaque externref whose `key in obj` above can't see Object.prototype,
+          // so `"toString" in ({} as any)` wrongly returned 0. Recognise the
+          // well-known Object.prototype keys explicitly for any non-null object.
+          // (Inherited *user-class* methods still need a method registry — not
+          // covered here.)
+          if (typeof key === "string" && (typeof obj === "object" || typeof obj === "function") && obj !== null) {
+            if (_OBJECT_PROTO_KEYS.has(key)) return 1;
+          }
           return 0;
         };
       if (name === "__extern_toString")
@@ -9709,6 +9739,24 @@ assert._isSameValue = isSameValue;
           // never reach this branch as wasm structs.
           if (ctorName === "Object" && v != null && _isWasmStruct(v)) {
             return 1;
+          }
+          // (#1992) `<fn> instanceof Function` — a compiled closure is a WasmGC
+          // struct, so V8's `v instanceof Function` above returns false for the
+          // opaque externref. Recognise it via `__is_closure` (the same callable
+          // discriminator `__typeof` uses to report "function"), so an
+          // `any`-typed callable answers `true` as the spec requires. Closures
+          // also have `Object` in their prototype chain — but only the explicit
+          // `Function` / `Object` RHS reaches here as a wasm struct.
+          if (ctorName === "Function" && v != null && typeof v === "object" && _isWasmStruct(v)) {
+            const exports = callbackState?.getExports();
+            const isClosureFn = exports?.__is_closure as ((x: any) => number) | undefined;
+            if (typeof isClosureFn === "function") {
+              try {
+                if (isClosureFn(v) === 1) return 1;
+              } catch {
+                /* fall through to false */
+              }
+            }
           }
           return 0;
         };
