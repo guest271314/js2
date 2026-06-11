@@ -1,10 +1,11 @@
 ---
 id: 1999
 title: "string += on a closure-captured variable traps 'illegal cast' (and emits invalid wasm when an i32 index is concatenated) — breaks the accumulator-in-callback idiom"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: critical
 feasibility: medium
 reasoning_effort: high

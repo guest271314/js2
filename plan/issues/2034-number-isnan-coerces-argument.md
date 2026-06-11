@@ -1,10 +1,11 @@
 ---
 id: 2034
 title: "Number.isNaN/isInteger/isFinite coerce their argument via f64 hint — Number.isNaN('foo') returns true (should be false, no coercion)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-11
 updated: 2026-06-11
+completed: 2026-06-11
 priority: medium
 feasibility: easy
 reasoning_effort: low

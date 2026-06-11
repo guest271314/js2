@@ -1,10 +1,11 @@
 ---
 id: 1995
 title: "flat() with no argument flattens depth 0 instead of default 1 — ref.null arrives as JS null, not undefined"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: easy
 reasoning_effort: low

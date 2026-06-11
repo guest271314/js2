@@ -1,10 +1,11 @@
 ---
 id: 1996
 title: "flat/flatMap host bridge leaves nested WasmGC vecs opaque — [[1,2],[3,4]].flat() → [null,null] (silent data corruption)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: medium
 reasoning_effort: medium
