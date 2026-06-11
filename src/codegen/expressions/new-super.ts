@@ -58,6 +58,7 @@ import {
   noJsHost,
   wasmFuncReturnsVoid,
 } from "./helpers.js";
+import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 
 function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
@@ -1014,6 +1015,42 @@ function compileNewFunctionDeclaration(
   // Bind `this` to the struct
   ctorFctx.localMap.set("this", selfLocal);
 
+  // (#1712) Register the instance → constructor-closure link with the JS
+  // host so instance property misses resolve through the closure's vivified
+  // `.prototype` object (acorn's `Parser.prototype.m = fn; new Parser().m()`
+  // pattern). Emitted in the ctor PROLOGUE — before the user body compiles —
+  // because acorn-style ctors call prototype methods on `this` inside the
+  // ctor itself (`this.context = this.initialContext()`); an end-of-ctor
+  // registration left those in-ctor dispatches unresolvable. JS-host mode
+  // only — standalone/WASI construction stays pure Wasm; the native
+  // equivalent rides on the #1888 open-object runtime in a later dogfood lap.
+  // Buffer-reach note: the flush below walks ctx.currentFunc (still the
+  // OUTER call-site fctx here) plus ctorFctx.body explicitly; once the body
+  // compile switches ctx.currentFunc to ctorFctx, later shifts reach these
+  // prologue instrs through currentFunc.body, and after attachment through
+  // ctx.mod.functions.
+  if (!ctx.standalone && !ctx.wasi) {
+    const ctorGlobalIdx = ctx.moduleGlobals.get(funcName) ?? ctx.funcClosureGlobals.get(funcName);
+    if (ctorGlobalIdx !== undefined) {
+      ensureLateImport(ctx, "__register_fnctor_instance", [{ kind: "externref" }, { kind: "externref" }], []);
+      // Apply the deferred index shift NOW (same discipline as every other
+      // ensureLateImport caller in this file) so the `call` below targets the
+      // import's final index instead of being re-shifted onto a neighbour.
+      flushLateImportShifts(ctx, ctorFctx);
+      const regIdx = ctx.funcMap.get("__register_fnctor_instance");
+      if (regIdx !== undefined) {
+        ctorFctx.body.push({ op: "local.get", index: selfLocal });
+        ctorFctx.body.push({ op: "extern.convert_any" });
+        ctorFctx.body.push({ op: "global.get", index: ctorGlobalIdx } as Instr);
+        const gdef = ctx.mod.globals[localGlobalIdx(ctx, ctorGlobalIdx)];
+        if (gdef && gdef.type.kind !== "externref" && gdef.type.kind !== "ref_extern") {
+          ctorFctx.body.push({ op: "extern.convert_any" });
+        }
+        ctorFctx.body.push({ op: "call", funcIdx: regIdx });
+      }
+    }
+  }
+
   // Compile the function body
   const savedFunc = ctx.currentFunc;
   if (savedFunc) ctx.parentBodiesStack.push(savedFunc.body);
@@ -1026,16 +1063,31 @@ function compileNewFunctionDeclaration(
   if (savedFunc) ctx.parentBodiesStack.pop();
   ctx.currentFunc = savedFunc;
 
-  // Return the struct instance
-  ctorFctx.body.push({ op: "local.get", index: selfLocal });
-
-  // Finalize the constructor function
+  // Attach the live body array to the registered function FIRST: the
+  // late-import registration below can shift function indices, and the shift
+  // walkers reach this body only through ctx.mod.functions (#1712 — same
+  // orphan-buffer class as the compileIfStatement then-branch fix).
   ctorFunc.locals = ctorFctx.locals;
   ctorFunc.body = ctorFctx.body;
 
+  // (#1712) The instance → constructor-closure registration
+  // (__register_fnctor_instance) is emitted in the ctor PROLOGUE above —
+  // before the user body — so in-ctor prototype-method calls on `this`
+  // (`this.context = this.initialContext()`) already resolve through the
+  // vivified prototype.
+
+  // Return the struct instance
+  ctorFctx.body.push({ op: "local.get", index: selfLocal });
+
   // 5. Emit the call to the constructor at the call site
   const args = expr.arguments ?? [];
-  const paramTypes = getFuncParamTypes(ctx, ctorFuncIdx);
+  // Use the in-scope ctorParams, NOT getFuncParamTypes(ctx, ctorFuncIdx): the
+  // (#1712) __register_fnctor_instance late import above opens a deferred
+  // index-shift window (#329/#1899) in which ctorFuncIdx is stale-low against
+  // the already-incremented numImportFuncs, so an index-based signature lookup
+  // would read the PREVIOUS function's params and coerce arguments against the
+  // wrong types (observed: `call[0] expected externref, found (ref null $N)`).
+  const paramTypes: ValType[] | undefined = ctorParams;
   for (let i = 0; i < args.length; i++) {
     compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
   }
