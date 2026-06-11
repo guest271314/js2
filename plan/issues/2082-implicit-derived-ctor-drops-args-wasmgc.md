@@ -1,10 +1,11 @@
 ---
 id: 2082
 title: "implicit derived-class constructor (WasmGC-struct path) synthesized with zero params — new Dog('rex') constructs with name=null"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-11
 updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: medium
 reasoning_effort: medium

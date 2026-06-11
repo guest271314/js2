@@ -1,10 +1,11 @@
 ---
 id: 2030
 title: "IteratorResult.done stringifies as 0/1 (raw i32, no boolean brand); exhausted .value becomes NaN instead of undefined"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-11
 updated: 2026-06-11
+completed: 2026-06-11
 priority: medium
 feasibility: easy
 reasoning_effort: low

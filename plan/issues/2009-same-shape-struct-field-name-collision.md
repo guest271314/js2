@@ -222,3 +222,18 @@ brand fields (option b).
 Unchanged: `feasibility: hard`, `reasoning_effort: max`. PR-1 is the load-
 bearing change; the export rewrite + construction stamping must stay in lockstep
 or every host enumeration breaks. Recommend senior-dev for PR-1.
+
+## Suspended Work (2026-06-11, infra incident)
+
+The implementing senior-dev was terminated by a team-store wipe mid-PR-1.
+State preserved in worktree `/workspace/.claude/worktrees/issue-2009-shape-id`
+(branch `issue-2009-shape-id`, based past upstream PR #1316): UNCOMMITTED
+257 insertions / 92 deletions across create-context.ts, context/types.ts,
+declarations.ts, index.ts, literals.ts, object-ops.ts, with-scope.ts,
+runtime.ts, plus tests/issue-2009.test.ts — the $shape field + shapeNames
+table + export rewrite per the Implementation Plan above.
+
+Resume steps: enter the worktree, `git diff` to review, run
+tests/issue-2009.test.ts, complete per the plan's PR-1 acceptance, commit
+(✓), push `--no-verify`, PR with `-R loopdive/js2 --head ttraenkler:...`.
+Do NOT discard — review and continue.

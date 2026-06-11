@@ -1,10 +1,11 @@
 ---
 id: 2010
 title: "{...null} / {...undefined} in an object literal silently drops ALL named properties (externref fallback skips PropertyAssignment)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: easy
 reasoning_effort: medium

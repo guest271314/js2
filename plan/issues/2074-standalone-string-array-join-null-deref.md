@@ -1,10 +1,11 @@
 ---
 id: 2074
 title: "standalone: join() on string[] receivers traps null deref (indexed reads of the same array work)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-11
 updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: medium
 reasoning_effort: medium

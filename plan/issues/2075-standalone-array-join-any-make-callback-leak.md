@@ -1,10 +1,11 @@
 ---
 id: 2075
 title: "standalone: externref-shaped array receivers leak env.__array_join_any / env.__make_callback imports (residual of #1664 retirement)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-11
 updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: medium
 reasoning_effort: medium

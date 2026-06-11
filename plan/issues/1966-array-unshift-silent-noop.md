@@ -1,10 +1,11 @@
 ---
 id: 1966
 title: "arr.unshift(...) is a silent no-op returning 0 — missing from ARRAY_METHODS, falls into garbage generic fallback"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: critical
 feasibility: easy
 reasoning_effort: medium

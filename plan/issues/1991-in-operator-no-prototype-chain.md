@@ -52,3 +52,11 @@ method registry (and built-in proto members) for struct receivers.
 
 #110/#166 (`in` basics) done; #1971 item 5 covers `delete`+own-`in` only.
 New.
+
+## Partial fix landed (2026-06-11)
+
+PR loopdive#1352 (merged) fixed the Object.prototype-members half
+(`"toString" in obj` etc. via _OBJECT_PROTO_KEYS in __extern_has) and all
+of #1992. REMAINING for this issue: inherited user-class methods
+(`"m" in subclassInstance`) need the per-class method-name registry —
+scoped in the sprint-62/63 proposal (analysis program 08-new-issues list).

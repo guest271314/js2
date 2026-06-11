@@ -1,10 +1,11 @@
 ---
 id: 2014
 title: "numeric-key element access on any-typed object returns undefined though the property exists (o[2] vs o['2'])"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: medium
 feasibility: medium
 reasoning_effort: medium

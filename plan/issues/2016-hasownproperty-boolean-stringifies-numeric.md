@@ -1,10 +1,11 @@
 ---
 id: 2016
 title: "hasOwnProperty result stringifies as '1'/'0' instead of 'true'/'false' (i32 result lacks boolean brand)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: low
 feasibility: easy
 reasoning_effort: low

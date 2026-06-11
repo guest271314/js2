@@ -1,10 +1,11 @@
 ---
 id: 1992
 title: "f instanceof Function hard-coded false for function values (collectInstanceOfTags empty → graceful i32.const 0)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: low
 feasibility: easy
 reasoning_effort: low

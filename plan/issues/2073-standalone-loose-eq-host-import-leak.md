@@ -1,10 +1,11 @@
 ---
 id: 2073
 title: "standalone: mixed-primitive loose == emits env.__host_loose_eq into the binary — instantiation with zero imports fails"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-11
 updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: medium
 reasoning_effort: medium

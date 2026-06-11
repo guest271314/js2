@@ -49,3 +49,13 @@ read guards entirely.
 
 #2017 (getter-only write), #581 (trap catchability family) — the
 store-path gap and the guard redundancy aren't covered. New (low).
+
+## Suspended Work (2026-06-11, infra incident)
+
+The implementing dev was terminated by a team-store wipe near completion.
+State preserved in worktree `/workspace/.claude/worktrees/issue-2084-global-guard`
+(branch `issue-2084-global-guard`): UNCOMMITTED 38 insertions in
+src/codegen/expressions/assignment.ts (write-path null guard) plus
+tests/issue-2084.test.ts. Likely close to done — review the diff, run the
+test, finish acceptance (read-guard elimination half may be unstarted),
+commit (✓), push `--no-verify`, PR with `-R loopdive/js2`.
