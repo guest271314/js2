@@ -49,7 +49,9 @@ describe("#2019 static property ++/--", () => {
 
   it("++ on an inherited static field writes the ancestor's global", async () => {
     expect(
-      await evalNum(`class A { static c = 0; } class B extends A {} export function test(): number { B.c++; return A.c; }`),
+      await evalNum(
+        `class A { static c = 0; } class B extends A {} export function test(): number { B.c++; return A.c; }`,
+      ),
     ).toBe(1);
   });
 });
@@ -65,7 +67,9 @@ describe("#2020 inherited static fields", () => {
 
   it("reads an inherited static field without a cast", async () => {
     expect(
-      await evalNum(`class A { static count = 11; } class B extends A {} export function test(): number { return B.count; }`),
+      await evalNum(
+        `class A { static count = 11; } class B extends A {} export function test(): number { return B.count; }`,
+      ),
     ).toBe(11);
   });
 
@@ -89,7 +93,9 @@ describe("#2020 inherited static fields", () => {
 describe("#2027 (this as any) in static initializer", () => {
   it("resolves a static field through a casted `this`", async () => {
     expect(
-      await evalNum(`class C { static a = 1; static b = (this as any).a + 1; } export function test(): number { return C.b; }`),
+      await evalNum(
+        `class C { static a = 1; static b = (this as any).a + 1; } export function test(): number { return C.b; }`,
+      ),
     ).toBe(2);
   });
 
