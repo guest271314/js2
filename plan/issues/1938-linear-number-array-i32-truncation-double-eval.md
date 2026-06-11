@@ -1,8 +1,8 @@
 ---
 id: 1938
 title: "Linear backend: number[] stores i32 elements ([1.5] → [1]) and element-assignment evaluates RHS twice"
-status: backlog
-sprint: Backlog
+status: ready
+sprint: 61
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

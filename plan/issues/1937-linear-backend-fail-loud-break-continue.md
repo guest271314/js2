@@ -1,8 +1,8 @@
 ---
 id: 1937
 title: "Linear backend: break/continue are never compiled (silent infinite loops); dispatchers need default-arm diagnostics"
-status: backlog
-sprint: Backlog
+status: ready
+sprint: 61
 created: 2026-06-10
 updated: 2026-06-10
 priority: critical
