@@ -2178,18 +2178,54 @@ function compileMathCall(
         fctx.body.push({ op: "i32.or" } as Instr);
       }
     }
-    // if any is Inf, return +Infinity, else sqrt(sum of squares)
+    // if any is Inf, return +Infinity, else the scaled sum-of-squares (#2060).
     const thenBlock: Instr[] = [{ op: "f64.const", value: Infinity }];
+
+    // Naive `sqrt(Σ aᵢ²)` overflows above ~1e154 and underflows below ~1e-162
+    // because each square leaves the f64 range. Scale by the largest magnitude
+    // `m = max(|aᵢ|)`: result = m * sqrt(Σ (aᵢ/m)²). Each ratio is in [0,1], so
+    // its square is representable, and the single multiply by `m` at the end
+    // restores the true magnitude. When `m == 0` every arg is ±0, so the result
+    // is 0 (and we must avoid the 0/0 = NaN the scaling would otherwise yield).
+    const mLocal = allocLocal(fctx, `__hypot_m_${fctx.locals.length}`, { kind: "f64" });
     const elseBlock: Instr[] = [];
+    // m = max(|a0|, |a1|, ...) via f64.max over the absolute values.
+    elseBlock.push({ op: "local.get", index: hypotLocals[0]! } as Instr);
+    elseBlock.push({ op: "f64.abs" } as Instr);
+    for (let i = 1; i < hypotLocals.length; i++) {
+      elseBlock.push({ op: "local.get", index: hypotLocals[i]! } as Instr);
+      elseBlock.push({ op: "f64.abs" } as Instr);
+      elseBlock.push({ op: "f64.max" } as unknown as Instr);
+    }
+    elseBlock.push({ op: "local.set", index: mLocal } as Instr);
+
+    // Guard m == 0 → 0; else m * sqrt(Σ (aᵢ/m)²).
+    elseBlock.push({ op: "local.get", index: mLocal } as Instr);
+    elseBlock.push({ op: "f64.const", value: 0 });
+    elseBlock.push({ op: "f64.eq" } as Instr);
+    const scaledBlock: Instr[] = [];
     for (let i = 0; i < hypotLocals.length; i++) {
-      elseBlock.push({ op: "local.get", index: hypotLocals[i]! } as Instr);
-      elseBlock.push({ op: "local.get", index: hypotLocals[i]! } as Instr);
-      elseBlock.push({ op: "f64.mul" } as Instr);
+      scaledBlock.push({ op: "local.get", index: hypotLocals[i]! } as Instr);
+      scaledBlock.push({ op: "local.get", index: mLocal } as Instr);
+      scaledBlock.push({ op: "f64.div" } as Instr);
+      scaledBlock.push({ op: "local.get", index: hypotLocals[i]! } as Instr);
+      scaledBlock.push({ op: "local.get", index: mLocal } as Instr);
+      scaledBlock.push({ op: "f64.div" } as Instr);
+      scaledBlock.push({ op: "f64.mul" } as Instr);
     }
     for (let i = 1; i < hypotLocals.length; i++) {
-      elseBlock.push({ op: "f64.add" } as Instr);
+      scaledBlock.push({ op: "f64.add" } as Instr);
     }
-    elseBlock.push({ op: "f64.sqrt" } as Instr);
+    scaledBlock.push({ op: "f64.sqrt" } as Instr);
+    scaledBlock.push({ op: "local.get", index: mLocal } as Instr);
+    scaledBlock.push({ op: "f64.mul" } as Instr);
+    elseBlock.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "f64" } },
+      then: [{ op: "f64.const", value: 0 }],
+      else: scaledBlock,
+    } as Instr);
+
     fctx.body.push({
       op: "if",
       blockType: { kind: "val", type: { kind: "f64" } },
