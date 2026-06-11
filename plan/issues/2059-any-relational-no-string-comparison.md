@@ -152,17 +152,38 @@ closes the gap in both lowerings. Gate it behind the same staged landing.
 - NaN operand → all relationals `false` (the `cmp == 2` sentinel / f64 NaN rule).
 - `null < 1` → `0 < 1 = true`; `undefined < 1` → `NaN < 1 = false` (ToNumber).
 
-### Coordination note (dev-4)
+### Coordination note (dev-4) — interim fix must be forward-compatible
 
 As of this spec, the local `issue-2059-any-relational-string` branch has **0
 commits ahead of main** and is **not pushed to origin** — no implementation
-exists to conflict with. This design slots the relational gate **next to** the
-#2058 `+` gate and **reuses** the same spill scaffolding and the new
-`__host_compare` host import, so dev-4 should implement #2059 **after** #2058
-lands (or coordinate to share the spill/dispatch helper). If dev-4 has already
-chosen a divergent approach (e.g. routing through `__any_lt` only), reconcile
-toward the externref-site gate here, since that is the path the repro exercises
-in default mode.
+exists to conflict with. Dev-4 was told to either **scope #2059 to
+provably-string operands** or **release the issue**.
+
+**Any scoped interim fix MUST be compatible with the general mechanism here**:
+
+- A provably-string-only interim (both operands statically `string`, route to
+  `__str_compare` / `wasm:js-string` ordering) is an **acceptable subset** of
+  this design — it is exactly the "both `__typeof_string`" arm, just resolved at
+  compile time instead of at runtime. Land it as the **statically-typed fast
+  path** that sits *in front of* the externref runtime gate, not as a competing
+  mechanism. Do **not** introduce a separate helper or a separate boxing scheme
+  that the full externref gate would later have to unwind.
+- Do **not** implement the interim by flipping `anyValueTypeIdx` on in default
+  mode or by re-tagging at the `externref→AnyValue` boxing site — that is the
+  −788 trap (see #2058's shared plan). The interim must stay **per-site on the
+  operands**, same as the full fix.
+- The general fix here **supersedes and absorbs** any such interim: when this
+  lands, the runtime externref gate handles the `any < any` repro and the
+  provably-string fast path remains a pure compile-time shortcut. No rework of
+  the interim is required if it followed the two rules above.
+
+This design slots the relational gate **next to** the #2058 `+` gate and
+**reuses** the same spill scaffolding and the new `__host_compare` host import,
+so dev-4 should implement the full #2059 **after** #2058 lands (or coordinate to
+share the spill/dispatch helper). If dev-4 has already chosen a divergent
+approach (e.g. routing through `__any_lt` only, or a bespoke boxing path),
+reconcile toward the externref-site gate here, since that is the path the repro
+exercises in default mode.
 
 ### Test files to verify (#2059)
 
