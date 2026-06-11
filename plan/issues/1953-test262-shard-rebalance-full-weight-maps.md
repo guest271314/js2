@@ -1,13 +1,15 @@
 ---
 id: 1953
 title: "test262: shard durations spread 32–153s — regenerate weight maps with full per-test coverage"
-status: blocked
+status: done
 created: 2026-06-11
 updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: easy
 reasoning_effort: low
 sprint: 61
+depends_on: [1957]
 area: ci
 ---
 ## Problem
@@ -45,7 +47,15 @@ compile-heavy bins overflowed (the 153s shard).
 - Verified by simulating `assignBalancedChunk` offline against ground-truth
   durations (see PR description for predicted spread before/after).
 
-## BLOCKED (2026-06-11) — deterministic contamination pairings
+## RESOLVED (2026-06-11) — unblocked by #1957
+
+The deterministic contamination pairings documented below were fixed at the
+root by #1957 (realm-contamination canary: workers detect actual intrinsic
+drift after each test and recycle before the next one; the poisoned-builtin
+fail-status retry gap is also closed). The maps below re-landed with this
+issue's second PR, regenerated from the post-#1957 baselines.
+
+## Historical context — first landing attempt (pre-#1957)
 
 The regenerated maps were validated offline (simulated bin spread 43s → 0s
 with the exact `assignBalancedChunk` algorithm) but BOUNCED off the
