@@ -36,6 +36,27 @@ export type InnerResult = ValType | null | typeof VOID_RESULT;
  * struct name from the local's ref type index. Used as a fallback when
  * resolveStructName returns undefined for `this`-property accesses/assignments.
  */
+/**
+ * Skip "transparent" wrapper expressions that have no runtime effect — parens,
+ * `as`/`<T>` casts, `satisfies`, and non-null `!` — to reach the underlying
+ * expression. The local stand-in for `ts.skipOuterExpressions` (not surfaced by
+ * the project's ts-api shim). Used to let `(this as any).x` / `(B as any).c`
+ * resolve to the same receiver as `this.x` / `B.c` (#2020/#2027).
+ */
+export function skipTransparentExpressions(expr: ts.Expression): ts.Expression {
+  let cur = expr;
+  while (
+    ts.isParenthesizedExpression(cur) ||
+    ts.isAsExpression(cur) ||
+    ts.isTypeAssertionExpression(cur) ||
+    ts.isSatisfiesExpression(cur) ||
+    ts.isNonNullExpression(cur)
+  ) {
+    cur = cur.expression;
+  }
+  return cur;
+}
+
 export function resolveThisStructName(ctx: CodegenContext, fctx: FunctionContext): string | undefined {
   const selfIdx = fctx.localMap.get("this");
   if (selfIdx === undefined) return undefined;
