@@ -75,6 +75,7 @@ import {
 } from "../statements/nested-declarations.js";
 import { compileNativeStringMethodCall, compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { tryCompileNodeProcessCall } from "../node-process-api.js";
+import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import {
   defaultValueInstrs,
   emitGuardedFuncRefCast,
@@ -7644,8 +7645,15 @@ function compileCallExpression(
         // Try to resolve via registered extern classes (e.g. Set.union, Map.get)
         // when the receiver type is `any` but the method matches a built-in.
         {
-          const externResult = tryExternClassMethodOnAny(ctx, fctx, expr, propAccess, methodName);
-          if (externResult !== null) return externResult;
+          const builtinNamespace = ctx.standalone
+            ? resolveBuiltinNamespaceValueName(ctx, propAccess.expression)
+            : undefined;
+          const preferOpenBuiltinNamespace =
+            builtinNamespace !== undefined && isSupportedBuiltinStaticProperty(builtinNamespace, methodName);
+          if (!preferOpenBuiltinNamespace) {
+            const externResult = tryExternClassMethodOnAny(ctx, fctx, expr, propAccess, methodName);
+            if (externResult !== null) return externResult;
+          }
         }
 
         // (#799 WI3) Generic host-delegated method call for any/externref receivers.
