@@ -7522,12 +7522,7 @@ function compileCallExpression(
               // omitted position so the host shim drops it and the JS method
               // applies its spec default (0 for includes/startsWith, length
               // for endsWith) instead of ToInteger(NaN)=0.
-              if (
-                method === "split" ||
-                method === "includes" ||
-                method === "startsWith" ||
-                method === "endsWith"
-              ) {
+              if (method === "split" || method === "includes" || method === "startsWith" || method === "endsWith") {
                 fctx.body.push({ op: "f64.const", value: Number.NaN });
               } else {
                 fctx.body.push({ op: "f64.const", value: 0 });

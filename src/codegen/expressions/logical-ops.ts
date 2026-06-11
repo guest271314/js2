@@ -180,11 +180,7 @@ export function compileLogicalOr(ctx: CodegenContext, fctx: FunctionContext, exp
  */
 function isCodePointAtCall(expr: ts.Expression): boolean {
   let inner: ts.Expression = expr;
-  while (
-    ts.isParenthesizedExpression(inner) ||
-    ts.isAsExpression(inner) ||
-    ts.isNonNullExpression(inner)
-  ) {
+  while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) || ts.isNonNullExpression(inner)) {
     inner = inner.expression;
   }
   return (

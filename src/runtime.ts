@@ -5478,10 +5478,7 @@ function resolveImport(
         // default (0 for includes/startsWith, length for endsWith) instead of
         // ToInteger(NaN)=0.
         if (
-          (method === "split" ||
-            method === "includes" ||
-            method === "startsWith" ||
-            method === "endsWith") &&
+          (method === "split" || method === "includes" || method === "startsWith" || method === "endsWith") &&
           args.length >= 2
         ) {
           const last = args[args.length - 1];
