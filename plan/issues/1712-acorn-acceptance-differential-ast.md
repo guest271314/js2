@@ -364,3 +364,22 @@ never becomes true. Suggested approach: instrument the host bridge with an
 invocation counter per method name (env-gated) and run one fixture to see
 which method spins; or precompile acorn once to .tmp and drive
 `parse` with a 1-char input under a watchdog.
+
+**Tokenizer-loop root cause pinned (`.tmp/dbg28.mts`, host-bridge call
+counter under a 200k watchdog):** for input `var x = 1;`, `parseStatement`
+executes 9,090 times — each iteration COMPLETES (its statement is pushed:
+`push` 9,090, `parseExpressionStatement` 9,089), but `parseTopLevel`'s
+guard `this.type !== types$1.eof` never becomes false. This is a token-
+object IDENTITY failure across dynamic reads: TokenType objects are
+compared with `!==` by reference, and the two operands (`this.type` via
+the instance read path; `types$1.eof` via module-global + property read)
+evidently don't resolve to the SAME reference — one side likely a
+`_wrapForHost` proxy / boxed copy and the other the raw struct (the
+`_hostProxyCache` makes proxies identity-stable per struct, so the bug is
+a path that returns the RAW value while the other returns the proxy, or
+vice versa). Also suspicious: every statement parses as an
+ExpressionStatement (`isLet` truthiness / keyword-token recognition may
+have the same identity/equality defect). Next slice: make all dynamic
+read paths return ONE canonical representation per struct (always raw, or
+always cached proxy) before values re-enter Wasm, and check the strict-
+equality lowering for externref operands unwraps proxies on both sides.
