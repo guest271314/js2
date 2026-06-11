@@ -3658,6 +3658,319 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       desc: { kind: "func", index: getFuncIdx },
     });
   }
+
+  // (#1712) Generic host-side vec MUTATORS. Compiled acorn mutates instance
+  // array fields through dynamic `this` dispatch (`this.scopeStack.push(
+  // new Scope(flags))` in enterScope): the receiver reaches the host's
+  // __extern_method_call as an opaque vec struct, and the host cannot grow a
+  // WasmGC array itself. These exports mirror the __vec_len/__vec_get
+  // per-vec-type ref.test dispatch and perform the mutation on the Wasm side
+  // (same grow discipline as compileArrayPush: newCap = max((len+1)*2, 4),
+  // array.new_default + array.copy + struct.set). Element-kind coverage is
+  // externref always, f64/i32 when __unbox_number/__box_number are imported;
+  // unsupported kinds return the -1 / 0 sentinel so the runtime falls
+  // through to its fail-loud TypeError instead of silently no-oping.
+  const unboxNumIdx = ctx.funcMap.get("__unbox_number");
+  const boxNumIdx2 = ctx.funcMap.get("__box_number");
+  const mutEntries = vecEntries.filter(([elemKey]) => {
+    if (elemKey === "externref") return true;
+    if (elemKey === "f64" || elemKey === "i32") return unboxNumIdx !== undefined && boxNumIdx2 !== undefined;
+    return false;
+  });
+
+  // __is_vec(externref) -> i32 — POSITIVE vec discriminator over ALL
+  // registered vec types. `__vec_len` cannot serve this role (its not-a-vec
+  // default of 0 is indistinguishable from an empty vec), and `__is_closure`
+  // can FALSE-POSITIVE on a vec whose canonicalized layout collides with a
+  // closure capture struct — the runtime's callable-wrapping paths consult
+  // this export to veto bridging a vec into a JS function.
+  {
+    const isVecTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__is_vec_type");
+    const isVecFuncIdx = ctx.numImportFuncs + mod.functions.length;
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 1 } as Instr,
+    ];
+    let current: Instr[] = [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr];
+    for (let i = vecEntries.length - 1; i >= 0; i--) {
+      const [, vecTypeIdx] = vecEntries[i]!;
+      current = [
+        { op: "local.get", index: 1 } as Instr,
+        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+          else: current,
+        } as Instr,
+      ];
+    }
+    body.push(...current);
+    mod.functions.push({
+      name: "__is_vec",
+      typeIdx: isVecTypeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as any);
+    mod.exports.push({ name: "__is_vec", desc: { kind: "func", index: isVecFuncIdx } });
+  }
+
+  // __vec_mut_supported(externref) -> i32 (1 = push/pop cover this vec's elem kind)
+  {
+    const supTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_mut_supported_type");
+    const supFuncIdx = ctx.numImportFuncs + mod.functions.length;
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 1 } as Instr,
+    ];
+    let current: Instr[] = [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr];
+    for (let i = mutEntries.length - 1; i >= 0; i--) {
+      const [, vecTypeIdx] = mutEntries[i]!;
+      current = [
+        { op: "local.get", index: 1 } as Instr,
+        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+          else: current,
+        } as Instr,
+      ];
+    }
+    body.push(...current);
+    mod.functions.push({
+      name: "__vec_mut_supported",
+      typeIdx: supTypeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as any);
+    mod.exports.push({ name: "__vec_mut_supported", desc: { kind: "func", index: supFuncIdx } });
+  }
+
+  // __vec_push(externref vec, externref value) -> i32 (new length, or -1 unsupported)
+  {
+    const pushTypeIdx = addFuncType(
+      ctx,
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      "$__vec_push_type",
+    );
+    const pushFuncIdx = ctx.numImportFuncs + mod.functions.length;
+    // locals: 2 = anyref converted; per-arm typed locals appended below
+    const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 2 } as Instr,
+    ];
+    let current: Instr[] = [{ op: "i32.const", value: -1 } as Instr, { op: "return" } as Instr];
+    for (let i = mutEntries.length - 1; i >= 0; i--) {
+      const [elemKey, vecTypeIdx] = mutEntries[i]!;
+      const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+      if (arrTypeIdx < 0) continue;
+      const base = 2 + locals.length; // 2 params + locals so far
+      const vecL = base;
+      const dataL = base + 1;
+      const lenL = base + 2;
+      const ncapL = base + 3;
+      const ndataL = base + 4;
+      locals.push(
+        { name: `__vp_vec_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: vecTypeIdx } },
+        { name: `__vp_data_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: arrTypeIdx } },
+        { name: `__vp_len_${vecTypeIdx}`, type: { kind: "i32" } },
+        { name: `__vp_ncap_${vecTypeIdx}`, type: { kind: "i32" } },
+        { name: `__vp_ndata_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: arrTypeIdx } },
+      );
+      // value unboxing per element kind (value param is local 1)
+      const valueInstrs: Instr[] =
+        elemKey === "externref"
+          ? [{ op: "local.get", index: 1 } as Instr]
+          : elemKey === "f64"
+            ? [{ op: "local.get", index: 1 } as Instr, { op: "call", funcIdx: unboxNumIdx! } as Instr]
+            : [
+                { op: "local.get", index: 1 } as Instr,
+                { op: "call", funcIdx: unboxNumIdx! } as Instr,
+                { op: "i32.trunc_sat_f64_s" } as Instr,
+              ];
+      const thenBranch: Instr[] = [
+        { op: "local.get", index: 2 } as Instr,
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.set", index: vecL } as Instr,
+        // len
+        { op: "local.get", index: vecL } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "local.set", index: lenL } as Instr,
+        // data + capacity check: cap < len+1 ?
+        { op: "local.get", index: vecL } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "local.tee", index: dataL } as Instr,
+        { op: "array.len" } as Instr,
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "i32.lt_s" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // ncap = max((len+1)*2, 4)
+            { op: "local.get", index: lenL } as Instr,
+            { op: "i32.const", value: 1 } as Instr,
+            { op: "i32.add" } as Instr,
+            { op: "i32.const", value: 1 } as Instr,
+            { op: "i32.shl" } as Instr,
+            { op: "i32.const", value: 4 } as Instr,
+            { op: "local.get", index: lenL } as Instr,
+            { op: "i32.const", value: 1 } as Instr,
+            { op: "i32.add" } as Instr,
+            { op: "i32.const", value: 1 } as Instr,
+            { op: "i32.shl" } as Instr,
+            { op: "i32.const", value: 4 } as Instr,
+            { op: "i32.gt_s" } as Instr,
+            { op: "select" } as Instr,
+            { op: "local.set", index: ncapL } as Instr,
+            // ndata = array.new_default(ncap); copy old; vec.data = ndata
+            { op: "local.get", index: ncapL } as Instr,
+            { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+            { op: "local.set", index: ndataL } as Instr,
+            { op: "local.get", index: ndataL } as Instr,
+            { op: "i32.const", value: 0 } as Instr,
+            { op: "local.get", index: dataL } as Instr,
+            { op: "i32.const", value: 0 } as Instr,
+            { op: "local.get", index: lenL } as Instr,
+            { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+            { op: "local.get", index: vecL } as Instr,
+            { op: "local.get", index: ndataL } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+            { op: "local.get", index: ndataL } as Instr,
+            { op: "local.set", index: dataL } as Instr,
+          ],
+        } as Instr,
+        // data[len] = value
+        { op: "local.get", index: dataL } as Instr,
+        { op: "local.get", index: lenL } as Instr,
+        ...valueInstrs,
+        { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+        // vec.length = len + 1
+        { op: "local.get", index: vecL } as Instr,
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+        // return len + 1
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "return" } as Instr,
+      ];
+      current = [
+        { op: "local.get", index: 2 } as Instr,
+        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: thenBranch,
+          else: current,
+        } as Instr,
+      ];
+    }
+    body.push(...current);
+    mod.functions.push({
+      name: "__vec_push",
+      typeIdx: pushTypeIdx,
+      locals,
+      body,
+      exported: true,
+    } as any);
+    mod.exports.push({ name: "__vec_push", desc: { kind: "func", index: pushFuncIdx } });
+  }
+
+  // __vec_pop(externref) -> externref (boxed last element; null.extern when
+  // empty or unsupported — callers gate on __vec_mut_supported to tell apart)
+  {
+    const popTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$__vec_pop_type");
+    const popFuncIdx = ctx.numImportFuncs + mod.functions.length;
+    const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 1 } as Instr,
+    ];
+    let current: Instr[] = [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr];
+    for (let i = mutEntries.length - 1; i >= 0; i--) {
+      const [elemKey, vecTypeIdx] = mutEntries[i]!;
+      const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+      if (arrTypeIdx < 0) continue;
+      const base = 1 + locals.length; // 1 param + locals so far
+      const vecL = base;
+      const lenL = base + 1;
+      locals.push(
+        { name: `__vpop_vec_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: vecTypeIdx } },
+        { name: `__vpop_len_${vecTypeIdx}`, type: { kind: "i32" } },
+      );
+      const boxInstrs: Instr[] =
+        elemKey === "externref"
+          ? []
+          : elemKey === "f64"
+            ? [{ op: "call", funcIdx: boxNumIdx2! } as Instr]
+            : [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx2! } as Instr];
+      const thenBranch: Instr[] = [
+        { op: "local.get", index: 1 } as Instr,
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.set", index: vecL } as Instr,
+        { op: "local.get", index: vecL } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "local.set", index: lenL } as Instr,
+        // empty → undefined
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.eqz" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr],
+        } as Instr,
+        // value = data[len-1] (boxed)
+        { op: "local.get", index: vecL } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.sub" } as Instr,
+        { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+        ...boxInstrs,
+        // vec.length = len - 1 (value stays beneath on the stack)
+        { op: "local.get", index: vecL } as Instr,
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.sub" } as Instr,
+        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "return" } as Instr,
+      ];
+      current = [
+        { op: "local.get", index: 1 } as Instr,
+        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: thenBranch,
+          else: current,
+        } as Instr,
+      ];
+    }
+    body.push(...current);
+    mod.functions.push({
+      name: "__vec_pop",
+      typeIdx: popTypeIdx,
+      locals,
+      body,
+      exported: true,
+    } as any);
+    mod.exports.push({ name: "__vec_pop", desc: { kind: "func", index: popFuncIdx } });
+  }
 }
 
 /**

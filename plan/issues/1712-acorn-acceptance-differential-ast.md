@@ -279,3 +279,40 @@ existing `__vec_len`/`__vec_get`/`__vec_set_byte` precedent,
 chains (grow = alloc new $arr + struct.set, fields are mutable), then route
 array methods on vec receivers there from `__extern_method_call`. The
 two-shape struct issue (previous section) remains relevant after that.
+
+### Vec-mutator slice 2026-06-11 (fable-1712c, branch issue-1712-vec-mutators, stacked on issue-1712-dyn-dispatch)
+
+Fixes the `push is not a function` blocker (acorn `enterScope`:
+`this.scopeStack.push(new Scope(flags))`) — THREE stacked defects:
+
+1. **No host-side vec mutation**: new Wasm-side exports in
+   `_emitVecAccessExportsInner` (`src/codegen/index.ts`): `__is_vec`,
+   `__vec_mut_supported`, `__vec_push`, `__vec_pop` — per-vec-type ref.test
+   dispatch, grow = compileArrayPush discipline (newCap = max((len+1)*2,4),
+   array.new_default + array.copy + struct.set). Elem coverage: externref
+   always; f64/i32 when __box_number/__unbox_number imported; others return
+   the -1/0 sentinel (runtime falls through to its fail-loud TypeError).
+2. **closureBridge wrapped DATA fields**: `_wrapForHost`'s get trap bridged
+   ANY struct field into a callable (`closureBridge`, #1090) — acorn's
+   `this.scopeStack` read returned a JS function. Vetoed via `__is_vec`
+   (positive discriminator; `__is_closure` can FALSE-POSITIVE on vecs whose
+   canonicalized layout collides with a closure capture struct).
+3. **Routing**: `__extern_method_call`'s not-a-function arm routes push/pop
+   on vec receivers through the new exports (raw args, not host proxies, so
+   Wasm-side element reads see structs; receiver unwrapped through both the
+   proxy map and `_wasmClosureWrapperTargets`).
+
+acorn now executes enterScope/exitScope; the chain stops at the NEXT
+blocker — a null-deref in `__closure_340` (the static `Parser.parse` body)
+right after `__fnctor_Parser_new` returns: this is the documented TWO-SHAPE
+instance trap (`new this(…).parse()` member call guard-casts the ctor-shape
+instance against the checker shape → null → struct.get). See the
+"fnctor instances have TWO irreconcilable struct shapes" analysis above —
+that is now the live front of the onion.
+
+Also KNOWN, pre-existing, NOT fixed here (`.tmp/dbg23.mts` L1/L2): when the
+TS checker CAN type the instance array field (TS-typed input, not acorn),
+the member call takes the STATIC vec path which UNGUARDED-casts the
+externref field value to the checker-inferred vec type → "illegal cast".
+Needs the same guarded-cast + dynamic-fallback treatment in the
+property-access lowering that feeds compileArrayPush.

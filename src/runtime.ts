@@ -4164,6 +4164,19 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // can invoke it. Without this, JS sees `typeof val === "object"` and
       // ToPrimitive fails with "Cannot convert object to primitive value".
       if (val != null && typeof val === "object" && _isWasmStruct(val) && exports) {
+        // (#1712) Vec structs are DATA, never callables — wrapping one in the
+        // closureBridge below made acorn's `this.scopeStack` field read return
+        // a JS function, so `scopeStack.push(…)` threw "push is not a
+        // function". `__is_vec` is the positive discriminator (`__is_closure`
+        // can false-positive on layout-canonicalization collisions).
+        try {
+          const isVecFn = exports.__is_vec as ((v: any) => number) | undefined;
+          if (typeof isVecFn === "function" && isVecFn(val) === 1) {
+            return _wrapForHost(val, exports);
+          }
+        } catch {
+          // fall through to the closure-bridge heuristics
+        }
         // Resolve the export key — for string keys use directly, for well-known
         // symbols use the @@name form (e.g. Symbol.toPrimitive → "@@toPrimitive") (#1090)
         const exportKey = typeof key === "string" ? key : typeof key === "symbol" ? _symbolToWasm.get(key) : undefined;
@@ -7062,6 +7075,56 @@ assert._isSameValue = isSameValue;
               if (typeof resolved === "function") {
                 const ret = resolved.apply(obj, wrappedArgs);
                 return ret === obj || ret === wrappedObj ? obj : _unwrapForHost(ret);
+              }
+            }
+            // (#1712) Array mutators on WasmGC vec structs. acorn mutates
+            // instance array fields through dynamic `this` dispatch
+            // (`this.scopeStack.push(new Scope(flags))`); the receiver is an
+            // opaque vec struct the host cannot grow. Route push/pop through
+            // the Wasm-side __vec_push/__vec_pop exports (per-vec-type
+            // dispatch, grow on the Wasm side). __vec_mut_supported is the
+            // discriminator — __vec_len's not-a-vec default is 0 and can't
+            // tell an empty vec from a non-vec. Push the RAW args (not host
+            // proxies) so Wasm-side reads of the elements see the structs.
+            {
+              // The receiver may be a _wrapForHost proxy (the field read that
+              // produced it wrapped the struct for host visibility) — unwrap
+              // to the raw vec struct before the export round-trip.
+              let rawVec = _unwrapForHost(obj);
+              // A vec struct whose canonicalized layout collides with a
+              // closure capture struct false-positives __is_closure, so
+              // wrapHostValue wrapped it into a callable bridge — reverse
+              // that through the wrapper→closure map.
+              if (typeof rawVec === "function") {
+                const wrapperTarget = _wasmClosureWrapperTargets.get(rawVec);
+                if (wrapperTarget) rawVec = wrapperTarget;
+              }
+              if (_isWasmStruct(rawVec) && exports) {
+                const mutSupFn = exports.__vec_mut_supported as ((v: any) => number) | undefined;
+                let vecSupported = false;
+                try {
+                  vecSupported = typeof mutSupFn === "function" && mutSupFn(rawVec) === 1;
+                } catch {
+                  vecSupported = false;
+                }
+                if (vecSupported) {
+                  if (method === "push" && typeof exports.__vec_push === "function") {
+                    const pushFn = exports.__vec_push as (v: any, x: any) => number;
+                    const rawArgs = args ?? [];
+                    let newLen = (exports.__vec_len as (v: any) => number)(rawVec);
+                    let ok = true;
+                    for (const a of rawArgs) {
+                      newLen = pushFn(rawVec, _unwrapForHost(a));
+                      if (newLen < 0) {
+                        ok = false;
+                        break;
+                      }
+                    }
+                    if (ok) return newLen;
+                  } else if (method === "pop" && typeof exports.__vec_pop === "function") {
+                    return (exports.__vec_pop as (v: any) => any)(rawVec);
+                  }
+                }
               }
             }
             // (#837) Map/WeakMap upsert proposal polyfill — Node 25 / V8
