@@ -287,8 +287,14 @@ export function compileTemplateExpression(
       const word = spanIsNullType ? "null" : "undefined";
       addStringConstantGlobal(ctx, word);
       fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get(word)! });
-    } else if (spanType && spanType.kind === "i32" && isBooleanType(spanTsType)) {
-      // boolean i32 → "true"/"false" (#2005)
+    } else if (
+      spanType &&
+      spanType.kind === "i32" &&
+      (isBooleanType(spanTsType) || (spanType as { boolean?: true }).boolean)
+    ) {
+      // boolean i32 → "true"/"false" (#2005). #2016/#2030: also covers branded
+      // i32 predicates (`.boolean`), which render "true"/"false", not "1"/"0".
+      // emitBoolToString returns an externref the following concat accepts.
       emitBoolToString(ctx, fctx);
     } else if (spanType && spanType.kind === "f64" && toStrIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: toStrIdx });
@@ -1172,7 +1178,10 @@ function compileAndCoerceConcatOperand(ctx: CodegenContext, fctx: FunctionContex
       index: ctx.stringGlobalMap.get("undefined")!,
     });
   } else if (valType.kind === "f64" || valType.kind === "i32" || valType.kind === "i64") {
-    if (isBooleanType(tsType) && valType.kind === "i32") {
+    // #2016/#2030: honour the boolean brand on the ValType, not just the TS type.
+    // i32-returning predicates (hasOwnProperty, IteratorResult.done, …) carry
+    // `boolean: true` so their string form is "true"/"false", not "1"/"0".
+    if (valType.kind === "i32" && (isBooleanType(tsType) || (valType as { boolean?: true }).boolean)) {
       emitBoolToString(ctx, fctx);
     } else {
       if (valType.kind === "i32") fctx.body.push({ op: "f64.convert_i32_s" });
@@ -1450,7 +1459,7 @@ export function compileStringBinaryOp(
     leftType &&
     (leftType.kind === "f64" || leftType.kind === "i32" || leftType.kind === "i64")
   ) {
-    if (isBooleanType(leftTsType) && leftType.kind === "i32") {
+    if (leftType.kind === "i32" && (isBooleanType(leftTsType) || (leftType as { boolean?: true }).boolean)) {
       // Boolean → "true"/"false" via conditional select of string constants
       emitBoolToString(ctx, fctx);
     } else {
@@ -1527,7 +1536,7 @@ export function compileStringBinaryOp(
     rightType &&
     (rightType.kind === "f64" || rightType.kind === "i32" || rightType.kind === "i64")
   ) {
-    if (isBooleanType(rightTsType) && rightType.kind === "i32") {
+    if (rightType.kind === "i32" && (isBooleanType(rightTsType) || (rightType as { boolean?: true }).boolean)) {
       emitBoolToString(ctx, fctx);
     } else {
       if (rightType.kind === "i32") fctx.body.push({ op: "f64.convert_i32_s" });
