@@ -2385,6 +2385,7 @@ const ARRAY_METHODS = new Set([
   "push",
   "pop",
   "shift",
+  "unshift",
   "indexOf",
   "includes",
   "slice",
@@ -2536,7 +2537,22 @@ export function compileArrayMethodCall(
   // getReceiverLocalIdx succeeds and mutating methods can write back.
   let moduleGlobalIdx: number | undefined;
   let savedLocal: number | undefined;
-  const MUTATING = new Set(["push", "pop", "shift", "reverse", "splice", "fill", "copyWithin", "sort", "set"]);
+  // #1966: `unshift` mutates in place (prepends + shifts), so its mutated vec
+  // must be written back to the receiver — include it here. The `to*`
+  // variants (toSorted/toReversed/toSpliced/with) and slice/concat/map/filter
+  // are NON-mutating (they return a new array) and are deliberately excluded.
+  const MUTATING = new Set([
+    "push",
+    "pop",
+    "shift",
+    "unshift",
+    "reverse",
+    "splice",
+    "fill",
+    "copyWithin",
+    "sort",
+    "set",
+  ]);
   if (ts.isIdentifier(propAccess.expression)) {
     const name = propAccess.expression.text;
     const gIdx = ctx.moduleGlobals.get(name);
@@ -2571,6 +2587,9 @@ export function compileArrayMethodCall(
       break;
     case "shift":
       result = compileArrayShift(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType, expectedType);
+      break;
+    case "unshift":
+      result = compileArrayUnshift(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     case "slice":
       result = compileArraySlice(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
@@ -4147,6 +4166,150 @@ function compileArrayShift(
   // Return result (default value if empty, shifted value if non-empty)
   fctx.body.push({ op: "local.get", index: resultTmp });
   return resultType;
+}
+
+/**
+ * arr.unshift(...items) -> O(n) in-place: grow if needed, shift existing
+ * elements right by argCount, write items into [0..argCount), bump length.
+ * Returns the new length. The mirror of shift; §23.1.3.34.
+ *
+ * #1966: previously `unshift` was not in ARRAY_METHODS at all, so it fell
+ * through to the host-import generic path which never wrote the mutation back
+ * to the WasmGC vec — a silent no-op (host) / corruption (standalone). This is
+ * the native lowering.
+ */
+function compileArrayUnshift(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  callExpr: ts.CallExpression,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  elemType: ValType,
+): ValType | null {
+  // 0-arg unshift: no-op, return current length.
+  if (callExpr.arguments.length === 0) {
+    const vecTmp0 = allocLocal(fctx, `__arr_unsft_vec_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: vecTypeIdx,
+    });
+    compileExpression(ctx, fctx, propAccess.expression);
+    fctx.body.push({ op: "local.tee", index: vecTmp0 });
+    emitReceiverNullGuard(ctx, fctx, vecTmp0, propAccess.expression);
+    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+    if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
+    return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+  }
+
+  const argCount = callExpr.arguments.length;
+  const vecTmp = allocLocal(fctx, `__arr_unsft_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+  const dataTmp = allocLocal(fctx, `__arr_unsft_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
+  const lenTmp = allocLocal(fctx, `__arr_unsft_len_${fctx.locals.length}`, { kind: "i32" });
+  const newCapTmp = allocLocal(fctx, `__arr_unsft_ncap_${fctx.locals.length}`, { kind: "i32" });
+  const newDataTmp = allocLocal(fctx, `__arr_unsft_ndata_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: arrTypeIdx,
+  });
+
+  // Compile receiver -> vec ref
+  compileExpression(ctx, fctx, propAccess.expression);
+  fctx.body.push({ op: "local.tee", index: vecTmp });
+  emitReceiverNullGuard(ctx, fctx, vecTmp, propAccess.expression);
+
+  // Get length
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: lenTmp });
+
+  // Get data array
+  fctx.body.push({ op: "local.get", index: vecTmp });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: dataTmp });
+
+  // Capacity check: len + argCount > capacity? If so, allocate a new buffer and
+  // copy the existing elements directly into their shifted destination
+  // (data[0..len] -> newData[argCount..argCount+len]); otherwise array.copy
+  // in place (overlapping copy is memmove-correct).
+  fctx.body.push({ op: "local.get", index: dataTmp });
+  fctx.body.push({ op: "array.len" });
+  fctx.body.push({ op: "local.get", index: lenTmp });
+  fctx.body.push({ op: "i32.const", value: argCount });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "i32.lt_s" }); // capacity < len + argCount
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      // newCap = max((len + argCount) * 2, 4)
+      { op: "local.get", index: lenTmp } as Instr,
+      { op: "i32.const", value: argCount } as Instr,
+      { op: "i32.add" } as Instr,
+      { op: "i32.const", value: 1 } as Instr,
+      { op: "i32.shl" } as Instr,
+      { op: "i32.const", value: 4 } as Instr,
+      { op: "local.get", index: lenTmp } as Instr,
+      { op: "i32.const", value: argCount } as Instr,
+      { op: "i32.add" } as Instr,
+      { op: "i32.const", value: 1 } as Instr,
+      { op: "i32.shl" } as Instr,
+      { op: "i32.const", value: 4 } as Instr,
+      { op: "i32.gt_s" } as Instr,
+      { op: "select" } as Instr,
+      { op: "local.set", index: newCapTmp } as Instr,
+
+      // newData = array.new_default(newCap)
+      { op: "local.get", index: newCapTmp } as Instr,
+      { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+      { op: "local.set", index: newDataTmp } as Instr,
+
+      // newData[argCount .. argCount+len] = data[0..len]
+      { op: "local.get", index: newDataTmp } as Instr,
+      { op: "i32.const", value: argCount } as Instr,
+      { op: "local.get", index: dataTmp } as Instr,
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "local.get", index: lenTmp } as Instr,
+      { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+
+      // Update vec struct data field + local pointer
+      { op: "local.get", index: vecTmp } as Instr,
+      { op: "local.get", index: newDataTmp } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+      { op: "local.get", index: newDataTmp } as Instr,
+      { op: "local.set", index: dataTmp } as Instr,
+    ],
+    else: [
+      // In-place right shift: data[argCount .. argCount+len] = data[0..len].
+      // array.copy is memmove-safe for overlapping ranges.
+      { op: "local.get", index: dataTmp } as Instr,
+      { op: "i32.const", value: argCount } as Instr,
+      { op: "local.get", index: dataTmp } as Instr,
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "local.get", index: lenTmp } as Instr,
+      { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+    ],
+  } as Instr);
+
+  // Write the new elements into data[0..argCount) (compile-time unrolled).
+  for (let i = 0; i < argCount; i++) {
+    fctx.body.push({ op: "local.get", index: dataTmp });
+    fctx.body.push({ op: "i32.const", value: i });
+    compileExpression(ctx, fctx, callExpr.arguments[i]!, elemType);
+    fctx.body.push({ op: "array.set", typeIdx: arrTypeIdx });
+  }
+
+  // Update length: vec.length = len + argCount
+  fctx.body.push({ op: "local.get", index: vecTmp });
+  fctx.body.push({ op: "local.get", index: lenTmp });
+  fctx.body.push({ op: "i32.const", value: argCount });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 });
+
+  // Return new length (i32 in fast mode, f64 otherwise).
+  fctx.body.push({ op: "local.get", index: lenTmp });
+  fctx.body.push({ op: "i32.const", value: argCount });
+  fctx.body.push({ op: "i32.add" });
+  if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" });
+  return ctx.fast ? { kind: "i32" } : { kind: "f64" };
 }
 
 /**
