@@ -153,6 +153,76 @@ interface EmitValidationCtx {
 
 let valCtx: EmitValidationCtx | null = null;
 
+/**
+ * Validate that every function reference (`call` / `return_call` / `ref.func`)
+ * in the module targets a real function slot `[0, numImportFuncs + funcs)`.
+ *
+ * This is the durable safety net for the late-import function-index-shift class
+ * (#1809/#1839/#1602/#1886/@@toPrimitive/`__str_flatten`): a `funcIdx` captured
+ * into a JS local before a deferred `flushLateImportShifts`/`addUnionImports`
+ * shift goes stale-low (off-by-`delta`), and a failed `funcMap.get` baked into a
+ * `call` lands as `-1`. The first used to surface as a silently-valid-but-wrong
+ * index → `expected externref, found i32` deep inside wasmtime on a random
+ * test262 shard; the second as the raw encoder's opaque `u32 out of range: -1`.
+ * Both are now a single named, pinpointed codegen error at emit time.
+ *
+ * Walks defined-function bodies, global initializers, element-segment offsets,
+ * and `declaredFuncRefs`. Pure read-only validation; throws on the first bad ref.
+ */
+function validateFuncRefs(mod: WasmModule, numImportFuncs: number): void {
+  const maxFuncIdx = numImportFuncs + mod.functions.length; // exclusive upper bound
+
+  const check = (funcIdx: number, where: string): void => {
+    if (!Number.isInteger(funcIdx) || funcIdx < 0 || funcIdx >= maxFuncIdx) {
+      throw new RangeError(
+        `Codegen error: function reference out of range — funcIdx ${funcIdx} ` +
+          `(valid: [0, ${maxFuncIdx})) at ${where}. This is the late-import ` +
+          `function-index-shift class: a captured funcIdx went stale across a ` +
+          `deferred shift, or a funcMap lookup failed and baked -1. Re-resolve ` +
+          `the funcIdx by name AFTER the last ensureLateImport/flushLateImportShifts.`,
+      );
+    }
+  };
+
+  const seen = new WeakSet<object>();
+  const walk = (instrs: Instr[] | undefined, where: string): void => {
+    if (!instrs || seen.has(instrs)) return;
+    seen.add(instrs);
+    for (const instr of instrs) {
+      const a = instr as {
+        op: string;
+        funcIdx?: number;
+        body?: Instr[];
+        then?: Instr[];
+        else?: Instr[];
+        catches?: { body?: Instr[] }[];
+        catchAll?: Instr[];
+      };
+      if ((a.op === "call" || a.op === "return_call" || a.op === "ref.func") && typeof a.funcIdx === "number") {
+        check(a.funcIdx, where);
+      }
+      if (Array.isArray(a.body)) walk(a.body, where);
+      if (Array.isArray(a.then)) walk(a.then, where);
+      if (Array.isArray(a.else)) walk(a.else, where);
+      if (Array.isArray(a.catches)) for (const c of a.catches) walk(c.body, where);
+      if (Array.isArray(a.catchAll)) walk(a.catchAll, where);
+    }
+  };
+
+  for (const f of mod.functions) {
+    walk(f.body, `function '${(f as { name?: string }).name ?? "?"}'`);
+  }
+  for (const g of mod.globals) walk(g.init, `global '${(g as { name?: string }).name ?? "?"}' init`);
+  for (const elem of mod.elements) {
+    walk(elem.offset, "element-segment offset");
+    if (elem.funcIndices) {
+      for (const fi of elem.funcIndices) check(fi, "element-segment function list");
+    }
+  }
+  for (const fi of mod.declaredFuncRefs) check(fi, "declared func ref");
+  if (mod.startFuncIdx !== undefined) check(mod.startFuncIdx, "start function");
+}
+
 function makeValidationCtx(mod: WasmModule): EmitValidationCtx {
   let numImportFuncs = 0;
   let numImportGlobals = 0;
@@ -280,6 +350,37 @@ function emitBinaryWithSourceMapUnguarded(mod: WasmModule): EmitResult {
   enc.bytes([0x01, 0x00, 0x00, 0x00]); // version 1
 
   const numImportFuncs = mod.imports.filter((i) => i.desc.kind === "func").length;
+
+  // Pre-emit guard: every `call`/`return_call`/`ref.func` funcIdx must point at a
+  // real function slot. Catches the recurring late-import index-shift class
+  // (#1809/#1839/#1602/#1886/@@toPrimitive) — a funcIdx captured into a JS local
+  // before a deferred shift goes stale-low or, on a failed funcMap lookup, lands
+  // as -1. Both used to surface only as an opaque `u32 out of range: -1` at the
+  // raw encoder, or (worse) as a silently valid-but-wrong index that became
+  // "expected externref, found i32" inside wasmtime on a test262 shard. This
+  // turns the whole class into a named, pinpointed codegen error at emit time.
+  //
+  // Opt-in (env-gated) so the default compile path is byte-for-byte unchanged —
+  // a diagnostic CI/devs enable, never a behaviour change that could false-fire
+  // on a long-tail construct. A pure range check is sound: any in-range index is
+  // accepted, so it cannot reject a valid module; it only converts the two
+  // already-broken outcomes above into an actionable message. Validated as a
+  // no-op across the issue-16xx/17xx/18xx + WASI corpus (0 fires).
+  // #1939 — run the funcref range-check by default everywhere except a
+  // production build. It is a pure in-range check (cannot reject a valid
+  // module; only turns the recurring stale-funcIdx bug class — #1891/#1899 —
+  // into a named emit-time error instead of an opaque wasmtime type mismatch),
+  // and it is a per-emit linear scan (negligible). Explicitly forced on in
+  // vitest/CI; `JS2WASM_VALIDATE_FUNCREFS` still force-enables, and a
+  // production build (`NODE_ENV=production`) opts out for byte-identical output.
+  const validateFuncRefsEnabled =
+    !!process.env.JS2WASM_VALIDATE_FUNCREFS ||
+    !!process.env.VITEST ||
+    !!process.env.CI ||
+    process.env.NODE_ENV !== "production";
+  if (validateFuncRefsEnabled) {
+    validateFuncRefs(mod, numImportFuncs);
+  }
 
   // Type section
   if (mod.types.length > 0) {
@@ -738,14 +839,18 @@ export function encodeValType(t: ValType, enc: WasmEncoder): void {
       enc.byte(TYPE.any);
       break;
     case "i8":
-      // i8 is only valid as a packed storage type — encode as i32 fallback
-      enc.byte(TYPE.i32);
-      break;
     case "i16":
-      // i16 is only valid as a packed storage type in struct fields/array elements,
-      // but if it appears in encodeValType, encode it as i32 (this shouldn't happen)
-      enc.byte(TYPE.i32);
-      break;
+      // #1939 — i8/i16 are *packed storage* types, valid only inside struct
+      // fields and array elements (encoded by the dedicated path at the top of
+      // this function / the field encoder). Reaching them here means a packed
+      // type leaked into a value position (param/result/local/global) where
+      // Wasm has no such type; silently encoding it as i32 produced a binary
+      // whose declared type disagreed with the values flowing through it — a
+      // downstream validation error far from the leak. Fail loud instead.
+      throw new Error(
+        `encodeValType: packed storage type "${t.kind}" is not valid in a value position ` +
+          `(only struct fields / array elements) — a packed type leaked into a param/result/local/global`,
+      );
   }
 }
 
@@ -1201,6 +1306,11 @@ export function encodeInstr(instr: Instr, enc: WasmEncoder): void {
       break;
     case "i32.trunc_f64_s":
       enc.byte(OP.i32_trunc_f64_s);
+      break;
+    case "i32.trunc_f64_u":
+      // #1939 — was a union member with no encoder case (silently dropped if
+      // ever emitted). Unsigned f64→i32 truncation, opcode 0xab.
+      enc.byte(OP.i32_trunc_f64_u);
       break;
     case "f64.convert_i32_s":
       enc.byte(OP.f64_convert_i32_s);
@@ -1861,6 +1971,35 @@ export function encodeInstr(instr: Instr, enc: WasmEncoder): void {
       enc.u32(instr.align);
       enc.u32(instr.offset);
       break;
+    case "end":
+      // #1939 — the explicit structured-block terminator (0x0b). Block/loop/if
+      // bodies normally emit their own trailing `end` in the structured
+      // encoders, but a standalone `end` instr is a valid union member and was
+      // previously a silent drop.
+      enc.byte(OP.end);
+      break;
+    case "br_table":
+      // #1939 — `br_table` is declared in the Instr union as `{ op: "br_table" }`
+      // with NO payload (target label vector + default), so there is no correct
+      // encoding for it: emitting opcode 0x0e without its operands would corrupt
+      // every following instruction. No codegen path produces it today. Fail
+      // loud rather than emit a malformed branch; wiring it needs the union to
+      // carry `targets: number[]` + `default: number` first.
+      throw new Error(
+        "encodeInstr: 'br_table' has no payload in the Instr union (needs targets[] + default) — " +
+          "cannot be encoded; no codegen path should emit it yet (#1939)",
+      );
+    // #1939 — fail loud on an op with no encoding case. The ~170
+    // `as unknown as Instr` casts (#1095) bypass the type union, so a
+    // mistyped/missing op string would otherwise be silently omitted from the
+    // binary — the worst failure shape, surfacing far downstream as an opaque
+    // wasm validation error (stack/type mismatch) with no link to the source
+    // op. The `never` binding is a compile-time exhaustiveness check over the
+    // real union; the throw also catches cast-injected strings at runtime.
+    default: {
+      const unknown: never = instr;
+      throw new Error(`encodeInstr: unknown op "${(unknown as { op?: string }).op ?? "<no op>"}"`);
+    }
   }
 }
 
