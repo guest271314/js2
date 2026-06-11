@@ -1,10 +1,9 @@
 ---
 id: 1953
 title: "test262: shard durations spread 32–153s — regenerate weight maps with full per-test coverage"
-status: done
+status: blocked
 created: 2026-06-11
 updated: 2026-06-11
-completed: 2026-06-11
 priority: high
 feasibility: easy
 reasoning_effort: low
@@ -45,6 +44,48 @@ compile-heavy bins overflowed (the 153s shard).
   `tests/test262-slow-tests-standalone.json`.
 - Verified by simulating `assignBalancedChunk` offline against ground-truth
   durations (see PR description for predicted spread before/after).
+
+## BLOCKED (2026-06-11) — deterministic contamination pairings
+
+The regenerated maps were validated offline (simulated bin spread 43s → 0s
+with the exact `assignBalancedChunk` algorithm) but BOUNCED off the
+regression gate twice on PR #1314 with net −1 (7 pass→fail / 6 fail→pass).
+**5 of the 7 regressions were identical across two independent runs** — the
+new deterministic shard assignment creates *fixed* cross-test contamination
+pairings (pre-existing isolation bugs in the unified fork pool):
+
+- `annexB/.../func-if-decl-else-decl-a-…switch.js` + `func-switch-case-…switch.js`
+  (eval-harness state; two sibling annexB tests flipped fail→pass in the
+  same runs — the family trades victims with the assignment)
+- `built-ins/Array/length/S15.4.4_A1.3_T1.js` (`Array.prototype.length`
+  mutated by a fork sibling; `built-ins/Array/prototype/length.js`
+  simultaneously flipped fail→pass)
+- `built-ins/Object/defineProperties/15.2.3.7-2-14.js`
+  (`Property description must be an object: JSON` — JSON global clobbered)
+- `built-ins/String/prototype/charAt/S15.5.4.4_A10.js`
+  (`wasm exception during compile (poisoned built-in)` — #1862 class, but
+  recorded as status=fail, which BYPASSES the poison retry: the retry only
+  triggers on status=compile_error)
+
+Any weight/shard-count change will hit this same wall — the gate cannot
+distinguish redistribution of pre-existing contamination from real
+regressions. Unblock options (pick one):
+
+1. **Stakeholder-approved one-time step change**: land the maps with an
+   admin merge accepting net −1; the next push-to-main run re-anchors the
+   baseline and subsequent PRs diff clean.
+2. **Extend the #1862 poison retry to status=fail poison-class errors**
+   (rescues the 2 poisoned-builtin flips deterministically) + a bounded
+   isolation-retry for fails matching known contamination signatures
+   (`Cannot redefine property`, `Property description must be an object`,
+   `eval harness assertion`) — rescues the rest, and reduces baseline noise
+   for every future PR, then re-land the maps.
+3. Fix the underlying fork-state isolation (recycle worker between tests of
+   mutating families) — correct but largest.
+
+The maps were REMOVED from PR #1314 so #1951/#1952/#1954 could land; the
+refresh-script clamp (≥1ms) stayed in. Regenerate with
+`node scripts/refresh-slow-tests.mjs --threshold 0` when unblocked.
 
 ## Refresh policy
 
