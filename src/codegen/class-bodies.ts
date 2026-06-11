@@ -2079,6 +2079,72 @@ export function compileSuperCall(
       compileExpression(ctx, fctx, member.initializer, childFields[fieldIdx]!.type);
       fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
     }
+    // #2078 — also replay the ancestor constructor BODY's `this.<field> = <expr>`
+    // assignments. Field declarations only cover initialized members (`x = 5`);
+    // a base ctor that sets `this.x = 1` in its body would otherwise leave the
+    // child's `x` slot at its zero default after an explicit `super()` (the
+    // implicit-super path already does this; compileSuperCall did not). Mirrors
+    // the implicit-super replay above. super()/argument-positional fields are
+    // handled separately below, so skip nested super() statements here.
+    const ancestorCtor = ancestorDecl.members.find(ts.isConstructorDeclaration) as
+      | ts.ConstructorDeclaration
+      | undefined;
+    if (ancestorCtor?.body) {
+      // Parent-ctor parameter names: assignments whose RHS reads a parameter
+      // (`constructor(v){ this.x = v*2 }`) are NOT replayed here — `v` is not
+      // bound in the child's super() frame, and the positional super(args)→field
+      // mapping below already drives those fields. We only replay
+      // parameter-independent body assignments (`this.x = 1`, `this.w = this.x + 3`).
+      const paramNames = new Set<string>();
+      for (const p of ancestorCtor.parameters) {
+        if (ts.isIdentifier(p.name)) paramNames.add(p.name.text);
+      }
+      const rhsReadsParam = (expr: ts.Expression): boolean => {
+        let found = false;
+        const visit = (n: ts.Node): void => {
+          if (found) return;
+          // A bare identifier that names a parameter (but not a `this.<param>`
+          // property access — that's a field, fine to replay).
+          if (ts.isIdentifier(n) && paramNames.has(n.text)) {
+            const parent = n.parent;
+            const isPropName = parent && ts.isPropertyAccessExpression(parent) && parent.name === n;
+            if (!isPropName) found = true;
+            return;
+          }
+          ts.forEachChild(n, visit);
+        };
+        visit(expr);
+        return found;
+      };
+      for (const stmt of ancestorCtor.body.statements) {
+        if (
+          ts.isExpressionStatement(stmt) &&
+          ts.isCallExpression(stmt.expression) &&
+          stmt.expression.expression.kind === ts.SyntaxKind.SuperKeyword
+        ) {
+          continue; // handled by ancestor chain order
+        }
+        if (
+          ts.isExpressionStatement(stmt) &&
+          ts.isBinaryExpression(stmt.expression) &&
+          stmt.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+          ts.isPropertyAccessExpression(stmt.expression.left) &&
+          stmt.expression.left.expression.kind === ts.SyntaxKind.ThisKeyword
+        ) {
+          if (rhsReadsParam(stmt.expression.right)) continue;
+          const rawName = stmt.expression.left.name.text;
+          const bodyFieldName = ts.isPrivateIdentifier(stmt.expression.left.name)
+            ? "__priv_" + rawName.slice(1)
+            : rawName;
+          const bodyFieldIdx = childFields.findIndex((f) => f.name === bodyFieldName);
+          if (bodyFieldIdx !== -1) {
+            fctx.body.push({ op: "local.get", index: selfLocal });
+            compileExpression(ctx, fctx, stmt.expression.right, childFields[bodyFieldIdx]!.type);
+            fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: bodyFieldIdx });
+          }
+        }
+      }
+    }
   }
 
   // Evaluate super(args) and assign to parent fields on the child struct.
