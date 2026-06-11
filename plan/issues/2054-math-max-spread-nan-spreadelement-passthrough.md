@@ -1,10 +1,11 @@
 ---
 id: 2054
 title: "Math.max(...arr) / Math.min(...arr) on runtime arrays silently return NaN — generic SpreadElement passthrough hazard"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -82,3 +83,38 @@ that converts a whole class of future silent miscompiles into compile errors.
 Grepped `Math.max(...` across plan/issues/ — only #18/#78/#83/#1135/#1888, all
 done, all asserting it works or planning it. No open issue for the current
 breakage.
+
+## Resolution (2026-06-11)
+
+Added `compileMathMinMaxSpread` in `src/codegen/expressions/builtins.ts`,
+dispatched from the Math.min/max lowering when any argument is a
+`SpreadElement`. It folds the arguments left-to-right into an f64 accumulator
+seeded with the identity (`+Infinity` for min, `-Infinity` for max):
+
+- positional numeric args compile to f64 and fold via `f64.min`/`f64.max`;
+- each spread resolves its backing vec through `resolveArrayInfo`, then a native
+  WasmGC loop reads `struct.get fieldIdx 0` (length) / `fieldIdx 1` (data) and
+  folds each `array.get` element (i32 elements promoted via `f64.convert_i32_s`);
+- NaN is tracked in a flag and propagated to the result via `select`
+  (§21.3.2.24/25 — result is NaN if any value is NaN);
+- a null vec contributes nothing (guarded by `ref.is_null`).
+
+Pure WasmGC, no host import, so it works in both JS-host and standalone modes.
+When a spread's element type cannot be resolved to a numeric native vec
+(externref element, etc.) the helper returns null and the caller keeps the
+legacy behaviour rather than emitting invalid Wasm.
+
+**Deferred**: the broader "make the SpreadElement passthrough in
+`compileExpressionInner` `reportError` instead of silently unwrapping" hardening
+(acceptance bullet 3) is intentionally NOT done here — it risks regressing
+legitimate consumers and needs the audit the issue itself calls for. This PR
+fixes the concrete Math.max/min breakage; the passthrough-to-error change should
+be a separate, audited issue.
+
+### Test Results
+
+New `tests/equivalence/math-minmax-spread.test.ts` — 10 cases (simple max/min,
+empty `±Infinity`, leading/trailing/both-sides positional, NaN propagation,
+multiple spreads, all-negative). All pass. `Math.max(...[3,9,4])` now returns
+`9` (was NaN). No regressions in math-builtins / new-expression-spread /
+spread-in-new-expressions / sparse-array-spread (40 tests green).
