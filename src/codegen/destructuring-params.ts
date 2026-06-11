@@ -9,6 +9,7 @@ import type { Instr, ValType } from "../ir/types.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { reportError } from "./context/errors.js";
 import { shiftLateImportIndices } from "./expressions/late-imports.js";
 import {
   addUnionImports,
@@ -44,6 +45,40 @@ import {
   syncDestructuredLocalsToGlobals,
   tryEmitArrayProtoIteratorReadDrive,
 } from "./statements/destructuring.js";
+
+/**
+ * #2032 — resolve the static property key for an object binding element.
+ *
+ * For a plain identifier or string/numeric literal property name the key is
+ * already its `.text`. For a `ComputedPropertyName` (`{ [k]: v }`) the struct
+ * fast path needs a compile-time-constant string to map to a field index; we
+ * recover it from the checker when the key expression has a string- or
+ * numeric-literal type (the common `const k = "dyn"; { [k]: v }` case).
+ *
+ * Returns `undefined` when the key cannot be resolved statically — the caller
+ * then reports a clear unsupported-feature error rather than silently binding
+ * the zero-initialized local (the original bug: a `ComputedPropertyName` has
+ * no `.text`, so `fields.findIndex` returned -1 and the binding was skipped).
+ */
+function resolveStaticPropKey(ctx: CodegenContext, element: ts.BindingElement): string | undefined {
+  const pn = element.propertyName ?? element.name;
+  if (ts.isIdentifier(pn)) return pn.text;
+  if (ts.isStringLiteral(pn) || ts.isNumericLiteral(pn)) return pn.text;
+  if (ts.isComputedPropertyName(pn)) {
+    const keyExpr = pn.expression;
+    // A string/numeric literal key folds directly.
+    if (ts.isStringLiteral(keyExpr) || ts.isNumericLiteral(keyExpr)) return keyExpr.text;
+    // Otherwise ask the checker for a literal type (covers `const k = "dyn"`).
+    try {
+      const t = ctx.checker.getTypeAtLocation(keyExpr);
+      if (t.isStringLiteral()) return t.value;
+      if (t.isNumberLiteral()) return String(t.value);
+    } catch {
+      // fall through to undefined — caller fails loudly
+    }
+  }
+  return undefined;
+}
 
 /**
  * Detect array binding patterns that, per ECMA-262 §13.3.3.6, perform no
@@ -727,11 +762,23 @@ export function destructureParamObject(
 
   for (const element of pattern.elements) {
     if (!ts.isBindingElement(element)) continue;
-    const propName = (element.propertyName ?? element.name) as ts.Identifier;
+    // #2032 — resolve the property key statically. A ComputedPropertyName
+    // (`{ [k]: v }`) has no `.text`; recover the constant string from the
+    // checker so it maps to the correct struct field instead of binding the
+    // zero-initialized local. Unresolvable computed keys fail loudly below.
+    const propKey = resolveStaticPropKey(ctx, element);
+    if (propKey === undefined && element.propertyName && ts.isComputedPropertyName(element.propertyName)) {
+      reportError(
+        ctx,
+        element,
+        "Computed property key in object destructuring must be a compile-time-constant string or number",
+      );
+      continue;
+    }
     if (!ts.isIdentifier(element.name)) {
       // Nested pattern — recurse
       if (ts.isObjectBindingPattern(element.name) || ts.isArrayBindingPattern(element.name)) {
-        const fieldIdx = fields.findIndex((f) => f.name === propName.text);
+        const fieldIdx = fields.findIndex((f) => f.name === propKey);
         if (fieldIdx === -1) continue;
         const fieldType = fields[fieldIdx]!.type;
         const tmpLocal = allocLocal(fctx, `__dparam_${fctx.locals.length}`, fieldType);
@@ -756,7 +803,7 @@ export function destructureParamObject(
       continue;
     }
     const localName = element.name.text;
-    const fieldIdx = fields.findIndex((f) => f.name === propName.text);
+    const fieldIdx = fields.findIndex((f) => f.name === propKey);
     if (fieldIdx === -1) {
       // Field not in struct — already pre-allocated by ensureBindingLocals
       continue;
@@ -1525,12 +1572,31 @@ export function destructureParamArray(
       fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
       fctx.body.push({ op: "local.set", index: restArrLocal });
 
-      // array.copy(restArr, 0, srcData, i, restLen)
+      // #2031 — clamp the source offset to `min(i, srcLen)`. WasmGC
+      // `array.copy` traps when `srcOffset > src.len` even for a zero-length
+      // copy, so when the source is shorter than the fixed bindings (e.g.
+      // `const [p, q = 9, ...rest] = [1]` ⇒ i=2 > len=1) the unclamped offset
+      // `i` traps. Clamping to the length keeps `restLen=0` copies valid while
+      // leaving longer sources (where `i <= len`) untouched.
+      const srcOffsetLocal = allocLocal(fctx, `__rest_src_off_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "local.get", index: paramIdx });
+      fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }); // srcLen
+      fctx.body.push({ op: "local.set", index: srcOffsetLocal });
+      // select(i, srcLen, i < srcLen) → min(i, srcLen)
+      fctx.body.push({ op: "i32.const", value: i });
+      fctx.body.push({ op: "local.get", index: srcOffsetLocal });
+      fctx.body.push({ op: "i32.const", value: i });
+      fctx.body.push({ op: "local.get", index: srcOffsetLocal });
+      fctx.body.push({ op: "i32.lt_s" } as Instr);
+      fctx.body.push({ op: "select" } as Instr);
+      fctx.body.push({ op: "local.set", index: srcOffsetLocal });
+
+      // array.copy(restArr, 0, srcData, min(i, srcLen), restLen)
       fctx.body.push({ op: "local.get", index: restArrLocal });
       fctx.body.push({ op: "i32.const", value: 0 });
       fctx.body.push({ op: "local.get", index: paramIdx });
       fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 }); // src data
-      fctx.body.push({ op: "i32.const", value: i });
+      fctx.body.push({ op: "local.get", index: srcOffsetLocal });
       fctx.body.push({ op: "local.get", index: restLenLocal });
       fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
 
