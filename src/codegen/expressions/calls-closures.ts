@@ -14,13 +14,10 @@ import { getOrCreateFuncRefWrapperTypes } from "../closures.js";
 import { allocLocal } from "../context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "../context/types.js";
 import { addFuncType, addImport, localGlobalIdx, resolveWasmType } from "../index.js";
-import { stringConstantExternrefInstrs } from "../native-strings.js";
-import { emitExternrefToStructGet, emitNullCheckThrow, emitNullGuardedStructGet } from "../property-access.js";
-import { addStringConstantGlobal } from "../registry/imports.js";
+import { emitNullCheckThrow } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, VOID_RESULT } from "../shared.js";
-import { ensureCurrentThisGlobal } from "../statements/nested-declarations.js";
-import { defaultValueInstrs, emitGuardedFuncRefCast, emitGuardedRefCast, pushDefaultValue } from "../type-coercion.js";
+import { emitGuardedFuncRefCast, emitGuardedRefCast, pushDefaultValue } from "../type-coercion.js";
 import { getFuncParamTypes, getWasmFuncReturnType, isEffectivelyVoidReturn, wasmFuncReturnsVoid } from "./helpers.js";
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { emitClosureCallArgcExtras, emitResetArgcExtras } from "./calls.js";
@@ -470,203 +467,45 @@ export function compileCallablePropertyCall(
 
   const fieldType = fields[fieldIdx]!.type;
 
-  const receiverIsNewThis = (() => {
-    let receiver: ts.Expression = propAccess.expression;
-    while (ts.isParenthesizedExpression(receiver)) receiver = receiver.expression;
-    return ts.isNewExpression(receiver) && receiver.expression.kind === ts.SyntaxKind.ThisKeyword;
-  })();
-  if (receiverIsNewThis && !ctx.standalone && !ctx.strictNoHostImports) {
-    const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-    const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
-    const methodCallIdx = ensureLateImport(
-      ctx,
-      "__extern_method_call",
-      [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
-      [{ kind: "externref" }],
-    );
-    flushLateImportShifts(ctx, fctx);
-
-    if (arrNewIdx !== undefined && arrPushIdx !== undefined && methodCallIdx !== undefined) {
-      const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
-      if (recvType && recvType.kind !== "externref") {
-        fctx.body.push({ op: "extern.convert_any" } as Instr);
-      }
-      if (recvType === null) {
-        fctx.body.push({ op: "ref.null.extern" } as Instr);
-      }
-      const recvLocal = allocLocal(fctx, `__emc_recv_${fctx.locals.length}`, { kind: "externref" });
-      fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
-
-      fctx.body.push({ op: "call", funcIdx: arrNewIdx } as Instr);
-      const argsLocal = allocLocal(fctx, `__emc_args_${fctx.locals.length}`, { kind: "externref" });
-      fctx.body.push({ op: "local.set", index: argsLocal } as Instr);
-
-      for (const arg of expr.arguments) {
-        fctx.body.push({ op: "local.get", index: argsLocal } as Instr);
-        const argType = compileExpression(ctx, fctx, arg, { kind: "externref" });
-        if (argType && argType.kind !== "externref") {
-          fctx.body.push({ op: "extern.convert_any" } as Instr);
-        }
-        if (argType === null) {
-          fctx.body.push({ op: "ref.null.extern" } as Instr);
-        }
-        fctx.body.push({ op: "call", funcIdx: arrPushIdx } as Instr);
-      }
-
-      fctx.body.push({ op: "local.get", index: recvLocal } as Instr);
-      addStringConstantGlobal(ctx, methodName);
-      fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
-      fctx.body.push({ op: "local.get", index: argsLocal } as Instr);
-      const finalMethodCallIdx = ctx.funcMap.get("__extern_method_call") ?? methodCallIdx;
-      fctx.body.push({ op: "call", funcIdx: finalMethodCallIdx } as Instr);
-      return { kind: "externref" };
-    }
-  }
-
-  // (#1734/#1712) Compile the receiver and read the callable field through the
-  // same guarded multi-struct dispatch used by normal property access.  Acorn's
-  // `Parser.parse = function (...) { return new this(...).parse() }` resolves
-  // `.parse` through one structurally compatible parser type but constructs a
-  // different concrete parser struct at runtime; a guard-cast-only path turns
-  // that mismatch into `ref.null` followed by `struct.get`.
-  type ReceiverLocal = { localIdx: number; type: ValType };
-
-  const isCurrentThisReceiver = (): boolean =>
-    propAccess.expression.kind === ts.SyntaxKind.ThisKeyword && !fctx.localMap.has("this");
-
-  const compileReceiverToLocal = (): ReceiverLocal | null => {
-    if (isCurrentThisReceiver()) ensureCurrentThisGlobal(ctx);
+  // (#1734) Compile the receiver and normalize it to `(ref null structTypeIdx)`
+  // before the bare `struct.get` that extracts the method-closure field.
+  //
+  // The receiver expression's compiled wasm type can disagree with the resolved
+  // struct type `structTypeIdx`: a receiver that is itself a call (e.g. a lifted
+  // closure / static factory whose declared return is `externref` but whose body
+  // returns a wider struct, or simply a method returning the object as externref)
+  // leaves an `externref` (or a different struct ref) on the stack. Emitting
+  // `struct.get structTypeIdx` directly on that value is ill-typed and fails Wasm
+  // validation (`struct.get expected (ref null N), found … M`). Route the value
+  // through `any.convert_extern` (when externref) + a `ref.test`-guarded cast to
+  // `structTypeIdx`, mirroring the guarded cast already used for the closure
+  // field itself below, so the `struct.get` operand is always the right struct.
+  const compileGuardedReceiver = (): void => {
     const recvResult = compileExpression(ctx, fctx, propAccess.expression);
-    if (!recvResult) return null;
-    const recvLocal = allocLocal(fctx, `__cprop_recv_${fctx.locals.length}`, recvResult);
-    fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
-    return { localIdx: recvLocal, type: recvResult };
-  };
-
-  const pushReceiverAsExternref = (receiver: ReceiverLocal | null): void => {
-    if (!receiver) {
-      fctx.body.push({ op: "ref.null.extern" } as Instr);
+    // Already exactly the target struct type (or its nullable form) — the bare
+    // struct.get is well-typed; no bridge needed.
+    if (
+      recvResult &&
+      (recvResult.kind === "ref" || recvResult.kind === "ref_null") &&
+      (recvResult as { typeIdx: number }).typeIdx === structTypeIdx
+    ) {
       return;
     }
-    fctx.body.push({ op: "local.get", index: receiver.localIdx } as Instr);
-    if (receiver.type.kind === "externref") return;
-    if (receiver.type.kind === "ref" || receiver.type.kind === "ref_null") {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    // externref must round-trip through anyref before ref.test/ref.cast.
+    if (recvResult && recvResult.kind === "externref") {
+      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      emitGuardedRefCast(fctx, structTypeIdx);
       return;
     }
-    fctx.body.push({ op: "drop" } as Instr);
-    fctx.body.push({ op: "ref.null.extern" } as Instr);
-  };
-
-  const pushCallableFieldFromReceiver = (receiver: ReceiverLocal | null): void => {
-    if (!receiver) {
-      fctx.body.push(...defaultValueInstrs(fieldType));
+    // A different struct ref is already an anyref subtype — guard-cast directly.
+    if (recvResult && (recvResult.kind === "ref" || recvResult.kind === "ref_null")) {
+      emitGuardedRefCast(fctx, structTypeIdx);
       return;
     }
-    const emitNullPrototypeFallback = (): void => {
-      if (fieldType.kind !== "externref" && fieldType.kind !== "ref_null") return;
-      if (ctx.standalone || ctx.strictNoHostImports) return;
-      const getIdx = ensureLateImport(
-        ctx,
-        "__extern_get",
-        [{ kind: "externref" }, { kind: "externref" }],
-        [{ kind: "externref" }],
-      );
-      flushLateImportShifts(ctx, fctx);
-      if (getIdx === undefined) return;
-
-      const fieldLocal = allocLocal(fctx, `__cprop_field_${fctx.locals.length}`, fieldType);
-      fctx.body.push({ op: "local.set", index: fieldLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: fieldLocal } as Instr);
-      fctx.body.push({ op: "ref.is_null" } as Instr);
-
-      const savedBody = fctx.body;
-      const thenBody: Instr[] = [];
-      fctx.body = thenBody;
-      pushReceiverAsExternref(receiver);
-      addStringConstantGlobal(ctx, methodName);
-      fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
-      fctx.body.push({ op: "call", funcIdx: getIdx } as Instr);
-      if (fieldType.kind === "ref_null") {
-        fctx.body.push({ op: "any.convert_extern" } as Instr);
-        emitGuardedRefCast(fctx, (fieldType as { typeIdx: number }).typeIdx);
-      }
-      fctx.body = savedBody;
-
-      fctx.body.push({
-        op: "if",
-        blockType: { kind: "val", type: fieldType },
-        then: thenBody,
-        else: [{ op: "local.get", index: fieldLocal } as Instr],
-      } as Instr);
-    };
-    const receiverIsCurrentThis = isCurrentThisReceiver();
-    if (receiverIsCurrentThis && !ctx.standalone && !ctx.strictNoHostImports) {
-      const getIdx = ensureLateImport(
-        ctx,
-        "__extern_get",
-        [{ kind: "externref" }, { kind: "externref" }],
-        [{ kind: "externref" }],
-      );
-      flushLateImportShifts(ctx, fctx);
-      if (getIdx !== undefined) {
-        pushReceiverAsExternref(receiver);
-        addStringConstantGlobal(ctx, methodName);
-        fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
-        fctx.body.push({ op: "call", funcIdx: getIdx } as Instr);
-        if (fieldType.kind === "ref" || fieldType.kind === "ref_null") {
-          fctx.body.push({ op: "any.convert_extern" } as Instr);
-          emitGuardedRefCast(fctx, (fieldType as { typeIdx: number }).typeIdx);
-          if (fieldType.kind === "ref") {
-            emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: (fieldType as { typeIdx: number }).typeIdx });
-            fctx.body.push({ op: "ref.as_non_null" } as Instr);
-          }
-        }
-        return;
-      }
-    }
-    fctx.body.push({ op: "local.get", index: receiver.localIdx } as Instr);
-    const recvResult = receiver.type;
-    if (!recvResult) {
-      fctx.body.push(...defaultValueInstrs(fieldType));
-      return;
-    }
-    if (recvResult.kind === "externref") {
-      emitExternrefToStructGet(ctx, fctx, fieldType, structTypeIdx, fieldIdx, methodName, true);
-      emitNullPrototypeFallback();
-      return;
-    }
-    if (recvResult.kind === "ref" || recvResult.kind === "ref_null") {
-      const nullableReceiver: ValType = { kind: "ref_null", typeIdx: (recvResult as { typeIdx: number }).typeIdx };
-      emitNullGuardedStructGet(ctx, fctx, nullableReceiver, fieldType, structTypeIdx, fieldIdx, methodName);
-      emitNullPrototypeFallback();
-      return;
-    }
-    fctx.body.push({ op: "drop" });
-    fctx.body.push(...defaultValueInstrs(fieldType));
-  };
-
-  const installCurrentThis = (receiver: ReceiverLocal | null): { globalIdx: number; prevLocal: number } => {
-    const globalIdx = ensureCurrentThisGlobal(ctx);
-    const prevLocal = allocLocal(fctx, `__prev_this_${fctx.locals.length}`, { kind: "externref" });
-    fctx.body.push({ op: "global.get", index: globalIdx } as Instr);
-    fctx.body.push({ op: "local.set", index: prevLocal } as Instr);
-    pushReceiverAsExternref(receiver);
-    fctx.body.push({ op: "global.set", index: globalIdx } as Instr);
-    return { globalIdx, prevLocal };
-  };
-
-  const restoreCurrentThis = (state: { globalIdx: number; prevLocal: number }, returnType: ValType | null): void => {
-    if (returnType) {
-      const resultLocal = allocLocal(fctx, `__cprop_result_${fctx.locals.length}`, returnType);
-      fctx.body.push({ op: "local.set", index: resultLocal } as Instr);
-      fctx.body.push({ op: "local.get", index: state.prevLocal } as Instr);
-      fctx.body.push({ op: "global.set", index: state.globalIdx } as Instr);
-      fctx.body.push({ op: "local.get", index: resultLocal } as Instr);
-      return;
-    }
-    fctx.body.push({ op: "local.get", index: state.prevLocal } as Instr);
-    fctx.body.push({ op: "global.set", index: state.globalIdx } as Instr);
+    // Anything else (primitive / void) — leave the stack as the legacy bare
+    // `struct.get` path expected; guarding a non-reference operand would itself
+    // be ill-typed. This preserves prior behavior for shapes that never reach
+    // the #1734 mismatch.
   };
 
   // The field must be a callable type — check via TS type checker
@@ -694,8 +533,9 @@ export function compileCallablePropertyCall(
   if (fieldType.kind === "ref" || fieldType.kind === "ref_null") {
     const closureInfo = ctx.closureInfoByTypeIdx.get((fieldType as { typeIdx: number }).typeIdx);
     if (closureInfo) {
-      const receiver = compileReceiverToLocal();
-      pushCallableFieldFromReceiver(receiver);
+      // Compile receiver (normalized to the struct type, #1734), get field value.
+      compileGuardedReceiver();
+      fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
 
       const closureLocal = allocLocal(fctx, `__cprop_${fctx.locals.length}`, fieldType);
       fctx.body.push({ op: "local.set", index: closureLocal });
@@ -726,7 +566,6 @@ export function compileCallablePropertyCall(
       }
 
       // Get funcref from closure struct field 0 and call_ref — null-check → TypeError (#728)
-      const thisState = installCurrentThis(receiver);
       fctx.body.push({ op: "local.get", index: closureLocal });
       if (fieldType.kind === "ref_null") {
         emitNullCheckThrow(ctx, fctx, fieldType);
@@ -740,7 +579,6 @@ export function compileCallablePropertyCall(
       emitGuardedFuncRefCast(fctx, closureInfo.funcTypeIdx);
       emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: closureInfo.funcTypeIdx });
       fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx });
-      restoreCurrentThis(thisState, closureInfo.returnType);
 
       return closureInfo.returnType ?? VOID_RESULT;
     }
@@ -754,8 +592,9 @@ export function compileCallablePropertyCall(
     if (wrapperTypes) {
       const { structTypeIdx: wrapperStructIdx, closureInfo: matchedClosureInfo } = wrapperTypes;
 
-      const receiver = compileReceiverToLocal();
-      pushCallableFieldFromReceiver(receiver);
+      // Compile receiver (normalized to the struct type, #1734), get field value.
+      compileGuardedReceiver();
+      fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
 
       // Convert externref -> closure struct ref (guarded to avoid illegal cast)
       const closureRefType: ValType = {
@@ -790,7 +629,6 @@ export function compileCallablePropertyCall(
       }
 
       // Get funcref from closure struct and call_ref — null-check → TypeError (#728)
-      const thisState = installCurrentThis(receiver);
       fctx.body.push({ op: "local.get", index: closureLocal });
       emitNullCheckThrow(ctx, fctx, closureRefType);
       fctx.body.push({
@@ -805,7 +643,6 @@ export function compileCallablePropertyCall(
         op: "call_ref",
         typeIdx: matchedClosureInfo.funcTypeIdx,
       });
-      restoreCurrentThis(thisState, matchedClosureInfo.returnType);
 
       return matchedClosureInfo.returnType ?? VOID_RESULT;
     }
@@ -837,8 +674,9 @@ export function compileCallablePropertyCall(
     }
 
     if (matchedClosureInfo && matchedStructTypeIdx !== undefined) {
-      const receiver = compileReceiverToLocal();
-      pushCallableFieldFromReceiver(receiver);
+      // Compile receiver, get field value
+      compileExpression(ctx, fctx, propAccess.expression);
+      fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
 
       const closureLocal = allocLocal(fctx, `__cprop_ref_${fctx.locals.length}`, fieldType);
       fctx.body.push({ op: "local.set", index: closureLocal });
@@ -871,7 +709,6 @@ export function compileCallablePropertyCall(
       }
 
       // Get funcref and call_ref — null-check → TypeError (#728)
-      const thisState = installCurrentThis(receiver);
       fctx.body.push({ op: "local.get", index: closureLocal });
       if (fieldType.kind === "ref_null") {
         emitNullCheckThrow(ctx, fctx, fieldType);
@@ -891,7 +728,6 @@ export function compileCallablePropertyCall(
         op: "call_ref",
         typeIdx: matchedClosureInfo.funcTypeIdx,
       });
-      restoreCurrentThis(thisState, matchedClosureInfo.returnType);
 
       return matchedClosureInfo.returnType ?? VOID_RESULT;
     }

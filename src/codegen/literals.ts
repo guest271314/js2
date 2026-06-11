@@ -2388,40 +2388,6 @@ export function compileArrayLiteral(
   fctx: FunctionContext,
   expr: ts.ArrayLiteralExpression,
 ): ValType | null {
-  if ((ctx as unknown as { _forceHostArrayLiteral?: boolean })._forceHostArrayLiteral) {
-    if (ctx.standalone || ctx.strictNoHostImports) return null;
-    const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-    const arrPushIdx =
-      expr.elements.length > 0
-        ? ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], [])
-        : undefined;
-    flushLateImportShifts(ctx, fctx);
-    if (arrNewIdx === undefined || (expr.elements.length > 0 && arrPushIdx === undefined)) return null;
-
-    fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__js_array_new") ?? arrNewIdx });
-    if (expr.elements.length === 0) return { kind: "externref" };
-
-    const arrLocal = allocLocal(fctx, `__host_arr_${fctx.locals.length}`, { kind: "externref" });
-    fctx.body.push({ op: "local.set", index: arrLocal });
-    for (const el of expr.elements) {
-      if (ts.isSpreadElement(el)) return null;
-      fctx.body.push({ op: "local.get", index: arrLocal });
-      const elemType = ts.isOmittedExpression(el)
-        ? emitUndefined(ctx, fctx)
-        : compileExpression(ctx, fctx, el, { kind: "externref" });
-      if (elemType && elemType.kind !== "externref") {
-        fctx.body.push({ op: "extern.convert_any" } as Instr);
-      }
-      if (elemType === null) {
-        fctx.body.push({ op: "ref.null.extern" } as Instr);
-      }
-      const finalPushIdx = ctx.funcMap.get("__js_array_push") ?? arrPushIdx!;
-      fctx.body.push({ op: "call", funcIdx: finalPushIdx });
-    }
-    fctx.body.push({ op: "local.get", index: arrLocal });
-    return { kind: "externref" };
-  }
-
   // Check if the target type is a tuple — compile as struct.new instead of array.
   // Skip if _arrayLiteralForceVec is set (e.g. destructuring default where the target
   // is a vec type, but TS contextual type resolution sees a tuple pattern).

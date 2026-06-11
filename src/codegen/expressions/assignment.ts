@@ -57,6 +57,7 @@ import {
 } from "./late-imports.js";
 import { emitMappedArgParamSync, emitMappedArgReverseSync } from "./logical-ops.js";
 import { resolveStructName, resolveStructNameForExpr } from "./misc.js";
+import { tryCompileStandaloneRegExpLastIndexWrite } from "../regexp-standalone.js";
 import { resolveEffectiveStructName } from "../property-access.js";
 import {
   compileStringBuilderAppend,
@@ -2180,6 +2181,14 @@ function compilePropertyAssignment(
     }
   }
 
+  // #1914 — `re.lastIndex = v` on a standalone RegExp receiver. Must run
+  // BEFORE the extern-class setter path, which would otherwise emit an
+  // `env.RegExp_set_lastIndex` host import (a standalone purity leak).
+  {
+    const standaloneLastIndexWrite = tryCompileStandaloneRegExpLastIndexWrite(ctx, fctx, target, value);
+    if (standaloneLastIndexWrite !== undefined) return standaloneLastIndexWrite;
+  }
+
   // Compile-away: if the target object is frozen, emit TypeError throw
   if (ts.isIdentifier(target.expression) && ctx.frozenVars.has(target.expression.text)) {
     // Evaluate RHS for side effects, then throw
@@ -2425,14 +2434,10 @@ function compilePropertyAssignment(
 
   const structTypeIdx = ctx.structMap.get(typeName);
   const fields = ctx.structFields.get(typeName);
-  if (structTypeIdx === undefined || !fields) {
-    return compilePropertyAssignmentExternSet(ctx, fctx, target, value, fieldName);
-  }
+  if (structTypeIdx === undefined || !fields) return null;
 
   const fieldIdx = fields.findIndex((f) => f.name === fieldName);
-  if (fieldIdx === -1) {
-    return compilePropertyAssignmentExternSet(ctx, fctx, target, value, fieldName);
-  }
+  if (fieldIdx === -1) return null;
 
   const structSelfType: ValType = { kind: "ref_null", typeIdx: structTypeIdx };
   const structObjResult = compileExpression(ctx, fctx, target.expression, structSelfType);
@@ -2440,18 +2445,7 @@ function compilePropertyAssignment(
     reportError(ctx, target, "Failed to compile struct field receiver");
     return null;
   }
-  const fieldType = fields[fieldIdx]!.type;
-  const forceHostArrayLiteral =
-    !ctx.standalone && !ctx.strictNoHostImports && fieldType.kind === "externref" && ts.isArrayLiteralExpression(value);
-  const ctxAny = ctx as unknown as { _forceHostArrayLiteral?: boolean };
-  const prevForceHostArrayLiteral = ctxAny._forceHostArrayLiteral;
-  if (forceHostArrayLiteral) ctxAny._forceHostArrayLiteral = true;
-  let valType: ValType | null;
-  try {
-    valType = compileExpression(ctx, fctx, value, fieldType);
-  } finally {
-    ctxAny._forceHostArrayLiteral = prevForceHostArrayLiteral;
-  }
+  const valType = compileExpression(ctx, fctx, value, fields[fieldIdx]!.type);
   if (!valType) return null;
   // Save value so assignment expression returns the RHS
   const tmpVal = allocLocal(fctx, `__prop_assign_${fctx.locals.length}`, valType);
@@ -4583,8 +4577,14 @@ export function compileCompoundAssignment(
     return { kind: "f64" };
   }
 
-  // String += : concat instead of numeric add
-  if (op === ts.SyntaxKind.PlusEqualsToken) {
+  // String += : concat instead of numeric add.
+  // Skip when the binding is a boxed mutable capture (ref cell): the boxed
+  // path below (assignment.ts boxedCaptures branch) loads/stores through the
+  // ref-cell struct and has its own externref string-concat handling (#795).
+  // compileStringCompoundAssignment uses bare local.get/local.tee, which would
+  // pass the `(struct (mut externref))` ref cell straight into js-string concat
+  // (→ illegal cast / invalid wasm). #1999.
+  if (op === ts.SyntaxKind.PlusEqualsToken && !fctx.boxedCaptures?.has(name)) {
     const leftTsType = ctx.checker.getTypeAtLocation(expr.left);
     let isStr = isStringType(leftTsType);
     if (!isStr && (leftTsType.flags & ts.TypeFlags.Any) !== 0) {
@@ -4707,9 +4707,13 @@ export function compileCompoundAssignment(
     if (boxed.valType.kind === "externref" && op === ts.SyntaxKind.PlusEqualsToken) {
       const rightTsType = ctx.checker.getTypeAtLocation(expr.right);
       const rhsIsString = isStringType(rightTsType);
+      // A statically string-typed LHS (`let acc = ""` / `let acc: string`) must
+      // concat even when the RHS is numeric (`acc += x`) — JS coerces x to
+      // string. #1999.
+      const lhsIsString = isStringType(ctx.checker.getTypeAtLocation(expr.left));
       // Also check if the variable was assigned a string in any enclosing scope
       const varHasStringAssign = hasStringAssignment(name, expr) || hasStringAssignmentInParentScopes(name, expr);
-      if (rhsIsString || varHasStringAssign) {
+      if (rhsIsString || lhsIsString || varHasStringAssign) {
         // String concat path: current value (externref) is on stack
         addStringImports(ctx);
         const concatIdx = ctx.jsStringImports.get("concat");

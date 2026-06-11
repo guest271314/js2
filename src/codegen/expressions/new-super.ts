@@ -8,10 +8,8 @@ import { forEachChild, ts } from "../../ts-api.js";
 import {
   collectReferencedIdentifiers,
   collectWrittenIdentifiers,
-  emitCachedFuncClosureAccess,
   emitFuncRefAsClosure,
   isOwnParamName,
-  resolveFunctionStyleThisCtor,
 } from "../closures.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
@@ -60,34 +58,13 @@ import {
   noJsHost,
   wasmFuncReturnsVoid,
 } from "./helpers.js";
+import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 
 function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
   if (fctx.enclosingClassName) return fctx.enclosingClassName;
   const underscoreIdx = fctx.name.indexOf("_");
   if (underscoreIdx > 0) return fctx.name.substring(0, underscoreIdx);
-  return undefined;
-}
-
-function resolveFunctionStyleThisCtorAtNew(
-  ctx: CodegenContext,
-  expr: ts.NewExpression,
-): FunctionContext["functionStyleThisCtor"] | undefined {
-  let current: ts.Node | undefined = expr.parent;
-  while (current) {
-    if (ts.isFunctionExpression(current) || ts.isArrowFunction(current)) {
-      return resolveFunctionStyleThisCtor(ctx, current);
-    }
-    if (
-      ts.isFunctionDeclaration(current) ||
-      ts.isMethodDeclaration(current) ||
-      ts.isConstructorDeclaration(current) ||
-      ts.isSourceFile(current)
-    ) {
-      return undefined;
-    }
-    current = current.parent;
-  }
   return undefined;
 }
 
@@ -871,38 +848,49 @@ function compileNewFunctionDeclaration(
 
   // 1. Analyze the function body for `this.prop = value` assignments
   const fields: FieldDef[] = [];
-  const addThisField = (access: ts.PropertyAccessExpression, value: ts.Expression): void => {
-    const fieldName = access.name.text;
-    if (fields.some((f) => f.name === fieldName)) return;
-    // Prefer the RHS type — when `this` is `any`, the LHS type is also `any`
-    // (externref), but the RHS has concrete type info (e.g., number → f64).
-    const lhsType = ctx.checker.getTypeAtLocation(access);
-    const rhsType = ctx.checker.getTypeAtLocation(value);
-    const lhsWasm = resolveWasmType(ctx, lhsType);
-    const rhsWasm = resolveWasmType(ctx, rhsType);
-    // Use RHS type if LHS resolved to externref (i.e., `any`)
-    const fieldType =
-      !ctx.standalone && !ctx.strictNoHostImports && ts.isArrayLiteralExpression(value)
-        ? ({ kind: "externref" } as ValType)
-        : lhsWasm.kind === "externref"
-          ? rhsWasm
-          : lhsWasm;
-    fields.push({ name: fieldName, type: fieldType, mutable: true });
-  };
-  const collectThisAssignmentsFromNode = (node: ts.Node): void => {
-    if (ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isArrowFunction(node)) return;
-    if (
-      ts.isBinaryExpression(node) &&
-      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-      ts.isPropertyAccessExpression(node.left) &&
-      node.left.expression.kind === ts.SyntaxKind.ThisKeyword
-    ) {
-      addThisField(node.left, node.right);
-    }
-    forEachChild(node, collectThisAssignmentsFromNode);
-  };
   function collectThisAssignments(stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[]): void {
-    for (const stmt of stmts) collectThisAssignmentsFromNode(stmt);
+    for (const stmt of stmts) {
+      if (
+        ts.isExpressionStatement(stmt) &&
+        ts.isBinaryExpression(stmt.expression) &&
+        stmt.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isPropertyAccessExpression(stmt.expression.left) &&
+        stmt.expression.left.expression.kind === ts.SyntaxKind.ThisKeyword
+      ) {
+        const fieldName = stmt.expression.left.name.text;
+        if (!fields.some((f) => f.name === fieldName)) {
+          // Prefer the RHS type — when `this` is `any`, the LHS type is also `any`
+          // (externref), but the RHS has concrete type info (e.g., number → f64).
+          const lhsType = ctx.checker.getTypeAtLocation(stmt.expression.left);
+          const rhsType = ctx.checker.getTypeAtLocation(stmt.expression.right);
+          const lhsWasm = resolveWasmType(ctx, lhsType);
+          const rhsWasm = resolveWasmType(ctx, rhsType);
+          // Use RHS type if LHS resolved to externref (i.e., `any`)
+          const fieldType = lhsWasm.kind === "externref" ? rhsWasm : lhsWasm;
+          fields.push({ name: fieldName, type: fieldType, mutable: true });
+        }
+      }
+      // Recurse into if/else blocks
+      if (ts.isIfStatement(stmt)) {
+        if (ts.isBlock(stmt.thenStatement)) {
+          collectThisAssignments(stmt.thenStatement.statements);
+        }
+        if (stmt.elseStatement && ts.isBlock(stmt.elseStatement)) {
+          collectThisAssignments(stmt.elseStatement.statements);
+        }
+      }
+      // Recurse into for/while/do blocks
+      if (
+        (ts.isForStatement(stmt) ||
+          ts.isForInStatement(stmt) ||
+          ts.isForOfStatement(stmt) ||
+          ts.isWhileStatement(stmt) ||
+          ts.isDoStatement(stmt)) &&
+        ts.isBlock(stmt.statement)
+      ) {
+        collectThisAssignments(stmt.statement.statements);
+      }
+    }
   }
   collectThisAssignments(body.statements);
 
@@ -1032,43 +1020,6 @@ function compileNewFunctionDeclaration(
   if (savedFunc) ctx.parentBodiesStack.push(savedFunc.body);
   if (savedFunc) ctx.funcStack.push(savedFunc);
   ctx.currentFunc = ctorFctx;
-  if (!ctx.standalone && !ctx.strictNoHostImports && !noJsHost(ctx)) {
-    const setProtoIdx = ensureLateImport(
-      ctx,
-      "__set_function_instance_prototype",
-      [{ kind: "externref" }, { kind: "externref" }],
-      [],
-    );
-    flushLateImportShifts(ctx, ctorFctx);
-    const finalSetProtoIdx = ctx.funcMap.get("__set_function_instance_prototype") ?? setProtoIdx;
-    if (finalSetProtoIdx !== undefined) {
-      const ctorGlobalIdx = ctx.moduleGlobals.get(funcName);
-      if (ctorGlobalIdx !== undefined) {
-        ctorFctx.body.push({ op: "local.get", index: selfLocal });
-        ctorFctx.body.push({ op: "extern.convert_any" } as Instr);
-        ctorFctx.body.push({ op: "global.get", index: ctorGlobalIdx });
-        ctorFctx.body.push({ op: "extern.convert_any" } as Instr);
-        ctorFctx.body.push({ op: "call", funcIdx: finalSetProtoIdx });
-      } else {
-        const funcIdx = ctx.funcMap.get(funcName);
-        if (funcIdx !== undefined && funcIdx >= ctx.numImportFuncs) {
-          ctorFctx.body.push({ op: "local.get", index: selfLocal });
-          ctorFctx.body.push({ op: "extern.convert_any" } as Instr);
-          const ctorValueType = emitCachedFuncClosureAccess(ctx, ctorFctx, funcName, funcIdx);
-          if (ctorValueType) {
-            if (ctorValueType.kind === "ref" || ctorValueType.kind === "ref_null") {
-              ctorFctx.body.push({ op: "extern.convert_any" } as Instr);
-            } else if (ctorValueType.kind !== "externref") {
-              coerceType(ctx, ctorFctx, ctorValueType, { kind: "externref" });
-            }
-            ctorFctx.body.push({ op: "call", funcIdx: finalSetProtoIdx });
-          } else {
-            ctorFctx.body.push({ op: "drop" } as Instr);
-          }
-        }
-      }
-    }
-  }
   for (const stmt of body.statements) {
     compileStatement(ctx, ctorFctx, stmt);
   }
@@ -1076,17 +1027,53 @@ function compileNewFunctionDeclaration(
   if (savedFunc) ctx.parentBodiesStack.pop();
   ctx.currentFunc = savedFunc;
 
-  // Return the struct instance
-  ctorFctx.body.push({ op: "local.get", index: selfLocal });
-
-  // Finalize the constructor function
+  // Attach the live body array to the registered function FIRST: the
+  // late-import registration below can shift function indices, and the shift
+  // walkers reach this body only through ctx.mod.functions (#1712 — same
+  // orphan-buffer class as the compileIfStatement then-branch fix).
   ctorFunc.locals = ctorFctx.locals;
   ctorFunc.body = ctorFctx.body;
 
+  // (#1712) Register the instance → constructor-closure link with the JS
+  // host so instance property misses resolve through the closure's vivified
+  // `.prototype` object (acorn's `Parser.prototype.m = fn; new Parser().m()`
+  // pattern). JS-host mode only — standalone/WASI construction stays pure
+  // Wasm; the native equivalent rides on the #1888 open-object runtime in a
+  // later dogfood lap.
+  if (!ctx.standalone && !ctx.wasi) {
+    const ctorGlobalIdx = ctx.moduleGlobals.get(funcName) ?? ctx.funcClosureGlobals.get(funcName);
+    if (ctorGlobalIdx !== undefined) {
+      ensureLateImport(ctx, "__register_fnctor_instance", [{ kind: "externref" }, { kind: "externref" }], []);
+      // Apply the deferred index shift NOW (same discipline as every other
+      // ensureLateImport caller in this file) so the `call` below targets the
+      // import's final index instead of being re-shifted onto a neighbour.
+      flushLateImportShifts(ctx, ctorFctx);
+      const regIdx = ctx.funcMap.get("__register_fnctor_instance");
+      if (regIdx !== undefined) {
+        ctorFctx.body.push({ op: "local.get", index: selfLocal });
+        ctorFctx.body.push({ op: "extern.convert_any" });
+        ctorFctx.body.push({ op: "global.get", index: ctorGlobalIdx } as Instr);
+        const gdef = ctx.mod.globals[localGlobalIdx(ctx, ctorGlobalIdx)];
+        if (gdef && gdef.type.kind !== "externref" && gdef.type.kind !== "ref_extern") {
+          ctorFctx.body.push({ op: "extern.convert_any" });
+        }
+        ctorFctx.body.push({ op: "call", funcIdx: regIdx });
+      }
+    }
+  }
+
+  // Return the struct instance
+  ctorFctx.body.push({ op: "local.get", index: selfLocal });
+
   // 5. Emit the call to the constructor at the call site
   const args = expr.arguments ?? [];
-  const finalCtorIdxForArgs = ctx.funcMap.get(ctorName) ?? ctorFuncIdx;
-  const paramTypes = getFuncParamTypes(ctx, finalCtorIdxForArgs);
+  // Use the in-scope ctorParams, NOT getFuncParamTypes(ctx, ctorFuncIdx): the
+  // (#1712) __register_fnctor_instance late import above opens a deferred
+  // index-shift window (#329/#1899) in which ctorFuncIdx is stale-low against
+  // the already-incremented numImportFuncs, so an index-based signature lookup
+  // would read the PREVIOUS function's params and coerce arguments against the
+  // wrong types (observed: `call[0] expected externref, found (ref null $N)`).
+  const paramTypes: ValType[] | undefined = ctorParams;
   for (let i = 0; i < args.length; i++) {
     compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
   }
@@ -1096,40 +1083,10 @@ function compileNewFunctionDeclaration(
     }
   }
   // Re-lookup funcIdx in case addUnionImports shifted indices
-  const finalCtorIdx = ctx.funcMap.get(ctorName) ?? finalCtorIdxForArgs;
+  const finalCtorIdx = ctx.funcMap.get(ctorName) ?? ctorFuncIdx;
   maybeSetArgcForKnownCall(ctx, fctx, ctorName, args.length, paramTypes?.length ?? args.length);
   fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
   return { kind: "ref", typeIdx: structTypeIdx };
-}
-
-function compileKnownFunctionConstructor(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  expr: ts.NewExpression,
-  funcName: string,
-  funcDecl: ts.FunctionDeclaration | ts.FunctionExpression,
-): ValType | null {
-  const cachedFnCtor = ctx.funcConstructorMap.get(funcName);
-  if (cachedFnCtor) {
-    const ctorFuncIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName);
-    if (ctorFuncIdx !== undefined) {
-      const paramTypes = getFuncParamTypes(ctx, ctorFuncIdx);
-      const args = expr.arguments ?? [];
-      for (let i = 0; i < args.length; i++) {
-        compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
-      }
-      if (paramTypes) {
-        for (let i = args.length; i < paramTypes.length; i++) {
-          pushDefaultValue(fctx, paramTypes[i]!, ctx);
-        }
-      }
-      const finalIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName) ?? ctorFuncIdx;
-      fctx.body.push({ op: "call", funcIdx: finalIdx });
-      return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
-    }
-  }
-
-  return compileNewFunctionDeclaration(ctx, fctx, expr, funcName, funcDecl as unknown as ts.FunctionDeclaration);
 }
 
 /**
@@ -1687,17 +1644,6 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
       fctx.body.push({ op: "call", funcIdx: mapNewIdx });
       return { kind: "ref", typeIdx: ctx.mapTypeIdx };
-    }
-  }
-
-  // Function-style static factory, e.g. acorn's
-  // `Parser.parse = function (...) { return new this(...) }`. The callee is a
-  // non-identifier `ThisKeyword`, so it must be handled before the generic
-  // non-constructor guards below.
-  if (expr.expression.kind === ts.SyntaxKind.ThisKeyword) {
-    const functionStyleThisCtor = fctx.functionStyleThisCtor ?? resolveFunctionStyleThisCtorAtNew(ctx, expr);
-    if (functionStyleThisCtor) {
-      return compileKnownFunctionConstructor(ctx, fctx, expr, functionStyleThisCtor.name, functionStyleThisCtor.decl);
     }
   }
 

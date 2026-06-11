@@ -80,99 +80,6 @@ function isFunctionScopeBoundary(node: ts.Node): boolean {
   );
 }
 
-function unwrapParens(expr: ts.Expression): ts.Expression {
-  let current = expr;
-  while (ts.isParenthesizedExpression(current)) current = current.expression;
-  return current;
-}
-
-function isPlainFunctionConstructor(fn: ts.FunctionDeclaration | ts.FunctionExpression): boolean {
-  return !fn.asteriskToken && fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) !== true;
-}
-
-function functionConstructorDeclFromSymbolDecl(
-  decl: ts.Declaration,
-): ts.FunctionDeclaration | ts.FunctionExpression | undefined {
-  if (
-    (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl)) &&
-    decl.body &&
-    isPlainFunctionConstructor(decl)
-  ) {
-    return decl;
-  }
-  if (ts.isVariableDeclaration(decl) && decl.initializer) {
-    const init = unwrapParens(decl.initializer);
-    if (ts.isFunctionExpression(init) && init.body && isPlainFunctionConstructor(init)) {
-      return init;
-    }
-  }
-  return undefined;
-}
-
-function findFunctionConstructorDeclInSource(
-  ownerName: string,
-  sourceFile: ts.SourceFile,
-): ts.FunctionDeclaration | ts.FunctionExpression | undefined {
-  for (const stmt of sourceFile.statements) {
-    if (
-      ts.isFunctionDeclaration(stmt) &&
-      stmt.name?.text === ownerName &&
-      stmt.body &&
-      isPlainFunctionConstructor(stmt)
-    ) {
-      return stmt;
-    }
-    if (ts.isVariableStatement(stmt)) {
-      for (const decl of stmt.declarationList.declarations) {
-        if (!ts.isIdentifier(decl.name) || decl.name.text !== ownerName || !decl.initializer) continue;
-        const init = unwrapParens(decl.initializer);
-        if (ts.isFunctionExpression(init) && init.body && isPlainFunctionConstructor(init)) {
-          return init;
-        }
-      }
-    }
-  }
-  return undefined;
-}
-
-export function resolveFunctionStyleThisCtor(
-  ctx: CodegenContext,
-  arrow: ts.ArrowFunction | ts.FunctionExpression,
-): FunctionContext["functionStyleThisCtor"] | undefined {
-  // Arrow functions have lexical `this`; only function expressions assigned as
-  // static members receive the constructor as the dynamic receiver.
-  if (!ts.isFunctionExpression(arrow)) return undefined;
-
-  const parent = arrow.parent;
-  if (
-    !parent ||
-    !ts.isBinaryExpression(parent) ||
-    parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
-    parent.right !== arrow ||
-    !ts.isPropertyAccessExpression(parent.left) ||
-    !ts.isIdentifier(parent.left.expression)
-  ) {
-    return undefined;
-  }
-
-  const owner = parent.left.expression;
-  const ownerName = owner.text;
-  if (ctx.classSet.has(ownerName)) return undefined;
-
-  const sym = ctx.checker.getSymbolAtLocation(owner);
-  const decls = sym?.getDeclarations();
-  if (decls) {
-    for (const decl of decls) {
-      const ctorDecl = functionConstructorDeclFromSymbolDecl(decl);
-      if (ctorDecl) return { name: ownerName, decl: ctorDecl };
-    }
-  }
-
-  const sourceDecl = findFunctionConstructorDeclInSource(ownerName, arrow.getSourceFile());
-  if (sourceDecl) return { name: ownerName, decl: sourceDecl };
-  return undefined;
-}
-
 function isSymbolIteratorExpression(expr: ts.Expression): boolean {
   return (
     ts.isPropertyAccessExpression(expr) &&
@@ -1812,7 +1719,6 @@ export function compileArrowAsClosure(
   const selfTypeIdx = usesWrapperFuncType
     ? getOrCreateFuncRefWrapperTypes(ctx, arrowParams, closureResults)!.structTypeIdx
     : structTypeIdx;
-  const functionStyleThisCtor = resolveFunctionStyleThisCtor(ctx, arrow);
   const liftedFctx: FunctionContext = {
     name: closureName,
     params: [
@@ -1843,7 +1749,6 @@ export function compileArrowAsClosure(
     // (with no other binding) to read that global. Named functions / methods
     // are NOT lifted here and keep `undefined`/globalObject `this`.
     readsCurrentThis: true,
-    functionStyleThisCtor,
   };
 
   // (#1384) Track liftedFctx.body in liveBodies BEFORE any emission so
@@ -3150,23 +3055,16 @@ export function getOrCreateFuncRefWrapperTypes(
   const closureName = `__fn_wrap_${ctx.closureCounter++}`;
   const structFields = [{ name: "func", type: { kind: "funcref" as const }, mutable: false }];
   const structTypeIdx = ctx.mod.types.length;
+  const rootWrapperTypeIdx = (ctx as unknown as { __funcRefWrapperRootTypeIdx?: number }).__funcRefWrapperRootTypeIdx;
   ctx.mod.types.push({
     kind: "struct",
     name: `${closureName}_struct`,
     fields: structFields,
-    // (#1712 ⊕ #1320) superTypeIdx STAYS -1 for every wrapper. e1ca62025
-    // briefly chained later wrappers under the first as nominal subtypes
-    // (`__funcRefWrapperRootTypeIdx`) so per-wrapper `ref.test` could
-    // discriminate same-layout wrappers, but that nominal hierarchy breaks
-    // the #1712 closure dispatchers (`__call_fn_*` / `__call_fn_method_*`
-    // direct-dispatch collects only `superTypeIdx === -1` types, and lifted
-    // funcref self-params are typed per-wrapper) — compiled acorn's
-    // `Parser.parse` dispatch returned null under the chained hierarchy.
-    // With -1, V8's isorecursive canonicalization collapses the same-layout
-    // wrappers to one type and the rewritten `emitClosureCallExport`
-    // (#1320) still discriminates via the per-entry funcref `ref.test`.
-    superTypeIdx: -1, // non-final, no parent — allows subtypes
+    superTypeIdx: rootWrapperTypeIdx ?? -1, // first wrapper is the root; later signatures subtype it
   });
+  if (rootWrapperTypeIdx === undefined) {
+    (ctx as unknown as { __funcRefWrapperRootTypeIdx?: number }).__funcRefWrapperRootTypeIdx = structTypeIdx;
+  }
 
   // Create the lifted function type: (ref $struct, ...userParams) -> results
   const liftedParams: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }, ...userParams];

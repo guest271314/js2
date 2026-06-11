@@ -15,14 +15,10 @@ import { reportError } from "../context/errors.js";
 import { allocLocal, getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { addUnionImports, ensureStructForType, getArrTypeIdxFromVec, localGlobalIdx } from "../index.js";
-import { stringConstantExternrefInstrs } from "../native-strings.js";
 import { emitBoundsGuardedArraySet } from "../property-access.js";
-import { addStringConstantGlobal } from "../registry/imports.js";
 import { coerceType, compileExpression } from "../shared.js";
-import { ensureCurrentThisGlobal } from "../statements/nested-declarations.js";
 import { defaultValueInstrs } from "../type-coercion.js";
 import { emitThrowString, emitThrowTypeError, getFuncParamTypes } from "./helpers.js";
-import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitMappedArgParamSync } from "./logical-ops.js";
 import { resolveStructName } from "./misc.js";
 
@@ -77,105 +73,6 @@ function emitToNumericForUpdate(ctx: CodegenContext, fctx: FunctionContext): voi
   fctx.body.push({ op: "call", funcIdx: unboxIdx });
 }
 
-function isCurrentThisReceiver(fctx: FunctionContext, expr: ts.Expression): boolean {
-  return expr.kind === ts.SyntaxKind.ThisKeyword && !fctx.localMap.has("this") && fctx.readsCurrentThis === true;
-}
-
-function coerceTopToExternref(ctx: CodegenContext, fctx: FunctionContext, type: ValType): boolean {
-  if (type.kind === "externref") return true;
-  if (type.kind === "ref" || type.kind === "ref_null") {
-    fctx.body.push({ op: "extern.convert_any" });
-    return true;
-  }
-  if (type.kind === "f64") {
-    addUnionImports(ctx);
-    const boxIdx = ctx.funcMap.get("__box_number");
-    if (boxIdx === undefined) return false;
-    fctx.body.push({ op: "call", funcIdx: boxIdx });
-    return true;
-  }
-  if (type.kind === "i32") {
-    fctx.body.push({ op: "f64.convert_i32_s" });
-    addUnionImports(ctx);
-    const boxIdx = ctx.funcMap.get("__box_number");
-    if (boxIdx === undefined) return false;
-    fctx.body.push({ op: "call", funcIdx: boxIdx });
-    return true;
-  }
-  return false;
-}
-
-function compileDynamicPropertyIncDec(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  operand: ts.PropertyAccessExpression,
-  propName: string,
-  arithOp: "add" | "sub",
-  mode: "prefix" | "postfix",
-): ValType | null {
-  addUnionImports(ctx);
-  const getIdx = ensureLateImport(
-    ctx,
-    "__extern_get",
-    [{ kind: "externref" }, { kind: "externref" }],
-    [{ kind: "externref" }],
-  );
-  const setIdx = ensureLateImport(
-    ctx,
-    "__extern_set",
-    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
-    [],
-  );
-  flushLateImportShifts(ctx, fctx);
-  const boxIdx = ctx.funcMap.get("__box_number");
-  const unboxIdx = ctx.funcMap.get("__unbox_number");
-  if (getIdx === undefined || setIdx === undefined || boxIdx === undefined || unboxIdx === undefined) {
-    reportError(ctx, operand, `Could not register dynamic update helpers for property: ${propName}`);
-    return null;
-  }
-
-  if (isCurrentThisReceiver(fctx, operand.expression)) {
-    ensureCurrentThisGlobal(ctx);
-  }
-
-  const objType = compileExpression(ctx, fctx, operand.expression);
-  if (!objType) return null;
-  if (!coerceTopToExternref(ctx, fctx, objType)) {
-    fctx.body.push({ op: "drop" });
-    fctx.body.push({ op: "f64.const", value: NaN });
-    return { kind: "f64" };
-  }
-  const objLocal = allocLocal(fctx, `__incdec_dyn_obj_${fctx.locals.length}`, { kind: "externref" });
-  fctx.body.push({ op: "local.set", index: objLocal });
-
-  addStringConstantGlobal(ctx, propName);
-  fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-  const keyLocal = allocLocal(fctx, `__incdec_dyn_key_${fctx.locals.length}`, { kind: "externref" });
-  fctx.body.push({ op: "local.set", index: keyLocal });
-
-  fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "local.get", index: keyLocal });
-  fctx.body.push({ op: "call", funcIdx: getIdx });
-  fctx.body.push({ op: "call", funcIdx: unboxIdx });
-
-  const oldLocal = allocLocal(fctx, `__incdec_dyn_old_${fctx.locals.length}`, { kind: "f64" });
-  fctx.body.push({ op: "local.tee", index: oldLocal });
-  fctx.body.push({ op: "f64.const", value: 1 });
-  fctx.body.push({ op: arithOp === "add" ? "f64.add" : "f64.sub" });
-  const newLocal = allocLocal(fctx, `__incdec_dyn_new_${fctx.locals.length}`, { kind: "f64" });
-  fctx.body.push({ op: "local.tee", index: newLocal });
-  fctx.body.push({ op: "call", funcIdx: boxIdx });
-  const boxedLocal = allocLocal(fctx, `__incdec_dyn_boxed_${fctx.locals.length}`, { kind: "externref" });
-  fctx.body.push({ op: "local.set", index: boxedLocal });
-
-  fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "local.get", index: keyLocal });
-  fctx.body.push({ op: "local.get", index: boxedLocal });
-  fctx.body.push({ op: "call", funcIdx: setIdx });
-  fctx.body.push({ op: "local.get", index: mode === "postfix" ? oldLocal : newLocal });
-  return { kind: "f64" };
-}
-
 /**
  * Compile prefix/postfix increment/decrement on member expressions:
  *   ++obj.x, obj.x++, --obj[i], obj[i]--, etc.
@@ -200,9 +97,6 @@ function compileMemberIncDec(
   if (ts.isPropertyAccessExpression(operand)) {
     const objType = ctx.checker.getTypeAtLocation(operand.expression);
     const propName = ts.isPrivateIdentifier(operand.name) ? "__priv_" + operand.name.text.slice(1) : operand.name.text;
-    if (isCurrentThisReceiver(fctx, operand.expression)) {
-      return compileDynamicPropertyIncDec(ctx, fctx, operand, propName, arithOp, mode);
-    }
     // Ensure anonymous types are registered as structs before resolving
     ensureStructForType(ctx, objType);
     let typeName = resolveStructName(ctx, objType);

@@ -258,17 +258,6 @@ export interface FunctionContext {
    * test262 failures in `function-code/10.4.3-1-*` and `Array/prototype/*`).
    */
   readsCurrentThis?: boolean;
-  /**
-   * Function-style constructor whose static function-expression body receives
-   * the constructor as dynamic `this`, e.g. `Parser.parse = function () {
-   * return new this(...) }`. TypeScript often resolves that `this` as `any`,
-   * so the new-expression compiler needs this declaration hint to reuse the
-   * function-constructor lowering.
-   */
-  functionStyleThisCtor?: {
-    name: string;
-    decl: ts.FunctionDeclaration | ts.FunctionExpression;
-  };
   /** Set of variable names known to be non-null in the current scope (type narrowing) */
   narrowedNonNull?: Set<string>;
   /** Const boolean aliases for null guards, e.g. `const ok = x !== null`. */

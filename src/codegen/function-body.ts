@@ -41,7 +41,6 @@ import {
   emitF64ParamSentinelCheck,
   emitArgumentsVecBody,
   emitParamDefaultArgMissingCheck,
-  ensureCurrentThisGlobal,
   paramDefaultNeedsArgc,
 } from "./statements/nested-declarations.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
@@ -57,31 +56,6 @@ import {
   registerLinearU8Buffer,
 } from "./linear-uint8-signatures.js";
 import { containsLinearU8Allocation, emitLinearU8ArenaMark, emitLinearU8ArenaReset } from "./linear-uint8-arena.js";
-
-function functionBodyUsesThis(decl: ts.FunctionDeclaration): boolean {
-  if (!decl.body) return false;
-  let found = false;
-  const visit = (node: ts.Node): void => {
-    if (found) return;
-    if (node.kind === ts.SyntaxKind.ThisKeyword) {
-      found = true;
-      return;
-    }
-    const nestedNonArrowFunction =
-      node !== decl &&
-      !ts.isArrowFunction(node) &&
-      (ts.isFunctionDeclaration(node) ||
-        ts.isFunctionExpression(node) ||
-        ts.isMethodDeclaration(node) ||
-        ts.isConstructorDeclaration(node) ||
-        ts.isGetAccessorDeclaration(node) ||
-        ts.isSetAccessorDeclaration(node));
-    if (nestedNonArrowFunction) return;
-    forEachChild(node, visit);
-  };
-  forEachChild(decl.body, visit);
-  return found;
-}
 
 /** Maximum number of instructions for a function body to be considered inlinable */
 export const INLINE_MAX_INSTRS = 10;
@@ -697,8 +671,6 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   // Depends on the i32 scalar set so that `arr[i] = sum` (where `sum` is i32)
   // counts as an i32-safe write.
   const i32SpecializedArrays = collectI32SpecializedArrays(decl, i32CoercedLocals);
-  const readsCurrentThis = functionBodyUsesThis(decl);
-  if (readsCurrentThis) ensureCurrentThisGlobal(ctx);
 
   const fctx: FunctionContext = {
     name: func.name,
@@ -715,7 +687,6 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     isGenerator,
     i32CoercedLocals: i32CoercedLocals.size > 0 ? i32CoercedLocals : undefined,
     i32SpecializedArrays: i32SpecializedArrays.size > 0 ? i32SpecializedArrays : undefined,
-    readsCurrentThis,
   };
 
   // Register params as locals

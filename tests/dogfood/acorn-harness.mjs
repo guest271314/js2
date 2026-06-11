@@ -30,7 +30,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
 
 import { compile } from "../../src/index.ts";
-import { buildImports, wrapExports } from "../../src/runtime.ts";
+import { wrapExports } from "../../src/runtime.ts";
 import { setupAcorn } from "./setup-acorn.mjs";
 import { diffAst } from "./ast-diff.mjs";
 
@@ -169,18 +169,26 @@ export async function runHarness({ quiet = false } = {}) {
     .sort()
     .map((f) => ({ name: f, src: readFileSync(join(INPUTS_DIR, f), "utf-8") }));
 
-  // Attempt to obtain a callable compiled-acorn parse through the normal
-  // runtime path. buildImports().setExports wires closure sidecars back to the
-  // instance exports, and wrapExports() marshals returned WasmGC AST structs
-  // into plain JS objects for the differential comparison.
+  // Attempt to obtain a callable compiled-acorn parse. The compiled module is a
+  // raw Wasm instance; acorn's parse() returns a deep object graph that we'd
+  // need marshalled back across the JS-host boundary as an externref. The first
+  // lap simply attempts instantiation + a `parse` export and records what it
+  // finds; when the binary does not validate this is skipped (and RECORDED),
+  // which is the expected state until #1690 is resolved.
   let compiledParse = null;
   if (validates) {
     try {
-      const imports = buildImports(result.imports ?? [], undefined, result.stringPool ?? []);
-      const { instance } = await WebAssembly.instantiate(result.binary, imports);
-      if (typeof imports.setExports === "function") {
-        imports.setExports(instance.exports);
-      }
+      const importObject = result.importObject ?? {};
+      const { instance } = await WebAssembly.instantiate(result.binary, importObject);
+      // (#1712) Wire the host runtime's exports hook so exports-backed
+      // capabilities (closure wrapping, __sget_* struct reads, deferred
+      // start-window Object.defineProperties) work on this convenience path.
+      importObject.__setExports?.(instance.exports);
+      // (#1712) Marshal struct/vec returns to plain JS via wrapExports —
+      // a raw `exports.parse` returns an opaque WasmGC struct that diffs as
+      // an empty object. wrapExports (#1504) recursively converts the node
+      // graph (struct fields via __sget_*, sidecar props, vecs as arrays)
+      // so diffAst compares real tree shape.
       const exp = wrapExports(instance.exports, { signatures: result.exportSignatures });
       report.diff.exports = Object.keys(exp).slice(0, 40);
       if (typeof exp.parse === "function") {

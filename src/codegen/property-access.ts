@@ -30,6 +30,10 @@ import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js"
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
 import { tryEmitLinearU8ElementGet, tryEmitLinearU8Length } from "./linear-uint8-codegen.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
+import {
+  tryCompileStandaloneRegExpMatchResultRead,
+  tryCompileStandaloneRegExpPropertyRead,
+} from "./regexp-standalone.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
@@ -48,11 +52,10 @@ import {
   resolveThisStructName,
   valTypesMatch,
 } from "./shared.js";
-import { coercionInstrs, defaultValueInstrs, emitGuardedRefCast } from "./type-coercion.js";
+import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 import { tryEmitJsonParseElementAccess, tryEmitJsonParsePropertyAccess } from "./json-standalone.js";
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
-import { ensureCurrentThisGlobal } from "./statements/nested-declarations.js";
 import { tryCompileTemporalPropertyAccess } from "./temporal-native.js";
 
 const BUILTIN_CTOR_NAMES = new Set([
@@ -1314,48 +1317,6 @@ export function compileExternPropertyGetFromStack(
 
 // ── Property access ──────────────────────────────────────────────────
 
-/**
- * (#1712 follow-up) Per-source-file scan: which identifiers have their
- * `.prototype` SLOT directly reassigned (`X.prototype = …`, including through
- * parenthesized/`as` wrappers like `(X as any).prototype = …`)? Used to gate
- * the `__get_function_prototype` host bridge OFF for harness-shim-style
- * constructors whose prototype object is replaced wholesale — the bridge's
- * vivified sidecar prototype would shadow the reassigned one. Member writes
- * (`X.prototype.m = …`) deliberately do NOT count: there the target of the
- * assignment is `X.prototype.m`, not the `prototype` slot itself.
- */
-const _protoReassignScanCache = new WeakMap<ts.SourceFile, Set<string>>();
-function prototypeSlotIsReassigned(ctx: CodegenContext, expr: ts.Node, fnName: string): boolean {
-  const sf = expr.getSourceFile();
-  let names = _protoReassignScanCache.get(sf);
-  if (!names) {
-    const found = new Set<string>();
-    const stripWrappers = (n: ts.Expression): ts.Expression => {
-      let cur = n;
-      while (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) {
-        cur = cur.expression;
-      }
-      return cur;
-    };
-    const visit = (node: ts.Node): void => {
-      if (
-        ts.isBinaryExpression(node) &&
-        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-        ts.isPropertyAccessExpression(node.left) &&
-        node.left.name.text === "prototype"
-      ) {
-        const recv = stripWrappers(node.left.expression);
-        if (ts.isIdentifier(recv)) found.add(recv.text);
-      }
-      ts.forEachChild(node, visit);
-    };
-    visit(sf);
-    names = found;
-    _protoReassignScanCache.set(sf, names);
-  }
-  return names.has(fnName);
-}
-
 export function compilePropertyAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1374,60 +1335,6 @@ export function compilePropertyAccess(
 
   const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
-
-  // FunctionDeclaration.prototype — top-level legacy constructor functions
-  // (acorn's `function Parser(...) {}` shape) need a stable, mutable prototype
-  // object even though the compiled function value is a Wasm closure struct.
-  if (propName === "prototype" && ts.isIdentifier(expr.expression)) {
-    const objName = expr.expression.text;
-    const sym = ctx.checker.getSymbolAtLocation(expr.expression);
-    const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
-    const isPlainFunctionDecl =
-      !!decl &&
-      !ctx.generatorFunctions.has(objName) &&
-      ((ts.isFunctionDeclaration(decl) &&
-        !decl.asteriskToken &&
-        decl.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) !== true) ||
-        (ts.isVariableDeclaration(decl) &&
-          !!decl.initializer &&
-          ts.isFunctionExpression(decl.initializer) &&
-          !decl.initializer.asteriskToken &&
-          decl.initializer.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) !== true));
-    // (#1712 follow-up) Skip the host prototype bridge for functions whose
-    // `.prototype` is explicitly REASSIGNED somewhere in the program (e.g.
-    // the test262 harness Iterator shim: `function Iterator() {}` followed by
-    // `(Iterator as any).prototype = %IteratorPrototype%`). The bridge's
-    // `__get_function_prototype` vivifies a fresh sidecar prototype object and
-    // never sees the reassigned value, so `Iterator.prototype.filter` read
-    // back `null`/`undefined` instead of the real proto member (regressed the
-    // Iterator.prototype.* test262 family). Acorn-style constructors only
-    // mutate MEMBERS of `.prototype` (`Parser.prototype.m = fn`,
-    // `Object.defineProperties(Parser.prototype, …)`) — never the slot itself
-    // — so they keep the bridge.
-    if (isPlainFunctionDecl && !prototypeSlotIsReassigned(ctx, expr, objName)) {
-      const protoIdx = ensureLateImport(
-        ctx,
-        "__get_function_prototype",
-        [{ kind: "externref" }],
-        [{ kind: "externref" }],
-      );
-      // (#1712 review finding 3) In standalone mode the import is refused
-      // (`protoIdx === undefined`); do NOT compile the receiver and return it
-      // as its own "prototype" — fall through to the legacy lowering below.
-      if (protoIdx !== undefined) {
-        flushLateImportShifts(ctx, fctx);
-        const recvType = compileExpression(ctx, fctx, expr.expression);
-        if (!recvType) return null;
-        if (recvType.kind === "ref" || recvType.kind === "ref_null") {
-          fctx.body.push({ op: "extern.convert_any" } as Instr);
-        } else if (recvType.kind !== "externref") {
-          coerceType(ctx, fctx, recvType, { kind: "externref" });
-        }
-        fctx.body.push({ op: "call", funcIdx: protoIdx } as Instr);
-        return { kind: "externref" };
-      }
-    }
-  }
 
   const jsonParsePropertyType = tryEmitJsonParsePropertyAccess(ctx, fctx, expr);
   if (jsonParsePropertyType !== undefined) return jsonParsePropertyType;
@@ -1462,6 +1369,18 @@ export function compilePropertyAccess(
         return { kind: "i32" };
       }
     }
+  }
+
+  // #1914 — standalone RegExp reflection (`re.source`/`.flags`/`.global`/…/
+  // `.lastIndex`) and match-result fields (`m.index`/`m.input`). Must run
+  // BEFORE the extern-class property path, which would otherwise emit an
+  // `env.RegExp_get_*` host import (a standalone purity leak), and before the
+  // generic struct/vec fallbacks, which silently return 0 for `.index`.
+  {
+    const standaloneRegExpRead = tryCompileStandaloneRegExpPropertyRead(ctx, fctx, expr);
+    if (standaloneRegExpRead !== undefined) return standaloneRegExpRead;
+    const standaloneMatchResultRead = tryCompileStandaloneRegExpMatchResultRead(ctx, fctx, expr);
+    if (standaloneMatchResultRead !== undefined) return standaloneMatchResultRead;
   }
 
   // #1780 — `TextEncoder.encodeInto(...).read` / `.written` under no-host
@@ -3210,71 +3129,6 @@ export function compilePropertyAccess(
   const accessType = ctx.checker.getTypeAtLocation(expr);
   const accessWasm = resolveWasmType(ctx, accessType);
 
-  // Host-dispatched closure bodies receive their method receiver through the
-  // __current_this externref global. Prefer the dynamic/prototype-aware host
-  // lookup before the static struct field path below can synthesize a missing
-  // field and return its default value. Acorn stores parser methods on
-  // Parser.prototype, so `this.parseMaybeAssign` must consult the runtime
-  // prototype sidecar rather than the parser instance's struct fields.
-  if (expr.expression.kind === ts.SyntaxKind.ThisKeyword && !fctx.localMap.has("this")) {
-    ensureCurrentThisGlobal(ctx);
-    const getIdx = ensureLateImport(
-      ctx,
-      "__extern_get",
-      [{ kind: "externref" }, { kind: "externref" }],
-      [{ kind: "externref" }],
-    );
-    let unboxIdx: number | undefined;
-    if (accessWasm.kind === "f64" || accessWasm.kind === "i32") {
-      unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
-    }
-    flushLateImportShifts(ctx, fctx);
-    if (getIdx !== undefined) {
-      const objExprType = compileExpression(ctx, fctx, expr.expression);
-      if (objExprType && objExprType.kind !== "externref") {
-        coerceType(ctx, fctx, objExprType, { kind: "externref" });
-      }
-      const objTmp = allocLocal(fctx, `__thisget_${fctx.locals.length}`, { kind: "externref" });
-      fctx.body.push({ op: "local.tee", index: objTmp });
-      fctx.body.push({ op: "ref.is_null" });
-      fctx.body.push({
-        op: "if",
-        blockType: { kind: "empty" },
-        then: typeErrorThrowInstrs(ctx, expr),
-        else: [],
-      });
-      fctx.body.push({ op: "local.get", index: objTmp });
-      addStringConstantGlobal(ctx, propName);
-      fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-      fctx.body.push({ op: "call", funcIdx: getIdx });
-      if (propName === "type") {
-        return { kind: "externref" };
-      }
-      if (accessWasm.kind === "f64") {
-        if (unboxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: unboxIdx });
-        return { kind: "f64" };
-      }
-      if (accessWasm.kind === "i32") {
-        if (unboxIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx: unboxIdx });
-          fctx.body.push({ op: "i32.trunc_sat_f64_s" });
-        }
-        return { kind: "i32" };
-      }
-      if (accessWasm.kind === "ref" || accessWasm.kind === "ref_null") {
-        const typeIdx = accessWasm.typeIdx;
-        fctx.body.push({ op: "any.convert_extern" } as Instr);
-        emitGuardedRefCast(fctx, typeIdx);
-        if (accessWasm.kind === "ref") {
-          emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx });
-          fctx.body.push({ op: "ref.as_non_null" } as Instr);
-        }
-        return accessWasm;
-      }
-      return { kind: "externref" };
-    }
-  }
-
   // For struct types with the property, try to compile the object and do struct.get
   // but NEVER for class struct types — their fields are fixed at collection time
   if (typeName && !ctx.classSet.has(typeName)) {
@@ -3345,14 +3199,8 @@ export function compilePropertyAccess(
   // use __extern_get(obj, key) to dynamically read the property at runtime.
   {
     const objWasmType = resolveWasmType(ctx, objType);
-    const isCurrentThisExternObj =
-      expr.expression.kind === ts.SyntaxKind.ThisKeyword &&
-      fctx.readsCurrentThis &&
-      ctx.currentThisGlobalIdx >= 0 &&
-      !fctx.localMap.has("this");
     const isExternObj =
       objWasmType.kind === "externref" ||
-      isCurrentThisExternObj ||
       (ts.isIdentifier(expr.expression) &&
         (() => {
           const localIdx = fctx.localMap.get(expr.expression.text);
@@ -3376,37 +3224,6 @@ export function compilePropertyAccess(
       }
       flushLateImportShifts(ctx, fctx);
       if (getIdx !== undefined) {
-        if (isCurrentThisExternObj) {
-          const objExprType = compileExpression(ctx, fctx, expr.expression);
-          if (objExprType && objExprType.kind !== "externref") {
-            coerceType(ctx, fctx, objExprType, { kind: "externref" });
-          }
-          const objTmp = allocLocal(fctx, `__thisget_${fctx.locals.length}`, { kind: "externref" });
-          fctx.body.push({ op: "local.tee", index: objTmp });
-          fctx.body.push({ op: "ref.is_null" });
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "empty" },
-            then: typeErrorThrowInstrs(ctx, expr),
-            else: [],
-          });
-          fctx.body.push({ op: "local.get", index: objTmp });
-          addStringConstantGlobal(ctx, propName);
-          fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
-          fctx.body.push({ op: "call", funcIdx: getIdx });
-          if (accessWasm.kind === "f64") {
-            if (unboxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: unboxIdx });
-            return { kind: "f64" };
-          }
-          if (accessWasm.kind === "i32") {
-            if (unboxIdx !== undefined) {
-              fctx.body.push({ op: "call", funcIdx: unboxIdx });
-              fctx.body.push({ op: "i32.trunc_sat_f64_s" });
-            }
-            return { kind: "i32" };
-          }
-          return { kind: "externref" };
-        }
         const objExprType = compileExpression(ctx, fctx, expr.expression);
         // If the expression produced a ref/ref_null (struct), convert to externref
         // so that __extern_get (which expects externref) can be used.
@@ -4133,7 +3950,12 @@ export function compileElementAccessBody(
     const isVecStructAccess =
       typeDef.fields[0]?.name === "length" &&
       typeDef.fields[1]?.name === "data" &&
-      (typeDef.fields.length === 2 || (typeDef.fields.length === 3 && typeDef.fields[2]?.name === "raw"));
+      (typeDef.fields.length === 2 ||
+        (typeDef.fields.length === 3 && typeDef.fields[2]?.name === "raw") ||
+        // #1914 — $__regexp_match_vec: the vec subtype carrying the spec
+        // exec/match result fields. Indexed reads use the same {length, data}
+        // prefix; index/input are property reads, not elements.
+        (typeDef.fields.length === 4 && typeDef.fields[2]?.name === "index" && typeDef.fields[3]?.name === "input"));
 
     if (!isVecStructAccess) {
       // Check if this is a tuple struct (registered in tupleTypeMap)
