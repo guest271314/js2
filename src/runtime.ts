@@ -4577,6 +4577,51 @@ function _toJsArray(arr: any, exports: Record<string, Function> | undefined): an
   return [arr]; // Fallback: wrap single value
 }
 
+/**
+ * (#1996) Recursion cap for `_toJsArrayDeep`. Generous enough for any
+ * realistic nesting while preventing unbounded recursion on a pathological
+ * input. Vec refs are acyclic, so this is a safety ceiling, not a semantic
+ * limit.
+ */
+const VEC_UNWRAP_MAX_DEPTH = 64;
+
+/**
+ * (#1996) Recursively materialize a WasmGC vec into a JS array, unwrapping
+ * any nested vec-ref elements into real JS arrays so native `Array.prototype`
+ * methods (`flat`, `flatMap`, `JSON.stringify`) recognize them via
+ * `Array.isArray`. Without this, `_toJsArray` converts only the outer vec and
+ * leaves inner elements as opaque WasmGC refs, which `flat()` cannot flatten
+ * and `JSON.stringify` renders as `null`.
+ *
+ * `maxDepth` bounds the recursion so already-flat scalar elements aren't probed
+ * past the depth the caller cares about (flat's depth argument). A non-vec
+ * value passes through unchanged.
+ */
+function _toJsArrayDeep(arr: any, exports: Record<string, Function> | undefined, maxDepth: number): any {
+  if (arr == null) return arr;
+  if (Array.isArray(arr)) {
+    if (maxDepth <= 0) return arr;
+    return arr.map((el) => _toJsArrayDeep(el, exports, maxDepth - 1));
+  }
+  // Only probe opaque WasmGC structs as candidate vecs — scalars (numbers,
+  // strings, booleans) and JS objects pass straight through.
+  if (maxDepth <= 0 || !_isWasmStruct(arr) || !exports) return arr;
+  const vecLen = exports.__vec_len;
+  const vecGet = exports.__vec_get;
+  if (typeof vecLen !== "function" || typeof vecGet !== "function") return arr;
+  try {
+    const len = vecLen(arr) as number;
+    if (typeof len !== "number" || len < 0) return arr;
+    const result: any[] = new Array(len);
+    for (let i = 0; i < len; i++) {
+      result[i] = _toJsArrayDeep(vecGet(arr, i), exports, maxDepth - 1);
+    }
+    return result;
+  } catch {
+    return arr; // Not a vec — pass through
+  }
+}
+
 /** Per-instance state shared across imports inside one `buildImports()`
  *  call. Currently used by the `web_storage` intent so localStorage /
  *  sessionStorage resolve to a stable per-instance polyfill in standalone
@@ -9581,15 +9626,23 @@ assert._isSameValue = isSameValue;
       if (name === "__array_flat")
         return (arr: any, depth: any) => {
           const exports = callbackState?.getExports();
-          const jsArr = _toJsArray(arr, exports);
-          return jsArr.flat(depth === undefined ? undefined : depth);
+          // (#1996) Deeply unwrap nested vec refs so native flat() can flatten
+          // them and JSON.stringify renders them as arrays, not null.
+          const jsArr = _toJsArrayDeep(arr, exports, VEC_UNWRAP_MAX_DEPTH) as any[];
+          // (#1995) An omitted depth arrives as JS null (ref.null.extern), not
+          // undefined. `null` would coerce to depth 0 via ToIntegerOrInfinity,
+          // so treat both null and undefined as "use the spec default of 1".
+          return depth == null ? jsArr.flat() : jsArr.flat(depth);
         };
       // Array.prototype.flatMap(callback, thisArg?) — map then flatten (#1136)
       if (name === "__array_flatMap")
         return (arr: any, fn: Function, thisArg: any) => {
           const exports = callbackState?.getExports();
           const jsArr = _toJsArray(arr, exports);
-          return thisArg !== undefined ? jsArr.flatMap(fn as any, thisArg) : jsArr.flatMap(fn as any);
+          // (#1996) The callback may return a WasmGC vec; unwrap its result so
+          // flatMap's single-level flatten recognizes it as an array.
+          const wrapped = (...args: any[]): any => _toJsArrayDeep((fn as any)(...args), exports, VEC_UNWRAP_MAX_DEPTH);
+          return thisArg !== undefined ? jsArr.flatMap(wrapped, thisArg) : jsArr.flatMap(wrapped);
         };
       // Callback bridges for functional array methods
       if (name === "__call_1_f64") return (fn: Function, a: number) => fn(a);
