@@ -430,8 +430,7 @@ export function compileTryStatement(ctx: CodegenContext, fctx: FunctionContext, 
       // #2062: skip the rethrow fast path when the catch parameter is reassigned
       // anywhere in the body (including via a capturing closure) — `throw e` must
       // then propagate the local's current value, not the originally-caught one.
-      const rethrowEligible =
-        catchVarName !== undefined && !catchVarIsReassigned(stmt.catchClause.block, catchVarName);
+      const rethrowEligible = catchVarName !== undefined && !catchVarIsReassigned(stmt.catchClause.block, catchVarName);
       if (catchVarName && rethrowEligible) {
         if (!fctx.catchRethrowStack) fctx.catchRethrowStack = [];
         fctx.catchRethrowStack.push({ varName: catchVarName, depth: 0 });
