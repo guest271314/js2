@@ -2032,8 +2032,16 @@ function compileCallExpression(
   expr: ts.CallExpression,
   expectedType?: ValType,
 ): InnerResult {
-  // Optional chaining on calls: obj?.method()
-  if (expr.questionDotToken && ts.isPropertyAccessExpression(expr.expression)) {
+  // Optional chaining on calls: obj?.method() and obj.method?.().
+  //
+  // In the TS AST the `?.` of `o?.m(args)` sits on the inner
+  // PropertyAccessExpression, NOT on the CallExpression — only `o.m?.(args)`
+  // sets `expr.questionDotToken`. Gating on the call token alone (#2049) missed
+  // the common `o?.m(args)` form, so it fell into the regular method-call path
+  // which evaluates arguments unconditionally and derefs the receiver (trapping
+  // on a null class instance). Gate on the optional chain itself so both forms
+  // route to the short-circuiting path.
+  if (ts.isOptionalChain(expr) && ts.isPropertyAccessExpression(expr.expression)) {
     return compileOptionalCallExpression(ctx, fctx, expr);
   }
 
