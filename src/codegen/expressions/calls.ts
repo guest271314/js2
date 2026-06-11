@@ -7338,13 +7338,22 @@ function compileCallExpression(
       // charCodeAt: uses wasm:js-string charCodeAt import (not string_charCodeAt)
       // Use jsStringImports to avoid shadowing by user-defined functions (#1072).
       if (method === "charCodeAt") {
+        // #2003 — the wasm:js-string `charCodeAt` builtin TRAPS on an
+        // out-of-range index, but §22.1.3.3 requires `NaN` for any index
+        // `< 0` or `>= length`. Emit a bounds guard around the builtin and
+        // return f64 so the NaN case is representable:
+        //   idx = ToInteger(arg); len = s.length
+        //   (idx >= 0 && idx < len) ? f64(charCodeAt(s, idx)) : NaN
         const charCodeAtIdx = ctx.jsStringImports.get("charCodeAt");
-        if (charCodeAtIdx !== undefined) {
+        const lengthIdx = ctx.jsStringImports.get("length");
+        if (charCodeAtIdx !== undefined && lengthIdx !== undefined) {
+          // Save receiver to a temp so we can read both its length and its char.
           compileExpression(ctx, fctx, propAccess.expression);
+          const recvLocal = allocLocal(fctx, `__cca_recv_${fctx.locals.length}`, { kind: "externref" });
+          fctx.body.push({ op: "local.tee", index: recvLocal });
+          // Compute the (truncated) index into an i32 temp.
           if (expr.arguments.length > 0) {
-            const argType = compileExpression(ctx, fctx, expr.arguments[0]!, {
-              kind: "f64",
-            });
+            const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
             if (!argType) {
               fctx.body.push({ op: "i32.const", value: 0 });
             } else if (argType.kind === "f64") {
@@ -7353,8 +7362,35 @@ function compileCallExpression(
           } else {
             fctx.body.push({ op: "i32.const", value: 0 });
           }
-          fctx.body.push({ op: "call", funcIdx: charCodeAtIdx });
-          return { kind: "i32" };
+          // (the receiver pushed by local.tee is still on the stack below idx;
+          //  drop it — we re-load from the temp inside each branch.)
+          const idxLocal = allocLocal(fctx, `__cca_idx_${fctx.locals.length}`, { kind: "i32" });
+          fctx.body.push({ op: "local.set", index: idxLocal });
+          fctx.body.push({ op: "drop" }); // drop the receiver left by local.tee
+          // Bounds test: (idx >= 0) & (idx < len)
+          fctx.body.push({ op: "local.get", index: idxLocal });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "i32.ge_s" });
+          fctx.body.push({ op: "local.get", index: idxLocal });
+          fctx.body.push({ op: "local.get", index: recvLocal });
+          fctx.body.push({ op: "call", funcIdx: lengthIdx });
+          fctx.body.push({ op: "i32.lt_s" });
+          fctx.body.push({ op: "i32.and" });
+          // then: f64(charCodeAt(recv, idx)) ; else: NaN
+          const thenInstrs: Instr[] = [
+            { op: "local.get", index: recvLocal } as Instr,
+            { op: "local.get", index: idxLocal } as Instr,
+            { op: "call", funcIdx: charCodeAtIdx } as Instr,
+            { op: "f64.convert_i32_u" } as Instr,
+          ];
+          const elseInstrs: Instr[] = [{ op: "f64.const", value: Number.NaN } as Instr];
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "val", type: { kind: "f64" } },
+            then: thenInstrs,
+            else: elseInstrs,
+          } as Instr);
+          return { kind: "f64" };
         }
       }
 
@@ -7542,7 +7578,11 @@ function compileCallExpression(
               // sentinel. ToUint32(NaN) === 0 would produce `[]` if the runtime
               // passed it through verbatim, so the `string_method` host shim
               // strips a trailing NaN limit before invoking the JS method.
-              if (method === "split") {
+              // #2002 — includes/startsWith/endsWith likewise use NaN for an
+              // omitted position so the host shim drops it and the JS method
+              // applies its spec default (0 for includes/startsWith, length
+              // for endsWith) instead of ToInteger(NaN)=0.
+              if (method === "split" || method === "includes" || method === "startsWith" || method === "endsWith") {
                 fctx.body.push({ op: "f64.const", value: Number.NaN });
               } else {
                 fctx.body.push({ op: "f64.const", value: 0 });
