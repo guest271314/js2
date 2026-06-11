@@ -1313,6 +1313,48 @@ export function compileExternPropertyGetFromStack(
 
 // ── Property access ──────────────────────────────────────────────────
 
+/**
+ * (#1712 follow-up) Per-source-file scan: which identifiers have their
+ * `.prototype` SLOT directly reassigned (`X.prototype = …`, including through
+ * parenthesized/`as` wrappers like `(X as any).prototype = …`)? Used to gate
+ * the `__get_function_prototype` host bridge OFF for harness-shim-style
+ * constructors whose prototype object is replaced wholesale — the bridge's
+ * vivified sidecar prototype would shadow the reassigned one. Member writes
+ * (`X.prototype.m = …`) deliberately do NOT count: there the target of the
+ * assignment is `X.prototype.m`, not the `prototype` slot itself.
+ */
+const _protoReassignScanCache = new WeakMap<ts.SourceFile, Set<string>>();
+function prototypeSlotIsReassigned(ctx: CodegenContext, expr: ts.Node, fnName: string): boolean {
+  const sf = expr.getSourceFile();
+  let names = _protoReassignScanCache.get(sf);
+  if (!names) {
+    const found = new Set<string>();
+    const stripWrappers = (n: ts.Expression): ts.Expression => {
+      let cur = n;
+      while (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) {
+        cur = cur.expression;
+      }
+      return cur;
+    };
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isPropertyAccessExpression(node.left) &&
+        node.left.name.text === "prototype"
+      ) {
+        const recv = stripWrappers(node.left.expression);
+        if (ts.isIdentifier(recv)) found.add(recv.text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+    names = found;
+    _protoReassignScanCache.set(sf, names);
+  }
+  return names.has(fnName);
+}
+
 export function compilePropertyAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1350,25 +1392,39 @@ export function compilePropertyAccess(
           ts.isFunctionExpression(decl.initializer) &&
           !decl.initializer.asteriskToken &&
           decl.initializer.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) !== true));
-    if (isPlainFunctionDecl) {
+    // (#1712 follow-up) Skip the host prototype bridge for functions whose
+    // `.prototype` is explicitly REASSIGNED somewhere in the program (e.g.
+    // the test262 harness Iterator shim: `function Iterator() {}` followed by
+    // `(Iterator as any).prototype = %IteratorPrototype%`). The bridge's
+    // `__get_function_prototype` vivifies a fresh sidecar prototype object and
+    // never sees the reassigned value, so `Iterator.prototype.filter` read
+    // back `null`/`undefined` instead of the real proto member (regressed the
+    // Iterator.prototype.* test262 family). Acorn-style constructors only
+    // mutate MEMBERS of `.prototype` (`Parser.prototype.m = fn`,
+    // `Object.defineProperties(Parser.prototype, …)`) — never the slot itself
+    // — so they keep the bridge.
+    if (isPlainFunctionDecl && !prototypeSlotIsReassigned(ctx, expr, objName)) {
       const protoIdx = ensureLateImport(
         ctx,
         "__get_function_prototype",
         [{ kind: "externref" }],
         [{ kind: "externref" }],
       );
-      flushLateImportShifts(ctx, fctx);
-      const recvType = compileExpression(ctx, fctx, expr.expression);
-      if (!recvType) return null;
-      if (recvType.kind === "ref" || recvType.kind === "ref_null") {
-        fctx.body.push({ op: "extern.convert_any" } as Instr);
-      } else if (recvType.kind !== "externref") {
-        coerceType(ctx, fctx, recvType, { kind: "externref" });
-      }
+      // (#1712 review finding 3) In standalone mode the import is refused
+      // (`protoIdx === undefined`); do NOT compile the receiver and return it
+      // as its own "prototype" — fall through to the legacy lowering below.
       if (protoIdx !== undefined) {
+        flushLateImportShifts(ctx, fctx);
+        const recvType = compileExpression(ctx, fctx, expr.expression);
+        if (!recvType) return null;
+        if (recvType.kind === "ref" || recvType.kind === "ref_null") {
+          fctx.body.push({ op: "extern.convert_any" } as Instr);
+        } else if (recvType.kind !== "externref") {
+          coerceType(ctx, fctx, recvType, { kind: "externref" });
+        }
         fctx.body.push({ op: "call", funcIdx: protoIdx } as Instr);
+        return { kind: "externref" };
       }
-      return { kind: "externref" };
     }
   }
 

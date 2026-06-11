@@ -81,8 +81,19 @@ function _getWasmVecView(obj: any, exports: Record<string, Function> | undefined
 }
 
 function _getArrayViewProperty(view: any[], key: any): any {
-  const value = view[key as keyof any[]];
-  return typeof value === "function" ? (value as Function).bind(view) : value;
+  // (#1712 follow-up) Serve ONLY own elements and `length` from the snapshot
+  // view — never Array.prototype methods. The earlier revision returned
+  // builtin methods `.bind(view)`, which (a) pinned `this` to a DETACHED
+  // cached copy so explicit-receiver calls like `[].fill.call(obj)` silently
+  // ignored their receiver (regressed Array.prototype.* `return-abrupt-from-
+  // this-length` test262 tests — the receiver's throwing `length` getter was
+  // never consulted), and (b) wrote mutations into the stale snapshot rather
+  // than the live wasm vec. Method lookups fall through to the existing
+  // closure/host paths, which thread the receiver correctly.
+  if (key === "length") return view.length;
+  if (typeof key === "number") return Number.isInteger(key) && key >= 0 ? view[key] : undefined;
+  if (typeof key === "string" && /^(0|[1-9]\d*)$/.test(key)) return view[Number(key)];
+  return undefined;
 }
 
 /**
@@ -6974,6 +6985,24 @@ assert._isSameValue = isSameValue;
           }
           const fn = wrappedObj[method];
           if (typeof fn !== "function") {
+            // (#1712 follow-up) Builtin Array method invoked directly ON a wasm
+            // vec (`vec.push(x)`, `vec.indexOf(y)` — acorn's token/context
+            // stacks). The receiver IS the vec, so dispatching the builtin on
+            // the live cached view is correct (reads and writes stay coherent
+            // through the same `_wasmVecViews` entry that element reads use).
+            // This deliberately does NOT cover `call`/`apply`/`bind` — those
+            // take an EXPLICIT receiver, and binding builtins to the view is
+            // exactly the receiver-corruption bug fixed in
+            // `_getArrayViewProperty` (test262 `return-abrupt-from-this-length`).
+            if (method !== "call" && method !== "apply" && method !== "bind") {
+              const vecView = _getWasmVecView(obj, exports);
+              if (vecView) {
+                const builtin = (Array.prototype as Record<string, any>)[method as string];
+                if (typeof builtin === "function") {
+                  return builtin.apply(vecView, wrappedArgs);
+                }
+              }
+            }
             // (#837) Map/WeakMap upsert proposal polyfill — Node 25 / V8
             // currently don't ship `getOrInsert` / `getOrInsertComputed`
             // (TC39 Stage 3). Implement the spec algorithm here so the

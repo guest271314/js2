@@ -1503,39 +1503,6 @@ export function compileBinaryExpression(
         // 1 for !== — those cases shouldn't conflate identity anyway.
         const otherType = leftIsRef ? rightType : leftType;
         if (otherType.kind === "externref") {
-          if (!ctx.standalone && !ctx.wasi) {
-            // (#1712) Confirm the host-eq import is available BEFORE coercing
-            // the operands to externref. The coercions below mutate the stack
-            // (and a temp-local swap for the left operand); if `__host_eq` is
-            // ultimately refused (`finalHostEqIdx === undefined`) we fall
-            // through to the legacy EQ_HEAP path, which consumes the ORIGINAL
-            // left/right ValTypes. Coercing first and then falling through left
-            // already-externref operands on the stack for a path expecting the
-            // original types → ill-typed Wasm. Resolve the import first.
-            const hostEqIdx = ensureLateImport(
-              ctx,
-              "__host_eq",
-              [{ kind: "externref" }, { kind: "externref" }],
-              [{ kind: "i32" }],
-            );
-            flushLateImportShifts(ctx, fctx);
-            const finalHostEqIdx = ctx.funcMap.get("__host_eq") ?? hostEqIdx;
-            if (finalHostEqIdx !== undefined) {
-              if (rightType.kind !== "externref") {
-                coerceType(ctx, fctx, rightType, { kind: "externref" });
-              }
-              if (leftType.kind !== "externref") {
-                const tmpR = allocTempLocal(fctx, { kind: "externref" });
-                fctx.body.push({ op: "local.set", index: tmpR });
-                coerceType(ctx, fctx, leftType, { kind: "externref" });
-                fctx.body.push({ op: "local.get", index: tmpR });
-                releaseTempLocal(fctx, tmpR);
-              }
-              fctx.body.push({ op: "call", funcIdx: finalHostEqIdx } as Instr);
-              if (isStrictNeq) fctx.body.push({ op: "i32.eqz" } as Instr);
-              return { kind: "i32" };
-            }
-          }
           const EQ_HEAP_TYPE_BR = -19;
           // Stack: [left, right]. Save right (as anyref), then handle left.
           const tmpRightAny = allocTempLocal(fctx, { kind: "anyref" });
@@ -2016,33 +1983,6 @@ export function compileBinaryExpression(
       if (equalsIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx: equalsIdx });
         if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
-        return { kind: "i32" };
-      }
-    }
-
-    if (
-      isStrict &&
-      !noJsHost &&
-      leftType.kind === "externref" &&
-      rightType.kind === "externref" &&
-      !leftIsString &&
-      !rightIsString &&
-      !leftIsNumber &&
-      !rightIsNumber &&
-      !leftIsBool &&
-      !rightIsBool
-    ) {
-      const hostEqIdx = ensureLateImport(
-        ctx,
-        "__host_eq",
-        [{ kind: "externref" }, { kind: "externref" }],
-        [{ kind: "i32" }],
-      );
-      flushLateImportShifts(ctx, fctx);
-      const finalHostEqIdx = ctx.funcMap.get("__host_eq") ?? hostEqIdx;
-      if (finalHostEqIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: finalHostEqIdx } as Instr);
-        if (isNeqOp) fctx.body.push({ op: "i32.eqz" } as Instr);
         return { kind: "i32" };
       }
     }
