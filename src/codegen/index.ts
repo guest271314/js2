@@ -5141,11 +5141,10 @@ export function ensureLinearU8AllocHelper(ctx: CodegenContext): number {
  * `[object]` placeholder in emitWasiValueToStdout, corrupting the stream.
  *
  * Strategy: flatten any AnyString (FlatString / ConsString / Utf8String) to a
- * NativeString via the existing __str_flatten helper, then copy the low byte
- * of each i16 code unit into linear memory and issue a single fd_write. The
- * round-trip is byte-exact for ASCII / Latin-1 content (the Native Messaging
- * JSON case). Non-Latin-1 code points are truncated to their low byte —
- * acceptable for the protocol use-case.
+ * NativeString via the existing __str_flatten helper, then encode the WTF-16
+ * code units as UTF-8 bytes directly into linear memory before issuing
+ * fd_write. This keeps WASI string output on the pure-Wasm path (#1470) without
+ * routing through the JS-host `__str_to_mem` / `TextEncoder` bridge.
  *
  * Param 0 is typed `ref NativeString` so callers can hand us a value compiled
  * as `{ kind: "ref", typeIdx: ctx.nativeStrTypeIdx }` directly; __str_flatten
@@ -5181,18 +5180,148 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
   // response in the Native Messaging host (#1723).
   const anyStrTypeIdx = ctx.anyStrTypeIdx >= 0 ? ctx.anyStrTypeIdx : strTypeIdx;
 
-  // param: s(0); locals: flat(1), len(2), off(3), data(4), i(5), needPages(6)
+  // param: s(0); locals: flat(1), len(2), off(3), data(4), i(5), o(6),
+  // needPages(7), cu(8), cp(9), lo(10)
   const S = 0;
   const FLAT = 1;
   const LEN = 2;
   const OFF = 3;
   const DATA = 4;
   const I = 5;
-  const NEED_PAGES = 6;
+  const O = 6;
+  const NEED_PAGES = 7;
+  const CU = 8;
+  const CP = 9;
+  const LO = 10;
 
   const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: anyStrTypeIdx }], []);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
   ctx.funcMap.set(helperName, funcIdx);
+
+  const storeByte = (offsetFromO: number, value: Instr[]): Instr[] => [
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "local.get", index: O } as Instr,
+    ...(offsetFromO === 0
+      ? []
+      : ([{ op: "i32.const", value: offsetFromO } as Instr, { op: "i32.add" } as Instr] as Instr[])),
+    { op: "i32.add" } as Instr,
+    ...value,
+    { op: "i32.store8", align: 0, offset: 0 } as Instr,
+  ];
+
+  const advanceOutput = (n: number): Instr[] => [
+    { op: "local.get", index: O } as Instr,
+    { op: "i32.const", value: n } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "local.set", index: O } as Instr,
+  ];
+
+  const encodeCurrentCodePoint: Instr[] = [
+    { op: "local.get", index: CP } as Instr,
+    { op: "i32.const", value: 0x80 } as Instr,
+    { op: "i32.lt_u" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [storeByte(0, [{ op: "local.get", index: CP } as Instr]), ...advanceOutput(1)].flat(),
+      else: [
+        { op: "local.get", index: CP } as Instr,
+        { op: "i32.const", value: 0x800 } as Instr,
+        { op: "i32.lt_u" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            ...storeByte(0, [
+              { op: "local.get", index: CP } as Instr,
+              { op: "i32.const", value: 6 } as Instr,
+              { op: "i32.shr_u" } as Instr,
+              { op: "i32.const", value: 0xc0 } as Instr,
+              { op: "i32.or" } as Instr,
+            ]),
+            ...storeByte(1, [
+              { op: "local.get", index: CP } as Instr,
+              { op: "i32.const", value: 0x3f } as Instr,
+              { op: "i32.and" } as Instr,
+              { op: "i32.const", value: 0x80 } as Instr,
+              { op: "i32.or" } as Instr,
+            ]),
+            ...advanceOutput(2),
+          ],
+          else: [
+            { op: "local.get", index: CP } as Instr,
+            { op: "i32.const", value: 0x10000 } as Instr,
+            { op: "i32.lt_u" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                ...storeByte(0, [
+                  { op: "local.get", index: CP } as Instr,
+                  { op: "i32.const", value: 12 } as Instr,
+                  { op: "i32.shr_u" } as Instr,
+                  { op: "i32.const", value: 0xe0 } as Instr,
+                  { op: "i32.or" } as Instr,
+                ]),
+                ...storeByte(1, [
+                  { op: "local.get", index: CP } as Instr,
+                  { op: "i32.const", value: 6 } as Instr,
+                  { op: "i32.shr_u" } as Instr,
+                  { op: "i32.const", value: 0x3f } as Instr,
+                  { op: "i32.and" } as Instr,
+                  { op: "i32.const", value: 0x80 } as Instr,
+                  { op: "i32.or" } as Instr,
+                ]),
+                ...storeByte(2, [
+                  { op: "local.get", index: CP } as Instr,
+                  { op: "i32.const", value: 0x3f } as Instr,
+                  { op: "i32.and" } as Instr,
+                  { op: "i32.const", value: 0x80 } as Instr,
+                  { op: "i32.or" } as Instr,
+                ]),
+                ...advanceOutput(3),
+              ],
+              else: [
+                ...storeByte(0, [
+                  { op: "local.get", index: CP } as Instr,
+                  { op: "i32.const", value: 18 } as Instr,
+                  { op: "i32.shr_u" } as Instr,
+                  { op: "i32.const", value: 0xf0 } as Instr,
+                  { op: "i32.or" } as Instr,
+                ]),
+                ...storeByte(1, [
+                  { op: "local.get", index: CP } as Instr,
+                  { op: "i32.const", value: 12 } as Instr,
+                  { op: "i32.shr_u" } as Instr,
+                  { op: "i32.const", value: 0x3f } as Instr,
+                  { op: "i32.and" } as Instr,
+                  { op: "i32.const", value: 0x80 } as Instr,
+                  { op: "i32.or" } as Instr,
+                ]),
+                ...storeByte(2, [
+                  { op: "local.get", index: CP } as Instr,
+                  { op: "i32.const", value: 6 } as Instr,
+                  { op: "i32.shr_u" } as Instr,
+                  { op: "i32.const", value: 0x3f } as Instr,
+                  { op: "i32.and" } as Instr,
+                  { op: "i32.const", value: 0x80 } as Instr,
+                  { op: "i32.or" } as Instr,
+                ]),
+                ...storeByte(3, [
+                  { op: "local.get", index: CP } as Instr,
+                  { op: "i32.const", value: 0x3f } as Instr,
+                  { op: "i32.and" } as Instr,
+                  { op: "i32.const", value: 0x80 } as Instr,
+                  { op: "i32.or" } as Instr,
+                ]),
+                ...advanceOutput(4),
+              ],
+            } as Instr,
+          ],
+        } as Instr,
+      ],
+    } as Instr,
+  ];
 
   const body: Instr[] = [
     // flat = __str_flatten(s)
@@ -5205,19 +5334,19 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
     { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 } as Instr,
     { op: "local.set", index: LEN } as Instr,
 
-    // #1723: grow linear memory if the staging buffer
-    // [WASI_WRITE_SCRATCH_START .. WASI_WRITE_SCRATCH_START+len) would overflow
-    // the current memory size. The module reserves only 3 pages by default, so
-    // a ~1 MiB response (the Native Messaging large-message case) writes far
-    // past page 2 and traps "memory access out of bounds" without this guard.
+    // #1723/#1470: grow linear memory if the staging buffer could overflow.
+    // UTF-8/WTF-8 needs at most 3 bytes per UTF-16 code unit: BMP scalars and
+    // lone surrogates are 1..3 bytes, while a surrogate pair is 4 bytes across
+    // two code units. The final fd_write length is the actual output cursor O.
     //
-    //   neededPages = ceil((WASI_WRITE_SCRATCH_START + len) / 65536)
-    //   if (memory.size < neededPages) memory.grow(neededPages - memory.size)
+    //   neededPages = ceil((WASI_WRITE_SCRATCH_START + len*3) / 65536)
     //
     // ceil(x / 65536) == (x + 65535) >> 16. We `i32.shr_u` so a large length
     // near 2^31 still computes a non-negative page count.
     { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
     { op: "local.get", index: LEN } as Instr,
+    { op: "i32.const", value: 3 } as Instr,
+    { op: "i32.mul" } as Instr,
     { op: "i32.add" } as Instr,
     { op: "i32.const", value: 65535 } as Instr,
     { op: "i32.add" } as Instr,
@@ -5253,8 +5382,11 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
     // i = 0
     { op: "i32.const", value: 0 } as Instr,
     { op: "local.set", index: I } as Instr,
+    // o = 0 (UTF-8 byte cursor)
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "local.set", index: O } as Instr,
 
-    // while (i < len) mem[SCRATCH+i] = (u8) data[off+i]; i++
+    // while (i < len) decode one WTF-16 code point and encode it as UTF-8.
     {
       op: "block",
       blockType: { kind: "empty" },
@@ -5268,26 +5400,76 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
             { op: "i32.ge_s" } as Instr,
             { op: "br_if", depth: 1 } as Instr,
 
-            // address = SCRATCH_START + i
-            { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-            { op: "local.get", index: I } as Instr,
-            { op: "i32.add" } as Instr,
-
-            // value = data[off + i] (i16, unsigned) — low byte kept by i32.store8
+            // cu = data[off + i]; cp = cu; i++
             { op: "local.get", index: DATA } as Instr,
             { op: "local.get", index: OFF } as Instr,
             { op: "local.get", index: I } as Instr,
             { op: "i32.add" } as Instr,
             { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
-
-            { op: "i32.store8", align: 0, offset: 0 },
-
-            // i++
+            { op: "local.set", index: CU } as Instr,
+            { op: "local.get", index: CU } as Instr,
+            { op: "local.set", index: CP } as Instr,
             { op: "local.get", index: I } as Instr,
             { op: "i32.const", value: 1 } as Instr,
             { op: "i32.add" } as Instr,
             { op: "local.set", index: I } as Instr,
 
+            // If cu is a high surrogate and the next code unit is a low
+            // surrogate, combine them into one scalar and consume the low unit.
+            { op: "local.get", index: CU } as Instr,
+            { op: "i32.const", value: 0xd800 } as Instr,
+            { op: "i32.ge_u" } as Instr,
+            { op: "local.get", index: CU } as Instr,
+            { op: "i32.const", value: 0xdbff } as Instr,
+            { op: "i32.le_u" } as Instr,
+            { op: "i32.and" } as Instr,
+            { op: "local.get", index: I } as Instr,
+            { op: "local.get", index: LEN } as Instr,
+            { op: "i32.lt_s" } as Instr,
+            { op: "i32.and" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: DATA } as Instr,
+                { op: "local.get", index: OFF } as Instr,
+                { op: "local.get", index: I } as Instr,
+                { op: "i32.add" } as Instr,
+                { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
+                { op: "local.set", index: LO } as Instr,
+                { op: "local.get", index: LO } as Instr,
+                { op: "i32.const", value: 0xdc00 } as Instr,
+                { op: "i32.ge_u" } as Instr,
+                { op: "local.get", index: LO } as Instr,
+                { op: "i32.const", value: 0xdfff } as Instr,
+                { op: "i32.le_u" } as Instr,
+                { op: "i32.and" } as Instr,
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    { op: "i32.const", value: 0x10000 } as Instr,
+                    { op: "local.get", index: CU } as Instr,
+                    { op: "i32.const", value: 0xd800 } as Instr,
+                    { op: "i32.sub" } as Instr,
+                    { op: "i32.const", value: 10 } as Instr,
+                    { op: "i32.shl" } as Instr,
+                    { op: "i32.add" } as Instr,
+                    { op: "local.get", index: LO } as Instr,
+                    { op: "i32.const", value: 0xdc00 } as Instr,
+                    { op: "i32.sub" } as Instr,
+                    { op: "i32.add" } as Instr,
+                    { op: "local.set", index: CP } as Instr,
+                    { op: "local.get", index: I } as Instr,
+                    { op: "i32.const", value: 1 } as Instr,
+                    { op: "i32.add" } as Instr,
+                    { op: "local.set", index: I } as Instr,
+                  ],
+                } as Instr,
+              ],
+            } as Instr,
+
+            ...encodeCurrentCodePoint,
             { op: "br", depth: 0 } as Instr,
           ],
         },
@@ -5298,9 +5480,9 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
     { op: "i32.const", value: 0 } as Instr,
     { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
     { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // iovec.buf_len = len at memory[4]
+    // iovec.buf_len = actual UTF-8 byte length at memory[4]
     { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: LEN } as Instr,
+    { op: "local.get", index: O } as Instr,
     { op: "i32.store", align: 2, offset: 0 } as Instr,
     // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
     { op: "i32.const", value: fd } as Instr,
@@ -5320,7 +5502,11 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
       { name: "off", type: { kind: "i32" } },
       { name: "data", type: { kind: "ref", typeIdx: strDataTypeIdx } },
       { name: "i", type: { kind: "i32" } },
+      { name: "o", type: { kind: "i32" } },
       { name: "needPages", type: { kind: "i32" } },
+      { name: "cu", type: { kind: "i32" } },
+      { name: "cp", type: { kind: "i32" } },
+      { name: "lo", type: { kind: "i32" } },
     ],
     body,
     exported: false,
