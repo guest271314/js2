@@ -114,3 +114,55 @@ table-driven fail-loud sweep) and `tests/linear-controlflow.test.ts`
 ## Source
 
 Compiler quality review 2026-06. Direct child of #1858; extends #1868/#1838.
+
+## Implementation Notes (2026-06-11)
+
+All changes in `src/codegen-linear/index.ts`; tests in
+`tests/linear-controlflow.test.ts`.
+
+**Depth bookkeeping convention** (now used consistently): `breakStack`/
+`continueStack` store *(interior depth − 1)* of the target label; a `br`
+at nesting `fctx.blockDepth` uses `depth = blockDepth − stored − 1`. Every
+construct that adds a Wasm label (`if` arms, the new inner blocks, the
+switch wrapper) increments `blockDepth` around the statements it compiles —
+the switch lowering previously did **not**, which would have made any
+implementation of break inside a case body mis-target.
+
+1. **break/continue implemented.** `while` continue targets the loop head
+   (re-tests the condition — already correct). `for`, array `for-of`, and
+   `do-while` got an **inner block** around the body so `continue` falls
+   out into the incrementor / condition instead of skipping it (a br to
+   the loop head would have spun on a stale induction variable). Map
+   `for-of` uses the `if (hash != 0)` then-arm itself as the continue
+   target (exiting the if reaches the index increment). Labeled
+   break/continue → hard error.
+2. **Switch.** Whole lowering wrapped in a `block` that is the `break`
+   target (pushed on `breakStack` only — `continue` passes through to the
+   enclosing loop). Fall-through from a *non-empty* case body (and from a
+   mid-list default) is a hard located error until a br_table lowering
+   exists; empty-body case grouping still works. `statementTerminates`
+   recursion keeps `if/else`-both-return bodies legal.
+3. **Fail-loud default arms** in `compileStatement` (with a no-op allow
+   list: empty/type-alias/interface/debugger) and `compileExpression`
+   (placeholder `f64.const 0` keeps stack arity sane; the #1868 gate fails
+   the compile). Also: non-identifier/non-property call targets error, and
+   the binary-operator default arm now drops both operands before its
+   placeholder. `as`/`satisfies`/`<T>x` casts pass through to the inner
+   expression.
+4. **`%` was an empty switch arm** — `a % b` compiled both operands and no
+   operator: the result was just `b` and the leftover `a` corrupted stack
+   arity (found because the new break/continue tests used `i % 2`).
+   Implemented as `a − trunc(a/b)·b` via temp locals (JS sign-of-dividend
+   semantics; known divergence: `b = ±Infinity` → NaN instead of `a`).
+5. **`throw`** → hard located error instead of a silent `unreachable` trap
+   (mirrors the #1838 try/catch decision; Wasm-EH lowering is the real fix).
+6. **NaN truthiness**: `f64` ToBoolean is now `abs(x) > 0` (covers 0, −0,
+   NaN) instead of `x != 0` (NaN was truthy).
+7. **Diagnostics carry real positions** via a local `nodeLoc()` helper
+   (1-based, mirrors the GC backend); threaded into all new arms and the
+   five pre-existing `line: 0, column: 0` sites.
+
+Validation: 138/138 tests across all 20 linear-consumer suites.
+`tests/ir-backend-decoupling.test.ts` + `tests/linker-self-host.test.ts`
+fail identically on the unmodified merge base (`env.__box_number`
+LinkError — pre-existing, unrelated to codegen-linear).
