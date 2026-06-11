@@ -144,10 +144,11 @@ export function hasStandaloneRegExpEngine(state: StandaloneRegExpEngineState): b
 }
 
 const STANDALONE_REGEXP_STRUCT_NAME = "__StandaloneRegExp";
-// g/i/y from Phase 2a, m/s from 2c, d from 2d Slice A (#1911 — `d` does not
-// change MATCHING semantics; the `.indices` result surface is #1914's lane).
-// u/v stay code-point follow-ups (2d Slice B).
-const SUPPORTED_STANDALONE_FLAGS = RE_FLAG_G | RE_FLAG_I | RE_FLAG_Y | RE_FLAG_M | RE_FLAG_S | RE_FLAG_D;
+// g/i/y from Phase 2a, m/s from 2c, d/u/v from 2d (#1911 — `d` does not
+// change MATCHING semantics; the `.indices` result surface is #1914's lane;
+// u/v code-point atoms resolve via compile-time host enumeration, Slice B).
+const SUPPORTED_STANDALONE_FLAGS =
+  RE_FLAG_G | RE_FLAG_I | RE_FLAG_Y | RE_FLAG_M | RE_FLAG_S | RE_FLAG_D | RE_FLAG_U | RE_FLAG_V;
 
 function reportStandaloneRegExpUnsupported(ctx: CodegenContext, node: ts.Node, detail: string): void {
   reportError(
@@ -388,8 +389,20 @@ function compileStaticStandaloneRegExp(
 
   const refusedFlags = flagBits & ~SUPPORTED_STANDALONE_FLAGS;
   if (refusedFlags !== 0) {
-    reportStandaloneRegExpUnsupported(ctx, node, `flags ${JSON.stringify(flags)} (u/v/d are #1539 Phase 2d)`);
+    reportStandaloneRegExpUnsupported(ctx, node, `flags ${JSON.stringify(flags)} (#1539 Phase 2d)`);
     return null;
+  }
+
+  // u/v mode is strict (no Annex B): pre-validate against the host so a
+  // genuinely invalid LITERAL refuses at compile instead of silently riding a
+  // lenient parser path (constructor sites already lowered host-invalid
+  // patterns to a runtime SyntaxError before reaching here). #1911 Slice B.
+  if ((flagBits & (RE_FLAG_U | RE_FLAG_V)) !== 0) {
+    const syntaxMsg = hostRegExpSyntaxErrorMessage(pattern, flags);
+    if (syntaxMsg !== null) {
+      reportStandaloneRegExpUnsupported(ctx, node, `invalid u/v pattern: ${syntaxMsg}`);
+      return null;
+    }
   }
 
   try {

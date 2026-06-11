@@ -1403,6 +1403,25 @@ const _wasmNonExtensibleObjs = new WeakSet<object>();
 const _userClassTags = new WeakMap<object, string>();
 const _userClassParents = new Map<string, string | null>();
 
+// (#1991) Object.prototype's own enumerable+non-enumerable data/accessor keys.
+// `key in obj` walks to Object.prototype (§13.10.1 → §7.3.12), so every object
+// value has these regardless of own properties — used by `__extern_has` to
+// answer e.g. `"toString" in ({} as any)` for opaque WasmGC-struct receivers.
+const _OBJECT_PROTO_KEYS: ReadonlySet<string> = new Set([
+  "constructor",
+  "hasOwnProperty",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  "toLocaleString",
+  "toString",
+  "valueOf",
+  "__proto__",
+  "__defineGetter__",
+  "__defineSetter__",
+  "__lookupGetter__",
+  "__lookupSetter__",
+]);
+
 /**
  * DataView subview metadata (#1064).
  *
@@ -3495,6 +3514,16 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
   // (e.g. getOwnPropertyNames conversion loop uses __extern_get with integer indices).
   // #1830 — the range must cover every id in `_symbolIdToKeys` (1-15, 15 =
   // @@matchAll); `<= 14` silently dropped Symbol.matchAll on WasmGC structs.
+  // #2014: a small integer key (1-15) collides with the well-known-symbol ID
+  // range below. A genuine numeric data property (`o[2]` on `{ 2: "two" }`) is
+  // stored under the string field name "2" and exposed as `__sget_2`, so try
+  // that real-property getter BEFORE interpreting the key as a symbol ID —
+  // otherwise `o[2]` is mis-resolved as Symbol(2) and returns undefined.
+  if (_isWasmStruct(obj) && typeof key === "number" && Number.isInteger(key) && key >= 0) {
+    const exports = callbackState?.getExports();
+    const getter = exports?.[`__sget_${String(key)}`];
+    if (typeof getter === "function") return getter(obj);
+  }
   if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 15) {
     const symKeys = _symbolIdToKeys.get(key);
     if (symKeys) {
@@ -4575,6 +4604,51 @@ function _toJsArray(arr: any, exports: Record<string, Function> | undefined): an
     }
   }
   return [arr]; // Fallback: wrap single value
+}
+
+/**
+ * (#1996) Recursion cap for `_toJsArrayDeep`. Generous enough for any
+ * realistic nesting while preventing unbounded recursion on a pathological
+ * input. Vec refs are acyclic, so this is a safety ceiling, not a semantic
+ * limit.
+ */
+const VEC_UNWRAP_MAX_DEPTH = 64;
+
+/**
+ * (#1996) Recursively materialize a WasmGC vec into a JS array, unwrapping
+ * any nested vec-ref elements into real JS arrays so native `Array.prototype`
+ * methods (`flat`, `flatMap`, `JSON.stringify`) recognize them via
+ * `Array.isArray`. Without this, `_toJsArray` converts only the outer vec and
+ * leaves inner elements as opaque WasmGC refs, which `flat()` cannot flatten
+ * and `JSON.stringify` renders as `null`.
+ *
+ * `maxDepth` bounds the recursion so already-flat scalar elements aren't probed
+ * past the depth the caller cares about (flat's depth argument). A non-vec
+ * value passes through unchanged.
+ */
+function _toJsArrayDeep(arr: any, exports: Record<string, Function> | undefined, maxDepth: number): any {
+  if (arr == null) return arr;
+  if (Array.isArray(arr)) {
+    if (maxDepth <= 0) return arr;
+    return arr.map((el) => _toJsArrayDeep(el, exports, maxDepth - 1));
+  }
+  // Only probe opaque WasmGC structs as candidate vecs — scalars (numbers,
+  // strings, booleans) and JS objects pass straight through.
+  if (maxDepth <= 0 || !_isWasmStruct(arr) || !exports) return arr;
+  const vecLen = exports.__vec_len;
+  const vecGet = exports.__vec_get;
+  if (typeof vecLen !== "function" || typeof vecGet !== "function") return arr;
+  try {
+    const len = vecLen(arr) as number;
+    if (typeof len !== "number" || len < 0) return arr;
+    const result: any[] = new Array(len);
+    for (let i = 0; i < len; i++) {
+      result[i] = _toJsArrayDeep(vecGet(arr, i), exports, maxDepth - 1);
+    }
+    return result;
+  } catch {
+    return arr; // Not a vec — pass through
+  }
 }
 
 /** Per-instance state shared across imports inside one `buildImports()`
@@ -6288,6 +6362,17 @@ assert._isSameValue = isSameValue;
                 /* getter not defined for this struct variant — fall through */
               }
             }
+          }
+          // (#1991) `in` walks the [[Prototype]] chain (§13.10.1 → §7.3.12), so
+          // EVERY object value inherits the Object.prototype members. A WasmGC
+          // struct (object literal / class instance / array) arrives here as an
+          // opaque externref whose `key in obj` above can't see Object.prototype,
+          // so `"toString" in ({} as any)` wrongly returned 0. Recognise the
+          // well-known Object.prototype keys explicitly for any non-null object.
+          // (Inherited *user-class* methods still need a method registry — not
+          // covered here.)
+          if (typeof key === "string" && (typeof obj === "object" || typeof obj === "function") && obj !== null) {
+            if (_OBJECT_PROTO_KEYS.has(key)) return 1;
           }
           return 0;
         };
@@ -9613,15 +9698,23 @@ assert._isSameValue = isSameValue;
       if (name === "__array_flat")
         return (arr: any, depth: any) => {
           const exports = callbackState?.getExports();
-          const jsArr = _toJsArray(arr, exports);
-          return jsArr.flat(depth === undefined ? undefined : depth);
+          // (#1996) Deeply unwrap nested vec refs so native flat() can flatten
+          // them and JSON.stringify renders them as arrays, not null.
+          const jsArr = _toJsArrayDeep(arr, exports, VEC_UNWRAP_MAX_DEPTH) as any[];
+          // (#1995) An omitted depth arrives as JS null (ref.null.extern), not
+          // undefined. `null` would coerce to depth 0 via ToIntegerOrInfinity,
+          // so treat both null and undefined as "use the spec default of 1".
+          return depth == null ? jsArr.flat() : jsArr.flat(depth);
         };
       // Array.prototype.flatMap(callback, thisArg?) — map then flatten (#1136)
       if (name === "__array_flatMap")
         return (arr: any, fn: Function, thisArg: any) => {
           const exports = callbackState?.getExports();
           const jsArr = _toJsArray(arr, exports);
-          return thisArg !== undefined ? jsArr.flatMap(fn as any, thisArg) : jsArr.flatMap(fn as any);
+          // (#1996) The callback may return a WasmGC vec; unwrap its result so
+          // flatMap's single-level flatten recognizes it as an array.
+          const wrapped = (...args: any[]): any => _toJsArrayDeep((fn as any)(...args), exports, VEC_UNWRAP_MAX_DEPTH);
+          return thisArg !== undefined ? jsArr.flatMap(wrapped, thisArg) : jsArr.flatMap(wrapped);
         };
       // Callback bridges for functional array methods
       if (name === "__call_1_f64") return (fn: Function, a: number) => fn(a);
@@ -9688,6 +9781,24 @@ assert._isSameValue = isSameValue;
           // never reach this branch as wasm structs.
           if (ctorName === "Object" && v != null && _isWasmStruct(v)) {
             return 1;
+          }
+          // (#1992) `<fn> instanceof Function` — a compiled closure is a WasmGC
+          // struct, so V8's `v instanceof Function` above returns false for the
+          // opaque externref. Recognise it via `__is_closure` (the same callable
+          // discriminator `__typeof` uses to report "function"), so an
+          // `any`-typed callable answers `true` as the spec requires. Closures
+          // also have `Object` in their prototype chain — but only the explicit
+          // `Function` / `Object` RHS reaches here as a wasm struct.
+          if (ctorName === "Function" && v != null && typeof v === "object" && _isWasmStruct(v)) {
+            const exports = callbackState?.getExports();
+            const isClosureFn = exports?.__is_closure as ((x: any) => number) | undefined;
+            if (typeof isClosureFn === "function") {
+              try {
+                if (isClosureFn(v) === 1) return 1;
+              } catch {
+                /* fall through to false */
+              }
+            }
           }
           return 0;
         };
