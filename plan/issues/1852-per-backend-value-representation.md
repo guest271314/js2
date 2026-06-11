@@ -5,10 +5,11 @@ status: done
 completed: 2026-06-10
 sprint: Backlog
 created: 2026-06-04
-updated: 2026-06-04
+updated: 2026-06-10
 priority: medium
 feasibility: hard
 reasoning_effort: high
+model: fable
 task_type: feature
 area: ir
 language_feature: compiler-internals
