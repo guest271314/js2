@@ -1,9 +1,10 @@
 ---
 id: 1956
 title: "CI: merge-group predecessor diffing → enable merge-queue batching (rollups) safely"
-status: ready
+status: done
 created: 2026-06-11
 updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -11,6 +12,20 @@ sprint: 61
 depends_on: [1951, 1952]
 area: ci
 ---
+## Implemented (2026-06-11)
+
+As designed below, with one deviation: results are published as
+`test262-group-<group-head-sha>` workflow artifacts (3-day retention) by
+merge-report on merge_group runs, and the regression-gate resolves the
+predecessor as `HEAD^1` of the group ref and downloads the artifact via the
+actions API (job got `actions: read`). Resolution path is logged as
+`pred_path=hit|miss|…` in the step output for observability. Queue ruleset
+flip applied post-merge: `max_entries_to_build: 5`, `max_entries_to_merge: 5`,
+`min_entries_to_merge: 1` — min stays 1 deliberately: a single multi-PR group
+gets one combined run and would reintroduce intra-group masking; with min=1
+every PR keeps its own run, predecessor-diffed, so batching only adds
+*concurrency*, not aggregation. docs/ci-policy.md §queue updated.
+
 ## Problem
 
 The merge queue is pinned to batch=1 (docs/ci-policy.md: "each PR validated on
