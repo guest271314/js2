@@ -6,6 +6,7 @@ import { ts } from "../../ts-api.js";
 import { isBooleanType, isNumberType, isStringType, isSymbolType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { popBody, pushBody } from "../context/bodies.js";
+import { resolveArrayInfo } from "../array-methods.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { ensureLateImport, flushLateImportShifts } from "../expressions/late-imports.js";
@@ -2263,6 +2264,19 @@ function compileMathCall(
       return { kind: "f64" };
     }
 
+    // Spread arguments (`Math.max(...arr)`, `Math.min(0, ...arr)`): fold the
+    // backing vec at runtime. Without this the generic SpreadElement
+    // passthrough in compileExpressionInner unwraps `...arr` to `arr`, and the
+    // array coerces to NaN. (#2054)
+    if (expr.arguments.some((a) => ts.isSpreadElement(a))) {
+      const spreadResult = compileMathMinMaxSpread(ctx, fctx, expr, method);
+      if (spreadResult) return spreadResult;
+      // Fall through to the legacy path only if every spread resolved to a
+      // recognisable native vec failed — compileMathMinMaxSpread returns null
+      // when a spread argument's element type cannot be resolved, leaving the
+      // historical (incorrect) behaviour rather than emitting invalid Wasm.
+    }
+
     // Check if any argument is statically NaN → evaluate all args for side effects, then return NaN
     if (expr.arguments.some((a) => isStaticNaN(ctx, a))) {
       // Must still evaluate all arguments (ToNumber coercion / side effects)
@@ -2358,6 +2372,188 @@ function compileMathCall(
   // to generic call handling. This avoids false positives when e.g.
   // Array.prototype.every.call(Math, ...) gets rewritten to Math.every(...).
   return undefined;
+}
+
+/**
+ * Lower `Math.min(...)` / `Math.max(...)` when at least one argument is a
+ * SpreadElement (`Math.max(...arr)`, `Math.min(0, ...arr, 9)`). Folds the
+ * arguments left to right into an f64 accumulator seeded with the identity
+ * (+Infinity for min, -Infinity for max), iterating each spread's backing vec
+ * with a native loop. NaN is tracked in a flag and propagated to the result
+ * (§21.3.2.24/25: the result is NaN if any value is NaN).
+ *
+ * Returns null if a spread argument's element type cannot be resolved to a
+ * numeric native vec (e.g. externref element); the caller then keeps the
+ * legacy behaviour rather than emitting invalid Wasm. (#2054)
+ */
+function compileMathMinMaxSpread(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  method: "min" | "max",
+): ValType | null {
+  const wasmOp = method === "min" ? "f64.min" : "f64.max";
+
+  // Pre-resolve each spread's vec info; bail (null) before emitting anything
+  // if any spread element type is not a numeric native vec.
+  const spreadInfos = new Map<ts.SpreadElement, { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType }>();
+  for (const arg of expr.arguments) {
+    if (!ts.isSpreadElement(arg)) continue;
+    const innerTsType = ctx.checker.getTypeAtLocation(arg.expression);
+    const info = resolveArrayInfo(ctx, innerTsType);
+    if (!info) return null;
+    if (info.elemType.kind !== "f64" && info.elemType.kind !== "i32") return null;
+    spreadInfos.set(arg, info);
+  }
+
+  const accLocal = allocLocal(fctx, `__minmax_acc_${fctx.locals.length}`, { kind: "f64" });
+  const nanLocal = allocLocal(fctx, `__minmax_nan_${fctx.locals.length}`, { kind: "i32" });
+
+  // Seed: acc = identity, sawNaN = 0
+  fctx.body.push({ op: "f64.const", value: method === "min" ? Infinity : -Infinity });
+  fctx.body.push({ op: "local.set", index: accLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: nanLocal });
+
+  // Fold one f64 value (already on the stack) into acc, NaN-guarded.
+  const emitFoldStackValue = () => {
+    const vTmp = allocTempLocal(fctx, { kind: "f64" });
+    fctx.body.push({ op: "local.tee", index: vTmp });
+    // isNaN(v): v !== v
+    fctx.body.push({ op: "local.get", index: vTmp });
+    fctx.body.push({ op: "f64.ne" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 1 } as Instr, { op: "local.set", index: nanLocal } as Instr],
+      else: [
+        { op: "local.get", index: accLocal } as Instr,
+        { op: "local.get", index: vTmp } as Instr,
+        { op: wasmOp } as Instr,
+        { op: "local.set", index: accLocal } as Instr,
+      ],
+    } as Instr);
+    releaseTempLocal(fctx, vTmp);
+  };
+
+  for (const arg of expr.arguments) {
+    if (!ts.isSpreadElement(arg)) {
+      // Positional numeric argument: compile to f64 and fold.
+      compileExpression(ctx, fctx, arg, { kind: "f64" });
+      emitFoldStackValue();
+      continue;
+    }
+
+    const info = spreadInfos.get(arg)!;
+    const vecLocal = allocLocal(fctx, `__minmax_vec_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: info.vecTypeIdx,
+    });
+    const dataLocal = allocLocal(fctx, `__minmax_data_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: info.arrTypeIdx,
+    });
+    const lenLocal = allocLocal(fctx, `__minmax_len_${fctx.locals.length}`, { kind: "i32" });
+    const idxLocal = allocLocal(fctx, `__minmax_idx_${fctx.locals.length}`, { kind: "i32" });
+
+    // vec = arr; if (vec == null) skip (empty contributes nothing).
+    compileExpression(ctx, fctx, arg.expression);
+    fctx.body.push({ op: "local.set", index: vecLocal });
+
+    const loopBody: Instr[] = [
+      // len = vec.length
+      { op: "local.get", index: vecLocal } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 0 } as Instr,
+      { op: "local.set", index: lenLocal } as Instr,
+      // data = vec.data
+      { op: "local.get", index: vecLocal } as Instr,
+      { op: "ref.as_non_null" } as Instr,
+      { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 1 } as Instr,
+      { op: "local.set", index: dataLocal } as Instr,
+      // idx = 0
+      { op: "i32.const", value: 0 } as Instr,
+      { op: "local.set", index: idxLocal } as Instr,
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if (idx >= len) break
+              { op: "local.get", index: idxLocal } as Instr,
+              { op: "local.get", index: lenLocal } as Instr,
+              { op: "i32.ge_s" } as Instr,
+              { op: "br_if", depth: 1 } as Instr,
+              // push data[idx] as f64, fold
+              { op: "local.get", index: dataLocal } as Instr,
+              { op: "local.get", index: idxLocal } as Instr,
+              { op: "array.get", typeIdx: info.arrTypeIdx } as Instr,
+              ...(info.elemType.kind === "i32" ? [{ op: "f64.convert_i32_s" } as Instr] : []),
+              ...buildFoldInstrs(fctx, accLocal, nanLocal, wasmOp),
+              // idx++
+              { op: "local.get", index: idxLocal } as Instr,
+              { op: "i32.const", value: 1 } as Instr,
+              { op: "i32.add" } as Instr,
+              { op: "local.set", index: idxLocal } as Instr,
+              { op: "br", depth: 0 } as Instr,
+            ],
+          } as Instr,
+        ],
+      } as Instr,
+    ];
+
+    // Guard the whole loop on non-null vec (null array → contributes nothing).
+    fctx.body.push({ op: "local.get", index: vecLocal });
+    fctx.body.push({ op: "ref.is_null" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [],
+      else: loopBody,
+    } as Instr);
+  }
+
+  // result = sawNaN ? NaN : acc
+  fctx.body.push({ op: "f64.const", value: NaN });
+  fctx.body.push({ op: "local.get", index: accLocal });
+  fctx.body.push({ op: "local.get", index: nanLocal });
+  fctx.body.push({ op: "select" } as Instr);
+  return { kind: "f64" };
+}
+
+/**
+ * Build the NaN-guarded fold of one f64 value (on the stack) into accLocal,
+ * as a self-contained instruction list (used inside loop bodies where we build
+ * Instr[] arrays rather than pushing to fctx.body directly).
+ */
+function buildFoldInstrs(
+  fctx: FunctionContext,
+  accLocal: number,
+  nanLocal: number,
+  wasmOp: "f64.min" | "f64.max",
+): Instr[] {
+  const vTmp = allocTempLocal(fctx, { kind: "f64" });
+  const instrs: Instr[] = [
+    { op: "local.tee", index: vTmp } as Instr,
+    { op: "local.get", index: vTmp } as Instr,
+    { op: "f64.ne" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 1 } as Instr, { op: "local.set", index: nanLocal } as Instr],
+      else: [
+        { op: "local.get", index: accLocal } as Instr,
+        { op: "local.get", index: vTmp } as Instr,
+        { op: wasmOp } as Instr,
+        { op: "local.set", index: accLocal } as Instr,
+      ],
+    } as Instr,
+  ];
+  releaseTempLocal(fctx, vTmp);
+  return instrs;
 }
 
 export { compileConsoleCall, compileDateMethodCall, compileMathCall, wasiAllocStringData };
