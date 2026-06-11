@@ -25,6 +25,10 @@ on:
       - "tests/test262-runner.ts"
       - "tests/test262-scope-classification.test.ts"
       - "tests/test262-shared.ts"
+      # Weight maps change shard ASSIGNMENT (which tests share a fork/chunk),
+      # so a refresh must be validated by the full matrix even though it
+      # cannot change individual results (#1953).
+      - "tests/test262-slow-tests*.json"
   push:
     branches: [main]
     paths: *test262-paths
