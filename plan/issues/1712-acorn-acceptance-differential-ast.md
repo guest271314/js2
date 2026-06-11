@@ -316,3 +316,38 @@ the member call takes the STATIC vec path which UNGUARDED-casts the
 externref field value to the checker-inferred vec type → "illegal cast".
 Needs the same guarded-cast + dynamic-fallback treatment in the
 property-access lowering that feeds compileArrayPush.
+
+### Two-shape slice 2026-06-11 (fable-1712c, branch issue-1712-two-shape, stacked on issue-1712-vec-mutators)
+
+The original Blocker-2 two-shape trap is FIXED — three coordinated changes
+(the "steer member-call split together with the type change" the failed
+attempt called for, but resolved to EXTERNREF instead of the ctor struct):
+
+1. `resolveWasmType` (src/codegen/index.ts, before the named-struct arm):
+   fnctor instance types resolve to EXTERNREF — the checker shape is never
+   synthesized. Gated to instance shapes only (`getCallSignatures().length
+   === 0` keeps the function VALUE on its closure-wrapper resolution),
+   JS-host only. This makes fnctor instances flow dynamically end-to-end.
+2. `compileCallablePropertyCall` (calls-closures.ts): when the receiver is
+   an fnctor instance, route the member call through
+   `emitWrapperDynamicMethodCall` (host bridge) instead of the
+   checker-shape field-read path (which trapped struct.get-on-null).
+3. `emitWrapperDynamicMethodCall` (calls.ts, exported now): grew args
+   support (__js_array_push packing, JS-host).
+4. Runtime `_wrapForHost.safeGetField`: a nullish `__sget_<name>` result is
+   a MISS, not a hit — the per-shape dispatcher returns undefined for
+   shapes that don't carry the field, which short-circuited the vivified-
+   prototype fallback (every prototype method was unreachable whenever the
+   checker shape had synthesized a same-named __sget export).
+
+Verified: `.tmp/dbg16/25/26` (E4/M-series) green, G/H probes unchanged,
+tests/issue-1712-dynamic-dispatch.test.ts extended (8 green), targeted
+suites 0 new fails (19 pre-existing env fails).
+
+**acorn status: parse() now EXECUTES into the tokenizer and LOOPS FOREVER
+(dogfood times out after compile+validate).** Next root-cause: likely
+instance field WRITES through dynamic dispatch (`this.pos = ...` /
+`+= `) not writing back to the struct (so the scan position never
+advances), or a loop-condition coercion. Probe direction: minimal
+`Parser.prototype.step = function(){ this.pos = this.pos + 1 }` write-back
+check, then bisect acorn's nextToken loop.

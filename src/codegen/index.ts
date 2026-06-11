@@ -9051,6 +9051,36 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
     // Check externref AFTER Array check — Array is declared in lib but should use wasm GC arrays
     if (isExternalDeclaredClass(tsType, ctx.checker)) return { kind: "externref" };
 
+    // (#1712) Function-style-constructor instance types resolve to EXTERNREF,
+    // never to a synthesized checker-shape struct. The runtime instance struct
+    // (compileFnctorNew, `__fnctor_<name>`) is built from ctor `this.*` writes
+    // only, while the checker's shape adds prototype-assigned methods as
+    // members — the two shapes have no subtype relation, so any value typed
+    // with the checker shape guard-casts to null and downstream struct.get /
+    // ref.as_non_null traps (acorn `Parser.prototype.parse = function () {
+    // return new Parser(...); }`). Externref makes fnctor instances flow
+    // dynamically end to end: member calls take the host-bridge path (which
+    // resolves through the vivified prototype) and field reads go through
+    // __extern_get/_safeGet. NOTE: resolving to the CTOR struct here instead
+    // was tried and regressed (.tmp/dbg15.mts G4/G5) — the member-call
+    // static/dynamic split keys off this type, so only the always-dynamic
+    // externref resolution is safe. JS-host mode only.
+    if (!ctx.standalone && !ctx.wasi) {
+      const fnDecl = sym?.valueDeclaration;
+      const isFnCtorType =
+        (sym?.name !== undefined && ctx.funcConstructorMap.has(sym.name)) ||
+        (!!fnDecl &&
+          (ts.isFunctionDeclaration(fnDecl) ||
+            ts.isFunctionExpression(fnDecl) ||
+            (ts.isVariableDeclaration(fnDecl) && !!fnDecl.initializer && ts.isFunctionExpression(fnDecl.initializer))));
+      // Only when the type is an INSTANCE shape (has properties but is not
+      // itself callable) — the function VALUE type (callable) must keep its
+      // closure-wrapper resolution.
+      if (isFnCtorType && tsType.getCallSignatures().length === 0) {
+        return { kind: "externref" };
+      }
+    }
+
     let name = sym?.name;
     // Map class expression symbol names to their synthetic names
     if (name && !ctx.structMap.has(name)) {

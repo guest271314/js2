@@ -1074,11 +1074,12 @@ function sourceHasMethodReassignment(ctx: CodegenContext, anchor: ts.Node, metho
  * runtime imports cannot be registered (caller falls through to the
  * static path as a best-effort fallback).
  */
-function emitWrapperDynamicMethodCall(
+export function emitWrapperDynamicMethodCall(
   ctx: CodegenContext,
   fctx: FunctionContext,
   recvExpr: ts.Expression,
   methodName: string,
+  callExpr?: ts.CallExpression,
 ): ValType | null {
   // (#1888 Slice 2) Standalone routes __extern_method_call native, which reads
   // its args over a $ObjVec — build the (empty) args list with the native
@@ -1086,6 +1087,13 @@ function emitWrapperDynamicMethodCall(
   const arrNewIdx = ctx.standalone
     ? ensureObjVecBuilders(ctx).newIdx
     : ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+  // (#1712) Args support: when a call expression with arguments is supplied,
+  // pack them into the args array via __js_array_push. JS-host only — the
+  // standalone $ObjVec path stays empty-args until it grows a native push.
+  const wantArgs = callExpr !== undefined && callExpr.arguments.length > 0 && !ctx.standalone && !ctx.wasi;
+  const arrPushIdx = wantArgs
+    ? ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], [])
+    : undefined;
   const methodCallIdx = ensureLateImport(
     ctx,
     "__extern_method_call",
@@ -1094,6 +1102,7 @@ function emitWrapperDynamicMethodCall(
   );
   flushLateImportShifts(ctx, fctx);
   if (arrNewIdx === undefined || methodCallIdx === undefined) return null;
+  if (wantArgs && arrPushIdx === undefined) return null;
 
   // Compile receiver as externref.
   const recvType = compileExpression(ctx, fctx, recvExpr, { kind: "externref" });
@@ -1108,8 +1117,23 @@ function emitWrapperDynamicMethodCall(
   addStringConstantGlobal(ctx, methodName);
   fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
 
-  // Empty args array: __js_array_new() → externref.
-  fctx.body.push({ op: "call", funcIdx: arrNewIdx });
+  // Args array: __js_array_new() → externref (+ per-arg __js_array_push).
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__js_array_new") ?? arrNewIdx });
+  if (wantArgs) {
+    const argsArrLocal = allocLocal(fctx, `__dynm_args_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: argsArrLocal });
+    for (const argExpr of callExpr!.arguments) {
+      fctx.body.push({ op: "local.get", index: argsArrLocal });
+      const t = compileExpression(ctx, fctx, argExpr, { kind: "externref" });
+      if (t === null) {
+        fctx.body.push({ op: "ref.null.extern" });
+      } else if (t.kind !== "externref") {
+        coerceType(ctx, fctx, t, { kind: "externref" });
+      }
+      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__js_array_push") ?? arrPushIdx! });
+    }
+    fctx.body.push({ op: "local.get", index: argsArrLocal });
+  }
 
   // Re-lookup methodCallIdx in case args compilation triggered shifts.
   const finalMcIdx = ctx.funcMap.get("__extern_method_call") ?? methodCallIdx;
