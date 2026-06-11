@@ -74,64 +74,80 @@ if (entries.length === 0) {
   process.exit(0);
 }
 
-const head = entries.reduce((a, b) => (a.position <= b.position ? a : b));
-log(`queue depth=${entries.length} head=#${head.pullRequest.number} state=${head.state} enqueued=${head.enqueuedAt}`);
+// 2. Fetch recent merge_group runs ONCE; match per entry below.
+//    PER-ENTRY LESSON (2026-06-11 11:19Z incident): the webhook glitch hits
+//    per-GROUP, not just the queue head. With parallel group building,
+//    entries 2..N can each be missing their runs while the head is healthy
+//    (or vice versa). A head-only check cleared one entry and left four
+//    others silently stalled — each needed its own nudge. So: check EVERY
+//    entry, nudge every stalled one (oldest first), capped per cycle.
+const runs = JSON.parse(gh(["api", `repos/${REPO}/actions/runs?event=merge_group&per_page=50`]));
+const allRuns = runs.workflow_runs ?? [];
 
-if (head.state !== "AWAITING_CHECKS") {
-  log(`head state ${head.state} — not the wedge signature, exiting`);
-  process.exit(0);
-}
+const MAX_NUDGES = Number(process.env.MAX_NUDGES || 5);
+let nudged = 0;
+let healthy = 0;
 
-// 2. Stall threshold first (cheap).
-const enqueuedAt = new Date(head.enqueuedAt);
-const ageMin = (Date.now() - enqueuedAt.getTime()) / 60000;
-if (ageMin < STALL_MINUTES) {
-  log(`head enqueued ${ageMin.toFixed(1)} min ago (< ${STALL_MINUTES}) — too fresh, exiting`);
-  process.exit(0);
-}
+const byPosition = [...entries].sort((a, b) => a.position - b.position);
+for (const entry of byPosition) {
+  const prNum = entry.pullRequest.number;
+  const enqueuedAt = new Date(entry.enqueuedAt);
+  const ageMin = (Date.now() - enqueuedAt.getTime()) / 60000;
 
-// 3. Any merge_group run for this PR since it was enqueued? Any status counts:
-//    queued/in_progress/completed all mean the webhook fired and the queue is
-//    working (or finishing). Only TOTAL ABSENCE is the wedge.
-const prNum = head.pullRequest.number;
-const runs = JSON.parse(gh(["api", `repos/${REPO}/actions/runs?event=merge_group&per_page=30`]));
-const groupRuns = (runs.workflow_runs ?? []).filter(
-  (r) => r.head_branch?.includes(`/pr-${prNum}-`) && new Date(r.created_at) >= enqueuedAt,
-);
-if (groupRuns.length > 0) {
-  log(`head #${prNum} has ${groupRuns.length} merge_group run(s) since enqueue — healthy, exiting`);
-  process.exit(0);
-}
+  if (entry.state !== "AWAITING_CHECKS") {
+    // QUEUED entries behind the build window have no group yet by design.
+    log(`#${prNum} pos=${entry.position} state=${entry.state} — skip (not building)`);
+    continue;
+  }
+  if (ageMin < STALL_MINUTES) {
+    log(`#${prNum} pos=${entry.position} enqueued ${ageMin.toFixed(1)} min ago (< ${STALL_MINUTES}) — too fresh`);
+    continue;
+  }
+  const groupRuns = allRuns.filter(
+    (r) => r.head_branch?.includes(`/pr-${prNum}-`) && new Date(r.created_at) >= enqueuedAt,
+  );
+  if (groupRuns.length > 0) {
+    healthy++;
+    log(`#${prNum} pos=${entry.position} has ${groupRuns.length} merge_group run(s) — healthy`);
+    continue;
+  }
 
-// 4. WEDGED: head AWAITING_CHECKS >= STALL_MINUTES with zero group runs.
-log(
-  `WEDGE DETECTED: head #${prNum} AWAITING_CHECKS for ${ageMin.toFixed(0)} min with zero merge_group runs — nudging (dequeue + re-enqueue)`,
-);
-if (DRY_RUN) {
-  log("dry-run — skipping mutations");
-  process.exit(0);
-}
-
-const prId = head.pullRequest.id;
-graphql(
-  `
-    mutation ($id: ID!) {
-      dequeuePullRequest(input: { id: $id }) {
-        clientMutationId
+  // WEDGED entry.
+  log(
+    `WEDGE DETECTED: #${prNum} pos=${entry.position} AWAITING_CHECKS for ${ageMin.toFixed(0)} min with zero merge_group runs — nudging (dequeue + re-enqueue)`,
+  );
+  if (DRY_RUN) {
+    log("dry-run — skipping mutation");
+    continue;
+  }
+  if (nudged >= MAX_NUDGES) {
+    log(`nudge cap (${MAX_NUDGES}) reached this cycle — leaving #${prNum} for the next run`);
+    continue;
+  }
+  const prId = entry.pullRequest.id;
+  graphql(
+    `
+      mutation ($id: ID!) {
+        dequeuePullRequest(input: { id: $id }) {
+          clientMutationId
+        }
       }
-    }
-  `,
-  { id: prId },
-);
-await new Promise((r) => setTimeout(r, 8000));
-graphql(
-  `
-    mutation ($id: ID!) {
-      enqueuePullRequest(input: { pullRequestId: $id }) {
-        clientMutationId
+    `,
+    { id: prId },
+  );
+  await new Promise((r) => setTimeout(r, 8000));
+  graphql(
+    `
+      mutation ($id: ID!) {
+        enqueuePullRequest(input: { pullRequestId: $id }) {
+          clientMutationId
+        }
       }
-    }
-  `,
-  { id: prId },
-);
-log(`nudged #${prNum} — dequeued and re-enqueued (now at queue back)`);
+    `,
+    { id: prId },
+  );
+  nudged++;
+  log(`nudged #${prNum} — dequeued and re-enqueued (now at queue back)`);
+}
+
+log(`cycle done: ${entries.length} entries, ${healthy} healthy, ${nudged} nudged`);
