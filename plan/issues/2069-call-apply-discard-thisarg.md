@@ -1,10 +1,11 @@
 ---
 id: 2069
 title: "fn.call(thisArg, …) / fn.apply(thisArg, […]) silently discard thisArg for functions that use this"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: medium
 reasoning_effort: high

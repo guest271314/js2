@@ -2004,6 +2004,28 @@ function compileNumberIsPredicate(
   return { kind: "i32" };
 }
 
+/**
+ * (#2069) Detect whether a named callee was declared with an explicit
+ * TypeScript `this` parameter (`function f(this: T, …)`). Such a function
+ * materializes a leading `externref` `this` slot in its Wasm signature, so a
+ * `.call`/`.apply` lowering must thread the user's thisArg into that slot
+ * rather than dropping it. Returns the function's first ParameterDeclaration
+ * when it is the `this` pseudo-parameter, else undefined.
+ */
+function getExplicitThisParam(ctx: CodegenContext, callee: ts.Expression): ts.ParameterDeclaration | undefined {
+  const sym = ctx.checker.getSymbolAtLocation(callee);
+  const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+  if (
+    decl &&
+    (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl) || ts.isArrowFunction(decl)) &&
+    decl.parameters.length > 0
+  ) {
+    const p0 = decl.parameters[0]!;
+    if (ts.isIdentifier(p0.name) && p0.name.text === "this") return p0;
+  }
+  return undefined;
+}
+
 function compileCallExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -2684,6 +2706,44 @@ function compileCallExpression(
         ts.setTextRange(reshapedCall, expr);
         (reshapedCall as any).parent = expr.parent;
         return compileCallExpression(ctx, fctx, reshapedCall as ts.CallExpression);
+      }
+
+      // (#2069) `.call`/`.apply` on a callee declared with an explicit
+      // TypeScript `this` parameter (`function f(this: T, …)`). Such a function
+      // has a leading `externref` `this` slot in its Wasm signature, so the
+      // legacy "evaluate thisArg, drop it" lowering passed `undefined` for
+      // `this` AND shifted every user argument into the wrong slot. Rewrite to a
+      // direct call that supplies the thisArg as the first positional argument —
+      // it lands in param 0 (the `this` slot, boxed to externref by the regular
+      // arg coercion) and the remaining args fill the declared params in order.
+      // Only fires when the thisArg can be threaded soundly: a named callee with
+      // a static this-param, and (for `.apply`) a statically-flattenable args
+      // array. Anything else falls through to the legacy paths below.
+      if (getExplicitThisParam(ctx, innerExpr) !== undefined && expr.arguments.length > 0) {
+        const thisArg = expr.arguments[0]!;
+        let directArgs: ts.Expression[] | undefined;
+        if (isCall) {
+          directArgs = [thisArg, ...expr.arguments.slice(1)];
+        } else if (expr.arguments.length === 1) {
+          // .apply(thisArg) — no args array
+          directArgs = [thisArg];
+        } else {
+          const argsExpr = expr.arguments[1]!;
+          if (ts.isArrayLiteralExpression(argsExpr)) {
+            const flattened = flattenStaticArrayElements(argsExpr);
+            if (flattened !== undefined) directArgs = [thisArg, ...flattened];
+          }
+        }
+        if (directArgs !== undefined) {
+          const directCall = ts.factory.createCallExpression(
+            innerExpr as ts.LeftHandSideExpression,
+            undefined,
+            directArgs,
+          );
+          ts.setTextRange(directCall, expr);
+          (directCall as { parent?: ts.Node }).parent = expr.parent;
+          return compileCallExpression(ctx, fctx, directCall as ts.CallExpression);
+        }
       }
 
       // Case 0: (function(){}).call/apply(...) and (() => {}).call/apply(...).
