@@ -6284,9 +6284,15 @@ export const STRING_METHODS: Record<string, { params: ValType[]; result: ValType
   },
   indexOf: { params: [{ kind: "externref" }, { kind: "externref" }], result: { kind: "f64" } },
   lastIndexOf: { params: [{ kind: "externref" }, { kind: "externref" }], result: { kind: "f64" } },
-  includes: { params: [{ kind: "externref" }], result: { kind: "i32" } },
-  startsWith: { params: [{ kind: "externref" }], result: { kind: "i32" } },
-  endsWith: { params: [{ kind: "externref" }], result: { kind: "i32" } },
+  // #2002 — second arg is the start position (includes/startsWith) or
+  // endPosition (endsWith). Declared as f64 so the generic arg loop forwards
+  // it to the host instead of truncating to import arity. An omitted position
+  // is padded with NaN; the `string_method` host shim strips a trailing NaN
+  // so the JS method applies its spec default (0 for includes/startsWith,
+  // length for endsWith) rather than ToInteger(NaN)=0.
+  includes: { params: [{ kind: "externref" }, { kind: "f64" }], result: { kind: "i32" } },
+  startsWith: { params: [{ kind: "externref" }, { kind: "f64" }], result: { kind: "i32" } },
+  endsWith: { params: [{ kind: "externref" }, { kind: "f64" }], result: { kind: "i32" } },
   replace: {
     params: [{ kind: "externref" }, { kind: "externref" }],
     result: { kind: "externref" },
