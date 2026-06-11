@@ -2960,31 +2960,48 @@ function compileElementAccessAssignment(
   left: ts.ElementAccessExpression,
   right: ts.Expression,
 ): void {
+  // #1938 — an element assignment used as an expression (`arr[i] = f()`) must
+  // evaluate the RHS exactly once. The previous code compiled `right` twice
+  // (once to store, once to leave as the expression value), so any
+  // side-effecting RHS ran twice. Fix: compile the RHS into a scratch local,
+  // store from the local, and leave the local on the stack as the result.
+  const addScratch = (type: ValType): number => {
+    const idx = fctx.params.length + fctx.locals.length;
+    fctx.locals.push({ name: `__elemassign_${idx}`, type });
+    return idx;
+  };
+
   // Handle typed array views: new Float64Array(buf)[i] = v, new Float32Array(buf)[i] = v
   if (ts.isNewExpression(left.expression) && ts.isIdentifier(left.expression.expression)) {
     const typeName = left.expression.expression.text;
     if (typeName === "Float64Array" && left.expression.arguments?.length) {
       // new Float64Array(buf)[i] = value → buf + i*8, f64.store(value)
+      const valLocal = addScratch({ kind: "f64" });
+      compileExpression(ctx, fctx, right); // value (f64) — evaluated once
+      fctx.body.push({ op: "local.set", index: valLocal });
       compileExpression(ctx, fctx, left.expression.arguments[0]); // buf ptr
       compileExprToI32(ctx, fctx, left.argumentExpression); // index
       fctx.body.push({ op: "i32.const", value: 3 }); // *8 = <<3
       fctx.body.push({ op: "i32.shl" });
       fctx.body.push({ op: "i32.add" }); // buf + index*8
-      compileExpression(ctx, fctx, right); // value (f64)
+      fctx.body.push({ op: "local.get", index: valLocal });
       fctx.body.push({ op: "f64.store", align: 3, offset: 0 });
-      compileExpression(ctx, fctx, right); // return value for expression result
+      fctx.body.push({ op: "local.get", index: valLocal }); // expression result
       return;
     }
     if (typeName === "Float32Array" && left.expression.arguments?.length) {
+      const valLocal = addScratch({ kind: "f64" });
+      compileExpression(ctx, fctx, right); // value (f64) — evaluated once
+      fctx.body.push({ op: "local.set", index: valLocal });
       compileExpression(ctx, fctx, left.expression.arguments[0]);
       compileExprToI32(ctx, fctx, left.argumentExpression);
       fctx.body.push({ op: "i32.const", value: 2 }); // *4 = <<2
       fctx.body.push({ op: "i32.shl" });
       fctx.body.push({ op: "i32.add" });
-      compileExpression(ctx, fctx, right); // value (f64)
+      fctx.body.push({ op: "local.get", index: valLocal });
       fctx.body.push({ op: "f32.demote_f64" });
       fctx.body.push({ op: "f32.store", align: 2, offset: 0 });
-      compileExpression(ctx, fctx, right);
+      fctx.body.push({ op: "local.get", index: valLocal }); // expression result
       return;
     }
   }
@@ -2992,23 +3009,43 @@ function compileElementAccessAssignment(
   const objKind = getExprCollectionKind(ctx, fctx, left.expression);
 
   if (objKind === "Array") {
-    // arr[i] = v → __arr_set(arr, i, v)
+    // arr[i] = v → __arr_set(arr, i, v); leave v as the expression result.
+    //
+    // For a numeric element the value is an f64; element storage is currently
+    // i32 (the truncation half of #1938 is a separate change), so we keep the
+    // f64 in a scratch local as the expression result (an assignment used as a
+    // value must yield the assigned value, not the i32-truncated form — and a
+    // numeric `arr[i] = v` flows into an f64 context) and truncate only for the
+    // store. Non-numeric (string/object) element arrays already produce an i32
+    // value; for those `compileExprToI32` is the identity and the scratch is i32.
     const setIdx = ctx.funcMap.get("__arr_set")!;
+    // A numeric RHS compiles to f64; a reference (string/object) RHS to i32.
+    const rightIsNumeric = inferExprType(ctx, fctx, right).kind === "f64";
+    const valLocal = addScratch({ kind: rightIsNumeric ? "f64" : "i32" });
+    compileExpression(ctx, fctx, right); // value — evaluated once
+    fctx.body.push({ op: "local.set", index: valLocal });
     compileExpression(ctx, fctx, left.expression); // arr ptr (i32)
     compileExprToI32(ctx, fctx, left.argumentExpression); // index → i32
-    compileExprToI32(ctx, fctx, right); // value → i32
+    fctx.body.push({ op: "local.get", index: valLocal });
+    if (rightIsNumeric) {
+      fctx.body.push({ op: "i32.trunc_f64_s" }); // store i32 element (#1938 part 2 will store f64)
+    }
     fctx.body.push({ op: "call", funcIdx: setIdx });
-    // Assignment expressions should return the assigned value
-    compileExpression(ctx, fctx, right);
+    fctx.body.push({ op: "local.get", index: valLocal }); // assigned value (f64 for numeric)
   } else if (objKind === "Uint8Array") {
-    // u8[i] = v → __u8arr_set(u8, i, v)
+    // u8[i] = v → __u8arr_set(u8, i, v); leave v as the expression result.
+    // Uint8Array elements are always numeric; store the byte (i32) and return
+    // the original f64 value as the expression result.
     const setIdx = ctx.funcMap.get("__u8arr_set")!;
+    const valLocal = addScratch({ kind: "f64" });
+    compileExpression(ctx, fctx, right); // value (f64) — evaluated once
+    fctx.body.push({ op: "local.set", index: valLocal });
     compileExpression(ctx, fctx, left.expression);
     compileExprToI32(ctx, fctx, left.argumentExpression); // index → i32
-    compileExprToI32(ctx, fctx, right); // value → i32
+    fctx.body.push({ op: "local.get", index: valLocal });
+    fctx.body.push({ op: "i32.trunc_f64_s" }); // byte value
     fctx.body.push({ op: "call", funcIdx: setIdx });
-    // Push the assigned value as the expression result
-    compileExpression(ctx, fctx, right);
+    fctx.body.push({ op: "local.get", index: valLocal }); // assigned value (f64)
   } else {
     ctx.errors.push({
       message: "Unsupported element access assignment",
