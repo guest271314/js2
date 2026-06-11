@@ -75,6 +75,7 @@ import {
 } from "../statements/nested-declarations.js";
 import { compileNativeStringMethodCall, compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { tryCompileNodeProcessCall } from "../node-process-api.js";
+import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import {
   defaultValueInstrs,
   emitGuardedFuncRefCast,
@@ -878,6 +879,64 @@ function calleeIsBoundFunctionVar(ctx: CodegenContext, expr: ts.Expression): boo
     return true;
   }
   return false;
+}
+
+/**
+ * (#1712 / #1941) Static gate for the host-callable dispatch fallback.
+ *
+ * The callable-param dispatch below emits an extra `__call_function` arm so a
+ * callee that arrives as a non-closure externref (a host builtin held in a JS
+ * variable — acorn's `var hasOwn = Object.hasOwn || function(…){…}`) dispatches
+ * through the host instead of trapping on `struct.get` of a null cast. That arm
+ * is only ever *taken* when the runtime value is NOT a wasm closure struct, but
+ * it was emitted for EVERY callable-param dispatch, which unconditionally pulls
+ * `__js_array_new` / `__js_array_push` / `__call_function` host imports into the
+ * module — even for pure local-closure programs (`applyTwice((x)=>x+1, 10)`,
+ * `const add5 = makeAdder(5)`) that need no JS host at all. That regressed the
+ * #1941 optimize-differential gate (LinkError: `__js_array_new` not provided)
+ * and violated the dual-mode "JS host optional" principle for these programs.
+ *
+ * Gate the fallback to callees whose runtime value can plausibly be a foreign
+ * (non-wasm-closure) callable: a variable whose initializer references a host
+ * builtin member directly (`var f = Object.hasOwn`) or as the left operand of a
+ * `||` / `??` short-circuit (`Object.hasOwn || function(){}`). Function
+ * parameters and locals/globals initialized from wasm expressions (closures,
+ * local function results) are always wrapped into the closure struct by the
+ * call-site coercion, so the fallback can never fire for them — and we must not
+ * burden them with host imports.
+ */
+function calleeMayBeHostCallable(ctx: CodegenContext, expr: ts.Expression): boolean {
+  if (!ts.isIdentifier(expr)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(expr);
+  const decl = sym?.valueDeclaration;
+  if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return false;
+
+  // Does `node` reference a host-builtin member (Object.hasOwn, Math.max, …)?
+  const isHostBuiltinMember = (node: ts.Expression): boolean => {
+    const inner = ts.isParenthesizedExpression(node) ? node.expression : node;
+    if (ts.isPropertyAccessExpression(inner) || ts.isElementAccessExpression(inner)) {
+      const recv = inner.expression;
+      return ts.isIdentifier(recv) && BUILTIN_CLASS_NAMES.has(recv.text);
+    }
+    return false;
+  };
+
+  // Unwrap `<host> || fn` / `<host> ?? fn` short-circuit fallbacks (and nested
+  // chains), checking whether any reachable left operand is a host builtin.
+  const initMayBeHost = (node: ts.Expression): boolean => {
+    const inner = ts.isParenthesizedExpression(node) ? node.expression : node;
+    if (isHostBuiltinMember(inner)) return true;
+    if (
+      ts.isBinaryExpression(inner) &&
+      (inner.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+        inner.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)
+    ) {
+      return initMayBeHost(inner.left) || initMayBeHost(inner.right);
+    }
+    return false;
+  };
+
+  return initMayBeHost(decl.initializer);
 }
 
 /**
@@ -1881,6 +1940,68 @@ function compileStandalonePromiseThenCallback(
   } finally {
     fctx.body = savedBody;
   }
+}
+
+/**
+ * #2034: compile a `Number.is*` predicate argument as an f64, honouring the
+ * spec rule that these predicates do NOT coerce (ES §21.1.2.x): a non-Number
+ * argument must yield `false` without ToNumber. (The *global* `isNaN`/`isFinite`
+ * DO coerce — they are handled elsewhere and unaffected.)
+ *
+ * Emits one of two shapes and returns i32 (0/1):
+ *   - static number arg → `predicate(arg)` (unchanged fast path).
+ *   - any-typed arg → `__typeof_number(box) ? predicate(__unbox_number(box)) : 0`.
+ *     The typeof guard runs first, so a string/object/null box short-circuits to
+ *     0 (false) and never reaches the numeric test.
+ *
+ * `emitPredicate` receives the local holding the f64 value and pushes the
+ * boolean (i32) test for that value.
+ */
+function compileNumberIsPredicate(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arg: ts.Expression,
+  emitPredicate: (valLocal: number) => Instr[],
+): ValType {
+  const argTsType = ctx.checker.getTypeAtLocation(arg);
+  const argWasm = resolveWasmType(ctx, argTsType);
+  const isStaticNumber = isNumberType(argTsType) || argWasm.kind === "f64" || argWasm.kind === "i32";
+
+  if (isStaticNumber) {
+    // Fast path: the argument is statically a number — apply the test directly.
+    compileExpression(ctx, fctx, arg, { kind: "f64" });
+    const valTmp = allocLocal(fctx, `__numpred_${fctx.locals.length}`, { kind: "f64" });
+    fctx.body.push({ op: "local.set", index: valTmp });
+    for (const instr of emitPredicate(valTmp)) fctx.body.push(instr);
+    return { kind: "i32" };
+  }
+
+  // Any-typed argument: inspect the box's runtime type. Non-numbers are `false`
+  // (no coercion); numbers unbox to f64 and run the test.
+  addUnionImports(ctx);
+  const typeofNumIdx = ctx.funcMap.get("__typeof_number")!;
+  const unboxIdx = ctx.funcMap.get("__unbox_number")!;
+
+  compileExpression(ctx, fctx, arg, { kind: "externref" });
+  const boxTmp = allocLocal(fctx, `__numpred_box_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: boxTmp });
+
+  const valTmp = allocLocal(fctx, `__numpred_${fctx.locals.length}`, { kind: "f64" });
+
+  fctx.body.push({ op: "local.get", index: boxTmp });
+  fctx.body.push({ op: "call", funcIdx: typeofNumIdx });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [
+      { op: "local.get", index: boxTmp } as Instr,
+      { op: "call", funcIdx: unboxIdx } as Instr,
+      { op: "local.set", index: valTmp } as Instr,
+      ...emitPredicate(valTmp),
+    ],
+    else: [{ op: "i32.const", value: 0 } as Instr],
+  } as Instr);
+  return { kind: "i32" };
 }
 
 function compileCallExpression(
@@ -3369,73 +3490,65 @@ function compileCallExpression(
     // Handle Number.isNaN(n) and Number.isInteger(n)
     if (ts.isIdentifier(propAccess.expression) && propAccess.expression.text === "Number") {
       const method = propAccess.name.text;
+      // #2034: `Number.is*` predicates must NOT coerce their argument — a
+      // non-Number value is `false` (ES §21.1.2.x). compileNumberIsPredicate
+      // guards an any-typed argument with `__typeof_number` before applying the
+      // numeric test; a static number keeps the direct f64 fast path.
       if (method === "isNaN" && expr.arguments.length >= 1) {
-        // NaN !== NaN is true; for any other value it's false
-        compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
-        const tmp = allocLocal(fctx, `__isnan_${fctx.locals.length}`, {
-          kind: "f64",
-        });
-        fctx.body.push({ op: "local.tee", index: tmp });
-        fctx.body.push({ op: "local.get", index: tmp });
-        fctx.body.push({ op: "f64.ne" } as Instr);
-        return { kind: "i32" };
+        // NaN !== NaN is true; for any other number it's false.
+        return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
+          { op: "local.get", index: v },
+          { op: "local.get", index: v },
+          { op: "f64.ne" } as Instr,
+        ]);
       }
       if (method === "isInteger" && expr.arguments.length >= 1) {
-        // n === Math.trunc(n) && isFinite(n)
-        compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
-        const tmp = allocLocal(fctx, `__isint_${fctx.locals.length}`, {
-          kind: "f64",
-        });
-        fctx.body.push({ op: "local.tee", index: tmp });
-        fctx.body.push({ op: "local.get", index: tmp });
-        fctx.body.push({ op: "f64.trunc" } as Instr);
-        fctx.body.push({ op: "f64.eq" } as Instr);
-        // Also check finite: n - n === 0 (Infinity - Infinity = NaN, NaN !== 0)
-        fctx.body.push({ op: "local.get", index: tmp });
-        fctx.body.push({ op: "local.get", index: tmp });
-        fctx.body.push({ op: "f64.sub" } as Instr);
-        fctx.body.push({ op: "f64.const", value: 0 });
-        fctx.body.push({ op: "f64.eq" } as Instr);
-        fctx.body.push({ op: "i32.and" } as Instr);
-        return { kind: "i32" };
+        // n === trunc(n) && isFinite(n)
+        return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
+          { op: "local.get", index: v },
+          { op: "local.get", index: v },
+          { op: "f64.trunc" } as Instr,
+          { op: "f64.eq" } as Instr,
+          // finite: n - n === 0 (Infinity - Infinity = NaN, NaN !== 0)
+          { op: "local.get", index: v },
+          { op: "local.get", index: v },
+          { op: "f64.sub" } as Instr,
+          { op: "f64.const", value: 0 },
+          { op: "f64.eq" } as Instr,
+          { op: "i32.and" } as Instr,
+        ]);
       }
       if (method === "isFinite" && expr.arguments.length >= 1) {
         // isFinite(n) → n - n === 0.0
-        compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
-        const tmp = allocLocal(fctx, `__isfin_${fctx.locals.length}`, {
-          kind: "f64",
-        });
-        fctx.body.push({ op: "local.tee", index: tmp });
-        fctx.body.push({ op: "local.get", index: tmp });
-        fctx.body.push({ op: "f64.sub" } as Instr);
-        fctx.body.push({ op: "f64.const", value: 0 });
-        fctx.body.push({ op: "f64.eq" } as Instr);
-        return { kind: "i32" };
+        return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
+          { op: "local.get", index: v },
+          { op: "local.get", index: v },
+          { op: "f64.sub" } as Instr,
+          { op: "f64.const", value: 0 },
+          { op: "f64.eq" } as Instr,
+        ]);
       }
       if (method === "isSafeInteger" && expr.arguments.length >= 1) {
         // isSafeInteger(n) = isInteger(n) && abs(n) <= MAX_SAFE_INTEGER
-        compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
-        const tmp = allocLocal(fctx, `__issafe_${fctx.locals.length}`, {
-          kind: "f64",
-        });
-        fctx.body.push({ op: "local.tee", index: tmp });
-        // isInteger: n === trunc(n) && isFinite(n)
-        fctx.body.push({ op: "local.get", index: tmp });
-        fctx.body.push({ op: "f64.trunc" } as Instr);
-        fctx.body.push({ op: "f64.eq" } as Instr);
-        fctx.body.push({ op: "local.get", index: tmp });
-        fctx.body.push({ op: "local.get", index: tmp });
-        fctx.body.push({ op: "f64.sub" } as Instr);
-        fctx.body.push({ op: "f64.const", value: 0 });
-        fctx.body.push({ op: "f64.eq" } as Instr);
-        fctx.body.push({ op: "i32.and" } as Instr);
-        // abs(n) <= MAX_SAFE_INTEGER
-        fctx.body.push({ op: "local.get", index: tmp });
-        fctx.body.push({ op: "f64.abs" } as Instr);
-        fctx.body.push({ op: "f64.const", value: Number.MAX_SAFE_INTEGER });
-        fctx.body.push({ op: "f64.le" } as Instr);
-        fctx.body.push({ op: "i32.and" } as Instr);
-        return { kind: "i32" };
+        return compileNumberIsPredicate(ctx, fctx, expr.arguments[0]!, (v) => [
+          // isInteger: n === trunc(n) && isFinite(n)
+          { op: "local.get", index: v },
+          { op: "local.get", index: v },
+          { op: "f64.trunc" } as Instr,
+          { op: "f64.eq" } as Instr,
+          { op: "local.get", index: v },
+          { op: "local.get", index: v },
+          { op: "f64.sub" } as Instr,
+          { op: "f64.const", value: 0 },
+          { op: "f64.eq" } as Instr,
+          { op: "i32.and" } as Instr,
+          // abs(n) <= MAX_SAFE_INTEGER
+          { op: "local.get", index: v },
+          { op: "f64.abs" } as Instr,
+          { op: "f64.const", value: Number.MAX_SAFE_INTEGER },
+          { op: "f64.le" } as Instr,
+          { op: "i32.and" } as Instr,
+        ]);
       }
       if ((method === "parseFloat" || method === "parseInt") && expr.arguments.length >= 1) {
         // Delegate to the global parseInt / parseFloat host import
@@ -7590,8 +7703,15 @@ function compileCallExpression(
         // Try to resolve via registered extern classes (e.g. Set.union, Map.get)
         // when the receiver type is `any` but the method matches a built-in.
         {
-          const externResult = tryExternClassMethodOnAny(ctx, fctx, expr, propAccess, methodName);
-          if (externResult !== null) return externResult;
+          const builtinNamespace = ctx.standalone
+            ? resolveBuiltinNamespaceValueName(ctx, propAccess.expression)
+            : undefined;
+          const preferOpenBuiltinNamespace =
+            builtinNamespace !== undefined && isSupportedBuiltinStaticProperty(builtinNamespace, methodName);
+          if (!preferOpenBuiltinNamespace) {
+            const externResult = tryExternClassMethodOnAny(ctx, fctx, expr, propAccess, methodName);
+            if (externResult !== null) return externResult;
+          }
         }
 
         // (#799 WI3) Generic host-delegated method call for any/externref receivers.
@@ -8456,12 +8576,20 @@ function compileCallExpression(
 
           // Save closure ref to a local
           let closureLocal: number;
+          let rawCalleeLocal: number | undefined;
           if (innerResultType?.kind === "externref") {
             const closureRefType: ValType = {
               kind: "ref_null",
               typeIdx: matchedStructTypeIdx,
             };
             closureLocal = allocLocal(fctx, `__callable_param_${fctx.locals.length}`, closureRefType);
+            // (#1712) Keep the raw externref callee around for the host-callable
+            // fallback below. When the guarded struct cast nulls out (the callee
+            // is a host builtin like `Object.hasOwn`, a bound function, or a
+            // closure of a foreign struct shape), the call must dispatch through
+            // `__call_function` instead of trapping on `struct.get` of null.
+            rawCalleeLocal = allocLocal(fctx, `__callable_raw_${fctx.locals.length}`, { kind: "externref" });
+            fctx.body.push({ op: "local.tee", index: rawCalleeLocal });
             fctx.body.push({ op: "any.convert_extern" });
             emitGuardedRefCast(fctx, matchedStructTypeIdx);
             fctx.body.push({ op: "local.set", index: closureLocal });
@@ -8534,6 +8662,104 @@ function compileCallExpression(
             const argLocal = allocLocal(fctx, `__carg_${fctx.locals.length}`, padType);
             fctx.body.push({ op: "local.set", index: argLocal });
             argLocals.push(argLocal);
+          }
+
+          // (#1712) Host-callable fallback: when the callee arrived as externref
+          // and the guarded cast to the wrapper struct failed (closureLocal is
+          // null) while the raw value is non-null, the callee is callable but
+          // not a closure of the matched shape — a host builtin held in a JS
+          // variable (acorn's `var hasOwn = Object.hasOwn || function(…){…}`),
+          // a bound function, or a closure with a foreign struct layout. The
+          // struct.get below would trap "dereferencing a null pointer". Route
+          // that case through `__call_function(callee, undefined, argsArray)`
+          // instead. JS-host mode only — standalone/WASI keeps the existing
+          // (trapping) path since __call_function has no host there.
+          // Eligibility excludes i64/v128-typed params/returns (no boxing rule).
+          const boxableKind = (t: ValType | null): boolean =>
+            t === null ||
+            t.kind === "externref" ||
+            t.kind === "f64" ||
+            t.kind === "i32" ||
+            t.kind === "ref" ||
+            t.kind === "ref_null";
+          const hostCallFallback =
+            rawCalleeLocal !== undefined &&
+            !ctx.standalone &&
+            !ctx.wasi &&
+            boxableKind(expectedReturn) &&
+            matchedClosureInfo.paramTypes.every((t) => boxableKind(t)) &&
+            // (#1941) Only emit the host-call arm for callees that can actually
+            // be a foreign (non-wasm-closure) callable — a JS variable holding a
+            // host builtin (`Object.hasOwn || fn`). Pure local closures /
+            // function params are always wrapped into the closure struct, so the
+            // arm would be dead code and only serve to pull host imports
+            // (__js_array_new/…) into otherwise self-contained modules.
+            calleeMayBeHostCallable(ctx, expr.expression);
+
+          let fallbackInstrs: Instr[] | null = null;
+          let dispatchOuterBody: Instr[] | null = null;
+          if (hostCallFallback) {
+            // Ensure all fallback imports BEFORE detaching buffers so the index
+            // shifts land while every buffer is reachable by the shifters.
+            const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+            const arrPushIdx = ensureLateImport(
+              ctx,
+              "__js_array_push",
+              [{ kind: "externref" }, { kind: "externref" }],
+              [],
+            );
+            const callFnIdx = ensureLateImport(
+              ctx,
+              "__call_function",
+              [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+              [{ kind: "externref" }],
+            );
+            flushLateImportShifts(ctx, fctx);
+            const arrNew = ctx.funcMap.get("__js_array_new") ?? arrNewIdx;
+            const arrPush = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
+            const callFn = ctx.funcMap.get("__call_function") ?? callFnIdx;
+            if (arrNew !== undefined && arrPush !== undefined && callFn !== undefined) {
+              // Build the fallback arm in a detached buffer parked in savedBodies
+              // (late-import/global shifters walk savedBodies — #1712 blocker 1).
+              const mainBuf = fctx.body;
+              fctx.savedBodies.push(mainBuf);
+              fctx.body = [];
+              fctx.body.push({ op: "call", funcIdx: arrNew });
+              const argsArrLocal = allocLocal(fctx, `__callable_hargs_${fctx.locals.length}`, { kind: "externref" });
+              fctx.body.push({ op: "local.set", index: argsArrLocal });
+              for (let ai = 0; ai < argLocals.length; ai++) {
+                // Only pass the call-site arg count — padded defaults must stay
+                // invisible to the host callee (fn.length / arguments.length).
+                if (ai >= expr.arguments.length) break;
+                fctx.body.push({ op: "local.get", index: argsArrLocal });
+                fctx.body.push({ op: "local.get", index: argLocals[ai]! });
+                const at = matchedClosureInfo.paramTypes[ai]!;
+                if (at.kind !== "externref") {
+                  coerceType(ctx, fctx, at, { kind: "externref" });
+                }
+                fctx.body.push({ op: "call", funcIdx: arrPush });
+              }
+              for (const exLocal of cpExtrasLocals) {
+                fctx.body.push({ op: "local.get", index: argsArrLocal });
+                fctx.body.push({ op: "local.get", index: exLocal });
+                fctx.body.push({ op: "call", funcIdx: arrPush });
+              }
+              fctx.body.push({ op: "local.get", index: rawCalleeLocal! });
+              fctx.body.push({ op: "ref.null.extern" });
+              fctx.body.push({ op: "local.get", index: argsArrLocal });
+              fctx.body.push({ op: "call", funcIdx: callFn });
+              if (expectedReturn === null) {
+                fctx.body.push({ op: "drop" });
+              } else if (expectedReturn.kind !== "externref") {
+                coerceType(ctx, fctx, { kind: "externref" }, expectedReturn);
+              }
+              fallbackInstrs = fctx.body;
+              // Redirect the existing dispatch emission below into a second
+              // detached buffer; both stay parked until the if-assembly.
+              fctx.savedBodies.push(fallbackInstrs);
+              fctx.body = [];
+              dispatchOuterBody = mainBuf;
+            }
           }
 
           // Extract funcref from the closure struct (field 0) — null-check → TypeError (#728)
@@ -8661,6 +8887,31 @@ function compileCallExpression(
             }
 
             fctx.body.push(...funcDispatch);
+          }
+
+          // (#1712) Assemble the host-callable fallback split: the funcref
+          // dispatch emitted above went into a detached buffer; wrap both arms
+          // in an `if` on "cast failed but raw callee non-null".
+          if (hostCallFallback && fallbackInstrs && dispatchOuterBody) {
+            const dispatchInstrs = fctx.body;
+            fctx.body = dispatchOuterBody;
+            fctx.savedBodies.pop(); // fallbackInstrs
+            fctx.savedBodies.pop(); // mainBuf (now fctx.body again)
+            fctx.body.push({ op: "local.get", index: closureLocal });
+            fctx.body.push({ op: "ref.is_null" });
+            fctx.body.push({ op: "local.get", index: rawCalleeLocal! });
+            fctx.body.push({ op: "ref.is_null" });
+            fctx.body.push({ op: "i32.eqz" });
+            fctx.body.push({ op: "i32.and" });
+            fctx.body.push({
+              op: "if",
+              blockType:
+                expectedReturn === null
+                  ? ({ kind: "empty" } as const)
+                  : ({ kind: "val", type: expectedReturn } as const),
+              then: fallbackInstrs,
+              else: dispatchInstrs,
+            });
           }
 
           return expectedReturn ?? VOID_RESULT;

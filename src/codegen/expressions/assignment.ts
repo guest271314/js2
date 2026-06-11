@@ -3964,35 +3964,37 @@ function emitLogicalAssignmentPattern(
     // the parallel pattern in `compileLogicalAssignment` that uses
     // `__extern_is_undefined` for variable-scope `??=`. Compose the
     // two checks via `i32.or` so the then-arm fires for both.
+    //
+    // GetValue must run exactly once (§13.15.2): tee the fetched value into
+    // a temp and reuse it on the keep path so accessor getters fire once.
     emitGet();
-    const tmpForUndef = varType.kind === "externref" ? allocTempLocal(fctx, varType) : -1;
-    if (varType.kind === "externref") {
-      fctx.body.push({ op: "local.tee", index: tmpForUndef });
-    }
+    const tmpKeep = allocTempLocal(fctx, varType);
+    fctx.body.push({ op: "local.tee", index: tmpKeep });
     fctx.body.push({ op: "ref.is_null" });
     if (varType.kind === "externref") {
       const undefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
       flushLateImportShifts(ctx, fctx);
       if (undefIdx !== undefined) {
-        fctx.body.push({ op: "local.get", index: tmpForUndef });
+        fctx.body.push({ op: "local.get", index: tmpKeep });
         fctx.body.push({ op: "call", funcIdx: undefIdx });
         fctx.body.push({ op: "i32.or" });
       }
-      releaseTempLocal(fctx, tmpForUndef);
     }
 
     const savedBody = pushBody(fctx);
     const rhsResult = compileExpression(ctx, fctx, rhs, varType);
     if (!rhsResult) {
       fctx.body = savedBody;
+      releaseTempLocal(fctx, tmpKeep);
       return null;
     }
     emitSet();
     const thenInstrs = fctx.body;
 
     fctx.body = [];
-    emitGet();
+    fctx.body.push({ op: "local.get", index: tmpKeep });
     const elseInstrs = fctx.body;
+    releaseTempLocal(fctx, tmpKeep);
 
     fctx.body = savedBody;
     fctx.body.push({
@@ -4003,21 +4005,26 @@ function emitLogicalAssignmentPattern(
     });
   } else if (op === ts.SyntaxKind.BarBarEqualsToken) {
     // target ||= rhs  →  if (target is truthy) { keep } else { target = rhs }
+    // GetValue once (§13.15.2): tee the fetched value, reuse on the keep path.
     emitGet();
+    const tmpKeep = allocTempLocal(fctx, varType);
+    fctx.body.push({ op: "local.tee", index: tmpKeep });
     ensureI32Condition(fctx, varType, ctx);
 
     const savedBody = pushBody(fctx);
-    emitGet();
+    fctx.body.push({ op: "local.get", index: tmpKeep });
     const thenInstrs = fctx.body;
 
     fctx.body = [];
     const rhsResult = compileExpression(ctx, fctx, rhs, varType);
     if (!rhsResult) {
       fctx.body = savedBody;
+      releaseTempLocal(fctx, tmpKeep);
       return null;
     }
     emitSet();
     const elseInstrs = fctx.body;
+    releaseTempLocal(fctx, tmpKeep);
 
     fctx.body = savedBody;
     fctx.body.push({
@@ -4028,21 +4035,26 @@ function emitLogicalAssignmentPattern(
     });
   } else {
     // target &&= rhs  →  if (target is truthy) { target = rhs } else { keep }
+    // GetValue once (§13.15.2): tee the fetched value, reuse on the keep path.
     emitGet();
+    const tmpKeep = allocTempLocal(fctx, varType);
+    fctx.body.push({ op: "local.tee", index: tmpKeep });
     ensureI32Condition(fctx, varType, ctx);
 
     const savedBody = pushBody(fctx);
     const rhsResult = compileExpression(ctx, fctx, rhs, varType);
     if (!rhsResult) {
       fctx.body = savedBody;
+      releaseTempLocal(fctx, tmpKeep);
       return null;
     }
     emitSet();
     const thenInstrs = fctx.body;
 
     fctx.body = [];
-    emitGet();
+    fctx.body.push({ op: "local.get", index: tmpKeep });
     const elseInstrs = fctx.body;
+    releaseTempLocal(fctx, tmpKeep);
 
     fctx.body = savedBody;
     fctx.body.push({
@@ -4577,8 +4589,14 @@ export function compileCompoundAssignment(
     return { kind: "f64" };
   }
 
-  // String += : concat instead of numeric add
-  if (op === ts.SyntaxKind.PlusEqualsToken) {
+  // String += : concat instead of numeric add.
+  // Skip when the binding is a boxed mutable capture (ref cell): the boxed
+  // path below (assignment.ts boxedCaptures branch) loads/stores through the
+  // ref-cell struct and has its own externref string-concat handling (#795).
+  // compileStringCompoundAssignment uses bare local.get/local.tee, which would
+  // pass the `(struct (mut externref))` ref cell straight into js-string concat
+  // (→ illegal cast / invalid wasm). #1999.
+  if (op === ts.SyntaxKind.PlusEqualsToken && !fctx.boxedCaptures?.has(name)) {
     const leftTsType = ctx.checker.getTypeAtLocation(expr.left);
     let isStr = isStringType(leftTsType);
     if (!isStr && (leftTsType.flags & ts.TypeFlags.Any) !== 0) {
@@ -4701,9 +4719,13 @@ export function compileCompoundAssignment(
     if (boxed.valType.kind === "externref" && op === ts.SyntaxKind.PlusEqualsToken) {
       const rightTsType = ctx.checker.getTypeAtLocation(expr.right);
       const rhsIsString = isStringType(rightTsType);
+      // A statically string-typed LHS (`let acc = ""` / `let acc: string`) must
+      // concat even when the RHS is numeric (`acc += x`) — JS coerces x to
+      // string. #1999.
+      const lhsIsString = isStringType(ctx.checker.getTypeAtLocation(expr.left));
       // Also check if the variable was assigned a string in any enclosing scope
       const varHasStringAssign = hasStringAssignment(name, expr) || hasStringAssignmentInParentScopes(name, expr);
-      if (rhsIsString || varHasStringAssign) {
+      if (rhsIsString || lhsIsString || varHasStringAssign) {
         // String concat path: current value (externref) is on stack
         addStringImports(ctx);
         const concatIdx = ctx.jsStringImports.get("concat");
