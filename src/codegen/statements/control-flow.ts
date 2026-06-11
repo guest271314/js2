@@ -412,22 +412,15 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
   // Handles: "x" === "y", "x" !== "y", true, false, !true, !false
   const constResult = evaluateConstantCondition(stmt.expression);
   if (constResult !== undefined) {
+    // Route the taken branch through compileStatement so its Block case runs
+    // block-scope save/restore — a const-folded `if (true) { let x = ... }`
+    // must not leak the inner binding into the enclosing scope either (#2064).
     if (constResult) {
       // Condition is always true — emit only the then branch
-      if (ts.isBlock(stmt.thenStatement)) {
-        for (const s of stmt.thenStatement.statements) compileStatement(ctx, fctx, s);
-      } else {
-        compileStatement(ctx, fctx, stmt.thenStatement);
-      }
-    } else {
+      compileStatement(ctx, fctx, stmt.thenStatement);
+    } else if (stmt.elseStatement) {
       // Condition is always false — emit only the else branch (if any)
-      if (stmt.elseStatement) {
-        if (ts.isBlock(stmt.elseStatement)) {
-          for (const s of stmt.elseStatement.statements) compileStatement(ctx, fctx, s);
-        } else {
-          compileStatement(ctx, fctx, stmt.elseStatement);
-        }
-      }
+      compileStatement(ctx, fctx, stmt.elseStatement);
     }
     return;
   }
@@ -474,13 +467,11 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
     typeofNarrowResult = applyTypeofNarrowing(ctx, fctx, typeofNarrowing.varName, typeofNarrowing.typeLiteral);
   }
 
-  if (ts.isBlock(stmt.thenStatement)) {
-    for (const s of stmt.thenStatement.statements) {
-      compileStatement(ctx, fctx, s);
-    }
-  } else {
-    compileStatement(ctx, fctx, stmt.thenStatement);
-  }
+  // Route through compileStatement so the generic Block case runs its
+  // saveBlockScopedShadows/restoreBlockScopedShadows handling — otherwise a
+  // branch-local `let`/`const` permanently clobbers the outer binding in
+  // fctx.localMap/constBindings for the rest of the function (#2064).
+  compileStatement(ctx, fctx, stmt.thenStatement);
   const thenInstrs = fctx.body;
 
   // Restore typeof narrowing after then branch
@@ -526,13 +517,8 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
       typeofNarrowResultElse = applyTypeofNarrowing(ctx, fctx, typeofNarrowing.varName, typeofNarrowing.typeLiteral);
     }
 
-    if (ts.isBlock(stmt.elseStatement)) {
-      for (const s of stmt.elseStatement.statements) {
-        compileStatement(ctx, fctx, s);
-      }
-    } else {
-      compileStatement(ctx, fctx, stmt.elseStatement);
-    }
+    // Block-scope save/restore via compileStatement's Block case (#2064).
+    compileStatement(ctx, fctx, stmt.elseStatement);
     elseInstrs = fctx.body;
 
     // Restore typeof narrowing after else branch
