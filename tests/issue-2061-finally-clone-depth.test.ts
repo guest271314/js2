@@ -98,7 +98,12 @@ describe("#2061 finally clone branch depth", () => {
         }
         return acc;
       }`,
-      [{ fn: "m", args: [0] }, { fn: "m", args: [1] }, { fn: "m", args: [3] }, { fn: "m", args: [9] }],
+      [
+        { fn: "m", args: [0] },
+        { fn: "m", args: [1] },
+        { fn: "m", args: [3] },
+        { fn: "m", args: [9] },
+      ],
     );
   });
 
@@ -119,7 +124,10 @@ describe("#2061 finally clone branch depth", () => {
         }
         return r;
       }`,
-      [{ fn: "sw", args: [1] }, { fn: "sw", args: [2] }],
+      [
+        { fn: "sw", args: [1] },
+        { fn: "sw", args: [2] },
+      ],
     );
   });
 });
