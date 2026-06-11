@@ -149,7 +149,10 @@ function optimizedBinaryValidates(binary: Uint8Array): boolean {
   const WA = (globalThis as { WebAssembly?: { validate?: (b: BufferSource) => boolean } }).WebAssembly;
   if (!WA || typeof WA.validate !== "function") return true;
   try {
-    return WA.validate(binary);
+    // Cast to BufferSource: under TS 5.7+ the typed-array generic types this
+    // as `Uint8Array<ArrayBufferLike>`, which the lib.dom `validate` overload
+    // (param: BufferSource) doesn't structurally accept without the widening.
+    return WA.validate(binary as unknown as BufferSource);
   } catch {
     // A throw from validate means the bytes are structurally broken — treat
     // as invalid rather than letting a malformed binary through.
