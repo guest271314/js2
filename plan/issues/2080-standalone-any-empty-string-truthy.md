@@ -6,8 +6,8 @@ sprint: 61
 created: 2026-06-11
 updated: 2026-06-11
 priority: medium
-feasibility: easy
-reasoning_effort: low
+feasibility: hard
+reasoning_effort: high
 task_type: bugfix
 area: codegen
 language_feature: type-coercion
@@ -45,3 +45,25 @@ branch.
 ## Dupe check
 
 #171 (old boolean edges, done); no standalone truthiness issue. New.
+
+## Investigation (2026-06-11, dev-spec-b2)
+
+The anyref ToBoolean lives in `ensureI32Condition`
+(`src/codegen/index.ts:11696-11705`): for a `ref $AnyValue` it calls
+`__any_unbox_bool` (`src/codegen/any-helpers.ts:384`). The bug is in that
+helper: its final arm is `tag >= 5 → 1` (always truthy), so a string never
+has its length checked.
+
+Compounding it (and the reason this is NOT a clean isolated fix): in
+standalone mode a native string (`ref $AnyString`, an eqref subtype) boxes via
+`__any_box_ref` → **tag 6**, NOT tag 5 (`__any_box_string`/tag 5 is only for
+externref/JS-host strings). So `__any_unbox_bool` would need to `ref.test` the
+tag-6 `refval` against `$AnyString` and, if it is a string, flatten
+(`__str_flatten`, registered in `ensureNativeStringHelpers`) and read the
+length field — a cross-helper dependency between the AnyValue helpers and the
+native-string helpers, with the usual late-import index-shift concerns.
+
+This is the SAME type-unaware-boxing root cause as [[2072]] (native string →
+tag 6, not a string tag). Fixing the boxing so strings carry a recoverable
+string tag fixes both. **Recommend bundling with #2072 under senior-dev/
+architect** rather than a tag-6 special-case here.
