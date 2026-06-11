@@ -882,6 +882,64 @@ function calleeIsBoundFunctionVar(ctx: CodegenContext, expr: ts.Expression): boo
 }
 
 /**
+ * (#1712 / #1941) Static gate for the host-callable dispatch fallback.
+ *
+ * The callable-param dispatch below emits an extra `__call_function` arm so a
+ * callee that arrives as a non-closure externref (a host builtin held in a JS
+ * variable — acorn's `var hasOwn = Object.hasOwn || function(…){…}`) dispatches
+ * through the host instead of trapping on `struct.get` of a null cast. That arm
+ * is only ever *taken* when the runtime value is NOT a wasm closure struct, but
+ * it was emitted for EVERY callable-param dispatch, which unconditionally pulls
+ * `__js_array_new` / `__js_array_push` / `__call_function` host imports into the
+ * module — even for pure local-closure programs (`applyTwice((x)=>x+1, 10)`,
+ * `const add5 = makeAdder(5)`) that need no JS host at all. That regressed the
+ * #1941 optimize-differential gate (LinkError: `__js_array_new` not provided)
+ * and violated the dual-mode "JS host optional" principle for these programs.
+ *
+ * Gate the fallback to callees whose runtime value can plausibly be a foreign
+ * (non-wasm-closure) callable: a variable whose initializer references a host
+ * builtin member directly (`var f = Object.hasOwn`) or as the left operand of a
+ * `||` / `??` short-circuit (`Object.hasOwn || function(){}`). Function
+ * parameters and locals/globals initialized from wasm expressions (closures,
+ * local function results) are always wrapped into the closure struct by the
+ * call-site coercion, so the fallback can never fire for them — and we must not
+ * burden them with host imports.
+ */
+function calleeMayBeHostCallable(ctx: CodegenContext, expr: ts.Expression): boolean {
+  if (!ts.isIdentifier(expr)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(expr);
+  const decl = sym?.valueDeclaration;
+  if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return false;
+
+  // Does `node` reference a host-builtin member (Object.hasOwn, Math.max, …)?
+  const isHostBuiltinMember = (node: ts.Expression): boolean => {
+    const inner = ts.isParenthesizedExpression(node) ? node.expression : node;
+    if (ts.isPropertyAccessExpression(inner) || ts.isElementAccessExpression(inner)) {
+      const recv = inner.expression;
+      return ts.isIdentifier(recv) && BUILTIN_CLASS_NAMES.has(recv.text);
+    }
+    return false;
+  };
+
+  // Unwrap `<host> || fn` / `<host> ?? fn` short-circuit fallbacks (and nested
+  // chains), checking whether any reachable left operand is a host builtin.
+  const initMayBeHost = (node: ts.Expression): boolean => {
+    const inner = ts.isParenthesizedExpression(node) ? node.expression : node;
+    if (isHostBuiltinMember(inner)) return true;
+    if (
+      ts.isBinaryExpression(inner) &&
+      (inner.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+        inner.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)
+    ) {
+      return initMayBeHost(inner.left) || initMayBeHost(inner.right);
+    }
+    return false;
+  };
+
+  return initMayBeHost(decl.initializer);
+}
+
+/**
  * (#1337) Emit a call to a host bound-function externref via the
  * `__call_function(fn, thisArg, argsArray)` host helper. The bound function
  * already carries [[BoundThis]] and [[BoundArguments]], so `thisArg` is passed
@@ -8629,7 +8687,14 @@ function compileCallExpression(
             !ctx.standalone &&
             !ctx.wasi &&
             boxableKind(expectedReturn) &&
-            matchedClosureInfo.paramTypes.every((t) => boxableKind(t));
+            matchedClosureInfo.paramTypes.every((t) => boxableKind(t)) &&
+            // (#1941) Only emit the host-call arm for callees that can actually
+            // be a foreign (non-wasm-closure) callable — a JS variable holding a
+            // host builtin (`Object.hasOwn || fn`). Pure local closures /
+            // function params are always wrapped into the closure struct, so the
+            // arm would be dead code and only serve to pull host imports
+            // (__js_array_new/…) into otherwise self-contained modules.
+            calleeMayBeHostCallable(ctx, expr.expression);
 
           let fallbackInstrs: Instr[] | null = null;
           let dispatchOuterBody: Instr[] | null = null;
