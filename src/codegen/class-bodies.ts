@@ -244,6 +244,31 @@ function externrefParams(count: number): ValType[] {
   return Array.from({ length: count }, () => ({ kind: "externref" }) as ValType);
 }
 
+/**
+ * #2082: for a derived class with NO explicit constructor and a WasmGC-struct
+ * parent, the spec synthesizes `constructor(...args) { super(...args); }`
+ * (§15.7.14). Walk the parent chain to the nearest ancestor that declares an
+ * explicit constructor and return its parameter list, so the implicit ctor is
+ * synthesized with the same parameters (bound as locals) and the replayed
+ * parent `this.x = param` assignments can resolve `param`. Returns undefined
+ * when no ancestor has an explicit constructor (no args to forward).
+ */
+function findNearestAncestorCtorParams(
+  ctx: CodegenContext,
+  className: string,
+): ts.NodeArray<ts.ParameterDeclaration> | undefined {
+  const seen = new Set<string>([className]);
+  let anc = ctx.classParentMap.get(className);
+  while (anc && !seen.has(anc)) {
+    seen.add(anc);
+    const ancDecl = ctx.classDeclarationMap.get(anc);
+    const ancCtor = ancDecl?.members.find(ts.isConstructorDeclaration) as ts.ConstructorDeclaration | undefined;
+    if (ancCtor) return ancCtor.parameters;
+    anc = ctx.classParentMap.get(anc);
+  }
+  return undefined;
+}
+
 function compileExternrefArgument(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
   const argResult = compileExpression(ctx, fctx, arg, { kind: "externref" });
   if (argResult === null) {
@@ -543,6 +568,22 @@ export function collectClassDeclaration(
   if (implicitForwarderArity > 0) {
     ctorParams.push(...externrefParams(implicitForwarderArity));
   }
+  // #2082: implicit ctor of a WasmGC-struct-backed derived class (no explicit
+  // ctor, non-builtin parent) — forward the nearest ancestor ctor's params so
+  // `new Dog("rex")` actually passes "rex" through to the replayed
+  // `this.name = name` (spec §15.7.14 `constructor(...args){ super(...args) }`).
+  const implicitStructCtorParams =
+    !ctor && !implicitBuiltinParent ? findNearestAncestorCtorParams(ctx, className) : undefined;
+  if (implicitStructCtorParams) {
+    for (const param of implicitStructCtorParams) {
+      const paramType = ctx.checker.getTypeAtLocation(param);
+      let wasmType = resolveWasmType(ctx, paramType);
+      if (param.initializer && wasmType.kind === "ref") {
+        wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
+      }
+      ctorParams.push(wasmType);
+    }
+  }
   if (ctor) {
     for (let i = 0; i < ctor.parameters.length; i++) {
       const param = ctor.parameters[i]!;
@@ -585,6 +626,10 @@ export function collectClassDeclaration(
     : [{ kind: "ref", typeIdx: structTypeIdx }];
   if (ctor) {
     registerClassOptionalParams(ctx, ctorName, ctor.parameters, ctorParams);
+  } else if (implicitStructCtorParams) {
+    // #2082: the implicit ctor inherits the forwarded parent params' optionality
+    // so the call site sets `__argc` and the default-value checks fire.
+    registerClassOptionalParams(ctx, ctorName, implicitStructCtorParams, ctorParams, implicitForwarderArity);
   }
   const ctorTypeIdx = addFuncType(ctx, ctorParams, ctorResults, `${className}_new_type`);
   const ctorFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
@@ -1098,6 +1143,23 @@ function compileClassBodiesInner(
     for (let i = 0; i < implicitForwarderArity; i++) {
       params.push({ name: `__arg${i}`, type: { kind: "externref" } });
     }
+    // #2082: bind the forwarded ancestor-ctor params as named locals so the
+    // replayed parent `this.x = name` assignments below resolve `name`. Must
+    // mirror the func-type registration (the implicitStructCtorParams block).
+    const implicitStructCtorParams =
+      !ctor && !implicitBuiltinParent ? findNearestAncestorCtorParams(ctx, className) : undefined;
+    if (implicitStructCtorParams) {
+      for (let pi = 0; pi < implicitStructCtorParams.length; pi++) {
+        const param = implicitStructCtorParams[pi]!;
+        const paramName = ts.isIdentifier(param.name) ? param.name.text : `__param${pi}`;
+        const paramType = ctx.checker.getTypeAtLocation(param);
+        let wasmType = resolveWasmType(ctx, paramType);
+        if (param.initializer && wasmType.kind === "ref") {
+          wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
+        }
+        params.push({ name: paramName, type: wasmType });
+      }
+    }
     if (ctor) {
       for (let pi = 0; pi < ctor.parameters.length; pi++) {
         const param = ctor.parameters[pi]!;
@@ -1202,19 +1264,27 @@ function compileClassBodiesInner(
     // Emit default-value initialization for constructor parameters with initializers.
     // For primitive params, __argc distinguishes an omitted argument from a
     // legitimate falsy value. Ref/externref params keep their value checks.
-    if (ctor) {
-      const defaultArgcLocal = ctor.parameters.some((param, i) => {
+    // #2082: the implicit ctor must also honour the FORWARDED parent params'
+    // defaults (`class A { constructor(v = 7){...} }; class B extends A {}` →
+    // `new B()` must see v = 7). Those params occupy indices
+    // [implicitForwarderArity, implicitForwarderArity + len) — 0-based here
+    // since a WasmGC-struct implicit ctor has no externref forwarder prefix.
+    const defaultInitParams: ts.NodeArray<ts.ParameterDeclaration> | undefined =
+      ctor?.parameters ?? implicitStructCtorParams;
+    const defaultInitBase = ctor ? 0 : implicitForwarderArity;
+    if (defaultInitParams) {
+      const defaultArgcLocal = defaultInitParams.some((param, i) => {
         if (!param.initializer) return false;
-        return paramDefaultNeedsArgc(params[i]?.type);
+        return paramDefaultNeedsArgc(params[defaultInitBase + i]?.type);
       })
         ? cacheParamDefaultArgc(ctx, fctx)
         : undefined;
-      for (let i = 0; i < ctor.parameters.length; i++) {
-        const param = ctor.parameters[i]!;
+      for (let i = 0; i < defaultInitParams.length; i++) {
+        const param = defaultInitParams[i]!;
         if (!param.initializer) continue;
 
-        const paramIdx = i;
-        const paramType = params[i]!.type;
+        const paramIdx = defaultInitBase + i;
+        const paramType = params[paramIdx]!.type;
 
         // Pre-ensure `__extern_is_undefined` before compiling the initializer so
         // any late-import funcIdx shift happens while `fctx.body` is authoritative.
