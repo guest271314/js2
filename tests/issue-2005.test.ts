@@ -22,9 +22,7 @@ import { compileAndInstantiate } from "../src/runtime.js";
 
 describe("#2005/#2006 template literal span stringification (JS-host)", () => {
   async function run(body: string): Promise<string> {
-    const exports = (await compileAndInstantiate(
-      `export function test(): string { ${body} }`,
-    )) as { test(): string };
+    const exports = (await compileAndInstantiate(`export function test(): string { ${body} }`)) as { test(): string };
     return exports.test();
   }
 
