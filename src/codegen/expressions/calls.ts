@@ -7399,9 +7399,33 @@ function compileCallExpression(
         // start and end to 0 → host called `s.substring(0, 0)` → "" instead of
         // the whole string. The pad loop's `pi === 2` branch supplies s.length
         // for the missing end; the missing start (pi === 1) correctly pads to 0.
+        // (#2124) An explicit `undefined` end arg is spec-equivalent to absent:
+        // substring/slice default `end` to `s.length`. Without this, the f64
+        // slot coerces `undefined` → NaN and the host runs `substring(1, NaN)`
+        // → wrong length. Detect a statically-undefined end so the same
+        // length-default path that handles a missing end fires.
+        const isStaticUndefinedExpr = (a: ts.Expression | undefined): boolean => {
+          if (a === undefined) return false;
+          let cur: ts.Expression = a;
+          while (
+            ts.isParenthesizedExpression(cur) ||
+            ts.isAsExpression(cur) ||
+            ts.isNonNullExpression(cur) ||
+            ts.isTypeAssertionExpression(cur)
+          ) {
+            cur = (cur as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression | ts.TypeAssertion)
+              .expression;
+          }
+          return (
+            (ts.isIdentifier(cur) && cur.text === "undefined") ||
+            (ts.isVoidExpression(cur) && ts.isNumericLiteral(cur.expression))
+          );
+        };
+        const substringEndUndefined =
+          (method === "substring" || method === "slice") && args.length === 2 && isStaticUndefinedExpr(args[1]);
         const needsLengthDefault =
           (method === "substring" || method === "slice") &&
-          args.length <= 1 &&
+          (args.length <= 1 || substringEndUndefined) &&
           paramTypes !== undefined &&
           paramTypes.length === 3;
         let savedReceiverLocal: number | undefined;
@@ -7418,6 +7442,19 @@ function compileCallExpression(
         // Cap at declared param count (excluding self) to avoid pushing extra values
         const userParamCount = paramTypes ? paramTypes.length - 1 : args.length;
         for (let ai = 0; ai < args.length; ai++) {
+          if (substringEndUndefined && ai === 1 && savedReceiverLocal !== undefined) {
+            // Explicit `undefined` end → s.length (#2124). Skip compiling the
+            // undefined arg; emit the receiver's length for the f64 end slot.
+            const lenIdx = ctx.jsStringImports.get("length");
+            if (lenIdx !== undefined) {
+              fctx.body.push({ op: "local.get", index: savedReceiverLocal });
+              fctx.body.push({ op: "call", funcIdx: lenIdx });
+              fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
+            } else {
+              fctx.body.push({ op: "f64.const", value: 0x7fffffff });
+            }
+            continue;
+          }
           if (ai < userParamCount) {
             const expectedArgType = paramTypes?.[ai + 1]; // +1 for self param
             const argResult = compileExpression(ctx, fctx, args[ai]!, expectedArgType);

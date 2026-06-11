@@ -38,6 +38,31 @@ import {
   tryStructToString,
 } from "./type-coercion.js";
 
+/**
+ * (#2124) An explicit `undefined` (or `void 0`) passed for an optional string
+ * index arg is spec-equivalent to omitting it — the method applies its own
+ * default (substring/slice/endsWith end → length, lastIndexOf from → length).
+ * But compiling it through the i32 arg path coerces NaN/undefined → 0, which is
+ * wrong. Detect the statically-undefined forms so callers can treat the arg as
+ * absent. Unwraps paren/as/!-assertion wrappers.
+ */
+function isStaticUndefinedArg(arg: ts.Expression | undefined): boolean {
+  if (arg === undefined) return false;
+  let cur: ts.Expression = arg;
+  while (
+    ts.isParenthesizedExpression(cur) ||
+    ts.isAsExpression(cur) ||
+    ts.isNonNullExpression(cur) ||
+    ts.isTypeAssertionExpression(cur)
+  ) {
+    cur = (cur as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression | ts.TypeAssertion).expression;
+  }
+  return (
+    (ts.isIdentifier(cur) && cur.text === "undefined") ||
+    (ts.isVoidExpression(cur) && ts.isNumericLiteral(cur.expression))
+  );
+}
+
 // ── Guarded funcref cast (ref.test before ref.cast to avoid illegal cast traps) ──
 function emitGuardedFuncRefCast(fctx: FunctionContext, funcTypeIdx: number): void {
   const tmpFunc = allocLocal(fctx, `__gfc_${fctx.locals.length}`, {
@@ -1738,7 +1763,9 @@ export function compileNativeStringMethodCall(
     const local = allocLocal(fctx, `${name}_${fctx.locals.length}`, {
       kind: "i32",
     });
-    if (value) {
+    // Explicit `undefined` is spec-equivalent to an absent arg → use the
+    // method's default sentinel rather than coercing undefined → 0 (#2124).
+    if (value && !isStaticUndefinedArg(value)) {
       compileStringIntegerArg(ctx, fctx, value);
     } else {
       fctx.body.push({ op: "i32.const", value: fallback });
@@ -1901,8 +1928,8 @@ export function compileNativeStringMethodCall(
     } else {
       fctx.body.push({ op: "i32.const", value: 0 });
     }
-    // end
-    if (expr.arguments.length > 1) {
+    // end — explicit `undefined` defaults to length (§22.1.3.24), same as absent (#2124)
+    if (expr.arguments.length > 1 && !isStaticUndefinedArg(expr.arguments[1])) {
       compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
     } else {
       // Default end = string length
@@ -1926,8 +1953,8 @@ export function compileNativeStringMethodCall(
     } else {
       fctx.body.push({ op: "i32.const", value: 0 });
     }
-    // end
-    if (expr.arguments.length > 1) {
+    // end — explicit `undefined` defaults to length (§22.1.3.22), same as absent (#2124)
+    if (expr.arguments.length > 1 && !isStaticUndefinedArg(expr.arguments[1])) {
       compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
     } else {
       fctx.body.push({ op: "i32.const", value: 0x7fffffff });
@@ -1954,7 +1981,13 @@ export function compileNativeStringMethodCall(
   if (method === "lastIndexOf") {
     const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_lastIndexOf_recv");
     const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_lastIndexOf_search");
-    const fromLocal = compileIntegerValueToLocal(expr.arguments[1], 0x7fffffff, "__str_lastIndexOf_from");
+    // §22.1.3.9 step 5: ToIntegerOrInfinity(position) with NaN → +∞, so an
+    // explicit `NaN` (or `undefined`) position searches from the end — the same
+    // 0x7fffffff sentinel as an absent arg. `compileIntegerValueToLocal` already
+    // maps explicit `undefined`; map explicit `NaN` here too (#2124).
+    const fromArg = expr.arguments[1];
+    const fromIsNaN = fromArg !== undefined && ts.isIdentifier(fromArg) && fromArg.text === "NaN";
+    const fromLocal = compileIntegerValueToLocal(fromIsNaN ? undefined : fromArg, 0x7fffffff, "__str_lastIndexOf_from");
     const funcIdx = ctx.nativeStrHelpers.get("__str_lastIndexOf")!;
     fctx.body.push({ op: "local.get", index: receiverLocal });
     fctx.body.push({ op: "local.get", index: searchLocal });
@@ -2027,11 +2060,18 @@ export function compileNativeStringMethodCall(
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!, {
         kind: "f64",
       });
-      // RangeError: count must be non-negative, finite, and not too large
+      // RangeError: count must be non-negative, finite, and not too large.
+      // §22.1.3.18: n = ToIntegerOrInfinity(count) (truncates toward zero),
+      // THEN throw if n < 0 or n is +∞. The `< 0` test must run on the
+      // truncated value, else `repeat(-0.5)` — whose ToIntegerOrInfinity is
+      // `-0`, NOT negative — wrongly throws (#2124). `f64.trunc(-0.5) = -0.0`,
+      // and `-0.0 < 0` is false, so truncating first gives the spec result.
+      // The +∞ check stays on the raw f64 (trunc_sat would clamp it).
       if (argType && argType.kind === "f64") {
         const countLocal = allocLocal(fctx, `__repeat_count_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.tee", index: countLocal });
-        // Check count < 0
+        // Check ToIntegerOrInfinity(count) < 0 — truncate toward zero first.
+        fctx.body.push({ op: "f64.trunc" } as Instr);
         fctx.body.push({ op: "f64.const", value: 0 });
         fctx.body.push({ op: "f64.lt" });
         // Check count is Infinity (count != count is NaN, but we also need +Inf)
