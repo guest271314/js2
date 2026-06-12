@@ -882,6 +882,106 @@ export function addStringRuntime(mod: WasmModule): void {
     2,
   );
 
+  // __str_cmp: lexicographic comparison → -1 / 0 / 1 (#1976).
+  // Compares byte-by-byte up to min(lenA, lenB); the first differing (unsigned)
+  // byte decides; if one is a prefix of the other, the shorter is "less". For
+  // ASCII this matches JS's UTF-16 code-unit ordering. (Multi-byte UTF-8 orders
+  // by byte, which can differ from UTF-16 order for astral/supplementary code
+  // points — tracked with the UTF-8↔UTF-16 storage decision in this issue.)
+  // locals: lenA(2), lenB(3), n(4 = min), i(5), ca(6), cb(7)
+  addRuntimeFunc(
+    mod,
+    "__str_cmp",
+    [{ kind: "i32" }, { kind: "i32" }],
+    [{ kind: "i32" }],
+    [],
+    (firstLocalIdx) => {
+      const lenA = firstLocalIdx;
+      const lenB = firstLocalIdx + 1;
+      const n = firstLocalIdx + 2;
+      const i = firstLocalIdx + 3;
+      const ca = firstLocalIdx + 4;
+      const cb = firstLocalIdx + 5;
+      return [
+        // lenA = a.len; lenB = b.len
+        { op: "local.get", index: 0 },
+        { op: "i32.load", align: 2, offset: 8 },
+        { op: "local.set", index: lenA },
+        { op: "local.get", index: 1 },
+        { op: "i32.load", align: 2, offset: 8 },
+        { op: "local.set", index: lenB },
+        // n = min(lenA, lenB)
+        { op: "local.get", index: lenA },
+        { op: "local.get", index: lenB },
+        { op: "i32.lt_u" },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [{ op: "local.get", index: lenA }],
+          else: [{ op: "local.get", index: lenB }],
+        },
+        { op: "local.set", index: n },
+        // i = 0
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: i },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                // break if i >= n
+                { op: "local.get", index: i },
+                { op: "local.get", index: n },
+                { op: "i32.ge_u" },
+                { op: "br_if", depth: 1 },
+                // ca = a.bytes[i]; cb = b.bytes[i]
+                { op: "local.get", index: 0 },
+                { op: "local.get", index: i },
+                { op: "i32.add" },
+                { op: "i32.load8_u", align: 0, offset: 12 },
+                { op: "local.set", index: ca },
+                { op: "local.get", index: 1 },
+                { op: "local.get", index: i },
+                { op: "i32.add" },
+                { op: "i32.load8_u", align: 0, offset: 12 },
+                { op: "local.set", index: cb },
+                // if ca < cb → return -1 ; if ca > cb → return 1
+                { op: "local.get", index: ca },
+                { op: "local.get", index: cb },
+                { op: "i32.lt_u" },
+                { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: -1 }, { op: "return" }] },
+                { op: "local.get", index: ca },
+                { op: "local.get", index: cb },
+                { op: "i32.gt_u" },
+                { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 1 }, { op: "return" }] },
+                // i++
+                { op: "local.get", index: i },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: i },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        // Common prefix equal: shorter string is "less".
+        { op: "local.get", index: lenA },
+        { op: "local.get", index: lenB },
+        { op: "i32.lt_u" },
+        { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: -1 }, { op: "return" }] },
+        { op: "local.get", index: lenA },
+        { op: "local.get", index: lenB },
+        { op: "i32.gt_u" },
+        { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 1 }, { op: "return" }] },
+        { op: "i32.const", value: 0 },
+      ];
+    },
+    6,
+  );
+
   // __str_hash: FNV-1a hash
   // FNV offset basis = 2166136261 (0x811c9dc5)
   // FNV prime = 16777619 (0x01000193)
