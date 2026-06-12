@@ -471,9 +471,22 @@ function compileSpreadCallArgs(
   // Strategy: for each spread arg, store the vec in a local, extract data array, then extract elements by index
   if (!paramTypes) return;
 
+  // Count non-spread (positional) args that follow each argument index, so a
+  // spread that precedes trailing positional args reserves their param slots
+  // instead of greedily consuming every remaining parameter (#2053). Without
+  // this, `f(...arr, x)` reads one element too many out of the spread vec
+  // (OOB → NaN) and compiles `x` as a surplus stack value.
+  const args = expr.arguments;
+  const trailingPositionalAfter: number[] = new Array(args.length).fill(0);
+  for (let i = args.length - 2; i >= 0; i--) {
+    const next = args[i + 1]!;
+    trailingPositionalAfter[i] = trailingPositionalAfter[i + 1]! + (ts.isSpreadElement(next) ? 0 : 1);
+  }
+
   // Collect all arguments, resolving spreads
   let paramIdx = 0;
-  for (const arg of expr.arguments) {
+  for (let argPos = 0; argPos < args.length; argPos++) {
+    const arg = args[argPos]!;
     if (ts.isSpreadElement(arg)) {
       // Compile the spread source (vec struct)
       const vecType = compileExpression(ctx, fctx, arg.expression);
@@ -504,7 +517,10 @@ function compileSpreadCallArgs(
       const arrDefSpread = ctx.mod.types[arrTypeIdx];
       const spreadElemType =
         arrDefSpread && arrDefSpread.kind === "array" ? arrDefSpread.element : { kind: "f64" as const };
-      const remainingParams = paramTypes.length - paramIdx;
+      // Reserve param slots for trailing positional args after this spread so
+      // the spread only expands into the parameters it actually covers (#2053).
+      const reservedForTrailing = trailingPositionalAfter[argPos] ?? 0;
+      const remainingParams = Math.max(0, paramTypes.length - paramIdx - reservedForTrailing);
       for (let i = 0; i < remainingParams; i++) {
         fctx.body.push({ op: "local.get", index: dataLocal });
         fctx.body.push({ op: "i32.const", value: i });

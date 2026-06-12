@@ -1,10 +1,11 @@
 ---
 id: 2055
 title: "relational comparison against an i32-promoted local silently truncates the other f64 operand (i < 2.5 wrong)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: critical
 feasibility: medium
 reasoning_effort: high
@@ -81,3 +82,37 @@ the hinted operand comes back f64, promote rather than truncate.
 Grepped `hasI32LocalOperand`, `fractional`, `i32-promoted`, `detectI32LoopVar`,
 `truncat` — closest are #1236 (i32 accumulator saturation, done) and #595/#1166
 (i32 loop inference). None cover relational truncation.
+
+## Resolution (2026-06-11)
+
+Fixed in `src/codegen/binary-ops.ts`. `hasI32LocalOperand` previously fired the
+i32 numeric hint for a relational whenever *either* operand was an i32 local,
+truncating a fractional/derived f64 operand via `i32.trunc_sat_f64_s` before the
+compare. The flag now also requires **both** operands to satisfy `isI32PureExpr`
+(which already treats an i32 local as a pure leaf), so it only fires when both
+sides are provably integral. The flag was changed to a `let` and assigned after
+`isI32PureExpr` is in scope. When the guard fails, the operands stay f64 (the
+existing i32↔f64 promotion at binary-ops.ts:1520 converts the i32 local with
+`f64.convert_i32_s` — cheap and exact) and an f64 compare is emitted. The
+for-header fast path (`i < 10000`, integer bound) and two-i32-local compares
+still take the i32 path.
+
+### Test Results
+
+`tests/issue-2055.test.ts` (8 cases, all PASS):
+
+| case | result |
+|------|--------|
+| `if (i < 2.5)` | 3 ✓ |
+| `if (i < n/2)` (n=5) | 3 ✓ |
+| `if (2.5 > i)` (literal left) | 3 ✓ |
+| `<=`, `>`, `>=` with 2.5 | 3 / 2 / 2 ✓ |
+| `while (i < x/2)` + ternary | 3 / 3 ✓ |
+| `if (i < 3)` integer fast path (unregressed) | 3 ✓ |
+| two i32 locals `i < j` (unregressed) | 3 ✓ |
+| `for (i<10000)` perf path intact | 10000 ✓ |
+
+`tsc --noEmit` clean. Pre-existing failures in `tests/i32-loop-inference.test.ts`,
+`tests/native-i32-type.test.ts`, etc. are unrelated — those harnesses call
+`compile()` without `await` or use a minimal import object missing
+`string_constants`; they fail identically on baseline with this change reverted.

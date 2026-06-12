@@ -1,10 +1,11 @@
 ---
 id: 2049
 title: "o?.m(args) never routed to optional-call codegen: args evaluated on nullish receiver, null class receiver traps"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -99,3 +100,38 @@ Grepped `optional chain`, `questionDot`, `short-circuit`, `optional call`,
 `uncatchable` over plan/issues/: #16, #409, #1281, #1375, #1392 (done; IR-path
 or other forms), #1820 (IR `&&`/`||`), #1298 (fn-typed field call). None cover
 the questionDotToken routing gap or arg evaluation on short-circuit.
+
+## Resolution (2026-06-11)
+
+Three changes in `src/codegen/expressions/`:
+
+1. **`calls.ts`** — routing gate now keys on `ts.isOptionalChain(expr)` instead
+   of `expr.questionDotToken`, so `o?.m(args)` (token on the inner
+   PropertyAccessExpression) reaches `compileOptionalCallExpression`.
+2. **`calls-optional.ts`** — strip receiver nullability with
+   `checker.getNonNullableType(...)` before method resolution; the receiver is
+   `K | null` by construction, so `getSymbol()` on the raw union never resolved
+   the class/struct.
+3. **`calls-optional.ts`** — added a closure-field fallback: when no named
+   method resolves, delegate the non-null branch to
+   `compileCallablePropertyCall` (which already extracts the closure field,
+   pushes self + args, and `call_ref`s, handling a nullable receiver via a
+   guarded cast). Gated on a side-effect-free receiver so the re-evaluation is
+   sound.
+
+### Test results (`tests/issue-2049.test.ts`, all pass)
+
+| case | before | after | node |
+|------|--------|-------|------|
+| `o?.f(mark(5))` null receiver — arg eval | `5` (mark ran) | `0` | `0` |
+| `k?.m(mark(7))` null class receiver | **trap** | `0` | `0` |
+| `o?.f(mark(5))` non-null closure field | `1005` | `1005` | `1005` |
+| `k?.m(mark(7))` non-null class method | `807` | `807` | `807` |
+| `o.f?.()` / `o?.f?.()` dynamic-call form | ok | ok | ok |
+| void method side effect via `k?.m()` | n/a | `7` | `7` |
+
+The **undefined-vs-NaN result-value** half of the short-circuit (e.g.
+`o?.f(x) ?? -1` yielding NaN instead of -1) is out of scope here — tracked as
+**#2051**. Nested `a?.b?.c()` previously threw an uncatchable host TypeError on
+the inner `a?.b`; it now returns a (NaN-encoded) value, a strict improvement,
+with the encoding likewise deferred to #2051.

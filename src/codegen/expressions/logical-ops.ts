@@ -169,6 +169,27 @@ export function compileLogicalOr(ctx: CodegenContext, fctx: FunctionContext, exp
 }
 
 /** Nullish coalescing: a ?? b → if a is null, return b, else return a */
+/**
+ * #2004 — `String.prototype.codePointAt(pos)` returns `undefined` when `pos`
+ * is out of range (§22.1.3.4 step 5). js2wasm lowers codePointAt to an f64
+ * result, so that `undefined` is erased to NaN at the externref→f64 boundary.
+ * A code point is always an integer in [0, 0x10FFFF], so NaN is an unambiguous
+ * "was undefined" sentinel. For `codePointAt(...) ?? rhs`, recognise the LHS
+ * and branch on NaN instead of short-circuiting (an f64 LHS would otherwise be
+ * treated as never-nullish, so `?? rhs` never fires for the OOB case).
+ */
+function isCodePointAtCall(expr: ts.Expression): boolean {
+  let inner: ts.Expression = expr;
+  while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) || ts.isNonNullExpression(inner)) {
+    inner = inner.expression;
+  }
+  return (
+    ts.isCallExpression(inner) &&
+    ts.isPropertyAccessExpression(inner.expression) &&
+    inner.expression.name.text === "codePointAt"
+  );
+}
+
 export function compileNullishCoalescing(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -183,6 +204,16 @@ export function compileNullishCoalescing(
   const resultKind: ValType = leftType ?? { kind: "externref" };
   const tmp = allocTempLocal(fctx, resultKind);
   fctx.body.push({ op: "local.tee", index: tmp });
+
+  // #2004 — codePointAt's f64 NaN result encodes an out-of-range `undefined`.
+  // Branch on NaN so `codePointAt(oob) ?? rhs` yields `rhs`, then unify the
+  // result type with the RHS exactly like the generic path below.
+  if (resultKind.kind === "f64" && isCodePointAtCall(expr.left)) {
+    // isNaN(lhs): a value is NaN iff it is not equal to itself.
+    fctx.body.push({ op: "local.get", index: tmp });
+    fctx.body.push({ op: "f64.ne" });
+    return finishNullishBranch(ctx, fctx, expr, resultKind, tmp);
+  }
 
   // If the left side is a value type (i32/f64), it can never be null/undefined — short-circuit
   if (resultKind.kind === "i32" || resultKind.kind === "f64") {
@@ -204,6 +235,21 @@ export function compileNullishCoalescing(
     fctx.body.push({ op: "i32.or" });
   }
 
+  return finishNullishBranch(ctx, fctx, expr, resultKind, tmp);
+}
+
+/**
+ * Shared tail of `compileNullishCoalescing`: with the "is-nullish" condition
+ * (i32, non-zero ⇒ use RHS) already on the stack and the LHS value saved in
+ * `tmp`, compile the RHS, unify the two branch types, and emit the `if`.
+ */
+function finishNullishBranch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  resultKind: ValType,
+  tmp: number,
+): ValType {
   // Compile RHS in a side buffer to discover its natural type
   const savedBody = pushBody(fctx);
   const rhsType = compileExpression(ctx, fctx, expr.right);

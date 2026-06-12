@@ -2004,14 +2004,44 @@ function compileNumberIsPredicate(
   return { kind: "i32" };
 }
 
+/**
+ * (#2069) Detect whether a named callee was declared with an explicit
+ * TypeScript `this` parameter (`function f(this: T, …)`). Such a function
+ * materializes a leading `externref` `this` slot in its Wasm signature, so a
+ * `.call`/`.apply` lowering must thread the user's thisArg into that slot
+ * rather than dropping it. Returns the function's first ParameterDeclaration
+ * when it is the `this` pseudo-parameter, else undefined.
+ */
+function getExplicitThisParam(ctx: CodegenContext, callee: ts.Expression): ts.ParameterDeclaration | undefined {
+  const sym = ctx.checker.getSymbolAtLocation(callee);
+  const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+  if (
+    decl &&
+    (ts.isFunctionDeclaration(decl) || ts.isFunctionExpression(decl) || ts.isArrowFunction(decl)) &&
+    decl.parameters.length > 0
+  ) {
+    const p0 = decl.parameters[0]!;
+    if (ts.isIdentifier(p0.name) && p0.name.text === "this") return p0;
+  }
+  return undefined;
+}
+
 function compileCallExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.CallExpression,
   expectedType?: ValType,
 ): InnerResult {
-  // Optional chaining on calls: obj?.method()
-  if (expr.questionDotToken && ts.isPropertyAccessExpression(expr.expression)) {
+  // Optional chaining on calls: obj?.method() and obj.method?.().
+  //
+  // In the TS AST the `?.` of `o?.m(args)` sits on the inner
+  // PropertyAccessExpression, NOT on the CallExpression — only `o.m?.(args)`
+  // sets `expr.questionDotToken`. Gating on the call token alone (#2049) missed
+  // the common `o?.m(args)` form, so it fell into the regular method-call path
+  // which evaluates arguments unconditionally and derefs the receiver (trapping
+  // on a null class instance). Gate on the optional chain itself so both forms
+  // route to the short-circuiting path.
+  if (ts.isOptionalChain(expr) && ts.isPropertyAccessExpression(expr.expression)) {
     return compileOptionalCallExpression(ctx, fctx, expr);
   }
 
@@ -2684,6 +2714,44 @@ function compileCallExpression(
         ts.setTextRange(reshapedCall, expr);
         (reshapedCall as any).parent = expr.parent;
         return compileCallExpression(ctx, fctx, reshapedCall as ts.CallExpression);
+      }
+
+      // (#2069) `.call`/`.apply` on a callee declared with an explicit
+      // TypeScript `this` parameter (`function f(this: T, …)`). Such a function
+      // has a leading `externref` `this` slot in its Wasm signature, so the
+      // legacy "evaluate thisArg, drop it" lowering passed `undefined` for
+      // `this` AND shifted every user argument into the wrong slot. Rewrite to a
+      // direct call that supplies the thisArg as the first positional argument —
+      // it lands in param 0 (the `this` slot, boxed to externref by the regular
+      // arg coercion) and the remaining args fill the declared params in order.
+      // Only fires when the thisArg can be threaded soundly: a named callee with
+      // a static this-param, and (for `.apply`) a statically-flattenable args
+      // array. Anything else falls through to the legacy paths below.
+      if (getExplicitThisParam(ctx, innerExpr) !== undefined && expr.arguments.length > 0) {
+        const thisArg = expr.arguments[0]!;
+        let directArgs: ts.Expression[] | undefined;
+        if (isCall) {
+          directArgs = [thisArg, ...expr.arguments.slice(1)];
+        } else if (expr.arguments.length === 1) {
+          // .apply(thisArg) — no args array
+          directArgs = [thisArg];
+        } else {
+          const argsExpr = expr.arguments[1]!;
+          if (ts.isArrayLiteralExpression(argsExpr)) {
+            const flattened = flattenStaticArrayElements(argsExpr);
+            if (flattened !== undefined) directArgs = [thisArg, ...flattened];
+          }
+        }
+        if (directArgs !== undefined) {
+          const directCall = ts.factory.createCallExpression(
+            innerExpr as ts.LeftHandSideExpression,
+            undefined,
+            directArgs,
+          );
+          ts.setTextRange(directCall, expr);
+          (directCall as { parent?: ts.Node }).parent = expr.parent;
+          return compileCallExpression(ctx, fctx, directCall as ts.CallExpression);
+        }
       }
 
       // Case 0: (function(){}).call/apply(...) and (() => {}).call/apply(...).
@@ -7278,13 +7346,22 @@ function compileCallExpression(
       // charCodeAt: uses wasm:js-string charCodeAt import (not string_charCodeAt)
       // Use jsStringImports to avoid shadowing by user-defined functions (#1072).
       if (method === "charCodeAt") {
+        // #2003 — the wasm:js-string `charCodeAt` builtin TRAPS on an
+        // out-of-range index, but §22.1.3.3 requires `NaN` for any index
+        // `< 0` or `>= length`. Emit a bounds guard around the builtin and
+        // return f64 so the NaN case is representable:
+        //   idx = ToInteger(arg); len = s.length
+        //   (idx >= 0 && idx < len) ? f64(charCodeAt(s, idx)) : NaN
         const charCodeAtIdx = ctx.jsStringImports.get("charCodeAt");
-        if (charCodeAtIdx !== undefined) {
+        const lengthIdx = ctx.jsStringImports.get("length");
+        if (charCodeAtIdx !== undefined && lengthIdx !== undefined) {
+          // Save receiver to a temp so we can read both its length and its char.
           compileExpression(ctx, fctx, propAccess.expression);
+          const recvLocal = allocLocal(fctx, `__cca_recv_${fctx.locals.length}`, { kind: "externref" });
+          fctx.body.push({ op: "local.tee", index: recvLocal });
+          // Compute the (truncated) index into an i32 temp.
           if (expr.arguments.length > 0) {
-            const argType = compileExpression(ctx, fctx, expr.arguments[0]!, {
-              kind: "f64",
-            });
+            const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
             if (!argType) {
               fctx.body.push({ op: "i32.const", value: 0 });
             } else if (argType.kind === "f64") {
@@ -7293,8 +7370,35 @@ function compileCallExpression(
           } else {
             fctx.body.push({ op: "i32.const", value: 0 });
           }
-          fctx.body.push({ op: "call", funcIdx: charCodeAtIdx });
-          return { kind: "i32" };
+          // (the receiver pushed by local.tee is still on the stack below idx;
+          //  drop it — we re-load from the temp inside each branch.)
+          const idxLocal = allocLocal(fctx, `__cca_idx_${fctx.locals.length}`, { kind: "i32" });
+          fctx.body.push({ op: "local.set", index: idxLocal });
+          fctx.body.push({ op: "drop" }); // drop the receiver left by local.tee
+          // Bounds test: (idx >= 0) & (idx < len)
+          fctx.body.push({ op: "local.get", index: idxLocal });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "i32.ge_s" });
+          fctx.body.push({ op: "local.get", index: idxLocal });
+          fctx.body.push({ op: "local.get", index: recvLocal });
+          fctx.body.push({ op: "call", funcIdx: lengthIdx });
+          fctx.body.push({ op: "i32.lt_s" });
+          fctx.body.push({ op: "i32.and" });
+          // then: f64(charCodeAt(recv, idx)) ; else: NaN
+          const thenInstrs: Instr[] = [
+            { op: "local.get", index: recvLocal } as Instr,
+            { op: "local.get", index: idxLocal } as Instr,
+            { op: "call", funcIdx: charCodeAtIdx } as Instr,
+            { op: "f64.convert_i32_u" } as Instr,
+          ];
+          const elseInstrs: Instr[] = [{ op: "f64.const", value: Number.NaN } as Instr];
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "val", type: { kind: "f64" } },
+            then: thenInstrs,
+            else: elseInstrs,
+          } as Instr);
+          return { kind: "f64" };
         }
       }
 
@@ -7399,9 +7503,33 @@ function compileCallExpression(
         // start and end to 0 → host called `s.substring(0, 0)` → "" instead of
         // the whole string. The pad loop's `pi === 2` branch supplies s.length
         // for the missing end; the missing start (pi === 1) correctly pads to 0.
+        // (#2124) An explicit `undefined` end arg is spec-equivalent to absent:
+        // substring/slice default `end` to `s.length`. Without this, the f64
+        // slot coerces `undefined` → NaN and the host runs `substring(1, NaN)`
+        // → wrong length. Detect a statically-undefined end so the same
+        // length-default path that handles a missing end fires.
+        const isStaticUndefinedExpr = (a: ts.Expression | undefined): boolean => {
+          if (a === undefined) return false;
+          let cur: ts.Expression = a;
+          while (
+            ts.isParenthesizedExpression(cur) ||
+            ts.isAsExpression(cur) ||
+            ts.isNonNullExpression(cur) ||
+            ts.isTypeAssertionExpression(cur)
+          ) {
+            cur = (cur as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression | ts.TypeAssertion)
+              .expression;
+          }
+          return (
+            (ts.isIdentifier(cur) && cur.text === "undefined") ||
+            (ts.isVoidExpression(cur) && ts.isNumericLiteral(cur.expression))
+          );
+        };
+        const substringEndUndefined =
+          (method === "substring" || method === "slice") && args.length === 2 && isStaticUndefinedExpr(args[1]);
         const needsLengthDefault =
           (method === "substring" || method === "slice") &&
-          args.length <= 1 &&
+          (args.length <= 1 || substringEndUndefined) &&
           paramTypes !== undefined &&
           paramTypes.length === 3;
         let savedReceiverLocal: number | undefined;
@@ -7418,6 +7546,19 @@ function compileCallExpression(
         // Cap at declared param count (excluding self) to avoid pushing extra values
         const userParamCount = paramTypes ? paramTypes.length - 1 : args.length;
         for (let ai = 0; ai < args.length; ai++) {
+          if (substringEndUndefined && ai === 1 && savedReceiverLocal !== undefined) {
+            // Explicit `undefined` end → s.length (#2124). Skip compiling the
+            // undefined arg; emit the receiver's length for the f64 end slot.
+            const lenIdx = ctx.jsStringImports.get("length");
+            if (lenIdx !== undefined) {
+              fctx.body.push({ op: "local.get", index: savedReceiverLocal });
+              fctx.body.push({ op: "call", funcIdx: lenIdx });
+              fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
+            } else {
+              fctx.body.push({ op: "f64.const", value: 0x7fffffff });
+            }
+            continue;
+          }
           if (ai < userParamCount) {
             const expectedArgType = paramTypes?.[ai + 1]; // +1 for self param
             const argResult = compileExpression(ctx, fctx, args[ai]!, expectedArgType);
@@ -7482,7 +7623,11 @@ function compileCallExpression(
               // sentinel. ToUint32(NaN) === 0 would produce `[]` if the runtime
               // passed it through verbatim, so the `string_method` host shim
               // strips a trailing NaN limit before invoking the JS method.
-              if (method === "split") {
+              // #2002 — includes/startsWith/endsWith likewise use NaN for an
+              // omitted position so the host shim drops it and the JS method
+              // applies its spec default (0 for includes/startsWith, length
+              // for endsWith) instead of ToInteger(NaN)=0.
+              if (method === "split" || method === "includes" || method === "startsWith" || method === "endsWith") {
                 fctx.body.push({ op: "f64.const", value: Number.NaN });
               } else {
                 fctx.body.push({ op: "f64.const", value: 0 });

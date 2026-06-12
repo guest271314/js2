@@ -2,10 +2,11 @@
 id: 2121
 renumbered_from: 1954
 title: "parameter-default TDZ not enforced: f(a = a) yields NaN and f(a = b, b = 2) reads later params instead of throwing ReferenceError"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: low
 feasibility: medium
 reasoning_effort: medium

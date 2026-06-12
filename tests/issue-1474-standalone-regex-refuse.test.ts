@@ -49,10 +49,15 @@ describe("#1474/#1539 --target standalone still refuses (narrowed)", () => {
     expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   });
 
-  it("rejects global s.match(regexLiteral) — all-match semantics (Phase 2c)", async () => {
-    await expectRefused(
+  // #1913 landed global String.match (§22.2.6.8 step 6) on the pure-WasmGC
+  // matcher — it now compiles instead of refusing. (Equivalence vs native
+  // global match lives in tests/issue-1913.test.ts.)
+  it("compiles global s.match(regexLiteral) — all-match semantics (#1913)", async () => {
+    const r = await compile(
       `export function f(s: string): number { const m = s.match(/\\d+/g); return m === null ? -1 : m.length; }`,
+      { target: "standalone" },
     );
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   });
 
   it("rejects s.matchAll(regexLiteral) — Phase 2c", async () => {

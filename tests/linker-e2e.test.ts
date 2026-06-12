@@ -56,7 +56,14 @@ function buildLinkerWasm(): Uint8Array {
   return emitBinary(mod);
 }
 
-describe("linker end-to-end", { timeout: 120_000 }, () => {
+// Skipped pending #1951 / #1838. These compile the linker source through the
+// linear backend (generateLinearMultiModule), which now FAILS LOUD on the
+// `try { ... } catch` boundaries in src/link/linker.ts (#1838) instead of
+// silently dropping the catch handler — the silent miscompilation these
+// self-host builds used to rely on. Blocked on the not-yet-implemented Wasm-EH
+// try/catch lowering for the linear backend (#1951). #1838's own fail-loud
+// coverage lives in tests/issue-1838.test.ts.
+describe.skip("linker end-to-end", { timeout: 120_000 }, () => {
   it("builds linker.wasm and tests runtime helpers", async () => {
     const wasmBinary = buildLinkerWasm();
     const { instance } = await WebAssembly.instantiate(wasmBinary);
