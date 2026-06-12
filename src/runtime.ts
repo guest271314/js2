@@ -6412,6 +6412,41 @@ assert._isSameValue = isSameValue;
             return "[object Object]";
           }
         };
+      // (#2022) ToString of a `+`-concat operand. `+` applies ToPrimitive with
+      // the DEFAULT hint (valueOf before toString), even when the other operand
+      // is a string — unlike `String(x)` / template literals which use the
+      // string hint. So `({ toString:()=>"P!", valueOf:()=>7 }) + ""` is "7",
+      // not "P!". Mirrors `__extern_toString` but with the "default" hint.
+      if (name === "__extern_to_string_default")
+        return (v: any) => {
+          if (v == null) return String(v);
+          if (typeof v === "object" && _isWasmStruct(v)) {
+            const prim = _toPrimitive(v, "default", callbackState);
+            if (prim !== undefined) {
+              if (typeof prim === "symbol") throw new TypeError("Cannot convert a Symbol value to a string");
+              return String(prim);
+            }
+            try {
+              const prim2 = _hostToPrimitive(v, "default", callbackState);
+              if (typeof prim2 === "symbol") throw new TypeError("Cannot convert a Symbol value to a string");
+              return String(prim2);
+            } catch {
+              return "[object Object]";
+            }
+          }
+          if (typeof v === "object") {
+            const prim = _toPrimitive(v, "default", callbackState);
+            if (prim !== undefined) {
+              if (typeof prim === "symbol") throw new TypeError("Cannot convert a Symbol value to a string");
+              return String(prim);
+            }
+          }
+          try {
+            return String(v);
+          } catch {
+            return "[object Object]";
+          }
+        };
       // (#1638) Date.prototype string formatters. The Wasm side holds the
       // timestamp as an i64 and passes it here with a mode selector; we build
       // the spec-correct string from a UTC Date. The invalid-Date sentinel
