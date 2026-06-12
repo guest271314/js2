@@ -9663,8 +9663,53 @@ assert._isSameValue = isSameValue;
             if (Number.isNaN(n) || n <= 0) return 0;
             return Math.min(Math.trunc(n), 0x1fffffffffffff);
           };
+          // §23.1.3.1.1 IsConcatSpreadable step 2: a true Array is ALWAYS
+          // spread (the `@@isConcatSpreadable` sidecar only governs non-Array
+          // objects). A WasmGC vec is the compiled representation of a true
+          // Array, so an argument that responds to `__vec_len` must be spread
+          // element-by-element via `__vec_get` — mirroring the receiver
+          // conversion below. Without this a vec argument that doesn't carry a
+          // sidecar flag falls through to `out.push(x)` and is appended whole
+          // (#1969 — data loss → NaN). Returns the spread length, or -1 when
+          // `x` is not a vec.
+          const tryVecLen = (x: any): number => {
+            if (
+              x == null ||
+              typeof x !== "object" ||
+              Array.isArray(x) ||
+              !_isWasmStruct(x) ||
+              typeof vecLen !== "function" ||
+              typeof vecGet !== "function"
+            ) {
+              return -1;
+            }
+            try {
+              const n = vecLen(x);
+              return typeof n === "number" && n >= 0 ? n : -1;
+            } catch {
+              return -1; // not a vec struct variant
+            }
+          };
           const applyConcat = (out: any[], xs: any[]): any[] => {
             for (const x of xs) {
+              // §23.1.3.1.1 IsConcatSpreadable step 2: a real Array (or a WasmGC
+              // vec, the compiled form of one) is ALWAYS spread regardless of
+              // the `@@isConcatSpreadable` sidecar. An `any`-typed array argument
+              // reaches this custom concat as either a JS array (literals lower
+              // to externref JS arrays) or an opaque vec struct — both must be
+              // spread element-by-element, else the argument is appended whole
+              // (#1969 — data loss → NaN).
+              if (Array.isArray(x)) {
+                for (let i = 0; i < x.length; i++) out.push(x[i]);
+                continue;
+              }
+              const vlen = tryVecLen(x);
+              if (vlen >= 0) {
+                // tryVecLen only returns >= 0 when vecGet is a function.
+                const get = vecGet as (v: any, i: number) => unknown;
+                for (let i = 0; i < vlen; i++) out.push(get(x, i));
+                continue;
+              }
               if (
                 x != null &&
                 typeof x === "object" &&
