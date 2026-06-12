@@ -2,9 +2,9 @@
 id: 1981
 title: "IR: === null / !== null on class-typed values statically folded to false/true — null guards silently deleted"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
 priority: high
 feasibility: easy
 reasoning_effort: medium

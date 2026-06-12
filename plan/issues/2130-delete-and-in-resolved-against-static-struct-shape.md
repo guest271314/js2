@@ -2,7 +2,7 @@
 id: 2130
 title: "delete o.prop is a no-op and `in` answers against the static struct shape — post-delete / dynamic-key / object-rest all wrong"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-12
 updated: 2026-06-12
 priority: high

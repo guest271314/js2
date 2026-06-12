@@ -2,7 +2,7 @@
 id: 1991
 title: "in operator never consults the prototype chain — inherited class methods and Object.prototype members invisible"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-12
 priority: medium
@@ -348,3 +348,11 @@ whole predicate to false.
   test. The optional static-path improvement in the plan is therefore
   already-implemented behavior — verify with a test, but expect no code
   change.
+
+## Sprint-62 scheduling note (2026-06-12)
+
+PR #1352 fixed the Object.prototype half only — the earlier `done` flip in
+this planning branch was premature and is reverted here. The remaining
+inherited-user-class-method half is Stage C of the joint presence-predicate
+plan above (#2130 = Stages A+B). Spec is complete (PR #1394) → scheduled
+sprint 62, dev lane (no Fable needed).
