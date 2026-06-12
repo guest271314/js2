@@ -1,9 +1,8 @@
 ---
 id: 1965
 title: "derived-class construction never executes the base constructor body; super(args) writes args positionally into parent struct fields"
-status: done
-completed: 2026-06-12
-sprint: 61
+status: ready
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-12
 priority: critical
@@ -81,63 +80,3 @@ in-review).
 (in-review) = builtin-parent forwarder arg truncation; #1366 (done) documents
 the positional mechanism for builtin parents. The user-base-ctor-body gap is
 unfiled.
-
----
-
-## Implementation notes (2026-06-12, senior-fable)
-
-**Design: split allocation from initialization.** For every WasmGC-struct
-user class, the collection phase now registers a second function
-`${Class}_init(...ctorParams, self: ref $Class) -> (ref $Class)` alongside
-`${Class}_new`. The init carries everything that used to live in `_new`'s
-body — parameter defaults, own field initializers, and the full constructor
-body — operating on a caller-allocated instance bound as `this`. `_new`
-reduces to `struct.new` (defaults + class tag) + `return_call _init`.
-`super(args)` in a derived ctor (and the implicit-ctor forward) is a real
-`call ${Parent}_init(args..., self)` — direct WasmGC subsumption, since
-class structs already declare `superTypeIdx`.
-
-Why the pieces fall out:
-
-- **Repro 4 (virtual dispatch from base ctor) needed no dispatch work**: the
-  derived-most `_new` allocates with the DERIVED `__tag`, so when the base
-  ctor body runs `this.m()` through the existing #1299 tag-cascade, it
-  dispatches to the override.
-- **Self is the LAST init param** so ctor param indices are identical in
-  `_new` and `_init` — the param-index-based defaults/`__argc` machinery
-  (`emitClassParamDefaultCheck`, `cacheParamDefaultArgc`) works unchanged.
-  `__argc` set by the `new` call site flows untouched through `_new` into
-  `_init`; explicit `super(k)` sites set it via `maybeSetArgcForKnownCall`
-  against the init name (optional/rest metadata is mirrored from
-  `${Class}_new` to `${Class}_init` at registration).
-- **Implicit derived ctors forward params 1:1** (they were already cloned
-  from the nearest explicit ancestor ctor — #2082) and skip their own
-  default emission: the parent's init applies defaults, so default
-  expressions with side effects run exactly once.
-- **`_init` returns the instance** (not void) so the entire existing
-  ctor-return logic (#2018 bare-return-this, return-override for base
-  ctors, derived return-primitive TypeError) applies verbatim to the moved
-  body. `super()` drops the parent init's result — parent return-override
-  through super() remains unsupported (it was equally unsupported by the
-  positional copy).
-- **Deleted machinery**: the ancestor field-initializer/`this.x=...` AST
-  replay in both `compileSuperCall` (#2078) and the implicit-ctor path, and
-  the positional args→parent-fields copy (incl. its spread variant). The
-  real call subsumes all of it. A defensive legacy replay remains only for
-  the cannot-happen case of a user parent without a registered `_init`.
-- **Externref-backed classes (`extends Error` etc.) are untouched** — they
-  keep the single-function host-forwarder shape (#1366a/#1833).
-
-Super arg handling per §13.3.7.1 (#1551 parity): args evaluate
-left-to-right with parent param types; extras evaluate and drop; missing
-args pad with sentinel defaults + argc; rest-param parents get the standard
-vec packing; statically-known spreads flatten; runtime spreads evaluate for
-side effects and call with argc 0 (pre-existing limitation).
-
-**Validation**: 4/4 issue repros fixed; `tests/issue-1965-super-ctor-body.test.ts`
-(13 cases: 3-level interleaving, defaults through both super forms, rest /
-static spread / extra args, derived overwrite ordering, base-throw
-propagation, #2018 bare return). 25+ class/inheritance/equivalence test
-files diffed against main: identical pass/fail sets (the failures are the
-pre-existing minimal-ENV/`string_constants` local breakage). IR fallback
-gate unchanged; biome clean.
