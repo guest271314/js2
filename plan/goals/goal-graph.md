@@ -5,7 +5,7 @@ Unlike a linear roadmap, multiple independent goals can be worked on in parallel
 and a goal being "ready" doesn't mean it should be worked on immediately.
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 31,089 / 43,135 (72.1 %) — baseline 3a3a91c5, 2026-06-12T05:54:18Z
+**test262 conformance**: 31,090 / 43,135 (72.1 %) — baseline f640bcfe, 2026-06-12T06:04:36Z
 <!-- AUTO:conformance-end -->
 
 ## DAG
