@@ -552,6 +552,97 @@ export function compileNativeTemplateExpression(
 
 // ── Tagged template expressions ──────────────────────────────────────
 
+/** Is `tag` syntactically the builtin `String.raw`? (#2008) */
+function isStringRawTag(tag: ts.Expression): boolean {
+  return (
+    ts.isPropertyAccessExpression(tag) &&
+    ts.isIdentifier(tag.expression) &&
+    tag.expression.text === "String" &&
+    tag.name.text === "raw"
+  );
+}
+
+/**
+ * Lower `String.raw`tmpl`` to the RAW parts interleaved with the stringified
+ * substitutions, as a plain in-module string concat (#2008). The raw parts are
+ * compile-time string literals, so no template struct read or host bridge is
+ * needed — this works in both JS-host and standalone/native-strings modes.
+ */
+function compileStringRaw(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.TaggedTemplateExpression,
+  rawParts: readonly string[],
+  substitutions: readonly ts.Expression[],
+): ValType | null {
+  addStringImports(ctx);
+  const concatIdx = ctx.jsStringImports.get("concat") ?? ctx.nativeStrHelpers.get("__str_concat");
+  if (concatIdx === undefined) {
+    reportError(ctx, expr, "String.raw: string concat helper unavailable");
+    return null;
+  }
+  const toStrIdx = ctx.funcMap.get("number_toString");
+
+  // rawParts has length substitutions.length + 1: raw0 sub0 raw1 sub1 ... rawN.
+  // Start the accumulator with raw0.
+  compileStringLiteral(ctx, fctx, rawParts[0] ?? "", expr);
+
+  for (let i = 0; i < substitutions.length; i++) {
+    const sub = substitutions[i]!;
+    const subTsType = ctx.checker.getTypeAtLocation(sub);
+    const subIsUndef = (subTsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+    const subIsNull = (subTsType.flags & ts.TypeFlags.Null) !== 0;
+    const subType = compileExpression(ctx, fctx, sub);
+
+    if ((subIsUndef || subIsNull) && subType && subType.kind !== "externref") {
+      fctx.body.push({ op: "drop" });
+      const word = subIsNull ? "null" : "undefined";
+      addStringConstantGlobal(ctx, word);
+      fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get(word)! });
+    } else if (subType && subType.kind === "i32" && isBooleanType(subTsType)) {
+      emitBoolToString(ctx, fctx);
+    } else if (subType && subType.kind === "f64" && toStrIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    } else if (subType && subType.kind === "i32" && toStrIdx !== undefined) {
+      fctx.body.push({ op: "f64.convert_i32_s" });
+      fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    } else if (subType && subType.kind === "i64" && toStrIdx !== undefined) {
+      fctx.body.push({ op: "f64.convert_i64_s" });
+      fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    } else if (subType && subType.kind === "externref") {
+      if (subIsNull) {
+        fctx.body.push({ op: "drop" });
+        addStringConstantGlobal(ctx, "null");
+        fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get("null")! });
+      } else if (subIsUndef) {
+        fctx.body.push({ op: "drop" });
+        addStringConstantGlobal(ctx, "undefined");
+        fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get("undefined")! });
+      } else if (!isStringType(subTsType)) {
+        const externToStrIdx = ensureLateImport(
+          ctx,
+          "__extern_toString",
+          [{ kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+        flushLateImportShifts(ctx, fctx);
+        const finalIdx = ctx.funcMap.get("__extern_toString") ?? externToStrIdx;
+        if (finalIdx !== undefined) fctx.body.push({ op: "call", funcIdx: finalIdx });
+      }
+    } else if (subType && (subType.kind === "ref" || subType.kind === "ref_null")) {
+      coerceType(ctx, fctx, subType, { kind: "externref" }, "string");
+    }
+    // Accumulator + stringified substitution.
+    fctx.body.push({ op: "call", funcIdx: concatIdx });
+
+    // Append the following raw part.
+    compileStringLiteral(ctx, fctx, rawParts[i + 1] ?? "", expr);
+    fctx.body.push({ op: "call", funcIdx: concatIdx });
+  }
+
+  return { kind: "externref" };
+}
+
 /**
  * Compile a tagged template expression: tag`hello ${x} world`
  * Desugars to: tag(["hello ", " world"], x)
@@ -687,6 +778,15 @@ export function compileTaggedTemplateExpression(
   // Load cached template object into the local
   fctx.body.push({ op: "global.get", index: cacheGlobalIdx });
   fctx.body.push({ op: "local.set", index: stringsLocal });
+
+  // `String.raw` is a builtin whose result is the RAW (uncooked) parts
+  // interleaved with the stringified substitutions. Lower it in-module rather
+  // than routing the template struct through the `__tagged_template` host
+  // bridge, which can't index a WasmGC struct from JS (#2008). The raw parts
+  // are known at compile time, so this "compiles away" to a plain concat.
+  if (isStringRawTag(expr.tag)) {
+    return compileStringRaw(ctx, fctx, expr, rawParts, substitutions);
+  }
 
   // Now compile the call to the tag function.
   // The tag function receives (stringsArray, ...substitutions).
