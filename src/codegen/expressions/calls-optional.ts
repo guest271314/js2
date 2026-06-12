@@ -14,6 +14,7 @@ import type { InnerResult } from "../shared.js";
 import { compileExpression, VOID_RESULT } from "../shared.js";
 import { compileNativeStringMethodCall } from "../string-ops.js";
 import { defaultValueInstrs, pushDefaultValue } from "../type-coercion.js";
+import { compileCallablePropertyCall } from "./calls-closures.js";
 import { getFuncParamTypes } from "./helpers.js";
 import { resolveStructName } from "./misc.js";
 
@@ -53,7 +54,11 @@ export function compileOptionalCallExpression(
   fctx.body.push({ op: "ref.is_null" });
 
   const savedBody = pushBody(fctx);
-  const tsReceiverType = ctx.checker.getTypeAtLocation(propAccess.expression);
+  // The receiver of an optional chain is nullable by construction (`K | null`),
+  // so `getTypeAtLocation` yields a union whose `getSymbol()` does not resolve
+  // to the underlying class/struct. Strip null/undefined first so method
+  // resolution sees the concrete declared type (#2049).
+  const tsReceiverType = ctx.checker.getNonNullableType(ctx.checker.getTypeAtLocation(propAccess.expression));
   const methodName = ts.isPrivateIdentifier(propAccess.name) ? propAccess.name.text.slice(1) : propAccess.name.text;
   let methodResolved = false;
 
@@ -155,6 +160,31 @@ export function compileOptionalCallExpression(
     }
   }
 
+  // Closure-field / function-typed-property callee (e.g. `o?.f(x)` where `f`
+  // holds a closure on an object/struct, not a named method). None of the
+  // method-resolution branches above match these, so without this fallback the
+  // non-null branch would emit a default value and the call would never happen
+  // (#2049). `compileCallablePropertyCall` implements exactly this — extract the
+  // closure field, push self + args, `call_ref` — and already normalizes a
+  // nullable receiver via a guarded cast. It recompiles the receiver
+  // (`propAccess.expression`) once inside this non-null branch, which runs only
+  // when the receiver is non-null, so re-evaluation is restricted to
+  // side-effect-free receivers to preserve `?.` short-circuit semantics.
+  if (!methodResolved && isSideEffectFreeOptionalReceiver(propAccess.expression)) {
+    const structName = resolveStructName(ctx, tsReceiverType);
+    if (structName) {
+      const delegated = compileCallablePropertyCall(ctx, fctx, expr, propAccess, structName);
+      if (delegated !== undefined) {
+        if (delegated !== null && delegated !== VOID_RESULT) {
+          resultType = delegated;
+        } else if (delegated === VOID_RESULT) {
+          fctx.body.push(...defaultValueInstrs(resultType));
+        }
+        methodResolved = true;
+      }
+    }
+  }
+
   if (!methodResolved) fctx.body.push(...defaultValueInstrs(resultType));
 
   const elseInstrs = fctx.body;
@@ -170,4 +200,27 @@ export function compileOptionalCallExpression(
   });
 
   return resultType;
+}
+
+/**
+ * The closure-field fallback in `compileOptionalCallExpression` re-evaluates the
+ * receiver inside the non-null branch by delegating to the regular call path.
+ * That is only correct when evaluating the receiver has no observable side
+ * effect. Identifiers, `this`, and member chains rooted in those qualify;
+ * calls and element access do not.
+ */
+function isSideEffectFreeOptionalReceiver(expr: ts.Expression): boolean {
+  let cur: ts.Expression = expr;
+  for (;;) {
+    if (ts.isIdentifier(cur) || cur.kind === ts.SyntaxKind.ThisKeyword) return true;
+    if (ts.isPropertyAccessExpression(cur)) {
+      cur = cur.expression;
+      continue;
+    }
+    if (ts.isParenthesizedExpression(cur) || ts.isNonNullExpression(cur)) {
+      cur = cur.expression;
+      continue;
+    }
+    return false;
+  }
 }

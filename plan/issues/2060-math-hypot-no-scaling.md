@@ -1,10 +1,11 @@
 ---
 id: 2060
 title: "Math.hypot overflows/underflows: inlined sqrt(a*a+b*b) without scaling"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: medium
 feasibility: easy
 reasoning_effort: medium

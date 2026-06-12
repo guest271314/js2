@@ -337,26 +337,65 @@ describe("#1539 standalone narrowed refusals (Phase 2a)", () => {
   // modifiers, and the `d` flag — none are refused anymore (see
   // tests/issue-1912-regex-phase2b.test.ts and
   // tests/issue-1911-regex-phase2d.test.ts for the dual-run coverage). The
-  // #1911 Slice B landed the `u`/`v` (code-point) flags via compile-time host
-  // enumeration — no flag refusals remain (see
-  // tests/issue-1911-regex-phase2d.test.ts).
-  it("refuses RegExp.exec with global lastIndex semantics", async () => {
-    await expectRefused(
-      `export function f(s: string): number { const m = /a/g.exec(s); return m === null ? -1 : m.length; }`,
-    );
+  // `u`/`v` (code-point) flags remain deferred to 2d Slice B.
+  it("refuses unicode flag (u, Phase 2d Slice B)", async () => {
+    await expectRefused(`export function f(s: string): boolean { return /^a/u.test(s); }`);
   });
-  it("refuses String.match with global all-match semantics", async () => {
-    await expectRefused(
-      `export function f(s: string): number { const m = s.match(/a/g); return m === null ? -1 : m.length; }`,
-    );
+});
+
+// #1913 landed g/y lastIndex exec (§22.2.7.2), global String.match
+// (§22.2.6.8), and full RegExpSplit (§22.2.6.14 — limits, captures,
+// empty-match separators). The former Phase 2a refusals above now compile
+// and must match native semantics (deep coverage in tests/issue-1913.test.ts).
+describe("#1913 formerly-refused forms now compile and match native", () => {
+  it("RegExp.exec with global lastIndex semantics", async () => {
+    const src = `
+      const re = /a/g;
+      export function run(): number {
+        let count = 0;
+        while (re.exec("banana") !== null) count++;
+        return count * 10 + re.lastIndex;
+      }
+    `;
+    const r = await compile(src, { fileName: "test.ts", target: "standalone" });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    // Native: 3 matches; the terminating failed exec resets lastIndex to 0.
+    expect((instance.exports as { run(): number }).run()).toBe(30);
   });
-  it("refuses regex split with capturing groups", async () => {
-    await expectRefused(`export function f(s: string): number { return s.split(/(,)/).length; }`);
+
+  it("String.match with global all-match semantics", async () => {
+    expect(await standaloneMatchSlots("an", "g", "banana")).toEqual(["an", "an"]);
+    expect(await standaloneMatchSlots("z", "g", "banana")).toEqual(null);
   });
-  it("refuses regex split with a limit argument", async () => {
-    await expectRefused(`export function f(s: string): number { return s.split(/,/, 2).length; }`);
-  });
-  it("refuses regex split with empty-match separators", async () => {
-    await expectRefused(`export function f(s: string): number { return s.split(/a*/).length; }`);
-  });
+
+  const splitCases: Array<{ p: string; f: string; limit?: number; input: string }> = [
+    { p: "(,)", f: "", input: "a,b,c" }, // capturing group interleaved
+    { p: ",", f: "", limit: 2, input: "a,b,c" }, // limit argument
+    { p: "a*", f: "", input: "abc" }, // empty-match separators
+    { p: "(?:)", f: "", input: "abc" }, // pure-empty separator → chars
+  ];
+  for (const { p, f, limit, input } of splitCases) {
+    const limArg = limit === undefined ? "" : `, ${limit}`;
+    it(`${JSON.stringify(input)}.split(/${p}/${f}${limArg})`, async () => {
+      const src = `
+        const __parts: string[] = ${JSON.stringify(input)}.split(/${p}/${f}${limArg});
+        export function count(): number { return __parts.length; }
+        export function len(i: number): number { return __parts[i]!.length; }
+        export function at(i: number, j: number): number { return __parts[i]!.charCodeAt(j); }
+      `;
+      const r = await compile(src, { fileName: "test.ts", target: "standalone" });
+      expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+      const { instance } = await WebAssembly.instantiate(r.binary, {});
+      const ex = instance.exports as { count(): number; len(i: number): number; at(i: number, j: number): number };
+      const out: string[] = [];
+      for (let i = 0; i < ex.count(); i++) {
+        let part = "";
+        for (let j = 0; j < ex.len(i); j++) part += String.fromCharCode(ex.at(i, j));
+        out.push(part);
+      }
+      const expected = limit === undefined ? input.split(new RegExp(p, f)) : input.split(new RegExp(p, f), limit);
+      expect(out).toEqual(expected);
+    });
+  }
 });

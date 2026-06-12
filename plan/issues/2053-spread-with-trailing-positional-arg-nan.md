@@ -1,10 +1,11 @@
 ---
 id: 2053
 title: "f(...arr, x) — trailing positional arg after spread silently miscompiles to NaN"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -74,3 +75,32 @@ currently also silently read OOB) rather than callee arity.
 Grepped spread issues: #18, #177, #213, #382, #409, #536, #761, #987, #1519,
 #1609, #1749 — all done; cover new-expression spread, destructuring rest, object
 spread, iterator override. None cover trailing-arg-after-spread in direct calls.
+
+## Resolution (2026-06-11)
+
+Fixed in `compileSpreadCallArgs` (non-rest target path) at
+`src/codegen/expressions/extern.ts`. Before expanding a spread, the code now
+precomputes `trailingPositionalAfter[argPos]` (count of non-spread args that
+follow each arg index) and reserves those param slots:
+`remainingParams = max(0, paramTypes.length - paramIdx - reservedForTrailing)`.
+The spread now expands only into the parameters it actually covers; trailing
+positional args fill the reserved slots instead of being left as surplus stack
+values, and the spread no longer reads past its array (OOB → NaN).
+
+### Test Results
+
+`tests/issue-2053.test.ts` (7 cases, all PASS):
+
+| case | result |
+|------|--------|
+| `sum3(...arr, 3)` (arr=[1,2]) | 123 ✓ |
+| `sum3(1, ...arr)` (arr=[2,3], unregressed) | 123 ✓ |
+| `sum3(...arr)` exact arity (unregressed) | 123 ✓ |
+| `sum3(1, ...arr, 3)` (arr=[2]) | 123 ✓ |
+| `sum4(...arr, 3, 4)` (arr=[1,2]) | 1234 ✓ |
+| `sum4(1, ...arr, 4)` (arr=[2,3]) | 1234 ✓ |
+| `sum3(...arr, 2, 3)` (arr=[1]) | 123 ✓ |
+
+`tsc --noEmit` clean. Pre-existing failures in `tests/spread-rest.test.ts`
+(missing `string_constants` import object) are unrelated — present on baseline
+with this change reverted.
