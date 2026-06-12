@@ -34,12 +34,13 @@ import { describe, expect, it } from "vitest";
 
 import { compile } from "../src/index.js";
 
-const ENV = {
-  env: {
-    console_log_number: () => {},
-    console_log_string: () => {},
-    console_log_bool: () => {},
-  },
+// Console-log stubs the test programs never call, but harmless to provide.
+// Merged on top of the compiler-supplied import object below so a future case
+// that logs still instantiates.
+const CONSOLE_STUBS = {
+  console_log_number: () => {},
+  console_log_string: () => {},
+  console_log_bool: () => {},
 };
 
 type Backend = "legacy-gc" | "ir-gc" | "linear";
@@ -60,7 +61,18 @@ async function compileAndRun(
   if (!result.success) {
     throw new Error(`${backend} compile failed: ${result.errors.map((e) => e.message).join("; ")}`);
   }
-  const { instance } = await WebAssembly.instantiate(result.binary, ENV);
+  // Instantiate with the compiler-supplied import object (#1667). Even a
+  // trivial numeric export emits an `env.__box_number` import in JS-host mode:
+  // every module pre-registers vec runtime types, so the `__vec_get` access
+  // export (emitVecAccessExports → addUnionImports) declares __box_number to
+  // box array-return elements (#854/#1504/#779c). A hand-rolled minimal env
+  // therefore fails instantiation; `result.importObject` is the supported
+  // contract that satisfies whatever the binary declares. The linear backend
+  // emits zero host imports, so its importObject is `{}` — also fine.
+  const provided = result.importObject ?? {};
+  const env = { ...((provided as Record<string, unknown>).env ?? {}), ...CONSOLE_STUBS };
+  const imports = { ...provided, env } as WebAssembly.Imports;
+  const { instance } = await WebAssembly.instantiate(result.binary, imports);
   const fn = (instance.exports as Record<string, (...a: unknown[]) => unknown>)[exportName];
   if (typeof fn !== "function") {
     throw new Error(`${backend}: export "${exportName}" not found`);
