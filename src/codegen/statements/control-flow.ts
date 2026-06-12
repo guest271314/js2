@@ -3,23 +3,60 @@
  * Control flow statement lowering: return, if, switch, break, continue, labeled.
  */
 import { ts } from "../../ts-api.js";
-import { isStringType } from "../../checker/type-mapper.js";
+import { isBooleanType, isNumberType, isStringType } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { popBody, pushBody } from "../context/bodies.js";
-import { allocLocal, getLocalType } from "../context/locals.js";
+import { allocLocal, allocTempLocal, getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext, NullGuardFact, NullishExclusion } from "../context/types.js";
 import { emitThrowString } from "../expressions/helpers.js";
-import { addStringImports, ensureI32Condition, ensureNativeStringHelpers, resolveWasmType } from "../index.js";
+import {
+  addStringImports,
+  addUnionImports,
+  ensureI32Condition,
+  ensureNativeStringHelpers,
+  resolveWasmType,
+} from "../index.js";
 import {
   coerceType,
   compileExpression,
   compileStatement,
   ensureAnyHelpers,
+  ensureLateImport,
+  flushLateImportShifts,
   isAnyValue,
   valTypesMatch,
 } from "../shared.js";
 import { emitLinearU8ArenaReset } from "../linear-uint8-arena.js";
 import { adjustRethrowDepth } from "./shared.js";
+
+/**
+ * (#2061) Compute the extra nesting depth between a finally-inline site and the
+ * try frame at which the finally body was pre-compiled.
+ *
+ * The finally body is lowered once with break/continue depths bumped by exactly
+ * +1 (the try frame). When a return/break/continue that triggers the inline is
+ * nested DEEPER than the try frame (inside an `if`/`switch`/inner-`try` within
+ * the try block), every label op descended since try entry has bumped all outer
+ * break/continue stack entries by +1, uniformly. So the delta is simply
+ * `current outer-label depth − baseline outer-label depth`, read from any outer
+ * entry. Returns 0 when the inline site is at the try frame itself, or when no
+ * outer label exists to measure against (e.g. a finally containing only
+ * `return`, whose clone has no outer-targeting branches to retarget).
+ */
+function finallyInlineDelta(
+  fctx: FunctionContext,
+  entry: { breakDepthBaseline: number[]; continueDepthBaseline: number[] },
+): number {
+  for (let i = entry.breakDepthBaseline.length - 1; i >= 0; i--) {
+    const cur = fctx.breakStack[i];
+    if (cur !== undefined) return cur - entry.breakDepthBaseline[i]!;
+  }
+  for (let i = entry.continueDepthBaseline.length - 1; i >= 0; i--) {
+    const cur = fctx.continueStack[i];
+    if (cur !== undefined) return cur - entry.continueDepthBaseline[i]!;
+  }
+  return 0;
+}
 
 function canTailCall(ctx: CodegenContext, fctx: FunctionContext, calleeIdx: number): boolean {
   let calleeTypeIdx: number | undefined;
@@ -159,6 +196,93 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
     }
   }
 
+  // §10.2.1.3 [[Construct]] step 13: a `return` inside a constructor never
+  // yields the raw operand. A returned Object overrides `this`; a returned
+  // primitive (or `undefined`, i.e. bare `return;`) is discarded and the
+  // constructor result is `this` (`__self`). Without this arm a constructor
+  // fell through to the generic value-return path below, which pushed a
+  // `ref.null <struct>` for bare/primitive returns and `ref.cast`-coerced an
+  // object operand to the struct return type — both producing a null/illegal
+  // struct ref that traps "dereferencing a null pointer" at the `new` site
+  // (#2018). The derived-ctor `return <primitive>` TypeError is handled
+  // statically above (#825); here we only reach base-class / object / bare
+  // returns, plus derived returns the static check let through.
+  // Scope to BASE (non-derived) constructors: a derived ctor's `__self` is
+  // produced by `super(...)` and the post-super `this` aliasing is handled on a
+  // separate path, so we leave derived returns to the existing logic (the
+  // static derived-ctor return-primitive TypeError above still applies). This
+  // matches the issue scope (#2018, "base-class constructor").
+  if (
+    fctx.isConstructor &&
+    !fctx.isDerivedConstructor &&
+    fctx.returnType &&
+    fctx.returnType.kind === "ref" &&
+    fctx.localMap.has("this")
+  ) {
+    const selfIdx = fctx.localMap.get("this")!;
+    const structTypeIdx = fctx.returnType.typeIdx;
+    if (!stmt.expression) {
+      // Bare `return;` → return `this` (the guard-clause idiom). #2018
+      fctx.body.push({ op: "local.get", index: selfIdx });
+    } else {
+      const tsType = ctx.checker.getTypeAtLocation(stmt.expression);
+      const primitiveFlags =
+        ts.TypeFlags.NumberLike |
+        ts.TypeFlags.BooleanLike |
+        ts.TypeFlags.BigIntLike |
+        ts.TypeFlags.StringLike |
+        ts.TypeFlags.ESSymbolLike |
+        ts.TypeFlags.Null |
+        ts.TypeFlags.Undefined |
+        ts.TypeFlags.Void;
+      // Compile WITHOUT the struct return-type hint: a struct hint would make
+      // `compileExpression` ref.cast the operand to `(ref $Struct)` (trapping
+      // for a primitive / foreign object) before we can apply the §10.2.1.3
+      // override/discard logic. Let it yield its natural type instead.
+      const exprType = compileExpression(ctx, fctx, stmt.expression, undefined);
+      if (tsType.flags & primitiveFlags) {
+        // Statically a primitive / null / undefined → discard, return `this`.
+        if (exprType) fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "local.get", index: selfIdx });
+      } else if (exprType && exprType.kind === "ref" && exprType.typeIdx === structTypeIdx) {
+        // Already the struct return type (e.g. `return this` / `return new Same()`)
+        // — pass it through as the override object.
+      } else if (
+        exprType &&
+        (exprType.kind === "externref" || exprType.kind === "ref" || exprType.kind === "ref_null")
+      ) {
+        // Object-typed or `any` operand. The override object is only
+        // representable as the constructor's `(ref $Struct)` result when it is
+        // a runtime instance of that struct, so guard the cast: if the operand
+        // is the struct, return it (the spec override); otherwise fall back to
+        // `this` rather than trapping with an illegal cast. A foreign plain
+        // object via `as any` cannot be represented by the struct-typed `new`
+        // result and so resolves to `this` (the non-trapping behaviour).
+        if (exprType.kind === "externref") {
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+        }
+        const overrideTmp = allocTempLocal(fctx, { kind: "anyref" } as ValType);
+        fctx.body.push({ op: "local.tee", index: overrideTmp });
+        fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx } as Instr);
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: fctx.returnType as ValType },
+          then: [{ op: "local.get", index: overrideTmp } as Instr, { op: "ref.cast", typeIdx: structTypeIdx } as Instr],
+          else: [{ op: "local.get", index: selfIdx } as Instr],
+        } as Instr);
+      } else {
+        // A non-ref operand slipped through (e.g. f64/i32 from `as any`) —
+        // discard and return `this`.
+        if (exprType) fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "local.get", index: selfIdx });
+      }
+    }
+    // Emit the shared finally / tail-call / `return` tail with the constructor
+    // result already on the stack.
+    emitReturnTail(ctx, fctx, hasPendingFinally);
+    return;
+  }
+
   if (stmt.expression) {
     const exprType = compileExpression(ctx, fctx, stmt.expression, fctx.returnType ?? undefined);
     // Coerce expression result to match function return type if they differ
@@ -180,6 +304,16 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
     else if (fctx.returnType.kind === "ref") fctx.body.push({ op: "ref.null", typeIdx: fctx.returnType.typeIdx });
   }
 
+  emitReturnTail(ctx, fctx, hasPendingFinally);
+}
+
+/**
+ * Shared tail for `return` lowering once the return value is on the stack:
+ * inline any pending `finally` blocks, then apply tail-call optimization, then
+ * emit the `return`. Factored out so the constructor return arm (#2018) and the
+ * generic value/void return paths share one implementation.
+ */
+function emitReturnTail(ctx: CodegenContext, fctx: FunctionContext, hasPendingFinally: boolean | undefined): void {
   // If inside a try block with a finally clause, save the return value to a
   // temp local, inline the finally instructions, then restore and return.
   // This ensures finally always runs, and if finally contains its own return,
@@ -191,9 +325,12 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
       retTmpIdx = allocLocal(fctx, `__finally_ret_${fctx.locals.length}`, fctx.returnType);
       fctx.body.push({ op: "local.set", index: retTmpIdx });
     }
-    // Inline ALL pending finally blocks from innermost to outermost
+    // Inline ALL pending finally blocks from innermost to outermost. Each
+    // clone's outer-targeting branches must be retargeted for the extra nesting
+    // between this return site and that try frame (#2061).
     for (let i = fctx.finallyStack!.length - 1; i >= 0; i--) {
-      fctx.body.push(...fctx.finallyStack![i]!.cloneFinally());
+      const entry = fctx.finallyStack![i]!;
+      fctx.body.push(...entry.cloneFinallyAtDepth(finallyInlineDelta(fctx, entry)));
     }
     emitLinearU8ArenaReset(ctx, fctx, fctx.linearU8ArenaMarkLocalIdx);
     // Restore return value and emit return
@@ -204,12 +341,6 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
     return;
   }
 
-  // Tail call optimization: if the last instruction is a call or call_ref,
-  // replace it with return_call / return_call_ref to eliminate stack growth
-  // for recursive and tail-position calls.
-  // Guard: only apply when the callee's return type matches the caller's,
-  // otherwise return_call produces a type mismatch (e.g., class constructors
-  // calling methods with different return types — #839).
   // Tail call optimization: if the last instruction is a call or call_ref,
   // replace it with return_call / return_call_ref to eliminate stack growth
   // for recursive and tail-position calls.
@@ -564,10 +695,242 @@ export function compileIfStatement(ctx: CodegenContext, fctx: FunctionContext, s
   });
 }
 
+/**
+ * (#2063) Is the switch comparison domain a single, statically-known primitive
+ * class? Per §14.12.2 CaseClauseIsSelected the discriminant is matched against
+ * each case with **StrictEquality** (different types ⇒ no match, no coercion).
+ * The fast path (unify the whole switch into one f64/i32/string comparison) is
+ * only sound when the discriminant AND every case expression are provably the
+ * same primitive class — otherwise an `any`/mixed switch silently coerces
+ * (`switch(true){case 1}` matches; `switch("1"){case 1}` matches) or crashes
+ * (numeric value shoved through string-equals). Returns the homogeneous class,
+ * or null when the switch must use per-case strict equality.
+ */
+function homogeneousSwitchClass(ctx: CodegenContext, stmt: ts.SwitchStatement): "number" | "string" | "boolean" | null {
+  const discType = ctx.checker.getTypeAtLocation(stmt.expression);
+  let cls: "number" | "string" | "boolean" | null;
+  if (isNumberType(discType)) cls = "number";
+  else if (isStringType(discType)) cls = "string";
+  else if (isBooleanType(discType)) cls = "boolean";
+  else return null; // any / unknown / union / object discriminant → strict per-case
+  for (const clause of stmt.caseBlock.clauses) {
+    if (!ts.isCaseClause(clause)) continue; // default clause carries no value
+    const caseType = ctx.checker.getTypeAtLocation(clause.expression);
+    const caseCls = isNumberType(caseType)
+      ? "number"
+      : isStringType(caseType)
+        ? "string"
+        : isBooleanType(caseType)
+          ? "boolean"
+          : null;
+    if (caseCls !== cls) return null; // any cross-class case ⇒ strict per-case
+  }
+  return cls;
+}
+
+/**
+ * (#2063) Emit a §7.2.16 StrictEquality comparison of two externref operands
+ * already spilled to temps `lTmp` / `rTmp`, pushing an i32 (1 = equal).
+ *
+ * Mirrors the externref-equality lowering the `===` operator uses
+ * (binary-ops.ts): JS-host mode delegates to `__host_eq` (JS `===`, which is
+ * strict and cross-type-false by construction, with a both-numbers unbox
+ * fallback to recover equal numbers boxed in distinct externrefs); standalone /
+ * WASI mode uses the #1776 Wasm-native tag dispatch (number→f64.eq,
+ * boolean→i32.eq, bigint→i64.eq, native-string→value compare, else ref
+ * identity). No coercion across tags — different runtime types compare unequal,
+ * never crash.
+ */
+function emitSwitchStrictEq(ctx: CodegenContext, fctx: FunctionContext, lTmp: number, rTmp: number): void {
+  const noJsHost = ctx.standalone === true || ctx.wasi === true;
+  if (noJsHost) {
+    const EQ_HEAP = -19; // WasmGC `eq` abstract heap type
+    addUnionImports(ctx);
+    const typeofNum = ctx.funcMap.get("__typeof_number")!;
+    const typeofBool = ctx.funcMap.get("__typeof_boolean")!;
+    const typeofBigint = ctx.funcMap.get("__typeof_bigint")!;
+    const unboxNum = ctx.funcMap.get("__unbox_number")!;
+    const unboxBool = ctx.funcMap.get("__unbox_boolean")!;
+    const toBigint = ctx.funcMap.get("__to_bigint")!;
+
+    const lAny = allocLocal(fctx, `__sweq_l_${fctx.locals.length}`, { kind: "anyref" });
+    const rAny = allocLocal(fctx, `__sweq_r_${fctx.locals.length}`, { kind: "anyref" });
+    const identityArm: Instr[] = [
+      { op: "local.get", index: lAny },
+      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "local.get", index: rAny },
+      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "i32.and" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: lAny },
+          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "local.get", index: rAny },
+          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "ref.eq" } as Instr,
+        ],
+        else: [{ op: "i32.const", value: 0 }],
+      } as Instr,
+    ];
+    const refArm: Instr[] = [
+      { op: "local.get", index: lTmp },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: lAny },
+      { op: "local.get", index: rTmp },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: rAny },
+    ];
+    let stringArmEmitted = false;
+    if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+      ensureNativeStringHelpers(ctx);
+      const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+      const strEqIdx = ctx.nativeStrHelpers.get("__str_equals");
+      if (flattenIdx !== undefined && strEqIdx !== undefined) {
+        stringArmEmitted = true;
+        refArm.push(
+          { op: "local.get", index: lAny },
+          { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+          { op: "local.get", index: rAny },
+          { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+          { op: "i32.and" } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [
+              { op: "local.get", index: lAny },
+              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+              { op: "call", funcIdx: flattenIdx },
+              { op: "local.get", index: rAny },
+              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+              { op: "call", funcIdx: flattenIdx },
+              { op: "call", funcIdx: strEqIdx },
+            ],
+            else: identityArm,
+          } as Instr,
+        );
+      }
+    }
+    if (!stringArmEmitted) refArm.push(...identityArm);
+
+    fctx.body.push(
+      { op: "local.get", index: lTmp },
+      { op: "call", funcIdx: typeofNum } as Instr,
+      { op: "local.get", index: rTmp },
+      { op: "call", funcIdx: typeofNum } as Instr,
+      { op: "i32.and" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: lTmp },
+          { op: "call", funcIdx: unboxNum },
+          { op: "local.get", index: rTmp },
+          { op: "call", funcIdx: unboxNum },
+          { op: "f64.eq" } as Instr,
+        ],
+        else: [
+          { op: "local.get", index: lTmp },
+          { op: "call", funcIdx: typeofBool } as Instr,
+          { op: "local.get", index: rTmp },
+          { op: "call", funcIdx: typeofBool } as Instr,
+          { op: "i32.and" } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [
+              { op: "local.get", index: lTmp },
+              { op: "call", funcIdx: unboxBool },
+              { op: "local.get", index: rTmp },
+              { op: "call", funcIdx: unboxBool },
+              { op: "i32.eq" } as Instr,
+            ],
+            else: [
+              { op: "local.get", index: lTmp },
+              { op: "call", funcIdx: typeofBigint } as Instr,
+              { op: "local.get", index: rTmp },
+              { op: "call", funcIdx: typeofBigint } as Instr,
+              { op: "i32.and" } as Instr,
+              {
+                op: "if",
+                blockType: { kind: "val", type: { kind: "i32" } },
+                then: [
+                  { op: "local.get", index: lTmp },
+                  { op: "call", funcIdx: toBigint },
+                  { op: "local.get", index: rTmp },
+                  { op: "call", funcIdx: toBigint },
+                  { op: "i64.eq" } as Instr,
+                ],
+                else: refArm,
+              } as Instr,
+            ],
+          } as Instr,
+        ],
+      } as Instr,
+    );
+    return;
+  }
+
+  // JS-host mode: delegate to JS `===` via `__host_eq`, with a both-numbers
+  // unbox fallback to recover equal numbers boxed in distinct externrefs (the
+  // same #1383-gated fallback the `===` operator uses).
+  const hostEqIdx = ensureLateImport(
+    ctx,
+    "__host_eq",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "i32" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  const finalHostEqIdx = ctx.funcMap.get("__host_eq") ?? hostEqIdx;
+  const typeofNumIdx = ctx.funcMap.get("__typeof_number");
+  const unboxIdx = ctx.funcMap.get("__unbox_number");
+  fctx.body.push({ op: "local.get", index: lTmp }, { op: "local.get", index: rTmp }, {
+    op: "call",
+    funcIdx: finalHostEqIdx!,
+  } as Instr);
+  if (typeofNumIdx !== undefined && unboxIdx !== undefined) {
+    // Wrap: host_eq || (bothNumbers && unbox-eq).
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: 1 }],
+      else: [
+        { op: "local.get", index: lTmp },
+        { op: "call", funcIdx: typeofNumIdx } as Instr,
+        { op: "local.get", index: rTmp },
+        { op: "call", funcIdx: typeofNumIdx } as Instr,
+        { op: "i32.and" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [
+            { op: "local.get", index: lTmp },
+            { op: "call", funcIdx: unboxIdx },
+            { op: "local.get", index: rTmp },
+            { op: "call", funcIdx: unboxIdx },
+            { op: "f64.eq" } as Instr,
+          ],
+          else: [{ op: "i32.const", value: 0 }],
+        } as Instr,
+      ],
+    } as Instr);
+  }
+}
+
 export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.SwitchStatement): void {
   // Evaluate the switch expression and save it to a temp local
   const exprType = ctx.checker.getTypeAtLocation(stmt.expression);
   let wasmType = resolveWasmType(ctx, exprType);
+
+  // (#2063) When the discriminant and every case are NOT provably the same
+  // primitive class, §14.12.2 requires per-case StrictEquality — the unified
+  // f64/string fast path below would coerce (`switch(true){case 1}` matches) or
+  // crash (numeric value through string-equals). Route those switches through a
+  // boxed, per-case strict-equality comparison instead. `homogeneousClass` is
+  // non-null exactly when the legacy fast path is sound.
+  const homogeneousClass = homogeneousSwitchClass(ctx, stmt);
+  const strictPerCase = homogeneousClass === null;
 
   // Detect if the switch discriminant or any case value involves strings (#245).
   // Check both the discriminant type and case expression types, since the
@@ -583,6 +946,13 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
         }
       }
     }
+  }
+
+  // (#2063) Strict per-case path: keep the discriminant boxed as externref and
+  // compare each case with `emitSwitchStrictEq` (no coercion across types).
+  if (strictPerCase) {
+    wasmType = { kind: "externref" };
+    switchIsString = false; // suppress the string fast path; strict-eq handles strings
   }
 
   // For string switch: use the appropriate string type and comparison
@@ -601,8 +971,9 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
       strEqFuncIdx = ctx.jsStringImports.get("equals");
       wasmType = { kind: "externref" };
     }
-  } else if (wasmType.kind === "externref") {
-    // Externref discriminant (non-string): unbox to f64 for numeric comparison
+  } else if (!strictPerCase && wasmType.kind === "externref") {
+    // Externref discriminant (non-string, homogeneous-numeric): unbox to f64 for
+    // numeric comparison. The strict per-case path (#2063) keeps it externref.
     wasmType = { kind: "f64" };
   }
 
@@ -639,20 +1010,29 @@ export function compileSwitchStatement(ctx: CodegenContext, fctx: FunctionContex
     // fixups when new string-constant imports are added during case compilation.
     const savedCaseBody = pushBody(fctx);
 
-    fctx.body.push({ op: "local.get", index: tmpLocalIdx });
-    if (switchIsString && ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
-      const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
-      fctx.body.push({ op: "call", funcIdx: flattenIdx });
-    }
-    compileExpression(ctx, fctx, caseClause.expression, wasmType);
-    if (switchIsString && ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
-      const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
-      fctx.body.push({ op: "call", funcIdx: flattenIdx });
-    }
-    if (switchIsString && strEqFuncIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: strEqFuncIdx });
+    if (strictPerCase) {
+      // (#2063) Compile the case to externref and compare with the discriminant
+      // (already boxed in tmpLocalIdx) using §7.2.16 StrictEquality. Pushes i32.
+      const caseTmp = allocLocal(fctx, `__sw_case_${fctx.locals.length}`, { kind: "externref" });
+      compileExpression(ctx, fctx, caseClause.expression, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: caseTmp });
+      emitSwitchStrictEq(ctx, fctx, tmpLocalIdx, caseTmp);
     } else {
-      fctx.body.push({ op: eqOp });
+      fctx.body.push({ op: "local.get", index: tmpLocalIdx });
+      if (switchIsString && ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+        const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
+        fctx.body.push({ op: "call", funcIdx: flattenIdx });
+      }
+      compileExpression(ctx, fctx, caseClause.expression, wasmType);
+      if (switchIsString && ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+        const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
+        fctx.body.push({ op: "call", funcIdx: flattenIdx });
+      }
+      if (switchIsString && strEqFuncIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: strEqFuncIdx });
+      } else {
+        fctx.body.push({ op: eqOp });
+      }
     }
     // if (comparison result) { target = ci; }
     const setTarget: Instr[] = [
@@ -881,7 +1261,9 @@ export function compileBreakStatement(_ctx: CodegenContext, fctx: FunctionContex
     for (let i = fctx.finallyStack.length - 1; i >= 0; i--) {
       const entry = fctx.finallyStack[i]!;
       if (breakIdx < entry.breakStackLen) {
-        fctx.body.push(...entry.cloneFinally());
+        // Retarget the clone's outer branches for the extra nesting between
+        // this break site and the try frame (#2061).
+        fctx.body.push(...entry.cloneFinallyAtDepth(finallyInlineDelta(fctx, entry)));
       }
     }
   }
@@ -911,7 +1293,9 @@ export function compileContinueStatement(
     for (let i = fctx.finallyStack.length - 1; i >= 0; i--) {
       const entry = fctx.finallyStack[i]!;
       if (contIdx < entry.continueStackLen) {
-        fctx.body.push(...entry.cloneFinally());
+        // Retarget the clone's outer branches for the extra nesting between
+        // this continue site and the try frame (#2061).
+        fctx.body.push(...entry.cloneFinallyAtDepth(finallyInlineDelta(fctx, entry)));
       }
     }
   }

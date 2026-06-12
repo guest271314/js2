@@ -2770,6 +2770,17 @@ function compileForOfArray(
   const vecLocal = allocLocal(fctx, `__forof_vec_${fctx.locals.length}`, vecType);
   fctx.body.push({ op: "local.set", index: vecLocal });
 
+  // #2065: Array iterators re-read the live length each step (§23.1.5.1), so a
+  // body that mutates the array (push/pop/splice/length=…/reassignment, or a
+  // closure that captures it) must observe the change. Hoisting `length`/`data`
+  // once before the loop misses pushes and over-iterates after pops (and a
+  // reallocated backing array leaves `data` stale). When the iterable is a plain
+  // identifier and the body may mutate it, re-read both fields from the vec local
+  // at the top of every iteration. Non-mutating loops keep the hoisted fast path.
+  const iterableSource = iterableOverride ?? stmt.expression;
+  const reReadLive =
+    ts.isIdentifier(iterableSource) && loopBodyMutatesIndexOrArray(stmt.statement, "", iterableSource.text);
+
   // Mark position for null guard wrapping (struct.get on null ref traps)
   const nullGuardStart = fctx.body.length;
 
@@ -2850,14 +2861,28 @@ function compileForOfArray(
   fctx.breakStack.push(2); // break = depth 2 (exit outer block)
   fctx.continueStack.push(0); // continue = depth 0 (exit body block, then increment)
 
-  // Condition: i >= length → break
+  // Condition: i >= length → break. When the array may be mutated mid-loop
+  // (#2065), read the live length from the vec each iteration rather than the
+  // hoisted `lenLocal`.
   fctx.body.push({ op: "local.get", index: iLocal });
-  fctx.body.push({ op: "local.get", index: lenLocal });
+  if (reReadLive) {
+    fctx.body.push({ op: "local.get", index: vecLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  } else {
+    fctx.body.push({ op: "local.get", index: lenLocal });
+  }
   fctx.body.push({ op: "i32.ge_s" });
   fctx.body.push({ op: "br_if", depth: 1 }); // break
 
-  // Get element: x = data[i]
-  fctx.body.push({ op: "local.get", index: dataLocal });
+  // Get element: x = data[i]. Re-read the live data array when mutating (#2065):
+  // a growth that reallocated the backing array leaves the hoisted `dataLocal`
+  // stale.
+  if (reReadLive) {
+    fctx.body.push({ op: "local.get", index: vecLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  } else {
+    fctx.body.push({ op: "local.get", index: dataLocal });
+  }
   fctx.body.push({ op: "local.get", index: iLocal });
   fctx.body.push({ op: "array.get", typeIdx: arrTypeIdx });
   // Coerce from Wasm array element type to the local's declared type
@@ -3712,15 +3737,10 @@ function compileForOfDirectIterator(
   fctx.breakStack.push(1);
   fctx.continueStack.push(0);
 
-  // Safety guard
-  const iterCountLocal = allocLocal(fctx, `__forit_guard_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: iterCountLocal });
-  fctx.body.push({ op: "i32.const", value: 1 });
-  fctx.body.push({ op: "i32.add" });
-  fctx.body.push({ op: "local.tee", index: iterCountLocal });
-  fctx.body.push({ op: "i32.const", value: 1_000_000 });
-  fctx.body.push({ op: "i32.gt_s" });
-  fctx.body.push({ op: "br_if", depth: 1 });
+  // #2067: no iteration cap — see the matching note in the __iterator_next path.
+  // The former 1,000,000-iteration `br_if` guard silently truncated long
+  // custom-iterator loops and accumulated across re-entries; the loop now runs
+  // to the iterator's own `done`.
 
   // Call next(): result = iter.next()
   fctx.body.push({ op: "local.get", index: iterLocal });
@@ -4076,39 +4096,44 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     const capturedDoneFlag = doneFlag;
     const capturedIterLocal = iterLocal;
     const capturedReturnIdx = returnIdx;
+    // The iterator-close finally body contains no `br` to any outer label
+    // (only `local.get`/`call`/`if`), so the #2061 abrupt-site depth delta is a
+    // no-op here: `cloneFinallyAtDepth` ignores `extraDepth` and the baselines
+    // are unused. We still satisfy the finallyStack entry shape.
+    const cloneIterClose = (): Instr[] =>
+      structuredClone([
+        { op: "local.get", index: capturedDoneFlag } as Instr,
+        { op: "i32.eqz" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: capturedIterLocal } as Instr,
+            { op: "call", funcIdx: capturedReturnIdx } as Instr,
+          ],
+          else: [],
+        },
+      ]);
     if (!fctx.finallyStack) fctx.finallyStack = [];
     fctx.finallyStack.push({
-      cloneFinally: (): Instr[] =>
-        structuredClone([
-          { op: "local.get", index: capturedDoneFlag } as Instr,
-          { op: "i32.eqz" } as Instr,
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: capturedIterLocal } as Instr,
-              { op: "call", funcIdx: capturedReturnIdx } as Instr,
-            ],
-            else: [],
-          },
-        ]),
+      cloneFinally: cloneIterClose,
+      cloneFinallyAtDepth: cloneIterClose,
       breakStackLen: iterCloseBreakStackLen,
       continueStackLen: iterCloseContinueStackLen,
+      breakDepthBaseline: fctx.breakStack.slice(),
+      continueDepthBaseline: fctx.continueStack.slice(),
     });
   }
 
   fctx.breakStack.push(1); // break = depth 1 (exit block, inside try wrapper)
   fctx.continueStack.push(0); // continue = depth 0 (restart loop)
 
-  // Safety guard: max iteration counter to prevent infinite loops from collection mutation
-  const iterCountLocal = allocLocal(fctx, `__forof_guard_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: iterCountLocal });
-  fctx.body.push({ op: "i32.const", value: 1 });
-  fctx.body.push({ op: "i32.add" });
-  fctx.body.push({ op: "local.tee", index: iterCountLocal });
-  fctx.body.push({ op: "i32.const", value: 1_000_000 });
-  fctx.body.push({ op: "i32.gt_s" });
-  fctx.body.push({ op: "br_if", depth: 1 }); // break if >1M iterations
+  // #2067: no iteration cap. A prior 1,000,000-iteration `br_if` guard (#662,
+  // against collection-mutation hangs) silently truncated legitimately long
+  // iterations — and its counter local was never reset across re-entries of the
+  // same compiled loop, so repeated executions accumulated toward the cap.
+  // Silent wrong results violate "compile away, don't emulate"; the loop now
+  // runs to the iterator's own `done`, matching JS.
 
   // Call __iterator_next(iter) → (i32 done, externref value) [multi-value].
   // Results are pushed left-to-right, so value (externref) is on top of the
@@ -4361,6 +4386,7 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   const keysIdx = ctx.funcMap.get("__for_in_keys");
   const lenIdx = ctx.funcMap.get("__for_in_len");
   const getIdx = ctx.funcMap.get("__for_in_get");
+  const hasIdx = ctx.funcMap.get("__for_in_has");
 
   if (keysIdx === undefined || lenIdx === undefined || getIdx === undefined) {
     // Fallback: static unrolling when host imports are not available (standalone mode)
@@ -4377,11 +4403,17 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
     return;
   }
 
-  // Compile the object expression and coerce to externref for the host import
+  // Compile the object expression and coerce to externref for the host import.
+  // Retain the object ref in a local so the per-visit liveness check (#2066) can
+  // re-query whether a key deleted during the loop body should be skipped.
+  const objLocal = allocLocal(fctx, `__forin_obj_${fctx.locals.length}`, {
+    kind: "externref",
+  });
   const exprType = compileExpression(ctx, fctx, stmt.expression);
   if (exprType && exprType.kind !== "externref") {
     coerceType(ctx, fctx, exprType, { kind: "externref" });
   }
+  fctx.body.push({ op: "local.tee", index: objLocal });
   fctx.body.push({ op: "call", funcIdx: keysIdx }); // __for_in_keys(obj) -> keys array
 
   // Store keys array in a local
@@ -4479,11 +4511,34 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   loopBody.push({ op: "call", funcIdx: getIdx }); // __for_in_get(keys, i) -> externref
   loopBody.push({ op: "local.set", index: keyLocal });
 
+  // Per-visit liveness guard (#2066): if the key was deleted earlier in this
+  // enumeration, skip it. Emitted at the START of the $continue block so the
+  // `br 0` lands on the increment (same path as a user `continue`), never
+  // re-running the loop without advancing. Only when the host check is
+  // available (it always is when the snapshot imports are).
+  const guardedBody: Instr[] = userBody;
+  if (hasIdx !== undefined) {
+    // The guard sits inside `block $continue { … }`. From inside the `if`'s
+    // `then`, the enclosing labels are: if(0) → $continue(1). Skipping a deleted
+    // key means exiting $continue (which falls through to the increment), so the
+    // br target is depth 1, not 0 (br 0 would only exit the `if` and fall into
+    // the user body — re-visiting the deleted key).
+    guardedBody.unshift({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "br", depth: 1 } as Instr],
+    } as Instr);
+    guardedBody.unshift({ op: "i32.eqz" } as Instr);
+    guardedBody.unshift({ op: "call", funcIdx: hasIdx } as Instr);
+    guardedBody.unshift({ op: "local.get", index: keyLocal } as Instr);
+    guardedBody.unshift({ op: "local.get", index: objLocal } as Instr);
+  }
+
   // Wrap user body in block $continue so `continue` exits here
   loopBody.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: userBody,
+    body: guardedBody,
   });
 
   // Increment counter (reached after user body OR after continue)

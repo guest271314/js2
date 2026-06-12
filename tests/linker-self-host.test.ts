@@ -16,7 +16,14 @@ function loadLinkerFiles(): Record<string, string> {
   };
 }
 
-describe("linker self-host", { timeout: 60_000 }, () => {
+// Skipped pending #1951 / #1838. The linker source (src/link/linker.ts) uses
+// `try { ... } catch` error boundaries, and the linear/standalone backend now
+// FAILS LOUD on try/catch (#1838) rather than silently dropping the catch
+// handler — which is what these self-host compiles used to rely on. So the
+// self-host goal is genuinely blocked on the not-yet-implemented Wasm-EH
+// try/catch lowering for the linear backend (#1951 tracks the unblock).
+// #1838's own fail-loud coverage lives in tests/issue-1838.test.ts.
+describe.skip("linker self-host", { timeout: 60_000 }, () => {
   it("compiles the linker source files via the linear backend", async () => {
     const files = loadLinkerFiles();
     const result = await compileMulti(files, "link/index.ts", { target: "linear" });

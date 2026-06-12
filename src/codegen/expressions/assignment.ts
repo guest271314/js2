@@ -29,7 +29,7 @@ import { buildDestructureNullThrow, patternIteratorStepCount } from "../destruct
 import { resolveComputedKeyExpression } from "../literals.js";
 import { emitNullGuardedStructGet, isProvablyNonNull, isSafeBoundsEliminated } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
-import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
+import { coerceType, compileExpression, skipTransparentExpressions, valTypesMatch } from "../shared.js";
 import { compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { findExternInfoForMember, patchStructNewForDynamicField } from "./extern.js";
 import { reserveAccessorSetDriver } from "../accessor-driver.js";
@@ -2226,7 +2226,7 @@ function compilePropertyAssignment(
   // the generic struct-write path, which silently drops the write because
   // `this` is the class constructor (not a per-instance struct).
   if (
-    target.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    skipTransparentExpressions(target.expression).kind === ts.SyntaxKind.ThisKeyword &&
     (fctx.localMap.get("this") === undefined || fctx.isStaticContext)
   ) {
     let enclosingClass: string | undefined = fctx.enclosingClassName;
@@ -4798,7 +4798,7 @@ export function compileCompoundAssignment(
         fctx.body.push({ op: "f64.div" });
         break;
       case ts.SyntaxKind.PercentEqualsToken:
-        emitModulo(fctx);
+        emitModulo(ctx, fctx);
         break;
       case ts.SyntaxKind.AsteriskAsteriskEqualsToken: {
         const fi = ctx.funcMap.get("Math_pow");
@@ -4932,7 +4932,7 @@ function emitCompoundOp(ctx: CodegenContext, fctx: FunctionContext, op: ts.Synta
       fctx.body.push({ op: "f64.div" });
       break;
     case ts.SyntaxKind.PercentEqualsToken:
-      emitModulo(fctx);
+      emitModulo(ctx, fctx);
       break;
     case ts.SyntaxKind.AmpersandEqualsToken:
     case ts.SyntaxKind.BarEqualsToken:

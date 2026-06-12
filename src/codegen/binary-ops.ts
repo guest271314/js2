@@ -30,6 +30,7 @@ import {
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
 import { ensureExternIsUndefinedImport, ensureLateImport } from "./expressions/late-imports.js";
+import { ensureFmod } from "./fmod.js";
 import { ensureNativeStringHelpers } from "./native-strings.js";
 import { compileLogicalAnd, compileLogicalOr, compileNullishCoalescing } from "./expressions/logical-ops.js";
 import { tryStaticToNumber } from "./expressions/misc.js";
@@ -1266,7 +1267,13 @@ export function compileBinaryExpression(
         : (entry as ValType | undefined);
     return type?.kind === "i32";
   };
-  const hasI32LocalOperand = isRelational && !isDivOrPow && (isI32LocalRef(expr.left) || isI32LocalRef(expr.right));
+  // Whether a relational op may use the i32 fast path. Computed below, once
+  // `isI32PureExpr` is in scope: it is only safe when BOTH operands are
+  // provably i32-pure. If only one side is an i32 local and the other is a
+  // fractional / non-integral f64 (e.g. `i < 2.5`, `i < n/2`), forcing the i32
+  // hint truncates that operand via i32.trunc_sat_f64_s before the compare,
+  // silently producing the wrong result (#2055).
+  let hasI32LocalOperand = false;
   // #1120: when an arithmetic expression is the operand of `expr | 0`
   // (ToInt32 coercion), AND both operands are already i32 locals, hint
   // i32 so we emit native i32 arithmetic. The i32-overflow wrap is
@@ -1405,6 +1412,19 @@ export function compileBinaryExpression(
     }
     return false;
   };
+  // #2055: a relational op only takes the i32 fast path when BOTH operands are
+  // provably i32-pure (the for-header fast path `i < N` with integer literal N,
+  // or two i32 locals). When one side is a fractional/derived f64 the i32 hint
+  // would truncate it before the compare, so we fall back to f64 comparison
+  // (promoting the i32 local via f64.convert_i32_s, which is cheap and exact).
+  // `isI32PureExpr` already treats an i32 local as a pure leaf, so this still
+  // covers the original `i < 10000` loop-condition optimisation.
+  hasI32LocalOperand =
+    isRelational &&
+    !isDivOrPow &&
+    (isI32LocalRef(expr.left) || isI32LocalRef(expr.right)) &&
+    isI32PureExpr(expr.left) &&
+    isI32PureExpr(expr.right);
   // #1746: emit a *proven-i32-pure* expression directly as an i32 instruction
   // chain, leaving the result as i32 on the stack. The caller MUST have verified
   // `isI32PureExpr(e)` first — this mirrors that predicate's structure exactly.
@@ -2799,63 +2819,25 @@ function compileBitwiseBinaryOp(
 }
 
 function compileModulo(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): ValType {
-  emitModulo(fctx);
+  emitModulo(ctx, fctx);
   return { kind: "f64" };
 }
 
 /**
- * Emit JS remainder (a % b) with correct IEEE 754 edge cases.
- * Stack: [a_f64, b_f64] -> [result_f64]
+ * Emit JS remainder (`a % b`) on f64 operands as a call to the Wasm-native
+ * `__fmod` helper, which computes the *exact* IEEE-754 remainder
+ * ([Number::remainder §6.1.6.1.6](https://tc39.es/ecma262/#sec-numeric-types-number-remainder)).
+ * Stack: [a_f64, b_f64] -> [result_f64].
  *
- * Edge cases handled:
- * - x % Infinity = x (when x is finite)
- * - -0 % x = -0 (sign of zero preserved via f64.copysign)
- * - Infinity % x = NaN, x % 0 = NaN, NaN % x = NaN (handled naturally by formula)
+ * The previous inline formula `a - trunc(a/b)*b` (+ copysign) was not fmod: it
+ * drifted by ULPs, collapsed to 0 for large `a/b`, and overflowed to ±Infinity
+ * when `a/b` exceeded f64 range. `__fmod` handles all of those plus the #216
+ * edge cases (`x % Inf`, `-0 % x`, `Inf % x`, `x % 0`, `NaN % x`) internally.
+ * See `fmod.ts` for the algorithm and correctness notes (#2056).
  */
-export function emitModulo(fctx: FunctionContext): void {
-  const tmpB = allocTempLocal(fctx, { kind: "f64" });
-  const tmpA = allocTempLocal(fctx, { kind: "f64" });
-
-  fctx.body.push({ op: "local.set", index: tmpB });
-  fctx.body.push({ op: "local.set", index: tmpA });
-
-  // Build the "then" branch: b is infinite and a is finite → result is a
-  const thenInstrs: Instr[] = [{ op: "local.get", index: tmpA }];
-
-  // Build the "else" branch: standard formula a - trunc(a/b) * b with copysign
-  const elseInstrs: Instr[] = [
-    { op: "local.get", index: tmpA },
-    { op: "local.get", index: tmpA },
-    { op: "local.get", index: tmpB },
-    { op: "f64.div" },
-    { op: "f64.trunc" }, // JS % uses truncation toward zero, not floor
-    { op: "local.get", index: tmpB },
-    { op: "f64.mul" },
-    { op: "f64.sub" },
-    // Preserve sign of dividend for zero results (-0 % x should be -0)
-    { op: "local.get", index: tmpA },
-    { op: "f64.copysign" },
-  ];
-
-  // Check: if |b| == Infinity and a is finite, result is a; else standard formula
-  fctx.body.push({ op: "local.get", index: tmpB });
-  fctx.body.push({ op: "f64.abs" });
-  fctx.body.push({ op: "f64.const", value: Infinity });
-  fctx.body.push({ op: "f64.eq" });
-  fctx.body.push({ op: "local.get", index: tmpA });
-  fctx.body.push({ op: "f64.abs" });
-  fctx.body.push({ op: "f64.const", value: Infinity });
-  fctx.body.push({ op: "f64.ne" });
-  fctx.body.push({ op: "i32.and" });
-  // Use if/then/else to select between Infinity shortcut and standard formula
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "val", type: { kind: "f64" } },
-    then: thenInstrs,
-    else: elseInstrs,
-  });
-  releaseTempLocal(fctx, tmpA);
-  releaseTempLocal(fctx, tmpB);
+export function emitModulo(ctx: CodegenContext, fctx: FunctionContext): void {
+  const fmodIdx = ensureFmod(ctx);
+  fctx.body.push({ op: "call", funcIdx: fmodIdx });
 }
 
 /**

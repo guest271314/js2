@@ -38,6 +38,31 @@ import {
   tryStructToString,
 } from "./type-coercion.js";
 
+/**
+ * (#2124) An explicit `undefined` (or `void 0`) passed for an optional string
+ * index arg is spec-equivalent to omitting it — the method applies its own
+ * default (substring/slice/endsWith end → length, lastIndexOf from → length).
+ * But compiling it through the i32 arg path coerces NaN/undefined → 0, which is
+ * wrong. Detect the statically-undefined forms so callers can treat the arg as
+ * absent. Unwraps paren/as/!-assertion wrappers.
+ */
+function isStaticUndefinedArg(arg: ts.Expression | undefined): boolean {
+  if (arg === undefined) return false;
+  let cur: ts.Expression = arg;
+  while (
+    ts.isParenthesizedExpression(cur) ||
+    ts.isAsExpression(cur) ||
+    ts.isNonNullExpression(cur) ||
+    ts.isTypeAssertionExpression(cur)
+  ) {
+    cur = (cur as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression | ts.TypeAssertion).expression;
+  }
+  return (
+    (ts.isIdentifier(cur) && cur.text === "undefined") ||
+    (ts.isVoidExpression(cur) && ts.isNumericLiteral(cur.expression))
+  );
+}
+
 // ── Guarded funcref cast (ref.test before ref.cast to avoid illegal cast traps) ──
 function emitGuardedFuncRefCast(fctx: FunctionContext, funcTypeIdx: number): void {
   const tmpFunc = allocLocal(fctx, `__gfc_${fctx.locals.length}`, {
@@ -267,17 +292,34 @@ export function compileTemplateExpression(
   for (let i = 0; i < expr.templateSpans.length; i++) {
     const span = expr.templateSpans[i]!;
 
-    // Compile the substitution expression and coerce to string if needed
-    const spanType = compileExpression(ctx, fctx, span.expression);
+    // Compile the substitution expression and coerce to string if needed.
+    // Mirrors the binary `+` concat path (compileStringBinaryExpression) so
+    // booleans stringify to "true"/"false" (#2005) and null/undefined spans
+    // produce "null"/"undefined" rather than tripping the js-string concat
+    // cast (#2006).
     const spanTsType = ctx.checker.getTypeAtLocation(span.expression);
-    if (
+    // #1931: `undefined`/`null` literals lower to a type-default scalar (i32 0)
+    // rather than an externref, so detect them by static type before codegen
+    // and substitute the spec stringification instead of running the scalar
+    // through number_toString (which would print "0").
+    const spanIsUndefType = (spanTsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+    const spanIsNullType = (spanTsType.flags & ts.TypeFlags.Null) !== 0;
+    const spanType = compileExpression(ctx, fctx, span.expression);
+    if ((spanIsUndefType || spanIsNullType) && spanType && spanType.kind !== "externref") {
+      // Scalar-lowered null/undefined → drop the placeholder value and push the
+      // matching string constant (#2005 undefined, #2006 null).
+      fctx.body.push({ op: "drop" });
+      const word = spanIsNullType ? "null" : "undefined";
+      addStringConstantGlobal(ctx, word);
+      fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get(word)! });
+    } else if (
       spanType &&
       spanType.kind === "i32" &&
       (isBooleanType(spanTsType) || (spanType as { boolean?: true }).boolean)
     ) {
-      // #2016/#2030: a boolean (incl. branded i32 predicates) renders
-      // "true"/"false", not "1"/"0". emitBoolToString returns an externref the
-      // following concat accepts.
+      // boolean i32 → "true"/"false" (#2005). #2016/#2030: also covers branded
+      // i32 predicates (`.boolean`), which render "true"/"false", not "1"/"0".
+      // emitBoolToString returns an externref the following concat accepts.
       emitBoolToString(ctx, fctx);
     } else if (spanType && spanType.kind === "f64" && toStrIdx !== undefined) {
       fctx.body.push({ op: "call", funcIdx: toStrIdx });
@@ -288,11 +330,37 @@ export function compileTemplateExpression(
       // BigInt → f64 → string
       fctx.body.push({ op: "f64.convert_i64_s" });
       fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    } else if (spanType && spanType.kind === "externref") {
+      // null/undefined externref spans must become "null"/"undefined" strings;
+      // a raw ref.null extern trips the js-string concat cast (#2006). Opaque
+      // externrefs route through __extern_toString so wasmGC structs run their
+      // ToPrimitive walker before reaching concat.
+      const spanIsNull = (spanTsType.flags & ts.TypeFlags.Null) !== 0;
+      const spanIsUndef = (spanTsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+      if (spanIsNull) {
+        fctx.body.push({ op: "drop" });
+        addStringConstantGlobal(ctx, "null");
+        fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get("null")! });
+      } else if (spanIsUndef) {
+        fctx.body.push({ op: "drop" });
+        addStringConstantGlobal(ctx, "undefined");
+        fctx.body.push({ op: "global.get", index: ctx.stringGlobalMap.get("undefined")! });
+      } else if (!isStringType(spanTsType)) {
+        const externToStrIdx = ensureLateImport(
+          ctx,
+          "__extern_toString",
+          [{ kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+        flushLateImportShifts(ctx, fctx);
+        const finalIdx = ctx.funcMap.get("__extern_toString") ?? externToStrIdx;
+        if (finalIdx !== undefined) fctx.body.push({ op: "call", funcIdx: finalIdx });
+      }
+      // otherwise a real string externref — already concat-ready
     } else if (spanType && (spanType.kind === "ref" || spanType.kind === "ref_null")) {
       // Struct ref → externref: use coerceType which checks @@toPrimitive("string") first
       coerceType(ctx, fctx, spanType, { kind: "externref" }, "string");
     }
-    // externref assumed to be string already
 
     // If we had a head (or previous spans), concat with accumulated string
     if (i === 0 && !expr.head.text) {
@@ -354,12 +422,34 @@ export function compileNativeTemplateExpression(
   for (let i = 0; i < expr.templateSpans.length; i++) {
     const span = expr.templateSpans[i]!;
 
+    const spanNativeTsType = ctx.checker.getTypeAtLocation(span.expression);
+    // #1931: `undefined`/`null` lower to a type-default scalar (i32 0), so
+    // resolve them from the static type before codegen and emit the spec
+    // stringification rather than "0" (parallels the JS-host path).
+    const spanNativeIsUndef = (spanNativeTsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+    const spanNativeIsNull = (spanNativeTsType.flags & ts.TypeFlags.Null) !== 0;
     const spanType = compileExpression(ctx, fctx, span.expression);
+    const spanIsScalarNullish = (spanNativeIsUndef || spanNativeIsNull) && spanType && spanType.kind !== "externref";
+    const spanIsBool = spanType && spanType.kind === "i32" && isBooleanType(spanNativeTsType);
+    if (spanIsScalarNullish) {
+      // Scalar-lowered null/undefined → drop the placeholder, build the native
+      // string constant inline (#2005/#2006). Leaves the native string ref on
+      // the stack for the shared concat tail below.
+      fctx.body.push({ op: "drop" } as Instr);
+      compileStringLiteral(ctx, fctx, spanNativeIsNull ? "null" : "undefined", span.expression);
+    } else if (spanIsBool) {
+      // boolean i32 → native "true"/"false" (#2005)
+      emitBoolToString(ctx, fctx);
+    }
     const spanIsString =
+      !spanIsScalarNullish &&
+      !spanIsBool &&
       spanType &&
       (spanType.kind === "ref" || spanType.kind === "ref_null") &&
       isStringType(ctx.checker.getTypeAtLocation(span.expression));
-    if (spanIsString) {
+    if (spanIsScalarNullish || spanIsBool) {
+      // value already on stack — fall through to the concat tail
+    } else if (spanIsString) {
       // #1618: a string-typed substitution is ALREADY a native string ref
       // (AnyString / NativeString). Concat it directly — do NOT round-trip
       // through externref via __str_to_extern/__str_from_extern. That bridge is
@@ -1738,7 +1828,9 @@ export function compileNativeStringMethodCall(
     const local = allocLocal(fctx, `${name}_${fctx.locals.length}`, {
       kind: "i32",
     });
-    if (value) {
+    // Explicit `undefined` is spec-equivalent to an absent arg → use the
+    // method's default sentinel rather than coercing undefined → 0 (#2124).
+    if (value && !isStaticUndefinedArg(value)) {
       compileStringIntegerArg(ctx, fctx, value);
     } else {
       fctx.body.push({ op: "i32.const", value: fallback });
@@ -1901,8 +1993,8 @@ export function compileNativeStringMethodCall(
     } else {
       fctx.body.push({ op: "i32.const", value: 0 });
     }
-    // end
-    if (expr.arguments.length > 1) {
+    // end — explicit `undefined` defaults to length (§22.1.3.24), same as absent (#2124)
+    if (expr.arguments.length > 1 && !isStaticUndefinedArg(expr.arguments[1])) {
       compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
     } else {
       // Default end = string length
@@ -1926,8 +2018,8 @@ export function compileNativeStringMethodCall(
     } else {
       fctx.body.push({ op: "i32.const", value: 0 });
     }
-    // end
-    if (expr.arguments.length > 1) {
+    // end — explicit `undefined` defaults to length (§22.1.3.22), same as absent (#2124)
+    if (expr.arguments.length > 1 && !isStaticUndefinedArg(expr.arguments[1])) {
       compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
     } else {
       fctx.body.push({ op: "i32.const", value: 0x7fffffff });
@@ -1954,7 +2046,13 @@ export function compileNativeStringMethodCall(
   if (method === "lastIndexOf") {
     const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_lastIndexOf_recv");
     const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_lastIndexOf_search");
-    const fromLocal = compileIntegerValueToLocal(expr.arguments[1], 0x7fffffff, "__str_lastIndexOf_from");
+    // §22.1.3.9 step 5: ToIntegerOrInfinity(position) with NaN → +∞, so an
+    // explicit `NaN` (or `undefined`) position searches from the end — the same
+    // 0x7fffffff sentinel as an absent arg. `compileIntegerValueToLocal` already
+    // maps explicit `undefined`; map explicit `NaN` here too (#2124).
+    const fromArg = expr.arguments[1];
+    const fromIsNaN = fromArg !== undefined && ts.isIdentifier(fromArg) && fromArg.text === "NaN";
+    const fromLocal = compileIntegerValueToLocal(fromIsNaN ? undefined : fromArg, 0x7fffffff, "__str_lastIndexOf_from");
     const funcIdx = ctx.nativeStrHelpers.get("__str_lastIndexOf")!;
     fctx.body.push({ op: "local.get", index: receiverLocal });
     fctx.body.push({ op: "local.get", index: searchLocal });
@@ -2027,11 +2125,18 @@ export function compileNativeStringMethodCall(
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!, {
         kind: "f64",
       });
-      // RangeError: count must be non-negative, finite, and not too large
+      // RangeError: count must be non-negative, finite, and not too large.
+      // §22.1.3.18: n = ToIntegerOrInfinity(count) (truncates toward zero),
+      // THEN throw if n < 0 or n is +∞. The `< 0` test must run on the
+      // truncated value, else `repeat(-0.5)` — whose ToIntegerOrInfinity is
+      // `-0`, NOT negative — wrongly throws (#2124). `f64.trunc(-0.5) = -0.0`,
+      // and `-0.0 < 0` is false, so truncating first gives the spec result.
+      // The +∞ check stays on the raw f64 (trunc_sat would clamp it).
       if (argType && argType.kind === "f64") {
         const countLocal = allocLocal(fctx, `__repeat_count_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.tee", index: countLocal });
-        // Check count < 0
+        // Check ToIntegerOrInfinity(count) < 0 — truncate toward zero first.
+        fctx.body.push({ op: "f64.trunc" } as Instr);
         fctx.body.push({ op: "f64.const", value: 0 });
         fctx.body.push({ op: "f64.lt" });
         // Check count is Infinity (count != count is NaN, but we also need +Inf)
