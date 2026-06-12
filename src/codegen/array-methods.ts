@@ -14,6 +14,7 @@ import { allocLocal, getLocalType } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
 import { addArrayIteratorImports, addStringImports, addUnionImports, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
+import { compileStringLiteral } from "./shared.js";
 import { getArrTypeIdxFromVec, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
 import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
@@ -2627,8 +2628,18 @@ export function compileArrayMethodCall(
       result = compileArrayLastIndexOf(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     case "sort":
+      // #1967 — the gate previously excluded externref (string, JS-host mode)
+      // and ref (struct) element arrays, so `["b","a"].sort()` and
+      // `objs.sort((x,y)=>…)` silently no-op'd via the generic fallback. The
+      // internal compileArraySort ALREADY routes non-numeric elements through
+      // tryCompileComparatorSort (comparator) and compileArrayDefaultToStringSort
+      // (default ToString order, #1993) — only this gate kept it unreachable.
       result =
-        elemType.kind === "f64" || elemType.kind === "i32"
+        elemType.kind === "f64" ||
+        elemType.kind === "i32" ||
+        elemType.kind === "externref" ||
+        elemType.kind === "ref" ||
+        elemType.kind === "ref_null"
           ? compileArraySort(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
           : undefined;
       break;
@@ -4863,6 +4874,12 @@ function compileArrayJoin(
     return null;
   }
 
+  // #1968 — the empty-join result must be "" not a null externref (which every
+  // downstream string consumer stringifies as "null"). Pre-register the ""
+  // string constant *before* any body instructions so the eventual fixup of
+  // module-global indices can't desync already-emitted global.gets.
+  addStringConstantGlobal(ctx, "");
+
   const vecTmp = allocLocal(fctx, `__arr_join_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_join_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const lenTmp = allocLocal(fctx, `__arr_join_len_${fctx.locals.length}`, { kind: "i32" });
@@ -4898,8 +4915,9 @@ function compileArrayJoin(
   }
   fctx.body.push({ op: "local.set", index: sepTmp });
 
-  // result starts as null (empty)
-  fctx.body.push({ op: "ref.null.extern" });
+  // result starts as "" (the empty-array join result, #1968) — not null, which
+  // would stringify as "null". A non-empty array overwrites this on iteration 0.
+  compileStringLiteral(ctx, fctx, "");
   fctx.body.push({ op: "local.set", index: resultTmp });
 
   fctx.body.push({ op: "i32.const", value: 0 });

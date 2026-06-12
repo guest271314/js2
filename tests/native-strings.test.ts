@@ -202,6 +202,33 @@ describe("fast mode: native strings", () => {
     expect(await runFast(src)).toBe(3);
   });
 
+  // §22.1.3.21: slice does NOT swap when start > end (returns "") — unlike
+  // substring. (#2123)
+  it("slice(3, 1) returns empty string (no swap)", async () => {
+    const src = `export function test(): number { return "hello".slice(3, 1).length; }`;
+    expect(await runFast(src)).toBe(0);
+  });
+
+  it("slice(2, 2) with equal bounds returns empty", async () => {
+    const src = `export function test(): number { return "hello".slice(2, 2).length; }`;
+    expect(await runFast(src)).toBe(0);
+  });
+
+  it("slice(1, 3) keeps order (does not swap)", async () => {
+    const src = `export function test(): number { return "hello".slice(1, 3).length; }`;
+    expect(await runFast(src)).toBe(2);
+  });
+
+  it("slice(-2, -1) negative bounds", async () => {
+    const src = `export function test(): number { return "hello".slice(-2, -1).length; }`;
+    expect(await runFast(src)).toBe(1);
+  });
+
+  it("slice(-100, 2) clamps start to 0", async () => {
+    const src = `export function test(): number { return "hello".slice(-100, 2).length; }`;
+    expect(await runFast(src)).toBe(2);
+  });
+
   // ── String as function parameter and return ──────────────────────
 
   it("string parameter and return", async () => {

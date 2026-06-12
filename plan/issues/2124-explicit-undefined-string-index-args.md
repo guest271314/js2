@@ -2,10 +2,11 @@
 id: 2124
 renumbered_from: 1957
 title: "explicit undefined as optional string-index arg coerced to NaN/0 instead of per-method default (substring/slice/lastIndexOf/endsWith/repeat, both backends)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
+completed: 2026-06-12
 priority: high
 feasibility: medium
 reasoning_effort: high
