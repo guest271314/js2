@@ -85,8 +85,12 @@ export function runAt(
   entryPc = 0,
   dir = 1,
   capsIn?: Int32Array,
+  nScratch = 0,
 ): Int32Array | null {
-  const nSlots = 2 * nGroups;
+  // Capture slots (2*nGroups) plus scratch slots for PROGRESS empty-loop guards
+  // (#1959). Scratch slots travel with the capture array (snapshotted on SPLIT,
+  // seeded into recursive lookaround attempts) and are sliced off by callers.
+  const nSlots = 2 * nGroups + nScratch;
   const initCaps = capsIn !== undefined ? capsIn.slice() : new Int32Array(nSlots).fill(-1);
   const stack: Frame[] = [];
   let pc = entryPc;
@@ -226,12 +230,21 @@ export function runAt(
         // the sub ran copy-on-write and never mutated ours (§22.2.2.4).
         const negated = (b & 1) !== 0;
         const behind = (b & 2) !== 0;
-        const sub = runAt(prog, classTable, nGroups, input, sp, a, behind ? -1 : 1, caps);
+        const sub = runAt(prog, classTable, nGroups, input, sp, a, behind ? -1 : 1, caps, nScratch);
         const ok = sub !== null;
         if (negated ? !ok : ok) {
           if (!negated && sub !== null) caps = sub;
           pc++;
         } else failed = true;
+        break;
+      }
+      case ReOp.PROGRESS: {
+        // Empty-iteration guard (§22.2.2.3.1, #1959): `a` is a scratch slot
+        // holding sp at this loop iteration's entry. If sp is unchanged the
+        // body matched empty, so fail the iteration — backtracking takes the
+        // quantifier's exit arm (the SPLIT alternative pushed at loop entry).
+        if (sp === caps[a]) failed = true;
+        else pc++;
         break;
       }
       case ReOp.MATCH: {
@@ -263,10 +276,11 @@ export function search(
   input: string,
   startIdx: number,
   sticky: boolean,
+  nScratch = 0,
 ): Int32Array | null {
   const len = input.length;
   for (let i = Math.max(0, startIdx); i <= len; i++) {
-    const m = runAt(prog, classTable, nGroups, input, i);
+    const m = runAt(prog, classTable, nGroups, input, i, 0, 1, undefined, nScratch);
     if (m) return m;
     if (sticky) return null;
   }
