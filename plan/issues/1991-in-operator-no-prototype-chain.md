@@ -4,7 +4,7 @@ title: "in operator never consults the prototype chain — inherited class metho
 status: ready
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -275,3 +275,76 @@ Add `tests/issue-1991-in-prototype-chain.test.ts`:
 test262: `language/expressions/in/*`,
 `built-ins/Object/prototype/hasOwnProperty/*` (must stay green — the Stage A
 extraction touches `__hasOwnProperty`).
+
+## Addendum — verified corrections to the plan (2026-06-12, second architect pass)
+
+See also the addendum in #2130's file (A1-A8); the items below are
+#1991-specific. **Dev: treat these as authoritative where they conflict with
+the text above.**
+
+### B1. Option (b)'s plain `ref.test` chain has a wrong-answer mode — dispatch on the `__tag` value instead
+
+The recommended `__instance_proto_methods(externref) -> externref` export is
+right, but a chain of `ref.test <classStructTypeIdx>` cannot distinguish
+classes whose structs have **identical field layouts**: WasmGC types are
+canonicalized **iso-recursively** (this is exactly #2009's collision), so
+`class A { m() {} }` and `class B { n() {} }` — both lowering to
+`(i32 __tag)` plus the same field kinds — share one heap type, and the chain
+returns the *first* class's method CSV for instances of both. Result:
+`"n" in new A()` → true. Field-name dispatch (`__struct_field_names`) lives
+with this today, but for the method registry there is a collision-free
+discriminator already in every class instance: the `__tag` field (field 0),
+whose **values** are globally unique per class (`ctx.classTagMap`) — it is
+per-instance data, immune to type canonicalization. Emit the export the way
+`compileInstanceOf`'s externref arm already reads tags
+(`src/codegen/typeof-delete.ts:531-585`):
+
+```wasm
+;; __instance_proto_methods(externref) -> externref
+local.get 0
+any.convert_extern
+local.tee $any
+ref.test $RootStruct_1          ;; per root-class hierarchy; gates the cast
+if
+  local.get $any
+  ref.cast $RootStruct_1
+  struct.get $RootStruct_1 0    ;; __tag
+  ;; if-chain (or br_table) over ALL class tag values → global.get <csv>
+end
+;; ... next root hierarchy ...
+ref.null.extern                 ;; not a class instance
+```
+
+Per-class transitive CSV = own `ctx.classMethodNames` ∪ ancestors via
+`ctx.classParentMap` (child names shadow parent — dedupe keeps one entry;
+membership is what matters here). Register CSVs with
+`addStringConstantGlobal`; skip emission in `ctx.nativeStrings` mode for the
+same reason as `emitStructFieldNamesExport` (`index.ts:2097`). Note the
+`ref.test $RootStruct` gate is only a safe-cast guard — two unrelated root
+hierarchies may canonicalize together and both pass the same test, which is
+fine because the tag if-chain spans all classes and disambiguates.
+
+### B2. Tombstone ordering for `delete instance.m` — simpler than the edge-case text suggests
+
+The "method deleted via `delete instance.m`" bullet hedges. The clean rule,
+already implied by the predicate shape: **the tombstone gates the OWN tier
+only** — when tombstoned, skip own checks but still evaluate
+`_wasmStructHasInherited`. That yields spec behavior with no special cases:
+`delete c.m` (m inherited, not own) per §13.5.1 removes nothing, and
+`"m" in c` stays true because the inherited tier answers after the
+tombstone-suppressed own tier. Do NOT make the tombstone short-circuit the
+whole predicate to false.
+
+### B3. Confirmations (probed/read on `c19a2e9c1`, no action needed)
+
+- Inherited accessors are covered: `class-bodies.ts:890-903` collects
+  get/set accessor names into `ctx.classMethodNames` alongside methods.
+- `"toString" in c` already true via `_OBJECT_PROTO_KEYS` (PR #1352);
+  `"m" in c` / `"missing" in c` probe `false`/`false` today — only the
+  registry tier is missing.
+- Statically-typed receivers (`const c: C = …; "m" in c`) already fold to
+  `true`: the TS type of `C` carries `m`, and `binary-ops.ts:588-614`
+  (`getProperty` + apparent-type check) answers before any struct-field
+  test. The optional static-path improvement in the plan is therefore
+  already-implemented behavior — verify with a test, but expect no code
+  change.

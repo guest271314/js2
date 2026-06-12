@@ -244,3 +244,124 @@ test262: `language/expressions/delete/*`,
 `language/statements/for-in/*`, `built-ins/Object/keys/*`,
 `built-ins/Object/prototype/hasOwnProperty/*` — Stage A touches
 `__hasOwnProperty`, must stay green.
+
+## Addendum — verified corrections to the plan (2026-06-12, second architect pass)
+
+Independent re-derivation against main `c19a2e9c1` with fresh probes
+(equivalence harness, JS-host). The plan above is architecturally right; the
+items below correct or pin down points where it is vague or where the probe
+results contradict its assumptions. **Dev: treat these as authoritative where
+they conflict with the text above.**
+
+### A1. The `__sget_<key>` probe must be DELETED, not "kept folded in"
+
+Stage A's closing line ("Keep the `__sget_<key>` getter probe folded into
+`_wasmStructHasOwn`") is wrong and is the single most likely way this fix
+fails review. The probe (`runtime.ts:6359-6373`) is the actual root cause of
+the `in` false positives: `__sget_<key>` getters **never throw** —
+`buildNestedIfElse` (`src/codegen/index.ts:4047`, default branch) falls
+through to `ref.null.extern`/`i32.const 0` for receivers matching no struct
+type. So "the getter returned without throwing" (the #1589A heuristic) is
+true for *every* receiver whenever *any* struct type in the module has a
+field of that name — a module-global check, not a per-receiver one. The
+per-receiver shape oracle is `_getStructFieldNames(obj, exports)`
+(`runtime.ts:2782`, backed by the `__struct_field_names` ref.test dispatch,
+`index.ts:2086-2181`) — already what `__hasOwnProperty` uses at
+`runtime.ts:8816`, and what `_wasmStructHasOwn` inherits via the extraction.
+Delete the probe lines; do not port them.
+
+### A2. Object-rest needs NO codegen work — close that open question
+
+The "Object-rest specifics" section asks the dev to verify how `rest` is
+lowered and sketches building a fresh struct type. Verified: `rest` is built
+by the `__extern_rest_object` host import (`runtime.ts:6988-7030`), which
+returns a **plain JS object** containing only the non-excluded keys. The
+false positive comes entirely from A1: the plain-JS branch of `__extern_has`
+misses (`"e" in rest` → false natively), then falls through to the
+module-global `__sget_e` probe (the source struct `{e,f}` makes it exist) →
+wrongly returns 1. The Stage A rewrite (own/inherited tiers for wasm structs;
+native `key in obj` + sidecar for plain JS, with no `__sget_` fallthrough)
+fixes rest with zero codegen changes. Drop options (i)/(ii); skip the
+fresh-struct work.
+
+### A3. delete-then-re-add is broken TODAY — promote from "confirm" to a fix item
+
+Probe: `const o:any={a:1}; delete o.a; o.a = 5;` then `o.a` reads **1** (the
+original value — the re-added `5` is lost). So the edge-case bullet
+("confirm the re-add path reaches `_sidecarSet`") understates it: the write
+path does NOT clear the tombstone and does not even surface the new value.
+`_sidecarSet` clears tombstones (`runtime.ts:2245-2253`) but `_safeSet`
+prefers the `__sset_<name>` struct setter (`emitStructFieldSetters`,
+`index.ts:1898`), which writes the real struct field and bypasses
+`_sidecarSet` entirely. Fix: clear `_wasmStructDeletedKeys` in **`_safeSet`
+itself** (single choke point covering both the sidecar and `__sset_` arms),
+and add `delete o.a; o.a=5; o.a===5 && ("a" in o)` to the tests — it guards
+two distinct regressions.
+
+### A4. `Object.keys` consistency: the real import is `__object_keys`, and it needs the sidecar union too
+
+B3 points at `__for_in_keys`/`__getOwnPropertyNames`, but `Object.keys(o)`
+on an `any` receiver routes to `__object_keys` (`runtime.ts:6684`; `values`
+6702, `entries` 6725 — chosen in `compileObjectKeysOrValues`,
+`src/codegen/object-ops.ts:3046-3063`). Probe confirms: after `delete o.a`,
+`Object.keys(o)` is still `["a","b"]`. All three helpers enumerate
+`_getStructFieldNames` + the `_SC_ENUMERABLE` filter only. Add (a) the
+tombstone filter, and (b) the union of enumerable **sidecar** keys not in the
+shape (mirror `__for_in_keys`'s sidecar block, `runtime.ts:8868-8882`) —
+without (b), a deleted-then-re-added key (which now lives in the sidecar per
+A3) vanishes from `Object.keys` forever. Shape order first, sidecar insertion
+order after, matching `__for_in_keys`.
+
+### A5. Read-path tombstone gate: both `__extern_get` AND `_safeGet`
+
+B1/B2's read fix should be pinned to two exact spots: the wasm-struct
+fallback region of `__extern_get` (`runtime.ts:6170-6179`, before the
+`__sget_<key>` call) and the top of `_safeGet`'s `_isWasmStruct` branch
+(`runtime.ts:3539`). Rule: **every path that treats `__sget_<key>` or struct
+shape as own-property evidence must first consult
+`_wasmStructDeletedKeys`.** With this in place, B1's "preferred"
+widened-struct-arm extension becomes optional hardening, not a correctness
+requirement — the generic arm + read gate already satisfy the acceptance
+criteria (the sentinel `struct.set` only matters for statically-typed
+`struct.get` reads, which remain number-typed NaN by design).
+
+### A6. Two residual `in` gaps to document in the PR (not blockers)
+
+- **Statically-typed receivers**: `const o={a:1}; delete (o as any).a;
+  "a" in o` still folds to `i32.const 1` at compile time
+  (`binary-ops.ts:654-702`). Acceptance criteria only cover `any` receivers,
+  so this is out of Stage A/B scope. If wanted later: add a
+  `sourceContainsDelete(sourceFile)` pre-scan (pattern:
+  `sourceContainsClass`, `index.ts:208-220`; count only delete of
+  property/element access) as `ctx.moduleUsesDelete`, and when true route
+  struct-ref receivers through `__extern_has` instead of folding — preserves
+  byte-identical output for delete-free modules.
+- **Dynamic-key `in` on typed structs** (`k in typedStruct`,
+  `binary-ops.ts:705-733`): an inline `__str_eq` loop over compile-time field
+  names — a third divergent presence implementation that misses tombstones,
+  sidecar props, and the proto tiers. Recommended: delete the path and route
+  through `__extern_has` unconditionally (the shape is rare; one predicate,
+  not three).
+
+### A7. Standalone mode (Stage D — file as a follow-up issue, do not do here)
+
+Static structs in standalone have no WeakMap sidecar; the native
+`__extern_has` / `__delete_property`
+(`src/codegen/object-runtime.ts:1468` / `:1199`) only understand the dynamic
+`$Object` representation, which already has spec-correct tombstones
+(`FLAG_TOMBSTONE`), proto-walk `in`, and #1837 insertion-order enumeration.
+Do NOT build a wasm-side global (obj, key) tombstone registry — WasmGC has no
+weak refs, so it would strongly retain every deleted-from object. The
+dual-mode answer is **representation steering**: reuse the A6 pre-scan to
+find object-literal struct types targeted by `delete`, and in standalone mode
+lower those literals to `$Object`. Zero overhead for untouched objects, full
+fidelity for delete-touched ones. PO: open the follow-up referencing this
+section.
+
+### A8. One-line predicate hygiene
+
+In the `__extern_has` rewrite, the plain-JS sidecar check must be key-based
+(`const sc = _wasmStructProps.get(obj); sc && key in sc`), not the current
+value-based `_sidecarGet(obj, key) !== undefined` (`runtime.ts:6357`) —
+HasProperty (§7.3.12) is value-independent, so `o.x = undefined; "x" in o`
+must be true.
