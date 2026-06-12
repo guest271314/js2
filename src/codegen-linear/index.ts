@@ -1967,6 +1967,31 @@ function compileBinaryExpression(ctx: LinearContext, fctx: LinearFuncContext, ex
     }
   }
 
+  // #1976: string `+=` is concatenation, not numeric add. `s += t` for string
+  // `s` must call __str_concat (both operands are i32 pointers) and store the
+  // i32 result — the generic compound path below emits f64.add, which produces
+  // an invalid module (i32/f64 mismatch). Handle local and global string LHS.
+  if (op === ts.SyntaxKind.PlusEqualsToken && ts.isIdentifier(expr.left) && isStringExpr(ctx, fctx, expr.left)) {
+    const strConcatIdx = ctx.funcMap.get("__str_concat");
+    const localIdx = fctx.localMap.get(expr.left.text);
+    if (strConcatIdx !== undefined && localIdx !== undefined) {
+      fctx.body.push({ op: "local.get", index: localIdx });
+      compileExpression(ctx, fctx, expr.right);
+      fctx.body.push({ op: "call", funcIdx: strConcatIdx });
+      fctx.body.push({ op: "local.tee", index: localIdx });
+      return;
+    }
+    const gIdx = ctx.moduleGlobals.get(expr.left.text);
+    if (strConcatIdx !== undefined && gIdx !== undefined) {
+      fctx.body.push({ op: "global.get", index: gIdx });
+      compileExpression(ctx, fctx, expr.right);
+      fctx.body.push({ op: "call", funcIdx: strConcatIdx });
+      fctx.body.push({ op: "global.set", index: gIdx });
+      fctx.body.push({ op: "global.get", index: gIdx });
+      return;
+    }
+  }
+
   // Handle compound assignment (+=, -=, *=, /=, |=, &=, etc.)
   if (isCompoundAssignment(op) && ts.isIdentifier(expr.left)) {
     const idx = fctx.localMap.get(expr.left.text);
@@ -2099,6 +2124,37 @@ function compileBinaryExpression(ctx: LinearContext, fctx: LinearFuncContext, ex
       compileExpression(ctx, fctx, expr.right);
       const strConcatIdx = ctx.funcMap.get("__str_concat")!;
       fctx.body.push({ op: "call", funcIdx: strConcatIdx });
+      return;
+    }
+    // #1976: string relationals (`<`/`<=`/`>`/`>=`) must compare by content, not
+    // by pointer address. Route through __str_cmp (-1/0/1) then test the sign;
+    // the result is an f64 boolean to match the rest of the expression lowering.
+    if (
+      op === ts.SyntaxKind.LessThanToken ||
+      op === ts.SyntaxKind.LessThanEqualsToken ||
+      op === ts.SyntaxKind.GreaterThanToken ||
+      op === ts.SyntaxKind.GreaterThanEqualsToken
+    ) {
+      compileExpression(ctx, fctx, expr.left);
+      compileExpression(ctx, fctx, expr.right);
+      const strCmpIdx = ctx.funcMap.get("__str_cmp")!;
+      fctx.body.push({ op: "call", funcIdx: strCmpIdx });
+      fctx.body.push({ op: "i32.const", value: 0 });
+      switch (op) {
+        case ts.SyntaxKind.LessThanToken:
+          fctx.body.push({ op: "i32.lt_s" });
+          break;
+        case ts.SyntaxKind.LessThanEqualsToken:
+          fctx.body.push({ op: "i32.le_s" });
+          break;
+        case ts.SyntaxKind.GreaterThanToken:
+          fctx.body.push({ op: "i32.gt_s" });
+          break;
+        default: // GreaterThanEqualsToken
+          fctx.body.push({ op: "i32.ge_s" });
+          break;
+      }
+      fctx.body.push({ op: "f64.convert_i32_s" });
       return;
     }
   }
@@ -3823,6 +3879,15 @@ function inferExprType(ctx: LinearContext, fctx: LinearFuncContext, expr: ts.Exp
   // String literals and template expressions are i32 (pointers)
   if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr) || ts.isTemplateExpression(expr)) {
     return { kind: "i32" };
+  }
+
+  // #1976: string concatenation (`a + b` where either side is a string) yields
+  // a string POINTER (i32). Decide this explicitly before the numeric default
+  // so `const x = "a" + b` declares an i32 local matching __str_concat's result.
+  if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    if (isStringExpr(ctx, fctx, expr.left) || isStringExpr(ctx, fctx, expr.right)) {
+      return { kind: "i32" };
+    }
   }
 
   // `this` is always an i32 pointer
