@@ -1,10 +1,11 @@
 ---
 id: 2056
 title: "% operator loses precision and returns Infinity/0 for extreme operand ratios (a - trunc(a/b)*b is not fmod)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -71,3 +72,28 @@ fast path.
 Grepped `emitModulo`, `fmod`, `modulo`, `remainder` — #216 (done;
 Infinity/-0 edge cases only), #1825 (i32 fast-mode rem traps, done).
 Precision/overflow not covered anywhere.
+
+## Resolution (2026-06-11)
+
+Replaced the inline `a - trunc(a/b)*b` formula in `emitModulo`
+(`src/codegen/binary-ops.ts`) with a call to a new Wasm-native `__fmod`
+helper (`src/codegen/fmod.ts`), registered once per module via `ensureFmod`
+(idempotent, funcMap-routed so the late-import index-shift contract patches
+it). `emitModulo` now takes `ctx` (both `%=` call sites in
+`expressions/assignment.ts` updated).
+
+`__fmod` computes the *exact* IEEE remainder via binary long-division
+(`t = y·2^k`; repeatedly `if x>=t x-=t; t*=0.5` down to `y`). Every step is
+an exact f64 operation and all intermediates stay ≤ |a|, so there is zero
+rounding drift and no overflow. Edge cases (`b==0`, `±Inf` dividend, NaN
+operands, `±Inf` divisor) are handled up front; sign is restored with
+`f64.copysign(x, a)`. Pure Wasm, **no host import** → works in standalone
+mode (dual-mode policy satisfied). Iteration count is bounded by the binary
+exponent difference (≤ ~2098).
+
+Verified against Node bit-for-bit: all six repro cases, the #216 edge cases,
+compound `%=`, and 500k randomized cases incl. subnormal divisors. Tests in
+`tests/equivalence/modulo-fmod.test.ts`.
+
+Note: the linear backend's separate `%` bug is tracked independently in
+#1974 — this fix is the WasmGC (`src/codegen/`) path only.
