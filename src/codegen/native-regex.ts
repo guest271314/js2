@@ -1348,6 +1348,7 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
   if (existing !== undefined) return existing;
 
   const searchIdx = ensureRegexSearch(ctx);
+  const getSubIdx = ensureRegexGetSubstitution(ctx);
   const i32Arr = regexI32ArrayType(ctx);
   const strDataIdx = ctx.nativeStrDataTypeIdx; // array i16
   const strTypeIdx = ctx.nativeStrTypeIdx; // $NativeString (for the empty-string struct.new)
@@ -1460,14 +1461,22 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
             { op: "i32.const", value: 1 },
             { op: "array.get", typeIdx: i32Arr },
             { op: "local.set", index: MEND },
-            // result = concat(concat(result, substring(subj, lastEnd, mstart)), replacement)
+            // result = concat(concat(result, substring(subj, lastEnd, mstart)),
+            //                 GetSubstitution(...)) — §22.2.6.11 (#1913): the
+            // replacement is expanded against the populated caps each match,
+            // so $&/$`/$'/$n/$$ work and plain text passes through unchanged.
             { op: "local.get", index: RESULT },
             { op: "local.get", index: SUBJ },
             { op: "local.get", index: LASTEND },
             { op: "local.get", index: MSTART },
             { op: "call", funcIdx: substringIdx },
             { op: "call", funcIdx: concatIdx },
+            { op: "local.get", index: SUBJ },
+            { op: "local.get", index: SLEN },
+            { op: "local.get", index: NGROUPS },
+            { op: "local.get", index: CAPS },
             { op: "local.get", index: REPL },
+            { op: "call", funcIdx: getSubIdx },
             { op: "call", funcIdx: concatIdx },
             { op: "local.set", index: RESULT },
             // lastEnd = mend
@@ -1725,12 +1734,16 @@ export function ensureRegexCaptureArray(ctx: CodegenContext): number {
 
 /**
  * Emit `__regex_split(prog, classTable, nGroups, strData, strOff, strLen,
- * subject) -> ref $vec_nstr` (#1539 Phase 2c).
+ * subject, lim) -> ref $vec_nstr` (#1913, full §22.2.6.14 semantics).
  *
- * This is the non-capturing, non-empty-match split slice. The call site refuses
- * capture groups and nullable separators so this helper can use the same simple
- * boundary loop as the native string splitter: append the substring before each
- * separator match, advance past the consumed separator, then append the tail.
+ * Implements the SplitMatch walk: split points where the separator matches,
+ * capture values (incl. unmatched → undefined elements) interleaved after
+ * each split slice, every append capped at `lim` (ToUint32 of the limit
+ * argument; compare unsigned so the spec default 2^32-1 is just -1), and the
+ * empty-separator rule — a match whose END equals the last split point makes
+ * no split and the scan resumes one unit further (this also covers the
+ * empty-pattern "split into chars" behaviour without looping forever).
+ * Empty subject: a separator match on "" yields `[]`, otherwise `[subject]`.
  */
 export function ensureRegexSplit(ctx: CodegenContext): number {
   const existing = ctx.nativeRegexHelpers.get("__regex_split");
@@ -1765,6 +1778,7 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
       { kind: "i32" }, // strOff
       { kind: "i32" }, // strLen
       strRef, // subject (flattened)
+      { kind: "i32" }, // lim (u32; -1 = no limit)
     ],
     [nstrVecRef],
   );
@@ -1778,19 +1792,23 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
     SDATA = 3,
     SOFF = 4,
     SLEN = 5,
-    SUBJ = 6;
+    SUBJ = 6,
+    LIM = 7;
   // locals
-  const NSLOTS = 7;
-  const CAPS = 8;
-  const POS = 9;
-  const LASTEND = 10;
-  const RARR = 11;
-  const RLEN = 12;
-  const RCAP = 13;
-  const NEWARR = 14;
-  const PART = 15;
-  const MSTART = 16;
-  const MEND = 17;
+  const NSLOTS = 8;
+  const CAPS = 9;
+  const P = 10; // last split point (spec p)
+  const Q = 11; // scan cursor (spec q)
+  const RARR = 12;
+  const RLEN = 13;
+  const RCAP = 14;
+  const NEWARR = 15;
+  const PART = 16;
+  const MSTART = 17;
+  const MEND = 18;
+  const GI = 19; // capture interleave index
+  const CS = 20;
+  const CE = 21;
 
   const appendPart = (): Instr[] => [
     // Grow result if needed.
@@ -1833,6 +1851,41 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
     { op: "local.set", index: RLEN },
   ];
 
+  /** Return the vec built so far. */
+  const returnVec = (): Instr[] => [
+    { op: "local.get", index: RLEN },
+    { op: "local.get", index: RARR },
+    { op: "ref.as_non_null" },
+    { op: "struct.new", typeIdx: nstrVecTypeIdx },
+    { op: "return" },
+  ];
+
+  /** appendPart + return-if-limit-reached (unsigned compare; lim=-1 ≈ ∞). */
+  const appendCapped = (): Instr[] => [
+    ...appendPart(),
+    { op: "local.get", index: RLEN },
+    { op: "local.get", index: LIM },
+    { op: "i32.ge_u" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: returnVec(),
+    } as Instr,
+  ];
+
+  const callSearchAt = (posLocal: number): Instr[] => [
+    { op: "local.get", index: PROG },
+    { op: "local.get", index: CTAB },
+    { op: "local.get", index: NSLOTS },
+    { op: "local.get", index: SDATA },
+    { op: "local.get", index: SOFF },
+    { op: "local.get", index: SLEN },
+    { op: "local.get", index: posLocal },
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: CAPS },
+    { op: "call", funcIdx: searchIdx },
+  ];
+
   const body: Instr[] = [
     // nSlots = 2 * nGroups; caps = array.new_default(nSlots)
     { op: "local.get", index: NGROUPS },
@@ -1842,7 +1895,285 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
     { op: "local.get", index: NSLOTS },
     { op: "array.new_default", typeIdx: i32Arr },
     { op: "local.set", index: CAPS },
-    // result array starts at cap 8; pos = lastEnd = 0.
+    // result array starts at cap 8.
+    { op: "i32.const", value: 8 },
+    { op: "array.new_default", typeIdx: nstrArrTypeIdx },
+    { op: "local.set", index: RARR },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: RLEN },
+    { op: "i32.const", value: 8 },
+    { op: "local.set", index: RCAP },
+    // lim == 0 → []
+    { op: "local.get", index: LIM },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: returnVec(),
+    },
+    // Empty subject (§22.2.6.14 step 14): separator matches "" → [], else [S].
+    { op: "local.get", index: SLEN },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: P },
+        ...callSearchAt(P),
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: returnVec(),
+          else: [{ op: "local.get", index: SUBJ }, { op: "local.set", index: PART }, ...appendPart(), ...returnVec()],
+        } as Instr,
+      ],
+    },
+    // p = 0; q = 0
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: P },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: Q },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            // if q >= slen: break
+            { op: "local.get", index: Q },
+            { op: "local.get", index: SLEN },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            // if !search(q): break
+            ...callSearchAt(Q),
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 },
+            // mstart = caps[0]; mend = caps[1]
+            { op: "local.get", index: CAPS },
+            { op: "i32.const", value: 0 },
+            { op: "array.get", typeIdx: i32Arr },
+            { op: "local.set", index: MSTART },
+            { op: "local.get", index: CAPS },
+            { op: "i32.const", value: 1 },
+            { op: "array.get", typeIdx: i32Arr },
+            { op: "local.set", index: MEND },
+            // Spec step 19.c.ii: e == p → no split; resume one unit further.
+            { op: "local.get", index: MEND },
+            { op: "local.get", index: P },
+            { op: "i32.eq" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: MSTART },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: Q },
+              ],
+              else: [
+                // Append S[p, mstart); cap at lim.
+                { op: "local.get", index: SUBJ },
+                { op: "local.get", index: P },
+                { op: "local.get", index: MSTART },
+                { op: "call", funcIdx: substringIdx },
+                { op: "local.set", index: PART },
+                ...appendCapped(),
+                // Interleave captures 1..nGroups-1 (unmatched → undefined).
+                { op: "i32.const", value: 1 },
+                { op: "local.set", index: GI },
+                {
+                  op: "block",
+                  blockType: { kind: "empty" },
+                  body: [
+                    {
+                      op: "loop",
+                      blockType: { kind: "empty" },
+                      body: [
+                        { op: "local.get", index: GI },
+                        { op: "local.get", index: NGROUPS },
+                        { op: "i32.ge_s" },
+                        { op: "br_if", depth: 1 },
+                        // cs = caps[2*gi]; ce = caps[2*gi+1]
+                        { op: "local.get", index: CAPS },
+                        { op: "local.get", index: GI },
+                        { op: "i32.const", value: 2 },
+                        { op: "i32.mul" },
+                        { op: "array.get", typeIdx: i32Arr },
+                        { op: "local.set", index: CS },
+                        { op: "local.get", index: CAPS },
+                        { op: "local.get", index: GI },
+                        { op: "i32.const", value: 2 },
+                        { op: "i32.mul" },
+                        { op: "i32.const", value: 1 },
+                        { op: "i32.add" },
+                        { op: "array.get", typeIdx: i32Arr },
+                        { op: "local.set", index: CE },
+                        // part = cs < 0 ? undefined : substring(subject, cs, ce)
+                        { op: "local.get", index: CS },
+                        { op: "i32.const", value: 0 },
+                        { op: "i32.lt_s" },
+                        {
+                          op: "if",
+                          blockType: { kind: "val", type: nstrElemType },
+                          then: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr],
+                          else: [
+                            { op: "local.get", index: SUBJ },
+                            { op: "local.get", index: CS },
+                            { op: "local.get", index: CE },
+                            { op: "call", funcIdx: substringIdx },
+                          ],
+                        } as Instr,
+                        { op: "local.set", index: PART },
+                        ...appendCapped(),
+                        { op: "local.get", index: GI },
+                        { op: "i32.const", value: 1 },
+                        { op: "i32.add" },
+                        { op: "local.set", index: GI },
+                        { op: "br", depth: 0 },
+                      ],
+                    },
+                  ],
+                },
+                // p = mend; q = mend (empty match: q = mstart + 1)
+                { op: "local.get", index: MEND },
+                { op: "local.set", index: P },
+                { op: "local.get", index: MEND },
+                { op: "local.get", index: MSTART },
+                { op: "i32.eq" },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: { kind: "i32" } },
+                  then: [{ op: "local.get", index: MSTART }, { op: "i32.const", value: 1 }, { op: "i32.add" }],
+                  else: [{ op: "local.get", index: MEND }],
+                } as Instr,
+                { op: "local.set", index: Q },
+              ],
+            } as Instr,
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    // Append final tail: substring(subject, p, slen) (§22.2.6.14 steps 20-22).
+    { op: "local.get", index: SUBJ },
+    { op: "local.get", index: P },
+    { op: "local.get", index: SLEN },
+    { op: "call", funcIdx: substringIdx },
+    { op: "local.set", index: PART },
+    ...appendPart(),
+    ...returnVec(),
+    // unreachable fallthrough — keep the validator happy.
+    { op: "local.get", index: RLEN },
+    { op: "local.get", index: RARR },
+    { op: "ref.as_non_null" },
+    { op: "struct.new", typeIdx: nstrVecTypeIdx },
+  ];
+
+  ctx.mod.functions.push({
+    name: "__regex_split",
+    typeIdx,
+    locals: [
+      { name: "nslots", type: { kind: "i32" } },
+      { name: "caps", type: i32ArrRef },
+      { name: "p", type: { kind: "i32" } },
+      { name: "q", type: { kind: "i32" } },
+      { name: "resultArr", type: { kind: "ref_null", typeIdx: nstrArrTypeIdx } },
+      { name: "resultLen", type: { kind: "i32" } },
+      { name: "resultCap", type: { kind: "i32" } },
+      { name: "newArr", type: { kind: "ref_null", typeIdx: nstrArrTypeIdx } },
+      { name: "part", type: { kind: "ref_null", typeIdx: anyStrTypeIdx } },
+      { name: "mstart", type: { kind: "i32" } },
+      { name: "mend", type: { kind: "i32" } },
+      { name: "gi", type: { kind: "i32" } },
+      { name: "cs", type: { kind: "i32" } },
+      { name: "ce", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
+/**
+ * Emit `__regex_match_all(prog, classTable, nGroups, strData, strOff, strLen,
+ * subject) -> ref null $__regexp_match_vec` (#1913).
+ *
+ * `String.prototype.match` with a GLOBAL regex (§22.2.6.8 step 6): collect
+ * every match's [0] substring, advancing past empty matches per
+ * AdvanceStringIndex; null when there were no matches. The result reuses the
+ * match-vec subtype for type uniformity with the non-global path —
+ * `index`/`input` carry the FIRST match (a documented narrow deviation: per
+ * spec a global match result is a plain Array without those properties).
+ */
+export function ensureRegexMatchAll(ctx: CodegenContext): number {
+  const existing = ctx.nativeRegexHelpers.get("__regex_match_all");
+  if (existing !== undefined) return existing;
+
+  const searchIdx = ensureRegexSearch(ctx);
+  const i32Arr = regexI32ArrayType(ctx);
+  const strDataIdx = ctx.nativeStrDataTypeIdx;
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
+  const strDataRef: ValType = { kind: "ref", typeIdx: strDataIdx };
+  const i32ArrRef: ValType = { kind: "ref", typeIdx: i32Arr };
+
+  const nstrElemKey = `ref_${anyStrTypeIdx}`;
+  const nstrElemType: ValType = { kind: "ref_null", typeIdx: anyStrTypeIdx };
+  const nstrArrTypeIdx = getOrRegisterArrayType(ctx, nstrElemKey, nstrElemType);
+  const matchVecTypeIdx = ensureRegexMatchVecType(ctx);
+
+  const substringIdx = ctx.nativeStrHelpers.get("__str_substring");
+  if (substringIdx === undefined) {
+    throw new Error("__regex_match_all requires __str_substring (#682 native string helpers)");
+  }
+
+  const typeIdx = addFuncType(
+    ctx,
+    [
+      i32ArrRef, // prog
+      i32ArrRef, // classTable
+      { kind: "i32" }, // nGroups
+      strDataRef, // strData
+      { kind: "i32" }, // strOff
+      { kind: "i32" }, // strLen
+      strRef, // subject (flattened)
+    ],
+    [{ kind: "ref_null", typeIdx: matchVecTypeIdx }],
+  );
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.nativeRegexHelpers.set("__regex_match_all", funcIdx);
+
+  // params
+  const PROG = 0,
+    CTAB = 1,
+    NGROUPS = 2,
+    SDATA = 3,
+    SOFF = 4,
+    SLEN = 5,
+    SUBJ = 6;
+  // locals
+  const NSLOTS = 7;
+  const CAPS = 8;
+  const POS = 9;
+  const RARR = 10;
+  const RLEN = 11;
+  const RCAP = 12;
+  const NEWARR = 13;
+  const MSTART = 14;
+  const MEND = 15;
+  const FIRSTMS = 16;
+
+  const body: Instr[] = [
+    { op: "local.get", index: NGROUPS },
+    { op: "i32.const", value: 2 },
+    { op: "i32.mul" },
+    { op: "local.set", index: NSLOTS },
+    { op: "local.get", index: NSLOTS },
+    { op: "array.new_default", typeIdx: i32Arr },
+    { op: "local.set", index: CAPS },
     { op: "i32.const", value: 8 },
     { op: "array.new_default", typeIdx: nstrArrTypeIdx },
     { op: "local.set", index: RARR },
@@ -1853,7 +2184,7 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
     { op: "i32.const", value: 0 },
     { op: "local.set", index: POS },
     { op: "i32.const", value: 0 },
-    { op: "local.set", index: LASTEND },
+    { op: "local.set", index: FIRSTMS },
     {
       op: "block",
       blockType: { kind: "empty" },
@@ -1867,7 +2198,7 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
             { op: "local.get", index: SLEN },
             { op: "i32.gt_s" },
             { op: "br_if", depth: 1 },
-            // if !__regex_search(... pos, sticky=0 ...): break
+            // if !search(pos): break
             { op: "local.get", index: PROG },
             { op: "local.get", index: CTAB },
             { op: "local.get", index: NSLOTS },
@@ -1880,7 +2211,6 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
             { op: "call", funcIdx: searchIdx },
             { op: "i32.eqz" },
             { op: "br_if", depth: 1 },
-            // mstart = caps[0]; mend = caps[1]
             { op: "local.get", index: CAPS },
             { op: "i32.const", value: 0 },
             { op: "array.get", typeIdx: i32Arr },
@@ -1889,52 +2219,584 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
             { op: "i32.const", value: 1 },
             { op: "array.get", typeIdx: i32Arr },
             { op: "local.set", index: MEND },
-            // part = substring(subject, lastEnd, mstart); append(part)
+            // first match start → the result's index field
+            { op: "local.get", index: RLEN },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: MSTART },
+                { op: "local.set", index: FIRSTMS },
+              ],
+            },
+            // Grow result if needed; append substring(subject, mstart, mend).
+            { op: "local.get", index: RLEN },
+            { op: "local.get", index: RCAP },
+            { op: "i32.ge_s" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: RCAP },
+                { op: "i32.const", value: 2 },
+                { op: "i32.mul" },
+                { op: "local.set", index: RCAP },
+                { op: "local.get", index: RCAP },
+                { op: "array.new_default", typeIdx: nstrArrTypeIdx },
+                { op: "local.set", index: NEWARR },
+                { op: "local.get", index: NEWARR },
+                { op: "i32.const", value: 0 },
+                { op: "local.get", index: RARR },
+                { op: "i32.const", value: 0 },
+                { op: "local.get", index: RLEN },
+                {
+                  op: "array.copy",
+                  dstTypeIdx: nstrArrTypeIdx,
+                  srcTypeIdx: nstrArrTypeIdx,
+                },
+                { op: "local.get", index: NEWARR },
+                { op: "local.set", index: RARR },
+              ],
+            },
+            { op: "local.get", index: RARR },
+            { op: "local.get", index: RLEN },
             { op: "local.get", index: SUBJ },
-            { op: "local.get", index: LASTEND },
             { op: "local.get", index: MSTART },
+            { op: "local.get", index: MEND },
             { op: "call", funcIdx: substringIdx },
-            { op: "local.set", index: PART },
-            ...appendPart(),
-            // lastEnd = mend; pos = mend (nullable patterns are refused at call site)
+            { op: "array.set", typeIdx: nstrArrTypeIdx },
+            { op: "local.get", index: RLEN },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.set", index: RLEN },
+            // pos = mend + (empty match ? 1 : 0) — AdvanceStringIndex
             { op: "local.get", index: MEND },
-            { op: "local.set", index: LASTEND },
             { op: "local.get", index: MEND },
+            { op: "local.get", index: MSTART },
+            { op: "i32.gt_s" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [{ op: "i32.const", value: 0 }],
+              else: [{ op: "i32.const", value: 1 }],
+            },
+            { op: "i32.add" },
             { op: "local.set", index: POS },
             { op: "br", depth: 0 },
           ],
         },
       ],
     },
-    // Append final tail: substring(subject, lastEnd, slen)
-    { op: "local.get", index: SUBJ },
-    { op: "local.get", index: LASTEND },
-    { op: "local.get", index: SLEN },
-    { op: "call", funcIdx: substringIdx },
-    { op: "local.set", index: PART },
-    ...appendPart(),
-    // return struct.new(resultLen, resultArr)
+    // 0 matches → null (the spec's @@match-global null result).
     { op: "local.get", index: RLEN },
-    { op: "local.get", index: RARR },
-    { op: "ref.as_non_null" },
-    { op: "struct.new", typeIdx: nstrVecTypeIdx },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "ref_null", typeIdx: matchVecTypeIdx } },
+      then: [{ op: "ref.null", typeIdx: matchVecTypeIdx } as Instr],
+      else: [
+        { op: "local.get", index: RLEN },
+        { op: "local.get", index: RARR },
+        { op: "ref.as_non_null" },
+        { op: "local.get", index: FIRSTMS },
+        { op: "local.get", index: SUBJ },
+        { op: "struct.new", typeIdx: matchVecTypeIdx },
+      ],
+    } as Instr,
   ];
 
   ctx.mod.functions.push({
-    name: "__regex_split",
+    name: "__regex_match_all",
     typeIdx,
     locals: [
       { name: "nslots", type: { kind: "i32" } },
       { name: "caps", type: i32ArrRef },
       { name: "pos", type: { kind: "i32" } },
-      { name: "lastEnd", type: { kind: "i32" } },
       { name: "resultArr", type: { kind: "ref_null", typeIdx: nstrArrTypeIdx } },
       { name: "resultLen", type: { kind: "i32" } },
       { name: "resultCap", type: { kind: "i32" } },
       { name: "newArr", type: { kind: "ref_null", typeIdx: nstrArrTypeIdx } },
-      { name: "part", type: { kind: "ref_null", typeIdx: anyStrTypeIdx } },
       { name: "mstart", type: { kind: "i32" } },
       { name: "mend", type: { kind: "i32" } },
+      { name: "firstms", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  });
+  return funcIdx;
+}
+
+/** Build inline instructions that materialize a `number[]` as a fixed
+ *  `array i32` on the stack (used for prog + classTable literals). */
+export function i32ArrayLiteralInstrs(ctx: CodegenContext, values: number[]): Instr[] {
+  const i32Arr = regexI32ArrayType(ctx);
+  const instrs: Instr[] = [];
+  for (const v of values) instrs.push({ op: "i32.const", value: v | 0 });
+  // array.new_fixed requires at least the length operand; empty arrays use
+  // array.new_default(0).
+  if (values.length === 0) {
+    return [
+      { op: "i32.const", value: 0 },
+      { op: "array.new_default", typeIdx: i32Arr },
+    ];
+  }
+  instrs.push({ op: "array.new_fixed", typeIdx: i32Arr, length: values.length });
+  return instrs;
+}
+
+/**
+ * Emit `__regex_get_substitution(subject, slen, nGroups, caps, repl)
+ * -> ref $AnyString` (#1913).
+ *
+ * GetSubstitution (ECMA-262 §22.2.6.11): expand `$$`, `$&`, `` $` ``, `$'`,
+ * and `$n`/`$nn` in the (flattened) replacement string against the populated
+ * caps array. Out-of-range `$n` and `$<` (no named groups in the standalone
+ * engine) pass through literally per spec. Unmatched captures expand to the
+ * empty string. Builds the result with `__str_concat` over O(1)
+ * `__str_substring` views.
+ */
+export function ensureRegexGetSubstitution(ctx: CodegenContext): number {
+  const existing = ctx.nativeRegexHelpers.get("__regex_get_substitution");
+  if (existing !== undefined) return existing;
+
+  const i32Arr = regexI32ArrayType(ctx);
+  const strDataIdx = ctx.nativeStrDataTypeIdx;
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
+  const i32ArrRef: ValType = { kind: "ref", typeIdx: i32Arr };
+
+  const substringIdxOpt = ctx.nativeStrHelpers.get("__str_substring");
+  const concatIdxOpt = ctx.nativeStrHelpers.get("__str_concat");
+  if (substringIdxOpt === undefined || concatIdxOpt === undefined) {
+    throw new Error("__regex_get_substitution requires __str_substring + __str_concat (#682 native string helpers)");
+  }
+  // Non-optional bindings so hoisted helper fns below see narrowed numbers.
+  const substringIdx: number = substringIdxOpt;
+  const concatIdx: number = concatIdxOpt;
+
+  const typeIdx = addFuncType(
+    ctx,
+    [
+      strRef, // subject (flattened)
+      { kind: "i32" }, // slen
+      { kind: "i32" }, // nGroups (incl. group 0)
+      i32ArrRef, // caps
+      strRef, // repl (flattened)
+    ],
+    [strRef],
+  );
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.nativeRegexHelpers.set("__regex_get_substitution", funcIdx);
+
+  // params
+  const SUBJ = 0,
+    SLEN = 1,
+    NG = 2,
+    CAPS = 3,
+    REPL = 4;
+  // locals
+  const RDATA = 5; // ref array<i16> — repl backing data
+  const ROFF = 6;
+  const RLEN = 7;
+  const RESULT = 8; // ref $AnyString accumulator
+  const I = 9; // scan cursor in repl
+  const SEG = 10; // start of the pending literal segment
+  const C = 11; // current code unit
+  const D1 = 12; // unit after '$'
+  const GRP = 13; // resolved capture index
+  const CONSUME = 14; // chars consumed by a digit escape (0 = literal)
+  const CS = 15; // capture start
+  const CE = 16; // capture end
+
+  /** result = concat(result, substring(repl, SEG, <endInstrs>)) */
+  const flush = (endInstrs: Instr[]): Instr[] => [
+    { op: "local.get", index: RESULT },
+    { op: "local.get", index: REPL },
+    { op: "local.get", index: SEG },
+    ...endInstrs,
+    { op: "call", funcIdx: substringIdx },
+    { op: "call", funcIdx: concatIdx },
+    { op: "local.set", index: RESULT },
+  ];
+
+  /** result = concat(result, substring(subject, <startInstrs>, <endInstrs>)) */
+  const appendSubject = (startInstrs: Instr[], endInstrs: Instr[]): Instr[] => [
+    { op: "local.get", index: RESULT },
+    { op: "local.get", index: SUBJ },
+    ...startInstrs,
+    ...endInstrs,
+    { op: "call", funcIdx: substringIdx },
+    { op: "call", funcIdx: concatIdx },
+    { op: "local.set", index: RESULT },
+  ];
+
+  const capsAt = (idxInstrs: Instr[]): Instr[] => [
+    { op: "local.get", index: CAPS },
+    ...idxInstrs,
+    { op: "array.get", typeIdx: i32Arr },
+  ];
+
+  /** i += n; seg = i */
+  const advance = (n: number): Instr[] => [
+    { op: "local.get", index: I },
+    { op: "i32.const", value: n },
+    { op: "i32.add" },
+    { op: "local.tee", index: I },
+    { op: "local.set", index: SEG },
+  ];
+
+  // The `$<d1>` dispatch — every arm ends with the cursor advanced past the
+  // escape (or falls through to the literal `i += 1` below via CONSUME=0).
+  const dollarDispatch: Instr[] = [
+    // d1 == '$' → literal "$"
+    { op: "local.get", index: D1 },
+    { op: "i32.const", value: 0x24 },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        ...flush([{ op: "local.get", index: I } as Instr]),
+        // append the '$' itself: substring(repl, i, i+1)
+        ...appendReplChar(),
+        ...advance(2),
+      ],
+      else: [
+        // d1 == '&' → matched substring
+        { op: "local.get", index: D1 },
+        { op: "i32.const", value: 0x26 },
+        { op: "i32.eq" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            ...flush([{ op: "local.get", index: I } as Instr]),
+            ...appendSubject(
+              capsAt([{ op: "i32.const", value: 0 } as Instr]),
+              capsAt([{ op: "i32.const", value: 1 } as Instr]),
+            ),
+            ...advance(2),
+          ],
+          else: [
+            // d1 == '`' → prefix S[0, matchStart)
+            { op: "local.get", index: D1 },
+            { op: "i32.const", value: 0x60 },
+            { op: "i32.eq" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                ...flush([{ op: "local.get", index: I } as Instr]),
+                ...appendSubject(
+                  [{ op: "i32.const", value: 0 } as Instr],
+                  capsAt([{ op: "i32.const", value: 0 } as Instr]),
+                ),
+                ...advance(2),
+              ],
+              else: [
+                // d1 == "'" → suffix S[matchEnd, slen)
+                { op: "local.get", index: D1 },
+                { op: "i32.const", value: 0x27 },
+                { op: "i32.eq" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    ...flush([{ op: "local.get", index: I } as Instr]),
+                    ...appendSubject(capsAt([{ op: "i32.const", value: 1 } as Instr]), [
+                      { op: "local.get", index: SLEN } as Instr,
+                    ]),
+                    ...advance(2),
+                  ],
+                  else: digitArm(),
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  /** append repl[i..i+1] (the literal '$') */
+  function appendReplChar(): Instr[] {
+    return [
+      { op: "local.get", index: RESULT },
+      { op: "local.get", index: REPL },
+      { op: "local.get", index: I },
+      { op: "local.get", index: I },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "call", funcIdx: substringIdx },
+      { op: "call", funcIdx: concatIdx },
+      { op: "local.set", index: RESULT },
+    ];
+  }
+
+  /** `$n` / `$nn` — consume = 0 leaves the '$' literal (out-of-range per spec). */
+  function digitArm(): Instr[] {
+    const isDigit = (local: number): Instr[] => [
+      { op: "local.get", index: local },
+      { op: "i32.const", value: 0x30 },
+      { op: "i32.ge_s" },
+      { op: "local.get", index: local },
+      { op: "i32.const", value: 0x39 },
+      { op: "i32.le_s" },
+      { op: "i32.and" },
+    ];
+    return [
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: CONSUME },
+      ...isDigit(D1),
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // grp1 = d1 - '0'
+          { op: "local.get", index: D1 },
+          { op: "i32.const", value: 0x30 },
+          { op: "i32.sub" },
+          { op: "local.set", index: GRP },
+          // Two-digit form: i+2 < rlen && isDigit(repl[i+2]) && 10*g1+d2 in [1, nGroups)
+          { op: "local.get", index: I },
+          { op: "i32.const", value: 2 },
+          { op: "i32.add" },
+          { op: "local.get", index: RLEN },
+          { op: "i32.lt_s" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              // c = repl[roff + i + 2]
+              { op: "local.get", index: RDATA },
+              { op: "local.get", index: ROFF },
+              { op: "local.get", index: I },
+              { op: "i32.add" },
+              { op: "i32.const", value: 2 },
+              { op: "i32.add" },
+              { op: "array.get_u", typeIdx: strDataIdx } as Instr,
+              { op: "local.set", index: C },
+              ...isDigit(C),
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  // candidate = 10*grp + (c - '0')
+                  { op: "local.get", index: GRP },
+                  { op: "i32.const", value: 10 },
+                  { op: "i32.mul" },
+                  { op: "local.get", index: C },
+                  { op: "i32.const", value: 0x30 },
+                  { op: "i32.sub" },
+                  { op: "i32.add" },
+                  { op: "local.set", index: C }, // reuse C as candidate
+                  // valid: 1 <= candidate < nGroups
+                  { op: "local.get", index: C },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.ge_s" },
+                  { op: "local.get", index: C },
+                  { op: "local.get", index: NG },
+                  { op: "i32.lt_s" },
+                  { op: "i32.and" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [
+                      { op: "local.get", index: C },
+                      { op: "local.set", index: GRP },
+                      { op: "i32.const", value: 3 },
+                      { op: "local.set", index: CONSUME },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+          // One-digit fallback: 1 <= grp < nGroups
+          { op: "local.get", index: CONSUME },
+          { op: "i32.eqz" },
+          { op: "local.get", index: GRP },
+          { op: "i32.const", value: 1 },
+          { op: "i32.ge_s" },
+          { op: "i32.and" },
+          { op: "local.get", index: GRP },
+          { op: "local.get", index: NG },
+          { op: "i32.lt_s" },
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "i32.const", value: 2 },
+              { op: "local.set", index: CONSUME },
+            ],
+          },
+          // Expand when a valid group was resolved.
+          { op: "local.get", index: CONSUME },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              ...flush([{ op: "local.get", index: I } as Instr]),
+              // cs = caps[2*grp]; ce = caps[2*grp+1]
+              ...capsAt([
+                { op: "local.get", index: GRP } as Instr,
+                { op: "i32.const", value: 2 } as Instr,
+                { op: "i32.mul" } as Instr,
+              ]),
+              { op: "local.set", index: CS },
+              ...capsAt([
+                { op: "local.get", index: GRP } as Instr,
+                { op: "i32.const", value: 2 } as Instr,
+                { op: "i32.mul" } as Instr,
+                { op: "i32.const", value: 1 } as Instr,
+                { op: "i32.add" } as Instr,
+              ]),
+              { op: "local.set", index: CE },
+              // Unmatched capture (cs < 0) → empty expansion.
+              { op: "local.get", index: CS },
+              { op: "i32.const", value: 0 },
+              { op: "i32.ge_s" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: appendSubject(
+                  [{ op: "local.get", index: CS } as Instr],
+                  [{ op: "local.get", index: CE } as Instr],
+                ),
+              },
+              // i += consume; seg = i
+              { op: "local.get", index: I },
+              { op: "local.get", index: CONSUME },
+              { op: "i32.add" },
+              { op: "local.tee", index: I },
+              { op: "local.set", index: SEG },
+            ],
+            else: [
+              // Out-of-range $n is literal text — keep scanning from '$'+1.
+              { op: "local.get", index: I },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: I },
+            ],
+          },
+        ],
+        else: [
+          // Unknown '$x' (incl. '$<' — no named groups) → literal per spec.
+          { op: "local.get", index: I },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "local.set", index: I },
+        ],
+      },
+    ];
+  }
+
+  const body: Instr[] = [
+    // rdata/roff/rlen from the flattened repl ($NativeString view).
+    { op: "local.get", index: REPL },
+    { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 },
+    { op: "local.set", index: RDATA },
+    { op: "local.get", index: REPL },
+    { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 },
+    { op: "local.set", index: ROFF },
+    { op: "local.get", index: REPL },
+    { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+    { op: "local.set", index: RLEN },
+    // result = ""; i = 0; seg = 0
+    { op: "i32.const", value: 0 },
+    { op: "i32.const", value: 0 },
+    { op: "i32.const", value: 0 },
+    { op: "array.new_default", typeIdx: strDataIdx } as Instr,
+    { op: "struct.new", typeIdx: strTypeIdx },
+    { op: "local.set", index: RESULT },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: I },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: SEG },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            // if i >= rlen: break
+            { op: "local.get", index: I },
+            { op: "local.get", index: RLEN },
+            { op: "i32.ge_s" },
+            { op: "br_if", depth: 1 },
+            // c = rdata[roff + i]
+            { op: "local.get", index: RDATA },
+            { op: "local.get", index: ROFF },
+            { op: "local.get", index: I },
+            { op: "i32.add" },
+            { op: "array.get_u", typeIdx: strDataIdx } as Instr,
+            { op: "local.set", index: C },
+            // '$' with at least one unit after it?
+            { op: "local.get", index: C },
+            { op: "i32.const", value: 0x24 },
+            { op: "i32.eq" },
+            { op: "local.get", index: I },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.get", index: RLEN },
+            { op: "i32.lt_s" },
+            { op: "i32.and" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                // d1 = rdata[roff + i + 1]
+                { op: "local.get", index: RDATA },
+                { op: "local.get", index: ROFF },
+                { op: "local.get", index: I },
+                { op: "i32.add" },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "array.get_u", typeIdx: strDataIdx } as Instr,
+                { op: "local.set", index: D1 },
+                ...dollarDispatch,
+              ],
+              else: [
+                { op: "local.get", index: I },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: I },
+              ],
+            },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    // Flush the trailing literal segment and return.
+    ...flush([{ op: "local.get", index: RLEN } as Instr]),
+    { op: "local.get", index: RESULT },
+  ];
+
+  ctx.mod.functions.push({
+    name: "__regex_get_substitution",
+    typeIdx,
+    locals: [
+      { name: "rdata", type: { kind: "ref", typeIdx: strDataIdx } },
+      { name: "roff", type: { kind: "i32" } },
+      { name: "rlen", type: { kind: "i32" } },
+      { name: "result", type: strRef },
+      { name: "i", type: { kind: "i32" } },
+      { name: "seg", type: { kind: "i32" } },
+      { name: "c", type: { kind: "i32" } },
+      { name: "d1", type: { kind: "i32" } },
+      { name: "grp", type: { kind: "i32" } },
+      { name: "consume", type: { kind: "i32" } },
+      { name: "cs", type: { kind: "i32" } },
+      { name: "ce", type: { kind: "i32" } },
     ],
     body,
     exported: false,
@@ -2023,22 +2885,4 @@ export function ensureRegexFlagsStr(ctx: CodegenContext): number {
     exported: false,
   });
   return funcIdx;
-}
-
-/** Build inline instructions that materialize a `number[]` as a fixed
- *  `array i32` on the stack (used for prog + classTable literals). */
-export function i32ArrayLiteralInstrs(ctx: CodegenContext, values: number[]): Instr[] {
-  const i32Arr = regexI32ArrayType(ctx);
-  const instrs: Instr[] = [];
-  for (const v of values) instrs.push({ op: "i32.const", value: v | 0 });
-  // array.new_fixed requires at least the length operand; empty arrays use
-  // array.new_default(0).
-  if (values.length === 0) {
-    return [
-      { op: "i32.const", value: 0 },
-      { op: "array.new_default", typeIdx: i32Arr },
-    ];
-  }
-  instrs.push({ op: "array.new_fixed", typeIdx: i32Arr, length: values.length });
-  return instrs;
 }

@@ -139,6 +139,73 @@ function compileExternrefCatchDestructure(
   fctx.body.push({ op: "drop" });
 }
 
+/**
+ * #2062: Does `name` get reassigned anywhere inside `node`?
+ *
+ * The `throw e` → Wasm `rethrow` fast path re-raises the *originally-caught*
+ * exception, not the catch local's current value. That is only correct when the
+ * catch parameter is never written between catch entry and the throw. We detect
+ * any write to the binding name — plain/compound assignment, `++`/`--`, and
+ * destructuring assignment targets — including writes performed inside nested
+ * functions/arrows that capture the variable (`const f = () => { e = x }; f()`).
+ * If any is found, the rethrow optimization is disabled for that catch clause so
+ * `throw e` compiles the local's current value instead.
+ */
+function catchVarIsReassigned(node: ts.Node, name: string): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    // `e = ...`, `e += ...`, etc. — assignment where the LHS is the identifier.
+    if (ts.isBinaryExpression(n) && isAssignmentOperator(n.operatorToken.kind)) {
+      if (assignmentTargetWritesName(n.left, name)) {
+        found = true;
+        return;
+      }
+    }
+    // `e++` / `++e` / `e--` / `--e`
+    if (
+      (ts.isPostfixUnaryExpression(n) || ts.isPrefixUnaryExpression(n)) &&
+      (n.operator === ts.SyntaxKind.PlusPlusToken || n.operator === ts.SyntaxKind.MinusMinusToken) &&
+      ts.isIdentifier(n.operand) &&
+      n.operand.text === name
+    ) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+  return found;
+}
+
+function isAssignmentOperator(kind: ts.SyntaxKind): boolean {
+  return kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment;
+}
+
+/**
+ * Whether an assignment target (LHS of `=`/`+=`/… ) writes `name`. Covers the
+ * bare identifier and identifiers appearing as elements of array/object
+ * destructuring assignment targets (`[e] = ...`, `({x: e} = ...)`).
+ */
+function assignmentTargetWritesName(target: ts.Expression, name: string): boolean {
+  if (ts.isIdentifier(target)) return target.text === name;
+  if (ts.isArrayLiteralExpression(target)) {
+    return target.elements.some((el) => {
+      const inner = ts.isSpreadElement(el) ? el.expression : el;
+      return assignmentTargetWritesName(inner, name);
+    });
+  }
+  if (ts.isObjectLiteralExpression(target)) {
+    return target.properties.some((p) => {
+      if (ts.isShorthandPropertyAssignment(p)) return p.name.text === name;
+      if (ts.isPropertyAssignment(p)) return assignmentTargetWritesName(p.initializer, name);
+      if (ts.isSpreadAssignment(p)) return assignmentTargetWritesName(p.expression, name);
+      return false;
+    });
+  }
+  return false;
+}
+
 export function compileThrowStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ThrowStatement): void {
   // Check if this is a rethrow: `throw e` where `e` is the catch variable
   // of an enclosing catch block. If so, emit `rethrow` to preserve the
@@ -280,8 +347,11 @@ export function compileTryStatement(ctx: CodegenContext, fctx: FunctionContext, 
     if (!fctx.finallyStack) fctx.finallyStack = [];
     fctx.finallyStack.push({
       cloneFinally,
+      cloneFinallyAtDepth,
       breakStackLen: fctx.breakStack.length,
       continueStackLen: fctx.continueStack.length,
+      breakDepthBaseline: fctx.breakStack.slice(),
+      continueDepthBaseline: fctx.continueStack.slice(),
     });
   }
 
@@ -359,8 +429,12 @@ export function compileTryStatement(ctx: CodegenContext, fctx: FunctionContext, 
       fctx.savedBodies.push(tryBody);
       fctx.body = [];
 
-      // Push rethrow info: depth starts at 0 (directly inside catch)
-      if (catchVarName) {
+      // Push rethrow info: depth starts at 0 (directly inside catch).
+      // #2062: skip the rethrow fast path when the catch parameter is reassigned
+      // anywhere in the body (including via a capturing closure) — `throw e` must
+      // then propagate the local's current value, not the originally-caught one.
+      const rethrowEligible = catchVarName !== undefined && !catchVarIsReassigned(stmt.catchClause.block, catchVarName);
+      if (catchVarName && rethrowEligible) {
         if (!fctx.catchRethrowStack) fctx.catchRethrowStack = [];
         fctx.catchRethrowStack.push({ varName: catchVarName, depth: 0 });
       }
@@ -375,8 +449,11 @@ export function compileTryStatement(ctx: CodegenContext, fctx: FunctionContext, 
         if (!fctx.finallyStack) fctx.finallyStack = [];
         fctx.finallyStack.push({
           cloneFinally,
+          cloneFinallyAtDepth,
           breakStackLen: fctx.breakStack.length,
           continueStackLen: fctx.continueStack.length,
+          breakDepthBaseline: fctx.breakStack.slice(),
+          continueDepthBaseline: fctx.continueStack.slice(),
         });
       }
 
@@ -407,8 +484,8 @@ export function compileTryStatement(ctx: CodegenContext, fctx: FunctionContext, 
         adjustRethrowDepth(fctx, -1);
       }
 
-      // Pop rethrow info
-      if (catchVarName) {
+      // Pop rethrow info (only if we pushed it above)
+      if (catchVarName && rethrowEligible) {
         fctx.catchRethrowStack!.pop();
       }
 

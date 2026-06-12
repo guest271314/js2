@@ -1,10 +1,11 @@
 ---
 id: 2062
 title: "throw e after reassigning the catch parameter rethrows the ORIGINAL exception (rethrow optimization ignores writes)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: easy
 reasoning_effort: medium
@@ -66,3 +67,32 @@ the moment an assignment to that name is compiled.
 
 Grepped `rethrow`, `catchRethrowStack`, `reassign` — hits are IR-port plumbing
 notes (#1124, #1131, #1169h) and unrelated async issues. Not covered.
+
+## Resolution (2026-06-11)
+
+Fixed in `src/codegen/statements/exceptions.ts`. Added `catchVarIsReassigned`,
+which walks the catch block AST (including nested functions/arrows) for any
+write to the catch parameter: plain/compound assignment, `++`/`--`, and
+identifiers appearing in array/object destructuring assignment targets. The
+`catchRethrowStack` entry is now pushed only when the parameter is NOT
+reassigned, so `throw e` after a write compiles `throw` of the local's current
+value (`compileExpression` + `throw $tag`) instead of Wasm `rethrow`. The pop is
+gated on the same condition. Plain `catch (e) { throw e; }` keeps the `rethrow`
+fast path (preserving exception identity for foreign/host exceptions).
+
+### Test Results
+
+`tests/issue-2062.test.ts` (6 cases, all PASS):
+
+| case | result |
+|------|--------|
+| `e = 2; throw e` | 20 ✓ |
+| `e = e + 7; throw e` (compound) | 10 ✓ |
+| closure mutation `()=>{e=2}; throw e` | 20 ✓ |
+| reassign then rethrow from nested `if` | 99 ✓ |
+| plain `throw e` (unregressed) | 42 ✓ |
+| plain rethrow from nested `if` (unregressed) | 8 ✓ |
+
+`tsc --noEmit` clean; `tests/try-catch.test.ts` green. Pre-existing failures in
+`tests/finally-block.test.ts` (minimal import object missing `string_constants`)
+are unrelated — they fail identically on baseline with this change reverted.
