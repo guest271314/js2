@@ -17,6 +17,8 @@ vim_mode=$(echo "$input" | jq -r '.vim.mode // empty')
 agent_name=$(echo "$input" | jq -r '.agent.name // empty')
 repo=$(echo "$input" | jq -r '.workspace.repo | if . then .owner + "/" + .name else empty end')
 case "$model_id" in
+  claude-fable-5*)    model='Fable 5';    price_in=15 ;;
+  claude-mythos-5*)   model='Mythos 5';   price_in=15 ;;
   claude-opus-4-8*)   model='Opus 4.8';   price_in=15 ;;
   claude-opus-4-7*)   model='Opus 4.7';   price_in=15 ;;
   claude-opus-4-6*)   model='Opus 4.6';   price_in=15 ;;
@@ -39,8 +41,6 @@ branch=$(git -C "${cwd:-$(pwd)}" rev-parse --abbrev-ref HEAD 2>/dev/null)
 issue=$(echo "$branch" | sed -n 's/^issue-\([a-zA-Z0-9]*\).*/\1/p')
 display_cwd=$(basename "${cwd:-$(pwd)}")
 printf '\033[01;34m%s\033[00m' "$display_cwd"
-# Session name (when /rename has been used)
-[ -n "$session_name" ] && printf ' \033[00;36m(%s)\033[00m' "$session_name"
 
 # PR badge from JSON (open PR for current branch — shown in both views)
 if [ -n "$pr_number" ]; then
@@ -429,4 +429,6 @@ fi
 [ -n "$vim_mode" ] && printf ' \033[00;35m%s\033[00m' "$vim_mode"
 # Agent name — shown when running under --agent flag
 [ -n "$agent_name" ] && printf ' \033[00;36magent:%s\033[00m' "$agent_name"
+# Session name (when /rename has been used) — kept last so it ends the line
+[ -n "$session_name" ] && printf ' \033[00;36m(%s)\033[00m' "$session_name"
 printf '\n'
