@@ -38,6 +38,31 @@ import {
   tryStructToString,
 } from "./type-coercion.js";
 
+/**
+ * (#2124) An explicit `undefined` (or `void 0`) passed for an optional string
+ * index arg is spec-equivalent to omitting it — the method applies its own
+ * default (substring/slice/endsWith end → length, lastIndexOf from → length).
+ * But compiling it through the i32 arg path coerces NaN/undefined → 0, which is
+ * wrong. Detect the statically-undefined forms so callers can treat the arg as
+ * absent. Unwraps paren/as/!-assertion wrappers.
+ */
+function isStaticUndefinedArg(arg: ts.Expression | undefined): boolean {
+  if (arg === undefined) return false;
+  let cur: ts.Expression = arg;
+  while (
+    ts.isParenthesizedExpression(cur) ||
+    ts.isAsExpression(cur) ||
+    ts.isNonNullExpression(cur) ||
+    ts.isTypeAssertionExpression(cur)
+  ) {
+    cur = (cur as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression | ts.TypeAssertion).expression;
+  }
+  return (
+    (ts.isIdentifier(cur) && cur.text === "undefined") ||
+    (ts.isVoidExpression(cur) && ts.isNumericLiteral(cur.expression))
+  );
+}
+
 // ── Guarded funcref cast (ref.test before ref.cast to avoid illegal cast traps) ──
 function emitGuardedFuncRefCast(fctx: FunctionContext, funcTypeIdx: number): void {
   const tmpFunc = allocLocal(fctx, `__gfc_${fctx.locals.length}`, {
@@ -1265,6 +1290,61 @@ function coerceCompiledValueToNumber(ctx: CodegenContext, fctx: FunctionContext,
   coerceType(ctx, fctx, valueType, { kind: "f64" }, "number");
 }
 
+/**
+ * (#1961) Null-tolerant native string content equality. A `string | undefined`
+ * operand lowers to a NULLABLE `$AnyString` ref where a null ref IS the
+ * `undefined` value. `__str_flatten`/`__str_equals` deref their operands and
+ * trap on null, so guard first: both-null → equal (1), exactly-one-null →
+ * unequal (0), else flatten both and compare content. Leaves an i32 (1/0) on
+ * the stack representing `left == right` (the caller negates for `!=`/`!==`).
+ */
+function emitNullableStringEquals(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  flattenIdx: number,
+  equalsIdx: number,
+): void {
+  const nullableStr = nativeStringTypeNullable(ctx);
+  const leftLocal = allocLocal(fctx, `__streq_l_${fctx.locals.length}`, nullableStr);
+  const rightLocal = allocLocal(fctx, `__streq_r_${fctx.locals.length}`, nullableStr);
+  compileExpression(ctx, fctx, expr.left, nullableStr);
+  fctx.body.push({ op: "local.set", index: leftLocal });
+  compileExpression(ctx, fctx, expr.right, nullableStr);
+  fctx.body.push({ op: "local.set", index: rightLocal });
+
+  // if (left is null) { result = right is null ? 1 : 0 }
+  // else if (right is null) { result = 0 }
+  // else { result = __str_equals(flatten(left), flatten(right)) }
+  const compareBody: Instr[] = [
+    { op: "local.get", index: leftLocal },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+    { op: "call", funcIdx: flattenIdx },
+    { op: "local.get", index: rightLocal },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+    { op: "call", funcIdx: flattenIdx },
+    { op: "call", funcIdx: equalsIdx },
+  ];
+  const rightNullCheck: Instr[] = [
+    { op: "local.get", index: rightLocal },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: 0 } as Instr],
+      else: compareBody,
+    } as Instr,
+  ];
+  fctx.body.push({ op: "local.get", index: leftLocal });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "local.get", index: rightLocal } as Instr, { op: "ref.is_null" } as Instr],
+    else: rightNullCheck,
+  } as Instr);
+}
+
 export function compileStringBinaryOp(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1324,27 +1404,18 @@ export function compileStringBinaryOp(
       }
       case ts.SyntaxKind.EqualsEqualsEqualsToken:
       case ts.SyntaxKind.EqualsEqualsToken: {
-        // equals needs flat strings — flatten both operands
-        compileExpression(ctx, fctx, expr.left);
-        fctx.body.push({ op: "call", funcIdx: strFlattenIdx });
-        compileExpression(ctx, fctx, expr.right);
-        fctx.body.push({ op: "call", funcIdx: strFlattenIdx });
         const funcIdx = ctx.nativeStrHelpers.get("__str_equals");
         if (funcIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx });
+          emitNullableStringEquals(ctx, fctx, expr, strFlattenIdx, funcIdx);
           return { kind: "i32" };
         }
         break;
       }
       case ts.SyntaxKind.ExclamationEqualsEqualsToken:
       case ts.SyntaxKind.ExclamationEqualsToken: {
-        compileExpression(ctx, fctx, expr.left);
-        fctx.body.push({ op: "call", funcIdx: strFlattenIdx });
-        compileExpression(ctx, fctx, expr.right);
-        fctx.body.push({ op: "call", funcIdx: strFlattenIdx });
         const funcIdx = ctx.nativeStrHelpers.get("__str_equals");
         if (funcIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx });
+          emitNullableStringEquals(ctx, fctx, expr, strFlattenIdx, funcIdx);
           fctx.body.push({ op: "i32.eqz" });
           return { kind: "i32" };
         }
@@ -1803,7 +1874,9 @@ export function compileNativeStringMethodCall(
     const local = allocLocal(fctx, `${name}_${fctx.locals.length}`, {
       kind: "i32",
     });
-    if (value) {
+    // Explicit `undefined` is spec-equivalent to an absent arg → use the
+    // method's default sentinel rather than coercing undefined → 0 (#2124).
+    if (value && !isStaticUndefinedArg(value)) {
       compileStringIntegerArg(ctx, fctx, value);
     } else {
       fctx.body.push({ op: "i32.const", value: fallback });
@@ -1966,8 +2039,8 @@ export function compileNativeStringMethodCall(
     } else {
       fctx.body.push({ op: "i32.const", value: 0 });
     }
-    // end
-    if (expr.arguments.length > 1) {
+    // end — explicit `undefined` defaults to length (§22.1.3.24), same as absent (#2124)
+    if (expr.arguments.length > 1 && !isStaticUndefinedArg(expr.arguments[1])) {
       compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
     } else {
       // Default end = string length
@@ -1991,8 +2064,8 @@ export function compileNativeStringMethodCall(
     } else {
       fctx.body.push({ op: "i32.const", value: 0 });
     }
-    // end
-    if (expr.arguments.length > 1) {
+    // end — explicit `undefined` defaults to length (§22.1.3.22), same as absent (#2124)
+    if (expr.arguments.length > 1 && !isStaticUndefinedArg(expr.arguments[1])) {
       compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
     } else {
       fctx.body.push({ op: "i32.const", value: 0x7fffffff });
@@ -2019,7 +2092,13 @@ export function compileNativeStringMethodCall(
   if (method === "lastIndexOf") {
     const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_lastIndexOf_recv");
     const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_lastIndexOf_search");
-    const fromLocal = compileIntegerValueToLocal(expr.arguments[1], 0x7fffffff, "__str_lastIndexOf_from");
+    // §22.1.3.9 step 5: ToIntegerOrInfinity(position) with NaN → +∞, so an
+    // explicit `NaN` (or `undefined`) position searches from the end — the same
+    // 0x7fffffff sentinel as an absent arg. `compileIntegerValueToLocal` already
+    // maps explicit `undefined`; map explicit `NaN` here too (#2124).
+    const fromArg = expr.arguments[1];
+    const fromIsNaN = fromArg !== undefined && ts.isIdentifier(fromArg) && fromArg.text === "NaN";
+    const fromLocal = compileIntegerValueToLocal(fromIsNaN ? undefined : fromArg, 0x7fffffff, "__str_lastIndexOf_from");
     const funcIdx = ctx.nativeStrHelpers.get("__str_lastIndexOf")!;
     fctx.body.push({ op: "local.get", index: receiverLocal });
     fctx.body.push({ op: "local.get", index: searchLocal });
@@ -2092,11 +2171,18 @@ export function compileNativeStringMethodCall(
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!, {
         kind: "f64",
       });
-      // RangeError: count must be non-negative, finite, and not too large
+      // RangeError: count must be non-negative, finite, and not too large.
+      // §22.1.3.18: n = ToIntegerOrInfinity(count) (truncates toward zero),
+      // THEN throw if n < 0 or n is +∞. The `< 0` test must run on the
+      // truncated value, else `repeat(-0.5)` — whose ToIntegerOrInfinity is
+      // `-0`, NOT negative — wrongly throws (#2124). `f64.trunc(-0.5) = -0.0`,
+      // and `-0.0 < 0` is false, so truncating first gives the spec result.
+      // The +∞ check stays on the raw f64 (trunc_sat would clamp it).
       if (argType && argType.kind === "f64") {
         const countLocal = allocLocal(fctx, `__repeat_count_${fctx.locals.length}`, { kind: "f64" });
         fctx.body.push({ op: "local.tee", index: countLocal });
-        // Check count < 0
+        // Check ToIntegerOrInfinity(count) < 0 — truncate toward zero first.
+        fctx.body.push({ op: "f64.trunc" } as Instr);
         fctx.body.push({ op: "f64.const", value: 0 });
         fctx.body.push({ op: "f64.lt" });
         // Check count is Infinity (count != count is NaN, but we also need +Inf)
@@ -2343,6 +2429,13 @@ export function compileNativeStringMethodCall(
         typeIdx: ctx.nativeStrDataTypeIdx,
       });
       fctx.body.push({ op: "struct.new", typeIdx: ctx.nativeStrTypeIdx });
+    }
+    // #2125: limit arg → i32 (ToUint32). Default (absent/undefined) is no limit,
+    // encoded as 0xFFFFFFFF (= -1 as i32) which the helper treats as unbounded.
+    if (expr.arguments.length > 1) {
+      compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
+    } else {
+      fctx.body.push({ op: "i32.const", value: -1 });
     }
     const splitIdx = ctx.nativeStrHelpers.get("__str_split")!;
     fctx.body.push({ op: "call", funcIdx: splitIdx });

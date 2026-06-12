@@ -258,6 +258,13 @@ All independent -- can run in parallel (different codegen paths).
 | 799 | Prototype chain (remaining: #802 for dynamic) | ~2,500 FAIL | **Ready** (CRITICAL) |
 | 802 | Dynamic prototype support (conditional __proto__) | property-model | **Ready** |
 | 678 | Dynamic prototype chain (reverted) | 625 FAIL | **Ready** |
+| 2126 | computed-key object construction: runtime key dropped, key side-effect skipped (#1971 residual of #140) | property-model | **Ready** |
+| 2127 | object spread of accessor source drops property (getter never fires) (#1971 residual of #492/#1112) | property-model | **Ready** |
+| 2128 | object-literal `set` accessor not invoked on assignment (#1971 residual of #1239) | property-model | **Ready** |
+| 2129 | duplicate object-literal keys: first-wins instead of last-wins (#1971) | property-model | **Ready** |
+| 2130 | `delete`/`in` resolved against static struct shape — post-delete/dynamic-key/rest wrong (#1971 residual of #1821; mirror of #1991) | property-model | **Ready** (hard) |
+| 2131 | JS-host enumeration ignores integer-keys-ascending (#1971 residual of #1837 standalone-only fix) | property-model | **Ready** |
+| 2132 | method call on null receiver = uncatchable trap, not catchable TypeError (#1971 residual of #785) | core-semantics | **Ready** |
 
 ---
 

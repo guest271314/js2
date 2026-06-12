@@ -1,10 +1,11 @@
 ---
 id: 1959
 title: "native RegExp VM: empty-body quantifier loops burn the 1M-step cap and silently report no-match (/(?:a?)*/ fails)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
+completed: 2026-06-12
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -64,3 +65,50 @@ exhaustion a thrown error rather than a silent no-match.
 #1909/#1911/#1912/#1914 catalog refusals/unsupported features; #1539 covers
 empty-match lastIndex advance and split separators — nothing about the
 quantifier-empty-body loop in the VM.
+
+## Resolution (2026-06-12)
+
+Added a `PROGRESS` opcode (`ReOp.PROGRESS = 13`) implementing the RepeatMatcher
+empty-iteration guard. The compiler allocates one **scratch capture slot** per
+nullable star/plus, appended after the real capture slots (`nScratch` on
+`CompiledRegex` / the `$NativeRegExp` struct). The loop records `sp` at each
+iteration's entry via `SAVE scratch`; after the body, `PROGRESS scratch` fails
+the iteration when `sp` is unchanged (empty match), so backtracking takes the
+quantifier's exit arm instead of re-entering forever.
+
+- **Nullability** decided at compile time by `canMatchEmpty` (over-approximating
+  — unknown shapes default to nullable, only adding a cheap guard). Non-nullable
+  quantifiers allocate no scratch slot and emit the original tight encoding, so
+  the common case is byte-for-byte unchanged.
+- **Plus** keeps its mandatory first match unguarded (min=1) and lowers the
+  remaining repetitions as a guarded star, so an empty first match (e.g.
+  `(a?)+` on `"b"`) still succeeds.
+- Threaded `nScratch` through the caps-array sizing at every VM entry point:
+  the search/exec path plus the `__regex_replace` / `__regex_split` /
+  `__regex_match_all` helpers (caps array is now `2*nGroups + nScratch`).
+
+### Files
+
+- `src/codegen/regex/bytecode.ts` — `ReOp.PROGRESS`, `CompiledRegex.nScratch`
+- `src/codegen/regex/compile.ts` — `canMatchEmpty`, scratch allocation, guarded
+  star/plus lowering
+- `src/codegen/regex/vm.ts` — reference VM `PROGRESS` dispatch + `nScratch` slot
+- `src/codegen/native-regex.ts` — Wasm VM `progressArm()` dispatch; `nScratch`
+  param on replace/split/match_all
+- `src/codegen/regexp-standalone.ts` — `nScratch` struct field + `pushNSlots`
+
+## Test Results
+
+All match Node `RegExp` semantics on the standalone backend:
+
+- `/(?:a?)*/.test("b")` → empty match at 0, <1 ms (was ~3 s "no match")
+- `/(a?)*x/.test("bbbbbbbbbbbbbbbbbbbb")` → false, <1 ms (was step-cap burn)
+- `/(?:a?)*/` on `"aab"` → `[0,2]`; `/(a*)*/` on `"aaa"` → `[0,3]`;
+  `/(a*)+/` on `""` → `[0,0]`
+- Non-nullable controls (`a*`, `a+`, `(ab)+`, `[0-9]+`) unregressed
+- `tests/issue-1959.test.ts` (15 cases) green; `regex-bytecode.test.ts` (277),
+  `issue-1539-standalone-regex-replace.test.ts` (17) green
+
+(Pre-existing unrelated failure: `issue-1539-standalone-regex.test.ts` "refuses
+unicode flag (u)" fails on clean main too — the `u` flag is no longer refused
+but that refusal test wasn't updated; not touched here.)

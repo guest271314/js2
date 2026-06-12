@@ -3751,6 +3751,24 @@ function compileCallExpression(
           fctx.body.push({ op: "f64.convert_i32_s" });
         }
         fctx.body.push({ op: "call", funcIdx });
+        // #2122: fromCharCode is variadic — each subsequent code unit produces a
+        // 1-char string that must be concatenated (ES §22.1.2.1). The host import
+        // is 1-arg, so call it per-argument and join via the js-string `concat`
+        // import. (Args are still evaluated left-to-right exactly once.)
+        if (expr.arguments.length > 1) {
+          addStringImports(ctx);
+          const concatIdx = ctx.jsStringImports.get("concat");
+          if (concatIdx !== undefined) {
+            for (let i = 1; i < expr.arguments.length; i++) {
+              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
+              if (ai && ai.kind === "i32") {
+                fctx.body.push({ op: "f64.convert_i32_s" });
+              }
+              fctx.body.push({ op: "call", funcIdx });
+              fctx.body.push({ op: "call", funcIdx: concatIdx });
+            }
+          }
+        }
         // In fast mode, marshal externref string to native string
         if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
           ensureNativeStringExternBridge(ctx);
@@ -3775,12 +3793,24 @@ function compileCallExpression(
       // Native strings mode: use pure-Wasm __str_fromCodePoint (no host import)
       if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
         const helperIdx = ctx.nativeStrHelpers.get("__str_fromCodePoint");
+        const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
         if (helperIdx !== undefined) {
           const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
           if (argType && argType.kind !== "i32") {
             fctx.body.push({ op: "i32.trunc_sat_f64_s" });
           }
           fctx.body.push({ op: "call", funcIdx: helperIdx });
+          // #2122: variadic — concat each subsequent code point's string.
+          if (expr.arguments.length > 1 && concatIdx !== undefined) {
+            for (let i = 1; i < expr.arguments.length; i++) {
+              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
+              if (ai && ai.kind !== "i32") {
+                fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+              }
+              fctx.body.push({ op: "call", funcIdx: helperIdx });
+              fctx.body.push({ op: "call", funcIdx: concatIdx });
+            }
+          }
           return nativeStringType(ctx);
         }
       }
@@ -3792,6 +3822,22 @@ function compileCallExpression(
           fctx.body.push({ op: "f64.convert_i32_s" });
         }
         fctx.body.push({ op: "call", funcIdx });
+        // #2122: variadic — concat each subsequent code point's string via the
+        // 1-arg host import joined with the js-string `concat` import.
+        if (expr.arguments.length > 1) {
+          addStringImports(ctx);
+          const concatIdx = ctx.jsStringImports.get("concat");
+          if (concatIdx !== undefined) {
+            for (let i = 1; i < expr.arguments.length; i++) {
+              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
+              if (ai && ai.kind === "i32") {
+                fctx.body.push({ op: "f64.convert_i32_s" });
+              }
+              fctx.body.push({ op: "call", funcIdx });
+              fctx.body.push({ op: "call", funcIdx: concatIdx });
+            }
+          }
+        }
         return { kind: "externref" };
       }
     }
@@ -7503,9 +7549,33 @@ function compileCallExpression(
         // start and end to 0 → host called `s.substring(0, 0)` → "" instead of
         // the whole string. The pad loop's `pi === 2` branch supplies s.length
         // for the missing end; the missing start (pi === 1) correctly pads to 0.
+        // (#2124) An explicit `undefined` end arg is spec-equivalent to absent:
+        // substring/slice default `end` to `s.length`. Without this, the f64
+        // slot coerces `undefined` → NaN and the host runs `substring(1, NaN)`
+        // → wrong length. Detect a statically-undefined end so the same
+        // length-default path that handles a missing end fires.
+        const isStaticUndefinedExpr = (a: ts.Expression | undefined): boolean => {
+          if (a === undefined) return false;
+          let cur: ts.Expression = a;
+          while (
+            ts.isParenthesizedExpression(cur) ||
+            ts.isAsExpression(cur) ||
+            ts.isNonNullExpression(cur) ||
+            ts.isTypeAssertionExpression(cur)
+          ) {
+            cur = (cur as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression | ts.TypeAssertion)
+              .expression;
+          }
+          return (
+            (ts.isIdentifier(cur) && cur.text === "undefined") ||
+            (ts.isVoidExpression(cur) && ts.isNumericLiteral(cur.expression))
+          );
+        };
+        const substringEndUndefined =
+          (method === "substring" || method === "slice") && args.length === 2 && isStaticUndefinedExpr(args[1]);
         const needsLengthDefault =
           (method === "substring" || method === "slice") &&
-          args.length <= 1 &&
+          (args.length <= 1 || substringEndUndefined) &&
           paramTypes !== undefined &&
           paramTypes.length === 3;
         let savedReceiverLocal: number | undefined;
@@ -7522,6 +7592,19 @@ function compileCallExpression(
         // Cap at declared param count (excluding self) to avoid pushing extra values
         const userParamCount = paramTypes ? paramTypes.length - 1 : args.length;
         for (let ai = 0; ai < args.length; ai++) {
+          if (substringEndUndefined && ai === 1 && savedReceiverLocal !== undefined) {
+            // Explicit `undefined` end → s.length (#2124). Skip compiling the
+            // undefined arg; emit the receiver's length for the f64 end slot.
+            const lenIdx = ctx.jsStringImports.get("length");
+            if (lenIdx !== undefined) {
+              fctx.body.push({ op: "local.get", index: savedReceiverLocal });
+              fctx.body.push({ op: "call", funcIdx: lenIdx });
+              fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
+            } else {
+              fctx.body.push({ op: "f64.const", value: 0x7fffffff });
+            }
+            continue;
+          }
           if (ai < userParamCount) {
             const expectedArgType = paramTypes?.[ai + 1]; // +1 for self param
             const argResult = compileExpression(ctx, fctx, args[ai]!, expectedArgType);
