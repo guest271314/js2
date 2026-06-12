@@ -41,6 +41,8 @@ branch=$(git -C "${cwd:-$(pwd)}" rev-parse --abbrev-ref HEAD 2>/dev/null)
 issue=$(echo "$branch" | sed -n 's/^issue-\([a-zA-Z0-9]*\).*/\1/p')
 display_cwd=$(basename "${cwd:-$(pwd)}")
 printf '\033[01;34m%s\033[00m' "$display_cwd"
+# Model badge — before the ctx bar
+[ -n "$model" ] && printf ' \033[%sm%s\033[00m' "$model_color" "$model"
 
 # Agent PR badge — only shown when inside a worktree, for that worktree's own agent
 status_dir="/workspace/.claude/agent-status"
@@ -410,7 +412,6 @@ else
 fi
 # Repo identity (owner/name) — shown only when available and not on main (already know the repo there)
 [ -n "$repo" ] && [ -n "$in_worktree" ] && printf ' \033[00;90m%s\033[00m' "$repo"
-[ -n "$model" ] && printf ' \033[%sm%s\033[00m' "$model_color" "$model"
 [ -n "$effort" ] && [ "$effort" != "none" ] && [ "$effort" != "disabled" ] && printf ' \033[00;33m%s\033[00m' "$effort"
 # Output style — shown when not "default" (non-default modes are worth flagging)
 [ -n "$output_style" ] && [ "$output_style" != "default" ] && [ "$output_style" != "Default" ] && printf ' \033[00;36m[%s]\033[00m' "$output_style"
