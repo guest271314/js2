@@ -2344,6 +2344,13 @@ export function compileNativeStringMethodCall(
       });
       fctx.body.push({ op: "struct.new", typeIdx: ctx.nativeStrTypeIdx });
     }
+    // #2125: limit arg → i32 (ToUint32). Default (absent/undefined) is no limit,
+    // encoded as 0xFFFFFFFF (= -1 as i32) which the helper treats as unbounded.
+    if (expr.arguments.length > 1) {
+      compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
+    } else {
+      fctx.body.push({ op: "i32.const", value: -1 });
+    }
     const splitIdx = ctx.nativeStrHelpers.get("__str_split")!;
     fctx.body.push({ op: "call", funcIdx: splitIdx });
     // Return type is ref $vec_nstr — use same key as resolveWasmType for string[]
