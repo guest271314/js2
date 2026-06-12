@@ -1493,19 +1493,30 @@ export function compilePropertyAccess(
       isBuiltinTypeName(lhsTsName) &&
       isWasiErrorName(lhsTsName) &&
       isBuiltinSubtype(lhsTsName, "Error");
-    if (isErrorLhs) {
+    // #2077: a `catch (e)` binding is typed `any` (or `unknown`), so the static
+    // `isErrorLhs` gate above never fires even though the caught value IS the
+    // `$Error` struct at runtime — the field read then fell through to the
+    // generic `__extern_get` host path, which returns null in standalone mode
+    // (no host). When the receiver could be an Error at runtime (its static
+    // type is `any`/`unknown`/an Error-containing union), emit a runtime
+    // `ref.test $Error`–guarded read instead of trusting the static type.
+    const isErrorLikeRuntimeLhs = !isErrorLhs && (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+    if (isErrorLhs || isErrorLikeRuntimeLhs) {
       const structIdx = getOrRegisterErrorStructType(ctx);
       const fieldIdx = propName === "message" ? 1 : 2;
-      // Compile receiver as externref. If the LHS is e.g. a class-ref
-      // (TypeScript narrowed it to a user class extending Error, externref-
-      // backed per #1366a), `compileExpression` returns externref already.
-      const objResult = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
+      // Compile receiver. Mirror the standalone instanceof lowering
+      // (identifiers.ts): compile WITHOUT forcing externref, then coerce, so a
+      // catch-binding externref holding an `$Error` struct keeps its identity
+      // through `any.convert_extern` + `ref.test` (forcing externref as the
+      // expected type re-boxed the value and broke the ref.test — #2077).
+      const objResult = compileExpression(ctx, fctx, expr.expression);
       if (objResult && objResult.kind !== "externref") {
         coerceType(ctx, fctx, objResult, { kind: "externref" });
+      } else if (!objResult) {
+        fctx.body.push({ op: "ref.null.extern" } as Instr);
       }
       fctx.body.push({ op: "any.convert_extern" } as Instr);
-      fctx.body.push({ op: "ref.cast", typeIdx: structIdx } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx: structIdx, fieldIdx } as Instr);
+
       // The `$Error_struct` message/name fields are stored as `externref`
       // (populated by the ctor via `extern.convert_any` over a native
       // string). In nativeStrings/WASI mode every other string producer hands
@@ -1514,12 +1525,54 @@ export function compilePropertyAccess(
       // (`=== `, `.length`, concat, interpolation) that expect `(ref null
       // $AnyString)`, and the per-consumer externref→string coercion either
       // misfires or is skipped → invalid Wasm (#1797).
-      if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
-        const nativeRef: ValType = { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
-        coerceType(ctx, fctx, { kind: "externref" }, nativeRef);
-        return nativeRef;
+      const resultType: ValType =
+        ctx.nativeStrings && ctx.anyStrTypeIdx >= 0
+          ? { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx }
+          : { kind: "externref" };
+
+      if (isErrorLhs) {
+        // Static Error type — the value is always an `$Error` struct, so cast
+        // unconditionally (a runtime non-Error would mean a miscompile elsewhere).
+        fctx.body.push({ op: "ref.cast", typeIdx: structIdx } as Instr);
+        fctx.body.push({ op: "struct.get", typeIdx: structIdx, fieldIdx } as Instr);
+        if (resultType.kind !== "externref") coerceType(ctx, fctx, { kind: "externref" }, resultType);
+        return resultType;
       }
-      return { kind: "externref" };
+
+      // #2077 — `any`/`unknown` receiver (the common `catch (e)` case). The
+      // anyref is on the stack. Guard with `ref.test $Error`: when it IS an
+      // `$Error` struct, cast + read the field + coerce to the native string
+      // ref; otherwise produce a null string (a non-Error value, e.g.
+      // `throw "str"`, has no struct field to read). The whole read — including
+      // the externref→string coercion — lives in the `then` arm so a non-Error
+      // never executes a struct.get/cast. Mirrors the instanceof guard in
+      // identifiers.ts, which proves the caught struct is recoverable here.
+      const tmpAny = allocTempLocal(fctx, { kind: "anyref" });
+      fctx.body.push({ op: "local.set", index: tmpAny } as Instr);
+      fctx.body.push({ op: "local.get", index: tmpAny } as Instr);
+      fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+      // Build the `then` arm (read + coerce) into a swapped body buffer so
+      // coerceType's appends land in the arm, not the main body.
+      const savedBody = fctx.body;
+      fctx.body = [];
+      fctx.body.push({ op: "local.get", index: tmpAny } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: structIdx } as Instr);
+      fctx.body.push({ op: "struct.get", typeIdx: structIdx, fieldIdx } as Instr);
+      if (resultType.kind !== "externref") coerceType(ctx, fctx, { kind: "externref" }, resultType);
+      const thenInstrs = fctx.body;
+      fctx.body = savedBody;
+      const elseInstrs: Instr[] =
+        resultType.kind === "externref"
+          ? [{ op: "ref.null.extern" } as Instr]
+          : [{ op: "ref.null", typeIdx: (resultType as { typeIdx: number }).typeIdx } as Instr];
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: resultType },
+        then: thenInstrs,
+        else: elseInstrs,
+      } as Instr);
+      releaseTempLocal(fctx, tmpAny);
+      return resultType;
     }
   }
 
