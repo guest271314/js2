@@ -137,7 +137,7 @@ if [ -n "$used" ] || [ -n "$weekly" ] || [ -n "$five_hour" ]; then
       if (p >= 75)      { fill="48;5;196"; fg=30 }
       else if (p >= 50) { fill=43; fg=30 }
       else              { fill=42; fg=30 }
-      width = 9
+      width = 8
       filled = int(p * width / 100)
       label = sprintf(" %d%% 5h", int(p))
       bar = ""
