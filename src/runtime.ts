@@ -10348,6 +10348,14 @@ assert._isSameValue = isSameValue;
       // Handles null == undefined → true and other JS coercion rules.
       // biome-ignore lint/suspicious/noDoubleEquals: §7.2.15 IsLooselyEqual requires == semantics (null == undefined, type coercion)
       return (a: any, b: any) => (a == b ? 1 : 0);
+    case "host_add":
+      // #2058 — `+` for two externref operands (§13.15.3
+      // ApplyStringOrNumericBinaryOperator). JS `+` gives us ToPrimitive on both
+      // operands, the "concatenate if either primitive is a string" rule, and
+      // object valueOf/toString ordering for free, so `1 + "2"` → `"12"` and
+      // `1 + 2` → `3`. Returns a boxed any (number or string) the caller stores
+      // back into the `any` slot.
+      return (a: any, b: any) => a + b;
     case "same_value_zero":
       // #1360 — SameValueZero comparison (§7.2.11).
       // Same as Strict Equality except NaN === NaN is true.
