@@ -890,6 +890,16 @@ export function destructureParamArray(
       const convertedType: ValType = { kind: "ref_null", typeIdx: extVecIdx };
       const resultLocal = allocLocal(fctx, `__dparam_cvt_${fctx.locals.length}`, convertedType);
 
+      // #1970 — reset resultLocal to null at the start of the emitted
+      // sequence. The materialization fallbacks below are gated on
+      // `ref.is_null resultLocal`; when this sequence re-executes inside a
+      // loop (for-of over Map/host iterables lowers through
+      // compileExternrefArrayDestructuringDecl per iteration), a stale
+      // non-null vec from the previous iteration would skip re-materializing
+      // and destructure last iteration's values forever.
+      fctx.body.push({ op: "ref.null", typeIdx: extVecIdx } as Instr);
+      fctx.body.push({ op: "local.set", index: resultLocal });
+
       // Convert externref -> anyref
       const anyTmp = allocLocal(fctx, `__dparam_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
       fctx.body.push({ op: "local.get", index: paramIdx });
