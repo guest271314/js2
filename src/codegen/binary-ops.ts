@@ -30,6 +30,7 @@ import {
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
 import { ensureExternIsUndefinedImport, ensureLateImport } from "./expressions/late-imports.js";
+import { ensureFmod } from "./fmod.js";
 import { ensureNativeStringHelpers } from "./native-strings.js";
 import { compileLogicalAnd, compileLogicalOr, compileNullishCoalescing } from "./expressions/logical-ops.js";
 import { tryStaticToNumber } from "./expressions/misc.js";
@@ -2799,63 +2800,25 @@ function compileBitwiseBinaryOp(
 }
 
 function compileModulo(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): ValType {
-  emitModulo(fctx);
+  emitModulo(ctx, fctx);
   return { kind: "f64" };
 }
 
 /**
- * Emit JS remainder (a % b) with correct IEEE 754 edge cases.
- * Stack: [a_f64, b_f64] -> [result_f64]
+ * Emit JS remainder (`a % b`) on f64 operands as a call to the Wasm-native
+ * `__fmod` helper, which computes the *exact* IEEE-754 remainder
+ * ([Number::remainder §6.1.6.1.6](https://tc39.es/ecma262/#sec-numeric-types-number-remainder)).
+ * Stack: [a_f64, b_f64] -> [result_f64].
  *
- * Edge cases handled:
- * - x % Infinity = x (when x is finite)
- * - -0 % x = -0 (sign of zero preserved via f64.copysign)
- * - Infinity % x = NaN, x % 0 = NaN, NaN % x = NaN (handled naturally by formula)
+ * The previous inline formula `a - trunc(a/b)*b` (+ copysign) was not fmod: it
+ * drifted by ULPs, collapsed to 0 for large `a/b`, and overflowed to ±Infinity
+ * when `a/b` exceeded f64 range. `__fmod` handles all of those plus the #216
+ * edge cases (`x % Inf`, `-0 % x`, `Inf % x`, `x % 0`, `NaN % x`) internally.
+ * See `fmod.ts` for the algorithm and correctness notes (#2056).
  */
-export function emitModulo(fctx: FunctionContext): void {
-  const tmpB = allocTempLocal(fctx, { kind: "f64" });
-  const tmpA = allocTempLocal(fctx, { kind: "f64" });
-
-  fctx.body.push({ op: "local.set", index: tmpB });
-  fctx.body.push({ op: "local.set", index: tmpA });
-
-  // Build the "then" branch: b is infinite and a is finite → result is a
-  const thenInstrs: Instr[] = [{ op: "local.get", index: tmpA }];
-
-  // Build the "else" branch: standard formula a - trunc(a/b) * b with copysign
-  const elseInstrs: Instr[] = [
-    { op: "local.get", index: tmpA },
-    { op: "local.get", index: tmpA },
-    { op: "local.get", index: tmpB },
-    { op: "f64.div" },
-    { op: "f64.trunc" }, // JS % uses truncation toward zero, not floor
-    { op: "local.get", index: tmpB },
-    { op: "f64.mul" },
-    { op: "f64.sub" },
-    // Preserve sign of dividend for zero results (-0 % x should be -0)
-    { op: "local.get", index: tmpA },
-    { op: "f64.copysign" },
-  ];
-
-  // Check: if |b| == Infinity and a is finite, result is a; else standard formula
-  fctx.body.push({ op: "local.get", index: tmpB });
-  fctx.body.push({ op: "f64.abs" });
-  fctx.body.push({ op: "f64.const", value: Infinity });
-  fctx.body.push({ op: "f64.eq" });
-  fctx.body.push({ op: "local.get", index: tmpA });
-  fctx.body.push({ op: "f64.abs" });
-  fctx.body.push({ op: "f64.const", value: Infinity });
-  fctx.body.push({ op: "f64.ne" });
-  fctx.body.push({ op: "i32.and" });
-  // Use if/then/else to select between Infinity shortcut and standard formula
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "val", type: { kind: "f64" } },
-    then: thenInstrs,
-    else: elseInstrs,
-  });
-  releaseTempLocal(fctx, tmpA);
-  releaseTempLocal(fctx, tmpB);
+export function emitModulo(ctx: CodegenContext, fctx: FunctionContext): void {
+  const fmodIdx = ensureFmod(ctx);
+  fctx.body.push({ op: "call", funcIdx: fmodIdx });
 }
 
 /**

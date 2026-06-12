@@ -2435,8 +2435,24 @@ const STRING_METHOD_TABLE: Readonly<Record<string, StringMethodSig>> = {
     result: irVal({ kind: "f64" }),
     requiredArgs: 1, // fromIndex optional
   },
+  // #2002 — the second arg is the start position (includes/startsWith) or
+  // endPosition (endsWith). Declared as an optional f64 so the IR host path
+  // forwards it to `string_<method>` (whose import signature is now
+  // `(externref, externref, f64) -> i32`). An omitted position pads with NaN;
+  // the `string_method` host shim strips a trailing NaN so the JS method
+  // applies its spec default (0 for includes/startsWith, length for endsWith).
   includes: {
-    hostArgs: [{ kind: "externref" }],
+    hostArgs: [{ kind: "externref" }, { kind: "f64" }],
+    result: irVal({ kind: "i32" }),
+    requiredArgs: 1,
+  },
+  startsWith: {
+    hostArgs: [{ kind: "externref" }, { kind: "f64" }],
+    result: irVal({ kind: "i32" }),
+    requiredArgs: 1,
+  },
+  endsWith: {
+    hostArgs: [{ kind: "externref" }, { kind: "f64" }],
     result: irVal({ kind: "i32" }),
     requiredArgs: 1,
   },
@@ -2458,7 +2474,16 @@ function lowerStringMethodCall(
   }
 
   const useNative = cx.resolver?.nativeStrings?.() === true;
-  if (useNative && (methodName === "indexOf" || methodName === "includes")) {
+  if (
+    useNative &&
+    (methodName === "indexOf" ||
+      methodName === "includes" ||
+      // #2002 — the native string backend lowers the position arg via its
+      // own __str_* helpers (src/codegen/string-ops.ts); defer to the legacy
+      // native path rather than re-implement position handling in the IR.
+      methodName === "startsWith" ||
+      methodName === "endsWith")
+  ) {
     return null;
   }
   const funcName = useNative ? `__str_${methodName}` : `string_${methodName}`;
@@ -2521,6 +2546,18 @@ function lowerStringMethodCall(
       if (methodName === "slice" && i === 1 && expectedHost.kind === "f64") {
         const lenVal = cx.builder.emitStringLen(recv);
         loweredArgs.push(lenVal);
+        continue;
+      }
+      // #2002 — includes/startsWith/endsWith pad an omitted position with NaN.
+      // The `string_method` host shim strips a trailing NaN so the JS method
+      // applies its spec default (0 for includes/startsWith, length for
+      // endsWith) instead of ToInteger(NaN)=0.
+      if (
+        expectedHost.kind === "f64" &&
+        (methodName === "includes" || methodName === "startsWith" || methodName === "endsWith")
+      ) {
+        const nan = cx.builder.emitConst({ kind: "f64", value: NaN }, irVal({ kind: "f64" }));
+        loweredArgs.push(nan);
         continue;
       }
       const def = emitDefaultExternArg(cx, expectedHost);

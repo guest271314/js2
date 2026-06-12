@@ -1,10 +1,11 @@
 ---
 id: 2057
 title: "Math.min/max constant-fold a reassigned variable to NaN — isStaticNaN traces initializers without const/reassignment check"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: critical
 feasibility: easy
 reasoning_effort: medium
