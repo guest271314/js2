@@ -435,7 +435,24 @@ const RE_FIELD_NGROUPS = 1;
 const RE_FIELD_PROG = 2;
 const RE_FIELD_CLASS_TABLE = 3;
 const RE_FIELD_SOURCE = 4;
-const RE_FIELD_LASTINDEX = 5;
+const RE_FIELD_NSCRATCH = 5; // #1959 — scratch slots for PROGRESS guards
+const RE_FIELD_LASTINDEX = 6;
+
+/**
+ * Push `2 * nGroups + nScratch` (the VM caps-array length) onto the stack,
+ * reading both fields from a `$NativeRegExp` struct local (#1959). The caps
+ * array carries the real capture slots plus the scratch slots that back
+ * PROGRESS empty-loop guards.
+ */
+function pushNSlots(fctx: FunctionContext, regexpLocal: number, structTypeIdx: number): void {
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_NGROUPS });
+  fctx.body.push({ op: "i32.const", value: 2 });
+  fctx.body.push({ op: "i32.mul" });
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_NSCRATCH });
+  fctx.body.push({ op: "i32.add" });
+}
 
 /**
  * EscapeRegExpPattern (ECMA-262 §22.2.6.13.1), computed at compile time —
@@ -497,6 +514,10 @@ function ensureStandaloneRegExpStruct(ctx: CodegenContext): number {
     { name: "prog", type: i32ArrRef, mutable: false },
     { name: "classTable", type: i32ArrRef, mutable: false },
     { name: "source", type: nativeStringType(ctx), mutable: false },
+    // Scratch capture-slot count for PROGRESS empty-loop guards (#1959). The VM
+    // caps array is sized `2*nGroups + nScratch`; scratch slots are never
+    // reported as captures. Field added after source to keep lastIndex last.
+    { name: "nScratch", type: { kind: "i32" } as ValType, mutable: false },
     // [[LastIndex]] (§22.2.7.1) — a plain writable number property on the
     // RegExp object. Stored as f64; exec applies ToLength at use time. Only
     // g/y exec mutates it (#1913); reads/writes route through the #1914
@@ -542,7 +563,9 @@ function emitStandaloneRegExpStruct(
   // EscapeRegExpPattern) so the `.source` getter is a plain field read.
   const srcType = compileStringLiteral(ctx, fctx, escapeRegExpPattern(pattern), node);
   if (!srcType) return null;
-  // field 5: lastIndex — fresh RegExp objects start at 0 (§22.2.3.3).
+  // field 5: nScratch — PROGRESS empty-loop guard slots (#1959).
+  fctx.body.push({ op: "i32.const", value: compiled.nScratch });
+  // field 6: lastIndex — fresh RegExp objects start at 0 (§22.2.3.3).
   fctx.body.push({ op: "f64.const", value: 0 });
   fctx.body.push({ op: "struct.new", typeIdx });
   return { kind: "ref", typeIdx };
@@ -770,12 +793,10 @@ function emitRegexSearchCall(
   });
   fctx.body.push({ op: "local.set", index: inputLocal });
 
-  // caps = array.new_default(2 * nGroups)
+  // caps = array.new_default(2 * nGroups + nScratch) — scratch slots back the
+  // PROGRESS empty-loop guards (#1959); they ride along in the caps array.
   const capsLocal = allocLocal(fctx, `__re_caps_${fctx.locals.length}`, { kind: "ref", typeIdx: i32Arr });
-  fctx.body.push({ op: "local.get", index: regexpLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_NGROUPS });
-  fctx.body.push({ op: "i32.const", value: 2 });
-  fctx.body.push({ op: "i32.mul" });
+  pushNSlots(fctx, regexpLocal, structTypeIdx);
   fctx.body.push({ op: "array.new_default", typeIdx: i32Arr } as Instr);
   fctx.body.push({ op: "local.set", index: capsLocal });
 
@@ -794,11 +815,8 @@ function emitRegexSearchCall(
   fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_PROG });
   fctx.body.push({ op: "local.get", index: regexpLocal });
   fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_CLASS_TABLE });
-  // nSlots = 2 * nGroups
-  fctx.body.push({ op: "local.get", index: regexpLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_NGROUPS });
-  fctx.body.push({ op: "i32.const", value: 2 });
-  fctx.body.push({ op: "i32.mul" });
+  // nSlots = 2 * nGroups + nScratch
+  pushNSlots(fctx, regexpLocal, structTypeIdx);
   // input data / off / len
   fctx.body.push({ op: "local.get", index: inputLocal });
   fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }); // data
@@ -1120,6 +1138,9 @@ export function tryCompileStandaloneStringMatch(
     fctx.body.push({ op: "local.get", index: subjLocal });
     fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }); // len
     fctx.body.push({ op: "local.get", index: subjLocal });
+    // nScratch (#1959) — PROGRESS empty-loop guard slots, last arg.
+    fctx.body.push({ op: "local.get", index: regexpLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_NSCRATCH });
     fctx.body.push({ op: "call", funcIdx: matchAllIdx });
     // lastIndex = 0 (net effect of the spec's exec loop on a global regex).
     fctx.body.push({ op: "local.get", index: regexpLocal });
@@ -1245,6 +1266,9 @@ export function tryCompileStandaloneStringReplace(
   fctx.body.push({ op: "local.get", index: subjLocal });
   fctx.body.push({ op: "local.get", index: replLocal });
   fctx.body.push({ op: "i32.const", value: globalReplace ? 1 : 0 });
+  // nScratch (#1959) — PROGRESS empty-loop guard slots, last arg.
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_NSCRATCH });
   fctx.body.push({ op: "call", funcIdx: replaceIdx });
   return nativeStringType(ctx);
 }
@@ -1343,6 +1367,9 @@ export function tryCompileStandaloneStringSplit(
       return null;
     }
   }
+  // nScratch (#1959) — PROGRESS empty-loop guard slots, last arg.
+  fctx.body.push({ op: "local.get", index: regexpLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_NSCRATCH });
   fctx.body.push({ op: "call", funcIdx: splitIdx });
 
   const nstrVecTypeIdx = ctx.vecTypeMap.get(`ref_${ctx.anyStrTypeIdx}`);
