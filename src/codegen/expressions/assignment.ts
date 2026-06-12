@@ -4843,8 +4843,14 @@ export function compileCompoundAssignment(
       }
     }
 
-    // For non-f64/non-i32 boxed captures with arithmetic ops, coerce to f64 first (#795, #816)
-    const boxedNeedsCoerce = boxed.valType.kind !== "f64" && boxed.valType.kind !== "i32";
+    // The compound-op switch below emits f64 arithmetic, so any non-f64 cell
+    // value (and its RHS) must be promoted to f64 first and coerced back on
+    // writeback. This includes i32 (#2120): a captured i32 loop var that is
+    // also compound-assigned in the body (`for (let i…) { f = () => i; i += 1 }`)
+    // read the cell as i32 but hit `f64.add`, producing an invalid module
+    // (F64Add left value type mismatch). The i32↔f64 round-trip is exact for the
+    // counter range. (#795, #816 covered the externref/other-ref cells.)
+    const boxedNeedsCoerce = boxed.valType.kind !== "f64";
     if (boxedNeedsCoerce) {
       coerceType(ctx, fctx, boxed.valType, { kind: "f64" });
     }

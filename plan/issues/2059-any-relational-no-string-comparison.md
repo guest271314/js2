@@ -1,11 +1,10 @@
 ---
 id: 2059
 title: "relational operators on two any/externref operands never perform string comparison (\"a\" < \"b\" → false)"
-status: done
-sprint: 61
+status: ready
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-12
-completed: 2026-06-12
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -193,59 +192,3 @@ exercises in default mode.
 - Standalone test262 shard: confirm no movement in comparator buckets (the −788
   guard from #2058 — relational gate is disjoint from equality, so the
   `isSameValue` path is untouched).
-
----
-
-## Resolution (2026-06-12)
-
-Reimplemented per the cluster spec (PR #1374 was closed — see below). Adds a new
-`__host_compare` host import and a shared `emitAnyRelational`, slotted next to the
-#2058 `+`/`emitAnyAdd` gate and reusing the same externref-spill scaffolding.
-
-### Why #1374 regressed (and how this avoids it)
-
-PR #1374 gated on the **TS checker types** (`!isPrimNumericish` on both sides), so
-**object/class** relationals were swept into the externref path and `__host_*`
-threw on opaque WasmGC structs → 14 runtime_error regressions, net −11. This
-reimplementation gates **only on statically `any`/`unknown` operands**
-(`flags & (Any | Unknown)`). A concrete object/class type is neither, so it keeps
-its existing relational path untouched — no new host-comparator exposure.
-
-### What landed
-
-1. **`__host_compare` wiring** — `src/index.ts` (`host_compare` intent),
-   `src/compiler/import-manifest.ts` (`__host_compare → host_compare`),
-   `src/runtime.ts`. The host body returns a **4-way** result so one import
-   serves all four operators: `-1` (a<b), `1` (a>b), `0` (equal), `2`
-   (incomparable — a NaN/undefined ToNumber operand; §7.2.13 returns `undefined`
-   ⇒ the relational is `false`). JS `<`/`>` give ToPrimitive(number) + the
-   string-lexicographic / string-vs-number-numeric dispatch for free.
-2. **`emitAnyRelational(ctx, fctx, expr, op)`** (`src/codegen/binary-ops.ts`) —
-   compiles both operands with an externref hint (keeps runtime strings boxed),
-   then:
-   - JS-host → `__host_compare`, map the -1/0/1/2 result to the operator's
-     boolean (the `2` sentinel can never satisfy any of the four predicates).
-   - standalone/WASI with `nativeStrings` → runtime branch: both `__typeof_string`
-     → `any.convert_extern` + `ref.cast $AnyString` + `__str_flatten` + native
-     `__str_compare` (lexicographic, -1/0/1); else ToNumber both
-     (`__unbox_number`) and derive a -1/0/1/2 sign via f64 compares. No
-     `__host_compare` import emitted standalone.
-   - no host / no native strings → legacy f64 compare (status quo).
-3. **Relational gate** (`compileBinaryExpression`, next to the #2058 `+` gate)
-   — fires when `isRelational && (leftIsAnyish || rightIsAnyish)` AND default
-   mode (`anyValueTypeIdx < 0`), before the f64 `numericHint` is applied (the
-   root cause: operands were ToNumber-coerced at compile time). Fast mode keeps
-   the AnyValue path; provably-typed relationals keep their fast paths.
-
-### Outcome (all verified)
-
-`lt("a","b")`/`lt("10","9")`/`ge("abc","abd")` → match Node (lexicographic);
-mixed `lt("10",9)` → false, `lt(5,"9")` → true (numeric); NaN operands → all
-false; `null < 1` → true. Provably-numeric / provably-string relationals
-unchanged. Standalone numeric compares validate + run.
-
-### Tests
-
-`tests/issue-2059-any-relational.test.ts` — JS-host (19 cases, boolean-normalized
-against Node via `compileToWasm`/`evaluateAsJs`) + a provably-typed-unchanged
-case + 3 standalone (`--target standalone`, validate + run).

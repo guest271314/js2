@@ -517,8 +517,28 @@ export function ensureRegexRun(ctx: CodegenContext): number {
                                             op: "if",
                                             blockType: { kind: "empty" },
                                             then: lookaroundArm(),
-                                            // op == MATCH (the only remaining op): return 1
-                                            else: [{ op: "i32.const", value: 1 }, { op: "return" }],
+                                            else: [
+                                              { op: "local.get", index: OP },
+                                              { op: "i32.const", value: ReOp.PROGRESS },
+                                              { op: "i32.eq" },
+                                              {
+                                                op: "if",
+                                                blockType: { kind: "empty" },
+                                                then: progressArm(),
+                                                else: [
+                                                  { op: "local.get", index: OP },
+                                                  { op: "i32.const", value: ReOp.CLEAR },
+                                                  { op: "i32.eq" },
+                                                  {
+                                                    op: "if",
+                                                    blockType: { kind: "empty" },
+                                                    then: clearArm(),
+                                                    // op == MATCH (the only remaining op): return 1
+                                                    else: [{ op: "i32.const", value: 1 }, { op: "return" }],
+                                                  },
+                                                ],
+                                              },
+                                            ],
                                           },
                                         ],
                                       },
@@ -662,6 +682,78 @@ export function ensureRegexRun(ctx: CodegenContext): number {
       { op: "local.get", index: A },
       { op: "local.get", index: SP },
       { op: "array.set", typeIdx: i32Arr },
+      { op: "local.get", index: PC },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "local.set", index: PC },
+    ];
+  }
+
+  function progressArm(): Instr[] {
+    // Empty-iteration guard (§22.2.2.3.1, #1959): if sp == caps[a] (the loop
+    // entry recorded by a preceding SAVE), the body matched empty — fail the
+    // iteration so backtracking takes the quantifier's exit arm. Otherwise
+    // pc++. Mirrors the PROGRESS case in regex/vm.ts.
+    return [
+      { op: "local.get", index: SP },
+      { op: "local.get", index: CAPS },
+      { op: "local.get", index: A },
+      { op: "array.get", typeIdx: i32Arr },
+      { op: "i32.eq" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "i32.const", value: 1 },
+          { op: "local.set", index: FAILED },
+        ],
+        else: [
+          { op: "local.get", index: PC },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "local.set", index: PC },
+        ],
+      },
+    ];
+  }
+
+  function clearArm(): Instr[] {
+    // Reset capture slots a..b (inclusive) to -1 (§22.2.2.3.1, #1960). TMPI is
+    // the loop cursor (general i32 scratch — does not overlap backref state).
+    // Mirrors the CLEAR case in regex/vm.ts; backtrack restore is handled by
+    // the enclosing SPLIT's caps snapshot.
+    return [
+      { op: "local.get", index: A },
+      { op: "local.set", index: TMPI },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if (TMPI > B) break
+              { op: "local.get", index: TMPI },
+              { op: "local.get", index: B },
+              { op: "i32.gt_s" },
+              { op: "br_if", depth: 1 },
+              // caps[TMPI] = -1
+              { op: "local.get", index: CAPS },
+              { op: "local.get", index: TMPI },
+              { op: "i32.const", value: -1 },
+              { op: "array.set", typeIdx: i32Arr },
+              // TMPI++
+              { op: "local.get", index: TMPI },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: TMPI },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      // pc++
       { op: "local.get", index: PC },
       { op: "i32.const", value: 1 },
       { op: "i32.add" },
@@ -1381,6 +1473,7 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
       strRef, // subject (flattened)
       strRef, // replacement (flattened)
       { kind: "i32" }, // global flag
+      { kind: "i32" }, // nScratch (#1959 — PROGRESS guard slots)
     ],
     [strRef],
   );
@@ -1396,21 +1489,24 @@ export function ensureRegexReplace(ctx: CodegenContext): number {
     SLEN = 5,
     SUBJ = 6,
     REPL = 7,
-    GLOBAL = 8;
+    GLOBAL = 8,
+    NSCRATCH = 9;
   // locals
-  const NSLOTS = 9; // 2 * nGroups
-  const CAPS = 10; // ref array<i32> capture slots
-  const POS = 11; // current search start
-  const LASTEND = 12; // end of last replaced match (start of next kept slice)
-  const RESULT = 13; // ref $NativeString accumulator
-  const MSTART = 14;
-  const MEND = 15;
+  const NSLOTS = 10; // 2 * nGroups + nScratch
+  const CAPS = 11; // ref array<i32> capture slots
+  const POS = 12; // current search start
+  const LASTEND = 13; // end of last replaced match (start of next kept slice)
+  const RESULT = 14; // ref $NativeString accumulator
+  const MSTART = 15;
+  const MEND = 16;
 
   const body: Instr[] = [
-    // nSlots = 2 * nGroups
+    // nSlots = 2 * nGroups + nScratch (#1959 scratch slots ride in caps)
     { op: "local.get", index: NGROUPS },
     { op: "i32.const", value: 2 },
     { op: "i32.mul" },
+    { op: "local.get", index: NSCRATCH },
+    { op: "i32.add" },
     { op: "local.set", index: NSLOTS },
     { op: "local.get", index: NSLOTS },
     { op: "array.new_default", typeIdx: i32Arr },
@@ -1779,6 +1875,7 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
       { kind: "i32" }, // strLen
       strRef, // subject (flattened)
       { kind: "i32" }, // lim (u32; -1 = no limit)
+      { kind: "i32" }, // nScratch (#1959 — PROGRESS guard slots)
     ],
     [nstrVecRef],
   );
@@ -1793,22 +1890,23 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
     SOFF = 4,
     SLEN = 5,
     SUBJ = 6,
-    LIM = 7;
+    LIM = 7,
+    NSCRATCH = 8;
   // locals
-  const NSLOTS = 8;
-  const CAPS = 9;
-  const P = 10; // last split point (spec p)
-  const Q = 11; // scan cursor (spec q)
-  const RARR = 12;
-  const RLEN = 13;
-  const RCAP = 14;
-  const NEWARR = 15;
-  const PART = 16;
-  const MSTART = 17;
-  const MEND = 18;
-  const GI = 19; // capture interleave index
-  const CS = 20;
-  const CE = 21;
+  const NSLOTS = 9;
+  const CAPS = 10;
+  const P = 11; // last split point (spec p)
+  const Q = 12; // scan cursor (spec q)
+  const RARR = 13;
+  const RLEN = 14;
+  const RCAP = 15;
+  const NEWARR = 16;
+  const PART = 17;
+  const MSTART = 18;
+  const MEND = 19;
+  const GI = 20; // capture interleave index
+  const CS = 21;
+  const CE = 22;
 
   const appendPart = (): Instr[] => [
     // Grow result if needed.
@@ -1887,10 +1985,12 @@ export function ensureRegexSplit(ctx: CodegenContext): number {
   ];
 
   const body: Instr[] = [
-    // nSlots = 2 * nGroups; caps = array.new_default(nSlots)
+    // nSlots = 2 * nGroups + nScratch; caps = array.new_default(nSlots) (#1959)
     { op: "local.get", index: NGROUPS },
     { op: "i32.const", value: 2 },
     { op: "i32.mul" },
+    { op: "local.get", index: NSCRATCH },
+    { op: "i32.add" },
     { op: "local.set", index: NSLOTS },
     { op: "local.get", index: NSLOTS },
     { op: "array.new_default", typeIdx: i32Arr },
@@ -2140,6 +2240,7 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
       { kind: "i32" }, // strOff
       { kind: "i32" }, // strLen
       strRef, // subject (flattened)
+      { kind: "i32" }, // nScratch (#1959 — PROGRESS guard slots)
     ],
     [{ kind: "ref_null", typeIdx: matchVecTypeIdx }],
   );
@@ -2153,23 +2254,27 @@ export function ensureRegexMatchAll(ctx: CodegenContext): number {
     SDATA = 3,
     SOFF = 4,
     SLEN = 5,
-    SUBJ = 6;
+    SUBJ = 6,
+    NSCRATCH = 7;
   // locals
-  const NSLOTS = 7;
-  const CAPS = 8;
-  const POS = 9;
-  const RARR = 10;
-  const RLEN = 11;
-  const RCAP = 12;
-  const NEWARR = 13;
-  const MSTART = 14;
-  const MEND = 15;
-  const FIRSTMS = 16;
+  const NSLOTS = 8;
+  const CAPS = 9;
+  const POS = 10;
+  const RARR = 11;
+  const RLEN = 12;
+  const RCAP = 13;
+  const NEWARR = 14;
+  const MSTART = 15;
+  const MEND = 16;
+  const FIRSTMS = 17;
 
   const body: Instr[] = [
+    // nSlots = 2 * nGroups + nScratch (#1959 scratch slots ride in caps)
     { op: "local.get", index: NGROUPS },
     { op: "i32.const", value: 2 },
     { op: "i32.mul" },
+    { op: "local.get", index: NSCRATCH },
+    { op: "i32.add" },
     { op: "local.set", index: NSLOTS },
     { op: "local.get", index: NSLOTS },
     { op: "array.new_default", typeIdx: i32Arr },
