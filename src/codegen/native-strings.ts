@@ -2706,33 +2706,50 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
   }
 
   // --- $__str_isWhitespace(codeUnit: i32) -> i32 (helper, not exported) ---
-  // Checks if a WTF-16 code unit is whitespace: 0x09-0x0D, 0x20, 0xA0, 0xFEFF
+  // §22.1.3.32 TrimString trims WhiteSpace + LineTerminator. The full set
+  // (#1963) mirrors the regex `\s` SPACE table in src/codegen/regex/parse.ts:
+  //   0x09-0x0D, 0x20, 0xA0, 0x1680, 0x2000-0x200A, 0x2028, 0x2029, 0x202F,
+  //   0x205F, 0x3000, 0xFEFF (BOM/ZWNBSP).
   {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }]);
     const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     ctx.nativeStrHelpers.set("__str_isWhitespace", funcIdx);
 
-    const body: Instr[] = [
-      // Check ranges: 0x09 <= c <= 0x0D || c == 0x20 || c == 0xA0 || c == 0xFEFF
-      // Use a chain of comparisons
+    // Membership test as an OR-chain. `eq(v)` / `range(lo,hi)` each push one i32
+    // truthy value; all are OR-ed together. The two ASCII forms (0x20 and
+    // 0x09-0x0D) stay first so the common case folds cheaply.
+    const eq = (v: number): Instr[] => [{ op: "local.get", index: 0 }, { op: "i32.const", value: v }, { op: "i32.eq" }];
+    const range = (lo: number, hi: number): Instr[] => [
       { op: "local.get", index: 0 },
-      { op: "i32.const", value: 0x20 },
-      { op: "i32.eq" },
-      { op: "local.get", index: 0 },
-      { op: "i32.const", value: 0x09 },
+      { op: "i32.const", value: lo },
       { op: "i32.ge_u" },
       { op: "local.get", index: 0 },
-      { op: "i32.const", value: 0x0d },
+      { op: "i32.const", value: hi },
       { op: "i32.le_u" },
       { op: "i32.and" },
+    ];
+
+    const body: Instr[] = [
+      ...eq(0x20),
+      ...range(0x09, 0x0d),
       { op: "i32.or" },
-      { op: "local.get", index: 0 },
-      { op: "i32.const", value: 0xa0 },
-      { op: "i32.eq" },
+      ...eq(0xa0),
       { op: "i32.or" },
-      { op: "local.get", index: 0 },
-      { op: "i32.const", value: 0xfeff },
-      { op: "i32.eq" },
+      ...eq(0x1680),
+      { op: "i32.or" },
+      ...range(0x2000, 0x200a),
+      { op: "i32.or" },
+      ...eq(0x2028),
+      { op: "i32.or" },
+      ...eq(0x2029),
+      { op: "i32.or" },
+      ...eq(0x202f),
+      { op: "i32.or" },
+      ...eq(0x205f),
+      { op: "i32.or" },
+      ...eq(0x3000),
+      { op: "i32.or" },
+      ...eq(0xfeff),
       { op: "i32.or" },
     ];
 
