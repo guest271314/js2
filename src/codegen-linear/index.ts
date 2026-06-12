@@ -573,7 +573,7 @@ function compileStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt: ts.
   } else if (ts.isIfStatement(stmt)) {
     compileExpression(ctx, fctx, stmt.expression);
     // Convert f64 condition to i32 (0.0 = false, else true)
-    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.expression));
+    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.expression), { ctx, expr: stmt.expression });
 
     const thenBody: Instr[] = [];
     const savedBody = fctx.body;
@@ -613,7 +613,7 @@ function compileStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt: ts.
     // Compile condition (break out if false)
     fctx.body = loopBody;
     compileExpression(ctx, fctx, stmt.expression);
-    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.expression));
+    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.expression), { ctx, expr: stmt.expression });
     fctx.body.push({ op: "i32.eqz" });
     fctx.body.push({ op: "br_if", depth: 1 }); // break to outer block
 
@@ -660,7 +660,7 @@ function compileStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt: ts.
     // Condition
     if (stmt.condition) {
       compileExpression(ctx, fctx, stmt.condition);
-      emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.condition));
+      emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.condition), { ctx, expr: stmt.condition });
       fctx.body.push({ op: "i32.eqz" });
       fctx.body.push({ op: "br_if", depth: 1 }); // break to outer block
     }
@@ -1193,7 +1193,7 @@ function compileDoWhileStatement(ctx: LinearContext, fctx: LinearFuncContext, st
 
   // Compile condition
   compileExpression(ctx, fctx, stmt.expression);
-  emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.expression));
+  emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.expression), { ctx, expr: stmt.expression });
   // If condition is true, continue looping (br to loop)
   fctx.body.push({ op: "br_if", depth: 0 });
 
@@ -1448,7 +1448,7 @@ export function compileExpression(ctx: LinearContext, fctx: LinearFuncContext, e
       // unary plus is a no-op for numbers
     } else if (expr.operator === ts.SyntaxKind.ExclamationToken) {
       compileExpression(ctx, fctx, expr.operand);
-      emitTruthyCoercion(fctx, inferExprType(ctx, fctx, expr.operand));
+      emitTruthyCoercion(fctx, inferExprType(ctx, fctx, expr.operand), { ctx, expr: expr.operand });
       fctx.body.push({ op: "i32.eqz" });
       // Result is i32 (0 or 1), convert back to f64
       fctx.body.push({ op: "f64.convert_i32_s" });
@@ -1617,7 +1617,7 @@ export function compileExpression(ctx: LinearContext, fctx: LinearFuncContext, e
   } else if (ts.isConditionalExpression(expr)) {
     // ternary: cond ? then : else
     compileExpression(ctx, fctx, expr.condition);
-    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, expr.condition));
+    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, expr.condition), { ctx, expr: expr.condition });
 
     const resultType = inferExprType(ctx, fctx, expr.whenTrue);
 
@@ -2107,7 +2107,7 @@ function compileBinaryExpression(ctx: LinearContext, fctx: LinearFuncContext, ex
   if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
     compileExpression(ctx, fctx, expr.left);
     const leftType = inferExprType(ctx, fctx, expr.left);
-    emitTruthyCoercion(fctx, leftType);
+    emitTruthyCoercion(fctx, leftType, { ctx, expr: expr.left });
     const thenBody: Instr[] = [];
     const elseBody: Instr[] = [];
     const savedBody = fctx.body;
@@ -2352,18 +2352,33 @@ function compoundAssignmentOp(op: ts.SyntaxKind): Instr {
 }
 
 /** Convert a value to i32 truthiness (for conditions) */
-function emitTruthyCoercion(fctx: LinearFuncContext, type: ValType): void {
+function emitTruthyCoercion(
+  fctx: LinearFuncContext,
+  type: ValType,
+  opts?: { ctx: LinearContext; expr: ts.Expression },
+): void {
   if (type.kind === "f64") {
     // f64 → i32: abs(value) > 0.0. The previous `value != 0` test made NaN
     // truthy (NaN != 0 is true); JS ToBoolean(NaN) is false (#1937).
     // abs folds -0 to 0 and NaN > 0 is false, so this covers 0, -0 and NaN.
-    // Note: strings are i32 pointers here, so JS "" falsiness does not apply —
-    // a string pointer is always nonzero (see the string layout in runtime.ts).
     fctx.body.push({ op: "f64.abs" });
     fctx.body.push({ op: "f64.const", value: 0 });
     fctx.body.push({ op: "f64.gt" });
   } else if (type.kind === "i32") {
-    // Already i32, no conversion needed
+    // #1975: a string value is an i32 POINTER (always nonzero), so raw i32
+    // truthiness would make every string — including "" — truthy. JS
+    // ToBoolean(string) is `length !== 0`, so for a string-typed expression
+    // replace the pointer on the stack with `__str_len(ptr) != 0`. Non-string
+    // i32 values (numbers-as-i32, booleans) keep raw i32 truthiness.
+    if (opts !== undefined && isStringExpr(opts.ctx, fctx, opts.expr)) {
+      const strLenIdx = opts.ctx.funcMap.get("__str_len");
+      if (strLenIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: strLenIdx });
+        fctx.body.push({ op: "i32.const", value: 0 });
+        fctx.body.push({ op: "i32.ne" });
+      }
+    }
+    // else: already i32, no conversion needed
   }
 }
 
@@ -3361,7 +3376,7 @@ function compileArrayHOF(
   if (method === "filter") {
     // if (callback(elem)) __arr_push(result, elem)
     compileExpression(ctx, fctx, bodyExpr);
-    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, bodyExpr));
+    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, bodyExpr), { ctx, expr: bodyExpr });
     const pushBody: Instr[] = [];
     const savedBody2 = fctx.body;
     fctx.body = pushBody;
@@ -3386,7 +3401,7 @@ function compileArrayHOF(
   } else if (method === "some") {
     // if (callback(elem)) { result = 1.0; break; }
     compileExpression(ctx, fctx, bodyExpr);
-    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, bodyExpr));
+    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, bodyExpr), { ctx, expr: bodyExpr });
     const foundBody: Instr[] = [];
     const savedBody2 = fctx.body;
     fctx.body = foundBody;
@@ -3398,7 +3413,7 @@ function compileArrayHOF(
   } else if (method === "find") {
     // if (callback(elem)) { result = elem; break; }
     compileExpression(ctx, fctx, bodyExpr);
-    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, bodyExpr));
+    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, bodyExpr), { ctx, expr: bodyExpr });
     const foundBody: Instr[] = [];
     const savedBody2 = fctx.body;
     fctx.body = foundBody;
