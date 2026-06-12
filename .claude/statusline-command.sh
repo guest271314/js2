@@ -42,17 +42,6 @@ issue=$(echo "$branch" | sed -n 's/^issue-\([a-zA-Z0-9]*\).*/\1/p')
 display_cwd=$(basename "${cwd:-$(pwd)}")
 printf '\033[01;34m%s\033[00m' "$display_cwd"
 
-# PR badge from JSON (open PR for current branch — shown in both views)
-if [ -n "$pr_number" ]; then
-  case "$pr_state" in
-    approved)           pr_color="00;32" ;  pr_icon="✓" ;;
-    changes_requested)  pr_color="00;31" ;  pr_icon="✗" ;;
-    draft)              pr_color="00;90" ;  pr_icon="~" ;;
-    *)                  pr_color="00;33" ;  pr_icon="?" ;;
-  esac
-  printf ' \033[%smPR#%s%s\033[00m' "$pr_color" "$pr_number" "$pr_icon"
-fi
-
 # Agent PR badge — only shown when inside a worktree, for that worktree's own agent
 status_dir="/workspace/.claude/agent-status"
 if [ -d "$status_dir" ] && [ -n "$in_worktree" ]; then
@@ -429,6 +418,16 @@ fi
 [ -n "$vim_mode" ] && printf ' \033[00;35m%s\033[00m' "$vim_mode"
 # Agent name — shown when running under --agent flag
 [ -n "$agent_name" ] && printf ' \033[00;36magent:%s\033[00m' "$agent_name"
-# Session name (when /rename has been used) — kept last so it ends the line
+# Session name (when /rename has been used) — near the end of the line
 [ -n "$session_name" ] && printf ' \033[00;36m(%s)\033[00m' "$session_name"
+# PR badge from JSON (open PR for current branch) — kept last so it ends the line
+if [ -n "$pr_number" ]; then
+  case "$pr_state" in
+    approved)           pr_color="00;32" ;  pr_icon="✓" ;;
+    changes_requested)  pr_color="00;31" ;  pr_icon="✗" ;;
+    draft)              pr_color="00;90" ;  pr_icon="~" ;;
+    *)                  pr_color="00;33" ;  pr_icon="?" ;;
+  esac
+  printf ' \033[%smPR#%s%s\033[00m' "$pr_color" "$pr_number" "$pr_icon"
+fi
 printf '\n'
