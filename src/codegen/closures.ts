@@ -1082,6 +1082,28 @@ const HOST_CALLBACK_METHODS = new Set<string>([
   "replaceAll",
 ]);
 
+/**
+ * (#2070) True when `recvType` is a JS `Array` (`T[]` / `Array<T>`) — used to
+ * give `push`/`unshift` callback args the closure-struct path. Recognises the
+ * type via its symbol name and, defensively, via the apparent type so a
+ * narrowed/aliased array still matches. Typed arrays (`Uint8Array`, …) are not
+ * `Array` and correctly fall through to the host-callback default.
+ */
+function isArrayLikeReceiverType(recvType: ts.Type, ctx: CodegenContext): boolean {
+  const named = (t: ts.Type | undefined): boolean => t?.getSymbol?.()?.getName?.() === "Array";
+  if (named(recvType)) return true;
+  try {
+    const apparent = ctx.checker.getApparentType?.(recvType);
+    if (named(apparent)) return true;
+    // typeToString covers the structural `T[]` form whose symbol may be absent.
+    const asStr = ctx.checker.typeToString(recvType);
+    if (/(\[\]|^Array<|^ReadonlyArray<)/.test(asStr) || asStr.endsWith("[]")) return true;
+  } catch {
+    // ignore checker errors — default to the host-callback path
+  }
+  return false;
+}
+
 /** Check if an arrow/function expression is used as a callback argument to a call
  *  that targets a HOST import (not a user-defined function). User-defined functions
  *  should receive closures via the GC struct path, not the __make_callback host path. */
@@ -1151,12 +1173,23 @@ export function isHostCallbackArgument(node: ts.Node, ctx: CodegenContext): bool
             return false;
           }
         }
-        // Note: we deliberately don't fall back to a "param has call sig"
-        // heuristic for non-user-defined methods — host array HOFs
-        // (forEach, map, filter, etc.) have dedicated inline compilation
-        // and other host method callbacks (Promise.then, etc.) need a
-        // JS-callable externref via __make_callback. Only user-defined
-        // methods on user-defined classes get the closure path here.
+        // (#2070) Not a user-defined class method. A closure pushed onto an
+        // array via `Array.prototype.push`/`unshift` is *stored*, not invoked,
+        // and the eventual element-read call site (`fns[0]()`) dispatches it as
+        // a WasmGC closure struct. Routing such a closure through the host
+        // `__make_callback` path produces a JS-wrapped externref that fails the
+        // read-site `ref.test`/`ref.cast` and null-derefs at `struct.get`. Give
+        // array storage methods the closure-struct path instead.
+        //
+        // This is deliberately narrow: `Map.set`/`Set.add` and the deferred
+        // DisposableStack methods keep the host-callback path because their
+        // in-class dispatch wrappers (#1311) and writeback machinery (#1695)
+        // depend on the JS-callable externref. The broader
+        // HOST_CALLBACK_METHODS allowlist still governs the invoke-during-call
+        // host methods (array HOFs, Promise.then, String.replace, …).
+        if ((methodName === "push" || methodName === "unshift") && isArrayLikeReceiverType(receiverType, ctx)) {
+          return false;
+        }
       } catch {
         // Fall through to host-callback path on any checker error
       }

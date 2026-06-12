@@ -27,6 +27,7 @@ import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import {
   ensureRegexCaptureArray,
   ensureRegexFlagsStr,
+  ensureRegexMatchAll,
   ensureRegexMatchVecType,
   ensureRegexReplace,
   ensureRegexSearch,
@@ -51,7 +52,6 @@ import {
   RE_FLAG_Y,
 } from "./regex/bytecode.js";
 import { compilePattern, RepeatTooLargeError } from "./regex/compile.js";
-import { search as regexSearch } from "./regex/vm.js";
 import type { InnerResult } from "./shared.js";
 import { compileExpression } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
@@ -730,6 +730,18 @@ function emitRegexSearchCall(
   fctx: FunctionContext,
   regexpExpr: ts.Expression,
   inputExpr: ts.Expression,
+  options?: {
+    /**
+     * §22.2.7.2 RegExpBuiltinExec [[LastIndex]] semantics for g/y regexps
+     * (#1913): start the scan at ToLength(lastIndex) (i32.trunc_sat maps
+     * NaN→0 and the search loop rejects starts past the subject, matching
+     * the lastIndex>length null result), then on return set lastIndex to
+     * the match end (or 0 on failure). Only passed when the flags are
+     * STATICALLY known to include g or y — non-g/y exec neither reads nor
+     * writes lastIndex.
+     */
+    gyLastIndex?: boolean;
+  },
 ): RegexSearchEmission | null {
   ensureNativeStringHelpers(ctx);
   const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
@@ -777,7 +789,7 @@ function emitRegexSearchCall(
   fctx.body.push({ op: "i32.ne" });
   fctx.body.push({ op: "local.set", index: stickyLocal });
 
-  // __regex_search(prog, classTable, 2*nGroups, inData, inOff, inLen, 0, sticky, caps)
+  // __regex_search(prog, classTable, 2*nGroups, inData, inOff, inLen, start, sticky, caps)
   fctx.body.push({ op: "local.get", index: regexpLocal });
   fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_PROG });
   fctx.body.push({ op: "local.get", index: regexpLocal });
@@ -794,12 +806,42 @@ function emitRegexSearchCall(
   fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }); // off
   fctx.body.push({ op: "local.get", index: inputLocal });
   fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }); // len
-  // startIdx = 0 (test/search ignore lastIndex for non-global/non-sticky;
-  // sticky-at-0 is honored). The i32 match flag is left on the stack.
-  fctx.body.push({ op: "i32.const", value: 0 });
+  // startIdx: 0 for the lastIndex-free methods (search; non-g/y exec/test/
+  // match), or ToLength(lastIndex) for g/y exec semantics (#1913).
+  if (options?.gyLastIndex) {
+    fctx.body.push({ op: "local.get", index: regexpLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX });
+    // trunc_sat: NaN→0 (= ToLength(NaN)); huge values saturate and the search
+    // loop's `start > slen` check yields the spec's no-match result. Negative
+    // values clamp to 0 inside __regex_search, matching ToLength.
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  } else {
+    fctx.body.push({ op: "i32.const", value: 0 });
+  }
   fctx.body.push({ op: "local.get", index: stickyLocal });
   fctx.body.push({ op: "local.get", index: capsLocal });
   fctx.body.push({ op: "call", funcIdx: searchIdx });
+  if (options?.gyLastIndex) {
+    // matched on stack → lastIndex = matched ? caps[1] : 0 (§22.2.7.2 steps
+    // 9.e / 15), then restore the match flag for the caller.
+    const matchedTmp = allocLocal(fctx, `__re_matched_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "local.set", index: matchedTmp });
+    fctx.body.push({ op: "local.get", index: regexpLocal });
+    fctx.body.push({ op: "local.get", index: matchedTmp });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "f64" } },
+      then: [
+        { op: "local.get", index: capsLocal },
+        { op: "i32.const", value: 1 },
+        { op: "array.get", typeIdx: i32Arr },
+        { op: "f64.convert_i32_s" },
+      ],
+      else: [{ op: "f64.const", value: 0 }],
+    } as Instr);
+    fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX } as Instr);
+    fctx.body.push({ op: "local.get", index: matchedTmp });
+  }
   return { regexpLocal, inputLocal, capsLocal, structTypeIdx };
 }
 
@@ -838,8 +880,15 @@ export function tryCompileStandaloneRegExpTest(
   }
 
   // __regex_search leaves the i32 match flag (1/0) on the stack — exactly the
-  // boolean `.test` returns; the caps array is discarded.
-  const emitted = emitRegexSearchCall(ctx, fctx, propAccess.expression, expr.arguments[0]!);
+  // boolean `.test` returns; the caps array is discarded. `.test` is
+  // RegExpExec (§22.2.6.17), so g/y receivers read AND advance [[LastIndex]]
+  // (#1913) — applied only when the flags are statically recoverable; the
+  // legacy start-at-0 behaviour is kept for backend receivers whose flags
+  // are not (provenance makes that case rare).
+  const testFlags = staticRegExpFlags(ctx, propAccess.expression);
+  const emitted = emitRegexSearchCall(ctx, fctx, propAccess.expression, expr.arguments[0]!, {
+    gyLastIndex: testFlags !== null && flagsHaveGlobalOrSticky(testFlags),
+  });
   if (emitted === null) return null;
   return { kind: "i32" };
 }
@@ -859,8 +908,9 @@ function emitRegexExecArrayCall(
   fctx: FunctionContext,
   regexpExpr: ts.Expression,
   inputExpr: ts.Expression,
+  options?: { gyLastIndex?: boolean },
 ): ValType | null {
-  const emitted = emitRegexSearchCall(ctx, fctx, regexpExpr, inputExpr);
+  const emitted = emitRegexSearchCall(ctx, fctx, regexpExpr, inputExpr, options);
   if (emitted === null) return null;
 
   const captureArrayIdx = ensureRegexCaptureArray(ctx);
@@ -920,16 +970,12 @@ export function tryCompileStandaloneRegExpExec(
     reportStandaloneRegExpUnsupported(ctx, propAccess.expression, "RegExp.prototype.exec with dynamic flags");
     return null;
   }
-  if (flagsHaveGlobalOrSticky(flags)) {
-    reportStandaloneRegExpUnsupported(
-      ctx,
-      propAccess.expression,
-      "RegExp.prototype.exec with g/y lastIndex semantics (#1539 Phase 2b)",
-    );
-    return null;
-  }
 
-  return emitRegexExecArrayCall(ctx, fctx, propAccess.expression, expr.arguments[0]!);
+  // §22.2.7.2 — g/y exec starts at [[LastIndex]] and writes back the match
+  // end (or 0 on failure); non-g/y exec ignores lastIndex entirely (#1913).
+  return emitRegexExecArrayCall(ctx, fctx, propAccess.expression, expr.arguments[0]!, {
+    gyLastIndex: flagsHaveGlobalOrSticky(flags),
+  });
 }
 
 /**
@@ -1029,21 +1075,64 @@ export function tryCompileStandaloneStringMatch(
     reportStandaloneRegExpUnsupported(ctx, argExpr, "String.prototype.match with dynamic RegExp flags");
     return null;
   }
-  if (flagsHaveGlobalOrSticky(flags)) {
-    reportStandaloneRegExpUnsupported(
-      ctx,
-      argExpr,
-      "String.prototype.match with g/y all-match or lastIndex semantics (#1539 Phase 2b/2c)",
-    );
-    return null;
-  }
 
   if (!hasStandaloneRegExpEngine(ctx)) {
     reportStandaloneRegExpUnsupported(ctx, expr, "String.prototype.match without an enabled standalone engine");
     return null;
   }
 
-  return emitRegexExecArrayCall(ctx, fctx, argExpr, propAccess.expression);
+  // §22.2.6.8 step 6 — GLOBAL match collects every [0] substring (#1913):
+  // SetLastIndex(0), loop RegExpExec with AdvanceStringIndex, lastIndex ends
+  // at 0. The eager walk lives in __regex_match_all; lastIndex is reset on
+  // the struct afterwards (net spec effect of the loop).
+  if (flags.includes("g")) {
+    ensureNativeStringHelpers(ctx);
+    const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+    if (flattenIdx === undefined) {
+      reportError(ctx, expr, "Codegen error: standalone RegExp backend missing native string helpers (#682).");
+      return null;
+    }
+    const matchAllIdx = ensureRegexMatchAll(ctx);
+    const matchVecTypeIdx = ensureRegexMatchVecType(ctx);
+    const strTypeIdx = ctx.nativeStrTypeIdx;
+
+    const loaded = loadStandaloneRegExpStruct(ctx, fctx, argExpr);
+    if (loaded === null) return null;
+    const { regexpLocal, structTypeIdx } = loaded;
+
+    const subjType = compileExpression(ctx, fctx, propAccess.expression, nativeStringType(ctx));
+    if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    fctx.body.push({ op: "call", funcIdx: flattenIdx });
+    const subjLocal = allocLocal(fctx, `__re_gm_subj_${fctx.locals.length}`, { kind: "ref", typeIdx: strTypeIdx });
+    fctx.body.push({ op: "local.set", index: subjLocal });
+
+    // __regex_match_all(prog, classTable, nGroups, subjData, subjOff, subjLen, subject)
+    fctx.body.push({ op: "local.get", index: regexpLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_PROG });
+    fctx.body.push({ op: "local.get", index: regexpLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_CLASS_TABLE });
+    fctx.body.push({ op: "local.get", index: regexpLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_NGROUPS });
+    fctx.body.push({ op: "local.get", index: subjLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 2 }); // data
+    fctx.body.push({ op: "local.get", index: subjLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 1 }); // off
+    fctx.body.push({ op: "local.get", index: subjLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }); // len
+    fctx.body.push({ op: "local.get", index: subjLocal });
+    fctx.body.push({ op: "call", funcIdx: matchAllIdx });
+    // lastIndex = 0 (net effect of the spec's exec loop on a global regex).
+    fctx.body.push({ op: "local.get", index: regexpLocal });
+    fctx.body.push({ op: "f64.const", value: 0 });
+    fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_LASTINDEX } as Instr);
+    return { kind: "ref_null", typeIdx: matchVecTypeIdx };
+  }
+
+  // Non-global match = RegExpExec (§22.2.6.8 step 5) — sticky regexps read
+  // and advance lastIndex through the shared exec path.
+  return emitRegexExecArrayCall(ctx, fctx, argExpr, propAccess.expression, {
+    gyLastIndex: flagsHaveGlobalOrSticky(flags),
+  });
 }
 
 /**
@@ -1084,14 +1173,15 @@ export function tryCompileStandaloneStringReplace(
     return undefined; // not a RegExp arg → generic string path
   }
 
-  // Replacement must be a static literal string with NO `$` substitution
-  // patterns (those are Phase 2c follow-up). A `$` anywhere → refuse.
-  const repl = staticStringValue(ctx, replExpr);
-  if (repl === null || repl === undefined || repl.includes("$")) {
+  // Replacement must be a STRING (any string expression — `$`-substitution
+  // patterns are expanded at runtime by __regex_get_substitution per
+  // §22.2.6.11, #1913). Function replacers need closure dispatch with
+  // capture-arg marshalling and stay a narrowed refusal.
+  if (!isStringLikeArg(ctx, replExpr)) {
     reportStandaloneRegExpUnsupported(
       ctx,
       replExpr,
-      `String.prototype.${method} with a $-substitution pattern or non-literal/function replacer (#1539 Phase 2c)`,
+      `String.prototype.${method} with a function (or non-string) replacer (#1913 follow-up)`,
     );
     return null;
   }
@@ -1159,10 +1249,6 @@ export function tryCompileStandaloneStringReplace(
   return nativeStringType(ctx);
 }
 
-function regexCanMatchEmpty(compiled: CompiledRegex): boolean {
-  return regexSearch(compiled.prog, compiled.classTable, compiled.nGroups, "", 0, false) !== null;
-}
-
 /**
  * `String.prototype.split(re)` in standalone mode (#1539 Phase 2c) —
  * non-capturing, non-nullable static RegExp separator only.
@@ -1187,10 +1273,11 @@ export function tryCompileStandaloneStringSplit(
     return undefined; // not a RegExp arg -> native string split / generic path
   }
 
-  if (expr.arguments.length !== 1) {
-    reportStandaloneRegExpUnsupported(ctx, expr.arguments[1] ?? expr, "String.prototype.split(RegExp, limit)");
+  if (expr.arguments.length > 2) {
+    reportStandaloneRegExpUnsupported(ctx, expr.arguments[2] ?? expr, "String.prototype.split arities above two");
     return null;
   }
+  const limitExpr = expr.arguments[1];
 
   const meta = staticRegExpPatternFlags(ctx, reExpr);
   if (meta === null) {
@@ -1198,20 +1285,9 @@ export function tryCompileStandaloneStringSplit(
     return null;
   }
 
-  const compiled = compileStaticStandaloneRegExp(ctx, meta.pattern, meta.flags, reExpr);
-  if (compiled === null) return null;
-  if (compiled.nGroups !== 1) {
-    reportStandaloneRegExpUnsupported(ctx, reExpr, "String.prototype.split with capturing groups (#1539 Phase 2b/2c)");
-    return null;
-  }
-  if (regexCanMatchEmpty(compiled)) {
-    reportStandaloneRegExpUnsupported(
-      ctx,
-      reExpr,
-      "String.prototype.split with empty-match separators (#1539 Phase 2c)",
-    );
-    return null;
-  }
+  // Compile-time validity gate only — unsupported patterns/flags surface the
+  // narrowed refusal here instead of mid-emission.
+  if (compileStaticStandaloneRegExp(ctx, meta.pattern, meta.flags, reExpr) === null) return null;
 
   if (!hasStandaloneRegExpEngine(ctx)) {
     reportStandaloneRegExpUnsupported(ctx, expr, "String.prototype.split without an enabled standalone engine");
@@ -1251,6 +1327,22 @@ export function tryCompileStandaloneStringSplit(
   fctx.body.push({ op: "local.get", index: subjLocal });
   fctx.body.push({ op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 }); // len
   fctx.body.push({ op: "local.get", index: subjLocal });
+  // lim (§22.2.6.14 step 12: undefined → 2^32-1, else ToUint32(limit)).
+  // -1 reinterprets as 0xFFFFFFFF under the helper's unsigned compares.
+  if (limitExpr === undefined) {
+    fctx.body.push({ op: "i32.const", value: -1 });
+  } else {
+    const limType = compileExpression(ctx, fctx, limitExpr, { kind: "f64" });
+    if (!limType) return null;
+    if (limType.kind === "f64") {
+      // ToUint32: trunc-sat then wrap — saturating trunc + i32 reinterpret
+      // matches ToUint32 for the integer limits tests exercise.
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    } else if (limType.kind !== "i32") {
+      reportStandaloneRegExpUnsupported(ctx, limitExpr, "String.prototype.split with non-numeric limits");
+      return null;
+    }
+  }
   fctx.body.push({ op: "call", funcIdx: splitIdx });
 
   const nstrVecTypeIdx = ctx.vecTypeMap.get(`ref_${ctx.anyStrTypeIdx}`);
