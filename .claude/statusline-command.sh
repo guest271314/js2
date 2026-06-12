@@ -94,6 +94,38 @@ if [ -d "$status_dir" ] && [ -n "$in_worktree" ]; then
   fi
 fi
 
+# Days-left-in-week bar: derived from rate_limits.seven_day.resets_at (Unix ts).
+# Computed here so it can be emitted right after the wkly bar below.
+days_bar=""
+resets_at=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+if [ -n "$resets_at" ]; then
+  now_sec=$(date +%s)
+  remaining_sec=$((${resets_at%.*} - now_sec))
+  if [ "$remaining_sec" -gt 0 ]; then
+    days_left=$(awk "BEGIN {printf \"%.1f\", $remaining_sec / 86400}")
+    days_int=$(awk "BEGIN {printf \"%d\", $remaining_sec / 86400}")
+    elapsed_pct=$(awk "BEGIN {printf \"%.4f\", (7 - $remaining_sec / 86400) * 100 / 7}")
+    days_bar=$(awk -v left="$days_left" -v days_int="$days_int" -v elapsed_pct="$elapsed_pct" 'BEGIN {
+      if (days_int >= 4) {
+        # Green zone: plain green text, no background bar — less salient
+        printf " \033[32m%sd left\033[00m", left
+      } else {
+        if (days_int >= 2) { fill=43;         fg=30 }
+        else               { fill="48;5;196"; fg=37 }
+        width = 10
+        filled = int(elapsed_pct * width / 100 + 0.5)
+        label = sprintf(" %sd left", left)
+        bar = ""
+        for (i = 0; i < width; i++) bar = bar " "
+        bar = label substr(bar, length(label) + 1)
+        filled_part = substr(bar, 1, filled)
+        empty_part  = substr(bar, filled + 1)
+        printf " \033[%s;%sm%s\033[48;5;237;37m%s \033[00m", fill, fg, filled_part, empty_part
+      }
+    }' /dev/null)
+  fi
+fi
+
 if [ -n "$used" ] || [ -n "$weekly" ] || [ -n "$five_hour" ]; then
   if [ -n "$used" ]; then
     awk -v p="$used" 'BEGIN {
@@ -142,6 +174,7 @@ if [ -n "$used" ] || [ -n "$weekly" ] || [ -n "$five_hour" ]; then
       empty_part  = substr(bar, filled + 1)
       printf " \033[%s;%sm%s\033[48;5;237;37m%s\033[00m", fill, fg, filled_part, empty_part
     }' /dev/null
+    [ -n "$days_bar" ] && printf '%s' "$days_bar"
   fi
 fi
 # Test262 progress
@@ -276,37 +309,6 @@ if [ -z "$in_worktree" ] && [ "$branch" = "main" ]; then
       fi
     fi
   fi
-  # Days-left-in-week bar: derived from rate_limits.seven_day.resets_at (Unix ts)
-  # Captured into $days_bar and emitted after the free memory indicator below.
-  days_bar=""
-  resets_at=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
-  if [ -n "$resets_at" ]; then
-    now_sec=$(date +%s)
-    remaining_sec=$((${resets_at%.*} - now_sec))
-    if [ "$remaining_sec" -gt 0 ]; then
-      days_left=$(awk "BEGIN {printf \"%.1f\", $remaining_sec / 86400}")
-      days_int=$(awk "BEGIN {printf \"%d\", $remaining_sec / 86400}")
-      elapsed_pct=$(awk "BEGIN {printf \"%.4f\", (7 - $remaining_sec / 86400) * 100 / 7}")
-      days_bar=$(awk -v left="$days_left" -v days_int="$days_int" -v elapsed_pct="$elapsed_pct" 'BEGIN {
-        if (days_int >= 4) {
-          # Green zone: plain green text, no background bar — less salient
-          printf " \033[32m%sd left\033[00m", left
-        } else {
-          if (days_int >= 2) { fill=43;         fg=30 }
-          else               { fill="48;5;196"; fg=37 }
-          width = 10
-          filled = int(elapsed_pct * width / 100 + 0.5)
-          label = sprintf(" %sd left", left)
-          bar = ""
-          for (i = 0; i < width; i++) bar = bar " "
-          bar = label substr(bar, length(label) + 1)
-          filled_part = substr(bar, 1, filled)
-          empty_part  = substr(bar, filled + 1)
-          printf " \033[%s;%sm%s\033[48;5;237;37m%s \033[00m", fill, fg, filled_part, empty_part
-        }
-      }' /dev/null)
-    fi
-  fi
   if [ -n "$sprint_n" ] && [ "$sprint_total" -gt 0 ]; then
     sprint_pct=$((sprint_done * 100 / sprint_total))
     awk -v p="$sprint_pct" -v n="$sprint_n" -v done="$sprint_done" -v total="$sprint_total" 'BEGIN {
@@ -387,7 +389,6 @@ elif [ -n "$vitesting" ]; then
         p_bar=$(pass_bar "$pass_pct" "${pass_pct}% t262")
         f_bar=$(free_bar "$free_g")
         printf ' \033[00;33m⟳t262\033[00m %s %s %s' "$p_bar" "$d_bar" "$f_bar"
-        [ -n "$days_bar" ] && printf '%s' "$days_bar"
       else
         printf ' \033[00;33m⟳t262\033[00m %s' "$d_bar"
       fi
@@ -407,7 +408,6 @@ elif [ -f "$report" ]; then
     p_bar=$(pass_bar "$pass_pct" "${pass_pct}% t262")
     f_bar=$(free_bar "$free_g")
     printf ' %s %s' "$p_bar" "$f_bar"
-    [ -n "$days_bar" ] && printf '%s' "$days_bar"
   fi
 fi
 # Branch display:
