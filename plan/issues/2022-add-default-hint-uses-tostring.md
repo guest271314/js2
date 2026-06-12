@@ -4,7 +4,7 @@ title: "obj + '' applies string-hint ToPrimitive (toString) instead of default h
 status: ready
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
 priority: medium
 feasibility: medium
 reasoning_effort: medium

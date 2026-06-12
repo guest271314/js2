@@ -2,9 +2,9 @@
 id: 2045
 title: "linear Uint8Array (WASI): silent-corruption holes — name-keyed buffer registry, no bounds checks — plus escape-analysis demotion gaps (#1886 follow-up)"
 status: ready
-sprint: Backlog
+sprint: 62
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
 priority: critical
 feasibility: medium
 reasoning_effort: high

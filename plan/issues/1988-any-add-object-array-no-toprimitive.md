@@ -4,7 +4,7 @@ title: "__any_add on object/array operands skips ToPrimitive entirely — 1 + {}
 status: ready
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
 priority: medium
 feasibility: medium
 reasoning_effort: medium

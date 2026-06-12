@@ -4,7 +4,7 @@ title: "IR: while/for with a numeric-truthiness condition emits invalid Wasm and
 status: ready
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
 priority: high
 feasibility: easy
 reasoning_effort: medium

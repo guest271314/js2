@@ -4,7 +4,7 @@ title: "IR: mid-body `if (cond) stmt;` in a void function silently skips ALL sub
 status: ready
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
 priority: high
 feasibility: medium
 reasoning_effort: high

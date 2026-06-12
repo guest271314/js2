@@ -4,7 +4,7 @@ title: "derived-class construction never executes the base constructor body; sup
 status: ready
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
 priority: critical
 feasibility: hard
 reasoning_effort: max

@@ -4,7 +4,7 @@ title: "module-global object access: reads re-emit null-check+throw per access (
 status: ready
 sprint: 62
 created: 2026-06-11
-updated: 2026-06-11
+updated: 2026-06-12
 priority: low
 feasibility: medium
 reasoning_effort: medium

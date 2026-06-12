@@ -4,7 +4,7 @@ title: "structurally identical struct types share field names at the host bounda
 status: ready
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-11
+updated: 2026-06-12
 priority: high
 feasibility: hard
 reasoning_effort: max
