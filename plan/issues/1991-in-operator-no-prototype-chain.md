@@ -1,10 +1,11 @@
 ---
 id: 1991
 title: "in operator never consults the prototype chain — inherited class methods and Object.prototype members invisible"
-status: ready
+status: done
+completed: 2026-06-12
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -60,3 +61,7 @@ PR loopdive#1352 (merged) fixed the Object.prototype-members half
 of #1992. REMAINING for this issue: inherited user-class methods
 (`"m" in subclassInstance`) need the per-class method-name registry —
 scoped in the sprint-62/63 proposal (analysis program 08-new-issues list).
+
+## Frontmatter reconcile (2026-06-12)
+
+Fixed by merged PR #1352; frontmatter was stale at `ready`. Flipped to `done` during sprint-62 planning triage.

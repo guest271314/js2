@@ -2,9 +2,9 @@
 id: 1979
 title: "IR: mid-body `if (cond) stmt;` in a void function silently skips ALL subsequent statements when cond is true"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
 priority: high
 feasibility: medium
 reasoning_effort: high

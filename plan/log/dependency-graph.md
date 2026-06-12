@@ -586,3 +586,12 @@ function in the same file.
 | prototype chain | 678, 799, 802 |
 | Array methods | 827, 840, 857 |
 | diagnostic suppression | 381, 831 |
+
+## 2026-06-12 — Sprint 62 (Fable architecture sprint) dependency spine
+
+See `plan/issues/sprints/62.md` for the full graph. Key edges:
+A1(#1917 amendment) → #1917 Step0 → Steps 1-3 → symptom closures;
+#2072/#2080 → #2104 → #2105/#2106 → #2107; #2142 → #2051/#2106 dispatch;
+#2009 → #1989(eqref); A2(#1916+#1899) → #1899 impl → #1983; #1923 → #1922
+→ #1924+#2134 → #1804 → STRICT ratchet flips; #1921 → #1927; #1917 Step0 →
+#2140; #2139 → #1854 → #2144(63); #2141 spec → 63 impl.
