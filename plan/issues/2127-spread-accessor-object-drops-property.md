@@ -1,11 +1,10 @@
 ---
 id: 2127
 title: "object spread of an accessor-bearing source drops the property — getter never fires, value is null"
-status: done
+status: ready
 sprint: 61
 created: 2026-06-12
 updated: 2026-06-12
-completed: 2026-06-12
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -60,40 +59,3 @@ data property on the target. See object-literal spread handling in
 
 Verified on main `c19a2e9c1` via `.tmp/triage.mts` (branch `po-1971-triage`).
 JS-host mode, default options.
-
-## Resolution (2026-06-12)
-
-`compileObjectLiteral` (src/codegen/literals.ts) now routes literals whose
-spread SOURCE type carries accessor-declared own properties (new
-`_hasAccessorSpreadSource` — checks `GetAccessor`/`SetAccessor` symbol flags
-and accessor declarations on the spread expression's checker type) to the
-host plain-object path. That path's spread already lowers to
-`__object_assign`, i.e. Object.assign semantics — exactly the spec
-CopyDataProperties [[Get]]-then-copy-as-data-property. The struct spread
-path (which copies data fields by layout and never fires getters) is
-unreachable for these shapes now.
-
-## Test Results
-
-- Repro: `({ ...{ get a(){return 7} } }).a` → 7 (was null/NaN). Verified
-  the bug was real on main with a correctly wired harness (see below).
-- `tests/issue-2127.test.ts` — 6/6: getter copied as data property, getter
-  side effect fires exactly once, setter-only → undefined data property,
-  getter mixed with data props, data spread unregressed, snapshot semantics
-  (later getter-state changes don't leak).
-- `computed-props` / `issue-computed-props` / `empty-object-widening` /
-  `issue-786`: 19/20 — the 1 failure identical on main.
-- `spread-rest.test.ts` fails 13/13 identically on main (stale harness,
-  see below), other spread test files have no tests.
-
-## Harness discovery (affects other suites' "failures" on main)
-
-`buildImports` returns an imports object whose `setExports(instance.exports)`
-MUST be called after instantiation — accessor getter/setter callbacks
-compile to `__cb_<id>` exports and the host-side bridge dispatches through
-`callbackState.getExports()`; without the wiring the bridge silently
-returns undefined. `tests/accessor-side-effects.test.ts` (16/16 failing on
-main) instantiates with a bare `{ env: {} }` and never wires exports — a
-stale TEST harness, not (only) a compiler bug. Worth a cleanup task:
-suites using bare `{env:{}}`/unwired `buildImports` (accessor-side-effects,
-spread-rest, basic-destructuring's missing `./helpers.js`, …).
