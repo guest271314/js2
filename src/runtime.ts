@@ -10311,6 +10311,24 @@ assert._isSameValue = isSameValue;
       // `1 + 2` → `3`. Returns a boxed any (number or string) the caller stores
       // back into the `any` slot.
       return (a: any, b: any) => a + b;
+    case "host_compare":
+      // #2059 — relational compare for two externref operands (§7.2.13
+      // IsLessThan). JS `<`/`>` give ToPrimitive (hint "number"), the
+      // string-vs-string lexicographic / string-vs-number numeric dispatch, and
+      // object valueOf ordering for free. Returns a 4-way result so all four
+      // relational operators map from one import:
+      //   -1  a < b      0  a == b (neither < nor >)      1  a > b
+      //    2  incomparable — a NaN/undefined ToNumber operand. Per §7.2.13 a
+      //        comparison yielding `undefined` makes the relational expression
+      //        false, so callers treat 2 as "no operator matches".
+      return (a: any, b: any) => {
+        if (a < b) return -1;
+        if (a > b) return 1;
+        // Equal, OR incomparable (NaN involved). `a <= b` distinguishes:
+        // `a <= b` is true only when equal; false when a NaN/undefined operand
+        // makes every comparison false.
+        return a <= b ? 0 : 2;
+      };
     case "same_value_zero":
       // #1360 — SameValueZero comparison (§7.2.11).
       // Same as Strict Equality except NaN === NaN is true.
