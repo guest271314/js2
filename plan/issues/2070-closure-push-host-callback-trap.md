@@ -1,10 +1,10 @@
 ---
 id: 2070
 title: "closures stored via Array.push/unshift (and bare Map.set) wrapped as host callbacks — trap when invoked from Wasm; HOST_CALLBACK_METHODS allowlist is dead code"
-status: ready
+status: in-progress
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -84,3 +84,35 @@ Grepped `push.*closure`, `make_callback`, `closure.*array`, `callback array`:
 #1306 (element-access call on closure array, done), #1311 (Map-in-class, done —
 its text lists `Array.push` as intended closure path), #1300/#1695 (adjacent,
 done). The push/unshift/bare-Map breakage on current main is untracked.
+
+## Partial resolution (2026-06-11) — array `push`/`unshift` landed
+
+`isHostCallbackArgument` (`src/codegen/closures.ts`) now consults the
+previously-dead `HOST_CALLBACK_METHODS` allowlist: in the property-access
+branch, a callable arg to `Array.prototype.push`/`unshift` on an **array**
+receiver (`isArrayLikeReceiverType`) is routed to the closure-struct path
+instead of the host `__make_callback` externref, so the eventual
+`fns[0]()` read-site dispatch (`ref.test`/`ref.cast`/`struct.get`) no longer
+null-derefs.
+
+Covered (match Node — `tests/equivalence/closure-push-host-callback.test.ts`):
+- `fns.push(() => 42); fns[0]()`
+- `unshift` then call
+- captured + multiple-closure push
+- array `map` host-HOF still works (host path preserved)
+
+**Deliberately scoped narrow** — only array `push`/`unshift`. `Map.set`/`Set.add`
+and `DisposableStack.defer/use/adopt` keep the host-callback path because the
+#1311 in-class Map dispatch and #1695 deferred-writeback machinery depend on the
+JS-callable externref; a universal `Map.set → closure` flip *re-broke* #1311
+(verified: null-deref). Confirmed zero new regressions across #1306/#1311/#1453/
+#1695 (the 3 still-red #1311 cases are pre-existing — identical on clean HEAD).
+
+### Remaining (issue stays open)
+
+- **Bare top-level `Map.set(k, () => …)` then `m.get(k)!()`** still traps/returns
+  0 — needs the read-site fallback (dispatch via host `__call_fn_*` when
+  `ref.test` fails) the Fix-direction's "alternatively" branch describes, so the
+  same stored externref works from both the #1311 class-wrapper and a bare
+  module-scope Map. Higher risk (touches the element-read dispatch site); split
+  out to avoid bundling with the safe array fix.

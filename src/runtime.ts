@@ -5472,7 +5472,15 @@ function resolveImport(
         // ToUint32(NaN) is 0, which would produce an empty array; per spec
         // (22.1.3.21 step 8) a missing limit means 2^32 - 1, so we drop the
         // trailing NaN and let the JS host apply the default.
-        if (method === "split" && args.length >= 2) {
+        // #2002 — includes/startsWith/endsWith use NaN as the "position not
+        // provided" sentinel for the same reason: a trailing NaN means the
+        // arg was omitted, so drop it and let the JS method apply its spec
+        // default (0 for includes/startsWith, length for endsWith) instead of
+        // ToInteger(NaN)=0.
+        if (
+          (method === "split" || method === "includes" || method === "startsWith" || method === "endsWith") &&
+          args.length >= 2
+        ) {
           const last = args[args.length - 1];
           if (typeof last === "number" && Number.isNaN(last)) {
             args.pop();
@@ -8906,6 +8914,30 @@ assert._isSameValue = isSameValue;
         return (keys: any, i: number) => {
           if (keys == null || !Array.isArray(keys)) return undefined;
           return keys[i];
+        };
+      // Per-visit liveness check for for-in (#2066). The key set is snapshotted
+      // up front (spec-permitted), but §14.7.5.10 requires that a property
+      // deleted before it is visited is skipped. This re-tests, at visit time,
+      // whether `key` still exists on the (own-or-inherited) live object — the
+      // `in`-operator semantics that match for-in's enumeration set. Returns 1
+      // if still present, 0 if it has since been deleted.
+      if (name === "__for_in_has")
+        return (obj: any, key: any): number => {
+          if (obj == null) return 0;
+          const k = typeof key === "symbol" ? key : String(key);
+          if (!_isWasmStruct(obj)) {
+            try {
+              return k in (obj as object) ? 1 : 0;
+            } catch {
+              return 0;
+            }
+          }
+          // WasmGC struct: an explicit delete records a tombstone — honor it.
+          const tomb = _wasmStructDeletedKeys.get(obj);
+          if (tomb && tomb.has(k)) return 0;
+          // Otherwise the key was enumerated from the live shape and has not been
+          // deleted, so it is still present.
+          return 1;
         };
       // Promise combinators and constructors
       // Helper: convert WasmGC vec struct to JS array (vec structs are opaque
