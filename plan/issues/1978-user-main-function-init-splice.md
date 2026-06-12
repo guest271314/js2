@@ -1,10 +1,11 @@
 ---
 id: 1978
 title: "user function named main gets the module-init body spliced into it: top-level state resets on every call; WASI infinite recursion for main() convention"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
+completed: 2026-06-12
 priority: high
 feasibility: easy
 reasoning_effort: medium
@@ -59,6 +60,35 @@ call rather than splicing the raw body.
 - Repro A returns `1, 2, 3` across calls
 - Repro B runs once and exits on WASI
 - Programs without a `main` unregressed (start section/init ordering intact)
+
+## Resolution
+
+Removed the `main`-splice special case in `injectModuleInit` (the tail of
+`compileDeclarations`, `src/codegen/declarations.ts`). The init body is now
+*always* emitted as a standalone `__module_init` run once via the Wasm start
+section (or, for WASI, the `_start` export `addWasiStartExport` builds) —
+exactly the `else` branch that already existed for the no-`main` case. A user
+function named `main` is treated as an ordinary export and receives no init
+treatment, so:
+- module-global initializers run exactly once (at instantiation), not on every
+  `main()` call, and
+- the `main()`-calls-itself convention no longer prepends a call to `main`'s own
+  index → no self-recursion.
+
+The now-dead `shiftLocalIndices` helper (only the removed splice used it) was
+deleted.
+
+## Test Results
+
+`tests/issue-1978.test.ts` — 5 cases: repro A (state persists `1,2,3`), a
+once-only top-level initializer, the WAT shape (start section + `__module_init`,
+no splice / no `__init_done`), repro B (WASI compiles with `_start`, no
+self-recursion), and a no-`main` control. All pass. `tests/issue-907.test.ts`:
+the one stale test that asserted the OLD spliced behaviour was updated to assert
+the start-section behaviour; 7/8 pass (the lone remaining failure — "WASI keeps
+_start … does NOT use start section" — is **pre-existing on main**, unrelated to
+this change). `tests/issue-1789-standalone-module-init.test.ts` + the
+`global-*` equivalence tests stay green.
 
 ## Dupe check
 
