@@ -2,7 +2,7 @@
 id: 1967
 title: "sort is a silent no-op on string/object-element arrays (even with comparator); map/filter/reduce on struct-element arrays return empty garbage"
 status: in-progress
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-12
 priority: critical

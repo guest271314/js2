@@ -3,7 +3,7 @@ id: 2114
 renumbered_from: 1955
 title: "String.fromCharCode/fromCodePoint silently drop all arguments after the first (host backend; native fromCodePoint too)"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

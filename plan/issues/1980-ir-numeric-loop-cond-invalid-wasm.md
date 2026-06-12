@@ -2,7 +2,7 @@
 id: 1980
 title: "IR: while/for with a numeric-truthiness condition emits invalid Wasm and bricks the entire module (no fallback, verifier silent)"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

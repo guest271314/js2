@@ -2,7 +2,7 @@
 id: 2032
 title: "computed-key object destructuring const { [k]: v } = obj silently binds 0 — ComputedPropertyName never evaluated in struct fast path"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-11
 updated: 2026-06-11
 priority: high

@@ -2,7 +2,7 @@
 id: 2070
 title: "closures stored via Array.push/unshift (and bare Map.set) wrapped as host callbacks — trap when invoked from Wasm; HOST_CALLBACK_METHODS allowlist is dead code"
 status: in-progress
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-11
 priority: high

@@ -2,7 +2,7 @@
 id: 2003
 title: "charCodeAt out-of-range traps 'string offset out of bounds' instead of returning NaN"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: medium

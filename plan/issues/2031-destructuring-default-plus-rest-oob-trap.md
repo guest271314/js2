@@ -2,7 +2,7 @@
 id: 2031
 title: "array destructuring with default + rest + short source traps 'array element access out of bounds' — array.copy keeps unclamped source offset"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-11
 updated: 2026-06-11
 priority: high

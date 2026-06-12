@@ -2,7 +2,7 @@
 id: 2021
 title: "array literal [new Subclass(), new Base()] traps 'dereferencing a null pointer' — element type taken from first element, contextual annotation ignored"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

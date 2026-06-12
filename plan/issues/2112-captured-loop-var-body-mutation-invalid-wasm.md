@@ -3,7 +3,7 @@ id: 2112
 renumbered_from: 1953
 title: "captured let loop variable also mutated in the loop body produces an invalid module (F64Add type mismatch)"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: medium

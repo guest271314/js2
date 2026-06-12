@@ -2,7 +2,7 @@
 id: 2078
 title: "standalone: derived-class constructor reads base-initialized field as 0 after super() (same read from a method works)"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-11
 updated: 2026-06-11
 priority: medium

@@ -2,7 +2,7 @@
 id: 2072
 title: "standalone: String(any-boxed primitive) returns '[object Object]' — $__any_to_string doesn't recognize the boxed shape from String()/pop/catch paths"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-11
 updated: 2026-06-11
 priority: high

@@ -2,7 +2,7 @@
 id: 2077
 title: "standalone: caught Error's .message traps null deref; .name returns '[object Object]' (catch-bound value isn't the $Error struct)"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-11
 updated: 2026-06-11
 priority: high

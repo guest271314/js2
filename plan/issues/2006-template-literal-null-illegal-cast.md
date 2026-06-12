@@ -2,7 +2,7 @@
 id: 2006
 title: "`${null}` in a template literal traps 'illegal cast' — externref spans assumed to be strings"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

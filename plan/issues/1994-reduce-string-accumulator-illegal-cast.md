@@ -2,7 +2,7 @@
 id: 1994
 title: "reduce/reduceRight on string[] trap 'illegal cast' — accumulator local hard-coded to numeric kind"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

@@ -2,7 +2,7 @@
 id: 2002
 title: "startsWith/endsWith/includes silently drop the position/endPosition argument on the JS-host backend (import arity truncation)"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

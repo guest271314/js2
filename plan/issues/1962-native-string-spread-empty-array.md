@@ -2,7 +2,7 @@
 id: 1962
 title: "nativeStrings: spreading a string ([...\"ab\"]) silently produces an empty array"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

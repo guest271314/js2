@@ -2,7 +2,7 @@
 id: 1973
 title: "optimize:true via binaryen npm module re-introduces exact heap types — optimized binaries rejected by stock V8 and JSC (#1580 masking silently no-ops)"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

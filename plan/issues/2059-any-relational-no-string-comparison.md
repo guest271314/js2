@@ -2,7 +2,7 @@
 id: 2059
 title: "relational operators on two any/externref operands never perform string comparison (\"a\" < \"b\" → false)"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

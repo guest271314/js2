@@ -2,7 +2,7 @@
 id: 2007
 title: "array operand in string concatenation traps 'illegal cast' — '+' never routes vecs through ToPrimitive/join"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: medium

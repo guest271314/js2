@@ -2,7 +2,7 @@
 id: 2064
 title: "let/const declared in if/else branch blocks leak into the enclosing scope (shadow not restored, const-ness leaks)"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: critical

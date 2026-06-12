@@ -2,7 +2,7 @@
 id: 2051
 title: "short-circuited ?. produces the type's default value (0 / \"null\") instead of undefined"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

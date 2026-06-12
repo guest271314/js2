@@ -3,7 +3,7 @@ id: 2117
 renumbered_from: 1958
 title: "nativeStrings split() ignores the limit argument; split(undefined) emits an invalid Wasm module"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

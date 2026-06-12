@@ -2,7 +2,7 @@
 id: 1971
 title: "re-validate object-literal/property cluster: 6 reproducible-on-main behaviors whose covering issues are marked done (#140/#1239/#492/#1112/#1837/#1136)"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

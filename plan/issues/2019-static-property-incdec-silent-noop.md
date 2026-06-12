@@ -2,7 +2,7 @@
 id: 2019
 title: "static property ++/-- is a silent no-op (write dropped, NaN pushed) — compileMemberIncDec has no staticProps arm"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: high

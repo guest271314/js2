@@ -2,7 +2,7 @@
 id: 2068
 title: "nested function declarations: self-recursion and forward sibling calls silently call undefined (fact(5) → 0)"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: critical

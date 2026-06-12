@@ -2,7 +2,7 @@
 id: 2080
 title: "standalone: any-boxed empty string is truthy — anyref truthiness checks ref non-null, never string length"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-11
 updated: 2026-06-11
 priority: medium

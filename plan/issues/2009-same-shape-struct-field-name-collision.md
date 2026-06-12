@@ -2,7 +2,7 @@
 id: 2009
 title: "structurally identical struct types share field names at the host boundary — Object.assign/spread/JSON.stringify mislabel keys, spread override order broken"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-11
 priority: high

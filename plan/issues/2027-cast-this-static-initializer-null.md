@@ -2,7 +2,7 @@
 id: 2027
 title: "(this as any).prop in a static field initializer yields null — static-context arm matches bare ThisKeyword only"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: low

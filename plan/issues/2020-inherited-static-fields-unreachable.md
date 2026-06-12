@@ -2,7 +2,7 @@
 id: 2020
 title: "inherited static fields unreachable through subclass name (B.count → null; static method inheritance works)"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: medium

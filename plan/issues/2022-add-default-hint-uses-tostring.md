@@ -2,7 +2,7 @@
 id: 2022
 title: "obj + '' applies string-hint ToPrimitive (toString) instead of default hint (valueOf first) when one operand is string-typed"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: medium

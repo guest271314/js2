@@ -2,7 +2,7 @@
 id: 1964
 title: "nativeStrings: for-of over a string iterates code units, not code points (4 iterations for \"a😀b\")"
 status: ready
-sprint: 61
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-10
 priority: medium
