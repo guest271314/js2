@@ -2,9 +2,9 @@
 id: 2008
 title: "tagged templates broken: cooked elements read as undefined, .raw access traps, String.raw throws (template object unusable)"
 status: ready
-sprint: 61
+sprint: 63
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
 priority: high
 feasibility: medium
 reasoning_effort: high

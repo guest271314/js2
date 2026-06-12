@@ -1290,6 +1290,61 @@ function coerceCompiledValueToNumber(ctx: CodegenContext, fctx: FunctionContext,
   coerceType(ctx, fctx, valueType, { kind: "f64" }, "number");
 }
 
+/**
+ * (#1961) Null-tolerant native string content equality. A `string | undefined`
+ * operand lowers to a NULLABLE `$AnyString` ref where a null ref IS the
+ * `undefined` value. `__str_flatten`/`__str_equals` deref their operands and
+ * trap on null, so guard first: both-null → equal (1), exactly-one-null →
+ * unequal (0), else flatten both and compare content. Leaves an i32 (1/0) on
+ * the stack representing `left == right` (the caller negates for `!=`/`!==`).
+ */
+function emitNullableStringEquals(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  flattenIdx: number,
+  equalsIdx: number,
+): void {
+  const nullableStr = nativeStringTypeNullable(ctx);
+  const leftLocal = allocLocal(fctx, `__streq_l_${fctx.locals.length}`, nullableStr);
+  const rightLocal = allocLocal(fctx, `__streq_r_${fctx.locals.length}`, nullableStr);
+  compileExpression(ctx, fctx, expr.left, nullableStr);
+  fctx.body.push({ op: "local.set", index: leftLocal });
+  compileExpression(ctx, fctx, expr.right, nullableStr);
+  fctx.body.push({ op: "local.set", index: rightLocal });
+
+  // if (left is null) { result = right is null ? 1 : 0 }
+  // else if (right is null) { result = 0 }
+  // else { result = __str_equals(flatten(left), flatten(right)) }
+  const compareBody: Instr[] = [
+    { op: "local.get", index: leftLocal },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+    { op: "call", funcIdx: flattenIdx },
+    { op: "local.get", index: rightLocal },
+    { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+    { op: "call", funcIdx: flattenIdx },
+    { op: "call", funcIdx: equalsIdx },
+  ];
+  const rightNullCheck: Instr[] = [
+    { op: "local.get", index: rightLocal },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: 0 } as Instr],
+      else: compareBody,
+    } as Instr,
+  ];
+  fctx.body.push({ op: "local.get", index: leftLocal });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "local.get", index: rightLocal } as Instr, { op: "ref.is_null" } as Instr],
+    else: rightNullCheck,
+  } as Instr);
+}
+
 export function compileStringBinaryOp(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1349,27 +1404,18 @@ export function compileStringBinaryOp(
       }
       case ts.SyntaxKind.EqualsEqualsEqualsToken:
       case ts.SyntaxKind.EqualsEqualsToken: {
-        // equals needs flat strings — flatten both operands
-        compileExpression(ctx, fctx, expr.left);
-        fctx.body.push({ op: "call", funcIdx: strFlattenIdx });
-        compileExpression(ctx, fctx, expr.right);
-        fctx.body.push({ op: "call", funcIdx: strFlattenIdx });
         const funcIdx = ctx.nativeStrHelpers.get("__str_equals");
         if (funcIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx });
+          emitNullableStringEquals(ctx, fctx, expr, strFlattenIdx, funcIdx);
           return { kind: "i32" };
         }
         break;
       }
       case ts.SyntaxKind.ExclamationEqualsEqualsToken:
       case ts.SyntaxKind.ExclamationEqualsToken: {
-        compileExpression(ctx, fctx, expr.left);
-        fctx.body.push({ op: "call", funcIdx: strFlattenIdx });
-        compileExpression(ctx, fctx, expr.right);
-        fctx.body.push({ op: "call", funcIdx: strFlattenIdx });
         const funcIdx = ctx.nativeStrHelpers.get("__str_equals");
         if (funcIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx });
+          emitNullableStringEquals(ctx, fctx, expr, strFlattenIdx, funcIdx);
           fctx.body.push({ op: "i32.eqz" });
           return { kind: "i32" };
         }
@@ -2383,6 +2429,13 @@ export function compileNativeStringMethodCall(
         typeIdx: ctx.nativeStrDataTypeIdx,
       });
       fctx.body.push({ op: "struct.new", typeIdx: ctx.nativeStrTypeIdx });
+    }
+    // #2125: limit arg → i32 (ToUint32). Default (absent/undefined) is no limit,
+    // encoded as 0xFFFFFFFF (= -1 as i32) which the helper treats as unbounded.
+    if (expr.arguments.length > 1) {
+      compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
+    } else {
+      fctx.body.push({ op: "i32.const", value: -1 });
     }
     const splitIdx = ctx.nativeStrHelpers.get("__str_split")!;
     fctx.body.push({ op: "call", funcIdx: splitIdx });
