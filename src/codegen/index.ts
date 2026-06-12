@@ -7479,6 +7479,14 @@ function collectGeneratorImports(ctx: CodegenContext, sourceFile: ts.SourceFile)
       typeIdx: pushRefType, // same signature as push_ref: (buf, iterable) → void
     });
 
+    // __gen_set_return: (externref, externref) → void  (#2035 — stashes the
+    // generator's `return` value on the buffer as a side property instead of
+    // pushing it as a yielded element; surfaced once as the terminal result)
+    addImport(ctx, "env", "__gen_set_return", {
+      kind: "func",
+      typeIdx: pushRefType, // same signature as push_ref: (buf, value) → void
+    });
+
     // __create_generator: (buf: externref, pendingThrow: externref) → externref
     // Takes a buffer of yielded values and an optional pending exception,
     // returns a Generator-like object that defers the throw to the first next() call.
@@ -8691,6 +8699,13 @@ export function addGeneratorImports(ctx: CodegenContext, options?: { allowNoJsHo
   addImport(ctx, "env", "__gen_yield_star", {
     kind: "func",
     typeIdx: pushRefType, // same signature as push_ref: (buf, iterable) → void
+  });
+
+  // __gen_set_return: (externref, externref) → void  (#2035 — stashes the
+  // generator's `return` value on the buffer instead of pushing it as a yield)
+  addImport(ctx, "env", "__gen_set_return", {
+    kind: "func",
+    typeIdx: pushRefType, // same signature as push_ref: (buf, value) → void
   });
 
   // __create_generator: (buf: externref, pendingThrow: externref) -> externref

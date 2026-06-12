@@ -145,23 +145,19 @@ export function compileReturnStatement(ctx: CodegenContext, fctx: FunctionContex
     if (stmt.expression) {
       const bufferIdx = fctx.localMap.get("__gen_buffer");
       const resultType = compileExpression(ctx, fctx, stmt.expression);
-      if (resultType !== null && bufferIdx !== undefined) {
-        // Push the return value into the gen buffer so it appears as the
-        // final next() value (#729)
+      const setReturnIdx = ctx.funcMap.get("__gen_set_return");
+      if (resultType !== null && bufferIdx !== undefined && setReturnIdx !== undefined) {
+        // #2035: the generator's `return` value belongs ONLY to the terminal
+        // `{value, done:true}` result — it must NOT be pushed into the yield
+        // buffer (where spread/for-of/Array.from would surface it as a yielded
+        // element). Coerce it to externref and stash it on the buffer via
+        // `__gen_set_return`; the host drain emits it once with `done:true`.
         const tmpLocal = allocLocal(fctx, `__gen_ret_${fctx.locals.length}`, resultType);
         fctx.body.push({ op: "local.set", index: tmpLocal });
         fctx.body.push({ op: "local.get", index: bufferIdx });
         fctx.body.push({ op: "local.get", index: tmpLocal });
-        if (resultType.kind === "f64") {
-          const pushIdx = ctx.funcMap.get("__gen_push_f64");
-          if (pushIdx !== undefined) fctx.body.push({ op: "call", funcIdx: pushIdx });
-        } else if (resultType.kind === "i32") {
-          const pushIdx = ctx.funcMap.get("__gen_push_i32");
-          if (pushIdx !== undefined) fctx.body.push({ op: "call", funcIdx: pushIdx });
-        } else {
-          const pushIdx = ctx.funcMap.get("__gen_push_ref");
-          if (pushIdx !== undefined) fctx.body.push({ op: "call", funcIdx: pushIdx });
-        }
+        coerceType(ctx, fctx, resultType, { kind: "externref" });
+        fctx.body.push({ op: "call", funcIdx: setReturnIdx });
       } else if (resultType !== null) {
         fctx.body.push({ op: "drop" });
       }
