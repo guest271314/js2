@@ -3,7 +3,7 @@ id: 1712
 title: "acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn"
 status: in-progress
 created: 2026-05-29
-updated: 2026-06-10
+updated: 2026-06-11
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -16,7 +16,11 @@ model: fable
 depends_on: [1710, 1711]
 es_edition: multi
 related: [1690, 1690b, 1584, 1058]
+claimed_by: codex-developer
+claimed_at: 2026-06-07T05:10:23.845Z
+pr: 1293
 ---
+
 # #1712 — Acceptance milestone: compiled acorn parses a representative .js with a structurally-equal AST
 
 ## Problem
@@ -35,17 +39,17 @@ correctly" — not just compile it to valid Wasm.
 
 The three known full-module blockers are **already fixed**: #1679
 (`new this`), #1690 (invalid-Wasm index-shift), #1690b (var-shadow) are all
-`done`. So acorn may already compile to a *valid, instantiable* binary on
+`done`. So acorn may already compile to a _valid, instantiable_ binary on
 current main — but "valid Wasm" is not "correct AST". The remaining risk is
-*runtime divergence*: compiled acorn instantiates and runs but produces a
+_runtime divergence_: compiled acorn instantiates and runs but produces a
 subtly wrong AST (off-by-one positions, a dropped node, a mis-coerced numeric
 field). Those bugs are exactly what the #1710 harness + #1711 triage exist to
 surface, and any of them blocks this acceptance.
 
-So #1712 is the *integration gate*: it flips from `backlog` to `ready` once
+So #1712 is the _integration gate_: it flips from `backlog` to `ready` once
 #1710 (harness) lands and #1711 (triage) confirms either zero divergences (in
 which case #1712 may pass immediately) or a tractable set of fixes. It is the
-track's north star; whether it lands *within* s57 depends on what #1711
+track's north star; whether it lands _within_ s57 depends on what #1711
 surfaces. The optimistic case — given the known blockers are cleared — is that
 #1712 passes early and the sprint pivots to widening the fixture corpus.
 
@@ -70,12 +74,69 @@ surfaces. The optimistic case — given the known blockers are cleared — is th
 - A passing #1712 is the trigger to (a) widen the fixture corpus for a second
   dogfood lap (more libraries), and (b) unblock #1584's "compile acorn as the
   runtime parser" dependency — the interpreter needs exactly this artifact.
-- Standalone (`--target wasi`) acorn execution is a *second-lap* extension, not
+- Standalone (`--target wasi`) acorn execution is a _second-lap_ extension, not
   part of this acceptance (JS-host first to isolate codegen correctness from
   host-import gaps).
 - Status starts `backlog`; the tech lead flips it to `ready` once the blocking
   issues merge. Do NOT dispatch a dev to "make #1712 pass" directly — it is an
   integration gate, satisfied by fixing its dependencies.
+
+## PR #1293 final scope (2026-06-11) — test lands SKIPPED, fixes landed
+
+PR #1293 (symphony/1712) ships `tests/issue-1712.test.ts` as a ready-to-arm
+acceptance gate, marked `it.skip` pending the in-flight fnctor laps (#1327
+dynamic-dispatch chain, #1345 two-shape unification, #1335 vec mutators).
+The PR's own closure-dispatch machinery passed the test on its branch, but
+main's independently-landed fnctor implementation (#1307 lineage) superseded
+it; reconciling both inside one merge would duplicate the open laps. The
+PR's durable codegen contribution is the `shiftLateImportIndices`
+startFuncIdx fix below. **Un-skip the test when #1345 lands.**
+
+### Historical note (2026-06-10, branch state before the supersede)
+
+PR #1293's branch passed the acceptance test green. The 24 equivalence
+regressions that previously blocked it were root-caused to a SINGLE latent
+bug exposed (not introduced) by the PR: `shiftLateImportIndices`
+(`src/codegen/expressions/late-imports.ts`) never shifted
+`ctx.mod.startFuncIdx`, so any late import added via
+`ensureLateImport`/`flushLateImportShifts` left `(start N)` pointing at an
+exported user function with a result type → `WebAssembly.validate` failure.
+Fixing that one shift cleared all 24 buckets (verified by a full local
+equivalence-gate run: 0 new regressions, 37 baseline failures now passing).
+Three additional hardening fixes shipped alongside: the
+`fctx.readsCurrentThis` gate on the `__current_this` read was restored
+(matches main; #1702 null-guard keeps host dispatch working), `__host_eq`
+import resolution now happens BEFORE operand coercion (ill-typed-Wasm
+fall-through), and externref switch discriminants keep numeric unbox-to-f64
+comparison when all case expressions are numeric (reference identity only
+for genuine reference cases). The PR's dynamic-`this` property lookup,
+`Foo.prototype` host bridge, and higher-arity closure dispatch are
+load-bearing for acorn and retained. #1301 (if/else then-buffer
+global-index shift) merged independently and complements the PR's
+`liveBodies` registration — both mechanisms coexist (dedup via the
+`shifted` set).
+
+## Attempt 22 Findings
+
+- Added `tests/issue-1712.test.ts`, a focused CI-safe acceptance test that
+  compiles the pinned Acorn tarball, instantiates the compiled parser in
+  JS-host mode, parses one representative JavaScript fixture, and diffs the AST
+  against node-acorn via the #1710 `diffAst` helper.
+- The comparison ignores Acorn position fields through `diffAst` and strips
+  compiled-only `sourceFile: null` metadata before comparison. All other fields
+  in the normalized AST are structurally compared.
+- The fixture covers multiple statement forms currently inside the compiled
+  parser's passing surface: expression statements, block statements, labeled
+  statements, a regex literal, and a conditional expression. Follow-up dogfood
+  widening should add declarations/classes/functions once the remaining keyword,
+  array/object, and operator-local parser-runtime gaps are closed.
+- Codegen/runtime fixes made for this acceptance include function-constructor
+  object-literal shape pre-registration, function-constructor call-index repair
+  after late import shifts, current-this dynamic update/writeback repairs, and
+  WasmGC struct getter/setter fallback improvements needed while Acorn
+  initializes token tables and parser state.
+- Scoped validation passes:
+  `node node_modules/vitest/dist/cli.js run tests/issue-1712.test.ts`.
 
 ## Dogfood lap 2026-06-10 (fable-1712, main 6efc0d279)
 

@@ -50,6 +50,7 @@ import {
   getLine,
   resolveComputedKeyExpression,
   resolveThisStructName,
+  skipTransparentExpressions,
   valTypesMatch,
 } from "./shared.js";
 import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
@@ -122,6 +123,30 @@ const WELL_KNOWN_SYMBOLS: Record<string, number> = {
   dispose: 13,
   asyncDispose: 14,
 };
+
+/**
+ * #2020: resolve an inherited static-property global by walking the class
+ * parent chain (classParentMap), retrying `<Ancestor>_<prop>` at each level.
+ * Static fields, like static methods, are inherited: `class B extends A {}`
+ * sees `A`'s static fields through `B`. Returns the owning ancestor's global
+ * index, or undefined when no ancestor declares the property. Callers run the
+ * own-class lookup first, so own statics correctly shadow inherited ones.
+ */
+export function resolveInheritedStaticProp(
+  ctx: CodegenContext,
+  className: string,
+  propName: string,
+): number | undefined {
+  const seen = new Set<string>([className]);
+  let cls: string | undefined = ctx.classParentMap.get(className);
+  while (cls && !seen.has(cls)) {
+    seen.add(cls);
+    const globalIdx = ctx.staticProps.get(`${cls}_${propName}`);
+    if (globalIdx !== undefined) return globalIdx;
+    cls = ctx.classParentMap.get(cls);
+  }
+  return undefined;
+}
 
 /**
  * ES spec IsAnonymousFunctionDefinition: returns true when the expression is
@@ -1869,8 +1894,12 @@ export function compilePropertyAccess(
   // `extern.convert_any` / re-enters the accessor trampoline (#1681 RUNFAIL
   // bucket). `fctx.isStaticContext` is propagated through closure spawning, so
   // it identifies exactly this case.
+  // #2027: `(this as any).a` / `(this).a` in a static initializer must reach
+  // this static-`this` arm too. The receiver is wrapped in an AsExpression /
+  // ParenthesizedExpression, so match on the unwrapped form rather than the
+  // literal `ThisKeyword` node kind. Plain `this.a` already matched.
   if (
-    expr.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    skipTransparentExpressions(expr.expression).kind === ts.SyntaxKind.ThisKeyword &&
     (fctx.localMap.get("this") === undefined || fctx.isStaticContext)
   ) {
     // Resolve the enclosing class name from context.
@@ -1927,8 +1956,13 @@ export function compilePropertyAccess(
   }
 
   // Check for static property access: ClassName.staticProp
-  if (ts.isIdentifier(expr.expression)) {
-    const objName = expr.expression.text;
+  // #2020: unwrap outer expressions so `(B as any).count` / `(B).count` still
+  // resolve the receiver to the class identifier `B`. A cast to `any` otherwise
+  // hides the Identifier and the static-field lookup (incl. the inherited-field
+  // parent walk below) is skipped, falling through to the dynamic any path.
+  const staticReceiver = skipTransparentExpressions(expr.expression);
+  if (ts.isIdentifier(staticReceiver)) {
+    const objName = staticReceiver.text;
 
     // (#1639) `genFn.prototype` where `genFn` is a `function*` / `async function*`
     // declaration must return the intrinsic `%GeneratorPrototype%` /
@@ -1959,7 +1993,11 @@ export function compilePropertyAccess(
     const resolvedClass = ctx.classExprNameMap.get(objName) ?? objName;
     if (ctx.classSet.has(resolvedClass)) {
       const fullName = `${resolvedClass}_${propName}`;
-      const globalIdx = ctx.staticProps.get(fullName);
+      // #2020: static fields are inherited. `class B extends A {}; B.count`
+      // resolves to A's `A_count` global. The own-class lookup misses, so walk
+      // the parent chain (classParentMap) retrying `<Ancestor>_<prop>` — own
+      // statics still shadow because the own lookup runs first.
+      const globalIdx = ctx.staticProps.get(fullName) ?? resolveInheritedStaticProp(ctx, resolvedClass, propName);
       if (globalIdx !== undefined) {
         fctx.body.push({ op: "global.get", index: globalIdx });
         const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];

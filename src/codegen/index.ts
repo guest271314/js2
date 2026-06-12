@@ -6178,9 +6178,15 @@ export const STRING_METHODS: Record<string, { params: ValType[]; result: ValType
   },
   indexOf: { params: [{ kind: "externref" }, { kind: "externref" }], result: { kind: "f64" } },
   lastIndexOf: { params: [{ kind: "externref" }, { kind: "externref" }], result: { kind: "f64" } },
-  includes: { params: [{ kind: "externref" }], result: { kind: "i32" } },
-  startsWith: { params: [{ kind: "externref" }], result: { kind: "i32" } },
-  endsWith: { params: [{ kind: "externref" }], result: { kind: "i32" } },
+  // #2002 — second arg is the start position (includes/startsWith) or
+  // endPosition (endsWith). Declared as f64 so the generic arg loop forwards
+  // it to the host instead of truncating to import arity. An omitted position
+  // is padded with NaN; the `string_method` host shim strips a trailing NaN
+  // so the JS method applies its spec default (0 for includes/startsWith,
+  // length for endsWith) rather than ToInteger(NaN)=0.
+  includes: { params: [{ kind: "externref" }, { kind: "f64" }], result: { kind: "i32" } },
+  startsWith: { params: [{ kind: "externref" }, { kind: "f64" }], result: { kind: "i32" } },
+  endsWith: { params: [{ kind: "externref" }, { kind: "f64" }], result: { kind: "i32" } },
   replace: {
     params: [{ kind: "externref" }, { kind: "externref" }],
     result: { kind: "externref" },
@@ -6508,6 +6514,13 @@ export function addStringImports(ctx: CodegenContext): void {
     for (const [name, idx] of ctx.nativeStrHelpers) {
       if (idx >= importsBefore) {
         ctx.nativeStrHelpers.set(name, idx + delta);
+      }
+    }
+    // (#1913) Regex helper map moves in lockstep too — regexp-standalone call
+    // sites bake `call` indices straight from this map.
+    for (const [name, idx] of ctx.nativeRegexHelpers) {
+      if (idx >= importsBefore) {
+        ctx.nativeRegexHelpers.set(name, idx + delta);
       }
     }
     // (#2039 slice 2) Re-base so reconcileNativeStrFinalizeShift doesn't apply
@@ -7917,6 +7930,10 @@ export function addUnionImports(ctx: CodegenContext): void {
       for (const [name, idx] of ctx.nativeStrHelpers) {
         if (idx >= importsBefore) ctx.nativeStrHelpers.set(name, idx + delta);
       }
+      // (#1913) Regex helper map shares the same lifecycle.
+      for (const [name, idx] of ctx.nativeRegexHelpers) {
+        if (idx >= importsBefore) ctx.nativeRegexHelpers.set(name, idx + delta);
+      }
       ctx.nativeStrHelperImportBase = ctx.numImportFuncs;
     }
     // (#1525b) Shift pendingMethodTrampolines side-channel indices in lockstep.
@@ -8722,6 +8739,11 @@ export function addForInImports(ctx: CodegenContext): void {
   // __for_in_get: (externref, i32) -> externref — returns keys[i]
   const extI32ToExt = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "externref" }]);
   addImport(ctx, "env", "__for_in_get", { kind: "func", typeIdx: extI32ToExt });
+
+  // __for_in_has: (externref obj, externref key) -> i32 — per-visit liveness
+  // check so a property deleted mid-enumeration is skipped (#2066).
+  const extExtToI32 = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+  addImport(ctx, "env", "__for_in_has", { kind: "func", typeIdx: extExtToI32 });
 }
 
 /**

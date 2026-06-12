@@ -242,6 +242,17 @@ export function shiftLateImportIndices(
       ctx.nativeStrHelpers.set(name, idx + added);
     }
   }
+  // (#1913) Same lockstep for `nativeRegexHelpers` — the regex lowering call
+  // sites (exec/test/match/split/replace in regexp-standalone.ts) read this
+  // map directly when baking `call` funcIdx. Leaving it stale-low meant any
+  // late import landing BETWEEN two regex call sites made the second site
+  // call one function too early; stack-balance then "fixed" the args against
+  // the wrong callee signature and emitted invalid ref.casts.
+  for (const [name, idx] of ctx.nativeRegexHelpers) {
+    if (idx >= importsBefore) {
+      ctx.nativeRegexHelpers.set(name, idx + added);
+    }
+  }
   // (#2039 slice 2) Re-base the native-string finalize-shift regime. The loop
   // above plus the mod.functions body walk fully repaired the helpers for the
   // `added` imports of this batch, so the helpers are now consistent with the
@@ -284,6 +295,18 @@ export function shiftLateImportIndices(
   // Shift declared func refs
   if (ctx.mod.declaredFuncRefs.length > 0) {
     ctx.mod.declaredFuncRefs = ctx.mod.declaredFuncRefs.map((idx) => (idx >= importsBefore ? idx + added : idx));
+  }
+  // (#1712) The module start function index also moves if it was a defined
+  // function at or above the insertion point. Mirrors the startFuncIdx shift
+  // in addStringImports / addUnionImports (index.ts) — without it, a late
+  // import added through ensureLateImport / flushLateImportShifts (e.g.
+  // __box_number for a boxed numeric struct field) shifts every defined-func
+  // index up by one but leaves `(start N)` pointing at the function that USED
+  // to live at __module_init's index (now an exported user function with a
+  // result type), producing "invalid start function: non-zero parameter or
+  // return count".
+  if (ctx.mod.startFuncIdx !== undefined && ctx.mod.startFuncIdx >= importsBefore) {
+    ctx.mod.startFuncIdx += added;
   }
 }
 
@@ -453,6 +476,11 @@ export function reconcileNativeStrFinalizeShift(ctx: CodegenContext): void {
   // every entry is a defined function by construction.
   for (const [name, idx] of ctx.nativeStrHelpers) {
     if (idx >= base) ctx.nativeStrHelpers.set(name, idx + added);
+  }
+  // (#1913) Regex helper map moves in lockstep too — see the comment in
+  // addLateImportBatch above.
+  for (const [name, idx] of ctx.nativeRegexHelpers) {
+    if (idx >= base) ctx.nativeRegexHelpers.set(name, idx + added);
   }
   // Shift export descriptors. Exports only ever reference defined functions in
   // this regime (helpers/runtime exports like `__vec_get`); a func export with
