@@ -4068,6 +4068,18 @@ function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Lo
   // `ref.is_null` check on the receiver. (TODO follow-up: emit
   // `ref.is_null` directly from the IR.)
   if (otherType.kind === "extern") return null;
+  // #1981: `class`, `object`, and `closure` IrTypes lower to nullable WasmGC
+  // ref shapes (`(ref null $Struct)`). A class/object/closure-typed value can
+  // be `null` at runtime (e.g. a host call passing `null` for a class-typed
+  // parameter), so the defensive `=== null` / `!== null` guard must NOT be
+  // folded to a constant — folding it deletes the guard, which either returns
+  // the wrong value (`=== null` → false) or dereferences null (`!== null` →
+  // true, then `p.v` traps). Bail so the caller falls back to legacy, which
+  // emits a runtime `ref.is_null` check. The slice-1 fold is only sound for
+  // statically non-nullable kinds.
+  if (otherType.kind === "class" || otherType.kind === "object" || otherType.kind === "closure") {
+    return null;
+  }
   // Slice 10 (#1169i): a `val { externref }` operand is similarly
   // nullable. Functions that compare externref-typed values against
   // null (e.g. through extern.call results assigned to a local) need
