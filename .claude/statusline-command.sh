@@ -68,12 +68,12 @@ if [ -d "$status_dir" ] && [ -n "$in_worktree" ]; then
         if [ -n "$last_seen" ]; then
           fresh=$(( now_sec - last_seen ))
           [ "$fresh" -lt 0 ] && fresh=0
-          if [ "$fresh" -ge 600 ]; then   color="48;5;196;37"  # red: >10min since heartbeat = likely dead
+          if [ "$fresh" -ge 600 ]; then   color="48;5;196;30"  # red: >10min since heartbeat = likely dead
           elif [ "$fresh" -ge 180 ]; then color="43;30"         # yellow: 3-10min = slow/lagging
           else                            color="42;30"; fi      # green: <3min = alive
         else
           # No heartbeat yet — fall back to time-in-state coloring
-          if [ "$elapsed" -ge 900 ]; then   color="48;5;196;37"
+          if [ "$elapsed" -ge 900 ]; then   color="48;5;196;30"
           elif [ "$elapsed" -ge 300 ]; then color="43;30"
           else                              color="100;37"; fi
         fi
@@ -100,7 +100,7 @@ if [ -n "$resets_at" ]; then
         printf " \033[32m%sd left\033[00m", left
       } else {
         if (days_int >= 2) { fill=43;         fg=30 }
-        else               { fill="48;5;196"; fg=37 }
+        else               { fill="48;5;196"; fg=30 }
         width = 10
         filled = int(elapsed_pct * width / 100 + 0.5)
         label = sprintf(" %sd left", left)
@@ -118,7 +118,7 @@ fi
 if [ -n "$used" ] || [ -n "$weekly" ] || [ -n "$five_hour" ]; then
   if [ -n "$used" ]; then
     awk -v p="$used" 'BEGIN {
-      if (p >= 75)      { fill="48;5;196"; fg=37 }
+      if (p >= 75)      { fill="48;5;196"; fg=30 }
       else if (p >= 50) { fill=43; fg=30 }
       else              { fill=42; fg=30 }
       width = 9
@@ -134,7 +134,7 @@ if [ -n "$used" ] || [ -n "$weekly" ] || [ -n "$five_hour" ]; then
   fi
   if [ -n "$five_hour" ] && [ -z "$in_worktree" ]; then
     awk -v p="$five_hour" 'BEGIN {
-      if (p >= 75)      { fill="48;5;196"; fg=37 }
+      if (p >= 75)      { fill="48;5;196"; fg=30 }
       else if (p >= 50) { fill=43; fg=30 }
       else              { fill=42; fg=30 }
       width = 9
@@ -150,7 +150,7 @@ if [ -n "$used" ] || [ -n "$weekly" ] || [ -n "$five_hour" ]; then
   fi
   if [ -n "$weekly" ] && [ -z "$in_worktree" ]; then
     awk -v p="$weekly" 'BEGIN {
-      if (p >= 75)      { fill="48;5;196"; fg=37 }
+      if (p >= 75)      { fill="48;5;196"; fg=30 }
       else if (p >= 50) { fill=43; fg=30 }
       else              { fill=42; fg=30 }
       width = 10
@@ -192,7 +192,7 @@ pass_bar() {
   awk -v p="$1" -v label="$2" 'BEGIN {
     if (p >= 66.7)     { fill=42; fg=30 }
     else if (p >= 33.3){ fill=43; fg=30 }
-    else               { fill="48;5;196"; fg=37 }
+    else               { fill="48;5;196"; fg=30 }
   }
   END {
     width = 12
@@ -213,7 +213,7 @@ free_bar() {
     pct = free_g * 100 / total_g
     if (pct >= 66.7)      { fill=42; fg=30 }
     else if (pct >= 33.3) { fill=43; fg=30 }
-    else                  { fill="48;5;196"; fg=37 }
+    else                  { fill="48;5;196"; fg=30 }
     width = 10
     filled = int(pct * width / 100)
     label = " " free_g "G free"
@@ -303,7 +303,7 @@ if [ -z "$in_worktree" ] && [ "$branch" = "main" ]; then
     awk -v p="$sprint_pct" -v n="$sprint_n" -v done="$sprint_done" -v total="$sprint_total" 'BEGIN {
       if (p >= 67)      { fill=42;         fg=30 }
       else if (p >= 33) { fill=43;         fg=30 }
-      else              { fill="48;5;196"; fg=37 }
+      else              { fill="48;5;196"; fg=30 }
       width = 12
       filled = int(p * width / 100)
       label = sprintf(" %d/%d s%d", done, total, n)
