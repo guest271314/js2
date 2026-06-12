@@ -26,7 +26,7 @@ async function run(src: string, fn: string): Promise<number> {
 }
 
 describe("#1961 nativeStrings: string|undefined === compares by content", () => {
-  it("the repro: \"hello\".at(1) === \"e\" is true", async () => {
+  it('the repro: "hello".at(1) === "e" is true', async () => {
     expect(await run(`export function t(): number { return "hello".at(1) === "e" ? 1 : 0; }`, "t")).toBe(1);
   });
 
