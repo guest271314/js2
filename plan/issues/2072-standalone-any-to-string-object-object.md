@@ -4,7 +4,7 @@ title: "standalone: String(any-boxed primitive) returns '[object Object]' — $_
 status: ready
 sprint: 62
 created: 2026-06-11
-updated: 2026-06-11
+updated: 2026-06-12
 priority: high
 feasibility: hard
 reasoning_effort: max

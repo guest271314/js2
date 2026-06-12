@@ -4,7 +4,7 @@ title: "standalone: loose == between two any operands compares references, never
 status: ready
 sprint: 62
 created: 2026-06-11
-updated: 2026-06-11
+updated: 2026-06-12
 priority: medium
 feasibility: medium
 reasoning_effort: medium

@@ -4,7 +4,7 @@ title: "ToPrimitive valueOf dispatch keyed by struct type name, not object ident
 status: ready
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-11
+updated: 2026-06-12
 priority: high
 feasibility: medium
 reasoning_effort: high

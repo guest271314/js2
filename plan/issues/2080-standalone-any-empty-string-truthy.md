@@ -4,7 +4,7 @@ title: "standalone: any-boxed empty string is truthy — anyref truthiness check
 status: ready
 sprint: 62
 created: 2026-06-11
-updated: 2026-06-11
+updated: 2026-06-12
 priority: medium
 feasibility: hard
 reasoning_effort: high
