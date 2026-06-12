@@ -3723,11 +3723,103 @@ function isThisGuardIndexSafe(arg: ts.Expression): boolean {
   );
 }
 
+/**
+ * Optional element access `a?.[i]` (#2050). On a nullish base the index
+ * expression — and any side effects in it — must NOT evaluate, and the result
+ * is undefined-equivalent (§13.3.9 Optional Chains). Sibling of
+ * compileOptionalPropertyAccess: tee the base into a local, branch on
+ * `ref.is_null`, and emit the index + read only in the non-null arm.
+ */
+export function compileOptionalElementAccess(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.ElementAccessExpression,
+): ValType | null {
+  // Compile the base receiver.
+  const objType = compileExpression(ctx, fctx, expr.expression);
+  if (!objType) return null;
+
+  // Result type = the TS type of the whole `a?.[i]` expression. Ref types use
+  // externref as the block type to avoid null-subtyping mismatches.
+  const tsResultType = ctx.checker.getTypeAtLocation(expr);
+  let resultType: ValType = resolveWasmType(ctx, tsResultType);
+  if (resultType.kind === "ref" || resultType.kind === "ref_null") {
+    resultType = { kind: "externref" };
+  }
+
+  // A non-reference base is the compiler's representation of `undefined`/`null`
+  // (e.g. a `const a = null` stored as an i32 global). Such a base always
+  // short-circuits: drop it and emit the default result, never touching the
+  // index expression.
+  if (objType.kind !== "ref" && objType.kind !== "ref_null" && objType.kind !== "externref") {
+    fctx.body.push({ op: "drop" });
+    if (resultType.kind === "f64") {
+      fctx.body.push({ op: "f64.const", value: 0 });
+    } else if (resultType.kind === "i32") {
+      fctx.body.push({ op: "i32.const", value: 0 });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    return resultType;
+  }
+
+  const tmp = allocLocal(fctx, `__optelem_${fctx.locals.length}`, objType);
+  fctx.body.push({ op: "local.tee", index: tmp });
+  fctx.body.push({ op: "ref.is_null" });
+
+  const savedBody = fctx.body;
+  fctx.savedBodies.push(savedBody);
+
+  // then branch (null path): the short-circuit default.
+  let thenInstrs: Instr[];
+  if (resultType.kind === "f64") {
+    thenInstrs = [{ op: "f64.const", value: 0 }];
+  } else if (resultType.kind === "i32") {
+    thenInstrs = [{ op: "i32.const", value: 0 }];
+  } else {
+    thenInstrs = [{ op: "ref.null.extern" }];
+  }
+
+  // else branch (non-null path): push the now-known-non-null base, then run
+  // the ordinary element-access read (which compiles the index expression).
+  fctx.body = [];
+  fctx.body.push({ op: "local.get", index: tmp });
+  const nonNullObjType: ValType =
+    objType.kind === "ref_null" ? { kind: "ref", typeIdx: (objType as any).typeIdx } : objType;
+  let elseResultType = compileElementAccessBody(ctx, fctx, expr, nonNullObjType);
+  if (elseResultType === null) {
+    // Read could not resolve to a concrete value — coerce the base ref to the
+    // block result type so the `if` typechecks rather than leaking a mismatch.
+    elseResultType = objType;
+  }
+  if (!valTypesMatch(elseResultType, resultType)) {
+    coerceType(ctx, fctx, elseResultType, resultType);
+  }
+  const elseInstrs = fctx.body;
+
+  popBody(fctx, savedBody);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: resultType },
+    then: thenInstrs,
+    else: elseInstrs,
+  });
+
+  return resultType;
+}
+
 export function compileElementAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.ElementAccessExpression,
 ): ValType | null {
+  // Optional chaining: a?.[i] (#2050). Short-circuits on a nullish base — the
+  // index expression must NOT evaluate and the result must be undefined-
+  // equivalent (§13.3.9 Optional Chains). Mirrors compileOptionalPropertyAccess.
+  if (expr.questionDotToken) {
+    return compileOptionalElementAccess(ctx, fctx, expr);
+  }
+
   const jsonParseElementType = tryEmitJsonParseElementAccess(ctx, fctx, expr);
   if (jsonParseElementType !== undefined) return jsonParseElementType;
 

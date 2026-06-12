@@ -1,10 +1,11 @@
 ---
 id: 2067
 title: "for-of iterator path silently breaks after 1,000,000 iterations (hard guard, counter not reset across re-entries)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: medium
 feasibility: easy
 reasoning_effort: low
@@ -63,3 +64,34 @@ i32.const 1000000 / i32.gt_s / br_if 1`. Guard lives at
 `src/codegen/statements/loops.ts:4103-4111`, introduced by #662 against
 collection-mutation hangs. Should throw loudly (RangeError-style) or be
 removed/raised — silent wrong results are worse than a hang.
+
+## Resolution (2026-06-11)
+
+Removed the silent 1,000,000-iteration `br_if` guard from BOTH for-of iterator
+lowerings in `src/codegen/statements/loops.ts`: the `__iterator_next` host path
+(formerly :4103-4111) and the custom `next()`-method path (formerly the
+`__forit_guard` block). The loop now runs to the iterator's own `done`, so long
+iterations are not truncated and the per-statement counter (never reset across
+re-entries) no longer accumulates toward a cap. The guards were emitted
+instruction sequences only (counter local + increment + compare + break); their
+removal leaves the loop's block structure and break/continue depths unchanged.
+
+**Out of scope (separate mechanism):** the eager-generator evaluation buffer
+(`__EAGER_GEN_LIMIT` in `src/runtime.ts:9142`) caps a *generator's* buffered
+yields at 1M and throws a loud `RangeError` (not a silent truncation), so it is
+already spec-defensible. Raising/streaming that buffer is a distinct change
+(memory tradeoff) and not part of this fix.
+
+### Test Results
+
+`tests/issue-2067.test.ts` (2 cases, all PASS):
+
+| case | result |
+|------|--------|
+| single 200k generator for-of (no truncation) | 200000 ✓ |
+| 20× re-entry of a 100k loop (no cap accumulation) | 2000000 ✓ |
+
+`tsc --noEmit` clean; `tests/iterators.test.ts` + `tests/symbol-iterator-protocol.test.ts`
+green (10/10). Pre-existing failure in `tests/for-of-generator.test.ts`
+(imports a missing `./helpers.js`) is unrelated — a module-resolution error, not
+a test assertion, and independent of this change.

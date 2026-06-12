@@ -3737,15 +3737,10 @@ function compileForOfDirectIterator(
   fctx.breakStack.push(1);
   fctx.continueStack.push(0);
 
-  // Safety guard
-  const iterCountLocal = allocLocal(fctx, `__forit_guard_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: iterCountLocal });
-  fctx.body.push({ op: "i32.const", value: 1 });
-  fctx.body.push({ op: "i32.add" });
-  fctx.body.push({ op: "local.tee", index: iterCountLocal });
-  fctx.body.push({ op: "i32.const", value: 1_000_000 });
-  fctx.body.push({ op: "i32.gt_s" });
-  fctx.body.push({ op: "br_if", depth: 1 });
+  // #2067: no iteration cap — see the matching note in the __iterator_next path.
+  // The former 1,000,000-iteration `br_if` guard silently truncated long
+  // custom-iterator loops and accumulated across re-entries; the loop now runs
+  // to the iterator's own `done`.
 
   // Call next(): result = iter.next()
   fctx.body.push({ op: "local.get", index: iterLocal });
@@ -4133,15 +4128,12 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   fctx.breakStack.push(1); // break = depth 1 (exit block, inside try wrapper)
   fctx.continueStack.push(0); // continue = depth 0 (restart loop)
 
-  // Safety guard: max iteration counter to prevent infinite loops from collection mutation
-  const iterCountLocal = allocLocal(fctx, `__forof_guard_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: iterCountLocal });
-  fctx.body.push({ op: "i32.const", value: 1 });
-  fctx.body.push({ op: "i32.add" });
-  fctx.body.push({ op: "local.tee", index: iterCountLocal });
-  fctx.body.push({ op: "i32.const", value: 1_000_000 });
-  fctx.body.push({ op: "i32.gt_s" });
-  fctx.body.push({ op: "br_if", depth: 1 }); // break if >1M iterations
+  // #2067: no iteration cap. A prior 1,000,000-iteration `br_if` guard (#662,
+  // against collection-mutation hangs) silently truncated legitimately long
+  // iterations — and its counter local was never reset across re-entries of the
+  // same compiled loop, so repeated executions accumulated toward the cap.
+  // Silent wrong results violate "compile away, don't emulate"; the loop now
+  // runs to the iterator's own `done`, matching JS.
 
   // Call __iterator_next(iter) → (i32 done, externref value) [multi-value].
   // Results are pushed left-to-right, so value (externref) is on top of the
