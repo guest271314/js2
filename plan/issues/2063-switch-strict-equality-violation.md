@@ -1,10 +1,11 @@
 ---
 id: 2063
 title: "switch violates strict-equality matching across types: switch(true){case 1:} matches; \"1\" matches case 1; mixed cases crash"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
+completed: 2026-06-12
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -218,3 +219,55 @@ per-site approach with zero comparator exposure.
 - Standalone test262 shard: confirm **no** comparator-bucket movement (switch and
   `__any_from_extern` are off the `isSameValue` path; this is the cleanest of the
   three to land regression-free).
+
+---
+
+## Resolution (2026-06-12)
+
+Implemented entirely in `src/codegen/statements/control-flow.ts`
+(`compileSwitchStatement`) — **the comparator path (`binary-ops.ts`) and
+`__any_from_extern` were NOT touched**, so the −788 trap is structurally
+avoided (the test262 `isSameValue` comparator is off this path).
+
+Chose the spec's **per-site externref tag-dispatch** alternative over the
+`__any_strict_eq`-boxing route, which also sidesteps the host-boxed-boolean
+`__any_from_extern` tag-recovery defect the spec flagged (that helper is never
+invoked by switch now).
+
+### What landed
+
+1. `homogeneousSwitchClass(ctx, stmt)` — returns `"number"|"string"|"boolean"`
+   only when the discriminant **and every case** are provably that one primitive
+   class (flag-based `isNumberType`/`isStringType`/`isBooleanType`, which are all
+   false for `any`/`unknown`/unions/objects). Null ⇒ the switch needs per-case
+   strict equality.
+2. Homogeneous (`homogeneousClass !== null`): the legacy fast path runs
+   **verbatim** — no boxing, no behavior or perf change.
+3. Non-homogeneous (`strictPerCase`): the discriminant is kept boxed as
+   `externref` (the `else if … unbox-to-f64` is now gated on `!strictPerCase`),
+   `switchIsString` is forced false, and each case is compiled to `externref`
+   and compared via the new `emitSwitchStrictEq(ctx, fctx, discTmp, caseTmp)`.
+4. `emitSwitchStrictEq` mirrors the `===` operator's externref-equality lowering:
+   - JS-host mode → `__host_eq` (JS `===`, strict + cross-type-false), with the
+     #1383-gated both-numbers `__unbox_number` fallback to recover equal numbers
+     boxed in distinct externrefs.
+   - standalone/WASI (`noJsHost`) → the #1776 Wasm-native tag dispatch
+     (`__typeof_number`→f64.eq, `__typeof_boolean`→i32.eq, `__typeof_bigint`→
+     i64.eq, native-string value compare via `__str_equals`, else `ref.eq`
+     identity). No coercion across tags.
+
+### Outcome (all verified)
+
+- `t3` (`switch(true){case 1}`) → 0, `s` (`switch("1"){case 1}`) → 0,
+  `t2` (mixed `case 1`/`case "1"`) → 50, `switch(1){case "1"}` → 0 with **no
+  crash** — both JS-host and standalone modes.
+- `switch(true){case true}` → match; `switch(true){case false}` → no match.
+- Homogeneous numeric/string/boolean switches unchanged (fast path).
+- #198 (the switch-coercion suite that introduced the unification), #1776,
+  #1914, #1888 all stay green; `binary-ops.ts` untouched.
+
+### Tests
+
+`tests/issue-2063-switch-strict-equality.test.ts` — 13 cases (JS-host via
+`assertEquivalent`, plus a standalone block compiling `--target standalone` and
+asserting `WebAssembly.validate` + correct results).
