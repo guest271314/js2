@@ -54,6 +54,22 @@ export enum ReOp {
    *  successful positive lookaround persist; everything else restores the
    *  pre-assertion capture state. #1911. */
   LOOKAROUND = 12,
+  /** `[PROGRESS, slot, 0]` — empty-iteration guard for nullable quantifiers
+   *  (§22.2.2.3.1 RepeatMatcher: a min=0 iteration that consumes nothing
+   *  fails, ending the loop). `slot` is a scratch capture slot into which the
+   *  loop entry recorded `sp` via a preceding SAVE; if the current `sp` equals
+   *  that recorded value the body matched empty, so this op FAILS the
+   *  iteration (backtracking to the quantifier's exit arm). Only emitted for
+   *  star/plus whose body can match the empty string. #1959. */
+  PROGRESS = 13,
+  /** `[CLEAR, loSlot, hiSlot]` — reset capture slots `loSlot..hiSlot`
+   *  (inclusive) to -1. §22.2.2.3.1 RepeatMatcher clears the quantified
+   *  subtree's capture set on each repetition entry, so only the final
+   *  iteration's participation is observable. Emitted at the head of every
+   *  star/plus/repeat body that contains capture groups; the slot range is the
+   *  group span `[2*lo, 2*hi+1]`. Backtrack-aware via the usual caps snapshot
+   *  (CLEAR mutates `caps`, which SPLIT snapshots). #1960. */
+  CLEAR = 14,
 }
 
 /** Slots per instruction in the flat program array. */
@@ -90,6 +106,11 @@ export interface CompiledRegex {
   classTable: number[];
   /** Number of capture groups including group 0 (the whole match). */
   nGroups: number;
+  /** Extra scratch slots appended after the `2*nGroups` capture slots, one per
+   *  nullable star/plus, used by `ReOp.PROGRESS` to detect empty iterations
+   *  (#1959). The VM allocates `2*nGroups + nScratch` slots; scratch slots are
+   *  never reported as captures. */
+  nScratch: number;
   /** Flags bitfield: g=1 i=2 m=4 s=8 u=16 y=32 d=64 v=128. */
   flags: number;
 }
