@@ -44,20 +44,24 @@ describe("#2122 fromCharCode/fromCodePoint keep all arguments", () => {
   });
 
   it("native fromCharCode multi-arg length / content", async () => {
-    expect(await runFast(`export function test(): number { return String.fromCharCode(104, 105, 33).length; }`)).toBe(3);
-    expect(await runFast(`export function test(): number { return String.fromCharCode(104, 105, 33).charCodeAt(2); }`)).toBe(
-      33,
+    expect(await runFast(`export function test(): number { return String.fromCharCode(104, 105, 33).length; }`)).toBe(
+      3,
     );
+    expect(
+      await runFast(`export function test(): number { return String.fromCharCode(104, 105, 33).charCodeAt(2); }`),
+    ).toBe(33);
   });
 
   it("native fromCodePoint multi-arg concatenates with surrogate pairs", async () => {
     // "a😀" — 'a' (1) + U+1F600 surrogate pair (2) = length 3
-    expect(await runFast(`export function test(): number { return String.fromCodePoint(97, 0x1F600).length; }`)).toBe(3);
-    expect(await runFast(`export function test(): number { return String.fromCodePoint(97, 0x1F600).charCodeAt(0); }`)).toBe(
-      97,
+    expect(await runFast(`export function test(): number { return String.fromCodePoint(97, 0x1F600).length; }`)).toBe(
+      3,
     );
-    expect(await runFast(`export function test(): number { return String.fromCodePoint(97, 0x1F600).charCodeAt(1); }`)).toBe(
-      0xd83d,
-    );
+    expect(
+      await runFast(`export function test(): number { return String.fromCodePoint(97, 0x1F600).charCodeAt(0); }`),
+    ).toBe(97);
+    expect(
+      await runFast(`export function test(): number { return String.fromCodePoint(97, 0x1F600).charCodeAt(1); }`),
+    ).toBe(0xd83d);
   });
 });
