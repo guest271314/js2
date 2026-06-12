@@ -3751,6 +3751,24 @@ function compileCallExpression(
           fctx.body.push({ op: "f64.convert_i32_s" });
         }
         fctx.body.push({ op: "call", funcIdx });
+        // #2122: fromCharCode is variadic — each subsequent code unit produces a
+        // 1-char string that must be concatenated (ES §22.1.2.1). The host import
+        // is 1-arg, so call it per-argument and join via the js-string `concat`
+        // import. (Args are still evaluated left-to-right exactly once.)
+        if (expr.arguments.length > 1) {
+          addStringImports(ctx);
+          const concatIdx = ctx.jsStringImports.get("concat");
+          if (concatIdx !== undefined) {
+            for (let i = 1; i < expr.arguments.length; i++) {
+              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
+              if (ai && ai.kind === "i32") {
+                fctx.body.push({ op: "f64.convert_i32_s" });
+              }
+              fctx.body.push({ op: "call", funcIdx });
+              fctx.body.push({ op: "call", funcIdx: concatIdx });
+            }
+          }
+        }
         // In fast mode, marshal externref string to native string
         if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
           ensureNativeStringExternBridge(ctx);
@@ -3775,12 +3793,24 @@ function compileCallExpression(
       // Native strings mode: use pure-Wasm __str_fromCodePoint (no host import)
       if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
         const helperIdx = ctx.nativeStrHelpers.get("__str_fromCodePoint");
+        const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
         if (helperIdx !== undefined) {
           const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
           if (argType && argType.kind !== "i32") {
             fctx.body.push({ op: "i32.trunc_sat_f64_s" });
           }
           fctx.body.push({ op: "call", funcIdx: helperIdx });
+          // #2122: variadic — concat each subsequent code point's string.
+          if (expr.arguments.length > 1 && concatIdx !== undefined) {
+            for (let i = 1; i < expr.arguments.length; i++) {
+              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
+              if (ai && ai.kind !== "i32") {
+                fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+              }
+              fctx.body.push({ op: "call", funcIdx: helperIdx });
+              fctx.body.push({ op: "call", funcIdx: concatIdx });
+            }
+          }
           return nativeStringType(ctx);
         }
       }
@@ -3792,6 +3822,22 @@ function compileCallExpression(
           fctx.body.push({ op: "f64.convert_i32_s" });
         }
         fctx.body.push({ op: "call", funcIdx });
+        // #2122: variadic — concat each subsequent code point's string via the
+        // 1-arg host import joined with the js-string `concat` import.
+        if (expr.arguments.length > 1) {
+          addStringImports(ctx);
+          const concatIdx = ctx.jsStringImports.get("concat");
+          if (concatIdx !== undefined) {
+            for (let i = 1; i < expr.arguments.length; i++) {
+              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
+              if (ai && ai.kind === "i32") {
+                fctx.body.push({ op: "f64.convert_i32_s" });
+              }
+              fctx.body.push({ op: "call", funcIdx });
+              fctx.body.push({ op: "call", funcIdx: concatIdx });
+            }
+          }
+        }
         return { kind: "externref" };
       }
     }
