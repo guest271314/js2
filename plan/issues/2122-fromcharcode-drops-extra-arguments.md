@@ -2,10 +2,11 @@
 id: 2122
 renumbered_from: 1955
 title: "String.fromCharCode/fromCodePoint silently drop all arguments after the first (host backend; native fromCodePoint too)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
+completed: 2026-06-12
 priority: high
 feasibility: easy
 reasoning_effort: medium
@@ -64,3 +65,33 @@ add variadic host imports taking a vec.
 #1598 (`fromCharCode` standalone, in-review) covers the standalone/native
 helper only; host-mode dropping untracked. Greps for
 `fromCharCode`/`fromCodePoint` found no argument-dropping issue.
+
+## Resolution (2026-06-12)
+
+Fixed in `src/codegen/expressions/calls.ts`. The native `fromCharCode` branch
+already looped over the args and joined via `__str_concat`; the other three
+paths compiled only `arguments[0]`. Added the same per-argument loop to:
+1. **host `fromCharCode`** — call the 1-arg `String_fromCharCode` import per
+   argument and join with the js-string `concat` import;
+2. **native `fromCodePoint`** — call `__str_fromCodePoint` per argument and join
+   with `__str_concat`;
+3. **host `fromCodePoint`** — same shape as (1) with `String_fromCodePoint`.
+
+Arguments are still compiled left-to-right exactly once. The native marshal /
+return-type handling is unchanged.
+
+### Test Results
+
+`tests/issue-2122.test.ts` (5 cases, all PASS):
+
+| case | result |
+|------|--------|
+| host `fromCharCode(104,105,33)` | "hi!" ✓ |
+| host `fromCodePoint(97, 0x1F600)` | "a😀" ✓ |
+| host fromCharCode side-effect count (eval once, in order) | 3 ✓ |
+| native fromCharCode multi-arg length/charCodeAt | 3 / 33 ✓ |
+| native fromCodePoint multi-arg + surrogate pair | length 3, cc0 97, cc1 0xD83D ✓ |
+
+`tsc --noEmit` clean; `tests/issue-1598.test.ts` green (9/9). Pre-existing
+failure in `tests/string-methods.test.ts` (imports a missing `./helpers.js`) is
+unrelated — a module-resolution error independent of this change.
