@@ -62,6 +62,14 @@ class Emitter {
   private reversed = false;
   /** Lookaround bodies pending sub-program emission (drained by compileParsed). */
   private readonly pendingSubs: PendingSub[] = [];
+  /** Count of scratch capture slots allocated for `ReOp.PROGRESS` empty-loop
+   *  guards (#1959). Each nullable star/plus claims one slot, appended after
+   *  the real capture slots so it is never reported as a capture. Seeded by
+   *  compileParsed once the capture count is known. */
+  scratchCount = 0;
+  /** Base slot index for the next scratch slot = `2 * nGroups + scratchCount`.
+   *  Set by compileParsed before compileNode runs. */
+  private scratchBase = 0;
 
   constructor(caseInsensitive: boolean, dotAll: boolean, multiline: boolean) {
     this.caseInsensitive = caseInsensitive;
@@ -86,6 +94,29 @@ class Emitter {
 
   private here(): number {
     return this.instrs.length;
+  }
+
+  /** Set the base index for scratch slots (called once nGroups is known). */
+  setScratchBase(base: number): void {
+    this.scratchBase = base;
+  }
+
+  /** Claim the next scratch capture slot for a PROGRESS guard (#1959). */
+  private allocScratch(): number {
+    return this.scratchBase + this.scratchCount++;
+  }
+
+  /**
+   * Emit a `CLEAR` at a quantifier-iteration head that resets the body's
+   * capture-group slots to -1 (§22.2.2.3.1 RepeatMatcher, #1960). No-op when the
+   * body has no capture groups. The slot range is `[2*lo, 2*hi+1]` for the
+   * group-index span `[lo, hi]`. Lookbehind bodies (reversed) store group spans
+   * the same way, so the same range applies.
+   */
+  private emitClearForBody(body: ReNode): void {
+    const span = captureSpan(body);
+    if (span === null) return;
+    this.emit(ReOp.CLEAR, 2 * span[0], 2 * span[1] + 1);
   }
 
   /** Add a class to the class table, return its start offset. */
@@ -194,11 +225,20 @@ class Emitter {
         return;
       }
       case "star": {
-        // L1: SPLIT body,exit ; body ; JMP L1 ; exit:   (greedy: body first)
+        // Greedy: SAVE? sp ; L1: SPLIT body,exit ; CLEAR? ; body ; PROGRESS? ; JMP L1 ; exit
+        // A nullable body needs the empty-iteration guard (§22.2.2.3.1): record
+        // sp before SPLIT, and after the body PROGRESS fails the iteration when
+        // sp is unchanged, so the loop can't spin on a zero-width match (#1959).
+        // CLEAR resets the subtree's capture slots on each iteration entry so a
+        // group that doesn't participate this time reads as unset (#1960).
+        const guard = canMatchEmpty(node.node) ? this.allocScratch() : -1;
+        if (guard >= 0) this.emit(ReOp.SAVE, guard);
         const l1 = this.emit(ReOp.SPLIT, 0, 0);
         const bodyStart = this.here();
+        this.emitClearForBody(node.node);
         this.compileNode(node.node);
-        this.emit(ReOp.JMP, l1);
+        if (guard >= 0) this.emit(ReOp.PROGRESS, guard);
+        this.emit(ReOp.JMP, guard >= 0 ? l1 - 1 : l1);
         const exit = this.here();
         if (node.greedy) {
           this.patchA(l1, bodyStart);
@@ -210,18 +250,37 @@ class Emitter {
         return;
       }
       case "plus": {
-        // L1: body ; SPLIT L1,exit ; exit:   (greedy: loop first)
-        const l1 = this.here();
-        this.compileNode(node.node);
-        const split = this.emit(ReOp.SPLIT, 0, 0);
-        const exit = this.here();
-        if (node.greedy) {
-          this.patchA(split, l1);
-          this.patchB(split, exit);
-        } else {
-          this.patchA(split, exit);
-          this.patchB(split, l1);
+        // The first repetition is mandatory (min=1), so it is NOT guarded — an
+        // empty first match is a legitimate one-repetition match. Only the loop
+        // back-edge (the min=0 repetitions) needs the empty-iteration guard.
+        // Non-nullable body keeps the tight original encoding:
+        //   L1: body ; SPLIT L1,exit ; exit
+        // Nullable body lowers to one body + a guarded star for the rest:
+        //   body ; SAVE g ; L2: SPLIT body2,exit ; body2 ; PROGRESS g ; JMP L2 ; exit
+        const guard = canMatchEmpty(node.node) ? this.allocScratch() : -1;
+        if (guard < 0) {
+          // L1: CLEAR? ; body ; SPLIT L1,exit ; exit — CLEAR runs each iteration
+          // (the SPLIT back-edge re-enters at L1), resetting the subtree's
+          // captures so only the final iteration participates (#1960).
+          const l1 = this.here();
+          this.emitClearForBody(node.node);
+          this.compileNode(node.node);
+          const split = this.emit(ReOp.SPLIT, 0, 0);
+          const exit = this.here();
+          if (node.greedy) {
+            this.patchA(split, l1);
+            this.patchB(split, exit);
+          } else {
+            this.patchA(split, exit);
+            this.patchB(split, l1);
+          }
+          return;
         }
+        // Nullable body: mandatory first match (cleared), then a guarded star
+        // (which clears on every iteration of the remaining repetitions).
+        this.emitClearForBody(node.node);
+        this.compileNode(node.node);
+        this.compileNode({ kind: "star", node: node.node, greedy: node.greedy });
         return;
       }
       case "opt": {
@@ -312,6 +371,89 @@ class Emitter {
   }
 }
 
+/**
+ * Conservative nullability test (#1959): can `node` match the empty string?
+ * Used to decide whether a star/plus loop needs the empty-iteration PROGRESS
+ * guard. Over-approximating (returning true when unsure) only adds a cheap
+ * guard; under-approximating would risk the silent-no-match bug, so unknown
+ * shapes default to nullable. Zero-width assertions (`^`, `$`, `\b`,
+ * lookaround) are nullable; consuming atoms (char/class/any) are not.
+ */
+export function canMatchEmpty(node: ReNode): boolean {
+  switch (node.kind) {
+    case "char":
+    case "any":
+    case "udot":
+    case "class":
+    case "backref":
+      // backref to an unset group matches empty, but a set group may consume;
+      // treat as consuming — the guard is only skipped when DEFINITELY non-empty.
+      return false;
+    case "bol":
+    case "eol":
+    case "wordBoundary":
+    case "lookaround":
+      return true;
+    case "star":
+    case "opt":
+      return true;
+    case "plus":
+      return canMatchEmpty(node.node);
+    case "repeat":
+      return node.min === 0 || canMatchEmpty(node.node);
+    case "group":
+    case "modGroup":
+      return canMatchEmpty(node.node);
+    case "concat":
+      return node.parts.every(canMatchEmpty);
+    case "alt":
+      return node.options.some(canMatchEmpty);
+  }
+}
+
+/**
+ * Capture-group index span of a subtree (#1960): `[min, max]` of every group's
+ * `capIndex` reachable inside `node`, or null when it contains no captures.
+ * Used to emit a `CLEAR` at each quantifier-iteration head so stale captures
+ * from an earlier iteration don't leak (§22.2.2.3.1 RepeatMatcher). Lookaround
+ * bodies are NOT descended into — their captures live in separate sub-programs
+ * governed by the lookaround's own atomic attempt, not the outer loop.
+ */
+export function captureSpan(node: ReNode): [number, number] | null {
+  let lo = Infinity;
+  let hi = -Infinity;
+  const visit = (n: ReNode): void => {
+    switch (n.kind) {
+      case "group":
+        if (n.capIndex >= 0) {
+          if (n.capIndex < lo) lo = n.capIndex;
+          if (n.capIndex > hi) hi = n.capIndex;
+        }
+        visit(n.node);
+        return;
+      case "concat":
+        for (const p of n.parts) visit(p);
+        return;
+      case "alt":
+        for (const o of n.options) visit(o);
+        return;
+      case "star":
+      case "plus":
+      case "opt":
+      case "modGroup":
+      case "repeat":
+        visit(n.node);
+        return;
+      // lookaround: separate sub-program — do not descend. char/any/udot/class/
+      // bol/eol/wordBoundary/backref define no groups.
+      default:
+        return;
+    }
+  };
+  visit(node);
+  return hi >= lo ? [lo, hi] : null;
+}
+
 /** Thrown when `{n,m}` expansion would blow past the size cap. */
 export class RepeatTooLargeError extends Error {
   constructor(detail: string) {
@@ -390,7 +532,11 @@ export function compileParsed(parsed: ParsedRegex, flags: number): CompiledRegex
   const caseInsensitive = (flags & RE_FLAG_I) !== 0;
   const dotAll = (flags & RE_FLAG_S) !== 0;
   const multiline = (flags & RE_FLAG_M) !== 0;
+  const nGroups = parsed.numCaptures + 1;
   const em = new Emitter(caseInsensitive, dotAll, multiline);
+  // Scratch slots for PROGRESS guards (#1959) live after the 2*nGroups capture
+  // slots, so the emitter must know the capture-slot count before lowering.
+  em.setScratchBase(2 * nGroups);
   // SAVE 0 (match start)
   em.emit(ReOp.SAVE, 0);
   em.compileNode(parsed.root);
@@ -404,7 +550,8 @@ export function compileParsed(parsed: ParsedRegex, flags: number): CompiledRegex
   return {
     prog,
     classTable: em.classTable,
-    nGroups: parsed.numCaptures + 1,
+    nGroups,
+    nScratch: em.scratchCount,
     flags,
   };
 }
