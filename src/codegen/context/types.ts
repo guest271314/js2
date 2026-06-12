@@ -354,6 +354,14 @@ export interface FunctionContext {
     continueDepthBaseline: number[];
   }[];
   /**
+   * Number of enclosing `try` blocks WITH a catch clause currently being
+   * compiled. Wasm `return_call` replaces the caller frame, so a callee's
+   * throw would unwind past the enclosing handler — the tail-call rewrite
+   * must be suppressed while this is > 0, exactly like `finallyStack`
+   * suppresses it for pending finally blocks. (#1972)
+   */
+  tryCatchDepth?: number;
+  /**
    * Pending writeback instructions for mutable callback captures (#859).
    */
   pendingCallbackWritebacks?: Instr[];
