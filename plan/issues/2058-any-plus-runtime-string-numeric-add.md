@@ -76,3 +76,188 @@ when the checker proves both operands numeric.
 Grepped `compileAnyBinaryDispatch`, `concat` + `any`, `addition` + `externref` —
 #79 (AnyValue infra, done, fast-mode only), #308 (static string/number
 addition, done), #1175 (concat type mismatch, different). Not covered.
+
+---
+
+## Implementation Plan (shared design for #2058 / #2059 / #2063)
+
+> This is the **anchor spec** for the AnyValue host-bridge tag-recovery cluster.
+> #2059 (relational) and #2063 (switch) reference this section for the shared
+> tag-dispatch mechanism and carry only their per-site deltas. Read this first.
+
+### Root cause (one sentence)
+
+In default (JS-host, non-`nativeStrings`) mode `any`/`unknown` parameters lower
+to a **plain `externref`** and `ctx.anyValueTypeIdx` stays `-1`
+(`create-context.ts:141`; set lazily only by `ensureAnyValueType`), so every
+operator site that needs runtime number-vs-string tag awareness instead takes a
+**type-blind fast path** that unconditionally treats the externref as a number:
+`+`/`+=` unbox both sides to f64 and `f64.add` (binary-ops.ts:1815-1828,
+assignment.ts:4587-4619), relationals do the same (#2059), and `switch` unifies
+the whole statement into one f64-or-string comparison domain (#2063). The
+honest tag lives in the host value (or, in standalone, in the WasmGC heap type)
+but is never probed.
+
+### Why honest recovery at the *boxing* site regressed −788 (do NOT touch it)
+
+`type-coercion.ts:1207-1219` boxes **every** `externref → AnyValue` as **tag 5**
+(`__any_box_string`, externval = the raw externref) on purpose. The comment
+there (and the mirror in `any-helpers.ts:694-705`) records the #1888 finding:
+routing that generic boxing through `__any_from_extern` (which probes
+`ref.test $BoxedNumber` / `$BoxedBoolean` and assigns honest tags 3/4) flipped
+**~794 standalone test262 passes red**. The dependency is the **test262
+standalone harness comparator**: `isSameValue(a: any, b: any)` /
+`assert.sameValue` compile their `any` params to `externref`, and their
+`a === b` / `a !== a` bodies reach the externref-equality path
+(binary-ops.ts:1833-2028). That path was already hardened (#1776 numeric/bool
+tag dispatch, #1914 string value-compare) to be **bit-compatible with the
+current tag-5 box-the-externref ABI**. Re-tagging at the boxing site shifts the
+representation those comparators were tuned against and desyncs the harness.
+
+**Design rule that falls out of this:** do **NOT** change the
+`externref → AnyValue` boxing in type-coercion.ts, and do **NOT** flip
+`anyValueTypeIdx` on for default mode. Honest tag recovery must happen
+**per-operator-site, on the externref operands directly**, exactly mirroring the
+#1776/#1914 equality blocks that already coexist with the comparator without
+regressing it. Each site is opt-in, so the baseline can only move per landed
+site and any regression is attributable and revertible.
+
+### The one shared mechanism: per-site externref tag dispatch
+
+All three issues get the same primitive — a helper that, given two `externref`
+operands already spilled to temps `$l` / `$r`, branches on runtime type and
+performs the spec-correct primitive operation. This is **the #1776 pattern
+generalized** from equality to `+`, relational, and `switch` case-compare.
+
+**Dual-mode probes (CLAUDE.md dual-mode principle — no new host import without a
+standalone fallback):**
+
+| Concern | JS-host fast path (import) | Standalone / WASI Wasm-native fallback |
+|---|---|---|
+| is operand a string? | `__typeof_string` (manifest 97) | same name — in `UNION_NATIVE_HELPER_NAMES` (late-imports.ts:32), `addUnionImports` emits an in-module func |
+| is operand a number? | `__typeof_number` (96) | union-native (late-imports.ts:30) |
+| is operand a boolean? | `__typeof_boolean` (98) | union-native (late-imports.ts:31) |
+| number value | `__unbox_number` (103) | union-native (late-imports.ts:26) |
+| boolean value | `__unbox_boolean` (104) | union-native (late-imports.ts:28) |
+| string→number (ToNumber) | `__unbox_number` (host ToNumber, manifest 103) | `__str_to_number` native scanner (§7.1.4.1), emitted via `emitNativeParseNumber(ctx, new Set(["__str_to_number"]))` — see binary-ops.ts:884-887 |
+| string content op (concat / compare / equals) | wasm:js-string `concat`/`equals` + a new host `__host_*` for ordering, OR native helpers when `nativeStrings` | `__str_concat` / `__str_compare` / `__str_equals` via `any.convert_extern` + `ref.test $AnyString` + `ref.cast` (the #1914 pattern at binary-ops.ts:1982-2009) |
+
+**Two new host imports** (each WITH a standalone story, so the dual-mode rule
+holds):
+
+1. **`__host_add(a: externref, b: externref) -> externref`** — §13.15.3
+   ApplyStringOrNumericBinaryOperator for `+`. Host body (runtime.ts, new
+   `case "host_add"` next to `host_loose_eq` at 10293): `(a, b) => a + b`. This
+   gets ToPrimitive + the string-if-either-is-string rule + object valueOf/
+   toString ordering **for free** from JS `+`. Manifest: add
+   `if (name === "__host_add") return { type: "host_add" };` near line 129.
+2. **`__host_compare(a: externref, b: externref) -> i32`** — §7.2.13 IsLessThan
+   core for relationals (used by #2059). Host body: return `-1` / `0` / `1` /
+   `2`(=undefined/NaN incomparable): e.g.
+   `(a,b) => { if (a < b) return -1; if (a > b) return 1; if (a === b ... ) ...; return 2 /*NaN*/ }`.
+   Returning a 4-way result lets the call-site map each relational operator
+   (`<`,`<=`,`>`,`>=`) without 4 separate imports, and the `2` sentinel makes
+   every comparison involving a NaN/undefined operand yield `false` per spec.
+   Manifest + runtime `case "host_compare"` likewise. (Detailed in #2059.)
+
+**Standalone substitution** for these two: there is no JS host, so the call-site
+must NOT emit `__host_add`/`__host_compare`. Instead, under
+`ctx.standalone || ctx.wasi`, build the operation inline from the union-native
+probes + `__str_*` helpers, exactly as binary-ops.ts:879-908 already does for
+mixed string⇄number `==` (the `noJsHost && ctx.nativeStrings` branch). Gate with
+`const noJsHost = ctx.standalone === true || ctx.wasi === true;` and require
+`ctx.nativeStrings && ctx.anyStrTypeIdx >= 0` for the string arms (auto-true for
+`--target standalone`/`wasi`). If neither host nor native-string support is
+available, fall through to the existing f64 path (status-quo, no regression).
+
+### #2058-specific changes — `+` and `+=`
+
+**File: `src/codegen/binary-ops.ts`**
+
+- **New gate, placed BEFORE the externref-numeric fallback at line 1815**
+  (so it intercepts `+` before the unconditional f64 unbox). Condition:
+  `op === ts.SyntaxKind.PlusToken && (leftType.kind === "externref" || rightType.kind === "externref")`.
+  (Use the lowered `leftType`/`rightType`, the Wasm types already computed
+  above — `any` lowers to externref, so this catches the issue's `any + any`,
+  `1 + any`, `any + "2"` cases. Do **not** rely on `leftIsAny && rightIsAny` —
+  one side is often a concrete `number`/`string` literal.)
+- Spill both operands to externref temps (`coerceType(..., {kind:"externref"})`
+  for any non-externref side), mirroring the spill at binary-ops.ts:1877-1887.
+- **JS-host path:** `ensureLateImport(ctx, "__host_add", [externref, externref],
+  [externref])`, `flushLateImportShifts(ctx, fctx)`, `call __host_add`. Result
+  is `externref` (a boxed any) — return `{ kind: "externref" }` so the caller
+  boxes it back into the `any` slot via the existing externref→AnyValue path.
+- **Standalone path** (`noJsHost`): inline §13.15.3 — if `__typeof_string(l) ||
+  __typeof_string(r)` then ToString both and `__str_concat`; else ToNumber both
+  (string via `__str_to_number`, number via `__unbox_number`) and `f64.add` then
+  box. Reuse `emitConcatOperand`-style ToString from string-ops.ts:68-72 for the
+  non-string side's `ToString`. If a clean standalone ToString for arbitrary
+  externref isn't reachable, scope the standalone string-concat arm to operands
+  `__typeof_string`-positive on at least one side and fall through to f64 add for
+  the all-numeric case (covers `lt`-style numeric `any+any`; pure object
+  ToPrimitive in standalone is out of scope and already unsupported).
+- **Fast path preserved:** when the checker proves both operands `number`
+  (`isNumberType(leftTsType) && isNumberType(rightTsType)`), skip this gate and
+  let the existing numeric path run — no host call, no perf change.
+
+**File: `src/codegen/expressions/assignment.ts`**
+
+- Function `compileCompoundAssignment` (the `PlusEqualsToken` arm, line
+  ~4587-4619). Today it forces the RHS to f64 and `f64.add`s. When the LHS
+  variable's static type is `any`/`unknown` (not provably numeric — extend the
+  existing `hasStringAssignment` heuristic at 4452/4595 to also fire for `any`),
+  route through the **same `__host_add` / standalone-inline helper**: load LHS as
+  externref, compile RHS to externref, call the shared add, store back. Keep the
+  f64 fast path when LHS is provably numeric.
+- Factor the add-dispatch into a small shared emitter (e.g.
+  `emitAnyAdd(ctx, fctx)` in binary-ops.ts exported for assignment.ts) so `+`
+  and `+=` share one implementation and one host import.
+
+### Edge cases (apply to all three sites)
+
+- **NaN**: ToNumber("x") → NaN; `f64.add`/`f64.eq`/comparisons propagate NaN
+  correctly. The `__host_compare` `2` sentinel makes NaN relationals `false`.
+- **-0**: `f64.add(-0, ...)`/`f64.eq` already match JS; do not special-case.
+- **null / undefined operands** (tags 0/1 in the AnyValue scheme; `null` /
+  `undefined` host values): `null + 1 === 1`, `undefined + 1 === NaN`,
+  `"x" + null === "xnull"`. JS-host `__host_add` gets these free. Standalone:
+  `__typeof_number(null)` is 0 and `__unbox_number(null/undefined)` →
+  `0`/`NaN` per the host ToNumber funnel (runtime.ts:10181-10206) / union-native
+  equivalent — verify the union-native `__unbox_number` returns NaN for
+  undefined and 0 for null (it must, to match the f64-unbox table at
+  type-coercion.ts:1270-1284).
+- **Subclassed primitives / wrapper objects** (`new String("a")`): these are
+  `typeof === "object"`, so `__typeof_string` is 0 and they take the ToPrimitive
+  path — JS-host `+`/`<` handle valueOf/toString ordering. Standalone wrapper
+  ToPrimitive is out of scope (already refused for open objects, late-imports.ts
+  §1472); fall through is acceptable.
+- **bigint**: not in scope for `+`/relational here — `any + bigint` keeps the
+  existing bigint routing (binary-ops.ts:998+) which runs before this gate for
+  statically-typed operands; for runtime bigint in an externref, `__host_add`
+  throws `TypeError` (string+bigint) or concatenates (correct), matching JS.
+
+### Staged landing order (regression-safe)
+
+1. **Land #2063 switch strict-eq first** (smallest blast radius, no new host
+   import — reuses `__any_strict_eq` + the host-boxed-boolean tag-4 fix). It is
+   the cleanest validation that per-site tag dispatch coexists with the harness.
+2. **Land #2058 `+`/`+=`** — adds `__host_add` (+ standalone inline). Run the
+   standalone test262 shard locally/CI and confirm the comparator buckets
+   (`isSameValue`, `sameValue`) do **not** move; the gate only fires for `+`, so
+   equality is untouched.
+3. **Land #2059 relational** — adds `__host_compare` (+ standalone inline),
+   depends on the spill/dispatch scaffolding from #2058. Re-check the same
+   buckets.
+
+Each step is independently revertible and touches a disjoint operator set, so a
+−N regression localizes to exactly one PR. **Do not** combine them into one PR
+and **do not** "simplify" by flipping `anyValueTypeIdx` on in default mode — that
+is precisely the −788 trap.
+
+### Test files to verify (#2058)
+
+- The three repros in this issue (`plus("2")`, `plusBoth("1","2")`,
+  `compound("2")`) → `"12"`; `plusBoth(1,2)` → `3`.
+- `tests/equivalence.test.ts` add `any`-concat cases.
+- Standalone: re-run the `test262` standalone shard; assert no movement in the
+  `isSameValue`/`assert.sameValue` pass buckets (the −788 guard).

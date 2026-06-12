@@ -50,6 +50,7 @@ import {
   getLine,
   resolveComputedKeyExpression,
   resolveThisStructName,
+  skipTransparentExpressions,
   valTypesMatch,
 } from "./shared.js";
 import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
@@ -122,6 +123,30 @@ const WELL_KNOWN_SYMBOLS: Record<string, number> = {
   dispose: 13,
   asyncDispose: 14,
 };
+
+/**
+ * #2020: resolve an inherited static-property global by walking the class
+ * parent chain (classParentMap), retrying `<Ancestor>_<prop>` at each level.
+ * Static fields, like static methods, are inherited: `class B extends A {}`
+ * sees `A`'s static fields through `B`. Returns the owning ancestor's global
+ * index, or undefined when no ancestor declares the property. Callers run the
+ * own-class lookup first, so own statics correctly shadow inherited ones.
+ */
+export function resolveInheritedStaticProp(
+  ctx: CodegenContext,
+  className: string,
+  propName: string,
+): number | undefined {
+  const seen = new Set<string>([className]);
+  let cls: string | undefined = ctx.classParentMap.get(className);
+  while (cls && !seen.has(cls)) {
+    seen.add(cls);
+    const globalIdx = ctx.staticProps.get(`${cls}_${propName}`);
+    if (globalIdx !== undefined) return globalIdx;
+    cls = ctx.classParentMap.get(cls);
+  }
+  return undefined;
+}
 
 /**
  * ES spec IsAnonymousFunctionDefinition: returns true when the expression is
@@ -1869,8 +1894,12 @@ export function compilePropertyAccess(
   // `extern.convert_any` / re-enters the accessor trampoline (#1681 RUNFAIL
   // bucket). `fctx.isStaticContext` is propagated through closure spawning, so
   // it identifies exactly this case.
+  // #2027: `(this as any).a` / `(this).a` in a static initializer must reach
+  // this static-`this` arm too. The receiver is wrapped in an AsExpression /
+  // ParenthesizedExpression, so match on the unwrapped form rather than the
+  // literal `ThisKeyword` node kind. Plain `this.a` already matched.
   if (
-    expr.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    skipTransparentExpressions(expr.expression).kind === ts.SyntaxKind.ThisKeyword &&
     (fctx.localMap.get("this") === undefined || fctx.isStaticContext)
   ) {
     // Resolve the enclosing class name from context.
@@ -1927,8 +1956,13 @@ export function compilePropertyAccess(
   }
 
   // Check for static property access: ClassName.staticProp
-  if (ts.isIdentifier(expr.expression)) {
-    const objName = expr.expression.text;
+  // #2020: unwrap outer expressions so `(B as any).count` / `(B).count` still
+  // resolve the receiver to the class identifier `B`. A cast to `any` otherwise
+  // hides the Identifier and the static-field lookup (incl. the inherited-field
+  // parent walk below) is skipped, falling through to the dynamic any path.
+  const staticReceiver = skipTransparentExpressions(expr.expression);
+  if (ts.isIdentifier(staticReceiver)) {
+    const objName = staticReceiver.text;
 
     // (#1639) `genFn.prototype` where `genFn` is a `function*` / `async function*`
     // declaration must return the intrinsic `%GeneratorPrototype%` /
@@ -1959,7 +1993,11 @@ export function compilePropertyAccess(
     const resolvedClass = ctx.classExprNameMap.get(objName) ?? objName;
     if (ctx.classSet.has(resolvedClass)) {
       const fullName = `${resolvedClass}_${propName}`;
-      const globalIdx = ctx.staticProps.get(fullName);
+      // #2020: static fields are inherited. `class B extends A {}; B.count`
+      // resolves to A's `A_count` global. The own-class lookup misses, so walk
+      // the parent chain (classParentMap) retrying `<Ancestor>_<prop>` — own
+      // statics still shadow because the own lookup runs first.
+      const globalIdx = ctx.staticProps.get(fullName) ?? resolveInheritedStaticProp(ctx, resolvedClass, propName);
       if (globalIdx !== undefined) {
         fctx.body.push({ op: "global.get", index: globalIdx });
         const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
@@ -3685,11 +3723,103 @@ function isThisGuardIndexSafe(arg: ts.Expression): boolean {
   );
 }
 
+/**
+ * Optional element access `a?.[i]` (#2050). On a nullish base the index
+ * expression — and any side effects in it — must NOT evaluate, and the result
+ * is undefined-equivalent (§13.3.9 Optional Chains). Sibling of
+ * compileOptionalPropertyAccess: tee the base into a local, branch on
+ * `ref.is_null`, and emit the index + read only in the non-null arm.
+ */
+export function compileOptionalElementAccess(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.ElementAccessExpression,
+): ValType | null {
+  // Compile the base receiver.
+  const objType = compileExpression(ctx, fctx, expr.expression);
+  if (!objType) return null;
+
+  // Result type = the TS type of the whole `a?.[i]` expression. Ref types use
+  // externref as the block type to avoid null-subtyping mismatches.
+  const tsResultType = ctx.checker.getTypeAtLocation(expr);
+  let resultType: ValType = resolveWasmType(ctx, tsResultType);
+  if (resultType.kind === "ref" || resultType.kind === "ref_null") {
+    resultType = { kind: "externref" };
+  }
+
+  // A non-reference base is the compiler's representation of `undefined`/`null`
+  // (e.g. a `const a = null` stored as an i32 global). Such a base always
+  // short-circuits: drop it and emit the default result, never touching the
+  // index expression.
+  if (objType.kind !== "ref" && objType.kind !== "ref_null" && objType.kind !== "externref") {
+    fctx.body.push({ op: "drop" });
+    if (resultType.kind === "f64") {
+      fctx.body.push({ op: "f64.const", value: 0 });
+    } else if (resultType.kind === "i32") {
+      fctx.body.push({ op: "i32.const", value: 0 });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    return resultType;
+  }
+
+  const tmp = allocLocal(fctx, `__optelem_${fctx.locals.length}`, objType);
+  fctx.body.push({ op: "local.tee", index: tmp });
+  fctx.body.push({ op: "ref.is_null" });
+
+  const savedBody = fctx.body;
+  fctx.savedBodies.push(savedBody);
+
+  // then branch (null path): the short-circuit default.
+  let thenInstrs: Instr[];
+  if (resultType.kind === "f64") {
+    thenInstrs = [{ op: "f64.const", value: 0 }];
+  } else if (resultType.kind === "i32") {
+    thenInstrs = [{ op: "i32.const", value: 0 }];
+  } else {
+    thenInstrs = [{ op: "ref.null.extern" }];
+  }
+
+  // else branch (non-null path): push the now-known-non-null base, then run
+  // the ordinary element-access read (which compiles the index expression).
+  fctx.body = [];
+  fctx.body.push({ op: "local.get", index: tmp });
+  const nonNullObjType: ValType =
+    objType.kind === "ref_null" ? { kind: "ref", typeIdx: (objType as any).typeIdx } : objType;
+  let elseResultType = compileElementAccessBody(ctx, fctx, expr, nonNullObjType);
+  if (elseResultType === null) {
+    // Read could not resolve to a concrete value — coerce the base ref to the
+    // block result type so the `if` typechecks rather than leaking a mismatch.
+    elseResultType = objType;
+  }
+  if (!valTypesMatch(elseResultType, resultType)) {
+    coerceType(ctx, fctx, elseResultType, resultType);
+  }
+  const elseInstrs = fctx.body;
+
+  popBody(fctx, savedBody);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: resultType },
+    then: thenInstrs,
+    else: elseInstrs,
+  });
+
+  return resultType;
+}
+
 export function compileElementAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.ElementAccessExpression,
 ): ValType | null {
+  // Optional chaining: a?.[i] (#2050). Short-circuits on a nullish base — the
+  // index expression must NOT evaluate and the result must be undefined-
+  // equivalent (§13.3.9 Optional Chains). Mirrors compileOptionalPropertyAccess.
+  if (expr.questionDotToken) {
+    return compileOptionalElementAccess(ctx, fctx, expr);
+  }
+
   const jsonParseElementType = tryEmitJsonParseElementAccess(ctx, fctx, expr);
   if (jsonParseElementType !== undefined) return jsonParseElementType;
 

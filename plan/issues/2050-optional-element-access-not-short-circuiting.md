@@ -1,10 +1,11 @@
 ---
 id: 2050
 title: "a?.[i] compiled as plain a[i]: index side effects fire and no undefined result on nullish base"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: high
 feasibility: easy
 reasoning_effort: medium
@@ -69,3 +70,27 @@ short-circuit result value shares #2051's undefined-representation question.
 ## Dupe check
 
 Grepped `?.\[`, `optional element` over plan/issues/ — zero hits.
+
+## Resolution (2026-06-11)
+
+Added `compileOptionalElementAccess` in `src/codegen/property-access.ts` and
+routed `compileElementAccess` to it whenever `expr.questionDotToken` is set —
+sibling of the existing `compileOptionalPropertyAccess`. It compiles the base,
+tees it into a local, branches on `ref.is_null`, and emits the index
+expression + read **only in the non-null arm**, so a nullish base never
+evaluates the index. A base that lowers to a non-reference value type (the
+compiler's `undefined`/`null` representation) drops and yields the default
+without touching the index.
+
+Verified via `tests/equivalence/optional-element-access.test.ts`:
+- nullish base does not fire the index side effect (`mark()` / `i++`)
+- non-null base evaluates the index and reads the element
+
+**Out of scope / follow-ups:**
+- The short-circuit *value* is still `0`/null rather than `undefined`, so
+  `a?.[0] ?? fallback` does not fall through on a nullish base. That is the
+  shared undefined-representation gap tracked in **#2051**.
+- The original repro used `getArr(): number[] | null`; a separate pre-existing
+  bug round-trips such a union return through externref and loses the null
+  identity (`getArr(false) === null` is already wrong on main with no optional
+  chaining), so the tests here use a directly null-typed local instead.

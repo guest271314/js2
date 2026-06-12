@@ -15,8 +15,8 @@ import { reportError } from "../context/errors.js";
 import { allocLocal, getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { addUnionImports, ensureStructForType, getArrTypeIdxFromVec, localGlobalIdx } from "../index.js";
-import { emitBoundsGuardedArraySet } from "../property-access.js";
-import { coerceType, compileExpression } from "../shared.js";
+import { emitBoundsGuardedArraySet, resolveInheritedStaticProp } from "../property-access.js";
+import { coerceType, compileExpression, skipTransparentExpressions } from "../shared.js";
 import { defaultValueInstrs } from "../type-coercion.js";
 import { emitThrowString, emitThrowTypeError, getFuncParamTypes } from "./helpers.js";
 import { emitMappedArgParamSync } from "./logical-ops.js";
@@ -74,6 +74,103 @@ function emitToNumericForUpdate(ctx: CodegenContext, fctx: FunctionContext): voi
 }
 
 /**
+ * #2019: resolve the module global backing a static property `++`/`--` target.
+ * Handles both receiver shapes:
+ *   - `ClassName.prop` — Identifier in classSet; own field first, then walk
+ *     the parent chain so inherited static fields update the ancestor's global.
+ *   - `this.prop` in a static context — resolve the enclosing class from
+ *     `fctx.enclosingClassName` or the function-name prefix, then look up the
+ *     static global (the receiver may be wrapped: `(this as any).prop`).
+ * Returns the global index, or undefined when the target is not a static field.
+ */
+function resolveStaticPropGlobalForUpdate(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiver: ts.Expression,
+  propName: string,
+): number | undefined {
+  // `ClassName.prop` (own or inherited).
+  if (ts.isIdentifier(receiver)) {
+    const clsName = ctx.classExprNameMap.get(receiver.text) ?? receiver.text;
+    if (ctx.classSet.has(clsName)) {
+      return ctx.staticProps.get(`${clsName}_${propName}`) ?? resolveInheritedStaticProp(ctx, clsName, propName);
+    }
+    return undefined;
+  }
+  // `this.prop` / `(this as any).prop` in a static context.
+  if (
+    skipTransparentExpressions(receiver).kind === ts.SyntaxKind.ThisKeyword &&
+    (fctx.localMap.get("this") === undefined || fctx.isStaticContext)
+  ) {
+    let enclosingClass: string | undefined = fctx.enclosingClassName;
+    if (!enclosingClass) {
+      const fname = fctx.name;
+      let pos = -1;
+      while (!enclosingClass) {
+        pos = fname.indexOf("_", pos + 1);
+        if (pos < 0) break;
+        const candidate = fname.substring(0, pos);
+        if (candidate && ctx.classSet.has(candidate)) enclosingClass = candidate;
+      }
+    }
+    if (enclosingClass) {
+      return (
+        ctx.staticProps.get(`${enclosingClass}_${propName}`) ??
+        resolveInheritedStaticProp(ctx, enclosingClass, propName)
+      );
+    }
+  }
+  return undefined;
+}
+
+/**
+ * #2019: emit `++`/`--` against a static-property module global. Reads the
+ * global, applies ToNumeric (so non-numeric externref backing values follow
+ * §13.4), computes old±1, writes it back, and leaves the spec result on the
+ * stack (old value for postfix, new value for prefix). Always yields f64.
+ */
+function compileStaticPropIncDec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  globalIdx: number,
+  f64Op: "f64.add" | "f64.sub",
+  mode: "prefix" | "postfix",
+): ValType {
+  const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
+  const globalType = globalDef?.type ?? { kind: "externref" };
+
+  // Read current value as f64 (ToNumeric for non-f64 backing globals).
+  fctx.body.push({ op: "global.get", index: globalIdx });
+  if (globalType.kind === "externref") {
+    emitToNumericForUpdate(ctx, fctx);
+  } else if (globalType.kind === "i32") {
+    fctx.body.push({ op: "f64.convert_i32_s" });
+  }
+
+  const oldTmp = allocLocal(fctx, `__static_incdec_old_${fctx.locals.length}`, { kind: "f64" });
+  const newTmp = allocLocal(fctx, `__static_incdec_new_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.tee", index: oldTmp });
+  fctx.body.push({ op: "f64.const", value: 1 });
+  fctx.body.push({ op: f64Op });
+  fctx.body.push({ op: "local.set", index: newTmp });
+
+  // Store the new value back, coercing to the global's declared type.
+  fctx.body.push({ op: "local.get", index: newTmp });
+  if (globalType.kind === "externref") {
+    addUnionImports(ctx);
+    const boxIdx = ctx.funcMap.get("__box_number");
+    if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+  } else if (globalType.kind === "i32") {
+    fctx.body.push({ op: "i32.trunc_f64_s" });
+  }
+  fctx.body.push({ op: "global.set", index: globalIdx });
+
+  // Result: old for postfix, new for prefix.
+  fctx.body.push({ op: "local.get", index: mode === "postfix" ? oldTmp : newTmp });
+  return { kind: "f64" };
+}
+
+/**
  * Compile prefix/postfix increment/decrement on member expressions:
  *   ++obj.x, obj.x++, --obj[i], obj[i]--, etc.
  *
@@ -95,8 +192,22 @@ function compileMemberIncDec(
 
   // Handle obj.prop
   if (ts.isPropertyAccessExpression(operand)) {
-    const objType = ctx.checker.getTypeAtLocation(operand.expression);
     const propName = ts.isPrivateIdentifier(operand.name) ? "__priv_" + operand.name.text.slice(1) : operand.name.text;
+
+    // #2019: static-property `++`/`--`. The receiver is either `ClassName`
+    // (Identifier in classSet, possibly inheriting the field from an ancestor)
+    // or `this` inside a static context. Static fields are module globals, not
+    // struct fields, so the generic struct-write path below cannot reach them —
+    // it falls through to the `f64.const NaN` fallback and the write is lost.
+    // Mirror the staticProps arm from assignment.ts with pre/post semantics.
+    {
+      const staticGlobalIdx = resolveStaticPropGlobalForUpdate(ctx, fctx, operand.expression, propName);
+      if (staticGlobalIdx !== undefined) {
+        return compileStaticPropIncDec(ctx, fctx, staticGlobalIdx, f64Op, mode);
+      }
+    }
+
+    const objType = ctx.checker.getTypeAtLocation(operand.expression);
     // Ensure anonymous types are registered as structs before resolving
     ensureStructForType(ctx, objType);
     let typeName = resolveStructName(ctx, objType);

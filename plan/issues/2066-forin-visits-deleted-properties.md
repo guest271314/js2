@@ -1,10 +1,11 @@
 ---
 id: 2066
 title: "for-in visits properties deleted during enumeration (eager key snapshot, no per-visit liveness check)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-11
+completed: 2026-06-11
 priority: medium
 feasibility: easy
 reasoning_effort: medium

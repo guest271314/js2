@@ -1,10 +1,11 @@
 ---
 id: 1968
 title: "[].join(...) returns \"null\" instead of \"\" (resultTmp initialized to ref.null extern)"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-12
+completed: 2026-06-12
 priority: high
 feasibility: easy
 reasoning_effort: low
@@ -54,3 +55,25 @@ the externref-element path concats raw nulls.
 
 Greps `join empty`, `join null` → only #1286 (externref-receiver join routing,
 done) and #1215 (number_toString registration, done). Unfiled.
+
+## Resolution (2026-06-12)
+
+`compileArrayJoin` (`src/codegen/array-methods.ts`) initialised `resultTmp`
+(externref) with `ref.null.extern`; for `len == 0` the element loop never ran,
+so the function returned a null externref that every downstream string consumer
+stringifies as `"null"`. Now `resultTmp` starts as `""` via
+`compileStringLiteral(ctx, fctx, "")`; a non-empty array still overwrites it on
+iteration 0, so non-empty joins are byte-identical. The `""` constant is
+registered with `addStringConstantGlobal(ctx, "")` at the top of the function —
+before any body instruction — so the module-global index fixup can't desync an
+already-emitted `global.get`.
+
+Verified (`tests/equivalence/empty-array-join.test.ts`, 6 green): `[].join(",")`,
+filter-to-empty `.join`, `string[]` empty join, and non-empty number/string/
+single-element joins unregressed. Native-strings path (`compileArrayJoinNative`)
+and #2074 join suite unaffected (108 native-string tests green).
+
+Out of scope: the spec's null/undefined-*element* → `""` rule
+([§23.1.3.18](https://tc39.es/ecma262/#sec-array.prototype.join)) — TS array
+element types don't admit `null`/`undefined` for the WasmGC vec path, so it's a
+separate element-stringification concern, not this resultTmp init bug.

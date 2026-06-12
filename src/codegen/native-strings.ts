@@ -2122,11 +2122,32 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
         ],
       },
 
-      // Delegate to __str_substring (which handles clamping to len and swapping)
-      { op: "local.get", index: 0 },
-      { op: "local.get", index: 1 },
-      { op: "local.get", index: 2 },
-      { op: "call", funcIdx: substringIdx },
+      // §22.1.3.21 String.prototype.slice: unlike substring, slice does NOT
+      // swap when start > end — it returns the empty string. __str_substring
+      // swaps, so guard here: if (start >= end) return "" instead of
+      // delegating. (#2123)
+      { op: "local.get", index: 1 }, // start
+      { op: "local.get", index: 2 }, // end
+      { op: "i32.ge_s" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: strRef },
+        then: [
+          // empty string: len=0, off=0, empty backing array
+          { op: "i32.const", value: 0 },
+          { op: "i32.const", value: 0 },
+          { op: "i32.const", value: 0 },
+          { op: "array.new_default", typeIdx: strDataTypeIdx },
+          { op: "struct.new", typeIdx: strTypeIdx },
+        ],
+        else: [
+          // start < end: __str_substring clamps to len; no swap occurs.
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 2 },
+          { op: "call", funcIdx: substringIdx },
+        ],
+      } as Instr,
     ];
 
     ctx.mod.functions.push({

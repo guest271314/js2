@@ -12,8 +12,9 @@
  * strings) via a generated `charCodeAt` reader, so both length AND content are
  * verified.
  *
- * The `$`-substitution patterns (`$1`/`$&`/`$<name>`) and function replacers
- * stay narrowed refusals (Phase 2c follow-up); see the refusal block below.
+ * `$`-substitution patterns (`$$`/`$&`/`$\``/`$'`/`$n`) landed with #1913's
+ * GetSubstitution (§22.2.6.11) — see the positive block below. Function
+ * replacers stay the one narrowed refusal of the family.
  */
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
@@ -98,6 +99,25 @@ describe("#1539 standalone String.prototype.replace/replaceAll — no JS host, m
   });
 });
 
+// #1913 landed GetSubstitution (§22.2.6.11): `$$`/`$&`/`$\``/`$'`/`$n`/`$nn`
+// replacement patterns now expand at runtime instead of refusing (deep
+// coverage in tests/issue-1913.test.ts). Function replacers remain the one
+// narrowed refusal of the family.
+describe("#1913 $-substitution replace — formerly refused, now matches native", () => {
+  const SUBST_CASES: Array<{ subj: string; p: string; f: string; repl: string }> = [
+    { subj: "a1b2", p: "\\d", f: "", repl: "[$&]" },
+    { subj: "a1b2", p: "(\\d)", f: "g", repl: "$1$1" },
+    { subj: "x-y", p: "-", f: "", repl: "($`|$')" },
+    { subj: "cost: 5", p: "\\d", f: "", repl: "$$$&" },
+  ];
+  for (const { subj, p, f, repl } of SUBST_CASES) {
+    it(`${JSON.stringify(subj)}.replace(/${p}/${f}, ${JSON.stringify(repl)})`, async () => {
+      const expected = subj.replace(new RegExp(p, f), repl);
+      expect(await standaloneReplace("replace", subj, p, f, repl)).toBe(expected);
+    });
+  }
+});
+
 describe("#1539 standalone replace narrowed refusals (Phase 2c)", () => {
   async function expectRefused(src: string): Promise<void> {
     const r = await compile(src, { target: "standalone" });
@@ -105,12 +125,6 @@ describe("#1539 standalone replace narrowed refusals (Phase 2c)", () => {
     expect(r.errors.some((e) => /#1539|#1474/.test(e.message))).toBe(true);
   }
 
-  it("refuses $-substitution replacement ($&)", async () => {
-    await expectRefused(`export function f(s: string): string { return s.replace(/\\d/, "[$&]"); }`);
-  });
-  it("refuses $-substitution replacement ($1)", async () => {
-    await expectRefused(`export function f(s: string): string { return s.replace(/(\\d)/, "$1$1"); }`);
-  });
   it("refuses function replacer", async () => {
     await expectRefused(`export function f(s: string): string { return s.replace(/\\d/, (m: string) => m + m); }`);
   });
