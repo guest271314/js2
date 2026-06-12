@@ -1,7 +1,7 @@
 ---
 id: 2035
 title: "generator return value leaks into iteration: spread/for-of/Array.from/yield* include it; final {value, done:true} never materializes"
-status: ready
+status: suspended
 sprint: 63
 created: 2026-06-11
 updated: 2026-06-12
@@ -61,3 +61,50 @@ coroutine rewrite.
 #1687 (blocked on #1665) covers suspension semantics (next(arg)/throw/
 yield* result value), NOT return-value-in-buffer; #1947 is the 1M cap.
 New.
+
+## Suspended Work (2026-06-12, dev-c)
+
+- **Worktree**: `/workspace/.claude/worktrees/issue-2035-gen-return`
+- **Branch**: `issue-2035-gen-return` (1 WIP commit, `5f79ff4ef`, not pushed)
+
+### Done (correct, validated)
+The "carry the return value separately" mechanism is implemented for the
+runtime + the lifted-function codegen path:
+- `src/runtime.ts`: `_GeneratorState` gains `retVal`/`retDone`. `next()`
+  surfaces `retVal` exactly once as the terminal `{value, done:true}` result,
+  then `{value:undefined, done:true}`. `return()` sets `retDone`. New host
+  import `__gen_set_return(buf, value)` stashes the return value on the buffer
+  as a non-enumerable `__genReturn` side property; `__create_generator` reads
+  it into state.
+- `src/codegen/index.ts`: `__gen_set_return` registered in both
+  `addGeneratorImports` sites (signature = `pushRefType`).
+- `src/codegen/statements/control-flow.ts` `compileReturnStatement`: routes the
+  generator return through `__gen_set_return` (coerced to externref) instead of
+  `__gen_push_*`.
+- `tests/equivalence/helpers.ts`: manual harness mirrors the runtime change.
+- **Verified passing**: raw `it.next()` sequence (return value only on the
+  `done:true` step) and `[...g()]` spread (return excluded). `tests/iterators.test.ts`
+  6/6 still pass (no regression).
+
+### Remaining (the actual blocker)
+`for (const v of g())` over an **immediate generator call** STILL includes the
+return value (count=3, sum=6 vs Node count=2, sum=3). Root cause is a **second
+generator codegen path** that the issue's root-cause note missed: the
+inline/eager generator materialization in `src/codegen/expressions/misc.ts`
+(see `getReturnExpression` / `getStaticReturnValue` ~lines 475-498 and the
+call-site buffer build). For this shape the lifted-function path
+(`compileReturnStatement`) is **bypassed** — WAT for the for-of repro shows
+3 `__gen_push_f64` calls (2 yields + return) and **no** `__gen_set_return`
+import. The fix is to apply the same `__gen_set_return` routing (or equivalent
+"don't push the return into the buffer") in the misc.ts inline path, then
+re-validate all five repros + `yield*` delegation.
+
+### Resume steps
+1. `cd` into the worktree, `git fetch origin && git merge origin/main`.
+2. Trace the inline generator path in `src/codegen/expressions/misc.ts` (grep
+   `__gen_buffer` / `__gen_push` / `getReturnExpression`); find where the
+   immediate `g()` call materializes its buffer and route the `return` value
+   through `__gen_set_return` instead of `__gen_push_*`.
+3. Re-run the repros (spread / for-of / `Array.from` / raw `it.next()` x2 /
+   `yield*`) against Node via `compileToWasm`; add `tests/issue-2035.test.ts`.
+4. Set `status: done` + `completed:`, open PR, self-merge.
