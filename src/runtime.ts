@@ -6447,6 +6447,57 @@ assert._isSameValue = isSameValue;
             return "[object Object]";
           }
         };
+      // (#1998/#1997) Array.prototype.join / toString element stringifier. Per
+      // ES2024 §23.1.3.18 step 7.c/d, `undefined` and `null` elements join as
+      // the empty String; every other element goes through ToString. This
+      // differs from `__extern_toString` (used by `+`), where null/undefined
+      // yield "null"/"undefined". A boxed `null`/`undefined` element arrives as
+      // a defined externref, so the empty-string rule is applied here, in JS.
+      // Nested arrays (`[[1,2],[3]].toString()` → "1,2,3") are WasmGC vec
+      // structs; ToString on a vec recurses into Array.prototype.join, which we
+      // reproduce by materialising the vec and joining with the default ",".
+      if (name === "__extern_join_str") {
+        const joinElem = (v: any): string => {
+          if (v == null) return "";
+          if (typeof v === "object" && _isWasmStruct(v)) {
+            // A WasmGC vec → recurse: ToString(array) === array.join(",").
+            const exports = callbackState?.getExports();
+            if (exports && typeof exports.__vec_len === "function" && typeof exports.__vec_get === "function") {
+              try {
+                const len = exports.__vec_len(v) as number;
+                if (typeof len === "number" && len >= 0) {
+                  let out = "";
+                  for (let i = 0; i < len; i++) {
+                    if (i > 0) out += ",";
+                    out += joinElem(exports.__vec_get(v, i));
+                  }
+                  return out;
+                }
+              } catch {
+                /* not a vec — fall through to ToPrimitive */
+              }
+            }
+            const prim = _toPrimitive(v, "string", callbackState);
+            if (prim !== undefined) return String(prim);
+            try {
+              return String(_hostToPrimitive(v, "string", callbackState));
+            } catch {
+              return "[object Object]";
+            }
+          }
+          if (typeof v.toString === "function") return v.toString();
+          if (typeof v === "object") {
+            const prim = _toPrimitive(v, "string", callbackState);
+            if (prim !== undefined) return String(prim);
+          }
+          try {
+            return String(v);
+          } catch {
+            return "[object Object]";
+          }
+        };
+        return joinElem;
+      }
       // (#1638) Date.prototype string formatters. The Wasm side holds the
       // timestamp as an i64 and passes it here with a mode selector; we build
       // the spec-correct string from a UTC Date. The invalid-Date sentinel
