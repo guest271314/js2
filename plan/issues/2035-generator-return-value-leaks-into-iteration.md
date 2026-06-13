@@ -1,10 +1,11 @@
 ---
 id: 2035
 title: "generator return value leaks into iteration: spread/for-of/Array.from/yield* include it; final {value, done:true} never materializes"
-status: suspended
+status: done
 sprint: 63
 created: 2026-06-11
-updated: 2026-06-12
+updated: 2026-06-13
+completed: 2026-06-13
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -108,3 +109,58 @@ re-validate all five repros + `yield*` delegation.
 3. Re-run the repros (spread / for-of / `Array.from` / raw `it.next()` x2 /
    `yield*`) against Node via `compileToWasm`; add `tests/issue-2035.test.ts`.
 4. Set `status: done` + `completed:`, open PR, self-merge.
+
+## Resolution (2026-06-13, sdev)
+
+### The "second codegen path" was the IR front-end, not `misc.ts`
+
+The handoff pointed at `src/codegen/expressions/misc.ts` (`getReturnExpression` /
+`getStaticReturnValue`), but those are the **object-literal ToPrimitive static
+folder** — unrelated. The actual second generator-body emitter is the **IR
+front-end** (`src/ir/from-ast.ts`). The `for (const v of g())` program is simple
+enough to be claimed by the IR path; the spread / `Array.from` programs (with
+`JSON.stringify` / host calls) fall back to the legacy direct-AST path. Proof:
+the for-of program's `$g` body had `$$slot___gen_buffer`, no try/pending-throw,
+**no `__gen_set_return` import**, and the `return 3` lowered to a third
+`__gen_push_f64`; the spread program's `$g` body was the legacy shape (try-block,
+`__gen_set_return`, `__gen_ret_*` local) and excluded the return correctly.
+
+### Root cause (IR)
+
+`from-ast.ts` `lowerTail` (the generator-return arm) emitted its own
+`emitGenPush(<return value>)` — re-implementing the exact buffer-leak bug the
+legacy `compileReturnStatement` already had (and which the prior WIP commit had
+fixed there via `__gen_set_return`).
+
+### Fix
+
+The IR has **no number-box primitive** (it cannot coerce a numeric `return 3` to
+the `externref` that the `__gen_set_return(externref, externref)` import
+expects — same gap that makes `coerceReturnValue`/`lowerThrowStatement` defer
+numeric returns/throws to legacy). Rather than build that primitive, the IR
+generator-return arm now **throws to defer any generator carrying a
+`return <expr>` to the already-correct legacy path** (which boxes via
+`__box_number` and routes through `__gen_set_return`). Bare `return;` (no value)
+has nothing to leak and stays on the IR path. The `lowerStmt` non-tail path
+already lacks a return arm, so mid-body `return <expr>` also defers cleanly. No
+`playground/examples/` example is a generator, so the IR-fallback budget gate is
+unaffected.
+
+### Validation
+
+`tests/issue-2035.test.ts` (9 cases): spread, for-of sum + count, `Array.from`,
+`yield*` delegation, raw `next()` terminal-value sequence, numeric `return`
+exclusion, bare `return;`, and `gen.return(v)` early-termination — all match
+Node. Standalone mode (native generator resume path) was already correct and is
+untouched. `tsc` + prettier + biome lint clean. The one failing generator
+equivalence test (`yield-as-expression.test.ts` "yield with value used as
+expression") is a **pre-existing TS type error** (`Type 'undefined' is not
+assignable to type 'number'`) reproduced identically on baseline `from-ast.ts`
+— path-independent, not introduced here.
+
+### Files
+
+- `src/ir/from-ast.ts` — `lowerTail` generator-return arm defers to legacy (this PR).
+- `src/runtime.ts`, `src/codegen/index.ts`, `src/codegen/statements/control-flow.ts`,
+  `tests/equivalence/helpers.ts` — runtime `retVal`/`retDone` + `__gen_set_return`
+  + legacy `compileReturnStatement` routing (prior WIP commit `5f79ff4ef`).
