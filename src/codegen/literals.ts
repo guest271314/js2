@@ -451,6 +451,18 @@ function compileObjectLiteralWithAccessors(
         fctx.body.push({ op: "local.get", index: objLocal });
         fctx.body.push({ op: "i32.const", value: wellKnownSymId });
         fctx.body.push({ op: "call", funcIdx: boxSymIdx });
+      } else if (propName === undefined && ts.isComputedPropertyName(prop.name)) {
+        // (#2126) Runtime computed key: evaluate the key expression here (in
+        // source order, before the value — its side effects must run) and
+        // pass it to __extern_set as the externref key. The host coerces a
+        // non-string key (e.g. a boxed number) per ToPropertyKey.
+        fctx.body.push({ op: "local.get", index: objLocal });
+        const keyType = compileExpression(ctx, fctx, prop.name.expression);
+        if (!keyType) {
+          fctx.body.push({ op: "ref.null.extern" });
+        } else if (keyType.kind !== "externref") {
+          coerceType(ctx, fctx, keyType, { kind: "externref" });
+        }
       } else {
         if (propName === undefined) continue;
         addStringConstantGlobal(ctx, propName);
@@ -512,6 +524,28 @@ function compileObjectLiteralWithAccessors(
           fctx.body.push({ op: "ref.null.extern" });
         }
         fctx.body.push({ op: "call", funcIdx: setIdx });
+        continue;
+      }
+      if (methodName === undefined && ts.isComputedPropertyName(prop.name)) {
+        // (#2126) Runtime computed method key — same as the PropertyAssignment
+        // branch: evaluate the key expression and pass it as the externref key.
+        fctx.body.push({ op: "local.get", index: objLocal });
+        const keyType = compileExpression(ctx, fctx, prop.name.expression);
+        if (!keyType) {
+          fctx.body.push({ op: "ref.null.extern" });
+        } else if (keyType.kind !== "externref") {
+          coerceType(ctx, fctx, keyType, { kind: "externref" });
+        }
+        const okRt = compileArrowAsCallback(ctx, fctx, prop as unknown as ts.FunctionExpression, { needsThis: true });
+        if (okRt) {
+          fctx.body.push({ op: "call", funcIdx: setIdx });
+        } else {
+          // Callback compilation declined — keep the pre-#2126 "property
+          // skipped" semantics (drop key + obj) but the key expression's
+          // side effects above have already run, per spec evaluation order.
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "drop" });
+        }
         continue;
       }
       if (methodName === undefined) continue;
@@ -667,6 +701,32 @@ function _hasDisposalMethod(expr: ts.ObjectLiteralExpression): boolean {
   return false;
 }
 
+/**
+ * (#2126) True when the literal has a data property or method whose computed
+ * key is only known at runtime — `[expr]` neither folds to a compile-time
+ * string (resolveComputedKeyExpression) nor names a well-known `Symbol.X`
+ * (those keep their existing __box_symbol routing). The struct paths lay out
+ * fields from compile-time names only, so these literals must take the host
+ * plain-object path, which evaluates the key expression at runtime.
+ */
+function _hasRuntimeComputedKey(ctx: CodegenContext, expr: ts.ObjectLiteralExpression): boolean {
+  for (const p of expr.properties) {
+    if (!ts.isPropertyAssignment(p) && !ts.isMethodDeclaration(p)) continue;
+    if (!ts.isComputedPropertyName(p.name)) continue;
+    const inner = p.name.expression;
+    if (
+      ts.isPropertyAccessExpression(inner) &&
+      ts.isIdentifier(inner.expression) &&
+      inner.expression.text === "Symbol" &&
+      getWellKnownSymbolId(inner.name.text) !== undefined
+    ) {
+      continue;
+    }
+    if (resolveComputedKeyExpression(ctx, inner) === undefined) return true;
+  }
+  return false;
+}
+
 export function compileObjectLiteral(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -680,10 +740,18 @@ export function compileObjectLiteral(
   // (#1433) Same routing for objects containing a `[Symbol.dispose]` or
   // `[Symbol.asyncDispose]` method — host DisposableStack / `using`
   // declarations rely on real Symbol-keyed properties.
+  //
+  // (#2126) Same routing for literals with a RUNTIME computed key — `[expr]`
+  // that neither folds to a compile-time string nor names a well-known
+  // Symbol. The struct paths lay out fields from compile-time-known names
+  // only, so such a property (and the key expression's side effects) would
+  // be silently dropped; the host plain-object path evaluates the key at
+  // runtime.
   if (
     expr.properties.length > 0 &&
     (expr.properties.some((p) => ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) ||
-      _hasDisposalMethod(expr))
+      _hasDisposalMethod(expr) ||
+      _hasRuntimeComputedKey(ctx, expr))
   ) {
     return compileObjectLiteralWithAccessors(ctx, fctx, expr);
   }
