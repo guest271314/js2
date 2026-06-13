@@ -614,6 +614,34 @@ function emitObjectLiteralAccessorFn(
 }
 
 /**
+ * (#2127) True when the literal contains a spread whose SOURCE type carries
+ * accessor-declared own properties (get/set). The struct spread lowering
+ * copies data fields by struct layout and never invokes getters — per spec
+ * CopyDataProperties each own enumerable key gets a [[Get]] whose result is
+ * copied as a data property. Such literals must take the host plain-object
+ * path, whose spread uses __object_assign (Object.assign semantics = the
+ * required [[Get]]-then-copy).
+ */
+function _hasAccessorSpreadSource(ctx: CodegenContext, expr: ts.ObjectLiteralExpression): boolean {
+  for (const p of expr.properties) {
+    if (!ts.isSpreadAssignment(p)) continue;
+    let srcType: ts.Type | undefined;
+    try {
+      srcType = ctx.checker.getTypeAtLocation(p.expression);
+    } catch {
+      continue;
+    }
+    if (!srcType) continue;
+    for (const sym of srcType.getProperties()) {
+      if ((sym.flags & (ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) !== 0) return true;
+      const decls = sym.declarations ?? [];
+      if (decls.some((d) => ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d))) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * (#1433) Check whether an object literal contains a method whose computed
  * property name resolves to `Symbol.dispose` or `Symbol.asyncDispose`. Such
  * objects MUST be routed through the JS-host plain-object path so the
@@ -657,6 +685,14 @@ export function compileObjectLiteral(
     (expr.properties.some((p) => ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) ||
       _hasDisposalMethod(expr))
   ) {
+    return compileObjectLiteralWithAccessors(ctx, fctx, expr);
+  }
+
+  // (#2127) Same routing when a spread SOURCE has accessor-declared
+  // properties: the struct spread copies data fields by layout and never
+  // fires the getter. The host path's __object_assign spread performs the
+  // spec CopyDataProperties [[Get]]-then-copy.
+  if (expr.properties.length > 0 && _hasAccessorSpreadSource(ctx, expr)) {
     return compileObjectLiteralWithAccessors(ctx, fctx, expr);
   }
 
