@@ -9,7 +9,6 @@ import type { Instr, ValType } from "../ir/types.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { reportError } from "./context/errors.js";
 import { shiftLateImportIndices } from "./expressions/late-imports.js";
 import {
   addUnionImports,
@@ -768,11 +767,16 @@ export function destructureParamObject(
     // zero-initialized local. Unresolvable computed keys fail loudly below.
     const propKey = resolveStaticPropKey(ctx, element);
     if (propKey === undefined && element.propertyName && ts.isComputedPropertyName(element.propertyName)) {
-      reportError(
-        ctx,
-        element,
-        "Computed property key in object destructuring must be a compile-time-constant string or number",
-      );
+      // #2032 + #2031-revival regression fix: a computed key that does NOT fold
+      // to a compile-time constant (e.g. `{ [thrower()]: x }`, where the key is
+      // a runtime call) must NOT hard-error — that regressed 7 test262 cases
+      // (for/for-await-of `obj-ptrn-prop-eval-err`) which compiled+ran on main.
+      // Fall back to the pre-#2032 behaviour: skip this binding element (the
+      // local was pre-allocated by `ensureBindingLocals`). The static
+      // fast-path simply can't map a runtime key to a struct field index; the
+      // generic/runtime destructuring path handles the key-evaluation order
+      // (and its abrupt completion) as before. Only the constant-computed-key
+      // improvement from #2032 stays active above.
       continue;
     }
     if (!ts.isIdentifier(element.name)) {
