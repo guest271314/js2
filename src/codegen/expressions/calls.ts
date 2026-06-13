@@ -6710,11 +6710,61 @@ function compileCallExpression(
         }
         // Push self (the receiver) as first argument, with type hint from method's first param
         const methodParamTypes0 = getFuncParamTypes(ctx, funcIdx);
-        let recvType = compileExpression(ctx, fctx, propAccess.expression, methodParamTypes0?.[0]);
+        // (#2132) A method call on a statically-nullable receiver (`C | null`,
+        // incl. when laundered through `as any`) must throw a CATCHABLE
+        // TypeError on null, not a bare `ref.as_non_null` trap (Wasm null-deref
+        // traps bypass the module's exception tags and abort uncatchably).
+        // Detect nullability from the static type here, because the param-0 type
+        // hint passed to compileExpression below can coerce the value to a
+        // non-null `ref` and hide it from the `recvType.kind === "ref_null"`
+        // guard further down.
+        const NULL_OR_UNDEF = ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void;
+        const typeIsMaybeNull = (t: ts.Type): boolean =>
+          (t.flags & NULL_OR_UNDEF) !== 0 ||
+          (t.isUnion?.() === true && t.types.some((u) => (u.flags & NULL_OR_UNDEF) !== 0));
+        // Peel `as`/`!`/parens so `(c as any)` / `c!` reveal the underlying
+        // declared nullability — `as any` launders Null out of the static type,
+        // so checking only the cast expression's own type would miss it (#2132).
+        let receiverInner: ts.Expression = propAccess.expression;
+        while (
+          ts.isAsExpression(receiverInner) ||
+          ts.isNonNullExpression(receiverInner) ||
+          ts.isParenthesizedExpression(receiverInner) ||
+          ts.isTypeAssertionExpression(receiverInner)
+        ) {
+          receiverInner = (
+            receiverInner as ts.AsExpression | ts.NonNullExpression | ts.ParenthesizedExpression | ts.TypeAssertion
+          ).expression;
+        }
+        const receiverMaybeNull =
+          typeIsMaybeNull(ctx.checker.getTypeAtLocation(propAccess.expression)) ||
+          typeIsMaybeNull(ctx.checker.getTypeAtLocation(receiverInner));
+        // (#2132) When the receiver may be null, pass a NULLABLE param-0 hint (or
+        // none) so compileExpression keeps the value nullable on the stack — a
+        // non-null `ref` hint makes coerceType emit `ref.as_non_null`, which
+        // would trap on null BEFORE the guard below can throw a catchable
+        // TypeError. The `ref_null` guard further down re-asserts non-null only
+        // on the non-null branch.
+        const recvHint0: ValType | undefined =
+          receiverMaybeNull && methodParamTypes0?.[0]?.kind === "ref"
+            ? { kind: "ref_null", typeIdx: (methodParamTypes0[0] as { typeIdx: number }).typeIdx }
+            : methodParamTypes0?.[0];
+        let recvType = compileExpression(ctx, fctx, propAccess.expression, recvHint0);
         // Track whether receiver went through emitGuardedRefCast — if so, null
         // means "wrong struct type" (not genuinely null), so we should NOT throw
         // TypeError on null after cast.
         let receiverWasCast = false;
+        // (#2132) If the receiver is statically nullable but compiled to a
+        // non-null `ref` (e.g. via `as any`), force `ref_null` so the null-guard
+        // below fires and throws a catchable TypeError instead of trapping.
+        if (
+          receiverMaybeNull &&
+          recvType &&
+          recvType.kind === "ref" &&
+          (recvType as { typeIdx?: number }).typeIdx !== undefined
+        ) {
+          recvType = { kind: "ref_null", typeIdx: (recvType as { typeIdx: number }).typeIdx };
+        }
         // If receiver is externref but the method expects a struct ref, coerce
         if (recvType && recvType.kind === "externref") {
           const structTypeIdx = ctx.structMap.get(receiverClassName);
