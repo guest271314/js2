@@ -2425,6 +2425,10 @@ const ARRAY_METHODS = new Set([
   "with",
   "flat",
   "flatMap",
+  // #1997: Array.prototype.toString() (§23.1.3.36) delegates to join with the
+  // default "," separator. Without this, it fell through to the generic object
+  // dispatch and produced "[object Array]".
+  "toString",
   // TypedArray-specific (#1664) — native WasmGC lowering avoids the generic
   // __extern_get / __extern_length host-import fallback under --target wasi.
   "set",
@@ -2604,6 +2608,11 @@ export function compileArrayMethodCall(
       result = compileArrayConcat(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     case "join":
+    // #1997: Array.prototype.toString() (§23.1.3.36) is specified to call join
+    // with the default "," separator. compileArrayJoin already defaults the
+    // separator to "," when no argument is present, and toString receives no
+    // arguments, so the two share the same lowering.
+    case "toString":
       // #1286: when the probe found the receiver to be externref at runtime,
       // route through the host-import fallback. The WasmGC-native path expects
       // a vec struct; trying to extract one from a JS array via ref.cast
@@ -4867,6 +4876,54 @@ function compileArrayJoin(
   // externref at runtime is handled in compileArrayMethodCall via the
   // `receiverIsExternref` flag set by the probe. By the time we get here, the
   // receiver is known to be a vec struct.
+
+  // #1998: when the element type is externref/ref, each element must be
+  // stringified via the `__extern_join_str` host import (undefined/null → "",
+  // else ToString) before it reaches wasm:js-string `concat`. Ensure that
+  // import FIRST — adding a late import shifts every defined-function /
+  // import index at or above the insertion point, and `flushLateImportShifts`
+  // can only repair indices already baked into instruction bodies, not the
+  // raw `concatIdx`/`toStrIdx` values we capture below. Hoisting the import +
+  // flush ahead of those captures keeps them correct.
+  const needsExternJoinStr = elemType.kind === "externref" || elemType.kind === "ref" || elemType.kind === "ref_null";
+  let joinStrIdx: number | undefined;
+  if (needsExternJoinStr) {
+    joinStrIdx = ensureLateImport(ctx, "__extern_join_str", [{ kind: "externref" }], [{ kind: "externref" }]);
+  }
+
+  // #1998: `number_toString` is normally registered up-front by
+  // collectPrimitiveMethodImports, but only when the receiver's number-index
+  // type statically resolves to number/boolean/bigint. For `any[]` receivers
+  // (e.g. `([10,9] as any[]).join(",")`) the element lowers to f64 here yet the
+  // import was never collected, so the f64 stringification branch below was
+  // silently skipped and a raw f64 reached `concat` → "illegal cast". Ensure it
+  // on demand. Hoisted above the `concatIdx` capture so the late-import index
+  // shift settles before any funcIdx is read into a JS variable.
+  if ((elemType.kind === "f64" || elemType.kind === "i32") && ctx.funcMap.get("number_toString") === undefined) {
+    ensureLateImport(ctx, "number_toString", [{ kind: "f64" }], [{ kind: "externref" }]);
+  }
+
+  flushLateImportShifts(ctx, fctx);
+
+  // #1998: register the empty-string constant. It backs two substitutions
+  // below: (1) f64 vecs store `undefined`, array holes, and elided trailing
+  // slots as the sNaN sentinel 0x7FF00000DEADC0DE (see emitDefaultValueCheck /
+  // #866), which join renders as "" (§23.1.3.18 step 7.c/d) while a *genuine*
+  // NaN (distinct bit pattern) still stringifies to "NaN"; (2) join/toString of
+  // an empty array is "", not the initial null.
+  addStringConstantGlobal(ctx, "");
+
+  // #1997: the default separator is "," (used when join is called with no
+  // argument, and always for Array.prototype.toString). It is normally
+  // registered by the up-front string-constant collection, but that pass does
+  // not see the implicit "," for toString / no-arg join on every receiver
+  // shape. Register it on demand so the default-separator branch below emits a
+  // real string global instead of falling back to `ref.null.extern` (which
+  // traps "illegal cast" in wasm:js-string `concat`).
+  if (callExpr.arguments.length < 1) {
+    addStringConstantGlobal(ctx, ",");
+  }
+
   const concatIdx = ctx.jsStringImports.get("concat");
   const toStrIdx = ctx.funcMap.get("number_toString");
   if (concatIdx === undefined) {
@@ -4932,10 +4989,36 @@ function compileArrayJoin(
     { op: getOp, typeIdx: arrTypeIdx } as Instr,
   ];
   if (elemType.kind === "f64" && toStrIdx !== undefined) {
-    elemToStr.push({ op: "call", funcIdx: toStrIdx });
+    // #1998: substitute "" for the undefined/hole sNaN sentinel; otherwise
+    // ToString the number (so a genuine NaN still renders "NaN").
+    const elemF64Tmp = allocLocal(fctx, `__arr_join_elem_${fctx.locals.length}`, { kind: "f64" });
+    elemToStr.push({ op: "local.tee", index: elemF64Tmp });
+    elemToStr.push({ op: "i64.reinterpret_f64" });
+    elemToStr.push({ op: "i64.const", value: 0x7ff00000deadc0den } as Instr);
+    elemToStr.push({ op: "i64.eq" });
+    elemToStr.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      then: stringConstantExternrefInstrs(ctx, ""),
+      else: [
+        { op: "local.get", index: elemF64Tmp },
+        { op: "call", funcIdx: toStrIdx },
+      ],
+    } as Instr);
   } else if (elemType.kind === "i32" && toStrIdx !== undefined) {
     elemToStr.push({ op: "f64.convert_i32_s" });
     elemToStr.push({ op: "call", funcIdx: toStrIdx });
+  } else if (needsExternJoinStr && joinStrIdx !== undefined) {
+    // #1998: any/object/boxed elements arrive as a raw externref. Feeding that
+    // straight into wasm:js-string `concat` traps "illegal cast" because the
+    // builtin requires string operands. Route each element through
+    // `__extern_join_str` (ensured above), which applies Array.prototype.join's
+    // spec rule (§23.1.3.18 step 7.c/d): `undefined`/`null` → "", else ToString.
+    if (elemType.kind !== "externref") {
+      // A WasmGC struct ref must be re-expressed as externref for the import.
+      elemToStr.push({ op: "extern.convert_any" });
+    }
+    elemToStr.push({ op: "call", funcIdx: joinStrIdx });
   }
 
   const loopBody: Instr[] = [
@@ -4974,7 +5057,17 @@ function compileArrayJoin(
     body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
   });
 
+  // An empty array leaves `resultTmp` as the initial null. join/toString of `[]`
+  // is the empty String "", not null — substitute it so the result is a real
+  // string (also keeps a null from ever reaching a caller that concatenates it).
   fctx.body.push({ op: "local.get", index: resultTmp });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    then: stringConstantExternrefInstrs(ctx, ""),
+    else: [{ op: "local.get", index: resultTmp }],
+  } as Instr);
   return { kind: "externref" };
 }
 
