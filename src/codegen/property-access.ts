@@ -1342,6 +1342,30 @@ export function compileExternPropertyGetFromStack(
 
 // ── Property access ──────────────────────────────────────────────────
 
+/**
+ * #2077 — true when `recv` is (or resolves to) a `catch (e)` clause binding.
+ * Used to scope the standalone `$Error`-guarded `.message`/`.name` read to
+ * values that genuinely originate from a `throw`, so plain `any`-typed objects
+ * (`const o: any = { message: "x" }`) keep reading their fields through the
+ * normal object-property path rather than the Error struct guard (whose
+ * non-Error `else` arm yields a null string → null-deref trap).
+ *
+ * A catch binding's symbol has a `valueDeclaration` that is the
+ * `VariableDeclaration` whose parent is a `CatchClause` (TS models
+ * `catch (e)` as a `VariableDeclaration` inside the `CatchClause`). Only a
+ * plain identifier receiver is considered — a destructured catch binding
+ * (`catch ({ message })`) isn't an identifier here and falls through to the
+ * generic path.
+ */
+function receiverIsCatchClauseBinding(ctx: CodegenContext, recv: ts.Expression): boolean {
+  if (!ts.isIdentifier(recv)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(recv);
+  const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+  return (
+    decl !== undefined && ts.isVariableDeclaration(decl) && decl.parent !== undefined && ts.isCatchClause(decl.parent)
+  );
+}
+
 export function compilePropertyAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1497,10 +1521,21 @@ export function compilePropertyAccess(
     // `isErrorLhs` gate above never fires even though the caught value IS the
     // `$Error` struct at runtime — the field read then fell through to the
     // generic `__extern_get` host path, which returns null in standalone mode
-    // (no host). When the receiver could be an Error at runtime (its static
-    // type is `any`/`unknown`/an Error-containing union), emit a runtime
-    // `ref.test $Error`–guarded read instead of trusting the static type.
-    const isErrorLikeRuntimeLhs = !isErrorLhs && (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+    // (no host). For such a binding, emit a runtime `ref.test $Error`–guarded
+    // read instead of trusting the static type.
+    //
+    // CRITICAL scope (#2077 regression fix): this guard MUST be restricted to a
+    // `catch`-clause binding, NOT every `any`/`unknown` receiver. A general
+    // `const o: any = { message: "x" }` reads `o.message` through the normal
+    // object-property path (which works in standalone); hijacking ALL
+    // `any.message`/`any.name` reads with the `$Error` guard made the non-Error
+    // `else` arm return a null string, so `o.message.length` trapped
+    // (null deref) on plain objects. Gating on the catch binding keeps the
+    // common plain-object read on its working generic path and applies the
+    // `$Error` guard only where the value genuinely originates from a `throw`.
+    const isCatchBindingReceiver = receiverIsCatchClauseBinding(ctx, expr.expression);
+    const isErrorLikeRuntimeLhs =
+      !isErrorLhs && isCatchBindingReceiver && (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
     if (isErrorLhs || isErrorLikeRuntimeLhs) {
       const structIdx = getOrRegisterErrorStructType(ctx);
       const fieldIdx = propName === "message" ? 1 : 2;
