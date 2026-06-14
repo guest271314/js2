@@ -1427,16 +1427,6 @@ class ObjectStructRegistry {
 
     const fieldIdxByName = new Map<string, number>();
     fields.forEach((f, i) => fieldIdxByName.set(f.name, i));
-    // (#2009) When this IR shape reuses a legacy `ensureStructForType`
-    // registration that appended a hidden `$shape` field, the struct's declared
-    // field count is one MORE than the IR shape's fields. `object.new` must push
-    // the shape-id operand last (see lower.ts) or `struct.new` is invalid Wasm.
-    // `structNameToShapeId` is set only for such legacy-registered structs;
-    // IR-only structs (no `$shape` field) leave `shapeId` undefined → no extra
-    // operand, matching their field count.
-    const structFields = this.ctx.structFields.get(structName);
-    const hasShapeField = structFields?.some((f) => f && f.name === "$shape") ?? false;
-    const shapeId = hasShapeField ? this.ctx.structNameToShapeId.get(structName) : undefined;
     const lowering: IrObjectStructLowering = {
       typeIdx,
       fieldIdx: (name: string): number => {
@@ -1446,7 +1436,6 @@ class ObjectStructRegistry {
         }
         return idx;
       },
-      shapeId,
     };
     this.cache.set(key, lowering);
     return lowering;

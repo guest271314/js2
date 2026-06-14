@@ -107,4 +107,28 @@ describe("#2009 — per-instance struct field names (host boundary)", () => {
       `),
     ).toBe('{"aa":1,"bb":2}|{"cc":3,"dd":4}');
   });
+
+  it("a struct with a unique field-name shape (no collision) reports its names", async () => {
+    // No other same-TYPE-shape struct exists, so this struct is NOT stamped with
+    // $shape (opt-in collision resolution) — verifies the non-colliding path
+    // still enumerates correctly and stays on the legacy typeIdx arm.
+    expect(
+      await runWasm(`
+        export function test(): string {
+          const o: any = { onlyMe: 1, alsoMe: 2 };
+          return JSON.stringify(o);
+        }
+      `),
+    ).toBe('{"onlyMe":1,"alsoMe":2}');
+  });
+
+  it("Object.assign onto a struct target keeps the target's own field value (writeback shape-guard)", async () => {
+    expect(
+      await runWasm(`
+        export function test(): string {
+          return JSON.stringify(Object.assign({ a: 1 }, { b: 2 }));
+        }
+      `),
+    ).toBe('{"a":1,"b":2}');
+  });
 });

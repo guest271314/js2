@@ -1426,6 +1426,13 @@ export function generateModule(
       mod.exportSignatures = obj;
     }
 
+    // (#2009) Resolve same-structural-shape field-name collisions BEFORE the
+    // getter/setter/name-export emitters read the struct layout. Runs after ALL
+    // function bodies are final (legacy + IR), so its struct.new patch covers
+    // every construction site uniformly and backend-agnostically. Only structs
+    // that genuinely collide are touched; everything else is byte-identical.
+    resolveSameShapeFieldNameCollisions(ctx);
+
     // Emit exported struct field getter helpers for the runtime.
     // These allow JS host imports to read WasmGC struct fields that are
     // otherwise opaque to JS (V8 returns undefined for direct property access).
@@ -1907,22 +1914,25 @@ function emitStructFieldSetters(ctx: CodegenContext): void {
 function _emitStructFieldSettersInner(ctx: CodegenContext): void {
   const mod = ctx.mod;
 
-  // Collect (fieldName → [{typeIdx, fieldIdx, fieldType, shapeId, shapeFieldIdx}])
+  // Collect (fieldName → [{typeIdx, fieldIdx, fieldType, shapeId?, shapeFieldIdx?}])
   // mappings, but ONLY for mutable fields. Mirror the skip rules used by the
   // getter emitter so the two stay in lockstep.
   //
-  // (#2009) Each entry records the struct's shape-id + the index of its hidden
-  // `$shape` field. Same-shape anon types are runtime-canonically-equal, so a
-  // bare `ref.test typeIdx` matches a DIFFERENT shape's instance — without a
-  // guard, `__sset_b(target {a:1})` would `struct.set` slot 0 of `target` (its
-  // `a` field!) because `ref.test (ref $__anon_bb)` matches the `{a}` instance.
-  // The store is gated on `struct.get $shape === <this entry's shapeId>` so a
-  // write only lands when the instance ACTUALLY has this field at this slot;
-  // otherwise it no-ops and the sidecar carries the write (the prior behaviour).
-  const fieldMap = new Map<
-    string,
-    { typeIdx: number; fieldIdx: number; fieldType: ValType; shapeId: number; shapeFieldIdx: number }[]
-  >();
+  // (#2009) For COLLIDING structs (those with a `$shape` field, set by
+  // resolveSameShapeFieldNameCollisions), record the shape-id + `$shape` field
+  // index so `buildSetterStore` can gate the write on the per-instance shape:
+  // same-shape canonicalization makes `ref.test typeIdx` match a DIFFERENT
+  // struct, so `__sset_b(target {a:1})` would otherwise write slot 0 of the
+  // target (its `a`). The guard makes a mismatched write no-op (sidecar carries
+  // it). Non-colliding structs leave shapeId undefined → no guard, byte-identical.
+  type SetterEntry = {
+    typeIdx: number;
+    fieldIdx: number;
+    fieldType: ValType;
+    shapeId?: number;
+    shapeFieldIdx?: number;
+  };
+  const fieldMap = new Map<string, SetterEntry[]>();
 
   for (const [structName, fields] of ctx.structFields) {
     const typeIdx = ctx.structMap.get(structName);
@@ -1936,8 +1946,8 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
     )
       continue;
 
-    const shapeId = ctx.structNameToShapeId.get(structName) ?? -1;
-    const shapeFieldIdx = fields.findIndex((f) => f && f.name === "$shape");
+    const shapeId = ctx.shapeIdByStructName.get(structName);
+    const shapeFieldIdx = shapeId !== undefined ? fields.findIndex((f) => f && f.name === "$shape") : -1;
 
     for (let i = 0; i < fields.length; i++) {
       const field = fields[i];
@@ -1952,7 +1962,12 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
         entries = [];
         fieldMap.set(field.name, entries);
       }
-      entries.push({ typeIdx, fieldIdx: i, fieldType: field.type, shapeId, shapeFieldIdx });
+      entries.push({
+        typeIdx,
+        fieldIdx: i,
+        fieldType: field.type,
+        ...(shapeId !== undefined && shapeFieldIdx >= 0 ? { shapeId, shapeFieldIdx } : {}),
+      });
     }
   }
 
@@ -2018,7 +2033,7 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
 
 /** Build nested if/else for struct field setter dispatch. */
 function buildSetterNestedIfElse(
-  entries: { typeIdx: number; fieldIdx: number; fieldType: ValType; shapeId: number; shapeFieldIdx: number }[],
+  entries: { typeIdx: number; fieldIdx: number; fieldType: ValType; shapeId?: number; shapeFieldIdx?: number }[],
   anyLocal: number,
   valMode: "extern" | "f64" | "i32",
 ): Instr[] {
@@ -2036,13 +2051,12 @@ function buildSetterNestedIfElse(
     const entry = entries[i]!;
     let thenBranch = buildSetterStore(entry, anyLocal, valMode);
 
-    // (#2009) Same-shape anon types are runtime-canonically-equal, so a
-    // `ref.test entry.typeIdx` match does NOT prove this instance actually has
-    // this field at `fieldIdx`. Gate the store on the per-instance `$shape`
-    // value: only write when it equals this entry's shape-id. A mismatch
-    // (a different same-shape struct that lacks this field) no-ops, leaving the
-    // sidecar to carry the write — exactly the pre-existing degradation path.
-    if (entry.shapeFieldIdx >= 0 && entry.shapeId >= 0) {
+    // (#2009) Colliding struct: `ref.test typeIdx` matched, but same-shape
+    // canonicalization means the instance might be a DIFFERENT struct that
+    // lacks this field. Gate the store on `struct.get $shape === entry.shapeId`
+    // so a mismatched write no-ops (sidecar carries it) instead of corrupting
+    // a same-slot field of the wrong struct.
+    if (entry.shapeId !== undefined && entry.shapeFieldIdx !== undefined) {
       thenBranch = [
         { op: "local.get", index: anyLocal } as Instr,
         { op: "ref.cast", typeIdx: entry.typeIdx } as Instr,
@@ -2111,6 +2125,149 @@ function buildSetterStore(
 }
 
 /**
+ * (#2009) Same-structural-shape field-name collision resolution.
+ *
+ * `{ aa: number }` and `{ bb: number }` compile to DISTINCT anon struct
+ * typeIdxs (fieldsHashKey includes field names) — but they are STRUCTURALLY
+ * identical (`struct (field (mut f64))`), so WasmGC iso-recursive
+ * canonicalization makes them indistinguishable to `ref.test`. The host
+ * `__struct_field_names` / `__sset_*` exports therefore mislabel / mis-write
+ * every same-shape instance with the first-registered shape's names.
+ *
+ * Fix (opt-in, minimal blast radius): only structs that ACTUALLY collide — two+
+ * anon object-literal structs that share field TYPES but differ in field NAMES —
+ * get a hidden trailing `$shape` i32 field retro-stamped per-instance. The host
+ * exports then read `$shape` to recover the instance's real names BY VALUE. A
+ * struct with a unique field-name-shape is never touched (the common case stays
+ * byte-identical, including all IR-path construction).
+ *
+ * Runs as a post-pass after every function body is final, so the struct.new
+ * operand patch is uniform across the legacy AND IR backends (it walks emitted
+ * `Instr` streams, not a specific construction path).
+ */
+function resolveSameShapeFieldNameCollisions(ctx: CodegenContext): void {
+  // Host enumeration is JS-only; standalone/WASI has no host name export.
+  if (ctx.nativeStrings) return;
+
+  // Structural-shape key = field TYPES only (the thing WasmGC canonicalizes on),
+  // ignoring names and any pre-existing internal `$`/`__` fields. Group anon
+  // object-literal structs by it.
+  const typeKindKey = (t: ValType): string => {
+    if (t.kind === "ref" || t.kind === "ref_null") return `${t.kind}:${(t as { typeIdx: number }).typeIdx}`;
+    if (t.kind === "i32" && (t as { boolean?: true }).boolean) return "i32:bool";
+    return t.kind;
+  };
+  type Member = { structName: string; typeIdx: number; names: string[] };
+  const byShape = new Map<string, Member[]>();
+
+  for (const [structName, fields] of ctx.structFields) {
+    // Only anonymous object-literal structs participate. Named classes have
+    // nominal types distinct under `ref.test` already; vec/arr/wrapper/union
+    // carriers are internal.
+    if (!structName.startsWith("__anon_")) continue;
+    const typeIdx = ctx.structMap.get(structName);
+    if (typeIdx === undefined) continue;
+
+    const names: string[] = [];
+    const typeParts: string[] = [];
+    for (const f of fields) {
+      if (!f || !f.type || !f.name) continue;
+      if (f.name.startsWith("$") || f.name.startsWith("__")) continue;
+      names.push(f.name);
+      typeParts.push(typeKindKey(f.type));
+    }
+    if (names.length === 0) continue; // no host-enumerable fields
+    const shapeKey = typeParts.join("|");
+    let group = byShape.get(shapeKey);
+    if (!group) {
+      group = [];
+      byShape.set(shapeKey, group);
+    }
+    group.push({ structName, typeIdx, names });
+  }
+
+  // A group "collides" iff it contains 2+ DISTINCT field-name lists. (Two
+  // structs that share BOTH types and names are just the same shape registered
+  // twice — `ref.test` returning either's identical names is correct, no fix.)
+  const shapeIdByCsv = new Map<string, number>();
+  const collidingTypeIdxs: { typeIdx: number; structName: string; shapeId: number }[] = [];
+
+  for (const group of byShape.values()) {
+    const distinctNameCsvs = new Set(group.map((m) => m.names.join(",")));
+    if (distinctNameCsvs.size < 2) continue; // unique-name shape — leave untouched
+
+    for (const m of group) {
+      const csv = m.names.join(",");
+      let shapeId = shapeIdByCsv.get(csv);
+      if (shapeId === undefined) {
+        shapeId = ctx.shapeNameCsvById.length;
+        ctx.shapeNameCsvById.push(csv);
+        shapeIdByCsv.set(csv, shapeId);
+      }
+      ctx.shapeIdByStructName.set(m.structName, shapeId);
+      collidingTypeIdxs.push({ typeIdx: m.typeIdx, structName: m.structName, shapeId });
+    }
+  }
+
+  if (collidingTypeIdxs.length === 0) return;
+
+  // Retro-stamp: append a hidden `$shape` i32 field to each colliding struct
+  // type + structFields, then patch every `struct.new <typeIdx>` instruction in
+  // every compiled body to insert `i32.const <shapeId>` immediately before it,
+  // matching the new operand count. The `$`-prefix excludes `$shape` from name
+  // enumeration and getter/setter emission.
+  for (const { typeIdx, structName, shapeId } of collidingTypeIdxs) {
+    const typeDef = ctx.mod.types[typeIdx] as { kind: string; fields?: FieldDef[] } | undefined;
+    if (!typeDef || typeDef.kind !== "struct" || !typeDef.fields) continue;
+    // The struct registration stores ONE `fields` array shared by both
+    // `ctx.mod.types[typeIdx].fields` and `ctx.structFields.get(structName)`, so
+    // push `$shape` exactly once. Guard against a double-append if this somehow
+    // re-runs for a type.
+    const alreadyStamped = typeDef.fields.some((f) => f && f.name === "$shape");
+    if (!alreadyStamped) {
+      typeDef.fields.push({ name: "$shape", type: { kind: "i32" }, mutable: false });
+      const sf = ctx.structFields.get(structName);
+      if (sf && sf !== typeDef.fields) sf.push({ name: "$shape", type: { kind: "i32" }, mutable: false });
+    }
+    patchStructNewWithShapeId(ctx, typeIdx, shapeId);
+  }
+}
+
+/**
+ * (#2009) Insert `i32.const <shapeId>` immediately before every
+ * `struct.new <typeIdx>` in every compiled function body — the retro-stamp that
+ * keeps a struct.new's operand count in sync after `$shape` is appended to its
+ * type. Backend-agnostic: walks the emitted `Instr` stream, so it covers both
+ * the legacy and IR construction paths uniformly. Mirrors the structural walk of
+ * `patchStructNewForAddedField` but inserts a specific value, not a default.
+ */
+function patchStructNewWithShapeId(ctx: CodegenContext, typeIdx: number, shapeId: number): void {
+  const patch = (root: Instr[]): void => {
+    const work: Instr[][] = [root];
+    while (work.length > 0) {
+      const arr = work.pop()!;
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const instr = arr[i]!;
+        if (instr.op === "struct.new" && (instr as { typeIdx?: number }).typeIdx === typeIdx) {
+          arr.splice(i, 0, { op: "i32.const", value: shapeId } as Instr);
+        }
+        const anyInstr = instr as Record<string, unknown>;
+        if (Array.isArray(anyInstr.body)) work.push(anyInstr.body as Instr[]);
+        if (Array.isArray(anyInstr.then)) work.push(anyInstr.then as Instr[]);
+        if (Array.isArray(anyInstr.else)) work.push(anyInstr.else as Instr[]);
+        if (Array.isArray(anyInstr.catches)) {
+          for (const c of anyInstr.catches as { body?: Instr[] }[]) {
+            if (Array.isArray(c.body)) work.push(c.body);
+          }
+        }
+        if (Array.isArray(anyInstr.catchAll)) work.push(anyInstr.catchAll as Instr[]);
+      }
+    }
+  };
+  for (const func of ctx.mod.functions) patch(func.body);
+}
+
+/**
  * Emit a __struct_field_names(externref) -> externref export.
  * For each struct type, ref.test and return a string constant with comma-separated field names.
  * Falls back to ref.null.extern for non-struct values.
@@ -2130,19 +2287,16 @@ function emitStructFieldNamesExport(
 
   const mod = ctx.mod;
 
-  // (#2009) Build per-struct-type field-name resolution. Two same-shape anon
-  // types (`{aa:f64}` vs `{bb:f64}`) are distinct typeIdxs but
-  // runtime-canonically-equal, so a bare `ref.test typeIdx → that type's CSV`
-  // chain returns the FIRST-registered shape's names for every same-shape
-  // instance. Disambiguate by reading the per-instance `$shape` i32 field
-  // (stamped at construction) and selecting the CSV by shape-id VALUE.
-  //
-  // - `anon` structs carrying a `$shape` field → read it, dispatch on shape-id.
-  // - other structs (named classes, etc.) → legacy typeIdx → own-CSV arm.
+  // (#2009) Two arms per struct:
+  //  - COLLIDING structs (have a `$shape` field, from
+  //    resolveSameShapeFieldNameCollisions): read `struct.get $shape` and pick
+  //    the name CSV by shape-id VALUE — disambiguates same-shape types that
+  //    `ref.test` cannot tell apart.
+  //  - non-colliding structs: legacy `ref.test typeIdx → own CSV` arm.
+  type LegacyEntry = { typeIdx: number; names: string[] };
   type ShapeEntry = { typeIdx: number; shapeFieldIdx: number };
-  const shapeEntries: ShapeEntry[] = []; // anon structs with a $shape field
-  const legacyTypeIdxToNames = new Map<number, string[]>(); // structs without $shape
-
+  const legacyEntries: LegacyEntry[] = [];
+  const shapeEntries: ShapeEntry[] = [];
   for (const [structName, fields] of ctx.structFields) {
     const typeIdx = ctx.structMap.get(structName);
     if (typeIdx === undefined) continue;
@@ -2155,7 +2309,7 @@ function emitStructFieldNamesExport(
       continue;
 
     const shapeFieldIdx = fields.findIndex((f) => f && f.name === "$shape");
-    if (shapeFieldIdx >= 0) {
+    if (shapeFieldIdx >= 0 && ctx.shapeIdByStructName.has(structName)) {
       shapeEntries.push({ typeIdx, shapeFieldIdx });
       continue;
     }
@@ -2166,54 +2320,46 @@ function emitStructFieldNamesExport(
       if (field.name.startsWith("$") || field.name.startsWith("__")) continue;
       names.push(field.name);
     }
-    if (names.length > 0) {
-      legacyTypeIdxToNames.set(typeIdx, names);
-    }
+    if (names.length > 0) legacyEntries.push({ typeIdx, names });
   }
 
-  if (shapeEntries.length === 0 && legacyTypeIdxToNames.size === 0) return;
+  if (legacyEntries.length === 0 && shapeEntries.length === 0) return;
 
-  // Register one CSV string-constant global per shape-id (anon path) and per
-  // legacy typeIdx (named path).
-  const shapeIdToGlobalIdx = new Map<number, number>();
-  for (let id = 0; id < ctx.shapeNames.length; id++) {
-    const csv = ctx.shapeNames[id]!.join(",");
-    addStringConstantGlobal(ctx, csv);
-    const globalIdx = ctx.stringGlobalMap.get(csv);
-    if (globalIdx !== undefined) shapeIdToGlobalIdx.set(id, globalIdx);
-  }
+  // Register comma-separated field name strings as string constants.
   const legacyTypeIdxToGlobalIdx = new Map<number, number>();
-  for (const [typeIdx, names] of legacyTypeIdxToNames) {
+  for (const { typeIdx, names } of legacyEntries) {
     const csv = names.join(",");
     addStringConstantGlobal(ctx, csv);
     const globalIdx = ctx.stringGlobalMap.get(csv);
     if (globalIdx !== undefined) legacyTypeIdxToGlobalIdx.set(typeIdx, globalIdx);
   }
+  // One CSV global per shape-id (colliding structs share the table by VALUE).
+  const shapeIdToGlobalIdx = new Map<number, number>();
+  for (let id = 0; id < ctx.shapeNameCsvById.length; id++) {
+    const csv = ctx.shapeNameCsvById[id]!;
+    addStringConstantGlobal(ctx, csv);
+    const globalIdx = ctx.stringGlobalMap.get(csv);
+    if (globalIdx !== undefined) shapeIdToGlobalIdx.set(id, globalIdx);
+  }
 
   // Build the function body: chain of ref.test / if-else returning the right string
   const getterExternTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$sfnames_type");
   const anyLocal = 1; // local 0 = externref param, local 1 = anyref conversion
+  const shapeLocal = 2; // i32 scratch for the read shape-id (colliding arms)
 
   const body: Instr[] = [];
-  // Convert externref to anyref
   body.push({ op: "local.get", index: 0 } as Instr);
   body.push({ op: "any.convert_extern" } as Instr);
   body.push({ op: "local.set", index: anyLocal } as Instr);
 
-  const SHAPE_LOCAL = 2; // i32 scratch holding the read shape-id
-
-  // Helper: nested-if dispatch over the shape-id value → CSV global. The shape-id
-  // is on the stack; tee it into SHAPE_LOCAL once, then compare against each id.
-  // Falls back to ref.null.extern for an unknown id (defensive; shouldn't happen).
+  // Helper: dispatch on a shape-id value (on stack) → CSV global.
   const buildShapeIdDispatch = (): Instr[] => {
     const ids = [...shapeIdToGlobalIdx.entries()];
-    // Inner chain reads SHAPE_LOCAL for each comparison (the value was tee'd in
-    // the first instruction emitted below).
     let chain: Instr[] = [{ op: "ref.null.extern" } as Instr];
     for (let i = ids.length - 1; i >= 0; i--) {
       const [shapeId, globalIdx] = ids[i]!;
       chain = [
-        { op: "local.get", index: SHAPE_LOCAL } as Instr,
+        { op: "local.get", index: shapeLocal } as Instr,
         { op: "i32.const", value: shapeId } as Instr,
         { op: "i32.eq" } as Instr,
         {
@@ -2224,17 +2370,16 @@ function emitStructFieldNamesExport(
         } as Instr,
       ];
     }
-    // First consume the shape-id from the stack into SHAPE_LOCAL.
-    return [{ op: "local.set", index: SHAPE_LOCAL } as Instr, ...chain];
+    return [{ op: "local.set", index: shapeLocal } as Instr, ...chain];
   };
 
-  // Build nested if-else chain: anon ($shape) arms first, then legacy arms.
+  // Build nested if-else chain: legacy arms first, then colliding $shape arms.
   let fallback: Instr[] = [{ op: "ref.null.extern" } as Instr];
 
-  // Legacy named-struct arms (typeIdx → own CSV).
-  const legacyEntries = [...legacyTypeIdxToGlobalIdx.entries()];
   for (let i = legacyEntries.length - 1; i >= 0; i--) {
-    const [typeIdx, globalIdx] = legacyEntries[i]!;
+    const typeIdx = legacyEntries[i]!.typeIdx;
+    const globalIdx = legacyTypeIdxToGlobalIdx.get(typeIdx);
+    if (globalIdx === undefined) continue;
     fallback = [
       { op: "local.get", index: anyLocal } as Instr,
       { op: "ref.test", typeIdx } as Instr,
@@ -2247,11 +2392,6 @@ function emitStructFieldNamesExport(
     ];
   }
 
-  // Anon `$shape` arms: ref.test the anon typeIdx; on match, struct.get the
-  // $shape field and dispatch on its VALUE. Because same-shape anon types are
-  // canonically equal, whichever arm matches reads the instance's own $shape,
-  // so the value-based dispatch yields the correct names regardless of which
-  // typeIdx the `ref.test` resolved to.
   for (let i = shapeEntries.length - 1; i >= 0; i--) {
     const { typeIdx, shapeFieldIdx } = shapeEntries[i]!;
     const thenBranch: Instr[] = [
@@ -2274,14 +2414,14 @@ function emitStructFieldNamesExport(
 
   body.push(...fallback);
 
+  const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
+  if (shapeEntries.length > 0) locals.push({ name: "__shapeId", type: { kind: "i32" } });
+
   const funcIdx = ctx.numImportFuncs + mod.functions.length;
   mod.functions.push({
     name: "__struct_field_names",
     typeIdx: getterExternTypeIdx,
-    locals: [
-      { name: "__any", type: { kind: "anyref" } },
-      { name: "__shapeId", type: { kind: "i32" } },
-    ],
+    locals,
     body,
     exported: true,
   } as WasmFunction);
@@ -9820,34 +9960,6 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
   }
 
   const structName = `__anon_${ctx.anonTypeCounter++}`;
-
-  // (#2009) Stamp a per-instance shape-id so host enumeration
-  // (`__struct_field_names` → Object.keys / JSON.stringify / Object.assign /
-  // spread) can recover THIS instance's field names even when WasmGC
-  // iso-recursive canonicalization makes two same-shape anon types
-  // (`{aa:f64}` vs `{bb:f64}`) indistinguishable to `ref.test`. The shape-id
-  // keys a name-list table; identical name lists share one id (no bloat). Only
-  // structs with ≥1 host-enumerable field need it. The hidden `$shape` i32 is
-  // APPENDED last so every existing positional `fieldIdx` reference is
-  // unaffected, and the `$`-prefix excludes it from name/getter emission.
-  const enumNames: string[] = [];
-  for (const f of fields) {
-    if (!f || !f.name || !f.type) continue;
-    if (f.name.startsWith("$") || f.name.startsWith("__")) continue;
-    enumNames.push(f.name);
-  }
-  if (enumNames.length > 0) {
-    const nameKey = enumNames.join(",");
-    let shapeId = ctx.shapeIdByNameKey.get(nameKey);
-    if (shapeId === undefined) {
-      shapeId = ctx.shapeNames.length;
-      ctx.shapeNames.push(enumNames);
-      ctx.shapeIdByNameKey.set(nameKey, shapeId);
-    }
-    ctx.structNameToShapeId.set(structName, shapeId);
-    fields.push({ name: "$shape", type: { kind: "i32" }, mutable: false });
-  }
-
   const typeIdx = ctx.mod.types.length;
   ctx.mod.types.push({
     kind: "struct",

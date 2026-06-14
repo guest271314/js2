@@ -334,3 +334,41 @@ legacy) don't get `$shape` — they're a separate same-shape-collision gap if tw
 IR-fresh different-name shapes collide. Not observed in tests; flag for follow-up
 if it surfaces (would need `$shape` in the IR-fresh registration branch too,
 integration.ts:1415).
+
+## FINAL approach (2026-06-14, sdev2) — option (B): opt-in $shape on real collisions only
+
+PR-1's first design (always-append $shape to EVERY anon struct) bricked the IR
+path (makePoint) — TWO struct-registration systems (legacy ensureStructForType +
+IR ObjectStructRegistry) over shared ctx.structFields/mod.types. Tech-lead chose
+(B): touch ONLY genuinely-colliding structs, zero blast radius elsewhere.
+
+Implementation (all in `src/codegen/index.ts`, one post-pass +
+context fields; literals.ts/IR untouched):
+
+- `resolveSameShapeFieldNameCollisions(ctx)` — a post-pass run AFTER all bodies
+  (legacy + IR) are final, BEFORE the getter/setter/name exporters. Groups anon
+  object-literal structs by structural-shape key (field TYPES only). A group
+  "collides" iff it has 2+ DISTINCT field-NAME lists. For colliding members only:
+  append a hidden `$shape` i32 field, assign a shape-id keyed by name-CSV (same
+  names → same id, no bloat), and retro-patch every `struct.new <typeIdx>` in
+  every compiled body via `patchStructNewWithShapeId` to insert
+  `i32.const <shapeId>` (backend-agnostic — walks the emitted Instr stream, so it
+  covers BOTH legacy and IR construction uniformly; the (A) IR-path/emitter-trait
+  change is NOT needed).
+- `emitStructFieldNamesExport` — colliding structs (have `$shape`,
+  `ctx.shapeIdByStructName`) read `struct.get $shape` and dispatch the CSV by
+  shape-id VALUE; non-colliding keep the legacy `ref.test typeIdx → own CSV` arm.
+- `emitStructFieldSetters` — colliding `__sset_<name>` gate the store on
+  `struct.get $shape === entry.shapeId` (the #20 writeback fix); non-colliding
+  setters are byte-identical.
+
+Result: R1 (names) + R2 (Object.assign value merge, = #20) FIXED. Non-colliding
+structs — incl. ALL makePoint-style IR construction — are byte-identical to main
+(verified: no `$shape` emitted, no `ref.test`/struct.new change). The 3
+IR-path equiv tests that the (A) attempt broke (refcast-regression,
+reverse-struct-map, null-destructuring) pass unchanged. tests/issue-2009.test.ts
+adds a non-colliding sanity case + the writeback case.
+
+R3 (spread source-order value resolution) remains — separate PR-2 (inline spread
+sources don't get struct types → resolveStructName undefined → values lost; needs
+the plan's lastWriter rewrite). Names + Object.assign values done here.

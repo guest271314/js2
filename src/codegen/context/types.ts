@@ -1020,26 +1020,19 @@ export interface CodegenContext {
   /** Hash-based lookup for anonymous struct deduplication */
   anonStructHash: Map<string, string>;
   /**
-   * (#2009) Per-instance shape-id support. Structurally-identical anon struct
-   * types (`{aa:f64}` vs `{bb:f64}`) are DISTINCT compiler typeIdxs but become
-   * runtime-indistinguishable under WasmGC iso-recursive canonicalization, so
-   * `__struct_field_names`'s `ref.test` chain returns the first-registered
-   * shape's names for ALL same-shape instances (mislabelling Object.keys /
-   * JSON.stringify / Object.assign / spread). Fix: every host-enumerable anon
-   * object-literal struct carries a hidden trailing `$shape` i32 field stamped at
-   * construction with a shape-id; the host export reads `struct.get $shape` to
-   * select the correct name list by VALUE rather than by (ambiguous) type.
-   *
-   * `shapeNames[id]` = the ordered field-name list for shape-id `id`.
-   * `shapeIdByNameKey` dedups: a shape-id is allocated per DISTINCT ordered
-   * name list (join(",")), so two `{aa}` literals share an id while `{bb}` gets
-   * its own — no per-literal bloat.
-   * `structNameToShapeId` maps an anon struct's name → its shape-id, read by the
-   * construction site (`compileObjectLiteralForStruct`) to stamp the field.
+   * (#2009) Result of the same-structural-shape collision-resolution post-pass:
+   * anon struct name → its shape-id. Populated ONLY for structs that genuinely
+   * collide (a different-named struct shares the same field TYPES, making them
+   * runtime-indistinguishable under WasmGC iso-recursive canonicalization). Such
+   * structs get a hidden trailing `$shape` i32 field retro-stamped per-instance;
+   * the host `__struct_field_names`/`__sset_*` exports read it to recover the
+   * instance's real field names by VALUE. Non-colliding structs are absent here
+   * and keep their original layout (zero blast radius — the common case, incl.
+   * all IR-path construction, is byte-identical to main).
    */
-  shapeNames: string[][];
-  shapeIdByNameKey: Map<string, number>;
-  structNameToShapeId: Map<string, number>;
+  shapeIdByStructName: Map<string, number>;
+  /** (#2009) shape-id → ordered field-name CSV, for the host name export. */
+  shapeNameCsvById: string[];
   /** Pending late import shift state */
   pendingLateImportShift: { importsBefore: number } | null;
   /** Map from class name → global index of the prototype externref singleton */

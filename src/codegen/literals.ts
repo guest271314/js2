@@ -1357,12 +1357,6 @@ export function compileWidenedEmptyObject(
 
   // Emit default values for each field
   for (const field of fields) {
-    // (#2009) The hidden trailing `$shape` field carries this struct's shape-id
-    // (its field-name-list key) so host enumeration recovers the right names.
-    if (field.name === "$shape") {
-      fctx.body.push({ op: "i32.const", value: ctx.structNameToShapeId.get(typeName) ?? 0 });
-      continue;
-    }
     switch (field.type.kind) {
       case "f64":
         fctx.body.push({ op: "f64.const", value: 0 });
@@ -1622,13 +1616,6 @@ export function compileObjectLiteralForStruct(
   }
 
   for (const field of fields) {
-    // (#2009) Hidden trailing `$shape` field: stamp this struct's shape-id so
-    // host enumeration recovers the right field names per instance (struct.new
-    // operand order matches the appended field order).
-    if (field.name === "$shape") {
-      fctx.body.push({ op: "i32.const", value: ctx.structNameToShapeId.get(typeName) ?? 0 });
-      continue;
-    }
     // (#2129) Collect EVERY property that defines this field, in source
     // order. Per §13.2.5.5 PropertyDefinitionEvaluation, each duplicate runs
     // (its initializer's side effects are observable) and the LAST definition

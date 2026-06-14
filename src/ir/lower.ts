@@ -1139,15 +1139,6 @@ export function lowerIrFunctionBody<S>(
         // (a2) struct/object family (#1584 §2a): route through emitAggregateNew
         // — byte-identical {op:"struct.new"} on WasmGC, OP.STRUCT_NEW on bytecode.
         for (const v of instr.values) emitValue(v, out);
-        // (#2009) If the resolved struct carries a hidden trailing `$shape` i32
-        // field (legacy `ensureStructForType` appends one to host-enumerable
-        // anon structs, and the IR path reuses that registration), push its
-        // shape-id as the final struct.new operand so the operand count matches
-        // the declared field count. Without this the IR `object.new` emits
-        // N operands for an N+1-field struct → invalid Wasm.
-        if (obj.shapeId !== undefined) {
-          emitter.pushRaw(out, { op: "i32.const", value: obj.shapeId });
-        }
         emitter.emitAggregateNew(obj, instr.values.length, out);
         return;
       }
