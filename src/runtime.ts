@@ -10684,12 +10684,43 @@ assert._isSameValue = isSameValue;
       };
     case "host_add":
       // #2058 — `+` for two externref operands (§13.15.3
-      // ApplyStringOrNumericBinaryOperator). JS `+` gives us ToPrimitive on both
-      // operands, the "concatenate if either primitive is a string" rule, and
-      // object valueOf/toString ordering for free, so `1 + "2"` → `"12"` and
-      // `1 + 2` → `3`. Returns a boxed any (number or string) the caller stores
-      // back into the `any` slot.
-      return (a: any, b: any) => a + b;
+      // ApplyStringOrNumericBinaryOperator). JS `+` gives us the "concatenate if
+      // either primitive is a string" rule and primitive valueOf/toString
+      // ordering for free, so `1 + "2"` → `"12"` and `1 + 2` → `3`. Returns a
+      // boxed any (number or string) the caller stores back into the `any` slot.
+      //
+      // #1989/#1988 — but a WasmGC struct operand carrying a COMPILED
+      // valueOf/toString (the funcref field isn't a JS-callable method) makes
+      // native JS `a + b` throw "Cannot convert object to primitive value". Per
+      // §13.15.3 step 1, `+` runs ToPrimitive(operand, "default") on each side
+      // FIRST. Route struct operands through `_toPrimitiveSync` (the same proxy
+      // `host_loose_eq` uses) so the per-instance compiled valueOf/toString is
+      // dispatched in-module; a no-method struct resolves to "[object Object]".
+      return (a: any, b: any) => {
+        const av =
+          a != null && typeof a === "object" && _isWasmStruct(a) ? _toPrimitiveSync(a, "default", callbackState) : a;
+        const bv =
+          b != null && typeof b === "object" && _isWasmStruct(b) ? _toPrimitiveSync(b, "default", callbackState) : b;
+        return av + bv;
+      };
+    case "host_compare":
+      // #2059 — relational compare for two externref operands (§7.2.13
+      // IsLessThan). JS `<`/`>` give ToPrimitive (hint "number"), the
+      // string-vs-string lexicographic / string-vs-number numeric dispatch, and
+      // object valueOf ordering for free. Returns a 4-way result so all four
+      // relational operators map from one import:
+      //   -1  a < b      0  a == b (neither < nor >)      1  a > b
+      //    2  incomparable — a NaN/undefined ToNumber operand. Per §7.2.13 a
+      //        comparison yielding `undefined` makes the relational expression
+      //        false, so callers treat 2 as "no operator matches".
+      return (a: any, b: any) => {
+        if (a < b) return -1;
+        if (a > b) return 1;
+        // Equal, OR incomparable (NaN involved). `a <= b` distinguishes:
+        // `a <= b` is true only when equal; false when a NaN/undefined operand
+        // makes every comparison false.
+        return a <= b ? 0 : 2;
+      };
     case "same_value_zero":
       // #1360 — SameValueZero comparison (§7.2.11).
       // Same as Strict Equality except NaN === NaN is true.
