@@ -17,8 +17,10 @@ import ts from "typescript";
 import { isStringType, isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../ir/types.js";
 import {
+  collectMutatedCaptureNames,
   compileArrowAsCallback,
   compileArrowAsClosure,
+  type SharedRefCellMap,
   emitMethodParamDefaults,
   emitObjectMethodAsClosure,
   promoteAccessorCapturesToGlobals,
@@ -358,6 +360,22 @@ function compileObjectLiteralWithAccessors(
     else pair.setter = p;
   }
 
+  // (#2128) Pre-compute, across ALL accessors in this literal, which outer
+  // locals any accessor body writes. Each such local is captured through ONE
+  // shared ref cell by every accessor in the literal, so a getter observes
+  // its paired setter's writes. The map is per-literal: each evaluation of
+  // the literal re-runs the creation sequence and re-fills the cell local.
+  const accessorForceMutable = new Set<string>();
+  for (const pair of accessorPairs.values()) {
+    for (const accFn of [pair.getter, pair.setter]) {
+      if (!accFn) continue;
+      for (const n of collectMutatedCaptureNames(fctx, accFn as unknown as ts.FunctionExpression)) {
+        accessorForceMutable.add(n);
+      }
+    }
+  }
+  const accessorSharedRefCells: SharedRefCellMap = new Map();
+
   // Helper to emit __extern_set(obj, key, value) — both the value and the
   // string key sit on the wasm stack first.
   const setIdx = ensureLateImport(
@@ -592,7 +610,10 @@ function compileObjectLiteralWithAccessors(
       // accessor arm dispatches via __call_accessor_get → __call_fn_method_0
       // (receiver bound as `this` through __current_this). Else JS-host callback.
       if (pair.getter) {
-        const ok = emitObjectLiteralAccessorFn(ctx, fctx, pair.getter as unknown as ts.FunctionExpression);
+        const ok = emitObjectLiteralAccessorFn(ctx, fctx, pair.getter as unknown as ts.FunctionExpression, {
+          forceMutableCaptures: accessorForceMutable,
+          sharedRefCells: accessorSharedRefCells,
+        });
         if (!ok) fctx.body.push({ op: "ref.null.extern" });
       } else {
         fctx.body.push({ op: "ref.null.extern" });
@@ -600,7 +621,10 @@ function compileObjectLiteralWithAccessors(
 
       // Setter
       if (pair.setter) {
-        const ok = emitObjectLiteralAccessorFn(ctx, fctx, pair.setter as unknown as ts.FunctionExpression);
+        const ok = emitObjectLiteralAccessorFn(ctx, fctx, pair.setter as unknown as ts.FunctionExpression, {
+          forceMutableCaptures: accessorForceMutable,
+          sharedRefCells: accessorSharedRefCells,
+        });
         if (!ok) fctx.body.push({ op: "ref.null.extern" });
       } else {
         fctx.body.push({ op: "ref.null.extern" });
@@ -635,6 +659,8 @@ function emitObjectLiteralAccessorFn(
   ctx: CodegenContext,
   fctx: FunctionContext,
   fn: ts.FunctionExpression | ts.ArrowFunction,
+  // (#2128) per-literal shared-cell capture options — see compileArrowAsCallback
+  captureOptions?: { forceMutableCaptures?: Set<string>; sharedRefCells?: SharedRefCellMap },
 ): boolean {
   if (ctx.standalone) {
     const closureType = compileArrowAsClosure(ctx, fctx, fn);
@@ -644,7 +670,7 @@ function emitObjectLiteralAccessorFn(
     }
     return true;
   }
-  return !!compileArrowAsCallback(ctx, fctx, fn, { needsThis: true });
+  return !!compileArrowAsCallback(ctx, fctx, fn, { needsThis: true, ...captureOptions });
 }
 
 /**
