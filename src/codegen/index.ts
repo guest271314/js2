@@ -3292,6 +3292,21 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
           fieldIdx: number;
           closureTypeIdx: number;
           closureInfo: ClosureInfo;
+        }
+      | {
+          // (#1989) externref field holding a closure (the `any`-typed
+          // object-literal method case — the field stores
+          // `extern.convert_any(closureStruct)`). Recover the closure per
+          // instance: `struct.get` (externref) → `any.convert_extern` →
+          // `ref.cast closureTypeIdx` → field-0 funcref → `call_ref`. This makes
+          // `__call_valueOf`/`__call_toString` per-object even when same-shape
+          // literals share a struct type but store distinct method funcrefs.
+          structName: string;
+          typeIdx: number;
+          mode: "closure-extern";
+          fieldIdx: number;
+          closureTypeIdx: number;
+          closureInfo: ClosureInfo;
         };
 
     const entries: DispatchEntry[] = [];
@@ -3307,8 +3322,67 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
       )
         continue;
 
-      // 1. Check for standalone method: StructName_toString
       const methodFullName = `${structName}_${methodName}`;
+      const fieldIdx = fields.findIndex((f) => f.name === methodName);
+      const field = fieldIdx >= 0 ? fields[fieldIdx]! : undefined;
+
+      // (#1989) 1. Per-instance closure FIELD takes precedence over the
+      // name-keyed standalone method — but ONLY for structs with the genuine
+      // same-shape collision (`toPrimitiveForkedStructs`): two+ object literals
+      // share the deduped struct type, each storing its OWN method closure in
+      // the field, so reading the field + `call_ref` resolves to the right body
+      // per object. The standalone `${structName}_${methodName}` func is only the
+      // first literal's body and would collapse all instances onto it.
+      //
+      // Single-literal structs intentionally STAY on the name-keyed standalone
+      // arm below: it is the one literal's correct body, is simpler, and
+      // (critically) preserves the §7.1.1.1 step-6 object-return TypeError walk
+      // in `_hostToPrimitive`. Same-shape valueOf/toString closures are
+      // `ref.test`-indistinguishable, so routing a single-literal struct through
+      // the per-instance arm could mis-select the closure type for `toString`.
+      const preferClosure = ctx.toPrimitiveForkedStructs.has(structName);
+      let pushedClosure = false;
+      if (field && preferClosure) {
+        // Closure ref field (eagerly-typed closure ref).
+        if (field.type.kind === "ref" || field.type.kind === "ref_null") {
+          const closureTypeIdx = (field.type as { typeIdx: number }).typeIdx;
+          const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
+          if (closureInfo && closureInfo.paramTypes.length === 0) {
+            entries.push({ structName, typeIdx, mode: "closure", fieldIdx, closureTypeIdx, closureInfo });
+            pushedClosure = true;
+          }
+        }
+        // eqref field — try tracked closure types (typed object-literal methods).
+        if (!pushedClosure && field.type.kind === "eqref") {
+          const trackedTypes = ctx.valueOfClosureTypes.get(structName) ?? [];
+          for (const closureTypeIdx of trackedTypes) {
+            const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
+            if (closureInfo && closureInfo.paramTypes.length === 0) {
+              entries.push({ structName, typeIdx, mode: "closure", fieldIdx, closureTypeIdx, closureInfo });
+              pushedClosure = true;
+              break;
+            }
+          }
+        }
+        // (#1989) externref field holding a closure — the `any`-typed
+        // object-literal method case. The field stores
+        // `extern.convert_any(closureStruct)`; recover it per instance.
+        if (!pushedClosure && field.type.kind === "externref") {
+          const trackedTypes = ctx.valueOfClosureTypes.get(structName) ?? [];
+          for (const closureTypeIdx of trackedTypes) {
+            const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
+            if (closureInfo && closureInfo.paramTypes.length === 0) {
+              entries.push({ structName, typeIdx, mode: "closure-extern", fieldIdx, closureTypeIdx, closureInfo });
+              pushedClosure = true;
+              break;
+            }
+          }
+        }
+      }
+      if (pushedClosure) continue;
+
+      // 2. Fallback: name-keyed standalone method `StructName_toString`. Used by
+      // nominal class methods and structs whose method has no stored closure.
       const funcIdx = ctx.funcMap.get(methodFullName);
       if (funcIdx !== undefined) {
         const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
@@ -3318,34 +3392,6 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
             ? funcType.results[0]!
             : { kind: "externref" };
         entries.push({ structName, typeIdx, mode: "standalone", funcIdx, resultType });
-        continue;
-      }
-
-      // 2. Check for closure field
-      const fieldIdx = fields.findIndex((f) => f.name === methodName);
-      if (fieldIdx < 0) continue;
-      const field = fields[fieldIdx]!;
-
-      // Closure ref field
-      if (field.type.kind === "ref" || field.type.kind === "ref_null") {
-        const closureTypeIdx = (field.type as { typeIdx: number }).typeIdx;
-        const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
-        if (closureInfo && closureInfo.paramTypes.length === 0) {
-          entries.push({ structName, typeIdx, mode: "closure", fieldIdx, closureTypeIdx, closureInfo });
-          continue;
-        }
-      }
-
-      // eqref field — try tracked closure types
-      if (field.type.kind === "eqref") {
-        const trackedTypes = ctx.valueOfClosureTypes.get(structName) ?? [];
-        for (const closureTypeIdx of trackedTypes) {
-          const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
-          if (closureInfo && closureInfo.paramTypes.length === 0) {
-            entries.push({ structName, typeIdx, mode: "closure", fieldIdx, closureTypeIdx, closureInfo });
-            break;
-          }
-        }
       }
     }
 
@@ -3395,6 +3441,34 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
           funcIdx: entry.funcIdx,
         } as Instr);
         boxResult(entry.resultType, thenInstrs);
+      } else if (entry.mode === "closure-extern") {
+        // (#1989) externref field holding `extern.convert_any(closureStruct)`.
+        // Recover the per-instance closure: struct.get (externref) →
+        // any.convert_extern → ref.cast closureType → field-0 funcref → call_ref.
+        const ci = entry.closureInfo;
+        const closureLocal = 2; // eqref scratch local
+        thenInstrs.push(
+          { op: "local.get", index: anyLocal } as Instr,
+          { op: "ref.cast", typeIdx: entry.typeIdx },
+          { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr,
+          // externref field → anyref → eqref scratch
+          { op: "any.convert_extern" } as Instr,
+          { op: "local.set", index: closureLocal } as Instr,
+          // self-param: the closure struct
+          { op: "local.get", index: closureLocal } as Instr,
+          { op: "ref.cast", typeIdx: entry.closureTypeIdx },
+          // funcref from closure field 0
+          { op: "local.get", index: closureLocal } as Instr,
+          { op: "ref.cast", typeIdx: entry.closureTypeIdx },
+          { op: "struct.get", typeIdx: entry.closureTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "ref.cast", typeIdx: ci.funcTypeIdx },
+          { op: "call_ref", typeIdx: ci.funcTypeIdx } as Instr,
+        );
+        if (!ci.returnType) {
+          thenInstrs.push({ op: "ref.null.extern" } as Instr);
+        } else {
+          boxResult(ci.returnType, thenInstrs);
+        }
       } else {
         // Closure field: extract closure, get funcref, call_ref
         const ci = entry.closureInfo;
@@ -3439,7 +3513,7 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
     };
 
     // Determine locals: param 0 (externref), local 1 (anyref), local 2 (eqref for closure)
-    const hasClosureEntry = entries.some((e) => e.mode === "closure");
+    const hasClosureEntry = entries.some((e) => e.mode === "closure" || e.mode === "closure-extern");
     const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
     if (hasClosureEntry) {
       locals.push({ name: "__closure", type: { kind: "eqref" } });
