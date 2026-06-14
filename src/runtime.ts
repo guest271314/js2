@@ -137,12 +137,26 @@ function _getOrVivifyFnPrototype(
  *   pendingThrow: any     — exception captured by the generator body, to be
  *                            re-thrown on the first `next()` after the
  *                            buffer is drained (#928)
+ *   retVal: any           — the generator's `return` value (#2035). Per
+ *                            §27.5.3.3 / §27.5.1.2 the return value belongs
+ *                            ONLY to the terminal `{value, done:true}` result;
+ *                            it must NOT appear as a yielded (`done:false`)
+ *                            element. Surfaced once when the buffer drains.
+ *   retDone: boolean      — `true` once the terminal `{retVal, done:true}`
+ *                            result has been handed out, so subsequent
+ *                            `next()` calls return `{value:undefined,done:true}`
  *   asyncWrap?: boolean   — `true` for async-generator state (so the same
  *                            map can back both `%GeneratorPrototype%` and
  *                            `%AsyncGeneratorPrototype%` methods)
  */
-const _GeneratorState = new WeakMap<object, { buf: any[]; index: number; pendingThrow: any }>();
-const _AsyncGeneratorState = new WeakMap<object, { buf: any[]; index: number; pendingThrow: any }>();
+const _GeneratorState = new WeakMap<
+  object,
+  { buf: any[]; index: number; pendingThrow: any; retVal?: any; retDone?: boolean }
+>();
+const _AsyncGeneratorState = new WeakMap<
+  object,
+  { buf: any[]; index: number; pendingThrow: any; retVal?: any; retDone?: boolean }
+>();
 
 let _GeneratorPrototypeCache: any = null;
 let _GeneratorFunctionPrototypeCache: any = null;
@@ -309,6 +323,13 @@ function _getGeneratorPrototype(): any {
       state.pendingThrow = null;
       throw e;
     }
+    // Buffer drained: surface the generator's `return` value ONCE as the
+    // terminal `{value, done:true}` result (#2035, §27.5.1.2 step 6). After
+    // that, every further `next()` returns `{value:undefined, done:true}`.
+    if (!state.retDone) {
+      state.retDone = true;
+      return { value: state.retVal, done: true };
+    }
     return { value: undefined, done: true };
   });
 
@@ -317,7 +338,11 @@ function _getGeneratorPrototype(): any {
     if (!state) {
       throw new TypeError("Generator.prototype.return called on incompatible receiver");
     }
+    // Early termination: skip the rest of the buffer AND suppress the
+    // generator's own return value — the caller-supplied `value` becomes the
+    // terminal result (§27.5.3.3). Mark retDone so a later next() is terminal.
     state.index = state.buf.length;
+    state.retDone = true;
     return { value, done: true };
   });
 
@@ -9354,7 +9379,12 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__gen_yield_star")
         return (buf: any[], iterable: any) => {
-          // Iterate the inner iterable and push all values into the outer buffer
+          // Iterate the inner iterable and push all values into the outer buffer.
+          // Per §27.5.3 yield* output, the inner generator's RETURN value is the
+          // value of the `yield*` expression and must NOT leak into the outer
+          // stream — `for...of`/manual iteration already stops at the inner
+          // `done:true` result, so only the yielded (`done:false`) values are
+          // pushed here. (#2035)
           if (iterable != null && typeof iterable[Symbol.iterator] === "function") {
             for (const v of iterable) {
               if (buf.length >= __EAGER_GEN_LIMIT) {
@@ -9362,6 +9392,22 @@ assert._isSameValue = isSameValue;
               }
               buf.push(v);
             }
+          }
+        };
+      // __gen_set_return: (buf, value) → void. Stashes the generator's `return`
+      // value on the buffer object (a non-enumerable side property) rather than
+      // pushing it as a yielded element. `__create_generator` reads it into
+      // `_GeneratorState.retVal` so the terminal `{value, done:true}` result
+      // carries it exactly once. (#2035)
+      if (name === "__gen_set_return")
+        return (buf: any, v: any) => {
+          if (buf != null) {
+            Object.defineProperty(buf, "__genReturn", {
+              value: v,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            });
           }
         };
       if (name === "__create_generator")
@@ -9387,7 +9433,16 @@ assert._isSameValue = isSameValue;
           // (`_GeneratorState.get(this)`) is unaffected.
           const proto = _getGeneratorInstancePrototype();
           const obj: any = Object.create(proto);
-          _GeneratorState.set(obj, { buf, index: 0, pendingThrow });
+          // (#2035) Read the generator's return value off the buffer's side
+          // property (set by `__gen_set_return`) into the instance state so the
+          // terminal `{value, done:true}` result carries it — without it ever
+          // appearing as a yielded element.
+          _GeneratorState.set(obj, {
+            buf,
+            index: 0,
+            pendingThrow,
+            retVal: (buf as any)?.__genReturn,
+          });
           return obj;
         };
       if (name === "__create_async_generator")
