@@ -1,10 +1,11 @@
 ---
 id: 2015
 title: "method call using `this` on an any-typed object-literal receiver throws bare WebAssembly.Exception (__extern_method_call this-routing)"
-status: suspended
+status: done
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-12
+updated: 2026-06-14
+completed: 2026-06-14
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -108,3 +109,61 @@ no-`this` method (`{ getx() { return 5; } }`) → 5 (works).
 so the real fix is a codegen this-threading change with regression risk across
 the closure-call paths. Warrants a focused pass / senior-dev with the corrected
 analysis above rather than a rushed change at session tail.
+
+## Resolution (2026-06-14, sdev) — FINAL root cause + fix
+
+Both the issue's original diagnosis (`__extern_method_call` this-routing) AND
+dev-c's corrected diagnosis (static `__call_fn_0`/`call_ref`, never reaching the
+runtime) were inaccurate against current main (76 commits had landed since the
+suspension). WAT-tracing the repro on the merged HEAD showed `o.getx()` DOES
+route through the JS host — but the real mechanism is a THREE-layer this-loss:
+
+1. **Runtime — `_wrapForHost` proxy `get` trap, generic `closureBridge`
+   fallback** (`src/runtime.ts` ~4250). Reading the `getx` closure field off
+   the host-mirror proxy returned a bridge that invoked the closure via the
+   PLAIN `__call_fn_N` dispatcher (`callFn0(val)`), discarding `this` entirely.
+   `__call_fn_N` never installs `__current_this`, so the receiver was lost
+   before the method body ran. (The `_wrapWasmClosureUnknownArity` dynamic
+   bridge had the same gap — it installed `this` but without unwrapping the
+   host-mirror proxy to the raw struct.)
+2. **Codegen — object-method trampoline** (`src/codegen/closures.ts`,
+   `emitObjectMethodAsClosure` / `emitCachedMethodClosureAccess` /
+   `finalizeMethodTrampolines`). The trampoline that bridges the closure ABI
+   `(closure_self, …args)` to the method ABI `(this_struct, …args)` HARDCODED
+   `ref.null <objStruct>` for the method's `this` slot. So even once
+   `__current_this` was installed, the method body (which reads `this` from its
+   struct param, not the global) got null → `this.<field>` = `struct.get` on
+   null → bare `WebAssembly.Exception`.
+
+### Fix (two files)
+- **`src/runtime.ts`**: the generic `closureBridge` fallback and the
+  `_wrapWasmClosureUnknownArity` dynamic bridge now dispatch through
+  `__call_fn_method_N` (unwrapping the `_wrapForHost` proxy to the raw struct
+  via `_unwrapForHost`, gated on `_isWasmStruct`) when invoked with a real
+  receiver. A bare/undefined/globalThis `this` (extraction call `const f = o.m;
+  f()`) keeps the plain `__call_fn_N` path, preserving spec-mandated unbound-
+  `this` semantics unchanged.
+- **`src/codegen/closures.ts`**: new `buildTrampolineThisSlot` helper — the
+  object-method trampoline reads `__current_this`, `ref.test`s it as the object
+  struct, casts and uses it as `this` when it matches, else falls back to
+  `ref.null` (so plain `__call_fn_N` dispatch still yields unbound `this`).
+  Mirrors the null-guarded `__current_this` read lifted closure bodies already
+  use for `ThisKeyword` (#1702). Applied to BOTH the per-call-site
+  (`emitObjectMethodAsClosure`) and the cached class/proto
+  (`emitCachedMethodClosureAccess`) trampolines, plus the `finalizeMethodTrampolines`
+  rebuild — the rebuild replaces (not appends) the func's locals so the
+  pre-seeded `__this_any` anyref scratch stays in lockstep with the rebuilt
+  body's local indices.
+
+### Verification
+- Repro `o.getx()` → 21; typed receiver → 21; no-`this` method → 5.
+- New `tests/issue-2015.test.ts` (7 cases): 0/1/2-arg this-threading, `this.x`
+  mutation across calls, nested method-to-method `this`. All pass.
+- Regression sweep: `issue-1636s1-this-regression`, `issue-1636-s1-tojson-this`,
+  `issue-1702-strict-this`, `issue-1742-this-receiver-guard`,
+  `issue-1712-capture-closure-dispatch`, `issue-1669-trampoline-externref-coercion`
+  all green (25 tests). Full `tests/equivalence/` sweep run; every failure that
+  surfaced was confirmed PRE-EXISTING on `origin/main` (verified by swapping the
+  original `closures.ts`/`runtime.ts` back in — identical per-file counts). The
+  stale `*-calls`/`externref` unit tests that instantiate with `{env:{}}` fail on
+  main too (they predate the lazy-importObject ABI), not caused by this change.
