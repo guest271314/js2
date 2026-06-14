@@ -2454,6 +2454,23 @@ export function compileArrayMethodCall(
     overrideMethodName ?? (ts.isPropertyAccessExpression(propAccess) ? propAccess.name.text : undefined);
   if (!methodName || !ARRAY_METHODS.has(methodName)) return undefined;
 
+  // (#2007/#1448) Record closure-allocating array methods so the standalone
+  // vec-concat join fast-path can avoid a late `number_toString` registration
+  // that would shift indices and corrupt this closure's already-emitted code.
+  if (
+    methodName === "map" ||
+    methodName === "filter" ||
+    methodName === "flatMap" ||
+    methodName === "forEach" ||
+    methodName === "reduce" ||
+    methodName === "reduceRight" ||
+    methodName === "find" ||
+    methodName === "findIndex" ||
+    methodName === "sort"
+  ) {
+    fctx.emittedClosureArrayMethod = true;
+  }
+
   const receiverExpr = propAccess.expression;
   const arrInfo =
     resolveArrayInfo(ctx, receiverType) ??
