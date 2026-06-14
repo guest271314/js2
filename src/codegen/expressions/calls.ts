@@ -1134,11 +1134,12 @@ function sourceHasMethodReassignment(ctx: CodegenContext, anchor: ts.Node, metho
  * runtime imports cannot be registered (caller falls through to the
  * static path as a best-effort fallback).
  */
-function emitWrapperDynamicMethodCall(
+export function emitWrapperDynamicMethodCall(
   ctx: CodegenContext,
   fctx: FunctionContext,
   recvExpr: ts.Expression,
   methodName: string,
+  callExpr?: ts.CallExpression,
 ): ValType | null {
   // (#1888 Slice 2) Standalone routes __extern_method_call native, which reads
   // its args over a $ObjVec — build the (empty) args list with the native
@@ -1146,6 +1147,13 @@ function emitWrapperDynamicMethodCall(
   const arrNewIdx = ctx.standalone
     ? ensureObjVecBuilders(ctx).newIdx
     : ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+  // (#1712) Args support: when a call expression with arguments is supplied,
+  // pack them into the args array via __js_array_push. JS-host only — the
+  // standalone $ObjVec path stays empty-args until it grows a native push.
+  const wantArgs = callExpr !== undefined && callExpr.arguments.length > 0 && !ctx.standalone && !ctx.wasi;
+  const arrPushIdx = wantArgs
+    ? ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], [])
+    : undefined;
   const methodCallIdx = ensureLateImport(
     ctx,
     "__extern_method_call",
@@ -1154,6 +1162,7 @@ function emitWrapperDynamicMethodCall(
   );
   flushLateImportShifts(ctx, fctx);
   if (arrNewIdx === undefined || methodCallIdx === undefined) return null;
+  if (wantArgs && arrPushIdx === undefined) return null;
 
   // Compile receiver as externref.
   const recvType = compileExpression(ctx, fctx, recvExpr, { kind: "externref" });
@@ -1168,8 +1177,23 @@ function emitWrapperDynamicMethodCall(
   addStringConstantGlobal(ctx, methodName);
   fctx.body.push(...stringConstantExternrefInstrs(ctx, methodName));
 
-  // Empty args array: __js_array_new() → externref.
-  fctx.body.push({ op: "call", funcIdx: arrNewIdx });
+  // Args array: __js_array_new() → externref (+ per-arg __js_array_push).
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__js_array_new") ?? arrNewIdx });
+  if (wantArgs) {
+    const argsArrLocal = allocLocal(fctx, `__dynm_args_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: argsArrLocal });
+    for (const argExpr of callExpr!.arguments) {
+      fctx.body.push({ op: "local.get", index: argsArrLocal });
+      const t = compileExpression(ctx, fctx, argExpr, { kind: "externref" });
+      if (t === null) {
+        fctx.body.push({ op: "ref.null.extern" });
+      } else if (t.kind !== "externref") {
+        coerceType(ctx, fctx, t, { kind: "externref" });
+      }
+      fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__js_array_push") ?? arrPushIdx! });
+    }
+    fctx.body.push({ op: "local.get", index: argsArrLocal });
+  }
 
   // Re-lookup methodCallIdx in case args compilation triggered shifts.
   const finalMcIdx = ctx.funcMap.get("__extern_method_call") ?? methodCallIdx;
@@ -6710,11 +6734,61 @@ function compileCallExpression(
         }
         // Push self (the receiver) as first argument, with type hint from method's first param
         const methodParamTypes0 = getFuncParamTypes(ctx, funcIdx);
-        let recvType = compileExpression(ctx, fctx, propAccess.expression, methodParamTypes0?.[0]);
+        // (#2132) A method call on a statically-nullable receiver (`C | null`,
+        // incl. when laundered through `as any`) must throw a CATCHABLE
+        // TypeError on null, not a bare `ref.as_non_null` trap (Wasm null-deref
+        // traps bypass the module's exception tags and abort uncatchably).
+        // Detect nullability from the static type here, because the param-0 type
+        // hint passed to compileExpression below can coerce the value to a
+        // non-null `ref` and hide it from the `recvType.kind === "ref_null"`
+        // guard further down.
+        const NULL_OR_UNDEF = ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void;
+        const typeIsMaybeNull = (t: ts.Type): boolean =>
+          (t.flags & NULL_OR_UNDEF) !== 0 ||
+          (t.isUnion?.() === true && t.types.some((u) => (u.flags & NULL_OR_UNDEF) !== 0));
+        // Peel `as`/`!`/parens so `(c as any)` / `c!` reveal the underlying
+        // declared nullability — `as any` launders Null out of the static type,
+        // so checking only the cast expression's own type would miss it (#2132).
+        let receiverInner: ts.Expression = propAccess.expression;
+        while (
+          ts.isAsExpression(receiverInner) ||
+          ts.isNonNullExpression(receiverInner) ||
+          ts.isParenthesizedExpression(receiverInner) ||
+          ts.isTypeAssertionExpression(receiverInner)
+        ) {
+          receiverInner = (
+            receiverInner as ts.AsExpression | ts.NonNullExpression | ts.ParenthesizedExpression | ts.TypeAssertion
+          ).expression;
+        }
+        const receiverMaybeNull =
+          typeIsMaybeNull(ctx.checker.getTypeAtLocation(propAccess.expression)) ||
+          typeIsMaybeNull(ctx.checker.getTypeAtLocation(receiverInner));
+        // (#2132) When the receiver may be null, pass a NULLABLE param-0 hint (or
+        // none) so compileExpression keeps the value nullable on the stack — a
+        // non-null `ref` hint makes coerceType emit `ref.as_non_null`, which
+        // would trap on null BEFORE the guard below can throw a catchable
+        // TypeError. The `ref_null` guard further down re-asserts non-null only
+        // on the non-null branch.
+        const recvHint0: ValType | undefined =
+          receiverMaybeNull && methodParamTypes0?.[0]?.kind === "ref"
+            ? { kind: "ref_null", typeIdx: (methodParamTypes0[0] as { typeIdx: number }).typeIdx }
+            : methodParamTypes0?.[0];
+        let recvType = compileExpression(ctx, fctx, propAccess.expression, recvHint0);
         // Track whether receiver went through emitGuardedRefCast — if so, null
         // means "wrong struct type" (not genuinely null), so we should NOT throw
         // TypeError on null after cast.
         let receiverWasCast = false;
+        // (#2132) If the receiver is statically nullable but compiled to a
+        // non-null `ref` (e.g. via `as any`), force `ref_null` so the null-guard
+        // below fires and throws a catchable TypeError instead of trapping.
+        if (
+          receiverMaybeNull &&
+          recvType &&
+          recvType.kind === "ref" &&
+          (recvType as { typeIdx?: number }).typeIdx !== undefined
+        ) {
+          recvType = { kind: "ref_null", typeIdx: (recvType as { typeIdx: number }).typeIdx };
+        }
         // If receiver is externref but the method expects a struct ref, coerce
         if (recvType && recvType.kind === "externref") {
           const structTypeIdx = ctx.structMap.get(receiverClassName);

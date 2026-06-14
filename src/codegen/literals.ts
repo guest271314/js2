@@ -2695,6 +2695,35 @@ export function compileArrayLiteral(
   } else {
     const firstElemType = ctx.checker.getTypeAtLocation(firstElem);
     elemWasm = resolveWasmType(ctx, firstElemType);
+    // (#2021) The first element's class type can be a SUBTYPE of the array's
+    // declared element type — e.g. `const a: Shape[] = [new Circle(), new
+    // Shape()]` derives `(ref $Circle)` from element 0, but a later `new
+    // Shape()` cannot satisfy `(ref $Circle)` and ends up null → trap. When the
+    // first element resolves to a struct ref AND a contextual `Array<T>`
+    // annotation is present whose element type resolves to a (different) struct
+    // ref, prefer the annotation's element type: it is the declared common
+    // supertype that holds every element. TS has already verified each element
+    // is assignable to `T`, so widening to it is sound. (`[new Shape(), new
+    // Circle()]` — base first — already worked because element 0 IS the
+    // supertype; this fixes the subclass-first ordering.)
+    if (elemWasm.kind === "ref" || elemWasm.kind === "ref_null") {
+      const ctxType = ctx.checker.getContextualType(expr);
+      if (ctxType) {
+        const ctxSym = (ctxType as ts.TypeReference).symbol ?? ctxType.symbol;
+        if (ctxSym?.name === "Array" || ctxSym?.name === "ReadonlyArray") {
+          const ctxElemType = ctx.checker.getTypeArguments(ctxType as ts.TypeReference)[0];
+          if (ctxElemType) {
+            const ctxElemWasm = resolveWasmType(ctx, ctxElemType);
+            if (
+              (ctxElemWasm.kind === "ref" || ctxElemWasm.kind === "ref_null") &&
+              ctxElemWasm.typeIdx !== elemWasm.typeIdx
+            ) {
+              elemWasm = ctxElemWasm;
+            }
+          }
+        }
+      }
+    }
     // If the literal mixes a `null` literal with another kind (e.g. `[1, null]`),
     // fall back to externref so the null survives. Without this, null gets coerced
     // to f64 0 and destructuring defaults misbehave (#1021). We gate on `null`

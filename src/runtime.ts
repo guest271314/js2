@@ -4100,7 +4100,16 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       const getter = exports[`__sget_${String(key)}`];
       if (typeof getter === "function") {
         try {
-          return getter(obj);
+          // (#1712) Treat a nullish result as a MISS, not a hit: the
+          // __sget_<name> per-shape dispatcher yields null/undefined when the
+          // receiver's struct shape doesn't carry the field at all (fnctor
+          // ctor-shape instances vs the wider checker shape that generated
+          // the export). Returning it unconditionally short-circuited the
+          // vivified-prototype fallback below and made every prototype
+          // method on a fnctor instance unreachable whenever the checker
+          // shape had synthesized a same-named field.
+          const v = getter(obj);
+          if (v !== undefined && v !== null) return v;
         } catch {
           /* not a field of this struct type */
         }
@@ -4193,6 +4202,19 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // can invoke it. Without this, JS sees `typeof val === "object"` and
       // ToPrimitive fails with "Cannot convert object to primitive value".
       if (val != null && typeof val === "object" && _isWasmStruct(val) && exports) {
+        // (#1712) Vec structs are DATA, never callables — wrapping one in the
+        // closureBridge below made acorn's `this.scopeStack` field read return
+        // a JS function, so `scopeStack.push(…)` threw "push is not a
+        // function". `__is_vec` is the positive discriminator (`__is_closure`
+        // can false-positive on layout-canonicalization collisions).
+        try {
+          const isVecFn = exports.__is_vec as ((v: any) => number) | undefined;
+          if (typeof isVecFn === "function" && isVecFn(val) === 1) {
+            return _wrapForHost(val, exports);
+          }
+        } catch {
+          // fall through to the closure-bridge heuristics
+        }
         // Resolve the export key — for string keys use directly, for well-known
         // symbols use the @@name form (e.g. Symbol.toPrimitive → "@@toPrimitive") (#1090)
         const exportKey = typeof key === "string" ? key : typeof key === "symbol" ? _symbolToWasm.get(key) : undefined;
@@ -6447,6 +6469,57 @@ assert._isSameValue = isSameValue;
             return "[object Object]";
           }
         };
+      // (#1998/#1997) Array.prototype.join / toString element stringifier. Per
+      // ES2024 §23.1.3.18 step 7.c/d, `undefined` and `null` elements join as
+      // the empty String; every other element goes through ToString. This
+      // differs from `__extern_toString` (used by `+`), where null/undefined
+      // yield "null"/"undefined". A boxed `null`/`undefined` element arrives as
+      // a defined externref, so the empty-string rule is applied here, in JS.
+      // Nested arrays (`[[1,2],[3]].toString()` → "1,2,3") are WasmGC vec
+      // structs; ToString on a vec recurses into Array.prototype.join, which we
+      // reproduce by materialising the vec and joining with the default ",".
+      if (name === "__extern_join_str") {
+        const joinElem = (v: any): string => {
+          if (v == null) return "";
+          if (typeof v === "object" && _isWasmStruct(v)) {
+            // A WasmGC vec → recurse: ToString(array) === array.join(",").
+            const exports = callbackState?.getExports();
+            if (exports && typeof exports.__vec_len === "function" && typeof exports.__vec_get === "function") {
+              try {
+                const len = exports.__vec_len(v) as number;
+                if (typeof len === "number" && len >= 0) {
+                  let out = "";
+                  for (let i = 0; i < len; i++) {
+                    if (i > 0) out += ",";
+                    out += joinElem(exports.__vec_get(v, i));
+                  }
+                  return out;
+                }
+              } catch {
+                /* not a vec — fall through to ToPrimitive */
+              }
+            }
+            const prim = _toPrimitive(v, "string", callbackState);
+            if (prim !== undefined) return String(prim);
+            try {
+              return String(_hostToPrimitive(v, "string", callbackState));
+            } catch {
+              return "[object Object]";
+            }
+          }
+          if (typeof v.toString === "function") return v.toString();
+          if (typeof v === "object") {
+            const prim = _toPrimitive(v, "string", callbackState);
+            if (prim !== undefined) return String(prim);
+          }
+          try {
+            return String(v);
+          } catch {
+            return "[object Object]";
+          }
+        };
+        return joinElem;
+      }
       // (#1638) Date.prototype string formatters. The Wasm side holds the
       // timestamp as an i64 and passes it here with a mode selector; we build
       // the spec-correct string from a UTC Date. The invalid-Date sentinel
@@ -7710,6 +7783,56 @@ assert._isSameValue = isSameValue;
               if (typeof resolved === "function") {
                 const ret = resolved.apply(obj, wrappedArgs);
                 return ret === obj || ret === wrappedObj ? obj : _unwrapForHost(ret);
+              }
+            }
+            // (#1712) Array mutators on WasmGC vec structs. acorn mutates
+            // instance array fields through dynamic `this` dispatch
+            // (`this.scopeStack.push(new Scope(flags))`); the receiver is an
+            // opaque vec struct the host cannot grow. Route push/pop through
+            // the Wasm-side __vec_push/__vec_pop exports (per-vec-type
+            // dispatch, grow on the Wasm side). __vec_mut_supported is the
+            // discriminator — __vec_len's not-a-vec default is 0 and can't
+            // tell an empty vec from a non-vec. Push the RAW args (not host
+            // proxies) so Wasm-side reads of the elements see the structs.
+            {
+              // The receiver may be a _wrapForHost proxy (the field read that
+              // produced it wrapped the struct for host visibility) — unwrap
+              // to the raw vec struct before the export round-trip.
+              let rawVec = _unwrapForHost(obj);
+              // A vec struct whose canonicalized layout collides with a
+              // closure capture struct false-positives __is_closure, so
+              // wrapHostValue wrapped it into a callable bridge — reverse
+              // that through the wrapper→closure map.
+              if (typeof rawVec === "function") {
+                const wrapperTarget = _wasmClosureWrapperTargets.get(rawVec);
+                if (wrapperTarget) rawVec = wrapperTarget;
+              }
+              if (_isWasmStruct(rawVec) && exports) {
+                const mutSupFn = exports.__vec_mut_supported as ((v: any) => number) | undefined;
+                let vecSupported = false;
+                try {
+                  vecSupported = typeof mutSupFn === "function" && mutSupFn(rawVec) === 1;
+                } catch {
+                  vecSupported = false;
+                }
+                if (vecSupported) {
+                  if (method === "push" && typeof exports.__vec_push === "function") {
+                    const pushFn = exports.__vec_push as (v: any, x: any) => number;
+                    const rawArgs = args ?? [];
+                    let newLen = (exports.__vec_len as (v: any) => number)(rawVec);
+                    let ok = true;
+                    for (const a of rawArgs) {
+                      newLen = pushFn(rawVec, _unwrapForHost(a));
+                      if (newLen < 0) {
+                        ok = false;
+                        break;
+                      }
+                    }
+                    if (ok) return newLen;
+                  } else if (method === "pop" && typeof exports.__vec_pop === "function") {
+                    return (exports.__vec_pop as (v: any) => any)(rawVec);
+                  }
+                }
               }
             }
             // (#837) Map/WeakMap upsert proposal polyfill — Node 25 / V8

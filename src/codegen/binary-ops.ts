@@ -2140,6 +2140,46 @@ export function compileBinaryExpression(
       }
     }
 
+    // (#1986/#1987) Strict equality where exactly one side is an `any`-typed
+    // externref and the other is a known primitive (number / boolean) — or both
+    // sides are externref `any`. The numeric fallback further down unboxes the
+    // externref to f64 via ToNumber (null→0, false→0, "1"→1) and emits f64.eq,
+    // which makes `===` behave LOOSER than `==` (`null === 0` → true). Per §7.2.16
+    // IsStrictlyEqual must short-circuit to false on a type mismatch with no
+    // coercion. Route through `__host_eq` (JS `===`) instead — it gets the spec
+    // exactly right, including +0 === -0 (true) and NaN !== NaN. JS-host only; the
+    // standalone/WASI path is handled above (the `noJsHost` tag-dispatch block).
+    // Strings keep their dedicated `wasm:js-string equals` path below. A
+    // boolean-typed side is also excluded: `coerceType(i32 → externref)` boxes
+    // it as a JS *number* (`__box_number`), so `__host_eq(true, 1)` would be
+    // false — boolean operands keep the existing (correct) lowering, and a
+    // boolean `any` compared to a boolean falls through to it.
+    if (isStrict && !noJsHost && !leftIsString && !rightIsString && !leftIsBool && !rightIsBool) {
+      if (rightType.kind !== "externref") {
+        coerceType(ctx, fctx, rightType, { kind: "externref" });
+      }
+      if (leftType.kind !== "externref") {
+        const tmpR = allocTempLocal(fctx, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: tmpR });
+        coerceType(ctx, fctx, leftType, { kind: "externref" });
+        fctx.body.push({ op: "local.get", index: tmpR });
+        releaseTempLocal(fctx, tmpR);
+      }
+      const hostIdx = ensureLateImport(
+        ctx,
+        "__host_eq",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "i32" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      const finalHostIdx = ctx.funcMap.get("__host_eq") ?? hostIdx;
+      if (finalHostIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: finalHostIdx });
+        if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
+        return { kind: "i32" };
+      }
+    }
+
     const eitherIsString = leftIsString || rightIsString;
     const bothAreStrings = leftIsString && rightIsString;
     // (#1134) For LOOSE equality where exactly ONE side is a string and the
