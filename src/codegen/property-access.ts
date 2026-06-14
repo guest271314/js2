@@ -278,12 +278,46 @@ function emitRuntimeDescriptorGet(
 /**
  * Consume an externref value and push the Array.isArray boolean result.
  *
- * Spec basis: ECMA-262 §23.1.2.3 delegates to IsArray (§7.2.2). In no-host
- * targets we can only decide compiled WasmGC array values, so the predicate is
- * a ref.test over every registered vec type; host mode ORs that with the real
- * JS Array.isArray predicate for foreign JS arrays.
+ * Spec basis: ECMA-262 §23.1.2.3 delegates to IsArray (§7.2.2).
+ *
+ * Two regimes (#2047 — unified):
+ *
+ * - **`--target standalone`**: route through the in-module native
+ *   `__extern_is_array` helper. That helper is reserved with the object runtime
+ *   and *filled at finalize* (`fillExternIsArray`) with the COMPLETE, filtered
+ *   array-carrier list, so a value-read of `Array.isArray` taken before a later
+ *   array type (e.g. `boolean[]` → `__vec_i32`) is registered no longer bakes an
+ *   incomplete `ref.test` chain. This both fixes the first-emission snapshot bug
+ *   (`const f = Array.isArray; f(boolean[])` ⇒ `false`) and excludes the
+ *   exclusively-non-array byte carriers (`i32_byte` ArrayBuffer/DataView,
+ *   `i8_byte` Uint8Array) per §7.2.2.
+ * - **Host / WASI**: keep the inline `ref.test` chain over every registered vec
+ *   type (it detects compiled WasmGC array values materialised into an externref
+ *   slot — #1678), ORed in host mode with the real JS `Array.isArray` host
+ *   predicate for foreign JS arrays (#1328). Host output is unchanged.
  */
 export function emitArrayIsArrayExternrefPredicate(ctx: CodegenContext, fctx: FunctionContext): void {
+  // (#2047) Standalone: defer entirely to the finalize-filled native helper.
+  // It owns the complete, byte-carrier-filtered carrier list (late binding),
+  // so neither declaration order nor lazy vec registration can produce a wrong
+  // answer here. WASI is intentionally NOT routed here: its
+  // `__extern_is_array` does not resolve to the native object-runtime func
+  // (OBJECT_RUNTIME_HELPER_NAMES routing is `ctx.standalone`-only), so it stays
+  // on the inline chain below.
+  if (ctx.standalone) {
+    const nativeIdx = ensureLateImport(ctx, "__extern_is_array", [{ kind: "externref" }], [{ kind: "i32" }]);
+    if (nativeIdx !== undefined) {
+      flushLateImportShifts(ctx, fctx);
+      fctx.body.push({ op: "call", funcIdx: nativeIdx });
+      return;
+    }
+    // Defensive fallback (should not happen — the object runtime always reserves
+    // the helper under standalone): nothing is an array.
+    fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    return;
+  }
+
   const vecTypeIdxs = Array.from(new Set(ctx.vecTypeMap.values()));
   const isArrIdx =
     !noJsHost(ctx) && !ctx.strictNoHostImports
