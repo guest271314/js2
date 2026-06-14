@@ -599,12 +599,7 @@ export function compileArrayLikePrototypeCall(
   // Wasm). Idempotent; the arms re-fetch these by name too.
   ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
   ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
-  ensureLateImport(
-    ctx,
-    "__extern_set",
-    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
-    [],
-  );
+  ensureLateImport(ctx, "__extern_set", [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }], []);
   ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
 
