@@ -62,7 +62,15 @@ describe("#2025 standalone any-receiver closed-struct method dispatch", () => {
 
   // Host mode must be byte-unaffected — same results via the JS-host path.
   it("host: o.next()/getx() unchanged", async () => {
-    expect(await run(`export function test(): number { const o: any = { next() { return 7; } }; return (o.next() as number); }`)).toBe(7);
-    expect(await run(`export function test(): number { const o: any = { x: 21, getx() { return this.x; } }; return (o.getx() as number); }`)).toBe(21);
+    expect(
+      await run(
+        `export function test(): number { const o: any = { next() { return 7; } }; return (o.next() as number); }`,
+      ),
+    ).toBe(7);
+    expect(
+      await run(
+        `export function test(): number { const o: any = { x: 21, getx() { return this.x; } }; return (o.getx() as number); }`,
+      ),
+    ).toBe(21);
   });
 });
