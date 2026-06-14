@@ -88,6 +88,8 @@ export function createCodegenContext(
     argcGlobalIdx: -1,
     currentThisGlobalIdx: -1,
     valueOfClosureTypes: new Map(),
+    toPrimitiveSharedClaimed: new Set(),
+    toPrimitiveForkedStructs: new Set(),
     exnTagIdx: -1,
     hasUnionImports: false,
     asyncFunctions: new Set(),
