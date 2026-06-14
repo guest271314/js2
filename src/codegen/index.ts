@@ -35,7 +35,7 @@ import type {
 import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
-import { ensureNativeIteratorRuntime } from "./iterator-native.js";
+import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
@@ -1462,6 +1462,30 @@ export function generateModule(
     // Emit __call_@@iterator export for runtime Symbol.iterator dispatch on WasmGC structs
     emitIteratorMethodExport(ctx);
 
+    // (#2038, reserve-then-fill #1719) Rebuild the native `__iterator` /
+    // `__iterator_next` carrier bodies with the USER `{next()}`-protocol arm now
+    // that the closed-struct dispatchers exist: `__sget_value`/`__sget_done`
+    // (emitStructFieldGetters, above) and `__call_@@iterator`/`__call_next`
+    // (emitIteratorMethodExport, just above). No-op unless the standalone native
+    // iterator runtime was registered AND a custom iterable produced those
+    // dispatchers — otherwise the carrier stays vec-only and byte-identical.
+    if (
+      ctx.nativeIteratorUserArmPending &&
+      ctx.funcMap.has("__call_@@iterator") &&
+      ctx.funcMap.has("__call_next") &&
+      ctx.funcMap.has("__sget_value") &&
+      ctx.funcMap.has("__sget_done") &&
+      !ctx.funcMap.has("__is_truthy")
+    ) {
+      // The USER `done` flag needs `__is_truthy` (ToBoolean on the boxed bool).
+      // `emitStructFieldGetters` usually registers it via `addUnionImports` when a
+      // `{value,done}` bucket boxes, but force it here for the rare bucket shape
+      // that does not, so the fill never silently degrades to vec-only.
+      // Native in standalone/WASI (appends funcs, no funcIdx shift).
+      addUnionImports(ctx);
+    }
+    fillNativeIteratorUserArms(ctx);
+
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
     emitToPrimitiveMethodExport(ctx);
@@ -1878,6 +1902,12 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
       name: funcName,
       desc: { kind: "func", index: funcIdx },
     });
+
+    // (#2038) Register in funcMap so the native iterator carrier's USER arm can
+    // resolve `__sget_value` / `__sget_done` at finalize-fill time
+    // (`fillNativeIteratorUserArms`). No other code looks `__sget_*` up by funcMap
+    // key, so this is inert for every other path.
+    ctx.funcMap.set(funcName, funcIdx);
   }
 
   // Emit __struct_field_names(externref) -> externref
@@ -2534,6 +2564,12 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
       name: exportName,
       desc: { kind: "func", index: funcIdx },
     });
+
+    // (#2038) Register in funcMap so the native iterator carrier's USER arm can
+    // resolve `__call_@@iterator` / `__call_next` at finalize-fill time
+    // (`fillNativeIteratorUserArms`). Harmless for the host/GC path — no other
+    // code looks these up by funcMap key.
+    ctx.funcMap.set(exportName, funcIdx);
   };
 
   emitMethodDispatch("@@iterator", "__call_@@iterator");
