@@ -672,6 +672,23 @@ export interface CodegenContext {
    */
   externIsArrayReserved?: boolean;
   /**
+   * (#2038) True once the native iterator runtime (`ensureNativeIteratorRuntime`,
+   * iterator-native.ts) has emitted `__iterator` / `__iterator_next` with a
+   * vec-only body and is awaiting its USER-iterator arm. The USER arm dispatches
+   * a custom `{[Symbol.iterator]()}` / `{next()}` object through the closed-struct
+   * method dispatchers `__call_@@iterator` / `__call_next` and the field getters
+   * `__sget_value` / `__sget_done`, all of which are emitted at FINALIZE (after
+   * every user struct is known — `emitIteratorMethodExport` /
+   * `emitStructFieldGetters`). So the carrier bodies are rebuilt with the USER arm
+   * by `fillNativeIteratorUserArms` in post-processing — same reserve-then-fill
+   * funcIdx-authority discipline as `protoIteratorDriverReserved` (#1719). The
+   * eager body is a valid vec-only carrier (byte-identical to the pre-#2038
+   * runtime), so if the fill is ever skipped (e.g. multi-module) custom iterables
+   * keep trapping as before rather than shipping a broken module. Only set under
+   * `--target standalone` / `wasi`.
+   */
+  nativeIteratorUserArmPending?: boolean;
+  /**
    * Static property initializer expressions to compile into __module_init.
    * `className` (#1395) is the owning class name — used to set
    * `enclosingClassName` + `isStaticContext` on the initFctx so `this`
