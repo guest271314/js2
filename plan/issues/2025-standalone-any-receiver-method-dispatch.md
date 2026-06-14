@@ -123,3 +123,41 @@ pattern.
 ## Test files
 - `tests/issue-2025.test.ts`: the three repros + a 1-arg method (`add(n)`),
   host/standalone/wasi parity.
+
+## Slice 1 RESULT (2026-06-14, sdev3) — IMPLEMENTED & GREEN
+
+Branch `standalone-any-method-dispatch` (commit 87a87ef93). Files:
+- `src/codegen/closed-method-dispatch.ts` (new): `reserveClosedMethodDispatch` +
+  `fillClosedMethodDispatch` (reserve-then-fill, #1719). Deps registered at
+  reserve time (call site, mid-compile) so fill is read-only → no finalize index
+  churn. Dispatcher `__call_m_<name>(recv)->externref`: type-switch over closed
+  structs with `<Struct>_<name>` (1-param = 0-arg-after-`this`), `ref.cast` +
+  `call` (struct = `this` param), box-coerce result; bottom arm =
+  `__extern_method_call(recv, "<name>", __objvec_new())` for open `$Object`.
+- `src/codegen/expressions/calls.ts`: any-receiver fallback (~`:7966`) — for
+  `ctx.standalone||ctx.wasi` + 0 args + non-builtin-class receiver, reserve+call
+  the dispatcher and return. (Runs after generator/extern-class checks, before
+  the generic `__extern_method_call` block.)
+- `src/codegen/index.ts`: `fillClosedMethodDispatch(ctx)` at finalize right after
+  `fillApplyClosure` (`:1528`).
+- `src/codegen/context/types.ts`: `closedMethodDispatchNames?: Set<string>`.
+
+Verified standalone AND wasi: `o.next()`→7, `getx()` `this`→21, captured
+`step()`×3→3, custom-iterable manual drive via any `.next()`→12 (the #2038
+building block), class-instance via any→5. `tests/issue-2025.test.ts` 11/11.
+NO regressions: object-methods 13/13, object-literals 21/21, generators 9/9,
+for-of-generator 9/9, hasownproperty-call 7/7; host mode byte-unaffected (gated
+`standalone||wasi`); tsc clean. Every other failure found (class-methods harness,
+wasi-generator, Map.keys-via-any, method-with-arg→NaN) reproduces identically on
+clean main — all PRE-EXISTING, not caused by this change.
+
+**Scope note:** Slice 1 = 0-arg methods only. `o.add(5)` (N-ary) still NaN
+(pre-existing) — Slice 2 generalizes the dispatcher to args (coerce each
+externref arg to the method's declared param type per candidate). This PATH B
+fix does NOT by itself fix #2038's carrier, which calls `__extern_method_call`
+from a hand-written Wasm body (that needs PATH A — rewrite the carrier to use
+the closed-struct dispatchers). PATH B is independently valuable for ALL
+standalone object-literal method calls.
+
+Status: ready to PR; held pending tech-lead go (#25 was marked DEFERRED epic —
+sdev3 found the 0-arg slice is contained + green and recommends landing it).
