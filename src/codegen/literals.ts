@@ -1467,8 +1467,7 @@ export function compileObjectLiteralForStruct(
     // pre-pass, but not for nominal struct types) — `existingFuncIdx` is an
     // unreliable "is this the first literal?" signal, so we track the claim
     // explicitly in `ctx.toPrimitiveSharedClaimed`.
-    const isToPrimitiveMethod =
-      methodName === "valueOf" || methodName === "toString" || methodName === "@@toPrimitive";
+    const isToPrimitiveMethod = methodName === "valueOf" || methodName === "toString" || methodName === "@@toPrimitive";
     let forkToPrimitive = false;
     if (isToPrimitiveMethod) {
       if (!ctx.toPrimitiveSharedClaimed.has(fullName)) {

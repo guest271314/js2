@@ -10697,8 +10697,10 @@ assert._isSameValue = isSameValue;
       // `host_loose_eq` uses) so the per-instance compiled valueOf/toString is
       // dispatched in-module; a no-method struct resolves to "[object Object]".
       return (a: any, b: any) => {
-        const av = a != null && typeof a === "object" && _isWasmStruct(a) ? _toPrimitiveSync(a, "default", callbackState) : a;
-        const bv = b != null && typeof b === "object" && _isWasmStruct(b) ? _toPrimitiveSync(b, "default", callbackState) : b;
+        const av =
+          a != null && typeof a === "object" && _isWasmStruct(a) ? _toPrimitiveSync(a, "default", callbackState) : a;
+        const bv =
+          b != null && typeof b === "object" && _isWasmStruct(b) ? _toPrimitiveSync(b, "default", callbackState) : b;
         return av + bv;
       };
     case "same_value_zero":

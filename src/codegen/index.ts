@@ -3392,7 +3392,6 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
             ? funcType.results[0]!
             : { kind: "externref" };
         entries.push({ structName, typeIdx, mode: "standalone", funcIdx, resultType });
-        continue;
       }
     }
 
