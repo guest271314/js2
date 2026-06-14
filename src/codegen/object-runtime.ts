@@ -4370,15 +4370,48 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   bridgeFn.locals = [{ name: "n", type: { kind: "i32" } }];
 }
 
+/**
+ * (#2047) Byte-backed vec carriers that are NEVER JS arrays and must report
+ * `Array.isArray === false` per ES §7.2.2:
+ *   - `i32_byte` — ArrayBuffer / DataView backing store.
+ *   - `i8_byte`  — native (standalone/WASI) `Uint8Array` packed-byte storage.
+ * The codebase already excludes `i32_byte` vecs from array treatment elsewhere
+ * (`type-coercion.ts` — the `__make_iterable` shim skips it), so this filter is
+ * consistent precedent. NOTE: other TypedArrays (Float64Array, Int32Array, …)
+ * share the generic `f64` vec carrier with `number[]`, so a struct-level
+ * `ref.test` cannot distinguish them without a brand bit — `__vec_f64` is kept
+ * IN the carrier list and `Array.isArray(new Float64Array(1))` remains a known
+ * residual false-positive tracked for a brand-bit follow-up. Only the
+ * exclusively-non-array `_byte` carriers can be filtered cleanly.
+ */
+const NON_ARRAY_BYTE_VEC_ELEM_KINDS: ReadonlySet<string> = new Set(["i32_byte", "i8_byte"]);
+
+function isNonArrayByteVecName(name: string): boolean {
+  // Matches `__vec_i32_byte` / `__vec_i8_byte`. Only `__vec_*` structs reach
+  // this check (the caller already restricts to vec struct names).
+  for (const elemKind of NON_ARRAY_BYTE_VEC_ELEM_KINDS) {
+    if (name === `__vec_${elemKind}`) return true;
+  }
+  return false;
+}
+
 function collectStandaloneArrayCarrierTypeIdxs(ctx: CodegenContext): number[] {
   const carriers = new Set<number>();
   const objVecTypeIdx = ctx.objectRuntimeTypes?.objVecTypeIdx;
   if (objVecTypeIdx !== undefined) carriers.add(objVecTypeIdx);
-  for (const typeIdx of ctx.vecTypeMap.values()) carriers.add(typeIdx);
+
+  // (#2047) Drop the exclusively-non-array byte carriers from vecTypeMap by key
+  // so ArrayBuffer/DataView (`i32_byte`) and native Uint8Array (`i8_byte`) are
+  // never claimed as arrays.
+  for (const [elemKind, typeIdx] of ctx.vecTypeMap.entries()) {
+    if (NON_ARRAY_BYTE_VEC_ELEM_KINDS.has(elemKind)) continue;
+    carriers.add(typeIdx);
+  }
   for (let typeIdx = 0; typeIdx < ctx.mod.types.length; typeIdx++) {
     const typeDef = ctx.mod.types[typeIdx];
     if (typeDef?.kind !== "struct") continue;
     const name = typeDef.name ?? "";
+    if (isNonArrayByteVecName(name)) continue; // (#2047) §7.2.2 — never an array
     if (name.startsWith("__vec_") || name === "__template_vec_externref") carriers.add(typeIdx);
   }
   return Array.from(carriers).sort((a, b) => a - b);
