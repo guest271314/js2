@@ -10458,6 +10458,24 @@ assert._isSameValue = isSameValue;
         // eslint-disable-next-line func-names
         function (this: any, ...args: any[]) {
           const exports = callbackState?.getExports();
+          // (#2128) Setter invoked during the module START function (top-level
+          // `o.v = 9` runs before WebAssembly.instantiate returns, so
+          // `getExports()` is still undefined and the dispatch would silently
+          // no-op). Park the write and replay it the moment setExports wires
+          // the instance — same mechanism as #1712's deferred
+          // defineProperties. Only setter calls (args present) are parkable;
+          // a getter needs its value synchronously and keeps returning
+          // undefined pre-wiring.
+          if (exports === undefined && args.length > 0 && callbackState) {
+            const defer = (callbackState as { deferToExports?: (fn: () => void) => void }).deferToExports;
+            if (defer) {
+              const self = this;
+              defer(() => {
+                callbackState.getExports()?.[`__cb_${id}`]?.(cap, self, ...args);
+              });
+              return undefined;
+            }
+          }
           return exports?.[`__cb_${id}`]?.(cap, this, ...args);
         };
     case "await":

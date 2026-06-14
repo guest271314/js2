@@ -2458,11 +2458,59 @@ export function compileArrowAsClosure(
 
 /** Compile an arrow function as a host callback via __make_callback.
  *  Captures are bundled into a per-instance GC struct (not shared globals). */
+/**
+ * (#2128) Collect the names a callback body WRITES that resolve to locals of
+ * the enclosing function — i.e. its mutable captures. Used by the
+ * object-literal accessor path to pre-compute, across a whole get/set pair,
+ * which locals must be captured through a SHARED ref cell so the getter
+ * observes the setter's writes.
+ */
+export function collectMutatedCaptureNames(
+  fctx: FunctionContext,
+  arrow: ts.ArrowFunction | ts.FunctionExpression,
+): Set<string> {
+  const ownLocals = new Set<string>();
+  collectFunctionOwnLocals(arrow, ownLocals);
+  if (ts.isFunctionExpression(arrow) && arrow.name) ownLocals.add(arrow.name.text);
+  const written = new Set<string>();
+  const body = arrow.body;
+  if (ts.isBlock(body)) {
+    for (const stmt of body.statements) collectWrittenIdentifiers(stmt, written, ownLocals);
+  } else {
+    collectWrittenIdentifiers(body, written, ownLocals);
+  }
+  const result = new Set<string>();
+  for (const name of written) {
+    if (fctx.localMap.has(name)) result.add(name);
+  }
+  return result;
+}
+
+/** (#2128) Per-literal registry of shared capture ref cells — see compileArrowAsCallback. */
+export type SharedRefCellMap = Map<string, { refCellLocal: number; refCellTypeIdx: number; valType: ValType }>;
+
 export function compileArrowAsCallback(
   ctx: CodegenContext,
   fctx: FunctionContext,
   arrow: ts.ArrowFunction | ts.FunctionExpression,
-  options?: { needsThis?: boolean; deferredInvocation?: boolean },
+  options?: {
+    needsThis?: boolean;
+    deferredInvocation?: boolean;
+    /**
+     * (#2128) Locals to capture mutably (via ref cell) even when THIS
+     * callback only reads them — a sibling callback in the same object
+     * literal writes them, and both must see one shared cell.
+     */
+    forceMutableCaptures?: Set<string>;
+    /**
+     * (#2128) Per-object-literal shared-cell registry. The first callback
+     * capturing a name mutably creates the cell and records it here; sibling
+     * callbacks reuse it so mutations are visible across the get/set pair.
+     * Scoped to one literal compilation — do NOT share across loop-iteration
+     * callback creations (per-iteration `let` semantics need fresh cells).
+     */
+    sharedRefCells?: SharedRefCellMap;
+  },
 ): ValType | null {
   const cbId = ctx.callbackCounter++;
   const cbName = `__cb_${cbId}`;
@@ -2503,7 +2551,10 @@ export function compileArrowAsCallback(
       localIdx < fctx.params.length
         ? fctx.params[localIdx]!.type
         : (fctx.locals[localIdx - fctx.params.length]?.type ?? { kind: "f64" });
-    const isMutable = writtenInCallback.has(name);
+    // (#2128) forceMutableCaptures: a sibling accessor in the same object
+    // literal writes this local — capture via the shared ref cell even if
+    // this callback (e.g. the getter) only reads it.
+    const isMutable = writtenInCallback.has(name) || (options?.forceMutableCaptures?.has(name) ?? false);
     const alreadyBoxed = !!fctx.boxedCaptures?.has(name);
     captures.push({ name, type, localIdx, mutable: isMutable, alreadyBoxed });
   }
@@ -2823,8 +2874,17 @@ export function compileArrowAsCallback(
       [];
     for (const cap of captures) {
       if (cap.mutable && !cap.alreadyBoxed) {
-        // Create a ref cell: struct.new $ref_cell_T (value)
         const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.type);
+        // (#2128) Reuse the literal's shared cell when a sibling callback
+        // already created one for this local (same ref-cell type), so the
+        // get/set pair aliases ONE cell. No new writebacks: the creator
+        // registered them.
+        const shared = options?.sharedRefCells?.get(cap.name);
+        if (shared && shared.refCellTypeIdx === refCellTypeIdx) {
+          fctx.body.push({ op: "local.get", index: shared.refCellLocal });
+          continue;
+        }
+        // Create a ref cell: struct.new $ref_cell_T (value)
         fctx.body.push({ op: "local.get", index: cap.localIdx });
         fctx.body.push({ op: "struct.new", typeIdx: refCellTypeIdx });
         // Keep a local ref to the ref cell for writeback after the host call
@@ -2835,6 +2895,7 @@ export function compileArrowAsCallback(
         fctx.body.push({ op: "local.tee", index: refCellLocal });
         // The struct.new result (ref cell) is on the stack for the capture struct
         refCellLocals.push({ refCellLocal, outerLocalIdx: cap.localIdx, refCellTypeIdx, valType: cap.type });
+        options?.sharedRefCells?.set(cap.name, { refCellLocal, refCellTypeIdx, valType: cap.type });
       } else {
         // Immutable capture or already-boxed: push directly
         fctx.body.push({ op: "local.get", index: cap.localIdx });
@@ -2851,10 +2912,23 @@ export function compileArrowAsCallback(
     if (refCellLocals.length > 0) {
       const writebacks: Instr[] = [];
       for (const rc of refCellLocals) {
+        // (#2128) Null-guard the cell: writebacks are re-emitted at sites that
+        // may execute while the creation site (e.g. inside an untaken branch)
+        // hasn't run, leaving refCellLocal null — skip instead of trapping.
         writebacks.push({ op: "local.get", index: rc.refCellLocal } as Instr);
-        writebacks.push({ op: "ref.as_non_null" });
-        writebacks.push({ op: "struct.get", typeIdx: rc.refCellTypeIdx, fieldIdx: 0 } as Instr);
-        writebacks.push({ op: "local.set", index: rc.outerLocalIdx } as Instr);
+        writebacks.push({ op: "ref.is_null" } as Instr);
+        writebacks.push({ op: "i32.eqz" } as Instr);
+        writebacks.push({
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: rc.refCellLocal } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "struct.get", typeIdx: rc.refCellTypeIdx, fieldIdx: 0 } as Instr,
+            { op: "local.set", index: rc.outerLocalIdx } as Instr,
+          ],
+          else: [],
+        } as Instr);
       }
       // (#1695) Promote to persistent for stored-callback host methods too:
       // defer/use/adopt only register the callback, the actual invocation
