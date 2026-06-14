@@ -14,6 +14,7 @@ import { allocLocal, getLocalType } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
 import { addArrayIteratorImports, addStringImports, addUnionImports, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
+import { compileStringLiteral } from "./shared.js";
 import { getArrTypeIdxFromVec, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
 import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
@@ -2424,6 +2425,10 @@ const ARRAY_METHODS = new Set([
   "with",
   "flat",
   "flatMap",
+  // #1997: Array.prototype.toString() (§23.1.3.36) delegates to join with the
+  // default "," separator. Without this, it fell through to the generic object
+  // dispatch and produced "[object Array]".
+  "toString",
   // TypedArray-specific (#1664) — native WasmGC lowering avoids the generic
   // __extern_get / __extern_length host-import fallback under --target wasi.
   "set",
@@ -2448,6 +2453,23 @@ export function compileArrayMethodCall(
   const methodName =
     overrideMethodName ?? (ts.isPropertyAccessExpression(propAccess) ? propAccess.name.text : undefined);
   if (!methodName || !ARRAY_METHODS.has(methodName)) return undefined;
+
+  // (#2007/#1448) Record closure-allocating array methods so the standalone
+  // vec-concat join fast-path can avoid a late `number_toString` registration
+  // that would shift indices and corrupt this closure's already-emitted code.
+  if (
+    methodName === "map" ||
+    methodName === "filter" ||
+    methodName === "flatMap" ||
+    methodName === "forEach" ||
+    methodName === "reduce" ||
+    methodName === "reduceRight" ||
+    methodName === "find" ||
+    methodName === "findIndex" ||
+    methodName === "sort"
+  ) {
+    fctx.emittedClosureArrayMethod = true;
+  }
 
   const receiverExpr = propAccess.expression;
   const arrInfo =
@@ -2603,6 +2625,11 @@ export function compileArrayMethodCall(
       result = compileArrayConcat(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     case "join":
+    // #1997: Array.prototype.toString() (§23.1.3.36) is specified to call join
+    // with the default "," separator. compileArrayJoin already defaults the
+    // separator to "," when no argument is present, and toString receives no
+    // arguments, so the two share the same lowering.
+    case "toString":
       // #1286: when the probe found the receiver to be externref at runtime,
       // route through the host-import fallback. The WasmGC-native path expects
       // a vec struct; trying to extract one from a JS array via ref.cast
@@ -2627,8 +2654,18 @@ export function compileArrayMethodCall(
       result = compileArrayLastIndexOf(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
       break;
     case "sort":
+      // #1967 — the gate previously excluded externref (string, JS-host mode)
+      // and ref (struct) element arrays, so `["b","a"].sort()` and
+      // `objs.sort((x,y)=>…)` silently no-op'd via the generic fallback. The
+      // internal compileArraySort ALREADY routes non-numeric elements through
+      // tryCompileComparatorSort (comparator) and compileArrayDefaultToStringSort
+      // (default ToString order, #1993) — only this gate kept it unreachable.
       result =
-        elemType.kind === "f64" || elemType.kind === "i32"
+        elemType.kind === "f64" ||
+        elemType.kind === "i32" ||
+        elemType.kind === "externref" ||
+        elemType.kind === "ref" ||
+        elemType.kind === "ref_null"
           ? compileArraySort(ctx, fctx, methodAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType)
           : undefined;
       break;
@@ -4856,12 +4893,66 @@ function compileArrayJoin(
   // externref at runtime is handled in compileArrayMethodCall via the
   // `receiverIsExternref` flag set by the probe. By the time we get here, the
   // receiver is known to be a vec struct.
+
+  // #1998: when the element type is externref/ref, each element must be
+  // stringified via the `__extern_join_str` host import (undefined/null → "",
+  // else ToString) before it reaches wasm:js-string `concat`. Ensure that
+  // import FIRST — adding a late import shifts every defined-function /
+  // import index at or above the insertion point, and `flushLateImportShifts`
+  // can only repair indices already baked into instruction bodies, not the
+  // raw `concatIdx`/`toStrIdx` values we capture below. Hoisting the import +
+  // flush ahead of those captures keeps them correct.
+  const needsExternJoinStr = elemType.kind === "externref" || elemType.kind === "ref" || elemType.kind === "ref_null";
+  let joinStrIdx: number | undefined;
+  if (needsExternJoinStr) {
+    joinStrIdx = ensureLateImport(ctx, "__extern_join_str", [{ kind: "externref" }], [{ kind: "externref" }]);
+  }
+
+  // #1998: `number_toString` is normally registered up-front by
+  // collectPrimitiveMethodImports, but only when the receiver's number-index
+  // type statically resolves to number/boolean/bigint. For `any[]` receivers
+  // (e.g. `([10,9] as any[]).join(",")`) the element lowers to f64 here yet the
+  // import was never collected, so the f64 stringification branch below was
+  // silently skipped and a raw f64 reached `concat` → "illegal cast". Ensure it
+  // on demand. Hoisted above the `concatIdx` capture so the late-import index
+  // shift settles before any funcIdx is read into a JS variable.
+  if ((elemType.kind === "f64" || elemType.kind === "i32") && ctx.funcMap.get("number_toString") === undefined) {
+    ensureLateImport(ctx, "number_toString", [{ kind: "f64" }], [{ kind: "externref" }]);
+  }
+
+  flushLateImportShifts(ctx, fctx);
+
+  // #1998: register the empty-string constant. It backs two substitutions
+  // below: (1) f64 vecs store `undefined`, array holes, and elided trailing
+  // slots as the sNaN sentinel 0x7FF00000DEADC0DE (see emitDefaultValueCheck /
+  // #866), which join renders as "" (§23.1.3.18 step 7.c/d) while a *genuine*
+  // NaN (distinct bit pattern) still stringifies to "NaN"; (2) join/toString of
+  // an empty array is "", not the initial null.
+  addStringConstantGlobal(ctx, "");
+
+  // #1997: the default separator is "," (used when join is called with no
+  // argument, and always for Array.prototype.toString). It is normally
+  // registered by the up-front string-constant collection, but that pass does
+  // not see the implicit "," for toString / no-arg join on every receiver
+  // shape. Register it on demand so the default-separator branch below emits a
+  // real string global instead of falling back to `ref.null.extern` (which
+  // traps "illegal cast" in wasm:js-string `concat`).
+  if (callExpr.arguments.length < 1) {
+    addStringConstantGlobal(ctx, ",");
+  }
+
   const concatIdx = ctx.jsStringImports.get("concat");
   const toStrIdx = ctx.funcMap.get("number_toString");
   if (concatIdx === undefined) {
     reportError(ctx, callExpr, "join requires string support (wasm:js-string concat)");
     return null;
   }
+
+  // #1968 — the empty-join result must be "" not a null externref (which every
+  // downstream string consumer stringifies as "null"). Pre-register the ""
+  // string constant *before* any body instructions so the eventual fixup of
+  // module-global indices can't desync already-emitted global.gets.
+  addStringConstantGlobal(ctx, "");
 
   const vecTmp = allocLocal(fctx, `__arr_join_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_join_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
@@ -4898,8 +4989,9 @@ function compileArrayJoin(
   }
   fctx.body.push({ op: "local.set", index: sepTmp });
 
-  // result starts as null (empty)
-  fctx.body.push({ op: "ref.null.extern" });
+  // result starts as "" (the empty-array join result, #1968) — not null, which
+  // would stringify as "null". A non-empty array overwrites this on iteration 0.
+  compileStringLiteral(ctx, fctx, "");
   fctx.body.push({ op: "local.set", index: resultTmp });
 
   fctx.body.push({ op: "i32.const", value: 0 });
@@ -4914,10 +5006,36 @@ function compileArrayJoin(
     { op: getOp, typeIdx: arrTypeIdx } as Instr,
   ];
   if (elemType.kind === "f64" && toStrIdx !== undefined) {
-    elemToStr.push({ op: "call", funcIdx: toStrIdx });
+    // #1998: substitute "" for the undefined/hole sNaN sentinel; otherwise
+    // ToString the number (so a genuine NaN still renders "NaN").
+    const elemF64Tmp = allocLocal(fctx, `__arr_join_elem_${fctx.locals.length}`, { kind: "f64" });
+    elemToStr.push({ op: "local.tee", index: elemF64Tmp });
+    elemToStr.push({ op: "i64.reinterpret_f64" });
+    elemToStr.push({ op: "i64.const", value: 0x7ff00000deadc0den } as Instr);
+    elemToStr.push({ op: "i64.eq" });
+    elemToStr.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      then: stringConstantExternrefInstrs(ctx, ""),
+      else: [
+        { op: "local.get", index: elemF64Tmp },
+        { op: "call", funcIdx: toStrIdx },
+      ],
+    } as Instr);
   } else if (elemType.kind === "i32" && toStrIdx !== undefined) {
     elemToStr.push({ op: "f64.convert_i32_s" });
     elemToStr.push({ op: "call", funcIdx: toStrIdx });
+  } else if (needsExternJoinStr && joinStrIdx !== undefined) {
+    // #1998: any/object/boxed elements arrive as a raw externref. Feeding that
+    // straight into wasm:js-string `concat` traps "illegal cast" because the
+    // builtin requires string operands. Route each element through
+    // `__extern_join_str` (ensured above), which applies Array.prototype.join's
+    // spec rule (§23.1.3.18 step 7.c/d): `undefined`/`null` → "", else ToString.
+    if (elemType.kind !== "externref") {
+      // A WasmGC struct ref must be re-expressed as externref for the import.
+      elemToStr.push({ op: "extern.convert_any" });
+    }
+    elemToStr.push({ op: "call", funcIdx: joinStrIdx });
   }
 
   const loopBody: Instr[] = [
@@ -4956,7 +5074,17 @@ function compileArrayJoin(
     body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
   });
 
+  // An empty array leaves `resultTmp` as the initial null. join/toString of `[]`
+  // is the empty String "", not null — substitute it so the result is a real
+  // string (also keeps a null from ever reaching a caller that concatenates it).
   fctx.body.push({ op: "local.get", index: resultTmp });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    then: stringConstantExternrefInstrs(ctx, ""),
+    else: [{ op: "local.get", index: resultTmp }],
+  } as Instr);
   return { kind: "externref" };
 }
 
@@ -5776,6 +5904,33 @@ function compileArrayMap(
 }
 
 /**
+ * Resolve the accumulator ValType for reduce/reduceRight.
+ *
+ * The accumulator holds whatever the callback returns between iterations, so
+ * the callback's resolved return type is the most accurate source. We fall
+ * back to the accumulator parameter type, then to the numeric kind. This
+ * lets non-numeric accumulators (e.g. `string[].reduce((x,y)=>x+y)`) use an
+ * `externref` local instead of being forced through a numeric unbox that
+ * traps with "illegal cast" (#1994).
+ */
+function resolveReduceAccType(setup: ArrayCallbackSetup, numKind: "i32" | "f64"): ValType {
+  const ci = setup.closureInfo;
+  if (ci) {
+    // A void-returning callback (returnType === null) yields `undefined`; keep
+    // the numeric kind so the default-value path stays valid.
+    if (ci.returnType && ci.returnType.kind !== numKind) {
+      return ci.returnType;
+    }
+    if (ci.returnType) return ci.returnType;
+    const accParam = ci.paramTypes[0];
+    if (accParam && accParam.kind !== numKind) {
+      return accParam;
+    }
+  }
+  return { kind: numKind };
+}
+
+/**
  * arr.reduce(cb, initial) -> iterate elements, accumulate result via callback.
  * Reduce has a 2-arg callback (acc, elem) so it uses custom call logic.
  */
@@ -5799,12 +5954,16 @@ function compileArrayReduce(
   const setup = setupArrayCallback(ctx, fctx, callExpr, "reduce", "red", bridgeName);
   if (!setup) return null;
 
+  // The accumulator local must match the actual accumulator type, not always
+  // the numeric kind — string/object accumulators are externref (#1994).
+  const accType = resolveReduceAccType(setup, numKind);
+
   const loop = setupArrayLoop(ctx, fctx, propAccess, vecTypeIdx, arrTypeIdx, elemType, "red");
-  const accTmp = allocLocal(fctx, `__arr_red_acc_${fctx.locals.length}`, { kind: numKind as any });
+  const accTmp = allocLocal(fctx, `__arr_red_acc_${fctx.locals.length}`, accType);
 
   // Compile initial value or use arr[0] as default
   if (callExpr.arguments.length >= 2) {
-    compileExpression(ctx, fctx, callExpr.arguments[1]!, { kind: numKind as any });
+    compileExpression(ctx, fctx, callExpr.arguments[1]!, accType);
     fctx.body.push({ op: "local.set", index: accTmp });
     // i already = 0 from setupArrayLoop
   } else {
@@ -5822,6 +5981,9 @@ function compileArrayReduce(
       op: elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get",
       typeIdx: arrTypeIdx,
     });
+    // Coerce the seed element to the accumulator type (e.g. element externref
+    // string → accumulator externref, or i32 element → f64 accumulator).
+    coercionInstrs(ctx, elemType, accType, fctx).forEach((i) => fctx.body.push(i));
     fctx.body.push({ op: "local.set", index: accTmp });
     fctx.body.push({ op: "i32.const", value: 1 });
     fctx.body.push({ op: "local.set", index: loop.iTmp });
@@ -5832,7 +5994,7 @@ function compileArrayReduce(
   if (setup.closureInfo && setup.closureTypeIdx !== undefined && setup.closureTmp !== undefined) {
     const ci = setup.closureInfo;
     const numParams = ci.paramTypes.length;
-    const accCoerce = ci.paramTypes[0] ? coercionInstrs(ctx, { kind: numKind as any }, ci.paramTypes[0], fctx) : [];
+    const accCoerce = ci.paramTypes[0] ? coercionInstrs(ctx, accType, ci.paramTypes[0], fctx) : [];
     const elemCoerce = ci.paramTypes[1] ? coercionInstrs(ctx, elemType, ci.paramTypes[1], fctx) : [];
     callInstrs = [
       { op: "local.get", index: setup.closureTmp } as Instr,
@@ -5874,13 +6036,16 @@ function compileArrayReduce(
       // validates. JS: cb returns `undefined` → acc becomes undefined →
       // for numeric kind that's NaN (f64) / 0 (i32). (#1522 Cluster 2)
       ...(ci.returnType === null
-        ? defaultValueInstrs({ kind: numKind as any })
-        : ci.returnType.kind !== numKind
-          ? coercionInstrs(ctx, ci.returnType, { kind: numKind as any }, fctx)
+        ? defaultValueInstrs(accType)
+        : ci.returnType.kind !== accType.kind
+          ? coercionInstrs(ctx, ci.returnType, accType, fctx)
           : []),
       { op: "local.set", index: accTmp } as Instr,
     ];
   } else {
+    // Host-bridge fallback path: the bridge takes/returns the numeric kind, so
+    // the accumulator must be numeric here. resolveReduceAccType returns the
+    // numeric kind when there is no closureInfo, so accTmp is numeric too.
     callInstrs = [
       { op: "local.get", index: setup.cbTmp! } as Instr,
       { op: "local.get", index: accTmp } as Instr,
@@ -5898,7 +6063,7 @@ function compileArrayReduce(
   emitArrayLoop(fctx, loopBody);
 
   fctx.body.push({ op: "local.get", index: accTmp });
-  return { kind: numKind as any };
+  return accType;
 }
 
 /**
@@ -5924,6 +6089,10 @@ function compileArrayReduceRight(
   const setup = setupArrayCallback(ctx, fctx, callExpr, "reduceRight", "rr", bridgeName);
   if (!setup) return null;
 
+  // The accumulator local must match the actual accumulator type, not always
+  // the numeric kind — string/object accumulators are externref (#1994).
+  const accType = resolveReduceAccType(setup, numKind);
+
   // Set up receiver: vec/data/len
   const vecTmp = allocLocal(fctx, `__arr_rr_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_rr_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
@@ -5940,11 +6109,11 @@ function compileArrayReduceRight(
   fctx.body.push({ op: "local.set", index: dataTmp });
 
   const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
-  const accTmp = allocLocal(fctx, `__arr_rr_acc_${fctx.locals.length}`, { kind: numKind as any });
+  const accTmp = allocLocal(fctx, `__arr_rr_acc_${fctx.locals.length}`, accType);
 
   // Compile initial value or use arr[length-1] as default
   if (callExpr.arguments.length >= 2) {
-    compileExpression(ctx, fctx, callExpr.arguments[1]!, { kind: numKind as any });
+    compileExpression(ctx, fctx, callExpr.arguments[1]!, accType);
     fctx.body.push({ op: "local.set", index: accTmp });
     // Start from length - 1
     fctx.body.push({ op: "local.get", index: lenTmp });
@@ -5965,6 +6134,9 @@ function compileArrayReduceRight(
     fctx.body.push({ op: "i32.const", value: 1 });
     fctx.body.push({ op: "i32.sub" });
     fctx.body.push({ op: getOp, typeIdx: arrTypeIdx });
+    // Coerce the seed element to the accumulator type (e.g. element externref
+    // string → accumulator externref, or i32 element → f64 accumulator).
+    coercionInstrs(ctx, elemType, accType, fctx).forEach((i) => fctx.body.push(i));
     fctx.body.push({ op: "local.set", index: accTmp });
     fctx.body.push({ op: "local.get", index: lenTmp });
     fctx.body.push({ op: "i32.const", value: 2 });
@@ -5986,7 +6158,7 @@ function compileArrayReduceRight(
   if (setup.closureInfo && setup.closureTypeIdx !== undefined && setup.closureTmp !== undefined) {
     const ci = setup.closureInfo;
     const numParams = ci.paramTypes.length;
-    const accCoerce = ci.paramTypes[0] ? coercionInstrs(ctx, { kind: numKind as any }, ci.paramTypes[0], fctx) : [];
+    const accCoerce = ci.paramTypes[0] ? coercionInstrs(ctx, accType, ci.paramTypes[0], fctx) : [];
     const elemCoerce = ci.paramTypes[1] ? coercionInstrs(ctx, elemType, ci.paramTypes[1], fctx) : [];
     callInstrs = [
       { op: "local.get", index: setup.closureTmp } as Instr,
@@ -6026,13 +6198,14 @@ function compileArrayReduceRight(
       // validates. JS: cb returns `undefined` → acc becomes undefined →
       // for numeric kind that's NaN (f64) / 0 (i32). (#1522 Cluster 2)
       ...(ci.returnType === null
-        ? defaultValueInstrs({ kind: numKind as any })
-        : ci.returnType.kind !== numKind
-          ? coercionInstrs(ctx, ci.returnType, { kind: numKind as any }, fctx)
+        ? defaultValueInstrs(accType)
+        : ci.returnType.kind !== accType.kind
+          ? coercionInstrs(ctx, ci.returnType, accType, fctx)
           : []),
       { op: "local.set", index: accTmp } as Instr,
     ];
   } else {
+    // Host-bridge fallback path: numeric accumulator (see compileArrayReduce).
     callInstrs = [
       { op: "local.get", index: setup.cbTmp! } as Instr,
       { op: "local.get", index: accTmp } as Instr,
@@ -6065,7 +6238,7 @@ function compileArrayReduceRight(
   emitArrayLoop(fctx, loopBody);
 
   fctx.body.push({ op: "local.get", index: accTmp });
-  return { kind: numKind as any };
+  return accType;
 }
 
 /**

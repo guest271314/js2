@@ -43,6 +43,7 @@ import {
   emitParamDefaultArgMissingCheck,
   paramDefaultNeedsArgc,
 } from "./statements/nested-declarations.js";
+import { emitThrowReferenceError } from "./expressions/helpers.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { isStrictFunction } from "./helpers/is-strict-function.js";
 import { detectStringBuilders, type StringBuilderPresizeInfo } from "./string-builder.js";
@@ -59,6 +60,62 @@ import { containsLinearU8Allocation, emitLinearU8ArenaMark, emitLinearU8ArenaRes
 
 /** Maximum number of instructions for a function body to be considered inlinable */
 export const INLINE_MAX_INSTRS = 10;
+
+/**
+ * (#2121) Per §10.2.11 FunctionDeclarationInstantiation, parameter bindings are
+ * initialized left-to-right, so a default value that reads its own parameter or
+ * a *later* one observes that binding in the TDZ and must throw ReferenceError.
+ * Scan the default initializer of the parameter at `paramIndex` for an
+ * identifier naming a parameter at index ≥ `paramIndex`. Returns that name when
+ * found (the default would throw if it fired), else undefined. References to
+ * strictly-earlier params (e.g. `f(a, b = a)`) are valid and ignored.
+ */
+function findTdzViolatingParamRef(decl: ts.FunctionLikeDeclarationBase, paramIndex: number): string | undefined {
+  // Names of params bound at or after this one (the TDZ window). Skip binding
+  // patterns and the `this` pseudo-param — only plain identifier params can be
+  // referenced by name and observed in the TDZ here.
+  const poisoned = new Set<string>();
+  for (let j = paramIndex; j < decl.parameters.length; j++) {
+    const p = decl.parameters[j]!;
+    if (ts.isIdentifier(p.name) && p.name.text !== "this") poisoned.add(p.name.text);
+  }
+  if (poisoned.size === 0) return undefined;
+
+  const init = decl.parameters[paramIndex]!.initializer;
+  if (!init) return undefined;
+  let found: string | undefined;
+  const walk = (node: ts.Node): void => {
+    if (found) return;
+    // Do not descend into nested functions/arrows: a reference to the param
+    // there is a closure capture resolved after instantiation, not a TDZ read.
+    if (
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isFunctionDeclaration(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)
+    ) {
+      return;
+    }
+    if (ts.isIdentifier(node) && poisoned.has(node.text)) {
+      // Exclude identifiers in non-reference positions (property names, etc.).
+      const parent = node.parent;
+      if (
+        parent &&
+        ((ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+          (ts.isPropertyAssignment(parent) && parent.name === node) ||
+          (ts.isBindingElement(parent) && parent.propertyName === node))
+      ) {
+        return;
+      }
+      found = node.text;
+      return;
+    }
+    forEachChild(node, walk);
+  };
+  walk(init);
+  return found;
+}
 
 /**
  * (#1042) Re-point a function to a func type with the same params but a new
@@ -604,7 +661,9 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   const restInfo = ctx.funcRestParams.get(func.name);
   const params: { name: string; type: ValType }[] = [];
   const linearParams = getLinearU8ParamIndicesForDeclaration(ctx, decl);
-  const linearParamBuffers: { name: string; ptrLocalIdx: number; lenLocalIdx: number }[] = [];
+  // #2045: carry the param's ts.Symbol so the buffer registry is keyed by
+  // symbol (scope-correct) rather than identifier text (shadow-blind).
+  const linearParamBuffers: { sym: ts.Symbol | undefined; ptrLocalIdx: number; lenLocalIdx: number }[] = [];
   const funcType = ctx.mod.types[func.typeIdx];
   const sigParamTypes = funcType?.kind === "func" ? funcType.params : undefined;
   let wasmParamCursor = 0;
@@ -624,7 +683,8 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
           type: sigParamTypes?.[lenLocalIdx] ?? { kind: "i32" },
         },
       );
-      linearParamBuffers.push({ name: paramName, ptrLocalIdx, lenLocalIdx });
+      const paramSym = ts.isIdentifier(param.name) ? ctx.checker.getSymbolAtLocation(param.name) : undefined;
+      linearParamBuffers.push({ sym: paramSym, ptrLocalIdx, lenLocalIdx });
     } else if (restInfo && i === restInfo.restIndex) {
       // Rest parameter — use the vec struct ref type from the function signature
       params.push({
@@ -694,7 +754,9 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     fctx.localMap.set(params[i]!.name, i);
   }
   for (const buf of linearParamBuffers) {
-    registerLinearU8Buffer(fctx, buf.name, buf.ptrLocalIdx, buf.lenLocalIdx);
+    // A param with no resolvable symbol can't be looked up by element access
+    // either, so skipping registration is sound — it falls to the GC path.
+    if (buf.sym) registerLinearU8Buffer(fctx, buf.sym, buf.ptrLocalIdx, buf.lenLocalIdx);
   }
 
   ctx.currentFunc = fctx;
@@ -751,9 +813,18 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       (ts.isObjectBindingPattern(param.name) || ts.isArrayBindingPattern(param.name)) &&
       isNullOrUndefinedLiteral(param.initializer);
 
+    // (#2121) TDZ: if this default reads its own parameter or a later one, the
+    // default — when it fires — observes that binding in the TDZ and must throw
+    // ReferenceError per §10.2.11, rather than reading the (still
+    // zero-/undefined-initialized) local. Emit the throw in the then-block.
+    const tdzViolatingName = findTdzViolatingParamRef(decl, i);
+
     // Build the "then" block: compile default expression, local.set
     const savedBody = pushBody(fctx);
-    if (dstrNullDefault) {
+    if (tdzViolatingName !== undefined) {
+      emitThrowReferenceError(ctx, fctx, `Cannot access '${tdzViolatingName}' before initialization`);
+      fctx.body.push({ op: "unreachable" } as Instr);
+    } else if (dstrNullDefault) {
       for (const ins of buildDestructureNullThrow(ctx, fctx)) fctx.body.push(ins);
     } else {
       // For destructuring patterns with externref param, force array literals in the

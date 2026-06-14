@@ -7,7 +7,7 @@ import { isBooleanType, isExternalDeclaredClass, isStringType } from "../../chec
 import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 import { emitBoundsCheckedArrayGet, resolveArrayInfo } from "../array-methods.js";
 import { tryEmitLinearU8ElementSet } from "../linear-uint8-codegen.js";
-import { emitModulo, emitToInt32 } from "../binary-ops.js";
+import { emitAnyAdd, emitModulo, emitToInt32 } from "../binary-ops.js";
 import { pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
@@ -2388,6 +2388,28 @@ function compilePropertyAssignment(
   if (ctx.classAccessorSet.has(accessorKey)) {
     const setterName = `${typeName}_set_${fieldName}`;
     const funcIdx = ctx.funcMap.get(setterName);
+    // (#2024) `classAccessorSet` records a class that declares EITHER a getter
+    // or a setter for this prop (class-bodies.ts adds the key for both). A
+    // get-only accessor — `class B extends A { get v() {…} }` over a parent
+    // with `set v` — therefore lands here with NO `${type}_set_${field}`
+    // function. Per §10.1.5.3 OrdinarySetWithOwnDescriptor, the own get-only
+    // accessor SHADOWS the inherited setter: strict-mode writes throw TypeError
+    // and the parent's setter must NOT run. Without this, control fell through
+    // to the struct-field path, which found no field named `<field>` and
+    // silently dropped the write. Emit the spec TypeError instead.
+    if (funcIdx === undefined && ctx.funcMap.has(`${typeName}_get_${fieldName}`)) {
+      // Evaluate the RHS for its side effects (spec: GetValue(rhs) is performed
+      // before the [[Set]]), drop its value, then throw. `emitThrowTypeError`
+      // emits an `unreachable`, so the assignment expression's stack effect is
+      // satisfied by divergence — we report the RHS type so any wrapping
+      // expression type-checks consistently.
+      const rhsResult = compileExpression(ctx, fctx, value);
+      if (rhsResult !== null) {
+        fctx.body.push({ op: "drop" });
+      }
+      emitThrowTypeError(ctx, fctx, `Cannot assign to read only property '${fieldName}' of object`);
+      return rhsResult ?? { kind: "f64" };
+    }
     if (funcIdx !== undefined) {
       // `C.prototype.<setter> = v` and `C.<static setter> = v` both write
       // through a receiver that is an externref (the prototype singleton or the
@@ -4098,6 +4120,59 @@ export function isCompoundAssignment(op: ts.SyntaxKind): boolean {
  * which corrupts every `call funcIdx=N` instruction whose index now points
  * at a host import instead of the intended native helper (#1175).
  */
+/**
+ * (#2058) `x += rhs` where the result may be a runtime string. Compute
+ * `x + rhs` via the shared runtime-dispatched add (`emitAnyAdd`: JS `+` host
+ * bridge, or a standalone tag-dispatch concat/add), then store the resulting
+ * externref back into the variable. Returns null (caller falls through to the
+ * numeric paths) only for storage classes this doesn't cover.
+ */
+function compileAnyCompoundAdd(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  name: string,
+): ValType | null {
+  const localIdx = fctx.localMap.get(name);
+  const capturedIdx = ctx.capturedGlobals.get(name);
+  const moduleIdx = ctx.moduleGlobals.get(name);
+  if (localIdx === undefined && capturedIdx === undefined && moduleIdx === undefined) {
+    return null; // unresolved binding — let the default paths handle it
+  }
+
+  // emitAnyAdd reads `expr.left` (the current value of `x`) and `expr.right`,
+  // leaving the §13.15.3 result on the stack as an externref.
+  const addResult = emitAnyAdd(ctx, fctx, expr);
+  if (addResult.kind !== "externref") {
+    // emitAnyAdd took the legacy f64 fallback (no host, no native strings).
+    // Coerce to externref so the store below is uniform.
+    coerceType(ctx, fctx, addResult, { kind: "externref" });
+  }
+
+  // Store back into the resolved binding (re-read global indices in case RHS
+  // compilation shifted them), coercing externref → the binding's storage type.
+  if (localIdx !== undefined) {
+    const localType = getLocalType(fctx, localIdx) ?? { kind: "externref" as const };
+    if (localType.kind !== "externref") coerceType(ctx, fctx, { kind: "externref" }, localType);
+    fctx.body.push({ op: "local.tee", index: localIdx });
+    return localType;
+  }
+  if (capturedIdx !== undefined) {
+    const capturedIdxPost = ctx.capturedGlobals.get(name)!;
+    const globalType: ValType = ctx.mod.globals[localGlobalIdx(ctx, capturedIdxPost)]?.type ?? { kind: "externref" };
+    if (globalType.kind !== "externref") coerceType(ctx, fctx, { kind: "externref" }, globalType);
+    fctx.body.push({ op: "global.set", index: capturedIdxPost });
+    fctx.body.push({ op: "global.get", index: capturedIdxPost });
+    return globalType;
+  }
+  const moduleIdxPost = ctx.moduleGlobals.get(name)!;
+  const globalType: ValType = ctx.mod.globals[localGlobalIdx(ctx, moduleIdxPost)]?.type ?? { kind: "externref" };
+  if (globalType.kind !== "externref") coerceType(ctx, fctx, { kind: "externref" }, globalType);
+  fctx.body.push({ op: "global.set", index: moduleIdxPost });
+  fctx.body.push({ op: "global.get", index: moduleIdxPost });
+  return globalType;
+}
+
 function compileStringCompoundAssignment(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -4611,6 +4686,33 @@ export function compileCompoundAssignment(
     }
   }
 
+  // (#2058) `x += rhs` where the value may be a runtime string at `+` time —
+  // either the LHS is `any`/`unknown` (it could currently hold a string) or the
+  // RHS is `any`/`unknown` (it could evaluate to a string). The numeric `+=`
+  // paths below ToNumber-coerce both sides, so `let x: any = 1; x += "2"` wrongly
+  // produced `3` instead of `"12"`. The static-string concat gate above only
+  // catches LHS that are *statically* assigned a string; this catches the
+  // runtime case. Skip boxed captures (their own externref concat path handles
+  // them) and bigint. Provably-numeric `+=` keeps the f64 fast path (neither
+  // side is `any`/`unknown`).
+  //
+  // Fast mode (`anyValueTypeIdx >= 0`) is excluded: there the AnyValue
+  // infrastructure already round-trips `any += number` through the existing
+  // numeric path, and the `__host_add` host import isn't part of that ABI.
+  // Per the #2058 design rule, this per-site recovery is **default-mode only**.
+  if (op === ts.SyntaxKind.PlusEqualsToken && !fctx.boxedCaptures?.has(name) && ctx.anyValueTypeIdx < 0) {
+    const leftTsType = ctx.checker.getTypeAtLocation(expr.left);
+    const rightTsType = ctx.checker.getTypeAtLocation(expr.right);
+    const leftIsAnyish = (leftTsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+    const rightIsAnyish = (rightTsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+    const isBigInt =
+      (leftTsType.flags & ts.TypeFlags.BigIntLike) !== 0 || (rightTsType.flags & ts.TypeFlags.BigIntLike) !== 0;
+    if ((leftIsAnyish || rightIsAnyish) && !isBigInt) {
+      const r = compileAnyCompoundAdd(ctx, fctx, expr, name);
+      if (r !== null) return r;
+    }
+  }
+
   // Check captured globals first
   const capturedIdx = ctx.capturedGlobals.get(name);
   if (capturedIdx !== undefined && fctx.localMap.get(name) === undefined) {
@@ -4763,8 +4865,14 @@ export function compileCompoundAssignment(
       }
     }
 
-    // For non-f64/non-i32 boxed captures with arithmetic ops, coerce to f64 first (#795, #816)
-    const boxedNeedsCoerce = boxed.valType.kind !== "f64" && boxed.valType.kind !== "i32";
+    // The compound-op switch below emits f64 arithmetic, so any non-f64 cell
+    // value (and its RHS) must be promoted to f64 first and coerced back on
+    // writeback. This includes i32 (#2120): a captured i32 loop var that is
+    // also compound-assigned in the body (`for (let i…) { f = () => i; i += 1 }`)
+    // read the cell as i32 but hit `f64.add`, producing an invalid module
+    // (F64Add left value type mismatch). The i32↔f64 round-trip is exact for the
+    // counter range. (#795, #816 covered the externref/other-ref cells.)
+    const boxedNeedsCoerce = boxed.valType.kind !== "f64";
     if (boxedNeedsCoerce) {
       coerceType(ctx, fctx, boxed.valType, { kind: "f64" });
     }
