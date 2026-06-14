@@ -19,7 +19,7 @@ import {
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
-import { ensureObjVecBuilders } from "../object-runtime.js";
+import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
 import {
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
@@ -5348,10 +5348,13 @@ function compileCallExpression(
       };
 
       // Helper — drop N pushed args and return a fallback constant when the import is unavailable.
-      const fallbackReturn = (n: number, ret: "i32-true" | "extern-null"): InnerResult => {
+      // (#2046 cleanup) `i32-false` is the safer default for boolean-returning
+      // Reflect methods on a registration failure (the module is already marked
+      // failed by reportError; false is the less-wrong observable value).
+      const fallbackReturn = (n: number, ret: "i32-true" | "i32-false" | "extern-null"): InnerResult => {
         for (let i = 0; i < n; i++) fctx.body.push({ op: "drop" });
-        if (ret === "i32-true") {
-          fctx.body.push({ op: "i32.const", value: 1 });
+        if (ret === "i32-true" || ret === "i32-false") {
+          fctx.body.push({ op: "i32.const", value: ret === "i32-true" ? 1 : 0 });
           return { kind: "i32" };
         }
         fctx.body.push({ op: "ref.null.extern" });
@@ -5385,24 +5388,25 @@ function compileCallExpression(
       //   native analog in this slice. Descriptor/prototype/integrity methods
       //   stay refused until their native invariants are proven end-to-end.
       if (ctx.standalone) {
-        const emitAndDropOptionalArg = (index: number): void => {
-          const arg = expr.arguments[index];
-          if (arg === undefined) return;
-          const argTy = compileExpression(ctx, fctx, arg, externRef);
-          if (argTy && argTy.kind !== "externref") {
-            coerceType(ctx, fctx, argTy, externRef);
-          } else if (argTy === null) {
-            fctx.body.push({ op: "ref.null.extern" });
-          }
-          fctx.body.push({ op: "drop" });
-        };
-
         if (reflectMethod === "get" && expr.arguments.length >= 2) {
+          // (#2046 PR-A defect 1) The native __extern_get has no separate
+          // receiver slot — an explicit receiver was previously evaluated and
+          // SILENTLY DROPPED, so accessor getters (live since #1888 S5b) ran
+          // with `this = target` instead of `receiver` (§28.1.5 → §10.1.8).
+          // Until real receiver plumbing (PR-C, senior/deferred), refuse loudly
+          // rather than mis-bind `this` — restores the #1888 fail-loud invariant.
+          if (expr.arguments.length > 2) {
+            reportError(
+              ctx,
+              expr,
+              "Codegen error: Reflect.get with an explicit receiver argument is not yet supported " +
+                "in --target standalone (#2046); the receiver would be silently dropped and accessor " +
+                "getters would bind `this` to the target instead of the receiver.",
+            );
+            fctx.body.push({ op: "ref.null.extern" });
+            return { kind: "externref" };
+          }
           emitReflectArgs(2);
-          // Evaluate the optional receiver for call argument side effects. The
-          // existing native __extern_get helper has no separate receiver slot,
-          // so this slice supports the data-property/default-receiver subset.
-          emitAndDropOptionalArg(2);
           const funcIdx = ensureLateImport(ctx, "__extern_get", [externRef, externRef], [externRef]);
           flushLateImportShifts(ctx, fctx);
           if (funcIdx !== undefined) {
@@ -5413,17 +5417,30 @@ function compileCallExpression(
         }
 
         if (reflectMethod === "set" && expr.arguments.length >= 2) {
+          // (#2046 PR-A defect 1) Same as Reflect.get: __reflect_set writes the
+          // data-property subset on `target` itself and has no receiver slot, so
+          // an explicit receiver was evaluated then dropped — writing to the
+          // wrong object for accessor setters (§28.1.12 → §10.1.9). Refuse
+          // loudly with an explicit receiver until PR-C lands.
+          if (expr.arguments.length > 3) {
+            reportError(
+              ctx,
+              expr,
+              "Codegen error: Reflect.set with an explicit receiver argument is not yet supported " +
+                "in --target standalone (#2046); the receiver would be silently dropped and accessor " +
+                "setters would write to the target instead of the receiver.",
+            );
+            fctx.body.push({ op: "i32.const", value: 0 });
+            return { kind: "i32" };
+          }
           emitReflectArgs(3);
-          // Evaluate the optional receiver for side effects. __extern_set writes
-          // the supported open-object data-property subset on target itself.
-          emitAndDropOptionalArg(3);
           const funcIdx = ensureLateImport(ctx, "__reflect_set", [externRef, externRef, externRef], [i32Ty]);
           flushLateImportShifts(ctx, fctx);
           if (funcIdx !== undefined) {
             fctx.body.push({ op: "call", funcIdx });
             return { kind: "i32" };
           }
-          return fallbackReturn(3, "i32-true");
+          return fallbackReturn(3, "i32-false");
         }
 
         if (reflectMethod === "has" && expr.arguments.length >= 2) {
@@ -5434,18 +5451,72 @@ function compileCallExpression(
             fctx.body.push({ op: "call", funcIdx });
             return { kind: "i32" };
           }
-          return fallbackReturn(2, "i32-true");
+          // (#2046 cleanup) i32-false: a registration failure should not report
+          // a phantom `true` for `Reflect.has`.
+          return fallbackReturn(2, "i32-false");
         }
 
         if (reflectMethod === "deleteProperty" && expr.arguments.length >= 2) {
-          emitReflectArgs(2);
+          // (#2046 PR-A defect 3a) Reflect.deleteProperty(primitive, k) must
+          // throw a TypeError (§28.1.4 — Reflect requires an Object target),
+          // NOT return true. The shared __delete_property helper returns 1 for
+          // non-$Object targets because sloppy `delete primitive[k]` is a no-op
+          // SUCCESS — correct there, wrong for Reflect. So gate at the CALL SITE
+          // (do NOT touch the shared helper): ref.test the target against
+          // $Object; if it is not an open object, throw a catchable TypeError.
+          const ort = ensureObjectRuntime(ctx);
+          const targetLocal = allocTempLocal(fctx, externRef);
+          // Evaluate the target once, save it for both the guard and the call.
+          {
+            const tArg = expr.arguments[0];
+            if (tArg !== undefined) {
+              const tTy = compileExpression(ctx, fctx, tArg, externRef);
+              if (tTy && tTy.kind !== "externref") coerceType(ctx, fctx, tTy, externRef);
+              else if (tTy === null) fctx.body.push({ op: "ref.null.extern" });
+            } else {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+          }
+          fctx.body.push({ op: "local.set", index: targetLocal });
+          // Pre-register the TypeError constructor + any late import the throw
+          // needs BEFORE entering the `if`, so capturing the throw instrs by
+          // splice below cannot interleave a late-import index shift into the
+          // nested block (the registration happens against the flat body here).
+          const throwInstrs: Instr[] = (() => {
+            const before = fctx.body.length;
+            emitThrowTypeError(ctx, fctx, "Reflect.deleteProperty called on non-object");
+            return fctx.body.splice(before);
+          })();
+          // if !ref.test $Object(target) → throw TypeError
+          fctx.body.push({ op: "local.get", index: targetLocal });
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "ref.test", typeIdx: ort.objectTypeIdx } as Instr);
+          fctx.body.push({ op: "i32.eqz" });
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: throwInstrs,
+          } as Instr);
+          // target is an $Object — push [target, key] and delete.
+          fctx.body.push({ op: "local.get", index: targetLocal });
+          releaseTempLocal(fctx, targetLocal);
+          {
+            const kArg = expr.arguments[1];
+            if (kArg !== undefined) {
+              const kTy = compileExpression(ctx, fctx, kArg, externRef);
+              if (kTy && kTy.kind !== "externref") coerceType(ctx, fctx, kTy, externRef);
+              else if (kTy === null) fctx.body.push({ op: "ref.null.extern" });
+            } else {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+          }
           const funcIdx = ensureLateImport(ctx, "__delete_property", [externRef, externRef], [i32Ty]);
           flushLateImportShifts(ctx, fctx);
           if (funcIdx !== undefined) {
             fctx.body.push({ op: "call", funcIdx });
             return { kind: "i32" };
           }
-          return fallbackReturn(2, "i32-true");
+          return fallbackReturn(0, "i32-false");
         }
 
         if (reflectMethod === "ownKeys" && expr.arguments.length >= 1) {
