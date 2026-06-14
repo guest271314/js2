@@ -237,3 +237,68 @@ Resume steps: enter the worktree, `git diff` to review, run
 tests/issue-2009.test.ts, complete per the plan's PR-1 acceptance, commit
 (✓), push `--no-verify`, PR with `-R loopdive/js2 --head ttraenkler:...`.
 Do NOT discard — review and continue.
+
+## Root-cause correction (2026-06-14, sdev2 — WAT-traced on current main 7afa431d7)
+
+The spec's root-cause #2 ("the compiler ITSELF merges shapes at
+`fieldsHashKey`+`anonStructHash`, both `{aa:1}` and `{bb:2}` reuse one
+`__anon_N` typeIdx") is **STALE / wrong on current main**. Verified by WAT:
+
+```
+(type $__anon_0 (struct (field $aa (mut f64))))
+(type $__anon_1 (struct (field $bb (mut f64))))   ; DISTINCT compiler types
+```
+
+`fieldsHashKey` (index.ts:9422) keys on field NAME+type (`"aa:f64"` vs
+`"bb:f64"`), so the two shapes get DISTINCT typeIdxs and DISTINCT name-CSV
+globals, and `__struct_field_names` emits a correct two-arm `ref.test` chain
+(`ref 11`→"aa", `ref 12`→"bb"). The bug is purely **WasmGC iso-recursive
+canonicalization at RUNTIME**: `$__anon_0` and `$__anon_1` are structurally
+identical (`struct (field (mut f64))`), so `ref.test (ref $__anon_0)` matches a
+`$__anon_1` instance too — the first arm wins for both, so `b` (a `{bb}`)
+stringifies with `a`'s names. Confirmed: `{bb:2}` ALONE → `{"bb":2}` (correct);
+`{aa:1}`+`{bb:2}` together → `{"aa":1}|{"aa":2}` (b mislabeled).
+
+**Consequence for the `$shape` fix:** appending `$shape:i32` to both makes them
+`struct (f64)(i32)` — STILL canonically equal (so `ref.test` still matches
+either), but the per-instance `$shape` VALUE (0 vs 1) selects the right name
+list. The field disambiguates by VALUE, not by type — exactly as the plan's B′
+relative (#1989) does for funcrefs. So the design holds; only the "dedup
+collapses them" justification was wrong. shape-id is keyed by the ordered
+name-CSV (so two `{aa}` literals share id 0), matching the plan.
+
+R3 spread on current main is WORSE than the spec recorded:
+`{...{x:1,y:2},...{y:3,z:4},x:9}` → `{"x":9,"y":null,"z":null}` (null values,
+not `{"x":3,"y":4}`) — the spread-source value resolution also regressed; PR-2
+(source-order lastWriter rewrite) must restore the values too.
+
+## PR-1 landed (2026-06-14, sdev2) — names fix ($shape per-instance)
+
+Implemented PR-1 of the plan: hidden trailing `$shape` i32 field on every
+host-enumerable anon object-literal struct, stamped at construction with a
+shape-id keyed by the ordered field-name list; `__struct_field_names` reads
+`struct.get $shape` and selects the field-name CSV by VALUE.
+
+**Fixed:** R1 (`JSON.stringify({aa:1})|JSON.stringify({bb:2})` →
+`{"aa":1}|{"bb":2}`), Object.keys/values/entries/for-in per-instance, nested
+same-shape collision. `$shape` excluded from all host enumeration (`$`-filter).
+Same-name literals still share one shape-id (no bloat). Named classes stay on
+the legacy typeIdx arm. Zero regressions in json/keys/spread/object equiv suites
+(the one `setter stores value` failure is pre-existing on base).
+
+Files: `context/types.ts` + `create-context.ts` (`shapeNames`,
+`shapeIdByNameKey`, `structNameToShapeId`); `index.ts` (`registerAnonStruct`
+appends `$shape`; `emitStructFieldNamesExport` rewritten to shape-id dispatch);
+`literals.ts` (both anon struct.new sites stamp the shape-id). Test:
+`tests/issue-2009.test.ts` (6 cases).
+
+**Remaining (PR-2 / follow-up, NOT in this PR):**
+- R2 `Object.assign({a:1},{b:2})` → now `{"a":2,"b":2}` (names fixed, both keys
+  present) but VALUES wrong (should be `{"a":1,"b":2}`) — the native
+  `__object_assign` source merge (#20's territory).
+- R3 `{...{x:1,y:2},...{y:3,z:4},x:9}` → `{"x":9,"y":null,"z":null}` (names
+  fixed) but spread-sourced VALUES are lost — the struct-path spread-source
+  resolution (`compileObjectLiteralForStruct` line ~1664) fails to find the
+  inline spread sources' fields, defaulting `y`/`z` to the undefined sentinel.
+  Needs the `lastWriter` source-order rewrite (plan PR-2). Separate concern from
+  the names collision; sequence after PR-1 merges.
