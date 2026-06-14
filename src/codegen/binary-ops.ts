@@ -15,7 +15,7 @@ import {
   isWrapperObjectType,
 } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
-import { isAnyValue } from "./any-helpers.js";
+import { ensureAnyFromExternHelper, isAnyValue } from "./any-helpers.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -1981,23 +1981,63 @@ export function compileBinaryExpression(
       }
       fctx.body.push({ op: "local.set", index: lTmp });
 
-      const eqInstrs: Instr[] = [
-        // ── number? ──
+      // (#2081) LOOSE null/undefined arm (§7.2.15 steps 2-3): `null == undefined`
+      // (and null==null / undefined==undefined) ⇒ true; a nullish vs a
+      // non-nullish ⇒ false (never coerces — `null == 0` is false). Under this
+      // representation both null and undefined are `ref.null extern`, so a
+      // both-nullish test captures all three nullish pairings. LOOSE only — strict
+      // `null === undefined` is handled by the type-aware path and must stay
+      // false; gate on `!isStrict`. The numeric/bool/string/identity cascade
+      // below is the `else`.
+      const looseNullish =
+        !isStrict && (op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken);
+      // (#2081) ToNumber for the LOOSE numeric arm: a boxed boolean coerces to
+      // 0/1 (§7.2.15 step 8 / §7.1.4 ToNumber(Boolean)), a number unboxes. Used
+      // only when the arm has already established the operand is number-or-bool.
+      const looseToNum = (externLocal: number): Instr[] => [
+        { op: "local.get", index: externLocal },
+        { op: "call", funcIdx: typeofBool } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "f64" } },
+          then: [
+            { op: "local.get", index: externLocal },
+            { op: "call", funcIdx: unboxBool },
+            { op: "f64.convert_i32_s" },
+          ],
+          else: [
+            { op: "local.get", index: externLocal },
+            { op: "call", funcIdx: unboxNum },
+          ],
+        } as Instr,
+      ];
+      const coreEqInstrs: Instr[] = [
+        // ── number (loose: number-or-boolean — §7.2.15 step 8 Boolean→ToNumber,
+        //    so `true == 1`, `false == 0` compare numerically; strict keeps
+        //    number-only since `true === 1` is false by type)? ──
         { op: "local.get", index: lTmp },
         { op: "call", funcIdx: typeofNum } as Instr,
+        ...(looseNullish
+          ? ([{ op: "local.get", index: lTmp }, { op: "call", funcIdx: typeofBool }, { op: "i32.or" }] as Instr[])
+          : []),
         { op: "local.get", index: rTmp },
         { op: "call", funcIdx: typeofNum } as Instr,
+        ...(looseNullish
+          ? ([{ op: "local.get", index: rTmp }, { op: "call", funcIdx: typeofBool }, { op: "i32.or" }] as Instr[])
+          : []),
         { op: "i32.and" } as Instr,
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "i32" } },
-          then: [
-            { op: "local.get", index: lTmp },
-            { op: "call", funcIdx: unboxNum },
-            { op: "local.get", index: rTmp },
-            { op: "call", funcIdx: unboxNum },
-            { op: "f64.eq" } as Instr,
-          ],
+          then: looseNullish
+            ? [...looseToNum(lTmp), ...looseToNum(rTmp), { op: "f64.eq" } as Instr]
+            : [
+                { op: "local.get", index: lTmp },
+                { op: "call", funcIdx: unboxNum },
+                { op: "local.get", index: rTmp },
+                { op: "call", funcIdx: unboxNum },
+                { op: "f64.eq" } as Instr,
+              ],
           else: [
             // ── boolean? ──
             { op: "local.get", index: lTmp },
@@ -2062,48 +2102,113 @@ export function compileBinaryExpression(
                           else: [{ op: "i32.const", value: 0 }],
                         } as Instr,
                       ];
+                      // ── string? ── (#1914) Native strings are VALUE-compared
+                      // (§7.2.16 "If x is a String"). Without this, `a === b` over
+                      // `any`-typed string operands (e.g. the test262 harness's
+                      // `isSameValue`) fell to ref.eq identity and returned false
+                      // for equal strings from distinct allocations. Falls back to
+                      // the eqref identity arm when not both strings.
+                      const stringAndIdentityArm = (): Instr[] => {
+                        if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+                          ensureNativeStringHelpers(ctx);
+                          const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+                          const strEqIdx = ctx.nativeStrHelpers.get("__str_equals");
+                          if (flattenIdx !== undefined && strEqIdx !== undefined) {
+                            return [
+                              { op: "local.get", index: lAny },
+                              { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                              { op: "local.get", index: rAny },
+                              { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                              { op: "i32.and" } as Instr,
+                              {
+                                op: "if",
+                                blockType: { kind: "val", type: { kind: "i32" } },
+                                then: [
+                                  { op: "local.get", index: lAny },
+                                  { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                                  { op: "call", funcIdx: flattenIdx },
+                                  { op: "local.get", index: rAny },
+                                  { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                                  { op: "call", funcIdx: flattenIdx },
+                                  { op: "call", funcIdx: strEqIdx },
+                                ],
+                                else: identityArm,
+                              } as Instr,
+                            ];
+                          }
+                        }
+                        return identityArm;
+                      };
                       const seq: Instr[] = [
                         { op: "local.set", index: rAny },
                         { op: "local.set", index: lAny },
                       ];
-                      // ── string? ── (#1914) Native strings are VALUE-compared
-                      // (§7.2.16 step "If x is a String"). Without this arm,
-                      // every `a === b` over `any`-typed string operands — most
-                      // visibly the test262 harness's `isSameValue` — fell to
-                      // ref.eq identity and returned false for equal strings
-                      // from distinct allocations (literal vs literal included,
-                      // since each string literal materializes a fresh struct).
-                      let stringArmEmitted = false;
-                      if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
-                        ensureNativeStringHelpers(ctx);
-                        const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
-                        const strEqIdx = ctx.nativeStrHelpers.get("__str_equals");
-                        if (flattenIdx !== undefined && strEqIdx !== undefined) {
-                          stringArmEmitted = true;
+                      // ── (#2081) LOOSE String ⇄ Number arm (§7.2.15 steps 4-7) ──
+                      // For `==`/`!=` only (NOT strict — `"1" === 1` is false by
+                      // type), when EXACTLY one operand is a native string and the
+                      // other is a number, compare ToNumber(both): ToNumber(string)
+                      // via the §7.1.4.1 `__str_to_number` scanner (NaN for
+                      // unparseable, 0 for empty, hex/inf), `__unbox_number` for the
+                      // numeric side, then `f64.eq`. Without this, `"1" == 1` fell
+                      // through the string==string arm (right isn't a string) to
+                      // ref.eq identity → wrong `false`. The boolean side is already
+                      // covered by the typeof-boolean arm above (`true == 1`).
+                      // `parseFloat` is deliberately NOT used (Number("0xff")=255 vs
+                      // parseFloat("0xff")=NaN — §7.1.4.1).
+                      let looseStrNumEmitted = false;
+                      if (
+                        !isStrict &&
+                        ctx.nativeStrings &&
+                        ctx.anyStrTypeIdx >= 0 &&
+                        (op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken)
+                      ) {
+                        if (!ctx.funcMap.has("__str_to_number")) {
+                          emitNativeParseNumber(ctx, new Set(["__str_to_number"]));
+                        }
+                        const strToNumIdx = ctx.funcMap.get("__str_to_number");
+                        if (strToNumIdx !== undefined) {
+                          looseStrNumEmitted = true;
+                          // ToNumber(side): native string → __str_to_number(extern);
+                          // else (a boxed number) → __unbox_number.
+                          const toNumberOf = (anyLocal: number, externLocal: number): Instr[] => [
+                            { op: "local.get", index: anyLocal },
+                            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                            {
+                              op: "if",
+                              blockType: { kind: "val", type: { kind: "f64" } },
+                              then: [
+                                { op: "local.get", index: externLocal },
+                                { op: "call", funcIdx: strToNumIdx },
+                              ],
+                              else: [
+                                { op: "local.get", index: externLocal },
+                                { op: "call", funcIdx: unboxNum },
+                              ],
+                            } as Instr,
+                          ];
+                          // (lIsStr && rIsNum) || (rIsStr && lIsNum)
                           seq.push(
                             { op: "local.get", index: lAny },
                             { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                            { op: "local.get", index: rTmp },
+                            { op: "call", funcIdx: typeofNum } as Instr,
+                            { op: "i32.and" } as Instr,
                             { op: "local.get", index: rAny },
                             { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                            { op: "local.get", index: lTmp },
+                            { op: "call", funcIdx: typeofNum } as Instr,
                             { op: "i32.and" } as Instr,
+                            { op: "i32.or" } as Instr,
                             {
                               op: "if",
                               blockType: { kind: "val", type: { kind: "i32" } },
-                              then: [
-                                { op: "local.get", index: lAny },
-                                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-                                { op: "call", funcIdx: flattenIdx },
-                                { op: "local.get", index: rAny },
-                                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-                                { op: "call", funcIdx: flattenIdx },
-                                { op: "call", funcIdx: strEqIdx },
-                              ],
-                              else: identityArm,
+                              then: [...toNumberOf(lAny, lTmp), ...toNumberOf(rAny, rTmp), { op: "f64.eq" } as Instr],
+                              else: stringAndIdentityArm(),
                             } as Instr,
                           );
                         }
                       }
-                      if (!stringArmEmitted) seq.push(...identityArm);
+                      if (!looseStrNumEmitted) seq.push(...stringAndIdentityArm());
                       releaseTempLocal(fctx, lAny);
                       releaseTempLocal(fctx, rAny);
                       return seq;
@@ -2115,6 +2220,31 @@ export function compileBinaryExpression(
           ],
         } as Instr,
       ];
+      // For loose equality, wrap the core cascade in the nullish guard
+      // (§7.2.15 steps 2-3): both nullish ⇒ true; nullish-vs-non-nullish ⇒ false.
+      const eqInstrs: Instr[] = looseNullish
+        ? [
+            { op: "local.get", index: lTmp },
+            { op: "ref.is_null" } as Instr,
+            { op: "local.get", index: rTmp },
+            { op: "ref.is_null" } as Instr,
+            // (lNull || rNull): if EITHER is nullish, the result is whether BOTH
+            // are nullish (true) or not (false) — never coerce against a nullish.
+            { op: "i32.or" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [
+                { op: "local.get", index: lTmp },
+                { op: "ref.is_null" } as Instr,
+                { op: "local.get", index: rTmp },
+                { op: "ref.is_null" } as Instr,
+                { op: "i32.and" } as Instr,
+              ],
+              else: coreEqInstrs,
+            } as Instr,
+          ]
+        : coreEqInstrs;
       for (const ins of eqInstrs) fctx.body.push(ins);
       if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
       releaseTempLocal(fctx, rTmp);
@@ -2161,6 +2291,46 @@ export function compileBinaryExpression(
         fctx.body.push({ op: "drop" });
         fctx.body.push({ op: "drop" });
         fctx.body.push({ op: "i32.const", value: isStrictNeq ? 1 : 0 });
+        return { kind: "i32" };
+      }
+    }
+
+    // (#1986/#1987) Strict equality where exactly one side is an `any`-typed
+    // externref and the other is a known primitive (number / boolean) — or both
+    // sides are externref `any`. The numeric fallback further down unboxes the
+    // externref to f64 via ToNumber (null→0, false→0, "1"→1) and emits f64.eq,
+    // which makes `===` behave LOOSER than `==` (`null === 0` → true). Per §7.2.16
+    // IsStrictlyEqual must short-circuit to false on a type mismatch with no
+    // coercion. Route through `__host_eq` (JS `===`) instead — it gets the spec
+    // exactly right, including +0 === -0 (true) and NaN !== NaN. JS-host only; the
+    // standalone/WASI path is handled above (the `noJsHost` tag-dispatch block).
+    // Strings keep their dedicated `wasm:js-string equals` path below. A
+    // boolean-typed side is also excluded: `coerceType(i32 → externref)` boxes
+    // it as a JS *number* (`__box_number`), so `__host_eq(true, 1)` would be
+    // false — boolean operands keep the existing (correct) lowering, and a
+    // boolean `any` compared to a boolean falls through to it.
+    if (isStrict && !noJsHost && !leftIsString && !rightIsString && !leftIsBool && !rightIsBool) {
+      if (rightType.kind !== "externref") {
+        coerceType(ctx, fctx, rightType, { kind: "externref" });
+      }
+      if (leftType.kind !== "externref") {
+        const tmpR = allocTempLocal(fctx, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: tmpR });
+        coerceType(ctx, fctx, leftType, { kind: "externref" });
+        fctx.body.push({ op: "local.get", index: tmpR });
+        releaseTempLocal(fctx, tmpR);
+      }
+      const hostIdx = ensureLateImport(
+        ctx,
+        "__host_eq",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "i32" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      const finalHostIdx = ctx.funcMap.get("__host_eq") ?? hostIdx;
+      if (finalHostIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: finalHostIdx });
+        if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
         return { kind: "i32" };
       }
     }
@@ -2387,6 +2557,37 @@ export function compileBinaryExpression(
               } as Instr,
             ] as Instr[];
           } else {
+            // Loose equality fallback for two externref `any` operands that are
+            // not eqref-identical.
+            //
+            // (#2081) STANDALONE/WASI has no JS host, so `__host_loose_eq` is an
+            // unsatisfiable import — it leaked into the module and made
+            // `("1" as any) == (1 as any)` either fail instantiation or return a
+            // wrong `false` (ref-identity never coerces string⇄number). Route
+            // through the NATIVE IsLooselyEqual instead: box both externrefs to
+            // `$AnyValue` (`__any_from_extern` → tag5 string / tag3 number / tag4
+            // bool / tag1 null) and call `__any_eq`, whose §7.2.15 arms
+            // (incl. the String⇄Number arm added in this PR) implement the spec
+            // coercion natively. Host mode keeps `__host_loose_eq` (JS `==`),
+            // unchanged.
+            const noJsHost = ctx.standalone === true || ctx.wasi === true;
+            if (noJsHost) {
+              ensureAnyHelpers(ctx);
+              const fromExternIdx = ensureAnyFromExternHelper(ctx);
+              const anyEqIdx = ctx.funcMap.get("__any_eq");
+              if (fromExternIdx !== undefined && anyEqIdx !== undefined) {
+                return [
+                  { op: "local.get", index: tmpLeft },
+                  { op: "call", funcIdx: fromExternIdx } as Instr,
+                  { op: "local.get", index: tmpRight },
+                  { op: "call", funcIdx: fromExternIdx } as Instr,
+                  { op: "call", funcIdx: anyEqIdx } as Instr,
+                  ...(isNeqOp ? [{ op: "i32.eqz" } as Instr] : []),
+                ] as Instr[];
+              }
+              // Helpers unavailable (should not happen) — fall through to the
+              // host import below rather than emit nothing.
+            }
             // Loose equality: __host_loose_eq (JS ==) handles all coercion
             // rules including null==undefined per §7.2.15. The result is
             // definitive — no numeric fallback needed. (#1134)

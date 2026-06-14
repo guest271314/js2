@@ -204,6 +204,18 @@ export interface FunctionContext {
   /** Whether this function is a generator (function*) */
   isGenerator?: boolean;
   /**
+   * (#2007/#1448) Set once a closure-allocating array method
+   * (`map`/`filter`/`flatMap`/`forEach`/`reduce`/`find`/`sort`) has been
+   * lowered in this function body. The standalone vec-concat join fast-path
+   * (`tryCompileNativeVecConcatOperand`) reads it: once such a method has
+   * emitted its closure setup, a LATE `number_toString` registration triggered
+   * by the join would `addUnionImports`-shift and corrupt the already-emitted
+   * closure code (a pre-existing hazard `a.join(",")` also exhibits). So the
+   * join falls back to `$__any_to_string` ("[object Object]", the baseline
+   * behaviour) when this flag is set — no regression.
+   */
+  emittedClosureArrayMethod?: boolean;
+  /**
    * (#1042) True while {@link emitAsyncStateMachine} is driving an async
    * function body through the CPS transform. Read by the `AwaitExpression`
    * dispatcher in expressions.ts to decide between the legacy pass-through and
@@ -701,6 +713,30 @@ export interface CodegenContext {
   currentThisGlobalIdx: number;
   /** Map from struct name → set of closure type indices used for valueOf fields */
   valueOfClosureTypes: Map<string, number[]>;
+  /**
+   * (#1989) Set of `${structName}_${valueOf|toString|@@toPrimitive}` method full
+   * names whose SHARED func body has already been claimed by the first object
+   * literal of a deduped anon-struct type. Same-shape literals share a struct
+   * type, so the first literal compiled keeps the shared `${name}_valueOf` func
+   * (referenced by the host `__call_*`/`__sget_*` exports and name-keyed coercion
+   * fallbacks); every LATER same-shape literal forks its own per-literal method
+   * func and stores its own funcref in the struct field, so per-instance
+   * `call_ref` dispatch resolves to the correct method body per object.
+   */
+  toPrimitiveSharedClaimed: Set<string>;
+  /**
+   * (#1989) Set of anon-struct type names that have MORE THAN ONE object literal
+   * sharing the deduped struct type and carrying a `valueOf`/`toString`/
+   * `@@toPrimitive` method — i.e. the same-shape collision case where each
+   * literal stores its own method funcref. Only these structs route the host
+   * `__call_*` ToPrimitive dispatch through the per-instance struct-field closure
+   * (instead of the name-keyed standalone func, which is the first literal's body
+   * and is correct + simpler for the single-literal case). This keeps the
+   * single-literal path — including the §7.1.1.1 step-6 TypeError walk — on the
+   * well-tested standalone arm, and only opts the genuine collision case into
+   * per-instance dispatch.
+   */
+  toPrimitiveForkedStructs: Set<string>;
   /** Tag index for the exception tag (-1 if not yet registered) */
   exnTagIdx: number;
   /** Whether union type helper imports have been registered */
@@ -983,6 +1019,20 @@ export interface CodegenContext {
   liveBodies: Set<Instr[]>;
   /** Hash-based lookup for anonymous struct deduplication */
   anonStructHash: Map<string, string>;
+  /**
+   * (#2009) Result of the same-structural-shape collision-resolution post-pass:
+   * anon struct name → its shape-id. Populated ONLY for structs that genuinely
+   * collide (a different-named struct shares the same field TYPES, making them
+   * runtime-indistinguishable under WasmGC iso-recursive canonicalization). Such
+   * structs get a hidden trailing `$shape` i32 field retro-stamped per-instance;
+   * the host `__struct_field_names`/`__sset_*` exports read it to recover the
+   * instance's real field names by VALUE. Non-colliding structs are absent here
+   * and keep their original layout (zero blast radius — the common case, incl.
+   * all IR-path construction, is byte-identical to main).
+   */
+  shapeIdByStructName: Map<string, number>;
+  /** (#2009) shape-id → ordered field-name CSV, for the host name export. */
+  shapeNameCsvById: string[];
   /** Pending late import shift state */
   pendingLateImportShift: { importsBefore: number } | null;
   /** Map from class name → global index of the prototype externref singleton */
