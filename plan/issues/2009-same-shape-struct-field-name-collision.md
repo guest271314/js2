@@ -302,3 +302,35 @@ appends `$shape`; `emitStructFieldNamesExport` rewritten to shape-id dispatch);
   inline spread sources' fields, defaulting `y`/`z` to the undefined sentinel.
   Needs the `lastWriter` source-order rewrite (plan PR-2). Separate concern from
   the names collision; sequence after PR-1 merges.
+
+## PR-1b (2026-06-14, sdev2) — IR-path $shape stamp + writeback shape-guard
+
+PR-1's first push broke CI: the spec MISSED that there are TWO struct-registration
+systems. The IR path (`src/ir/integration.ts` ObjectStructRegistry) REUSES the
+legacy `$shape`-bearing struct type via `anonStructHash` but its `object.new`
+emitted `struct.new` with only the real-field operands → one short of the 3-field
+type → INVALID WASM (broke refcast-regression, reverse-struct-map,
+null-destructuring + test262). Root-caused via `function makePoint(){return {x:1,y:2}}`
+(IR path) emitting a 2-operand struct.new for a 3-field type.
+
+Fix (PR-1b, same #1462):
+- `IrObjectStructLowering.shapeId` (handles.ts) carried from integration.ts when
+  the reused struct has a `$shape` field; lower.ts `object.new` pushes
+  `i32.const shapeId` as the final struct.new operand. makePoint now emits
+  `f64 f64 i32.const 0 struct.new` (valid).
+- Writeback shape-guard (unblocks #20): `__sset_<name>` had the same
+  canonicalization collision — `__sset_b(target {a:1})` wrote slot 0 of the
+  target (its `a`!). Gated each store on `struct.get $shape === entry.shapeId`;
+  mismatch no-ops, sidecar carries it. Fixes `Object.assign({a:1},{b:2})` →
+  `{"a":1,"b":2}` (R2 value bug, was `{"a":2,"b":2}`).
+
+Status now: R1 (names) + R2 (Object.assign values) FIXED. All 3 CI-failing equiv
+tests restored; no new regressions. R3 (spread source-order value resolution)
+still pending — separate concern (inline spread sources don't get struct types,
+resolveStructName→undefined), the plan's PR-2 `lastWriter` rewrite.
+
+Note: IR-FRESH structs (registered by ObjectStructRegistry, NOT reused from
+legacy) don't get `$shape` — they're a separate same-shape-collision gap if two
+IR-fresh different-name shapes collide. Not observed in tests; flag for follow-up
+if it surfaces (would need `$shape` in the IR-fresh registration branch too,
+integration.ts:1415).
