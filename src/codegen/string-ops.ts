@@ -107,6 +107,7 @@ function emitNativeStringRefFromExternref(ctx: CodegenContext, fctx: FunctionCon
  * Returns true when the operand was compiled and left a `ref $AnyString` on the
  * stack; false when the caller should fall back to its own handling.
  */
+
 function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, operand: ts.Expression): boolean {
   // Precondition: caller has established `noJsHost(ctx)` (WASI / --target
   // standalone). There, `number_toString` is the pure-Wasm helper whose
@@ -179,9 +180,8 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
     // #2007 — a statically-known vec (array) operand stringifies via
     // Array.prototype.join semantics ("1,2"), not the `$__any_to_string`
     // "[object Object]" fallthrough. The concrete vec type is known here, so
-    // route straight to the per-vec-type native join helper (which recurses
-    // through `$__any_to_string` for nested-array / object elements).
-    if (tryCompileNativeVecConcatOperand(ctx, fctx.body, opType)) {
+    // emit the join lowering inline (index-shift-safe — see #1448).
+    if (tryCompileNativeVecConcatOperand(ctx, fctx, opType)) {
       return true;
     }
     // #1806 Phase 1 (string-hint): when the operand is a compile-time-resolvable
@@ -527,10 +527,9 @@ export function compileNativeTemplateExpression(
       if (standaloneNativeStrings) {
         // #2007 — a vec (array) substitution stringifies via join semantics
         // ("1,2") rather than the `$__any_to_string` "[object Object]"
-        // fallthrough. Concrete vec type is known here, so call the per-vec-type
-        // native join helper directly (recurses through `$__any_to_string` for
-        // nested-array / object elements).
-        if (tryCompileNativeVecConcatOperand(ctx, fctx.body, spanType)) {
+        // fallthrough. Concrete vec type is known here; emit the join lowering
+        // inline (index-shift-safe — see #1448).
+        if (tryCompileNativeVecConcatOperand(ctx, fctx, spanType)) {
           // joined native string is on the stack — fall through to concat tail
         } else if (!tryStructToString(ctx, fctx, spanType)) {
           // #1806 Phase 1 (string-hint): compile-time-resolvable object struct →

@@ -56,36 +56,48 @@ mode**, where `"" + [1,2]` returned `"[object Object]"` (length 15): the
 `$__any_to_string` walker tested `$AnyString` → `$AnyValue` (tag) → else
 `"[object Object]"`, and a vec ref matched neither.
 
-### Fix
+### Fix (final — inline lowering, after a CI-caught rework)
+
+The first attempt mutated the shared `$__any_to_string` helper for ALL callers
+(`patchAnyToStringVecArm`) and emitted cached `__vec_join_*` helpers that baked
+cross-function call indices. Both interacted badly with the `addUnionImports`
+late index shift (CLAUDE.md hazard): a shift between baking a `call funcIdx` and
+attaching a not-yet-pushed helper body left the index stale →
+**standalone net −7755 (`wasm_compile +7755`)** in CI (PR #1448 first push). It
+was reverted to:
 
 `src/codegen/native-strings.ts`:
-- `ensureNativeVecJoinHelper(elemKind, vecTypeIdx, arrTypeIdx, anyToStringFuncIdx)`
-  — emits a per-vec-type `__vec_join_<elemKind>(ref null $__vec_<kind>) ->
-  ref $AnyString` that joins elements with `","` using `__str_concat`. Numeric
-  elements go via `number_toString` (ensured via `emitNativeNumberFormat` so a
-  vec join inside a template literal — where `number_toString` is not yet
-  registered — does not silently fall back); string elements pass through; ref
-  elements (nested vec / object) recurse through `$__any_to_string`, so
-  `[[1,2],[3]]` → `"1,2,3"`.
-- `patchAnyToStringVecArm` — splices a `ref.test $__vec_<kind>` arm for every
-  registered vec type ahead of the `"[object Object]"` fallback inside
-  `$__any_to_string`, so a type-erased / nested vec recurses to the join helper.
-- `tryCompileNativeVecConcatOperand` — call-site entry point: when a concat /
-  template operand is a statically-known vec ref, calls the join helper directly
-  (the concrete vec type is known there, sidestepping the type-erased dispatch).
+- `tryCompileNativeVecConcatOperand(ctx, fctx, vecValType)` — the call-site
+  entry, now emits the Array.prototype.join lowering **inline into `fctx.body`**
+  (the proven `compileArrayJoinNative` pattern). `number_toString` /
+  `__str_concat` indices live in the current function body, which the late
+  shift always walks — so no stale index. Numeric elements →
+  `number_toString`; native-string elements → passthrough; nested-vec elements
+  → the cached per-vec join helper (`[[1,2],[3]]` → `"1,2,3"`).
+- `ensureNativeVecJoinHelper(...)` — retained ONLY for nested-vec element
+  recursion (closure-free literal context, where its indices are consistent).
+- It **bails to `$__any_to_string`** (the baseline `"[object Object]"`) when
+  `fctx.emittedClosureArrayMethod` is set (a `map`/`filter`/… already lowered in
+  this function) — that case hits a **pre-existing** array-join/closure index
+  hazard (`a.join(",")` fails it on baseline too) and is out of scope; bailing
+  keeps the baseline result so there is no regression.
 
-`src/codegen/string-ops.ts`:
-- `compileNativeConcatOperand` (the standalone `+` path) and
-  `compileNativeTemplateExpression` (template span) — try
-  `tryCompileNativeVecConcatOperand` before the `tryStructToString` /
-  `$__any_to_string` fallthrough.
+`src/codegen/array-methods.ts`: `compileArrayMethodCall` sets
+`fctx.emittedClosureArrayMethod = true` for the closure-allocating methods.
+
+`src/codegen/context/types.ts`: new `emittedClosureArrayMethod?: boolean` flag.
+
+`src/codegen/string-ops.ts`: `compileNativeConcatOperand` (standalone `+`) and
+`compileNativeTemplateExpression` (template span) try the inline vec path before
+the `tryStructToString` / `$__any_to_string` fallthrough.
 
 ### Test results (standalone)
 
-`tests/issue-2007.test.ts` — 9/9 pass. All previously `"[object Object]"`:
-`"" + [1,2]` → `"1,2"`, `"a=" + [1,2]` → `"a=1,2"`, floats, `string[]`,
-single, empty `→ ""`, nested `[[1,2],[3]]` → `"1,2,3"`, template
-`` `v=${[1,2,3]}` `` → `"v=1,2,3"`, and the standalone module has zero host
-imports. No regressions: `issue-2074` (12), `issue-2022` (7),
-`issue-1539-standalone-array-coercion` (3), `native-strings-roundtrip` (7),
-`issue-1470-string-coercion-standalone` (4) all pass.
+`tests/issue-2007.test.ts` — 10/10 pass: `"" + [1,2]` → `"1,2"`,
+`"a=" + [1,2]` → `"a=1,2"`, floats, `string[]`, single, empty `→ ""`, nested
+`[[1,2],[3]]` → `"1,2,3"`, template `` `v=${[1,2,3]}` `` → `"v=1,2,3"`, zero host
+imports, and "array concat coexists with a closure array method (valid
+module)". No regressions: `issue-2074` (12), `issue-2022` (7),
+`issue-1539-standalone-array-coercion` (3), `native-strings-roundtrip` (7) all
+pass; broad standalone `__any_to_string`/concat sample (objects, `any` concat,
+templates, `String()`, `===`, loop `+=`) all emit valid modules.

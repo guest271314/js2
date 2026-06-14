@@ -35,12 +35,16 @@ async function runStandalone(src: string): Promise<number> {
 
 describe("#2007 — standalone array `+`/template string coercion (join semantics)", () => {
   it('number[] coerces to "1,2" not "[object Object]"', async () => {
-    expect(await runStandalone('export function test(): number { const a = [1, 2]; return ("" + a) === "1,2" ? 1 : 0; }')).toBe(1);
+    expect(
+      await runStandalone('export function test(): number { const a = [1, 2]; return ("" + a) === "1,2" ? 1 : 0; }'),
+    ).toBe(1);
   });
 
   it('prefixed concat "a=" + [1,2] yields "a=1,2"', async () => {
     expect(
-      await runStandalone('export function test(): number { const a = [1, 2]; return ("a=" + a) === "a=1,2" ? 1 : 0; }'),
+      await runStandalone(
+        'export function test(): number { const a = [1, 2]; return ("a=" + a) === "a=1,2" ? 1 : 0; }',
+      ),
     ).toBe(1);
   });
 
@@ -54,14 +58,16 @@ describe("#2007 — standalone array `+`/template string coercion (join semantic
 
   it("string[] joins without quoting", async () => {
     expect(
-      await runStandalone('export function test(): number { const a = ["x", "y"]; return ("" + a) === "x,y" ? 1 : 0; }'),
+      await runStandalone(
+        'export function test(): number { const a = ["x", "y"]; return ("" + a) === "x,y" ? 1 : 0; }',
+      ),
     ).toBe(1);
   });
 
   it('single element array → that element ("7")', async () => {
-    expect(await runStandalone('export function test(): number { const a = [7]; return ("" + a) === "7" ? 1 : 0; }')).toBe(
-      1,
-    );
+    expect(
+      await runStandalone('export function test(): number { const a = [7]; return ("" + a) === "7" ? 1 : 0; }'),
+    ).toBe(1);
   });
 
   it('empty array → "" ("[" + [] + "]" === "[]")', async () => {
@@ -97,5 +103,22 @@ describe("#2007 — standalone array `+`/template string coercion (join semantic
     // standalone purity: no host imports at all.
     expect((r.imports ?? []).length).toBe(0);
     await expect(WebAssembly.instantiate(r.binary, {})).resolves.toBeDefined();
+  });
+
+  // #1448 — a closure-allocating array method (`map`/`filter`) elsewhere in the
+  // function must NOT make a sibling array concat emit an invalid module. The
+  // join fast-path bails to `$__any_to_string` ("[object Object]") in that case
+  // (pre-existing array-join/closure index hazard); the key invariant is "valid
+  // module", not the join result.
+  it("array concat coexists with a closure array method (valid module)", async () => {
+    for (const src of [
+      'export function test(): string { const m = [9].map((x) => x); const a = [1, 2]; return "" + a; }',
+      'export function test(): string { const a = [1, 2].filter((x) => x > 1); return "" + a; }',
+      'export function test(): string { const a = [1, 2].map((x) => x * 2); return "" + a; }',
+    ]) {
+      const r = await compile(src, { fileName: "test.ts", target: "standalone" });
+      expect(r.success).toBe(true);
+      await expect(WebAssembly.instantiate(r.binary, {})).resolves.toBeDefined();
+    }
   });
 });
