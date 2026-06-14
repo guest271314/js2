@@ -653,6 +653,18 @@ export interface CodegenContext {
    */
   applyClosureReserved?: boolean;
   /**
+   * (#2025) Method names for which a closed-struct `__call_m_<name>` dispatcher
+   * was reserved at an any-receiver call site (standalone/wasi). The placeholder
+   * body is filled by `fillClosedMethodDispatch` at FINALIZE (after all
+   * object-literal struct types + their `<Struct>_<name>` methods are known),
+   * mirroring the `fillApplyClosure` reserve-then-fill pattern (#1719). Each
+   * dispatcher does a `ref.test/ref.cast/call <Struct>_<name>` type-switch over
+   * every closed struct that has the method (threading the struct as `this`),
+   * falling through to the open-`$Object` `__extern_method_call` otherwise. Only
+   * populated under `--target standalone || --target wasi`.
+   */
+  closedMethodDispatchNames?: Set<string>;
+  /**
    * (#1904) True once the standalone `__extern_is_array(externref) -> i32`
    * helper placeholder has been emitted by the object runtime. Its body is
    * filled in post-processing after all Wasm array carrier types (`__vec_*`
