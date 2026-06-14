@@ -128,6 +128,25 @@ Two test262 workflows currently run on PRs:
   (#1246). Compares branch tip vs. main HEAD with src-tree-hash caching.
   Useful for triaging "which exact tests flipped on my branch?" but the
   sharded `merge shard reports` aggregate is what gates the merge.
+- **`test262-pr-stub.yml` is the path-excluded companion producer (#4).**
+  The `paths:` filter above means a PR that touches **no** test262-relevant
+  path (docs-only, plan/bookkeeping, or a `tests/issue-N.test.ts`-only PR —
+  those test files are not in the allowlist) never triggers
+  `test262-sharded.yml` at all, so its three required contexts
+  (`cheap gate (main-ancestor + lint)`, `merge shard reports`,
+  `check for test262 regressions`) are never produced and the PR is
+  permanently BLOCKED ("3 of 6 required status checks expected") even when
+  fully green. `test262-pr-stub.yml` runs on **every** PR, diffs base..head
+  through `scripts/test262-paths-match.sh` (the same single source of truth
+  the `&test262-paths` allowlist mirrors), and emits those three contexts
+  **green only when no test262-relevant path changed**. When a test262 path
+  did change, the three stub jobs `skipped` (a skipped job publishes no
+  context), so the real workflow remains the **sole** producer — the two are
+  mutually exclusive on the same matcher, so the green stub can never mask a
+  red real run (the PR #496 masking trap). Correctness: a path-excluded PR
+  cannot affect conformance, and the merge **queue** still runs the full
+  authoritative validation on the merge_group ref regardless (#1657), so
+  nothing lands without the real gate's verdict on the merged-with-main tree.
 
 For one-off sharded runs outside the normal PR/merge_group path,
 `workflow_dispatch` is the supported entry point.
