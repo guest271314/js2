@@ -3174,10 +3174,19 @@ function _isCallableReviver(
  * parse result is host `JSON.parse` output, so values are plain JS — no WasmGC
  * walking needed). For each own enumerable property of the value at
  * `holder[key]` (array indices in order, then object keys in insertion order),
- * recurse, then assign the recursive result (deleting when it returns
- * `undefined`, per steps 2.b.ii / 2.c.iii). Finally call the reviver with
- * `(key, value)` on `holder` as `this` and return its result. The reviver may
- * be a JS function or a WasmGC closure (dispatched via `_invokeJsonCallable`).
+ * recurse, then write the recursive result back — via CreateDataProperty when
+ * it is defined (step 2.b.iii.4 / 2.c.iii.3.a) or `[[Delete]]` when it is
+ * `undefined` (step 2.b.iii.3.a / 2.c.iii.2.a). **Both operations are
+ * spec-silent on failure**: `CreateDataProperty`/`[[Delete]]` return a boolean
+ * that InternalizeJSONProperty ignores ("If status is false … no exception").
+ * A reviver that makes a property non-configurable mid-walk must therefore NOT
+ * throw and must leave the old value in place — so we use `Reflect.defineProperty`
+ * with a fresh fully-configurable data descriptor (CreateDataProperty) and
+ * `Reflect.deleteProperty` (both return false without throwing), NOT plain
+ * assignment / `delete` (which would succeed on a writable non-configurable prop
+ * and diverge from the spec). Finally call the reviver with `(key, value)` on
+ * `holder` as `this` and return its result. The reviver may be a JS function or
+ * a WasmGC closure (dispatched via `_invokeJsonCallable`).
  */
 function _internalizeJSONProperty(
   holder: any,
@@ -3187,15 +3196,19 @@ function _internalizeJSONProperty(
 ): any {
   const value = holder[key];
   if (value !== null && typeof value === "object") {
+    // CreateDataProperty(O, P, V) — §7.3.5: define a fresh {writable, enumerable,
+    // configurable} data property; returns the [[DefineOwnProperty]] status,
+    // which the caller ignores (silent on a non-configurable existing prop).
+    const createDataProperty = (o: any, p: string, v: any): void => {
+      Reflect.defineProperty(o, p, { value: v, writable: true, enumerable: true, configurable: true });
+    };
     if (Array.isArray(value)) {
       for (let i = 0; i < value.length; i++) {
         const elem = _internalizeJSONProperty(value, String(i), reviver, callbackState);
         if (elem === undefined) {
-          // §25.5.1.1 step 2.b.ii — delete maps to setting the hole; JSON.parse
-          // results have no inherited props so a direct delete is spec-faithful.
-          delete value[i];
+          Reflect.deleteProperty(value, String(i));
         } else {
-          value[i] = elem;
+          createDataProperty(value, String(i), elem);
         }
       }
     } else {
@@ -3204,9 +3217,9 @@ function _internalizeJSONProperty(
       for (const k of Object.keys(value)) {
         const newElem = _internalizeJSONProperty(value, k, reviver, callbackState);
         if (newElem === undefined) {
-          delete value[k];
+          Reflect.deleteProperty(value, k);
         } else {
-          value[k] = newElem;
+          createDataProperty(value, k, newElem);
         }
       }
     }
