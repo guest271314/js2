@@ -1,10 +1,10 @@
 ---
 id: 2038
 title: "standalone: `illegal cast` in __iterator_next / async destructuring & yield* paths (~470 tests)"
-status: ready
-sprint: Backlog
+status: in-progress
+sprint: 62
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-14
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -73,3 +73,173 @@ the microtask/CPS scheduler (#1326/#1326c).
   baseline; overall bucket ≤ 50 (remaining rows reassigned to owners).
 - Wasm traps are not used for spec-reachable error paths in the iterator
   protocol (TypeError surfaces as catchable JS error).
+
+## Investigation (2026-06-14, sdev) — PR-A as scoped is ALREADY satisfied; the
+## remaining bucket needs the DEFERRED sub-bucket B + PR-C, not PR-A
+
+Re-traced on current main (d1aba0601 — 76+ commits past the architect spec's
+936d1ac51 base). The spec's "## Implementation Plan" is on a not-yet-merged
+branch; I read it from the /workspace copy. Findings against live HEAD:
+
+1. **Array-literal-backed for-await already works standalone** — the loop is
+   inlined/unrolled over the literal, bypassing the iterator protocol. All
+   compile valid, leak ZERO env imports, run correctly:
+   `for await (const x of [1,2,3])` → 6; `for await (var {} of [{a:1}])` (the
+   spec's "simplest passing case") → ok; `for await (const {a} of [{a:1},{a:2}])`
+   → 3; `for await (const [x,y] of [[1,2],[3,4]])` → 10. So PR-A's sync-backed
+   array acceptance shapes **pass on current main with no change.**
+
+2. **The spec's premise "sync is healthy" is INACCURATE for custom iterables.**
+   BOTH sync `for-of` AND async `for await` over a user
+   `{ [Symbol.iterator](){ return {next(){…}} } }` trap `illegal cast` in
+   standalone — the native iterator runtime (`iterator-native.ts`
+   `__iterator`/`__iterator_next`) only supports the canonical externref **vec**
+   carrier (`ref.cast $vecExtern`), NOT the general user `{next()}` protocol.
+   This is a broad native-iterator gap, not an async-only carrier mismatch.
+
+3. **The named PR-A smoke file is actually a sub-bucket-B case.**
+   `async-func-dstr-var-async-obj-ptrn-empty.js` =
+   `var asyncIter = (async function*(){ yield* [obj]; })(); for await (var {} of asyncIter)`
+   — an **async generator** with **`yield*`**. It compiles standalone to an
+   INVALID module leaking 7 host imports (`__create_async_generator`,
+   `__gen_yield_star`, `__async_iterator`, `__make_getter_callback`,
+   `__gen_create_buffer`, `__get_caught_exception`, `__extern_is_undefined`).
+   Native-async-generators + standalone-Promise territory — the spec's own
+   **deferred** sub-bucket B / PR-C.
+
+### Conclusion / recommendation
+No clean in-scope PR-A change remains: the sync-backed array for-await shapes PR-A
+targets already pass; every remaining 470-bucket row needs either (a) extending
+the native iterator runtime to the general `{next()}` protocol (affects sync
+for-of too — a separate broad effort) or (b) native async generators + standalone
+Promise/Await (deferred sub-bucket B / PR-C). Recommend re-scoping #2038 around a
+**native `{next()}`-protocol iterator runtime** (the real shared root cause for
+sync+async custom iterables) and keeping async-generator/Promise as the
+explicitly-deferred follow-ups. Surfaced to tech lead for a scope decision rather
+than shipping a no-op PR-A or silently expanding into the deferred work.
+
+## Re-scope APPROVED (tech-lead, 2026-06-14) + implementation design (sdev)
+
+Scope: add a **USER_ITER carrier** to `src/codegen/iterator-native.ts` so the
+standalone native iterator runtime drives the general `{next()}` protocol, not
+just the canonical externref vec. Fixes BOTH sync `for-of` and (sync-backed)
+async `for await` over a user
+`{ [Symbol.iterator]() { return { next(){…} } } }`. DEFERRED (separate
+follow-ups): native async generators + `yield*` (sub-bucket B), standalone
+Promise runtime (PR-C).
+
+### Precise trap (confirmed via WAT)
+For-of consumer emits `call $__iterator(subject)` → `$IterRec` → loop
+`call $__iterator_next(iter)`. Native `__iterator` (iterator-native.ts:106)
+unconditionally `ref.cast`s `subject` to `$vecExtern`; a custom-iterable object
+struct is not a vec ⇒ `illegal cast`. (For arrays the loop is inlined upstream,
+so only custom iterables reach here.)
+
+### Design — USER_ITER carrier (kind=1)
+Extend `$IterRec` to carry a user iterator object as an externref alongside the
+vec. Two new fields (keep vec path byte-identical):
+`(struct $__IterRec (field kind i32) (field vec (ref null $vecExtern))
+  (field idx (mut i32)) (field userIter (mut externref)))`.
+
+- **`__iterator(subject)`**: `ref.test (ref $vecExtern)` on
+  `any.convert_extern(subject)`.
+  - vec ⇒ existing kind=VEC path (unchanged).
+  - else ⇒ obtain the user iterator: call `subject[@@iterator]()` and store the
+    result in `userIter`, build `$IterRec{kind:USER, vec:null, idx:0, userIter}`.
+    Resolving `@@iterator` on an arbitrary externref needs the standalone
+    method-by-name dispatch — reuse the same mechanism `compileForOfDirectIterator`
+    uses for typed structs, lifted to a name-keyed call (`@@iterator` field +
+    `__call_fn_method_*`). If `subject` is ALREADY an iterator (has `next` but no
+    `@@iterator` — the result of a manual `obj[Symbol.iterator]()`), pass through.
+- **`__iterator_next(rec)`**: branch on `rec.kind`.
+  - VEC ⇒ existing path.
+  - USER ⇒ call `userIter.next()` via the closure dispatcher → result externref
+    → `done = truthy(__sget_done(result))`, `value = __sget_value(result)`.
+    Return `(done, value)` in ABI order. A non-object `next()` result ⇒ TypeError
+    via the standalone throw helper (#1888 invariant), never a trap.
+- **`__iterator_return(rec)`**: USER ⇒ if `userIter.return` exists, call it; else
+  no-op (sync-backed close is a no-op for the common shape).
+
+### Building blocks (already present)
+- `__sget_value` / `__sget_done` per-field getters (index.ts:1856) — emitted when
+  `.value`/`.done` are accessed; ensure they exist (force-register for USER path).
+- closure dispatch `__call_fn_method_*` for calling `next`/`@@iterator` closures.
+- `@@iterator` reserved field name (literals.ts:1162/1246).
+- truthiness helper for `done` (boxed-bool / number) — reuse buildTruthyCheck.
+
+### Async (for-await) reuse
+`ensureAsyncIterator` (destructuring.ts:377) in standalone should NOT add the
+host import; instead return the native `__iterator` (CreateAsyncFromSyncIterator
+= identity carrier for sync-backed), so the async consumer drives the SAME
+USER_ITER carrier. Per-element Await reduces to identity for already-settled
+(sync-backed) values — no `Promise_resolve` leak. Genuinely-pending Promises
+remain deferred to PR-C (refuse-loud, no host leak).
+
+### Smoke tests
+- sync: `for (const x of {[Symbol.iterator](){let i=0;return{next(){return i<3?{value:i++,done:false}:{value:undefined,done:true}}}}}) …` → 0+1+2
+- async sync-backed: same subject under `for await` → identical.
+- both standalone (`--target wasi`): valid module, ZERO env imports, correct sum.
+- regression: array for-of/for-await (inlined) + typed-struct @@iterator
+  (compileForOfDirectIterator) byte-identical.
+
+### Status
+status stays `ready`/in-progress; implementation in worktree
+`/workspace/.claude/worktrees/issue-2038-async-iter-carrier`
+(branch `issue-2038-async-iter-carrier`).
+
+### Confirmed building blocks (all already in standalone)
+- **`__extern_method_call(recv, name, args)`** — native, `object-runtime.ts:4141`
+  (filled at finalize via `fillApplyClosure` → `__call_fn_method_0..4`). Use it
+  to call `subject["@@iterator"]()` and `userIter["next"]()` from the
+  fctx-less native iterator bodies. Pass an empty args vec.
+- **`__obj_find(obj, key)`** / `__sget_value` / `__sget_done` — native property
+  read on the `{value,done}` result. `__sget_*` getters are emitted only when
+  the field name is referenced; FORCE-register `__sget_value`/`__sget_done` (and
+  the `@@iterator`/`next`/`done`/`value` string constants) when the USER_ITER
+  path is enabled so they exist at runtime.
+- **truthiness** for `done` — reuse `buildTruthyCheck` (boxed-bool / number).
+- **`@@iterator`** reserved field name — `literals.ts:1162/1246`.
+
+## Suspended Work (2026-06-14, sdev) — full blueprint ready, NOT yet coded
+
+- **Worktree**: `/workspace/.claude/worktrees/issue-2038-async-iter-carrier`
+  (branch `issue-2038-async-iter-carrier`). Only this issue doc is modified;
+  NO source changed yet (analysis + design only).
+- **Why suspended**: re-scope approved late in a long session; the USER_ITER
+  carrier is a sizable, careful `iterator-native.ts` runtime change (extend
+  `$IterRec`, branch `__iterator`/`__iterator_next` on kind, wire
+  `__extern_method_call` + `__sget_value`/`__sget_done` + truthiness + TypeError
+  on non-object next-result + late-import/funcIdx ordering). Best done as a
+  focused pass on the freshest main (after PRs #1450/#1452 land), not rushed at
+  session tail.
+- **Resume steps**:
+  1. Extend `getOrRegisterIterRecType` (iterator-native.ts:43) with a mutable
+     `userIter` externref field (4th field). Keep field order so existing
+     `fieldIdx` refs (kind=0, vec=1, idx=2) are unchanged; userIter=3.
+  2. Add `ITER_KIND_USER = 1`. In `__iterator` (`:106`): `ref.test (ref
+     $vecExtern)` on `any.convert_extern(subject)` — vec ⇒ existing path; else ⇒
+     `__extern_method_call(subject, "@@iterator", emptyVec)` (if it returns
+     non-null use it as userIter; if subject already has `next` and no
+     `@@iterator`, treat subject itself as userIter), build
+     `$IterRec{kind:USER, vec:null, idx:0, userIter}`.
+  3. In `__iterator_next` (`buildIteratorNextBody`, `:183`): branch on
+     `struct.get kind`. USER ⇒ `r = __extern_method_call(userIter, "next",
+     emptyVec)`; non-object `r` ⇒ TypeError via `__new_TypeError`+exn tag (#1888);
+     `done = truthy(__sget_done(r))`, `value = __sget_value(r)`; return (done,value).
+  4. `__iterator_return` USER ⇒ call `userIter["return"]()` if present, else no-op.
+  5. Async reuse: in `ensureAsyncIterator` (destructuring.ts:377), when
+     `ctx.standalone || ctx.wasi` do NOT addImport — return native `__iterator`
+     (identity CreateAsyncFromSyncIterator for sync-backed); mirror its
+     `shiftLateImportIndices`. Per-element Await = identity for already-settled.
+  6. Force-register `__sget_value`/`__sget_done` + string constants
+     `@@iterator`/`next`/`return`/`value`/`done` when the USER path is enabled.
+  7. Validate (`.tmp` probes already written): sync `for (const x of
+     {[Symbol.iterator](){…}})` → 0+1+2; async `for await` same → identical;
+     both `--target wasi` valid + ZERO env imports; arrays + typed-struct
+     `@@iterator` (compileForOfDirectIterator) byte-identical; full equivalence
+     suite identical failing-set vs origin/main.
+  8. New `tests/issue-2038.test.ts` per the smoke list above. PR + self-merge.
+- **Pitfalls**: `__extern_method_call`/`__call_fn_method_*` are filled at
+  FINALIZE — ensure the native iterator bodies reference them by funcMap name
+  (resolved at finalize), not by eager funcIdx. Watch late-import index shifting
+  when registering the new string constants / forcing `__sget_*`.
