@@ -1835,7 +1835,15 @@ function _wrapWasmClosureUnknownArity(
     for (let i = 0; i < arity; i++) padded.push(args[i]);
     const methodCallFn = exports[`__call_fn_method_${arity}`];
     if (typeof methodCallFn === "function" && this !== undefined && this !== globalThis) {
-      return methodCallFn(this, closure, ...padded);
+      // (#2015) Unwrap a `_wrapForHost` proxy receiver back to its raw WasmGC
+      // struct before installing it as `__current_this`. `__extern_method_call`
+      // dispatches `fn.apply(wrappedObj, …)` with `wrappedObj` being the host
+      // proxy, so without this unwrap `__call_fn_method_N` would install the
+      // opaque Proxy as `__current_this`; the object-literal method trampoline's
+      // `ref.test (ref objStruct)` then fails and the body's `this.<field>` traps.
+      // Mirrors the known-arity bridge in `_wrapWasmClosure` (#1712 / #1320).
+      const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
+      return methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...padded);
     }
     return callFn(closure, ...padded);
   };
@@ -4385,7 +4393,32 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
         const callFn1 = exports["__call_fn_1"];
         const callFn2 = exports["__call_fn_2"];
         if (typeof callFn0 === "function" || typeof callFn1 === "function" || typeof callFn2 === "function") {
+          // (#2015) Method-`this` threading. When this closure field is invoked
+          // as a METHOD (`o.m()` on an any/externref receiver routes through
+          // `__extern_method_call` → `fn.apply(wrappedObj, …)`), the bridge's
+          // `this` is the host-mirror proxy for the receiver struct. Dispatch
+          // through `__call_fn_method_N` so the compiled method body's
+          // `this.<field>` observes the receiver via the `__current_this` global
+          // (#1636-S1) / the object-method trampoline's receiver slot. Unwrap
+          // the proxy to the raw struct first (mirrors `_wrapWasmClosure`).
+          // A bare/undefined/globalThis `this` (extraction call `const f = o.m;
+          // f()`) keeps the plain `__call_fn_N` path so the spec-mandated
+          // unbound-`this` semantics are preserved unchanged.
+          const mcall0 = exports["__call_fn_method_0"];
+          const mcall1 = exports["__call_fn_method_1"];
+          const mcall2 = exports["__call_fn_method_2"];
           return function closureBridge(this: any, ...args: any[]) {
+            const hasRecv = this !== undefined && this !== null && this !== globalThis;
+            const rawThis = hasRecv && typeof this === "object" ? _unwrapForHost(this) : this;
+            const recv = _isWasmStruct(rawThis) ? rawThis : undefined;
+            if (recv !== undefined) {
+              if (args.length === 0 && typeof mcall0 === "function") return mcall0(recv, val);
+              if (args.length === 1 && typeof mcall1 === "function") return mcall1(recv, val, args[0]);
+              if (args.length >= 2 && typeof mcall2 === "function") return mcall2(recv, val, args[0], args[1]);
+              if (typeof mcall1 === "function") return mcall1(recv, val, args[0]);
+              if (typeof mcall0 === "function") return mcall0(recv, val);
+              if (typeof mcall2 === "function") return mcall2(recv, val, args[0], args[1]);
+            }
             if (args.length === 0 && typeof callFn0 === "function") return callFn0(val);
             if (args.length === 1 && typeof callFn1 === "function") return callFn1(val, args[0]);
             if (args.length >= 2 && typeof callFn2 === "function") return callFn2(val, args[0], args[1]);
