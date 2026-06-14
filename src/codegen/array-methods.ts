@@ -28,6 +28,7 @@ import {
   VOID_RESULT,
 } from "./shared.js";
 import { emitUndefined, ensureGetUndefined } from "./expressions/late-imports.js";
+import { ensureAnyHelpers, isAnyValue } from "./any-helpers.js";
 import {
   ensureNativeStringHelpers,
   nativeStringLiteralInstrs,
@@ -5595,20 +5596,72 @@ function buildTruthyCheck(ctx: CodegenContext, setup: ArrayCallbackSetup): Instr
     if (setup.closureInfo.returnType === null) {
       return [{ op: "i32.const", value: 0 } as Instr];
     }
-    const retKind = setup.closureInfo.returnType?.kind;
-    if (retKind === "f64") {
-      return [{ op: "f64.const", value: 0 } as Instr, { op: "f64.ne" } as Instr];
-    }
-    if (retKind === "i32") {
-      return []; // i32 is already truthy/falsy
-    }
-    // externref / ref / ref_null: non-null is truthy
-    if (retKind === "externref" || retKind === "ref" || retKind === "ref_null") {
-      return [{ op: "ref.is_null" } as Instr, { op: "i32.eqz" } as Instr];
-    }
-    return []; // default: assume i32
+    return buildToBooleanInstrs(ctx, setup.closureInfo.returnType);
   }
-  return ctx.fast ? [] : [{ op: "f64.const", value: 0 } as Instr, { op: "f64.ne" } as Instr];
+  // #2085 — non-closure (legacy) path: f64 result. Use |x|>0 so NaN/±0 are
+  // falsy (the old `f64.ne 0` wrongly treated NaN as truthy), matching
+  // `ensureI32Condition`.
+  return ctx.fast
+    ? []
+    : [{ op: "f64.abs" } as Instr, { op: "f64.const", value: 0 } as Instr, { op: "f64.gt" } as Instr];
+}
+
+/**
+ * #2085 — spec §7.1.2 ToBoolean for an array-HOF callback result, mirroring the
+ * canonical `ensureI32Condition` (src/codegen/index.ts) so the two hand-rolled
+ * truthiness sites agree. Returns `Instr[]` (these helpers build instruction
+ * lists rather than push to a body). Produces an i32 (1 = truthy).
+ *   - f64        → |x| > 0   (NaN, +0, -0 all falsy; the old `f64.ne 0` made NaN truthy)
+ *   - i32        → as-is (already 0/1-valued for the boolean callbacks)
+ *   - externref  → `__is_truthy` (false/0/NaN/""/null/undefined → falsy)
+ *   - any-boxed ref → `__any_unbox_bool` (proper JS truthiness on the boxed value)
+ *   - native string ref → length > 0 (empty string is falsy)
+ *   - other ref  → non-null (the only observable truthiness for opaque structs)
+ */
+function buildToBooleanInstrs(ctx: CodegenContext, retType: ValType): Instr[] {
+  const retKind = retType.kind;
+  if (retKind === "f64") {
+    return [{ op: "f64.abs" } as Instr, { op: "f64.const", value: 0 } as Instr, { op: "f64.gt" } as Instr];
+  }
+  if (retKind === "i32") {
+    return []; // already truthy/falsy
+  }
+  if (retKind === "i64") {
+    return [{ op: "i64.eqz" } as Instr, { op: "i32.eqz" } as Instr];
+  }
+  if (retKind === "externref") {
+    addUnionImports(ctx);
+    const isTruthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
+    if (isTruthyIdx !== undefined) {
+      return [{ op: "call", funcIdx: isTruthyIdx } as Instr];
+    }
+    return [{ op: "ref.is_null" } as Instr, { op: "i32.eqz" } as Instr];
+  }
+  if (retKind === "ref" || retKind === "ref_null") {
+    // Boxed `any` value — proper JS truthiness (false/0/NaN/""/null → falsy).
+    if (isAnyValue(retType, ctx)) {
+      ensureAnyHelpers(ctx);
+      const unboxBoolIdx = ctx.funcMap.get("__any_unbox_bool");
+      if (unboxBoolIdx !== undefined) {
+        return [{ op: "call", funcIdx: unboxBoolIdx } as Instr];
+      }
+    }
+    // Native string ref — empty string is falsy (check len > 0 after flatten).
+    if (retType.typeIdx === ctx.anyStrTypeIdx && ctx.anyStrTypeIdx >= 0) {
+      const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+      if (flattenIdx !== undefined && ctx.nativeStrTypeIdx >= 0) {
+        return [
+          { op: "call", funcIdx: flattenIdx } as Instr,
+          { op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "i32.gt_s" } as Instr,
+        ];
+      }
+    }
+    // Opaque struct ref — non-null is truthy.
+    return [{ op: "ref.is_null" } as Instr, { op: "i32.eqz" } as Instr];
+  }
+  return []; // default: assume already i32
 }
 
 /** Build instructions to check falsiness of a callback result (-> i32). */
@@ -5620,20 +5673,19 @@ function buildFalsyCheck(ctx: CodegenContext, setup: ArrayCallbackSetup): Instr[
     if (setup.closureInfo.returnType === null) {
       return [{ op: "i32.const", value: 1 } as Instr];
     }
-    const retKind = setup.closureInfo.returnType?.kind;
-    if (retKind === "f64") {
-      return [{ op: "f64.const", value: 0 } as Instr, { op: "f64.eq" } as Instr];
-    }
-    if (retKind === "i32") {
-      return [{ op: "i32.eqz" } as Instr];
-    }
-    // externref / ref / ref_null: null is falsy
-    if (retKind === "externref" || retKind === "ref" || retKind === "ref_null") {
-      return [{ op: "ref.is_null" } as Instr];
-    }
-    return [{ op: "i32.eqz" } as Instr];
+    // #2085 — falsy == !truthy. Reuse the canonical ToBoolean then negate, so
+    // NaN / boxed 0/""/false are correctly falsy (the old per-kind copy treated
+    // NaN-as-truthy and boxed-falsy-as-truthy, the inverse of the #2085 bug).
+    return [...buildToBooleanInstrs(ctx, setup.closureInfo.returnType), { op: "i32.eqz" } as Instr];
   }
-  return ctx.fast ? [{ op: "i32.eqz" } as Instr] : [{ op: "f64.const", value: 0 } as Instr, { op: "f64.eq" } as Instr];
+  return ctx.fast
+    ? [{ op: "i32.eqz" } as Instr]
+    : [
+        { op: "f64.abs" } as Instr,
+        { op: "f64.const", value: 0 } as Instr,
+        { op: "f64.gt" } as Instr,
+        { op: "i32.eqz" } as Instr,
+      ];
 }
 
 /**
