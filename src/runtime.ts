@@ -3149,6 +3149,72 @@ function _invokeJsonCallable(
   return undefined;
 }
 
+/**
+ * #2013 — true when `reviver` is a usable JSON.parse reviver callback: a JS
+ * function, or a WasmGC closure struct the host can dispatch via `__call_fn_2`.
+ * A `null`/`undefined` reviver (the common no-arg / explicit-undefined case)
+ * returns false so `JSON.parse` returns the unfiltered value unchanged.
+ */
+function _isCallableReviver(
+  reviver: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): boolean {
+  if (reviver == null) return false;
+  if (typeof reviver === "function") return true;
+  // WasmGC closure → callable via the __call_fn_2 bridge.
+  if (typeof reviver === "object" && _isWasmStruct(reviver)) {
+    const exports = callbackState?.getExports();
+    return typeof exports?.__call_fn_2 === "function";
+  }
+  return false;
+}
+
+/**
+ * #2013 — §25.5.1.1 InternalizeJSONProperty. `holder` is a plain JS object (the
+ * parse result is host `JSON.parse` output, so values are plain JS — no WasmGC
+ * walking needed). For each own enumerable property of the value at
+ * `holder[key]` (array indices in order, then object keys in insertion order),
+ * recurse, then assign the recursive result (deleting when it returns
+ * `undefined`, per steps 2.b.ii / 2.c.iii). Finally call the reviver with
+ * `(key, value)` on `holder` as `this` and return its result. The reviver may
+ * be a JS function or a WasmGC closure (dispatched via `_invokeJsonCallable`).
+ */
+function _internalizeJSONProperty(
+  holder: any,
+  key: string,
+  reviver: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
+  const value = holder[key];
+  if (value !== null && typeof value === "object") {
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        const elem = _internalizeJSONProperty(value, String(i), reviver, callbackState);
+        if (elem === undefined) {
+          // §25.5.1.1 step 2.b.ii — delete maps to setting the hole; JSON.parse
+          // results have no inherited props so a direct delete is spec-faithful.
+          delete value[i];
+        } else {
+          value[i] = elem;
+        }
+      }
+    } else {
+      // Own enumerable string keys, insertion order (JSON.parse yields plain
+      // objects whose key order is the source/text order).
+      for (const k of Object.keys(value)) {
+        const newElem = _internalizeJSONProperty(value, k, reviver, callbackState);
+        if (newElem === undefined) {
+          delete value[k];
+        } else {
+          value[k] = newElem;
+        }
+      }
+    }
+  }
+  // §25.5.1.1 step 3 — call reviver(key, value) with `this` = holder.
+  return _invokeJsonCallable(reviver, holder, [key, value], callbackState);
+}
+
 function _liveGetEnumerableKeys(obj: any, exports: Record<string, Function> | undefined): string[] {
   if (!_isWasmStruct(obj)) {
     // Plain JS object — Object.keys gives enumerable own keys.
@@ -6039,7 +6105,18 @@ function resolveImport(
           const wrapper: any = { "": v };
           return _serializeJSONProperty("", wrapper, rep, gap, "", new Set(), callbackState);
         };
-      if (name === "JSON_parse") return (s: any) => JSON.parse(s);
+      if (name === "JSON_parse")
+        return (s: any, reviver?: any) => {
+          // #2013 — §25.5.1 JSON.parse(text, reviver). Parse first, then if a
+          // callable reviver is supplied apply InternalizeJSONProperty so the
+          // callback observes (key, value) per holder and its return value
+          // substitutes (or, when `undefined`, deletes) each property.
+          const unfiltered = JSON.parse(s);
+          if (!_isCallableReviver(reviver, callbackState)) return unfiltered;
+          // §25.5.1 steps 7-10: root holder is { "": unfiltered }.
+          const root: any = { "": unfiltered };
+          return _internalizeJSONProperty(root, "", reviver, callbackState);
+        };
       if (name === "__extern_eval") {
         // #1164: dynamic eval via Wasm module compilation.  The primary
         // path compiles the eval string through js2wasm and instantiates

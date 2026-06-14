@@ -5937,6 +5937,19 @@ function compileCallExpression(
             } else {
               fctx.body.push({ op: "ref.null.extern" });
             }
+          } else {
+            // #2013 — `JSON.parse(text, reviver)` §25.5.1: forward the reviver
+            // (arg 2) so the host applies InternalizeJSONProperty. A WasmGC
+            // closure reviver coerces to externref like any other ref and the
+            // host bridges it via `__call_fn_2`; absent → null sentinel (no-op).
+            if (expr.arguments.length >= 2) {
+              const revType = compileExpression(ctx, fctx, expr.arguments[1]!);
+              if (revType && revType.kind !== "externref") {
+                coerceType(ctx, fctx, revType, { kind: "externref" });
+              }
+            } else {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
           }
           fctx.body.push({ op: "call", funcIdx });
           return { kind: "externref" };
