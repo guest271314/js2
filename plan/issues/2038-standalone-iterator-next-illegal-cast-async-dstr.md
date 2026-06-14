@@ -331,3 +331,88 @@ custom-iterable repro (`for (const x of {[Symbol.iterator](){return
 {next(){…}}}})` → 0+1+2) should pass, and `ensureAsyncIterator` returning native
 `__iterator` in standalone extends it to sync-backed `for await`. Keep
 async-gen/yield* + Promise deferred.
+
+## Deep re-analysis (2026-06-14, sdev3) — precise dispatch mechanism + two fix paths
+
+Independently re-confirmed the whole chain on current main (branch
+`issue-2038-async-iter-carrier` @ `8ca988f34`). The USER carrier is correct and
+regression-free (vec/array path byte-identical, module valid, zero leaked `env`
+imports). #2038 is genuinely blocked by **#25**. Two new precise facts beyond
+the prior write-up:
+
+### Fact 1 — `__extern_method_call`/`__extern_get` are `$Object`-ONLY; object literals are CLOSED structs
+The native `__extern_method_call` (object-runtime.ts ~`:4188`) body is:
+`if ref.test (ref $Object) → __apply_closure(__extern_get(recv,name), recv,
+args) else → ref.null.extern`. A standalone object literal `{ next(){…} }`
+compiles to a **closed nominal WasmGC struct** with a named funcref field
+(`$next`), NOT the open `$Object` open-hash-map. So `ref.test $Object` is FALSE
+→ else arm → `ref.null.extern`. `__extern_get` (`:~ same family`) has the same
+`$Object`-only gate, so reading `.value`/`.done` off the (also closed) result
+struct returns null too. Net: the USER `__iterator_next` gets `next()`→null,
+`done`→null→falsy→never done→**infinite loop** (clean repro:
+`const o:any={next(){return 7}}; o.next()` → **0 in BOTH `--target wasi` AND
+`--target standalone`**; under wasi it additionally can't even instantiate
+because the any-method arg-array path requests refused `env.__js_array_new`).
+
+### Fact 2 — closed-struct dispatchers ALREADY EXIST and work on these structs
+`emitIteratorMethodExport` (index.ts `:2190`, via `emitMethodDispatch`
+`:2198`) emits, at finalize, **type-switch** dispatchers over every registered
+closed struct:
+- `__call_@@iterator(externref)->externref` — `ref.test/ref.cast/call
+  <Struct>_@@iterator` per struct.
+- `__call_next(externref)->externref` — same for `<Struct>_next`.
+
+and `emitStructFieldGetters` (index.ts `:1737`) emits `__sget_value` /
+`__sget_done` — type-switch field getters over closed structs (the #1320
+`{value,done}` host-read path). **Verified at runtime**: on the sync
+custom-iterable module, `exports.__call_@@iterator(obj)` returns the closed
+`{next}` struct (non-null) and `exports.__call_next(it)` returns the `{value,
+done}` struct — i.e. these dispatch closed structs correctly. (Could not read
+the boxed value from JS, but dispatch fires; the all-`$Object` path returns
+null.)
+
+### Two fix paths
+
+**PATH A — targeted carrier rewrite (unblocks #2038 alone, does NOT need #25):**
+In `iterator-native.ts`, the USER arms should call the closed-struct
+dispatchers, NOT the `$Object`-only helpers:
+- `__iterator` USER arm: `userIter = __call_@@iterator(obj)` (fallback to `obj`
+  if null), instead of `__extern_method_call(obj,"@@iterator",emptyVec)`.
+- `__iterator_next` USER arm: `res = __call_next(userIter)`;
+  `done = __is_truthy(__sget_done(res))`; `value = __sget_done(res)?undef:__sget_value(res)`,
+  instead of `__extern_method_call`/`__extern_get`.
+- **Ordering hazard (the reason this is senior work):** `__call_@@iterator` /
+  `__call_next` / `__sget_*` are emitted at FINALIZE (after user structs are
+  known), but the carrier bodies are built EARLY in `ensureNativeIteratorRuntime`.
+  So their funcIdx are forward references → use the established
+  **reserve-then-fill** pattern (`reserveProtoIteratorDriver` /
+  `fillProtoIteratorDriver`, #1719) — reserve the carrier `__iterator`/
+  `__iterator_next` funcIdx with placeholder bodies, and fill them at finalize
+  AFTER `emitIteratorMethodExport` + `emitStructFieldGetters` have run, so the
+  `call` targets resolve. Alternatively, late-bind the dispatcher funcIdx the
+  same way `fillApplyClosure` does. Validate the vec arm stays byte-identical.
+- Spec edge (§7.4.4): a non-object `next()` result ⇒ TypeError via the #1888
+  standalone throw helper, never a trap (covered once the USER arm dispatches).
+- This path is self-contained to `iterator-native.ts` + finalize ordering and
+  does not regress the general any-method path.
+
+**PATH B — general #25 fix (broader, helps every standalone object-literal
+method call):** Give `__extern_method_call`/`__extern_get` a closed-struct
+fallback. Because they are name-dynamic and fctx-less, a per-name `ref.test`
+switch can't live inside one generic body — instead route the call SITE
+(calls.ts any-receiver fallback `:7966`, and `emitWrapperDynamicMethodCall`
+`:1137`) to: (a) for `ctx.wasi`, take the **ObjVec-builder** branch too (the
+`if (ctx.standalone)` at `:8068` / `:1147` must be `ctx.standalone || ctx.wasi`,
+else wasi requests refused `__js_array_new`); and (b) when the receiver is a
+known closed struct, emit a `ref.test/ref.cast/call <Struct>_<method>`
+type-switch (generalize `emitMethodDispatch` to arbitrary method names + args).
+Larger surface; needs its own regression pass over all standalone method calls.
+
+### Recommendation (sdev3)
+Do **PATH A** to unblock #2038 now (contained, finalize-ordering-sensitive →
+keep on senior); pursue **PATH B** as the standalone #25 epic in parallel since
+it fixes the whole class. The committed USER-carrier scaffolding only needs its
+two dispatch calls swapped to `__call_@@iterator`/`__call_next` + `__sget_*`
+plus the reserve-then-fill ordering. Clean repros for both paths:
+`const o:any={next(){return 7}};o.next()` (→ should 7) and
+`for (const x of {[Symbol.iterator](){let i=0;return{next(){return i<3?{value:i++,done:false}:{value:undefined,done:true}}}}}) sum+=x` (→ 3).
