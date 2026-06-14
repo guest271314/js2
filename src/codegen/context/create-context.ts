@@ -169,6 +169,8 @@ export function createCodegenContext(
     parentBodiesStack: [],
     liveBodies: new Set(),
     anonStructHash: new Map(),
+    shapeIdByStructName: new Map(),
+    shapeNameCsvById: [],
     funcTypeCache: new Map(),
     pendingLateImportShift: null,
     protoGlobals: new Map(),
