@@ -62,6 +62,17 @@ export interface IrObjectStructLowering {
   readonly typeIdx: number;
   /** Field index for each field name in the shape's canonical order. */
   fieldIdx(name: string): number;
+  /**
+   * (#2009) Shape-id to stamp into the struct's hidden trailing `$shape` i32
+   * field at construction, when the registered struct carries one. `undefined`
+   * for structs without a `$shape` field. The IR path reuses the legacy
+   * `ensureStructForType` registration, which appends `$shape` to every
+   * host-enumerable anon struct — so `object.new` must push this operand last
+   * to match the field count, or `struct.new` is invalid Wasm. The host
+   * `__struct_field_names` reads `$shape` to recover the instance's real field
+   * names under WasmGC iso-recursive canonicalization.
+   */
+  readonly shapeId?: number;
 }
 
 /**

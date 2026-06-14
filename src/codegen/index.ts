@@ -1907,10 +1907,22 @@ function emitStructFieldSetters(ctx: CodegenContext): void {
 function _emitStructFieldSettersInner(ctx: CodegenContext): void {
   const mod = ctx.mod;
 
-  // Collect (fieldName → [{typeIdx, fieldIdx, fieldType}]) mappings, but
-  // ONLY for mutable fields. Mirror the skip rules used by the getter
-  // emitter so the two stay in lockstep.
-  const fieldMap = new Map<string, { typeIdx: number; fieldIdx: number; fieldType: ValType }[]>();
+  // Collect (fieldName → [{typeIdx, fieldIdx, fieldType, shapeId, shapeFieldIdx}])
+  // mappings, but ONLY for mutable fields. Mirror the skip rules used by the
+  // getter emitter so the two stay in lockstep.
+  //
+  // (#2009) Each entry records the struct's shape-id + the index of its hidden
+  // `$shape` field. Same-shape anon types are runtime-canonically-equal, so a
+  // bare `ref.test typeIdx` matches a DIFFERENT shape's instance — without a
+  // guard, `__sset_b(target {a:1})` would `struct.set` slot 0 of `target` (its
+  // `a` field!) because `ref.test (ref $__anon_bb)` matches the `{a}` instance.
+  // The store is gated on `struct.get $shape === <this entry's shapeId>` so a
+  // write only lands when the instance ACTUALLY has this field at this slot;
+  // otherwise it no-ops and the sidecar carries the write (the prior behaviour).
+  const fieldMap = new Map<
+    string,
+    { typeIdx: number; fieldIdx: number; fieldType: ValType; shapeId: number; shapeFieldIdx: number }[]
+  >();
 
   for (const [structName, fields] of ctx.structFields) {
     const typeIdx = ctx.structMap.get(structName);
@@ -1923,6 +1935,9 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
       structName.startsWith("__arr_")
     )
       continue;
+
+    const shapeId = ctx.structNameToShapeId.get(structName) ?? -1;
+    const shapeFieldIdx = fields.findIndex((f) => f && f.name === "$shape");
 
     for (let i = 0; i < fields.length; i++) {
       const field = fields[i];
@@ -1937,7 +1952,7 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
         entries = [];
         fieldMap.set(field.name, entries);
       }
-      entries.push({ typeIdx, fieldIdx: i, fieldType: field.type });
+      entries.push({ typeIdx, fieldIdx: i, fieldType: field.type, shapeId, shapeFieldIdx });
     }
   }
 
@@ -2003,7 +2018,7 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
 
 /** Build nested if/else for struct field setter dispatch. */
 function buildSetterNestedIfElse(
-  entries: { typeIdx: number; fieldIdx: number; fieldType: ValType }[],
+  entries: { typeIdx: number; fieldIdx: number; fieldType: ValType; shapeId: number; shapeFieldIdx: number }[],
   anyLocal: number,
   valMode: "extern" | "f64" | "i32",
 ): Instr[] {
@@ -2019,7 +2034,24 @@ function buildSetterNestedIfElse(
 
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i]!;
-    const thenBranch = buildSetterStore(entry, anyLocal, valMode);
+    let thenBranch = buildSetterStore(entry, anyLocal, valMode);
+
+    // (#2009) Same-shape anon types are runtime-canonically-equal, so a
+    // `ref.test entry.typeIdx` match does NOT prove this instance actually has
+    // this field at `fieldIdx`. Gate the store on the per-instance `$shape`
+    // value: only write when it equals this entry's shape-id. A mismatch
+    // (a different same-shape struct that lacks this field) no-ops, leaving the
+    // sidecar to carry the write — exactly the pre-existing degradation path.
+    if (entry.shapeFieldIdx >= 0 && entry.shapeId >= 0) {
+      thenBranch = [
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: entry.typeIdx } as Instr,
+        { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.shapeFieldIdx } as Instr,
+        { op: "i32.const", value: entry.shapeId } as Instr,
+        { op: "i32.eq" } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: thenBranch } as Instr,
+      ];
+    }
 
     const ifInstr: Instr = {
       op: "if",
