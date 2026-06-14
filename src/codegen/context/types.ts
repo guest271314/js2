@@ -204,6 +204,18 @@ export interface FunctionContext {
   /** Whether this function is a generator (function*) */
   isGenerator?: boolean;
   /**
+   * (#2007/#1448) Set once a closure-allocating array method
+   * (`map`/`filter`/`flatMap`/`forEach`/`reduce`/`find`/`sort`) has been
+   * lowered in this function body. The standalone vec-concat join fast-path
+   * (`tryCompileNativeVecConcatOperand`) reads it: once such a method has
+   * emitted its closure setup, a LATE `number_toString` registration triggered
+   * by the join would `addUnionImports`-shift and corrupt the already-emitted
+   * closure code (a pre-existing hazard `a.join(",")` also exhibits). So the
+   * join falls back to `$__any_to_string` ("[object Object]", the baseline
+   * behaviour) when this flag is set — no regression.
+   */
+  emittedClosureArrayMethod?: boolean;
+  /**
    * (#1042) True while {@link emitAsyncStateMachine} is driving an async
    * function body through the CPS transform. Read by the `AwaitExpression`
    * dispatcher in expressions.ts to decide between the legacy pass-through and
