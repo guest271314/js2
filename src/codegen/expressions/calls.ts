@@ -8051,7 +8051,7 @@ function compileCallExpression(
           }
         }
 
-        // (#2025) Standalone/WASI closed-struct method dispatch. An object
+        // (#2151) Standalone/WASI closed-struct method dispatch. An object
         // literal `{ m(){…} }` is a CLOSED nominal WasmGC struct; the generic
         // __extern_method_call below only handles the OPEN $Object receiver
         // (ref.test $Object), so `o.m()` on a closed struct returns null/0 and

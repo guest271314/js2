@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #2025 — standalone any-receiver method dispatch over CLOSED object-literal
+ * #2151 — standalone any-receiver method dispatch over CLOSED object-literal
  * structs.
  *
  * Under `--target standalone` / `--target wasi` an object literal `{ m(){…} }`

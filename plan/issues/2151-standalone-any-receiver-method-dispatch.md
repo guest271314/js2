@@ -1,5 +1,5 @@
 ---
-id: 2025
+id: 2151
 title: "standalone: any-receiver method dispatch — o.method() on a closed object-literal struct doesn't invoke"
 status: in-progress
 sprint: 62
@@ -16,9 +16,9 @@ related: [2015, 2038, 1888, 1320]
 origin: "2026-06-14 #2038 investigation — the standalone analog of #2015 (which fixed only the JS-host any-receiver path)."
 ---
 
-# #2025 — standalone any-receiver method dispatch (closed object-literal structs)
+# #2151 — standalone any-receiver method dispatch (closed object-literal structs)
 
-> Tracking-task name in the board: "#25". Filed as plan issue #2025 for the file.
+> Tracking-task name in the board: "#25". Filed as plan issue #2151 for the file.
 
 ## Problem
 

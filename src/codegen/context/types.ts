@@ -653,7 +653,7 @@ export interface CodegenContext {
    */
   applyClosureReserved?: boolean;
   /**
-   * (#2025) Method names for which a closed-struct `__call_m_<name>` dispatcher
+   * (#2151) Method names for which a closed-struct `__call_m_<name>` dispatcher
    * was reserved at an any-receiver call site (standalone/wasi). The placeholder
    * body is filled by `fillClosedMethodDispatch` at FINALIZE (after all
    * object-literal struct types + their `<Struct>_<name>` methods are known),

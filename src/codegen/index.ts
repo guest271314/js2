@@ -1558,7 +1558,7 @@ export function generateModule(
     // method-dispatch site reserved the bridge (`ctx.applyClosureReserved`).
     fillApplyClosure(ctx);
 
-    // (#2025) Fill the reserved `__call_m_<name>` closed-struct method
+    // (#2151) Fill the reserved `__call_m_<name>` closed-struct method
     // dispatchers now that every object-literal struct + its `<Struct>_<name>`
     // method funcs are registered. Read-only over funcMap (all deps registered
     // at reserve time), so no funcIdx churn. No-op when no any-receiver call site

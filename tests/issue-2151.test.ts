@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #2025 / board-task #25 — standalone any-receiver method dispatch over CLOSED
+ * #2151 / board-task #25 — standalone any-receiver method dispatch over CLOSED
  * object-literal structs (Slice 1: zero-arg methods).
  *
  * `const o: any = { m(){…} }; o.m()` under --target standalone / --target wasi
@@ -23,7 +23,7 @@ async function run(src: string, target?: "wasi" | "standalone"): Promise<unknown
 
 const TARGETS = ["standalone", "wasi"] as const;
 
-describe("#2025 standalone any-receiver closed-struct method dispatch", () => {
+describe("#2151 standalone any-receiver closed-struct method dispatch", () => {
   for (const target of TARGETS) {
     it(`${target}: o.next() invokes the closed-struct method`, async () => {
       const src = `export function test(): number { const o: any = { next() { return 7; } }; return (o.next() as number); }`;
