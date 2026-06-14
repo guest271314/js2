@@ -1019,6 +1019,20 @@ export interface CodegenContext {
   liveBodies: Set<Instr[]>;
   /** Hash-based lookup for anonymous struct deduplication */
   anonStructHash: Map<string, string>;
+  /**
+   * (#2009) Result of the same-structural-shape collision-resolution post-pass:
+   * anon struct name → its shape-id. Populated ONLY for structs that genuinely
+   * collide (a different-named struct shares the same field TYPES, making them
+   * runtime-indistinguishable under WasmGC iso-recursive canonicalization). Such
+   * structs get a hidden trailing `$shape` i32 field retro-stamped per-instance;
+   * the host `__struct_field_names`/`__sset_*` exports read it to recover the
+   * instance's real field names by VALUE. Non-colliding structs are absent here
+   * and keep their original layout (zero blast radius — the common case, incl.
+   * all IR-path construction, is byte-identical to main).
+   */
+  shapeIdByStructName: Map<string, number>;
+  /** (#2009) shape-id → ordered field-name CSV, for the host name export. */
+  shapeNameCsvById: string[];
   /** Pending late import shift state */
   pendingLateImportShift: { importsBefore: number } | null;
   /** Map from class name → global index of the prototype externref singleton */
