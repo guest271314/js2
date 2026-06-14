@@ -3134,13 +3134,25 @@ function _invokeJsonCallable(
   if (typeof fn === "function") {
     return fn.apply(thisVal, args);
   }
-  // WasmGC closure — dispatch via __call_fn_<arity>. The closure's `this`
-  // is not observable on the Wasm side (Slice C work, blocked on #1308/#1382);
-  // for Slice A we accept that `this` is the bridge's `thisVal` only when
-  // `fn` is a real JS function.
+  // WasmGC closure. #2013/#2015 — when a meaningful receiver is supplied
+  // (`thisVal`), dispatch through `__call_fn_method_<arity>` so the closure
+  // body's `this` (the `__current_this` global) observes it. The JSON.parse
+  // reviver's `this` IS the holder (§25.5.1.1 step 3 — InternalizeJSONProperty
+  // calls reviver with the holder as receiver), so a reviver that does
+  // `Object.defineProperty(this, …)` / `this.x` now sees the holder instead of
+  // throwing "called on non-object". Bare-callback semantics (undefined /
+  // globalThis receiver) keep the plain `__call_fn_<arity>` path unchanged.
   const exports = callbackState?.getExports();
   if (!exports) return undefined;
   const arity = args.length;
+  const hasReceiver = thisVal !== undefined && thisVal !== null && thisVal !== globalThis;
+  if (hasReceiver) {
+    const methodCallFn = exports[`__call_fn_method_${arity}`];
+    if (typeof methodCallFn === "function") {
+      const rawThis = typeof thisVal === "object" ? _unwrapForHost(thisVal) : thisVal;
+      return methodCallFn(_isWasmStruct(rawThis) ? rawThis : thisVal, fn, ...args);
+    }
+  }
   const callFn = exports[`__call_fn_${arity}`];
   if (typeof callFn === "function") {
     return callFn(fn, ...args);
