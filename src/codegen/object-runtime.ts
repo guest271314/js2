@@ -64,6 +64,7 @@ import {
   nativeStringLiteralInstrs,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
+import { emitNativeNumberFormat } from "./number-format-native.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
@@ -147,6 +148,24 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // Dependencies: native string helpers (flatten + equals) and the string type
   // indices they populate.
   ensureNativeStringHelpers(ctx);
+
+  // #2036 — the array-like `$Object` arms in __extern_length / __extern_get_idx /
+  // __extern_has_idx need (a) `number_toString` to ToString a numeric index into
+  // its canonical decimal key, and (b) `__unbox_number` to ToLength the stored
+  // `length` value. Gate on standalone: in gc/host mode this runtime is also
+  // pulled in (Object.keys etc.) but the host `__extern_*` JS imports own the
+  // array-like read path, so registering these helpers there would only shift
+  // funcMap indices and risk breaking existing references — the $Object arms are
+  // skipped in gc mode (see `withObjectArrayLikeArms` below). Both helpers are
+  // DEFINED funcs in standalone (no import added → no funcIdx shift) and
+  // idempotent. Register BEFORE the helper bodies bake their `call` funcIdx.
+  // (`number_toString` also upgrades __extern_toString's boxed-number arm from
+  // "[object Object]" to the real decimal, which is spec-correct.)
+  const objArrayLikeArms = ctx.standalone;
+  if (objArrayLikeArms) {
+    emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+    addUnionImportsViaRegistry(ctx);
+  }
 
   const anyStrTypeIdx = ctx.anyStrTypeIdx;
   const nativeStrTypeIdx = ctx.nativeStrTypeIdx;
@@ -2629,13 +2648,73 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
 
   // ── __extern_length(externref v) -> f64 ──────────────────────────────────
   //
-  // Standalone numeric "length" for an enumeration result. Recognises a wrapped
-  // $ObjVec and returns its f64 len; any other value returns 0 (matches the
-  // host import's null/non-array fallback). This is what the array-iteration
-  // consumers (buildVecFromExternref, array-methods length loops) read.
+  // Standalone numeric "length". Recognises a wrapped $ObjVec (enumeration
+  // result) and returns its f64 len. #2036: ALSO recognises a real array-like
+  // `$Object` ({0:x, length:n}) — ToLength(Get(O, "length")) per §23.1.3 so
+  // borrowed Array.prototype generics (`indexOf.call(arrayLike, …)`) iterate
+  // correctly. Any other value returns 0 (matches the host import fallback).
   //
-  // params: 0=v(externref) ; locals: 1=any(anyref)
+  // params: 0=v(externref) ; locals: 1=any(anyref) 2=lenF64(f64) 3=lenTrunc(f64)
   {
+    const MAX_SAFE = 9007199254740991; // 2^53 - 1
+    // #2036 — array-like $Object arm (standalone only): ToLength(Get(O,"length")).
+    // In gc/host mode the host `__extern_length` JS import owns this path, so the
+    // arm is omitted and the body stays the original $ObjVec-or-0 to keep host
+    // output byte-identical.
+    const objLengthArm: Instr[] = objArrayLikeArms
+      ? (() => {
+          const externGetIdx2036 = ctx.funcMap.get("__extern_get")!;
+          const unboxIdx2036 = ctx.funcMap.get("__unbox_number")!;
+          return [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: objectTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "f64" } },
+              then: [
+                // lenVal = __extern_get(v, "length")  (proto-walk + marshaling)
+                { op: "local.get", index: 0 },
+                ...nativeStringLiteralInstrs(ctx, "length"),
+                { op: "extern.convert_any" },
+                { op: "call", funcIdx: externGetIdx2036 },
+                // ToLength: unbox to number (NaN for non-number length), then
+                // truncate + clamp to [0, 2^53-1]. __unbox_number(null) = NaN.
+                { op: "call", funcIdx: unboxIdx2036 },
+                { op: "local.tee", index: 2 },
+                // if NaN → 0 (n != n)
+                { op: "local.get", index: 2 },
+                { op: "f64.ne" },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: { kind: "f64" } },
+                  then: [{ op: "f64.const", value: 0 }],
+                  else: [
+                    // trunc toward zero
+                    { op: "local.get", index: 2 },
+                    { op: "f64.trunc" },
+                    { op: "local.tee", index: 3 },
+                    // if <= 0 → 0
+                    { op: "f64.const", value: 0 },
+                    { op: "f64.le" },
+                    {
+                      op: "if",
+                      blockType: { kind: "val", type: { kind: "f64" } },
+                      then: [{ op: "f64.const", value: 0 }],
+                      else: [
+                        // min(trunc, 2^53-1)
+                        { op: "local.get", index: 3 },
+                        { op: "f64.const", value: MAX_SAFE },
+                        { op: "f64.min" } as Instr,
+                      ],
+                    },
+                  ],
+                },
+              ],
+              else: [{ op: "f64.const", value: 0 }],
+            },
+          ] as Instr[];
+        })()
+      : [{ op: "f64.const", value: 0 }];
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -2650,14 +2729,18 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 0 },
           { op: "f64.convert_i32_s" },
         ],
-        else: [{ op: "f64.const", value: 0 }],
+        else: objLengthArm,
       },
     ];
     registerNative(
       "__extern_length",
       [{ kind: "externref" }],
       [{ kind: "f64" }],
-      [{ name: "any", type: { kind: "anyref" } }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "lenF64", type: { kind: "f64" } },
+        { name: "lenTrunc", type: { kind: "f64" } },
+      ],
       body,
     );
   }
@@ -2670,10 +2753,35 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   //
   // params: 0=v(externref) 1=idx(f64) ; locals: 2=any(anyref) 3=vec(ref null $ObjVec) 4=i
   {
+    // #2036 — array-like $Object arm (standalone only): return
+    // __extern_get(v, ToString(idx)). number_toString gives the canonical decimal
+    // key ("0","5") matching how {0:x} stores numeric-literal keys; __extern_get
+    // does the proto-walk + value marshaling, returning null for absent (hole)
+    // indices. Omitted in gc/host mode (the host import owns the path).
+    const objIdxArm: Instr[] = objArrayLikeArms
+      ? [
+          { op: "local.get", index: 2 },
+          { op: "ref.test", typeIdx: objectTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: 1 },
+              { op: "f64.trunc" },
+              { op: "call", funcIdx: ctx.funcMap.get("number_toString")! },
+              { op: "call", funcIdx: ctx.funcMap.get("__extern_get")! },
+              { op: "return" },
+            ],
+          },
+        ]
+      : [];
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
-      { op: "local.tee", index: 2 },
+      { op: "local.set", index: 2 },
+      ...objIdxArm,
+      { op: "local.get", index: 2 },
       { op: "ref.test", typeIdx: objVecTypeIdx },
       { op: "i32.eqz" },
       {
@@ -2928,10 +3036,35 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   //
   // params: 0=v(externref) 1=idx(f64) ; locals: 2=any(anyref) 3=i
   {
+    // #2036 — array-like $Object arm (standalone only): HasProperty(O,
+    // ToString(idx)) so indexOf/forEach hole-skipping (§23.1.3 "HasProperty") is
+    // correct — __extern_has does the proto-walk; a present-but-undefined entry
+    // returns true while an absent (hole) index returns false. Omitted in
+    // gc/host mode (the host import owns the path).
+    const objHasArm: Instr[] = objArrayLikeArms
+      ? [
+          { op: "local.get", index: 2 },
+          { op: "ref.test", typeIdx: objectTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: 1 },
+              { op: "f64.trunc" },
+              { op: "call", funcIdx: ctx.funcMap.get("number_toString")! },
+              { op: "call", funcIdx: ctx.funcMap.get("__extern_has")! },
+              { op: "return" },
+            ],
+          },
+        ]
+      : [];
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
-      { op: "local.tee", index: 2 },
+      { op: "local.set", index: 2 },
+      ...objHasArm,
+      { op: "local.get", index: 2 },
       { op: "ref.test", typeIdx: objVecTypeIdx },
       { op: "i32.eqz" },
       {
