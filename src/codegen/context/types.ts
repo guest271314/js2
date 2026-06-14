@@ -730,6 +730,30 @@ export interface CodegenContext {
   currentThisGlobalIdx: number;
   /** Map from struct name → set of closure type indices used for valueOf fields */
   valueOfClosureTypes: Map<string, number[]>;
+  /**
+   * (#1989) Set of `${structName}_${valueOf|toString|@@toPrimitive}` method full
+   * names whose SHARED func body has already been claimed by the first object
+   * literal of a deduped anon-struct type. Same-shape literals share a struct
+   * type, so the first literal compiled keeps the shared `${name}_valueOf` func
+   * (referenced by the host `__call_*`/`__sget_*` exports and name-keyed coercion
+   * fallbacks); every LATER same-shape literal forks its own per-literal method
+   * func and stores its own funcref in the struct field, so per-instance
+   * `call_ref` dispatch resolves to the correct method body per object.
+   */
+  toPrimitiveSharedClaimed: Set<string>;
+  /**
+   * (#1989) Set of anon-struct type names that have MORE THAN ONE object literal
+   * sharing the deduped struct type and carrying a `valueOf`/`toString`/
+   * `@@toPrimitive` method — i.e. the same-shape collision case where each
+   * literal stores its own method funcref. Only these structs route the host
+   * `__call_*` ToPrimitive dispatch through the per-instance struct-field closure
+   * (instead of the name-keyed standalone func, which is the first literal's body
+   * and is correct + simpler for the single-literal case). This keeps the
+   * single-literal path — including the §7.1.1.1 step-6 TypeError walk — on the
+   * well-tested standalone arm, and only opts the genuine collision case into
+   * per-instance dispatch.
+   */
+  toPrimitiveForkedStructs: Set<string>;
   /** Tag index for the exception tag (-1 if not yet registered) */
   exnTagIdx: number;
   /** Whether union type helper imports have been registered */

@@ -1442,7 +1442,58 @@ export function compileObjectLiteralForStruct(
     if (methodName === undefined) continue;
     const fullName = `${typeName}_${methodName}`;
     const existingFuncIdx = ctx.funcMap.get(fullName);
-    if (existingFuncIdx === undefined) continue;
+
+    // (#1989) ToPrimitive-relevant methods (`valueOf`/`toString`/
+    // `@@toPrimitive`) MUST be per-instance when two same-shape object literals
+    // deduplicate to the same struct type. Otherwise the shared
+    // `${typeName}_valueOf` method (used both as the ToPrimitive fallback AND as
+    // the body referenced by the first literal's stored closure) collapses
+    // distinct literals onto the LAST-compiled method body — so
+    // `{valueOf(){return 7}}` and `{valueOf(){return 100}}` both coerce via
+    // `()=>100`. The generic #1557 fork below only fires on a *signature*
+    // mismatch; same-signature siblings (the exact #1989 repro) slip past it.
+    //
+    // We fix this with a per-struct "claim" of the shared method func:
+    //   - The FIRST same-shape literal claims the shared `${typeName}_valueOf`
+    //     func (binding it in `literalMethodFuncIdx` so its OWN closure points at
+    //     it and its body lands in it). The shared func keeps a real body, so the
+    //     host `__call_*`/`__sget_*` exports and name-keyed coercion fallbacks
+    //     still work.
+    //   - Every LATER same-shape literal FORKS a fresh per-literal func (below),
+    //     stores its own funcref in the struct field, and the per-instance
+    //     `call_ref` dispatch resolves to the right body per object.
+    // This claim is independent of WHEN the method func happens to be pre-
+    // registered in `funcMap` (it is for `any`-typed structs via the widening
+    // pre-pass, but not for nominal struct types) — `existingFuncIdx` is an
+    // unreliable "is this the first literal?" signal, so we track the claim
+    // explicitly in `ctx.toPrimitiveSharedClaimed`.
+    const isToPrimitiveMethod = methodName === "valueOf" || methodName === "toString" || methodName === "@@toPrimitive";
+    let forkToPrimitive = false;
+    if (isToPrimitiveMethod) {
+      if (!ctx.toPrimitiveSharedClaimed.has(fullName)) {
+        // First same-shape literal: claim the shared func but leave it ENTIRELY
+        // on the base path — do NOT add a `literalMethodFuncIdx` override. The
+        // shared `${typeName}_valueOf` func is maintained by `funcMap` and the
+        // body loop the same way it is on main; capturing the funcIdx HERE
+        // (pre-construction) would record a STALE index, because
+        // `emitObjectMethodAsClosure` for an earlier field pushes a trampoline
+        // func during construction and shifts later method funcs (a
+        // valueOf+toString literal hit exactly this: toString's body landed in
+        // the pre-pass index while `funcMap` advanced to a fresh one, leaving the
+        // dispatched func empty). The first literal's per-instance closure is
+        // stored at construction via `funcMap.get(methodFullName)` for `any`
+        // structs (pre-registered) just as on main; nominal single-literal
+        // structs keep the name-keyed standalone path. Only LATER same-shape
+        // literals need a per-literal fork.
+        ctx.toPrimitiveSharedClaimed.add(fullName);
+        continue;
+      }
+      // 2nd+ same-shape literal: always fork a fresh per-literal func so its
+      // stored closure carries its own body (the #1989 collision fix).
+      forkToPrimitive = true;
+    }
+
+    if (existingFuncIdx === undefined && !forkToPrimitive) continue;
 
     // Compute the signature this method would compile to. This MUST mirror the
     // body-compile param-type derivation below (search "methodParams") exactly,
@@ -1483,36 +1534,48 @@ export function compileObjectLiteralForStruct(
     // method-as-closure trampoline built for the first literal forwards args in
     // the wrong order, emitting an invalid `call`. Treat any per-position type
     // divergence as a mismatch too, so each literal gets its own funcIdx.
-    const localIdx = existingFuncIdx - ctx.numImportFuncs;
-    const existingFunc = ctx.mod.functions[localIdx];
-    if (!existingFunc) continue;
-    const existingType = ctx.mod.types[existingFunc.typeIdx];
-    if (!existingType || existingType.kind !== "func") continue;
-    const sameArity = existingType.params.length === newParams.length;
-    // (#1602 regression fix) Compare param types nullability-insensitively for
-    // ref/ref_null of the SAME struct typeIdx. The pre-pass builds the self
-    // param as a non-null `ref structTypeIdx`, but the actual compiled method
-    // uses `ref null structTypeIdx` for self (and `ref null T` for any
-    // default-initialised ref param). A strict `valTypesMatch` flags this as a
-    // mismatch and forks a per-literal funcIdx — but that orphans the original
-    // shared funcMap entry (left with an empty body), so a *direct* call like
-    // `obj.method()` (which dispatches via funcMap, not the per-literal map)
-    // lands on the empty func and traps. Real divergence we still want to
-    // catch (e.g. sibling literals with [f64, externref] vs [externref, f64])
-    // differs in `kind` or `typeIdx`, which `refTypesMatch` still rejects.
-    const refTypesMatch = (p: ValType, q: ValType): boolean => {
-      const pRef = p.kind === "ref" || p.kind === "ref_null";
-      const qRef = q.kind === "ref" || q.kind === "ref_null";
-      if (pRef && qRef) {
-        return (p as { typeIdx: number }).typeIdx === (q as { typeIdx: number }).typeIdx;
-      }
-      return valTypesMatch(p, q);
-    };
-    const sameParamTypes = sameArity && existingType.params.every((p, i) => refTypesMatch(p, newParams[i]!));
-    if (sameArity && sameParamTypes) continue;
+    // (#1989) A 2nd+ ToPrimitive-method literal (`forkToPrimitive`) skips the
+    // same-signature short-circuit entirely: it must ALWAYS fork a per-literal
+    // funcIdx so its stored closure carries its own body, even when its
+    // signature matches the first literal's (the exact #1989 same-shape repro).
+    // Other methods keep the #1557 behaviour: fork only on a real signature
+    // mismatch.
+    if (!forkToPrimitive) {
+      // Reaching here with `!forkToPrimitive` guarantees `existingFuncIdx` is
+      // defined (the `existingFuncIdx === undefined && !forkToPrimitive`
+      // short-circuit above already `continue`d), but TS can't narrow it.
+      if (existingFuncIdx === undefined) continue;
+      const localIdx = existingFuncIdx - ctx.numImportFuncs;
+      const existingFunc = ctx.mod.functions[localIdx];
+      if (!existingFunc) continue;
+      const existingType = ctx.mod.types[existingFunc.typeIdx];
+      if (!existingType || existingType.kind !== "func") continue;
+      const sameArity = existingType.params.length === newParams.length;
+      // (#1602 regression fix) Compare param types nullability-insensitively for
+      // ref/ref_null of the SAME struct typeIdx. The pre-pass builds the self
+      // param as a non-null `ref structTypeIdx`, but the actual compiled method
+      // uses `ref null structTypeIdx` for self (and `ref null T` for any
+      // default-initialised ref param). A strict `valTypesMatch` flags this as a
+      // mismatch and forks a per-literal funcIdx — but that orphans the original
+      // shared funcMap entry (left with an empty body), so a *direct* call like
+      // `obj.method()` (which dispatches via funcMap, not the per-literal map)
+      // lands on the empty func and traps. Real divergence we still want to
+      // catch (e.g. sibling literals with [f64, externref] vs [externref, f64])
+      // differs in `kind` or `typeIdx`, which `refTypesMatch` still rejects.
+      const refTypesMatch = (p: ValType, q: ValType): boolean => {
+        const pRef = p.kind === "ref" || p.kind === "ref_null";
+        const qRef = q.kind === "ref" || q.kind === "ref_null";
+        if (pRef && qRef) {
+          return (p as { typeIdx: number }).typeIdx === (q as { typeIdx: number }).typeIdx;
+        }
+        return valTypesMatch(p, q);
+      };
+      const sameParamTypes = sameArity && existingType.params.every((p, i) => refTypesMatch(p, newParams[i]!));
+      if (sameArity && sameParamTypes) continue;
+    }
 
-    // Mismatch — allocate a fresh funcIdx for this literal's method without
-    // touching the shared funcMap entry.
+    // Mismatch (or a forced-per-instance ToPrimitive method) — allocate a fresh
+    // funcIdx for this literal's method without touching the shared funcMap entry.
     //
     // (#1602) Seed the fresh func with a type built from THIS literal's actual
     // params (`newParams`) and result, not the colliding sibling's type. A
@@ -1541,6 +1604,15 @@ export function compileObjectLiteralForStruct(
       exported: false,
     });
     literalMethodFuncIdx.set(methodName, freshFuncIdx);
+
+    if (forkToPrimitive) {
+      // (#1989) This is a 2nd+ same-shape literal of a ToPrimitive method — the
+      // genuine same-shape collision. Mark the struct so the host `__call_*`
+      // dispatch (and the in-module coercion sites) opt into per-instance
+      // struct-field closure dispatch. The single-literal case stays on the
+      // name-keyed standalone arm, preserving the §7.1.1.1 step-6 TypeError walk.
+      ctx.toPrimitiveForkedStructs.add(typeName);
+    }
   }
 
   for (const field of fields) {
@@ -1595,6 +1667,26 @@ export function compileObjectLiteralForStruct(
       if (methodFuncIdx !== undefined) {
         const closureType = emitObjectMethodAsClosure(ctx, fctx, methodFullName, methodFuncIdx, structTypeIdx);
         if (closureType) {
+          // (#1989) Method-shorthand `valueOf`/`toString` now store a
+          // per-instance closure in the eqref field (each literal owns a
+          // distinct funcIdx via the per-literal fork above). Register the
+          // closure type so ToPrimitive coercion takes the per-instance
+          // eqref-closure dispatch (type-coercion.ts) — `struct.get` the
+          // closure field of THIS instance and `call_ref` its own funcref —
+          // instead of the name-keyed `${typeName}_valueOf` standalone
+          // fallback that collapses same-shape literals onto one body.
+          if (
+            (field.name === "valueOf" || field.name === "toString") &&
+            field.type.kind === "eqref" &&
+            (closureType.kind === "ref" || closureType.kind === "ref_null")
+          ) {
+            const closureTypeIdx = (closureType as { typeIdx: number }).typeIdx;
+            const existing = ctx.valueOfClosureTypes.get(typeName) ?? [];
+            if (!existing.includes(closureTypeIdx)) {
+              existing.push(closureTypeIdx);
+              ctx.valueOfClosureTypes.set(typeName, existing);
+            }
+          }
           // Coerce closure-struct ref → field type. The common case is
           // externref (un-typed obj literal), which needs extern.convert_any.
           // For a concretely-typed struct field of the same closure type,
