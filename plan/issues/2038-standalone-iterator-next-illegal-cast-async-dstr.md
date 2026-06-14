@@ -1,10 +1,11 @@
 ---
 id: 2038
 title: "standalone: `illegal cast` in __iterator_next / async destructuring & yield* paths (~470 tests)"
-status: in-progress
+status: done
 sprint: 62
 created: 2026-06-10
 updated: 2026-06-14
+completed: 2026-06-14
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -416,3 +417,53 @@ two dispatch calls swapped to `__call_@@iterator`/`__call_next` + `__sget_*`
 plus the reserve-then-fill ordering. Clean repros for both paths:
 `const o:any={next(){return 7}};o.next()` (→ should 7) and
 `for (const x of {[Symbol.iterator](){let i=0;return{next(){return i<3?{value:i++,done:false}:{value:undefined,done:true}}}}}) sum+=x` (→ 3).
+
+## PATH A LANDED (2026-06-14, sdev4) — USER carrier wired to closed-struct dispatchers
+
+Implemented PATH A exactly as sdev3 specced. `status: done`.
+
+**What changed**
+- `src/codegen/iterator-native.ts` — the `$IterRec` USER arm now dispatches
+  through the closed-struct helpers, NOT the `$Object`-only
+  `__extern_method_call`/`__extern_get` (which returned null → infinite loop):
+  - `__iterator` USER arm: `userIter = __call_@@iterator(obj)` (fallback to `obj`
+    if null = obj is itself a bare-`next` iterator).
+  - `__iterator_next` USER arm: `res = __call_next(userIter)`;
+    `done = __is_truthy(__sget_done(res))`; `value = done ? undefined :
+    __sget_value(res)`.
+  - **Reserve-then-fill (#1719):** the carrier `__iterator`/`__iterator_next` are
+    emitted **vec-only** in `ensureNativeIteratorRuntime` (byte-identical to the
+    pre-#2038 runtime) with `ctx.nativeIteratorUserArmPending`. The new
+    `fillNativeIteratorUserArms(ctx)` rebuilds both bodies with the USER arm at
+    FINALIZE, after `emitStructFieldGetters` + `emitIteratorMethodExport` have run
+    (so the `__sget_*` / `__call_*` funcIdx resolve). If a module has no custom
+    iterable, the dispatchers are absent → the fill is a no-op → vec-only carrier
+    (byte-identical, verified).
+- `src/codegen/index.ts` — (1) `emitIteratorMethodExport` + `emitStructFieldGetters`
+  now register their emitted funcs (`__call_@@iterator`/`__call_next`/`__sget_*`)
+  in `ctx.funcMap` (they previously only pushed to `mod.functions`/`mod.exports`,
+  so the fill couldn't find them — the actual blocker); (2) finalize calls
+  `fillNativeIteratorUserArms` after the two emitters, force-registering
+  `__is_truthy` via `addUnionImports` only in the rare bucket that didn't box.
+- `src/codegen/statements/destructuring.ts` — `ensureAsyncIterator` in
+  standalone/wasi returns the native `__iterator` (CreateAsyncFromSyncIterator =
+  identity for sync-backed) instead of the `env.__async_iterator` host import, so
+  sync-backed `for await` drives the SAME USER carrier (no host leak, no
+  `illegal cast`). Host mode unchanged.
+
+**Validation (all green)**
+- sync `for (const x of {[Symbol.iterator](){return {next(){…}}}})` → 3,
+  array-backed custom iterable → 60 — standalone, ZERO env imports.
+- async sync-backed `for await (const x of customIterable)` → 3 — standalone,
+  ZERO env imports. (Was `illegal cast` before.)
+- array for-of / for-await / spread / destructuring / generator standalone
+  binaries **byte-identical** (sha256) to origin/main — no regression.
+- new `tests/issue-2038.test.ts` (6 cases) passes; iterator/generator equiv
+  suites show the SAME pre-existing failure set as origin/main (3 unrelated:
+  one #681 case, two `symbol-async-iterator` test-harness instantiate errors —
+  both fail identically on main, not caused here).
+
+**Still deferred (NOT in this PR):** async-generator `yield*` (sub-bucket B,
+`generators-native.ts` sequential-restriction lift) and the standalone
+Promise/microtask runtime for genuinely-pending for-await (PR-C). The general
+closed-struct any-method dispatch is the separate #25 epic (PATH B).
