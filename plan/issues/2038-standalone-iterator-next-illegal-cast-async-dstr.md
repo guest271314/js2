@@ -243,3 +243,41 @@ status stays `ready`/in-progress; implementation in worktree
   FINALIZE — ensure the native iterator bodies reference them by funcMap name
   (resolved at finalize), not by eager funcIdx. Watch late-import index shifting
   when registering the new string constants / forcing `__sget_*`.
+
+### Implementation-start learnings (2026-06-14, sdev — partial attempt, reverted)
+Started the carrier on freshest main (branch is merged-current with main), then
+reverted to keep the branch clean (blueprint-only) because the full USER carrier
+is a sizable, finalize-ordering-sensitive runtime change that warrants a
+fresh-context focused pass rather than a rushed one at deep context. Concrete
+gotchas confirmed while starting:
+1. **Struct arity is load-bearing.** Adding `userIter` as `$__IterRec` field 3
+   means the EXISTING vec-path `__iterator` body (`struct.new $__IterRec` with
+   3 operands: kind, vec, idx) becomes INVALID — it must push a 4th operand
+   (`ref.null.extern` for userIter). Update BOTH the `__iterator` vec arm AND
+   any other `struct.new $__IterRec` site in lockstep with the field add, or the
+   module fails validation. (I extracted the body into a `buildIteratorBody`
+   helper to branch vec-vs-user; do the same and keep the vec arm's 4-field
+   struct.new.)
+2. **Dependency setup order in `ensureNativeIteratorRuntime`:** call
+   `ensureObjectRuntime(ctx)` (registers/reserves `__extern_method_call`,
+   `__extern_get`, `__obj_find`) and force-register `__sget_value`/`__sget_done`
+   + the `@@iterator`/`next`/`value`/`done` string constants
+   (`addStringConstantGlobal` then `stringConstantExternrefInstrs(ctx, …)`)
+   BEFORE building the `__iterator`/`__iterator_next` bodies, so their funcIdx /
+   string-global refs are stable. The native bodies are passed EAGERLY to
+   `registerNative`, so capture `ctx.funcMap.get("__extern_method_call")` etc.
+   after `ensureObjectRuntime` — referencing the reserved index is fine
+   (finalize fills the body, not the index).
+3. **`stringConstantExternrefInstrs(ctx, value)`** (native-strings.ts:169) is the
+   right way to push a string-const externref from the fctx-less native body
+   (call `addStringConstantGlobal(ctx, value)` first). Use it for the
+   `@@iterator` / `next` name args to `__extern_method_call`.
+4. **USER `__iterator_next`:** `r = __extern_method_call(userIter, "next", emptyVec)`;
+   `done = truthy(__sget_done(r))` (reuse buildTruthyCheck), `value = __sget_value(r)`;
+   non-object `r` ⇒ TypeError via the standalone throw helper (#1888), never a
+   trap. Build the empty-args vec the same way the for-of consumer builds arg
+   vecs (or pass a null/empty externref the host bridge tolerates).
+5. **Validate incrementally:** after the struct+vec-arm change alone, the array
+   for-of/typed-struct paths must stay byte-identical (run the generator/for-of
+   suites) BEFORE adding the USER arm — that isolates a struct-arity regression
+   from a USER-arm bug.
