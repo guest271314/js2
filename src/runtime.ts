@@ -4035,6 +4035,49 @@ function _wasmStructPropertyIsEnumerable(obj: any, key: any, exports: Record<str
  * reachable via `_getStructFieldNames` + `__sget_<key>`), so a plain struct
  * would enumerate as `[]`.
  */
+/**
+ * (#2131) True for a CANONICAL array-index key per ES §6.1.7: a string that
+ * is the canonical numeric representation of an integer in [0, 2^32-2]
+ * (no leading zeros, no sign, no exponent).
+ */
+function _isCanonicalArrayIndexKey(k: string): boolean {
+  if (k.length === 0 || k.length > 10) return false;
+  if (k === "0") return true;
+  if (k.charCodeAt(0) === 48) return false; // leading zero → not canonical
+  for (let i = 0; i < k.length; i++) {
+    const c = k.charCodeAt(i);
+    if (c < 48 || c > 57) return false;
+  }
+  return Number(k) <= 4294967294; // 2^32 - 2
+}
+
+/**
+ * (#2131) Apply the OrdinaryOwnPropertyKeys ordering (ES §10.1.11.1) to a
+ * key list: canonical array-index keys first in ascending numeric order,
+ * then the remaining keys in their existing (insertion) order. Mirrors the
+ * #1837 standalone fix for the JS-host enumeration paths, which previously
+ * emitted raw struct-field declaration order. Returns the input array
+ * unchanged when no array-index key is present (the common pure-string case).
+ */
+function _orderOwnKeysSpec<T extends string | symbol>(keys: T[]): T[] {
+  let hasIndexKey = false;
+  for (const k of keys) {
+    if (typeof k === "string" && _isCanonicalArrayIndexKey(k)) {
+      hasIndexKey = true;
+      break;
+    }
+  }
+  if (!hasIndexKey) return keys;
+  const indices: string[] = [];
+  const rest: T[] = [];
+  for (const k of keys) {
+    if (typeof k === "string" && _isCanonicalArrayIndexKey(k)) indices.push(k);
+    else rest.push(k);
+  }
+  indices.sort((a, b) => Number(a) - Number(b));
+  return [...(indices as unknown as T[]), ...rest];
+}
+
 function _ownStructKeys(obj: any, exports: Record<string, Function> | undefined): (string | symbol)[] {
   const keys: (string | symbol)[] = [];
   const push = (k: string | symbol) => {
@@ -4076,7 +4119,7 @@ function _ownStructKeys(obj: any, exports: Record<string, Function> | undefined)
   } catch {
     // ignore
   }
-  return keys;
+  return _orderOwnKeysSpec(keys); // (#2131) array-index keys first, ascending
 }
 
 function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): any {
@@ -6823,11 +6866,13 @@ assert._isSameValue = isSameValue;
             const fieldNames = _getStructFieldNames(obj, exports);
             if (fieldNames) {
               const descs = _wasmPropDescs.get(obj);
-              return fieldNames.filter((k) => {
-                if (!descs) return true;
-                const flags = descs.get(k);
-                return flags === undefined || !!(flags & _SC_ENUMERABLE);
-              });
+              return _orderOwnKeysSpec(
+                fieldNames.filter((k) => {
+                  if (!descs) return true;
+                  const flags = descs.get(k);
+                  return flags === undefined || !!(flags & _SC_ENUMERABLE);
+                }),
+              ); // (#2131)
             }
           }
           return Object.keys(obj);
@@ -6841,16 +6886,16 @@ assert._isSameValue = isSameValue;
             const fieldNames = _getStructFieldNames(obj, exports);
             if (fieldNames) {
               const descs = _wasmPropDescs.get(obj);
-              return fieldNames
-                .filter((k) => {
+              return _orderOwnKeysSpec(
+                fieldNames.filter((k) => {
                   if (!descs) return true;
                   const flags = descs.get(k);
                   return flags === undefined || !!(flags & _SC_ENUMERABLE);
-                })
-                .map((key) => {
-                  const getter = exports?.[`__sget_${key}`];
-                  return typeof getter === "function" ? getter(obj) : undefined;
-                });
+                }),
+              ).map((key) => {
+                const getter = exports?.[`__sget_${key}`];
+                return typeof getter === "function" ? getter(obj) : undefined;
+              }); // (#2131) value order follows spec key order
             }
           }
           return Object.values(obj);
@@ -6864,17 +6909,17 @@ assert._isSameValue = isSameValue;
             const fieldNames = _getStructFieldNames(obj, exports);
             if (fieldNames) {
               const descs = _wasmPropDescs.get(obj);
-              return fieldNames
-                .filter((k) => {
+              return _orderOwnKeysSpec(
+                fieldNames.filter((k) => {
                   if (!descs) return true;
                   const flags = descs.get(k);
                   return flags === undefined || !!(flags & _SC_ENUMERABLE);
-                })
-                .map((key) => {
-                  const getter = exports?.[`__sget_${key}`];
-                  const val = typeof getter === "function" ? getter(obj) : undefined;
-                  return [key, val];
-                });
+                }),
+              ).map((key) => {
+                const getter = exports?.[`__sget_${key}`];
+                const val = typeof getter === "function" ? getter(obj) : undefined;
+                return [key, val];
+              }); // (#2131) entry order follows spec key order
             }
           }
           return Object.entries(obj);
@@ -9040,28 +9085,32 @@ assert._isSameValue = isSameValue;
           let current: any = obj;
           while (current != null) {
             if (_isWasmStruct(current)) {
-              // WasmGC struct — get field names from exported helper
+              // WasmGC struct — get field names from exported helper.
+              // (#2131) Per spec, EnumerateObjectProperties visits each
+              // chain level's own keys in OrdinaryOwnPropertyKeys order:
+              // collect this level's keys first, order, then push.
+              const levelKeys: string[] = [];
               const fieldNames = _getStructFieldNames(current, exports) ?? [];
               for (const k of fieldNames) {
-                if (!seen.has(k)) {
-                  keys.push(k);
-                  seen.add(k);
-                }
+                if (!seen.has(k) && !levelKeys.includes(k)) levelKeys.push(k);
               }
               // Also include enumerable sidecar properties
               const sc = _wasmStructProps.get(current);
               if (sc) {
                 const descs = _wasmPropDescs.get(current);
                 for (const k of Object.keys(sc)) {
-                  if (seen.has(k)) continue;
+                  if (seen.has(k) || levelKeys.includes(k)) continue;
                   // Check enumerability — sidecar props without explicit descriptor are enumerable
                   if (descs) {
                     const flags = descs.get(k);
                     if (flags !== undefined && flags & _SC_DEFINED && !(flags & _SC_ENUMERABLE)) continue;
                   }
-                  keys.push(k);
-                  seen.add(k);
+                  levelKeys.push(k);
                 }
+              }
+              for (const k of _orderOwnKeysSpec(levelKeys)) {
+                keys.push(k);
+                seen.add(k);
               }
             } else {
               // Plain JS object — use Object.keys for own enumerable, respecting shadowing
