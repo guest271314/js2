@@ -30,10 +30,24 @@
  */
 import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
+import { stringConstantExternrefInstrs } from "./native-strings.js";
+import { ensureObjectRuntime } from "./object-runtime.js";
+import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 
 /** Slice-1 IterRec kind tag for a canonical externref `$Vec`. */
 const ITER_KIND_VEC = 3;
+
+/**
+ * (#2038) IterRec kind tag for a USER iterator: a general `{next()}`-protocol
+ * object obtained from a custom iterable's `[Symbol.iterator]()`. The `vec`
+ * field is null; the iterator object is held in `userIter` (field 3, externref)
+ * and each `__iterator_next` step calls `userIter.next()` via
+ * `__extern_method_call` and reads `.value`/`.done`. This covers BOTH sync
+ * `for-of` and (sync-backed) async `for await` over a user iterable, which
+ * previously trapped `illegal cast` in the vec-only native runtime.
+ */
+const ITER_KIND_USER = 1;
 
 /**
  * Lazily register (or fetch) the `$__IterRec` GC struct type. Mirrors
@@ -47,10 +61,14 @@ export function getOrRegisterIterRecType(ctx: CodegenContext): number {
   // The canonical externref vec the record cursors over.
   const vecTypeIdx = getOrRegisterVecType(ctx, "externref", { kind: "externref" });
 
+  // Field order is load-bearing: fieldIdx kind=0, vec=1, idx=2 (the vec path).
+  // (#2038) userIter=3 — a mutable externref holding the user `{next()}`
+  // iterator object for the USER carrier (null on the vec path).
   const fields = [
     { name: "kind", type: { kind: "i32" as const }, mutable: false },
     { name: "vec", type: { kind: "ref_null" as const, typeIdx: vecTypeIdx }, mutable: false },
     { name: "idx", type: { kind: "i32" as const }, mutable: true },
+    { name: "userIter", type: { kind: "externref" as const }, mutable: true },
   ];
   const typeIdx = ctx.mod.types.length;
   ctx.mod.types.push({ kind: "struct", name: "__IterRec", fields });
@@ -85,6 +103,29 @@ export function ensureNativeIteratorRuntime(ctx: CodegenContext): void {
   const iterRecRef: ValType = { kind: "ref", typeIdx: iterRecTypeIdx };
   const vecRefNull: ValType = { kind: "ref_null", typeIdx: vecTypeIdx };
 
+  // (#2038) USER `{next()}`-protocol carrier dependencies. Set up BEFORE building
+  // the native bodies so funcMap indices / string-const globals are stable when
+  // captured. `__extern_method_call` (+ `__extern_get`/`__apply_closure`) is
+  // filled at FINALIZE — referencing its reserved funcIdx is fine (finalize
+  // fills the body, not the index). Force-register the method-name string
+  // constants so `stringConstantExternrefInstrs` materializes them.
+  ensureObjectRuntime(ctx);
+  for (const s of ["@@iterator", "next", "value", "done"]) addStringConstantGlobal(ctx, s);
+  const externMethodCallIdx = ctx.funcMap.get("__extern_method_call");
+  // Per-field getters for the {value, done} next()-result. They are emitted on
+  // demand when a `.value`/`.done` access is compiled; on the USER iterator path
+  // the result object is host/$Object-shaped, so use the generic host get via
+  // `__extern_get` (resolves own + prototype) keyed by the field-name string,
+  // which is always available once ensureObjectRuntime ran.
+  const externGetIdx = ctx.funcMap.get("__extern_get");
+  // `__is_truthy(externref) -> i32` for the §7.2.15 `done` flag (ToBoolean).
+  // Emitted natively in standalone; resolved by funcMap name.
+  const isTruthyIdx = ctx.funcMap.get("__is_truthy");
+  // USER carrier is only wired when the host-dispatch helpers exist (they do in
+  // standalone after ensureObjectRuntime). If absent (shouldn't happen), the
+  // vec-only path is preserved and a non-vec subject keeps trapping as before.
+  const userCarrierWired = externMethodCallIdx !== undefined && externGetIdx !== undefined && isTruthyIdx !== undefined;
+
   const registerNative = (
     name: string,
     paramTypes: ValType[],
@@ -100,24 +141,88 @@ export function ensureNativeIteratorRuntime(ctx: CodegenContext): void {
   };
 
   // --- __iterator(obj: externref) -> externref (the $IterRec, as externref) ---
-  // GetIterator §7.4.1. Slice 1: `obj` is an externref-wrapped canonical
-  // externref `$Vec`. Unwrap → build $IterRec{kind:3, vec, idx:0} → rewrap.
-  // local 0 = obj (param, externref)
+  // GetIterator §7.4.1.
+  //   - obj is a canonical externref `$Vec` (the common array path)  → build
+  //     $IterRec{kind:VEC, vec, idx:0, userIter:null}.
+  //   - (#2038) otherwise obj is a USER iterable (custom `{[Symbol.iterator]()
+  //     {…}}`) → obtain its iterator object via `obj[@@iterator]()` and build
+  //     $IterRec{kind:USER, vec:null, idx:0, userIter}. If `@@iterator` resolves
+  //     to nothing (obj is ALREADY an iterator with a bare `next`), fall back to
+  //     using obj itself as the iterator object.
+  // local 0 = obj (param, externref); local 1 = objAny (anyref); local 2 = userIter (externref)
+  const emptyArgsVec: Instr[] = [
+    // $vecExtern{ length: 0, data: null } → externref
+    { op: "i32.const", value: 0 },
+    { op: "ref.null", typeIdx: arrTypeIdx } as Instr,
+    { op: "struct.new", typeIdx: vecTypeIdx },
+    { op: "extern.convert_any" } as Instr,
+  ];
+  const iteratorBody: Instr[] = [
+    // objAny = any.convert_extern(obj)
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.tee", index: 1 },
+    { op: "ref.test", typeIdx: vecTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "externref" } },
+      then: [
+        // VEC carrier: $IterRec{VEC, vec, 0, userIter:null}
+        { op: "i32.const", value: ITER_KIND_VEC },
+        { op: "local.get", index: 1 },
+        { op: "ref.cast", typeIdx: vecTypeIdx },
+        { op: "i32.const", value: 0 },
+        { op: "ref.null.extern" } as Instr,
+        { op: "struct.new", typeIdx: iterRecTypeIdx },
+        { op: "extern.convert_any" } as Instr,
+      ],
+      else: userCarrierWired
+        ? [
+            // userIter = obj[@@iterator]()  (null if obj has no @@iterator)
+            { op: "local.get", index: 0 },
+            ...stringConstantExternrefInstrs(ctx, "@@iterator"),
+            ...emptyArgsVec,
+            { op: "call", funcIdx: externMethodCallIdx! },
+            { op: "local.tee", index: 2 },
+            { op: "ref.is_null" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              // No @@iterator → obj is itself the iterator (has `next`).
+              then: [{ op: "local.get", index: 0 }],
+              else: [{ op: "local.get", index: 2 }],
+            } as unknown as Instr,
+            { op: "local.set", index: 2 },
+            // $IterRec{USER, vec:null, idx:0, userIter}
+            { op: "i32.const", value: ITER_KIND_USER },
+            { op: "ref.null", typeIdx: vecTypeIdx } as Instr,
+            { op: "i32.const", value: 0 },
+            { op: "local.get", index: 2 },
+            { op: "struct.new", typeIdx: iterRecTypeIdx },
+            { op: "extern.convert_any" } as Instr,
+          ]
+        : [
+            // USER carrier unavailable — preserve the legacy hard cast so the
+            // failure mode is unchanged (loud trap) rather than silently wrong.
+            { op: "i32.const", value: ITER_KIND_VEC },
+            { op: "local.get", index: 1 },
+            { op: "ref.cast", typeIdx: vecTypeIdx },
+            { op: "i32.const", value: 0 },
+            { op: "ref.null.extern" } as Instr,
+            { op: "struct.new", typeIdx: iterRecTypeIdx },
+            { op: "extern.convert_any" } as Instr,
+          ],
+    } as unknown as Instr,
+  ];
   registerNative(
     "__iterator",
     [{ kind: "externref" }],
     [{ kind: "externref" }],
-    [],
     [
-      { op: "i32.const", value: ITER_KIND_VEC },
-      // vec = ref.cast<$vecExtern>(any.convert_extern(obj))
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" } as Instr,
-      { op: "ref.cast", typeIdx: vecTypeIdx },
-      { op: "i32.const", value: 0 },
-      { op: "struct.new", typeIdx: iterRecTypeIdx },
-      { op: "extern.convert_any" } as Instr,
+      { name: "objAny", type: { kind: "anyref" } },
+      { name: "userIter", type: { kind: "externref" } },
     ],
+    iteratorBody,
   );
 
   // --- __iterator_next(recExt: externref) -> (i32 done, externref value) ---
@@ -131,6 +236,7 @@ export function ensureNativeIteratorRuntime(ctx: CodegenContext): void {
   //   local 3 = i      (i32 cursor)
   //   local 4 = done   (i32)
   //   local 5 = value  (externref)
+  //   local 6 = res    (externref — USER next() result, #2038)
   registerNative(
     "__iterator_next",
     [{ kind: "externref" }],
@@ -141,8 +247,15 @@ export function ensureNativeIteratorRuntime(ctx: CodegenContext): void {
       { name: "i", type: { kind: "i32" } },
       { name: "done", type: { kind: "i32" } },
       { name: "value", type: { kind: "externref" } },
+      { name: "res", type: { kind: "externref" } },
     ],
-    buildIteratorNextBody(iterRecTypeIdx, vecTypeIdx, arrTypeIdx),
+    buildIteratorNextBody(ctx, iterRecTypeIdx, vecTypeIdx, arrTypeIdx, {
+      userCarrierWired,
+      externMethodCallIdx,
+      externGetIdx,
+      isTruthyIdx,
+      emptyArgsVec,
+    }),
   );
 
   // --- __iterator_return(recExt: externref) -> ()  (IteratorClose §7.4.8) ---
@@ -178,16 +291,27 @@ export function ensureNativeIteratorRuntime(ctx: CodegenContext): void {
 /**
  * Build the `__iterator_next` body with explicit done/value computation so the
  * multi-value `(i32 done, externref value)` results are emitted in ABI order.
- * Locals: 0=recExt(param), 1=rec, 2=vec, 3=i, 4=done(i32), 5=value(externref).
+ * Locals: 0=recExt(param), 1=rec, 2=vec, 3=i, 4=done(i32), 5=value(externref),
+ * 6=res(externref, USER next() result).
  */
-function buildIteratorNextBody(iterRecTypeIdx: number, vecTypeIdx: number, arrTypeIdx: number): Instr[] {
-  return [
-    // rec = cast(any.convert_extern(recExt))
-    { op: "local.get", index: 0 },
-    { op: "any.convert_extern" } as Instr,
-    { op: "ref.cast", typeIdx: iterRecTypeIdx },
-    { op: "local.tee", index: 1 },
+interface UserNextDeps {
+  userCarrierWired: boolean;
+  externMethodCallIdx: number | undefined;
+  externGetIdx: number | undefined;
+  isTruthyIdx: number | undefined;
+  emptyArgsVec: Instr[];
+}
+function buildIteratorNextBody(
+  ctx: CodegenContext,
+  iterRecTypeIdx: number,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+  deps: UserNextDeps,
+): Instr[] {
+  // The vec-carrier step (existing behavior), computing done(4)/value(5).
+  const vecStep: Instr[] = [
     // vec = rec.vec
+    { op: "local.get", index: 1 },
     { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 1 },
     { op: "local.set", index: 2 },
     // i = rec.idx
@@ -214,14 +338,12 @@ function buildIteratorNextBody(iterRecTypeIdx: number, vecTypeIdx: number, arrTy
       op: "if",
       blockType: { kind: "empty" },
       then: [
-        // value = vec.data[i]
         { op: "local.get", index: 2 },
         { op: "ref.as_non_null" } as Instr,
         { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 },
         { op: "local.get", index: 3 },
         { op: "array.get", typeIdx: arrTypeIdx },
         { op: "local.set", index: 5 },
-        // rec.idx = i + 1
         { op: "local.get", index: 1 },
         { op: "local.get", index: 3 },
         { op: "i32.const", value: 1 },
@@ -229,6 +351,67 @@ function buildIteratorNextBody(iterRecTypeIdx: number, vecTypeIdx: number, arrTy
         { op: "struct.set", typeIdx: iterRecTypeIdx, fieldIdx: 2 } as Instr,
       ],
       else: [],
+    } as unknown as Instr,
+  ];
+
+  // (#2038) The USER-carrier step (§7.4.4 IteratorNext + §7.4.6 IteratorValue):
+  //   res = userIter.next();  done = ToBoolean(res.done);  value = res.value
+  // Result-not-an-object is left to the host get returning undefined (the common
+  // user-iterator shapes always return an object); a hard TypeError on a
+  // non-object result is a follow-up refinement.
+  const userStep: Instr[] = deps.userCarrierWired
+    ? [
+        // res = __extern_method_call(rec.userIter, "next", emptyArgs)
+        { op: "local.get", index: 1 },
+        { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 3 },
+        ...stringConstantExternrefInstrs(ctx, "next"),
+        ...deps.emptyArgsVec,
+        { op: "call", funcIdx: deps.externMethodCallIdx! },
+        { op: "local.set", index: 6 },
+        // done = ToBoolean(__extern_get(res, "done"))
+        { op: "local.get", index: 6 },
+        ...stringConstantExternrefInstrs(ctx, "done"),
+        { op: "call", funcIdx: deps.externGetIdx! },
+        { op: "call", funcIdx: deps.isTruthyIdx! },
+        { op: "local.set", index: 4 },
+        // value = done ? undefined : __extern_get(res, "value")
+        { op: "local.get", index: 4 },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "externref" } },
+          then: [{ op: "ref.null.extern" } as Instr],
+          else: [
+            { op: "local.get", index: 6 },
+            ...stringConstantExternrefInstrs(ctx, "value"),
+            { op: "call", funcIdx: deps.externGetIdx! },
+          ],
+        } as unknown as Instr,
+        { op: "local.set", index: 5 },
+      ]
+    : // USER carrier not wired — never reached (kind is never USER without it).
+      [
+        { op: "i32.const", value: 1 },
+        { op: "local.set", index: 4 },
+        { op: "ref.null.extern" } as Instr,
+        { op: "local.set", index: 5 },
+      ];
+
+  return [
+    // rec = cast(any.convert_extern(recExt))
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" } as Instr,
+    { op: "ref.cast", typeIdx: iterRecTypeIdx },
+    { op: "local.set", index: 1 },
+    // if (rec.kind == USER) { userStep } else { vecStep }
+    { op: "local.get", index: 1 },
+    { op: "struct.get", typeIdx: iterRecTypeIdx, fieldIdx: 0 },
+    { op: "i32.const", value: ITER_KIND_USER },
+    { op: "i32.eq" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: userStep,
+      else: vecStep,
     } as unknown as Instr,
     // results in ABI order: (done, value)
     { op: "local.get", index: 4 },

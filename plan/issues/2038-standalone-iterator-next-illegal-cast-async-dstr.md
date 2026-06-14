@@ -281,3 +281,53 @@ gotchas confirmed while starting:
    for-of/typed-struct paths must stay byte-identical (run the generator/for-of
    suites) BEFORE adding the USER arm — that isolates a struct-arity regression
    from a USER-arm bug.
+
+## Implementation attempt (2026-06-14, sdev) — USER carrier WIP + PREREQUISITE BLOCKER
+
+Implemented the USER_ITER carrier on this branch (committed WIP):
+- `$IterRec` extended with `userIter` (field 3, externref); the vec-path
+  `__iterator` `struct.new` updated to push the 4th operand. **Vec/array path is
+  byte-identical and fully intact** (array for-of host+wasi → 6; `issue-1320-
+  standalone-iter` 5/5; closure tests green — zero regression).
+- `__iterator` now branches `ref.test $vecExtern`: vec → VEC carrier; else →
+  USER carrier: `userIter = __extern_method_call(obj, "@@iterator", emptyVec)`
+  (falls back to `obj` itself if no `@@iterator`), builds `$IterRec{USER, null,
+  0, userIter}`. The module compiles VALID with ZERO leaked env imports.
+- `__iterator_next` branches on `rec.kind`: USER →
+  `res = __extern_method_call(userIter, "next", emptyVec)`,
+  `done = __is_truthy(__extern_get(res, "done"))`,
+  `value = __extern_get(res, "value")`.
+- Deps set up before bodies: `ensureObjectRuntime`, force-register the
+  `@@iterator`/`next`/`value`/`done` string constants, capture
+  `__extern_method_call`/`__extern_get`/`__is_truthy` funcMap indices. All three
+  are NATIVE funcs in standalone (not imports). tsc clean, module valid.
+
+### BLOCKER (root cause for the runtime hang)
+The USER runtime path HANGS (infinite loop in `__iterator_next` — `done` never
+becomes truthy). Traced to a PREREQUISITE GAP, not a bug in this code:
+**standalone any-receiver method dispatch is broken.** Direct repro on current
+main: `const o: any = { next() { return 7; } }; o.next()` → **standalone returns
+0** (should be 7) and does NOT even emit `__extern_method_call` — it takes a
+different, broken path. So `__extern_method_call(userIter, "next", …)` never
+actually invokes the iterator's `next()`; it returns null → `__extern_get(null,
+"done")` → null → `__is_truthy` 0 → never done → infinite loop.
+
+Root: `__extern_method_call` only handles an OPEN `$Object` receiver
+(object-runtime.ts:~4188 — non-`$Object` brands return undefined); a standalone
+object-literal method is a CLOSED WasmGC struct, and the any-receiver call path
+doesn't route closed-struct method calls through a working dispatcher. This is
+the STANDALONE analog of #2015 (which fixed the JS-host any-receiver `this`
+path). The USER carrier is correct in shape but cannot function until standalone
+any-receiver object-literal/iterator method dispatch works.
+
+### Recommendation
+Prerequisite needed: **native standalone any-receiver method dispatch**
+(`o.method()` on an `any`/externref object-literal receiver → call the
+closed-struct's compiled method, or a `__extern_method_call` that handles closed
+structs). File as a SENIOR prerequisite blocking #2038's USER arm. The
+USER-carrier scaffolding (struct + `__iterator`/`__iterator_next` branches) is
+committed and ready to light up once the dispatch prereq lands — then the sync
+custom-iterable repro (`for (const x of {[Symbol.iterator](){return
+{next(){…}}}})` → 0+1+2) should pass, and `ensureAsyncIterator` returning native
+`__iterator` in standalone extends it to sync-backed `for await`. Keep
+async-gen/yield* + Promise deferred.
