@@ -119,6 +119,22 @@ Two test262 workflows currently run on PRs:
     summary) and the `js2wasm-baselines` repo's `test262-current.jsonl`
     (history feed for the trend chart). The `refresh-committed-baseline.yml`
     workflow consumes the sharded artifact to sync the committed JSONL.
+  - **Baseline pushes to `main` MUST authenticate with the `MAIN_DEPLOY_KEY`
+    SSH deploy key, never `GITHUB_TOKEN`.** The deploy key is the only auth
+    path in this ruleset's `bypass_actors` (DeployKey: `always`); a
+    `GITHUB_TOKEN`-authenticated push to `main` is rejected by ruleset GH013
+    ("Changes must be made through a pull request") and silently FREEZES the
+    committed baseline while the `js2wasm-baselines` repo moves on — the
+    drift deadlock (regression gates go blind; phantom ~500-test regression
+    in `git status` / fresh clones). All three baseline-promoting jobs use
+    the deploy key + the `baseline-promote` Environment (deployment branch
+    restricted to `main`): `promote-baseline` (test262-sharded.yml), the
+    scheduled `sync` (baseline-summary-sync.yml), and the manual emergency
+    `merge-and-promote` (refresh-baseline.yml). PR #725/#896 and #3 each
+    regressed one of these back onto `GITHUB_TOKEN`; do NOT swap any of them
+    back. If GH013 recurs, first confirm the ruleset still lists the
+    `DeployKey: always` bypass actor
+    (`gh api /repos/loopdive/js2/rulesets/16700772 --jq .bypass_actors`).
   - The `check for test262 regressions` job is also required. It compares
     the merged PR report against the baseline and catches full pass→fail
     regressions even when the inline hard guards inside `merge shard reports`
