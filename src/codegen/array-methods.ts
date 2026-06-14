@@ -589,6 +589,23 @@ export function compileArrayLikePrototypeCall(
   const isTruthyFn = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
   if (lenFn === undefined || getIdxFn === undefined || hasIdxFn === undefined || isTruthyFn === undefined)
     return undefined;
+  // #16 — pre-register the result-array build helpers used by the filter/map/
+  // reduce arms BELOW, BEFORE we resolve any per-element funcIdx. These
+  // `ensureLateImport`s shift every defined-func index; doing them up-front
+  // means the single re-resolve of __extern_get_idx/__extern_has_idx (after the
+  // receiver + callback compile) stays valid through the method arm, instead of
+  // the arm's own late imports invalidating an already-baked loadElem funcIdx
+  // (the addUnionImports late-shift hazard → `call[0] expected extern`/invalid
+  // Wasm). Idempotent; the arms re-fetch these by name too.
+  ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+  ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+  ensureLateImport(
+    ctx,
+    "__extern_set",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [],
+  );
+  ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
 
   // Compile receiver to externref
@@ -605,7 +622,9 @@ export function compileArrayLikePrototypeCall(
   // len = i32(f64(__extern_length(receiver)))
   const lenTmp = allocLocal(fctx, `__ali_len_${fctx.locals.length}`, { kind: "i32" });
   fctx.body.push({ op: "local.get", index: receiverTmp });
-  fctx.body.push({ op: "call", funcIdx: lenFn });
+  // #16 — re-resolve __extern_length: the receiver compile above can shift
+  // defined-func indices (addUnionImports late-shift hazard); names are stable.
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__extern_length") ?? lenFn });
   fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   fctx.body.push({ op: "local.set", index: lenTmp });
 
@@ -622,6 +641,15 @@ export function compileArrayLikePrototypeCall(
   const closureTmp = allocLocal(fctx, `__ali_cl_${fctx.locals.length}`, cbResult);
   fctx.body.push({ op: "local.set", index: closureTmp });
 
+  // #16 — re-resolve the per-element helpers AFTER the callback compile (which,
+  // like the receiver compile, can register new functions and shift every
+  // defined-func index). The funcIdx captured at the top of this function would
+  // otherwise be stale-low → `call` to the wrong function → invalid Wasm (the
+  // emitBinary/emitWat divergence). Names are stable in funcMap. (filter/map
+  // also register __js_array_* below, a further shift source.)
+  const getIdxFnNow = ctx.funcMap.get("__extern_get_idx") ?? getIdxFn;
+  const hasIdxFnNow = ctx.funcMap.get("__extern_has_idx") ?? hasIdxFn;
+
   // i = 0
   const iTmp = allocLocal(fctx, `__ali_i_${fctx.locals.length}`, { kind: "i32" });
   fctx.body.push({ op: "i32.const", value: 0 });
@@ -637,7 +665,7 @@ export function compileArrayLikePrototypeCall(
     { op: "local.get", index: receiverTmp } as Instr,
     { op: "local.get", index: iTmp } as Instr,
     { op: "f64.convert_i32_s" },
-    { op: "call", funcIdx: getIdxFn } as Instr,
+    { op: "call", funcIdx: getIdxFnNow } as Instr,
     { op: "local.set", index: elemTmp } as Instr,
   ];
 
@@ -713,7 +741,7 @@ export function compileArrayLikePrototypeCall(
     { op: "local.get", index: receiverTmp } as Instr,
     { op: "local.get", index: iTmp } as Instr,
     { op: "f64.convert_i32_s" },
-    { op: "call", funcIdx: hasIdxFn } as Instr,
+    { op: "call", funcIdx: hasIdxFnNow } as Instr,
   ];
 
   /**
@@ -1054,7 +1082,7 @@ export function compileArrayLikePrototypeCall(
                     { op: "local.get", index: receiverTmp } as Instr,
                     { op: "local.get", index: iTmp } as Instr,
                     { op: "f64.convert_i32_s" },
-                    { op: "call", funcIdx: getIdxFn } as Instr,
+                    { op: "call", funcIdx: getIdxFnNow } as Instr,
                     { op: "local.set", index: accTmp } as Instr,
                     // foundTmp = 1
                     { op: "i32.const", value: 1 } as Instr,
@@ -1214,7 +1242,7 @@ export function compileArrayLikePrototypeCall(
                     { op: "local.get", index: receiverTmp } as Instr,
                     { op: "local.get", index: iTmp } as Instr,
                     { op: "f64.convert_i32_s" },
-                    { op: "call", funcIdx: getIdxFn } as Instr,
+                    { op: "call", funcIdx: getIdxFnNow } as Instr,
                     { op: "local.set", index: accTmp } as Instr,
                     { op: "i32.const", value: 1 } as Instr,
                     { op: "local.set", index: foundTmpR } as Instr,
@@ -1435,7 +1463,15 @@ function compileArrayLikePrototypeSearch(
   // imports `__extern_get_idx` / `__extern_has_idx` already take f64 indices.
   const lenTmp = allocLocal(fctx, `__alis_len_${fctx.locals.length}`, { kind: "f64" });
   fctx.body.push({ op: "local.get", index: receiverTmp });
-  fctx.body.push({ op: "call", funcIdx: lenFn });
+  // #16 — re-resolve __extern_length from funcMap: compiling the receiver above
+  // can register a new function (e.g. via ensureObjectRuntime / late imports)
+  // that SHIFTS every defined-func index, so the `lenFn` captured before the
+  // receiver compile is stale-low by the shift delta and would `call` the wrong
+  // function (manifests as `local.set expected f64, found call externref` —
+  // emitBinary bakes the numeric index while emitWat reprints the name, hiding
+  // it). Names in funcMap are stable; the index is not. (addUnionImports
+  // late-shift hazard.)
+  fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__extern_length") ?? lenFn });
   fctx.body.push({ op: "local.set", index: lenTmp });
 
   // Search value (externref). For booleans we MUST box via __box_boolean so the
@@ -1597,6 +1633,16 @@ function compileArrayLikePrototypeSearch(
     fctx.body.push({ op: "local.set", index: iTmp });
   }
 
+  // #16 — re-resolve the loop helpers from funcMap: compiling the receiver,
+  // search value, and fromIndex above can register new functions that SHIFT
+  // every defined-func index, leaving the funcIdx captured at the top stale
+  // (→ `call` to the wrong function → invalid Wasm). Names are stable; re-read
+  // the current index right before baking the loop's `call`s. (addUnionImports
+  // late-shift hazard.)
+  const getIdxFnNow = ctx.funcMap.get("__extern_get_idx") ?? getIdxFn;
+  const hasIdxFnNow = ctx.funcMap.get("__extern_has_idx") ?? hasIdxFn;
+  const cmpFnNow = ctx.funcMap.get(isIncludes ? "__same_value_zero" : "__host_eq") ?? cmpFn;
+
   // ── Loop body ────────────────────────────────────────────────────
   // Outer block: "exit on found".
   // Inner loop: forward (i++) or backward (i--).
@@ -1627,16 +1673,16 @@ function compileArrayLikePrototypeSearch(
   const hasIdxCheck: Instr[] = [
     { op: "local.get", index: receiverTmp } as Instr,
     { op: "local.get", index: iTmp } as Instr,
-    { op: "call", funcIdx: hasIdxFn } as Instr,
+    { op: "call", funcIdx: hasIdxFnNow } as Instr,
   ];
 
   // Element compare: leaves i32 (0/1) on the stack. Pass f64 index directly.
   const compareInstrs: Instr[] = [
     { op: "local.get", index: receiverTmp } as Instr,
     { op: "local.get", index: iTmp } as Instr,
-    { op: "call", funcIdx: getIdxFn } as Instr,
+    { op: "call", funcIdx: getIdxFnNow } as Instr,
     { op: "local.get", index: searchTmp } as Instr,
-    { op: "call", funcIdx: cmpFn } as Instr,
+    { op: "call", funcIdx: cmpFnNow } as Instr,
   ];
 
   // On-match: write result + break the outer block (depth 3 from inside the
