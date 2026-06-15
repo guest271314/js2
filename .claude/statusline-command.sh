@@ -270,7 +270,7 @@ if [ -z "$in_worktree" ] && [ "$branch" = "main" ]; then
   sprint_n=""
   sprint_done=0
   sprint_total=0
-  sprints_json="/workspace/dashboard/data/sprints.json"
+  sprints_json="/workspace/website/dashboard/data/sprints.json"
   if [ -f "$sprints_json" ]; then
     # Read from pre-built sprints.json (deduplicated, wont-fix counted as done)
     sprint_data=$(jq -r '
