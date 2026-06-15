@@ -3134,13 +3134,25 @@ function _invokeJsonCallable(
   if (typeof fn === "function") {
     return fn.apply(thisVal, args);
   }
-  // WasmGC closure — dispatch via __call_fn_<arity>. The closure's `this`
-  // is not observable on the Wasm side (Slice C work, blocked on #1308/#1382);
-  // for Slice A we accept that `this` is the bridge's `thisVal` only when
-  // `fn` is a real JS function.
+  // WasmGC closure. #2013/#2015 — when a meaningful receiver is supplied
+  // (`thisVal`), dispatch through `__call_fn_method_<arity>` so the closure
+  // body's `this` (the `__current_this` global) observes it. The JSON.parse
+  // reviver's `this` IS the holder (§25.5.1.1 step 3 — InternalizeJSONProperty
+  // calls reviver with the holder as receiver), so a reviver that does
+  // `Object.defineProperty(this, …)` / `this.x` now sees the holder instead of
+  // throwing "called on non-object". Bare-callback semantics (undefined /
+  // globalThis receiver) keep the plain `__call_fn_<arity>` path unchanged.
   const exports = callbackState?.getExports();
   if (!exports) return undefined;
   const arity = args.length;
+  const hasReceiver = thisVal !== undefined && thisVal !== null && thisVal !== globalThis;
+  if (hasReceiver) {
+    const methodCallFn = exports[`__call_fn_method_${arity}`];
+    if (typeof methodCallFn === "function") {
+      const rawThis = typeof thisVal === "object" ? _unwrapForHost(thisVal) : thisVal;
+      return methodCallFn(_isWasmStruct(rawThis) ? rawThis : thisVal, fn, ...args);
+    }
+  }
   const callFn = exports[`__call_fn_${arity}`];
   if (typeof callFn === "function") {
     return callFn(fn, ...args);
@@ -3155,6 +3167,85 @@ function _invokeJsonCallable(
     }
   }
   return undefined;
+}
+
+/**
+ * #2013 — true when `reviver` is a usable JSON.parse reviver callback: a JS
+ * function, or a WasmGC closure struct the host can dispatch via `__call_fn_2`.
+ * A `null`/`undefined` reviver (the common no-arg / explicit-undefined case)
+ * returns false so `JSON.parse` returns the unfiltered value unchanged.
+ */
+function _isCallableReviver(
+  reviver: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): boolean {
+  if (reviver == null) return false;
+  if (typeof reviver === "function") return true;
+  // WasmGC closure → callable via the __call_fn_2 bridge.
+  if (typeof reviver === "object" && _isWasmStruct(reviver)) {
+    const exports = callbackState?.getExports();
+    return typeof exports?.__call_fn_2 === "function";
+  }
+  return false;
+}
+
+/**
+ * #2013 — §25.5.1.1 InternalizeJSONProperty. `holder` is a plain JS object (the
+ * parse result is host `JSON.parse` output, so values are plain JS — no WasmGC
+ * walking needed). For each own enumerable property of the value at
+ * `holder[key]` (array indices in order, then object keys in insertion order),
+ * recurse, then write the recursive result back — via CreateDataProperty when
+ * it is defined (step 2.b.iii.4 / 2.c.iii.3.a) or `[[Delete]]` when it is
+ * `undefined` (step 2.b.iii.3.a / 2.c.iii.2.a). **Both operations are
+ * spec-silent on failure**: `CreateDataProperty`/`[[Delete]]` return a boolean
+ * that InternalizeJSONProperty ignores ("If status is false … no exception").
+ * A reviver that makes a property non-configurable mid-walk must therefore NOT
+ * throw and must leave the old value in place — so we use `Reflect.defineProperty`
+ * with a fresh fully-configurable data descriptor (CreateDataProperty) and
+ * `Reflect.deleteProperty` (both return false without throwing), NOT plain
+ * assignment / `delete` (which would succeed on a writable non-configurable prop
+ * and diverge from the spec). Finally call the reviver with `(key, value)` on
+ * `holder` as `this` and return its result. The reviver may be a JS function or
+ * a WasmGC closure (dispatched via `_invokeJsonCallable`).
+ */
+function _internalizeJSONProperty(
+  holder: any,
+  key: string,
+  reviver: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
+  const value = holder[key];
+  if (value !== null && typeof value === "object") {
+    // CreateDataProperty(O, P, V) — §7.3.5: define a fresh {writable, enumerable,
+    // configurable} data property; returns the [[DefineOwnProperty]] status,
+    // which the caller ignores (silent on a non-configurable existing prop).
+    const createDataProperty = (o: any, p: string, v: any): void => {
+      Reflect.defineProperty(o, p, { value: v, writable: true, enumerable: true, configurable: true });
+    };
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        const elem = _internalizeJSONProperty(value, String(i), reviver, callbackState);
+        if (elem === undefined) {
+          Reflect.deleteProperty(value, String(i));
+        } else {
+          createDataProperty(value, String(i), elem);
+        }
+      }
+    } else {
+      // Own enumerable string keys, insertion order (JSON.parse yields plain
+      // objects whose key order is the source/text order).
+      for (const k of Object.keys(value)) {
+        const newElem = _internalizeJSONProperty(value, k, reviver, callbackState);
+        if (newElem === undefined) {
+          Reflect.deleteProperty(value, k);
+        } else {
+          createDataProperty(value, k, newElem);
+        }
+      }
+    }
+  }
+  // §25.5.1.1 step 3 — call reviver(key, value) with `this` = holder.
+  return _invokeJsonCallable(reviver, holder, [key, value], callbackState);
 }
 
 function _liveGetEnumerableKeys(obj: any, exports: Record<string, Function> | undefined): string[] {
@@ -6072,7 +6163,18 @@ function resolveImport(
           const wrapper: any = { "": v };
           return _serializeJSONProperty("", wrapper, rep, gap, "", new Set(), callbackState);
         };
-      if (name === "JSON_parse") return (s: any) => JSON.parse(s);
+      if (name === "JSON_parse")
+        return (s: any, reviver?: any) => {
+          // #2013 — §25.5.1 JSON.parse(text, reviver). Parse first, then if a
+          // callable reviver is supplied apply InternalizeJSONProperty so the
+          // callback observes (key, value) per holder and its return value
+          // substitutes (or, when `undefined`, deletes) each property.
+          const unfiltered = JSON.parse(s);
+          if (!_isCallableReviver(reviver, callbackState)) return unfiltered;
+          // §25.5.1 steps 7-10: root holder is { "": unfiltered }.
+          const root: any = { "": unfiltered };
+          return _internalizeJSONProperty(root, "", reviver, callbackState);
+        };
       if (name === "__extern_eval") {
         // #1164: dynamic eval via Wasm module compilation.  The primary
         // path compiles the eval string through js2wasm and instantiates
