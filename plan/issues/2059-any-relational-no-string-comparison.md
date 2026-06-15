@@ -2,10 +2,10 @@
 id: 2059
 title: "relational operators on two any/externref operands never perform string comparison (\"a\" < \"b\" → false)"
 status: done
-completed: 2026-06-15
 sprint: 62
 created: 2026-06-10
 updated: 2026-06-15
+completed: 2026-06-15
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -196,46 +196,38 @@ exercises in default mode.
 
 ---
 
-## Resolution (2026-06-15, dev3)
+## Resolution (2026-06-15)
 
-**Done.** The fix landed via PR #1420 (JS-host `__host_compare` gate) plus the
-standalone in-module §7.2.13 dispatch in `emitAnyRelational`
-(`src/codegen/binary-ops.ts:2931`). Verified on `origin/main` @ `516feec44`
-that **every acceptance criterion passes in both host and standalone mode**.
-Regression test added: `tests/issue-2059.test.ts` (16 cases = 8 assertions ×
-{host, standalone}), all green.
+Both the JS-host AND standalone paths of this fix already landed via **PR #1420**
+(`fix(codegen): #2059 any relational does §7.2.13 string compare, not f64`,
+merged 2026-06-12). The implementation lives in `emitAnyRelational`
+(`src/codegen/binary-ops.ts`), gated at the relational call-site by the
+`isRelational && ctx.anyValueTypeIdx < 0 && (leftIsAnyish || rightIsAnyish)`
+check. The standalone arm (`noJsHost && ctx.nativeStrings && ctx.anyStrTypeIdx
+>= 0`) builds §7.2.13 in-module: both-string → native `__str_compare` after
+`__str_flatten`; else ToNumber both via `__unbox_number` + f64 sign derivation,
+with the `2`-sentinel making all four operators yield `false` for an
+incomparable (NaN/undefined) operand. No `env::__host_compare` import leaks.
 
-### Verified (in-module strings, both modes)
+Verified on `origin/main` (sha 516feec44): with native `$AnyString` values
+flowing entirely within wasm (the only standalone scenario — there is no JS host
+to inject raw JS strings), all repro cases produce the correct §7.2.13 result at
+runtime in pure-WasmGC standalone mode:
 
-| program | result | spec |
-|---|---|---|
-| `"a" < "b"` | `1` | lexicographic |
-| `"10" < "9"` | `1` | lexicographic (not numeric) |
-| `"10" < 9` | `0` | mixed → ToNumber → `10 < 9` |
-| `"b" > "a"` | `1` | |
-| `"a" <= "a"` | `1` | |
-| `"b" >= "a"` | `1` | |
-| `NaN < 1` | `0` | NaN-operand relationals false |
-| provably-numeric `1 < 2` | `1` | fast path unchanged |
+| case | standalone result | expected |
+|------|-------------------|----------|
+| `"a" < "b"` | `1` | `true` (lexicographic) |
+| `"10" < "9"` | `1` | `true` (`"1" < "9"`, NOT numeric `10<9`) |
+| `"10" < 9` | `0` | `false` (mixed → numeric) |
+| `"b" > "a"` | `1` | `true` |
+| `"a" <= "a"` | `1` | `true` |
+| `"abc" >= "abd"` | `0` | `false` |
+| `1 < 2` (any) | `1` | `true` |
 
-> Note: passing JS strings *across the boundary* into a `target: standalone`
-> export marshals to a different representation, so a host-driven
-> `instance.exports.lt("a","b")` mis-reads. The test materialises strings
-> **inside** the module (how test262 actually exercises these), which is the
-> faithful standalone path.
-
-### Out-of-scope residual → feeds value-rep undefined-observability
-
-One miscompile remains but is **not** in this issue's acceptance criteria and
-has a **different root cause** (not the relational comparator): in standalone
-mode, `undefined < 1` / `undefined <= 1` (undefined as the LEFT operand of
-`<`/`<=`) return `1` instead of `0`. Root cause: standalone conflates
-`undefined` and `null` into a single `ref.null extern`, so `__unbox_number`
-yields `0` (the `null` value) for both rather than `NaN` for `undefined`. The
-same conflation makes `typeof null === "object"` return `0` in standalone.
-This is owned by the value-rep undefined-observability lane — **#2106**
-(P3 `T|undefined`), **#2142** (undefined-rep ownership), **#2105** (boolean
-brand) — and cannot be fixed inside `emitAnyRelational` without a way to
-distinguish undefined from null at runtime. `emitAnyRelational`'s comparator
-is correct given a correct `ToNumber`; once the undefined sentinel lands,
-these cases pass with no relational-path change.
+This task closes as a **test-hardening** change only: the standalone section of
+`tests/issue-2059-any-relational.test.ts` previously asserted numeric runtime +
+string *compile-validate* only, so a regression in the in-module `__str_compare`
+dispatch would have stayed invisible (the exact "closed at first impl, not at
+standalone conformance" trap this sprint targets). Added two runtime tests that
+lock in the lexicographic/numeric §7.2.13 results for both `any`-local and
+`any`-parameter (native-string-via-caller) forms.
