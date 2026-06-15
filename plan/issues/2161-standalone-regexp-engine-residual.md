@@ -54,3 +54,53 @@ wiring matchAll = focused sub-feature (iterator of capture-ARRAYS). Dominant
 ~425 `(none)`-leak compile_errors need the real test262 harness (Symbol.match
 protocol). NEXT: pull standalone-shard RegExp compile_error entries from CI,
 bucket by leaked import, dispatch top 2-3 + matchAll iterator as sub-PRs.
+
+## matchAll sub-feature — dispatch-ready spec (2026-06-15, sdev5)
+
+Confirmed on main (`39a63edf0`): standalone `"aXbXc".match(/X/g)` works (→ 2, 0
+imports) but `"aXbXc".matchAll(/X/g)` is **blanket-refused** with the rest of the
+RegExp-or-symbol-protocol forms at `string-ops.ts:2786` (`alwaysRegExp = match ||
+matchAll || search`). The native engine is healthy; matchAll just isn't wired.
+
+**Why it's NOT a thin wrap of the existing `match` path:** the global `match`
+helper `__regex_match_all` (regexp-standalone.ts:1106+) returns a vec of the
+**[0] matched substrings only** (`ensureRegexMatchVecType`). `matchAll` per
+§22.2.6.9 must yield **full match arrays** — each with all capture groups,
+`.index`, `.input`, named groups — i.e. a vec of capture-ARRAYS, not substrings.
+
+**Building blocks already on main (verified):**
+- `ensureRegexCaptureArray` / `__regex_capture_array` (regexp-standalone.ts:934)
+  — builds the [0]+captures array for ONE exec result (used by `exec`/`match`).
+- `emitRegexExecArrayCall` (the exec driver) — runs one match from lastIndex.
+- The `__regex_match_all` loop (1106+) is the exact advance/empty-match-guard
+  template to copy, but collecting capture-arrays instead of substrings.
+
+**Implementation plan (focused, ~half-day):**
+1. New native helper `ensureRegexMatchAllArrays` — clone `__regex_match_all`'s
+   eager loop (SetLastIndex 0; loop RegExpExec with AdvanceStringIndex on empty
+   match), but per iteration call the capture-array builder and push the
+   capture-array ref into a vec-of-capture-arrays (a `__vec_ref_<captureArr>`).
+   Reset lastIndex to 0 after (matchAll is a fresh iterator; spec keeps the
+   regex's lastIndex at 0 for a `g` regex after the StringIndexOf loop).
+2. `tryCompileStandaloneStringMatchAll` (regexp-standalone.ts) — mirror
+   `tryCompileStandaloneStringMatch`'s gating (global RegExp or backend-created
+   receiver, static flags, engine present); require the `g` flag (matchAll
+   throws TypeError on a non-global regex per §22.1.3.13 — a narrowed refusal is
+   acceptable for the slice). Emit the helper call; return the vec-of-arrays as
+   an **iterable** (for-of over a vec already works; `.next()`/spread reuse the
+   #2169 native-vec consumers).
+3. `string-ops.ts:2786` — remove `matchAll` from the blanket `alwaysRegExp`
+   refusal and route it to the new path BEFORE the refusal (mirror the
+   `method === "match"` branch at :2754). Keep the refusal for `search` +
+   dynamic/symbol-protocol forms.
+
+**Test gate:** `for (const m of "a1b2".matchAll(/(\d)/g)) sum += Number(m[1])` →
+3; iteration count over `/X/g` → 2; named groups + `.index`. Standalone, zero
+host imports.
+
+**Deferred:** non-global matchAll (throws — narrow refuse), dynamic-flags,
+string-arg coercion (`s.matchAll("x")` → new RegExp). Dominant ~425 `(none)`
+compile_errors remain the separate Symbol.match-protocol harness bucket (needs
+the CI standalone-shard breakdown), tracked under #2161 still.
+
+Status kept in-progress; matchAll is the first dispatch-ready slice.
