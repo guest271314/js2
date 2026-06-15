@@ -423,8 +423,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
     strConcatIdx = ctx.nativeStrHelpers.get("__str_concat") ?? -1;
   }
   // True when the standalone concat arm can be built (all pieces present).
-  const anyAddCanConcat =
-    anyToStringIdx >= 0 && externToStringIdx >= 0 && strConcatIdx >= 0 && ctx.anyStrTypeIdx >= 0;
+  const anyAddCanConcat = anyToStringIdx >= 0 && externToStringIdx >= 0 && strConcatIdx >= 0 && ctx.anyStrTypeIdx >= 0;
 
   // Helper to register a helper function
   function addHelper(
@@ -822,37 +821,8 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
   // numeric-only behaviour — no regression, just the unimplemented edge.
   //
   // params: a(0), b(1)  locals: tagA(2), tagB(3)
-  const numericArm: Instr[] = [
-    // if tagA == 2 && tagB == 2 → i32 add
-    { op: "local.get", index: 2 },
-    { op: "i32.const", value: 2 },
-    { op: "i32.eq" },
-    { op: "local.get", index: 3 },
-    { op: "i32.const", value: 2 },
-    { op: "i32.eq" },
-    { op: "i32.and" },
-    {
-      op: "if",
-      blockType: { kind: "val", type: anyRef },
-      then: [
-        { op: "local.get", index: 0 },
-        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
-        { op: "local.get", index: 1 },
-        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
-        { op: "i32.add" },
-        { op: "call", funcIdx: boxI32Idx },
-      ],
-      else: [
-        // f64 path: convert both to f64, add, box as f64
-        { op: "local.get", index: 0 },
-        { op: "call", funcIdx: toF64Idx },
-        { op: "local.get", index: 1 },
-        { op: "call", funcIdx: toF64Idx },
-        { op: "f64.add" },
-        { op: "call", funcIdx: boxF64Idx },
-      ],
-    } as Instr,
-  ];
+  // (numeric arm built lazily via `buildNumericArm()` below — see the note there
+  //  on why each `if` arm must be a distinct array.)
 
   // ToString(operand: ref $AnyValue) → ref $AnyString, dispatched on the tag:
   //   - tag 6 (object/array ref): pull the actual ref out of `refval`, wrap to
@@ -884,6 +854,50 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
     } as Instr,
   ];
 
+  // Build a fresh copy of the numeric instructions every time this is called.
+  // CRITICAL: the `then`/`else` arms of an `if` must be DISTINCT array objects
+  // (and contain distinct instruction objects). Several post-codegen passes
+  // mutate instruction nodes in place — most notably `shiftFuncIndices` in
+  // index.ts, which does `instr.funcIdx += delta` on every `call`. If the same
+  // array (or the same `call` instruction object) is reachable from two tree
+  // positions, those passes can visit it twice and double-shift the funcIdx,
+  // corrupting `__any_box_i32`/`__any_box_f64` call targets. (Before this fix,
+  // the non-concat fallback aliased `concatArm` to `numericArm`, then the outer
+  // `if` used `then: concatArm, else: numericArm` — the SAME array in both arms
+  // — which produced exactly that corruption: "expected (ref null N), got i32"
+  // / "call[0] expected type (ref null 5), found i32.add" in fast mode.)
+  const buildNumericArm = (): Instr[] => [
+    // if tagA == 2 && tagB == 2 → i32 add
+    { op: "local.get", index: 2 },
+    { op: "i32.const", value: 2 },
+    { op: "i32.eq" },
+    { op: "local.get", index: 3 },
+    { op: "i32.const", value: 2 },
+    { op: "i32.eq" },
+    { op: "i32.and" },
+    {
+      op: "if",
+      blockType: { kind: "val", type: anyRef },
+      then: [
+        { op: "local.get", index: 0 },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
+        { op: "local.get", index: 1 },
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 1 },
+        { op: "i32.add" },
+        { op: "call", funcIdx: boxI32Idx },
+      ],
+      else: [
+        // f64 path: convert both to f64, add, box as f64
+        { op: "local.get", index: 0 },
+        { op: "call", funcIdx: toF64Idx },
+        { op: "local.get", index: 1 },
+        { op: "call", funcIdx: toF64Idx },
+        { op: "f64.add" },
+        { op: "call", funcIdx: boxF64Idx },
+      ],
+    } as Instr,
+  ];
+
   const concatArm: Instr[] = anyAddCanConcat
     ? [
         // box a tag-5 $AnyValue around __str_concat(ToString(a), ToString(b))
@@ -897,7 +911,11 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
         { op: "extern.convert_any" } as Instr,
         { op: "struct.new", typeIdx: anyTypeIdx },
       ]
-    : numericArm;
+    : // No concat support (e.g. fast mode): the stringy `then` arm can never be
+      // reached at runtime (no tag-5/6 operands without native strings), but it
+      // must still be a SEPARATE, well-typed instruction array from the `else`
+      // numeric arm so the two arms don't alias. Use a fresh numeric copy.
+      buildNumericArm();
 
   addHelper(
     "__any_add",
@@ -934,8 +952,11 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
         // string concatenation (§13.15.3 step 2) when either operand is a
         // string or an object/array (whose ToPrimitive→toString is a string).
         then: concatArm,
-        // numeric addition (§13.15.3 step 3).
-        else: numericArm,
+        // numeric addition (§13.15.3 step 3). A FRESH numeric arm (distinct
+        // array + distinct instruction objects) so it never aliases `concatArm`
+        // — see the `buildNumericArm` note above on why in-place index-shift
+        // passes corrupt shared `if` arms.
+        else: buildNumericArm(),
       } as Instr,
     ],
     [

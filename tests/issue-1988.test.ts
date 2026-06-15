@@ -34,7 +34,7 @@ describe("#1988 any + ref operand applies ToPrimitive (JS-host / default mode)",
     await assertEquivalent(`export function f(o: any): any { return o + 1; }`, [{ fn: "f", args: [{}] }]);
   });
 
-  it("{} + {} → \"[object Object][object Object]\"", async () => {
+  it('{} + {} → "[object Object][object Object]"', async () => {
     await assertEquivalent(`export function f(a: any, b: any): any { return a + b; }`, [{ fn: "f", args: [{}, {}] }]);
   });
 
@@ -42,8 +42,10 @@ describe("#1988 any + ref operand applies ToPrimitive (JS-host / default mode)",
     await assertEquivalent(`export function f(a: any, b: any): any { return a + b; }`, [{ fn: "f", args: [[], []] }]);
   });
 
-  it("[1,2] + 1 → \"1,21\"", async () => {
-    await assertEquivalent(`export function f(a: any, b: any): any { return a + b; }`, [{ fn: "f", args: [[1, 2], 1] }]);
+  it('[1,2] + 1 → "1,21"', async () => {
+    await assertEquivalent(`export function f(a: any, b: any): any { return a + b; }`, [
+      { fn: "f", args: [[1, 2], 1] },
+    ]);
   });
 
   it("both numbers stay numeric (no false concat)", async () => {
@@ -71,11 +73,11 @@ describe("#1988 any + ref operand applies ToPrimitive (standalone / pure WasmGC)
     return (instance.exports as Record<string, () => number>).test();
   }
 
-  it("1 + {} length is 16 (\"1[object Object]\")", async () => {
+  it('1 + {} length is 16 ("1[object Object]")', async () => {
     expect(await concatLen(`const o: any = {}; return f(1, o).length;`)).toBe(16);
   });
 
-  it("{} + {} length is 30 (two \"[object Object]\")", async () => {
+  it('{} + {} length is 30 (two "[object Object]")', async () => {
     expect(await concatLen(`const o: any = {}; return f(o, o).length;`)).toBe(30);
   });
 
