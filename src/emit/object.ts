@@ -705,23 +705,32 @@ function encodeInstrWithReloc(
     case "ref.cast": {
       enc.byte(GC.prefix);
       enc.byte(GC.ref_cast);
-      // Type index relocation
-      relocs.push({
-        type: RELOC.R_WASM_TYPE_INDEX_LEB,
-        offset: enc.position,
-        symbolIndex: instr.typeIdx,
-      });
+      // #15 — only relocate CONCRETE (>= 0) type indices. A negative typeIdx is
+      // an ABSTRACT heap type (eq=-19, any=-18, func=-16, …) that `enc.i32`
+      // encodes directly as a signed-LEB heap type; it is not a relocatable
+      // module type, and pushing it as a reloc `symbolIndex` makes the reloc
+      // section's `s.u32(symbolIndex)` throw `u32 out of range: -19`.
+      if (instr.typeIdx >= 0) {
+        relocs.push({
+          type: RELOC.R_WASM_TYPE_INDEX_LEB,
+          offset: enc.position,
+          symbolIndex: instr.typeIdx,
+        });
+      }
       enc.i32(instr.typeIdx);
       break;
     }
     case "ref.cast_null": {
       enc.byte(GC.prefix);
       enc.byte(GC.ref_cast_null);
-      relocs.push({
-        type: RELOC.R_WASM_TYPE_INDEX_LEB,
-        offset: enc.position,
-        symbolIndex: instr.typeIdx,
-      });
+      // #15 — concrete types only (see ref.cast above).
+      if (instr.typeIdx >= 0) {
+        relocs.push({
+          type: RELOC.R_WASM_TYPE_INDEX_LEB,
+          offset: enc.position,
+          symbolIndex: instr.typeIdx,
+        });
+      }
       enc.i32(instr.typeIdx);
       break;
     }
@@ -736,11 +745,14 @@ function encodeInstrWithReloc(
     case "ref.test": {
       enc.byte(GC.prefix);
       enc.byte(GC.ref_test);
-      relocs.push({
-        type: RELOC.R_WASM_TYPE_INDEX_LEB,
-        offset: enc.position,
-        symbolIndex: instr.typeIdx,
-      });
+      // #15 — concrete types only (see ref.cast above).
+      if (instr.typeIdx >= 0) {
+        relocs.push({
+          type: RELOC.R_WASM_TYPE_INDEX_LEB,
+          offset: enc.position,
+          symbolIndex: instr.typeIdx,
+        });
+      }
       enc.i32(instr.typeIdx);
       break;
     }

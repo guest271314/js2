@@ -7,6 +7,7 @@
 import { ts, forEachChild } from "../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
+import { bodyReferencesOwnThis } from "./helpers/body-references-own-this.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, deduplicateLocals } from "./context/locals.js";
@@ -661,7 +662,9 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   const restInfo = ctx.funcRestParams.get(func.name);
   const params: { name: string; type: ValType }[] = [];
   const linearParams = getLinearU8ParamIndicesForDeclaration(ctx, decl);
-  const linearParamBuffers: { name: string; ptrLocalIdx: number; lenLocalIdx: number }[] = [];
+  // #2045: carry the param's ts.Symbol so the buffer registry is keyed by
+  // symbol (scope-correct) rather than identifier text (shadow-blind).
+  const linearParamBuffers: { sym: ts.Symbol | undefined; ptrLocalIdx: number; lenLocalIdx: number }[] = [];
   const funcType = ctx.mod.types[func.typeIdx];
   const sigParamTypes = funcType?.kind === "func" ? funcType.params : undefined;
   let wasmParamCursor = 0;
@@ -681,7 +684,8 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
           type: sigParamTypes?.[lenLocalIdx] ?? { kind: "i32" },
         },
       );
-      linearParamBuffers.push({ name: paramName, ptrLocalIdx, lenLocalIdx });
+      const paramSym = ts.isIdentifier(param.name) ? ctx.checker.getSymbolAtLocation(param.name) : undefined;
+      linearParamBuffers.push({ sym: paramSym, ptrLocalIdx, lenLocalIdx });
     } else if (restInfo && i === restInfo.restIndex) {
       // Rest parameter — use the vec struct ref type from the function signature
       params.push({
@@ -729,6 +733,17 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   // counts as an i32-safe write.
   const i32SpecializedArrays = collectI32SpecializedArrays(decl, i32CoercedLocals);
 
+  // #2152 — a named function declaration whose body references `this` may be
+  // passed by reference as an array-HOF callback (e.g.
+  // `arr.filter(callbackfn, thisArg)`), which installs the spec `thisArg` into
+  // the `__current_this` module global before the `call_ref`. Allow such a
+  // body's `this` to read that global. For DIRECT calls `__current_this` is
+  // null, and the null-guarded read (#1702) falls back to `undefined` — exactly
+  // the spec-correct free-function `this`, so this is behavior-preserving for
+  // ordinary calls and only changes the value when a receiver was actually
+  // installed by an enclosing dispatch.
+  const readsThis = decl.body ? bodyReferencesOwnThis(decl.body) : false;
+
   const fctx: FunctionContext = {
     name: func.name,
     params,
@@ -742,6 +757,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     labelMap: new Map(),
     savedBodies: [],
     isGenerator,
+    readsCurrentThis: readsThis,
     i32CoercedLocals: i32CoercedLocals.size > 0 ? i32CoercedLocals : undefined,
     i32SpecializedArrays: i32SpecializedArrays.size > 0 ? i32SpecializedArrays : undefined,
   };
@@ -751,7 +767,9 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     fctx.localMap.set(params[i]!.name, i);
   }
   for (const buf of linearParamBuffers) {
-    registerLinearU8Buffer(fctx, buf.name, buf.ptrLocalIdx, buf.lenLocalIdx);
+    // A param with no resolvable symbol can't be looked up by element access
+    // either, so skipping registration is sound — it falls to the GC path.
+    if (buf.sym) registerLinearU8Buffer(fctx, buf.sym, buf.ptrLocalIdx, buf.lenLocalIdx);
   }
 
   ctx.currentFunc = fctx;

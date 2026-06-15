@@ -1,10 +1,10 @@
 ---
 id: 2036
 title: "standalone: Array.prototype generics over array-like receivers emit invalid Wasm / null-deref / wrong results instead of refusing loud (~500+ tests)"
-status: ready
+status: in-progress
 sprint: Backlog
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-14
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -101,3 +101,41 @@ null deref or `-1`.
 - No `local.set expected f64, found externref` rows remain in the standalone
   baseline for `built-ins/Array/prototype`.
 - Host mode unchanged.
+
+## Progress
+
+### PR-1 — helper `$Object` arm (2026-06-14, dev-b) — DONE (partial)
+
+Taught the three standalone native array-like helpers to read a real array-like
+`$Object` receiver (`{0:x, length:n}`), so the target-agnostic generic loop in
+`compileArrayLikePrototypeCall` works for the callback methods. All in
+`src/codegen/object-runtime.ts`, gated on `ctx.standalone` (gc/host uses the JS
+`__extern_*` imports, byte-identical):
+
+- `__extern_length`: `$Object` arm = ToLength(Get(O,"length")) — `__extern_get`
+  the `"length"` key, `__unbox_number`, then truncate + clamp to [0, 2^53-1].
+- `__extern_get_idx`: `$Object` arm = `__extern_get(O, number_toString(trunc(idx)))`
+  — canonical decimal key matching `{0:x}` storage; proto-walk + marshaling via
+  `__extern_get`; null for holes.
+- `__extern_has_idx`: `$Object` arm = `__extern_has(O, number_toString(trunc(idx)))`
+  — HasProperty (proto-walk); present-but-undefined ≠ absent (hole).
+- `ensureObjectRuntime` registers `number_toString` + the boxing helpers early
+  (standalone only) so the arm bodies resolve their funcIdx.
+
+**Verified (tests/issue-2036.test.ts, 6 passing):** `forEach`/`some`/`every`/
+`findIndex` over an array-like `$Object` in standalone now return the correct
+result (were null-deref / silent-wrong); ToLength is honored (only in-range
+indices visited); holes are skipped.
+
+### Remaining (NOT in PR-1)
+
+- **SEARCH methods (`indexOf`/`lastIndexOf`/`includes`) and `filter`** over an
+  `$Object` receiver still emit **invalid Wasm** in standalone — a SEPARATE
+  pre-existing codegen bug in their call-site loop. The compiler's `emitWat`
+  output for the offending function is well-formed, but `emitBinary` mis-types a
+  local (`local.set[0] expected f64, found call externref`). This reproduces on
+  origin/main with the helper fix reverted, so it is NOT caused by PR-1 — it is a
+  binary-emitter / local-type-layout bug needing senior/infra attention. Filed as
+  a follow-up (escalated to tech lead 2026-06-14).
+- The broader generic-arm work (#1888 Slice 4) and the ~308 residual
+  callback-evaluation assertion rows — re-measure after PR-1.
