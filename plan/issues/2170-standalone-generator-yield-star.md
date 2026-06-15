@@ -1,7 +1,8 @@
 ---
 id: 2170
 title: "standalone: `yield*` delegation unsupported in native generator lowering (clean #680 bail)"
-status: ready
+status: done
+completed: 2026-06-15
 sprint: 62
 created: 2026-06-15
 priority: medium
@@ -100,3 +101,47 @@ general-iterable delegation (#1320 bridge) and `.return()/.throw()` forwarding a
 follow-up slices. Do NOT widen all spills to a tagged union in one pass (the #618
 big-bang-shift lesson). Released back to `ready` with this plan so a focused
 effort can execute it cleanly.
+
+## PR-1 landed (2026-06-15, sdev3) — slice-1: yield* <native-generator-call>
+
+Implemented the plan above (`src/codegen/generators-native.ts` + the
+`NativeGeneratorInfo.delegationSlots` field in `context/types.ts`):
+
+- **Terminator** `{ kind: "yield-star"; subject; innerName; siteIndex; next }`
+  added to `StateTerminator`. `emitYield` emits it when `yieldExpr.asteriskToken`
+  and the subject is a no-arg call to a native-generator declaration
+  (`nativeGeneratorDelegationName` resolves the callee symbol → its
+  `FunctionDeclaration` → `isNativeGeneratorCandidate`). Anything else
+  (arbitrary iterable, `x = yield* …` binding form, args) still `fail()`s to the
+  host path. `suspendCount`/candidate checks now count yield-star states.
+- **State struct** gains one `ref null $InnerState` mutable `deleg_<n>` field per
+  delegation site, appended AFTER the f64 spills so `spillFieldOffset+i`
+  indexing is untouched (the f64-only spill path is the regression-prone part —
+  left alone). `compileNativeGeneratorFunction` pushes `ref.null` for each
+  delegation slot at construction.
+- **Runtime** (`compileState` `yield-star` arm): on entry, lazily materialize the
+  inner (`compileNativeGeneratorFunction(inner)`) into the slot if null; drive
+  `__gen_resume_<inner>(slot)`; if `innerRes.done==0` re-yield `innerRes.value`
+  staying in THIS state (self-suspend → next `.next()` re-drives the inner);
+  else null the slot, advance to `next`, re-enter the dispatch loop. §27.5.3.7
+  iteration semantics for the common path.
+
+**Verified standalone, ZERO host imports:** delegate-then-yield (→6),
+yield-before-delegation (→10), delegation-only (→11), two sequential
+delegations (→6), element-count across the boundary (→4), manual `next()`
+ordering (inner values first). Tests: `tests/issue-2170-yield-star-delegation.test.ts`
+(6 cases) + the #2157 SF-3 `it.todo` flipped to a passing `it`. `generators.test`
++ #2157 regression guards unchanged; tsc/lint/format clean; zero host-mode
+regressions (the new terminator is reachable only on `yield*`).
+
+**Deferred (follow-up slices, NOT this PR):**
+- General-iterable delegation (`yield* [1,2,3]` / `yield* customIterable`) —
+  needs the #1320 standalone `__iterator`/`__iterator_next` bridge instead of a
+  direct native-generator resume call.
+- `x = yield* inner()` binding the inner's return value (§27.5.3.7's
+  return-value step) — currently bails.
+- `.return()`/`.throw()` delegation into the inner during iteration — an outer
+  `.return()` mid-delegation currently runs only the outer finalizers.
+- Empty inner generator (no yields) isn't a native-generator candidate, so
+  `yield* emptyGen()` bails to the host path (pre-existing native-generator
+  limitation, not specific to yield*).
