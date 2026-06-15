@@ -18,7 +18,7 @@ import { compileStringLiteral } from "./shared.js";
 import { getArrTypeIdxFromVec, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
 import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
-import { ensureArgcGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
+import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
 import {
   compileArrowAsClosure,
   compileExpression,
@@ -28,6 +28,7 @@ import {
   VOID_RESULT,
 } from "./shared.js";
 import { emitUndefined, ensureGetUndefined } from "./expressions/late-imports.js";
+import { ensureAnyHelpers, isAnyValue } from "./any-helpers.js";
 import {
   ensureNativeStringHelpers,
   nativeStringLiteralInstrs,
@@ -5338,11 +5339,75 @@ interface ArrayCallbackSetup {
   closureTmp?: number;
   callBridgeIdx?: number;
   cbTmp?: number;
+  /**
+   * #2152 — externref local holding the `thisArg` to bind as the callback's
+   * `this` (spec §23.1.3.* `Call(callbackfn, thisArg, …)`). Undefined when the
+   * method takes no thisArg (reduce/reduceRight), none was passed, or the
+   * callback is an arrow function (arrows are lexically `this`-bound, so the
+   * thisArg is ignored). When set, `buildClosureCallInstrs` installs it into the
+   * `__current_this` module global (save/restore) around the `call_ref`, where
+   * the callback body's `this` reads it (#1636-S1 / #1702).
+   */
+  thisArgTmp?: number;
+  /**
+   * #2152 — externref save slot for the previous `__current_this` value, so the
+   * global can be restored after each callback `call_ref` (nesting safety:
+   * nested HOFs / re-entrant dispatch must not leak a stale receiver). Paired
+   * with `thisArgTmp` (set iff `thisArgTmp` is set).
+   */
+  prevThisTmp?: number;
+}
+
+/**
+ * #2152 — Compile the optional `thisArg` argument of an array HOF method into an
+ * externref local so it can be installed as the callback's `this` around the
+ * `call_ref`. Returns the local index, or undefined when no thisArg should be
+ * forwarded:
+ *   - the method has no thisArg slot (`thisArgIndex` undefined — reduce family),
+ *   - no thisArg argument is present,
+ *   - the callback is an arrow function (lexical `this`; thisArg ignored).
+ * Per ECMA-262 the thisArg is evaluated as `arguments[thisArgIndex]`, AFTER the
+ * callback (`arguments[0]`), which matches the call order here (callback is
+ * compiled by `setupArrayCallback` before this runs).
+ */
+function compileThisArg(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  callExpr: ts.CallExpression,
+  tag: string,
+  thisArgIndex: number | undefined,
+): { thisArgTmp: number; prevThisTmp: number } | undefined {
+  if (thisArgIndex === undefined) return undefined;
+  const cbArg = callExpr.arguments[0];
+  // Arrow callbacks are lexically `this`-bound — the thisArg MUST be ignored.
+  if (cbArg && ts.isArrowFunction(cbArg)) return undefined;
+  const thisArgExpr = callExpr.arguments[thisArgIndex];
+  if (!thisArgExpr) return undefined;
+
+  // Ensure the __current_this global exists so buildClosureCallInstrs can install.
+  ensureCurrentThisGlobal(ctx);
+  const thisArgTmp = allocLocal(fctx, `__arr_${tag}_this_${fctx.locals.length}`, { kind: "externref" });
+  const prevThisTmp = allocLocal(fctx, `__arr_${tag}_prevthis_${fctx.locals.length}`, { kind: "externref" });
+  const tArgType = compileExpression(ctx, fctx, thisArgExpr);
+  if (tArgType && tArgType.kind !== "externref") {
+    coerceType(ctx, fctx, tArgType, { kind: "externref" });
+  } else if (!tArgType) {
+    // null result — treat as undefined receiver.
+    emitUndefined(ctx, fctx);
+  }
+  fctx.body.push({ op: "local.set", index: thisArgTmp });
+  return { thisArgTmp, prevThisTmp };
 }
 
 /**
  * Compile the callback argument and set up either a closure (call_ref) path
  * or a host bridge fallback. Returns null if setup fails (error pushed).
+ *
+ * `thisArgIndex` (#2152): the argument position of the spec `thisArg` for this
+ * method (1 for filter / map / forEach / find / findIndex / findLast /
+ * findLastIndex / some / every), or undefined for methods with no thisArg
+ * (reduce / reduceRight). When present and the callback is not an arrow, the
+ * thisArg is compiled and threaded so the callback's `this` binds to it.
  */
 function setupArrayCallback(
   ctx: CodegenContext,
@@ -5351,6 +5416,7 @@ function setupArrayCallback(
   methodName: string,
   tag: string,
   bridgeName?: string,
+  thisArgIndex?: number,
 ): ArrayCallbackSetup | null {
   const cbArg = callExpr.arguments[0]!;
   const cbResult =
@@ -5384,7 +5450,18 @@ function setupArrayCallback(
     fctx.body.push({ op: "local.set", index: cbTmp });
   }
 
-  return { closureInfo, closureTypeIdx, closureTmp, callBridgeIdx, cbTmp };
+  // #2152 — compile the optional thisArg AFTER the callback (spec arg order).
+  const thisArgSlots = compileThisArg(ctx, fctx, callExpr, tag, thisArgIndex);
+
+  return {
+    closureInfo,
+    closureTypeIdx,
+    closureTmp,
+    callBridgeIdx,
+    cbTmp,
+    thisArgTmp: thisArgSlots?.thisArgTmp,
+    prevThisTmp: thisArgSlots?.prevThisTmp,
+  };
 }
 
 /** Common locals for array iteration loops. */
@@ -5467,8 +5544,35 @@ function buildClosureCallInstrs(
   const SPEC_ARITY = 3;
   const argsPlumbing = emitArrayCallbackArgsPlumbing(ctx, fctx, SPEC_ARITY, numParams, vecTypeIdx, arrTypeIdx, loop);
 
+  // #2152 — install thisArg as the callback's `this` for the duration of the
+  // call_ref. The callback body (funcexpr / named-decl that references `this`)
+  // reads the `__current_this` module global with a null-guard (#1702), so
+  // setting it here forwards the spec `thisArg`. Save the previous value first
+  // (nesting safety) and restore it right after the call_ref. The restore
+  // (`global.set`) does not disturb the call result already on the stack.
+  // No host import — `__current_this` is a pure Wasm global, so this works
+  // identically in standalone mode. Arrow callbacks never reach here with a
+  // thisArgTmp (lexical `this`; see compileThisArg).
+  const installThis: Instr[] =
+    setup.thisArgTmp !== undefined && setup.prevThisTmp !== undefined && ctx.currentThisGlobalIdx >= 0
+      ? [
+          { op: "global.get", index: ctx.currentThisGlobalIdx } as Instr,
+          { op: "local.set", index: setup.prevThisTmp } as Instr,
+          { op: "local.get", index: setup.thisArgTmp } as Instr,
+          { op: "global.set", index: ctx.currentThisGlobalIdx } as Instr,
+        ]
+      : [];
+  const restoreThis: Instr[] =
+    setup.thisArgTmp !== undefined && setup.prevThisTmp !== undefined && ctx.currentThisGlobalIdx >= 0
+      ? [
+          { op: "local.get", index: setup.prevThisTmp } as Instr,
+          { op: "global.set", index: ctx.currentThisGlobalIdx } as Instr,
+        ]
+      : [];
+
   return [
     ...argsPlumbing,
+    ...installThis,
     { op: "local.get", index: closureTmp } as Instr,
     // Element value (1st user param) — only pushed if callback declares ≥1 param.
     // A 0-arg callback (e.g. `function() {}`) compiles to a funcref that takes only
@@ -5509,6 +5613,7 @@ function buildClosureCallInstrs(
     ...guardedFuncRefCastInstrs(fctx, closureInfo.funcTypeIdx),
     { op: "ref.as_non_null" } as Instr,
     { op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr,
+    ...restoreThis,
   ];
 }
 
@@ -5653,20 +5758,72 @@ function buildTruthyCheck(ctx: CodegenContext, setup: ArrayCallbackSetup): Instr
     if (setup.closureInfo.returnType === null) {
       return [{ op: "i32.const", value: 0 } as Instr];
     }
-    const retKind = setup.closureInfo.returnType?.kind;
-    if (retKind === "f64") {
-      return [{ op: "f64.const", value: 0 } as Instr, { op: "f64.ne" } as Instr];
-    }
-    if (retKind === "i32") {
-      return []; // i32 is already truthy/falsy
-    }
-    // externref / ref / ref_null: non-null is truthy
-    if (retKind === "externref" || retKind === "ref" || retKind === "ref_null") {
-      return [{ op: "ref.is_null" } as Instr, { op: "i32.eqz" } as Instr];
-    }
-    return []; // default: assume i32
+    return buildToBooleanInstrs(ctx, setup.closureInfo.returnType);
   }
-  return ctx.fast ? [] : [{ op: "f64.const", value: 0 } as Instr, { op: "f64.ne" } as Instr];
+  // #2085 — non-closure (legacy) path: f64 result. Use |x|>0 so NaN/±0 are
+  // falsy (the old `f64.ne 0` wrongly treated NaN as truthy), matching
+  // `ensureI32Condition`.
+  return ctx.fast
+    ? []
+    : [{ op: "f64.abs" } as Instr, { op: "f64.const", value: 0 } as Instr, { op: "f64.gt" } as Instr];
+}
+
+/**
+ * #2085 — spec §7.1.2 ToBoolean for an array-HOF callback result, mirroring the
+ * canonical `ensureI32Condition` (src/codegen/index.ts) so the two hand-rolled
+ * truthiness sites agree. Returns `Instr[]` (these helpers build instruction
+ * lists rather than push to a body). Produces an i32 (1 = truthy).
+ *   - f64        → |x| > 0   (NaN, +0, -0 all falsy; the old `f64.ne 0` made NaN truthy)
+ *   - i32        → as-is (already 0/1-valued for the boolean callbacks)
+ *   - externref  → `__is_truthy` (false/0/NaN/""/null/undefined → falsy)
+ *   - any-boxed ref → `__any_unbox_bool` (proper JS truthiness on the boxed value)
+ *   - native string ref → length > 0 (empty string is falsy)
+ *   - other ref  → non-null (the only observable truthiness for opaque structs)
+ */
+function buildToBooleanInstrs(ctx: CodegenContext, retType: ValType): Instr[] {
+  const retKind = retType.kind;
+  if (retKind === "f64") {
+    return [{ op: "f64.abs" } as Instr, { op: "f64.const", value: 0 } as Instr, { op: "f64.gt" } as Instr];
+  }
+  if (retKind === "i32") {
+    return []; // already truthy/falsy
+  }
+  if (retKind === "i64") {
+    return [{ op: "i64.eqz" } as Instr, { op: "i32.eqz" } as Instr];
+  }
+  if (retKind === "externref") {
+    addUnionImports(ctx);
+    const isTruthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
+    if (isTruthyIdx !== undefined) {
+      return [{ op: "call", funcIdx: isTruthyIdx } as Instr];
+    }
+    return [{ op: "ref.is_null" } as Instr, { op: "i32.eqz" } as Instr];
+  }
+  if (retKind === "ref" || retKind === "ref_null") {
+    // Boxed `any` value — proper JS truthiness (false/0/NaN/""/null → falsy).
+    if (isAnyValue(retType, ctx)) {
+      ensureAnyHelpers(ctx);
+      const unboxBoolIdx = ctx.funcMap.get("__any_unbox_bool");
+      if (unboxBoolIdx !== undefined) {
+        return [{ op: "call", funcIdx: unboxBoolIdx } as Instr];
+      }
+    }
+    // Native string ref — empty string is falsy (check len > 0 after flatten).
+    if (retType.typeIdx === ctx.anyStrTypeIdx && ctx.anyStrTypeIdx >= 0) {
+      const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+      if (flattenIdx !== undefined && ctx.nativeStrTypeIdx >= 0) {
+        return [
+          { op: "call", funcIdx: flattenIdx } as Instr,
+          { op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "i32.gt_s" } as Instr,
+        ];
+      }
+    }
+    // Opaque struct ref — non-null is truthy.
+    return [{ op: "ref.is_null" } as Instr, { op: "i32.eqz" } as Instr];
+  }
+  return []; // default: assume already i32
 }
 
 /** Build instructions to check falsiness of a callback result (-> i32). */
@@ -5678,20 +5835,19 @@ function buildFalsyCheck(ctx: CodegenContext, setup: ArrayCallbackSetup): Instr[
     if (setup.closureInfo.returnType === null) {
       return [{ op: "i32.const", value: 1 } as Instr];
     }
-    const retKind = setup.closureInfo.returnType?.kind;
-    if (retKind === "f64") {
-      return [{ op: "f64.const", value: 0 } as Instr, { op: "f64.eq" } as Instr];
-    }
-    if (retKind === "i32") {
-      return [{ op: "i32.eqz" } as Instr];
-    }
-    // externref / ref / ref_null: null is falsy
-    if (retKind === "externref" || retKind === "ref" || retKind === "ref_null") {
-      return [{ op: "ref.is_null" } as Instr];
-    }
-    return [{ op: "i32.eqz" } as Instr];
+    // #2085 — falsy == !truthy. Reuse the canonical ToBoolean then negate, so
+    // NaN / boxed 0/""/false are correctly falsy (the old per-kind copy treated
+    // NaN-as-truthy and boxed-falsy-as-truthy, the inverse of the #2085 bug).
+    return [...buildToBooleanInstrs(ctx, setup.closureInfo.returnType), { op: "i32.eqz" } as Instr];
   }
-  return ctx.fast ? [{ op: "i32.eqz" } as Instr] : [{ op: "f64.const", value: 0 } as Instr, { op: "f64.eq" } as Instr];
+  return ctx.fast
+    ? [{ op: "i32.eqz" } as Instr]
+    : [
+        { op: "f64.abs" } as Instr,
+        { op: "f64.const", value: 0 } as Instr,
+        { op: "f64.gt" } as Instr,
+        { op: "i32.eqz" } as Instr,
+      ];
 }
 
 /**
@@ -5773,7 +5929,7 @@ function compileArrayFilter(
     return { kind: "ref_null", typeIdx: vecTypeIdx };
   }
 
-  const setup = setupArrayCallback(ctx, fctx, callExpr, "filter", "flt");
+  const setup = setupArrayCallback(ctx, fctx, callExpr, "filter", "flt", undefined, 1);
   if (!setup) return null;
 
   const resData = allocLocal(fctx, `__arr_flt_rd_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
@@ -5878,7 +6034,7 @@ function compileArrayMap(
     }
   }
 
-  const setup = setupArrayCallback(ctx, fctx, callExpr, "map", "map");
+  const setup = setupArrayCallback(ctx, fctx, callExpr, "map", "map", undefined, 1);
   if (!setup) return null;
 
   // Update map result type from closure return type if available
@@ -6300,7 +6456,7 @@ function compileArrayForEach(
     return null; // void method
   }
 
-  const setup = setupArrayCallback(ctx, fctx, callExpr, "forEach", "fe");
+  const setup = setupArrayCallback(ctx, fctx, callExpr, "forEach", "fe", undefined, 1);
   if (!setup) return null;
 
   const loop = setupArrayLoop(ctx, fctx, propAccess, vecTypeIdx, arrTypeIdx, elemType, "fe");
@@ -6343,7 +6499,7 @@ function compileArrayFind(
     return elemType;
   }
 
-  const setup = setupArrayCallback(ctx, fctx, callExpr, "find", "find");
+  const setup = setupArrayCallback(ctx, fctx, callExpr, "find", "find", undefined, 1);
   if (!setup) return null;
 
   const elemTmpLocal = allocLocal(fctx, `__arr_find_el_${fctx.locals.length}`, elemType);
@@ -6421,7 +6577,7 @@ function compileArrayFindIndex(
     return { kind: "i32" };
   }
 
-  const setup = setupArrayCallback(ctx, fctx, callExpr, "findIndex", "fi");
+  const setup = setupArrayCallback(ctx, fctx, callExpr, "findIndex", "fi", undefined, 1);
   if (!setup) return null;
 
   const loop = setupArrayLoop(ctx, fctx, propAccess, vecTypeIdx, arrTypeIdx, elemType, "fi");
@@ -6534,7 +6690,7 @@ function compileArrayFindLast(
     return elemType;
   }
 
-  const setup = setupArrayCallback(ctx, fctx, callExpr, "findLast", "findLast");
+  const setup = setupArrayCallback(ctx, fctx, callExpr, "findLast", "findLast", undefined, 1);
   if (!setup) return null;
 
   const elemTmpLocal = allocLocal(fctx, `__arr_findLast_el_${fctx.locals.length}`, elemType);
@@ -6612,7 +6768,7 @@ function compileArrayFindLastIndex(
     return { kind: "i32" };
   }
 
-  const setup = setupArrayCallback(ctx, fctx, callExpr, "findLastIndex", "fli");
+  const setup = setupArrayCallback(ctx, fctx, callExpr, "findLastIndex", "fli", undefined, 1);
   if (!setup) return null;
 
   const loop = setupArrayLoopReverse(ctx, fctx, propAccess, vecTypeIdx, arrTypeIdx, elemType, "fli");
@@ -6680,7 +6836,7 @@ function compileArraySome(
     return { kind: "i32" };
   }
 
-  const setup = setupArrayCallback(ctx, fctx, callExpr, "some", "some");
+  const setup = setupArrayCallback(ctx, fctx, callExpr, "some", "some", undefined, 1);
   if (!setup) return null;
 
   const loop = setupArrayLoop(ctx, fctx, propAccess, vecTypeIdx, arrTypeIdx, elemType, "some");
@@ -6742,7 +6898,7 @@ function compileArrayEvery(
     return { kind: "i32" };
   }
 
-  const setup = setupArrayCallback(ctx, fctx, callExpr, "every", "evr");
+  const setup = setupArrayCallback(ctx, fctx, callExpr, "every", "evr", undefined, 1);
   if (!setup) return null;
 
   const loop = setupArrayLoop(ctx, fctx, propAccess, vecTypeIdx, arrTypeIdx, elemType, "evr");

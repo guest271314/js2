@@ -1,10 +1,10 @@
 ---
-id: 2149
+id: 2153
 title: "standalone object emit: `Object emit error: u32 out of range: -19` — abstract heap-type typeIdx emitted as a relocation symbolIndex"
 status: done
 sprint: Backlog
 created: 2026-06-14
-updated: 2026-06-14
+updated: 2026-06-15
 completed: 2026-06-14
 priority: high
 feasibility: medium
@@ -17,7 +17,17 @@ related: [2029, 2081, 1842]
 origin: "Surfaced by dev-c during #2081 standalone loose-eq work: a function with any-typed params (`function eq(a:any,b:any){return a==b}`) fails relocatable-object compilation (`compileToObject`, --target standalone) with `Object emit error: u32 out of range: -19`, blocking #2081 reproduction."
 ---
 
-# #2149 — object emit: abstract heap-type typeIdx serialized as a reloc symbolIndex
+> **2026-06-15 renumber (senior-dev, #2152 PR):** this issue was created with
+> `id: 2149`, colliding on `origin/main` with
+> `2149-ci-refresh-baseline-github-token-gh013-deadlock.md` (both `done`, both
+> with merged PRs — #1455 here, #1452 there). The duplicate failed the issue-id
+> integrity gate (`check:issue-ids`) on every PR that merged main, blocking the
+> `quality` required check. Renumbered the chronologically-newer file (this one,
+> commit `d81789006`) to the next free ID **2153** per the gate's own guidance.
+> Historical PR/commit references to `#2149` for the object-emit fix remain
+> valid as history; this file is now `#2153`.
+
+# #2149 → #2153 — object emit: abstract heap-type typeIdx serialized as a reloc symbolIndex
 
 ## Problem
 

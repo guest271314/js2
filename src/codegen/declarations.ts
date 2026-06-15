@@ -1260,7 +1260,9 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     addImport(ctx, "env", "JSON_stringify", { kind: "func", typeIdx });
   }
   if (!jsonHostUnavailable && state.jsonNeedParse) {
-    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+    // #2013 — (text, reviver) so JSON.parse can apply §25.5.1
+    // InternalizeJSONProperty. The reviver is `ref.null.extern` when absent.
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "JSON_parse", { kind: "func", typeIdx });
   }
 

@@ -8058,7 +8058,9 @@ function collectJsonImports(ctx: CodegenContext, sourceFile: ts.SourceFile): voi
     addImport(ctx, "env", "JSON_stringify", { kind: "func", typeIdx });
   }
   if (needParse) {
-    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+    // #2013 — (text, reviver); reviver is `ref.null.extern` when absent so the
+    // host can apply §25.5.1 InternalizeJSONProperty.
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "JSON_parse", { kind: "func", typeIdx });
   }
 }
