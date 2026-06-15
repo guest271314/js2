@@ -204,6 +204,18 @@ export interface FunctionContext {
   /** Whether this function is a generator (function*) */
   isGenerator?: boolean;
   /**
+   * (#2007/#1448) Set once a closure-allocating array method
+   * (`map`/`filter`/`flatMap`/`forEach`/`reduce`/`find`/`sort`) has been
+   * lowered in this function body. The standalone vec-concat join fast-path
+   * (`tryCompileNativeVecConcatOperand`) reads it: once such a method has
+   * emitted its closure setup, a LATE `number_toString` registration triggered
+   * by the join would `addUnionImports`-shift and corrupt the already-emitted
+   * closure code (a pre-existing hazard `a.join(",")` also exhibits). So the
+   * join falls back to `$__any_to_string` ("[object Object]", the baseline
+   * behaviour) when this flag is set — no regression.
+   */
+  emittedClosureArrayMethod?: boolean;
+  /**
    * (#1042) True while {@link emitAsyncStateMachine} is driving an async
    * function body through the CPS transform. Read by the `AwaitExpression`
    * dispatcher in expressions.ts to decide between the legacy pass-through and
@@ -354,6 +366,14 @@ export interface FunctionContext {
     continueDepthBaseline: number[];
   }[];
   /**
+   * Number of enclosing `try` blocks WITH a catch clause currently being
+   * compiled. Wasm `return_call` replaces the caller frame, so a callee's
+   * throw would unwind past the enclosing handler — the tail-call rewrite
+   * must be suppressed while this is > 0, exactly like `finallyStack`
+   * suppresses it for pending finally blocks. (#1972)
+   */
+  tryCatchDepth?: number;
+  /**
    * Pending writeback instructions for mutable callback captures (#859).
    */
   pendingCallbackWritebacks?: Instr[];
@@ -426,16 +446,22 @@ export interface FunctionContext {
     }
   >;
   /**
-   * #1886 Slice B — live linear-backed `Uint8Array` buffers in this function,
-   * keyed by binding name. A buffer proven linear-safe by the #1886 analysis
+   * #1886 Slice B — live linear-backed `Uint8Array` buffers in this function. A
+   * buffer proven linear-safe by the #1886 analysis
    * (`ctx.linearUint8.safeBindings`) is represented as a `(ptr, len)` pair of
    * i32 locals instead of a GC vec, so `buf[i]`, `buf.length`, and
    * `process.std*.{read,write}(buf)` operate on linear memory with zero
    * GC↔linear copies. Absent entry ⇒ the binding uses the existing GC-vec path
    * unchanged.
+   *
+   * #2045: keyed by the binding's `ts.Symbol`, NOT by identifier text. A
+   * name-keyed registry was scope-blind — a linear param `buf` plus an
+   * inner-block `const buf = new Uint8Array(...)` (a distinct symbol with the
+   * same name) collided, so element access addressed the wrong buffer in both
+   * shadowing directions (silent corruption). Symbol identity is scope-correct.
    */
   linearU8Buffers?: Map<
-    string,
+    ts.Symbol,
     {
       ptrLocalIdx: number; // i32 — base byte offset into the page-4 linear arena
       lenLocalIdx: number; // i32 — element length (== byte length for Uint8Array)
@@ -627,12 +653,41 @@ export interface CodegenContext {
    */
   applyClosureReserved?: boolean;
   /**
+   * (#2151) Method names for which a closed-struct `__call_m_<name>` dispatcher
+   * was reserved at an any-receiver call site (standalone/wasi). The placeholder
+   * body is filled by `fillClosedMethodDispatch` at FINALIZE (after all
+   * object-literal struct types + their `<Struct>_<name>` methods are known),
+   * mirroring the `fillApplyClosure` reserve-then-fill pattern (#1719). Each
+   * dispatcher does a `ref.test/ref.cast/call <Struct>_<name>` type-switch over
+   * every closed struct that has the method (threading the struct as `this`),
+   * falling through to the open-`$Object` `__extern_method_call` otherwise. Only
+   * populated under `--target standalone || --target wasi`.
+   */
+  closedMethodDispatchNames?: Set<string>;
+  /**
    * (#1904) True once the standalone `__extern_is_array(externref) -> i32`
    * helper placeholder has been emitted by the object runtime. Its body is
    * filled in post-processing after all Wasm array carrier types (`__vec_*`
    * plus `$ObjVec`) are known.
    */
   externIsArrayReserved?: boolean;
+  /**
+   * (#2038) True once the native iterator runtime (`ensureNativeIteratorRuntime`,
+   * iterator-native.ts) has emitted `__iterator` / `__iterator_next` with a
+   * vec-only body and is awaiting its USER-iterator arm. The USER arm dispatches
+   * a custom `{[Symbol.iterator]()}` / `{next()}` object through the closed-struct
+   * method dispatchers `__call_@@iterator` / `__call_next` and the field getters
+   * `__sget_value` / `__sget_done`, all of which are emitted at FINALIZE (after
+   * every user struct is known — `emitIteratorMethodExport` /
+   * `emitStructFieldGetters`). So the carrier bodies are rebuilt with the USER arm
+   * by `fillNativeIteratorUserArms` in post-processing — same reserve-then-fill
+   * funcIdx-authority discipline as `protoIteratorDriverReserved` (#1719). The
+   * eager body is a valid vec-only carrier (byte-identical to the pre-#2038
+   * runtime), so if the fill is ever skipped (e.g. multi-module) custom iterables
+   * keep trapping as before rather than shipping a broken module. Only set under
+   * `--target standalone` / `wasi`.
+   */
+  nativeIteratorUserArmPending?: boolean;
   /**
    * Static property initializer expressions to compile into __module_init.
    * `className` (#1395) is the owning class name — used to set
@@ -687,6 +742,30 @@ export interface CodegenContext {
   currentThisGlobalIdx: number;
   /** Map from struct name → set of closure type indices used for valueOf fields */
   valueOfClosureTypes: Map<string, number[]>;
+  /**
+   * (#1989) Set of `${structName}_${valueOf|toString|@@toPrimitive}` method full
+   * names whose SHARED func body has already been claimed by the first object
+   * literal of a deduped anon-struct type. Same-shape literals share a struct
+   * type, so the first literal compiled keeps the shared `${name}_valueOf` func
+   * (referenced by the host `__call_*`/`__sget_*` exports and name-keyed coercion
+   * fallbacks); every LATER same-shape literal forks its own per-literal method
+   * func and stores its own funcref in the struct field, so per-instance
+   * `call_ref` dispatch resolves to the correct method body per object.
+   */
+  toPrimitiveSharedClaimed: Set<string>;
+  /**
+   * (#1989) Set of anon-struct type names that have MORE THAN ONE object literal
+   * sharing the deduped struct type and carrying a `valueOf`/`toString`/
+   * `@@toPrimitive` method — i.e. the same-shape collision case where each
+   * literal stores its own method funcref. Only these structs route the host
+   * `__call_*` ToPrimitive dispatch through the per-instance struct-field closure
+   * (instead of the name-keyed standalone func, which is the first literal's body
+   * and is correct + simpler for the single-literal case). This keeps the
+   * single-literal path — including the §7.1.1.1 step-6 TypeError walk — on the
+   * well-tested standalone arm, and only opts the genuine collision case into
+   * per-instance dispatch.
+   */
+  toPrimitiveForkedStructs: Set<string>;
   /** Tag index for the exception tag (-1 if not yet registered) */
   exnTagIdx: number;
   /** Whether union type helper imports have been registered */
@@ -969,6 +1048,20 @@ export interface CodegenContext {
   liveBodies: Set<Instr[]>;
   /** Hash-based lookup for anonymous struct deduplication */
   anonStructHash: Map<string, string>;
+  /**
+   * (#2009) Result of the same-structural-shape collision-resolution post-pass:
+   * anon struct name → its shape-id. Populated ONLY for structs that genuinely
+   * collide (a different-named struct shares the same field TYPES, making them
+   * runtime-indistinguishable under WasmGC iso-recursive canonicalization). Such
+   * structs get a hidden trailing `$shape` i32 field retro-stamped per-instance;
+   * the host `__struct_field_names`/`__sset_*` exports read it to recover the
+   * instance's real field names by VALUE. Non-colliding structs are absent here
+   * and keep their original layout (zero blast radius — the common case, incl.
+   * all IR-path construction, is byte-identical to main).
+   */
+  shapeIdByStructName: Map<string, number>;
+  /** (#2009) shape-id → ordered field-name CSV, for the host name export. */
+  shapeNameCsvById: string[];
   /** Pending late import shift state */
   pendingLateImportShift: { importsBefore: number } | null;
   /** Map from class name → global index of the prototype externref singleton */

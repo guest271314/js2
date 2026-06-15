@@ -182,3 +182,35 @@ Sprint 50 ran as a transition sprint: began as "closure/call dispatch wave 2" bu
 - Structural issue #1382 filed: Wasm closures not JS-callable from host (blocks #1338, #1339, #1358)
 
 **Sprint 51 begins**: 25 issues, theme = spec-completeness wave + IR retirement gate. Target: +1,500–1,800 net passes.
+
+---
+
+## Sprint 61 (2026-06-05 → 2026-06-12) — npm-library support + architecture hardening
+
+Began at 30,585 / 43,135 test262 passes (70.9%); closed at 31,267 / 43,135
+(72.5%), **+682 net** over the cycle. 91 issues done (0 wont-fix), 84 carried to
+sprint 62.
+
+**Key work landed**:
+- AnyValue host-bridge cluster (#2063 → #2058 → #2059): per-site externref tag
+  dispatch (`__host_eq`/`__host_add`/`__host_compare`) — the −788 comparator
+  trap structurally avoided.
+- ~45 deep-audit fixes (optional chaining, spread, switch, block scope,
+  for-of/for-in, regex VM opcodes, native strings, linear backend, IR reordering,
+  fmod/hypot/isStaticNaN).
+- Object-literal cluster #2126–#2132; presence-predicate joint spec (#2130+#1991,
+  PR #1394).
+- Pipeline hardening: 4 queue-rot mechanisms fixed (PR #1408) + baseline-meta SHA
+  fix (PR #1413).
+- Two architect specs (optional-chain undefined repr PR #1393; presence predicate
+  PR #1394), adversarially reviewed.
+
+**Infrastructure / process**:
+- Symphony takeover: claims released, acorn gate #1712 blocker landed.
+- Wrap-up debt flagged: sprints 55–60 lacked formal closure; sprint 61 closed
+  retroactively 2026-06-15 with full wrap_checklist, retro, and this entry.
+
+**Sprint 62 begins**: "Fable architecture sprint" — clean/maintainable/trustworthy/
+consistent compiler architecture (one pipeline driver, one coercion engine, value-rep
+doctrine, IR verifier, backend symmetry). Flat test262 headline accepted by design;
+conformance payoff lands in sprint 63.

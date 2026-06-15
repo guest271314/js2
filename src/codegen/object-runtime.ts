@@ -64,6 +64,7 @@ import {
   nativeStringLiteralInstrs,
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
+import { emitNativeNumberFormat } from "./number-format-native.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
@@ -147,6 +148,24 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // Dependencies: native string helpers (flatten + equals) and the string type
   // indices they populate.
   ensureNativeStringHelpers(ctx);
+
+  // #2036 — the array-like `$Object` arms in __extern_length / __extern_get_idx /
+  // __extern_has_idx need (a) `number_toString` to ToString a numeric index into
+  // its canonical decimal key, and (b) `__unbox_number` to ToLength the stored
+  // `length` value. Gate on standalone: in gc/host mode this runtime is also
+  // pulled in (Object.keys etc.) but the host `__extern_*` JS imports own the
+  // array-like read path, so registering these helpers there would only shift
+  // funcMap indices and risk breaking existing references — the $Object arms are
+  // skipped in gc mode (see `withObjectArrayLikeArms` below). Both helpers are
+  // DEFINED funcs in standalone (no import added → no funcIdx shift) and
+  // idempotent. Register BEFORE the helper bodies bake their `call` funcIdx.
+  // (`number_toString` also upgrades __extern_toString's boxed-number arm from
+  // "[object Object]" to the real decimal, which is spec-correct.)
+  const objArrayLikeArms = ctx.standalone;
+  if (objArrayLikeArms) {
+    emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+    addUnionImportsViaRegistry(ctx);
+  }
 
   const anyStrTypeIdx = ctx.anyStrTypeIdx;
   const nativeStrTypeIdx = ctx.nativeStrTypeIdx;
@@ -1198,13 +1217,16 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
 
   // ── __delete_property(externref obj, externref key) -> i32 ───────────────
   //
-  // ES §13.5.1 delete operator on an own data property. Finds the live entry;
-  // if present, marks it tombstoned (FLAG_TOMBSTONE), nulls its value (drop the
-  // reference for GC), decrements count, increments tombstones, returns 1. A
-  // configurable check could refuse non-configurable props, but data props
-  // created via __extern_set are always configurable (FLAG_DEFAULT), so delete
-  // always succeeds — returns 1 even when the key is absent (matches the host
-  // import, which returns true for missing own props per spec step 5).
+  // ES §13.5.1 delete operator / §28.1.4 Reflect.deleteProperty on an own data
+  // property. Finds the live entry; if present AND configurable (§10.1.10
+  // OrdinaryDelete), marks it tombstoned (FLAG_TOMBSTONE), nulls its value (drop
+  // the reference for GC), decrements count, increments tombstones, returns 1.
+  // (#2046 PR-B) A configurability preflight refuses non-configurable props
+  // (return 0): props on a sealed/frozen object, or data props defined
+  // non-configurable via __defineProperty_value (#1629) — the prior "always
+  // configurable" assumption was stale once #1629 landed. Returns 1 when the key
+  // is absent (delete of a missing own prop succeeds, §10.1.10 step 2 / host
+  // import parity).
   //
   // params: 0=obj(externref) 1=key(externref)
   // locals: 2=any(anyref) 3=o(ref null $Object) 4=e(ref null $PropEntry)
@@ -1234,6 +1256,39 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         op: "if",
         blockType: { kind: "empty" },
         then: [{ op: "i32.const", value: 1 }, { op: "return" }],
+      },
+      // (#2046 PR-B) Configurability preflight — §10.1.10 OrdinaryDelete step 3-4:
+      // a non-configurable own property is NOT deletable. Return 0 (false, keep)
+      // when either:
+      //   (a) the OBJECT is sealed/frozen — `__object_seal`/`__object_freeze`
+      //       set the object-level OBJ_FLAG_SEALED bit but do NOT clear each
+      //       entry's FLAG_CONFIGURABLE, so the per-entry check below is NOT
+      //       sufficient on its own; sealed ⇒ every own prop is non-configurable
+      //       (frozen ⊃ sealed), so test the object bit too; OR
+      //   (b) the individual entry was defined non-configurable
+      //       (FLAG_CONFIGURABLE cleared) via __defineProperty_value (#1629).
+      // This is correct for BOTH callers of __delete_property: Reflect (returns
+      // false) and sloppy `delete obj[k]` (also returns false for a
+      // non-configurable own prop, §13.5.1.2).
+      // (a) object sealed/frozen?
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 4 },
+      { op: "i32.const", value: OBJ_FLAG_SEALED },
+      { op: "i32.and" },
+      // (b) entry non-configurable? ((e.flags & FLAG_CONFIGURABLE) == 0)
+      { op: "local.get", index: 4 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+      { op: "i32.const", value: FLAG_CONFIGURABLE },
+      { op: "i32.and" },
+      { op: "i32.eqz" },
+      // refuse-delete = (sealed) | (entry not configurable)
+      { op: "i32.or" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
       // e.flags |= TOMBSTONE
       { op: "local.get", index: 4 },
@@ -2629,13 +2684,73 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
 
   // ── __extern_length(externref v) -> f64 ──────────────────────────────────
   //
-  // Standalone numeric "length" for an enumeration result. Recognises a wrapped
-  // $ObjVec and returns its f64 len; any other value returns 0 (matches the
-  // host import's null/non-array fallback). This is what the array-iteration
-  // consumers (buildVecFromExternref, array-methods length loops) read.
+  // Standalone numeric "length". Recognises a wrapped $ObjVec (enumeration
+  // result) and returns its f64 len. #2036: ALSO recognises a real array-like
+  // `$Object` ({0:x, length:n}) — ToLength(Get(O, "length")) per §23.1.3 so
+  // borrowed Array.prototype generics (`indexOf.call(arrayLike, …)`) iterate
+  // correctly. Any other value returns 0 (matches the host import fallback).
   //
-  // params: 0=v(externref) ; locals: 1=any(anyref)
+  // params: 0=v(externref) ; locals: 1=any(anyref) 2=lenF64(f64) 3=lenTrunc(f64)
   {
+    const MAX_SAFE = 9007199254740991; // 2^53 - 1
+    // #2036 — array-like $Object arm (standalone only): ToLength(Get(O,"length")).
+    // In gc/host mode the host `__extern_length` JS import owns this path, so the
+    // arm is omitted and the body stays the original $ObjVec-or-0 to keep host
+    // output byte-identical.
+    const objLengthArm: Instr[] = objArrayLikeArms
+      ? (() => {
+          const externGetIdx2036 = ctx.funcMap.get("__extern_get")!;
+          const unboxIdx2036 = ctx.funcMap.get("__unbox_number")!;
+          return [
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: objectTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "f64" } },
+              then: [
+                // lenVal = __extern_get(v, "length")  (proto-walk + marshaling)
+                { op: "local.get", index: 0 },
+                ...nativeStringLiteralInstrs(ctx, "length"),
+                { op: "extern.convert_any" },
+                { op: "call", funcIdx: externGetIdx2036 },
+                // ToLength: unbox to number (NaN for non-number length), then
+                // truncate + clamp to [0, 2^53-1]. __unbox_number(null) = NaN.
+                { op: "call", funcIdx: unboxIdx2036 },
+                { op: "local.tee", index: 2 },
+                // if NaN → 0 (n != n)
+                { op: "local.get", index: 2 },
+                { op: "f64.ne" },
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: { kind: "f64" } },
+                  then: [{ op: "f64.const", value: 0 }],
+                  else: [
+                    // trunc toward zero
+                    { op: "local.get", index: 2 },
+                    { op: "f64.trunc" },
+                    { op: "local.tee", index: 3 },
+                    // if <= 0 → 0
+                    { op: "f64.const", value: 0 },
+                    { op: "f64.le" },
+                    {
+                      op: "if",
+                      blockType: { kind: "val", type: { kind: "f64" } },
+                      then: [{ op: "f64.const", value: 0 }],
+                      else: [
+                        // min(trunc, 2^53-1)
+                        { op: "local.get", index: 3 },
+                        { op: "f64.const", value: MAX_SAFE },
+                        { op: "f64.min" } as Instr,
+                      ],
+                    },
+                  ],
+                },
+              ],
+              else: [{ op: "f64.const", value: 0 }],
+            },
+          ] as Instr[];
+        })()
+      : [{ op: "f64.const", value: 0 }];
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
@@ -2650,14 +2765,18 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 0 },
           { op: "f64.convert_i32_s" },
         ],
-        else: [{ op: "f64.const", value: 0 }],
+        else: objLengthArm,
       },
     ];
     registerNative(
       "__extern_length",
       [{ kind: "externref" }],
       [{ kind: "f64" }],
-      [{ name: "any", type: { kind: "anyref" } }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "lenF64", type: { kind: "f64" } },
+        { name: "lenTrunc", type: { kind: "f64" } },
+      ],
       body,
     );
   }
@@ -2670,10 +2789,35 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   //
   // params: 0=v(externref) 1=idx(f64) ; locals: 2=any(anyref) 3=vec(ref null $ObjVec) 4=i
   {
+    // #2036 — array-like $Object arm (standalone only): return
+    // __extern_get(v, ToString(idx)). number_toString gives the canonical decimal
+    // key ("0","5") matching how {0:x} stores numeric-literal keys; __extern_get
+    // does the proto-walk + value marshaling, returning null for absent (hole)
+    // indices. Omitted in gc/host mode (the host import owns the path).
+    const objIdxArm: Instr[] = objArrayLikeArms
+      ? [
+          { op: "local.get", index: 2 },
+          { op: "ref.test", typeIdx: objectTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: 1 },
+              { op: "f64.trunc" },
+              { op: "call", funcIdx: ctx.funcMap.get("number_toString")! },
+              { op: "call", funcIdx: ctx.funcMap.get("__extern_get")! },
+              { op: "return" },
+            ],
+          },
+        ]
+      : [];
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
-      { op: "local.tee", index: 2 },
+      { op: "local.set", index: 2 },
+      ...objIdxArm,
+      { op: "local.get", index: 2 },
       { op: "ref.test", typeIdx: objVecTypeIdx },
       { op: "i32.eqz" },
       {
@@ -2928,10 +3072,35 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   //
   // params: 0=v(externref) 1=idx(f64) ; locals: 2=any(anyref) 3=i
   {
+    // #2036 — array-like $Object arm (standalone only): HasProperty(O,
+    // ToString(idx)) so indexOf/forEach hole-skipping (§23.1.3 "HasProperty") is
+    // correct — __extern_has does the proto-walk; a present-but-undefined entry
+    // returns true while an absent (hole) index returns false. Omitted in
+    // gc/host mode (the host import owns the path).
+    const objHasArm: Instr[] = objArrayLikeArms
+      ? [
+          { op: "local.get", index: 2 },
+          { op: "ref.test", typeIdx: objectTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: 1 },
+              { op: "f64.trunc" },
+              { op: "call", funcIdx: ctx.funcMap.get("number_toString")! },
+              { op: "call", funcIdx: ctx.funcMap.get("__extern_has")! },
+              { op: "return" },
+            ],
+          },
+        ]
+      : [];
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
-      { op: "local.tee", index: 2 },
+      { op: "local.set", index: 2 },
+      ...objHasArm,
+      { op: "local.get", index: 2 },
       { op: "ref.test", typeIdx: objVecTypeIdx },
       { op: "i32.eqz" },
       {
@@ -4370,15 +4539,48 @@ export function fillApplyClosure(ctx: CodegenContext): void {
   bridgeFn.locals = [{ name: "n", type: { kind: "i32" } }];
 }
 
+/**
+ * (#2047) Byte-backed vec carriers that are NEVER JS arrays and must report
+ * `Array.isArray === false` per ES §7.2.2:
+ *   - `i32_byte` — ArrayBuffer / DataView backing store.
+ *   - `i8_byte`  — native (standalone/WASI) `Uint8Array` packed-byte storage.
+ * The codebase already excludes `i32_byte` vecs from array treatment elsewhere
+ * (`type-coercion.ts` — the `__make_iterable` shim skips it), so this filter is
+ * consistent precedent. NOTE: other TypedArrays (Float64Array, Int32Array, …)
+ * share the generic `f64` vec carrier with `number[]`, so a struct-level
+ * `ref.test` cannot distinguish them without a brand bit — `__vec_f64` is kept
+ * IN the carrier list and `Array.isArray(new Float64Array(1))` remains a known
+ * residual false-positive tracked for a brand-bit follow-up. Only the
+ * exclusively-non-array `_byte` carriers can be filtered cleanly.
+ */
+const NON_ARRAY_BYTE_VEC_ELEM_KINDS: ReadonlySet<string> = new Set(["i32_byte", "i8_byte"]);
+
+function isNonArrayByteVecName(name: string): boolean {
+  // Matches `__vec_i32_byte` / `__vec_i8_byte`. Only `__vec_*` structs reach
+  // this check (the caller already restricts to vec struct names).
+  for (const elemKind of NON_ARRAY_BYTE_VEC_ELEM_KINDS) {
+    if (name === `__vec_${elemKind}`) return true;
+  }
+  return false;
+}
+
 function collectStandaloneArrayCarrierTypeIdxs(ctx: CodegenContext): number[] {
   const carriers = new Set<number>();
   const objVecTypeIdx = ctx.objectRuntimeTypes?.objVecTypeIdx;
   if (objVecTypeIdx !== undefined) carriers.add(objVecTypeIdx);
-  for (const typeIdx of ctx.vecTypeMap.values()) carriers.add(typeIdx);
+
+  // (#2047) Drop the exclusively-non-array byte carriers from vecTypeMap by key
+  // so ArrayBuffer/DataView (`i32_byte`) and native Uint8Array (`i8_byte`) are
+  // never claimed as arrays.
+  for (const [elemKind, typeIdx] of ctx.vecTypeMap.entries()) {
+    if (NON_ARRAY_BYTE_VEC_ELEM_KINDS.has(elemKind)) continue;
+    carriers.add(typeIdx);
+  }
   for (let typeIdx = 0; typeIdx < ctx.mod.types.length; typeIdx++) {
     const typeDef = ctx.mod.types[typeIdx];
     if (typeDef?.kind !== "struct") continue;
     const name = typeDef.name ?? "";
+    if (isNonArrayByteVecName(name)) continue; // (#2047) §7.2.2 — never an array
     if (name.startsWith("__vec_") || name === "__template_vec_externref") carriers.add(typeIdx);
   }
   return Array.from(carriers).sort((a, b) => a - b);

@@ -2,7 +2,7 @@
 id: 1854
 title: "Cross-backend differential testing harness — same TS to WasmGC / linear / bytecode-VM must produce identical observable output"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-04
 updated: 2026-06-12
 priority: high

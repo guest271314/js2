@@ -2,7 +2,7 @@
 id: 1922
 title: "Shared IR traversal/use-collection module — fixes live defect: ordinary while loops demote off the IR path"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-10
 updated: 2026-06-12
 priority: high

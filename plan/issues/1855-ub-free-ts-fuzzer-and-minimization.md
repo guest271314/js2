@@ -2,7 +2,7 @@
 id: 1855
 title: "UB-free TypeScript program generator + automated validity-preserving test-case minimization for equivalence failures"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-04
 updated: 2026-06-12
 priority: medium

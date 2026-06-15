@@ -2,7 +2,7 @@
 id: 1804
 title: "feat(IR): vec.new_fixed — lower fixed-length array literals through the IR path"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-03
 updated: 2026-06-12
 priority: medium

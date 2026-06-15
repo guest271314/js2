@@ -2,7 +2,7 @@
 id: 2084
 title: "module-global object access: reads re-emit null-check+throw per access (survives -O); writes have NO check and trap instead of TypeError"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-11
 updated: 2026-06-12
 priority: low

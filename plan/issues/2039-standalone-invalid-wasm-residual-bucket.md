@@ -1,7 +1,8 @@
 ---
 id: 2039
 title: "standalone invalid-Wasm residual bucket after #1623/#1666/#1677: async-gen i64 ABI, __obj_find externref key, __str_flatten, arguments arity (~1,135 tests)"
-status: in-progress
+status: blocked
+blocked_by: [2167]
 sprint: Backlog
 created: 2026-06-10
 updated: 2026-06-10

@@ -1,8 +1,9 @@
 ---
 id: 2138
 title: "IR-first compile-once inversion: selector decides before compileDeclarations (flag-gated investigation)"
-status: ready
-sprint: 62
+status: blocked
+blocked_by: [2167]
+sprint: 64
 created: 2026-06-12
 updated: 2026-06-12
 priority: high
