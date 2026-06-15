@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// scripts/claim-issue.mjs (#2155)
+// scripts/claim-issue.mjs (#2168)
 //
 // Cross-developer atomic issue-claim lock for multi-dev work (humans + agents,
 // possibly across forks). The live lock lives on a dedicated orphan ref —
