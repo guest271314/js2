@@ -5630,30 +5630,63 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
     } as Instr,
   ];
 
-  // (#1988) A standalone `any` number flows as a `__box_number_struct`
-  // externref (see `__box_number` / type-coercion i32→AnyValue boxing), NOT a
-  // $AnyValue tag-3 box. ToString of one — e.g. the `1` in `1 + {}` after
-  // ToPrimitive — must yield its decimal, not the "[object Object]" fallback.
-  // Add a recognition arm when both the box type and the formatter are present.
+  // (#2072) Standalone primitive-box recovery — subsumes the #1988 number-only
+  // arm (which lived at this exact residual location and recovered ONLY
+  // `$__box_number_struct` → number_toString, e.g. the `1` in `1 + {}` after
+  // ToPrimitive). An `any`-held primitive is NOT stored as a $AnyValue box on
+  // the WasmGC/standalone path — `coerceType` boxes f64 via `__box_number`
+  // ($__box_number_struct), bool via `__box_boolean` ($__box_boolean_struct),
+  // then `extern.convert_any` makes it externref (the #1888 externref ABI the
+  // test262 comparator relies on, which is why we recover the shape here rather
+  // than changing the box). So when the value is neither $AnyString nor
+  // $AnyValue, before yielding "[object Object]" we ref.test the boxed-primitive
+  // structs and format them, matching what the $AnyValue tag-2/tag-4 arms above
+  // already do. Without this, String(v) for `const v: any = 42 / true` returned
+  // "[object Object]". The number sub-arm uses `numberArm(...)`, which appends
+  // exactly `call number_toString; any.convert_extern; ref.cast $AnyString` —
+  // byte-identical to #1988's explicit emit (and falls back to "[object Object]"
+  // when `number_toString` is absent), so #1988's `1 + {}` case still holds.
+  // Type indices (not func indices) are read here, so no late-import shift
+  // hazard; the only func index baked in is `numToStrIdx`, which this helper
+  // already bakes for tag 2/3.
   const boxNumIdx = ctx.nativeBoxNumberTypeIdx;
-  const boxNumberArm: Instr[] =
-    boxNumIdx >= 0 && numToStrIdx !== undefined
+  const boxBoolIdx = ctx.nativeBoxBooleanTypeIdx;
+  const residualArm: Instr[] =
+    boxNumIdx >= 0 && boxBoolIdx >= 0
       ? [
+          // $__box_number_struct? → number_toString(value)
           { op: "local.get", index: L_V },
           { op: "ref.test", typeIdx: boxNumIdx } as Instr,
           {
             op: "if",
             blockType: { kind: "val", type: strRef },
-            then: [
+            then: numberArm([
               { op: "local.get", index: L_V },
               { op: "ref.cast", typeIdx: boxNumIdx } as Instr,
               { op: "struct.get", typeIdx: boxNumIdx, fieldIdx: 0 },
-              { op: "call", funcIdx: numToStrIdx },
-              { op: "any.convert_extern" } as Instr,
-              { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+            ]),
+            else: [
+              // $__box_boolean_struct? → "true" / "false"
+              { op: "local.get", index: L_V },
+              { op: "ref.test", typeIdx: boxBoolIdx } as Instr,
+              {
+                op: "if",
+                blockType: { kind: "val", type: strRef },
+                then: [
+                  { op: "local.get", index: L_V },
+                  { op: "ref.cast", typeIdx: boxBoolIdx } as Instr,
+                  { op: "struct.get", typeIdx: boxBoolIdx, fieldIdx: 0 },
+                  {
+                    op: "if",
+                    blockType: { kind: "val", type: strRef },
+                    then: litStr("true"),
+                    else: litStr("false"),
+                  } as Instr,
+                ],
+                // tag 6 / unknown ref → "[object Object]"
+                else: litStr("[object Object]"),
+              } as Instr,
             ],
-            // else (null ref, plain object, vec, …) → "[object Object]"
-            else: litStr("[object Object]"),
           } as Instr,
         ]
       : litStr("[object Object]");
@@ -5679,9 +5712,9 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
             { op: "local.set", index: L_BOX },
             ...boxDispatch,
           ],
-          // else: a boxed-number externref → decimal; everything else →
-          // "[object Object]" (Phase-1 fallback).
-          else: boxNumberArm,
+          // else (boxed primitive externref shape, null ref, plain object, vec,
+          // …) → recover number/boolean boxes, then "[object Object]"
+          else: residualArm,
         } as Instr,
       ],
     } as Instr,
