@@ -717,6 +717,23 @@ function staticTypeofForType(ctx: CodegenContext, tsType: ts.Type): string | nul
   if (tsType.flags & ts.TypeFlags.Undefined || tsType.flags & ts.TypeFlags.Void) return "undefined";
   if (tsType.flags & ts.TypeFlags.BigInt || tsType.flags & ts.TypeFlags.BigIntLiteral) return "bigint";
 
+  // (#2051) Resolve unions BEFORE the `resolveWasmType` collapse below. A
+  // nullable primitive like `number | undefined` (the static type of `o?.v`)
+  // collapses to a bare f64 under `resolveWasmType`, which would mis-fold
+  // `typeof o?.v` to the constant "number" — wrong when the chain short-circuits
+  // to `undefined`. Per §13.5.3 the union's typeof is only statically known if
+  // every member agrees; `number` + `undefined` disagree (size 2) → dynamic
+  // (`null`), so it reaches the runtime `__typeof` which reads host undefined.
+  if (tsType.isUnion?.()) {
+    const results = new Set<string>();
+    for (const member of (tsType as ts.UnionType).types) {
+      const r = staticTypeofForType(ctx, member);
+      if (r === null) return null;
+      results.add(r);
+    }
+    return results.size === 1 ? [...results][0]! : null;
+  }
+
   // Wrapper objects (new String/Number/Boolean) are "object" not their primitive type (#929)
   if (tsType.flags & ts.TypeFlags.Object) {
     const sym = tsType.getSymbol?.();
@@ -758,17 +775,7 @@ function staticTypeofForType(ctx: CodegenContext, tsType: ts.Type): string | nul
     if (tsType.flags & ts.TypeFlags.Object) return "object";
   }
 
-  // For union types, check if all members resolve to the same result
-  if (tsType.isUnion?.()) {
-    const results = new Set<string>();
-    for (const member of (tsType as ts.UnionType).types) {
-      const r = staticTypeofForType(ctx, member);
-      if (r === null) return null;
-      results.add(r);
-    }
-    if (results.size === 1) return [...results][0]!;
-  }
-
+  // (Unions are resolved up-front above, before the resolveWasmType collapse.)
   return null;
 }
 
