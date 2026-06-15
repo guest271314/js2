@@ -2,7 +2,7 @@
 id: 2143
 title: "WebAssembly.validate lane for unoptimized pipeline output (split of #1858-C5)"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-12
 updated: 2026-06-12
 priority: medium

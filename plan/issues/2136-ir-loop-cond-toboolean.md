@@ -2,7 +2,7 @@
 id: 2136
 title: "IR loop conditions: lower non-i32 conds through ToBoolean instead of bailing to legacy"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-12
 updated: 2026-06-12
 priority: medium

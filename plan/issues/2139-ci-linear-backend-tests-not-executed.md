@@ -2,7 +2,7 @@
 id: 2139
 title: "CI: linear-backend tests (22 files) are not executed by any CI job"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-12
 updated: 2026-06-12
 priority: critical

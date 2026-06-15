@@ -8,7 +8,7 @@ updated: 2026-06-10
 priority: critical
 feasibility: medium
 reasoning_effort: high
-model: fable
+model: opus
 task_type: bugfix
 area: codegen, emit
 language_feature: classes, explicit-resource-management, objects
