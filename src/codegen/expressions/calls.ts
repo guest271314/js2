@@ -8111,14 +8111,28 @@ function compileCallExpression(
         // with arguments keep the existing generic path below.
         const recvIsBuiltinClass =
           ts.isIdentifier(propAccess.expression) && BUILTIN_CLASS_NAMES.has(propAccess.expression.text);
-        if ((ctx.standalone || ctx.wasi) && expr.arguments.length === 0 && !recvIsBuiltinClass) {
-          const dispatchIdx = reserveClosedMethodDispatch(ctx, methodName);
+        // (#2151 Slice 2) N-ary: the dispatcher is arity-specialized
+        // `__call_m_<name>_<arity>(recv, arg0..arg{arity-1})` (all externref).
+        // Spread args fall through to the generic path (the dispatcher has a
+        // fixed arity).
+        const hasSpreadArg = expr.arguments.some((a) => ts.isSpreadElement(a));
+        if ((ctx.standalone || ctx.wasi) && !hasSpreadArg && !recvIsBuiltinClass) {
+          const arity = expr.arguments.length;
+          const dispatchIdx = reserveClosedMethodDispatch(ctx, methodName, arity);
           flushLateImportShifts(ctx, fctx);
+          // Receiver as externref.
           const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
           if (recvType && recvType.kind !== "externref") {
             fctx.body.push({ op: "extern.convert_any" });
           } else if (recvType === null) {
             fctx.body.push({ op: "ref.null.extern" });
+          }
+          // Each argument compiled and boxed to externref (the dispatcher unboxes
+          // to the method's declared param type per candidate struct).
+          for (const arg of expr.arguments) {
+            const at = compileExpression(ctx, fctx, arg, { kind: "externref" });
+            if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+            else if (at === null) fctx.body.push({ op: "ref.null.extern" });
           }
           fctx.body.push({ op: "call", funcIdx: dispatchIdx });
           return { kind: "externref" };
