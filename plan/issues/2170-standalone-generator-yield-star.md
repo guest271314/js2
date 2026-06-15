@@ -42,3 +42,61 @@ iterator-delegation algorithm — `next`/`return`/`throw` forwarding).
 ## Source
 
 Triage of #2157 (2026-06-15, sdev5), SF-3. Fetch §27.5.3.7 before implementing.
+
+## Implementation Plan (2026-06-15, sdev3 — machinery study)
+
+Studied `src/codegen/generators-native.ts` (1794 lines). The native generator is
+a state struct + a `__gen_resume_<g>(self) -> ref $result` trampoline
+(`loop`/`block` dispatching on the `state` i32 field; terminators
+`yield`/`return`/`jump`/`branch`/`done` at lines 1046-1102). The `yield*` bail is
+`emitYield` line 350 (`if (yieldExpr.asteriskToken …) return fail()`).
+
+### The load-bearing constraint: spills are f64-only
+`buildResumeInfo` (≈727-751) builds the state struct as
+`state:i32, sent:f64, mode:i32, abrupt:f64, param_*…, spill_*:f64` — **every body
+spill is `f64`** (line 748). A `yield*` must persist the INNER iterator's **ref**
+state across the outer generator's re-entries (the outer resume returns to the
+host between each inner yield), so delegation cannot reuse an f64 spill. This is
+why SF-3 is `hard`, not a one-terminator add.
+
+### Design (tractable slice: `yield* <native-generator-call>`)
+The repro (`function* g(){ yield* inner(); yield 3; }`) delegates to a call whose
+callee is itself a native generator — resolve via
+`ctx.nativeGenerators.get(<callee fn name>)` at plan-build time; if absent
+(arbitrary iterable), keep `fail()` (general-iterable case = follow-up using the
+#1320 standalone `__iterator`/`__iterator_next` bridge).
+
+1. **State struct — typed delegation slot.** Extend `stateFields` with one
+   `ref null $InnerState`-typed mutable field per `yield*` site (`deleg_<n>`),
+   tracked in `NativeGeneratorInfo`. Append AFTER the f64 spills so existing
+   `spillFieldOffset + i` indexing is unaffected.
+2. **Plan builder.** New terminator
+   `{ kind: "yield-star"; subject; innerKey; next }`. `emitYield` emits it
+   (instead of `fail`) when `asteriskToken` and the callee resolves to a native
+   generator. It is a SELF-suspending state: on resume it re-enters the SAME
+   state until the inner is done; `next` is the post-delegation successor.
+3. **Runtime (`yield-star` case).** On entry: if `deleg_<n>` null, materialize
+   the inner (`compileExpression(subject)` → inner `_new`) and `struct.set` it.
+   `call __gen_resume_<inner>(deleg_<n>)` → `res`. If `res.done==0`: store outer
+   spills + slot, state = THIS id, build `{res.value, done:0}`, `br exit`
+   (suspend). Else: clear `deleg_<n>`, `setState(next)`, `br loop` (the `yield*`
+   expression value is the inner's return value — bind if `bindSentTo`).
+4. **§27.5.3.7 forwarding.** Slice-1: thread outer `sent` → inner `sent` before
+   the inner resume call (`.next(v)` forwarding). `.return()`/`.throw()`
+   delegation is a SEPARATE slice; until then an outer `.return()` mid-delegation
+   runs only the outer finalizers (document the gap).
+
+### Test gates
+New `tests/issue-2170-*.test.ts` + flip the SF-3 `it.todo`:
+`function* inner(){yield 1;yield 2;} function* g(){yield* inner();yield 3;}` →
+standalone `[...g()] === [1,2,3]`, ZERO host imports (assert on
+`result.imports`).
+
+### Why staged
+The f64→typed-spill struct extension is the regression-prone part (the entire
+f64 spill path assumes homogeneous f64 fields). Land struct-layout + single
+`yield* <native-gen-call>` terminator first with the repro as a gate; add
+general-iterable delegation (#1320 bridge) and `.return()/.throw()` forwarding as
+follow-up slices. Do NOT widen all spills to a tagged union in one pass (the #618
+big-bang-shift lesson). Released back to `ready` with this plan so a focused
+effort can execute it cleanly.
