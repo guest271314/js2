@@ -26,12 +26,13 @@
  *     (try/finally without catch is, as in Phase 1).
  */
 import { ts } from "../ts-api.js";
-import { isBooleanType, isNumberType } from "../checker/type-mapper.js";
+import { isBooleanType, isNumberType, isStringType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType, WasmFunction } from "../ir/types.js";
 import { allocLocal } from "./context/locals.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import type { CodegenContext, FunctionContext, NativeGeneratorInfo } from "./context/types.js";
 import { reportError } from "./context/errors.js";
+import { nativeStringType } from "./native-strings.js";
 import { addFuncType } from "./registry/types.js";
 import { coerceType, compileExpression, compileStatement, valTypesMatch } from "./shared.js";
 
@@ -84,6 +85,8 @@ interface NativeGeneratorState {
 interface NativeGeneratorPlan {
   states: NativeGeneratorState[];
   spills: string[];
+  /** (#2171) Uniform yield element ValType — f64 (numeric) or native string. */
+  elemValType: ValType;
 }
 
 function noJsHostTarget(ctx: CodegenContext): boolean {
@@ -98,6 +101,51 @@ function isNumericExpression(ctx: CodegenContext, expr: ts.Expression | undefine
   if (!expr) return true;
   const t = ctx.checker.getTypeAtLocation(expr);
   return isNumberType(t) || isBooleanType(t);
+}
+
+// (#2171) Native-string yield support. A yield expression qualifies for the
+// string-payload path when its static type is a string and the target lowers
+// strings to the native `$AnyString` ref (standalone / nativeStrings). The
+// generator-wide elem type is decided up-front (generatorElemValType): all
+// numeric → f64 (the default path), all string → the native string ref,
+// anything else / mixed → unsupported (bail to the #680 diagnostic).
+function isStringYieldExpression(ctx: CodegenContext, expr: ts.Expression | undefined): boolean {
+  if (!expr) return false;
+  if (!(ctx.nativeStrings && ctx.anyStrTypeIdx >= 0)) return false;
+  return isStringType(ctx.checker.getTypeAtLocation(expr));
+}
+
+/**
+ * Decide a generator's uniform yield element ValType, or null when the yields
+ * are mixed / unsupported (caller bails). Walks every `yield` in the body
+ * (not descending into nested functions). Returns `{kind:"f64"}` when there are
+ * no yields (degenerate; the plan rejects zero-yield generators separately).
+ */
+function generatorElemValType(ctx: CodegenContext, decl: ts.FunctionDeclaration): ValType | null {
+  let sawNumeric = false;
+  let sawString = false;
+  let unsupported = false;
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isMethodDeclaration(node)
+    ) {
+      return; // a yield here belongs to an inner generator
+    }
+    if (ts.isYieldExpression(node) && !node.asteriskToken) {
+      if (isNumericExpression(ctx, node.expression)) sawNumeric = true;
+      else if (isStringYieldExpression(ctx, node.expression)) sawString = true;
+      else unsupported = true;
+    }
+    ts.forEachChild(node, visit);
+  };
+  if (decl.body) visit(decl.body);
+  if (unsupported) return null;
+  if (sawString && sawNumeric) return null; // mixed — deferred follow-up
+  if (sawString) return nativeStringType(ctx);
+  return { kind: "f64" };
 }
 
 function statementContainsYield(stmt: ts.Statement): boolean {
@@ -174,6 +222,17 @@ function nodeContainsYield(root: ts.Node): boolean {
  */
 function buildNativeGeneratorPlan(ctx: CodegenContext, decl: ts.FunctionDeclaration): NativeGeneratorPlan | null {
   if (!decl.body) return null;
+
+  // (#2171) Decide the uniform yield element type up-front. Numeric → f64 (the
+  // historical path); all-string → native string ref; mixed / unsupported →
+  // bail. `yieldValueOk` then gates each per-yield check on that decision so a
+  // string yield is accepted only in a string-typed generator (and a numeric
+  // yield only in a numeric one).
+  const elemValType = generatorElemValType(ctx, decl);
+  if (elemValType === null) return null;
+  const elemIsString = elemValType.kind === "ref" || elemValType.kind === "ref_null";
+  const yieldValueOk = (expr: ts.Expression | undefined): boolean =>
+    elemIsString ? isStringYieldExpression(ctx, expr) : isNumericExpression(ctx, expr);
 
   const states: NativeGeneratorState[] = [];
   const spills: string[] = [];
@@ -258,7 +317,9 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: ts.FunctionDeclarat
       // first so a bare `return expr;` is a completion terminator, not a raw
       // wasm `return` from compileStatement.)
       if (ts.isReturnStatement(stmt)) {
-        if (!isNumericExpression(ctx, stmt.expression)) return fail();
+        // (#2171) The return *value* must match the generator's yield element
+        // type (numeric or string); a bare `return;` (no expr) is allowed.
+        if (stmt.expression && !yieldValueOk(stmt.expression)) return fail();
         collectSpillsIn(stmt);
         finishState(curId, { kind: "return", expr: stmt.expression });
         // Unreachable tail — start a fresh (dead) state so the cursor stays
@@ -347,7 +408,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: ts.FunctionDeclarat
     bindSentTo: string | undefined,
     activeFinalizers: readonly ts.Statement[][],
   ): boolean {
-    if (yieldExpr.asteriskToken || !isNumericExpression(ctx, yieldExpr.expression)) return fail();
+    if (yieldExpr.asteriskToken || !yieldValueOk(yieldExpr.expression)) return fail();
     const next = startStateAfterYield(bindSentTo, activeFinalizers);
     // The state we were filling (curIdBefore) is finished by startStateAfterYield's
     // caller — handled inside helper to keep ids tidy.
@@ -604,7 +665,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: ts.FunctionDeclarat
   if (yieldCount === 0) return null;
   if (states.length > MAX_NATIVE_GENERATOR_STATES) return null;
 
-  return { states, spills };
+  return { states, spills, elemValType };
 }
 
 /** A `break`/`continue` inside a yield-loop body is not modeled in this slice. */
@@ -688,24 +749,38 @@ export function sourceNeedsGeneratorHostImports(ctx: CodegenContext, sourceFile:
   return found && needsHost;
 }
 
-export function ensureNativeGeneratorResultType(ctx: CodegenContext): number {
-  if (ctx.nativeGeneratorResultTypeIdx >= 0) return ctx.nativeGeneratorResultTypeIdx;
-  const existing = ctx.structMap.get("__NativeGeneratorResult_f64");
+/**
+ * Result struct (`{ value, done }`) for a generator whose yields have the given
+ * `elemValType`. The numeric (f64) variant is cached on
+ * `ctx.nativeGeneratorResultTypeIdx` (the historical singleton, kept so the many
+ * f64 callers are unchanged); any other elem type (e.g. the native string ref,
+ * #2171) gets its own `__NativeGeneratorResult_<kind>` struct, cached in
+ * `structMap` by name. Defaults to f64 when no elem type is supplied.
+ */
+export function ensureNativeGeneratorResultType(ctx: CodegenContext, elemValType?: ValType): number {
+  const elem: ValType = elemValType ?? { kind: "f64" };
+  const isF64 = elem.kind === "f64";
+  if (isF64 && ctx.nativeGeneratorResultTypeIdx >= 0) return ctx.nativeGeneratorResultTypeIdx;
+
+  const kindTag =
+    elem.kind === "ref" || elem.kind === "ref_null" ? `ref${(elem as { typeIdx: number }).typeIdx}` : elem.kind;
+  const structName = `__NativeGeneratorResult_${kindTag}`;
+  const existing = ctx.structMap.get(structName);
   if (existing !== undefined) {
-    ctx.nativeGeneratorResultTypeIdx = existing;
+    if (isF64) ctx.nativeGeneratorResultTypeIdx = existing;
     return existing;
   }
 
   const fields: FieldDef[] = [
-    { name: "value", type: { kind: "f64" }, mutable: false },
+    { name: "value", type: elem, mutable: false },
     { name: "done", type: { kind: "i32" }, mutable: false },
   ];
   const typeIdx = ctx.mod.types.length;
-  ctx.mod.types.push({ kind: "struct", name: "__NativeGeneratorResult_f64", fields });
-  ctx.structMap.set("__NativeGeneratorResult_f64", typeIdx);
-  ctx.typeIdxToStructName.set(typeIdx, "__NativeGeneratorResult_f64");
-  ctx.structFields.set("__NativeGeneratorResult_f64", fields);
-  ctx.nativeGeneratorResultTypeIdx = typeIdx;
+  ctx.mod.types.push({ kind: "struct", name: structName, fields });
+  ctx.structMap.set(structName, typeIdx);
+  ctx.typeIdxToStructName.set(typeIdx, structName);
+  ctx.structFields.set(structName, fields);
+  if (isF64) ctx.nativeGeneratorResultTypeIdx = typeIdx;
   return typeIdx;
 }
 
@@ -722,7 +797,20 @@ export function registerNativeGenerator(
   const plan = buildNativeGeneratorPlan(ctx, decl);
   if (!plan) return null;
 
-  const resultTypeIdx = ensureNativeGeneratorResultType(ctx);
+  const elemValType = plan.elemValType;
+  const elemIsString = elemValType.kind !== "f64";
+  // (#2171) Scope guard for the string slice: spilled locals are typed f64 in
+  // the state struct, so a string generator that needs to spill a live local
+  // across a suspension can't faithfully store it yet. Bail to the host/#680
+  // path for that shape (numeric generators are unaffected — they spill f64).
+  // This keeps the slice to the dominant `yield "a"; yield "b"` shape; spilled
+  // non-numeric locals are the documented follow-up.
+  const bodySpillsForGuard = plan.spills.filter(
+    (s) => !decl.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === s),
+  );
+  if (elemIsString && bodySpillsForGuard.length > 0) return null;
+
+  const resultTypeIdx = ensureNativeGeneratorResultType(ctx, elemValType);
   const paramNames = decl.parameters.map((p) => (ts.isIdentifier(p.name) ? p.name.text : ""));
   const stateFields: FieldDef[] = [
     { name: "state", type: { kind: "i32" }, mutable: true },
@@ -773,13 +861,27 @@ export function registerNativeGenerator(
     spillFieldOffset,
     yieldCount,
     doneState: plan.states.length - 1, // the final `done` state id
+    elemValType,
   };
   ctx.nativeGenerators.set(functionName, info);
   return info;
 }
 
+// (#2171) The default `value` for a done/empty result: f64 0 for numeric
+// generators, a null ref for string (the consumer never reads value when
+// done=1, so the null is inert — it only satisfies struct.new's type).
+function defaultElemValueInstr(elemValType: ValType): Instr {
+  if (elemValType.kind === "f64") return { op: "f64.const", value: 0 };
+  if (elemValType.kind === "i32") return { op: "i32.const", value: 0 };
+  return { op: "ref.null", typeIdx: (elemValType as { typeIdx: number }).typeIdx } as Instr;
+}
+
 function emptyResult(info: NativeGeneratorInfo): Instr[] {
-  return emptyResultForType(info.resultTypeIdx);
+  return [
+    defaultElemValueInstr(info.elemValType),
+    { op: "i32.const", value: 1 },
+    { op: "struct.new", typeIdx: info.resultTypeIdx },
+  ];
 }
 
 function emptyResultForType(resultTypeIdx: number): Instr[] {
@@ -864,6 +966,37 @@ function emitExpressionAsF64(ctx: CodegenContext, fctx: FunctionContext, expr: t
     coerceType(ctx, fctx, resultType, { kind: "f64" });
   }
   const tmp = allocLocal(fctx, `__gen_value_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: tmp });
+  return tmp;
+}
+
+/**
+ * (#2171) Compile a yield/return value to the generator's element ValType and
+ * return a local holding it. For numeric generators this is exactly
+ * `emitExpressionAsF64` (unchanged path). For a string generator it compiles the
+ * expression to the native string ref and stores it; a missing expr (bare
+ * `return;`) yields the elem-type default (null ref).
+ */
+function emitYieldValueAsElem(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.Expression | undefined,
+  info: NativeGeneratorInfo,
+): number {
+  if (info.elemValType.kind === "f64") return emitExpressionAsF64(ctx, fctx, expr);
+  const elem = info.elemValType;
+  const tmp = allocLocal(fctx, `__gen_value_${fctx.locals.length}`, elem);
+  if (!expr) {
+    fctx.body.push(defaultElemValueInstr(elem));
+    fctx.body.push({ op: "local.set", index: tmp });
+    return tmp;
+  }
+  const t = compileExpression(ctx, fctx, expr, elem);
+  if (t === null) {
+    fctx.body.push(defaultElemValueInstr(elem));
+  } else if (!valTypesMatch(t, elem)) {
+    coerceType(ctx, fctx, t, elem);
+  }
   fctx.body.push({ op: "local.set", index: tmp });
   return tmp;
 }
@@ -1011,8 +1144,17 @@ function compileState(
     }
     abruptBody.push(...storeSpills(info, fctx, selfLocal));
     abruptBody.push(...setStateInstrs(info, selfLocal, info.doneState));
-    abruptBody.push({ op: "local.get", index: selfLocal });
-    abruptBody.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.abruptFieldIdx });
+    // (#2171) `.return(v)` value lives in the f64 `abrupt` field. For a numeric
+    // generator that f64 IS the completion value; for a string generator the
+    // result `value` is a string ref, and string `.return(v)` is not yet wired
+    // (the abrupt field stays f64) — complete with the elem-type default so the
+    // result struct typechecks. (String `.return(v)` is a documented follow-up.)
+    if (info.elemValType.kind === "f64") {
+      abruptBody.push({ op: "local.get", index: selfLocal });
+      abruptBody.push({ op: "struct.get", typeIdx: info.stateTypeIdx, fieldIdx: info.abruptFieldIdx });
+    } else {
+      abruptBody.push(defaultElemValueInstr(info.elemValType));
+    }
     abruptBody.push({ op: "i32.const", value: 1 });
     abruptBody.push({ op: "struct.new", typeIdx: info.resultTypeIdx });
     abruptBody.push({ op: "local.set", index: resultLocal });
@@ -1046,7 +1188,7 @@ function compileState(
   const term = state.terminator;
   switch (term.kind) {
     case "yield": {
-      const tmp = emitExpressionAsF64(ctx, fctx, term.expr);
+      const tmp = emitYieldValueAsElem(ctx, fctx, term.expr, info);
       body.push(...storeSpills(info, fctx, selfLocal));
       body.push(...setStateInstrs(info, selfLocal, term.next));
       body.push(...setModeInstrs(info, selfLocal, 0));
@@ -1058,7 +1200,7 @@ function compileState(
       break;
     }
     case "return": {
-      const tmp = emitExpressionAsF64(ctx, fctx, term.expr);
+      const tmp = emitYieldValueAsElem(ctx, fctx, term.expr, info);
       body.push(...storeSpills(info, fctx, selfLocal));
       body.push(...setStateInstrs(info, selfLocal, info.doneState));
       body.push(...setModeInstrs(info, selfLocal, 0));
@@ -1222,13 +1364,27 @@ function nativeInfoForStateType(ctx: CodegenContext, typeIdx: number): NativeGen
   return undefined;
 }
 
+// (#2171) Reverse-lookup a generator info by its result-struct typeIdx (used to
+// recover the element ValType of an `it.next()` result whose type is a per-elem
+// result struct, not the f64 singleton).
+function resultInfoForType(ctx: CodegenContext, typeIdx: number): NativeGeneratorInfo | undefined {
+  for (const info of ctx.nativeGenerators.values()) {
+    if (info.resultTypeIdx === typeIdx) return info;
+  }
+  return undefined;
+}
+
 function isNativeResultType(ctx: CodegenContext, type: ValType | null): boolean {
-  return (
-    !!type &&
-    (type.kind === "ref" || type.kind === "ref_null") &&
-    ctx.nativeGeneratorResultTypeIdx >= 0 &&
-    type.typeIdx === ctx.nativeGeneratorResultTypeIdx
-  );
+  if (!type || (type.kind !== "ref" && type.kind !== "ref_null")) return false;
+  const idx = type.typeIdx;
+  if (ctx.nativeGeneratorResultTypeIdx >= 0 && idx === ctx.nativeGeneratorResultTypeIdx) return true;
+  // (#2171) Result types are per-elem-kind (numeric f64 vs native string), so a
+  // string generator's result struct is a distinct typeIdx. Recognize any
+  // registered generator's result type.
+  for (const info of ctx.nativeGenerators.values()) {
+    if (info.resultTypeIdx === idx) return true;
+  }
+  return false;
 }
 
 function compileIgnoredArgs(ctx: CodegenContext, fctx: FunctionContext, args: readonly ts.Expression[]): void {
@@ -1461,17 +1617,25 @@ export function tryCompileNativeGeneratorResultProperty(
   propName: string,
 ): ValType | null | undefined {
   if (propName !== "value" && propName !== "done") return undefined;
-  if (ctx.nativeGeneratorResultTypeIdx < 0) return undefined;
+  // (#2171) Proceed if either the f64 singleton or any per-elem native
+  // generator result type exists (a string-only module never sets the singleton).
+  if (ctx.nativeGeneratorResultTypeIdx < 0 && ctx.nativeGenerators.size === 0) return undefined;
 
   const resultType = compileExpression(ctx, fctx, resultExpr);
   if (isNativeResultType(ctx, resultType)) {
+    // (#2171) The result type may be the f64 singleton OR a per-elem-kind result
+    // struct (e.g. native string). Read the value field at the matched result
+    // type's typeIdx and report its element ValType, not the f64 singleton.
+    const rtIdx = (resultType as { typeIdx: number }).typeIdx;
+    const matchInfo = resultInfoForType(ctx, rtIdx);
+    const valVT: ValType = matchInfo ? matchInfo.elemValType : { kind: "f64" };
     if (resultType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" });
     fctx.body.push({
       op: "struct.get",
-      typeIdx: ctx.nativeGeneratorResultTypeIdx,
+      typeIdx: rtIdx,
       fieldIdx: propName === "value" ? RESULT_VALUE_FIELD : RESULT_DONE_FIELD,
     });
-    return propName === "value" ? { kind: "f64" } : { kind: "i32" };
+    return propName === "value" ? valVT : { kind: "i32" };
   }
 
   if (resultType?.kind === "externref") {
@@ -1590,9 +1754,10 @@ export function tryCompileNativeGeneratorForOf(
 
   const resultLocal = allocLocal(fctx, `__nativegen_res_${fctx.locals.length}`, resultRef);
 
-  // Loop variable: f64 (the native result value type). const-ness recorded so
+  // Loop variable: the generator's element ValType (f64 numeric, or the native
+  // string ref for a string generator — #2171). const-ness recorded so
   // shadowing/TDZ logic downstream stays consistent.
-  const elemLocal = allocLocal(fctx, loopVarName, { kind: "f64" });
+  const elemLocal = allocLocal(fctx, loopVarName, info.elemValType);
   if (isConst) {
     if (!fctx.constBindings) fctx.constBindings = new Set();
     fctx.constBindings.add(loopVarName);
