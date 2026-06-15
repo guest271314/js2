@@ -87,3 +87,83 @@ WasmGC box wrapper as truthy. That is a separate closure-return-boxing /
 `__is_truthy`-unwrap concern (the `buildTruthyCheck` drift this issue names is
 fixed — element-typed and variable-boxed `any` predicates, the common shapes,
 all work via `__any_unbox_bool`).
+
+## CI regression analysis (2026-06-15, senior-dev — PR #1459)
+
+PR #1459 (this fix) is **net −6/−7 test262**: it FIXES 12 and REGRESSES 18-19.
+I root-caused all 18 array regressions with runtime proof. **They are NOT a
+`buildTruthyCheck` defect — the ToBoolean fix is correct.** They are
+pre-existing `this`-modeling bugs that were *masked* by the two truthiness
+bugs this PR removes.
+
+### What the 18 regressions actually are
+
+All callbacks here are **named function declarations** (`function callbackfn(){
+return this.X }`) passed by reference, e.g. `arr.filter(callbackfn, o)`. Such a
+callback compiles to the **closure path** (`call_ref`), with funcref signature
+`(captures, elem, idx, arr) → result` — **no `this` parameter**. Inside the
+callback body `this` is compiled as a literal `__get_undefined()` (proven:
+`[1].map(function(){return this;})[0] === undefined`). So:
+
+- **15 of 18** (`every/filter/some` `-5-2..6`): callback returns `this.PROP`
+  with a **thisArg passed** whose PROP is truthy. thisArg is **not forwarded**
+  to the closure → `this` is `undefined` → `this.PROP` is `undefined`/falsy.
+- **3 of 18** (`every/filter/some` `-7-c-iii-26/27`, `-9-c-iii-28`): callback
+  `return global` where `var global = this` at top level. Top-level `this` is
+  compiled as `undefined` (should be the sloppy-mode global object) → falsy.
+
+On **main**, these values are wrong (falsy) but two compensating truthiness
+bugs render them truthy, matching the spec answer **by accident**:
+- f64 arm `f64.ne 0` → NaN (from `Number(undefined)`) wrongly **truthy**;
+- bare-externref arm `ref.is_null` → the non-null `undefined` sentinel wrongly
+  **truthy**.
+
+This PR replaces both with correct ToBoolean (`|x|>0`; `__is_truthy`), so the
+wrong `undefined` value is now correctly falsy → element dropped → assertion
+fails. Verified: on main `filter(cb,{res:true}).length === 3`, on PR `=== 0`,
+**both via the missing-thisArg path** (Node gives 3 because thisArg IS bound).
+
+### Why it cannot be fixed in buildTruthyCheck
+
+The 12 improvements and 18 regressions flow through the **same ToBoolean arms**:
+- genuine wins `return NaN` / `return ""` / `return false` use the f64-abs /
+  `__is_truthy` / i32 arms — all this-independent, all correct;
+- the regressions return `this.X` (→ `undefined`) which ALSO uses the
+  `__is_truthy` arm and is ALSO correctly falsy.
+
+At the ToBoolean layer a legitimately-falsy `""` and a broken-`this`
+`undefined` are indistinguishable — both are falsy values being correctly
+identified as falsy. **No arm-level lever separates them.** Reverting the
+externref arm to `ref.is_null` to "recover" the regressions would re-break the
+`""`/boxed-empty-string wins (and re-introduce the exact #2080/#2085 defect).
+`if (undefined)` already correctly evaluates falsy via `ensureI32Condition`, so
+masking it here would be a deliberate regression of correct ToBoolean.
+
+### The 8 genuinely this-independent wins (keep these)
+
+`every/some/filter -7-c-iii-12` (NaN), `-7-c-iii-13`/`-9-c-iii-14` (""),
+`filter -9-c-iii-13` (NaN), `findIndex`/`findLastIndex
+return-negative-one-if-predicate-returns-false-value` (boxed false). All 8
+confirmed PASS on the PR branch and depend on nothing but the ToBoolean fix.
+
+### Decision
+
+The regression is **not fixable without the upstream `this` work**:
+1. **Forward thisArg to HOF callbacks** (fixes 15) — requires giving the
+   callback a dynamic `this` binding: either route thisArg-bearing callbacks
+   through a new `.call`-aware host bridge (`fn.call(thisArg, …)`), or thread a
+   `__this` param through the array-method `call_ref` closure ABI. Touches
+   runtime + declarations + every functional array method, with its own
+   object-return → f64 coercion surface. **Architect-spec sized.**
+2. **Model top-level `this` as the sloppy-mode global** (fixes 3) — separate
+   semantics change.
+
+Masking the `this` bug inside `buildTruthyCheck` (re-breaking ToBoolean) is
+rejected: it would re-introduce the defect this issue fixes and lose the `""`
+wins. Tracked as **#2152 (thisArg forwarding to array HOF callbacks)**.
+
+Recommendation to tech lead: **do not merge #1459 as-is** (net −6). Either (a)
+land #2152 first so this PR becomes net-positive, or (b) merge #1459 + #2152
+together. No code change to `buildTruthyCheck` will make #1459 net-positive on
+its own — the branch is left unchanged (the ToBoolean fix is correct); the
+blocker is the upstream `this`-modeling issue #2152.
