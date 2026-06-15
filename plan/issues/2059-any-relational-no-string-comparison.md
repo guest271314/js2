@@ -1,10 +1,11 @@
 ---
 id: 2059
 title: "relational operators on two any/externref operands never perform string comparison (\"a\" < \"b\" → false)"
-status: ready
+status: done
+completed: 2026-06-15
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-12
+updated: 2026-06-15
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -192,3 +193,49 @@ exercises in default mode.
 - Standalone test262 shard: confirm no movement in comparator buckets (the −788
   guard from #2058 — relational gate is disjoint from equality, so the
   `isSameValue` path is untouched).
+
+---
+
+## Resolution (2026-06-15, dev3)
+
+**Done.** The fix landed via PR #1420 (JS-host `__host_compare` gate) plus the
+standalone in-module §7.2.13 dispatch in `emitAnyRelational`
+(`src/codegen/binary-ops.ts:2931`). Verified on `origin/main` @ `516feec44`
+that **every acceptance criterion passes in both host and standalone mode**.
+Regression test added: `tests/issue-2059.test.ts` (16 cases = 8 assertions ×
+{host, standalone}), all green.
+
+### Verified (in-module strings, both modes)
+
+| program | result | spec |
+|---|---|---|
+| `"a" < "b"` | `1` | lexicographic |
+| `"10" < "9"` | `1` | lexicographic (not numeric) |
+| `"10" < 9` | `0` | mixed → ToNumber → `10 < 9` |
+| `"b" > "a"` | `1` | |
+| `"a" <= "a"` | `1` | |
+| `"b" >= "a"` | `1` | |
+| `NaN < 1` | `0` | NaN-operand relationals false |
+| provably-numeric `1 < 2` | `1` | fast path unchanged |
+
+> Note: passing JS strings *across the boundary* into a `target: standalone`
+> export marshals to a different representation, so a host-driven
+> `instance.exports.lt("a","b")` mis-reads. The test materialises strings
+> **inside** the module (how test262 actually exercises these), which is the
+> faithful standalone path.
+
+### Out-of-scope residual → feeds value-rep undefined-observability
+
+One miscompile remains but is **not** in this issue's acceptance criteria and
+has a **different root cause** (not the relational comparator): in standalone
+mode, `undefined < 1` / `undefined <= 1` (undefined as the LEFT operand of
+`<`/`<=`) return `1` instead of `0`. Root cause: standalone conflates
+`undefined` and `null` into a single `ref.null extern`, so `__unbox_number`
+yields `0` (the `null` value) for both rather than `NaN` for `undefined`. The
+same conflation makes `typeof null === "object"` return `0` in standalone.
+This is owned by the value-rep undefined-observability lane — **#2106**
+(P3 `T|undefined`), **#2142** (undefined-rep ownership), **#2105** (boolean
+brand) — and cannot be fixed inside `emitAnyRelational` without a way to
+distinguish undefined from null at runtime. `emitAnyRelational`'s comparator
+is correct given a correct `ToNumber`; once the undefined sentinel lands,
+these cases pass with no relational-path change.
