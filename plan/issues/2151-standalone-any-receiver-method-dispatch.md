@@ -161,3 +161,36 @@ standalone object-literal method calls.
 
 Status: ready to PR; held pending tech-lead go (#25 was marked DEFERRED epic —
 sdev3 found the 0-arg slice is contained + green and recommends landing it).
+
+## Slice 2 RESULT (2026-06-15, sdev5) — N-ary methods IMPLEMENTED & GREEN
+
+Branch `issue-2151-nary-method`. Generalizes the Slice 1 dispatcher to methods
+**with arguments**:
+- `closed-method-dispatch.ts`: the dispatcher is now arity-specialized
+  `__call_m_<name>_<arity>(recv, arg0..arg{arity-1})` (all externref). The fill
+  side matches each candidate struct's `<Struct>_<name>` by `1 + arity` params,
+  coerces each externref arg to the method's declared param type inline
+  (`__unbox_number` for f64, `__unbox_boolean`/`__unbox_number`+trunc for i32,
+  `any.convert_extern`+`ref.cast` for refs), threads the struct as `this`, calls,
+  and box-coerces the result. The open-`$Object` fallback arm builds an `$ObjVec`
+  of the args (`__objvec_new`/`__objvec_push`) for `__extern_method_call`.
+- `calls.ts`: the any-receiver routing no longer gates on `arguments.length===0`
+  — it reserves `__call_m_<name>_<arity>`, compiles the receiver + each arg to
+  externref, and calls. Spread args still fall through to the generic path.
+
+Verified standalone AND wasi, ZERO host imports: 1-arg `f(n)→n+4`=9, 2-arg
+`g(a,b)→a*b+2`=14, 3-arg `h(a,b,c)`=6, `this`+arg `plus(n)→this.base+n`=25, and
+the Slice 1 0-arg path (`next()`=7) intact. Test: `tests/issue-2151-nary.test.ts`
+(6 cases). No regression: `issue-2151` 11/11, `object-methods` 13/13,
+`object-literals` 21/21. Host mode unchanged (gated `standalone||wasi`).
+
+**Still deferred (pre-existing, NOT this slice):**
+- **Built-in-method-name collision**: `o.add(5)` / `o.push(x)` on an object
+  literal route to the built-in `Set_add` / array fast-path BEFORE the
+  any-receiver fallback (verified identical on main). Needs the static
+  builtin-method fast-path to defer to the closed-struct dispatcher for `any`
+  receivers — a separate precedence fix.
+- **Host mode** any-method on a closed object literal (`o.f(5)` → "f is not a
+  function") — pre-existing host limitation (verified on main), out of scope
+  (this fix is gated on standalone/wasi).
+- Spread-arg method calls (`o.m(...xs)`).
