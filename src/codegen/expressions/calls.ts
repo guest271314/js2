@@ -4102,15 +4102,34 @@ function compileCallExpression(
       const method = propAccess.name.text;
       const arg0 = expr.arguments[0]!;
 
-      // Compile-time tracking: mark variable by freeze/seal/preventExtensions state
-      if (ts.isIdentifier(arg0)) {
-        ctx.nonExtensibleVars.add(arg0.text);
+      // Compile-time tracking: mark variable by freeze/seal/preventExtensions state.
+      // Two binding shapes carry the integrity to a variable the write-path /
+      // isFrozen consult (both keyed on the identifier name in ctx.frozenVars):
+      //   (a) `Object.freeze(o)` — the ARGUMENT is the identifier.
+      //   (b) `const o = Object.freeze({...})` (#2012) — the inline-literal arg
+      //       is not an identifier, but the CALL is the initializer of a
+      //       variable declaration, so mark the DECLARED variable instead.
+      //       Without this, an inline-literal freeze was a complete no-op for
+      //       struct receivers (no frozenVars entry → write never throws,
+      //       isFrozen → false).
+      const markIntegrity = (name: string): void => {
+        ctx.nonExtensibleVars.add(name);
         if (method === "freeze") {
-          ctx.frozenVars.add(arg0.text);
-          ctx.sealedVars.add(arg0.text); // frozen implies sealed
+          ctx.frozenVars.add(name);
+          ctx.sealedVars.add(name); // frozen implies sealed
         } else if (method === "seal") {
-          ctx.sealedVars.add(arg0.text);
+          ctx.sealedVars.add(name);
         }
+      };
+      if (ts.isIdentifier(arg0)) {
+        markIntegrity(arg0.text);
+      } else if (
+        // (#2012) `const/let o = Object.<freeze|seal|preventExtensions>(<expr>)`
+        ts.isVariableDeclaration(expr.parent) &&
+        ts.isIdentifier(expr.parent.name) &&
+        expr.parent.initializer === expr
+      ) {
+        markIntegrity(expr.parent.name.text);
       }
 
       // Compile the argument — returns the object itself (freeze/seal return their arg)
