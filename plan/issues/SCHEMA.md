@@ -52,6 +52,7 @@ goal: correctness
 parent: 1000
 depends_on: [1073]
 blocked_by: external
+assignee: "ttraenkler/senior-dev-1"
 ---
 ```
 
@@ -159,6 +160,28 @@ blocked_by: external
   - Optional flat array of numeric issue ids.
 - `blocked_by`
   - Optional blocker label or id.
+
+## Assignment Field (multi-dev, #2155)
+
+- `assignee`
+  - Who is working the issue. Humans use their name/handle; dev **agents** use a
+    github-account-prefixed name, e.g. `ttraenkler/senior-dev-1`, so an agent's
+    work is attributable to the account whose token pushed it.
+  - **This frontmatter value is eventually-consistent.** It is written into the
+    issue file lazily, inside the issue's own implementation PR (alongside
+    `status: in-progress`), and so only reflects on `main` once that PR merges.
+  - **The live claim lock is NOT this field.** Because multiple developers
+    (humans + agents, possibly across forks) cannot see each other's in-memory
+    TaskList, the authoritative "who holds this issue right now" lock lives on a
+    dedicated orphan ref, `refs/heads/issue-assignments` on `origin`, one
+    `<id>.json` per claimed issue. Claiming pushes there — which never moves
+    `main`, never rebuilds queued merge groups (#1951), and never triggers CI.
+  - **Always claim through the script**, never by hand-editing this field as the
+    lock: `node scripts/claim-issue.mjs <id> <assignee>` (or the `/claim-issue`
+    skill). It fetches `origin`, refuses if already claimed or already
+    done/wont-fix on `main`, and the first `git push` wins (a concurrent
+    claimant gets a non-fast-forward rejection and re-evaluates). `--release`
+    on abandon, `--complete` on merge, `--list` to see all live claims.
 
 ## Provenance Fields
 

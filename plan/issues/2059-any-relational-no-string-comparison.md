@@ -1,10 +1,11 @@
 ---
 id: 2059
 title: "relational operators on two any/externref operands never perform string comparison (\"a\" < \"b\" → false)"
-status: ready
+status: done
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-12
+updated: 2026-06-15
+completed: 2026-06-15
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -192,3 +193,41 @@ exercises in default mode.
 - Standalone test262 shard: confirm no movement in comparator buckets (the −788
   guard from #2058 — relational gate is disjoint from equality, so the
   `isSameValue` path is untouched).
+
+---
+
+## Resolution (2026-06-15)
+
+Both the JS-host AND standalone paths of this fix already landed via **PR #1420**
+(`fix(codegen): #2059 any relational does §7.2.13 string compare, not f64`,
+merged 2026-06-12). The implementation lives in `emitAnyRelational`
+(`src/codegen/binary-ops.ts`), gated at the relational call-site by the
+`isRelational && ctx.anyValueTypeIdx < 0 && (leftIsAnyish || rightIsAnyish)`
+check. The standalone arm (`noJsHost && ctx.nativeStrings && ctx.anyStrTypeIdx
+>= 0`) builds §7.2.13 in-module: both-string → native `__str_compare` after
+`__str_flatten`; else ToNumber both via `__unbox_number` + f64 sign derivation,
+with the `2`-sentinel making all four operators yield `false` for an
+incomparable (NaN/undefined) operand. No `env::__host_compare` import leaks.
+
+Verified on `origin/main` (sha 516feec44): with native `$AnyString` values
+flowing entirely within wasm (the only standalone scenario — there is no JS host
+to inject raw JS strings), all repro cases produce the correct §7.2.13 result at
+runtime in pure-WasmGC standalone mode:
+
+| case | standalone result | expected |
+|------|-------------------|----------|
+| `"a" < "b"` | `1` | `true` (lexicographic) |
+| `"10" < "9"` | `1` | `true` (`"1" < "9"`, NOT numeric `10<9`) |
+| `"10" < 9` | `0` | `false` (mixed → numeric) |
+| `"b" > "a"` | `1` | `true` |
+| `"a" <= "a"` | `1` | `true` |
+| `"abc" >= "abd"` | `0` | `false` |
+| `1 < 2` (any) | `1` | `true` |
+
+This task closes as a **test-hardening** change only: the standalone section of
+`tests/issue-2059-any-relational.test.ts` previously asserted numeric runtime +
+string *compile-validate* only, so a regression in the in-module `__str_compare`
+dispatch would have stayed invisible (the exact "closed at first impl, not at
+standalone conformance" trap this sprint targets). Added two runtime tests that
+lock in the lexicographic/numeric §7.2.13 results for both `any`-local and
+`any`-parameter (native-string-via-caller) forms.

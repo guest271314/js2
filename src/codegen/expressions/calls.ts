@@ -365,8 +365,22 @@ function tryEmitJsonStringifyPrimitive(
   }
   const flags = argType.flags;
 
+  // (#2166) TypeScript models the `boolean` primitive as the union
+  // `true | false`, so a `boolean`-typed value (e.g. `const b: boolean = x`)
+  // carries the `Union` flag and was wrongly skipped by the ambiguous-mask
+  // early-return below — so `JSON.stringify(b)` refused in standalone instead
+  // of serializing to "true"/"false". A `BooleanLike` type (the boolean union
+  // or a boolean literal) is unambiguously serializable, so recognize it before
+  // the mask. Guard on `intrinsicName === "boolean"` for the union so we don't
+  // misfire on a mixed union that merely contains a boolean member.
+  const isBooleanType =
+    (flags & ts.TypeFlags.BooleanLiteral) !== 0 ||
+    ((flags & ts.TypeFlags.Boolean) !== 0 &&
+      (argType as ts.Type & { intrinsicName?: string }).intrinsicName === "boolean");
+
   // Skip ambiguous shapes (any/unknown/union/object/intersection) — let
-  // the caller fall through to the host import which handles them.
+  // the caller fall through to the host import which handles them. The
+  // `boolean` union is the documented exception (see above).
   const ambiguousMask =
     ts.TypeFlags.Any |
     ts.TypeFlags.Unknown |
@@ -375,7 +389,7 @@ function tryEmitJsonStringifyPrimitive(
     ts.TypeFlags.Object |
     ts.TypeFlags.NonPrimitive |
     ts.TypeFlags.TypeParameter;
-  if (flags & ambiguousMask) return undefined;
+  if (!isBooleanType && flags & ambiguousMask) return undefined;
 
   // null literal
   if (flags & ts.TypeFlags.Null) {

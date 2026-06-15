@@ -5630,18 +5630,25 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
     } as Instr,
   ];
 
-  // (#2072) Standalone primitive-box recovery. An `any`-held primitive is
-  // NOT stored as a $AnyValue box on the WasmGC/standalone path — `coerceType`
-  // boxes f64 via `__box_number` ($__box_number_struct), bool via
-  // `__box_boolean` ($__box_boolean_struct), then `extern.convert_any` makes it
-  // externref (the #1888 externref ABI the test262 comparator relies on, which
-  // is why we recover the shape here rather than changing the box). So when the
-  // value is neither $AnyString nor $AnyValue, before yielding "[object Object]"
-  // we ref.test the boxed-primitive structs and format them, matching what the
-  // $AnyValue tag-2/tag-4 arms above already do. Without this, String(v) for
-  // `const v: any = 42 / true` returned "[object Object]". Type indices (not
-  // func indices) are read here, so no late-import shift hazard; the only func
-  // index baked in is `numToStrIdx`, which this helper already bakes for tag 2/3.
+  // (#2072) Standalone primitive-box recovery — subsumes the #1988 number-only
+  // arm (which lived at this exact residual location and recovered ONLY
+  // `$__box_number_struct` → number_toString, e.g. the `1` in `1 + {}` after
+  // ToPrimitive). An `any`-held primitive is NOT stored as a $AnyValue box on
+  // the WasmGC/standalone path — `coerceType` boxes f64 via `__box_number`
+  // ($__box_number_struct), bool via `__box_boolean` ($__box_boolean_struct),
+  // then `extern.convert_any` makes it externref (the #1888 externref ABI the
+  // test262 comparator relies on, which is why we recover the shape here rather
+  // than changing the box). So when the value is neither $AnyString nor
+  // $AnyValue, before yielding "[object Object]" we ref.test the boxed-primitive
+  // structs and format them, matching what the $AnyValue tag-2/tag-4 arms above
+  // already do. Without this, String(v) for `const v: any = 42 / true` returned
+  // "[object Object]". The number sub-arm uses `numberArm(...)`, which appends
+  // exactly `call number_toString; any.convert_extern; ref.cast $AnyString` —
+  // byte-identical to #1988's explicit emit (and falls back to "[object Object]"
+  // when `number_toString` is absent), so #1988's `1 + {}` case still holds.
+  // Type indices (not func indices) are read here, so no late-import shift
+  // hazard; the only func index baked in is `numToStrIdx`, which this helper
+  // already bakes for tag 2/3.
   const boxNumIdx = ctx.nativeBoxNumberTypeIdx;
   const boxBoolIdx = ctx.nativeBoxBooleanTypeIdx;
   const residualArm: Instr[] =
