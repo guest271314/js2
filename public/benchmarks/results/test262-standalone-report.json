@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-15T10:49:12.585Z",
-  "baseline_generated_at": "2026-06-15T10:49:12Z",
-  "baseline_sha": "d6a8f6be8049c28d8dfb6d203c12702027479228",
+  "timestamp": "2026-06-15T10:57:31.335Z",
+  "baseline_generated_at": "2026-06-15T10:57:31Z",
+  "baseline_sha": "7a735be5d2824331fd37e2bff87fdf07d0e13144",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -1123,15 +1123,15 @@
           "promise_error": 6
         },
         "sample_files": [
-          "test/language/expressions/class/subclass-builtins/subclass-Number.js",
           "test/language/expressions/assignment/dstr/obj-rest-symbol-val.js",
+          "test/language/expressions/class/subclass-builtins/subclass-Number.js",
           "test/language/expressions/class/subclass-builtins/subclass-Array.js",
           "test/language/expressions/compound-assignment/S11.13.2_A5.2_T1.js",
           "test/language/statements/class/subclass-builtins/subclass-WeakRef.js"
         ],
         "sample_signatures": [
-          "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'Subclass_new'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionI",
           "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'test'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImports/a",
+          "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'Subclass_new'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionI",
           "other:L#:## ##: with statement requires a proven closed object-literal shape before codegen; target Identifier is not a closed object literal. ECMA-# #.# creates an Object Environment Record, #.#.# checks HasProperty plus @@unscopables, and #.# i",
           "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'RE2_new'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImport",
           "other:L#:## Binary emit error: Codegen error: function index out of range — undefined (valid: [#, #)) at function 'values'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUni"
@@ -1228,8 +1228,8 @@
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js",
-          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
-          "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js"
+          "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
+          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js"
         ],
         "sample_signatures": [
           "runtime_error:Cannot convert object to primitive value",
@@ -1381,7 +1381,7 @@
           "test/built-ins/JSON/stringify/space-wrong-type.js",
           "test/built-ins/JSON/stringify/replacer-function-result.js",
           "test/built-ins/JSON/parse/15.12.1.1-0-8.js",
-          "test/built-ins/JSON/stringify/replacer-array-empty.js"
+          "test/built-ins/JSON/parse/reviver-array-define-prop-err.js"
         ],
         "sample_signatures": [
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
@@ -1598,21 +1598,21 @@
           "total": 296
         },
         "error_categories": {
-          "other": 269,
           "assertion_fail": 12,
+          "other": 269,
           "runtime_error": 14,
           "illegal_cast": 1
         },
         "sample_files": [
-          "test/built-ins/Reflect/getOwnPropertyDescriptor/undefined-own-property.js",
           "test/built-ins/Reflect/has/return-boolean.js",
+          "test/built-ins/Reflect/getOwnPropertyDescriptor/undefined-own-property.js",
           "test/built-ins/Reflect/construct/length.js",
           "test/built-ins/Reflect/enumerate/undefined.js",
           "test/built-ins/Object/prototype/setPrototypeOf-with-non-circular-values-__proto__.js"
         ],
         "sample_signatures": [
-          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C).",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(Reflect.has(o1, 'p'), true, 'true from own property');",
+          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Reflect.construct built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
           "other:L#:## Codegen error: Reflect.hasOwnProperty not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Object.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.; L#:## Codegen error: Reflect.setPrototypeOf not supported"
@@ -1652,13 +1652,13 @@
           "test/language/expressions/class/async-gen-method/forbidden-ext/b2/cls-expr-async-gen-meth-forbidden-ext-indirect-access-prop-caller.js",
           "test/language/expressions/class/dstr/async-private-gen-meth-dflt-ary-init-iter-close.js",
           "test/language/expressions/class/dstr/gen-meth-static-ary-ptrn-elem-id-iter-val-err.js",
-          "test/language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-rest-id.js"
+          "test/language/expressions/class/dstr/async-private-gen-meth-ary-ptrn-elem-ary-rest-init.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Symbol.iterator built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"inner\" failed: call[#] expected type externref, found ref.cast of type (ref #) @+#) [in inner()] [@+#] [wat: (func $inner (type #) (local $__nullchk_0 externref) g",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(x.length, #);",
           "assertion_fail:returned # — assert ## at L#: assert.notSameValue(x, values);",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(x.length, #);",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(result.value, undefined);"
         ]
       },
@@ -2155,8 +2155,8 @@
           "assertion_fail": 87,
           "null_deref": 6,
           "other": 1,
-          "negative_test_fail": 4,
           "wasm_compile": 5,
+          "negative_test_fail": 4,
           "illegal_cast": 1
         },
         "sample_files": [
