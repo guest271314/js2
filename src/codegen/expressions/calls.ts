@@ -121,7 +121,11 @@ import { analyzeTdzAccessByPos, emitLocalTdzCheck, emitStaticTdzThrow } from "./
 import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
-import { tryCompileNativeGeneratorMethodCall } from "../generators-native.js";
+import {
+  emitNativeGeneratorToVec,
+  nativeGeneratorInfoForForOfSubject,
+  tryCompileNativeGeneratorMethodCall,
+} from "../generators-native.js";
 import {
   ensureNativeStringExternBridge,
   ensureStrToCharVecHelper,
@@ -3969,6 +3973,27 @@ function compileCallExpression(
           return { kind: "ref", typeIdx: nstrVecTypeIdx };
         }
         // Didn't lower as a native string — roll back and use the paths below.
+        fctx.body.length = bodyLenBefore;
+      }
+      // (#2169) Array.from(g()) over a Wasm-native generator without a mapFn.
+      // The argument lowers to the generator state struct, NOT a __vec — the
+      // host fallback below would convert it to externref and call __array_from
+      // (an env import that doesn't exist standalone). Drain the generator into
+      // an f64 vec via the native resume loop instead (shares the spread
+      // helper). Tentatively compile + commit only when the arg genuinely
+      // lowers to a native-generator subject (mirrors the #1470 native-string
+      // probe above).
+      if (!hasMapFn) {
+        const bodyLenBefore = fctx.body.length;
+        const t = compileExpression(ctx, fctx, expr.arguments[0]!);
+        const genInfo = t ? nativeGeneratorInfoForForOfSubject(ctx, t) : undefined;
+        if (genInfo) {
+          const genVecTypeIdx = getOrRegisterVecType(ctx, "f64");
+          const genArrTypeIdx = getArrTypeIdxFromVec(ctx, genVecTypeIdx);
+          emitNativeGeneratorToVec(ctx, fctx, genInfo, t!, genVecTypeIdx, genArrTypeIdx);
+          return { kind: "ref", typeIdx: genVecTypeIdx };
+        }
+        // Not a native generator — roll back and use the paths below.
         fctx.body.length = bodyLenBefore;
       }
       // Only handle array arguments — create a shallow copy
