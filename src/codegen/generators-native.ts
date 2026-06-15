@@ -359,10 +359,7 @@ function buildNativeGeneratorPlan(ctx: CodegenContext, decl: ts.FunctionDeclarat
   // context, returning its id.
   let pendingResumeBindings: string[] = [];
   let pendingAbrupt: NativeGeneratorState["abruptResume"] | undefined;
-  function startStateAfterYield(
-    bindSentTo: string | undefined,
-    activeFinalizers: readonly ts.Statement[][],
-  ): number {
+  function startStateAfterYield(bindSentTo: string | undefined, activeFinalizers: readonly ts.Statement[][]): number {
     pendingResumeBindings = bindSentTo ? [bindSentTo] : [];
     pendingAbrupt = { finalizers: [...activeFinalizers].reverse() };
     if (bindSentTo) addSpill(bindSentTo);
@@ -939,7 +936,17 @@ function emitTrampoline(
     const loopDepth = level + 1; // br to re-enter dispatch
     const exitDepth = level + 2; // br to leave block (return to caller)
 
-    const thenBody = compileState(ctx, fctx, info, states[stateId]!, stateId, loopDepth, exitDepth, selfLocal, resultLocal);
+    const thenBody = compileState(
+      ctx,
+      fctx,
+      info,
+      states[stateId]!,
+      stateId,
+      loopDepth,
+      exitDepth,
+      selfLocal,
+      resultLocal,
+    );
     const elseBody = buildArm(stateId + 1, level + 1);
     return [
       { op: "local.get", index: selfLocal },
@@ -1079,10 +1086,7 @@ function compileState(
           ...setStateInstrs(info, selfLocal, term.thenState),
           { op: "br", depth: loopDepth + 1 }, // +1 for the inner branch `if`
         ],
-        else: [
-          ...setStateInstrs(info, selfLocal, term.elseState),
-          { op: "br", depth: loopDepth + 1 },
-        ],
+        else: [...setStateInstrs(info, selfLocal, term.elseState), { op: "br", depth: loopDepth + 1 }],
       });
       break;
     }
