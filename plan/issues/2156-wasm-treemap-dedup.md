@@ -1,5 +1,5 @@
 ---
-id: 2150
+id: 2156
 title: "Unify the two wasm-treemap implementations (playground .ts vs standalone .html)"
 status: backlog
 sprint: Backlog
@@ -12,8 +12,8 @@ task_type: refactor
 area: website
 language_feature: tooling
 goal: process
-related: [2149]
-origin: "Surfaced while fixing #2149/GH #1465 — the same component-handling fix had to be implemented twice"
+related: [2155]
+origin: "Surfaced while fixing #2155/GH #1465 — the same component-handling fix had to be implemented twice"
 ---
 
 ## Problem
@@ -30,11 +30,11 @@ lines of parser + tree-building + rendering logic:
 
 `parseWasm`, `parseComponent`, `buildSectionsTree` / `addModuleSections`,
 `buildFunctionsTree`, `squarify`, `renderNode`, `applyRemainders`, the LEB
-decoders, etc. are all duplicated. #2149 (GH #1465) is direct evidence of the
+decoders, etc. are all duplicated. #2155 (GH #1465) is direct evidence of the
 maintenance cost: the identical Component-Model fix had to be written into both
 files, and any future treemap change risks the two drifting.
 
-## Why it wasn't done inline with #2149
+## Why it wasn't done inline with #2155
 
 Unifying is a structural change, not a bugfix, and there's a real tradeoff:
 
@@ -45,7 +45,7 @@ Unifying is a structural change, not a bugfix, and there's a real tradeoff:
   reformats the whole (previously non-Prettier-clean) file — mixing that with a
   behavior change is poor PR hygiene.
 
-So #2149 fixed both copies to actually resolve the issue, and deferred the
+So #2155 fixed both copies to actually resolve the issue, and deferred the
 dedup here.
 
 ## Proposed approach
@@ -66,5 +66,5 @@ widget) and have the standalone page consume it. Options to evaluate:
 - One implementation of the parser/tree/render logic; no duplicated `parseWasm`
   / tree-builders.
 - The deployed standalone treemap page still works (drag-drop a `.wasm`/`.wat`,
-  `?url=` param, sections/functions toggle, component drill-down from #2149).
+  `?url=` param, sections/functions toggle, component drill-down from #2155).
 - The playground treemap is unchanged for the user.

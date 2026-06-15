@@ -1,5 +1,5 @@
 ---
-id: 2149
+id: 2155
 title: "wasm-treemap can't visualize WebAssembly Component binaries (GH #1465)"
 status: done
 sprint: 62
@@ -13,7 +13,7 @@ task_type: bug
 area: website
 language_feature: tooling
 goal: process
-related: [2150]
+related: [2156]
 origin: "GitHub issue #1465 (external, guest271314) — dropping a 13.4 MiB componentize-js .wasm onto the treemap fails"
 ---
 
@@ -79,4 +79,4 @@ Against the actual 14,092,650-byte file:
 
 The parser + tree-building + rendering logic is **duplicated** between the `.ts`
 module and the standalone `.html` (both had to be patched here). Tracked for
-unification in [[2150-wasm-treemap-dedup]].
+unification in [[2156-wasm-treemap-dedup]].
