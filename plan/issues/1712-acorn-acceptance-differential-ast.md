@@ -12,7 +12,7 @@ area: test-infrastructure, codegen
 language_feature: multi
 goal: self-hosting-dogfood
 sprint: 64
-model: fable
+model: opus
 depends_on: [1710, 1711]
 es_edition: multi
 related: [1690, 1690b, 1584, 1058]

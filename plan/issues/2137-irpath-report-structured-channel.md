@@ -2,7 +2,7 @@
 id: 2137
 title: "IrPathReport channel: stop laundering IR fallbacks through ctx.errors warnings"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-12
 updated: 2026-06-12
 priority: medium

@@ -1,7 +1,8 @@
 ---
 id: 1985
 title: "stale-proof index cells: shift-walker-updated { idx } handles for captured func indices (#2043 Option 2b, incremental)"
-status: ready
+status: blocked
+blocked_by: [2167]
 sprint: 64
 created: 2026-06-10
 updated: 2026-06-12
