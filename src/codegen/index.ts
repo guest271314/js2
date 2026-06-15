@@ -9138,6 +9138,31 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
           { op: "return" },
         ],
       },
+      // (#2080) native string? → length !== 0 (ToBoolean §7.1.2: "" → false).
+      // In standalone/nativeStrings mode an `any`-held string is a $AnyString
+      // (the supertype of $NativeString / $ConsString, all carrying $len at
+      // field 0) wrapped as externref — NOT a $AnyValue box. Without this arm
+      // it falls through to the "any non-null ref → truthy" default, so the
+      // empty string is wrongly truthy. Guarded on anyStrTypeIdx so the GC /
+      // host-string path (no native-string type registered) is unaffected.
+      ...(ctx.anyStrTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+                { op: "struct.get", typeIdx: ctx.anyStrTypeIdx, fieldIdx: 0 },
+                { op: "i32.const", value: 0 },
+                { op: "i32.ne" },
+                { op: "return" },
+              ],
+            },
+          ] as Instr[])
+        : []),
       // any other non-null ref → truthy
       { op: "i32.const", value: 1 },
     ],

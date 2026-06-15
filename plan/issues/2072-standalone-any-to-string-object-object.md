@@ -1,10 +1,11 @@
 ---
 id: 2072
 title: "standalone: String(any-boxed primitive) returns '[object Object]' — $__any_to_string doesn't recognize the boxed shape from String()/pop/catch paths"
-status: ready
+status: done
 sprint: 62
 created: 2026-06-11
-updated: 2026-06-12
+updated: 2026-06-15
+completed: 2026-06-15
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -80,3 +81,40 @@ type, so this means threading a TS-type hint through the boxing path — a
 cross-cutting change to the coercion API. **Recommend senior-dev/architect**:
 this is the standalone-AnyValue-representation core, same family as the
 #2009/#1989 struct-shape work, not a localized two-helper fix.
+
+## Resolution (2026-06-15, sdev5) — corrected root cause, no boxing-ABI change
+
+The "wrong tag" framing above was a half-truth that pointed at a dangerous
+fix. Tracing the WAT (`const v: any = 42; String(v)`) on main shows `any`-held
+primitives in standalone are **not** stored as `$AnyValue` boxes at all — they
+take the **externref** path: `__box_number(f64)` → `$__box_number_struct`
+wrapped via `extern.convert_any`; `__box_boolean(i32)` → `$__box_boolean_struct`;
+a string stays a native `$AnyString` (eqref). `String()` routes through
+`__extern_toString` → `__any_to_string`. The bug: `$__any_to_string`
+(`native-strings.ts`, `ensureAnyToStringHelper`) only recognized `$AnyString`
+and `$AnyValue`, so a `$__box_number_struct` / `$__box_boolean_struct` fell to
+the `"[object Object]"` else-arm.
+
+Threading a static-TS hint to flip the boxing to `$AnyValue` (the "type-aware
+boxing" above) would change the externref ABI — exactly what #1888's NOTE in
+`type-coercion.ts:1208` warns cost **−794 baseline standalone passes**. So
+instead the fix **recovers the boxed shape at the read site**:
+`$__any_to_string` now `ref.test`s `ctx.nativeBoxNumberTypeIdx` /
+`nativeBoxBooleanTypeIdx` before "[object Object]" and formats the value
+(number via the same `number_toString` arm it uses for `$AnyValue` tag 2/3;
+boolean → "true"/"false"). Type indices (not func indices) are baked in, so no
+late-import shift hazard. Guarded on the box types existing (`>= 0`).
+
+**Fixed**: `String(v)` for `v: any =` number / float / boolean, `String(a.pop())`,
+property-read results, catch bindings — all match Node in standalone + wasi.
+Host/gc mode unchanged (host path uses the JS-host `__extern_toString` import).
+
+**Deliberately deferred** (NOT this issue's shape-blindness root cause):
+`String(v)` for `v: any = null / undefined`. On the current standalone path
+BOTH lower to a bare `ref.null extern` — the null-vs-undefined distinction is
+**lost at the value level**, so there is no boxed shape to recover. Restoring
+it is the undefined-representation work owned by **#2142** (spec, done) →
+**#2051 / #2106** (impl). Tracked there; out of scope for this P0 read-site fix.
+
+Regression test: `tests/issue-2072.test.ts`. Companion #2080 (empty-string
+truthiness) fixed in the same PR via the `__is_truthy` native-string arm.

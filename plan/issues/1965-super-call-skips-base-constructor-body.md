@@ -1,7 +1,8 @@
 ---
 id: 1965
 title: "derived-class construction never executes the base constructor body; super(args) writes args positionally into parent struct fields"
-status: ready
+status: done
+completed: 2026-06-15
 sprint: 62
 created: 2026-06-10
 updated: 2026-06-12

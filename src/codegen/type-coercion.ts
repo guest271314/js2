@@ -1133,6 +1133,35 @@ export function coerceType(
     if (isAnyValue(from, ctx) && !isAnyValue(to, ctx)) {
       ensureAnyHelpers(ctx);
       const toIdx = (to as { typeIdx: number }).typeIdx;
+      // (#1988) A native string is boxed into $AnyValue tag 5 with its payload
+      // in `externval` (field 4, externref-wrapped $AnyString) — NOT `refval`
+      // (field 3, eqref). The generic unbox below reads field 3, so a tag-5
+      // string box (e.g. the result of the `__any_add` concat arm) deref'd null.
+      // When the target is a native-string type, pull the string out of
+      // externval and cast it; fall through to the field-3 eqref path for every
+      // other GC ref target (objects/arrays/tag 6).
+      const isNativeStrTarget =
+        ctx.nativeStrings &&
+        (toIdx === ctx.anyStrTypeIdx || (ctx.nativeStrTypeIdx >= 0 && toIdx === ctx.nativeStrTypeIdx));
+      if (isNativeStrTarget) {
+        const tmpStr = allocTempLocal(fctx, { kind: "anyref" } as ValType);
+        fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 4 }); // externval
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        fctx.body.push({ op: "local.tee", index: tmpStr });
+        fctx.body.push({ op: "ref.test", typeIdx: toIdx });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
+          then: [
+            { op: "local.get", index: tmpStr },
+            { op: "ref.cast_null", typeIdx: toIdx },
+          ],
+          else: [{ op: "ref.null", typeIdx: toIdx }],
+        });
+        fctx.body.push({ op: "ref.as_non_null" } as Instr);
+        releaseTempLocal(fctx, tmpStr);
+        return;
+      }
       fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 3 });
       // Guarded cast: eqref → ref $X
       const tmpUnbox = allocTempLocal(fctx, { kind: "eqref" } as ValType);

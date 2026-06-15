@@ -34,3 +34,12 @@ hard `fix(...)`/`refactor(...)` tasks. You must still skip:
 - tasks whose issue already has a merged/another-agent-owned-open PR — flag the tech lead, skip.
 A task pinned to a *named* senior-dev (e.g. `owner sendev-flatten` in the subject or `owner`
 field) belongs to that agent only — do not take it even though it is in your role lane.
+
+**Cross-developer git lock — REQUIRED (#2155):** once the gate passes, before you
+start work, take the git-backed lock exactly as developer.md's Start step
+describes: `node scripts/claim-issue.mjs <id> ttraenkler/<your-agent-name>
+--branch issue-<id>-<slug>`. Exit `0` = proceed, `3` = claimed by someone else
+(skip), `4` = already done on `main` (skip, flag tech lead). Set `assignee:` +
+`status: in-progress` in the issue frontmatter on your branch. `--release` on
+suspend, `--complete` on merge. When resuming a *suspended* branch, re-claim with
+`--force`. See the `/claim-issue` skill.

@@ -42,3 +42,15 @@ host mode but fail standalone**, attributed to the RegExp engine — currently
 
 Parent (done): #1909. Part of sprint-62 standalone catch-up (rank 5 by gap
 impact).
+
+## Tech-lead triage note (2026-06-15, from sdev3)
+
+Released to pending after triage — needs CI standalone-shard compile_error
+breakdown to scope sub-fixes. Basic standalone RegExp is HEALTHY (test/exec/
+captures/source/flags/lastIndex/replace/split/match all correct). Concrete leak:
+`String.prototype.matchAll` refused in standalone (string-ops.ts:2786) though
+regexp-standalone.ts has `__regex_match_all` (wired only to global `match`);
+wiring matchAll = focused sub-feature (iterator of capture-ARRAYS). Dominant
+~425 `(none)`-leak compile_errors need the real test262 harness (Symbol.match
+protocol). NEXT: pull standalone-shard RegExp compile_error entries from CI,
+bucket by leaked import, dispatch top 2-3 + matchAll iterator as sub-PRs.
