@@ -86,7 +86,7 @@ export function test(): number {
 Hard: native state-machine plan must additionally handle **closure capture**
 of enclosing locals (top-level generators have none). Likely multi-PR. Highest
 single lever in the gap (nested generators are pervasive in test262 fixtures).
-→ **sub-task #2168** (proposed).
+→ **sub-task #2172** (proposed; #2168 was already taken by an unrelated issue).
 
 ### SF-2 — spread / Array.from / destructuring don't drive a native generator
 
@@ -140,4 +140,4 @@ overlaps the collection-iterator path tracked under #2162; cross-referenced.
 Lands the **triage + a standalone test-gate suite** (`tests/issue-2157-*.test.ts`)
 that pins the currently-working cases as regression guards and `it.todo`-marks
 SF-1..SF-4 with their repros, so the sub-tasks have executable acceptance gates.
-The four sub-fixes are dispatched as #2168–#2171.
+The four sub-fixes are dispatched as #2172 (SF-1; #2168 was taken), #2169, #2170, #2171.

@@ -1,5 +1,5 @@
 ---
-id: 2168
+id: 2172
 title: "standalone: nested `function*` declarations take the JS-host path (funcindex CE) — native lowering only wired for top-level generators"
 status: ready
 sprint: 62
@@ -15,7 +15,7 @@ parent: 2157
 depends_on: [2079]
 ---
 
-# #2168 — nested generator native lowering (SF-1 of #2157)
+# #2172 — nested generator native lowering (SF-1 of #2157)
 
 ## Problem
 

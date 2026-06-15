@@ -6,7 +6,7 @@
  * work standalone for `for-of` and manual `next()`. This file is the
  * **test-gate suite** for the remaining residual: it pins the currently-working
  * cases as regression guards, and `it.todo`-marks the four concrete sub-fixes
- * (SF-1..SF-4, dispatched as #2168–#2171) with their exact repros so each
+ * (SF-1..SF-4, dispatched as #2172/#2169/#2170/#2171) with their exact repros so each
  * sub-task has an executable acceptance gate.
  *
  * Triage detail: plan/issues/2157-standalone-iterator-generator-conformance-residual.md
@@ -65,8 +65,8 @@ export function test(): number { const it=g(); return (it.next().value as number
 });
 
 describe("#2157 residual sub-fixes — executable gates (currently failing)", () => {
-  // SF-1 (#2168) — nested `function*` declaration takes the JS-host path → funcindex CE.
-  it.todo("SF-1 #2168: nested generator for-of returns 6", async () => {
+  // SF-1 (#2172) — nested `function*` declaration takes the JS-host path → funcindex CE.
+  it.todo("SF-1 #2172: nested generator for-of returns 6", async () => {
     expect(
       await runStandalone(`export function test(): number {
         function* g(){ yield 1; yield 2; yield 3; }
