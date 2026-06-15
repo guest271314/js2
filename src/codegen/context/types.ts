@@ -158,6 +158,14 @@ export interface NativeGeneratorInfo {
   yieldCount: number;
   /** Terminal state value. */
   doneState: number;
+  /**
+   * (#2171) ValType of the generator's yielded values. `{kind:"f64"}` for the
+   * numeric path (default); the native-string ref for a generator whose yields
+   * are all strings. The result struct's `value` field and the for-of / .next()
+   * extraction read this. Mixed / object yields are not yet supported (the plan
+   * bails before a generator with disagreeing yield types is registered).
+   */
+  elemValType: ValType;
 }
 
 export type NullishExclusion = "null" | "undefined" | "nullish";
