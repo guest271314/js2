@@ -74,3 +74,9 @@ object/array) still refuse with the #1599 Phase-2 compile error — they need th
 pure-Wasm JSON codec + a dynamic value representation. That is the #1599 Phase 2
 architect-spec follow-up (large; benefits from the #1917 coercion engine and the
 value-rep work), not a point fix.
+
+## Tech-lead note (2026-06-15, from dev3)
+
+PR #1488 fixed one slice (standalone `JSON.stringify` of a boolean-typed value).
+Stays `ready`: the ~75-test bulk is dynamic object-graph stringify/parse, needing
+the #1599 Phase-2 pure-Wasm JSON codec + dynamic value rep (architect/senior).

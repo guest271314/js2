@@ -1,7 +1,8 @@
 ---
 id: 2142
 title: "Reconcile undefined-representation ownership: #2051 spec (externref widening) vs #2106 (UNDEF_F64 sentinel)"
-status: ready
+status: done
+completed: 2026-06-15
 sprint: 62
 created: 2026-06-12
 updated: 2026-06-12

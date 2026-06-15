@@ -1,7 +1,8 @@
 ---
 id: 2100
 title: "architect spec: deep-marshaling contract at the host boundary (vec ⇄ array, closure ⇄ callback, struct ⇄ object)"
-status: ready
+status: done
+completed: 2026-06-15
 sprint: 62
 created: 2026-06-11
 updated: 2026-06-15
