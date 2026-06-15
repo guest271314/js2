@@ -5630,6 +5630,60 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
     } as Instr,
   ];
 
+  // (#2072) Standalone primitive-box recovery. An `any`-held primitive is
+  // NOT stored as a $AnyValue box on the WasmGC/standalone path — `coerceType`
+  // boxes f64 via `__box_number` ($__box_number_struct), bool via
+  // `__box_boolean` ($__box_boolean_struct), then `extern.convert_any` makes it
+  // externref (the #1888 externref ABI the test262 comparator relies on, which
+  // is why we recover the shape here rather than changing the box). So when the
+  // value is neither $AnyString nor $AnyValue, before yielding "[object Object]"
+  // we ref.test the boxed-primitive structs and format them, matching what the
+  // $AnyValue tag-2/tag-4 arms above already do. Without this, String(v) for
+  // `const v: any = 42 / true` returned "[object Object]". Type indices (not
+  // func indices) are read here, so no late-import shift hazard; the only func
+  // index baked in is `numToStrIdx`, which this helper already bakes for tag 2/3.
+  const boxNumIdx = ctx.nativeBoxNumberTypeIdx;
+  const boxBoolIdx = ctx.nativeBoxBooleanTypeIdx;
+  const residualArm: Instr[] =
+    boxNumIdx >= 0 && boxBoolIdx >= 0
+      ? [
+          // $__box_number_struct? → number_toString(value)
+          { op: "local.get", index: L_V },
+          { op: "ref.test", typeIdx: boxNumIdx } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: strRef },
+            then: numberArm([
+              { op: "local.get", index: L_V },
+              { op: "ref.cast", typeIdx: boxNumIdx } as Instr,
+              { op: "struct.get", typeIdx: boxNumIdx, fieldIdx: 0 },
+            ]),
+            else: [
+              // $__box_boolean_struct? → "true" / "false"
+              { op: "local.get", index: L_V },
+              { op: "ref.test", typeIdx: boxBoolIdx } as Instr,
+              {
+                op: "if",
+                blockType: { kind: "val", type: strRef },
+                then: [
+                  { op: "local.get", index: L_V },
+                  { op: "ref.cast", typeIdx: boxBoolIdx } as Instr,
+                  { op: "struct.get", typeIdx: boxBoolIdx, fieldIdx: 0 },
+                  {
+                    op: "if",
+                    blockType: { kind: "val", type: strRef },
+                    then: litStr("true"),
+                    else: litStr("false"),
+                  } as Instr,
+                ],
+                // tag 6 / unknown ref → "[object Object]"
+                else: litStr("[object Object]"),
+              } as Instr,
+            ],
+          } as Instr,
+        ]
+      : litStr("[object Object]");
+
   const body: Instr[] = [
     // if (v is a $AnyString) return it directly
     { op: "local.get", index: L_V },
@@ -5651,8 +5705,9 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
             { op: "local.set", index: L_BOX },
             ...boxDispatch,
           ],
-          // else (null ref, plain object, vec, …) → "[object Object]"
-          else: litStr("[object Object]"),
+          // else (boxed primitive externref shape, null ref, plain object, vec,
+          // …) → recover number/boolean boxes, then "[object Object]"
+          else: residualArm,
         } as Instr,
       ],
     } as Instr,
