@@ -36,6 +36,7 @@ import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
+import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
@@ -1556,6 +1557,13 @@ export function generateModule(
     // `__call_fn_method_0..4` are registered. No-op when no standalone open-any
     // method-dispatch site reserved the bridge (`ctx.applyClosureReserved`).
     fillApplyClosure(ctx);
+
+    // (#2151) Fill the reserved `__call_m_<name>` closed-struct method
+    // dispatchers now that every object-literal struct + its `<Struct>_<name>`
+    // method funcs are registered. Read-only over funcMap (all deps registered
+    // at reserve time), so no funcIdx churn. No-op when no any-receiver call site
+    // reserved a dispatcher (standalone/wasi only).
+    fillClosedMethodDispatch(ctx);
 
     // (#1904) Fill the standalone native Array.isArray predicate after all
     // module-local array carriers have been registered.

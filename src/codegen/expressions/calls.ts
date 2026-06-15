@@ -19,6 +19,7 @@ import {
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
+import { reserveClosedMethodDispatch } from "../closed-method-dispatch.js";
 import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
 import {
   emitStandalonePromiseReject,
@@ -8048,6 +8049,33 @@ function compileCallExpression(
             const externResult = tryExternClassMethodOnAny(ctx, fctx, expr, propAccess, methodName);
             if (externResult !== null) return externResult;
           }
+        }
+
+        // (#2151) Standalone/WASI closed-struct method dispatch. An object
+        // literal `{ m(){…} }` is a CLOSED nominal WasmGC struct; the generic
+        // __extern_method_call below only handles the OPEN $Object receiver
+        // (ref.test $Object), so `o.m()` on a closed struct returns null/0 and
+        // never invokes the method (standalone analog of the JS-host #2015 bug).
+        // Route 0-arg any-receiver calls through a reserved per-name dispatcher
+        // `__call_m_<name>` that type-switches over every closed struct having
+        // `<Struct>_<name>` (threading the struct as `this`) and falls through to
+        // __extern_method_call for the open-$Object case. Reserve-then-fill
+        // (#1719): the body is built at finalize once all structs are known.
+        // Slice 1: zero-arg only (covers next()/getx()/iterator protocol); calls
+        // with arguments keep the existing generic path below.
+        const recvIsBuiltinClass =
+          ts.isIdentifier(propAccess.expression) && BUILTIN_CLASS_NAMES.has(propAccess.expression.text);
+        if ((ctx.standalone || ctx.wasi) && expr.arguments.length === 0 && !recvIsBuiltinClass) {
+          const dispatchIdx = reserveClosedMethodDispatch(ctx, methodName);
+          flushLateImportShifts(ctx, fctx);
+          const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+          if (recvType && recvType.kind !== "externref") {
+            fctx.body.push({ op: "extern.convert_any" });
+          } else if (recvType === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "call", funcIdx: dispatchIdx });
+          return { kind: "externref" };
         }
 
         // (#799 WI3) Generic host-delegated method call for any/externref receivers.
