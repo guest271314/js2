@@ -36,6 +36,13 @@ sentinel truthy), so the affected test262 cases passed *by accident*. Correct
 ToBoolean made the broken `this` observable, regressing 18 array tests. The
 truthiness fix is correct; the latent defect is this `this`-binding bug.
 
+Proof (current main + PR #1459):
+```ts
+[1].map(function () { return this; })[0]        // => undefined
+var o = { res: true };
+[1, 2, 3].filter(function () { return this.res; }, o).length   // wasm => 0   (Node => 3)
+```
+
 ## Scope
 
 In scope: forward `thisArg` to the callback's `this` for the thisArg-bearing
@@ -44,14 +51,18 @@ findLastIndex / some / every). NOT reduce / reduceRight (their 2nd arg is
 `initialValue`, not `thisArg`). Arrow callbacks are lexically `this`-bound, so
 `thisArg` MUST be ignored for them.
 
-Out of scope (separate residuals, tracked elsewhere):
-- top-level `this` modeled as the sloppy-mode global object
-  (`var global = this; return global` — the `*-7-c-iii-26/27`, `*-9-c-iii-28`
-  group). The compiler models top-level/free-function `this` as `undefined`.
-- arbitrary own-property on an Array used as the receiver
-  (`var a = new Array(); a.res = true; return this.res` — the `*-5-3` group).
-  Array-as-property-bag is a distinct limitation; the thisArg IS forwarded, but
-  reading `.res` off a WasmGC vec receiver does not resolve.
+### The 18 #1459 regressions break down as
+
+- **15** (`-5-2..6` × every/filter/some): callback returns `this.PROP` with a
+  **thisArg passed** whose PROP is truthy → needs thisArg forwarding. **FIXED**
+  for the object-receiver shapes; the Array-as-receiver-property-bag shapes
+  (`-5-3`: `var a = new Array(); a.res = true; return this.res`) remain a
+  separate limitation (thisArg IS forwarded, but reading `.res` off a WasmGC vec
+  receiver does not resolve).
+- **3** (`-7-c-iii-26/27`, `-9-c-iii-28`): callback returns top-level `this`
+  (= sloppy global) → needs top-level-`this` = sloppy-global modeling. **Out of
+  scope** here (separate semantics change; the compiler models top-level/
+  free-function `this` as `undefined`).
 
 ## Acceptance criteria
 
@@ -68,15 +79,16 @@ Out of scope (separate residuals, tracked elsewhere):
 ### Strategy chosen — `__current_this` install/restore (mode-agnostic)
 
 Reused the existing `__current_this` **module global** (#1636-S1) rather than a
-new closure-ABI `__this` param or a `.call`-aware host bridge. `__current_this`
-is a pure Wasm global (not a host import), so the same path forwards `this` in
-standalone mode — no JS-host-only branch. The host-bridge approach (#1) was
-rejected because it can't satisfy the standalone-parity constraint without a
-separate Wasm implementation; the closure-ABI `__this`-param approach (#2) was
-rejected as a far larger and riskier ABI change touching every array method's
-`call_ref` signature, its `__call_fn_method_N` exports, and the object-return →
-f64 coercion surface — `__current_this` achieves the same effect with a save +
-two `global.set`s per dispatch.
+new closure-ABI `__this` param (candidate strategy #2) or a `.call`-aware host
+bridge (candidate strategy #1). `__current_this` is a pure Wasm global (not a
+host import), so the same path forwards `this` in standalone mode — no
+JS-host-only branch. The host-bridge approach was rejected because it can't
+satisfy the standalone-parity constraint without a separate Wasm
+implementation; the closure-ABI `__this`-param approach was rejected as a far
+larger and riskier ABI change touching every array method's `call_ref`
+signature, its `__call_fn_method_N` exports, and the object-return → f64
+coercion surface — `__current_this` achieves the same effect with a save + two
+`global.set`s per dispatch.
 
 The two halves:
 
@@ -104,6 +116,11 @@ The two halves:
    DFS, skips nested non-arrow/method/class scopes, traverses arrows — mirrors
    `bodyUsesArguments`).
 
+The test262 runner wraps each test body in `export function test()`, so the
+named `callbackfn` is a **nested** function declaration — which is why the
+read-side change had to cover `compileNestedFunctionDeclaration`, not just the
+top-level `compileFunctionBody`.
+
 ### Why not patch `buildTruthyCheck` (rejected)
 
 The 12 #2085 wins and the 18 #1459 regressions flow through the SAME (correct)
@@ -119,7 +136,9 @@ forwarding (this issue). `buildTruthyCheck` left unchanged.
   thisArg; reduce 2nd-arg-is-initialValue; nested-HOF this restore). Both the
   default and `standalone: true` mode verified via scoped probes
   (filter/funcexpr/no-thisArg all correct in standalone).
-- `tests/issue-2085.test.ts` — 7/7 still green.
+- `tests/issue-2085.test.ts` — 7/7 still green. Direct-call probes confirm a
+  `this`-using function called directly still sees `undefined` (null-guard), and
+  a direct call AFTER a HOF dispatch sees `undefined` (restore worked).
 - **Array-method test262 delta (local harness, my-branch vs the merged
   pre-#2152 branch — same harness, deltas only):** +17 / **−0**. Zero
   newly-broken tests; 17 thisArg cases recovered/fixed
@@ -135,3 +154,10 @@ forwarding (this issue). `buildTruthyCheck` left unchanged.
 Recommendation: land with #2085/#1459 (PR #1459). Together they are
 net-positive: #1459's ToBoolean wins + this issue's thisArg recoveries, with no
 new array-method regressions.
+
+## Follow-up (out of scope, new issues if pursued)
+
+- **top-level `this` = sloppy global**: resolve module-scope `this` to the
+  global object instead of `__get_undefined()` (fixes the 3 `*-c-iii-26..28`).
+- **Array-as-property-bag receiver**: reading an own data property (`.res`) off
+  an Array used as a thisArg/receiver (fixes the `*-5-3` group).
