@@ -1392,12 +1392,36 @@ export function compileObjectLiteralForStruct(
     return null;
   }
 
-  // Check if there are any spread assignments — if so, compile spread sources into locals
-  const spreadSources: { local: number; srcStructTypeIdx: number; srcFields: { name: string }[] }[] = [];
-  for (const prop of expr.properties) {
+  // Check if there are any spread assignments — if so, compile spread sources into locals.
+  // (#2009 R3) `propIndex` records each spread's position in `expr.properties` so the
+  // field-assembly loop can honour SOURCE ORDER between a named prop and a spread that
+  // both write the same key (later writer wins — `{ x:1, ...{x:5} }` → `x:5`).
+  const spreadSources: {
+    local: number;
+    srcStructTypeIdx: number;
+    srcFields: { name: string }[];
+    propIndex: number;
+  }[] = [];
+  for (let propIndex = 0; propIndex < expr.properties.length; propIndex++) {
+    const prop = expr.properties[propIndex]!;
     if (ts.isSpreadAssignment(prop)) {
       const srcType = ctx.checker.getTypeAtLocation(prop.expression);
-      const srcStructName = resolveStructName(ctx, srcType);
+      // (#2009 R3) An INLINE object-literal spread source (`{ ...{ x: 1 } }`)
+      // is never independently declared, so its anonymous object type was never
+      // registered as a struct — `resolveStructName` returns undefined, the
+      // source is dropped from `spreadSources`, and every spread-sourced field
+      // falls through to the undefined-default branch below (the observed
+      // `{ ...{x:1,y:2} }` → `{x:null,y:null}` bug). Register a struct for the
+      // source type first (mirroring the outer-literal registration at the
+      // `compileObjectLiteral` entry, lines ~921/938/950) so both
+      // `resolveStructName` AND the `compileExpression` below lower it to a real
+      // struct instance whose fields can be read. NAMED sources already work
+      // (their declaration registered the struct), so this is a no-op for them.
+      let srcStructName = resolveStructName(ctx, srcType);
+      if (!srcStructName) {
+        ensureStructForType(ctx, srcType);
+        srcStructName = resolveStructName(ctx, srcType);
+      }
       if (srcStructName) {
         const srcStructTypeIdx = ctx.structMap.get(srcStructName);
         const srcFields = ctx.structFields.get(srcStructName);
@@ -1407,7 +1431,7 @@ export function compileObjectLiteralForStruct(
           const spreadResult = compileExpression(ctx, fctx, prop.expression);
           if (!spreadResult) continue;
           fctx.body.push({ op: "local.set", index: srcLocal });
-          spreadSources.push({ local: srcLocal, srcStructTypeIdx, srcFields });
+          spreadSources.push({ local: srcLocal, srcStructTypeIdx, srcFields, propIndex });
         }
       }
     }
@@ -1651,6 +1675,40 @@ export function compileObjectLiteralForStruct(
         const dupType = compileExpression(ctx, fctx, dup.initializer);
         if (dupType) fctx.body.push({ op: "drop" });
       }
+    }
+    // (#2009 R3) Source-order override: when a spread appears AFTER the last
+    // named/shorthand/method writer of this key, the spread wins
+    // (`{ x:1, ...{x:5} }` → `x:5`). Find the position of the winning named
+    // writer and the LAST spread (by source position) that also defines this
+    // field; if that spread comes later, take its value instead of the named
+    // prop. When there is no named writer this is a no-op (the existing
+    // "fall through to spread" path below handles it). The named prop's
+    // initializer is still evaluated above for its observable side effects.
+    const lastMatchIndex = lastMatch ? expr.properties.indexOf(lastMatch) : -1;
+    let overridingSpread:
+      | { local: number; srcStructTypeIdx: number; srcFields: { name: string }[]; propIndex: number }
+      | undefined;
+    for (const src of spreadSources) {
+      if (src.propIndex <= lastMatchIndex) continue;
+      if (src.srcFields.some((f) => f.name === field.name)) {
+        if (!overridingSpread || src.propIndex > overridingSpread.propIndex) {
+          overridingSpread = src;
+        }
+      }
+    }
+    if (overridingSpread) {
+      // (§13.2.5.5) The overridden named prop is still evaluated for its
+      // observable side effects, then its value is dropped — only a
+      // PropertyAssignment has an initializer to run (shorthand/method have
+      // none). The earlier duplicates were already evaluated+dropped above.
+      if (lastMatch && ts.isPropertyAssignment(lastMatch)) {
+        const overriddenType = compileExpression(ctx, fctx, lastMatch.initializer);
+        if (overriddenType) fctx.body.push({ op: "drop" });
+      }
+      const fieldIdx = overridingSpread.srcFields.findIndex((f) => f.name === field.name);
+      fctx.body.push({ op: "local.get", index: overridingSpread.local });
+      fctx.body.push({ op: "struct.get", typeIdx: overridingSpread.srcStructTypeIdx, fieldIdx });
+      continue;
     }
     const prop =
       lastMatch && !ts.isShorthandPropertyAssignment(lastMatch) && !ts.isMethodDeclaration(lastMatch)

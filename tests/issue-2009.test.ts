@@ -132,3 +132,68 @@ describe("#2009 — per-instance struct field names (host boundary)", () => {
     ).toBe('{"a":1,"b":2}');
   });
 });
+
+/**
+ * #2009 R3 — spread-source VALUE resolution (PR-2).
+ *
+ * The struct-path object-literal lowering only read a spread source's field
+ * values when the source had a *registered* struct type. An INLINE
+ * object-literal spread source (`{ ...{ x: 1 } }`) is never independently
+ * declared, so its anonymous object type was never registered — the source was
+ * dropped from `spreadSources` and every spread-sourced field defaulted to the
+ * undefined sentinel (`{ ...{x:1,y:2} }` produced `{x:null,y:null}` instead of
+ * `{x:1,y:2}`). Fix: register a struct for the inline source type before
+ * compiling it (`ensureStructForType`), and honour SOURCE ORDER between a named
+ * prop and a spread that both write the same key (later writer wins).
+ *
+ * Asserted on VALUE equality (key insertion order for spread-result structs is
+ * a separate pre-existing defect — see the `it.todo` below — driven by the
+ * TypeChecker ordering the spread-result type's properties last-spread-first;
+ * it affects NAMED-source spreads on main too and is not introduced here).
+ */
+describe("#2009 R3 — spread-source value resolution + source-order override", () => {
+  const cases: { name: string; lit: string }[] = [
+    { name: "inline single spread", lit: `{ ...{ x: 1, y: 2 } }` },
+    { name: "inline two spreads value merge", lit: `{ ...{ x: 1, y: 2 }, ...{ y: 3, z: 4 } }` },
+    { name: "inline spreads + named override after", lit: `{ ...{ x: 1, y: 2 }, ...{ y: 3, z: 4 }, x: 9 }` },
+    { name: "named prop before inline spread (spread wins)", lit: `{ x: 1, ...{ x: 5, y: 6 } }` },
+    { name: "named after spread (named wins)", lit: `{ ...{ x: 5, y: 6 }, x: 1 }` },
+    { name: "mixed named + inline source", lit: `{ x: 1, ...{ z: 3 } }` },
+    { name: "string values in spread", lit: `{ ...{ a: "hi", b: "bye" } }` },
+    { name: "three inline sources", lit: `{ ...{ a: 1 }, ...{ b: 2 }, ...{ c: 3 } }` },
+    { name: "named between two spreads (later spread overrides)", lit: `{ ...{ x: 1 }, y: 2, ...{ x: 9 } }` },
+  ];
+  for (const { name, lit } of cases) {
+    it(name, async () => {
+      const got = (await runWasm(
+        `export function test(): string { return JSON.stringify(${lit}); }`,
+      )) as string;
+      // eslint-disable-next-line no-eval
+      const expected = eval("(" + lit + ")") as Record<string, unknown>;
+      expect(JSON.parse(got)).toEqual(expected);
+    });
+  }
+
+  it("overridden named-prop initializer still runs for side effects (§13.2.5.5)", async () => {
+    // `x: se()` is overridden by a later `...{ x: 5 }`, but its side-effecting
+    // initializer must still evaluate exactly once.
+    expect(
+      await runWasm(`
+        let calls = 0;
+        function se(): number { calls = calls + 1; return 1; }
+        export function test(): string {
+          const o = { x: se(), ...{ x: 5 } };
+          return JSON.stringify(o.x) + "|" + String(calls);
+        }
+      `),
+    ).toBe("5|1");
+  });
+
+  // R3b (separate follow-up): key INSERTION ORDER for spread-result structs.
+  // `{ ...{x:1,y:2}, ...{y:3,z:4} }` should stringify as `{"x":1,"y":3,"z":4}`
+  // but the spread-result anon struct's fields are ordered last-spread-first
+  // (`y,z,x`) by the TypeChecker, so JSON/Object.keys report `{"y":3,"z":4,"x":1}`.
+  // Pre-existing on main (affects named-source spreads too); fixing it needs the
+  // spread-result struct's field registration to follow JS insertion order.
+  it.todo("spread-result keys follow JS insertion order (R3b — struct field-order)");
+});
