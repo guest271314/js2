@@ -49,7 +49,7 @@ Projects in this category usually take years to reach meaningful semantic covera
 
 Current Test262 conformance and benchmark numbers are tracked in one place and
 change frequently — see **[STATUS.md](./STATUS.md)** for the live figures, the
-[Playground](https://loopdive.github.io/js2wasm/playground/), and the
+[Playground](https://js2.loopdive.com/playground/), and the
 [Roadmap](./ROADMAP.md). The single auto-updated conformance figure (refreshed
 by CI on every merge) is for the JS-host path; everything else links to
 STATUS.md rather than duplicating numbers that go stale. Standalone
@@ -57,7 +57,7 @@ STATUS.md rather than duplicating numbers that go stale. Standalone
 README until the current standalone regression is fixed.
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 31,180 / 43,135 (72.3 %) — baseline 8470e3de, 2026-06-15T01:27:40Z
+**test262 conformance**: 31,268 / 43,135 (72.5 %) — baseline d6a8f6be, 2026-06-15T10:49:11Z
 <!-- AUTO:conformance-end -->
 
 ## Current Status
@@ -443,7 +443,7 @@ The foundational design choices behind `js2wasm` — why WasmGC instead of linea
 
 ## Further Reading
 
-- [Playground](https://loopdive.github.io/js2wasm/playground/)
+- [Playground](https://js2.loopdive.com/playground/)
 - [Roadmap](./ROADMAP.md)
 - [Architecture Decisions](./docs/adr/README.md)
 - [Architecture Notes](./CLAUDE.md)

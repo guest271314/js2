@@ -7,6 +7,7 @@
 import { ts } from "../../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../../checker/type-mapper.js";
 import { bodyUsesArguments } from "../helpers/body-uses-arguments.js";
+import { bodyReferencesOwnThis } from "../helpers/body-references-own-this.js";
 import { isStrictFunction } from "../helpers/is-strict-function.js";
 import type { Instr, ValType, WasmFunction } from "../../ir/types.js";
 import {
@@ -388,6 +389,13 @@ export function compileNestedFunctionDeclaration(
       labelMap: new Map(),
       savedBodies: [],
       isGenerator,
+      // #2152 — a nested function declaration whose body references its own
+      // `this` may be passed by reference as an array-HOF callback
+      // (`arr.filter(callbackfn, thisArg)`), which installs the spec `thisArg`
+      // into `__current_this` before the `call_ref`. Allow its `this` to read
+      // that global; for direct calls the global is null and the null-guarded
+      // read (#1702) falls back to `undefined` — behaviour-preserving.
+      readsCurrentThis: stmt.body ? bodyReferencesOwnThis(stmt.body) : false,
     };
     for (let i = 0; i < liftedFctx.params.length; i++) {
       liftedFctx.localMap.set(liftedFctx.params[i]!.name, i);
@@ -575,6 +583,13 @@ export function compileNestedFunctionDeclaration(
       labelMap: new Map(),
       savedBodies: [],
       isGenerator,
+      // #2152 — a nested function declaration whose body references its own
+      // `this` may be passed by reference as an array-HOF callback
+      // (`arr.filter(callbackfn, thisArg)`), which installs the spec `thisArg`
+      // into `__current_this` before the `call_ref`. Allow its `this` to read
+      // that global; for direct calls the global is null and the null-guarded
+      // read (#1702) falls back to `undefined` — behaviour-preserving.
+      readsCurrentThis: stmt.body ? bodyReferencesOwnThis(stmt.body) : false,
     };
     for (let i = 0; i < liftedFctx.params.length; i++) {
       liftedFctx.localMap.set(liftedFctx.params[i]!.name, i);
