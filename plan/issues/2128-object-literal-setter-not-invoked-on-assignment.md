@@ -1,10 +1,12 @@
 ---
 id: 2128
 title: "object-literal setter not invoked on property assignment — the write silently no-ops"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-12
-updated: 2026-06-12
+updated: 2026-06-15
+completed: 2026-06-14
+pr: 1423
 priority: high
 feasibility: medium
 reasoning_effort: medium

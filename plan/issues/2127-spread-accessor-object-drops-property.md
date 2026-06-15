@@ -1,10 +1,12 @@
 ---
 id: 2127
 title: "object spread of an accessor-bearing source drops the property — getter never fires, value is null"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-12
-updated: 2026-06-12
+updated: 2026-06-15
+completed: 2026-06-13
+pr: 1419
 priority: high
 feasibility: medium
 reasoning_effort: medium
