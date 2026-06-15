@@ -1667,3 +1667,128 @@ export function tryCompileNativeGeneratorForOf(
   });
   return true;
 }
+
+/**
+ * #2169 — materialize a Wasm-native generator into a `__vec` of f64 by driving
+ * its resume function to completion, WITHOUT the JS-host iterator protocol.
+ *
+ * The non-`for-of` iterator consumers (array spread `[...g()]`, `Array.from(g())`,
+ * array-destructuring `[a,b]=g()`) previously treated the generator's state
+ * struct as if it were a `__vec` (reading field 0 as a `$length`), producing a
+ * garbage-length array of defaults / leaking host imports. This helper gives
+ * them the same `next()`-until-`done` drain the for-of driver uses, but
+ * collects the values into a growable backing array and leaves a freshly
+ * constructed `ref $vec_f64` on the stack (so the caller can treat it as a
+ * normal materialized vec).
+ *
+ * Contract: the generator state ref (`subjectType`, a ref/ref_null to the
+ * `info.stateTypeIdx` struct) MUST already be on the stack. On return the stack
+ * top is `(ref <vecTypeIdx>)` of element type f64. Numeric yields only (native
+ * generators are numeric today; non-numeric is #2171 / SF-4).
+ *
+ * The vec struct layout matches `getVecInfo`: field 0 = `$length` (i32),
+ * field 1 = `$data` (ref $arr). `vecTypeIdx`/`arrTypeIdx` are supplied by the
+ * caller (an f64 vec from `getOrRegisterVecType`).
+ */
+export function emitNativeGeneratorToVec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  info: NativeGeneratorInfo,
+  subjectType: ValType,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+): void {
+  const resumeIdx = ensureNativeGeneratorResumeFunction(ctx, info);
+  const resultRef: ValType = { kind: "ref", typeIdx: info.resultTypeIdx };
+
+  // Stash the generator state ref (currently on stack) into a local typed as
+  // the exact state struct.
+  const iterLocal = allocLocal(fctx, `__gen2vec_iter_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: info.stateTypeIdx,
+  } as ValType);
+  if (subjectType.kind === "ref_null") {
+    fctx.body.push({ op: "ref.as_non_null" });
+  }
+  if ((subjectType as { typeIdx?: number }).typeIdx !== info.stateTypeIdx) {
+    fctx.body.push({ op: "ref.cast", typeIdx: info.stateTypeIdx });
+  }
+  fctx.body.push({ op: "local.set", index: iterLocal });
+
+  const resultLocal = allocLocal(fctx, `__gen2vec_res_${fctx.locals.length}`, resultRef);
+  const capLocal = allocLocal(fctx, `__gen2vec_cap_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__gen2vec_len_${fctx.locals.length}`, { kind: "i32" });
+  const dataLocal = allocLocal(fctx, `__gen2vec_data_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const growLocal = allocLocal(fctx, `__gen2vec_grow_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+
+  // cap = 4; data = new f64[cap]; len = 0.
+  fctx.body.push({ op: "i32.const", value: 4 });
+  fctx.body.push({ op: "local.set", index: capLocal });
+  fctx.body.push({ op: "local.get", index: capLocal });
+  fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+  fctx.body.push({ op: "local.set", index: dataLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: lenLocal });
+
+  // Grow when len == cap: cap *= 2; grow = new f64[cap];
+  // array.copy grow[0..len] = data[0..len]; data = grow.
+  const growInstrs: Instr[] = [
+    { op: "local.get", index: capLocal },
+    { op: "i32.const", value: 2 },
+    { op: "i32.mul" },
+    { op: "local.set", index: capLocal },
+    { op: "local.get", index: capLocal },
+    { op: "array.new_default", typeIdx: arrTypeIdx },
+    { op: "local.set", index: growLocal },
+    { op: "local.get", index: growLocal },
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: dataLocal },
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: lenLocal },
+    { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+    { op: "local.get", index: growLocal },
+    { op: "local.set", index: dataLocal },
+  ];
+
+  // block { loop {
+  //   res = resume(iter); if (res.done) br block;
+  //   if (len == cap) grow; data[len] = res.value; len++; br loop;
+  // } }
+  const loopBody: Instr[] = [
+    { op: "local.get", index: iterLocal },
+    { op: "call", funcIdx: resumeIdx },
+    { op: "local.set", index: resultLocal },
+    { op: "local.get", index: resultLocal },
+    { op: "struct.get", typeIdx: info.resultTypeIdx, fieldIdx: RESULT_DONE_FIELD },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "br", depth: 2 } as Instr], else: [] },
+    // grow if full
+    { op: "local.get", index: lenLocal },
+    { op: "local.get", index: capLocal },
+    { op: "i32.eq" },
+    { op: "if", blockType: { kind: "empty" }, then: growInstrs, else: [] },
+    // data[len] = res.value
+    { op: "local.get", index: dataLocal },
+    { op: "local.get", index: lenLocal },
+    { op: "local.get", index: resultLocal },
+    { op: "struct.get", typeIdx: info.resultTypeIdx, fieldIdx: RESULT_VALUE_FIELD },
+    { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+    // len++
+    { op: "local.get", index: lenLocal },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "local.set", index: lenLocal },
+    { op: "br", depth: 0 },
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  });
+
+  // Construct ref $vec { length: len, data }. Note: the backing array may be
+  // larger than len (capacity); the vec's $length field is the authoritative
+  // element count, matching every other materialized vec in the codebase.
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "local.get", index: dataLocal });
+  fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
+}

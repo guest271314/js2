@@ -1,9 +1,10 @@
 ---
 id: 2169
 title: "standalone: spread / Array.from / array-destructure don't drive a native generator (treat the state struct as a __vec)"
-status: ready
+status: in-progress
 sprint: 62
 created: 2026-06-15
+updated: 2026-06-15
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -55,3 +56,28 @@ don't duplicate, the driver.
 ## Source
 
 Triage of #2157 (2026-06-15, sdev5), SF-2.
+
+## Resolution (2026-06-15, sdev5) — array spread landed; Array.from/destructure carried forward
+
+Landed the **array-spread** consumer (`[...g()]`). Added a reusable
+`emitNativeGeneratorToVec(ctx, fctx, info, subjectType, vecTypeIdx, arrTypeIdx)`
+in `generators-native.ts`: it drains the native generator via the same
+`resume()`-until-`done` loop the for-of driver uses, accumulating yields into a
+growable f64 backing array, and leaves a freshly-built `ref $vec_f64` on the
+stack. The array-literal spread site (`literals.ts compileArrayLiteral`) now
+detects a native-generator subject via `nativeGeneratorInfoForForOfSubject` and
+materializes through that helper, then reuses the existing materialized-vec
+spread machinery (same shape as the externref `buildVecFromExternref` path).
+
+Verified standalone, zero host imports: `[...g()]` length/values, >4-yield grow
+path, control-flow generators, mixed `[head, ...g()]`; array/string spread
+regressions unchanged. Test: `tests/issue-2169-spread-native-generator.test.ts`
++ the SF-2 spread gate in `tests/issue-2157-*.test.ts` (un-todo'd).
+
+**Carried forward (still on this issue):** `Array.from(g())` and
+array-destructuring `[a,b]=g()` are separate consumer call sites
+(`destructuring-params.ts` and the Array.from builtin) — the
+`emitNativeGeneratorToVec` helper is ready to wire into both, but they're a
+distinct, independently-testable change left as a follow-up to keep this PR
+focused. Their `it.todo` gates in `tests/issue-2157-*.test.ts` stay todo.
+Status kept `in-progress` until those two land.

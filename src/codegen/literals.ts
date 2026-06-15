@@ -49,6 +49,7 @@ import {
   resolveWasmType,
 } from "./index.js";
 import { ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
+import { emitNativeGeneratorToVec, nativeGeneratorInfoForForOfSubject } from "./generators-native.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
@@ -2974,6 +2975,36 @@ export function compileArrayLiteral(
     if (ts.isSpreadElement(el)) {
       const srcType = compileExpression(ctx, fctx, el.expression);
       if (!srcType) continue;
+      // (#2169) Spread of a Wasm-native generator (`[...g()]`). The subject is a
+      // ref to the generator state struct, NOT a __vec — without this it fell
+      // into the generic vec branch below (struct.get field 0 read as $length →
+      // garbage-length array of defaults / host-import leak). Drain the
+      // generator into an f64 vec via the native resume loop, then treat it as a
+      // normal materialized vec spread (same shape as the externref path).
+      const genInfo = nativeGeneratorInfoForForOfSubject(ctx, srcType);
+      if (genInfo) {
+        const genVecTypeIdx = getOrRegisterVecType(ctx, "f64");
+        const genArrTypeIdx = getArrTypeIdxFromVec(ctx, genVecTypeIdx);
+        if (vecTypeIdx !== genVecTypeIdx) {
+          // Result element type isn't f64 (mixed literal whose first-element
+          // heuristic picked another type) — copying f64s into that array would
+          // be invalid Wasm. Preserve the conservative skip for this rare shape.
+          fctx.body.push({ op: "drop" });
+          continue;
+        }
+        // Stack: [running-length(i32), genState]. emitNativeGeneratorToVec
+        // consumes genState and leaves (ref $vec_f64).
+        emitNativeGeneratorToVec(ctx, fctx, genInfo, srcType, genVecTypeIdx, genArrTypeIdx);
+        const srcLocal = allocLocal(fctx, `__spread_gen_${fctx.locals.length}`, {
+          kind: "ref_null",
+          typeIdx: genVecTypeIdx,
+        });
+        fctx.body.push({ op: "local.tee", index: srcLocal });
+        fctx.body.push({ op: "struct.get", typeIdx: genVecTypeIdx, fieldIdx: 0 });
+        fctx.body.push({ op: "i32.add" });
+        spreadLocals.push({ local: srcLocal, elemIdx: i, srcVecTypeIdx: genVecTypeIdx });
+        continue;
+      }
       if (
         (srcType.kind === "ref" || srcType.kind === "ref_null") &&
         ctx.nativeStrings &&
