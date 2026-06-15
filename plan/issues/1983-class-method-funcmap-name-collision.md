@@ -139,3 +139,12 @@ origin/main — verified by running `tests/inheritance.test.ts` on a base worktr
 (7/7 fail there too). Not a regression: the module *compiles* successfully.
 
 Status: implementation done; awaiting CI on the PR.
+
+## Earlier scope note (2026-06-15, sdev5) — superseded by the SOLVED section above
+
+The initial scope analysis (landed via #1498) estimated ~103 `${className}_${member}`
+call sites and recommended deferring after #2158. The actual implementation
+found the real consumer surface is far narrower once `classMemberFuncKey` is
+made byte-identical for non-colliding programs (only the funcMap funcIdx key +
+display name relocate, on collision only), and the last missing consumer was the
+IR front-end (not a 103-site sweep). Kept for history.
