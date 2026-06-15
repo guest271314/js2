@@ -1,10 +1,11 @@
 ---
 id: 1983
 title: "synthetic class-method names collide with user functions: class A { m() {} } + function A_m() breaks both paths"
-status: ready
+status: done
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-12
+updated: 2026-06-16
+completed: 2026-06-16
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -106,20 +107,35 @@ collision-free; method-dispatch reads them by the same legacy name).
 - The dispatch site **bakes the right compile-time funcIdx** (instrumented:
   `new A().m()` bakes `call <method funcIdx>`, fnName=`__cm$A_m`).
 
-### REMAINING (blocks acceptance — needs dedicated sequencing)
+### SOLVED (2026-06-16, sdev5) — the real last consumer was the IR front-end
 
-`test()` still returns `4` not `12`: in a function that calls BOTH `new A().m()`
-and `A_m()`, the **DCE finalize funcIdx remap** (`dead-elimination.ts` Phase 4
-`fR` table) mis-maps the relocated method's compile-time index — the
-`new A().m()` `call` lands on the user fn's *final* slot (idx 5) instead of the
-method's (idx 4), even though the pre-DCE baked index and both bodies are
-correct. The remap/reachability needs to be relocation-aware (order-dependent).
+The earlier "DCE remap" hypothesis was WRONG. Root cause of the residual
+`test() === 4`: the **IR front-end recompiles eligible top-level functions**
+(`compileIrPathFunctions`, index.ts), and the IR backend has its **own**
+class-member dispatch resolution that bypassed `classMemberFuncKey`:
 
-This touches the funcIdx **reservation + DCE remap pipeline** — the compiler's
-highest-regression-risk machinery — and is order-dependent. Recommend it land as
-a **dedicated change with architect input on the reservation pipeline, NOT raced
-against the active #2158** (which edits class-bodies.ts concurrently). The
-branch + commit 26f099222 carry the complete scaffolding; resume by making the
-DCE Phase-4 remap consistent with the relocated keys (and re-run the equivalence
-+ class suites — the safe-by-construction property means a green suite proves the
-non-colliding path is unchanged).
+- `src/ir/integration.ts` `ClassRegistry` — `methodFuncName` / `constructorFuncName`
+  built the legacy `${className}_${member}` name, which the IR
+  `class.call` lowering (`src/ir/lower.ts:1358`) resolved via `resolveFunc` →
+  `funcMap`. For a colliding class that key resolved to the **user function's**
+  funcIdx. Fixed: both route through `classMemberFuncKey(ctx, …)`.
+- `src/codegen/property-access.ts` — the getter-read / method-reference paths
+  resolve `${className}_get_${prop}` / `${className}_${method}` funcMap keys
+  (~14 sites: `getterName` / `setterName` / `methodFullName` / `fullName`).
+  All routed through `classMemberFuncKey`.
+
+With those two, the fix is COMPLETE. `tests/issue-1983-funcmap-collision.test.ts`
+(5 cases, standalone + empty importObject) all pass:
+
+- method `A.m` vs `function A_m()` → `test()` = **12** ✓
+- ctor `A_new` vs `function A_new()` → **10** ✓
+- getter `B.v` vs `function B_get_v()` → **8** ✓ (acceptance criterion)
+- non-colliding class → **15** ✓ (byte-identical / unchanged — safe-by-construction)
+- user `A_m()` reachable on its own → **42** ✓
+
+The existing class suites' `string_constants` instantiate failures are a
+**pre-existing harness artifact** (`{ env: {} }` importObject), identical on
+origin/main — verified by running `tests/inheritance.test.ts` on a base worktree
+(7/7 fail there too). Not a regression: the module *compiles* successfully.
+
+Status: implementation done; awaiting CI on the PR.
