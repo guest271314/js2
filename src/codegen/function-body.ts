@@ -7,6 +7,7 @@
 import { ts, forEachChild } from "../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
+import { bodyReferencesOwnThis } from "./helpers/body-references-own-this.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, deduplicateLocals } from "./context/locals.js";
@@ -732,6 +733,17 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   // counts as an i32-safe write.
   const i32SpecializedArrays = collectI32SpecializedArrays(decl, i32CoercedLocals);
 
+  // #2152 — a named function declaration whose body references `this` may be
+  // passed by reference as an array-HOF callback (e.g.
+  // `arr.filter(callbackfn, thisArg)`), which installs the spec `thisArg` into
+  // the `__current_this` module global before the `call_ref`. Allow such a
+  // body's `this` to read that global. For DIRECT calls `__current_this` is
+  // null, and the null-guarded read (#1702) falls back to `undefined` — exactly
+  // the spec-correct free-function `this`, so this is behavior-preserving for
+  // ordinary calls and only changes the value when a receiver was actually
+  // installed by an enclosing dispatch.
+  const readsThis = decl.body ? bodyReferencesOwnThis(decl.body) : false;
+
   const fctx: FunctionContext = {
     name: func.name,
     params,
@@ -745,6 +757,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     labelMap: new Map(),
     savedBodies: [],
     isGenerator,
+    readsCurrentThis: readsThis,
     i32CoercedLocals: i32CoercedLocals.size > 0 ? i32CoercedLocals : undefined,
     i32SpecializedArrays: i32SpecializedArrays.size > 0 ? i32SpecializedArrays : undefined,
   };

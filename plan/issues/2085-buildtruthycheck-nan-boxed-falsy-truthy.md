@@ -13,9 +13,19 @@ task_type: bugfix
 area: codegen
 language_feature: type-coercion
 goal: core-semantics
-related: [2080]
+related: [2080, 2152]
+updated: 2026-06-15
 origin: "2026-06-11 coercion-engine analysis (fable agent): code-derived divergence, found during site inventory"
 ---
+
+> **2026-06-15 update (senior-dev):** the net −6 regression this PR (#1459)
+> exposed was root-caused to the upstream `this`-binding bug **#2152** (array
+> HOF callbacks ignored `thisArg`; callback `this` was always `undefined`).
+> #2152 is now FIXED on this same branch via `__current_this` install/restore +
+> `readsCurrentThis` on `this`-using function declarations (mode-agnostic, works
+> standalone). With #2152 landed, the array-method suite shows **+17 / −0** vs
+> the pre-#2152 branch — PR #1459 is net-positive. See
+> `plan/issues/2152-thisarg-forwarding-array-hof-callbacks.md`.
 
 # #2085 — second hand-rolled ToBoolean disagrees with the first
 
