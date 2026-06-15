@@ -2,7 +2,7 @@
 id: 1853
 title: "Track a separate hard-error (compiler-crash / malformed-Wasm) stability bucket on the conformance dashboard, distinct from unsupported-feature"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-04
 updated: 2026-06-12
 priority: high

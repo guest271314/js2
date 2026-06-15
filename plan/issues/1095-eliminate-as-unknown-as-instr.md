@@ -10,7 +10,7 @@ reasoning_effort: high
 task_type: refactor
 language_feature: compiler-internals
 goal: maintainability
-sprint: 62
+sprint: 63
 es_edition: n/a
 ---
 # #1095 — Eliminate `as unknown as Instr` casts (273 sites)
