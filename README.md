@@ -49,7 +49,7 @@ Projects in this category usually take years to reach meaningful semantic covera
 
 Current Test262 conformance and benchmark numbers are tracked in one place and
 change frequently — see **[STATUS.md](./STATUS.md)** for the live figures, the
-[Playground](https://loopdive.github.io/js2wasm/playground/), and the
+[Playground](https://js2.loopdive.com/playground/), and the
 [Roadmap](./ROADMAP.md). The single auto-updated conformance figure (refreshed
 by CI on every merge) is for the JS-host path; everything else links to
 STATUS.md rather than duplicating numbers that go stale. Standalone
@@ -443,7 +443,7 @@ The foundational design choices behind `js2wasm` — why WasmGC instead of linea
 
 ## Further Reading
 
-- [Playground](https://loopdive.github.io/js2wasm/playground/)
+- [Playground](https://js2.loopdive.com/playground/)
 - [Roadmap](./ROADMAP.md)
 - [Architecture Decisions](./docs/adr/README.md)
 - [Architecture Notes](./CLAUDE.md)
