@@ -1,5 +1,5 @@
 ---
-id: 2155
+id: 2168
 title: "Cross-developer issue-assignment lock (humans + agents, no CI churn)"
 status: in-progress
 sprint: Backlog

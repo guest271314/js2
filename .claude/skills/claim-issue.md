@@ -3,7 +3,7 @@ name: claim-issue
 description: Atomically claim an issue for a developer (human or agent) via the cross-developer lock ref, so two devs never pick up the same task. Syncs with origin first, refuses if already claimed or already done on main, and pushes the claim immediately without touching main or triggering CI.
 ---
 
-# /claim-issue — atomic cross-developer issue claim (#2155)
+# /claim-issue — atomic cross-developer issue claim (#2168)
 
 With several developers (humans + agents, possibly across forks) on the project,
 the in-memory TaskList is invisible to other devs. Before starting work on an
