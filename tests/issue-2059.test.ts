@@ -41,49 +41,81 @@ describe("#2059 — any < any performs §7.2.13 string comparison", () => {
     describe(`[${label}]`, () => {
       it('"a" < "b" is true (lexicographic)', async () => {
         expect(
-          await runExport(`export function test(): boolean { const a: any = "a"; const b: any = "b"; return a < b; }`, "test", opts),
+          await runExport(
+            `export function test(): boolean { const a: any = "a"; const b: any = "b"; return a < b; }`,
+            "test",
+            opts,
+          ),
         ).toBe(1);
       });
 
       it('"10" < "9" is true (lexicographic, not numeric)', async () => {
         expect(
-          await runExport(`export function test(): boolean { const a: any = "10"; const b: any = "9"; return a < b; }`, "test", opts),
+          await runExport(
+            `export function test(): boolean { const a: any = "10"; const b: any = "9"; return a < b; }`,
+            "test",
+            opts,
+          ),
         ).toBe(1);
       });
 
       it('"10" < 9 is false (mixed string/number → numeric)', async () => {
         expect(
-          await runExport(`export function test(): boolean { const a: any = "10"; const b: any = 9; return a < b; }`, "test", opts),
+          await runExport(
+            `export function test(): boolean { const a: any = "10"; const b: any = 9; return a < b; }`,
+            "test",
+            opts,
+          ),
         ).toBe(0);
       });
 
       it('"b" > "a" is true', async () => {
         expect(
-          await runExport(`export function test(): boolean { const a: any = "b"; const b: any = "a"; return a > b; }`, "test", opts),
+          await runExport(
+            `export function test(): boolean { const a: any = "b"; const b: any = "a"; return a > b; }`,
+            "test",
+            opts,
+          ),
         ).toBe(1);
       });
 
       it('"a" <= "a" is true', async () => {
         expect(
-          await runExport(`export function test(): boolean { const a: any = "a"; const b: any = "a"; return a <= b; }`, "test", opts),
+          await runExport(
+            `export function test(): boolean { const a: any = "a"; const b: any = "a"; return a <= b; }`,
+            "test",
+            opts,
+          ),
         ).toBe(1);
       });
 
       it('"b" >= "a" is true', async () => {
         expect(
-          await runExport(`export function test(): boolean { const a: any = "b"; const b: any = "a"; return a >= b; }`, "test", opts),
+          await runExport(
+            `export function test(): boolean { const a: any = "b"; const b: any = "a"; return a >= b; }`,
+            "test",
+            opts,
+          ),
         ).toBe(1);
       });
 
       it("NaN < 1 is false (NaN-operand relationals are false)", async () => {
         expect(
-          await runExport(`export function test(): boolean { const a: any = NaN; const b: any = 1; return a < b; }`, "test", opts),
+          await runExport(
+            `export function test(): boolean { const a: any = NaN; const b: any = 1; return a < b; }`,
+            "test",
+            opts,
+          ),
         ).toBe(0);
       });
 
       it("provably-numeric compare is unchanged (fast path)", async () => {
         expect(
-          await runExport(`export function test(): boolean { const a: number = 1; const b: number = 2; return a < b; }`, "test", opts),
+          await runExport(
+            `export function test(): boolean { const a: number = 1; const b: number = 2; return a < b; }`,
+            "test",
+            opts,
+          ),
         ).toBe(1);
       });
     });
