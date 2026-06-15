@@ -152,24 +152,38 @@ describe("#2009 — per-instance struct field names (host boundary)", () => {
  * it affects NAMED-source spreads on main too and is not introduced here).
  */
 describe("#2009 R3 — spread-source value resolution + source-order override", () => {
-  const cases: { name: string; lit: string }[] = [
-    { name: "inline single spread", lit: `{ ...{ x: 1, y: 2 } }` },
-    { name: "inline two spreads value merge", lit: `{ ...{ x: 1, y: 2 }, ...{ y: 3, z: 4 } }` },
-    { name: "inline spreads + named override after", lit: `{ ...{ x: 1, y: 2 }, ...{ y: 3, z: 4 }, x: 9 }` },
-    { name: "named prop before inline spread (spread wins)", lit: `{ x: 1, ...{ x: 5, y: 6 } }` },
-    { name: "named after spread (named wins)", lit: `{ ...{ x: 5, y: 6 }, x: 1 }` },
-    { name: "mixed named + inline source", lit: `{ x: 1, ...{ z: 3 } }` },
-    { name: "string values in spread", lit: `{ ...{ a: "hi", b: "bye" } }` },
-    { name: "three inline sources", lit: `{ ...{ a: 1 }, ...{ b: 2 }, ...{ c: 3 } }` },
-    { name: "named between two spreads (later spread overrides)", lit: `{ ...{ x: 1 }, y: 2, ...{ x: 9 } }` },
+  // Each `lit` is the literal under test; `expected` is the Node-evaluated
+  // value (asserted key-order-insensitive via `toEqual` — key order is R3b).
+  const cases: { name: string; lit: string; expected: Record<string, unknown> }[] = [
+    { name: "inline single spread", lit: `{ ...{ x: 1, y: 2 } }`, expected: { x: 1, y: 2 } },
+    {
+      name: "inline two spreads value merge",
+      lit: `{ ...{ x: 1, y: 2 }, ...{ y: 3, z: 4 } }`,
+      expected: { x: 1, y: 3, z: 4 },
+    },
+    {
+      name: "inline spreads + named override after",
+      lit: `{ ...{ x: 1, y: 2 }, ...{ y: 3, z: 4 }, x: 9 }`,
+      expected: { x: 9, y: 3, z: 4 },
+    },
+    {
+      name: "named prop before inline spread (spread wins)",
+      lit: `{ x: 1, ...{ x: 5, y: 6 } }`,
+      expected: { x: 5, y: 6 },
+    },
+    { name: "named after spread (named wins)", lit: `{ ...{ x: 5, y: 6 }, x: 1 }`, expected: { x: 1, y: 6 } },
+    { name: "mixed named + inline source", lit: `{ x: 1, ...{ z: 3 } }`, expected: { x: 1, z: 3 } },
+    { name: "string values in spread", lit: `{ ...{ a: "hi", b: "bye" } }`, expected: { a: "hi", b: "bye" } },
+    { name: "three inline sources", lit: `{ ...{ a: 1 }, ...{ b: 2 }, ...{ c: 3 } }`, expected: { a: 1, b: 2, c: 3 } },
+    {
+      name: "named between two spreads (later spread overrides)",
+      lit: `{ ...{ x: 1 }, y: 2, ...{ x: 9 } }`,
+      expected: { x: 9, y: 2 },
+    },
   ];
-  for (const { name, lit } of cases) {
+  for (const { name, lit, expected } of cases) {
     it(name, async () => {
-      const got = (await runWasm(
-        `export function test(): string { return JSON.stringify(${lit}); }`,
-      )) as string;
-      // eslint-disable-next-line no-eval
-      const expected = eval("(" + lit + ")") as Record<string, unknown>;
+      const got = (await runWasm(`export function test(): string { return JSON.stringify(${lit}); }`)) as string;
       expect(JSON.parse(got)).toEqual(expected);
     });
   }
