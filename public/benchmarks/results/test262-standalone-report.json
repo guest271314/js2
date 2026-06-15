@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-15T01:27:40.957Z",
-  "baseline_generated_at": "2026-06-15T01:27:40Z",
-  "baseline_sha": "8470e3de32d3be7231c27ad6721e26c169626155",
+  "timestamp": "2026-06-15T10:49:12.585Z",
+  "baseline_generated_at": "2026-06-15T10:49:12Z",
+  "baseline_sha": "d6a8f6be8049c28d8dfb6d203c12702027479228",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -9,22 +9,22 @@
   },
   "summary": {
     "total": 43135,
-    "pass": 19902,
-    "fail": 10488,
-    "compile_error": 12721,
+    "pass": 19953,
+    "fail": 10498,
+    "compile_error": 12660,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 30390,
+    "compilable": 30451,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42049,
-        "pass": 19411,
-        "fail": 10123,
-        "compile_error": 12491,
+        "pass": 19462,
+        "fail": 10133,
+        "compile_error": 12430,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 29534,
+        "compilable": 29595,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -52,23 +52,23 @@
       },
       "official": {
         "total": 43135,
-        "pass": 19902,
-        "fail": 10488,
-        "compile_error": 12721,
+        "pass": 19953,
+        "fail": 10498,
+        "compile_error": 12660,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 30390,
+        "compilable": 30451,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48117,
-        "pass": 20881,
-        "fail": 11670,
-        "compile_error": 15445,
+        "pass": 20932,
+        "fail": 11680,
+        "compile_error": 15384,
         "compile_timeout": 7,
         "skip": 114,
-        "compilable": 32551,
+        "compilable": 32612,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -76,32 +76,32 @@
   },
   "official_summary": {
     "total": 43135,
-    "pass": 19902,
-    "fail": 10488,
-    "compile_error": 12721,
+    "pass": 19953,
+    "fail": 10498,
+    "compile_error": 12660,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 30390,
+    "compilable": 30451,
     "stale": 0
   },
   "full_summary": {
     "total": 48117,
-    "pass": 20881,
-    "fail": 11670,
-    "compile_error": 15445,
+    "pass": 20932,
+    "fail": 11680,
+    "compile_error": 15384,
     "compile_timeout": 7,
     "skip": 114,
-    "compilable": 32551,
+    "compilable": 32612,
     "stale": 0
   },
   "strict_summary": {
     "total": 40626,
-    "pass": 18907,
-    "fail": 9655,
-    "compile_error": 12040,
+    "pass": 18954,
+    "fail": 9663,
+    "compile_error": 11985,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 28562,
+    "compilable": 28617,
     "stale": 0
   },
   "scope_summaries": {
@@ -127,12 +127,12 @@
     },
     "standard": {
       "total": 42049,
-      "pass": 19411,
-      "fail": 10123,
-      "compile_error": 12491,
+      "pass": 19462,
+      "fail": 10133,
+      "compile_error": 12430,
       "compile_timeout": 6,
       "skip": 18,
-      "compilable": 29534,
+      "compilable": 29595,
       "stale": 0
     }
   },
@@ -180,9 +180,9 @@
     {
       "name": "built-ins/Array",
       "path": "built-ins/Array",
-      "pass": 594,
-      "fail": 1196,
-      "compile_error": 1288,
+      "pass": 645,
+      "fail": 1170,
+      "compile_error": 1263,
       "compile_timeout": 3,
       "skip": 0,
       "total": 3081
@@ -401,8 +401,8 @@
       "name": "built-ins/Function",
       "path": "built-ins/Function",
       "pass": 143,
-      "fail": 145,
-      "compile_error": 221,
+      "fail": 180,
+      "compile_error": 186,
       "compile_timeout": 0,
       "skip": 0,
       "total": 509
@@ -1051,8 +1051,8 @@
       "name": "language/statements",
       "path": "language/statements",
       "pass": 5389,
-      "fail": 2003,
-      "compile_error": 1944,
+      "fail": 2004,
+      "compile_error": 1943,
       "compile_timeout": 1,
       "skip": 0,
       "total": 9337
@@ -1079,18 +1079,18 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 8286,
+    "assertion_fail": 8292,
     "illegal_cast": 412,
     "negative_test_fail": 77,
-    "null_deref": 594,
+    "null_deref": 597,
     "oob": 70,
     "other": 10255,
     "promise_error": 180,
     "range_error": 22,
-    "runtime_error": 5046,
+    "runtime_error": 4983,
     "type_error": 2,
     "unreachable": 27,
-    "wasm_compile": 2144
+    "wasm_compile": 2147
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1098,8 +1098,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 27122,
-    "classified": 27122,
+    "total_non_pass_non_skip": 27071,
+    "classified": 27071,
     "unclassified_threshold": 0,
     "buckets": [
       {
@@ -1123,15 +1123,15 @@
           "promise_error": 6
         },
         "sample_files": [
-          "test/language/expressions/assignment/dstr/obj-rest-symbol-val.js",
           "test/language/expressions/class/subclass-builtins/subclass-Number.js",
+          "test/language/expressions/assignment/dstr/obj-rest-symbol-val.js",
           "test/language/expressions/class/subclass-builtins/subclass-Array.js",
           "test/language/expressions/compound-assignment/S11.13.2_A5.2_T1.js",
           "test/language/statements/class/subclass-builtins/subclass-WeakRef.js"
         ],
         "sample_signatures": [
-          "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'test'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImports/a",
           "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'Subclass_new'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionI",
+          "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'test'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImports/a",
           "other:L#:## ##: with statement requires a proven closed object-literal shape before codegen; target Identifier is not a closed object literal. ECMA-# #.# creates an Object Environment Record, #.#.# checks HasProperty plus @@unscopables, and #.# i",
           "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'RE2_new'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImport",
           "other:L#:## Binary emit error: Codegen error: function index out of range — undefined (valid: [#, #)) at function 'values'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUni"
@@ -1226,8 +1226,8 @@
         },
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
-          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
+          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js",
           "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js"
         ],
@@ -1473,33 +1473,33 @@
           "#682"
         ],
         "label": "Standalone RegExp native-engine/runtime gaps: source, constructors, prototype access, result shape",
-        "count": 520,
+        "count": 518,
         "statuses": {
           "pass": 0,
-          "fail": 186,
+          "fail": 184,
           "compile_error": 334,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 520
+          "total": 518
         },
         "error_categories": {
-          "assertion_fail": 132,
           "other": 317,
+          "assertion_fail": 130,
           "runtime_error": 38,
           "null_deref": 29,
           "wasm_compile": 4
         },
         "sample_files": [
+          "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
           "test/built-ins/RegExp/S15.10.2.15_A1_T1.js",
           "test/built-ins/RegExp/prototype/flags/coercion-ignoreCase.js",
-          "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
           "test/annexB/built-ins/RegExp/legacy-accessors/leftContext/this-not-regexp-constructor.js",
           "test/language/literals/regexp/S7.8.5_A2.3_T4.js"
         ],
         "sample_signatures": [
+          "other:L#:## Codegen error: Symbol.match built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.; L#:## Codegen error: standalone RegExp engine does not suppor",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error('##: /[b-ac-e]/.exec(\"a\") throw SyntaxError. Actual: ' + (new RegExp(\"[b-ac-e]\").exec(\"a\")));",
           "other:L#:## Codegen error: RegExp.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "other:L#:## Codegen error: Symbol.match built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.; L#:## Codegen error: standalone RegExp engine does not suppor",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "runtime_error:L#:## Cannot convert object to primitive value"
         ]
@@ -1550,16 +1550,16 @@
         "count": 3288,
         "statuses": {
           "pass": 0,
-          "fail": 1395,
-          "compile_error": 1893,
+          "fail": 1397,
+          "compile_error": 1891,
           "compile_timeout": 0,
           "skip": 0,
           "total": 3288
         },
         "error_categories": {
           "illegal_cast": 99,
-          "assertion_fail": 941,
-          "runtime_error": 488,
+          "assertion_fail": 943,
+          "runtime_error": 486,
           "other": 1640,
           "wasm_compile": 103,
           "null_deref": 13,
@@ -1652,13 +1652,13 @@
           "test/language/expressions/class/async-gen-method/forbidden-ext/b2/cls-expr-async-gen-meth-forbidden-ext-indirect-access-prop-caller.js",
           "test/language/expressions/class/dstr/async-private-gen-meth-dflt-ary-init-iter-close.js",
           "test/language/expressions/class/dstr/gen-meth-static-ary-ptrn-elem-id-iter-val-err.js",
-          "test/language/expressions/class/dstr/async-private-gen-meth-ary-ptrn-elem-ary-rest-init.js"
+          "test/language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-rest-id.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Symbol.iterator built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"inner\" failed: call[#] expected type externref, found ref.cast of type (ref #) @+#) [in inner()] [@+#] [wat: (func $inner (type #) (local $__nullchk_0 externref) g",
-          "assertion_fail:returned # — assert ## at L#: assert.notSameValue(x, values);",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(x.length, #);",
+          "assertion_fail:returned # — assert ## at L#: assert.notSameValue(x, values);",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(result.value, undefined);"
         ]
       },
@@ -1709,24 +1709,24 @@
           "#1364"
         ],
         "label": "Class element, prototype, private-name, and descriptor reconciliation gaps",
-        "count": 7157,
+        "count": 7108,
         "statuses": {
           "pass": 0,
-          "fail": 2697,
-          "compile_error": 4457,
+          "fail": 2706,
+          "compile_error": 4399,
           "compile_timeout": 3,
           "skip": 0,
-          "total": 7157
+          "total": 7108
         },
         "error_categories": {
           "other": 3847,
-          "assertion_fail": 2092,
-          "wasm_compile": 372,
+          "assertion_fail": 2098,
+          "wasm_compile": 375,
           "oob": 58,
-          "runtime_error": 472,
+          "runtime_error": 411,
           "illegal_cast": 81,
           "promise_error": 50,
-          "null_deref": 169,
+          "null_deref": 172,
           "negative_test_fail": 13
         },
         "sample_files": [
@@ -1756,8 +1756,8 @@
         "count": 801,
         "statuses": {
           "pass": 0,
-          "fail": 594,
-          "compile_error": 207,
+          "fail": 595,
+          "compile_error": 206,
           "compile_timeout": 0,
           "skip": 0,
           "total": 801
@@ -1970,16 +1970,16 @@
         "sample_files": [
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
-          "test/annexB/language/global-code/switch-case-global-update.js",
           "test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-of-lhs.js",
-          "test/annexB/language/comments/single-line-html-close-first-line-3.js"
+          "test/annexB/language/comments/single-line-html-close-first-line-3.js",
+          "test/annexB/language/global-code/switch-case-global-update.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( f, undefined, 'Initialized binding created prior to evaluation' );",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');",
           "runtime_error:L#:## Invalid left-hand side in for-in/for-of",
-          "other:L#:## ';' expected."
+          "other:L#:## ';' expected.",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');"
         ]
       },
       {
@@ -2155,8 +2155,8 @@
           "assertion_fail": 87,
           "null_deref": 6,
           "other": 1,
-          "wasm_compile": 5,
           "negative_test_fail": 4,
+          "wasm_compile": 5,
           "illegal_cast": 1
         },
         "sample_files": [
