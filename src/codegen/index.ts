@@ -1683,36 +1683,13 @@ function applyModuleInitGuard(ctx: CodegenContext): void {
   ctx.moduleInitGuardApplied = true;
 }
 
-/** Add a _start export for WASI — wraps __module_init or a no-arg main() (#1122).
+/** Add a _start export for WASI — wraps a user `main()` (running module init
+ *  first via the #1789 guard) or, when there is no callable `main`, the bare
+ *  `__module_init` (#1122).
  *  When the async microtask queue was registered (#1326c Phase 1C-A), append a
  *  call to `__drain_microtasks` after the entry function so any scheduled
  *  microtasks fire before WASI process exit. */
 function addWasiStartExport(ctx: CodegenContext): void {
-  // Prefer __module_init — it's always () -> void and handles all top-level code
-  let targetIdx: number | undefined;
-  for (let i = 0; i < ctx.mod.functions.length; i++) {
-    if (ctx.mod.functions[i]!.name === "__module_init") {
-      targetIdx = ctx.numImportFuncs + i;
-      break;
-    }
-  }
-
-  // Fall back to main only if __module_init doesn't exist AND main is () -> void
-  if (targetIdx === undefined) {
-    const mainIdx = ctx.funcMap.get("main");
-    if (mainIdx !== undefined) {
-      // Check that the function takes no parameters and returns no values
-      const funcArrayIdx = mainIdx - ctx.numImportFuncs;
-      if (funcArrayIdx >= 0 && funcArrayIdx < ctx.mod.functions.length) {
-        const func = ctx.mod.functions[funcArrayIdx]!;
-        const funcType = ctx.mod.types[func.typeIdx];
-        if (funcType && funcType.kind === "func" && funcType.params.length === 0 && funcType.results.length === 0) {
-          targetIdx = mainIdx;
-        }
-      }
-    }
-  }
-
   // (#1789) Make module init run before ANY exported function, not just
   // `_start`. The test262 standalone harness calls exports (e.g. `test()`)
   // directly without invoking `_start`, so a module-level `const`/`let`
@@ -1724,8 +1701,70 @@ function addWasiStartExport(ctx: CodegenContext): void {
   // no-op. Observable top-level side effects (console.log/stdout) therefore
   // still fire on whichever entry runs first (for WASI hosts that's `_start`,
   // preserving existing stdout behaviour) and never run twice.
+  //
+  // This MUST run BEFORE we pick the `_start` target below: the guard prepends
+  // `call __module_init` to every exported function (including a user `main`),
+  // which is exactly what lets `_start → main` run module init before main's
+  // body without splicing the init body into `main` (see the #1411/#1978 note
+  // on target selection).
   if (ctx.wasi) {
     applyModuleInitGuard(ctx);
+  }
+
+  // Choose the WASI program entry that `_start` wraps.
+  //
+  // #1411 regression: #1978 correctly stopped splicing the module-init body
+  // INTO a user `main` (init must run once at module load, not on every
+  // `main()` call), moving init to a standalone `__module_init`. But that left
+  // this function preferring `__module_init` unconditionally, so for a program
+  // WITH a user `main` (e.g. the Native Messaging host) `_start` wrapped ONLY
+  // `__module_init` — top-level globals were initialised but the user `main()`
+  // never ran, so the program produced no stdout under wasmtime.
+  //
+  // Fix: prefer an EXPORTED, no-arg, no-result `main` as the entry. Because
+  // applyModuleInitGuard (above) has already prepended `call __module_init` to
+  // every exported function, wrapping `main` runs module init exactly once (the
+  // idempotent guard) and THEN main's body — restoring the pre-#1978 behaviour
+  // WITHOUT re-introducing the splice. Only when there is no callable exported
+  // `main` do we fall back to wrapping `__module_init` directly: that covers
+  // pure top-level / init-only programs, and the `main()`-calls-itself
+  // convention where a NON-exported `main` is already invoked from top-level
+  // code captured in `__module_init`.
+  let targetIdx: number | undefined;
+
+  const mainIdx = ctx.funcMap.get("main");
+  if (mainIdx !== undefined) {
+    const funcArrayIdx = mainIdx - ctx.numImportFuncs;
+    if (funcArrayIdx >= 0 && funcArrayIdx < ctx.mod.functions.length) {
+      const func = ctx.mod.functions[funcArrayIdx]!;
+      const funcType = ctx.mod.types[func.typeIdx];
+      // Only an EXPORTED, no-arg, no-result `main` is a valid `_start` entry.
+      // A non-exported `main` (the `main()`-calls-itself convention) is reached
+      // through the top-level call already captured in `__module_init`, so it
+      // must NOT be the target — and, being non-exported, it does NOT carry the
+      // guard's `call __module_init` prefix, so wrapping it would skip module
+      // init entirely.
+      if (
+        func.exported &&
+        funcType &&
+        funcType.kind === "func" &&
+        funcType.params.length === 0 &&
+        funcType.results.length === 0
+      ) {
+        targetIdx = mainIdx;
+      }
+    }
+  }
+
+  // No callable exported `main` → wrap `__module_init`, which carries all
+  // top-level code (including any top-level call to a non-exported `main`).
+  if (targetIdx === undefined) {
+    for (let i = 0; i < ctx.mod.functions.length; i++) {
+      if (ctx.mod.functions[i]!.name === "__module_init") {
+        targetIdx = ctx.numImportFuncs + i;
+        break;
+      }
+    }
   }
 
   if (targetIdx !== undefined) {
