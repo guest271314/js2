@@ -5630,6 +5630,34 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
     } as Instr,
   ];
 
+  // (#1988) A standalone `any` number flows as a `__box_number_struct`
+  // externref (see `__box_number` / type-coercion i32→AnyValue boxing), NOT a
+  // $AnyValue tag-3 box. ToString of one — e.g. the `1` in `1 + {}` after
+  // ToPrimitive — must yield its decimal, not the "[object Object]" fallback.
+  // Add a recognition arm when both the box type and the formatter are present.
+  const boxNumIdx = ctx.nativeBoxNumberTypeIdx;
+  const boxNumberArm: Instr[] =
+    boxNumIdx >= 0 && numToStrIdx !== undefined
+      ? [
+          { op: "local.get", index: L_V },
+          { op: "ref.test", typeIdx: boxNumIdx } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: strRef },
+            then: [
+              { op: "local.get", index: L_V },
+              { op: "ref.cast", typeIdx: boxNumIdx } as Instr,
+              { op: "struct.get", typeIdx: boxNumIdx, fieldIdx: 0 },
+              { op: "call", funcIdx: numToStrIdx },
+              { op: "any.convert_extern" } as Instr,
+              { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+            ],
+            // else (null ref, plain object, vec, …) → "[object Object]"
+            else: litStr("[object Object]"),
+          } as Instr,
+        ]
+      : litStr("[object Object]");
+
   const body: Instr[] = [
     // if (v is a $AnyString) return it directly
     { op: "local.get", index: L_V },
@@ -5651,8 +5679,9 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
             { op: "local.set", index: L_BOX },
             ...boxDispatch,
           ],
-          // else (null ref, plain object, vec, …) → "[object Object]"
-          else: litStr("[object Object]"),
+          // else: a boxed-number externref → decimal; everything else →
+          // "[object Object]" (Phase-1 fallback).
+          else: boxNumberArm,
         } as Instr,
       ],
     } as Instr,

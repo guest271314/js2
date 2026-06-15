@@ -36,6 +36,7 @@ import { ensureNativeStringHelpers } from "./native-strings.js";
 import { compileLogicalAnd, compileLogicalOr, compileNullishCoalescing } from "./expressions/logical-ops.js";
 import { tryStaticToNumber } from "./expressions/misc.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
+import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringImports, addUnionImports, resolveNativeTypeAnnotation, resolveWasmType } from "./index.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts } from "./shared.js";
@@ -2806,6 +2807,19 @@ function compileAnyBinaryDispatch(
 export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): ValType {
   const noJsHost = ctx.standalone === true || ctx.wasi === true;
 
+  // #1988: in standalone/WASI the §13.15.3 string-vs-numeric decision must be
+  // made on the ToPrimitive(default) results, not the raw operands — an object
+  // or array reduces (valueOf→toString) to a STRING, which forces string
+  // concatenation. The native `__to_primitive` helper that performs that
+  // reduction is registered by `ensureObjectRuntime`. Run it here, BEFORE the
+  // operands are compiled into `fctx.body`, so any one-time funcIdx setup it
+  // does cannot desync the current function body. It registers only defined
+  // funcs (no import shift) and is idempotent, so this is a no-op when the
+  // object runtime is already present.
+  if (noJsHost && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+    ensureObjectRuntime(ctx);
+  }
+
   // Compile both operands to externref temps. Passing the externref hint keeps a
   // runtime string boxed (no ToNumber coercion) so §13.15.3 can concatenate.
   const lType = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
@@ -2853,12 +2867,45 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
     const typeofStr = ctx.funcMap.get("__typeof_string");
     const unboxNum = ctx.funcMap.get("__unbox_number");
     const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
+    // #1988: the native ToPrimitive helper registered by `ensureObjectRuntime`
+    // (called at the top of this function). Reducing the operands to primitives
+    // BEFORE the string-vs-numeric test is what §13.15.3 requires — an object /
+    // array operand becomes its toString string, forcing concatenation. When it
+    // is unavailable (older minimal standalone path) we degrade to the previous
+    // raw-operand dispatch rather than failing.
+    const toPrimIdx = ctx.funcMap.get("__to_primitive");
     if (typeofStr !== undefined && unboxNum !== undefined && concatIdx !== undefined) {
       // ToString(externref) → ref $AnyString, via the runtime walker (handles
       // boxed strings, numbers, null/undefined, and struct valueOf/toString).
       const externToStr = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       const finalToStr = ctx.funcMap.get("__extern_toString") ?? externToStr;
+
+      // §13.15.3 step 1-2: lprim = ToPrimitive(left, default); rprim =
+      // ToPrimitive(right, default). The "default" hint maps to valueOf→toString
+      // ordering; `__to_primitive` treats a null hint as default. Plain objects
+      // and arrays (no exotic valueOf) reduce to their toString string, so the
+      // string test below then forces concatenation. Reduce into fresh temps so
+      // both the typeof test and the two arms operate on the SAME primitives
+      // (no double-evaluation of valueOf/toString).
+      const lPrim = allocTempLocal(fctx, { kind: "externref" });
+      const rPrim = allocTempLocal(fctx, { kind: "externref" });
+      if (toPrimIdx !== undefined) {
+        fctx.body.push({ op: "local.get", index: lTmp });
+        fctx.body.push({ op: "ref.null.extern" } as Instr); // default hint
+        fctx.body.push({ op: "call", funcIdx: toPrimIdx } as Instr);
+        fctx.body.push({ op: "local.set", index: lPrim });
+        fctx.body.push({ op: "local.get", index: rTmp });
+        fctx.body.push({ op: "ref.null.extern" } as Instr);
+        fctx.body.push({ op: "call", funcIdx: toPrimIdx } as Instr);
+        fctx.body.push({ op: "local.set", index: rPrim });
+      } else {
+        // Degrade: no ToPrimitive available — carry the raw operands through.
+        fctx.body.push({ op: "local.get", index: lTmp });
+        fctx.body.push({ op: "local.set", index: lPrim });
+        fctx.body.push({ op: "local.get", index: rTmp });
+        fctx.body.push({ op: "local.set", index: rPrim });
+      }
 
       const emitToAnyString = (tmp: number): Instr[] => [
         { op: "local.get", index: tmp },
@@ -2867,18 +2914,19 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
         { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
       ];
 
-      // if (__typeof_string(l) | __typeof_string(r)) → concat both as strings
-      //                                      else      → f64.add(unbox, unbox)
+      // if (__typeof_string(lprim) | __typeof_string(rprim)) → concat both as
+      //                                            strings
+      //                                      else            → f64.add(unbox, unbox)
       const concatArm: Instr[] = [
-        ...emitToAnyString(lTmp),
-        ...emitToAnyString(rTmp),
+        ...emitToAnyString(lPrim),
+        ...emitToAnyString(rPrim),
         { op: "call", funcIdx: concatIdx } as Instr,
         { op: "extern.convert_any" } as Instr,
       ];
       const numericArm: Instr[] = [
-        { op: "local.get", index: lTmp },
+        { op: "local.get", index: lPrim },
         { op: "call", funcIdx: unboxNum } as Instr,
-        { op: "local.get", index: rTmp },
+        { op: "local.get", index: rPrim },
         { op: "call", funcIdx: unboxNum } as Instr,
         { op: "f64.add" } as Instr,
       ];
@@ -2888,9 +2936,9 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
       const finalBoxNum = ctx.funcMap.get("__box_number") ?? boxNum;
       numericArm.push({ op: "call", funcIdx: finalBoxNum } as Instr);
 
-      fctx.body.push({ op: "local.get", index: lTmp });
+      fctx.body.push({ op: "local.get", index: lPrim });
       fctx.body.push({ op: "call", funcIdx: typeofStr } as Instr);
-      fctx.body.push({ op: "local.get", index: rTmp });
+      fctx.body.push({ op: "local.get", index: rPrim });
       fctx.body.push({ op: "call", funcIdx: typeofStr } as Instr);
       fctx.body.push({ op: "i32.or" } as Instr);
       fctx.body.push({
@@ -2899,6 +2947,8 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
         then: concatArm,
         else: numericArm,
       } as Instr);
+      releaseTempLocal(fctx, rPrim);
+      releaseTempLocal(fctx, lPrim);
       releaseTempLocal(fctx, rTmp);
       releaseTempLocal(fctx, lTmp);
       return { kind: "externref" };
