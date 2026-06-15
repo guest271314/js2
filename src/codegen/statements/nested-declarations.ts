@@ -20,6 +20,11 @@ import { popBody, pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext, OptionalParamInfo } from "../context/types.js";
+import {
+  compileNativeGeneratorFunction,
+  isNativeGeneratorCandidate,
+  registerNativeGenerator,
+} from "../generators-native.js";
 import { emitThrowReferenceError, emitThrowString, emitThrowTypeError } from "../expressions/helpers.js";
 import {
   collectClassDeclaration,
@@ -319,6 +324,31 @@ export function compileNestedFunctionDeclaration(
     captures.push({ name, type, localIdx, mutable: isMutable, hasTdzFlag, tdzFlagIdx });
   }
 
+  // (#2172 / SF-1 of #2157) Wasm-native lowering for a NESTED `function*` in
+  // standalone/WASI. Previously a nested generator always took the JS-host
+  // buffer path (`__create_generator` etc.), which in standalone leaks env
+  // imports / hits the late-import funcindex CE — the same regression #2079
+  // fixed for top-level generators, but never wired for nested declarations.
+  //
+  // Scope: NO captures only. A capturing nested generator would need its
+  // captured cells spilled into the state struct (the resume function runs
+  // detached from the enclosing frame) — that's a separate, larger change
+  // (`reasoning_effort: max`), so a capturing native candidate falls through to
+  // the host path unchanged. A no-capture nested generator is semantically a
+  // module-level function, so it slots straight into the existing top-level
+  // native machinery (`registerNativeGenerator` → state struct return →
+  // `compileNativeGeneratorFunction`). The funcindex hazard is already handled:
+  // both the no-capture and has-captures branches reserve the function's module
+  // slot with a placeholder BEFORE the body emits (#2068 / #2079).
+  const nativeGenInfo =
+    isGenerator && captures.length === 0 && isNativeGeneratorCandidate(ctx, stmt)
+      ? registerNativeGenerator(ctx, stmt, funcName, paramTypes)
+      : undefined;
+  if (nativeGenInfo) {
+    // The generator factory returns the state struct, not a JS Generator object.
+    returnType = { kind: "ref", typeIdx: nativeGenInfo.stateTypeIdx };
+  }
+
   const results: ValType[] = returnType ? [returnType] : [];
 
   // Register optional/default parameters so call sites can supply defaults
@@ -458,7 +488,12 @@ export function compileNestedFunctionDeclaration(
       emitArgumentsObject(ctx, liftedFctx, paramTypes, 0, isStrictFunction(stmt));
     }
 
-    if (isGenerator) {
+    if (nativeGenInfo) {
+      // (#2172) No-capture nested `function*` in standalone/WASI — emit the
+      // Wasm-native generator factory (builds + returns the state struct), the
+      // same body the top-level path emits. No host imports, no JS buffer.
+      compileNativeGeneratorFunction(ctx, liftedFctx, stmt, nativeGenInfo);
+    } else if (isGenerator) {
       // Generator function: eagerly evaluate body, collect yields into a JS array,
       // then wrap it with __create_generator to return a Generator-like object.
       // The body is wrapped in try/catch so that exceptions thrown before any yields
