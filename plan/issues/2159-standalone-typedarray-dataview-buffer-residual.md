@@ -73,12 +73,39 @@ Verified standalone: set/get, negative in-range values, loop writes, compound
 assignment (read-modify-write), and 8-bit store wrap (256 → 0) all pass.
 Test: `tests/issue-2159.test.ts`.
 
-### Remaining slices (issue stays open)
+### Remaining slices (issue stays open) — triage 2026-06-16
 
-- **ArrayBuffer.byteLength** reads 0 standalone (`new ArrayBuffer(8).byteLength`
-  → 0, expect 8).
-- **DataView** leaks `env::` host imports standalone (`new DataView(buf)` and
-  `getInt32`/`setInt32`/`getFloat64`/… are not standalone-native) — the 336-test
-  DataView bucket.
-- Int8Array signed-read of an out-of-range store (`a[0]=200` → expect -56)
-  reads unsigned — a separate signed/wrap concern, not the leak above.
+**Slice 2 — ArrayBuffer / TypedArray byteLength + buffer + `new TA(buffer)`.**
+A coherent cluster, all standalone:
+
+| repro | standalone | expected |
+|---|---|---|
+| `new ArrayBuffer(8).byteLength` | `0` | `8` |
+| `new Int32Array(buf).length` | `8` | `2` (byteLength/4) |
+| `new Int32Array(4).byteLength` | `0` | `16` |
+| `new Int32Array(4).byteOffset` | `0` ✓ | `0` |
+| `new Int32Array(4).buffer.byteLength` | throws | `16` |
+
+Root: the standalone ArrayBuffer is the `i32_byte` vec struct (field 0 =
+**byte** length, field 1 = data) — see `src/codegen/dataview-native.ts`.
+`.length` is intercepted as a field-0 read in `property-access.ts` (~line 2516),
+but **`byteLength` / `buffer` are not intercepted at all**, so they fall through
+to `__extern_length`/default → `0`. The fix is NOT a plain field-0 alias because
+`byteLength` is element-size-scaled: ArrayBuffer/Uint8Array `byteLength == length`,
+but `Int32Array.byteLength == length*4`, `Float64Array == length*8`, etc. And
+`new Int32Array(buffer)` currently mis-computes `length` (uses the buffer's byte
+count as the element count instead of `byteLength / BYTES_PER_ELEMENT`). Slice 2
+needs: (a) a `byteLength` property interception that scales by the receiver's
+element byte-size; (b) a `buffer` accessor returning the backing i32_byte vec;
+(c) the `new TA(ArrayBuffer)` constructor to set element count =
+`buffer.byteLength / BYTES_PER_ELEMENT`. Medium-sized, representation-aware —
+self-contained from slice 1.
+
+**Slice 3 — DataView standalone** leaks `env::` host imports
+(`new DataView(buf)` + `getInt32`/`setInt32`/`getFloat64`/… not wired to the
+native `dataview-native.ts` accessors on this path) — the 336-test DataView
+bucket. Larger; likely a senior-dev slice.
+
+**Not a slice:** Int8Array signed-read of an out-of-range store (`a[0]=200` →
+expect `-56`) reads unsigned — a separate signed/wrap concern, orthogonal to the
+above.
