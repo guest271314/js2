@@ -25,10 +25,11 @@ import {
   resolveWasmType,
 } from "../index.js";
 import { ensureMapHelpers } from "../map-runtime.js";
+import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
 import { ensureSetHelpers } from "../set-runtime.js";
 import { ensureWeakCollectionHelpers } from "../weak-collections-runtime.js";
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
-import { resolveComputedKeyExpression } from "../literals.js";
+import { compileObjectLiteralAsExternref, resolveComputedKeyExpression } from "../literals.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
 import {
   compileStandaloneRegExpConstructor,
@@ -2107,14 +2108,67 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
-  // Handle `new Proxy(target, handler)` — delegate to __proxy_create host import.
-  // The host wraps the target in a real JS Proxy with the given handler object.
-  // Standalone has no JS Proxy machinery, so fail clearly instead of silently
-  // lowering to a half-working pass-through value (#1472 Phase C).
+  // Handle `new Proxy(target, handler)`.
+  //
+  // JS-host mode: delegate to the `__proxy_create(target, handler)` host import
+  // (the host wraps the target in a real JS Proxy with the given handler).
+  //
+  // Standalone mode (#1100 Phase 1): there is no host Proxy, so route through the
+  // Wasm-native `__proxy_create(target, handler)` emitted by `ensureObjectRuntime`
+  // (object-runtime.ts `ensureProxyRuntime`). It reads the get/set/has/apply trap
+  // closures off the handler object at runtime, allocates a `$Proxy` (subtype of
+  // `$Object`), and the property-runtime front-guards (`__extern_get/set/has`)
+  // dispatch reads/writes/has through the traps. Both modes share the same
+  // `(target, handler) -> externref` signature, so the call site is uniform.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Proxy") {
     if (ctx.standalone) {
-      reportError(ctx, expr, "Codegen error: Proxy not supported in standalone mode (#1472 Phase C).");
-      fctx.body.push({ op: "ref.null.extern" });
+      const args = expr.arguments ?? [];
+      // Force the object runtime (which registers the native __proxy_create +
+      // the trap dispatch helpers + the front-guards) before we look up the idx.
+      ensureObjectRuntime(ctx);
+      const compileToExternref = (arg: ts.Expression | undefined): void => {
+        if (arg === undefined) {
+          fctx.body.push({ op: "ref.null.extern" });
+          return;
+        }
+        // An OBJECT-LITERAL handler/target must lower to an OPEN `$Object`
+        // (`__new_plain_object` + `__extern_set` per prop) so the runtime
+        // `__proxy_create` can read the traps off the handler via `__extern_get`.
+        // A closed typed struct (the default for an inline literal) hides its
+        // fields from the open-object prop-map walk, so every trap reads null and
+        // never fires. `compileObjectLiteralAsExternref` builds the open form —
+        // the same shape a `const h: any = {…}` handler takes.
+        if (ts.isObjectLiteralExpression(arg)) {
+          const r = compileObjectLiteralAsExternref(ctx, fctx, arg);
+          if (r === null) {
+            // Builder unavailable — push undefined so the body stays valid.
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          return;
+        }
+        const r = compileExpression(ctx, fctx, arg, { kind: "externref" });
+        if (r && r.kind !== "externref") {
+          if (r.kind === "ref" || r.kind === "ref_null") {
+            fctx.body.push({ op: "extern.convert_any" });
+          } else {
+            coerceTypeImpl(ctx, fctx, r, { kind: "externref" });
+          }
+        } else if (!r) {
+          // void result (shouldn't happen for a value arg) — push undefined.
+          fctx.body.push({ op: "ref.null.extern" });
+        }
+      };
+      compileToExternref(args[0]);
+      compileToExternref(args[1]);
+      const proxyCreateIdx = ctx.funcMap.get("__proxy_create");
+      if (proxyCreateIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: proxyCreateIdx });
+      } else {
+        // Runtime not available (should not happen) — drop args, push undefined.
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "ref.null.extern" });
+      }
       return { kind: "externref" };
     }
     const args = expr.arguments ?? [];

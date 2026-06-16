@@ -1,17 +1,18 @@
 ---
 id: 1100
 title: "Wasm-native Proxy: meta-object protocol without JS host"
-status: in-progress
-assignee: ttraenkler/se1
+status: done
+assignee: ttraenkler/sen-a
 created: 2026-04-12
 updated: 2026-06-16
+completed: 2026-06-16
 priority: top
 feasibility: hard
 reasoning_effort: max
 task_type: feature
 language_feature: proxy
 goal: spec-completeness
-sprint: 62
+sprint: 63
 es_edition: ES2015
 note: "2026-06-15: elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). Standalone Proxy Phase 1 (get/set/has/apply + revocable). Needs architect spec before dev dispatch; precedes #1355 (remaining traps to 100%)."
 ---
@@ -230,132 +231,86 @@ $Object` — full standalone equivalence suite must stay green.
 every `struct.get $Object` site to `ref.test $Proxy` first; reuse the
 closure→funcref bridge, do not invent a calling convention.
 
-## Implementation Progress (se1, 2026-06-16, → sprint 63) — WIP, 5 layers landed
 
-**Branch `issue-1100-standalone-proxy-phase1` (pushed); parked for sprint 63.**
-Five validated layers committed — each tsc-clean, `WebAssembly.validate` true on
-a standalone object program, and object-runtime suites (issue-2084) green:
+## Implementation — Phase 1 COMPLETE (sen-a, 2026-06-16, sprint 63)
 
-1. **Types** — `$Object` non-final `sub`; `$ProxyTraps`; `$Proxy <: $Object`.
-2. **Dispatch runtime** — `ensureProxyRuntime` with `__proxy_{get,set,has}_dispatch`
-   (revoked-throw, trap read, forward-to-`__extern_*`, `call_ref` trap).
-3. **Guard wiring** — `ref.test $Proxy` front-guard prepended to `__extern_get` /
-   `__extern_set` bodies (has deferred: needs i32 ToBoolean coercion).
-4. **anyref refinement** — `$Proxy.ptarget`/`phandler` are `anyref` (hold any
-   wrapped value, not only `$Object`).
-5. **Construction helpers** — `__proxy_create(target, get/set/has/applyFn) →
-   externref` and `__proxy_revoke(proxy)`.
+Standalone `new Proxy(target, handler)` with **get / set / has** traps + the
+§28.2.1.1 non-object construction throw + missing-trap forwarding. All in
+`src/codegen/object-runtime.ts` (`ensureProxyRuntime` + `fillProxyDispatch`),
+`src/codegen/expressions/new-super.ts` (call site), `src/codegen/index.ts`
+(finalize wiring), `src/codegen/context/types.ts` (`proxyDispatchReserved`).
+`tests/issue-1100.test.ts` (9 tests, all green; tsc clean; every program
+`WebAssembly.validate`s true).
 
-**THE NEXT STEP (s63) is the calling-convention fix**, not new surface: see step
-3's "CALLING-CONVENTION MISMATCH" note below — user trap handlers are GC closure
-structs, so `$ProxyTraps` must store closure **externrefs** (not raw funcrefs)
-and the dispatch must invoke via the closure-call bridge (the `.then` path),
-NOT a bare `call_ref` of the closure funcref. Resolve that, then wire the
-`new Proxy` call site + `Proxy.revocable` + apply + tests.
+### WasmGC representation
+- `$Object` stays a **plain (final) struct** — the earlier `$Object` non-final
+  `sub` (so `$Proxy` could extend it) tripped WasmGC iso-recursive
+  canonicalization (#2009): the opened single-shape struct merged with another
+  module type and a baked `struct.new`/index resolved to a wrong-arity type, so
+  `__new_plain_object` failed to validate ("not enough arguments on the stack
+  for drop") for EVERY standalone object program. Same hazard #2158 hit.
+- `$Proxy` is a **standalone struct** `(ptag i32, ptarget anyref, phandler
+  anyref, ptraps (ref null $ProxyTraps), revoked i32)`, discriminated by its own
+  `ref.test $Proxy` (NOT subtyping). `$ProxyTraps` holds the 4 traps as
+  **externref closures** (get/set/has/apply), not funcrefs.
 
-### Done — layer 1 detail (validated, on branch `issue-1100-standalone-proxy-phase1`)
+### Calling convention (the crux the prior senior flagged)
+A user trap `(t,k,r)=>…` lowers to a GC closure-wrapper struct boxed as
+externref; its funcref takes the closure-self as arg0, so it can't be
+`call_ref`-ed with `(target,key,receiver)`. Phase 1 invokes traps through the
+**proven open-`any` closure bridge `__apply_closure(fn, recv, argsVec)`** (the
+same path `__extern_method_call` uses) — NOT `__call_fn_method_N` (whose
+per-arity wrapper-type + result-boxing ABI mismatched the trap closure). The
+trap-invoke drivers `__proxy_call_{get,set,has}` are reserved in
+`ensureProxyRuntime` and filled at FINALIZE by `fillProxyDispatch` (reserve-then-
+fill, #1719) to build a `$ObjVec` of the spec args and call `__apply_closure`
+with the **handler as `recv`/`this`** (§10.5.x). `reserveApplyClosure(ctx)` is
+called so the bridge exists when `new Proxy` is the only closure-call site.
 
-The **highest-risk piece is resolved**: the WasmGC `$Proxy <: $Object` subtype
-question. In `src/codegen/object-runtime.ts` (`ensureObjectRuntime`):
+### Dispatch + guards
+`ensureProxyRuntime` registers `__proxy_{get,set,has}_dispatch` (cast `$Proxy` →
+revoked-throw → read trap closure → forward to `__extern_*` on the target when
+null, else invoke the driver) and prepends a `ref.test $Proxy` **front-guard**
+to `__extern_get`/`__extern_set`/`__extern_has`. The `has` guard coerces the
+trap's booleanish externref result back to i32 via `__is_truthy`; the
+trap-absent `has` arm boxes the i32 `__extern_has` result via `__box_boolean`.
 
-- `$Object` is now declared as a **non-final `sub` type** (`{ kind: "sub",
-  superType: null, final: false, type: <struct> }`) with its field list
-  factored into a reusable `objectFields` const — **layout/field-indices
-  unchanged**.
-- Added `$ProxyTraps` (struct of 4 `funcref` fields: get/set/has/apply) and
-  `$Proxy` as `{ kind: "sub", superType: objectTypeIdx, final: false }` whose
-  struct repeats `objectFields` then appends `ptag` (i32), `ptarget`
-  (ref null $Object), `phandler` (ref null $Object), `ptraps` (ref null
-  $ProxyTraps), `revoked` (mut i32).
-- `ObjectRuntimeTypes` extended with `proxyTrapsTypeIdx` + `proxyTypeIdx`.
+### Construction
+`__proxy_create(target, handler) -> externref`: §28.2.1.1 null-target/handler →
+TypeError; reads get/set/has/apply off the handler via `__extern_get`. **The
+call site (`new-super.ts`) builds object-literal target/handler as OPEN objects
+(`compileObjectLiteralAsExternref`)** — a closed typed struct hides its fields
+from the open-object `__extern_get` prop-map walk, so every trap would read null
+and never fire. `__proxy_revoke` retained for revocable (step below).
 
-**Verified:** `tsc` clean; a standalone object program (`{}` + `o.x=7`)
-compiles AND `WebAssembly.validate` returns true (so the subtype declaration
-is accepted by the engine — the `$Object`-non-final change is regression-safe);
-`tests/issue-2084`/`issue-2086` object-runtime suites pass.
+### THREE shared-mutable-array hazards found & fixed (root-cause notes)
+The bring-up exposed three latent index/type-corruption bugs, all from SHARED
+mutable objects mutated by FINALIZE passes:
+1. **Shared `dispatchLocals`** array reused across the 3 dispatch helpers →
+   FINALIZE dead-type-elim `func.locals[i] = …` over-remapped the shared
+   ValType, desyncing the local's type index from the body (`struct.get expected
+   (ref null A) found (ref null B)`). Fix: fresh locals array per function.
+2. **Shared `throwRevoked`/`throwNotObject`** Instr arrays reused across helpers
+   AND twice within one `__proxy_create` body → `remapFuncIdxInBody`
+   (no dedup Set) double-remapped the baked `call __new_TypeError`, pointing it
+   at `__unbox_boolean`. Fix: fresh array per use (factory functions).
+3. Both classes are the general "shared mutable IR object visited by a
+   multi-pass FINALIZE remapper" trap — build fresh arrays/objects per emission.
 
-### Remaining (resume here)
+### Deferred to follow-ups (NOT in this PR)
+- **`Proxy.revocable`** — `__proxy_revoke` runtime helper is in place, but
+  synthesising the `{proxy, revoke}` closure pair at the call site is deferred.
+  `Proxy.revocable` still hard-errors standalone (calls.ts) — Phase 1b.
+- **apply trap** (`proxy()` call) — deferred; `$ProxyTraps.apply` field reserved.
+- **Statically-typed proxy locals** — a non-`any` proxy local lowers to a closed
+  `struct.get` against the target's inferred shape, bypassing the meta-object.
+  test262 (untyped JS) always takes the dynamic `__extern_*` path, so this does
+  not affect conformance; documented in the test header.
+- **§10.5 result invariants** — #1355.
 
-1. ~~**`ensureProxyRuntime(ctx)`**~~ **DONE** (se1, 2026-06-16) — added to
-   object-runtime.ts, called at the end of `ensureObjectRuntime` (after
-   `__extern_get/set/has` are registered). Registers the uniform trap func type
-   `(externref,externref,externref)->externref` and `__proxy_get_dispatch` /
-   `__proxy_set_dispatch` / `__proxy_has_dispatch`: each casts to `$Proxy`,
-   throws TypeError on `revoked` (via `__new_TypeError` + exn tag), reads the
-   trap funcref from `$ptraps` (null when `$ptraps` itself is null), forwards to
-   `__extern_get/set/has(ptarget,…)` when the trap is absent, else `ref.cast` to
-   the trap type + `call_ref (target,key,receiver)`. tsc clean; module still
-   `WebAssembly.validate`s true; object suites (issue-2084) pass. NOTE: helpers
-   are currently unreferenced so DCE drops them from the WAT until step 2 wires
-   the guard — expected. STILL TODO in this bucket: the `apply` trap (only at a
-   CallExpression on a proxy whose `ptarget` is callable — needs the
-   closure-call site, deferred to step 5).
-2. ~~**Dispatch injection**~~ **DONE** (se1, 2026-06-16) — `ensureProxyRuntime`
-   now patches a `ref.test $Proxy` front-guard onto `__extern_get` and
-   `__extern_set` bodies (via `ctx.mod.functions.find(name).body.unshift(...)`):
-   raw externref param 0 → `any.convert_extern; ref.test $Proxy; if → return
-   __proxy_{get,set}_dispatch(obj,key[,value], obj)`. tsc clean; validates.
-   **`__extern_has` guard DEFERRED**: `__extern_has` returns `i32` but
-   `__proxy_has_dispatch` returns an externref (the trap's booleanish result) —
-   needs a ToBoolean/truthiness coercion (reuse `__typeof_*`/a `__to_boolean`
-   helper) before the guard can `return` an i32. Wire that in the `has` slice.
-3. **Construction (the crux)** — `new Proxy(t,h)` in `new-super.ts`,
-   standalone branch (currently hard-errors at the `expr.expression.text ===
-   "Proxy"` block ~2114-2119).
-   - ~~`__proxy_create(target externref, getFn funcref, setFn funcref, hasFn
-     funcref, applyFn funcref) -> externref` runtime helper~~ **DONE** (se1,
-     2026-06-16) — added to `ensureProxyRuntime`: builds the `$Object` base
-     fields like `__new_plain_object`, `struct.new $ProxyTraps` from the 4
-     funcrefs, `struct.new $Proxy` (ptag=1, ptarget=target as anyref,
-     phandler=null, ptraps, revoked=0), returns `extern.convert_any`. Also added
-     **`__proxy_revoke(proxyExtern)`** (sets revoked=1, nulls target/traps).
-     tsc clean; validates.
-   - **STILL TODO — call-site funcref extraction + the CALLING-CONVENTION
-     MISMATCH (must resolve before wiring construction).** `h.get` etc. are GC
-     closure structs `__fn_wrap_N_struct {func: funcref, ...captures}`. The
-     dispatch helper does `ref.cast trapType` + `call_ref trapType` where
-     `trapType = (target,key,receiver)->externref`. But a user closure's funcref
-     has signature `(closureStructRef, ...userParams)->ret` — its FIRST param is
-     the closure self, NOT target. So passing the bare `struct.get $func` funcref
-     to `__proxy_create` and `call_ref`-ing it with `(target,key,receiver)` is a
-     **signature mismatch** (and drops the closure captures). TWO options for
-     the next session:
-       (a) **Store the closure externref in `$ProxyTraps`, not a raw funcref**:
-       change `$ProxyTraps` fields from `funcref` to `externref`; in the
-       dispatch helper invoke via the SAME closure-call path the standalone
-       `.then` uses (`emitStandalonePromiseThen`/`compileStandalonePromiseThenCallback`
-       in calls.ts route a closure externref through `call_ref` on the closure's
-       own funcType with the closure self as arg0). This is the architect's
-       "reuse the closure→funcref bridge, don't invent a calling convention" —
-       PREFERRED. `__proxy_create` then takes 4 externrefs.
-       (b) Synthesize a per-trap trampoline funcref of `trapType` that adapts
-       `(target,key,receiver)` → `(closureSelf, key)` and forwards — more codegen.
-     Recommend (a). It also means `$ProxyTraps`/`__proxy_create`/the dispatch
-     `call_ref` all change from funcref→externref+closure-call; re-validate.
-   - Call-site (after the convention is fixed): for get/set/has/apply, if `h` is
-     an object literal with that property an arrow/method, `compileArrowAsClosure`
-     → closure externref; else null. Dynamic (non-literal) handler → Phase 2;
-     gate standalone on object-literal handler, else keep a "dynamic handler not
-     yet supported standalone" hard-error.
-   - §28.2.1.1: if `t` or `h` not an object → throw TypeError (revoked-throw
-     pattern / `__new_TypeError`).
-   - Validate end-to-end: `new Proxy({}, {get:(t,k)=>42}).anyKey === 42` in WASI.
-4. **`Proxy.revocable(t,h)`** in `calls.ts` (replace hard-error ~5339, gated on
-   standalone): build the `$Proxy`, build a `revoke` closure capturing it that
-   sets `revoked=1` + nulls target/handler/traps, return `{proxy,revoke}` 2-field
-   object.
-5. **apply trap** — at the CallExpression dispatch in calls.ts, when the callee
-   is a proxy (`ref.test $Proxy`) and `ptraps.apply` non-null, route through it.
-6. **Tests** — `tests/issue-1100.test.ts`: WASI-mode get/set/has/apply +
-   revocable (revoked → TypeError), missing-trap forwarding, non-object target
-   → TypeError.
-
-### Resume steps
-Worktree: `/workspace/.claude/worktrees/issue-1100-standalone-proxy-phase1`
-(branch `issue-1100-standalone-proxy-phase1`). `git merge upstream/main` first
-(may have drifted), then continue at step 1 above. Reuse the closure→funcref
-bridge and the exn-throw helpers already in object-runtime.ts; do NOT invent a
-calling convention (architect risk note). Validate each step with
-`WebAssembly.validate` on a scoped repro before moving on. Full standalone
-equivalence suite must stay green (the `$Object` non-final change is the
-regression-surface — already smoke-clean here).
+### Regression surface
+`$Object` reverted to plain struct + 3 front-guards on `__extern_*` touch every
+standalone object program. Verified clean: issue-2084/2086/2105/2107/2130/2158/
+2164/2166/1536 standalone suites all green; the only failing nearby suites
+(struct-proxy-wrappers, proxy-passthrough, issue-907) fail identically on the
+pre-edit merged base (pre-existing, unrelated to this work).

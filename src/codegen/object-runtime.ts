@@ -228,24 +228,21 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     // ordering for Object.keys/values/entries/for-in/spread/JSON.stringify.
     { name: "nextSeq", type: { kind: "i32" }, mutable: true },
   ];
-  // (#1100) `$Object` is declared as a NON-FINAL sub type (no explicit
-  // supertype) so the standalone Proxy meta-object (`$Proxy`) can extend it.
-  // Subtyping is the lowest-churn discriminator: every existing
-  // `ref.test $Object` / `ref.cast $Object` keeps matching a `$Proxy` instance
-  // (a proxy IS-A object), and the Proxy dispatch only adds one extra
-  // `ref.test $Proxy` ahead of the ordinary path. The field list is identical
-  // to the previous plain-struct form, so the layout (and every field index)
-  // is unchanged.
+  // `$Object` is a plain (final) struct. NOTE (#1100): an earlier attempt made
+  // this a NON-FINAL `sub` so the standalone `$Proxy` could extend it, but
+  // opening `$Object` up triggered WasmGC iso-recursive canonicalization
+  // (#2009): the now-open single-shape struct merged with another module type,
+  // so a baked `struct.new`/index resolved to a wrong-arity type and
+  // `__new_plain_object` failed to validate ("not enough arguments on the stack
+  // for drop"). Same canonicalization hazard as #2158. So `$Object` stays
+  // closed and `$Proxy` is a STANDALONE struct (below), discriminated by its own
+  // `ref.test $Proxy` ahead of the ordinary `ref.cast $Object` path — the
+  // front-guards already test `$Proxy` first, so a proxy never reaches the
+  // `$Object` cast.
   ctx.mod.types.push({
-    kind: "sub",
+    kind: "struct",
     name: "$Object",
-    superType: null,
-    final: false,
-    type: {
-      kind: "struct",
-      name: "$Object",
-      fields: objectFields,
-    },
+    fields: objectFields,
   });
 
   // $ObjVec backing array: (array (mut externref)) — holds enumeration results
@@ -273,54 +270,52 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     ],
   });
 
-  // (#1100) `$ProxyTraps` — 4 funcref fields for the standalone Proxy Phase 1
-  // traps (get/set/has/apply). A null field means "no trap" → forward to the
-  // ordinary operation on the proxy target. Each trap funcref has the uniform
-  // shape `(externref...) -> externref` and is `call_ref`-dispatched via a
-  // registered func type in `ensureProxyRuntime`; here we only reserve the
-  // struct shape (the fields hold bare `funcref`, cast at the dispatch site).
+  // (#1100) `$ProxyTraps` — 4 trap fields for the standalone Proxy Phase 1
+  // (get/set/has/apply). A null field means "no trap" → forward to the ordinary
+  // operation on the proxy target. The fields hold the user trap handler as an
+  // **externref closure** (the boxed closure-wrapper struct produced by every
+  // compiled function expression), NOT a bare funcref: a user trap `(t,k,r) =>
+  // …` lowers to a GC closure struct whose own funcref takes the closure-self as
+  // arg0, so it cannot be `call_ref`-ed with `(target,key,receiver)` directly.
+  // Phase 1 invokes traps through the existing closure-call bridge
+  // (`__call_fn_method_N`, the same path accessors/`__apply_closure` use) which
+  // threads `this` and the closure-self correctly — see `ensureProxyRuntime` /
+  // `fillProxyDispatch`. This is the architect's "reuse the closure→funcref
+  // bridge, don't invent a calling convention" requirement.
   const proxyTrapsTypeIdx = ctx.mod.types.length;
   ctx.mod.types.push({
     kind: "struct",
     name: "$ProxyTraps",
     fields: [
-      { name: "get", type: { kind: "funcref" }, mutable: false },
-      { name: "set", type: { kind: "funcref" }, mutable: false },
-      { name: "has", type: { kind: "funcref" }, mutable: false },
-      { name: "apply", type: { kind: "funcref" }, mutable: false },
+      { name: "get", type: { kind: "externref" }, mutable: false },
+      { name: "set", type: { kind: "externref" }, mutable: false },
+      { name: "has", type: { kind: "externref" }, mutable: false },
+      { name: "apply", type: { kind: "externref" }, mutable: false },
     ],
   });
 
-  // (#1100) `$Proxy` — subtype of `$Object`. It repeats `$Object`'s fields
-  // (required for WasmGC struct subtyping) then appends the proxy-specific
-  // fields. Because it extends `$Object`, every existing `ref.test $Object` /
-  // `ref.cast $Object` keeps matching a proxy instance, so the ordinary
-  // property/enumeration paths still work on the proxy struct itself; the
-  // Proxy dispatch only adds a `ref.test $Proxy` ahead of those paths.
+  // (#1100) `$Proxy` — a STANDALONE struct (NOT a subtype of `$Object`; see the
+  // canonicalization note on `$Object` above). A proxy is discriminated by its
+  // own `ref.test $Proxy`, emitted by the `__extern_get/set/has` front-guards
+  // AHEAD of the ordinary `ref.cast $Object`, so the proxy never flows down the
+  // plain-object path and does not need to carry `$Object`'s fields. Fields:
+  //   0 ptag      i32           PROXY_TAG marker (the bare ref.test is the real
+  //                             discriminator; kept for symmetry with #1325)
+  //   1 ptarget   anyref(mut)   wrapped target (any value)
+  //   2 phandler  anyref(mut)   handler object — trap `this` (§10.5.x)
+  //   3 ptraps    ref null …    the 4 trap closures
+  //   4 revoked   i32(mut)      revocation bit
   const proxyTypeIdx = ctx.mod.types.length;
   ctx.mod.types.push({
-    kind: "sub",
+    kind: "struct",
     name: "$Proxy",
-    superType: objectTypeIdx,
-    final: false,
-    type: {
-      kind: "struct",
-      name: "$Proxy",
-      fields: [
-        ...objectFields,
-        // proxy-specific fields. ptarget/phandler are `anyref` (not
-        // `ref null $Object`) so they hold ANY value the proxy wraps — a
-        // function, array, or host externref target, not only a plain $Object
-        // (§28.2.1.1 only requires target/handler to be objects, but the
-        // standalone value model carries them as anyref; the dispatch forwards
-        // via `extern.convert_any`).
-        { name: "ptag", type: { kind: "i32" }, mutable: false },
-        { name: "ptarget", type: { kind: "anyref" }, mutable: true },
-        { name: "phandler", type: { kind: "anyref" }, mutable: true },
-        { name: "ptraps", type: { kind: "ref_null", typeIdx: proxyTrapsTypeIdx }, mutable: true },
-        { name: "revoked", type: { kind: "i32" }, mutable: true },
-      ],
-    },
+    fields: [
+      { name: "ptag", type: { kind: "i32" }, mutable: false },
+      { name: "ptarget", type: { kind: "anyref" }, mutable: true },
+      { name: "phandler", type: { kind: "anyref" }, mutable: true },
+      { name: "ptraps", type: { kind: "ref_null", typeIdx: proxyTrapsTypeIdx }, mutable: true },
+      { name: "revoked", type: { kind: "i32" }, mutable: true },
+    ],
   });
 
   const types: ObjectRuntimeTypes = {
@@ -4456,23 +4451,40 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   return types;
 }
 
+/** (#1100) Reserved trap-invoke driver names — filled by `fillProxyDispatch`. */
+const PROXY_CALL_GET = "__proxy_call_get";
+const PROXY_CALL_SET = "__proxy_call_set";
+const PROXY_CALL_HAS = "__proxy_call_has";
+
 /**
  * (#1100) Standalone Proxy meta-object dispatch runtime — Phase 1.
  *
- * Registers a uniform trap func type `(externref,externref,externref) ->
- * externref` and the per-operation dispatch helpers. Each helper takes the
- * proxy (as externref), the key, and the receiver; it (1) casts to `$Proxy`,
- * (2) throws a TypeError if the proxy is revoked, (3) reads the relevant trap
- * funcref from `$ptraps`, (4) forwards to the ordinary operation on `$ptarget`
- * when the trap is absent, else `call_ref`s the trap with
- * `(target, key, receiver)`.
+ * Registers the per-operation dispatch helpers (`__proxy_{get,set,has}_dispatch`),
+ * the trap-invoke driver placeholders (`__proxy_call_{get,set,has}`, filled at
+ * FINALIZE by `fillProxyDispatch`), the constructor (`__proxy_create`) and the
+ * revoker (`__proxy_revoke`), and patches the `ref.test $Proxy` front-guard onto
+ * `__extern_get`/`__extern_set`/`__extern_has`.
+ *
+ * ## Calling convention (the crux)
+ * A user trap `(t,k,r) => …` lowers to a GC **closure-wrapper struct** boxed as
+ * an externref; its own funcref takes the closure-self as arg0 and carries the
+ * captured environment. It therefore CANNOT be `call_ref`-ed with a bare
+ * `(target,key,receiver)` signature. So `$ProxyTraps` stores the trap as an
+ * externref closure, and the dispatch invokes it through the existing
+ * closure-call bridge `__call_fn_method_N(thisVal, closure, arg0…)` — the same
+ * path accessors (`fillAccessorDrivers`) and open-`any` method calls
+ * (`__apply_closure`) use. Those exports only exist at FINALIZE, so the
+ * `__proxy_call_*` drivers are reserved here (placeholder `unreachable`) and
+ * filled later (reserve-then-fill, #1719). The trap `this` is the handler
+ * (§10.5.x `Call(trap, handler, …)`), threaded as `thisVal`.
+ *
+ * Each dispatch helper: (1) casts to `$Proxy`, (2) throws a TypeError if the
+ * proxy is revoked, (3) reads the relevant trap closure from `$ptraps`,
+ * (4) forwards to the ordinary operation on `$ptarget` when the trap is absent,
+ * else invokes the trap driver with `(handler, target, key, receiver[, value])`.
  *
  * Phase 1 performs NO §10.5 result-invariant checks (deferred to #1355) — it
  * only enforces the revoked-proxy invariant.
- *
- * Caller (`__extern_get`/`set`/`has` body, patched separately) is responsible
- * for the `ref.test $Proxy` guard that routes here; these helpers assume the
- * incoming externref IS a proxy.
  */
 function ensureProxyRuntime(
   ctx: CodegenContext,
@@ -4490,8 +4502,12 @@ function ensureProxyRuntime(
   const { objectTypeIdx, proxyTypeIdx, proxyTrapsTypeIdx } = types;
   const externref: ValType = { kind: "externref" };
 
-  // Uniform trap signature: (target, key, receiver) -> result.
-  const trapTypeIdx = addFuncType(ctx, [externref, externref, externref], [externref]);
+  // The dispatch helpers depend on `__box_boolean` (has-trap-absent arm boxes
+  // the i32 __extern_has result) and `__is_truthy` (the __extern_has front-guard
+  // coerces the trap's booleanish externref result back to i32). Both are
+  // registered via the union-import registry; ensure they exist before we bake
+  // their funcIdx into the proxy bodies (idempotent).
+  addUnionImportsViaRegistry(ctx);
 
   // Revoked-proxy TypeError. Reuse the WASI error constructor + exn tag like
   // the ToPrimitive path does (object-runtime.ts ~1695).
@@ -4500,29 +4516,113 @@ function ensureProxyRuntime(
   emitWasiErrorConstructor(ctx, "TypeError", 1);
   const typeErrorCtorIdx = ctx.funcMap.get("__new_TypeError")!;
   const exnTagIdx = ensureExnTag(ctx);
-  const throwRevoked: Instr[] = [
+  // FRESH Instr array per use. The same throw block is embedded in three
+  // dispatch helpers; a SHARED array would be visited once per containing-body
+  // pass AND, when reused twice in one body, double-remapped by the FINALIZE
+  // dead-code `remapFuncIdxInBody` walk (no dedup Set) — over-shifting the baked
+  // `call __new_TypeError` funcIdx. Build a new array each time.
+  const throwRevoked = (): Instr[] => [
     ...stringConstantExternrefInstrs(ctx, revokedMsg),
     { op: "call", funcIdx: typeErrorCtorIdx },
     { op: "throw", tagIdx: exnTagIdx } as Instr,
   ];
 
-  // Field indices on $Proxy: the 6 $Object fields come first (0..5), then
-  // ptag(6) ptarget(7) phandler(8) ptraps(9) revoked(10).
-  const F_PTARGET = 7;
-  const F_PTRAPS = 9;
-  const F_REVOKED = 10;
+  // Reserve the open-`any` closure-call bridge `__apply_closure` (filled at
+  // FINALIZE by `fillApplyClosure`). The proxy trap-invoke drivers
+  // (`fillProxyDispatch`) call it to run the user trap closure with the handler
+  // bound as `this` — the same bridge `__extern_method_call` uses. Reserving here
+  // guarantees the bridge + its `__call_fn_method_N` arms exist when a standalone
+  // `new Proxy` is the only closure-call site in the module.
+  reserveApplyClosure(ctx);
+
+  // Field indices on the standalone $Proxy struct:
+  // ptag(0) ptarget(1) phandler(2) ptraps(3) revoked(4).
+  const F_PTARGET = 1;
+  const F_PHANDLER = 2;
+  const F_PTRAPS = 3;
+  const F_REVOKED = 4;
   // Field indices on $ProxyTraps: get(0) set(1) has(2) apply(3).
   const TRAP_GET = 0;
   const TRAP_SET = 1;
   const TRAP_HAS = 2;
 
-  // Builds a dispatch helper body. `trapFieldIdx` selects the trap; `forwardName`
-  // is the ordinary operation to call when the trap is absent; `forwardArgc` is
-  // 2 (get/has: target,key) or 3 (set: target,key,value-in-receiver-slot).
-  // params: 0=proxyExtern 1=key 2=receiver(get)/value(set)
-  // locals: 3=p (ref $Proxy)  4=trap (funcref)
+  // ── Reserve the trap-invoke driver placeholders (filled by fillProxyDispatch) ──
+  //
+  // Each driver forwards to the closure-call bridge __call_fn_method_N. The
+  // bodies are filled at FINALIZE once those exports exist; here we only reserve
+  // the funcIdx (append position) so the dispatch helpers can bake a stable
+  // `call <reserved funcIdx>`. Signatures match the spec trap arities:
+  //   get(handler, trap, target, key, receiver)        → __call_fn_method_3
+  //   set(handler, trap, target, key, value, receiver) → __call_fn_method_4
+  //   has(handler, trap, target, key)                  → __call_fn_method_2
+  const reserveDriver = (name: string, params: ValType[]): number => {
+    const existing = ctx.funcMap.get(name);
+    if (existing !== undefined) return existing;
+    const typeIdx = addFuncType(ctx, params, [externref]);
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.mod.functions.push({
+      name,
+      typeIdx,
+      locals: [],
+      // Placeholder; filled by fillProxyDispatch. A bare `unreachable` keeps the
+      // stub valid (externref result) if the fill is ever skipped (no closure of
+      // the needed arity ⇒ no real trap could have been installed ⇒ unused).
+      body: [{ op: "unreachable" } as Instr],
+      exported: false,
+    });
+    ctx.funcMap.set(name, funcIdx);
+    return funcIdx;
+  };
+  const callGetIdx = reserveDriver(PROXY_CALL_GET, [externref, externref, externref, externref, externref]);
+  const callSetIdx = reserveDriver(PROXY_CALL_SET, [
+    externref,
+    externref,
+    externref,
+    externref,
+    externref,
+    externref,
+  ]);
+  const callHasIdx = reserveDriver(PROXY_CALL_HAS, [externref, externref, externref, externref]);
+  ctx.proxyDispatchReserved = true;
+
+  // Builds a dispatch helper body. `trapFieldIdx` selects the trap closure;
+  // `forwardName` is the ordinary operation to call when the trap is absent;
+  // `isSet` switches the 3-arg (set) / 2-arg (get/has) forward + arg shape.
+  // params: 0=proxyExtern 1=key 2=receiver(get/has)/value(set)
+  // locals: 3=p (ref $Proxy)  4=trap (externref)
   const buildDispatch = (trapFieldIdx: number, forwardName: string, isSet: boolean): Instr[] => {
     const forwardIdx = ctx.funcMap.get(forwardName)!;
+    // The trap-invoke arm: read handler + target, then call the reserved driver.
+    // get:  driver(handler, trap, target, key, receiver=param2)
+    // has:  driver(handler, trap, target, key)
+    // set:  driver(handler, trap, target, key, value=param2, receiver=proxy)
+    const trapArm: Instr[] = [
+      // handler
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PHANDLER },
+      { op: "extern.convert_any" } as Instr,
+      // trap closure
+      { op: "local.get", index: 4 },
+      // target
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+      { op: "extern.convert_any" } as Instr,
+      // key
+      { op: "local.get", index: 1 },
+    ];
+    if (isSet) {
+      // value, then receiver (= the proxy itself, param 0)
+      trapArm.push({ op: "local.get", index: 2 });
+      trapArm.push({ op: "local.get", index: 0 });
+      trapArm.push({ op: "call", funcIdx: callSetIdx });
+    } else if (trapFieldIdx === TRAP_HAS) {
+      trapArm.push({ op: "call", funcIdx: callHasIdx });
+    } else {
+      // get: receiver = param 2
+      trapArm.push({ op: "local.get", index: 2 });
+      trapArm.push({ op: "call", funcIdx: callGetIdx });
+    }
+
     const body: Instr[] = [
       // p = ref.cast $Proxy(any.convert_extern(proxyExtern))
       { op: "local.get", index: 0 },
@@ -4532,15 +4632,15 @@ function ensureProxyRuntime(
       // if p.revoked: throw TypeError
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_REVOKED },
-      { op: "if", blockType: { kind: "empty" }, then: throwRevoked } as Instr,
+      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() } as Instr,
       // trap = p.ptraps==null ? null : p.ptraps.<field>
       { op: "local.get", index: 3 },
       { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
       { op: "ref.is_null" },
       {
         op: "if",
-        blockType: { kind: "val", type: { kind: "funcref" } },
-        then: [{ op: "ref.null.func" } as Instr],
+        blockType: { kind: "val", type: externref },
+        then: [{ op: "ref.null.extern" } as Instr],
         else: [
           { op: "local.get", index: 3 },
           { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
@@ -4566,91 +4666,130 @@ function ensureProxyRuntime(
               { op: "call", funcIdx: forwardIdx },
               { op: "ref.null.extern" },
             ]
-          : [
-              // __extern_get/has(target, key) -> externref
-              { op: "local.get", index: 3 },
-              { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-              { op: "extern.convert_any" } as Instr,
-              { op: "local.get", index: 1 },
-              { op: "call", funcIdx: forwardIdx },
-            ],
-        else: [
-          // call_ref trap (target, key, receiver/value)
-          { op: "local.get", index: 3 },
-          { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
-          { op: "extern.convert_any" } as Instr,
-          { op: "local.get", index: 1 },
-          { op: "local.get", index: 2 },
-          { op: "local.get", index: 4 },
-          { op: "ref.cast", typeIdx: trapTypeIdx } as Instr,
-          { op: "call_ref", typeIdx: trapTypeIdx } as Instr,
-        ],
+          : trapFieldIdx === TRAP_HAS
+            ? [
+                // __extern_has(target, key) -> i32 ; box back to a boolean any so
+                // the dispatch result stays uniform externref.
+                { op: "local.get", index: 3 },
+                { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+                { op: "extern.convert_any" } as Instr,
+                { op: "local.get", index: 1 },
+                { op: "call", funcIdx: forwardIdx },
+                { op: "call", funcIdx: ctx.funcMap.get("__box_boolean")! },
+              ]
+            : [
+                // __extern_get(target, key) -> externref
+                { op: "local.get", index: 3 },
+                { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+                { op: "extern.convert_any" } as Instr,
+                { op: "local.get", index: 1 },
+                { op: "call", funcIdx: forwardIdx },
+              ],
+        // trap present → invoke it through the closure-call bridge driver.
+        else: trapArm,
       } as Instr,
     ];
     return body;
   };
 
-  const dispatchLocals = [
+  // FRESH locals array + ValType objects per dispatch function. `registerNative`
+  // stores `locals` by reference, and the FINALIZE dead-type-elimination pass
+  // (`eliminateDeadImports`) mutates `func.locals[i]` in place when renumbering
+  // surviving types — a SHARED array would be remapped once per owning function,
+  // desyncing the local's type index from the (separately-remapped) body
+  // instructions and yielding "struct.get expected (ref null A) found (ref null
+  // B)". Build a new array each time so each function owns its locals.
+  const dispatchLocals = (): { name: string; type: ValType }[] => [
     { name: "p", type: { kind: "ref", typeIdx: proxyTypeIdx } as ValType },
-    { name: "trap", type: { kind: "funcref" } as ValType },
+    { name: "trap", type: { kind: "externref" } as ValType },
   ];
 
   registerNative(
     "__proxy_get_dispatch",
     [externref, externref, externref],
     [externref],
-    dispatchLocals,
+    dispatchLocals(),
     buildDispatch(TRAP_GET, "__extern_get", false),
   );
   registerNative(
     "__proxy_set_dispatch",
     [externref, externref, externref],
     [externref],
-    dispatchLocals,
+    dispatchLocals(),
     buildDispatch(TRAP_SET, "__extern_set", true),
   );
   registerNative(
     "__proxy_has_dispatch",
     [externref, externref, externref],
     [externref],
-    dispatchLocals,
+    dispatchLocals(),
     buildDispatch(TRAP_HAS, "__extern_has", false),
   );
 
-  // ── __proxy_create(target, getFn, setFn, hasFn, applyFn) -> externref ─────
+  // ── __proxy_create(target, handler) -> externref ──────────────────────────
   //
-  // Allocate a `$Proxy` struct (§28.2.1.1 ProxyCreate, minus the non-object
-  // target/handler TypeError which the construction site checks before calling
-  // here). Builds `$ProxyTraps` from the 4 funcrefs (all-null funcrefs still
-  // get a $ProxyTraps with null fields → dispatch forwards to the target). The
-  // `$Object` base fields are initialised exactly like `__new_plain_object`
-  // (proto null, fresh $PropMap, zeroed counters) so the proxy is a valid
-  // $Object for any code that reaches the ordinary path on the proxy struct
-  // itself (it shouldn't, but keeps the struct well-formed). Returns the proxy
-  // as externref via `extern.convert_any`.
+  // §28.2.1.1 ProxyCreate. Reads get/set/has/apply off `handler` via
+  // `__extern_get`. CONTRACT: the call site (new-super.ts) builds the handler as
+  // an OPEN `$Object` (`compileObjectLiteralAsExternref`) so these reads resolve
+  // — a closed typed struct would hide its fields from the open-object prop-map
+  // walk and every trap would read null. Each read yields the trap **closure
+  // externref** (or undefined → stored null → dispatch forwards to the target).
+  //  1. target/handler null/undefined → TypeError (§28.2.1.1 step 1/2; full
+  //     object-ness is Phase 2 / #1355).
+  //  2. build `$ProxyTraps` from the 4 reads; build `$Proxy` (phandler kept for
+  //     the trap `this`).
   //
-  // params: 0=target(externref) 1=getFn 2=setFn 3=hasFn 4=applyFn (all funcref)
+  // params: 0=target 1=handler ; locals: 2=getT 3=setT 4=hasT 5=applyT (externref)
   {
+    const externGetIdx = ctx.funcMap.get("__extern_get")!;
+    const notObjectMsg = "Cannot create proxy with a non-object as target or handler";
+    addStringConstantGlobal(ctx, notObjectMsg);
+    // FRESH array per use (this block is embedded in BOTH the target-null and
+    // handler-null checks of the SAME `__proxy_create` body — a shared array gets
+    // double-remapped by the FINALIZE dead-code funcIdx walk, corrupting the
+    // baked `call __new_TypeError`).
+    const throwNotObject = (): Instr[] => [
+      ...stringConstantExternrefInstrs(ctx, notObjectMsg),
+      { op: "call", funcIdx: typeErrorCtorIdx },
+      { op: "throw", tagIdx: exnTagIdx } as Instr,
+    ];
+    // readTrap(name) → __extern_get(handler, "name") (undefined → dispatch nulls).
+    const readTrap = (name: string): Instr[] => [
+      { op: "local.get", index: 1 },
+      ...stringConstantExternrefInstrs(ctx, name),
+      { op: "call", funcIdx: externGetIdx },
+    ];
     const proxyCreateBody: Instr[] = [
-      // $Object base fields:
-      { op: "ref.null", typeIdx: objectTypeIdx }, // proto
-      { op: "i32.const", value: INITIAL_CAP }, // props: new $PropMap[INITIAL_CAP]
-      { op: "array.new_default", typeIdx: types.propMapTypeIdx },
-      { op: "i32.const", value: 0 }, // count
-      { op: "i32.const", value: 0 }, // tombstones
-      { op: "i32.const", value: 0 }, // flags
-      { op: "i32.const", value: 0 }, // nextSeq
-      // proxy fields:
+      // if target == null → throw
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.is_null" },
+      { op: "if", blockType: { kind: "empty" }, then: throwNotObject() } as Instr,
+      // if handler == null → throw
+      { op: "local.get", index: 1 },
+      { op: "any.convert_extern" },
+      { op: "ref.is_null" },
+      { op: "if", blockType: { kind: "empty" }, then: throwNotObject() } as Instr,
+      // read the four traps off the (open) handler.
+      ...readTrap("get"),
+      { op: "local.set", index: 2 },
+      ...readTrap("set"),
+      { op: "local.set", index: 3 },
+      ...readTrap("has"),
+      { op: "local.set", index: 4 },
+      ...readTrap("apply"),
+      { op: "local.set", index: 5 },
+      // proxy fields (standalone $Proxy struct):
       { op: "i32.const", value: 1 }, // ptag = PROXY_TAG (1; bare ref.test $Proxy is the real discriminator)
       { op: "local.get", index: 0 }, // ptarget (externref → anyref)
       { op: "any.convert_extern" } as Instr,
-      { op: "ref.null.extern" }, // phandler (anyref; Phase 1 stores traps directly, handler unused)
+      { op: "local.get", index: 1 }, // phandler (externref → anyref; trap `this`)
       { op: "any.convert_extern" } as Instr,
-      // ptraps = struct.new $ProxyTraps (getFn, setFn, hasFn, applyFn)
-      { op: "local.get", index: 1 },
+      // ptraps = struct.new $ProxyTraps (getT, setT, hasT, applyT)
       { op: "local.get", index: 2 },
       { op: "local.get", index: 3 },
       { op: "local.get", index: 4 },
+      { op: "local.get", index: 5 },
       { op: "struct.new", typeIdx: proxyTrapsTypeIdx } as Instr,
       { op: "i32.const", value: 0 }, // revoked = 0
       { op: "struct.new", typeIdx: proxyTypeIdx } as Instr,
@@ -4658,9 +4797,14 @@ function ensureProxyRuntime(
     ];
     registerNative(
       "__proxy_create",
-      [externref, { kind: "funcref" }, { kind: "funcref" }, { kind: "funcref" }, { kind: "funcref" }],
+      [externref, externref],
       [externref],
-      [],
+      [
+        { name: "getT", type: externref },
+        { name: "setT", type: externref },
+        { name: "hasT", type: externref },
+        { name: "applyT", type: externref },
+      ],
       proxyCreateBody,
     );
   }
@@ -4682,6 +4826,10 @@ function ensureProxyRuntime(
       { op: "any.convert_extern" } as Instr,
       { op: "struct.set", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
       { op: "local.get", index: 1 },
+      { op: "ref.null.extern" },
+      { op: "any.convert_extern" } as Instr,
+      { op: "struct.set", typeIdx: proxyTypeIdx, fieldIdx: F_PHANDLER },
+      { op: "local.get", index: 1 },
       { op: "ref.null", typeIdx: proxyTrapsTypeIdx },
       { op: "struct.set", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
     ];
@@ -4694,21 +4842,18 @@ function ensureProxyRuntime(
     );
   }
 
-  // ── Patch the `ref.test $Proxy` guard onto the FRONT of __extern_get/set ──
+  // ── Patch the `ref.test $Proxy` guard onto the FRONT of __extern_get/set/has ──
   //
-  // Every standalone property read/write routes through these helpers, so a
-  // single front-guard covers `p.x`, `p[k]`, etc. uniformly (the architect's
-  // "branch at the helper" approach — far less churn than editing every
-  // property-access.ts call site). The guard tests the RAW externref param 0
-  // (any.convert_extern → ref.test $Proxy) BEFORE the ordinary body's
-  // `ref.cast $Object` runs; a proxy IS-A $Object so it would otherwise take
-  // the plain-object path and miss its traps.
-  //
-  // `has` is deferred to the next slice: __extern_has returns i32 but
-  // __proxy_has_dispatch returns an externref (the trap's booleanish result),
-  // which needs a ToBoolean coercion not yet wired here.
+  // Every standalone property read/write/has routes through these helpers, so a
+  // single front-guard covers `p.x`, `p[k]`, `k in p`, etc. uniformly (the
+  // architect's "branch at the helper" approach — far less churn than editing
+  // every property-access.ts call site). The guard tests the RAW externref param
+  // 0 (any.convert_extern → ref.test $Proxy) BEFORE the ordinary body's
+  // `ref.cast $Object` runs; a proxy IS-A $Object so it would otherwise take the
+  // plain-object path and miss its traps.
   const getDispatchIdx = ctx.funcMap.get("__proxy_get_dispatch")!;
   const setDispatchIdx = ctx.funcMap.get("__proxy_set_dispatch")!;
+  const hasDispatchIdx = ctx.funcMap.get("__proxy_has_dispatch")!;
 
   const findBody = (name: string): Instr[] | undefined => ctx.mod.functions.find((f) => f.name === name)?.body;
 
@@ -4757,7 +4902,108 @@ function ensureProxyRuntime(
     setBody.unshift(...guard);
   }
 
+  // __extern_has(obj, key) -> i32 : if proxy → ToBoolean(has_dispatch(obj,key,obj))
+  // The dispatch returns the trap's booleanish result as an externref; coerce to
+  // i32 via `__is_truthy` (reliably present in the standalone runtime — same
+  // helper the accessor/array-callback truthiness sites use).
+  const hasBody = findBody("__extern_has");
+  if (hasBody) {
+    const isTruthyIdx = ctx.funcMap.get("__is_truthy")!;
+    const guard: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: proxyTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 0 }, // receiver = the proxy itself
+          { op: "call", funcIdx: hasDispatchIdx },
+          { op: "call", funcIdx: isTruthyIdx },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    hasBody.unshift(...guard);
+  }
+
   void objectTypeIdx;
+}
+
+/**
+ * (#1100) Fill the reserved Proxy trap-invoke driver bodies at FINALIZE, AFTER
+ * `emitClosureMethodCallExportN(2..4)` have registered `__call_fn_method_2/3/4`
+ * in `funcMap`. Each driver is a thin wrapper around the closure-call bridge
+ * that threads the handler as `this` and forwards the spec trap args:
+ *
+ *   __proxy_call_get(handler, trap, target, key, receiver)
+ *       = __call_fn_method_3(handler, trap, target, key, receiver)
+ *   __proxy_call_set(handler, trap, target, key, value, receiver)
+ *       = __call_fn_method_4(handler, trap, target, key, value, receiver)
+ *   __proxy_call_has(handler, trap, target, key)
+ *       = __call_fn_method_2(handler, trap, target, key)
+ *
+ * No-op when the proxy runtime was never reserved (`ctx.proxyDispatchReserved`).
+ * When a driver WAS reserved but the matching dispatcher was never emitted (no
+ * closure of that arity exists — so no real trap of that arity could have been
+ * installed either), the body is filled with `ref.null.extern` so the module
+ * still verifies — mirrors `fillAccessorDrivers` / `fillApplyClosure`.
+ */
+export function fillProxyDispatch(ctx: CodegenContext): void {
+  if (!ctx.proxyDispatchReserved) return;
+
+  // The trap is invoked through the proven open-`any` closure bridge
+  // `__apply_closure(fn, recv, argsVec)` — the SAME path `__extern_method_call`
+  // uses for `o.m(...)` on an open receiver — NOT `__call_fn_method_N`. Rationale:
+  // `__apply_closure` reads its args from a `$ObjVec` via `__extern_get_idx` and
+  // re-dispatches by runtime arity, so it tolerates ANY user trap closure
+  // signature (the `__call_fn_method_N` exports bind a single per-arity wrapper
+  // type + box the result by the wrapper's declared return type, which mismatched
+  // the trap closure's ABI). `recv` is the handler (trap `this`, §10.5.x).
+  const applyClosureIdx = ctx.funcMap.get("__apply_closure");
+  const objVecNewIdx = ctx.funcMap.get("__objvec_new");
+  const objVecPushIdx = ctx.funcMap.get("__objvec_push");
+  const externref: ValType = { kind: "externref" };
+
+  // Build the args $ObjVec from the driver's trap-arg params (indices 2..2+argc)
+  // and call __apply_closure(trap=param1, handler=param0, vec). Uses a `$vec`
+  // local appended after the driver's params.
+  const fill = (name: string, argCount: number): void => {
+    const driverIdx = ctx.funcMap.get(name);
+    if (driverIdx === undefined) return;
+    const driverFn = ctx.mod.functions[driverIdx - ctx.numImportFuncs];
+    if (!driverFn) return;
+    if (applyClosureIdx === undefined || objVecNewIdx === undefined || objVecPushIdx === undefined) {
+      // Closure bridge / objvec builders absent (no standalone closure in the
+      // module) → no trap could have been installed; keep a valid stub body.
+      driverFn.body = [{ op: "ref.null.extern" } as Instr];
+      return;
+    }
+    // params: 0=handler 1=trap 2..(argCount+1)=trap args. vec local index =
+    // argCount + 2 (after all params).
+    const vecLocal = argCount + 2;
+    driverFn.locals = [{ name: "vec", type: externref }];
+    const body: Instr[] = [
+      { op: "call", funcIdx: objVecNewIdx } as Instr, // vec = __objvec_new()
+      { op: "local.set", index: vecLocal } as Instr,
+    ];
+    for (let a = 0; a < argCount; a++) {
+      body.push({ op: "local.get", index: vecLocal } as Instr);
+      body.push({ op: "local.get", index: 2 + a } as Instr);
+      body.push({ op: "call", funcIdx: objVecPushIdx } as Instr); // __objvec_push(vec, arg_a)
+    }
+    // return __apply_closure(trap, handler, vec)
+    body.push({ op: "local.get", index: 1 } as Instr); // trap
+    body.push({ op: "local.get", index: 0 } as Instr); // handler (recv → this)
+    body.push({ op: "local.get", index: vecLocal } as Instr); // args vec
+    body.push({ op: "call", funcIdx: applyClosureIdx } as Instr);
+    driverFn.body = body;
+  };
+  fill(PROXY_CALL_GET, 3); // (target, key, receiver)
+  fill(PROXY_CALL_SET, 4); // (target, key, value, receiver)
+  fill(PROXY_CALL_HAS, 2); // (target, key)
 }
 
 /**

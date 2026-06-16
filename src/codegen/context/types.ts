@@ -706,6 +706,16 @@ export interface CodegenContext {
    */
   applyClosureReserved?: boolean;
   /**
+   * (#1100) Set when the standalone Proxy trap-dispatch runtime reserved its
+   * `__proxy_call_{get,set,has}` driver placeholders (in `ensureProxyRuntime`).
+   * Those drivers invoke the user trap closures through the `__call_fn_method_N`
+   * exports, which are only emitted at FINALIZE, so their bodies are filled by
+   * `fillProxyDispatch` in post-processing — same reserve-then-fill pattern as
+   * `applyClosureReserved` / the accessor drivers (#1719). Only set under
+   * `--target standalone`, so the GC/host path stays byte-identical.
+   */
+  proxyDispatchReserved?: boolean;
+  /**
    * (#2151) Method names for which a closed-struct `__call_m_<name>` dispatcher
    * was reserved at an any-receiver call site (standalone/wasi). The placeholder
    * body is filled by `fillClosedMethodDispatch` at FINALIZE (after all
