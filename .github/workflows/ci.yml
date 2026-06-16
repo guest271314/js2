@@ -160,6 +160,37 @@ jobs:
       #       fi
       #     fi
 
+  # #2139 — Execute the linear-backend (linear-memory lowering), C-ABI, and
+  # SIMD test suites in CI. These 20 files (tests/linear-*.test.ts,
+  # tests/c-abi.test.ts, tests/simd*.test.ts) sat at tests/ root with NO CI
+  # job running them: the equivalence shards only run tests/equivalence/ and
+  # the `quality` job only runs lint/typecheck/gates plus a few named files.
+  # That gap is why #1974/#1975/#1976/#1977 (linear-backend bugs) shipped
+  # silently — nothing executed linear output after merge. All 20 files pass
+  # on main, so this runs them directly (no baseline-gate needed); any failure
+  # is a genuine regression and blocks the PR. Single-fork keeps peak RAM low.
+  linear-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 25
+      - name: Setup pnpm via Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.30.2 --activate
+      - run: pnpm install --frozen-lockfile
+      - name: Run linear-backend, C-ABI, and SIMD tests
+        run: |
+          # Invoke vitest directly (not `pnpm test --`) so the trailing file
+          # globs are scoped to vitest and not consumed by pnpm. Single-fork +
+          # no file-parallelism keeps peak RAM ~1 GB (same pattern as the
+          # equivalence shards). See #2139.
+          pnpm exec vitest run \
+            tests/linear-*.test.ts tests/c-abi.test.ts tests/simd.test.ts tests/simd-wat.test.ts \
+            --pool=forks --poolOptions.forks.singleFork=true --no-file-parallelism
+
   # #1659 — Run tests/equivalence/ in CI. Previously skipped because the full
   # suite OOMed under file-parallelism. Each shard runs single-fork (peak
   # ~1 GB RAM, ~1-2 min) and emits a partial failure list; the merge job
