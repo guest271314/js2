@@ -749,6 +749,7 @@ export function compileSourceSync(
   // Step 2: Generate IR
   let mod;
   let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
+  let capturedIrPostClaimErrors: import("./index.js").CompileResult["irPostClaimErrors"];
   try {
     if (useLinear) {
       mod = generateLinearModule(ast, { exposeArenaReset: options.allocator === "arena-reset" });
@@ -791,6 +792,7 @@ export function compileSourceSync(
       });
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
+      capturedIrPostClaimErrors = result.irPostClaimErrors;
       // Propagate codegen errors with source locations. #1921 — a deliberate
       // "degrade" diagnostic is surfaced as a non-fatal "warning"; the fatal
       // decision is made by isFatalCodegenDiagnostic on the raw severity.
@@ -960,6 +962,7 @@ export function compileSourceSync(
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
     exportSignatures: mod.exportSignatures,
     fallbackCounts: capturedFallbackCounts,
+    irPostClaimErrors: capturedIrPostClaimErrors,
   };
 }
 
@@ -1070,6 +1073,7 @@ export async function compileMultiSource(
 
   let mod;
   let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
+  let capturedIrPostClaimErrors: import("./index.js").CompileResult["irPostClaimErrors"];
   try {
     if (useLinear) {
       mod = generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" });
@@ -1102,6 +1106,7 @@ export async function compileMultiSource(
       });
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
+      capturedIrPostClaimErrors = result.irPostClaimErrors;
       // Propagate codegen errors with source locations. #1921 — a deliberate
       // "degrade" diagnostic is surfaced as a non-fatal "warning"; the fatal
       // decision is made by isFatalCodegenDiagnostic on the raw severity.
@@ -1269,6 +1274,7 @@ export async function compileMultiSource(
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
     exportSignatures: mod.exportSignatures,
     fallbackCounts: capturedFallbackCounts,
+    irPostClaimErrors: capturedIrPostClaimErrors,
   };
 }
 
@@ -1353,6 +1359,7 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
 
   let mod;
   let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
+  let capturedIrPostClaimErrors: import("./index.js").CompileResult["irPostClaimErrors"];
   try {
     if (useLinear) {
       mod = generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" });
@@ -1385,6 +1392,7 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
       });
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
+      capturedIrPostClaimErrors = result.irPostClaimErrors;
       // #1921 — a deliberate "degrade" diagnostic is surfaced as a non-fatal
       // "warning"; the fatal decision is made by isFatalCodegenDiagnostic.
       for (const err of result.errors) {
@@ -1544,5 +1552,6 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
     exportSignatures: mod.exportSignatures,
     fallbackCounts: capturedFallbackCounts,
+    irPostClaimErrors: capturedIrPostClaimErrors,
   };
 }

@@ -556,6 +556,15 @@ export interface CodegenContext {
    * `JS2WASM_LOG_CODEGEN_FALLBACKS=1` turn it on.
    */
   trackSilentFallbacks?: boolean;
+  /**
+   * #1923 — captured IR post-claim demotions (build/verify/lower/backend-
+   * legality failures on a function the selector claimed, which fall back to
+   * legacy through the warning channel). Always collected (cheap), mirroring
+   * `fallbackCounts`; surfaced on `CompileResult.irPostClaimErrors` for the
+   * ratchet gate. Each entry carries the IR integration error's `kind` and the
+   * function/message.
+   */
+  irPostClaimErrors: { kind: string; func: string; message: string }[];
   /** Last AST node with a valid source position — used as fallback for error reporting
    * when the immediate node lacks source file context (synthetic/detached nodes). */
   lastKnownNode: ts.Node | null;

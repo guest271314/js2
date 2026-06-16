@@ -960,6 +960,8 @@ export function generateModule(
   errors: CodegenError[];
   // #2089 — silent-fallback telemetry counters (per class → per site → count).
   fallbackCounts?: FallbackCounts;
+  // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
+  irPostClaimErrors?: { kind: string; func: string; message: string }[];
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, ast.checker, options);
@@ -1354,6 +1356,20 @@ export function generateModule(
       // class. This is the per-kind scoping hook the long-term retire
       // plan wires through (see plan/log/ir-adoption.md).
       for (const err of report.errors) {
+        // #1923 — meter post-claim demotions for the ratchet gate. These are
+        // functions the selector CLAIMED that then failed build/verify/lower/
+        // backend-legality and fell back to legacy through this warning channel
+        // — counted by no selector-level metric (`IrFallbackReason`). Always
+        // collected (cheap: the errors are already iterated here) and surfaced
+        // on `CompileResult.irPostClaimErrors`, mirroring `fallbackCounts`,
+        // which is likewise always counted; the gate buckets by kind +
+        // normalized message class. Pure telemetry; the demotion below is
+        // unchanged.
+        (ctx.irPostClaimErrors ??= []).push({
+          kind: err.kind ?? "lower",
+          func: err.func,
+          message: err.message,
+        });
         const diag = formatIrPathFallbackDiagnostic(err);
         // #1858 C4: keep the leading "IR path failed for …" text intact — many
         // bridge tests filter on `e.message.startsWith("IR path failed")` — but
@@ -1667,7 +1683,12 @@ export function generateModule(
   // binary and report each as a structured compile error.
   assertNoLeakedHostImports(ctx, mod);
 
-  return { module: mod, errors: ctx.errors, fallbackCounts: ctx.fallbackCounts };
+  return {
+    module: mod,
+    errors: ctx.errors,
+    fallbackCounts: ctx.fallbackCounts,
+    irPostClaimErrors: ctx.irPostClaimErrors,
+  };
 }
 
 /**
@@ -4975,6 +4996,8 @@ export function generateMultiModule(
   errors: CodegenError[];
   // #2089 — silent-fallback telemetry counters (per class → per site → count).
   fallbackCounts?: FallbackCounts;
+  // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
+  irPostClaimErrors?: { kind: string; func: string; message: string }[];
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, multiAst.checker, options);
@@ -5254,7 +5277,12 @@ export function generateMultiModule(
   // (#2094) Emit-time backstop for the addImport gate — see generateModule.
   assertNoLeakedHostImports(ctx, mod);
 
-  return { module: mod, errors: ctx.errors, fallbackCounts: ctx.fallbackCounts };
+  return {
+    module: mod,
+    errors: ctx.errors,
+    fallbackCounts: ctx.fallbackCounts,
+    irPostClaimErrors: ctx.irPostClaimErrors,
+  };
 }
 
 // ── Unified single-pass import collector (#592) ─────────────────────

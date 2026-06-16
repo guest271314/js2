@@ -129,6 +129,19 @@ export interface CompileResult {
    * normal compiles pay nothing.
    */
   fallbackCounts?: import("./codegen/fallback-telemetry.js").FallbackCounts;
+  /**
+   * #1923 — IR post-claim demotions. When the IR selector *claims* a function
+   * but it then fails during build/verify/lower/backend-legality, it demotes to
+   * the legacy path through the warning channel (`codegen/index.ts`) and is
+   * counted by no selector-level metric (`IrFallbackReason` covers only
+   * selector-level rejections). Always collected on the WasmGC path (cheap,
+   * mirrors `fallbackCounts`); empty/absent for the linear backend (no IR path).
+   * Each entry carries the `IrIntegrationError.kind` (build/verify/lower/
+   * backend-legality) and the function/message so the ratchet gate
+   * `scripts/check-ir-fallbacks.ts` can bucket by kind + normalized message
+   * class.
+   */
+  irPostClaimErrors?: { kind: string; func: string; message: string }[];
 }
 
 export interface CompileError {
