@@ -337,6 +337,18 @@ export function destructureParamObjectExternref(
   if (shouldEnsureLetConstFlags(opts)) {
     ensureLetConstBindingPatternTdzFlags(ctx, fctx, pattern);
   }
+  // (#1151) RequireObjectCoercible — destructuring a binding pattern against
+  // null/undefined must throw a synchronous TypeError (ECMA-262 §8.6.2 step 1,
+  // BindingPattern : ObjectBindingPattern). The array param helper and
+  // `destructureParamObject`'s own externref arm already emit this guard, but
+  // the `compileFunctionExpression` arrow / function-expression path
+  // (closures.ts) calls THIS helper directly for an `any`/externref object
+  // pattern with no struct to ref.test against, so without the guard
+  // `(({a}) => a)(null)` silently returned undefined. The guard only fires for
+  // null/undefined; valid objects (and `destructureParamObject` callers that
+  // already guarded) pass through unchanged (a second guard on a non-null value
+  // is a no-op).
+  emitExternrefDestructureGuard(ctx, fctx, paramIdx);
   // Ensure __extern_get is available (#1866: ensureLateImport routes to the
   // native object-runtime impl under --target standalone — no leaked
   // `env::__extern_get` host import — and to the host import in JS-host mode).
