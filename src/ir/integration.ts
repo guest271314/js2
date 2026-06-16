@@ -33,7 +33,12 @@ import {
   type StringEncoding,
 } from "../codegen/native-strings.js";
 import { addStringConstantGlobal, ensureExnTag } from "../codegen/registry/imports.js";
-import { addFuncType, getOrRegisterRefCellType } from "../codegen/registry/types.js";
+import {
+  addFuncType,
+  getArrTypeIdxFromVec,
+  getOrRegisterRefCellType,
+  getOrRegisterVecType,
+} from "../codegen/registry/types.js";
 import type { CodegenContext } from "../codegen/context/types.js";
 import { lowerFunctionAstToIr, type IrFromAstResolver } from "./from-ast.js";
 import {
@@ -845,6 +850,38 @@ interface DeferredClassResolver {
  * yet at that point. The two share the same logic for the methods
  * both expose — see `makeResolver` for the full body.
  */
+/**
+ * #1804 — shared `resolveVecForElement` body for both resolvers. Get-or-creates
+ * the `$arr`/`$vec` types for `elementValType` via the legacy registry (so the
+ * constructed vec shares identity with `compileArrayLiteral` output), and
+ * returns the `IrVecLowering` the `vec.new_fixed` emitter needs. Mirrors the
+ * legacy elemKind derivation in `compileArrayLiteral` (literals.ts) so the
+ * registry keys collide intentionally and no parallel type is registered.
+ */
+function resolveVecForElementImpl(
+  ctx: CodegenContext,
+  elementValType: ValType,
+): import("./lower.js").IrVecLowering | null {
+  // Match the legacy elemKind key: ref/ref_null elements key on `ref_<typeIdx>`,
+  // everything else on the ValType kind.
+  const elemKind =
+    elementValType.kind === "ref" || elementValType.kind === "ref_null"
+      ? `ref_${(elementValType as { typeIdx: number }).typeIdx}`
+      : elementValType.kind;
+  const vecStructTypeIdx = getOrRegisterVecType(ctx, elemKind, elementValType);
+  const arrayTypeIdx = getArrTypeIdxFromVec(ctx, vecStructTypeIdx);
+  if (arrayTypeIdx < 0) return null;
+  const arrayDef = ctx.mod.types[arrayTypeIdx];
+  if (!arrayDef || arrayDef.kind !== "array") return null;
+  return {
+    vecStructTypeIdx,
+    lengthFieldIdx: 0,
+    dataFieldIdx: 1,
+    arrayTypeIdx,
+    elementValType: arrayDef.element,
+  };
+}
+
 function makeFromAstResolver(ctx: CodegenContext): IrFromAstResolver {
   return {
     nativeStrings(): boolean {
@@ -898,6 +935,11 @@ function makeFromAstResolver(ctx: CodegenContext): IrFromAstResolver {
         arrayTypeIdx,
         elementValType: arrayDef.element,
       };
+    },
+    // #1804 — register-or-recover the vec struct for an element ValType, for
+    // `vec.new_fixed` construction. See `resolveVecForElementImpl`.
+    resolveVecForElement(elementValType: ValType) {
+      return resolveVecForElementImpl(ctx, elementValType);
     },
     // #1375 narrow slice — TS-narrowing fast-path for optional chaining.
     // The IR's `isIrTypeNullable` flags `extern` (host class) values as
@@ -1019,6 +1061,11 @@ function makeResolver(
         arrayTypeIdx,
         elementValType: arrayDef.element,
       };
+    },
+    // #1804 — register-or-recover the vec struct for an element ValType, for
+    // `vec.new_fixed` construction. See `resolveVecForElementImpl`.
+    resolveVecForElement(elementValType: ValType): import("./lower.js").IrVecLowering | null {
+      return resolveVecForElementImpl(ctx, elementValType);
     },
     // -------------------------------------------------------------------
     // String backend dispatch (#1169a).

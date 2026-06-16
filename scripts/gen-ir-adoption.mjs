@@ -124,7 +124,12 @@ const SECTIONS = [
         "Non-empty `{ key: val, ... }` lowered; empty literal, computed keys throw.",
         "#1131",
       ],
-      ["`ArrayLiteralExpression`", "mixed", "Slice 12 — fixed-length numeric arrays. Spread/sparse partial.", "#1131"],
+      [
+        "`ArrayLiteralExpression`",
+        "mixed",
+        "Slice 12 + #1804 — fixed-length same-typed literals constructed via `vec.new_fixed`. Spread/sparse/mixed-type partial.",
+        "#1804",
+      ],
       ["`SpreadElement`", "mixed", "Static-arity spread in calls only.", "#1131"],
       ["`FunctionExpression`", "mixed", "Nested closures via slice 3; named function-expressions partial.", "#1131"],
       ["`ArrowFunction`", "mixed", "Same as `FunctionExpression`.", "#1131"],

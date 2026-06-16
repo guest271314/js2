@@ -20,48 +20,8 @@
 // callers can decide whether to bail or fall back to the legacy path.
 
 import type { IrBlock, IrFunction, IrInstr, IrType, IrValueId } from "./nodes.js";
-import { asVal } from "./nodes.js";
+import { asVal, forEachInstrDeep, forEachNestedBuffer } from "./nodes.js";
 import type { ValType } from "./types.js";
-
-/**
- * #1844 — Yield every direct nested instruction buffer carried by `instr`
- * (then/else arms, loop cond/body/update, for-of bodies, try/catch/finally
- * bodies). These buffers hold SSA defs and uses that live in their own
- * emission-internal scope but must still satisfy the global SSA single-def
- * invariant and the #1798 return-type gate. Mirrors the traversal in
- * `registerInstrDefs` (lower.ts) so the verifier and lowerer agree on which
- * buffers exist; if a new buffer-bearing instr kind is added, extend both.
- */
-function nestedBuffers(instr: IrInstr): readonly (readonly IrInstr[])[] {
-  switch (instr.kind) {
-    case "if":
-      return [instr.then, instr.else];
-    case "forof.vec":
-    case "forof.iter":
-    case "forof.string":
-      return [instr.body];
-    case "while.loop":
-      return [instr.cond, instr.body];
-    case "for.loop":
-      return [instr.cond, instr.body, instr.update];
-    case "try": {
-      const bufs: (readonly IrInstr[])[] = [instr.body];
-      if (instr.catchClause) bufs.push(instr.catchClause.body);
-      if (instr.finallyBody) bufs.push(instr.finallyBody);
-      return bufs;
-    }
-    default:
-      return [];
-  }
-}
-
-/** Recursively visit `instr` and every instruction inside its nested buffers. */
-function forEachInstrDeep(instr: IrInstr, visit: (i: IrInstr) => void): void {
-  visit(instr);
-  for (const buf of nestedBuffers(instr)) {
-    for (const sub of buf) forEachInstrDeep(sub, visit);
-  }
-}
 
 /**
  * #1850 — successor block ids of a block, derived from its terminator.
@@ -485,9 +445,9 @@ function verifyBlock(
         walkBuffer(instr.body);
         walkBuffer(instr.update);
       } else {
-        for (const buf of nestedBuffers(instr)) {
-          walkBuffer(buf);
-        }
+        // Non-loop buffer-bearing kinds (if / for-of / try). Loops are handled
+        // above so their cond buffer (already walked) isn't re-walked here.
+        forEachNestedBuffer(instr, walkBuffer);
       }
     }
   };
@@ -586,6 +546,9 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [instr.vec];
     case "vec.get":
       return [instr.vec, instr.index];
+    case "vec.new_fixed":
+      // #1804 — every element is an SSA use (like object.new's values).
+      return instr.elements;
     case "forof.vec":
       // The body executes inside a Wasm loop and is not part of the
       // straight-line use-before-def walk. We only surface `vec` here so

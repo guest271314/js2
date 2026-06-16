@@ -1674,6 +1674,14 @@ export function generateModule(
     // Peephole optimization: remove redundant ref.as_non_null after ref.cast, etc.
     peepholeOptimize(mod);
 
+    // #1984 — freeze the index spaces. Every legitimate late import mutation
+    // (addUnionImports / addStringImports / reconcileNativeStrFinalizeShift,
+    // across gc/wasi/standalone) has run by this point; the remaining passes
+    // (stackBalance, fixupExternConvertAny, emit) do NOT add imports. Any
+    // addImport/ensureLateImport after here is a producer bug and throws at
+    // its own call site (see imports.ts / late-imports.ts).
+    ctx.indexSpaceFrozen = true;
+
     // Stack-balancing fixup: ensure all branches in if/try/block have matching stack states
     stackBalance(mod);
     // #1918 — drain fixup telemetry: per-compile debug log + optional strict mode.
@@ -5263,6 +5271,12 @@ export function generateMultiModule(
 
     // Peephole optimization: remove redundant ref.as_non_null after ref.cast, etc.
     peepholeOptimize(mod);
+
+    // #1984 — freeze the index spaces (multi-module path). Same boundary as the
+    // single-module generateModule: all legitimate late import mutations have
+    // run; stackBalance / fixupExternConvertAny / emit add no imports. Any
+    // addImport/ensureLateImport after here throws at the producer site.
+    ctx.indexSpaceFrozen = true;
 
     // Stack-balancing fixup: ensure all branches in if/try/block have matching stack states
     stackBalance(mod);
