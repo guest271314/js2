@@ -57,6 +57,9 @@ jobs:
       - name: IR fallback gate (#1376)
         run: pnpm run check:ir-fallbacks
 
+      - name: Codegen silent-fallback gate (#2089)
+        run: pnpm run check:codegen-fallbacks
+
       - name: AnyValue box-site gate (#2104)
         run: pnpm run check:any-box-sites
 
