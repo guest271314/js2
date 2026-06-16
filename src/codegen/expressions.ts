@@ -168,7 +168,13 @@ function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): bo
   if (
     isStandalonePromiseActive(ctx) &&
     ts.isPropertyAccessExpression(expr.expression) &&
-    expr.expression.name.text === "then"
+    (expr.expression.name.text === "then" ||
+      // (#2165) `.catch` lowers to the same native `$Promise` then-machinery
+      // in standalone mode (`.catch(f)` ≡ `.then(undefined, f)`); it already
+      // returns a `$Promise`, so it must NOT be re-wrapped by `wrapAsyncReturn`
+      // (double-wrapping yields a Promise-of-Promise → illegal cast / NaN when
+      // the chained result is consumed).
+      expr.expression.name.text === "catch")
   ) {
     const receiverType = ctx.checker.getTypeAtLocation(expr.expression.expression);
     const receiverSym = receiverType.getSymbol()?.name;
