@@ -63,6 +63,15 @@ jobs:
         # `pnpm run gen:ir-adoption`.
         run: pnpm run check:ir-adoption
 
+      - name: Stack-balance fixup ratchet (#1918)
+        # Each stack-balance fixup repairs an emitter bug. Fails when any fixup
+        # bucket grows vs. scripts/stack-balance-baseline.json — a new fixup
+        # means new wrong codegen reached the safety net (some arms are lossy:
+        # a missing/wrong-typed branch value patched with a const default ships
+        # a silently-wrong runtime value). Shrink the producing codegen, not
+        # the gate. See plan/issues/1918-stack-balance-strict-mode-fixup-ratchet.md.
+        run: pnpm run check:stack-balance
+
       - name: Codegen silent-fallback gate (#2089)
         run: pnpm run check:codegen-fallbacks
 
