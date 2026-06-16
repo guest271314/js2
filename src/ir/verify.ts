@@ -102,6 +102,37 @@ function buildDefBlockMap(func: IrFunction): Map<IrValueId, number> {
 }
 
 /**
+ * #1924 — build the SSA value → declared `IrType` map ONCE per function.
+ *
+ * Every SSA value's type is taken from the `resultType` denormalized onto its
+ * defining instruction (`nodes.ts`), plus params and per-block `blockArgTypes`.
+ * The instruction-level type rules consult this O(1) map instead of
+ * `operandIrType`, which re-scans the whole function per query (#1924 perf
+ * note: that made any per-operand check quadratic). One build keeps total
+ * verify cost O(n).
+ *
+ * A value may be absent (def has `resultType: null`, or is a void/effect-only
+ * instruction) — callers treat `undefined` as "unknown type" and skip the
+ * rule, matching `operandIrType`'s conservative null contract.
+ */
+function buildDefTypeMap(func: IrFunction): Map<IrValueId, IrType> {
+  const m = new Map<IrValueId, IrType>();
+  for (const p of func.params) m.set(p.value, p.type);
+  for (const block of func.blocks) {
+    for (let i = 0; i < block.blockArgs.length; i++) {
+      const t = block.blockArgTypes[i];
+      if (t) m.set(block.blockArgs[i]!, t);
+    }
+    for (const instr of block.instrs) {
+      forEachInstrDeep(instr, (inst) => {
+        if (inst.result !== null && inst.resultType) m.set(inst.result, inst.resultType);
+      });
+    }
+  }
+  return m;
+}
+
+/**
  * #1850 — classic iterative dominator-set computation over the block CFG
  * (Cooper/Harvey/Kennedy-style fixpoint on full sets — O(blocks²) but the
  * functions the IR path claims are small). `dom[b]` is the set of blocks that
@@ -198,20 +229,30 @@ export function verifyIrFunction(func: IrFunction): IrVerifyError[] {
   const defBlock = blockIdsContiguous ? buildDefBlockMap(func) : null;
   const dominators = blockIdsContiguous ? computeDominators(func) : null;
 
+  // #1924 — build the def→IrType map once (O(n)); reused by the per-instruction
+  // type rules and the branch-arg type check below.
+  const typeOf = buildDefTypeMap(func);
+
   for (const block of func.blocks) {
     verifyBlock(func, block, defs, errors, defBlock, dominators);
   }
 
-  // Check branch-arg arity against target block signatures.
+  // Check branch-arg arity AND types against target block signatures (#1924).
   for (const block of func.blocks) {
     const t = block.terminator;
     if (t.kind === "br") {
       checkBranchArity(func, block, t.branch.target as number, t.branch.args.length, errors);
+      checkBranchArgTypes(func, block, t.branch.target as number, t.branch.args, typeOf, errors);
     } else if (t.kind === "br_if") {
       checkBranchArity(func, block, t.ifTrue.target as number, t.ifTrue.args.length, errors);
       checkBranchArity(func, block, t.ifFalse.target as number, t.ifFalse.args.length, errors);
+      checkBranchArgTypes(func, block, t.ifTrue.target as number, t.ifTrue.args, typeOf, errors);
+      checkBranchArgTypes(func, block, t.ifFalse.target as number, t.ifFalse.args, typeOf, errors);
     }
   }
+
+  // #1924 — per-instruction operand / result / slot type rules.
+  verifyInstrTypeRules(func, typeOf, errors);
 
   // #1798 — defense-in-depth: every `return` terminator's value types must be
   // Wasm-assignment-compatible with the function's declared `resultTypes`.
@@ -716,5 +757,262 @@ function checkBranchArity(
       func: func.name,
       block: from.id as number,
     });
+  }
+}
+
+/**
+ * #1924 — branch-arg type matching. `checkBranchArity` only compared lengths;
+ * the passed values' types were never matched against the target block's
+ * `blockArgTypes`, so a `br` that passes an f64 where the target expects an i32
+ * block arg slipped through (the lowerer then emits a Wasm br with a mismatched
+ * stack type). Fire only on a *definite* scalar-kind mismatch where both the
+ * passed value's kind and the declared block-arg kind are known — unknown
+ * types are skipped (conservative, mirrors the operand rules).
+ */
+function checkBranchArgTypes(
+  func: IrFunction,
+  from: IrBlock,
+  toIdx: number,
+  args: readonly IrValueId[],
+  typeOf: ReadonlyMap<IrValueId, IrType>,
+  errors: IrVerifyError[],
+): void {
+  const target = func.blocks[toIdx];
+  if (!target) return; // arity check already reported the bad target
+  const n = Math.min(args.length, target.blockArgTypes.length);
+  for (let i = 0; i < n; i++) {
+    const declared = target.blockArgTypes[i];
+    if (!declared) continue;
+    const declaredKind = asVal(declared)?.kind ?? null;
+    if (declaredKind === null) continue; // non-scalar target arg — skip
+    const passedKind = valKindOf(typeOf, args[i]!);
+    if (passedKind === null) continue; // unknown passed type — skip
+    if (passedKind !== declaredKind) {
+      errors.push({
+        message: `branch arg ${i} type mismatch: block ${from.id as number} passes ${passedKind} to block ${toIdx} arg (expects ${declaredKind})`,
+        func: func.name,
+        block: from.id as number,
+      });
+    }
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// #1924 — Instruction-level type rules.
+//
+// The verifier historically checked SSA scope, dominance, branch *arity*, the
+// union trio, and return assignability — but NO per-instruction operand typing.
+// `f64.add` over two i32 values, a `binary` whose denormalized `resultType`
+// disagrees with the op's actual result, or a `slot.read` out of bounds all
+// passed verification and only failed (or silently miscompiled) at the engine.
+//
+// These rules consult the per-function def→IrType map (`buildDefTypeMap`, built
+// once — keeps verify O(n)) and fire ONLY on a *definite* mismatch: the operand
+// (or result) type is KNOWN and its `ValType.kind` contradicts the op's
+// contract. Unknown / null types are skipped (a value whose def carries no
+// `resultType`), exactly like `operandIrType`'s conservative contract — so a
+// real program never demotes on a missing annotation, only on a genuine type
+// error. A fired rule pushes a verify error, which demotes the function to the
+// legacy path (integration.ts), so the bar for firing is "provably wrong".
+// ───────────────────────────────────────────────────────────────────────────
+
+/** ValType.kind of a value, or null if unknown / not a single `val` IrType. */
+function valKindOf(typeOf: ReadonlyMap<IrValueId, IrType>, v: IrValueId): ValType["kind"] | null {
+  const t = typeOf.get(v);
+  if (!t) return null;
+  const av = asVal(t);
+  return av ? av.kind : null;
+}
+
+/** The Wasm scalar kind an `IrBinop` produces, or null if not a fixed scalar. */
+function binopResultKind(op: import("./nodes.js").IrBinop): ValType["kind"] | null {
+  // f64 arithmetic → f64; every comparison / logical / i32 op → i32.
+  switch (op) {
+    case "f64.add":
+    case "f64.sub":
+    case "f64.mul":
+    case "f64.div":
+      return "f64";
+    // js.bit* result is f64 by default but may be narrowed to i32 (Stage 3) —
+    // both are valid, so it has no single fixed result kind. Return null to
+    // skip result-kind validation for these (operand rule still applies).
+    case "js.bitand":
+    case "js.bitor":
+    case "js.bitxor":
+    case "js.shl":
+    case "js.shr_s":
+    case "js.shr_u":
+      return null;
+    default:
+      // All remaining binops are comparisons / i32 logical → i32 (bool).
+      return "i32";
+  }
+}
+
+/**
+ * Expected operand `ValType.kind`s for an `IrBinop`, or null if the op accepts
+ * mixed/!either domains (js.bit* takes i32 OR f64 per the lowerer's Stage-3
+ * fast path, so we don't constrain it).
+ */
+function binopOperandKind(op: import("./nodes.js").IrBinop): ValType["kind"] | null {
+  if (op.startsWith("f64.")) return "f64";
+  if (op.startsWith("i32.")) return "i32";
+  // js.bit* — operands may be i32 or f64; no single required kind.
+  return null;
+}
+
+/** The Wasm scalar kind an `IrUnop` produces, or null if not a fixed scalar. */
+function unopResultKind(op: import("./nodes.js").IrUnop): ValType["kind"] | null {
+  switch (op) {
+    case "f64.neg":
+      return "f64";
+    case "i32.eqz":
+    case "ref.is_null":
+      return "i32";
+    case "i32.trunc_sat_f64_s":
+      return "i32";
+    default:
+      return null;
+  }
+}
+
+/** Expected operand kind for an `IrUnop`, or null if unconstrained. */
+function unopOperandKind(op: import("./nodes.js").IrUnop): ValType["kind"] | null {
+  switch (op) {
+    case "f64.neg":
+    case "i32.trunc_sat_f64_s":
+      return "f64";
+    case "i32.eqz":
+      return "i32";
+    // ref.is_null takes a ref/externref/funcref — not a fixed scalar; skip.
+    default:
+      return null;
+  }
+}
+
+/**
+ * Walk every instruction (incl. nested buffers) once and apply the per-kind
+ * type rules. `typeOf` is the precomputed def→IrType map.
+ */
+function verifyInstrTypeRules(func: IrFunction, typeOf: ReadonlyMap<IrValueId, IrType>, errors: IrVerifyError[]): void {
+  const numSlots = func.slots?.length ?? 0;
+
+  const checkInstr = (instr: IrInstr, blockId: number): void => {
+    switch (instr.kind) {
+      case "binary": {
+        const want = binopOperandKind(instr.op);
+        if (want) {
+          for (const [label, v] of [
+            ["lhs", instr.lhs],
+            ["rhs", instr.rhs],
+          ] as const) {
+            const k = valKindOf(typeOf, v);
+            if (k !== null && k !== want) {
+              errors.push({
+                message: `${instr.op} ${label} must be ${want}, got ${k} (value ${v})`,
+                func: func.name,
+                block: blockId,
+              });
+            }
+          }
+        }
+        // resultType must match the op's fixed result kind, when both known.
+        const rk = binopResultKind(instr.op);
+        if (rk !== null && instr.result !== null && instr.resultType) {
+          const got = asVal(instr.resultType)?.kind ?? null;
+          if (got !== null && got !== rk) {
+            errors.push({
+              message: `${instr.op} resultType must be ${rk}, got ${got}`,
+              func: func.name,
+              block: blockId,
+            });
+          }
+        }
+        break;
+      }
+      case "unary": {
+        const want = unopOperandKind(instr.op);
+        if (want) {
+          const k = valKindOf(typeOf, instr.rand);
+          if (k !== null && k !== want) {
+            errors.push({
+              message: `${instr.op} operand must be ${want}, got ${k} (value ${instr.rand})`,
+              func: func.name,
+              block: blockId,
+            });
+          }
+        }
+        const rk = unopResultKind(instr.op);
+        if (rk !== null && instr.result !== null && instr.resultType) {
+          const got = asVal(instr.resultType)?.kind ?? null;
+          if (got !== null && got !== rk) {
+            errors.push({
+              message: `${instr.op} resultType must be ${rk}, got ${got}`,
+              func: func.name,
+              block: blockId,
+            });
+          }
+        }
+        break;
+      }
+      // String ops produce a known IrType kind; validate resultType when set.
+      case "string.len":
+      case "vec.len": {
+        if (instr.result !== null && instr.resultType) {
+          const got = asVal(instr.resultType)?.kind ?? null;
+          if (got !== null && got !== "f64") {
+            errors.push({
+              message: `${instr.kind} resultType must be f64 (length), got ${got}`,
+              func: func.name,
+              block: blockId,
+            });
+          }
+        }
+        break;
+      }
+      case "string.const":
+      case "string.concat": {
+        if (instr.result !== null && instr.resultType && instr.resultType.kind !== "string") {
+          errors.push({
+            message: `${instr.kind} resultType must be string, got ${instr.resultType.kind}`,
+            func: func.name,
+            block: blockId,
+          });
+        }
+        break;
+      }
+      case "string.eq": {
+        if (instr.result !== null && instr.resultType) {
+          const got = asVal(instr.resultType)?.kind ?? null;
+          if (got !== null && got !== "i32") {
+            errors.push({
+              message: `string.eq resultType must be i32 (bool), got ${got}`,
+              func: func.name,
+              block: blockId,
+            });
+          }
+        }
+        break;
+      }
+      // Slot discipline: read/write indices must be within `func.slots` bounds.
+      case "slot.read":
+      case "slot.write": {
+        const idx = instr.slotIndex;
+        if (idx < 0 || idx >= numSlots) {
+          errors.push({
+            message: `${instr.kind} slot index ${idx} out of bounds (function has ${numSlots} slots)`,
+            func: func.name,
+            block: blockId,
+          });
+        }
+        break;
+      }
+    }
+  };
+
+  for (const block of func.blocks) {
+    for (const instr of block.instrs) {
+      forEachInstrDeep(instr, (i) => checkInstr(i, block.id as number));
+    }
   }
 }

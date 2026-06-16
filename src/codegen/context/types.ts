@@ -16,7 +16,25 @@ export interface CodegenError {
   message: string;
   line: number;
   column: number;
-  severity?: "error" | "warning";
+  /**
+   * #1921 — the compile-failure gate keys on this field, not on a magic
+   * `"Codegen error:"` message prefix.
+   *
+   * - `"error"` (the default for {@link reportError} / {@link reportErrorNoNode})
+   *   fails the build (`success: false`).
+   * - `"warning"` is non-blocking and used by the IR-fallback channel for
+   *   "we tried the IR path, it didn't fit, the legacy body still works" events.
+   * - `"degrade"` is a *deliberate* compile-with-fallback-value diagnostic: the
+   *   expression compiled to a placeholder (stack-balancer hole, identity bind,
+   *   etc.) and the build is intentionally allowed to succeed. Each degrade site
+   *   must reference a tracking issue, mirroring the host-import allowlist
+   *   discipline.
+   *
+   * An omitted severity is treated as `"error"` by the gate (see
+   * `isFatalCodegenDiagnostic` in src/compiler.ts) so that a forgotten
+   * classification fails loudly instead of silently degrading.
+   */
+  severity?: "error" | "warning" | "degrade";
 }
 
 /** Result returned by generateModule / generateMultiModule. */
