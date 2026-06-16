@@ -11,6 +11,7 @@ import { getNullablePrimitiveInfo } from "./checker/type-mapper.js";
 import { generateLinearModule, generateLinearMultiModule } from "./codegen-linear/index.js";
 import { resetCompileDepth } from "./codegen/expressions.js";
 import { generateModule, generateMultiModule } from "./codegen/index.js";
+import { isFatalCodegenDiagnostic } from "./codegen/context/errors.js";
 import type { WasmModule } from "./ir/types.js";
 import {
   buildImportManifest,
@@ -56,18 +57,31 @@ export type { ObjectCompileResult } from "./compiler/output.js";
  * `errors`), telling the caller to bail with `success: false` instead of
  * emitting the invalid binary.
  */
+const CODEGEN_ERROR_PREFIX = "Codegen error:";
+
+/**
+ * Cosmetic-only: prefix a linear-backend diagnostic with `"Codegen error:"`
+ * for human readability when it isn't already so prefixed. The compile-failure
+ * gate keys on severity (#1921), not on this prefix.
+ */
+function withCodegenPrefix(message: string): string {
+  return message.startsWith(CODEGEN_ERROR_PREFIX) ? message : `${CODEGEN_ERROR_PREFIX} ${message}`;
+}
+
 function collectLinearCodegenErrors(mod: WasmModule, errors: CompileError[]): boolean {
+  let fatal = false;
   const diags = mod.codegenErrors;
   if (!diags || diags.length === 0) return false;
   for (const err of diags) {
+    if (isFatalCodegenDiagnostic(err)) fatal = true;
     errors.push({
-      message: err.message.startsWith("Codegen error:") ? err.message : `Codegen error: ${err.message}`,
+      message: withCodegenPrefix(err.message),
       line: err.line,
       column: err.column,
-      severity: "error",
+      severity: isFatalCodegenDiagnostic(err) ? "error" : "warning",
     });
   }
-  return true;
+  return fatal;
 }
 
 const HARD_TS_DIAG_CODES = new Set([
@@ -724,16 +738,19 @@ export function compileSourceSync(
       });
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
-      // Propagate codegen errors with source locations
+      // Propagate codegen errors with source locations. #1921 — a deliberate
+      // "degrade" diagnostic is surfaced as a non-fatal "warning"; the fatal
+      // decision is made by isFatalCodegenDiagnostic on the raw severity.
       for (const err of result.errors) {
         errors.push({
           message: err.message,
           line: err.line,
           column: err.column,
-          severity: err.severity ?? "error",
+          severity: isFatalCodegenDiagnostic(err) ? "error" : "warning",
         });
       }
-      if (result.errors.some((err) => err.message.startsWith("Codegen error:"))) {
+      // #1921 — gate on severity, not a "Codegen error:" message prefix.
+      if (result.errors.some(isFatalCodegenDiagnostic)) {
         return {
           binary: new Uint8Array(0),
           wat: "",
@@ -1032,16 +1049,19 @@ export async function compileMultiSource(
       });
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
-      // Propagate codegen errors with source locations
+      // Propagate codegen errors with source locations. #1921 — a deliberate
+      // "degrade" diagnostic is surfaced as a non-fatal "warning"; the fatal
+      // decision is made by isFatalCodegenDiagnostic on the raw severity.
       for (const err of result.errors) {
         errors.push({
           message: err.message,
           line: err.line,
           column: err.column,
-          severity: err.severity ?? "error",
+          severity: isFatalCodegenDiagnostic(err) ? "error" : "warning",
         });
       }
-      if (result.errors.some((err) => err.message.startsWith("Codegen error:"))) {
+      // #1921 — gate on severity, not a "Codegen error:" message prefix.
+      if (result.errors.some(isFatalCodegenDiagnostic)) {
         return {
           binary: new Uint8Array(0),
           wat: "",
@@ -1312,15 +1332,18 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
       });
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
+      // #1921 — a deliberate "degrade" diagnostic is surfaced as a non-fatal
+      // "warning"; the fatal decision is made by isFatalCodegenDiagnostic.
       for (const err of result.errors) {
         errors.push({
           message: err.message,
           line: err.line,
           column: err.column,
-          severity: err.severity ?? "error",
+          severity: isFatalCodegenDiagnostic(err) ? "error" : "warning",
         });
       }
-      if (result.errors.some((err) => err.message.startsWith("Codegen error:"))) {
+      // #1921 — gate on severity, not a "Codegen error:" message prefix.
+      if (result.errors.some(isFatalCodegenDiagnostic)) {
         return {
           binary: new Uint8Array(0),
           wat: "",
