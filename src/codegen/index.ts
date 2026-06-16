@@ -1347,6 +1347,16 @@ export function generateModule(
         funcs: new Set<string>([...selection.funcs].filter((n) => overrideMap.has(n))),
         classMembers: selection.classMembers,
       };
+      // (#2023) The IR `new C(...)` lowering does not thread the new.target
+      // class-id (that machinery lives only on the legacy path). When the
+      // program uses `new.target`, route every function through legacy so the
+      // outermost-`new` global is set/restored at each construction site. This
+      // is a coarse but safe gate — `new.target` is rare, so the perf cost is
+      // negligible and it avoids a parallel IR implementation of the threading.
+      if (ctx.usesNewTarget) {
+        safeSelection.funcs.clear();
+        safeSelection.classMembers = new Set();
+      }
       const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes);
       // Slice 12 (#1169o) — most IR-path failures are NOT compile errors. The
       // legacy path has already produced a working `body` for every function
