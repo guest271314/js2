@@ -255,17 +255,20 @@ is accepted by the engine — the `$Object`-non-final change is regression-safe)
 
 ### Remaining (resume here)
 
-1. **`ensureProxyRuntime(ctx)`** (new slice in object-runtime.ts or a new
-   `proxy-runtime.ts`): register a uniform trap func type
-   `(externref,externref,externref)->externref` and the dispatch helpers:
-   - `__proxy_get_dispatch(proxyExtern, key, receiver)`: unwrap → `ref.cast
-     $Proxy`; if `revoked` → throw TypeError (reuse `ensureExnTag` + the
-     `__new_TypeError`/string-throw path used elsewhere in this file); read
-     `ptraps.get`; if null → forward `__extern_get(ptarget, key)`; else
-     `ref.cast` the funcref to the trap type and `call_ref (ptarget,key,receiver)`.
-   - `__proxy_set_dispatch` / `__proxy_has_dispatch` symmetric (has returns the
-     trap result as a boolean-ish externref; set returns void/undefined).
-   - apply: only at a CallExpression on a proxy whose `ptarget` is callable.
+1. ~~**`ensureProxyRuntime(ctx)`**~~ **DONE** (se1, 2026-06-16) — added to
+   object-runtime.ts, called at the end of `ensureObjectRuntime` (after
+   `__extern_get/set/has` are registered). Registers the uniform trap func type
+   `(externref,externref,externref)->externref` and `__proxy_get_dispatch` /
+   `__proxy_set_dispatch` / `__proxy_has_dispatch`: each casts to `$Proxy`,
+   throws TypeError on `revoked` (via `__new_TypeError` + exn tag), reads the
+   trap funcref from `$ptraps` (null when `$ptraps` itself is null), forwards to
+   `__extern_get/set/has(ptarget,…)` when the trap is absent, else `ref.cast` to
+   the trap type + `call_ref (target,key,receiver)`. tsc clean; module still
+   `WebAssembly.validate`s true; object suites (issue-2084) pass. NOTE: helpers
+   are currently unreferenced so DCE drops them from the WAT until step 2 wires
+   the guard — expected. STILL TODO in this bucket: the `apply` trap (only at a
+   CallExpression on a proxy whose `ptarget` is callable — needs the
+   closure-call site, deferred to step 5).
 2. **Dispatch injection** — at the TOP of `__extern_get` / `__extern_set` /
    `__extern_has` bodies (object-runtime.ts ~702/1141/1659), prepend
    `local.get $objParam; ref.test $Proxy; if → return __proxy_*_dispatch(...)`.
