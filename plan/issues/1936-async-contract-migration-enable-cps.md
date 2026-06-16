@@ -1,17 +1,18 @@
 ---
 id: 1936
 title: "Async contract migration — teach call sites to drive Promises, then enable the built-but-disabled CPS lowering"
-status: backlog
-sprint: Backlog
+status: ready
+sprint: 63
 created: 2026-06-10
-updated: 2026-06-10
-priority: high
+updated: 2026-06-15
+priority: top
 feasibility: hard
 reasoning_effort: max
 task_type: feature
 area: codegen
 language_feature: async-await
 goal: conformance
+note: "2026-06-15: elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). Census/architect spec (started in s62) → impl in s63. Precedes #1796 CPS flip."
 ---
 # #1936 — Async contract migration (enable CPS)
 

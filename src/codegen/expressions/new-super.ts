@@ -26,6 +26,7 @@ import {
 } from "../index.js";
 import { ensureMapHelpers } from "../map-runtime.js";
 import { ensureSetHelpers } from "../set-runtime.js";
+import { ensureWeakCollectionHelpers } from "../weak-collections-runtime.js";
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { resolveComputedKeyExpression } from "../literals.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
@@ -1675,6 +1676,25 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   ) {
     addUnionImports(ctx);
     ensureSetHelpers(ctx);
+    const mapNewIdx = ctx.mapHelpers.get("__map_new");
+    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+  }
+
+  // (#2162) `new WeakMap()` / `new WeakSet()` in standalone / nativeStrings mode
+  // → the native weak-collection runtime, which reuses the Map backing store
+  // (`__map_new` yields the same empty `$Map`). No-arg form only; the iterable
+  // form falls through.
+  if (
+    ctx.nativeStrings &&
+    ts.isIdentifier(expr.expression) &&
+    (expr.expression.text === "WeakMap" || expr.expression.text === "WeakSet") &&
+    (expr.arguments?.length ?? 0) === 0
+  ) {
+    addUnionImports(ctx);
+    ensureWeakCollectionHelpers(ctx);
     const mapNewIdx = ctx.mapHelpers.get("__map_new");
     if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
       fctx.body.push({ op: "call", funcIdx: mapNewIdx });

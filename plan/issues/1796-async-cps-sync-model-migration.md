@@ -3,15 +3,16 @@ id: 1796
 title: "Migrate synchronous-async contract to CPS Promise model (flip ASYNC_CPS_ENABLED)"
 status: ready
 created: 2026-06-03
-priority: medium
+priority: top
 feasibility: hard
 reasoning_effort: high
 task_type: feature
 area: codegen
 language_feature: async, promises
 goal: spec-completeness
-sprint: Backlog
+sprint: 63
 related: [1042, 1326, 1373, 1373b]
+note: "2026-06-15: elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). Host-mode Promise/async completion linchpin. Needs architect spec + senior-dev; sequenced after #1936 census, gated on #1373b CPS lowering."
 ---
 # #1796 — Migrate the synchronous-async contract to the CPS Promise model
 
