@@ -1,9 +1,11 @@
 ---
 id: 2180
 title: "Host-mode Proxy: close remaining test262 failures toward 100% (invariant checks, Wasm-typed targets, revocation lifecycle)"
-status: ready
+status: done
+assignee: se2
 created: 2026-06-15
-updated: 2026-06-15
+updated: 2026-06-16
+completed: 2026-06-16
 priority: top
 feasibility: hard
 reasoning_effort: high
@@ -150,3 +152,76 @@ non-skipped `built-ins/Proxy`.
 File overlap with #1100/#1355 in `new-super.ts`/`calls.ts`/`runtime.ts` — land #2180
 first (small additive runtime fixes); standalone tracks branch on `ctx.standalone`.
 Adding `Proxy` to `NAMESPACE_NON_CALLABLE` must not shadow `new Proxy`.
+
+## Implementation Notes (se2, 2026-06-16)
+
+Host-mode `built-ins/Proxy` went **71 → 112 pass / 311** (+41; 23 % → 36 %),
+no `built-ins/Reflect` regression (119/153 ≈ 78 %, well above the ≥72 % gate).
+The architect plan's first-order diagnosis (construction TypeErrors + wrap
+Wasm-struct targets) was correct but **incomplete** — empirical triage found the
+dominant defect was trap **discovery**, not target wrapping. Root causes and
+fixes:
+
+1. **Trap discovery was the real blocker (largest win).** A compiled object
+   literal handler is an opaque WasmGC struct; `handler[trapName]` returns
+   `undefined` for every trap, so the host's native `Proxy` fired **no traps**
+   and silently fell through to the target. The architect plan's `_wrapForHost`
+   route does **not** work here: `_wrapForHost(handler).get` runs the closure
+   value back through `_wrapForHost` (because the closure-field detector only
+   matched `_isWasmStruct(val)` *after* the mirror had already wrapped it),
+   yielding a non-callable object. Fix: read each trap closure **directly off
+   the raw struct** via the per-shape `__sget_<name>` getter (+ sidecar
+   fallback) in `_structFieldRaw`, then wrap with
+   `_maybeWrapCallableUnknownArity`. The result is a plain-object *bridge
+   handler* the host can read; each bridge method forwards to the closure with
+   `this` = the **raw** handler struct so trap-receiver identity
+   (`assert.sameValue(this, handler)`) holds. `new-super.ts`/`calls.ts` are
+   unchanged on the wrapping side — all of this is in `runtime.ts`.
+
+2. **Construction TypeErrors** (§28.2.1.1 step 1/2): `_hostProxyConstruct` /
+   `_hostProxyConstructRevocable` throw `TypeError` when target/handler is not
+   object-like, replacing the old swallow-and-return-target behaviour. The raw
+   struct stays as `[[ProxyTarget]]` so `t === target` holds in traps.
+
+3. **`Proxy(t,h)` without `new`** → added `"Proxy"` to `NAMESPACE_NON_CALLABLE`
+   in `calls.ts` (bare-identifier call guard only; `new Proxy` and
+   `Proxy.revocable(...)` reach other branches, so no shadowing).
+
+4. **Proxy-over-struct misclassified as a struct.** `_isWasmStruct` probes by
+   "null proto + set throws"; a Proxy whose target is a WasmGC struct inherits
+   the null proto and forwards the probe-set to the opaque target (which
+   throws), so the heuristic flagged the Proxy itself as a struct — routing
+   `delete`/`in`/`getPrototypeOf` to the sidecar instead of the host trap.
+   Fixed with a `_userProxies` WeakSet that `_isWasmStruct` short-circuits
+   (+9 pass).
+
+5. **Revoked-proxy errors were swallowed.** `__extern_get`/`__extern_has`/
+   `_safeSet`/`__delete_property` wrap their host read in a try/catch that
+   falls through to a struct-getter path; a revoked-proxy `TypeError` was
+   eaten there. Added `_isRevokedProxyError` and re-throw it in each.
+
+### Out of scope (separate front-end codegen issues, not host-proxy plumbing)
+Empirically confirmed via probes that these remaining buckets fail **before**
+the runtime proxy path:
+- `construct/**` — proxy target is a `class`; the extern-class machinery
+  ("No dependency provided for extern class …") is unrelated.
+- `with`-statement tests (#1387).
+- A function that returns a complex object literal (`allowProxyTraps` helper)
+  compiles to `return null`, so handlers built through it arrive as `null` —
+  many `*/call-parameters-prototype.js` and several `null-handler` revocation
+  tests depend on it.
+- `delete p.x` / `Reflect.deleteProperty` on an `any`-typed proxy receiver: the
+  bare `delete` statement never emits `__delete_property` (the front-end
+  resolves/elides it), so the trap can't fire regardless of runtime. The
+  `_userProxies` + revoked-rethrow fixes are in place for when that path is
+  fixed.
+
+### Files changed
+- `src/runtime.ts` — `_hostProxyConstruct`, `_hostProxyConstructRevocable`,
+  `_buildProxyBridgeHandler`, `_structFieldRaw`, `_isObjectLike`,
+  `_isRevokedProxyError`, `_userProxies`; rewired `proxy_create` intent +
+  `__proxy_revocable` host import; revoked-rethrow in the four boundary helpers.
+- `src/codegen/expressions/calls.ts` — `"Proxy"` in `NAMESPACE_NON_CALLABLE`.
+- `src/codegen/expressions/new-super.ts` — no-arg `new Proxy()` now routes
+  through `__proxy_create(null, null)` so the runtime raises the TypeError.
+- `tests/issue-2180.test.ts` — construction-throws + trap-dispatch coverage.

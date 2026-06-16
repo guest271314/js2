@@ -1165,6 +1165,23 @@ export interface CodegenContext {
    *  in object-runtime.ts. Undefined until first open-object op under
    *  --target standalone. */
   objectRuntimeTypes?: ObjectRuntimeTypes;
+  /** (#2175 S0) Module-type index of the single shared `$NativeProto` struct —
+   *  the host-free builtin/class prototype-object representation. Registered
+   *  once by `registerNativeProtoType` (property-access.ts) the first time a
+   *  `.prototype`-as-value read demands a native proto object under
+   *  `--target standalone`. Undefined until then. */
+  nativeProtoTypeIdx?: number;
+  /** (#2175 S0) Builtin-brand id table — a reserved high-negative i32 band
+   *  disjoint from `classTagMap`'s range, so a `$NativeProto.$brand` (or the
+   *  `$ClassMeta.$parentTag` externref-backed-subclass slot from #2101) is a
+   *  single i32 namespace shared with class tags without collision. Seeded
+   *  lazily from the BUILTIN_BRAND_TABLE constant by `getBuiltinBrand`. */
+  builtinBrandMap?: Map<string, number>;
+  /** (#2175 S0) Per-funcIdx metadata for native-method-closure values, so the
+   *  existing `.length`/`.name`-on-function reads resolve a closure's arity and
+   *  member name (e.g. `RegExp.prototype.test.length === 1`,
+   *  `.name === "test"`). Populated by `ensureStandaloneNativeMethodClosure`. */
+  nativeClosureMeta?: Map<number, { name: string; length: number }>;
   /** (#682) Native standalone RegExp engine hook. Standalone mode currently
    *  enables the reduced literal-substring backend; null means RegExp lowering
    *  must stay on the explicit #1474 refusal path. */

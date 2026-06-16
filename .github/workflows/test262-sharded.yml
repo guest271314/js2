@@ -604,6 +604,20 @@ jobs:
             --baseline-generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             ${{ github.event_name != 'workflow_dispatch' && '--include-proposals' || (inputs.include_proposals && '--include-proposals' || '') }}
 
+      # #2097 — ABSOLUTE standalone pass-count floor (high-water-mark backstop).
+      # The #1897 standalone gate is a MOVING floor (re-seeded from the new
+      # baseline every push to main), so a run of small net-negative PRs each
+      # within tolerance can compound undetected. This guard asserts the merged
+      # standalone pass count stays within `tolerance` of the committed
+      # high-water mark (benchmarks/results/test262-standalone-highwater.json),
+      # which only ever ratchets UP. It lives inside the required
+      # "merge shard reports" check so a breach blocks the merge queue.
+      - name: Standalone pass-count high-water floor (#2097)
+        if: env.SHARDS_RAN == 'true'
+        run: |
+          node scripts/check-standalone-highwater.mjs \
+            --report merged-reports/test262-standalone-report-merged.json
+
       # #1668 — HARD catastrophic-regression guard. Lives INSIDE the REQUIRED
       # "merge shard reports" check so it blocks the merge queue. The
       # fine-grained `regression-gate` job below also blocks the merge queue
@@ -1278,6 +1292,15 @@ jobs:
           cp shard-artifacts/test262-results-merged.jsonl public/benchmarks/results/test262-results.jsonl
           cp shard-artifacts/test262-standalone-report-merged.json public/benchmarks/results/test262-standalone-report.json
 
+      # #2097 — ratchet the absolute standalone high-water mark UP when this
+      # push improved standalone conformance. Only ever raises (never lowers);
+      # the raised file is staged into the same atomic main-repo commit below.
+      - name: Raise standalone pass-count high-water mark (#2097)
+        run: |
+          node scripts/check-standalone-highwater.mjs \
+            --report benchmarks/results/test262-standalone-current.json \
+            --update --sha "${{ github.sha }}" || true
+
       - name: Regenerate edition buckets
         run: node --experimental-strip-types scripts/generate-editions.ts --results benchmarks/results/test262-current.jsonl
 
@@ -1541,6 +1564,10 @@ jobs:
               benchmarks/results/test262-report.json \
               public/benchmarks/results/test262-report.json \
               public/benchmarks/results/test262-standalone-report.json
+            # #2097 — the standalone high-water mark (raised just above when
+            # conformance improved). Staged so the new floor lands atomically
+            # with the refreshed summary.
+            git add -f benchmarks/results/test262-standalone-highwater.json 2>/dev/null || true
             # editions JSON is regenerated into website/public/ (the vite
             # publicDir, served by the landing page) by the earlier step. #1656
             # moved the public dir under website/; staging the old public/ path

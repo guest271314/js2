@@ -1430,6 +1430,7 @@ function buildPreamble(
   needsIteratorBinding: boolean,
   needsDetachBuffer: boolean,
   needs262: boolean,
+  needsProxyTraps: boolean,
 ): string {
   let p = `let __fail: number = 0;
 let __assert_count: number = 1;
@@ -1752,6 +1753,39 @@ let $262: any = {
 };`;
   }
 
+  if (needsProxyTraps) {
+    // #2183: test262 harness/proxyTrapsHelper.js. Returns a Proxy handler where
+    // every trap defaults to a stub that throws a Test262Error when invoked
+    // (so a test asserting "trap T must NOT be called" fails if it fires), with
+    // each trap overridable via the `overrides` argument. Mirrors the upstream
+    // helper verbatim; the throwing stubs are function expressions so they
+    // compile to ordinary Wasm closures.
+    p += `
+
+function allowProxyTraps(overrides: any): any {
+  function throwTest262Error(msg: string): any {
+    return function (): any { throw new Test262Error(msg); };
+  }
+  if (!overrides) { overrides = {}; }
+  return {
+    getPrototypeOf: overrides.getPrototypeOf || throwTest262Error("[[GetPrototypeOf]] trap called"),
+    setPrototypeOf: overrides.setPrototypeOf || throwTest262Error("[[SetPrototypeOf]] trap called"),
+    isExtensible: overrides.isExtensible || throwTest262Error("[[IsExtensible]] trap called"),
+    preventExtensions: overrides.preventExtensions || throwTest262Error("[[PreventExtensions]] trap called"),
+    getOwnPropertyDescriptor: overrides.getOwnPropertyDescriptor || throwTest262Error("[[GetOwnProperty]] trap called"),
+    has: overrides.has || throwTest262Error("[[HasProperty]] trap called"),
+    get: overrides.get || throwTest262Error("[[Get]] trap called"),
+    set: overrides.set || throwTest262Error("[[Set]] trap called"),
+    deleteProperty: overrides.deleteProperty || throwTest262Error("[[Delete]] trap called"),
+    defineProperty: overrides.defineProperty || throwTest262Error("[[DefineOwnProperty]] trap called"),
+    enumerate: throwTest262Error("[[Enumerate]] trap called: this trap has been removed"),
+    ownKeys: overrides.ownKeys || throwTest262Error("[[OwnPropertyKeys]] trap called"),
+    apply: overrides.apply || throwTest262Error("[[Call]] trap called"),
+    construct: overrides.construct || throwTest262Error("[[Construct]] trap called"),
+  };
+}`;
+  }
+
   return p;
 }
 
@@ -2049,6 +2083,14 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   // sets a sidecar `__detached__` marker the runtime DataView dispatch checks.
   const needsDetachBuffer = /\$DETACHBUFFER\b/.test(body);
 
+  // #2183: proxyTrapsHelper.js — `allowProxyTraps(overrides)` returns a Proxy
+  // handler whose every trap defaults to a throwing stub (so a test asserting
+  // "this trap is never called" fails loudly if it fires) and is overridable.
+  // Not injected before, so `allowProxyTraps` was undefined and `new Proxy(t,
+  // allowProxyTraps(...))` got a null handler — every built-ins/Proxy test that
+  // includes this helper failed at construction.
+  const needsProxyTraps = includes.includes("proxyTrapsHelper.js") && /\ballowProxyTraps\b/.test(body);
+
   // #1523: test262 host-object `$262`. Tests use it as a precondition for
   // realm creation, ArrayBuffer detach, agent messaging, and global access.
   // We expose a minimal stub: createRealm returns a fresh global with eval,
@@ -2080,6 +2122,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
     needsIteratorBinding,
     needsDetachBuffer,
     needs262,
+    needsProxyTraps,
   ]
     .map((b) => (b ? "1" : "0"))
     .join("");
@@ -2109,6 +2152,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
       needsIteratorBinding,
       needsDetachBuffer,
       needs262,
+      needsProxyTraps,
     );
     preambleCache.set(cacheKey, preamble);
   }
