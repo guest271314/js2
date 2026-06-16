@@ -10,6 +10,7 @@ import { tryEmitLinearU8ElementSet } from "../linear-uint8-codegen.js";
 import { emitAnyAdd, emitModulo, emitToInt32 } from "../binary-ops.js";
 import { pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
+import { reportSilentFallback } from "../fallback-telemetry.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
@@ -871,7 +872,10 @@ function compileDestructuringAssignment(
       }
       if (!propName) continue; // truly unresolvable property name — skip
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(ctx, "lookup-miss-skip", "assignment:destructure-assign-property-field-miss", prop);
+        continue;
+      }
       const fieldType = fields[fieldIdx]!.type;
 
       // Determine the target and optional default value
@@ -1876,7 +1880,10 @@ function emitObjectDestructureFromLocal(
     if (ts.isShorthandPropertyAssignment(prop)) {
       const propName = prop.name.text;
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(ctx, "lookup-miss-skip", "assignment:object-destructure-shorthand-field-miss", prop);
+        continue;
+      }
 
       let localIdx = fctx.localMap.get(propName);
       if (localIdx === undefined) {
@@ -1905,7 +1912,15 @@ function emitObjectDestructureFromLocal(
       }
       if (!propName) continue; // truly unresolvable property name — skip
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(
+          ctx,
+          "lookup-miss-skip",
+          "assignment:object-destructure-from-local-property-field-miss",
+          prop,
+        );
+        continue;
+      }
       const fieldType = fields[fieldIdx]!.type;
 
       const targetExpr = prop.initializer;
