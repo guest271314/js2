@@ -57,6 +57,12 @@ jobs:
       - name: IR fallback gate (#1376)
         run: pnpm run check:ir-fallbacks
 
+      - name: IR adoption table freshness (#2145)
+        # Fails when plan/log/ir-adoption.md drifts from its generator data or
+        # from the IrFallbackReason union in src/ir/select.ts. Regenerate with
+        # `pnpm run gen:ir-adoption`.
+        run: pnpm run check:ir-adoption
+
       - name: Stack-balance fixup ratchet (#1918)
         # Each stack-balance fixup repairs an emitter bug. Fails when any fixup
         # bucket grows vs. scripts/stack-balance-baseline.json — a new fixup

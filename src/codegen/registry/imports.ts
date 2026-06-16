@@ -36,11 +36,20 @@ export function addImport(ctx: CodegenContext, module: string, name: string, des
     const decision = isHostImportAllowed(module, name);
     if (!decision.allowed) {
       const message = buildStrictHostImportError(module, name);
-      ctx.errors.push({ message, line: 0, column: 0 });
-      // Skip registration. The caller will record a stale funcMap index if
-      // it tries to look the import up by name; `result.success` will be
-      // false thanks to the error above, and downstream emit/link will
-      // refuse to produce a final binary.
+      // #1921 — this per-call gate *drops* the import and lets codegen
+      // continue, so the diagnostic is a deliberate `"degrade"`, not a hard
+      // error: the binary is still produced (dropped imports degrade to no-op
+      // / stale-index sites). The authoritative fatal backstop is the
+      // emit-time import-section scan (`assertNoLeakedHostImports` →
+      // `buildLeakedHostImportError`, severity "error"), which fires only if
+      // an unsupported host import actually *survived* into the finished
+      // binary. Classifying this as "error" instead would fail builds that
+      // legitimately drop-and-degrade unsupported host APIs under WASI (e.g.
+      // examples/native-messaging/nm_js2wasm.ts: setTimeout/fetch/…).
+      ctx.errors.push({ message, line: 0, column: 0, severity: "degrade" });
+      // Skip registration. The caller may record a stale funcMap index if it
+      // looks the import up by name; if that index is ever emitted into the
+      // binary the emit-time leak scan / link step catches it.
       return;
     }
   }

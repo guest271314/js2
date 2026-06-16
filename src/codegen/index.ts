@@ -29,6 +29,7 @@ import { allocLocal, getLocalType } from "./context/locals.js";
 import type {
   ClosureInfo,
   CodegenContext,
+  CodegenError,
   CodegenOptions,
   ExternClassInfo,
   FunctionContext,
@@ -956,7 +957,7 @@ export function generateModule(
   options?: CodegenOptions,
 ): {
   module: WasmModule;
-  errors: { message: string; line: number; column: number; severity?: "error" | "warning" }[];
+  errors: CodegenError[];
   // #2089 — silent-fallback telemetry counters (per class → per site → count).
   fallbackCounts?: FallbackCounts;
   // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
@@ -1304,9 +1305,18 @@ export function generateModule(
         } catch (e) {
           // Selector claimed a function whose types can't be resolved —
           // skip the IR path for this one. Fall through to legacy.
+          //
+          // #1921 — this is a deliberate IR→legacy fallback, not a compile
+          // error: the legacy path still produces a working body for `name`.
+          // Emit severity "warning" so it stays visible to bridge tests but
+          // does NOT fail the build (consistent with the IR-fallback channel
+          // at `formatIrPathFallbackDiagnostic` below). Defaulting to "error"
+          // would fail every program with a class-typed cross-function return
+          // that the IR lowerer can't yet represent (e.g. a `Builder` chain).
           reportErrorNoNode(
             ctx,
             `IR path: could not resolve types for ${name}: ${e instanceof Error ? e.message : String(e)}`,
+            "warning",
           );
         }
       }
@@ -4983,7 +4993,7 @@ export function generateMultiModule(
   options?: CodegenOptions,
 ): {
   module: WasmModule;
-  errors: { message: string; line: number; column: number; severity?: "error" | "warning" }[];
+  errors: CodegenError[];
   // #2089 — silent-fallback telemetry counters (per class → per site → count).
   fallbackCounts?: FallbackCounts;
   // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
