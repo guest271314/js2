@@ -1,9 +1,9 @@
 ---
 id: 1326
 title: "Async standalone: implement microtask queue + CPS scheduler in Wasm for Promise/async without JS host"
-status: in-review
+status: in-progress
 created: 2026-05-07
-updated: 2026-06-03
+updated: 2026-06-16
 priority: low
 feasibility: hard
 reasoning_effort: max
