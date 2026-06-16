@@ -3313,3 +3313,175 @@ function addRuntimeFunc(
     exported: false,
   });
 }
+
+/** Reserved name for the linear-backend f64 remainder helper (#2144). */
+export const FMOD_FN = "__fmod";
+
+/**
+ * (#2144) Add the Wasm-native IEEE-754 remainder (`fmod`) helper to the linear
+ * backend, mirroring the WasmGC `src/codegen/fmod.ts` work (#2056).
+ *
+ * The linear `%` arm previously emitted the naive `a - trunc(a/b)*b` formula
+ * that the GC backend explicitly retired: it drifts by ULPs, collapses to 0
+ * when `trunc(a/b)*b` rounds back to `a`, and produces `±Infinity` when `a/b`
+ * overflows f64 (ratio ≳ 1e308). This is the textbook cross-backend divergence
+ * flagged in docs/architecture/codegen-axes.md — both backends must agree on
+ * `%`.
+ *
+ * Algorithm (exact, no host import — dual-mode standalone): classic binary
+ * long-division remainder operating purely in f64. All intermediates stay
+ * ≤ |a|, so nothing overflows, and every step is an exact f64 op, so there is
+ * zero rounding drift. See fmod.ts for the full derivation and the verified
+ * edge-case set (`x % Inf`, `-0 % x`, `Inf % x`, `x % 0`, `NaN % x`, …).
+ *
+ * Signature: `(f64 a, f64 b) -> f64`. Idempotent — a second call is a no-op.
+ */
+export function addFmodRuntime(mod: WasmModule): void {
+  if (mod.functions.some((f) => f.name === FMOD_FN)) return;
+
+  const typeIdx = mod.types.length;
+  mod.types.push({
+    kind: "func",
+    name: "$type___fmod",
+    params: [{ kind: "f64" }, { kind: "f64" }],
+    results: [{ kind: "f64" }],
+  });
+
+  // Locals: 0=a, 1=b (params); 2=x (|a|, running remainder), 3=y (|b|), 4=t.
+  const A = 0;
+  const B = 1;
+  const X = 2;
+  const Y = 3;
+  const T = 4;
+  const INF = Infinity;
+
+  const body: Instr[] = [
+    // if (b == 0) return NaN
+    { op: "local.get", index: B },
+    { op: "f64.const", value: 0 },
+    { op: "f64.eq" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "f64.const", value: NaN }, { op: "return" }] },
+    // if (|a| == Inf) return NaN  (Inf % x)
+    { op: "local.get", index: A },
+    { op: "f64.abs" },
+    { op: "f64.const", value: INF },
+    { op: "f64.eq" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "f64.const", value: NaN }, { op: "return" }] },
+    // if (a != a) return NaN  (NaN dividend)
+    { op: "local.get", index: A },
+    { op: "local.get", index: A },
+    { op: "f64.ne" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "f64.const", value: NaN }, { op: "return" }] },
+    // if (b != b) return NaN  (NaN divisor)
+    { op: "local.get", index: B },
+    { op: "local.get", index: B },
+    { op: "f64.ne" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "f64.const", value: NaN }, { op: "return" }] },
+    // if (|b| == Inf) return a  (a finite → remainder is a itself)
+    { op: "local.get", index: B },
+    { op: "f64.abs" },
+    { op: "f64.const", value: INF },
+    { op: "f64.eq" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "local.get", index: A }, { op: "return" }] },
+
+    // x = |a|; y = |b|
+    { op: "local.get", index: A },
+    { op: "f64.abs" },
+    { op: "local.set", index: X },
+    { op: "local.get", index: B },
+    { op: "f64.abs" },
+    { op: "local.set", index: Y },
+
+    // if (x < y) return copysign(x, a)  (covers x == 0 → ±0)
+    { op: "local.get", index: X },
+    { op: "local.get", index: Y },
+    { op: "f64.lt" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "local.get", index: X }, { op: "local.get", index: A }, { op: "f64.copysign" }, { op: "return" }],
+    },
+
+    // t = y; while (t * 2 <= x) t *= 2
+    { op: "local.get", index: Y },
+    { op: "local.set", index: T },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: T },
+            { op: "f64.const", value: 2 },
+            { op: "f64.mul" },
+            { op: "local.get", index: X },
+            { op: "f64.le" },
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: T },
+            { op: "f64.const", value: 2 },
+            { op: "f64.mul" },
+            { op: "local.set", index: T },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+
+    // while (t >= y) { if (x >= t) x -= t; t *= 0.5 }
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: T },
+            { op: "local.get", index: Y },
+            { op: "f64.ge" },
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: X },
+            { op: "local.get", index: T },
+            { op: "f64.ge" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: X },
+                { op: "local.get", index: T },
+                { op: "f64.sub" },
+                { op: "local.set", index: X },
+              ],
+            },
+            { op: "local.get", index: T },
+            { op: "f64.const", value: 0.5 },
+            { op: "f64.mul" },
+            { op: "local.set", index: T },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+
+    // return copysign(x, a)
+    { op: "local.get", index: X },
+    { op: "local.get", index: A },
+    { op: "f64.copysign" },
+  ];
+
+  mod.functions.push({
+    name: FMOD_FN,
+    typeIdx,
+    locals: [
+      { name: "$x", type: { kind: "f64" } }, // X
+      { name: "$y", type: { kind: "f64" } }, // Y
+      { name: "$t", type: { kind: "f64" } }, // T
+    ],
+    body,
+    exported: false,
+  });
+}

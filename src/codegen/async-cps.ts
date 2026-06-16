@@ -40,24 +40,24 @@ import { isPromiseType } from "../checker/type-mapper.js";
  * Master gate for the AST-side async CPS lowering.
  *
  * Slice 2A (#1042) built the linear single-tail-await state machine and made it
- * *correct when it runs* (verified end-to-end in `tests/issue-1042.test.ts` with
- * the gate forced on locally): the three canonical shapes resolve to the right
- * value through `Promise_resolve` → `Promise_then2` → continuation, captures and
- * the `return await` identity tail are handled, and the late-import shift hazard
- * is removed by the `collectAsyncCpsImports` prepass.
+ * *correct when it runs*: the canonical shapes resolve to the right value
+ * through `Promise_resolve` → `Promise_then2` → continuation, captures and the
+ * `return await` identity tail are handled, and the late-import shift hazard is
+ * removed by the `collectAsyncCpsImports` prepass.
  *
- * It stays **OFF** because flipping it globally regresses the *synchronous
- * consumption* contract: a single-await async fn consumed as a raw value
- * (`asyncFn() as any as number`, the #1313/#1727 "compile away" pattern) relies
- * on the legacy path returning the unwrapped value synchronously. With CPS on,
- * that fn returns a real Promise and the cast yields NaN — see the 3 regressed
- * `tests/equivalence/{async-function,promise-chains}.test.ts` cases. The gate is
- * per-definition but the contract is per-call-site, so a global flip cannot
- * preserve both. Turning CPS on for real needs the synchronous-consumption call
- * sites taught to drive the Promise (architect-level; risk #1/#6 in the spec).
- * See the "Slice 2A — gate-flip regression" finding in the #1042 issue file.
+ * Flipped **ON** in #1796. The synchronous-consumption regression that kept it
+ * off is resolved by the per-function {@link asyncFnNeedsCps} predicate (#1936):
+ * an async fn is CPS-lowered (returns a real Promise) ONLY when it *genuinely
+ * suspends* — at least one await operand is not statically resolved. Fully
+ * await-elidable bodies (`return await Promise.resolve(42)`, `await 41; ...`)
+ * stay on the legacy synchronous path and keep returning the unwrapped value, so
+ * the `asyncFn() as any as number` "compile away" idiom (#1313/#1727) is
+ * preserved for those. Functions that truly suspend now return a real Promise;
+ * call sites that consume such a result as a raw value cannot be served
+ * synchronously by construction and were already semantically broken under the
+ * legacy fakery — those test cases are migrated to the Promise model in #1796.
  */
-export const ASYNC_CPS_ENABLED = false;
+export const ASYNC_CPS_ENABLED = true;
 
 /**
  * Result of analysing an async function body for the CPS transform.
@@ -235,6 +235,38 @@ export function awaitIsStaticallyResolved(operand: ts.Expression): boolean {
   return false;
 }
 
+/** Promise static combinators whose call result is already a real Promise. */
+const PROMISE_COMBINATOR_NAMES = new Set(["all", "race", "any", "allSettled"]);
+
+/**
+ * Is `operand` a `Promise.<combinator>(...)` call (`Promise.all`, `Promise.race`,
+ * `Promise.any`, `Promise.allSettled`)? Such an operand is *already* a real
+ * Promise, so `await` over it gains nothing from the CPS state machine: the
+ * legacy path (`await`-is-identity over a combinator that returns a real
+ * Promise) already produces a correct result Promise. Keeping these on the
+ * legacy path also sidesteps the host `declare`-class-method argument marshaling
+ * gap (e.g. `Promise.all(src.getPromises())`) that #2028 owns — the CPS awaited
+ * expression would otherwise mis-marshal the host-method argument. (#1796)
+ */
+function awaitedExprIsPromiseCombinator(operand: ts.Expression): boolean {
+  let expr: ts.Expression = operand;
+  while (
+    ts.isParenthesizedExpression(expr) ||
+    ts.isAsExpression(expr) ||
+    ts.isTypeAssertionExpression(expr) ||
+    ts.isNonNullExpression(expr)
+  ) {
+    expr = expr.expression;
+  }
+  return (
+    ts.isCallExpression(expr) &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    ts.isIdentifier(expr.expression.expression) &&
+    expr.expression.expression.text === "Promise" &&
+    PROMISE_COMBINATOR_NAMES.has(expr.expression.name.text)
+  );
+}
+
 /**
  * The per-function CPS decision (#1936) — replaces the global
  * {@link ASYNC_CPS_ENABLED} kill-switch with a per-function predicate. Returns
@@ -247,18 +279,25 @@ export function awaitIsStaticallyResolved(operand: ts.Expression): boolean {
  *      a fulfilled Promise), and
  *   3. {@link splitBodyAtAwait} accepts the body shape (single top-level await in
  *      a canonical position; richer control flow stays on the legacy path with a
- *      `cps-unsupported-shape` census bucket).
+ *      `cps-unsupported-shape` census bucket), and
+ *   4. the single awaited operand is not a `Promise.<combinator>(...)` call —
+ *      those already return a real Promise that the legacy `await`-identity path
+ *      resolves correctly, and routing them through CPS regresses host-method
+ *      argument marshaling pending #2028 (see {@link awaitedExprIsPromiseCombinator}).
  *
  * `ASYNC_CPS_ENABLED` is retained as a transitional master kill-switch routed
- * through this predicate so the global flip stays inert until #1796; when it is
- * `false` the predicate always returns `false` (current shipped behaviour).
+ * through this predicate; when it is `false` the predicate always returns
+ * `false` (the pre-#1796 shipped behaviour).
  */
 export function asyncFnNeedsCps(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): boolean {
   if (!ASYNC_CPS_ENABLED) return false;
   if (plan.awaitPoints.length === 0) return false;
   const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
   if (!anyRealSuspension) return false; // fully await-elidable → sync + resolved Promise
-  return splitBodyAtAwait(fn, plan) !== null;
+  const split = splitBodyAtAwait(fn, plan);
+  if (split === null) return false;
+  if (awaitedExprIsPromiseCombinator(split.awaitedExpr)) return false; // already a real Promise
+  return true;
 }
 
 /**
