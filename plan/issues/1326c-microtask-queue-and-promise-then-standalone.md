@@ -11,7 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: async, promises
 goal: standalone-mode
-sprint: 52
+sprint: 62
 depends_on: [1326]
 required_by: [1373b]
 ---

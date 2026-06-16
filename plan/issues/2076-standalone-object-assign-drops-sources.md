@@ -2,7 +2,7 @@
 id: 2076
 title: "standalone: Object.assign drops later sources entirely — native __object_assign never iterates the sources vec"
 status: ready
-sprint: 63
+sprint: 62
 created: 2026-06-11
 updated: 2026-06-12
 priority: medium

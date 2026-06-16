@@ -1,7 +1,7 @@
 ---
 id: 1536
 title: "Wasm-native exception types: $Error WasmGC struct + throw / try_table / catch_ref"
-status: backlog
+status: ready
 created: 2026-05-20
 updated: 2026-05-20
 priority: high
@@ -11,7 +11,7 @@ task_type: feature
 area: runtime
 language_feature: errors
 goal: standalone-wasm
-sprint: Backlog
+sprint: 62
 related: [1535, 1470, 1471, 1472, 1473]
 ---
 # #1536 — Wasm-native exception types ($Error + Wasm 3.0 EH)
@@ -49,3 +49,36 @@ No external library — pure Wasm 3.0 EH. Binaryen wasm-opt has `exnref` support
 
 ## Risk
 Binaryen `exnref` is still rough; may need to land on legacy EH (`try`/`catch $tag`) first and migrate to `exnref` once Binaryen catches up.
+
+## Implementation Plan (architect, 2026-06-16)
+
+### Status correction (recon)
+Most originally-proposed work already landed (#1104 Phase 1, #1473, #1536 Phase 2, #2077). Confirmed in-tree:
+- `$Error_struct` exists — `src/codegen/registry/error-types.ts:79` `getOrRegisterErrorStructType` registers `struct { tag:i32, message:(mut externref), name:externref }` (tag from `BUILTIN_TYPE_TAGS`).
+- Wasm-native `__new_<ErrorName>` constructors exist — `emitWasiErrorConstructor` (error-types.ts:117); all 8 (Error/TypeError/RangeError/SyntaxError/URIError/EvalError/ReferenceError/AggregateError).
+- `.message`/`.name` reads work standalone — `property-access.ts:1547-1640` reads struct fields under `ctx.wasi || ctx.standalone`, incl. the #2077 `catch (e)` any-binding path.
+- `instanceof TypeError` works standalone — `identifiers.ts:1112-1166` discriminates via `$tag` vs `collectErrorInstanceOfTags`; no `__instanceof` import.
+- `throw`/`try`/`catch` lower without host import standalone — `statements/exceptions.ts:209-250` coerces thrown value to externref + `throw $tag`; `catch_all`+`__get_caught_exception` already skipped when `ctx.wasi || ctx.standalone` (exceptions.ts:549 `skipCatchAll`).
+
+So the only EH host import is `__get_caught_exception`, already DCE'd in standalone. **Re-scope to the four real gaps.**
+
+### Remaining gaps & decisions
+1. **`error.stack` returns nothing** — no `$stack` field; `err.stack` falls to host `__extern_get` (null standalone).
+2. **User `class MyError extends Error {}` not modeled** — a user subclass is a normal class struct, not `$Error_struct`, so `instanceof Error` + `.message` via `super(msg)` aren't wired through the tag machinery.
+3. **REJECT per-class tags** (issue step 2) — single `__exn(externref)` tag (`registry/imports.ts:116`) + struct `$tag` discrimination is already shipped and simpler. Document.
+4. **DEFER `try_table`/`catch_ref` migration** (issue step 4) — emitter (`emit/binary.ts:1387`) emits legacy `try`/`catch`/`catch_all`/`rethrow`; legacy EH is accepted by current V8/wasmtime. Split to `#1536b`.
+
+### Changes
+- `registry/error-types.ts`: add 4th field `stack:(mut externref)` after `name` (fieldIdx 3; keeps message=1/name=2 indices stable). `emitWasiErrorConstructor`: init `stack = ref.null.extern` (= undefined; `.stack` is non-standard, no normative test262 coverage; real stack-capture needs no Wasm primitive → out of scope).
+- `property-access.ts`: extend the `(wasi||standalone)` Error fast path (1547) with `propName === "stack"` → fieldIdx 3, null-tolerant like message/name.
+- User subclass `instanceof Error` (`identifiers.ts:42` `collectErrorInstanceOfTags`, 1117 block): **(a) preferred** reuse `BUILTIN_TYPE_TAGS["Error"]` as the discriminant for any class transitively `extends Error` (heritage walk); **(b) fallback** standalone-only compile-time heritage check. If it balloons, ship gap #1 + decisions #3/#4 here and split user subclasses to `#1536c`.
+- `super(msg)` propagation (only if subclasses in-scope): route `super(m)` to `struct.set $Error_struct fieldIdx 1` via the class-bodies super-call lowering.
+
+### Edge cases
+`throw "str"`/`throw 42` (already works; `.stack` on non-Error caught value → undefined not trap); `catch(e){throw e}` rethrow (already optimized, exceptions.ts:209-228); nested try/catch/finally (depth bookkeeping handled — do NOT touch); `new Error()` no-arg → `.message === ""` (§20.5.1.1); `error.name = "Custom"` write → `$name` currently immutable, flip to mutable only if a test requires (§20.5.3); AggregateError `.errors` out of scope.
+
+### Scoping / gate
+All gated `ctx.wasi || ctx.standalone`; JS-host unchanged (V8 gives real `.stack`). No new host imports.
+
+### test262 gate
+`built-ins/Error/`, `built-ins/NativeErrors/{TypeError,RangeError,SyntaxError,ReferenceError,EvalError,URIError}/`, `language/statements/{try,throw}/` standalone; `.stack` has no normative coverage — unit-test that reads return undefined without trapping. `tests/issue-1536.test.ts` `{target:"standalone", testRuntime:true}`.

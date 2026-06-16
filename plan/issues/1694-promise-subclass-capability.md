@@ -1,7 +1,7 @@
 ---
 id: 1694
 title: "Promise.any/all/allSettled/race: non-Promise capability `this` + extends-Promise codegen (~50 fails)"
-status: backlog
+status: ready
 created: 2026-05-28
 updated: 2026-06-03
 revalidated: 2026-06-03
@@ -12,7 +12,7 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: promises, subclassing
 goal: spec-completeness
-sprint: Backlog
+sprint: 62
 needs_architect_spec: true
 related: [1368, 1465, 1528, 1116, 1644, 1682, 1596, 1632b]
 ---
