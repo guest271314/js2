@@ -1268,6 +1268,42 @@ jobs:
           pattern: test262-merged-report
           merge-multiple: true
 
+      # #2099 — heal poison-classified rows BEFORE promotion. A phantom
+      # "Binary emit error" (etc.) row from a contaminated sharded worker would
+      # otherwise be copied verbatim into the baseline and carried forward by
+      # every later promotion. Re-run just those rows serially in a clean
+      # in-process compiler; a row that now passes (or fails for a non-poison
+      # reason) replaces the phantom, a row that still trips the poison
+      # signature is left as-is (genuine resource limit, not contamination).
+      # Bounded cost: the poison count is small (acceptance: < 2 min).
+      # Needs pnpm + deps + the test262 submodule (checkout already pulls
+      # submodules recursively above).
+      - name: Setup pnpm via Corepack
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.30.2 --activate
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Heal poison-classified rows (#2099)
+        run: |
+          npx tsx scripts/heal-poison-rows.ts \
+            --in  shard-artifacts/test262-results-merged.jsonl \
+            --out shard-artifacts/test262-results-merged.jsonl
+          npx tsx scripts/heal-poison-rows.ts \
+            --target standalone \
+            --in  shard-artifacts/test262-standalone-results-merged.jsonl \
+            --out shard-artifacts/test262-standalone-results-merged.jsonl
+          # Rebuild the merged report JSONs so their summary counts reflect any
+          # healed rows (the report build derives status counts from the JSONL).
+          node scripts/build-test262-report.mjs \
+            --input  shard-artifacts/test262-results-merged.jsonl \
+            --output shard-artifacts/test262-report-merged.json \
+            --baseline-sha "${{ github.sha }}"
+          node scripts/build-test262-report.mjs \
+            --input  shard-artifacts/test262-standalone-results-merged.jsonl \
+            --output shard-artifacts/test262-standalone-report-merged.json \
+            --baseline-sha "${{ github.sha }}"
+
       - name: Promote merged artifacts to stable baseline
         run: |
           mkdir -p benchmarks/results
