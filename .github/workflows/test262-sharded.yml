@@ -1208,6 +1208,19 @@ jobs:
           path: merged-reports/test262-regressions.txt
           if-no-files-found: warn
 
+      # #1853 — hard-error stability gate. Count malformed-Wasm / missing-
+      # test-export rows in THIS PR's merged results and fail if any kind
+      # exceeds the committed baseline (refreshed on main by promote-baseline).
+      # This is a stability signal distinct from coverage: any growth is a
+      # release-blocking bug, not an unsupported-feature statistic. The general
+      # regression gate above already fails on the underlying pass→compile_error
+      # flips; this surfaces the hard-error bucket explicitly with a pointer.
+      - name: Hard-error stability gate (#1853)
+        if: env.SHARDS_RAN == 'true'
+        run: |
+          node scripts/check-test262-hard-errors.mjs \
+            --jsonl merged-reports/test262-results-merged.jsonl
+
       - name: Fail on regressions
         if: env.SHARDS_RAN == 'true' && steps.regression_diff.outputs.regressions == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.force_baseline_refresh == true && inputs.confirm_force == 'YES')
         run: |
@@ -1595,11 +1608,22 @@ jobs:
           # 2026-05-29 merge-queue drops of #895/#896.
           node scripts/sync-conformance-numbers.mjs || \
             echo "WARN: sync-conformance-numbers failed (non-fatal) — docs may drift"
+          # #1853 — refresh the hard-error stability baseline to the freshly
+          # promoted summary's `hard_errors` count, so main always carries a
+          # matching baseline (PRs can't regenerate the committed summary, so the
+          # gate's useful work is here, post-merge). Growth is surfaced by the
+          # per-PR regression gate (pass→compile_error flips) at PR time; this
+          # records the new ceiling. Non-fatal if the summary lacks the field
+          # (pre-#1853 summaries) — the gate treats absent as zero.
+          node scripts/check-test262-hard-errors.mjs --update || \
+            echo "WARN: hard-error baseline update failed (non-fatal)"
           stage_files() {
             git add -f benchmarks/results/test262-current.json \
               benchmarks/results/test262-report.json \
               public/benchmarks/results/test262-report.json \
               public/benchmarks/results/test262-standalone-report.json
+            # #1853 — hard-error stability baseline, refreshed just above.
+            git add -f scripts/test262-hard-error-baseline.json 2>/dev/null || true
             # #2097 — the standalone high-water mark (raised just above when
             # conformance improved). Staged so the new floor lands atomically
             # with the refreshed summary.
