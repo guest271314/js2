@@ -6004,8 +6004,17 @@ function compileCallExpression(
             }
             return primitiveStringType;
           }
-          if ((ctx.standalone || ctx.wasi) && expr.arguments.length === 1) {
-            const staticStringType = tryEmitJsonStringifyStatic(ctx, fctx, expr.arguments[0]!);
+          if ((ctx.standalone || ctx.wasi) && expr.arguments.length >= 1) {
+            // #2166: thread the optional replacer (must be null/undefined) and
+            // space args so `JSON.stringify(value, null, 2)` produces the
+            // indented form statically instead of refusing.
+            const staticStringType = tryEmitJsonStringifyStatic(
+              ctx,
+              fctx,
+              expr.arguments[0]!,
+              expr.arguments[1],
+              expr.arguments[2],
+            );
             if (staticStringType !== undefined) {
               return staticStringType;
             }
