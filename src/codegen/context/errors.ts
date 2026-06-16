@@ -72,11 +72,7 @@ export function reportError(
  *
  * #1921 — defaults to `severity: "error"` (see {@link reportError}).
  */
-export function reportErrorNoNode(
-  ctx: CodegenContext,
-  message: string,
-  severity: ReportSeverity = "error",
-): void {
+export function reportErrorNoNode(ctx: CodegenContext, message: string, severity: ReportSeverity = "error"): void {
   if (ctx.lastKnownNode) {
     const loc = extractLocation(ctx.lastKnownNode);
     ctx.errors.push({ message, line: loc.line, column: loc.column, severity });
