@@ -171,14 +171,22 @@ async function main(): Promise<void> {
       continue;
     }
 
-    // Heal: replace status/error, drop the stale error_category/signature so
-    // the report build re-derives them. Preserve all other fields.
-    const after: Row = { ...before, status: newStatus };
+    // Heal: replace status/error, drop the stale error/error_category/
+    // error_signature so the report build re-derives them. Build the row by
+    // omitting those keys (no `delete` — biome noDelete) and re-adding error
+    // only when the re-run produced one. JSON.stringify drops undefined keys,
+    // so an absent `error` serializes the same as a deleted one.
+    const {
+      error: _staleError,
+      error_category: _staleCategory,
+      error_signature: _staleSignature,
+      ...rest
+    } = before as Row & { error_category?: unknown; error_signature?: unknown };
+    void _staleError;
+    void _staleCategory;
+    void _staleSignature;
+    const after: Row = { ...rest, status: newStatus, poison_healed: true };
     if (newError) after.error = newError;
-    else delete after.error;
-    delete after.error_category;
-    delete after.error_signature;
-    after.poison_healed = true; // breadcrumb for audit (#2099)
     lines[idx] = JSON.stringify(after);
     healed += 1;
     if (!args.quiet) console.log(`  • ${file}: ${before.status} → ${newStatus} (healed).`);
