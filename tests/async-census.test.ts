@@ -126,15 +126,24 @@ describe("#1936 — awaitIsStaticallyResolved", () => {
 });
 
 describe("#1936 — asyncFnNeedsCps (gated through ASYNC_CPS_ENABLED)", () => {
-  it("the master gate stays OFF until #1796", () => {
-    expect(ASYNC_CPS_ENABLED).toBe(false);
+  it("the master gate is ON (#1796 flipped it)", () => {
+    expect(ASYNC_CPS_ENABLED).toBe(true);
   });
 
-  it("returns false for every shape while the gate is off (current shipped behaviour)", () => {
+  it("returns true for a genuinely-suspending single-tail-await body, false otherwise (#1796)", () => {
+    // `const x = await g(); return x` — `g()` is a non-static call ⇒ real
+    // suspension ⇒ canonical single-tail-await shape ⇒ CPS-lowered.
     const a = firstFn(`async function f() { const x = await g(); return x; }`);
-    expect(asyncFnNeedsCps(a.fn, a.plan)).toBe(false);
+    expect(asyncFnNeedsCps(a.fn, a.plan)).toBe(true);
+    // No await ⇒ await-elidable / sync ⇒ legacy path.
     const b = firstFn(`async function f() { return 1; }`);
     expect(asyncFnNeedsCps(b.fn, b.plan)).toBe(false);
+    // Await present but fully statically resolved ⇒ await-elidable ⇒ legacy path.
+    const c = firstFn(`async function f() { const x = await 1; return x; }`);
+    expect(asyncFnNeedsCps(c.fn, c.plan)).toBe(false);
+    // Two awaits ⇒ outside the single-tail-await shape ⇒ legacy path.
+    const d = firstFn(`async function f() { const x = await g(); const y = await h(); return x + y; }`);
+    expect(asyncFnNeedsCps(d.fn, d.plan)).toBe(false);
   });
 
   it("populates awaitedStaticallyResolved per await point", () => {

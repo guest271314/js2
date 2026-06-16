@@ -19,7 +19,7 @@ import {
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../ir/types.js";
 import { collectShapes } from "../shape-inference.js";
 import { ensureWrapperTypes } from "./any-helpers.js";
-import { ASYNC_CPS_ENABLED, analyzeAsyncBody, splitBodyAtAwait } from "./async-cps.js";
+import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
 import { collectClassDeclaration, compileClassBodies } from "./class-bodies.js";
 import { collectFunctionOwnLocals, collectReferencedIdentifiers } from "./closures.js";
 import { reportError } from "./context/errors.js";
@@ -659,7 +659,12 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     hasAsyncModifier(node)
   ) {
     const plan = analyzeAsyncBody(ctx, node);
-    if (plan.awaitPoints.length === 1 && !plan.hasTryAcrossAwait && splitBodyAtAwait(node, plan) !== null) {
+    // Mirror the function-body.ts activation gate EXACTLY (#1936
+    // `asyncFnNeedsCps`): genuine suspension + single canonical tail-await
+    // shape. Pre-registering imports for a fn that won't actually be CPS-lowered
+    // would add unused imports (harmless) but a mismatch the other way would
+    // re-introduce the late-import shift hazard, so keep the predicates identical.
+    if (asyncFnNeedsCps(node, plan)) {
       state.asyncCpsFound = true;
     }
   }
