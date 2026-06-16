@@ -11,6 +11,12 @@ export interface WasmSection {
   dataSize: number;
   totalSize: number;
   customName?: string | null;
+  /**
+   * For Component Model `core:module` / nested `component` sections, the
+   * recursively-parsed embedded module/component. Its bytes are a complete,
+   * self-contained binary, so the treemap can drill into its sections/functions.
+   */
+  embedded?: WasmData;
 }
 
 interface WasmImport {
@@ -46,6 +52,8 @@ export interface WasmData {
   typeCount: number;
   importFuncCount: number;
   exportNames: Map<number, string>;
+  /** True when the binary is a WebAssembly Component (layer 1), not a core module. */
+  isComponent?: boolean;
 }
 
 interface TreeNode {
@@ -88,6 +96,23 @@ const SECTION_NAMES: Record<number, string> = {
   10: "code",
   11: "data",
   12: "datacount",
+};
+
+// Component Model section ids (binary layer 1). Distinct id space from core modules.
+const COMPONENT_SECTION_NAMES: Record<number, string> = {
+  0: "custom",
+  1: "core:module",
+  2: "core:instance",
+  3: "core:type",
+  4: "component",
+  5: "instance",
+  6: "alias",
+  7: "type",
+  8: "canon",
+  9: "start",
+  10: "import",
+  11: "export",
+  12: "value",
 };
 
 // ─── Fixed section colors ───────────────────────────────────────────────
@@ -208,6 +233,13 @@ export function parseWasm(buffer: ArrayBuffer): WasmData {
   const magic = bytes[0] === 0x00 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d;
   if (!magic) throw new Error("Invalid WASM magic bytes");
 
+  // The 8-byte preamble is magic + version(u16) + layer(u16). Core modules use
+  // layer 0 (`01 00 00 00`); WebAssembly Components use layer 1 (`0d 00 01 00`).
+  // Components have a completely different section-id space, so dispatch early —
+  // otherwise the core parser misreads the component framing as garbage sections.
+  const layer = bytes[6] | (bytes[7] << 8);
+  if (layer === 1) return parseComponent(bytes);
+
   const version = bytes[4] | (bytes[5] << 8) | (bytes[6] << 16) | (bytes[7] << 24);
 
   const result: WasmData = {
@@ -231,6 +263,10 @@ export function parseWasm(buffer: ArrayBuffer): WasmData {
     const { value: sectionSize, next: dataStart } = readU32Leb(bytes, pos);
     const overhead = dataStart - (pos - 1);
     const sectionEnd = dataStart + sectionSize;
+
+    // Guard against truncated/malformed input: a section that runs past EOF or
+    // doesn't advance would otherwise spin or over-read. Stop cleanly instead.
+    if (sectionEnd > bytes.length || sectionEnd <= pos - 1) break;
 
     const sectionName = SECTION_NAMES[sectionId] || `unknown_${sectionId}`;
     const section: WasmSection = {
@@ -401,6 +437,77 @@ export function parseWasm(buffer: ArrayBuffer): WasmData {
     if (exp.kind === "func") {
       result.exportNames.set(exp.index, exp.name);
     }
+  }
+
+  return result;
+}
+
+// ─── Component Model parser ─────────────────────────────────────────────
+//
+// A WebAssembly Component shares the `\0asm` magic with core modules but uses a
+// different section-id space (layer 1). The bulk of a component's bytes live in
+// embedded `core:module` sections, each of which is a complete core module. We
+// walk the top-level component sections and recurse into embedded modules /
+// nested components so the treemap can drill into the real code and data.
+
+export function parseComponent(bytes: Uint8Array): WasmData {
+  const version = bytes[4] | (bytes[5] << 8) | (bytes[6] << 16) | (bytes[7] << 24);
+  const result: WasmData = {
+    fileSize: bytes.length,
+    version,
+    headerSize: 8,
+    sections: [],
+    functionNames: new Map(),
+    imports: [],
+    exports: [],
+    functionBodies: [],
+    typeCount: 0,
+    importFuncCount: 0,
+    exportNames: new Map(),
+    isComponent: true,
+  };
+
+  let pos = 8;
+  while (pos + 1 < bytes.length) {
+    const sectionId = bytes[pos];
+    const { value: sectionSize, next: dataStart } = readU32Leb(bytes, pos + 1);
+    const sectionEnd = dataStart + sectionSize;
+    // Truncated/malformed guard — stop cleanly rather than spin or over-read.
+    if (sectionEnd > bytes.length || sectionEnd <= pos) break;
+
+    const overhead = dataStart - pos;
+    const sectionName = COMPONENT_SECTION_NAMES[sectionId] ?? `unknown_${sectionId}`;
+    const section: WasmSection = {
+      id: sectionId,
+      name: sectionName,
+      offset: pos,
+      headerSize: overhead,
+      dataSize: sectionSize,
+      totalSize: overhead + sectionSize,
+      customName: null,
+    };
+
+    // core:module (1) and nested component (4) payloads are complete binaries —
+    // recurse so their sections/functions become drill-down children.
+    if ((sectionId === 1 || sectionId === 4) && sectionSize >= 8) {
+      try {
+        const sub = bytes.buffer.slice(bytes.byteOffset + dataStart, bytes.byteOffset + sectionEnd);
+        section.embedded = parseWasm(sub as ArrayBuffer);
+      } catch {
+        /* fall back to an opaque leaf if the embedded binary won't parse */
+      }
+    } else if (sectionId === 0) {
+      try {
+        const { value: cname } = readName(bytes, dataStart);
+        section.customName = cname;
+        section.name = `custom:"${cname}"`;
+      } catch {
+        /* best-effort custom-section name */
+      }
+    }
+
+    result.sections.push(section);
+    pos = sectionEnd;
   }
 
   return result;
@@ -1252,15 +1359,16 @@ export class WasmTreemap {
     this.totalFileSize = data.fileSize;
     this.treeRoot = this.viewMode === "functions" ? this.buildFunctionsTree(data) : this.buildSectionsTree(data);
 
-    // Info bar
-    const codeSection = data.sections.find((s) => s.id === 10);
+    // Info bar \u2014 for components, aggregate stats across embedded core modules.
+    const stats = aggregateStats(data);
     this.infoBar.style.display = "flex";
     this.infoBar.textContent = [
-      `${formatSize(data.fileSize)}`,
-      `Code: ${formatSize(codeSection ? codeSection.totalSize : 0)}`,
-      `${data.functionBodies.length} funcs`,
-      `${data.imports.length} imports`,
-      `${data.exports.length} exports`,
+      `${formatSize(data.fileSize)}${data.isComponent ? " (component)" : ""}`,
+      `Code: ${formatSize(stats.codeSize)}`,
+      `${stats.funcs} funcs`,
+      `${stats.imports} imports`,
+      `${stats.exports} exports`,
+      ...(data.isComponent ? [`${stats.modules} core modules`] : []),
     ].join("  \u00b7  ");
 
     this.zoomStack = [];
@@ -1309,13 +1417,25 @@ export class WasmTreemap {
 
     const root = this.makeNode("root", "root");
     root.isRoot = true;
+    root.size = this.addModuleSections(root, data, "");
+    return root;
+  }
+
+  /**
+   * Append a module's header + sections as children of `parent`, recursing into
+   * embedded core modules / nested components. Returns the summed child size
+   * (equal to `data.fileSize`).
+   */
+  private addModuleSections(parent: TreeNode, data: WasmData, prefix: string): number {
+    const path = (name: string) => (prefix ? `${prefix}/${name}` : name);
+    let total = 0;
 
     if (data.headerSize > 0) {
-      const hdr = this.makeNode("header", "header");
+      const hdr = this.makeNode("header", path("header"));
       hdr.size = data.headerSize;
       hdr.isLeaf = true;
-      root.children["header"] = hdr;
-      root.size += data.headerSize;
+      parent.children["header"] = hdr;
+      total += data.headerSize;
       this.assignColor("header");
     }
 
@@ -1323,26 +1443,37 @@ export class WasmTreemap {
       const sName = section.name;
       this.assignColor(sName.split(":")[0].split('"')[0]);
 
-      const sNode = this.makeNode(sName, sName);
+      const sNode = this.makeNode(sName, path(sName));
       sNode.size = section.totalSize;
 
-      if (section.id === 10 && data.functionBodies.length > 0) {
+      if (section.embedded) {
+        // Embedded core module / nested component — drill in. Children sum to
+        // the embedded binary's size; the few framing bytes become overhead.
+        const inner = this.addModuleSections(sNode, section.embedded, sNode.fullPath);
+        const framing = section.totalSize - inner;
+        if (framing > 0) {
+          const oh = this.makeNode("[section overhead]", `${sNode.fullPath}/[overhead]`);
+          oh.size = framing;
+          oh.isLeaf = true;
+          sNode.children["__overhead__"] = oh;
+        }
+      } else if (section.id === 10 && !data.isComponent && data.functionBodies.length > 0) {
         let overhead = section.totalSize;
         for (const body of data.functionBodies) {
           const fname = this.getFunctionName(data, body.index);
-          const fNode = this.makeNode(fname, `${sName}/${fname}`);
+          const fNode = this.makeNode(fname, `${sNode.fullPath}/${fname}`);
           fNode.size = body.totalSize;
           fNode.isLeaf = true;
           sNode.children[`func_${body.index}`] = fNode;
           overhead -= body.totalSize;
         }
         if (overhead > 0) {
-          const oh = this.makeNode("[section overhead]", `${sName}/[overhead]`);
+          const oh = this.makeNode("[section overhead]", `${sNode.fullPath}/[overhead]`);
           oh.size = overhead;
           oh.isLeaf = true;
           sNode.children["__overhead__"] = oh;
         }
-      } else if (section.id === 2 && data.imports.length > 0) {
+      } else if (section.id === 2 && !data.isComponent && data.imports.length > 0) {
         const byModule: Record<string, WasmImport[]> = {};
         for (const imp of data.imports) {
           if (!byModule[imp.module]) byModule[imp.module] = [];
@@ -1351,10 +1482,10 @@ export class WasmTreemap {
         let accounted = 0;
         for (const [mod, imps] of Object.entries(byModule)) {
           this.assignColor(mod);
-          const modNode = this.makeNode(mod, `${sName}/${mod}`);
+          const modNode = this.makeNode(mod, `${sNode.fullPath}/${mod}`);
           for (const imp of imps) {
             const label = `${imp.name} [${imp.kind}]`;
-            const iNode = this.makeNode(label, `${sName}/${mod}/${label}`);
+            const iNode = this.makeNode(label, `${sNode.fullPath}/${mod}/${label}`);
             iNode.size = imp.size || 1;
             iNode.isLeaf = true;
             modNode.children[`imp_${imp.index}_${imp.kind}`] = iNode;
@@ -1365,7 +1496,7 @@ export class WasmTreemap {
         }
         const overhead = section.totalSize - accounted;
         if (overhead > 0) {
-          const oh = this.makeNode("[section overhead]", `${sName}/[overhead]`);
+          const oh = this.makeNode("[section overhead]", `${sNode.fullPath}/[overhead]`);
           oh.size = overhead;
           oh.isLeaf = true;
           sNode.children["__overhead__"] = oh;
@@ -1374,11 +1505,11 @@ export class WasmTreemap {
         sNode.isLeaf = true;
       }
 
-      root.children[`section_${section.id}_${section.offset}`] = sNode;
-      root.size += section.totalSize;
+      parent.children[`section_${section.id}_${section.offset}`] = sNode;
+      total += section.totalSize;
     }
 
-    return root;
+    return total;
   }
 
   private buildFunctionsTree(data: WasmData): TreeNode {
@@ -1390,6 +1521,47 @@ export class WasmTreemap {
     const root = this.makeNode("root", "root");
     root.isRoot = true;
 
+    if (data.isComponent) {
+      this.addComponentFunctions(root, data, "");
+    } else {
+      this.addModuleFunctions(root, data, "");
+    }
+    return root;
+  }
+
+  /** Functions view for a component: one group per embedded core module / nested component. */
+  private addComponentFunctions(parent: TreeNode, data: WasmData, prefix: string): void {
+    const path = (name: string) => (prefix ? `${prefix}/${name}` : name);
+    let moduleIdx = 0;
+    for (const section of data.sections) {
+      if (!section.embedded) continue;
+      const label = section.embedded.isComponent ? "component" : `core:module[${moduleIdx++}]`;
+      const mNode = this.makeNode(label, path(label));
+      this.assignColor(label);
+      if (section.embedded.isComponent) {
+        this.addComponentFunctions(mNode, section.embedded, mNode.fullPath);
+      } else {
+        this.addModuleFunctions(mNode, section.embedded, mNode.fullPath);
+      }
+      if (mNode.size > 0) {
+        parent.children[`module_${section.offset}`] = mNode;
+        parent.size += mNode.size;
+      }
+    }
+    const overhead = data.fileSize - parent.size;
+    if (overhead > 0) {
+      const oh = this.makeNode("[component glue]", path("[glue]"));
+      oh.size = overhead;
+      oh.isLeaf = true;
+      parent.children["__overhead__"] = oh;
+      parent.size += overhead;
+    }
+  }
+
+  /** Functions view for a single core module — grouped by namespace, plus imports & non-code overhead. */
+  private addModuleFunctions(parent: TreeNode, data: WasmData, prefix: string): void {
+    const path = (name: string) => (prefix ? `${prefix}/${name}` : name);
+
     if (data.functionBodies.length > 0) {
       for (const body of data.functionBodies) {
         const globalIdx = data.importFuncCount + body.index;
@@ -1397,61 +1569,59 @@ export class WasmTreemap {
         const isExported = data.exportNames.has(globalIdx);
 
         const parts = name.replace(/^\$/, "").split(/[./:]+/);
-        let parent = root;
+        let node = parent;
         if (parts.length > 1) {
-          let path = "";
+          let p = "";
           for (let i = 0; i < parts.length - 1; i++) {
-            path += (path ? "/" : "") + parts[i];
-            const key = `group_${path}`;
-            if (!parent.children[key]) {
+            p += (p ? "/" : "") + parts[i];
+            const key = `group_${p}`;
+            if (!node.children[key]) {
               this.assignColor(parts[i]);
-              parent.children[key] = this.makeNode(parts[i], path);
+              node.children[key] = this.makeNode(parts[i], path(p));
             }
-            parent.children[key].size += body.totalSize;
-            parent = parent.children[key];
+            node.children[key].size += body.totalSize;
+            node = node.children[key];
           }
         }
 
         const leafName = parts.length > 1 ? parts[parts.length - 1] : name;
         const tag = isExported ? " [export]" : "";
         this.assignColor(name);
-        const fNode = this.makeNode(leafName + tag, name);
+        const fNode = this.makeNode(leafName + tag, path(name));
         fNode.size = body.totalSize;
         fNode.isLeaf = true;
-        parent.children[`func_${body.index}`] = fNode;
-        root.size += body.totalSize;
+        node.children[`func_${body.index}`] = fNode;
+        parent.size += body.totalSize;
       }
     }
 
     if (data.imports.length > 0) {
-      const impNode = this.makeNode("[imports]", "imports");
+      const impNode = this.makeNode("[imports]", path("imports"));
       this.assignColor("import");
       for (const imp of data.imports) {
         if (imp.kind !== "func") continue;
         const label = `${imp.module}::${imp.name}`;
-        const iNode = this.makeNode(label, `imports/${label}`);
+        const iNode = this.makeNode(label, `${impNode.fullPath}/${label}`);
         iNode.size = imp.size || 1;
         iNode.isLeaf = true;
         impNode.children[`imp_${imp.index}`] = iNode;
         impNode.size += iNode.size;
       }
       if (impNode.size > 0) {
-        root.children["__imports__"] = impNode;
-        root.size += impNode.size;
+        parent.children["__imports__"] = impNode;
+        parent.size += impNode.size;
       }
     }
 
     const codeSize = data.functionBodies.reduce((s, b) => s + b.totalSize, 0);
     const overhead = data.fileSize - codeSize;
     if (overhead > 0) {
-      const oh = this.makeNode("[non-code sections]", "overhead");
+      const oh = this.makeNode("[non-code sections]", path("overhead"));
       oh.size = overhead;
       oh.isLeaf = true;
-      root.children["__overhead__"] = oh;
-      root.size += overhead;
+      parent.children["__overhead__"] = oh;
+      parent.size += overhead;
     }
-
-    return root;
   }
 
   // ─── Remainder grouping ───────────────────────────────────────────────
@@ -1888,6 +2058,39 @@ export class WasmTreemap {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
+
+interface ModuleStats {
+  codeSize: number;
+  funcs: number;
+  imports: number;
+  exports: number;
+  modules: number;
+}
+
+/** Aggregate code/function/import/export totals, recursing into embedded modules of a component. */
+function aggregateStats(data: WasmData): ModuleStats {
+  if (!data.isComponent) {
+    const codeSection = data.sections.find((s) => s.id === 10);
+    return {
+      codeSize: codeSection ? codeSection.totalSize : 0,
+      funcs: data.functionBodies.length,
+      imports: data.imports.length,
+      exports: data.exports.length,
+      modules: 0,
+    };
+  }
+  const acc: ModuleStats = { codeSize: 0, funcs: 0, imports: 0, exports: 0, modules: 0 };
+  for (const section of data.sections) {
+    if (!section.embedded) continue;
+    const sub = aggregateStats(section.embedded);
+    acc.codeSize += sub.codeSize;
+    acc.funcs += sub.funcs;
+    acc.imports += sub.imports;
+    acc.exports += sub.exports;
+    acc.modules += section.embedded.isComponent ? sub.modules : 1;
+  }
+  return acc;
+}
 
 function formatSize(bytes: number): string {
   if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " MB";

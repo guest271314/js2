@@ -43,6 +43,11 @@ Options:
   --standalone      Shorthand for --target standalone (pure WasmGC, no JS host,
                     no WASI). Forces nativeStrings: true and refuses to emit
                     wasm:js-string or env JS-host imports.
+  --allocator <a>   Linear backend allocator (#1856): bump (default,
+                    allocate-and-exit arena, smallest binary) or arena-reset
+                    (same arena + __arena_reset/__arena_used exports for hosts
+                    reusing one instance across short-lived tasks). Linear
+                    target only.
   --allow-fs        Allow node:fs JS-host imports (readFileSync, writeFileSync)
                     for non-WASI targets (#1491). Off by default to prevent
                     accidental capability leakage.
@@ -57,8 +62,13 @@ Options:
   --wit             Generate WIT interface file for Component Model
   --wit-package <p> Package name for --wit output (ns:name[@version]).
                     Implies --wit. Defaults to js2wasm:<input-basename>.
-  -O, --optimize    Run Binaryen wasm-opt optimizer (default: -O3)
+  -O, --optimize    Run Binaryen wasm-opt optimizer (on by default at -O3)
   -O1..-O4          Set optimization level (1-4)
+  --no-optimize, -O0
+                    Disable the optimizer; emit raw codegen output. Optimization
+                    is ON by default; this restores the pre-#1950 behaviour.
+                    (No-op when binaryen/wasm-opt is unavailable — that path
+                    already degrades to a one-line note, never a failure.)
   --no-host-imports Strict dual-mode: reject JS-host 'env' imports not on
                     the allowlist (#1524). Implied by --target wasi.
   --allow-host-imports
@@ -94,8 +104,17 @@ const emitWasm = true;
 let emitWat = true;
 let emitDts = true;
 let watOnly = false;
-let optimize: boolean | 1 | 2 | 3 | 4 = false;
+// #1950 — default-on optimization for the CLI. Binaryen wasm-opt does
+// materially valuable, safe work the in-compiler passes don't (small-function
+// inlining, array.len-into-local, post-inline null-check cleanup, dead
+// convert/drop removal). Builds opt in by default at -O3; `--no-optimize`
+// restores raw output. Absence of binaryen/wasm-opt degrades gracefully to a
+// one-line note (optimize.ts), never a failure. The programmatic `compile()`
+// API keeps its opt-out default (no surprise behaviour change for library
+// users) — only the CLI flips.
+let optimize: boolean | 1 | 2 | 3 | 4 = 3;
 let target: "gc" | "linear" | "wasi" | "standalone" | undefined;
+let allocator: "bump" | "arena-reset" | undefined;
 let emitWit = false;
 let witPackageName: string | undefined;
 let allowFs = false;
@@ -121,6 +140,14 @@ for (let i = 0; i < args.length; i++) {
     }
   } else if (arg === "--standalone") {
     target = "standalone";
+  } else if (arg === "--allocator") {
+    const a = args[++i];
+    if (a === "bump" || a === "arena-reset") {
+      allocator = a;
+    } else {
+      console.error(`Unknown allocator: ${a} (expected bump or arena-reset)`);
+      process.exit(1);
+    }
   } else if (arg === "--wat") {
     watOnly = true;
   } else if (arg === "--no-wat") {
@@ -157,6 +184,9 @@ for (let i = 0; i < args.length; i++) {
     strictNoHostImports = false;
   } else if (arg === "-O" || arg === "--optimize") {
     optimize = true;
+  } else if (arg === "--no-optimize" || arg === "-O0") {
+    // #1950 — explicit opt-out of the default-on optimizer.
+    optimize = false;
   } else if (/^-O[1-4]$/.test(arg)) {
     optimize = parseInt(arg.slice(2)) as 1 | 2 | 3 | 4;
   } else if (arg === "--define") {
@@ -210,6 +240,14 @@ if (target === "standalone" && allowFs) {
   process.exit(1);
 }
 
+// #1856 — the bump/arena allocator only exists on the linear backend. The
+// WasmGC targets delegate object lifetime to the host GC, so `--allocator`
+// has nothing to act on there; reject it rather than silently ignore.
+if (allocator !== undefined && target !== "linear") {
+  console.error("error: --allocator requires --target linear");
+  process.exit(1);
+}
+
 const absInput = resolve(inputPath);
 const source = readFileSync(absInput, "utf-8");
 const name = basename(absInput, ".ts");
@@ -218,6 +256,7 @@ const dir = outDir ? resolve(outDir) : dirname(absInput);
 const result = await compile(source, {
   ...(optimize ? { optimize } : {}),
   ...(target ? { target } : {}),
+  ...(allocator ? { allocator } : {}),
   ...(emitWit ? { wit: witPackageName ? { packageName: witPackageName } : true } : {}),
   ...(allowFs ? { allowFs: true } : {}),
   ...(utf8Storage ? { utf8Storage: true } : {}),
@@ -229,7 +268,10 @@ const result = await compile(source, {
 if (!result.success) {
   for (const e of result.errors) {
     const severity = e.severity === "warning" ? "warning" : "error";
-    console.error(`${absInput}:${e.line}:${e.column} - ${severity}: ${e.message}`);
+    // #1929 — prefer the diagnostic's own source file when present (multi-file
+    // compiles report errors from imported files, not just the entry).
+    const where = e.file ?? absInput;
+    console.error(`${where}:${e.line}:${e.column} - ${severity}: ${e.message}`);
   }
   process.exit(1);
 }

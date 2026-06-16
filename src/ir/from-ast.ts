@@ -395,6 +395,31 @@ export function lowerFunctionAstToIr(
   return { main: builder.finish(), lifted };
 }
 
+/**
+ * Does `stmt` unconditionally terminate its control flow (return / throw, or a
+ * block / if-else whose every path does)? Used by the mid-body `if (cond)
+ * <then>; <rest>` rewrite: the "early-return" structural reinterpretation
+ * (`if (cond) <then> else { <rest> }`) is only sound when the then-arm
+ * terminates — otherwise `<rest>` must still run after a true-branch
+ * side effect. (#1979)
+ */
+function thenArmTerminates(stmt: ts.Statement): boolean {
+  if (ts.isReturnStatement(stmt) || ts.isThrowStatement(stmt)) {
+    return true;
+  }
+  if (ts.isBlock(stmt)) {
+    const last = stmt.statements[stmt.statements.length - 1];
+    return last !== undefined && thenArmTerminates(last);
+  }
+  if (ts.isIfStatement(stmt)) {
+    // An `if` terminates only when it has an else and BOTH arms terminate.
+    return (
+      stmt.elseStatement !== undefined && thenArmTerminates(stmt.thenStatement) && thenArmTerminates(stmt.elseStatement)
+    );
+  }
+  return false;
+}
+
 function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void {
   if (stmts.length < 1) {
     throw new Error(`ir/from-ast: empty statement list in ${cx.funcName}`);
@@ -479,16 +504,27 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
     // (lowerTail enforces that); the else-arm opens a reserved block and
     // recursively lowers the remaining statements.
     if (ts.isIfStatement(s) && !s.elseStatement) {
+      // Whether the then-arm unconditionally terminates decides the shape:
+      // a terminating then-arm permits the early-return rewrite
+      // (`if (cond) <tail> else { <rest> }`); a non-terminating one is just a
+      // side-effecting guard and `<rest>` must run afterwards either way. (#1979)
+      const terminates = thenArmTerminates(s.thenStatement);
+
       // #1043: compile-time constant fold. After --define substitution of
       // process.env.NODE_ENV (etc.), the condition may be a literal-vs-literal
       // comparison. Skip the dead arm so dev-only code never reaches codegen.
       const constResult = evaluateConstantCondition(s.expression);
       if (constResult !== undefined) {
         if (constResult) {
-          // Then-arm taken: it must be a tail (returns), so the rest is
-          // unreachable and we stop here.
-          lowerTail(s.thenStatement, { ...cx, scope: new Map(cx.scope) });
-          return;
+          if (terminates) {
+            // Then-arm taken and terminating: the rest is unreachable, stop.
+            lowerTail(s.thenStatement, { ...cx, scope: new Map(cx.scope) });
+            return;
+          }
+          // Then-arm taken but non-terminating: run its side effects, then
+          // fall through to the rest in the same block / scope.
+          lowerStmt(s.thenStatement, { ...cx, scope: new Map(cx.scope) });
+          continue;
         }
         // Then-arm dead: skip it and continue with the remaining statements
         // in the same block / scope.
@@ -499,21 +535,50 @@ function lowerStatementList(stmts: readonly ts.Statement[], cx: LowerCtx): void 
       if (asVal(condType)?.kind !== "i32") {
         throw new Error(`ir/from-ast: if condition must be bool in ${cx.funcName}`);
       }
+      const rest = stmts.slice(i + 1);
+
+      if (terminates) {
+        // Early-return rewrite: `if (cond) <tail> else { <rest> }`.
+        const thenId = cx.builder.reserveBlockId();
+        const elseId = cx.builder.reserveBlockId();
+        cx.builder.terminate({
+          kind: "br_if",
+          condition: cond,
+          ifTrue: { target: thenId, args: [] },
+          ifFalse: { target: elseId, args: [] },
+        });
+
+        cx.builder.openReservedBlock(thenId);
+        lowerTail(s.thenStatement, { ...cx, scope: new Map(cx.scope) });
+
+        cx.builder.openReservedBlock(elseId);
+        lowerStatementList(rest, { ...cx, scope: new Map(cx.scope) });
+        return;
+      }
+
+      // Non-terminating then-arm: emit a converging guard. Both the then-block
+      // (after its side effect) and the false branch fall through to a shared
+      // continuation block holding `<rest>`. (#1979)
       const thenId = cx.builder.reserveBlockId();
-      const elseId = cx.builder.reserveBlockId();
+      const contId = cx.builder.reserveBlockId();
       cx.builder.terminate({
         kind: "br_if",
         condition: cond,
         ifTrue: { target: thenId, args: [] },
-        ifFalse: { target: elseId, args: [] },
+        ifFalse: { target: contId, args: [] },
       });
 
       cx.builder.openReservedBlock(thenId);
-      lowerTail(s.thenStatement, { ...cx, scope: new Map(cx.scope) });
+      lowerStmt(s.thenStatement, { ...cx, scope: new Map(cx.scope) });
+      cx.builder.terminate({ kind: "br", branch: { target: contId, args: [] } });
 
-      cx.builder.openReservedBlock(elseId);
-      const rest = stmts.slice(i + 1);
-      lowerStatementList(rest, { ...cx, scope: new Map(cx.scope) });
+      cx.builder.openReservedBlock(contId);
+      if (rest.length === 0) {
+        // No trailing statements — the function's implicit void return.
+        cx.builder.terminate({ kind: "return", values: [] });
+      } else {
+        lowerStatementList(rest, { ...cx, scope: new Map(cx.scope) });
+      }
       return;
     }
     throw new Error(`ir/from-ast: unexpected statement before tail (got ${ts.SyntaxKind[s.kind]} in ${cx.funcName})`);
@@ -544,18 +609,23 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
     // externref → __gen_push_ref). Same dispatch logic as `lowerYield`
     // except we get a `ts.Expression` already, not a YieldExpression.
     if (cx.funcKind === "generator") {
+      // #2035: a generator's `return <value>` value belongs ONLY to the
+      // terminal `{value, done:true}` IteratorResult — it must NOT be pushed
+      // into the eager yield buffer (where spread / for-of / Array.from would
+      // surface it as a yielded `done:false` element). The legacy return path
+      // (`compileReturnStatement` in `codegen/statements/control-flow.ts`)
+      // routes the value through `__gen_set_return`, which stashes it on the
+      // buffer as a side property for the host drain to emit once with
+      // `done:true`. The IR has no number-box primitive (so it cannot coerce a
+      // numeric return to the `externref` that `__gen_set_return` expects), so
+      // rather than re-emit the buffer-leak bug here we defer any generator
+      // carrying a `return <expr>` to the already-correct legacy path. Bare
+      // `return;` (no value) has nothing to leak and stays on the IR path.
       if (stmt.expression) {
-        const v = lowerExpr(stmt.expression, cx, irVal({ kind: "externref" }));
-        const vt = cx.builder.typeOf(v);
-        const valTy = asVal(vt);
-        if (valTy?.kind === "f64" || valTy?.kind === "i32") {
-          cx.builder.emitGenPush(v);
-        } else {
-          // Reference-shaped — coerce to externref upstream so the
-          // lowerer's `__gen_push_ref` arm sees the right Wasm type.
-          const vExt = coerceYieldValueToExternref(v, cx);
-          cx.builder.emitGenPush(vExt);
-        }
+        throw new Error(
+          `ir/from-ast: generator 'return <value>' must route through __gen_set_return ` +
+            `(needs the number-box helper) — deferring to legacy in ${cx.funcName} (#2035)`,
+        );
       }
       const generatorObj = cx.builder.emitGenEpilogue();
       cx.builder.terminate({ kind: "return", values: [generatorObj] });
@@ -575,7 +645,8 @@ function lowerTail(stmt: ts.Statement, cx: LowerCtx): void {
       throw new Error(`ir/from-ast: Phase 1 return must have an expression in ${cx.funcName}`);
     }
     const v = lowerExpr(stmt.expression, cx, cx.returnType);
-    cx.builder.terminate({ kind: "return", values: [v] });
+    const vCoerced = coerceReturnValue(v, cx);
+    cx.builder.terminate({ kind: "return", values: [vCoerced] });
     return;
   }
   // Slice 14 (#1228) — void function tail: any non-return statement that
@@ -1183,10 +1254,30 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
     return lowerTypeOf(expr, cx);
   }
   if (expr.kind === ts.SyntaxKind.NullKeyword) {
-    // Bare `null` is only valid inside `=== null` / `!== null` (handled by
-    // `tryFoldNullCompare` before we recurse into operands). Reaching here
-    // means the selector accepted a context this slice can't lower.
-    throw new Error(`ir/from-ast: bare 'null' outside === / !== is not supported in slice 1 (${cx.funcName})`);
+    // Bare `null` composes only when the consuming context is reference-
+    // shaped (externref / ref_null), because IR Phase 1 has no nullable
+    // union: a `null` flowing into an f64/i32 hint would mismatch the
+    // consumer's Wasm type at validation. The optional-chaining null arm
+    // and the `??` lowering both pass a reference-shaped hint here.
+    //
+    // `=== null` / `!== null` never reach this branch — `tryFoldNullCompare`
+    // intercepts them before operand recursion (the fold is purely static
+    // because there's no runtime null value to compare against).
+    // The null const's `ty` must be a `val`-kind externref/ref_null so the
+    // lowerer emits `ref.null.extern` / `ref.null T` (see lower.ts "null").
+    // An `extern` className hint is null-compatible at the Wasm level
+    // (opaque externref), so we materialize a plain `externref` null for it.
+    const hintVal = asVal(hint);
+    if (hint.kind === "extern") {
+      const ty = irVal({ kind: "externref" });
+      return cx.builder.emitConst({ kind: "null", ty }, ty);
+    }
+    if (hintVal && (hintVal.kind === "externref" || hintVal.kind === "ref_null")) {
+      return cx.builder.emitConst({ kind: "null", ty: hint }, hint);
+    }
+    throw new Error(
+      `ir/from-ast: bare 'null' in non-reference context (${describeIrType(hint)}) is not supported in IR (${cx.funcName})`,
+    );
   }
   if (ts.isPropertyAccessExpression(expr)) {
     return lowerPropertyAccess(expr, cx);
@@ -1260,7 +1351,7 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
     return lowerPrefixUnary(expr, cx);
   }
   if (ts.isBinaryExpression(expr)) {
-    return lowerBinary(expr, cx);
+    return lowerBinary(expr, cx, hint);
   }
   if (ts.isConditionalExpression(expr)) {
     return lowerConditional(expr, cx);
@@ -2414,8 +2505,24 @@ const STRING_METHOD_TABLE: Readonly<Record<string, StringMethodSig>> = {
     result: irVal({ kind: "f64" }),
     requiredArgs: 1, // fromIndex optional
   },
+  // #2002 — the second arg is the start position (includes/startsWith) or
+  // endPosition (endsWith). Declared as an optional f64 so the IR host path
+  // forwards it to `string_<method>` (whose import signature is now
+  // `(externref, externref, f64) -> i32`). An omitted position pads with NaN;
+  // the `string_method` host shim strips a trailing NaN so the JS method
+  // applies its spec default (0 for includes/startsWith, length for endsWith).
   includes: {
-    hostArgs: [{ kind: "externref" }],
+    hostArgs: [{ kind: "externref" }, { kind: "f64" }],
+    result: irVal({ kind: "i32" }),
+    requiredArgs: 1,
+  },
+  startsWith: {
+    hostArgs: [{ kind: "externref" }, { kind: "f64" }],
+    result: irVal({ kind: "i32" }),
+    requiredArgs: 1,
+  },
+  endsWith: {
+    hostArgs: [{ kind: "externref" }, { kind: "f64" }],
     result: irVal({ kind: "i32" }),
     requiredArgs: 1,
   },
@@ -2437,7 +2544,16 @@ function lowerStringMethodCall(
   }
 
   const useNative = cx.resolver?.nativeStrings?.() === true;
-  if (useNative && (methodName === "indexOf" || methodName === "includes")) {
+  if (
+    useNative &&
+    (methodName === "indexOf" ||
+      methodName === "includes" ||
+      // #2002 — the native string backend lowers the position arg via its
+      // own __str_* helpers (src/codegen/string-ops.ts); defer to the legacy
+      // native path rather than re-implement position handling in the IR.
+      methodName === "startsWith" ||
+      methodName === "endsWith")
+  ) {
     return null;
   }
   const funcName = useNative ? `__str_${methodName}` : `string_${methodName}`;
@@ -2500,6 +2616,18 @@ function lowerStringMethodCall(
       if (methodName === "slice" && i === 1 && expectedHost.kind === "f64") {
         const lenVal = cx.builder.emitStringLen(recv);
         loweredArgs.push(lenVal);
+        continue;
+      }
+      // #2002 — includes/startsWith/endsWith pad an omitted position with NaN.
+      // The `string_method` host shim strips a trailing NaN so the JS method
+      // applies its spec default (0 for includes/startsWith, length for
+      // endsWith) instead of ToInteger(NaN)=0.
+      if (
+        expectedHost.kind === "f64" &&
+        (methodName === "includes" || methodName === "startsWith" || methodName === "endsWith")
+      ) {
+        const nan = cx.builder.emitConst({ kind: "f64", value: NaN }, irVal({ kind: "f64" }));
+        loweredArgs.push(nan);
         continue;
       }
       const def = emitDefaultExternArg(cx, expectedHost);
@@ -2721,6 +2849,65 @@ function coerceYieldValueToExternref(value: IrValueId, cx: LowerCtx): IrValueId 
 }
 
 /**
+ * #1798 — reconcile a lowered return value with the function's declared
+ * result type before terminating with `return`.
+ *
+ * The return expression is lowered with `cx.returnType` as an *advisory*
+ * hint, but several expression kinds honestly produce their concrete type
+ * regardless of the hint (most notably `new C()` → `IrType.class` (struct
+ * ref), object literals → struct ref). When the function declares `: any`
+ * (which `resolvePositionType` maps to `externref`, see
+ * `src/codegen/index.ts:438`), a `(ref $C) → externref` mismatch would reach
+ * `return` and the emitted body fails Wasm validation
+ * (`return[0] expected externref, got (ref null N)`).
+ *
+ * The legacy return path (`compileReturnStatement` →
+ * `coerceType(exprType, fctx.returnType)`) coerces here; the IR return-tail
+ * previously did not. This mirrors that coercion for the externref case:
+ *
+ *   - Declared result is `externref` and the value is reference-shaped
+ *     (class / object / closure / vec ref / ref_null / native-string) →
+ *     coerce via `coerceYieldValueToExternref` (`extern.convert_any`). This
+ *     is a zero-cost re-tag valid for any anyref subtype, agnostic to the
+ *     exact struct typeIdx (so type compaction cannot break it).
+ *   - Declared result is `externref` but the value is a native scalar
+ *     (`f64` / `i32`) → throw a clean "not in slice" fallback. Boxing a
+ *     number to externref needs `__box_number`; the IR has no box primitive
+ *     yet, and the legacy path boxes correctly. Deferring mirrors the
+ *     existing numeric-throw deferral in `lowerThrowStatement`.
+ *
+ * All other cases (matching kinds, already-externref values, non-externref
+ * declared results) pass through unchanged.
+ */
+function coerceReturnValue(value: IrValueId, cx: LowerCtx): IrValueId {
+  const declared = cx.returnType;
+  // Only the externref (TS `any`) declared-result case can mismatch here;
+  // native scalar / matching-ref returns already line up via the hint.
+  if (!declared || declared.kind !== "val" || declared.val.kind !== "externref") {
+    return value;
+  }
+  const actual = cx.builder.typeOf(value);
+  // Already externref — nothing to do.
+  if (actual.kind === "val" && actual.val.kind === "externref") {
+    return value;
+  }
+  // Native scalar → externref needs a number-box helper the IR lacks; defer
+  // the whole function to legacy (which boxes via __box_number).
+  const actualVal = asVal(actual);
+  if (actualVal && (actualVal.kind === "f64" || actualVal.kind === "i32" || actualVal.kind === "i64")) {
+    throw new Error(
+      `ir/from-ast: return of numeric ${actualVal.kind} into an 'any' (externref) result ` +
+        `needs the box helper — deferring to legacy in ${cx.funcName}`,
+    );
+  }
+  // Reference-shaped (class / object / closure / vec ref / ref_null /
+  // native-string) → extern.convert_any. `coerceYieldValueToExternref` is a
+  // no-op for host-strings (already externref) and re-tags all anyref
+  // subtypes otherwise.
+  return coerceYieldValueToExternref(value, cx);
+}
+
+/**
  * Lower a `for (const|let <id> of <expr>) <body>` statement using the
  * vec fast path. The iterable expression must lower to an IR value
  * whose ValType is `(ref $vec_*)` or `(ref_null $vec_*)`. The vec's
@@ -2816,12 +3003,23 @@ function lowerForOfStatement(stmt: ts.ForOfStatement, cx: LowerCtx): void {
  * through `slot.read` / `slot.write` and survive the loop.
  */
 function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
+  // Capture the value id `lowerExpr` returns rather than the cond buffer's
+  // last instruction result — the latter is fragile (e.g. a trailing store
+  // produces no value). (#1980)
+  let condResult: number | null = null;
   const condInstrs = cx.builder.collectBodyInstrs(() => {
-    lowerExpr(stmt.expression, cx, irVal({ kind: "i32" }));
+    condResult = lowerExpr(stmt.expression, cx, irVal({ kind: "i32" }));
   });
-  const condResult = condInstrs[condInstrs.length - 1]?.result;
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: while cond produced no SSA value (${cx.funcName})`);
+  }
+  // `if`/ternary throw a clean fallback when the condition isn't already an
+  // i32 bool; loops skipped that check and the lowerer's unconditional
+  // `i32.eqz` then emitted invalid Wasm (e.g. a numeric-truthiness `while (k)`
+  // with an f64 `k`). Throw the same fallback so the legacy path handles
+  // ToBoolean lowering until the IR grows its own. (#1980)
+  if (asVal(cx.builder.typeOf(condResult))?.kind !== "i32") {
+    throw new Error(`ir/from-ast: while condition must be bool in ${cx.funcName}`);
   }
   const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
   const bodyInstrs = cx.builder.collectBodyInstrs(() => {
@@ -2865,12 +3063,20 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   }
 
   // 2. Cond — collect its IR into a buffer.
+  // Capture the value id `lowerExpr` returns rather than the buffer's last
+  // instruction result (fragile — see #1980).
+  let condResult: number | null = null;
   const condInstrs = innerCx.builder.collectBodyInstrs(() => {
-    lowerExpr(stmt.condition!, innerCx, irVal({ kind: "i32" }));
+    condResult = lowerExpr(stmt.condition!, innerCx, irVal({ kind: "i32" }));
   });
-  const condResult = condInstrs[condInstrs.length - 1]?.result;
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: for cond produced no SSA value (${cx.funcName})`);
+  }
+  // Same i32-bool fallback as `if`/ternary — a numeric-truthiness `for` cond
+  // (e.g. `for (...; k; ...)` with f64 `k`) otherwise reaches the lowerer's
+  // unconditional `i32.eqz` and emits invalid Wasm. (#1980)
+  if (asVal(innerCx.builder.typeOf(condResult))?.kind !== "i32") {
+    throw new Error(`ir/from-ast: for condition must be bool in ${cx.funcName}`);
   }
 
   // 3. Body — collect into a buffer.
@@ -3387,10 +3593,28 @@ function lowerConditional(expr: ts.ConditionalExpression, cx: LowerCtx): IrValue
   if (asVal(condType)?.kind !== "i32") {
     throw new Error(`ir/from-ast: ternary condition must be bool in ${cx.funcName}`);
   }
-  const whenTrue = lowerExpr(expr.whenTrue, cx, irVal({ kind: "f64" }));
-  const whenFalse = lowerExpr(expr.whenFalse, cx, irVal({ kind: "f64" }));
+
+  // #1820 — short-circuit semantics: only the selected arm may run. A prior
+  // implementation lowered both arms eagerly and combined them with Wasm
+  // `select`, which evaluates BOTH operands. That is fine for pure arms but
+  // wrong when an arm has side effects or recurses (e.g.
+  // `n <= 1 ? 1 : n * fact(n - 1)` recursed at the base case → non-termination).
+  // Lower each arm into its own body buffer and combine with `IrInstrIf`, so
+  // the lowerer emits a structured `if`/`else` that runs exactly one arm.
+  let whenTrue!: IrValueId;
+  const thenBody = cx.builder.collectBodyInstrs(() => {
+    whenTrue = lowerExpr(expr.whenTrue, cx, irVal({ kind: "f64" }));
+  });
   const ttype = cx.builder.typeOf(whenTrue);
+
+  // Hint the false arm with the true arm's type so both land on the same
+  // carrier (matches the `lowerNullish` convention).
+  let whenFalse!: IrValueId;
+  const elseBody = cx.builder.collectBodyInstrs(() => {
+    whenFalse = lowerExpr(expr.whenFalse, cx, ttype);
+  });
   const ftype = cx.builder.typeOf(whenFalse);
+
   const tVal = asVal(ttype);
   const fVal = asVal(ftype);
   if (!tVal || !fVal || tVal.kind !== fVal.kind) {
@@ -3398,7 +3622,15 @@ function lowerConditional(expr: ts.ConditionalExpression, cx: LowerCtx): IrValue
       `ir/from-ast: ternary branches have different types (${describeIrType(ttype)} vs ${describeIrType(ftype)}) in ${cx.funcName}`,
     );
   }
-  return cx.builder.emitSelect(cond, whenTrue, whenFalse, ttype);
+
+  return cx.builder.emitIfElse({
+    cond,
+    then: thenBody,
+    thenValue: whenTrue,
+    else: elseBody,
+    elseValue: whenFalse,
+    resultType: ttype,
+  });
 }
 
 function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValueId {
@@ -3430,8 +3662,28 @@ function lowerPrefixUnary(expr: ts.PrefixUnaryExpression, cx: LowerCtx): IrValue
   }
 }
 
-function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
+function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrValueId {
   const op = expr.operatorToken.kind;
+
+  // `??` nullish coalescing — IR-native short-circuit over a reference-
+  // shaped lhs (`lhs ?? rhs`). Handled before the slice-11 early-throw
+  // because, unlike `%` / `**` / `in` / `instanceof`, it has a lowering
+  // when both arms are the same reference type. `lowerNullish` throws
+  // clean fallback for non-reference / mismatched-type operands.
+  if (op === ts.SyntaxKind.QuestionQuestionToken) {
+    return lowerNullish(expr, cx, hint);
+  }
+
+  // #1820 — `&&` / `||` short-circuit. A prior implementation lowered both
+  // operands eagerly and combined them with `i32.and` / `i32.or`, which
+  // evaluates the right operand unconditionally — losing JS short-circuit
+  // semantics (e.g. `guard && risky()` ran `risky()` even when `guard` was
+  // false). Lower the right operand into its own body buffer and combine with
+  // `IrInstrIf` so it runs only on the branch that needs it. Handled before
+  // the eager operand lowering below, like `??`.
+  if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
+    return lowerLogicalAndOr(expr, op, cx);
+  }
 
   // Slice 11 (#1169n) — early fallback for ops the selector accepts
   // shape-only but the lowerer doesn't yet implement. Throwing BEFORE
@@ -3440,7 +3692,6 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
   if (
     op === ts.SyntaxKind.PercentToken ||
     op === ts.SyntaxKind.AsteriskAsteriskToken ||
-    op === ts.SyntaxKind.QuestionQuestionToken ||
     op === ts.SyntaxKind.InKeyword ||
     op === ts.SyntaxKind.InstanceOfKeyword
   ) {
@@ -3581,16 +3832,9 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
       binop = isF64 ? "f64.ne" : "i32.ne";
       resultType = irVal({ kind: "i32" });
       break;
-    case ts.SyntaxKind.AmpersandAmpersandToken:
-      requireI32(isI32, "&&", cx.funcName);
-      binop = "i32.and";
-      resultType = irVal({ kind: "i32" });
-      break;
-    case ts.SyntaxKind.BarBarToken:
-      requireI32(isI32, "||", cx.funcName);
-      binop = "i32.or";
-      resultType = irVal({ kind: "i32" });
-      break;
+    // `&&` / `||` are intercepted at the top of `lowerBinary` (#1820) and
+    // lowered to a short-circuiting `IrInstrIf` before the eager operand
+    // lowering above — they never reach this switch.
     // Slice 11 (#1169n) — bitwise ops on f64 operands. Each lowers to
     // ToInt32 + i32 op + convert back; the lowerer's `case "binary"`
     // arm dispatches on the `js.*` prefix to emit the multi-instr
@@ -3637,9 +3881,9 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
       binop = "js.shr_u";
       resultType = irVal({ kind: "f64" });
       break;
-    // Slice 11 (#1169n) — `%`, `**`, `??`, `in`, `instanceof` are
-    // intercepted by the early-fallback check at the top of
-    // `lowerBinary`; if any reach here the early-throw is missing.
+    // Slice 11 (#1169n) — `%`, `**`, `in`, `instanceof` are intercepted by
+    // the early-fallback check at the top of `lowerBinary`; `??` is handled
+    // by `lowerNullish`. If any reach here the early-dispatch is missing.
     default:
       throw new Error(`ir/from-ast: unsupported binary operator ${ts.tokenToString(op)} in ${cx.funcName}`);
   }
@@ -3647,12 +3891,136 @@ function lowerBinary(expr: ts.BinaryExpression, cx: LowerCtx): IrValueId {
   return cx.builder.emitBinary(binop, lhs, rhs, resultType);
 }
 
-function requireF64(isF64: boolean, op: string, fn: string): void {
-  if (!isF64) throw new Error(`ir/from-ast: operator '${op}' requires number operands in ${fn}`);
+/**
+ * Lower `lhs ?? rhs` (nullish coalescing) IR-natively.
+ *
+ * Semantics: evaluate `lhs`; if it is `null` OR `undefined`, the result is
+ * `rhs`, else `lhs`. IR Phase 1 has no nullable-union ValType, so the only
+ * representation that can carry "a value that might be null" is a Wasm
+ * reference (externref / ref_null). We therefore lower only when:
+ *   - `lhs` lowers to a reference-shaped IrType (extern / externref / ref_null),
+ *     so `ref.is_null` is a valid test; and
+ *   - `rhs` lowers to the SAME reference type, so both `emitIfElse` arms agree
+ *     on the carrier Wasm type (no union to widen into).
+ *
+ * Anything else (numeric/string lhs, mismatched arm types) throws clean
+ * fallback to legacy — exactly like the optional-chaining null-arm guard in
+ * `lowerOptionalExternPropertyAccess`.
+ *
+ * Note on `undefined`: a reference-shaped lhs that is JS-`undefined` is
+ * represented at the Wasm level as a null externref (the host shim maps
+ * `undefined ↔ ref.null.extern`), so the single `ref.is_null` test covers
+ * both the `null` and `undefined` cases the spec requires.
+ */
+function lowerNullish(expr: ts.BinaryExpression, cx: LowerCtx, hint: IrType): IrValueId {
+  // Lower the lhs with the caller's hint so a reference-shaped consumer
+  // (e.g. an externref slot / return) propagates the right carrier type.
+  const lhs = lowerExpr(expr.left, cx, hint);
+  const lhsType = cx.builder.typeOf(lhs);
+  const lhsVal = asVal(lhsType);
+  const lhsIsRef =
+    lhsType.kind === "extern" || (lhsVal !== null && (lhsVal.kind === "externref" || lhsVal.kind === "ref_null"));
+  if (!lhsIsRef) {
+    throw new Error(
+      `ir/from-ast: '??' on non-reference lhs (${describeIrType(lhsType)}) is not supported in IR (${cx.funcName})`,
+    );
+  }
+
+  // The result carrier type is the lhs reference type. Both arms must land
+  // on it: the rhs is lowered with `lhsType` as its hint and must agree.
+  const resultType: IrType = lhsType;
+
+  const cond = cx.builder.emitRefIsNull(lhs);
+
+  // then-arm (lhs IS null/undefined) → evaluate and yield rhs.
+  let thenValue!: IrValueId;
+  const thenBody = cx.builder.collectBodyInstrs(() => {
+    thenValue = lowerExpr(expr.right, cx, resultType);
+  });
+  const rhsType = cx.builder.typeOf(thenValue);
+  if (!irTypeEquals(rhsType, resultType)) {
+    throw new Error(
+      `ir/from-ast: '??' arm type mismatch (lhs ${describeIrType(resultType)} vs rhs ${describeIrType(rhsType)}) is not supported in IR (${cx.funcName})`,
+    );
+  }
+
+  // else-arm (lhs is non-null) → yield `lhs` directly. The lowerer records
+  // `elseValue` as a cross-block use (lower.ts:479 `recordUse(elseValue, -1)`)
+  // so the outer `lhs` SSA value is pre-materialized into a Wasm local before
+  // the `if`, and the empty else arm just `local.get`s it as its carrier.
+  return cx.builder.emitIfElse({
+    cond,
+    then: thenBody,
+    thenValue,
+    else: [],
+    elseValue: lhs,
+    resultType,
+  });
 }
 
-function requireI32(isI32: boolean, op: string, fn: string): void {
-  if (!isI32) throw new Error(`ir/from-ast: operator '${op}' requires bool operands in ${fn}`);
+/**
+ * #1820 — short-circuiting lowering for `&&` / `||`.
+ *
+ * The previous lowering eagerly evaluated both operands and combined them with
+ * `i32.and` / `i32.or`, running the right operand unconditionally. JS requires
+ * the right operand to be evaluated only when the left does not already decide
+ * the result:
+ *   - `a && b` → if `a` is truthy yield `b`, else yield `a` (the falsy value).
+ *   - `a || b` → if `a` is truthy yield `a`, else yield `b`.
+ *
+ * We keep the existing IR scope (both operands `i32`/bool); anything else
+ * throws clean fallback to legacy, exactly as the old `requireI32` did. The
+ * right operand is lowered into its own body buffer (only the taken branch
+ * runs it) and the two arms are combined with a structured `IrInstrIf`.
+ */
+function lowerLogicalAndOr(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: LowerCtx): IrValueId {
+  const isAnd = op === ts.SyntaxKind.AmpersandAmpersandToken;
+  const opName = isAnd ? "&&" : "||";
+
+  const lhs = lowerExpr(expr.left, cx, irVal({ kind: "i32" }));
+  const lhsType = cx.builder.typeOf(lhs);
+  if (asVal(lhsType)?.kind !== "i32") {
+    throw new Error(`ir/from-ast: operator '${opName}' requires bool operands in ${cx.funcName}`);
+  }
+
+  const resultType: IrType = irVal({ kind: "i32" });
+
+  // Lower the right operand into its own buffer so it executes only on the
+  // branch that needs it.
+  let rhs!: IrValueId;
+  const rhsBody = cx.builder.collectBodyInstrs(() => {
+    rhs = lowerExpr(expr.right, cx, resultType);
+  });
+  if (asVal(cx.builder.typeOf(rhs))?.kind !== "i32") {
+    throw new Error(`ir/from-ast: operator '${opName}' requires bool operands in ${cx.funcName}`);
+  }
+
+  // `cond = lhs`. For `&&`, the rhs is the then-arm (lhs truthy) and lhs is the
+  // else-arm value. For `||`, lhs is the then-arm value and rhs is the
+  // else-arm. The empty arm yields the already-materialized `lhs` (the lowerer
+  // records it as a cross-block use, like `lowerNullish`'s else arm).
+  if (isAnd) {
+    return cx.builder.emitIfElse({
+      cond: lhs,
+      then: rhsBody,
+      thenValue: rhs,
+      else: [],
+      elseValue: lhs,
+      resultType,
+    });
+  }
+  return cx.builder.emitIfElse({
+    cond: lhs,
+    then: [],
+    thenValue: lhs,
+    else: rhsBody,
+    elseValue: rhs,
+    resultType,
+  });
+}
+
+function requireF64(isF64: boolean, op: string, fn: string): void {
+  if (!isF64) throw new Error(`ir/from-ast: operator '${op}' requires number operands in ${fn}`);
 }
 
 function typeOfValue(v: IrValueId, cx: LowerCtx): IrType {
@@ -3705,6 +4073,18 @@ function tryFoldNullCompare(expr: ts.BinaryExpression, op: ts.SyntaxKind, cx: Lo
   // `ref.is_null` check on the receiver. (TODO follow-up: emit
   // `ref.is_null` directly from the IR.)
   if (otherType.kind === "extern") return null;
+  // #1981: `class`, `object`, and `closure` IrTypes lower to nullable WasmGC
+  // ref shapes (`(ref null $Struct)`). A class/object/closure-typed value can
+  // be `null` at runtime (e.g. a host call passing `null` for a class-typed
+  // parameter), so the defensive `=== null` / `!== null` guard must NOT be
+  // folded to a constant — folding it deletes the guard, which either returns
+  // the wrong value (`=== null` → false) or dereferences null (`!== null` →
+  // true, then `p.v` traps). Bail so the caller falls back to legacy, which
+  // emits a runtime `ref.is_null` check. The slice-1 fold is only sound for
+  // statically non-nullable kinds.
+  if (otherType.kind === "class" || otherType.kind === "object" || otherType.kind === "closure") {
+    return null;
+  }
   // Slice 10 (#1169i): a `val { externref }` operand is similarly
   // nullable. Functions that compare externref-typed values against
   // null (e.g. through extern.call results assigned to a local) need

@@ -6,9 +6,11 @@ import { ts, forEachChild } from "../../ts-api.js";
 import { isBooleanType, isExternalDeclaredClass, isStringType } from "../../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 import { emitBoundsCheckedArrayGet, resolveArrayInfo } from "../array-methods.js";
-import { emitModulo, emitToInt32 } from "../binary-ops.js";
+import { tryEmitLinearU8ElementSet } from "../linear-uint8-codegen.js";
+import { emitAnyAdd, emitModulo, emitToInt32 } from "../binary-ops.js";
 import { pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
+import { reportSilentFallback } from "../fallback-telemetry.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
@@ -26,11 +28,18 @@ import {
 } from "../index.js";
 import { buildDestructureNullThrow, patternIteratorStepCount } from "../destructuring-params.js";
 import { resolveComputedKeyExpression } from "../literals.js";
-import { emitNullGuardedStructGet, isProvablyNonNull, isSafeBoundsEliminated } from "../property-access.js";
+import {
+  emitNullGuardedStructGet,
+  isProvablyNonNull,
+  isSafeBoundsEliminated,
+  typeErrorThrowInstrs,
+} from "../property-access.js";
 import type { InnerResult } from "../shared.js";
-import { coerceType, compileExpression, valTypesMatch } from "../shared.js";
+import { coerceType, compileExpression, skipTransparentExpressions, valTypesMatch } from "../shared.js";
 import { compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { findExternInfoForMember, patchStructNewForDynamicField } from "./extern.js";
+import { reserveAccessorSetDriver } from "../accessor-driver.js";
+import { S5C_STRUCT_ACCESSOR_CLOSURE } from "../struct-accessor-closure.js";
 import {
   arrayIteratorOverrideGlobalIdx,
   emitArrayProtoIteratorDrive,
@@ -54,6 +63,7 @@ import {
 } from "./late-imports.js";
 import { emitMappedArgParamSync, emitMappedArgReverseSync } from "./logical-ops.js";
 import { resolveStructName, resolveStructNameForExpr } from "./misc.js";
+import { tryCompileStandaloneRegExpLastIndexWrite } from "../regexp-standalone.js";
 import { resolveEffectiveStructName } from "../property-access.js";
 import {
   compileStringBuilderAppend,
@@ -562,17 +572,17 @@ function compileDestructuringAssignment(
     // property, because the no-struct-fields path returned early without
     // touching any of the target identifiers.
     if (resultType.kind === "externref") {
-      let getIdx = ctx.funcMap.get("__extern_get");
-      if (getIdx === undefined) {
-        const importsBefore = ctx.numImportFuncs;
-        const getType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-        addImport(ctx, "env", "__extern_get", { kind: "func", typeIdx: getType });
-        shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-        getIdx = ctx.funcMap.get("__extern_get");
-      }
+      // (#1866) Route `__extern_get` through `ensureLateImport` rather than a raw
+      // `addImport("env", …)`: under `--target standalone` that re-routes to the
+      // Wasm-native object-runtime impl (no `env::__extern_get` host import), so
+      // the module instantiates under wasmtime; in JS-host mode it adds the host
+      // import as before. A raw addImport leaks an undefined `env::__extern_get`
+      // that breaks the zero-JS-host guarantee.
+      ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+      flushLateImportShifts(ctx, fctx);
       const undefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
       flushLateImportShifts(ctx, fctx);
-      getIdx = ctx.funcMap.get("__extern_get");
+      const getIdx = ctx.funcMap.get("__extern_get");
 
       if (getIdx !== undefined && undefIdx !== undefined) {
         for (const prop of target.properties) {
@@ -867,7 +877,10 @@ function compileDestructuringAssignment(
       }
       if (!propName) continue; // truly unresolvable property name — skip
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(ctx, "lookup-miss-skip", "assignment:destructure-assign-property-field-miss", prop);
+        continue;
+      }
       const fieldType = fields[fieldIdx]!.type;
 
       // Determine the target and optional default value
@@ -1217,8 +1230,13 @@ function compileArrayDestructuringAssignment(
     // the primitive via __box_number and recursed; the lenient runtime then
     // silently produced an empty array. Drop the value and throw directly.
     if (resultType.kind === "f64" || resultType.kind === "i32") {
+      // #846: emit a REAL TypeError instance (not a bare string) so the
+      // test262 `assert.throws(TypeError, …)` callbacks — which check
+      // `e instanceof TypeError` inside the compiled program — observe the
+      // correct error type. `emitThrowString` produced an opaque
+      // string-payload exception that failed the instanceof check.
       fctx.body.push({ op: "drop" });
-      emitThrowString(ctx, fctx, "TypeError: value is not iterable");
+      emitThrowTypeError(ctx, fctx, "value is not iterable");
       fctx.body.push({ op: "ref.null.extern" } as Instr);
       return { kind: "externref" };
     }
@@ -1576,15 +1594,12 @@ function compileExternrefArrayDestructuringAssignment(
     }
   }
 
-  // Ensure __extern_get is available
+  // Ensure __extern_get is available (#1866: ensureLateImport routes to the
+  // native object-runtime impl under --target standalone — no leaked
+  // `env::__extern_get` host import — and to the host import in JS-host mode).
+  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
   let getIdx = ctx.funcMap.get("__extern_get");
-  if (getIdx === undefined) {
-    const importsBefore = ctx.numImportFuncs;
-    const getType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__extern_get", { kind: "func", typeIdx: getType });
-    shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-    getIdx = ctx.funcMap.get("__extern_get");
-  }
   if (getIdx === undefined) return null;
 
   // Ensure __box_number is available (needed to convert index to externref)
@@ -1797,7 +1812,10 @@ function emitAssignToTarget(
       const idxResult = compileExpression(ctx, fctx, target.argumentExpression);
       if (!idxResult) return;
       if (idxResult.kind === "f64") {
-        fctx.body.push({ op: "i32.trunc_f64_s" } as Instr);
+        // Saturating truncation: NaN/Infinity/out-of-range indices clamp
+        // instead of trapping the module. Matches every other index/length
+        // conversion in this file (#1834).
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
       }
       const idxTmp = allocLocal(fctx, `__dstr_idx_${fctx.locals.length}`, {
         kind: "i32",
@@ -1867,7 +1885,10 @@ function emitObjectDestructureFromLocal(
     if (ts.isShorthandPropertyAssignment(prop)) {
       const propName = prop.name.text;
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(ctx, "lookup-miss-skip", "assignment:object-destructure-shorthand-field-miss", prop);
+        continue;
+      }
 
       let localIdx = fctx.localMap.get(propName);
       if (localIdx === undefined) {
@@ -1896,7 +1917,15 @@ function emitObjectDestructureFromLocal(
       }
       if (!propName) continue; // truly unresolvable property name — skip
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(
+          ctx,
+          "lookup-miss-skip",
+          "assignment:object-destructure-from-local-property-field-miss",
+          prop,
+        );
+        continue;
+      }
       const fieldType = fields[fieldIdx]!.type;
 
       const targetExpr = prop.initializer;
@@ -2172,6 +2201,14 @@ function compilePropertyAssignment(
     }
   }
 
+  // #1914 — `re.lastIndex = v` on a standalone RegExp receiver. Must run
+  // BEFORE the extern-class setter path, which would otherwise emit an
+  // `env.RegExp_set_lastIndex` host import (a standalone purity leak).
+  {
+    const standaloneLastIndexWrite = tryCompileStandaloneRegExpLastIndexWrite(ctx, fctx, target, value);
+    if (standaloneLastIndexWrite !== undefined) return standaloneLastIndexWrite;
+  }
+
   // Compile-away: if the target object is frozen, emit TypeError throw
   if (ts.isIdentifier(target.expression) && ctx.frozenVars.has(target.expression.text)) {
     // Evaluate RHS for side effects, then throw
@@ -2209,7 +2246,7 @@ function compilePropertyAssignment(
   // the generic struct-write path, which silently drops the write because
   // `this` is the class constructor (not a per-instance struct).
   if (
-    target.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    skipTransparentExpressions(target.expression).kind === ts.SyntaxKind.ThisKeyword &&
     (fctx.localMap.get("this") === undefined || fctx.isStaticContext)
   ) {
     let enclosingClass: string | undefined = fctx.enclosingClassName;
@@ -2297,7 +2334,10 @@ function compilePropertyAssignment(
       // Convert f64 to i32 if needed
       const newLenTmp = allocLocal(fctx, `__arr_len_set_nl_${fctx.locals.length}`, { kind: "i32" });
       if (valType.kind === "f64") {
-        fctx.body.push({ op: "i32.trunc_f64_s" as any });
+        // Saturating truncation: NaN/Infinity/out-of-range lengths clamp
+        // instead of trapping the module. Matches every other length
+        // conversion in this file (#1834).
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" as any });
       }
       fctx.body.push({ op: "local.set", index: newLenTmp });
       // Set vec.length = newLen
@@ -2323,9 +2363,73 @@ function compilePropertyAssignment(
   // Check for setter accessor on user-defined classes
   const fieldName = ts.isPrivateIdentifier(target.name) ? "__priv_" + target.name.text.slice(1) : target.name.text;
   const accessorKey = `${typeName}_${fieldName}`;
+  // (#1888 S5c / C4) Migrated struct accessor → route the write through the
+  // host-free setter closure (per-(struct,prop) global + shared S5b
+  // __call_accessor_set driver) so a setter that mutates an outer-scope capture
+  // observes it. __call_accessor_set(recv, setter, value): recv = the struct
+  // instance boxed to externref (threaded as `this` via __current_this); the
+  // setter's return is DISCARDED by the driver (§10.1.5.3 [[Set]]); the
+  // assignment expression evaluates to the RHS, not the setter result. The
+  // closure globals only exist for Object.defineProperty(o,…)/objlit receivers
+  // (always a struct instance), so the proto/class-object dummy path is not a
+  // concern here.
+  const closureAccSet =
+    S5C_STRUCT_ACCESSOR_CLOSURE && ctx.standalone ? ctx.structAccessorClosure.get(accessorKey)?.setGlobal : undefined;
+  if (closureAccSet !== undefined) {
+    // recv: struct instance → externref
+    const recvResult = compileExpression(ctx, fctx, target.expression);
+    if (!recvResult) {
+      reportError(ctx, target, "Failed to compile setter receiver");
+      return null;
+    }
+    if (recvResult.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    }
+    // setter closure (externref)
+    fctx.body.push({ op: "global.get", index: closureAccSet });
+    // value: compile in its natural type, save for the assignment result, then
+    // box a copy to externref for the driver's `value` arg.
+    const valResult = compileExpression(ctx, fctx, value);
+    if (!valResult) {
+      reportError(ctx, target, "Failed to compile setter value");
+      return null;
+    }
+    const valTmp = allocLocal(fctx, `__acc_set_val_${fctx.locals.length}`, valResult);
+    fctx.body.push({ op: "local.tee", index: valTmp });
+    if (valResult.kind !== "externref") {
+      coerceType(ctx, fctx, valResult, { kind: "externref" });
+    }
+    const setDriverIdx = reserveAccessorSetDriver(ctx);
+    fctx.body.push({ op: "call", funcIdx: setDriverIdx }); // () result — setter return discarded
+    // Assignment expression evaluates to the RHS (natural type).
+    fctx.body.push({ op: "local.get", index: valTmp });
+    return valResult;
+  }
   if (ctx.classAccessorSet.has(accessorKey)) {
     const setterName = `${typeName}_set_${fieldName}`;
     const funcIdx = ctx.funcMap.get(setterName);
+    // (#2024) `classAccessorSet` records a class that declares EITHER a getter
+    // or a setter for this prop (class-bodies.ts adds the key for both). A
+    // get-only accessor — `class B extends A { get v() {…} }` over a parent
+    // with `set v` — therefore lands here with NO `${type}_set_${field}`
+    // function. Per §10.1.5.3 OrdinarySetWithOwnDescriptor, the own get-only
+    // accessor SHADOWS the inherited setter: strict-mode writes throw TypeError
+    // and the parent's setter must NOT run. Without this, control fell through
+    // to the struct-field path, which found no field named `<field>` and
+    // silently dropped the write. Emit the spec TypeError instead.
+    if (funcIdx === undefined && ctx.funcMap.has(`${typeName}_get_${fieldName}`)) {
+      // Evaluate the RHS for its side effects (spec: GetValue(rhs) is performed
+      // before the [[Set]]), drop its value, then throw. `emitThrowTypeError`
+      // emits an `unreachable`, so the assignment expression's stack effect is
+      // satisfied by divergence — we report the RHS type so any wrapping
+      // expression type-checks consistently.
+      const rhsResult = compileExpression(ctx, fctx, value);
+      if (rhsResult !== null) {
+        fctx.body.push({ op: "drop" });
+      }
+      emitThrowTypeError(ctx, fctx, `Cannot assign to read only property '${fieldName}' of object`);
+      return rhsResult ?? { kind: "f64" };
+    }
     if (funcIdx !== undefined) {
       // `C.prototype.<setter> = v` and `C.<static setter> = v` both write
       // through a receiver that is an externref (the prototype singleton or the
@@ -2383,12 +2487,39 @@ function compilePropertyAssignment(
     reportError(ctx, target, "Failed to compile struct field receiver");
     return null;
   }
+  // (#2084) Null-guard the write. The read path already throws a catchable
+  // TypeError on a null receiver, but the store path emitted `struct.set`
+  // directly — a null receiver then trapped uncatchably ("dereferencing a null
+  // pointer") instead of throwing `TypeError: Cannot set properties of null`
+  // (error-model divergence, family #581/#2025). Skip the guard when the
+  // receiver is a non-nullable `ref` or is statically provably non-null (e.g.
+  // `new Foo()`, `this`) — no trap is possible there and the check is dead
+  // weight. Mirrors the array-element write guard below (`isProvablyNonNull`).
+  const guardNull = structObjResult.kind === "ref_null" && !isProvablyNonNull(target.expression, ctx.checker);
   const valType = compileExpression(ctx, fctx, value, fields[fieldIdx]!.type);
   if (!valType) return null;
-  // Save value so assignment expression returns the RHS
+  // Save value so the assignment expression returns the RHS.
   const tmpVal = allocLocal(fctx, `__prop_assign_${fctx.locals.length}`, valType);
-  fctx.body.push({ op: "local.tee", index: tmpVal });
-  fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
+  if (guardNull) {
+    // stack: [receiver, value] — stash value, then null-check the receiver.
+    fctx.body.push({ op: "local.set", index: tmpVal });
+    const tmpRecv = allocLocal(fctx, `__prop_recv_${fctx.locals.length}`, structSelfType);
+    fctx.body.push({ op: "local.tee", index: tmpRecv });
+    fctx.body.push({ op: "ref.is_null" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: typeErrorThrowInstrs(ctx, target),
+      else: [
+        { op: "local.get", index: tmpRecv } as Instr,
+        { op: "local.get", index: tmpVal } as Instr,
+        { op: "struct.set", typeIdx: structTypeIdx, fieldIdx } as Instr,
+      ],
+    } as Instr);
+  } else {
+    fctx.body.push({ op: "local.tee", index: tmpVal });
+    fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
+  }
   fctx.body.push({ op: "local.get", index: tmpVal });
 
   return valType;
@@ -2565,6 +2696,12 @@ function compileElementAssignment(
   target: ts.ElementAccessExpression,
   value: ts.Expression,
 ): InnerResult {
+  // #1886 Slice B: linear-backed Uint8Array write `buf[i] = v` →
+  // i32.store8(ptr+i, trunc(v)). Only fires for a registered linear-safe
+  // buffer; any other target falls through to the GC element-assign path.
+  const linU8Set = tryEmitLinearU8ElementSet(ctx, fctx, target, value);
+  if (linU8Set !== null) return linU8Set;
+
   // Handle ClassName[key] = value for static setter accessors and static properties (#848)
   if (ts.isIdentifier(target.expression)) {
     const objName = target.expression.text;
@@ -2765,7 +2902,17 @@ function compileElementAssignment(
       reportError(ctx, target, "Failed to compile element value");
       return null;
     }
-    const valLocal = allocLocal(fctx, `__val_${fctx.locals.length}`, arrDef.element);
+    // #2159 — `i8`/`i16` are *packed storage* types, valid only inside array
+    // elements / struct fields. The value temp holds the unpacked Wasm value
+    // (an `i32`) that `array.set` re-packs; allocating the local with the raw
+    // packed `arrDef.element` leaked an `i8`/`i16` into a local (value position),
+    // which Wasm has no encoding for and the binary emitter rejects. This is the
+    // standalone Uint8Array/Int8Array/Int16Array/Uint16Array element-write CE.
+    // The matching read path already unpacks via array.get_u/_s → i32
+    // (property-access.ts). Mirror it here for the store value local.
+    const valLocalType: ValType =
+      arrDef.element.kind === "i8" || arrDef.element.kind === "i16" ? { kind: "i32" } : arrDef.element;
+    const valLocal = allocLocal(fctx, `__val_${fctx.locals.length}`, valLocalType);
     fctx.body.push({ op: "local.set", index: valLocal });
 
     // #1196: Bounds-check elimination on writes — when the for-loop pattern
@@ -3151,7 +3298,7 @@ export function compileLogicalAssignment(
   if (!storage) {
     const capturedIdx = ctx.capturedGlobals.get(name);
     if (capturedIdx !== undefined) {
-      const globalDef = ctx.mod.globals[capturedIdx];
+      const globalDef = ctx.mod.globals[localGlobalIdx(ctx, capturedIdx)];
       storage = {
         kind: "captured",
         index: capturedIdx,
@@ -3162,7 +3309,7 @@ export function compileLogicalAssignment(
   if (!storage) {
     const moduleIdx = ctx.moduleGlobals.get(name);
     if (moduleIdx !== undefined) {
-      const globalDef = ctx.mod.globals[moduleIdx];
+      const globalDef = ctx.mod.globals[localGlobalIdx(ctx, moduleIdx)];
       storage = {
         kind: "module",
         index: moduleIdx,
@@ -3896,35 +4043,37 @@ function emitLogicalAssignmentPattern(
     // the parallel pattern in `compileLogicalAssignment` that uses
     // `__extern_is_undefined` for variable-scope `??=`. Compose the
     // two checks via `i32.or` so the then-arm fires for both.
+    //
+    // GetValue must run exactly once (§13.15.2): tee the fetched value into
+    // a temp and reuse it on the keep path so accessor getters fire once.
     emitGet();
-    const tmpForUndef = varType.kind === "externref" ? allocTempLocal(fctx, varType) : -1;
-    if (varType.kind === "externref") {
-      fctx.body.push({ op: "local.tee", index: tmpForUndef });
-    }
+    const tmpKeep = allocTempLocal(fctx, varType);
+    fctx.body.push({ op: "local.tee", index: tmpKeep });
     fctx.body.push({ op: "ref.is_null" });
     if (varType.kind === "externref") {
       const undefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
       flushLateImportShifts(ctx, fctx);
       if (undefIdx !== undefined) {
-        fctx.body.push({ op: "local.get", index: tmpForUndef });
+        fctx.body.push({ op: "local.get", index: tmpKeep });
         fctx.body.push({ op: "call", funcIdx: undefIdx });
         fctx.body.push({ op: "i32.or" });
       }
-      releaseTempLocal(fctx, tmpForUndef);
     }
 
     const savedBody = pushBody(fctx);
     const rhsResult = compileExpression(ctx, fctx, rhs, varType);
     if (!rhsResult) {
       fctx.body = savedBody;
+      releaseTempLocal(fctx, tmpKeep);
       return null;
     }
     emitSet();
     const thenInstrs = fctx.body;
 
     fctx.body = [];
-    emitGet();
+    fctx.body.push({ op: "local.get", index: tmpKeep });
     const elseInstrs = fctx.body;
+    releaseTempLocal(fctx, tmpKeep);
 
     fctx.body = savedBody;
     fctx.body.push({
@@ -3935,21 +4084,26 @@ function emitLogicalAssignmentPattern(
     });
   } else if (op === ts.SyntaxKind.BarBarEqualsToken) {
     // target ||= rhs  →  if (target is truthy) { keep } else { target = rhs }
+    // GetValue once (§13.15.2): tee the fetched value, reuse on the keep path.
     emitGet();
+    const tmpKeep = allocTempLocal(fctx, varType);
+    fctx.body.push({ op: "local.tee", index: tmpKeep });
     ensureI32Condition(fctx, varType, ctx);
 
     const savedBody = pushBody(fctx);
-    emitGet();
+    fctx.body.push({ op: "local.get", index: tmpKeep });
     const thenInstrs = fctx.body;
 
     fctx.body = [];
     const rhsResult = compileExpression(ctx, fctx, rhs, varType);
     if (!rhsResult) {
       fctx.body = savedBody;
+      releaseTempLocal(fctx, tmpKeep);
       return null;
     }
     emitSet();
     const elseInstrs = fctx.body;
+    releaseTempLocal(fctx, tmpKeep);
 
     fctx.body = savedBody;
     fctx.body.push({
@@ -3960,21 +4114,26 @@ function emitLogicalAssignmentPattern(
     });
   } else {
     // target &&= rhs  →  if (target is truthy) { target = rhs } else { keep }
+    // GetValue once (§13.15.2): tee the fetched value, reuse on the keep path.
     emitGet();
+    const tmpKeep = allocTempLocal(fctx, varType);
+    fctx.body.push({ op: "local.tee", index: tmpKeep });
     ensureI32Condition(fctx, varType, ctx);
 
     const savedBody = pushBody(fctx);
     const rhsResult = compileExpression(ctx, fctx, rhs, varType);
     if (!rhsResult) {
       fctx.body = savedBody;
+      releaseTempLocal(fctx, tmpKeep);
       return null;
     }
     emitSet();
     const thenInstrs = fctx.body;
 
     fctx.body = [];
-    emitGet();
+    fctx.body.push({ op: "local.get", index: tmpKeep });
     const elseInstrs = fctx.body;
+    releaseTempLocal(fctx, tmpKeep);
 
     fctx.body = savedBody;
     fctx.body.push({
@@ -4018,6 +4177,59 @@ export function isCompoundAssignment(op: ts.SyntaxKind): boolean {
  * which corrupts every `call funcIdx=N` instruction whose index now points
  * at a host import instead of the intended native helper (#1175).
  */
+/**
+ * (#2058) `x += rhs` where the result may be a runtime string. Compute
+ * `x + rhs` via the shared runtime-dispatched add (`emitAnyAdd`: JS `+` host
+ * bridge, or a standalone tag-dispatch concat/add), then store the resulting
+ * externref back into the variable. Returns null (caller falls through to the
+ * numeric paths) only for storage classes this doesn't cover.
+ */
+function compileAnyCompoundAdd(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  name: string,
+): ValType | null {
+  const localIdx = fctx.localMap.get(name);
+  const capturedIdx = ctx.capturedGlobals.get(name);
+  const moduleIdx = ctx.moduleGlobals.get(name);
+  if (localIdx === undefined && capturedIdx === undefined && moduleIdx === undefined) {
+    return null; // unresolved binding — let the default paths handle it
+  }
+
+  // emitAnyAdd reads `expr.left` (the current value of `x`) and `expr.right`,
+  // leaving the §13.15.3 result on the stack as an externref.
+  const addResult = emitAnyAdd(ctx, fctx, expr);
+  if (addResult.kind !== "externref") {
+    // emitAnyAdd took the legacy f64 fallback (no host, no native strings).
+    // Coerce to externref so the store below is uniform.
+    coerceType(ctx, fctx, addResult, { kind: "externref" });
+  }
+
+  // Store back into the resolved binding (re-read global indices in case RHS
+  // compilation shifted them), coercing externref → the binding's storage type.
+  if (localIdx !== undefined) {
+    const localType = getLocalType(fctx, localIdx) ?? { kind: "externref" as const };
+    if (localType.kind !== "externref") coerceType(ctx, fctx, { kind: "externref" }, localType);
+    fctx.body.push({ op: "local.tee", index: localIdx });
+    return localType;
+  }
+  if (capturedIdx !== undefined) {
+    const capturedIdxPost = ctx.capturedGlobals.get(name)!;
+    const globalType: ValType = ctx.mod.globals[localGlobalIdx(ctx, capturedIdxPost)]?.type ?? { kind: "externref" };
+    if (globalType.kind !== "externref") coerceType(ctx, fctx, { kind: "externref" }, globalType);
+    fctx.body.push({ op: "global.set", index: capturedIdxPost });
+    fctx.body.push({ op: "global.get", index: capturedIdxPost });
+    return globalType;
+  }
+  const moduleIdxPost = ctx.moduleGlobals.get(name)!;
+  const globalType: ValType = ctx.mod.globals[localGlobalIdx(ctx, moduleIdxPost)]?.type ?? { kind: "externref" };
+  if (globalType.kind !== "externref") coerceType(ctx, fctx, { kind: "externref" }, globalType);
+  fctx.body.push({ op: "global.set", index: moduleIdxPost });
+  fctx.body.push({ op: "global.get", index: moduleIdxPost });
+  return globalType;
+}
+
 function compileStringCompoundAssignment(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -4509,8 +4721,14 @@ export function compileCompoundAssignment(
     return { kind: "f64" };
   }
 
-  // String += : concat instead of numeric add
-  if (op === ts.SyntaxKind.PlusEqualsToken) {
+  // String += : concat instead of numeric add.
+  // Skip when the binding is a boxed mutable capture (ref cell): the boxed
+  // path below (assignment.ts boxedCaptures branch) loads/stores through the
+  // ref-cell struct and has its own externref string-concat handling (#795).
+  // compileStringCompoundAssignment uses bare local.get/local.tee, which would
+  // pass the `(struct (mut externref))` ref cell straight into js-string concat
+  // (→ illegal cast / invalid wasm). #1999.
+  if (op === ts.SyntaxKind.PlusEqualsToken && !fctx.boxedCaptures?.has(name)) {
     const leftTsType = ctx.checker.getTypeAtLocation(expr.left);
     let isStr = isStringType(leftTsType);
     if (!isStr && (leftTsType.flags & ts.TypeFlags.Any) !== 0) {
@@ -4522,6 +4740,33 @@ export function compileCompoundAssignment(
     }
     if (isStr) {
       return compileStringCompoundAssignment(ctx, fctx, expr, name);
+    }
+  }
+
+  // (#2058) `x += rhs` where the value may be a runtime string at `+` time —
+  // either the LHS is `any`/`unknown` (it could currently hold a string) or the
+  // RHS is `any`/`unknown` (it could evaluate to a string). The numeric `+=`
+  // paths below ToNumber-coerce both sides, so `let x: any = 1; x += "2"` wrongly
+  // produced `3` instead of `"12"`. The static-string concat gate above only
+  // catches LHS that are *statically* assigned a string; this catches the
+  // runtime case. Skip boxed captures (their own externref concat path handles
+  // them) and bigint. Provably-numeric `+=` keeps the f64 fast path (neither
+  // side is `any`/`unknown`).
+  //
+  // Fast mode (`anyValueTypeIdx >= 0`) is excluded: there the AnyValue
+  // infrastructure already round-trips `any += number` through the existing
+  // numeric path, and the `__host_add` host import isn't part of that ABI.
+  // Per the #2058 design rule, this per-site recovery is **default-mode only**.
+  if (op === ts.SyntaxKind.PlusEqualsToken && !fctx.boxedCaptures?.has(name) && ctx.anyValueTypeIdx < 0) {
+    const leftTsType = ctx.checker.getTypeAtLocation(expr.left);
+    const rightTsType = ctx.checker.getTypeAtLocation(expr.right);
+    const leftIsAnyish = (leftTsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+    const rightIsAnyish = (rightTsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+    const isBigInt =
+      (leftTsType.flags & ts.TypeFlags.BigIntLike) !== 0 || (rightTsType.flags & ts.TypeFlags.BigIntLike) !== 0;
+    if ((leftIsAnyish || rightIsAnyish) && !isBigInt) {
+      const r = compileAnyCompoundAdd(ctx, fctx, expr, name);
+      if (r !== null) return r;
     }
   }
 
@@ -4633,9 +4878,13 @@ export function compileCompoundAssignment(
     if (boxed.valType.kind === "externref" && op === ts.SyntaxKind.PlusEqualsToken) {
       const rightTsType = ctx.checker.getTypeAtLocation(expr.right);
       const rhsIsString = isStringType(rightTsType);
+      // A statically string-typed LHS (`let acc = ""` / `let acc: string`) must
+      // concat even when the RHS is numeric (`acc += x`) — JS coerces x to
+      // string. #1999.
+      const lhsIsString = isStringType(ctx.checker.getTypeAtLocation(expr.left));
       // Also check if the variable was assigned a string in any enclosing scope
       const varHasStringAssign = hasStringAssignment(name, expr) || hasStringAssignmentInParentScopes(name, expr);
-      if (rhsIsString || varHasStringAssign) {
+      if (rhsIsString || lhsIsString || varHasStringAssign) {
         // String concat path: current value (externref) is on stack
         addStringImports(ctx);
         const concatIdx = ctx.jsStringImports.get("concat");
@@ -4673,8 +4922,14 @@ export function compileCompoundAssignment(
       }
     }
 
-    // For non-f64/non-i32 boxed captures with arithmetic ops, coerce to f64 first (#795, #816)
-    const boxedNeedsCoerce = boxed.valType.kind !== "f64" && boxed.valType.kind !== "i32";
+    // The compound-op switch below emits f64 arithmetic, so any non-f64 cell
+    // value (and its RHS) must be promoted to f64 first and coerced back on
+    // writeback. This includes i32 (#2120): a captured i32 loop var that is
+    // also compound-assigned in the body (`for (let i…) { f = () => i; i += 1 }`)
+    // read the cell as i32 but hit `f64.add`, producing an invalid module
+    // (F64Add left value type mismatch). The i32↔f64 round-trip is exact for the
+    // counter range. (#795, #816 covered the externref/other-ref cells.)
+    const boxedNeedsCoerce = boxed.valType.kind !== "f64";
     if (boxedNeedsCoerce) {
       coerceType(ctx, fctx, boxed.valType, { kind: "f64" });
     }
@@ -4708,7 +4963,7 @@ export function compileCompoundAssignment(
         fctx.body.push({ op: "f64.div" });
         break;
       case ts.SyntaxKind.PercentEqualsToken:
-        emitModulo(fctx);
+        emitModulo(ctx, fctx);
         break;
       case ts.SyntaxKind.AsteriskAsteriskEqualsToken: {
         const fi = ctx.funcMap.get("Math_pow");
@@ -4842,7 +5097,7 @@ function emitCompoundOp(ctx: CodegenContext, fctx: FunctionContext, op: ts.Synta
       fctx.body.push({ op: "f64.div" });
       break;
     case ts.SyntaxKind.PercentEqualsToken:
-      emitModulo(fctx);
+      emitModulo(ctx, fctx);
       break;
     case ts.SyntaxKind.AmpersandEqualsToken:
     case ts.SyntaxKind.BarEqualsToken:

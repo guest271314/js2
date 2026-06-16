@@ -8,21 +8,37 @@ import { ts } from "../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, StructTypeDef, ValType } from "../ir/types.js";
 import { isHostConstructibleBuiltin } from "./builtin-tags.js";
+import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, deduplicateLocals } from "./context/locals.js";
-import type { CodegenContext, FunctionContext } from "./context/types.js";
+import type { CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
 import {
   buildDestructureNullThrow,
   destructureParamArray,
   destructureParamObject,
   isNullOrUndefinedLiteral,
 } from "./destructuring-params.js";
-import { emitThrowReferenceError } from "./expressions/helpers.js";
+import { emitThrowReferenceError, getFuncParamTypes } from "./expressions/helpers.js";
+import { pushDefaultValue } from "./type-coercion.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
-import { cacheStringLiterals, hasAbstractModifier, hasStaticModifier, resolveWasmType } from "./index.js";
+import {
+  cacheStringLiterals,
+  extractConstantDefault,
+  hasAbstractModifier,
+  hasStaticModifier,
+  resolveWasmType,
+} from "./index.js";
+import { emitUndefined } from "./expressions/late-imports.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
+import {
+  cacheParamDefaultArgc,
+  emitF64ParamSentinelCheck,
+  emitParamDefaultArgMissingCheck,
+  maybeSetArgcForKnownCall,
+  paramDefaultNeedsArgc,
+} from "./statements/nested-declarations.js";
 import {
   coerceType,
   compileExpression,
@@ -74,6 +90,261 @@ function constructorBodyHasSuperCall(node: ts.Node): boolean {
   return found;
 }
 
+function getBuiltinConstructorForwardArity(ctx: CodegenContext, builtinParent: string): number {
+  const declaredArity = ctx.externClasses.get(builtinParent)?.constructorParams.length ?? 0;
+  return Math.max(1, declaredArity);
+}
+
+function countStaticallyKnownArgs(
+  args: ts.NodeArray<ts.Expression> | readonly ts.Expression[] | undefined,
+): number | undefined {
+  if (!args) return 0;
+  let count = 0;
+  for (const arg of args) {
+    if (ts.isSpreadElement(arg)) {
+      if (!ts.isArrayLiteralExpression(arg.expression)) return undefined;
+      count += arg.expression.elements.length;
+    } else {
+      count++;
+    }
+  }
+  return count;
+}
+
+function flattenStaticallyKnownArgs(
+  args: ts.NodeArray<ts.Expression> | readonly ts.Expression[],
+): ts.Expression[] | null {
+  const result: ts.Expression[] = [];
+  for (const arg of args) {
+    if (ts.isSpreadElement(arg)) {
+      if (!ts.isArrayLiteralExpression(arg.expression)) return null;
+      for (const element of arg.expression.elements) {
+        result.push(element);
+      }
+    } else {
+      result.push(arg);
+    }
+  }
+  return result;
+}
+
+function emitClassParamDefaultCheck(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  paramIdx: number,
+  paramType: ValType,
+  thenInstrs: Instr[],
+  argIndex: number,
+  argcLocal: number | undefined,
+): void {
+  if (paramType.kind === "externref") {
+    fctx.body.push({ op: "local.get", index: paramIdx });
+    const isUndefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
+    if (isUndefIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: isUndefIdx });
+    } else {
+      fctx.body.push({ op: "ref.is_null" });
+    }
+  } else if (paramType.kind === "ref_null" || paramType.kind === "ref") {
+    fctx.body.push({ op: "local.get", index: paramIdx });
+    fctx.body.push({ op: "ref.is_null" });
+  } else if (paramType.kind === "i32") {
+    emitParamDefaultArgMissingCheck(fctx, argcLocal!, argIndex);
+  } else if (paramType.kind === "f64") {
+    emitParamDefaultArgMissingCheck(fctx, argcLocal!, argIndex);
+    emitF64ParamSentinelCheck(fctx, paramIdx);
+    fctx.body.push({ op: "i32.or" });
+  } else {
+    return;
+  }
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenInstrs });
+}
+
+function registerClassOptionalParams(
+  ctx: CodegenContext,
+  funcName: string,
+  parameters: ts.NodeArray<ts.ParameterDeclaration>,
+  paramTypes: ValType[],
+  paramTypeOffset = 0,
+): void {
+  const optionalParams: OptionalParamInfo[] = [];
+  for (let i = 0; i < parameters.length; i++) {
+    const param = parameters[i]!;
+    if (!param.questionToken && !param.initializer) continue;
+    const type = paramTypes[paramTypeOffset + i];
+    if (!type) continue;
+    const info: OptionalParamInfo = { index: i, type };
+    if (param.initializer) {
+      const cd = extractConstantDefault(param.initializer, type);
+      if (cd) info.constantDefault = cd;
+      else info.hasExpressionDefault = true;
+    }
+    optionalParams.push(info);
+  }
+  if (optionalParams.length > 0) {
+    ctx.funcOptionalParams.set(funcName, optionalParams);
+  }
+}
+
+function unwrapParenthesized(expr: ts.Expression): ts.Expression {
+  let current = expr;
+  while (ts.isParenthesizedExpression(current)) {
+    current = current.expression;
+  }
+  return current;
+}
+
+function newExpressionTargetsClass(
+  ctx: CodegenContext,
+  expr: ts.NewExpression,
+  decl: ts.ClassDeclaration | ts.ClassExpression,
+  className: string,
+): boolean {
+  const callee = unwrapParenthesized(expr.expression);
+  if (callee === decl) return true;
+  if (!ts.isIdentifier(callee)) return false;
+
+  const targetSymbol = ctx.checker.getSymbolAtLocation(callee);
+  const targetDecls = targetSymbol?.getDeclarations() ?? [];
+  if (targetDecls.some((d) => d === decl || (ts.isVariableDeclaration(d) && d.initializer === decl))) {
+    return true;
+  }
+  if (targetSymbol !== undefined) return false;
+
+  return (ctx.classExprNameMap.get(callee.text) ?? callee.text) === className;
+}
+
+function getObservedClassNewArity(
+  ctx: CodegenContext,
+  decl: ts.ClassDeclaration | ts.ClassExpression,
+  className: string,
+): number {
+  let maxArity = 0;
+  const visit = (node: ts.Node): void => {
+    if (ts.isNewExpression(node) && newExpressionTargetsClass(ctx, node, decl, className)) {
+      const argCount = countStaticallyKnownArgs(node.arguments);
+      if (argCount !== undefined) maxArity = Math.max(maxArity, argCount);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(decl.getSourceFile());
+  return maxArity;
+}
+
+function getImplicitExternrefForwarderArity(
+  ctx: CodegenContext,
+  decl: ts.ClassDeclaration | ts.ClassExpression,
+  className: string,
+  builtinParent: string,
+): number {
+  return Math.max(
+    getBuiltinConstructorForwardArity(ctx, builtinParent),
+    getObservedClassNewArity(ctx, decl, className),
+  );
+}
+
+function externrefParams(count: number): ValType[] {
+  return Array.from({ length: count }, () => ({ kind: "externref" }) as ValType);
+}
+
+/**
+ * #2082: for a derived class with NO explicit constructor and a WasmGC-struct
+ * parent, the spec synthesizes `constructor(...args) { super(...args); }`
+ * (§15.7.14). Walk the parent chain to the nearest ancestor that declares an
+ * explicit constructor and return its parameter list, so the implicit ctor is
+ * synthesized with the same parameters (bound as locals) and the replayed
+ * parent `this.x = param` assignments can resolve `param`. Returns undefined
+ * when no ancestor has an explicit constructor (no args to forward).
+ */
+function findNearestAncestorCtorParams(
+  ctx: CodegenContext,
+  className: string,
+): ts.NodeArray<ts.ParameterDeclaration> | undefined {
+  const seen = new Set<string>([className]);
+  let anc = ctx.classParentMap.get(className);
+  while (anc && !seen.has(anc)) {
+    seen.add(anc);
+    const ancDecl = ctx.classDeclarationMap.get(anc);
+    const ancCtor = ancDecl?.members.find(ts.isConstructorDeclaration) as ts.ConstructorDeclaration | undefined;
+    if (ancCtor) return ancCtor.parameters;
+    anc = ctx.classParentMap.get(anc);
+  }
+  return undefined;
+}
+
+/**
+ * #2086: single source of truth for the parameter prefix synthesized for an
+ * implicit derived constructor (`constructor(...args){ super(...args) }`,
+ * §15.7.14). The rule was previously realized twice — once for func-type
+ * registration and once for the `FunctionContext` build — and the two copies
+ * drifted (each point fix #1833/#2082/#2078 landed in one phase or one
+ * representation lane). Both phases now derive the prefix from this function.
+ *
+ * `implicitForwarderArity` (the externref-backed built-in lane, #1833) and
+ * `implicitStructCtorParams` (the WasmGC-struct lane, #2082) are mutually
+ * exclusive by construction (`implicitStructCtorParams` is only computed for a
+ * non-builtin parent), so the returned list has at most one of the two shapes.
+ * `ctor` (the explicit-constructor case) is handled by the callers, not here —
+ * this helper covers only the *implicit* (no own ctor) synthesis.
+ */
+function computeImplicitDerivedCtorPrefix(
+  ctx: CodegenContext,
+  decl: ts.ClassDeclaration | ts.ClassExpression,
+  className: string,
+  ctor: ts.ConstructorDeclaration | undefined,
+): {
+  implicitBuiltinParent: string | undefined;
+  implicitForwarderArity: number;
+  implicitStructCtorParams: ts.NodeArray<ts.ParameterDeclaration> | undefined;
+  prefixParams: { name: string; type: ValType }[];
+} {
+  const implicitBuiltinParent = !ctor ? ctx.classBuiltinParentMap.get(className) : undefined;
+  const implicitForwarderArity = implicitBuiltinParent
+    ? getImplicitExternrefForwarderArity(ctx, decl, className, implicitBuiltinParent)
+    : 0;
+  const implicitStructCtorParams =
+    !ctor && !implicitBuiltinParent ? findNearestAncestorCtorParams(ctx, className) : undefined;
+
+  const prefixParams: { name: string; type: ValType }[] = [];
+  for (let i = 0; i < implicitForwarderArity; i++) {
+    prefixParams.push({ name: `__arg${i}`, type: { kind: "externref" } });
+  }
+  if (implicitStructCtorParams) {
+    for (let pi = 0; pi < implicitStructCtorParams.length; pi++) {
+      const param = implicitStructCtorParams[pi]!;
+      const paramName = ts.isIdentifier(param.name) ? param.name.text : `__param${pi}`;
+      const paramType = ctx.checker.getTypeAtLocation(param);
+      let wasmType = resolveWasmType(ctx, paramType);
+      // Widen ref→ref_null for params with defaults (caller passes ref.null as
+      // the omitted-arg sentinel). Must match the explicit-ctor widening below.
+      if (param.initializer && wasmType.kind === "ref") {
+        wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
+      }
+      prefixParams.push({ name: paramName, type: wasmType });
+    }
+  }
+  return { implicitBuiltinParent, implicitForwarderArity, implicitStructCtorParams, prefixParams };
+}
+
+function compileExternrefArgument(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
+  const argResult = compileExpression(ctx, fctx, arg, { kind: "externref" });
+  if (argResult === null) {
+    emitUndefined(ctx, fctx);
+    return;
+  }
+  if (argResult.kind !== "externref") {
+    coerceType(ctx, fctx, argResult, { kind: "externref" });
+  }
+}
+
+function evaluateArgumentForSideEffects(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
+  const inner = ts.isSpreadElement(arg) ? arg.expression : arg;
+  const argResult = compileExpression(ctx, fctx, inner);
+  if (argResult !== null) {
+    fctx.body.push({ op: "drop" });
+  }
+}
+
 /**
  * (#1455) Emit the call sequence that adjusts an externref-backed subclass
  * instance's [[Prototype]] from `Parent.prototype` (set by `__new_<Parent>(...)`)
@@ -112,8 +383,19 @@ function emitSetSubclassProto(
   addStringConstantGlobal(ctx, parentName);
   const subNameGlobal = ctx.stringGlobalMap.get(subName);
   const parentNameGlobal = ctx.stringGlobalMap.get(parentName);
-  if (subNameGlobal === undefined || parentNameGlobal === undefined) {
-    // String pool not available (very unusual) — skip silently.
+  // (#2029) In `--target standalone`/`nativeStrings`, `addStringConstantGlobal`
+  // stores the documented `-1` sentinel ("no host `string_constants` global —
+  // materialize the literal inline at use sites", see registry/imports.ts).
+  // The class-name strings here exist only to feed the `__set_subclass_proto`
+  // HOST import — which is itself unavailable standalone — so a `global.get -1`
+  // would be baked and crash binary emit (`u32 out of range: -1`). Guarding only
+  // `=== undefined` (a missing key) missed this in-pool `-1` value, the
+  // builtin-subclass cluster of the #2029 emit bucket. Skip the proto adjustment
+  // when either name resolves to the sentinel (or is absent): there is no host to
+  // call, and the WasmGC instance tag already carries class identity for
+  // `instanceof`.
+  if (subNameGlobal === undefined || parentNameGlobal === undefined || subNameGlobal < 0 || parentNameGlobal < 0) {
+    // String pool not available, or the standalone `-1` sentinel — skip silently.
     return;
   }
   // Skip when the instance is null (e.g. standalone `__new_<Parent>` fallback);
@@ -145,6 +427,11 @@ export function resolveClassMemberName(ctx: CodegenContext, name: ts.PropertyNam
   }
   return undefined;
 }
+
+// (#1983) `classMemberFuncKey` lives in the leaf module `class-member-keys.ts`
+// (imported above) so consumer files can use it without an import cycle; it is
+// re-exported here for callers that already import from `class-bodies.js`.
+export { classMemberFuncKey } from "./class-member-keys.js";
 
 /** Collect all function declarations and interfaces */
 /** Collect a class declaration or class expression: register struct type, constructor, and methods */
@@ -300,6 +587,35 @@ export function collectClassDeclaration(
   // struct type registered), since built-ins have no Wasm struct fields to inherit.
   if (!parentClassName || parentStructTypeIdx === undefined) {
     fields.unshift({ name: "__tag", type: { kind: "i32" }, mutable: false });
+
+    // (#2158 / #2009) Structural-collision guard. An empty class root struct
+    // is exactly `(struct (field $__tag i32))`. The native-string supertype
+    // `$AnyString` is also a single-i32-field open struct
+    // (`(struct (field $len i32))`). When such a class is a hierarchy ROOT
+    // (it has subclasses, so it is left non-final/open), WasmGC iso-recursive
+    // canonicalization merges it with `$AnyString` — both are structurally
+    // identical open singletons. The class's (final) subclasses then become
+    // subtypes of `$AnyString`, so `ref.test $AnyString` on a subclass
+    // instance (or class-object singleton) returns TRUE. That false positive
+    // drives the standalone `===` / `typeof` string arm to
+    // `ref.cast $AnyString` + `__str_flatten` on a non-string struct →
+    // `RuntimeError: illegal cast`, breaking every strict-equality and
+    // string-typeof over a subclass value in --target standalone (a large
+    // slice of the #2158 class/prototype residual). Lone empty classes do not
+    // hit this because `markLeafStructsFinal` makes them `final`, and a final
+    // struct is not subtype-compatible with the non-final `$AnyString`.
+    //
+    // Fix: append a hidden immutable sentinel i32 so the root struct is
+    // `(struct (field i32) (field i32))` — structurally distinct from the
+    // single-field `$AnyString`, breaking the canonical merge. Appended LAST
+    // so every existing positional `fieldIdx` for real instance fields is
+    // unaffected; constructors / lazy proto+class-object inits iterate the
+    // field list and default it to 0 automatically. Cost: +4 bytes only on
+    // empty class instances (the rare case). A class with any instance field
+    // is already structurally distinct and needs no sentinel.
+    if (fields.length === 1) {
+      fields.push({ name: "__shape_brand", type: { kind: "i32" }, mutable: false });
+    }
   }
 
   // Update the placeholder struct type with resolved fields
@@ -342,16 +658,21 @@ export function collectClassDeclaration(
   // Register constructor function: takes ctor params, returns (ref $structTypeIdx)
   const ctorParams: ValType[] = [];
   const ctorName = `${className}_new`;
-  // (#1455) For externref-backed subclasses with no explicit constructor
+  // (#1833) For externref-backed subclasses with no explicit constructor
   // (`class Sub extends DataView {}`), synthesize the spec's implicit
-  // `constructor(...args) { super(...args); }` as a single-arg forwarder.
-  // The single externref param `__arg0` is forwarded to `__new_<Parent>`.
-  // Multi-arg forms (e.g. `new DataView(buf, 0, 16)`) only forward the first
-  // arg — multi-arg implicit forwarding is deferred (#1366c follow-up).
-  const isImplicitExternrefForwarder = !ctor && ctx.classBuiltinParentMap.has(className);
-  if (isImplicitExternrefForwarder) {
-    ctorParams.push({ kind: "externref" });
-  }
+  // `constructor(...args) { super(...args); }` as an externref forwarder whose
+  // arity matches the parent constructor shape. Missing caller args are padded
+  // as JS undefined and stripped by the runtime's `__new_<Parent>` resolver.
+  // (#2086) Synthesize the implicit derived-ctor parameter prefix from the one
+  // shared rule. `implicitForwarderArity` (#1833, externref-backed built-in
+  // parent) and `implicitStructCtorParams` (#2082, WasmGC-struct parent) are
+  // the two lanes; the fctx-build phase below reuses the same helper.
+  const {
+    implicitForwarderArity,
+    implicitStructCtorParams,
+    prefixParams: implicitPrefixParams,
+  } = computeImplicitDerivedCtorPrefix(ctx, decl, className, ctor);
+  ctorParams.push(...implicitPrefixParams.map((p) => p.type));
   if (ctor) {
     for (let i = 0; i < ctor.parameters.length; i++) {
       const param = ctor.parameters[i]!;
@@ -392,17 +713,62 @@ export function collectClassDeclaration(
   const ctorResults: ValType[] = isExternrefBackedClass
     ? [{ kind: "externref" }]
     : [{ kind: "ref", typeIdx: structTypeIdx }];
+  if (ctor) {
+    registerClassOptionalParams(ctx, ctorName, ctor.parameters, ctorParams);
+  } else if (implicitStructCtorParams) {
+    // #2082: the implicit ctor inherits the forwarded parent params' optionality
+    // so the call site sets `__argc` and the default-value checks fire.
+    registerClassOptionalParams(ctx, ctorName, implicitStructCtorParams, ctorParams, implicitForwarderArity);
+  }
   const ctorTypeIdx = addFuncType(ctx, ctorParams, ctorResults, `${className}_new_type`);
   const ctorFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.funcMap.set(ctorName, ctorFuncIdx);
+  // (#1983) collision-free key — also the wasm display name so the funcByName
+  // body-fill lookup doesn't collide with a user `function ClassName_new()`.
+  const ctorKey = classMemberFuncKey(ctx, ctorName);
+  ctx.funcMap.set(ctorKey, ctorFuncIdx);
 
   ctx.mod.functions.push({
-    name: ctorName,
+    name: ctorKey,
     typeIdx: ctorTypeIdx,
     locals: [],
     body: [],
     exported: false,
   });
+
+  // (#1965) Register the constructor-init function `${className}_init`:
+  // `(...ctorParams, self: ref $struct) -> (ref $struct)`. It carries the
+  // parameter defaults, field initializers, and the full constructor BODY,
+  // operating on a caller-allocated instance. `${className}_new` reduces to
+  // alloc + tail-call init, and `super(args)` in a derived constructor
+  // becomes a real `call ${Parent}_init(args..., self)` — the parent ctor
+  // body finally executes (previously super() positionally copied args onto
+  // parent struct fields and dropped the body). Self is the LAST param so
+  // ctor param indices are identical in `_new` and `_init`, which keeps the
+  // optional/default machinery (param-index-based) working unchanged.
+  // Externref-backed classes (extends Error etc.) keep the single-function
+  // host-forwarder shape — no init split.
+  if (!isExternrefBackedClass) {
+    const initName = `${className}_init`;
+    const initParams: ValType[] = [...ctorParams, { kind: "ref", typeIdx: structTypeIdx }];
+    const initTypeIdx = addFuncType(ctx, initParams, [{ kind: "ref", typeIdx: structTypeIdx }], `${initName}_type`);
+    const initFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    const initKey = classMemberFuncKey(ctx, initName); // (#1983) collision-free key + display name
+    ctx.funcMap.set(initKey, initFuncIdx);
+    ctx.mod.functions.push({
+      name: initKey,
+      typeIdx: initTypeIdx,
+      locals: [],
+      body: [],
+      exported: false,
+    });
+    // Mirror the ctor's optional-param / rest-param call-site metadata so
+    // super() call sites (which call init directly) pad and set __argc the
+    // same way `new C(...)` sites do for `${className}_new`.
+    const ctorOptionals = ctx.funcOptionalParams.get(ctorName);
+    if (ctorOptionals) ctx.funcOptionalParams.set(initName, ctorOptionals);
+    const ctorRest = ctx.funcRestParams.get(ctorName);
+    if (ctorRest) ctx.funcRestParams.set(initName, ctorRest);
+  }
 
   // Register method functions (own methods defined on this class)
   // Skip abstract methods — they have no body and are implemented by subclasses
@@ -439,7 +805,9 @@ export function collectClassDeclaration(
       // Skip if a function with this name is already registered (e.g., when
       // both a static and instance method share the same name, they produce
       // the same function name — avoid creating duplicate placeholders).
-      if (ctx.funcMap.has(fullName)) continue;
+      // (#1983) check the relocated key so a user `function ClassName_m()` does
+      // not look like an already-registered method and suppress the real one.
+      if (ctx.funcMap.has(classMemberFuncKey(ctx, fullName))) continue;
 
       // Static methods have no self parameter; instance methods get self: (ref $structTypeIdx)
       const methodParams: ValType[] = isStatic ? [] : [{ kind: "ref", typeIdx: structTypeIdx }];
@@ -452,6 +820,7 @@ export function collectClassDeclaration(
         }
         methodParams.push(wasmType);
       }
+      registerClassOptionalParams(ctx, fullName, member.parameters, methodParams, isStatic ? 0 : 1);
 
       // Detect async methods — unwrap Promise<T> to T for Wasm return type
       // Exclude async generators: they return AsyncGenerator objects, not Promises.
@@ -484,10 +853,14 @@ export function collectClassDeclaration(
 
       const methodTypeIdx = addFuncType(ctx, methodParams, methodResults, `${fullName}_type`);
       const methodFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-      ctx.funcMap.set(fullName, methodFuncIdx);
+      // (#1983) Use the collision-free key for the funcMap entry AND the wasm
+      // display name, so the `funcByName` body-fill lookup (which keys on the
+      // display name) does not collide with a user `function ClassName_m()`.
+      const methodKey = classMemberFuncKey(ctx, fullName);
+      ctx.funcMap.set(methodKey, methodFuncIdx);
 
       ctx.mod.functions.push({
-        name: fullName,
+        name: methodKey,
         typeIdx: methodTypeIdx,
         locals: [],
         body: [],
@@ -524,7 +897,7 @@ export function collectClassDeclaration(
       // both a static and instance getter share the same computed property name,
       // they produce the same function name — avoid creating duplicates that
       // leave empty-body placeholders causing "stack fallthru" validation errors).
-      if (ctx.funcMap.has(getterName)) continue;
+      if (ctx.funcMap.has(classMemberFuncKey(ctx, getterName))) continue; // (#1983)
       // Getter takes self, returns the accessor return type
       const getterParams: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
       const sig = ctx.checker.getSignatureFromDeclaration(member);
@@ -538,10 +911,11 @@ export function collectClassDeclaration(
 
       const getterTypeIdx = addFuncType(ctx, getterParams, getterResults, `${getterName}_type`);
       const getterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-      ctx.funcMap.set(getterName, getterFuncIdx);
+      const getterKey = classMemberFuncKey(ctx, getterName); // (#1983) key + display name
+      ctx.funcMap.set(getterKey, getterFuncIdx);
 
       ctx.mod.functions.push({
-        name: getterName,
+        name: getterKey,
         typeIdx: getterTypeIdx,
         locals: [],
         body: [],
@@ -560,20 +934,22 @@ export function collectClassDeclaration(
 
       const setterName = `${className}_set_${propName}`;
       // Skip if already registered (same collision guard as getter above)
-      if (ctx.funcMap.has(setterName)) continue;
+      if (ctx.funcMap.has(classMemberFuncKey(ctx, setterName))) continue; // (#1983)
       // Setter takes self + value, returns void
       const setterParams: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
       for (const param of member.parameters) {
         const paramType = ctx.checker.getTypeAtLocation(param);
         setterParams.push(resolveWasmType(ctx, paramType));
       }
+      registerClassOptionalParams(ctx, setterName, member.parameters, setterParams, 1);
 
       const setterTypeIdx = addFuncType(ctx, setterParams, [], `${setterName}_type`);
       const setterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-      ctx.funcMap.set(setterName, setterFuncIdx);
+      const setterKey = classMemberFuncKey(ctx, setterName); // (#1983) key + display name
+      ctx.funcMap.set(setterKey, setterFuncIdx);
 
       ctx.mod.functions.push({
-        name: setterName,
+        name: setterKey,
         typeIdx: setterTypeIdx,
         locals: [],
         body: [],
@@ -602,8 +978,13 @@ export function collectClassDeclaration(
       visitedAncestors.add(ancestor);
       // Inherit methods
       for (const [key, funcIdx] of ctx.funcMap) {
-        if (key.startsWith(`${ancestor}_`) && !key.endsWith("_new") && !key.endsWith("_type")) {
-          const suffix = key.substring(ancestor.length + 1);
+        // (#1983) A parent member whose legacy `${ancestor}_${member}` key
+        // collided with a user function is registered under the relocated
+        // `__cm$${ancestor}_${member}` key. Recover the legacy form first so the
+        // prefix-scan below sees inherited members regardless of relocation.
+        const legacyKey = key.startsWith("__cm$") ? key.slice("__cm$".length) : key;
+        if (legacyKey.startsWith(`${ancestor}_`) && !legacyKey.endsWith("_new") && !legacyKey.endsWith("_type")) {
+          const suffix = legacyKey.substring(ancestor.length + 1);
           // Skip constructor-related entries
           if (suffix === "new" || suffix.startsWith("new_")) continue;
           // Check if this is a getter/setter (get_X or set_X)
@@ -614,8 +995,9 @@ export function collectClassDeclaration(
             const accPropName = (getMatch || setMatch)![1]!;
             if (!ownAccessorNames.has(accPropName)) {
               const childFullName = `${className}_${suffix}`;
-              if (!ctx.funcMap.has(childFullName)) {
-                ctx.funcMap.set(childFullName, funcIdx);
+              const childKey = classMemberFuncKey(ctx, childFullName); // (#1983)
+              if (!ctx.funcMap.has(childKey)) {
+                ctx.funcMap.set(childKey, funcIdx);
               }
               // Also inherit accessor set entry
               const parentAccessorKey = `${ancestor}_${accPropName}`;
@@ -628,8 +1010,9 @@ export function collectClassDeclaration(
             // Regular method — inherit from parent (works for all method names,
             // including those with underscores like my_method) (#799 WI6)
             const childFullName = `${className}_${suffix}`;
-            if (!ownMethodNames.has(suffix) && !ctx.funcMap.has(childFullName)) {
-              ctx.funcMap.set(childFullName, funcIdx);
+            const childKey = classMemberFuncKey(ctx, childFullName); // (#1983)
+            if (!ownMethodNames.has(suffix) && !ctx.funcMap.has(childKey)) {
+              ctx.funcMap.set(childKey, funcIdx);
               ctx.classMethodSet.add(childFullName);
             }
           }
@@ -890,15 +1273,21 @@ function compileClassBodiesInner(
   // Compile constructor
   const ctor = decl.members.find(ts.isConstructorDeclaration) as ts.ConstructorDeclaration | undefined;
   const ctorName = `${className}_new`;
-  const ctorLocalIdx = funcByName.get(ctorName);
+  const ctorLocalIdx = funcByName.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
   if (ctorLocalIdx !== undefined) {
     const func = ctx.mod.functions[ctorLocalIdx]!;
     const params: { name: string; type: ValType }[] = [];
-    // (#1455) Match the synthetic forwarder param added during pre-registration.
-    const isImplicitForwarder = !ctor && ctx.classBuiltinParentMap.has(className);
-    if (isImplicitForwarder) {
-      params.push({ name: "__arg0", type: { kind: "externref" } });
-    }
+    // (#2086) Match the synthetic forwarder params added during pre-registration
+    // from the SAME shared rule — `__arg{i}` externref forwarders (#1833) and/or
+    // the bound ancestor-ctor params (#2082) so the replayed parent
+    // `this.x = name` assignments below resolve `name`. `implicitForwarderArity`
+    // / `implicitStructCtorParams` are reused later in the body-emission phase.
+    const {
+      implicitForwarderArity,
+      implicitStructCtorParams,
+      prefixParams: implicitPrefixParams,
+    } = computeImplicitDerivedCtorPrefix(ctx, decl, className, ctor);
+    params.push(...implicitPrefixParams);
     if (ctor) {
       for (let pi = 0; pi < ctor.parameters.length; pi++) {
         const param = ctor.parameters[pi]!;
@@ -919,9 +1308,24 @@ function compileClassBodiesInner(
     // an externref slot and we skip the WasmGC `struct.new` initialization.
     const isExternrefBacked = ctx.classExternrefBackedSet.has(className);
 
+    // (#1965) WasmGC-struct classes compile the defaults + field initializers
+    // + constructor BODY into `${className}_init(...params, self)`, while
+    // `${className}_new` reduces to alloc + tail-call init. `super(args)`
+    // calls the parent's init on the derived instance, so the parent ctor
+    // body actually executes. Externref-backed classes keep the legacy
+    // single-function shape (their instance comes from a host import).
+    const initLocalIdx = isExternrefBacked ? undefined : funcByName.get(classMemberFuncKey(ctx, `${className}_init`)); // (#1983)
+    const initFunc = initLocalIdx !== undefined ? ctx.mod.functions[initLocalIdx] : undefined;
+    const splitInit = !isExternrefBacked && initFunc !== undefined;
+
+    const fctxParams = splitInit
+      ? [...params, { name: "__self", type: { kind: "ref", typeIdx: structTypeIdx } as ValType }]
+      : params;
     const fctx: FunctionContext = {
-      name: ctorName,
-      params,
+      // display name only — cosmetic; the relocated funcMap/funcByName keys
+      // above carry the actual identity (#1983).
+      name: splitInit ? `${className}_init` : ctorName,
+      params: fctxParams,
       locals: [],
       localMap: new Map(),
       returnType: isExternrefBacked ? { kind: "externref" } : { kind: "ref", typeIdx: structTypeIdx },
@@ -935,9 +1339,10 @@ function compileClassBodiesInner(
       isDerivedConstructor: ctx.classParentMap.has(className),
     };
 
-    // Re-resolve the constructor function type now that all class struct types
-    // are registered. Constructor parameter types that reference forward-declared
-    // classes may have resolved to externref during the collection phase.
+    // Re-resolve the constructor (and init) function types now that all class
+    // struct types are registered. Constructor parameter types that reference
+    // forward-declared classes may have resolved to externref during the
+    // collection phase.
     {
       const resolvedParams = params.map((p) => p.type);
       const resolvedResults: ValType[] = isExternrefBacked
@@ -947,18 +1352,24 @@ function compileClassBodiesInner(
       if (updatedTypeIdx !== func.typeIdx) {
         func.typeIdx = updatedTypeIdx;
       }
+      if (splitInit && initFunc) {
+        const initResolvedParams = fctxParams.map((p) => p.type);
+        const updatedInitTypeIdx = addFuncType(ctx, initResolvedParams, resolvedResults, `${className}_init_type`);
+        if (updatedInitTypeIdx !== initFunc.typeIdx) {
+          initFunc.typeIdx = updatedInitTypeIdx;
+        }
+      }
     }
 
-    for (let i = 0; i < params.length; i++) {
-      fctx.localMap.set(params[i]!.name, i);
+    for (let i = 0; i < fctxParams.length; i++) {
+      fctx.localMap.set(fctxParams[i]!.name, i);
     }
 
-    // Allocate a local for the struct instance (externref for host-backed subclasses)
-    const selfLocal = allocLocal(
-      fctx,
-      "__self",
-      isExternrefBacked ? { kind: "externref" } : { kind: "ref", typeIdx: structTypeIdx },
-    );
+    // The struct instance binding: a param of `_init` for split classes, a
+    // local for externref-backed ones.
+    const selfLocal = splitInit
+      ? fctxParams.length - 1
+      : allocLocal(fctx, "__self", isExternrefBacked ? { kind: "externref" } : { kind: "ref", typeIdx: structTypeIdx });
 
     if (isExternrefBacked) {
       // No struct.new; `__self` starts as null externref and is set by the
@@ -966,7 +1377,8 @@ function compileClassBodiesInner(
       // super-call we emit below for default-constructor subclasses.
       fctx.body.push({ op: "ref.null.extern" });
       fctx.body.push({ op: "local.set", index: selfLocal });
-    } else {
+    } else if (!splitInit) {
+      // Legacy fallback (no `${className}_init` registered): allocate inline.
       // Push default values for all fields, then struct.new
       for (const field of fields) {
         if (field.name === "__tag") {
@@ -993,6 +1405,8 @@ function compileClassBodiesInner(
       fctx.body.push({ op: "struct.new", typeIdx: structTypeIdx });
       fctx.body.push({ op: "local.set", index: selfLocal });
     }
+    // splitInit: `self` arrives as the last param — allocation happens in
+    // `${className}_new`, emitted at the end of this function.
 
     // __proto__ initialization: deferred to #802 (dynamic prototype support)
 
@@ -1000,17 +1414,42 @@ function compileClassBodiesInner(
     fctx.localMap.set("this", selfLocal);
     ctx.currentFunc = fctx;
 
+    // (#1965) Does this implicit ctor forward to a real parent `_init`?
+    // If so, the parent's init applies the forwarded params' defaults — this
+    // function must NOT apply them too (a default expression with side
+    // effects would run twice, and the raw args + untouched `__argc` global
+    // flow through to the parent's own check).
+    const implicitParentInitIdx =
+      splitInit && !ctor
+        ? ctx.funcMap.get(classMemberFuncKey(ctx, `${ctx.classParentMap.get(className) ?? ""}_init`)) // (#1983)
+        : undefined;
+
     // Emit default-value initialization for constructor parameters with initializers.
-    // For each param with a default value, check if the caller passed the zero/null
-    // sentinel (meaning the argument was omitted) and if so, compile the initializer
-    // expression and assign it to the param local.
-    if (ctor) {
-      for (let i = 0; i < ctor.parameters.length; i++) {
-        const param = ctor.parameters[i]!;
+    // For primitive params, __argc distinguishes an omitted argument from a
+    // legitimate falsy value. Ref/externref params keep their value checks.
+    // #2082: the implicit ctor must also honour the FORWARDED parent params'
+    // defaults (`class A { constructor(v = 7){...} }; class B extends A {}` →
+    // `new B()` must see v = 7). Those params occupy indices
+    // [implicitForwarderArity, implicitForwarderArity + len) — 0-based here
+    // since a WasmGC-struct implicit ctor has no externref forwarder prefix.
+    // (#1965) ...unless the forwarded params flow into a real parent `_init`
+    // call, which applies its own defaults.
+    const defaultInitParams: ts.NodeArray<ts.ParameterDeclaration> | undefined =
+      ctor?.parameters ?? (implicitParentInitIdx !== undefined ? undefined : implicitStructCtorParams);
+    const defaultInitBase = ctor ? 0 : implicitForwarderArity;
+    if (defaultInitParams) {
+      const defaultArgcLocal = defaultInitParams.some((param, i) => {
+        if (!param.initializer) return false;
+        return paramDefaultNeedsArgc(params[defaultInitBase + i]?.type);
+      })
+        ? cacheParamDefaultArgc(ctx, fctx)
+        : undefined;
+      for (let i = 0; i < defaultInitParams.length; i++) {
+        const param = defaultInitParams[i]!;
         if (!param.initializer) continue;
 
-        const paramIdx = i;
-        const paramType = params[i]!.type;
+        const paramIdx = defaultInitBase + i;
+        const paramType = params[paramIdx]!.type;
 
         // Pre-ensure `__extern_is_undefined` before compiling the initializer so
         // any late-import funcIdx shift happens while `fctx.body` is authoritative.
@@ -1048,80 +1487,34 @@ function compileClassBodiesInner(
         const thenInstrs = fctx.body;
         popBody(fctx, savedBody);
 
-        // Emit the null/zero check + conditional assignment.
-        // externref: use `__extern_is_undefined` — callers padding missing args
-        // use `__get_undefined` which returns real JS undefined, so a plain
-        // `ref.is_null` would miss it and skip the default.
-        if (paramType.kind === "externref") {
-          fctx.body.push({ op: "local.get", index: paramIdx });
-          const isUndefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
-          if (isUndefIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: isUndefIdx });
-          } else {
-            fctx.body.push({ op: "ref.is_null" });
-          }
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "empty" },
-            then: thenInstrs,
-          });
-        } else if (paramType.kind === "ref_null" || paramType.kind === "ref") {
-          fctx.body.push({ op: "local.get", index: paramIdx });
-          fctx.body.push({ op: "ref.is_null" });
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "empty" },
-            then: thenInstrs,
-          });
-        } else if (paramType.kind === "i32") {
-          fctx.body.push({ op: "local.get", index: paramIdx });
-          fctx.body.push({ op: "i32.eqz" });
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "empty" },
-            then: thenInstrs,
-          });
-        } else if (paramType.kind === "f64") {
-          // NaN sentinel check: x != x is true iff x is NaN (#787)
-          fctx.body.push({ op: "local.get", index: paramIdx });
-          fctx.body.push({ op: "local.get", index: paramIdx });
-          fctx.body.push({ op: "f64.ne" });
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "empty" },
-            then: thenInstrs,
-          });
-        }
+        emitClassParamDefaultCheck(ctx, fctx, paramIdx, paramType, thenInstrs, i, defaultArgcLocal);
       }
     }
 
-    // (#1366a) For externref-backed subclasses, the parent-chain field-walk
-    // path is irrelevant (no struct fields to copy). When there's no explicit
-    // ctor, emit an implicit `super(args[0])`-equivalent: forward the first
-    // declared parameter to `__new_<ParentBuiltin>(...)`. With no params, we
-    // call `__new_<Parent>(null)`.
+    // (#1366a / #1833) For externref-backed subclasses, the parent-chain
+    // field-walk path is irrelevant (no struct fields to copy). When there's no
+    // explicit ctor, emit the default derived constructor: forward the synthetic
+    // externref parameter list to `__new_<ParentBuiltin>(...)`.
     if (!ctor && isExternrefBacked) {
       const parentName = ctx.classBuiltinParentMap.get(className);
       if (parentName) {
         const importName = `__new_${parentName}`;
-        // (#1455) Implicit constructor: forward the synthetic `__arg0`
-        // externref param to `__new_<Parent>(__arg0)`. Callers that supply
-        // zero args have `pushDefaultValue` pad with `ref.null.extern`; the
-        // runtime strips trailing null/undefined so `new Sub()` correctly
-        // calls `new Builtin()`. Callers that supply 2+ args have the extras
-        // truncated — multi-arg forwarding is a follow-up.
-        if (params.length > 0 && params[0]!.type.kind === "externref") {
-          fctx.body.push({ op: "local.get", index: 0 });
-        } else {
-          fctx.body.push({ op: "ref.null.extern" });
-        }
-        const funcIdx = ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "externref" }]);
+        const forwardParams = externrefParams(implicitForwarderArity);
+        const funcIdx = ensureLateImport(ctx, importName, forwardParams, [{ kind: "externref" }]);
         flushLateImportShifts(ctx, fctx);
         if (funcIdx !== undefined) {
+          for (let i = 0; i < implicitForwarderArity; i++) {
+            fctx.body.push({ op: "local.get", index: i });
+          }
           fctx.body.push({ op: "call", funcIdx });
         } else {
-          // Standalone (no host import): the externref message is already on
-          // stack; treat that as the instance (best-effort fallback).
+          // Standalone (no host import): treat the first constructor argument
+          // as the instance, matching the previous single-arg fallback.
+          if (implicitForwarderArity > 0) {
+            fctx.body.push({ op: "local.get", index: 0 });
+          } else {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
         }
         fctx.body.push({ op: "local.set", index: selfLocal });
         // (#1455) Set the instance's [[Prototype]] to `Sub.prototype` so
@@ -1131,14 +1524,30 @@ function compileClassBodiesInner(
       }
     }
 
-    // When a child class has no explicit constructor, run inherited field
-    // initializers from the parent chain (implicit super() semantics).
-    // This must happen before own field initializers.
+    // When a child class has no explicit constructor, the spec synthesizes
+    // `constructor(...args) { super(...args); }`. (#1965) With the init
+    // split this is a REAL call to the parent's `_init` on this instance —
+    // the parent runs its own field initializers and full ctor body (which
+    // recursively chains to ITS parent). The old AST replay (field
+    // initializers + mined `this.x = ...` assignments) is gone: it skipped
+    // every non-assignment statement of the ancestor ctor bodies.
     if (!ctor && !isExternrefBacked) {
-      const parentClassName = ctx.classParentMap.get(className);
-      if (parentClassName) {
-        // Walk the parent chain (grandparent first) and compile field initializers
-        // Guard against circular inheritance (e.g., class X extends X)
+      if (implicitParentInitIdx !== undefined) {
+        // Forward our params 1:1 (they were cloned from the nearest explicit
+        // ancestor ctor's param list — #2082), then self. `__argc` from the
+        // `new` call site flows through untouched so the parent's defaults
+        // fire exactly as if it had been constructed directly.
+        for (let i = 0; i < params.length; i++) {
+          fctx.body.push({ op: "local.get", index: i });
+        }
+        fctx.body.push({ op: "local.get", index: selfLocal });
+        fctx.body.push({ op: "call", funcIdx: implicitParentInitIdx });
+        fctx.body.push({ op: "drop" });
+      } else if (ctx.classParentMap.get(className) !== undefined) {
+        // Legacy fallback (parent has no `_init` — should not happen for
+        // user struct classes): keep prior behavior of replaying ancestor
+        // field initializers so fields are not silently zero.
+        const parentClassName = ctx.classParentMap.get(className)!;
         const ancestors: string[] = [];
         const visitedAnc = new Set<string>();
         let anc: string | undefined = parentClassName;
@@ -1162,46 +1571,20 @@ function compileClassBodiesInner(
               }
             }
           }
-          // Also run constructor body assignments (this.x = ...) from the parent
-          const ancCtor = ancDecl.members.find(ts.isConstructorDeclaration) as ts.ConstructorDeclaration | undefined;
-          if (ancCtor?.body) {
-            for (const stmt of ancCtor.body.statements) {
-              if (
-                ts.isExpressionStatement(stmt) &&
-                ts.isCallExpression(stmt.expression) &&
-                stmt.expression.expression.kind === ts.SyntaxKind.SuperKeyword
-              ) {
-                continue; // skip super() — already handled by ancestor chain order
-              }
-              if (
-                ts.isExpressionStatement(stmt) &&
-                ts.isBinaryExpression(stmt.expression) &&
-                stmt.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-                ts.isPropertyAccessExpression(stmt.expression.left) &&
-                stmt.expression.left.expression.kind === ts.SyntaxKind.ThisKeyword
-              ) {
-                const rawName = stmt.expression.left.name.text;
-                const fieldName = ts.isPrivateIdentifier(stmt.expression.left.name)
-                  ? "__priv_" + rawName.slice(1)
-                  : rawName;
-                const fieldIdx = fields.findIndex((f) => f.name === fieldName);
-                if (fieldIdx !== -1) {
-                  fctx.body.push({ op: "local.get", index: selfLocal });
-                  compileExpression(ctx, fctx, stmt.expression.right, fields[fieldIdx]!.type);
-                  fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
-                }
-              }
-            }
-          }
         }
       }
     }
 
-    // Compile field initializers from property declarations (e.g., x: number = 42, #x: number = 42)
-    // (#1366a) Skip for externref-backed classes — they have no WasmGC struct
-    // fields; user `prop = ...` declarations inside `class Sub extends Error`
-    // would need to be installed via host setters, which is out of scope.
-    if (!isExternrefBacked) {
+    const isDerivedClass = ctx.classParentMap.has(className) || ctx.classBuiltinParentMap.has(className);
+    let ownFieldInitializersEmitted = false;
+    const emitOwnInstanceFieldInitializers = (): void => {
+      // Compile field initializers from property declarations
+      // (e.g., x: number = 42, #x: number = 42). (#1366a) Skip for
+      // externref-backed classes — they have no WasmGC struct fields; user
+      // `prop = ...` declarations inside `class Sub extends Error` would need
+      // to be installed via host setters, which is out of scope.
+      if (isExternrefBacked || ownFieldInitializersEmitted) return;
+      ownFieldInitializersEmitted = true;
       for (const member of decl.members) {
         if (ts.isPropertyDeclaration(member) && member.name && member.initializer && !hasStaticModifier(member)) {
           const fieldName = resolveClassMemberName(ctx, member.name);
@@ -1214,6 +1597,13 @@ function compileClassBodiesInner(
           }
         }
       }
+    };
+
+    // Base classes and implicit derived constructors run own fields at the
+    // original constructor-initialization point. Explicit derived constructors
+    // must wait until `super()` returns (§13.3.7.1).
+    if (!isDerivedClass || !ctor) {
+      emitOwnInstanceFieldInitializers();
     }
 
     // (#846h) A derived class with an explicit constructor that never calls
@@ -1223,7 +1613,6 @@ function compileClassBodiesInner(
     // case (no lexical `super()` anywhere in the constructor body) and emit an
     // unconditional throw at the constructor entry, skipping the (now dead)
     // body compilation.
-    const isDerivedClass = ctx.classParentMap.has(className) || ctx.classBuiltinParentMap.has(className);
     const ctorMissingSuper = isDerivedClass && ctor?.body !== undefined && !constructorBodyHasSuperCall(ctor.body);
 
     if (ctorMissingSuper) {
@@ -1245,6 +1634,9 @@ function compileClassBodiesInner(
           stmt.expression.expression.kind === ts.SyntaxKind.SuperKeyword
         ) {
           compileSuperCall(ctx, fctx, className, selfLocal, stmt.expression, fields);
+          if (isDerivedClass) {
+            emitOwnInstanceFieldInitializers();
+          }
           continue;
         }
         compileStatement(ctx, fctx, stmt);
@@ -1301,8 +1693,55 @@ function compileClassBodiesInner(
 
     cacheStringLiterals(ctx, fctx);
     deduplicateLocals(fctx);
-    func.locals = fctx.locals;
-    func.body = fctx.body;
+    if (splitInit && initFunc) {
+      // (#1965) The body compiled above IS `${className}_init`. Fill
+      // `${className}_new` with: alloc (defaults + tag) → tail-call init.
+      initFunc.locals = fctx.locals;
+      initFunc.body = fctx.body;
+
+      const newBody: Instr[] = [];
+      for (const field of fields) {
+        if (field.name === "__tag") {
+          // Class-specific tag value for instanceof discrimination. The
+          // derived-most class allocates, so a base ctor body running via
+          // the init chain observes the DERIVED tag — that is what makes
+          // `this.method()` in a base ctor virtual-dispatch correctly.
+          const tagValue = ctx.classTagMap.get(className) ?? 0;
+          newBody.push({ op: "i32.const", value: tagValue });
+        } else if (field.type.kind === "f64") {
+          newBody.push({ op: "f64.const", value: 0 });
+        } else if (field.type.kind === "i32") {
+          newBody.push({ op: "i32.const", value: 0 });
+        } else if (field.type.kind === "externref") {
+          newBody.push({ op: "ref.null.extern" });
+        } else if (field.type.kind === "ref" || field.type.kind === "ref_null") {
+          newBody.push({ op: "ref.null", typeIdx: field.type.typeIdx });
+        } else if ((field.type as any).kind === "i64") {
+          newBody.push({ op: "i64.const", value: 0n });
+        } else if ((field.type as any).kind === "eqref") {
+          newBody.push({ op: "ref.null.eq" });
+        } else {
+          newBody.push({ op: "i32.const", value: 0 });
+        }
+      }
+      newBody.push({ op: "struct.new", typeIdx: structTypeIdx });
+      // Stash the fresh instance, push args 0..n-1 then the instance, and
+      // tail-call init (init returns the instance, satisfying `_new`'s
+      // (ref $struct) result type).
+      const newSelfLocal = params.length; // first local after params
+      newBody.push({ op: "local.set", index: newSelfLocal });
+      for (let i = 0; i < params.length; i++) {
+        newBody.push({ op: "local.get", index: i });
+      }
+      newBody.push({ op: "local.get", index: newSelfLocal });
+      const initIdxNow = ctx.funcMap.get(classMemberFuncKey(ctx, `${className}_init`)); // (#1983)
+      newBody.push({ op: "return_call", funcIdx: initIdxNow! } as Instr);
+      func.locals = [{ name: "__self", type: { kind: "ref", typeIdx: structTypeIdx } }];
+      func.body = newBody;
+    } else {
+      func.locals = fctx.locals;
+      func.body = fctx.body;
+    }
     ctx.currentFunc = null;
   }
 
@@ -1318,7 +1757,7 @@ function compileClassBodiesInner(
       if (compiledMethods.has(fullName)) continue; // already compiled
       compiledMethods.add(fullName);
       const isStatic = ctx.staticMethodSet.has(fullName);
-      const methodLocalIdx = funcByName.get(fullName);
+      const methodLocalIdx = funcByName.get(classMemberFuncKey(ctx, fullName)); // (#1983)
       if (methodLocalIdx === undefined) continue;
 
       const func = ctx.mod.functions[methodLocalIdx]!;
@@ -1400,6 +1839,13 @@ function compileClassBodiesInner(
       ctx.currentFunc = fctx;
 
       // Emit default-value initialization for method parameters with initializers.
+      const defaultArgcLocal = member.parameters.some((param, i) => {
+        if (!param.initializer) return false;
+        const paramLocalIdx = isStatic ? i : i + 1;
+        return paramDefaultNeedsArgc(params[paramLocalIdx]?.type);
+      })
+        ? cacheParamDefaultArgc(ctx, fctx)
+        : undefined;
       for (let pi = 0; pi < member.parameters.length; pi++) {
         const param = member.parameters[pi]!;
         if (!param.initializer) continue;
@@ -1455,48 +1901,7 @@ function compileClassBodiesInner(
         const thenInstrs = fctx.body;
         popBody(fctx, savedBody);
 
-        // Emit the null/zero check + conditional assignment.
-        // externref: see constructor site above for the `__extern_is_undefined` rationale.
-        if (paramType.kind === "externref") {
-          fctx.body.push({ op: "local.get", index: paramLocalIdx });
-          const isUndefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
-          if (isUndefIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: isUndefIdx });
-          } else {
-            fctx.body.push({ op: "ref.is_null" });
-          }
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "empty" },
-            then: thenInstrs,
-          });
-        } else if (paramType.kind === "ref_null" || paramType.kind === "ref") {
-          fctx.body.push({ op: "local.get", index: paramLocalIdx });
-          fctx.body.push({ op: "ref.is_null" });
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "empty" },
-            then: thenInstrs,
-          });
-        } else if (paramType.kind === "i32") {
-          fctx.body.push({ op: "local.get", index: paramLocalIdx });
-          fctx.body.push({ op: "i32.eqz" });
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "empty" },
-            then: thenInstrs,
-          });
-        } else if (paramType.kind === "f64") {
-          // NaN sentinel check: x != x is true iff x is NaN (#787)
-          fctx.body.push({ op: "local.get", index: paramLocalIdx });
-          fctx.body.push({ op: "local.get", index: paramLocalIdx });
-          fctx.body.push({ op: "f64.ne" });
-          fctx.body.push({
-            op: "if",
-            blockType: { kind: "empty" },
-            then: thenInstrs,
-          });
-        }
+        emitClassParamDefaultCheck(ctx, fctx, paramLocalIdx, paramType, thenInstrs, pi, defaultArgcLocal);
       }
 
       // Destructure parameters with binding patterns
@@ -1620,7 +2025,7 @@ function compileClassBodiesInner(
       const getterName = `${className}_get_${propName}`;
       if (compiledAccessors.has(getterName)) continue; // already compiled
       compiledAccessors.add(getterName);
-      const getterLocalIdx = funcByName.get(getterName);
+      const getterLocalIdx = funcByName.get(classMemberFuncKey(ctx, getterName)); // (#1983)
       if (getterLocalIdx === undefined) continue;
 
       const func = ctx.mod.functions[getterLocalIdx]!;
@@ -1708,7 +2113,7 @@ function compileClassBodiesInner(
       const setterName = `${className}_set_${propName}`;
       if (compiledAccessors.has(setterName)) continue; // already compiled
       compiledAccessors.add(setterName);
-      const setterLocalIdx = funcByName.get(setterName);
+      const setterLocalIdx = funcByName.get(classMemberFuncKey(ctx, setterName)); // (#1983)
       if (setterLocalIdx === undefined) continue;
 
       const func = ctx.mod.functions[setterLocalIdx]!;
@@ -1766,6 +2171,12 @@ function compileClassBodiesInner(
       ctx.currentFunc = fctx;
 
       // Emit default-value initialization for setter parameters with initializers (#377)
+      const defaultArgcLocal = member.parameters.some((param, i) => {
+        if (!param.initializer) return false;
+        return paramDefaultNeedsArgc(params[i + 1]?.type);
+      })
+        ? cacheParamDefaultArgc(ctx, fctx)
+        : undefined;
       for (let pi = 0; pi < member.parameters.length; pi++) {
         const param = member.parameters[pi]!;
         if (!param.initializer) continue;
@@ -1805,32 +2216,7 @@ function compileClassBodiesInner(
         const thenInstrs = fctx.body;
         popBody(fctx, savedBody);
 
-        // Emit the null/zero check + conditional assignment.
-        // externref: see constructor site above for the `__extern_is_undefined` rationale.
-        if (paramType.kind === "externref") {
-          fctx.body.push({ op: "local.get", index: paramLocalIdx });
-          const isUndefIdx = ensureLateImport(ctx, "__extern_is_undefined", [{ kind: "externref" }], [{ kind: "i32" }]);
-          if (isUndefIdx !== undefined) {
-            fctx.body.push({ op: "call", funcIdx: isUndefIdx });
-          } else {
-            fctx.body.push({ op: "ref.is_null" });
-          }
-          fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenInstrs });
-        } else if (paramType.kind === "ref_null" || paramType.kind === "ref") {
-          fctx.body.push({ op: "local.get", index: paramLocalIdx });
-          fctx.body.push({ op: "ref.is_null" });
-          fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenInstrs });
-        } else if (paramType.kind === "i32") {
-          fctx.body.push({ op: "local.get", index: paramLocalIdx });
-          fctx.body.push({ op: "i32.eqz" });
-          fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenInstrs });
-        } else if (paramType.kind === "f64") {
-          // NaN sentinel check: x != x is true iff x is NaN (#787)
-          fctx.body.push({ op: "local.get", index: paramLocalIdx });
-          fctx.body.push({ op: "local.get", index: paramLocalIdx });
-          fctx.body.push({ op: "f64.ne" });
-          fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenInstrs });
-        }
+        emitClassParamDefaultCheck(ctx, fctx, paramLocalIdx, paramType, thenInstrs, pi, defaultArgcLocal);
       }
 
       if (member.body) {
@@ -1875,43 +2261,52 @@ export function compileSuperCall(
   if (builtinParent) {
     const args = callExpr.arguments;
     const hasSpread = args.some((a) => ts.isSpreadElement(a));
-    if (hasSpread || args.length === 0) {
-      // (#1551) Even when we cannot forward spread args to the host
-      // constructor, evaluate them left-to-right for side effects so that
-      // abrupt completions (throws from arg expressions) propagate to the
-      // user's try/catch around `super(...)`. The host import receives null
-      // (best-effort; #1366b refines spread forwarding).
-      for (const a of args) {
-        const inner = ts.isSpreadElement(a) ? a.expression : a;
-        const argResult = compileExpression(ctx, fctx, inner);
-        if (argResult !== null) {
-          fctx.body.push({ op: "drop" });
-        }
-      }
-      fctx.body.push({ op: "ref.null.extern" });
-    } else {
-      // Single message arg coerced to externref, plus side-effect-only
-      // evaluation of any trailing args (§13.3.7.1 step 4 — #1551).
-      const argResult = compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
-      if (argResult && argResult.kind !== "externref") {
-        coerceType(ctx, fctx, argResult, { kind: "externref" });
-      }
-      for (let i = 1; i < args.length; i++) {
-        const extra = compileExpression(ctx, fctx, args[i]!);
-        if (extra !== null) {
-          fctx.body.push({ op: "drop" });
-        }
-      }
-    }
     const importName = `__new_${builtinParent}`;
-    const funcIdx = ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "externref" }]);
+    const forwardArity = getBuiltinConstructorForwardArity(ctx, builtinParent);
+    const forwardParams = externrefParams(forwardArity);
+    const funcIdx = ensureLateImport(ctx, importName, forwardParams, [{ kind: "externref" }]);
     flushLateImportShifts(ctx, fctx);
     if (funcIdx !== undefined) {
+      const flatArgs = hasSpread ? flattenStaticallyKnownArgs(args) : [...args];
+      if (flatArgs) {
+        for (let i = 0; i < forwardArity; i++) {
+          if (i < flatArgs.length) {
+            compileExternrefArgument(ctx, fctx, flatArgs[i]!);
+          } else {
+            emitUndefined(ctx, fctx);
+          }
+        }
+        for (let i = forwardArity; i < flatArgs.length; i++) {
+          evaluateArgumentForSideEffects(ctx, fctx, flatArgs[i]!);
+        }
+      } else {
+        // (#1551) Non-literal spread cannot be unpacked here yet. Evaluate
+        // operands left-to-right for side effects, then call the parent with an
+        // all-undefined argument list that the runtime trims to `super()`.
+        for (const arg of args) {
+          evaluateArgumentForSideEffects(ctx, fctx, arg);
+        }
+        for (let i = 0; i < forwardArity; i++) {
+          emitUndefined(ctx, fctx);
+        }
+      }
       fctx.body.push({ op: "call", funcIdx });
+    } else {
+      // If the import is unavailable (standalone/WASI), preserve the old
+      // best-effort fallback: evaluate arguments, then use the first value (or
+      // null) as the instance.
+      if (args.length > 0 && !ts.isSpreadElement(args[0]!)) {
+        compileExternrefArgument(ctx, fctx, args[0]!);
+        for (let i = 1; i < args.length; i++) {
+          evaluateArgumentForSideEffects(ctx, fctx, args[i]!);
+        }
+      } else {
+        for (const arg of args) {
+          evaluateArgumentForSideEffects(ctx, fctx, arg);
+        }
+        fctx.body.push({ op: "ref.null.extern" });
+      }
     }
-    // If the import is unavailable (standalone/WASI), the message externref
-    // is already on the stack; treating it as the instance is the documented
-    // standalone fallback (architect spec, risk #2).
     fctx.body.push({ op: "local.set", index: selfLocal });
     // (#1455) Adjust the instance's [[Prototype]] to `childClassName.prototype`
     // so `instance instanceof childClassName` returns true. Without this step
@@ -1920,86 +2315,97 @@ export function compileSuperCall(
     return;
   }
 
-  const parentFields = ctx.structFields.get(parentClassName) ?? [];
-  const structTypeIdx = ctx.structMap.get(childClassName)!;
-
-  // Evaluate super(args) and assign to parent fields on the child struct.
-  // Skip __tag (immutable, already set by struct.new) and map arguments to
-  // the remaining parent fields in order.
-  const assignableParentFields = parentFields
-    .map((f, idx) => ({ field: f, fieldIdx: idx }))
-    .filter((e) => e.field.name !== "__tag");
-
-  // Check if any argument uses spread syntax: super(...args) (#382)
-  const hasSuperSpread = callExpr.arguments.some((a) => ts.isSpreadElement(a));
-
-  if (hasSuperSpread) {
-    // Handle spread arguments: super(...args) where args is a vec struct { length, data }
-    let fieldIdx2 = 0;
+  // (#1965) `super(args)` is a REAL call to the parent's constructor-init
+  // function `${parent}_init(args..., self)`. The parent binds its
+  // parameters, runs its field initializers and its full ctor body (and
+  // recursively chains to ITS parent via its own super()). The old
+  // positional args→parent-struct-fields copy and the AST replay of
+  // ancestor field initializers are gone — the real call subsumes both.
+  // Passing `self: (ref $Child)` where the init expects `(ref $Parent)` is
+  // direct WasmGC subsumption ($Child <: $Parent via superTypeIdx).
+  const parentInitName = `${parentClassName}_init`;
+  const parentInitIdx = ctx.funcMap.get(parentInitName);
+  if (parentInitIdx === undefined) {
+    // Parent is not a struct-backed user class with an init (should not
+    // happen — builtin parents took the branch above). Evaluate args for
+    // side effects to preserve §13.3.7.1 ArgumentListEvaluation.
     for (const arg of callExpr.arguments) {
-      if (ts.isSpreadElement(arg)) {
-        const vecType = compileExpression(ctx, fctx, arg.expression);
-        if (!vecType || (vecType.kind !== "ref" && vecType.kind !== "ref_null")) continue;
-        const vecLocal = allocLocal(fctx, `__super_spread_vec_${fctx.locals.length}`, vecType);
-        fctx.body.push({ op: "local.set", index: vecLocal });
-        const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecType.typeIdx);
-        if (arrTypeIdx < 0) continue;
-        const dataLocal = allocLocal(fctx, `__super_spread_data_${fctx.locals.length}`, {
-          kind: "ref_null",
-          typeIdx: arrTypeIdx,
-        });
-        fctx.body.push({ op: "local.get", index: vecLocal });
-        fctx.body.push({ op: "struct.get", typeIdx: vecType.typeIdx, fieldIdx: 1 });
-        fctx.body.push({ op: "local.set", index: dataLocal });
-        const arrDefSpread = ctx.mod.types[arrTypeIdx];
-        const spreadElemType =
-          arrDefSpread && arrDefSpread.kind === "array" ? arrDefSpread.element : { kind: "f64" as const };
-        const remaining = assignableParentFields.length - fieldIdx2;
-        for (let i = 0; i < remaining; i++) {
-          const { fieldIdx } = assignableParentFields[fieldIdx2]!;
-          fctx.body.push({ op: "local.get", index: selfLocal });
-          fctx.body.push({ op: "local.get", index: dataLocal });
-          fctx.body.push({ op: "i32.const", value: i });
-          emitBoundsCheckedArrayGet(fctx, arrTypeIdx, spreadElemType);
-          fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
-          fieldIdx2++;
-        }
-      } else {
-        if (fieldIdx2 < assignableParentFields.length) {
-          const { field, fieldIdx } = assignableParentFields[fieldIdx2]!;
-          fctx.body.push({ op: "local.get", index: selfLocal });
-          compileExpression(ctx, fctx, arg, field.type);
-          fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
-          fieldIdx2++;
-        } else {
-          // (#1551) Side-effect-only evaluation for non-spread args after
-          // parent fields are exhausted.
-          const sideRes = compileExpression(ctx, fctx, arg);
-          if (sideRes !== null) {
-            fctx.body.push({ op: "drop" });
-          }
-        }
-      }
+      evaluateArgumentForSideEffects(ctx, fctx, arg);
     }
-  } else {
-    // (#1551) ArgumentListEvaluation (§13.3.7.1 step 4) must evaluate every
-    // argument expression left-to-right, regardless of whether the parent
-    // struct has a slot to receive it. Side-effects (and abrupt completions
-    // from arg evaluation) must propagate to the user's try/catch around
-    // `super(...)`. Args beyond `assignableParentFields.length` are evaluated
-    // for side effects only and the produced value is dropped.
-    for (let i = 0; i < callExpr.arguments.length; i++) {
-      if (i < assignableParentFields.length) {
-        const { field, fieldIdx } = assignableParentFields[i]!;
-        fctx.body.push({ op: "local.get", index: selfLocal });
-        compileExpression(ctx, fctx, callExpr.arguments[i]!, field.type);
-        fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
-      } else {
-        const argResult = compileExpression(ctx, fctx, callExpr.arguments[i]!);
-        if (argResult !== null) {
-          fctx.body.push({ op: "drop" });
-        }
-      }
-    }
+    return;
   }
+  const initParamTypes = getFuncParamTypes(ctx, parentInitIdx) ?? [];
+  // Strip the trailing `self` param — callers supply it separately below.
+  const paramTypes = initParamTypes.slice(0, Math.max(0, initParamTypes.length - 1));
+  const restInfo = ctx.funcRestParams.get(parentInitName);
+  const args = callExpr.arguments;
+  const hasSpread = args.some((a) => ts.isSpreadElement(a));
+  // Statically-known spreads (array literals of literals) flatten to
+  // positional args; runtime spreads fall through to the side-effect path.
+  const flatArgs: ts.Expression[] | undefined = hasSpread ? (flattenStaticallyKnownArgs(args) ?? undefined) : [...args];
+
+  let actualArgCount = 0;
+  if (restInfo && !hasSpread) {
+    // Parent ctor has a rest parameter: pack trailing args into a vec, the
+    // same shape regular rest-param call sites build.
+    for (let i = 0; i < restInfo.restIndex; i++) {
+      if (i < args.length) {
+        compileExpression(ctx, fctx, args[i]!, paramTypes[i]);
+      } else {
+        pushDefaultValue(fctx, paramTypes[i] ?? { kind: "f64" }, ctx);
+      }
+    }
+    const restArgCount = Math.max(0, args.length - restInfo.restIndex);
+    fctx.body.push({ op: "i32.const", value: restArgCount });
+    for (let i = restInfo.restIndex; i < args.length; i++) {
+      compileExpression(ctx, fctx, args[i]!, restInfo.elemType);
+    }
+    fctx.body.push({
+      op: "array.new_fixed",
+      typeIdx: restInfo.arrayTypeIdx,
+      length: restArgCount,
+    } as Instr);
+    fctx.body.push({ op: "struct.new", typeIdx: restInfo.vecTypeIdx });
+    actualArgCount = args.length;
+  } else if (flatArgs) {
+    // (#1551) ArgumentListEvaluation (§13.3.7.1 step 4) evaluates every
+    // argument expression left-to-right; args beyond the parent's param
+    // count are evaluated for side effects only and dropped.
+    for (let i = 0; i < Math.min(flatArgs.length, paramTypes.length); i++) {
+      compileExpression(ctx, fctx, flatArgs[i]!, paramTypes[i]);
+    }
+    for (let i = paramTypes.length; i < flatArgs.length; i++) {
+      const argResult = compileExpression(ctx, fctx, flatArgs[i]!);
+      if (argResult !== null) {
+        fctx.body.push({ op: "drop" });
+      }
+    }
+    for (let i = flatArgs.length; i < paramTypes.length; i++) {
+      pushDefaultValue(fctx, paramTypes[i]!, ctx);
+    }
+    actualArgCount = flatArgs.length;
+  } else {
+    // Runtime spread that cannot be statically unpacked (#1551): evaluate
+    // operands left-to-right for side effects, then call the parent with
+    // default-padded params and argc 0 so the parent's own defaults fire.
+    for (const arg of args) {
+      evaluateArgumentForSideEffects(ctx, fctx, arg);
+    }
+    for (const t of paramTypes) {
+      pushDefaultValue(fctx, t, ctx);
+    }
+    actualArgCount = 0;
+  }
+  // Let the parent's defaults/`arguments` machinery see the real arg count.
+  maybeSetArgcForKnownCall(ctx, fctx, parentInitName, actualArgCount, paramTypes.length);
+  fctx.body.push({ op: "local.get", index: selfLocal });
+  // Re-resolve: compiling arguments may have added late imports and shifted
+  // function indices.
+  const finalInitIdx = ctx.funcMap.get(parentInitName) ?? parentInitIdx;
+  fctx.body.push({ op: "call", funcIdx: finalInitIdx });
+  // The init returns the instance (constructor-return-override plumbing for
+  // the direct-construction path); super() ignores it — `this` stays the
+  // derived allocation. Parent return-override through super() is out of
+  // scope (was equally unsupported by the positional-copy mechanism).
+  fctx.body.push({ op: "drop" });
 }

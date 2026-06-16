@@ -91,6 +91,7 @@ export const OP = {
   f64_copysign: 0xa6,
   i32_wrap_i64: 0xa7,
   i32_trunc_f64_s: 0xaa,
+  i32_trunc_f64_u: 0xab,
   f32_demote_f64: 0xb6,
   f64_promote_f32: 0xbb,
   // i64 comparison
@@ -441,7 +442,13 @@ export const TYPE = {
   i31: 0x6c,
   struct_ht: 0x6b,
   array_ht: 0x6a,
-  none: 0x6e, // alias – bottom of ref hierarchy
+  // #1842 — WasmGC abstract bottom heap types. `none` is the bottom of the
+  // `any` hierarchy and MUST be 0x71; it previously aliased `any` (0x6e), which
+  // would mis-encode any future bottom-type emission. `noextern`/`nofunc`
+  // (bottoms of the extern/func hierarchies) were absent entirely.
+  none: 0x71,
+  noextern: 0x72,
+  nofunc: 0x73,
   v128: 0x7b,
   i8: 0x78,
   i16: 0x77,
@@ -477,7 +484,10 @@ export const RELOC = {
   R_WASM_GLOBAL_INDEX_LEB: 7,
   R_WASM_FUNCTION_OFFSET_I32: 8,
   R_WASM_SECTION_OFFSET_I32: 9,
-  R_WASM_TAG_INDEX_LEB: 11,
+  // #1843 — LLVM canonical for the tag-index relocation is 10 (historically
+  // R_WASM_EVENT_INDEX_LEB). This was 11, so a tag relocation written by the
+  // emitter was parsed as unknown by `src/link/reader.ts` (which uses 10).
+  R_WASM_TAG_INDEX_LEB: 10,
 } as const;
 
 /** Symbol flags for the linking section symbol table */

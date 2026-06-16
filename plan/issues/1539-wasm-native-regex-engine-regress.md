@@ -1,9 +1,9 @@
 ---
 id: 1539
 title: "Standalone Wasm RegExp engine via regress (Phase 2 of #1474)"
-status: in-progress
+status: done
 created: 2026-05-20
-updated: 2026-06-03
+updated: 2026-06-11
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -11,9 +11,13 @@ task_type: feature
 area: codegen, runtime
 language_feature: regular expressions
 goal: standalone-wasm
-sprint: 58
+sprint: 61
 depends_on: [1474]
 related: [1474, 682, 1535]
+claimed_by: codex-developer
+claimed_at: 2026-06-06T09:31:52.475Z
+pr: 1252
+completed: 2026-06-06
 ---
 # #1539 — Standalone Wasm RegExp engine via regress (Phase 2 of #1474)
 
@@ -468,3 +472,139 @@ dodged this only incidentally (its field[1] was `flags:i32`).
 Remaining (later slices): `.exec`/`.match` capture arrays + named groups
 (2b); `.replace`/`.split`/`matchAll` + `m`/`s`/`d` (2c); `\p{}`/lookaround/
 backrefs (2d).
+
+## Implementation Notes (dev-1539-flags, 2026-06-04) — Phase 2c flags `m` + `s`
+
+Landed the `m` (multiline) and `s` (dotAll) flags on the existing pure-WasmGC
+bytecode VM. No new opcodes, no struct changes, no toolchain — the flags ride
+existing instruction operands, so the change is small and self-contained.
+
+- **`s` (dotAll)** — the `ANY` opcode already carries a `dotAll` flag in
+  operand `a` (the VM excludes `\n \r U+2028 U+2029` when `a==0`). The compiler
+  had hardcoded `0`; it now emits `a = (flags & RE_FLAG_S) ? 1 : 0`. Both the
+  reference VM (`regex/vm.ts`) and the Wasm VM (`native-regex.ts` `anyArm`)
+  already read operand `a`, so the run-time side needed no change for `s`.
+- **`m` (multiline)** — `BOL`/`EOL` previously matched only at string
+  start/end. The compiler now stores the multiline bit in their operand `a`.
+  Both VMs gained the multiline branch (§22.2.2.6/§22.2.2.7): `^` also matches
+  right after a line terminator (unit at `sp-1` is a LT), `$` also matches right
+  before one (unit at `sp`). The neighbour read in the Wasm `anchorArm` is
+  guarded by an in-bounds check (`sp>0` / `sp<slen`) so it can never trap.
+  `\r\n` is two terminators, so an anchor between them still matches (matches
+  native `RegExp`).
+- **Gate** — `regexp-standalone.ts` flag refusal narrowed from
+  `g|i|y` to `g|i|y|m|s`; `u`/`v` (code-point) and `d` (indices) stay refused
+  citing #1539 Phase 2d.
+
+Files: `src/codegen/regex/{compile,vm}.ts`, `src/codegen/native-regex.ts`
+(`anchorArm` + new `multilineAnchorMatch`), `src/codegen/regexp-standalone.ts`.
+
+Tests: `tests/regex-bytecode.test.ts` (141 pure-TS cases incl. new `m`/`s`/`ms`
+rows vs native `RegExp`), `tests/issue-1539-standalone-regex.test.ts` (78
+dual-run cases, real Wasm, empty import object — incl. `m`/`s`/`ms`), and the
+narrowed-refusal tests flipped from "refuses `m`" to "refuses `u`/`d` (Phase
+2d)".
+
+Still open for #1539 (issue stays `in-progress`): Phase 2b capture
+arrays/`.exec`/`.match`/named groups; Phase 2c `.replace`/`.split`/`matchAll`
+and the `d` indices flag; Phase 2d `u`/`v` code-point semantics + fancy
+features.
+
+## Implementation Notes (dev-regex, 2026-06-05) — Phase 2b `String.prototype.search`
+
+Landed `String.prototype.search(/re/)` in standalone mode on the existing
+pure-WasmGC VM — the first **String-prototype** RegExp method to leave the
+#1474 refusal gate (the prior slices were all `RegExp.prototype.*`). Returns
+the match index (f64) or `-1`, matching ECMA-262 §22.1.3.13 + §22.2.6.13
+(`RegExp.prototype[@@search]`): search runs from index 0, is unaffected by the
+`g` flag, and never advances `lastIndex`. No new opcodes, no struct changes,
+no new Wasm helper — it reuses `__regex_search` (which already fills the
+capture-slots array) and reads `caps[0]` (whole-match start).
+
+- Refactor: extracted the `.test` body's "load `$NativeRegExp` struct + flatten
+  subject + alloc caps + compute sticky + call `__regex_search`" sequence into
+  two shared helpers in `regexp-standalone.ts` — `loadStandaloneRegExpStruct`
+  (narrows an externref backend-created RegExp back to the struct) and
+  `emitRegexSearchCall` (leaves the i32 match flag on the stack, exposes the
+  populated caps array). `.test` now returns that flag directly; `.search`
+  branches on it: `matched ? f64(caps[0]) : -1`. This shared seam is the
+  spine Phase 2b `.exec`/`.match` capture-array reads will build on.
+- Routing: `tryCompileStandaloneStringSearch` hooks
+  `compileNativeStringMethodCall` (string-ops.ts) *before* the #1474 refusal,
+  fired only when the receiver is string-like and the argument is a static /
+  backend-created RegExp (`/re/`, `new RegExp("…")`, or a `const re = /…/`
+  binding). The string-coercion form (string argument the spec wraps in
+  `new RegExp`) and JS-host mode are untouched — both still take the legacy
+  host path.
+- Flag/pattern subset: identical to the `.test` slice — literal / `.` /
+  `[...]` / `^`/`$` / quantifiers / `|` / groups; flags `i`/`g`/`y`/`m`/`s`.
+  `u`/`v`/`d` and fancy features stay narrowed refusals.
+
+Files: `src/codegen/regexp-standalone.ts` (shared helpers + search hook),
+`src/codegen/string-ops.ts` (route search before refusal).
+Tests: `tests/issue-1539-standalone-regex.test.ts` (75 dual-run `.search`
+cases vs native + var-bound/`new RegExp` arg forms), narrowed the `s.search`
+refusal in `tests/issue-1474-standalone-regex-refuse.test.ts` to a
+compiles-OK assertion.
+
+## Implementation Notes (codex-developer, 2026-06-06) — Phase 2c non-capturing `String.prototype.split`
+
+Landed `String.prototype.split(/re/)` in standalone mode for backend-created
+static RegExp separators on the existing pure-WasmGC VM. The helper
+`__regex_split` mirrors the native string split vec shape (`ref_<AnyString>`)
+and uses `__regex_search` to find separator spans, returning a native
+`string[]` without `env.RegExp_new`, `env.string_split`, or `env.__make_iterable`
+imports.
+
+- Scope: regex literal / trusted var-bound RegExp / `new RegExp("static")`,
+  non-capturing separators only, no `limit` argument, and separators that cannot
+  match the empty string. This avoids silently mis-modeling capture interleaving
+  and zero-width split edge cases until the capture-array follow-up lands.
+- Refactor: consolidated standalone regex flag/subset validation so literal
+  struct emission and string-method routing share the same `g/i/y/m/s` support
+  and `u/v/d` refusal diagnostics.
+- Tests: extended `tests/issue-1539-standalone-regex.test.ts` with split
+  equivalence cases vs native RegExp plus var-bound / constructor forms and
+  narrowed refusals for capture groups, `limit`, and empty-match separators.
+  Updated `tests/issue-1474-standalone-regex-refuse.test.ts` so the now-supported
+  `split` and literal-replacement `replace` paths compile.
+
+Still open for #1539: capture-array materialization for `.exec`/`.match` and
+capture-interleaved `split`, `$`/function replacement semantics, `matchAll`, and
+the `d`/`u`/`v` plus lookaround/backreference/property-escape work.
+
+## Implementation Notes (codex-developer, 2026-06-06) — Phase 2b `.exec` + non-global `.match`
+
+Landed standalone capture-array materialization for non-global/non-sticky
+`RegExp.prototype.exec(str)` and `String.prototype.match(/re/)` on the existing
+pure-WasmGC regex VM. Matches now return a nullable native string vec:
+`null` for no match, otherwise `[fullMatch, cap1, cap2, ...]`, with unmatched
+captures represented as null native strings so indexed reads observe
+`undefined` without any JS host array bridge.
+
+- Added `__regex_capture_array`, which consumes the populated `caps` slot array
+  from `__regex_search` and slices the flattened subject via native string
+  helpers. This keeps `.exec`/`.match` fully standalone and avoids
+  `env.RegExp_new`, `env.string_match`, `env.__make_iterable`, and
+  `env.__extern_get`.
+- Routed static backend-created regex values through `.exec` and non-global
+  `.match`; global/sticky paths remain narrowed refusals because observable
+  `lastIndex` and all-match semantics need the next slice.
+- Added local/global type inference for variables initialized from static
+  `.exec`/non-global `.match` calls, including non-null assertions, so indexed
+  result reads stay on the native vec path instead of coercing through
+  `externref`.
+- Tests: extended `tests/issue-1539-standalone-regex.test.ts` with dual-run
+  capture cases for full matches, optional captures, alternation captures,
+  `i`/`m` flags, no-match results, var-bound regexes, and `new RegExp(...)`;
+  updated `tests/issue-1474-standalone-regex-refuse.test.ts` so non-global
+  `.match` compiles while global `.match` remains refused.
+
+Validation: `npm test -- tests/issue-1539-standalone-regex.test.ts
+tests/issue-1474-standalone-regex-refuse.test.ts
+tests/issue-1539-standalone-regex-replace.test.ts` passed
+(3 files, 208 tests).
+
+Still open for #1539: capture-interleaved `split`, `$`/function replacement
+semantics, `matchAll`, named groups / `groups`, and the `d`/`u`/`v` plus
+lookaround/backreference/property-escape work.

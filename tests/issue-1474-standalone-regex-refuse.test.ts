@@ -31,8 +31,8 @@ async function expectRefused(src: string): Promise<ReturnType<typeof compile>> {
 // #1539 Phase 2a narrowed these refusals: a static-pattern `RegExp.prototype.
 // test` now compiles to the pure-WasmGC backtracking VM (see
 // tests/issue-1539-standalone-regex.test.ts). The cases below are the residual
-// forms that are STILL refused — dynamic patterns, the String.prototype
-// regex-coercing methods (Phase 2c), and out-of-subset pattern features.
+// forms that are STILL refused — dynamic patterns, capture-materializing
+// String.prototype regex methods, and out-of-subset pattern features.
 describe("#1474/#1539 --target standalone still refuses (narrowed)", () => {
   it("rejects new RegExp(dynamicPattern, ...)", async () => {
     await expectRefused(`export function f(p: string): boolean { return new RegExp(p, "g").test("x"); }`);
@@ -42,24 +42,63 @@ describe("#1474/#1539 --target standalone still refuses (narrowed)", () => {
     await expectRefused(`export function f(p: string): boolean { const r = RegExp(p); return r.test("x"); }`);
   });
 
-  it("rejects s.match(regexLiteral) — String method (Phase 2c)", async () => {
-    await expectRefused(`export function f(s: string): boolean { return s.match(/\\d+/) !== null; }`);
+  it("compiles non-global s.match(regexLiteral) — capture-array Phase 2b slice", async () => {
+    const r = await compile(`export function f(s: string): boolean { return s.match(/\\d+/) !== null; }`, {
+      target: "standalone",
+    });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   });
 
-  it("rejects s.matchAll(regexLiteral) — Phase 2c", async () => {
-    await expectRefused(`export function f(s: string): number { return [...s.matchAll(/\\d/g)].length; }`);
+  // #1913 landed global String.match (§22.2.6.8 step 6) on the pure-WasmGC
+  // matcher — it now compiles instead of refusing. (Equivalence vs native
+  // global match lives in tests/issue-1913.test.ts.)
+  it("compiles global s.match(regexLiteral) — all-match semantics (#1913)", async () => {
+    const r = await compile(
+      `export function f(s: string): number { const m = s.match(/\\d+/g); return m === null ? -1 : m.length; }`,
+      { target: "standalone" },
+    );
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   });
 
-  it("rejects s.search(regexLiteral) — String method (Phase 2c)", async () => {
-    await expectRefused(`export function f(s: string): number { return s.search(/\\d/); }`);
+  // #2161 landed global String.matchAll(/re/g) on the pure-WasmGC matcher as an
+  // iterable vec of capture-arrays — the for-of form now compiles instead of
+  // refusing. (Behavior coverage lives in tests/issue-2161-matchall.test.ts.)
+  it("compiles global s.matchAll(/re/g) for-of — iterable of capture arrays (#2161)", async () => {
+    const r = await compile(
+      `export function f(s: string): number { let n = 0; for (const m of s.matchAll(/\\d/g)) n++; return n; }`,
+      { target: "standalone" },
+    );
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   });
 
-  it("rejects s.split(regexArg) — Phase 2c", async () => {
-    await expectRefused(`export function f(s: string): number { const r = /,/; return s.split(r).length; }`);
+  it("rejects non-global s.matchAll(/re/) — runtime TypeError per §22.1.3.13 (#2161 narrowed)", async () => {
+    await expectRefused(
+      `export function f(s: string): number { let n = 0; for (const m of s.matchAll(/\\d/)) n++; return n; }`,
+    );
   });
 
-  it("rejects s.replace(regexArg, ...) — Phase 2c", async () => {
-    await expectRefused(`export function f(s: string): string { const r = /a/g; return s.replace(r, "b"); }`);
+  // #1539 Phase 2b landed `String.prototype.search(/re/)` on the pure-WasmGC
+  // matcher — it now compiles instead of refusing. (Equivalence vs native
+  // `search` lives in tests/issue-1539-standalone-regex.test.ts.)
+  it("compiles s.search(regexLiteral) — String method (Phase 2b)", async () => {
+    const r = await compile(`export function f(s: string): number { return s.search(/\\d/); }`, {
+      target: "standalone",
+    });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+  });
+
+  it("compiles s.split(regexArg) — non-capturing Phase 2c slice", async () => {
+    const r = await compile(`export function f(s: string): number { const r = /,/; return s.split(r).length; }`, {
+      target: "standalone",
+    });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+  });
+
+  it("compiles s.replace(regexArg, literal) — Phase 2c slice", async () => {
+    const r = await compile(`export function f(s: string): string { const r = /a/g; return s.replace(r, "b"); }`, {
+      target: "standalone",
+    });
+    expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   });
 
   it("emits no env::RegExp_new import when refused", async () => {

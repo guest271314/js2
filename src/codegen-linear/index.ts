@@ -9,6 +9,7 @@ import type { ClassLayout } from "./layout.js";
 import { computeClassLayout } from "./layout.js";
 import {
   addArrayRuntime,
+  addFmodRuntime,
   addMapRuntime,
   addNumericMapRuntime,
   addNumericSetRuntime,
@@ -16,6 +17,7 @@ import {
   addSetRuntime,
   addStringRuntime,
   addUint8ArrayRuntime,
+  FMOD_FN,
 } from "./runtime.js";
 
 /** Type tag for class instances in linear memory */
@@ -34,14 +36,46 @@ function isNumberArrayOrUint8ArrayUnionText(text: string): boolean {
 }
 
 /**
+ * Extract a 1-based {line, column} from an AST node for diagnostics (#1937).
+ * Mirrors the GC backend's extractLocation (src/codegen/context/errors.ts);
+ * falls back to {0,0} for synthetic nodes without a source file.
+ */
+function nodeLoc(node: ts.Node): { line: number; column: number } {
+  try {
+    const sf = node.getSourceFile();
+    if (sf) {
+      const { line, character } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
+      return { line: line + 1, column: character + 1 };
+    }
+  } catch {
+    // fall through to {0,0}
+  }
+  return { line: 0, column: 0 };
+}
+
+/**
+ * Options for the linear-memory backend (#1856).
+ */
+export interface LinearOptions {
+  /**
+   * Expose the explicit arena-management exports `__arena_reset` /
+   * `__arena_used` on the bump allocator. Useful for embedders that reuse a
+   * single instance across many short-lived tasks; off by default so the
+   * common "allocate-and-exit" program pays nothing for them.
+   * See {@link import("./runtime.js").ArenaOptions}.
+   */
+  exposeArenaReset?: boolean;
+}
+
+/**
  * Generate a WasmModule using the linear-memory backend.
  * Compiles TS functions to standard Wasm with i32/f64 values.
  */
-export function generateLinearModule(ast: TypedAST): WasmModule {
+export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): WasmModule {
   const mod = createEmptyModule();
 
   // Add memory and runtime functions first
-  addRuntime(mod);
+  addRuntime(mod, { exposeArenaReset: opts.exposeArenaReset });
   addUint8ArrayRuntime(mod);
   addArrayRuntime(mod);
   addStringRuntime(mod);
@@ -49,6 +83,7 @@ export function generateLinearModule(ast: TypedAST): WasmModule {
   addSetRuntime(mod);
   addNumericMapRuntime(mod);
   addNumericSetRuntime(mod);
+  addFmodRuntime(mod); // #2144 — exact f64 remainder for the `%` arm
 
   // Add __closure_env global (mutable i32, init 0) for closure support
   const closureEnvGlobalIdx = mod.globals.length;
@@ -161,6 +196,10 @@ export function generateLinearModule(ast: TypedAST): WasmModule {
 
   emitClosureTable(ctx);
 
+  // Surface codegen diagnostics so compiler.ts fails the compile rather than
+  // emitting a structurally invalid binary for unsupported constructs (#1868).
+  if (ctx.errors.length > 0) mod.codegenErrors = ctx.errors;
+
   return mod;
 }
 
@@ -168,10 +207,10 @@ export function generateLinearModule(ast: TypedAST): WasmModule {
  * Generate a WasmModule from multiple TS source files using the linear-memory backend.
  * Cross-file imports are resolved by the TypeScript checker; we iterate all source files.
  */
-export function generateLinearMultiModule(multiAst: MultiTypedAST): WasmModule {
+export function generateLinearMultiModule(multiAst: MultiTypedAST, opts: LinearOptions = {}): WasmModule {
   const mod = createEmptyModule();
 
-  addRuntime(mod);
+  addRuntime(mod, { exposeArenaReset: opts.exposeArenaReset });
   addUint8ArrayRuntime(mod);
   addArrayRuntime(mod);
   addStringRuntime(mod);
@@ -179,6 +218,7 @@ export function generateLinearMultiModule(multiAst: MultiTypedAST): WasmModule {
   addSetRuntime(mod);
   addNumericMapRuntime(mod);
   addNumericSetRuntime(mod);
+  addFmodRuntime(mod); // #2144 — exact f64 remainder for the `%` arm
 
   // Add __closure_env global for closure support
   const closureEnvGlobalIdx = mod.globals.length;
@@ -317,6 +357,10 @@ export function generateLinearMultiModule(multiAst: MultiTypedAST): WasmModule {
   }
 
   emitClosureTable(ctx);
+
+  // Surface codegen diagnostics so compiler.ts fails the compile rather than
+  // emitting a structurally invalid binary for unsupported constructs (#1868).
+  if (ctx.errors.length > 0) mod.codegenErrors = ctx.errors;
 
   return mod;
 }
@@ -533,7 +577,7 @@ function compileStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt: ts.
   } else if (ts.isIfStatement(stmt)) {
     compileExpression(ctx, fctx, stmt.expression);
     // Convert f64 condition to i32 (0.0 = false, else true)
-    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.expression));
+    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.expression), { ctx, expr: stmt.expression });
 
     const thenBody: Instr[] = [];
     const savedBody = fctx.body;
@@ -573,7 +617,7 @@ function compileStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt: ts.
     // Compile condition (break out if false)
     fctx.body = loopBody;
     compileExpression(ctx, fctx, stmt.expression);
-    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.expression));
+    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.expression), { ctx, expr: stmt.expression });
     fctx.body.push({ op: "i32.eqz" });
     fctx.body.push({ op: "br_if", depth: 1 }); // break to outer block
 
@@ -620,22 +664,30 @@ function compileStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt: ts.
     // Condition
     if (stmt.condition) {
       compileExpression(ctx, fctx, stmt.condition);
-      emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.condition));
+      emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.condition), { ctx, expr: stmt.condition });
       fctx.body.push({ op: "i32.eqz" });
       fctx.body.push({ op: "br_if", depth: 1 }); // break to outer block
     }
 
-    // Push break/continue stack
-    fctx.breakStack.push(fctx.blockDepth);
-    fctx.continueStack.push(fctx.blockDepth + 1);
-    fctx.blockDepth += 2;
+    // Body goes in an inner block so `continue` falls out of it and still
+    // runs the incrementor (a br straight to the loop head would skip it
+    // and re-test the condition with a stale induction variable, #1937).
+    // Nesting inside the body: block(+1) loop(+2) inner-block(+3); the
+    // stacks store (interior depth - 1) of the target label.
+    const innerBody: Instr[] = [];
+    fctx.body = innerBody;
+    fctx.breakStack.push(fctx.blockDepth); // outer block
+    fctx.continueStack.push(fctx.blockDepth + 2); // inner block
+    fctx.blockDepth += 3;
 
-    // Body
     compileStatement(ctx, fctx, stmt.statement);
 
-    fctx.blockDepth -= 2;
+    fctx.blockDepth -= 3;
     fctx.breakStack.pop();
     fctx.continueStack.pop();
+
+    fctx.body = loopBody;
+    fctx.body.push({ op: "block", blockType: { kind: "empty" }, body: innerBody });
 
     // Incrementor
     if (stmt.incrementor) {
@@ -667,21 +719,97 @@ function compileStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt: ts.
     // switch (expr) { case ...: ... }
     compileSwitchStatement(ctx, fctx, stmt);
   } else if (ts.isTryStatement(stmt)) {
-    // Compile try body inline (wasm has no exception handling in MVP).
-    // The catch clause is skipped — wasm traps are not catchable.
-    for (const s of stmt.tryBlock.statements) {
-      compileStatement(ctx, fctx, s);
+    // #1838 — the linear backend does not yet lower JS exception handling. The
+    // previous behaviour silently inlined the try body and DISCARDED the catch
+    // clause, so `try { throw e } catch (e) { handler }` ran the (unreachable)
+    // throw and never the handler — a silent divergence from JS with no
+    // diagnostic. Until the EH `try`/`catch` lowering (the emitter supports it,
+    // src/emit/binary.ts) is wired through this backend, raise a clear compile
+    // error rather than miscompile. A try with no catch (try/finally) is still
+    // safe to inline: the finally always runs and there is no handler to drop.
+    if (stmt.catchClause) {
+      // Throw rather than push to ctx.errors: the linear backend's ctx.errors
+      // are not surfaced into the compile result, so a push would still
+      // silently miscompile. The compiler.ts try/catch around
+      // generateLinearM(ulti)Module converts a thrown Error into a
+      // `Codegen error:` failed result, which is what we want.
+      throw new Error(
+        "try/catch is not yet supported by the linear/standalone backend — emitting it " +
+          "would silently drop the catch handler (#1838). A Wasm-EH try/catch lowering is " +
+          "the planned fix; a bare `try { ... }` with only `finally` is supported.",
+      );
+    } else {
+      // try { ... } finally { ... } — no handler to lose; inline both blocks.
+      for (const s of stmt.tryBlock.statements) {
+        compileStatement(ctx, fctx, s);
+      }
+      if (stmt.finallyBlock) {
+        for (const s of stmt.finallyBlock.statements) {
+          compileStatement(ctx, fctx, s);
+        }
+      }
     }
-    // Skip catch clause — it would only fire on JS exceptions
   } else if (ts.isExpressionStatement(stmt)) {
     compileExpression(ctx, fctx, stmt.expression);
     // Only drop if the expression produces a value
     if (!isVoidExpression(ctx, stmt.expression)) {
       fctx.body.push({ op: "drop" });
     }
+  } else if (ts.isBreakStatement(stmt) || ts.isContinueStatement(stmt)) {
+    // #1937 — break/continue were previously never compiled: the dispatcher
+    // had no arm for them, so `while (true) { if (x) break; }` silently
+    // became an infinite loop. The loop lowerings maintain breakStack/
+    // continueStack as (interior block depth - 1) of the target label, so
+    // the relative br depth from the current nesting is
+    // `blockDepth - target - 1` (every if/block/loop arm increments
+    // fctx.blockDepth around the statements it compiles into).
+    const isBreak = ts.isBreakStatement(stmt);
+    const kw = isBreak ? "break" : "continue";
+    if (stmt.label) {
+      ctx.errors.push({
+        message: `Unsupported in linear backend: labeled ${kw} ('${stmt.label.text}')`,
+        ...nodeLoc(stmt),
+      });
+    } else {
+      const stack = isBreak ? fctx.breakStack : fctx.continueStack;
+      if (stack.length === 0) {
+        ctx.errors.push({
+          message: `'${kw}' outside of ${isBreak ? "a loop or switch" : "a loop"}`,
+          ...nodeLoc(stmt),
+        });
+      } else {
+        fctx.body.push({ op: "br", depth: fctx.blockDepth - stack[stack.length - 1]! - 1 });
+      }
+    }
   } else if (ts.isThrowStatement(stmt)) {
-    // throw → unreachable (wasm trap)
-    fctx.body.push({ op: "unreachable" });
+    // #1937 — `throw` used to lower to a bare `unreachable`, silently
+    // replacing exception semantics with a trap (no catch can ever see it,
+    // and the exit status differs from JS). Until a Wasm-EH lowering lands
+    // (the emitter supports try/catch, see #1838), refuse loudly like
+    // try/catch does rather than miscompile.
+    ctx.errors.push({
+      message:
+        "Unsupported in linear backend: 'throw' (would silently become a trap; " +
+        "Wasm-EH lowering is the planned fix, see #1838/#1937)",
+      ...nodeLoc(stmt),
+    });
+    fctx.body.push({ op: "unreachable" }); // keep downstream stack analysis sane
+  } else if (
+    ts.isEmptyStatement(stmt) ||
+    ts.isTypeAliasDeclaration(stmt) ||
+    ts.isInterfaceDeclaration(stmt) ||
+    ts.isDebuggerStatement(stmt)
+  ) {
+    // Type-only / no-op statements: nothing to emit.
+  } else {
+    // #1937 — fail-loud default arm: any statement kind without an explicit
+    // arm above used to fall through silently, emitting zero instructions
+    // and diverging from JS with no diagnostic. The #1868 gate in
+    // compiler.ts turns these errors into success:false.
+    ctx.errors.push({
+      message: `Unsupported statement in linear backend: ${ts.SyntaxKind[stmt.kind]}`,
+      ...nodeLoc(stmt),
+    });
   }
 }
 
@@ -826,17 +954,23 @@ function compileForOfStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt
     fctx.body.push({ op: "local.set", index: loopVarIdx });
   }
 
-  // Push break/continue stack
-  fctx.breakStack.push(fctx.blockDepth);
-  fctx.continueStack.push(fctx.blockDepth + 1);
-  fctx.blockDepth += 2;
+  // Body goes in an inner block so `continue` falls out of it and still
+  // increments the index (#1937). Nesting: block(+1) loop(+2) inner(+3).
+  const innerBody: Instr[] = [];
+  fctx.body = innerBody;
+  fctx.breakStack.push(fctx.blockDepth); // outer block
+  fctx.continueStack.push(fctx.blockDepth + 2); // inner block
+  fctx.blockDepth += 3;
 
   // Compile body
   compileStatement(ctx, fctx, stmt.statement);
 
-  fctx.blockDepth -= 2;
+  fctx.blockDepth -= 3;
   fctx.breakStack.pop();
   fctx.continueStack.pop();
+
+  fctx.body = loopBody;
+  fctx.body.push({ op: "block", blockType: { kind: "empty" }, body: innerBody });
 
   // Increment index
   fctx.body.push({ op: "local.get", index: idxLocal });
@@ -988,16 +1122,18 @@ function compileForOfMap(
     fctx.body.push({ op: "local.set", index: valVarIdx });
   }
 
-  // Push break/continue stack
-  // Note: We're inside the if block, so block depth is higher
-  fctx.breakStack.push(fctx.blockDepth);
-  fctx.continueStack.push(fctx.blockDepth + 1);
-  fctx.blockDepth += 2; // +2 for block/loop that wraps us
+  // The body lives inside the `if (hash != 0)` then-arm, which is its own
+  // label: nesting is block(+1) loop(+2) if-then(+3). `continue` targets the
+  // if-then label itself — exiting the if falls through to the index
+  // increment below, which is exactly JS continue semantics (#1937).
+  fctx.breakStack.push(fctx.blockDepth); // outer block
+  fctx.continueStack.push(fctx.blockDepth + 2); // if-then arm
+  fctx.blockDepth += 3;
 
   // Compile body
   compileStatement(ctx, fctx, stmt.statement);
 
-  fctx.blockDepth -= 2;
+  fctx.blockDepth -= 3;
   fctx.breakStack.pop();
   fctx.continueStack.pop();
 
@@ -1039,21 +1175,29 @@ function compileDoWhileStatement(ctx: LinearContext, fctx: LinearFuncContext, st
   const savedBody = fctx.body;
   fctx.body = loopBody;
 
-  // Push break/continue stack
-  fctx.breakStack.push(fctx.blockDepth);
-  fctx.continueStack.push(fctx.blockDepth + 1);
-  fctx.blockDepth += 2;
+  // Body goes in an inner block so `continue` falls out of it into the
+  // condition check (a br straight to the loop head would re-run the body
+  // without testing the condition, #1937). Nesting: block(+1) loop(+2)
+  // inner-block(+3); the stacks store (interior depth - 1) of the target.
+  const innerBody: Instr[] = [];
+  fctx.body = innerBody;
+  fctx.breakStack.push(fctx.blockDepth); // outer block
+  fctx.continueStack.push(fctx.blockDepth + 2); // inner block
+  fctx.blockDepth += 3;
 
   // Compile body first (do-while executes body before checking condition)
   compileStatement(ctx, fctx, stmt.statement);
 
-  fctx.blockDepth -= 2;
+  fctx.blockDepth -= 3;
   fctx.breakStack.pop();
   fctx.continueStack.pop();
 
+  fctx.body = loopBody;
+  fctx.body.push({ op: "block", blockType: { kind: "empty" }, body: innerBody });
+
   // Compile condition
   compileExpression(ctx, fctx, stmt.expression);
-  emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.expression));
+  emitTruthyCoercion(fctx, inferExprType(ctx, fctx, stmt.expression), { ctx, expr: stmt.expression });
   // If condition is true, continue looping (br to loop)
   fctx.body.push({ op: "br_if", depth: 0 });
 
@@ -1073,14 +1217,42 @@ function compileDoWhileStatement(ctx: LinearContext, fctx: LinearFuncContext, st
 
 // ── SwitchStatement ────────────────────────────────────────────────────
 
+/**
+ * Is `s` guaranteed to transfer control (so execution cannot fall off its
+ * end into the next switch case)? Conservative recursive check used by the
+ * switch fall-through guard (#1937).
+ */
+function statementTerminates(s: ts.Statement): boolean {
+  if (ts.isReturnStatement(s) || ts.isBreakStatement(s) || ts.isContinueStatement(s) || ts.isThrowStatement(s)) {
+    return true;
+  }
+  if (ts.isBlock(s)) {
+    return s.statements.length > 0 && statementTerminates(s.statements[s.statements.length - 1]!);
+  }
+  if (ts.isIfStatement(s)) {
+    return !!s.elseStatement && statementTerminates(s.thenStatement) && statementTerminates(s.elseStatement);
+  }
+  return false;
+}
+
 function compileSwitchStatement(ctx: LinearContext, fctx: LinearFuncContext, stmt: ts.SwitchStatement): void {
-  // Compile as cascading if/else with fall-through support.
-  // Group consecutive case clauses with empty bodies (fall-through)
-  // into a single OR'd condition.
+  // Compile as cascading if/else, all wrapped in one block that serves as
+  // the `break` target (#1937). Consecutive case clauses with empty bodies
+  // (fall-through) are grouped into a single OR'd condition; fall-through
+  // out of a NON-empty case body cannot be expressed in this lowering and
+  // is rejected with a hard error below (it used to be silently dropped).
   compileExpression(ctx, fctx, stmt.expression);
   const switchExprType = inferExprType(ctx, fctx, stmt.expression);
   const switchLocal = addLocal(fctx, `__switch_${fctx.locals.length}`, switchExprType);
   fctx.body.push({ op: "local.set", index: switchLocal });
+
+  // Everything below goes inside the break-target block. The stacks store
+  // (interior depth - 1) of the target label, so push the pre-entry depth.
+  const switchBody: Instr[] = [];
+  const outerBody = fctx.body;
+  fctx.body = switchBody;
+  fctx.breakStack.push(fctx.blockDepth); // switch block (continue passes through to the enclosing loop)
+  fctx.blockDepth += 1;
 
   let defaultClause: ts.CaseOrDefaultClause | null = null;
 
@@ -1101,6 +1273,21 @@ function compileSwitchStatement(ctx: LinearContext, fctx: LinearFuncContext, stm
   while (i < clauseArr.length) {
     const clause = clauseArr[i]!;
     if (ts.isDefaultClause(clause)) {
+      // A mid-list default with a non-terminated body would fall through
+      // into the next case in JS; this lowering hoists default to the end,
+      // so reject rather than silently diverge (#1937).
+      if (
+        i < clauseArr.length - 1 &&
+        clause.statements.length > 0 &&
+        !statementTerminates(clause.statements[clause.statements.length - 1]!)
+      ) {
+        ctx.errors.push({
+          message:
+            "Unsupported in linear backend: switch default-clause fall-through into a following case " +
+            "(end the default body with break/return)",
+          ...nodeLoc(clause),
+        });
+      }
       defaultClause = clause;
       i++;
       continue;
@@ -1134,10 +1321,28 @@ function compileSwitchStatement(ctx: LinearContext, fctx: LinearFuncContext, stm
       }
     }
 
-    // Then body
+    // Fall-through out of a non-empty case body is silently dropped by the
+    // cascading-if lowering (the next case's condition re-tests instead of
+    // running its body) — hard error until a real br_table lowering lands
+    // (#1937). The last clause has nothing to fall into, so it is exempt.
+    if (
+      i < clauseArr.length - 1 &&
+      bodyClause.statements.length > 0 &&
+      !statementTerminates(bodyClause.statements[bodyClause.statements.length - 1]!)
+    ) {
+      ctx.errors.push({
+        message:
+          "Unsupported in linear backend: switch case fall-through from a non-empty case body " +
+          "(end the case with break/return)",
+        ...nodeLoc(bodyClause),
+      });
+    }
+
+    // Then body (an `if` arm is its own br label, so track the depth)
     const thenBody: Instr[] = [];
     const savedBody = fctx.body;
     fctx.body = thenBody;
+    fctx.blockDepth += 1;
     if (matchedLocal !== undefined) {
       fctx.body.push({ op: "i32.const", value: 1 });
       fctx.body.push({ op: "local.set", index: matchedLocal });
@@ -1145,6 +1350,7 @@ function compileSwitchStatement(ctx: LinearContext, fctx: LinearFuncContext, stm
     for (const s of bodyClause.statements) {
       compileStatement(ctx, fctx, s);
     }
+    fctx.blockDepth -= 1;
     fctx.body = savedBody;
 
     fctx.body.push({
@@ -1164,9 +1370,11 @@ function compileSwitchStatement(ctx: LinearContext, fctx: LinearFuncContext, stm
       const defaultBody: Instr[] = [];
       const savedBody = fctx.body;
       fctx.body = defaultBody;
+      fctx.blockDepth += 1; // inside the `if` arm
       for (const s of defaultClause.statements) {
         compileStatement(ctx, fctx, s);
       }
+      fctx.blockDepth -= 1;
       fctx.body = savedBody;
       fctx.body.push({
         op: "if",
@@ -1179,6 +1387,12 @@ function compileSwitchStatement(ctx: LinearContext, fctx: LinearFuncContext, stm
       }
     }
   }
+
+  // Close the break-target block (#1937)
+  fctx.blockDepth -= 1;
+  fctx.breakStack.pop();
+  fctx.body = outerBody;
+  fctx.body.push({ op: "block", blockType: { kind: "empty" }, body: switchBody });
 }
 
 export function compileExpression(ctx: LinearContext, fctx: LinearFuncContext, expr: ts.Expression): void {
@@ -1238,7 +1452,7 @@ export function compileExpression(ctx: LinearContext, fctx: LinearFuncContext, e
       // unary plus is a no-op for numbers
     } else if (expr.operator === ts.SyntaxKind.ExclamationToken) {
       compileExpression(ctx, fctx, expr.operand);
-      emitTruthyCoercion(fctx, inferExprType(ctx, fctx, expr.operand));
+      emitTruthyCoercion(fctx, inferExprType(ctx, fctx, expr.operand), { ctx, expr: expr.operand });
       fctx.body.push({ op: "i32.eqz" });
       // Result is i32 (0 or 1), convert back to f64
       fctx.body.push({ op: "f64.convert_i32_s" });
@@ -1382,22 +1596,32 @@ export function compileExpression(ctx: LinearContext, fctx: LinearFuncContext, e
           } else {
             ctx.errors.push({
               message: `Unknown function: ${funcName}`,
-              line: 0,
-              column: 0,
+              ...nodeLoc(expr),
             });
           }
         }
       }
+    } else {
+      // Callee is neither a property access nor an identifier (IIFE,
+      // computed callee, …) — used to silently emit nothing (#1937).
+      ctx.errors.push({
+        message: `Unsupported call target in linear backend: ${ts.SyntaxKind[expr.expression.kind]}`,
+        ...nodeLoc(expr),
+      });
+      fctx.body.push({ op: "f64.const", value: 0 });
     }
   } else if (ts.isNonNullExpression(expr)) {
     // Handle `expr!` (non-null assertion) - just compile the inner expression
+    compileExpression(ctx, fctx, expr.expression);
+  } else if (ts.isAsExpression(expr) || ts.isSatisfiesExpression(expr) || ts.isTypeAssertionExpression(expr)) {
+    // Type-level only (`x as T`, `x satisfies T`, `<T>x`) — compile the inner expression
     compileExpression(ctx, fctx, expr.expression);
   } else if (ts.isTemplateExpression(expr)) {
     compileTemplateExpression(ctx, fctx, expr);
   } else if (ts.isConditionalExpression(expr)) {
     // ternary: cond ? then : else
     compileExpression(ctx, fctx, expr.condition);
-    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, expr.condition));
+    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, expr.condition), { ctx, expr: expr.condition });
 
     const resultType = inferExprType(ctx, fctx, expr.whenTrue);
 
@@ -1425,6 +1649,18 @@ export function compileExpression(ctx: LinearContext, fctx: LinearFuncContext, e
     });
   } else if (ts.isObjectLiteralExpression(expr)) {
     compileObjectLiteral(ctx, fctx, expr);
+  } else {
+    // #1937 — fail-loud default arm: any expression kind without an explicit
+    // arm above (typeof, await, spread, tagged templates, regex literals, …)
+    // used to compile to ZERO instructions — a silent stack-arity hole that
+    // surfaced, at best, as an opaque validator error far from the source.
+    // Push a located diagnostic (the #1868 gate fails the compile) and a
+    // placeholder value so downstream stack accounting stays balanced.
+    ctx.errors.push({
+      message: `Unsupported expression in linear backend: ${ts.SyntaxKind[expr.kind]}`,
+      ...nodeLoc(expr),
+    });
+    fctx.body.push({ op: "f64.const", value: 0 });
   }
 }
 
@@ -1735,6 +1971,31 @@ function compileBinaryExpression(ctx: LinearContext, fctx: LinearFuncContext, ex
     }
   }
 
+  // #1976: string `+=` is concatenation, not numeric add. `s += t` for string
+  // `s` must call __str_concat (both operands are i32 pointers) and store the
+  // i32 result — the generic compound path below emits f64.add, which produces
+  // an invalid module (i32/f64 mismatch). Handle local and global string LHS.
+  if (op === ts.SyntaxKind.PlusEqualsToken && ts.isIdentifier(expr.left) && isStringExpr(ctx, fctx, expr.left)) {
+    const strConcatIdx = ctx.funcMap.get("__str_concat");
+    const localIdx = fctx.localMap.get(expr.left.text);
+    if (strConcatIdx !== undefined && localIdx !== undefined) {
+      fctx.body.push({ op: "local.get", index: localIdx });
+      compileExpression(ctx, fctx, expr.right);
+      fctx.body.push({ op: "call", funcIdx: strConcatIdx });
+      fctx.body.push({ op: "local.tee", index: localIdx });
+      return;
+    }
+    const gIdx = ctx.moduleGlobals.get(expr.left.text);
+    if (strConcatIdx !== undefined && gIdx !== undefined) {
+      fctx.body.push({ op: "global.get", index: gIdx });
+      compileExpression(ctx, fctx, expr.right);
+      fctx.body.push({ op: "call", funcIdx: strConcatIdx });
+      fctx.body.push({ op: "global.set", index: gIdx });
+      fctx.body.push({ op: "global.get", index: gIdx });
+      return;
+    }
+  }
+
   // Handle compound assignment (+=, -=, *=, /=, |=, &=, etc.)
   if (isCompoundAssignment(op) && ts.isIdentifier(expr.left)) {
     const idx = fctx.localMap.get(expr.left.text);
@@ -1869,13 +2130,44 @@ function compileBinaryExpression(ctx: LinearContext, fctx: LinearFuncContext, ex
       fctx.body.push({ op: "call", funcIdx: strConcatIdx });
       return;
     }
+    // #1976: string relationals (`<`/`<=`/`>`/`>=`) must compare by content, not
+    // by pointer address. Route through __str_cmp (-1/0/1) then test the sign;
+    // the result is an f64 boolean to match the rest of the expression lowering.
+    if (
+      op === ts.SyntaxKind.LessThanToken ||
+      op === ts.SyntaxKind.LessThanEqualsToken ||
+      op === ts.SyntaxKind.GreaterThanToken ||
+      op === ts.SyntaxKind.GreaterThanEqualsToken
+    ) {
+      compileExpression(ctx, fctx, expr.left);
+      compileExpression(ctx, fctx, expr.right);
+      const strCmpIdx = ctx.funcMap.get("__str_cmp")!;
+      fctx.body.push({ op: "call", funcIdx: strCmpIdx });
+      fctx.body.push({ op: "i32.const", value: 0 });
+      switch (op) {
+        case ts.SyntaxKind.LessThanToken:
+          fctx.body.push({ op: "i32.lt_s" });
+          break;
+        case ts.SyntaxKind.LessThanEqualsToken:
+          fctx.body.push({ op: "i32.le_s" });
+          break;
+        case ts.SyntaxKind.GreaterThanToken:
+          fctx.body.push({ op: "i32.gt_s" });
+          break;
+        default: // GreaterThanEqualsToken
+          fctx.body.push({ op: "i32.ge_s" });
+          break;
+      }
+      fctx.body.push({ op: "f64.convert_i32_s" });
+      return;
+    }
   }
 
   // Logical AND / OR: short-circuit evaluation producing f64
   if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
     compileExpression(ctx, fctx, expr.left);
     const leftType = inferExprType(ctx, fctx, expr.left);
-    emitTruthyCoercion(fctx, leftType);
+    emitTruthyCoercion(fctx, leftType, { ctx, expr: expr.left });
     const thenBody: Instr[] = [];
     const elseBody: Instr[] = [];
     const savedBody = fctx.body;
@@ -1954,21 +2246,19 @@ function compileBinaryExpression(ctx: LinearContext, fctx: LinearFuncContext, ex
     case ts.SyntaxKind.SlashToken:
       fctx.body.push({ op: "f64.div" });
       break;
-    case ts.SyntaxKind.PercentToken:
-      // f64 remainder: a - trunc(a/b) * b
-      // We need to use a temp approach. Actually, wasm doesn't have f64.rem.
-      // Use i32 truncation for integer modulo
-      // For simplicity, truncate both to i32, do i32.rem_s, convert back
-      // Pop the two f64 values we already pushed, redo with i32
-      // Actually, we already pushed them. Let's just truncate on stack.
-      // Remove the two f64 values and redo
-      // Easier: don't push above, handle separately
-      // We need to restructure. Let's handle % specially before the switch.
-      // For now, use the values on the stack:
-      // stack: [left_f64, right_f64]
-      // But we can't convert them in-place easily with the switch pattern.
-      // Let's use a different approach: handle % before the main compile
+    case ts.SyntaxKind.PercentToken: {
+      // #2144 — call the `__fmod` runtime helper (exact IEEE-754 remainder,
+      // shared algorithm with the WasmGC backend's #2056 work). The previous
+      // inline `a - trunc(a/b)*b` formula (#1937) diverged from JS / the GC
+      // backend: it produced `±Infinity` for extreme ratios (ratio ≳ 1e308,
+      // e.g. `1e308 % 1e-308`), `NaN` for `x % Infinity` (0*Inf), and drifted
+      // by ULPs / collapsed to 0 when the intermediate rounded. `__fmod`
+      // handles all those cases exactly. Operands are already on the stack in
+      // (a, b) order — the helper's signature is `(f64 a, f64 b) -> f64`.
+      const fmodIdx = ctx.funcMap.get(FMOD_FN)!;
+      fctx.body.push({ op: "call", funcIdx: fmodIdx });
       break;
+    }
     case ts.SyntaxKind.LessThanToken:
       fctx.body.push({ op: "f64.lt" });
       break;
@@ -1992,9 +2282,14 @@ function compileBinaryExpression(ctx: LinearContext, fctx: LinearFuncContext, ex
     default:
       ctx.errors.push({
         message: `Unsupported binary operator: ${ts.SyntaxKind[op]}`,
-        line: 0,
-        column: 0,
+        ...nodeLoc(expr),
       });
+      // Both operands are already on the stack — collapse them to one
+      // placeholder value so downstream stack accounting stays balanced
+      // (the #1868 gate fails the compile regardless).
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "f64.const", value: 0 });
   }
 
   // Comparison operators return i32 (0 or 1), convert to f64
@@ -2109,13 +2404,33 @@ function compoundAssignmentOp(op: ts.SyntaxKind): Instr {
 }
 
 /** Convert a value to i32 truthiness (for conditions) */
-function emitTruthyCoercion(fctx: LinearFuncContext, type: ValType): void {
+function emitTruthyCoercion(
+  fctx: LinearFuncContext,
+  type: ValType,
+  opts?: { ctx: LinearContext; expr: ts.Expression },
+): void {
   if (type.kind === "f64") {
-    // f64 → i32: value != 0.0
+    // f64 → i32: abs(value) > 0.0. The previous `value != 0` test made NaN
+    // truthy (NaN != 0 is true); JS ToBoolean(NaN) is false (#1937).
+    // abs folds -0 to 0 and NaN > 0 is false, so this covers 0, -0 and NaN.
+    fctx.body.push({ op: "f64.abs" });
     fctx.body.push({ op: "f64.const", value: 0 });
-    fctx.body.push({ op: "f64.ne" });
+    fctx.body.push({ op: "f64.gt" });
   } else if (type.kind === "i32") {
-    // Already i32, no conversion needed
+    // #1975: a string value is an i32 POINTER (always nonzero), so raw i32
+    // truthiness would make every string — including "" — truthy. JS
+    // ToBoolean(string) is `length !== 0`, so for a string-typed expression
+    // replace the pointer on the stack with `__str_len(ptr) != 0`. Non-string
+    // i32 values (numbers-as-i32, booleans) keep raw i32 truthiness.
+    if (opts !== undefined && isStringExpr(opts.ctx, fctx, opts.expr)) {
+      const strLenIdx = opts.ctx.funcMap.get("__str_len");
+      if (strLenIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: strLenIdx });
+        fctx.body.push({ op: "i32.const", value: 0 });
+        fctx.body.push({ op: "i32.ne" });
+      }
+    }
+    // else: already i32, no conversion needed
   }
 }
 
@@ -2306,7 +2621,7 @@ function compileObjectDestructuring(
 
     const fieldInfo = propOffsets.get(propName);
     if (!fieldInfo) {
-      ctx.errors.push({ message: `Object destructuring: unknown property "${propName}"`, line: 0, column: 0 });
+      ctx.errors.push({ message: `Object destructuring: unknown property "${propName}"`, ...nodeLoc(element) });
       continue;
     }
 
@@ -2404,7 +2719,7 @@ function compileArrayDestructuring(
 
 function compileNewExpression(ctx: LinearContext, fctx: LinearFuncContext, expr: ts.NewExpression): void {
   if (!ts.isIdentifier(expr.expression)) {
-    ctx.errors.push({ message: "Unsupported new expression", line: 0, column: 0 });
+    ctx.errors.push({ message: "Unsupported new expression", ...nodeLoc(expr) });
     return;
   }
   const ctorName = expr.expression.text;
@@ -2506,7 +2821,7 @@ function compileNewExpression(ctx: LinearContext, fctx: LinearFuncContext, expr:
     if (layout) {
       compileClassNewExpression(ctx, fctx, expr, ctorName, layout);
     } else {
-      ctx.errors.push({ message: `Unsupported constructor: ${ctorName}`, line: 0, column: 0 });
+      ctx.errors.push({ message: `Unsupported constructor: ${ctorName}`, ...nodeLoc(expr) });
     }
   }
 }
@@ -2567,10 +2882,14 @@ function compilePropertyAccess(ctx: LinearContext, fctx: LinearFuncContext, expr
     return;
   }
 
-  // string.length → call __str_len(str) → i32, convert to f64
+  // string.length → number of UTF-16 code units (JS semantics), NOT the
+  // UTF-8 byte count (#1976). Linear strings are stored as UTF-8, so route the
+  // user-facing `.length` through __str_length_utf16, which scans the bytes and
+  // counts code units (astral code points = 2). __str_len (byte count) stays
+  // the internal primitive for slice/indexOf, which index by byte offset.
   if (propName === "length" && isStringExpr(ctx, fctx, expr.expression)) {
     compileExpression(ctx, fctx, expr.expression);
-    const strLenIdx = ctx.funcMap.get("__str_len")!;
+    const strLenIdx = ctx.funcMap.get("__str_length_utf16")!;
     fctx.body.push({ op: "call", funcIdx: strLenIdx });
     fctx.body.push({ op: "f64.convert_i32_s" });
     return;
@@ -2712,31 +3031,48 @@ function compileElementAccessAssignment(
   left: ts.ElementAccessExpression,
   right: ts.Expression,
 ): void {
+  // #1938 — an element assignment used as an expression (`arr[i] = f()`) must
+  // evaluate the RHS exactly once. The previous code compiled `right` twice
+  // (once to store, once to leave as the expression value), so any
+  // side-effecting RHS ran twice. Fix: compile the RHS into a scratch local,
+  // store from the local, and leave the local on the stack as the result.
+  const addScratch = (type: ValType): number => {
+    const idx = fctx.params.length + fctx.locals.length;
+    fctx.locals.push({ name: `__elemassign_${idx}`, type });
+    return idx;
+  };
+
   // Handle typed array views: new Float64Array(buf)[i] = v, new Float32Array(buf)[i] = v
   if (ts.isNewExpression(left.expression) && ts.isIdentifier(left.expression.expression)) {
     const typeName = left.expression.expression.text;
     if (typeName === "Float64Array" && left.expression.arguments?.length) {
       // new Float64Array(buf)[i] = value → buf + i*8, f64.store(value)
+      const valLocal = addScratch({ kind: "f64" });
+      compileExpression(ctx, fctx, right); // value (f64) — evaluated once
+      fctx.body.push({ op: "local.set", index: valLocal });
       compileExpression(ctx, fctx, left.expression.arguments[0]); // buf ptr
       compileExprToI32(ctx, fctx, left.argumentExpression); // index
       fctx.body.push({ op: "i32.const", value: 3 }); // *8 = <<3
       fctx.body.push({ op: "i32.shl" });
       fctx.body.push({ op: "i32.add" }); // buf + index*8
-      compileExpression(ctx, fctx, right); // value (f64)
+      fctx.body.push({ op: "local.get", index: valLocal });
       fctx.body.push({ op: "f64.store", align: 3, offset: 0 });
-      compileExpression(ctx, fctx, right); // return value for expression result
+      fctx.body.push({ op: "local.get", index: valLocal }); // expression result
       return;
     }
     if (typeName === "Float32Array" && left.expression.arguments?.length) {
+      const valLocal = addScratch({ kind: "f64" });
+      compileExpression(ctx, fctx, right); // value (f64) — evaluated once
+      fctx.body.push({ op: "local.set", index: valLocal });
       compileExpression(ctx, fctx, left.expression.arguments[0]);
       compileExprToI32(ctx, fctx, left.argumentExpression);
       fctx.body.push({ op: "i32.const", value: 2 }); // *4 = <<2
       fctx.body.push({ op: "i32.shl" });
       fctx.body.push({ op: "i32.add" });
-      compileExpression(ctx, fctx, right); // value (f64)
+      fctx.body.push({ op: "local.get", index: valLocal });
       fctx.body.push({ op: "f32.demote_f64" });
       fctx.body.push({ op: "f32.store", align: 2, offset: 0 });
-      compileExpression(ctx, fctx, right);
+      fctx.body.push({ op: "local.get", index: valLocal }); // expression result
       return;
     }
   }
@@ -2744,23 +3080,43 @@ function compileElementAccessAssignment(
   const objKind = getExprCollectionKind(ctx, fctx, left.expression);
 
   if (objKind === "Array") {
-    // arr[i] = v → __arr_set(arr, i, v)
+    // arr[i] = v → __arr_set(arr, i, v); leave v as the expression result.
+    //
+    // For a numeric element the value is an f64; element storage is currently
+    // i32 (the truncation half of #1938 is a separate change), so we keep the
+    // f64 in a scratch local as the expression result (an assignment used as a
+    // value must yield the assigned value, not the i32-truncated form — and a
+    // numeric `arr[i] = v` flows into an f64 context) and truncate only for the
+    // store. Non-numeric (string/object) element arrays already produce an i32
+    // value; for those `compileExprToI32` is the identity and the scratch is i32.
     const setIdx = ctx.funcMap.get("__arr_set")!;
+    // A numeric RHS compiles to f64; a reference (string/object) RHS to i32.
+    const rightIsNumeric = inferExprType(ctx, fctx, right).kind === "f64";
+    const valLocal = addScratch({ kind: rightIsNumeric ? "f64" : "i32" });
+    compileExpression(ctx, fctx, right); // value — evaluated once
+    fctx.body.push({ op: "local.set", index: valLocal });
     compileExpression(ctx, fctx, left.expression); // arr ptr (i32)
     compileExprToI32(ctx, fctx, left.argumentExpression); // index → i32
-    compileExprToI32(ctx, fctx, right); // value → i32
+    fctx.body.push({ op: "local.get", index: valLocal });
+    if (rightIsNumeric) {
+      fctx.body.push({ op: "i32.trunc_f64_s" }); // store i32 element (#1938 part 2 will store f64)
+    }
     fctx.body.push({ op: "call", funcIdx: setIdx });
-    // Assignment expressions should return the assigned value
-    compileExpression(ctx, fctx, right);
+    fctx.body.push({ op: "local.get", index: valLocal }); // assigned value (f64 for numeric)
   } else if (objKind === "Uint8Array") {
-    // u8[i] = v → __u8arr_set(u8, i, v)
+    // u8[i] = v → __u8arr_set(u8, i, v); leave v as the expression result.
+    // Uint8Array elements are always numeric; store the byte (i32) and return
+    // the original f64 value as the expression result.
     const setIdx = ctx.funcMap.get("__u8arr_set")!;
+    const valLocal = addScratch({ kind: "f64" });
+    compileExpression(ctx, fctx, right); // value (f64) — evaluated once
+    fctx.body.push({ op: "local.set", index: valLocal });
     compileExpression(ctx, fctx, left.expression);
     compileExprToI32(ctx, fctx, left.argumentExpression); // index → i32
-    compileExprToI32(ctx, fctx, right); // value → i32
+    fctx.body.push({ op: "local.get", index: valLocal });
+    fctx.body.push({ op: "i32.trunc_f64_s" }); // byte value
     fctx.body.push({ op: "call", funcIdx: setIdx });
-    // Push the assigned value as the expression result
-    compileExpression(ctx, fctx, right);
+    fctx.body.push({ op: "local.get", index: valLocal }); // assigned value (f64)
   } else {
     ctx.errors.push({
       message: "Unsupported element access assignment",
@@ -2967,7 +3323,7 @@ function compileArrayHOF(
   // Extract lambda parameter and body
   const callback = expr.arguments[0];
   if (!callback || !(ts.isArrowFunction(callback) || ts.isFunctionExpression(callback))) {
-    ctx.errors.push({ message: `Array.${method}() requires inline arrow function`, line: 0, column: 0 });
+    ctx.errors.push({ message: `Array.${method}() requires inline arrow function`, ...nodeLoc(expr) });
     return;
   }
   const paramName =
@@ -3068,7 +3424,7 @@ function compileArrayHOF(
     : callback.body;
 
   if (!bodyExpr) {
-    ctx.errors.push({ message: `Array.${method}() callback must have a simple expression body`, line: 0, column: 0 });
+    ctx.errors.push({ message: `Array.${method}() callback must have a simple expression body`, ...nodeLoc(callback) });
     fctx.body = savedBody;
     return;
   }
@@ -3076,7 +3432,7 @@ function compileArrayHOF(
   if (method === "filter") {
     // if (callback(elem)) __arr_push(result, elem)
     compileExpression(ctx, fctx, bodyExpr);
-    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, bodyExpr));
+    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, bodyExpr), { ctx, expr: bodyExpr });
     const pushBody: Instr[] = [];
     const savedBody2 = fctx.body;
     fctx.body = pushBody;
@@ -3101,7 +3457,7 @@ function compileArrayHOF(
   } else if (method === "some") {
     // if (callback(elem)) { result = 1.0; break; }
     compileExpression(ctx, fctx, bodyExpr);
-    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, bodyExpr));
+    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, bodyExpr), { ctx, expr: bodyExpr });
     const foundBody: Instr[] = [];
     const savedBody2 = fctx.body;
     fctx.body = foundBody;
@@ -3113,7 +3469,7 @@ function compileArrayHOF(
   } else if (method === "find") {
     // if (callback(elem)) { result = elem; break; }
     compileExpression(ctx, fctx, bodyExpr);
-    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, bodyExpr));
+    emitTruthyCoercion(fctx, inferExprType(ctx, fctx, bodyExpr), { ctx, expr: bodyExpr });
     const foundBody: Instr[] = [];
     const savedBody2 = fctx.body;
     fctx.body = foundBody;
@@ -3523,6 +3879,15 @@ function inferExprType(ctx: LinearContext, fctx: LinearFuncContext, expr: ts.Exp
   // String literals and template expressions are i32 (pointers)
   if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr) || ts.isTemplateExpression(expr)) {
     return { kind: "i32" };
+  }
+
+  // #1976: string concatenation (`a + b` where either side is a string) yields
+  // a string POINTER (i32). Decide this explicitly before the numeric default
+  // so `const x = "a" + b` declares an i32 local matching __str_concat's result.
+  if (ts.isBinaryExpression(expr) && expr.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    if (isStringExpr(ctx, fctx, expr.left) || isStringExpr(ctx, fctx, expr.right)) {
+      return { kind: "i32" };
+    }
   }
 
   // `this` is always an i32 pointer

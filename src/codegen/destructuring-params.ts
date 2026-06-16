@@ -7,6 +7,7 @@
 import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { popBody, pushBody } from "./context/bodies.js";
+import { reportSilentFallback } from "./fallback-telemetry.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { shiftLateImportIndices } from "./expressions/late-imports.js";
@@ -44,6 +45,40 @@ import {
   syncDestructuredLocalsToGlobals,
   tryEmitArrayProtoIteratorReadDrive,
 } from "./statements/destructuring.js";
+
+/**
+ * #2032 — resolve the static property key for an object binding element.
+ *
+ * For a plain identifier or string/numeric literal property name the key is
+ * already its `.text`. For a `ComputedPropertyName` (`{ [k]: v }`) the struct
+ * fast path needs a compile-time-constant string to map to a field index; we
+ * recover it from the checker when the key expression has a string- or
+ * numeric-literal type (the common `const k = "dyn"; { [k]: v }` case).
+ *
+ * Returns `undefined` when the key cannot be resolved statically — the caller
+ * then reports a clear unsupported-feature error rather than silently binding
+ * the zero-initialized local (the original bug: a `ComputedPropertyName` has
+ * no `.text`, so `fields.findIndex` returned -1 and the binding was skipped).
+ */
+function resolveStaticPropKey(ctx: CodegenContext, element: ts.BindingElement): string | undefined {
+  const pn = element.propertyName ?? element.name;
+  if (ts.isIdentifier(pn)) return pn.text;
+  if (ts.isStringLiteral(pn) || ts.isNumericLiteral(pn)) return pn.text;
+  if (ts.isComputedPropertyName(pn)) {
+    const keyExpr = pn.expression;
+    // A string/numeric literal key folds directly.
+    if (ts.isStringLiteral(keyExpr) || ts.isNumericLiteral(keyExpr)) return keyExpr.text;
+    // Otherwise ask the checker for a literal type (covers `const k = "dyn"`).
+    try {
+      const t = ctx.checker.getTypeAtLocation(keyExpr);
+      if (t.isStringLiteral()) return t.value;
+      if (t.isNumberLiteral()) return String(t.value);
+    } catch {
+      // fall through to undefined — caller fails loudly
+    }
+  }
+  return undefined;
+}
 
 /**
  * Detect array binding patterns that, per ECMA-262 §13.3.3.6, perform no
@@ -302,15 +337,24 @@ export function destructureParamObjectExternref(
   if (shouldEnsureLetConstFlags(opts)) {
     ensureLetConstBindingPatternTdzFlags(ctx, fctx, pattern);
   }
-  // Ensure __extern_get is available
+  // (#1151) RequireObjectCoercible — destructuring a binding pattern against
+  // null/undefined must throw a synchronous TypeError (ECMA-262 §8.6.2 step 1,
+  // BindingPattern : ObjectBindingPattern). The array param helper and
+  // `destructureParamObject`'s own externref arm already emit this guard, but
+  // the `compileFunctionExpression` arrow / function-expression path
+  // (closures.ts) calls THIS helper directly for an `any`/externref object
+  // pattern with no struct to ref.test against, so without the guard
+  // `(({a}) => a)(null)` silently returned undefined. The guard only fires for
+  // null/undefined; valid objects (and `destructureParamObject` callers that
+  // already guarded) pass through unchanged (a second guard on a non-null value
+  // is a no-op).
+  emitExternrefDestructureGuard(ctx, fctx, paramIdx);
+  // Ensure __extern_get is available (#1866: ensureLateImport routes to the
+  // native object-runtime impl under --target standalone — no leaked
+  // `env::__extern_get` host import — and to the host import in JS-host mode).
+  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
   let getIdx = ctx.funcMap.get("__extern_get");
-  if (getIdx === undefined) {
-    const importsBefore = ctx.numImportFuncs;
-    const getType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__extern_get", { kind: "func", typeIdx: getType });
-    shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-    getIdx = ctx.funcMap.get("__extern_get");
-  }
   if (getIdx === undefined) return;
 
   const excludedKeys: string[] = [];
@@ -487,13 +531,16 @@ export function destructureParamObjectExternref(
         }
       }
 
-      // Per ECMA-262 §13.15.5.5 RequireObjectCoercible / §8.4.2 GetIterator,
-      // destructuring null/undefined through a non-empty nested pattern must
-      // throw TypeError. Emit the guard BEFORE recursing so we throw even when
-      // the nested destructure path silently no-ops on null (#1225).
-      if (element.name.elements.length > 0) {
-        emitExternrefDestructureGuard(ctx, fctx, nestedLocal);
-      }
+      // Per ECMA-262 8.6.2 BindingInitialization, both
+      // `BindingPattern : ObjectBindingPattern` (RequireObjectCoercible) and
+      // `BindingPattern : ArrayBindingPattern` (GetIterator) run their
+      // coercibility step FIRST — even for an empty nested pattern `{}` / `[]`.
+      // So `{ w: {} } = { w: null }` and `{ w: [] } = { w: null }` must throw
+      // TypeError. Emit the null/undefined guard unconditionally (the prior
+      // `length > 0` gate skipped empty nested patterns — #846). The guard only
+      // fires for null/undefined, so coercible primitive values still pass.
+      // (#1225 / #846)
+      emitExternrefDestructureGuard(ctx, fctx, nestedLocal);
 
       if (ts.isObjectBindingPattern(element.name)) {
         destructureParamObjectExternref(ctx, fctx, nestedLocal, element.name, opts);
@@ -727,12 +774,32 @@ export function destructureParamObject(
 
   for (const element of pattern.elements) {
     if (!ts.isBindingElement(element)) continue;
-    const propName = (element.propertyName ?? element.name) as ts.Identifier;
+    // #2032 — resolve the property key statically. A ComputedPropertyName
+    // (`{ [k]: v }`) has no `.text`; recover the constant string from the
+    // checker so it maps to the correct struct field instead of binding the
+    // zero-initialized local. Unresolvable computed keys fail loudly below.
+    const propKey = resolveStaticPropKey(ctx, element);
+    if (propKey === undefined && element.propertyName && ts.isComputedPropertyName(element.propertyName)) {
+      // #2032 + #2031-revival regression fix: a computed key that does NOT fold
+      // to a compile-time constant (e.g. `{ [thrower()]: x }`, where the key is
+      // a runtime call) must NOT hard-error — that regressed 7 test262 cases
+      // (for/for-await-of `obj-ptrn-prop-eval-err`) which compiled+ran on main.
+      // Fall back to the pre-#2032 behaviour: skip this binding element (the
+      // local was pre-allocated by `ensureBindingLocals`). The static
+      // fast-path simply can't map a runtime key to a struct field index; the
+      // generic/runtime destructuring path handles the key-evaluation order
+      // (and its abrupt completion) as before. Only the constant-computed-key
+      // improvement from #2032 stays active above.
+      continue;
+    }
     if (!ts.isIdentifier(element.name)) {
       // Nested pattern — recurse
       if (ts.isObjectBindingPattern(element.name) || ts.isArrayBindingPattern(element.name)) {
-        const fieldIdx = fields.findIndex((f) => f.name === propName.text);
-        if (fieldIdx === -1) continue;
+        const fieldIdx = fields.findIndex((f) => f.name === propKey);
+        if (fieldIdx === -1) {
+          reportSilentFallback(ctx, "lookup-miss-skip", "destructuring-params:nested-pattern-field-miss", element);
+          continue;
+        }
         const fieldType = fields[fieldIdx]!.type;
         const tmpLocal = allocLocal(fctx, `__dparam_${fctx.locals.length}`, fieldType);
         fctx.body.push({ op: "local.get", index: paramIdx });
@@ -756,7 +823,7 @@ export function destructureParamObject(
       continue;
     }
     const localName = element.name.text;
-    const fieldIdx = fields.findIndex((f) => f.name === propName.text);
+    const fieldIdx = fields.findIndex((f) => f.name === propKey);
     if (fieldIdx === -1) {
       // Field not in struct — already pre-allocated by ensureBindingLocals
       continue;
@@ -890,6 +957,16 @@ export function destructureParamArray(
       const convertedType: ValType = { kind: "ref_null", typeIdx: extVecIdx };
       const resultLocal = allocLocal(fctx, `__dparam_cvt_${fctx.locals.length}`, convertedType);
 
+      // #1970 — reset resultLocal to null at the start of the emitted
+      // sequence. The materialization fallbacks below are gated on
+      // `ref.is_null resultLocal`; when this sequence re-executes inside a
+      // loop (for-of over Map/host iterables lowers through
+      // compileExternrefArrayDestructuringDecl per iteration), a stale
+      // non-null vec from the previous iteration would skip re-materializing
+      // and destructure last iteration's values forever.
+      fctx.body.push({ op: "ref.null", typeIdx: extVecIdx } as Instr);
+      fctx.body.push({ op: "local.set", index: resultLocal });
+
       // Convert externref -> anyref
       const anyTmp = allocLocal(fctx, `__dparam_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
       fctx.body.push({ op: "local.get", index: paramIdx });
@@ -1006,14 +1083,16 @@ export function destructureParamArray(
       // Pre-register fallback host imports BEFORE building convertInstrs, so that
       // any function index shifts from late imports are visible to boxToExternref
       // calls inside the vec-type conversion loop below. (#825)
-      const fbLenFn = ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
+      //
+      // (#1890 / late-shift class) We deliberately do NOT capture the returned
+      // funcIdx here: the `convertInstrs` loop below runs `boxToExternref` →
+      // `addUnionImports`, which shifts every defined-function index, so any index
+      // captured now would go stale. We re-resolve all three by name from funcMap
+      // *after* that loop, just before baking them into call instructions. Only
+      // the *presence* of these imports matters at this point.
+      ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
       flushLateImportShifts(ctx, fctx);
-      const fbGetIdxFn = ensureLateImport(
-        ctx,
-        "__extern_get_idx",
-        [{ kind: "externref" }, { kind: "f64" }],
-        [{ kind: "externref" }],
-      );
+      ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       // __array_from_iter_n materializes iterables (generators, sets, custom
       // @@iterator) so __extern_length / __extern_get_idx operate on a real
@@ -1023,12 +1102,7 @@ export function destructureParamArray(
       // pass -1 → unbounded drain, byte-identical to legacy __array_from_iter
       // and preserving its IteratorClose tuning (#1219, #1592).
       const fbIterStepCount = patternIteratorStepCount(pattern.elements);
-      const fbIterFn = ensureLateImport(
-        ctx,
-        "__array_from_iter_n",
-        [{ kind: "externref" }, { kind: "f64" }],
-        [{ kind: "externref" }],
-      );
+      ensureLateImport(ctx, "__array_from_iter_n", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
 
       // Else: try each other known vec type and convert element-by-element
@@ -1115,7 +1189,20 @@ export function destructureParamArray(
       // Fallback: if no Wasm vec type matched, the externref is a plain JS array/iterable.
       // Materialize via Array.from first so iterator protocol runs (generators, custom
       // @@iterator); then walk with __extern_length + __extern_get_idx. (#825, #1150)
-      if (fbLenFn !== undefined && fbGetIdxFn !== undefined && fbIterFn !== undefined) {
+      //
+      // (#1890 / late-shift class) RE-RESOLVE the three fallback funcIdx by name
+      // before baking them into call instructions below. They were captured above
+      // (lines ~1012/1014/1029), but the `convertInstrs` loop just ran
+      // `boxToExternref` → `addUnionImports`, which adds func imports and shifts
+      // EVERY defined-function index. Under standalone/WASI these names resolve to
+      // DEFINED helpers (via addUnionImportsViaRegistry / ensureObjectRuntime), so
+      // their captured indices are now stale-low → the `call`s would target the
+      // freshly-inserted import (invalid Wasm). funcMap holds the post-shift truth;
+      // re-reading by name is the fix (idempotent — no new import is added here).
+      const fbLenFnFinal = ctx.funcMap.get("__extern_length");
+      const fbGetIdxFnFinal = ctx.funcMap.get("__extern_get_idx");
+      const fbIterFnFinal = ctx.funcMap.get("__array_from_iter_n");
+      if (fbLenFnFinal !== undefined && fbGetIdxFnFinal !== undefined && fbIterFnFinal !== undefined) {
         const fbMatTmp = allocLocal(fctx, `__dparam_fb_mat_${fctx.locals.length}`, { kind: "externref" });
         const fbLenTmp = allocLocal(fctx, `__dparam_fb_len_${fctx.locals.length}`, { kind: "i32" });
         const fbArrTmp = allocLocal(fctx, `__dparam_fb_arr_${fctx.locals.length}`, {
@@ -1129,11 +1216,11 @@ export function destructureParamArray(
           // iterator .next() propagate; stepCount bounds the drain (#1592).
           { op: "local.get", index: paramIdx } as Instr,
           { op: "f64.const", value: fbIterStepCount } as Instr,
-          { op: "call", funcIdx: fbIterFn } as Instr,
+          { op: "call", funcIdx: fbIterFnFinal } as Instr,
           { op: "local.set", index: fbMatTmp } as Instr,
           // len = i32(__extern_length(materialized))
           { op: "local.get", index: fbMatTmp } as Instr,
-          { op: "call", funcIdx: fbLenFn } as Instr,
+          { op: "call", funcIdx: fbLenFnFinal } as Instr,
           { op: "i32.trunc_sat_f64_s" },
           { op: "local.set", index: fbLenTmp } as Instr,
           // arr = array.new_default(len)
@@ -1163,7 +1250,7 @@ export function destructureParamArray(
                   { op: "local.get", index: fbMatTmp } as Instr,
                   { op: "local.get", index: fbIdxTmp } as Instr,
                   { op: "f64.convert_i32_s" } as Instr,
-                  { op: "call", funcIdx: fbGetIdxFn } as Instr,
+                  { op: "call", funcIdx: fbGetIdxFnFinal } as Instr,
                   { op: "array.set", typeIdx: extArrTypeIdx } as Instr,
                   // idx++
                   { op: "local.get", index: fbIdxTmp } as Instr,
@@ -1271,13 +1358,15 @@ export function destructureParamArray(
       if (isNullable && pattern.elements.length > 0) {
         addStringConstantGlobal(ctx, "Cannot destructure 'null' or 'undefined'");
       }
-      const savedBody = fctx.body;
-      const destructInstrs: Instr[] = [];
+      let savedBody: Instr[] | undefined;
+      let destructInstrs: Instr[] = [];
       if (isNullable) {
-        // Keep `destructInstrs` reachable to index fixups while it is the
-        // active emission buffer (#1553d — see vec path note below).
-        fctx.savedBodies.push(destructInstrs);
-        fctx.body = destructInstrs;
+        // Keep both sides of the body swap reachable to index fixups. Late
+        // imports can be triggered while emitting `destructInstrs`; callers such
+        // as the externref conversion path have already populated the previous
+        // body with call indices that must shift too (#1891).
+        savedBody = pushBody(fctx);
+        destructInstrs = fctx.body;
       }
 
       for (let i = 0; i < pattern.elements.length; i++) {
@@ -1338,8 +1427,7 @@ export function destructureParamArray(
 
       // Close null guard — throw TypeError when null (JS spec)
       if (isNullable) {
-        fctx.savedBodies.pop();
-        fctx.body = savedBody;
+        popBody(fctx, savedBody!);
         if (destructInstrs.length > 0) {
           // When param is null (e.g. empty array cast failed), apply element defaults
           const nullDefaultInstrs: Instr[] = [];
@@ -1410,17 +1498,15 @@ export function destructureParamArray(
   if (isNullable && pattern.elements.length > 0) {
     addStringConstantGlobal(ctx, "Cannot destructure 'null' or 'undefined'");
   }
-  const savedBody = fctx.body;
-  const destructInstrs: Instr[] = [];
+  let savedBody: Instr[] | undefined;
+  let destructInstrs: Instr[] = [];
   if (isNullable) {
-    // Keep `destructInstrs` reachable to global/late-import index fixups while
-    // it is the active emission buffer. `fixupModuleGlobalIndices` and
-    // `shiftLateImportIndices` walk `ctx.currentFunc.body` (= the restored
-    // outer `savedBody`) plus `savedBodies`; a raw `fctx.body = destructInstrs`
-    // swap leaves the new buffer invisible to those walks, so a function-call
-    // default (`[x = f()]`, where `f` adds a late import) corrupts indices.
-    fctx.savedBodies.push(destructInstrs);
-    fctx.body = destructInstrs;
+    // Keep both sides of the body swap reachable to global/late-import index
+    // fixups. `destructInstrs` is the active body, while the saved body may
+    // already contain call indices emitted by the externref conversion fallback
+    // before this recursive typed destructure runs (#1891).
+    savedBody = pushBody(fctx);
+    destructInstrs = fctx.body;
   }
 
   for (let i = 0; i < pattern.elements.length; i++) {
@@ -1516,12 +1602,31 @@ export function destructureParamArray(
       fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx } as Instr);
       fctx.body.push({ op: "local.set", index: restArrLocal });
 
-      // array.copy(restArr, 0, srcData, i, restLen)
+      // #2031 — clamp the source offset to `min(i, srcLen)`. WasmGC
+      // `array.copy` traps when `srcOffset > src.len` even for a zero-length
+      // copy, so when the source is shorter than the fixed bindings (e.g.
+      // `const [p, q = 9, ...rest] = [1]` ⇒ i=2 > len=1) the unclamped offset
+      // `i` traps. Clamping to the length keeps `restLen=0` copies valid while
+      // leaving longer sources (where `i <= len`) untouched.
+      const srcOffsetLocal = allocLocal(fctx, `__rest_src_off_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "local.get", index: paramIdx });
+      fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 }); // srcLen
+      fctx.body.push({ op: "local.set", index: srcOffsetLocal });
+      // select(i, srcLen, i < srcLen) → min(i, srcLen)
+      fctx.body.push({ op: "i32.const", value: i });
+      fctx.body.push({ op: "local.get", index: srcOffsetLocal });
+      fctx.body.push({ op: "i32.const", value: i });
+      fctx.body.push({ op: "local.get", index: srcOffsetLocal });
+      fctx.body.push({ op: "i32.lt_s" } as Instr);
+      fctx.body.push({ op: "select" } as Instr);
+      fctx.body.push({ op: "local.set", index: srcOffsetLocal });
+
+      // array.copy(restArr, 0, srcData, min(i, srcLen), restLen)
       fctx.body.push({ op: "local.get", index: restArrLocal });
       fctx.body.push({ op: "i32.const", value: 0 });
       fctx.body.push({ op: "local.get", index: paramIdx });
       fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 }); // src data
-      fctx.body.push({ op: "i32.const", value: i });
+      fctx.body.push({ op: "local.get", index: srcOffsetLocal });
       fctx.body.push({ op: "local.get", index: restLenLocal });
       fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
 
@@ -1654,8 +1759,7 @@ export function destructureParamArray(
   // Close null guard — throw TypeError when null (JS spec)
   // Skip for empty `[]` patterns (#225).
   if (isNullable) {
-    fctx.savedBodies.pop();
-    fctx.body = savedBody;
+    popBody(fctx, savedBody!);
     if (destructInstrs.length > 0 && pattern.elements.length > 0) {
       fctx.body.push({ op: "local.get", index: paramIdx });
       fctx.body.push({ op: "ref.is_null" } as Instr);

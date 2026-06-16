@@ -27,6 +27,7 @@ The format follows Michael Nygard's 2011 ADR template: **Context**,
 | 012 | Accepted | [Intermediate representation: multi-stage typed IR](./0012-intermediate-representation.md) |
 | 013 | Accepted | [Explicit allocation sites in the IR](./0013-ir-allocation-sites.md)          |
 | 014 | Accepted | [Ownership and access-semantics analysis on IR values](./0014-ownership-access-analysis.md) |
+| 017 | Accepted | [Linear-backend bump/arena allocator; one fixed GC strategy, not pluggable](./0017-linear-bump-arena-allocator.md) |
 
 ## Reading order
 

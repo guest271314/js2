@@ -11,6 +11,8 @@ import { allocLocal } from "../context/locals.js";
 import type { CodegenContext, ExternClassInfo, FunctionContext, RestParamInfo } from "../context/types.js";
 import { addUnionImports, getArrTypeIdxFromVec } from "../index.js";
 import { tryCompileNativeMapMethodCall } from "../map-runtime.js";
+import { tryCompileNativeSetMethodCall } from "../set-runtime.js";
+import { tryCompileNativeWeakMethodCall } from "../weak-collections-runtime.js";
 import { addStringConstantGlobal } from "../registry/imports.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
@@ -61,6 +63,26 @@ function compileExternMethodCall(
     addUnionImports(ctx);
     const mapResult = tryCompileNativeMapMethodCall(ctx, fctx, propAccess, callExpr);
     if (mapResult !== undefined) return mapResult;
+  }
+
+  // (#2162) Native Set method dispatch in standalone / nativeStrings mode.
+  // Without this, `s.add(...)` etc. emit `Set_add` host imports the standalone
+  // runtime can't satisfy. Route to the WasmGC-native Set runtime (which reuses
+  // the Map backing store). Same up-front addUnionImports rationale as Map.
+  if (className === "Set" && ctx.nativeStrings) {
+    addUnionImports(ctx);
+    const setResult = tryCompileNativeSetMethodCall(ctx, fctx, propAccess, callExpr);
+    if (setResult !== undefined) return setResult;
+  }
+
+  // (#2162) Native WeakMap / WeakSet method dispatch in standalone /
+  // nativeStrings mode. Without this, `wm.set(...)` / `ws.add(...)` etc. emit
+  // `WeakMap_*` / `WeakSet_*` host imports the standalone runtime can't satisfy.
+  // Route to the native weak-collection runtime (reuses the Map backing store).
+  if ((className === "WeakMap" || className === "WeakSet") && ctx.nativeStrings) {
+    addUnionImports(ctx);
+    const weakResult = tryCompileNativeWeakMethodCall(ctx, fctx, className, propAccess, callExpr);
+    if (weakResult !== undefined) return weakResult;
   }
 
   if (!className) return null;
@@ -471,9 +493,22 @@ function compileSpreadCallArgs(
   // Strategy: for each spread arg, store the vec in a local, extract data array, then extract elements by index
   if (!paramTypes) return;
 
+  // Count non-spread (positional) args that follow each argument index, so a
+  // spread that precedes trailing positional args reserves their param slots
+  // instead of greedily consuming every remaining parameter (#2053). Without
+  // this, `f(...arr, x)` reads one element too many out of the spread vec
+  // (OOB → NaN) and compiles `x` as a surplus stack value.
+  const args = expr.arguments;
+  const trailingPositionalAfter: number[] = new Array(args.length).fill(0);
+  for (let i = args.length - 2; i >= 0; i--) {
+    const next = args[i + 1]!;
+    trailingPositionalAfter[i] = trailingPositionalAfter[i + 1]! + (ts.isSpreadElement(next) ? 0 : 1);
+  }
+
   // Collect all arguments, resolving spreads
   let paramIdx = 0;
-  for (const arg of expr.arguments) {
+  for (let argPos = 0; argPos < args.length; argPos++) {
+    const arg = args[argPos]!;
     if (ts.isSpreadElement(arg)) {
       // Compile the spread source (vec struct)
       const vecType = compileExpression(ctx, fctx, arg.expression);
@@ -504,7 +539,10 @@ function compileSpreadCallArgs(
       const arrDefSpread = ctx.mod.types[arrTypeIdx];
       const spreadElemType =
         arrDefSpread && arrDefSpread.kind === "array" ? arrDefSpread.element : { kind: "f64" as const };
-      const remainingParams = paramTypes.length - paramIdx;
+      // Reserve param slots for trailing positional args after this spread so
+      // the spread only expands into the parameters it actually covers (#2053).
+      const reservedForTrailing = trailingPositionalAfter[argPos] ?? 0;
+      const remainingParams = Math.max(0, paramTypes.length - paramIdx - reservedForTrailing);
       for (let i = 0; i < remainingParams; i++) {
         fctx.body.push({ op: "local.get", index: dataLocal });
         fctx.body.push({ op: "i32.const", value: i });

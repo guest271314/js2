@@ -20,9 +20,10 @@
  *
  * Fix lives in `src/codegen/expressions/calls.ts` (void-IIFE inlining).
  */
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 import { buildImports } from "../src/runtime.js";
+import { compileToWasm } from "./equivalence/helpers.js";
 
 async function runWasm(src: string): Promise<unknown> {
   const r = await compile(src, { fileName: "test.ts", allowJs: true });
@@ -127,8 +128,109 @@ describe("#1348 — void IIFE return", () => {
         return x;
       }
     `;
-    // Inner return after first iteration → x === 1, post-arrow code in outer
+    // Inner return after first iteration -> x === 1, post-arrow code in outer
     // function runs normally (no-op here since the return is the last statement).
     expect(await runWasm(src)).toBe(1);
+  });
+});
+
+// #1348 — class static initialization order and private-field semantics.
+//
+// These cases mirror the residual test262 clusters called out in the issue.
+// Spec anchors:
+// - ECMA-262 §15.7.14 ClassDefinitionEvaluation collects static fields/blocks
+//   in class-body order and executes those records during class evaluation.
+// - ECMA-262 §13.3.7.1 SuperCall performs InitializeInstanceElements on the
+//   derived constructor after the super constructor returns.
+// - ECMA-262 §7.3.26 PrivateElementFind underpins `#x in obj` brand checks.
+describe("#1348 class static initialization and private fields", () => {
+  it("runs static fields and static blocks in source order", async () => {
+    const ex = await compileToWasm(`
+      class C {
+        static n: number = 0;
+        static a: number = C.n + 1;
+        static { C.n = C.a + 1; }
+        static b: number = C.n + 1;
+        static { C.n = C.b + 1; }
+      }
+      export function test(): number { return C.n * 100 + C.a * 10 + C.b; }
+    `);
+    expect(ex.test()).toBe(413);
+  });
+
+  it("static block can read earlier private static field", async () => {
+    const ex = await compileToWasm(`
+      class C {
+        static #x: number = 41;
+        static y: number = 0;
+        static { C.y = this.#x + 1; }
+      }
+      export function test(): number { return C.y; }
+    `);
+    expect(ex.test()).toBe(42);
+  });
+
+  it("private in is a brand check and does not throw on wrong receiver", async () => {
+    const ex = await compileToWasm(`
+      class A {
+        #x: number = 1;
+        has(o: any): boolean { return #x in o; }
+      }
+      class B {
+        #x: number = 2;
+      }
+      export function test(): number {
+        const a = new A();
+        const b = new B();
+        return (a.has(a) ? 1 : 0) + (a.has(b) ? 10 : 0) + (a.has(null) ? 100 : 0);
+      }
+    `);
+    expect(ex.test()).toBe(1);
+  });
+
+  it("private field read rejects unrelated class with the same private name", async () => {
+    const ex = await compileToWasm(`
+      class A {
+        #x: number = 1;
+        read(o: any): number { return o.#x; }
+      }
+      class B {
+        #x: number = 2;
+      }
+      export function test(): number {
+        const a = new A();
+        const b = new B();
+        if (a.read(a) !== 1) return 0;
+        try {
+          a.read(b);
+          return 0;
+        } catch (e: any) {
+          return e instanceof TypeError ? 1 : 2;
+        }
+      }
+    `);
+    expect(ex.test()).toBe(1);
+  });
+
+  it("super() runs parent field initializer before child shadow field", async () => {
+    const ex = await compileToWasm(`
+      let log: number = 0;
+      function mark(n: number): number {
+        log = log * 10 + n;
+        return n;
+      }
+      class Parent {
+        x: number = mark(1);
+      }
+      class Child extends Parent {
+        x: number = mark(2);
+        constructor() { super(); }
+      }
+      export function test(): number {
+        const c = new Child();
+        return log * 10 + c.x;
+      }
+    `);
+    expect(ex.test()).toBe(122);
   });
 });

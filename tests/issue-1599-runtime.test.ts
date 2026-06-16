@@ -71,3 +71,96 @@ describe("#1599 Phase 2 — runtime JSON.stringify(string) standalone", () => {
     assertNoJsonHostImports(result);
   });
 });
+
+// (#1599 Phase 2) Runtime JSON.parse(s) primitive slice — number / true / false
+// / null — in --target standalone, lowered to the pure-Wasm
+// `__json_parse_primitive` helper (no env::JSON_parse host import).
+describe("#1599 Phase 2 — runtime JSON.parse(primitive) standalone", () => {
+  it("parses a runtime JSON number", async () => {
+    const r = await runStandalone(`
+      let s: string = "123";
+      s = s + ".45";
+      const n: number = JSON.parse(s);
+      return n === 123.45 ? 1 : 0;
+    `);
+    expect(r).toBe(1);
+  });
+
+  it("parses a negative number with an exponent", async () => {
+    const r = await runStandalone(`
+      let s: string = "-7";
+      s = s + "e2";
+      const n: number = JSON.parse(s);
+      return n === -700 ? 1 : 0;
+    `);
+    expect(r).toBe(1);
+  });
+
+  it("parses a leading-zero fraction", async () => {
+    const r = await runStandalone(`
+      let s: string = "0.";
+      s = s + "5";
+      const n: number = JSON.parse(s);
+      return n === 0.5 ? 1 : 0;
+    `);
+    expect(r).toBe(1);
+  });
+
+  it("parses true and false", async () => {
+    const t = await runStandalone(`
+      let s: string = "tr";
+      s = s + "ue";
+      const b: boolean = JSON.parse(s);
+      return b ? 1 : 0;
+    `);
+    expect(t).toBe(1);
+    const f = await runStandalone(`
+      let s: string = "fa";
+      s = s + "lse";
+      const b: boolean = JSON.parse(s);
+      return b ? 1 : 0;
+    `);
+    expect(f).toBe(0);
+  });
+
+  it("parses null (typeof object)", async () => {
+    // The parsed null boxes as a tag-0 $AnyValue, which `typeof` reports as
+    // "object" per ECMA-262. (`=== null` against a boxed AnyValue is a separate
+    // pre-existing comparison concern tracked under #1599 Phase 2 string work.)
+    const r = await runStandalone(`
+      let s: string = "nu";
+      s = s + "ll";
+      const v = JSON.parse(s);
+      return typeof v === "object" ? 1 : 0;
+    `);
+    expect(r).toBe(1);
+  });
+
+  it("skips leading/trailing whitespace around a number", async () => {
+    const r = await runStandalone(`
+      let s: string = " 4";
+      s = s + "2 ";
+      const n: number = JSON.parse(s);
+      return n === 42 ? 1 : 0;
+    `);
+    expect(r).toBe(1);
+  });
+
+  it("does not pull in env::JSON_parse for runtime primitive parse", async () => {
+    const result = await compile(
+      "export function test(s: string): number { const n: number = JSON.parse(s); return n; }",
+      { target: "standalone" },
+    );
+    expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoJsonHostImports(result);
+  });
+
+  it("works under --target wasi too", async () => {
+    const result = await compile(
+      "export function test(s: string): number { const n: number = JSON.parse(s); return n; }",
+      { target: "wasi" },
+    );
+    expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
+    assertNoJsonHostImports(result);
+  });
+});

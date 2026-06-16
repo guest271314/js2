@@ -1,9 +1,9 @@
 ---
 id: 1629
 title: "spec gap: Object.defineProperty — descriptor attribute fidelity (664 test262 fails, biggest single bucket)"
-status: ready
+status: done
 created: 2026-05-08
-updated: 2026-05-30
+updated: 2026-06-11
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -11,10 +11,14 @@ task_type: feature
 area: codegen, runtime
 language_feature: object
 goal: spec-completeness
-sprint: Backlog
+sprint: 61
+pr: 1281
 renumbered_from: 1335
 parent: 1328
 related: [1629a, 1629b, 1629c, 1630, 1631, 1130, 1364b]
+claimed_by: codex-developer
+claimed_at: 2026-06-07T10:02:45.369Z
+completed: 2026-06-10
 ---
 > **UNIFIED DESCRIPTOR-MODEL SPEC (architect, 2026-05-29).** The single
 > coherent implementation plan for the whole Object property-descriptor
@@ -199,6 +203,66 @@ arg0 is an identifier, falling back to the shape table. Tests:
 overrides + default preservation, all green). Does not address
 sub-clusters #1629a (dynamic descriptor) or #1629c (Array/Function
 exotic) — those remain open.
+
+## Attempt 22 (2026-06-07, codex-developer)
+
+Focused implementation landed for descriptor-field presence when the field's
+value is explicitly `undefined`. The previous runtime used `!== undefined` as
+both a value test and a descriptor-field presence test, which made
+`{ value: undefined }`, `{ get: undefined }`, and variable-held descriptor
+objects indistinguishable from omitted fields after lowering through WasmGC
+descriptor structs.
+
+Changes:
+- Codegen routes inline/dynamic descriptor structs with explicit `undefined`
+  descriptor fields through `__defineProperty_desc`, annotating the lowered
+  descriptor object with sidecar entries for those present fields.
+- Runtime `ToPropertyDescriptor` materialization now uses HasProperty-style
+  presence checks before reading descriptor values, so present `undefined`
+  fields remain present.
+- Runtime descriptor validation now uses field-presence bits, preserving the
+  data/accessor conflict and non-configurable accessor SameValue invariants
+  when `get`, `set`, or `value` are explicitly `undefined`.
+- `Object.getOwnPropertyDescriptor` fast paths defer to the runtime descriptor
+  table for properties known to have been defined through the sidecar path.
+- `extern_get` no longer falls through ordinary JS descriptor-object properties
+  whose value is `undefined` to Wasm struct field getters.
+
+Focused validation:
+- `pnpm exec vitest run tests/issue-1629.test.ts` — 5/5 pass.
+- `pnpm exec vitest run tests/issue-1629.test.ts tests/issue-1629*.test.ts`
+  — 42/42 pass.
+- Scoped test262 samples around `Object.defineProperty` descriptor coalescing
+  and invariants were rerun. The targeted `undefined` descriptor field behavior
+  is fixed by the local tests, but representative test262 samples still expose
+  downstream gaps outside this slice: widened-field `verifyProperty` coverage,
+  array exotic length RangeError behavior, and accessor closure identity
+  read-back.
+
+## Attempt 30 (2026-06-07, codex-developer)
+
+Focused follow-up for accessor descriptor fidelity:
+
+- `Object.defineProperty` now treats `get: identifierRef` / `set: identifierRef`
+  descriptors as accessor descriptors when the receiver key is an existing
+  struct field. Those descriptors route through the runtime descriptor sidecar
+  instead of being recorded as flag-only data descriptors.
+- Compiled dot/bracket reads for locals with accessor-backed descriptor entries
+  consult the runtime descriptor model before falling back to `struct.get`, so
+  statically typed fields redefined through accessor-reference descriptors
+  invoke the getter per ECMA-262 §10.1.8.1.
+- Wasm closure callable wrappers are cached per closure/arity and `__host_eq`
+  canonicalizes cached wrappers to their underlying closure. This preserves
+  accessor identity for `Object.getOwnPropertyDescriptor(o, k).get === getter`,
+  matching the descriptor read-back expected after §20.1.2.4 DefinePropertyOrThrow.
+
+Focused validation:
+
+- `pnpm exec vitest run tests/issue-1629.test.ts` — 8/8 pass.
+- `pnpm exec vitest run tests/issue-1629.test.ts tests/issue-1629*.test.ts`
+  — 45/45 pass.
+- `TEST262_WORKERS=2 TEST262_REPORTER=dot TEST262_LOCAL_SHARD_GLOB='tests/test262-local-shard[1-3].test.ts' TEST262_PATH_FILTER='built-ins/Object/defineProperty/15.2.3.6-4-10.js|built-ins/Object/defineProperty/15.2.3.6-4-11.js|built-ins/Object/defineProperty/15.2.3.6-3-1.js' pnpm run test:262`
+  — 3/3 pass.
 
 ---
 
@@ -707,6 +771,72 @@ required so the feature is not host-only.
 **Tests**: extend `tests/equivalence/` standalone variants; add a
 `--target wasi` smoke test compiling a `defineProperty({get})` program and
 asserting the getter fires.
+
+> **S6 STATUS — data-descriptor sub-slice DONE (2026-06-03, senior-developer).**
+> `Object.defineProperty(obj, key, { value, writable?, enumerable?,
+> configurable? })` (and `Reflect.defineProperty` for a data descriptor) now
+> lowers to a **native** `__defineProperty_value` on the #1472 Phase B
+> `$Object`/`$PropEntry` runtime under `--target standalone`, instead of
+> refusing (#1472 Phase A). Zero `env::__defineProperty*` host imports; modules
+> instantiate with an empty import object.
+>
+> **What shipped (`src/codegen/object-runtime.ts`, `late-imports.ts`,
+> `object-ops.ts`):**
+> 1. New native helper `__defineProperty_value(obj, key, value, flags:f64) ->
+>    externref` — structurally a sibling of `__extern_set`: unwrap obj→$Object
+>    (lenient no-op on non-object), translate the host f64 flag word
+>    (`computeRuntimeFlags`: value bits 0/1/2) to the native `$PropEntry.flags`
+>    (`FLAG_WRITABLE/ENUMERABLE/CONFIGURABLE` — same bit positions), grow at the
+>    0.7 load factor, then `__obj_insert`. The existing native `__extern_get`
+>    reads the value back; no `$PropEntry` layout change was needed for the
+>    data path (value+flags slots already exist).
+> 2. Added `__defineProperty_value` to `OBJECT_RUNTIME_HELPER_NAMES` so
+>    `ensureLateImport` routes it native (the routing check precedes the
+>    `STANDALONE_REFUSED_IMPORT` `__defineProperty*` refusal, so the name in both
+>    sets resolves native first).
+>
+> **Latent bug fixed (shared, host + standalone): `emitObjectArgNullGuard`
+> (object-ops.ts) emitted `global.get index: stringGlobalMap.get(msg)` which is
+> the `-1` nativeStrings sentinel** → `Invalid global index: 4294967295` at
+> instantiate. This was dormant because the Object.* null-guard was previously
+> unreachable under standalone (defineProperty refused before reaching it). Now
+> the guard materializes its message via `stringConstantExternrefInstrs` (inline
+> `$NativeString` under nativeStrings, host `string_constants` global otherwise)
+> — same canonical fix family as #1623. `Object.defineProperty(null, …)` now
+> throws a catchable TypeError in standalone.
+>
+> **Deferred to S6 follow-up (NOT this slice):** accessor descriptors
+> (`{ get, set }`) — `__defineProperty_accessor` stays in `STANDALONE_REFUSED_IMPORT`.
+> Native accessor support needs `$PropEntry` accessor slots (`$get`/`$set` anyref
+> + isAccessor flag) and `call_ref` invocation on the stored closure at the read
+> site — the WasmGC analogue of the host `_maybeWrapCallable` path. Dynamic
+> (non-literal) descriptor objects (`__defineProperty_desc`) and
+> `Object.getOwnPropertyDescriptor` native read-back also remain follow-ups.
+>
+> **Follow-on slice — native `hasOwnProperty`/`propertyIsEnumerable` for struct
+> receivers (from sd-846-slice3's #1591 investigation):**
+> `Object.prototype.hasOwnProperty.call(receiver, key)` (and
+> `propertyIsEnumerable`) currently routes to the JS-host `__proto_method_call`
+> import at `src/codegen/expressions/calls.ts` Case 2a (`typeName === "Object"`),
+> so it refuses under `--target standalone`. With the #1629 native descriptor
+> model in place, this becomes a localized routing slice: at the Case-2a site,
+> when `ctx.standalone && typeName === "Object" && methodName ∈
+> {hasOwnProperty, propertyIsEnumerable}`, lower to a new native helper built
+> on the already-present `$Object`/`$PropEntry` primitives — `hasOwnProperty`
+> reuses `__extern_has_idx` (own-slot probe, tombstone-aware), and
+> `propertyIsEnumerable` reads the matched `$PropEntry.$flags & FLAG_ENUMERABLE`
+> (returning `false` for a missing key rather than throwing). Both take the
+> coerced receiver→`$Object` (lenient: non-object receiver → ToObject already
+> handled upstream) and the key string. No `$PropEntry` layout change needed —
+> the enumerable bit and own-slot probe already exist. This is the natural
+> dispatch-layer extension of S6 and should be cut as its own net-≥0 PR after
+> S6 lands.
+>
+> **Tests:** `tests/issue-1629-S6.test.ts` (6 cases: full-attr define +
+> read-back, omitted-attr defaults, coexist with dynamic set/get, redefine
+> overwrite, null-throw TypeError, table grow/rehash). No-regression: the
+> existing #1472 (21) + #1629 S1/S2/S3 (23) suites stay green; host-mode
+> defineProperty still compiles.
 
 ## Cross-cutting risks & guardrails (apply to every slice)
 

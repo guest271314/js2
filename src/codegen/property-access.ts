@@ -8,25 +8,46 @@
  */
 
 import { ts } from "../ts-api.js";
-import { isExternalDeclaredClass, isIteratorResultType, isStringType } from "../checker/type-mapper.js";
+import {
+  isExternalDeclaredClass,
+  isIteratorResultType,
+  isNullablePrimitiveType,
+  isStringType,
+} from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import { emitBoundsCheckedArrayGet } from "./array-methods.js";
+import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { popBody } from "./context/bodies.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { emitCachedMethodClosureAccess, emitFuncRefAsClosure } from "./closures.js";
-import { emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
+import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
+import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
 import {
   classifyPrivateMember,
+  emitPrivateBrandPredicate,
   emitThrowTypeError,
+  noJsHost,
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
-import { patchStructNewForAddedField } from "./expressions/late-imports.js";
+import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { addUnionImports, resolveWasmType } from "./index.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
+import { tryCompileNativeSetSizeGet } from "./set-runtime.js";
+import { tryEmitLinearU8ElementGet, tryEmitLinearU8Length } from "./linear-uint8-codegen.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
+import {
+  ensureRegExpNativeProtoGlue,
+  tryCompileStandaloneRegExpMatchResultRead,
+  tryCompileStandaloneRegExpPropertyRead,
+} from "./regexp-standalone.js";
+import {
+  emitLazyNativeProtoGet,
+  ensureStandaloneNativeMethodClosure,
+  getBuiltinBrand,
+  getNativeProtoBuiltinGlue,
+} from "./native-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
@@ -43,10 +64,62 @@ import {
   getLine,
   resolveComputedKeyExpression,
   resolveThisStructName,
+  skipTransparentExpressions,
   valTypesMatch,
 } from "./shared.js";
 import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 import { tryEmitJsonParseElementAccess, tryEmitJsonParsePropertyAccess } from "./json-standalone.js";
+import { reserveAccessorGetDriver } from "./accessor-driver.js";
+import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
+import { tryCompileTemporalPropertyAccess } from "./temporal-native.js";
+
+const BUILTIN_CTOR_NAMES = new Set([
+  "Object",
+  "Array",
+  "Function",
+  "Symbol",
+  "Proxy",
+  "Reflect",
+  "Math",
+  "BigInt",
+  "JSON",
+  "Date",
+  "RegExp",
+  "ArrayBuffer",
+  "SharedArrayBuffer",
+  "DataView",
+  "Promise",
+  "WeakMap",
+  "WeakSet",
+  "WeakRef",
+  "FinalizationRegistry",
+  "Atomics",
+  "Iterator",
+  "Map",
+  "Set",
+  "Error",
+  "TypeError",
+  "RangeError",
+  "SyntaxError",
+  "URIError",
+  "EvalError",
+  "ReferenceError",
+  "String",
+  "Number",
+  "Boolean",
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+  "BigInt64Array",
+  "BigUint64Array",
+]);
+
 // Well-known Symbol IDs (inlined from literals.ts to avoid circular deps)
 const WELL_KNOWN_SYMBOLS: Record<string, number> = {
   iterator: 1,
@@ -66,6 +139,30 @@ const WELL_KNOWN_SYMBOLS: Record<string, number> = {
 };
 
 /**
+ * #2020: resolve an inherited static-property global by walking the class
+ * parent chain (classParentMap), retrying `<Ancestor>_<prop>` at each level.
+ * Static fields, like static methods, are inherited: `class B extends A {}`
+ * sees `A`'s static fields through `B`. Returns the owning ancestor's global
+ * index, or undefined when no ancestor declares the property. Callers run the
+ * own-class lookup first, so own statics correctly shadow inherited ones.
+ */
+export function resolveInheritedStaticProp(
+  ctx: CodegenContext,
+  className: string,
+  propName: string,
+): number | undefined {
+  const seen = new Set<string>([className]);
+  let cls: string | undefined = ctx.classParentMap.get(className);
+  while (cls && !seen.has(cls)) {
+    seen.add(cls);
+    const globalIdx = ctx.staticProps.get(`${cls}_${propName}`);
+    if (globalIdx !== undefined) return globalIdx;
+    cls = ctx.classParentMap.get(cls);
+  }
+  return undefined;
+}
+
+/**
  * ES spec IsAnonymousFunctionDefinition: returns true when the expression is
  * an anonymous FunctionExpression / ArrowFunction / ClassExpression (with
  * optional parentheses around it). Used by NamedEvaluation to decide whether
@@ -80,6 +177,447 @@ function isAnonymousFunctionDefinition(expr: ts.Expression): boolean {
 }
 function getWellKnownSymbolId(name: string): number | undefined {
   return WELL_KNOWN_SYMBOLS[name];
+}
+
+/**
+ * (#1888 S6-c) Math/Number constant property names that have a Wasm-native
+ * fall-through emitter further down in `compileMemberRead` (the `f64.const`
+ * handlers for `Math.PI` / `Number.MAX_SAFE_INTEGER` & co.). These MUST be
+ * reachable: under `--target standalone` the generic `Builtin.prop` →
+ * `__get_builtin` branch above them refuses-loud (the open-object runtime does
+ * not expose `__get_builtin`), so without an exclusion `Math.PI` etc. fail to
+ * compile even though a pure-Wasm `f64.const` lowering exists. Keep this set in
+ * sync with the `mathConstants` / `numberConstants` tables below (the single
+ * source of truth is those tables; this mirror only decides whether the
+ * `__get_builtin` shortcut must yield to them). Symbol well-knowns
+ * (`Symbol.iterator` etc.) are covered separately via `getWellKnownSymbolId`.
+ */
+const MATH_CONSTANT_PROPS = new Set(["PI", "E", "LN2", "LN10", "SQRT2", "SQRT1_2", "LOG2E", "LOG10E"]);
+const NUMBER_CONSTANT_PROPS = new Set([
+  "EPSILON",
+  "MAX_SAFE_INTEGER",
+  "MIN_SAFE_INTEGER",
+  "MAX_VALUE",
+  "MIN_VALUE",
+  "POSITIVE_INFINITY",
+  "NEGATIVE_INFINITY",
+  "NaN",
+]);
+
+/**
+ * True when `<builtinName>.<propName>` has a Wasm-native **f64 constant**
+ * emitter downstream in `compileMemberRead` that the `__get_builtin` shortcut
+ * must not pre-empt. Keeps the standalone path host-import-free for the
+ * numeric-constant reads we can already lower natively (Math.PI →
+ * `f64.const`, Number.MAX_SAFE_INTEGER → `f64.const`).
+ *
+ * Scoped to Math/Number f64 constants ONLY. `Symbol.<wellKnown>` also has a
+ * downstream emitter (an `i32.const` symbol id), but that i32 result does not
+ * yet compose safely with every consumer under standalone — e.g.
+ * `Symbol.iterator !== undefined` would compare an i32 against an externref
+ * `undefined`, producing **invalid Wasm**. Leaving the `__get_builtin` shortcut
+ * to keep refusing-loud for Symbol is strictly safer than emitting an invalid
+ * module (refuse-loud > silent-wrong); native Symbol value-reads are deferred
+ * to the S6-b builtins-as-globals lever.
+ */
+function hasNativeBuiltinConstantHandler(builtinName: string, propName: string): boolean {
+  if (builtinName === "Math") return MATH_CONSTANT_PROPS.has(propName);
+  if (builtinName === "Number") return NUMBER_CONSTANT_PROPS.has(propName);
+  return false;
+}
+
+const DESCRIPTOR_FLAG_ACCESSOR = 1 << 4;
+
+function runtimeAccessorDescriptorKey(
+  ctx: CodegenContext,
+  receiver: ts.Expression,
+  propName: string,
+): string | undefined {
+  if (!ts.isIdentifier(receiver)) return undefined;
+  const key = `${receiver.text}:${propName}`;
+  const flags = ctx.definedPropertyFlags.get(key);
+  if (flags === undefined || (flags & DESCRIPTOR_FLAG_ACCESSOR) === 0) return undefined;
+  return ctx.sidecarDefinedPropertyKeys.has(key) ? key : undefined;
+}
+
+function emitRuntimeDescriptorGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  receiver: ts.Expression,
+  propName: string,
+  accessNode: ts.Expression,
+): ValType | null {
+  const accessType = ctx.checker.getTypeAtLocation(accessNode);
+  const accessWasm = resolveWasmType(ctx, accessType);
+  const resultType: ValType =
+    accessWasm.kind === "f64" || accessWasm.kind === "i32" ? accessWasm : { kind: "externref" };
+  const getIdx = ensureLateImport(
+    ctx,
+    "__extern_get",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  let unboxIdx: number | undefined;
+  if (resultType.kind === "f64" || resultType.kind === "i32") {
+    unboxIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+  }
+  flushLateImportShifts(ctx, fctx);
+  if (getIdx === undefined) return null;
+
+  const recvType = compileExpression(ctx, fctx, receiver);
+  if (!recvType) return null;
+  if (recvType.kind === "ref_null") {
+    if (!isProvablyNonNull(receiver, ctx.checker)) {
+      emitNullCheckThrow(ctx, fctx, recvType, accessNode);
+    }
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+  } else if (recvType.kind === "ref") {
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+  } else if (recvType.kind !== "externref") {
+    coerceType(ctx, fctx, recvType, { kind: "externref" });
+  }
+
+  addStringConstantGlobal(ctx, propName);
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+  fctx.body.push({ op: "call", funcIdx: getIdx });
+  if (resultType.kind === "f64" && unboxIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: unboxIdx });
+  } else if (resultType.kind === "i32" && unboxIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: unboxIdx });
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  }
+  return resultType;
+}
+
+/**
+ * Consume an externref value and push the Array.isArray boolean result.
+ *
+ * Spec basis: ECMA-262 §23.1.2.3 delegates to IsArray (§7.2.2).
+ *
+ * Two regimes (#2047 — unified):
+ *
+ * - **`--target standalone`**: route through the in-module native
+ *   `__extern_is_array` helper. That helper is reserved with the object runtime
+ *   and *filled at finalize* (`fillExternIsArray`) with the COMPLETE, filtered
+ *   array-carrier list, so a value-read of `Array.isArray` taken before a later
+ *   array type (e.g. `boolean[]` → `__vec_i32`) is registered no longer bakes an
+ *   incomplete `ref.test` chain. This both fixes the first-emission snapshot bug
+ *   (`const f = Array.isArray; f(boolean[])` ⇒ `false`) and excludes the
+ *   exclusively-non-array byte carriers (`i32_byte` ArrayBuffer/DataView,
+ *   `i8_byte` Uint8Array) per §7.2.2.
+ * - **Host / WASI**: keep the inline `ref.test` chain over every registered vec
+ *   type (it detects compiled WasmGC array values materialised into an externref
+ *   slot — #1678), ORed in host mode with the real JS `Array.isArray` host
+ *   predicate for foreign JS arrays (#1328). Host output is unchanged.
+ */
+export function emitArrayIsArrayExternrefPredicate(ctx: CodegenContext, fctx: FunctionContext): void {
+  // (#2047) Standalone: defer entirely to the finalize-filled native helper.
+  // It owns the complete, byte-carrier-filtered carrier list (late binding),
+  // so neither declaration order nor lazy vec registration can produce a wrong
+  // answer here. WASI is intentionally NOT routed here: its
+  // `__extern_is_array` does not resolve to the native object-runtime func
+  // (OBJECT_RUNTIME_HELPER_NAMES routing is `ctx.standalone`-only), so it stays
+  // on the inline chain below.
+  if (ctx.standalone) {
+    const nativeIdx = ensureLateImport(ctx, "__extern_is_array", [{ kind: "externref" }], [{ kind: "i32" }]);
+    if (nativeIdx !== undefined) {
+      flushLateImportShifts(ctx, fctx);
+      fctx.body.push({ op: "call", funcIdx: nativeIdx });
+      return;
+    }
+    // Defensive fallback (should not happen — the object runtime always reserves
+    // the helper under standalone): nothing is an array.
+    fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    return;
+  }
+
+  const vecTypeIdxs = Array.from(new Set(ctx.vecTypeMap.values()));
+  const isArrIdx =
+    !noJsHost(ctx) && !ctx.strictNoHostImports
+      ? ensureLateImport(ctx, "__extern_is_array", [{ kind: "externref" }], [{ kind: "i32" }])
+      : undefined;
+
+  if (vecTypeIdxs.length === 0 && isArrIdx === undefined) {
+    fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    return;
+  }
+
+  const externTmp = allocLocal(fctx, `__isarr_ext_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: externTmp });
+  let emittedTerm = false;
+
+  if (vecTypeIdxs.length > 0) {
+    const anyTmp = allocLocal(fctx, `__isarr_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+    fctx.body.push({ op: "local.get", index: externTmp } as Instr);
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+    fctx.body.push({ op: "local.set", index: anyTmp });
+    for (let vi = 0; vi < vecTypeIdxs.length; vi++) {
+      fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
+      fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdxs[vi]! } as Instr);
+      if (vi > 0) fctx.body.push({ op: "i32.or" } as Instr);
+    }
+    emittedTerm = true;
+  }
+
+  if (isArrIdx !== undefined) {
+    flushLateImportShifts(ctx, fctx);
+    fctx.body.push({ op: "local.get", index: externTmp } as Instr);
+    fctx.body.push({ op: "call", funcIdx: isArrIdx });
+    if (emittedTerm) fctx.body.push({ op: "i32.or" } as Instr);
+    emittedTerm = true;
+  }
+
+  if (!emittedTerm) {
+    fctx.body.push({ op: "i32.const", value: 0 });
+  }
+}
+
+function reportUnsupportedStandaloneBuiltinValueRead(ctx: CodegenContext, builtinName: string, propName: string): void {
+  if (!ctx.standaloneRefusedImports) ctx.standaloneRefusedImports = new Set<string>();
+  const key = `#1907:${builtinName}.${propName}`;
+  if (ctx.standaloneRefusedImports.has(key)) return;
+  ctx.standaloneRefusedImports.add(key);
+  reportErrorNoNode(
+    ctx,
+    `Codegen error: ${builtinName}.${propName} built-in static property value read is not supported ` +
+      `in --target standalone (#1907 / #1888 S6-b). Add a native built-in method closure for this pair.`,
+  );
+}
+
+function makeBuiltinClosureFctx(
+  name: string,
+  selfType: ValType,
+  paramTypes: ValType[],
+  returnType: ValType | null,
+): FunctionContext {
+  const fctx: FunctionContext = {
+    name,
+    params: [{ name: "__self", type: selfType }, ...paramTypes.map((type, i) => ({ name: `arg${i}`, type }))],
+    locals: [],
+    localMap: new Map(),
+    returnType,
+    body: [],
+    blockDepth: 0,
+    breakStack: [],
+    continueStack: [],
+    labelMap: new Map(),
+    savedBodies: [],
+  };
+  for (let i = 0; i < fctx.params.length; i++) {
+    fctx.localMap.set(fctx.params[i]!.name, i);
+  }
+  return fctx;
+}
+
+/**
+ * (#2175 S0) Generalized native-method-closure factory. `kind`:
+ *   - `"static"` — the existing receiver-less builtin-static behaviour
+ *     (`Array.isArray`, `Object.keys`, `Object.getOwnPropertyDescriptor`),
+ *     kept BYTE-IDENTICAL — delegates to the unchanged
+ *     `ensureStandaloneBuiltinStaticMethodClosure` below.
+ *   - `"method"` / `"getter"` — brand-keyed native-method/getter closures with
+ *     an `externref this` first user param + a brand-recovery prologue,
+ *     delegated to `ensureStandaloneNativeMethodClosure` (native-proto.ts).
+ *
+ * S0 reaches only the `"static"` path; S1 wires `"method"`/`"getter"` for
+ * RegExp through the refusal site below.
+ */
+function ensureStandaloneNativeMethodClosureLocal(
+  ctx: CodegenContext,
+  builtinName: string,
+  propName: string,
+  expr: ts.PropertyAccessExpression,
+  kind: "static" | "method" | "getter",
+  brand?: number,
+): { type: { kind: "ref"; typeIdx: number }; funcIdx: number } | null {
+  if (kind !== "static") {
+    if (brand === undefined) return null;
+    return ensureStandaloneNativeMethodClosure(ctx, brand, propName, kind);
+  }
+  return ensureStandaloneBuiltinStaticMethodClosure(ctx, builtinName, propName, expr);
+}
+
+/**
+ * (#2175 S1) Register a builtin's `$NativeProto` glue (so its proto object can
+ * materialize and its members resolve to native-method closures) and return its
+ * brand. Returns `undefined` for builtins not yet wired into the native-proto
+ * core (caller falls through to the existing refusal). S1 wires RegExp only;
+ * S3 adds %TypedArray% / the concrete views.
+ */
+function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): number | undefined {
+  if (builtinName === "RegExp") {
+    return ensureRegExpNativeProtoGlue(ctx);
+  }
+  // Other builtins: only resolve if some path already registered glue for them.
+  const brand = getBuiltinBrand(ctx, builtinName);
+  if (brand === undefined) return undefined;
+  return getNativeProtoBuiltinGlue(ctx, brand) ? brand : undefined;
+}
+
+/**
+ * (#2175 S1) `<Builtin>.prototype.<member>` value read → a native-method/getter
+ * closure value. Detects the two-level shape (inner is `<Builtin>.prototype`
+ * where `<Builtin>` is an unshadowed registered-brand ctor identifier),
+ * registers the brand glue, classifies the member as getter/method, and emits a
+ * `ref.func` + `struct.new` closure value. Getters are returned as a closure
+ * here too (the descriptor `.get` is the same value); calling them runs the
+ * brand-recovery prologue on `this`.
+ *
+ * Returns `undefined` when the shape doesn't match (caller falls through), or
+ * the closure value's ValType. Standalone-only.
+ */
+/**
+ * (#2175 S1) `<Builtin>.prototype.<member>.length` / `.name` — fold the
+ * native-method-closure value's arity / member name at compile time from the
+ * brand glue. The member is statically known, so this is a constant emit (no
+ * closure materialized). Returns `undefined` when the shape doesn't match.
+ */
+function tryCompileStandaloneBuiltinProtoMemberMeta(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.PropertyAccessExpression,
+): ValType | undefined {
+  if (!ctx.standalone || ts.isPrivateIdentifier(expr.name)) return undefined;
+  const metaProp = expr.name.text;
+  if (metaProp !== "length" && metaProp !== "name") return undefined;
+  const memberAccess = skipTransparentExpressions(expr.expression);
+  if (!ts.isPropertyAccessExpression(memberAccess)) return undefined;
+  const inner = skipTransparentExpressions(memberAccess.expression);
+  if (!ts.isPropertyAccessExpression(inner)) return undefined;
+  if (inner.name.text !== "prototype" || !ts.isIdentifier(inner.expression)) return undefined;
+  const builtinName = inner.expression.text;
+  if (!BUILTIN_CTOR_NAMES.has(builtinName)) return undefined;
+  const isShadowed = fctx.localMap.has(builtinName) || (fctx.boxedCaptures?.has(builtinName) ?? false);
+  if (isShadowed) return undefined;
+
+  const brand = tryEnsureNativeProtoBrand(ctx, builtinName);
+  if (brand === undefined) return undefined;
+  const glue = getNativeProtoBuiltinGlue(ctx, brand);
+  if (!glue) return undefined;
+
+  const member = memberAccess.name.text;
+  // Only fold for members the glue actually advertises (so a typo / unknown
+  // member still routes through the normal path rather than fabricating a 0).
+  if (!glue.memberCsv.split(",").includes(member)) return undefined;
+
+  if (metaProp === "length") {
+    const arity = glue.memberKind(member) === "getter" ? 0 : glue.memberLength(member);
+    fctx.body.push({ op: "f64.const", value: arity } as Instr);
+    return { kind: "f64" };
+  }
+  // `.name` — the member's own name (getters are spelled "get <member>" per
+  // §10.2.9, but the test gate reads method names; emit the bare member name).
+  return compileStringLiteral(ctx, fctx, member) ?? undefined;
+}
+
+function tryCompileStandaloneBuiltinProtoMemberRead(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.PropertyAccessExpression,
+): ValType | undefined {
+  if (!ctx.standalone || ts.isPrivateIdentifier(expr.name)) return undefined;
+  const inner = skipTransparentExpressions(expr.expression);
+  if (!ts.isPropertyAccessExpression(inner)) return undefined;
+  if (inner.name.text !== "prototype") return undefined;
+  if (!ts.isIdentifier(inner.expression)) return undefined;
+  const builtinName = inner.expression.text;
+  if (!BUILTIN_CTOR_NAMES.has(builtinName)) return undefined;
+  const isShadowed = fctx.localMap.has(builtinName) || (fctx.boxedCaptures?.has(builtinName) ?? false);
+  if (isShadowed) return undefined;
+
+  const brand = tryEnsureNativeProtoBrand(ctx, builtinName);
+  if (brand === undefined) return undefined;
+  const glue = getNativeProtoBuiltinGlue(ctx, brand);
+  if (!glue) return undefined;
+
+  const member = expr.name.text;
+  const kind = glue.memberKind(member);
+  const closure = ensureStandaloneNativeMethodClosure(ctx, brand, member, kind);
+  if (!closure) return undefined;
+
+  fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx } as Instr);
+  return closure.type;
+}
+
+function ensureStandaloneBuiltinStaticMethodClosure(
+  ctx: CodegenContext,
+  builtinName: string,
+  propName: string,
+  _expr: ts.PropertyAccessExpression,
+): { type: { kind: "ref"; typeIdx: number }; funcIdx: number } | null {
+  const key = `${builtinName}.${propName}`;
+  let paramTypes: ValType[];
+  let returnType: ValType | null;
+
+  switch (key) {
+    case "Array.isArray":
+      paramTypes = [{ kind: "externref" }];
+      returnType = { kind: "i32" };
+      break;
+    case "Object.keys":
+      paramTypes = [{ kind: "externref" }];
+      // Standalone Object.keys returns the object-runtime `$ObjVec` as an
+      // externref; consumers read it back through native __extern_length /
+      // __extern_get_idx. Preserve that contract for method values.
+      returnType = { kind: "externref" };
+      break;
+    case "Object.getOwnPropertyDescriptor":
+      paramTypes = [{ kind: "externref" }, { kind: "externref" }];
+      returnType = { kind: "externref" };
+      break;
+    default:
+      return null;
+  }
+
+  const resultTypes = returnType ? [returnType] : [];
+  const wrapperTypes = getOrCreateFuncRefWrapperTypes(ctx, paramTypes, resultTypes);
+  if (!wrapperTypes) return null;
+
+  const funcName = `__builtin_static_${builtinName}_${propName}`;
+  let funcIdx = ctx.funcMap.get(funcName);
+  if (funcIdx === undefined) {
+    const selfType: ValType = { kind: "ref", typeIdx: wrapperTypes.structTypeIdx };
+    const closureFctx = makeBuiltinClosureFctx(funcName, selfType, paramTypes, returnType);
+
+    if (key === "Array.isArray") {
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      emitArrayIsArrayExternrefPredicate(ctx, closureFctx);
+    } else if (key === "Object.keys") {
+      const keysIdx = ensureLateImport(ctx, "__object_keys", [{ kind: "externref" }], [{ kind: "externref" }]);
+      if (keysIdx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "call", funcIdx: keysIdx });
+      if (returnType && !valTypesMatch({ kind: "externref" }, returnType)) {
+        coerceType(ctx, closureFctx, { kind: "externref" }, returnType);
+      }
+    } else if (key === "Object.getOwnPropertyDescriptor") {
+      const gopdIdx = ensureLateImport(
+        ctx,
+        "__getOwnPropertyDescriptor",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      if (gopdIdx === undefined) return null;
+      closureFctx.body.push({ op: "local.get", index: 1 });
+      closureFctx.body.push({ op: "local.get", index: 2 });
+      closureFctx.body.push({ op: "call", funcIdx: gopdIdx });
+    }
+
+    funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.mod.functions.push({
+      name: funcName,
+      typeIdx: wrapperTypes.liftedFuncTypeIdx,
+      locals: closureFctx.locals,
+      body: closureFctx.body,
+      exported: false,
+    });
+    ctx.funcMap.set(funcName, funcIdx);
+  }
+
+  return { type: { kind: "ref", typeIdx: wrapperTypes.structTypeIdx }, funcIdx };
 }
 
 /**
@@ -799,6 +1337,24 @@ export function compileOptionalPropertyAccess(
   if (resultType.kind === "ref" || resultType.kind === "ref_null") {
     resultType = { kind: "externref" };
   }
+  // (#2051) A short-circuited `?.` must yield `undefined`, not the property
+  // type's default. When the whole-chain static type is a nullable primitive
+  // (`number | undefined` etc., which `resolveWasmType` collapses to a bare
+  // f64/i32 that cannot represent `undefined`), widen the result to externref so
+  // the null arm can carry host `undefined` (via `emitUndefined`) and the
+  // non-null arm boxes the primitive (`__box_number`/`__box_boolean`) — both
+  // arms then agree on externref. The rest of the pipeline already discriminates
+  // host undefined in this slot: `=== undefined` (`__extern_is_undefined`),
+  // `typeof` (`__typeof`), and ToString (`__extern_toString`). Gated on the
+  // nullable static type so non-nullable optional accesses (e.g. `s?.length`
+  // where `s: string`) keep their bare f64/i32 codegen — no boxing, no perf hit.
+  // This boxes into a plain externref, NOT the AnyValue struct, so the #1888
+  // tag-5 comparator ABI is untouched.
+  const widenToUndefinedExternref =
+    (resultType.kind === "f64" || resultType.kind === "i32") && isNullablePrimitiveType(tsPropType);
+  if (widenToUndefinedExternref) {
+    resultType = { kind: "externref" };
+  }
 
   // `?.` short-circuits on null/undefined. `ref.is_null` only validates on a
   // reference operand, but the receiver can lower to a non-reference value
@@ -813,7 +1369,10 @@ export function compileOptionalPropertyAccess(
     } else if (resultType.kind === "i32") {
       fctx.body.push({ op: "i32.const", value: 0 });
     } else {
-      fctx.body.push({ op: "ref.null.extern" });
+      // (#2051) externref result (incl. the nullable-primitive widening above)
+      // → host `undefined`, so `=== undefined` / `typeof` / `+` read it as
+      // undefined rather than a bare null.
+      emitUndefined(ctx, fctx);
     }
     return resultType;
   }
@@ -832,7 +1391,14 @@ export function compileOptionalPropertyAccess(
   } else if (resultType.kind === "i32") {
     thenInstrs = [{ op: "i32.const", value: 0 }];
   } else {
-    thenInstrs = [{ op: "ref.null.extern" }];
+    // (#2051) externref result (incl. the nullable-primitive widening above) →
+    // host `undefined`. Build via a body-swap because `emitUndefined` pushes to
+    // `fctx.body` and may flush late imports; do not hand-roll the instr array.
+    const savedForThen = fctx.body;
+    fctx.body = [];
+    emitUndefined(ctx, fctx);
+    thenInstrs = fctx.body;
+    fctx.body = savedForThen;
   }
 
   // else branch (non-null path): get the property from the temp
@@ -868,8 +1434,25 @@ export function compileOptionalPropertyAccess(
         // Check for accessor first
         const accessorKey = `${structName}_${propName}`;
         const getterName = `${structName}_get_${propName}`;
-        const getterIdx = ctx.funcMap.get(getterName);
-        if (ctx.classAccessorSet.has(accessorKey) && getterIdx !== undefined) {
+        const getterIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
+        const closureAccGet =
+          S5C_STRUCT_ACCESSOR_CLOSURE && ctx.standalone
+            ? ctx.structAccessorClosure.get(accessorKey)?.getGlobal
+            : undefined;
+        if (closureAccGet !== undefined) {
+          // (#1888 S5c / C3) Migrated struct accessor → route the read through the
+          // host-free closure stored in the per-(struct,prop) global, using the
+          // SAME S5b __call_accessor_get driver as the open-`$Object` arm. The
+          // receiver struct ref is on the stack: box it to externref so the driver
+          // threads it as `this` via __current_this (#1636-S1), then call. Result
+          // is externref (the getter's boxed return); downstream coerces to the
+          // member's static type, exactly as the __extern_get path does.
+          fctx.body.push({ op: "extern.convert_any" } as Instr); // recv struct ref → externref
+          fctx.body.push({ op: "global.get", index: closureAccGet }); // getter closure (externref)
+          const driverIdx = reserveAccessorGetDriver(ctx);
+          fctx.body.push({ op: "call", funcIdx: driverIdx });
+          elseResultType = { kind: "externref" };
+        } else if (ctx.classAccessorSet.has(accessorKey) && getterIdx !== undefined) {
           fctx.body.push({ op: "call", funcIdx: getterIdx });
           // Determine getter return type
           const funcDef = ctx.mod.functions[getterIdx - ctx.numImportFuncs];
@@ -966,6 +1549,30 @@ export function compileExternPropertyGetFromStack(
 
 // ── Property access ──────────────────────────────────────────────────
 
+/**
+ * #2077 — true when `recv` is (or resolves to) a `catch (e)` clause binding.
+ * Used to scope the standalone `$Error`-guarded `.message`/`.name` read to
+ * values that genuinely originate from a `throw`, so plain `any`-typed objects
+ * (`const o: any = { message: "x" }`) keep reading their fields through the
+ * normal object-property path rather than the Error struct guard (whose
+ * non-Error `else` arm yields a null string → null-deref trap).
+ *
+ * A catch binding's symbol has a `valueDeclaration` that is the
+ * `VariableDeclaration` whose parent is a `CatchClause` (TS models
+ * `catch (e)` as a `VariableDeclaration` inside the `CatchClause`). Only a
+ * plain identifier receiver is considered — a destructured catch binding
+ * (`catch ({ message })`) isn't an identifier here and falls through to the
+ * generic path.
+ */
+function receiverIsCatchClauseBinding(ctx: CodegenContext, recv: ts.Expression): boolean {
+  if (!ts.isIdentifier(recv)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(recv);
+  const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+  return (
+    decl !== undefined && ts.isVariableDeclaration(decl) && decl.parent !== undefined && ts.isCatchClause(decl.parent)
+  );
+}
+
 export function compilePropertyAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -976,11 +1583,22 @@ export function compilePropertyAccess(
     return compileOptionalPropertyAccess(ctx, fctx, expr);
   }
 
+  // #1886 Slice B: linear-backed Uint8Array `buf.length` → the len i32 local
+  // (widened to f64). Only fires for a registered linear-safe buffer; any other
+  // receiver falls through to the GC property-access path unchanged.
+  const linU8Len = tryEmitLinearU8Length(ctx, fctx, expr);
+  if (linU8Len !== null) return linU8Len;
+
   const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
 
   const jsonParsePropertyType = tryEmitJsonParsePropertyAccess(ctx, fctx, expr);
   if (jsonParsePropertyType !== undefined) return jsonParsePropertyType;
+
+  {
+    const temporalPropertyType = tryCompileTemporalPropertyAccess(ctx, fctx, expr);
+    if (temporalPropertyType !== undefined) return temporalPropertyType;
+  }
 
   // TextEncoder/TextDecoder read-only Web API properties under no-host
   // targets. These instances are stateless placeholders; preserve receiver
@@ -1007,6 +1625,75 @@ export function compilePropertyAccess(
         return { kind: "i32" };
       }
     }
+  }
+
+  // #1914 — standalone RegExp reflection (`re.source`/`.flags`/`.global`/…/
+  // `.lastIndex`) and match-result fields (`m.index`/`m.input`). Must run
+  // BEFORE the extern-class property path, which would otherwise emit an
+  // `env.RegExp_get_*` host import (a standalone purity leak), and before the
+  // generic struct/vec fallbacks, which silently return 0 for `.index`.
+  // (#2175 S1) `<Builtin>.prototype.<member>.length` / `.name` — the arity/name
+  // of a native-method-closure VALUE, folded at compile time from the glue's
+  // advertised metadata (e.g. `RegExp.prototype.test.length === 1`,
+  // `.name === "test"`). Must precede the closure-value path so the member is
+  // not materialized just to read its arity. Static, zero runtime cost.
+  {
+    const metaRead = tryCompileStandaloneBuiltinProtoMemberMeta(ctx, fctx, expr);
+    if (metaRead !== undefined) return metaRead;
+  }
+
+  // (#2175 S1) `<Builtin>.prototype.<member>` as a value (two-level access whose
+  // inner is a builtin proto): resolve `<member>` to a native-method/getter
+  // closure value via the brand-keyed factory, with a brand-recovery prologue.
+  // This is the reflective tier — `RegExp.prototype.test`, the `.flags`-getter,
+  // etc. — that chained off the inner `RegExp.prototype` refusal pre-#2175.
+  //
+  // MUST run BEFORE the #1914 instance-reflection read: the static type of
+  // `RegExp.prototype` is `RegExp`, so #1914's `isGlobalRegExpType` guard would
+  // otherwise capture `RegExp.prototype.flags` and refuse (the proto object is
+  // not a backend-created RegExp *value*). The proto-member path returns the
+  // member's accessor/method *closure* — the correct reflective semantics.
+  {
+    const protoMember = tryCompileStandaloneBuiltinProtoMemberRead(ctx, fctx, expr);
+    if (protoMember !== undefined) return protoMember;
+  }
+
+  {
+    const standaloneRegExpRead = tryCompileStandaloneRegExpPropertyRead(ctx, fctx, expr);
+    if (standaloneRegExpRead !== undefined) return standaloneRegExpRead;
+    const standaloneMatchResultRead = tryCompileStandaloneRegExpMatchResultRead(ctx, fctx, expr);
+    if (standaloneMatchResultRead !== undefined) return standaloneMatchResultRead;
+  }
+
+  // #1780 — `TextEncoder.encodeInto(...).read` / `.written` under no-host
+  // targets. The call lowers to a native helper returning a
+  // `TextEncoderEncodeIntoResult` WasmGC struct; read its fields with a direct
+  // `struct.get` (fields: 0 = read, 1 = written, both f64) instead of the
+  // generic `__extern_get` host import, which is unavailable standalone/WASI.
+  if (
+    (ctx.wasi || ctx.standalone || ctx.strictNoHostImports) &&
+    (propName === "read" || propName === "written") &&
+    objType.getSymbol()?.name === "TextEncoderEncodeIntoResult"
+  ) {
+    // Compile the receiver first: the `encodeInto(...)` call registers the
+    // `TextEncoderEncodeIntoResult` struct and returns it as a ref, so the
+    // struct type index is only known *after* the call is lowered.
+    const recvType = compileExpression(ctx, fctx, expr.expression);
+    const resultTypeIdx = ctx.structMap.get("TextEncoderEncodeIntoResult");
+    if (
+      resultTypeIdx !== undefined &&
+      recvType &&
+      (recvType.kind === "ref" || recvType.kind === "ref_null") &&
+      recvType.typeIdx === resultTypeIdx
+    ) {
+      fctx.body.push({ op: "struct.get", typeIdx: resultTypeIdx, fieldIdx: propName === "read" ? 0 : 1 } as Instr);
+      return { kind: "f64" };
+    }
+    // Receiver didn't lower to the result struct — undo nothing (we already
+    // emitted it); coerce/return a sensible f64 fallback.
+    if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    return { kind: "f64" };
   }
 
   // #1482 — `process.env.X` under `--target wasi`. Short-circuit BEFORE the
@@ -1056,27 +1743,105 @@ export function compilePropertyAccess(
   // $Error_struct) + struct.get`. If the receiver is already null at
   // runtime, `ref.cast` traps — but native JS has the same behaviour
   // (`null.message` throws), so the trap is acceptable Phase 1/2 semantics.
-  if ((ctx.wasi || ctx.standalone) && (propName === "message" || propName === "name")) {
+  if ((ctx.wasi || ctx.standalone) && (propName === "message" || propName === "name" || propName === "stack")) {
     const lhsTsName = objType.getSymbol()?.name;
     const isErrorLhs =
       lhsTsName !== undefined &&
       isBuiltinTypeName(lhsTsName) &&
       isWasiErrorName(lhsTsName) &&
       isBuiltinSubtype(lhsTsName, "Error");
-    if (isErrorLhs) {
+    // #2077: a `catch (e)` binding is typed `any` (or `unknown`), so the static
+    // `isErrorLhs` gate above never fires even though the caught value IS the
+    // `$Error` struct at runtime — the field read then fell through to the
+    // generic `__extern_get` host path, which returns null in standalone mode
+    // (no host). For such a binding, emit a runtime `ref.test $Error`–guarded
+    // read instead of trusting the static type.
+    //
+    // CRITICAL scope (#2077 regression fix): this guard MUST be restricted to a
+    // `catch`-clause binding, NOT every `any`/`unknown` receiver. A general
+    // `const o: any = { message: "x" }` reads `o.message` through the normal
+    // object-property path (which works in standalone); hijacking ALL
+    // `any.message`/`any.name` reads with the `$Error` guard made the non-Error
+    // `else` arm return a null string, so `o.message.length` trapped
+    // (null deref) on plain objects. Gating on the catch binding keeps the
+    // common plain-object read on its working generic path and applies the
+    // `$Error` guard only where the value genuinely originates from a `throw`.
+    const isCatchBindingReceiver = receiverIsCatchClauseBinding(ctx, expr.expression);
+    const isErrorLikeRuntimeLhs =
+      !isErrorLhs && isCatchBindingReceiver && (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+    if (isErrorLhs || isErrorLikeRuntimeLhs) {
       const structIdx = getOrRegisterErrorStructType(ctx);
-      const fieldIdx = propName === "message" ? 1 : 2;
-      // Compile receiver as externref. If the LHS is e.g. a class-ref
-      // (TypeScript narrowed it to a user class extending Error, externref-
-      // backed per #1366a), `compileExpression` returns externref already.
-      const objResult = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
+      // $Error_struct field layout: 1=message, 2=name, 3=stack (#1536).
+      const fieldIdx = propName === "message" ? 1 : propName === "name" ? 2 : 3;
+      // Compile receiver. Mirror the standalone instanceof lowering
+      // (identifiers.ts): compile WITHOUT forcing externref, then coerce, so a
+      // catch-binding externref holding an `$Error` struct keeps its identity
+      // through `any.convert_extern` + `ref.test` (forcing externref as the
+      // expected type re-boxed the value and broke the ref.test — #2077).
+      const objResult = compileExpression(ctx, fctx, expr.expression);
       if (objResult && objResult.kind !== "externref") {
         coerceType(ctx, fctx, objResult, { kind: "externref" });
+      } else if (!objResult) {
+        fctx.body.push({ op: "ref.null.extern" } as Instr);
       }
       fctx.body.push({ op: "any.convert_extern" } as Instr);
+
+      // The `$Error_struct` message/name fields are stored as `externref`
+      // (populated by the ctor via `extern.convert_any` over a native
+      // string). In nativeStrings/WASI mode every other string producer hands
+      // consumers a `$AnyString` ref, so coerce here once and return that ref
+      // type. Otherwise the externref result flows into native string ops
+      // (`=== `, `.length`, concat, interpolation) that expect `(ref null
+      // $AnyString)`, and the per-consumer externref→string coercion either
+      // misfires or is skipped → invalid Wasm (#1797).
+      const resultType: ValType =
+        ctx.nativeStrings && ctx.anyStrTypeIdx >= 0
+          ? { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx }
+          : { kind: "externref" };
+
+      if (isErrorLhs) {
+        // Static Error type — the value is always an `$Error` struct, so cast
+        // unconditionally (a runtime non-Error would mean a miscompile elsewhere).
+        fctx.body.push({ op: "ref.cast", typeIdx: structIdx } as Instr);
+        fctx.body.push({ op: "struct.get", typeIdx: structIdx, fieldIdx } as Instr);
+        if (resultType.kind !== "externref") coerceType(ctx, fctx, { kind: "externref" }, resultType);
+        return resultType;
+      }
+
+      // #2077 — `any`/`unknown` receiver (the common `catch (e)` case). The
+      // anyref is on the stack. Guard with `ref.test $Error`: when it IS an
+      // `$Error` struct, cast + read the field + coerce to the native string
+      // ref; otherwise produce a null string (a non-Error value, e.g.
+      // `throw "str"`, has no struct field to read). The whole read — including
+      // the externref→string coercion — lives in the `then` arm so a non-Error
+      // never executes a struct.get/cast. Mirrors the instanceof guard in
+      // identifiers.ts, which proves the caught struct is recoverable here.
+      const tmpAny = allocTempLocal(fctx, { kind: "anyref" });
+      fctx.body.push({ op: "local.set", index: tmpAny } as Instr);
+      fctx.body.push({ op: "local.get", index: tmpAny } as Instr);
+      fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+      // Build the `then` arm (read + coerce) into a swapped body buffer so
+      // coerceType's appends land in the arm, not the main body.
+      const savedBody = fctx.body;
+      fctx.body = [];
+      fctx.body.push({ op: "local.get", index: tmpAny } as Instr);
       fctx.body.push({ op: "ref.cast", typeIdx: structIdx } as Instr);
       fctx.body.push({ op: "struct.get", typeIdx: structIdx, fieldIdx } as Instr);
-      return { kind: "externref" };
+      if (resultType.kind !== "externref") coerceType(ctx, fctx, { kind: "externref" }, resultType);
+      const thenInstrs = fctx.body;
+      fctx.body = savedBody;
+      const elseInstrs: Instr[] =
+        resultType.kind === "externref"
+          ? [{ op: "ref.null.extern" } as Instr]
+          : [{ op: "ref.null", typeIdx: (resultType as { typeIdx: number }).typeIdx } as Instr];
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: resultType },
+        then: thenInstrs,
+        else: elseInstrs,
+      } as Instr);
+      releaseTempLocal(fctx, tmpAny);
+      return resultType;
     }
   }
 
@@ -1122,9 +1887,7 @@ export function compilePropertyAccess(
           fctx.body.push({ op: "any.convert_extern" } as Instr);
         }
         fctx.body.push({ op: "local.set", index: tmpAny });
-        // Brand check: ref.test against the declaring class's struct.
-        fctx.body.push({ op: "local.get", index: tmpAny });
-        fctx.body.push({ op: "ref.test", typeIdx: declared.structTypeIdx } as Instr);
+        emitPrivateBrandPredicate(ctx, fctx, tmpAny, declared.className, declared.structTypeIdx);
         // result-type block: on success, return the field value; on
         // failure, throw TypeError (which doesn't return).
         const successInstrs: Instr[] = [
@@ -1176,7 +1939,8 @@ export function compilePropertyAccess(
     ) {
       const structTypeIdx = ctx.structMap.get(cls.className);
       const getterName = `${cls.className}_get_${cls.fieldName}`;
-      const canEmit = structTypeIdx !== undefined && (cls.kind === "method" || ctx.funcMap.has(getterName));
+      const canEmit =
+        structTypeIdx !== undefined && (cls.kind === "method" || ctx.funcMap.has(classMemberFuncKey(ctx, getterName)));
       if (canEmit) {
         const objResult = compileExpression(ctx, fctx, expr.expression);
         const tmpAny = allocTempLocal(fctx, { kind: "anyref" });
@@ -1184,8 +1948,7 @@ export function compilePropertyAccess(
           fctx.body.push({ op: "any.convert_extern" } as Instr);
         }
         fctx.body.push({ op: "local.set", index: tmpAny });
-        fctx.body.push({ op: "local.get", index: tmpAny });
-        fctx.body.push({ op: "ref.test", typeIdx: structTypeIdx! } as Instr);
+        emitPrivateBrandPredicate(ctx, fctx, tmpAny, cls.className, structTypeIdx!);
 
         // Build the failure (throw) branch FIRST. emitThrowTypeError may
         // register late imports, which shift every funcMap index (the
@@ -1215,7 +1978,7 @@ export function compilePropertyAccess(
           resultKind = { kind: "externref" };
         } else {
           // Resolve the getter funcIdx AFTER the throw branch settled imports.
-          const getterIdx = ctx.funcMap.get(getterName)!;
+          const getterIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName))!;
           successInstrs.push({ op: "call", funcIdx: getterIdx });
           const funcDef = ctx.mod.functions[getterIdx - ctx.numImportFuncs];
           const typeDef = funcDef ? ctx.mod.types[funcDef.typeIdx] : undefined;
@@ -1357,54 +2120,41 @@ export function compilePropertyAccess(
   // Skip if the name is shadowed by a local variable.
   if (ts.isIdentifier(expr.expression)) {
     const builtinName = expr.expression.text;
-    const BUILTIN_CTOR_NAMES = new Set([
-      "Object",
-      "Array",
-      "Function",
-      "Symbol",
-      "Proxy",
-      "Reflect",
-      "Math",
-      "BigInt",
-      "JSON",
-      "Date",
-      "RegExp",
-      "ArrayBuffer",
-      "SharedArrayBuffer",
-      "DataView",
-      "Promise",
-      "WeakMap",
-      "WeakSet",
-      "WeakRef",
-      "FinalizationRegistry",
-      "Atomics",
-      "Iterator",
-      "Map",
-      "Set",
-      "Error",
-      "TypeError",
-      "RangeError",
-      "SyntaxError",
-      "URIError",
-      "EvalError",
-      "ReferenceError",
-      "String",
-      "Number",
-      "Boolean",
-      "Int8Array",
-      "Uint8Array",
-      "Uint8ClampedArray",
-      "Int16Array",
-      "Uint16Array",
-      "Int32Array",
-      "Uint32Array",
-      "Float32Array",
-      "Float64Array",
-      "BigInt64Array",
-      "BigUint64Array",
-    ]);
     const isShadowed = fctx.localMap.has(builtinName) || (fctx.boxedCaptures?.has(builtinName) ?? false);
-    if (BUILTIN_CTOR_NAMES.has(builtinName) && !isShadowed) {
+    // (#1888 S6-c) Under --target standalone, `__get_builtin` refuses-loud (the
+    // open-object runtime does not expose it). For builtin constant reads that
+    // already have a pure-Wasm fall-through emitter below (Math.PI →
+    // `f64.const`, Number.MAX_SAFE_INTEGER → `f64.const`, Symbol.iterator →
+    // `i32.const`), this shortcut would pre-empt that native lowering and turn a
+    // compilable program into a hard refusal. Skip it for those (builtin, prop)
+    // pairs so control reaches the constant emitter. gc/host is unaffected
+    // (`__get_builtin` is a real host import there and the early shortcut +
+    // the later constant handler are observationally identical for these reads).
+    const deferToNativeConstant = ctx.standalone && hasNativeBuiltinConstantHandler(builtinName, propName);
+    if (ctx.standalone && BUILTIN_CTOR_NAMES.has(builtinName) && !isShadowed && !deferToNativeConstant) {
+      // (#2175 S1) `<Builtin>.prototype` as a value → the native `$NativeProto`
+      // object (host-free), for builtins with a registered brand. This is the
+      // inner read every reflective form (`RegExp.prototype.test`,
+      // `.flags`-getter via descriptor, `[Symbol.match]`) chains off of — it
+      // refused at this exact site pre-#2175. Reaches `emitLazyNativeProtoGet`
+      // instead of the refusal.
+      if (propName === "prototype") {
+        const protoBrand = tryEnsureNativeProtoBrand(ctx, builtinName);
+        if (protoBrand !== undefined && emitLazyNativeProtoGet(ctx, fctx, protoBrand)) {
+          return { kind: "externref" };
+        }
+      }
+      const closure = ensureStandaloneBuiltinStaticMethodClosure(ctx, builtinName, propName, expr);
+      if (closure) {
+        fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx });
+        fctx.body.push({ op: "struct.new", typeIdx: closure.type.typeIdx });
+        return closure.type;
+      }
+      reportUnsupportedStandaloneBuiltinValueRead(ctx, builtinName, propName);
+      fctx.body.push({ op: "ref.null.extern" });
+      return { kind: "externref" };
+    }
+    if (BUILTIN_CTOR_NAMES.has(builtinName) && !isShadowed && !deferToNativeConstant) {
       const getBuiltinIdx = ensureLateImport(ctx, "__get_builtin", [{ kind: "externref" }], [{ kind: "externref" }]);
       const getIdx = ensureLateImport(
         ctx,
@@ -1479,8 +2229,12 @@ export function compilePropertyAccess(
   // `extern.convert_any` / re-enters the accessor trampoline (#1681 RUNFAIL
   // bucket). `fctx.isStaticContext` is propagated through closure spawning, so
   // it identifies exactly this case.
+  // #2027: `(this as any).a` / `(this).a` in a static initializer must reach
+  // this static-`this` arm too. The receiver is wrapped in an AsExpression /
+  // ParenthesizedExpression, so match on the unwrapped form rather than the
+  // literal `ThisKeyword` node kind. Plain `this.a` already matched.
   if (
-    expr.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    skipTransparentExpressions(expr.expression).kind === ts.SyntaxKind.ThisKeyword &&
     (fctx.localMap.get("this") === undefined || fctx.isStaticContext)
   ) {
     // Resolve the enclosing class name from context.
@@ -1516,7 +2270,7 @@ export function compilePropertyAccess(
       const accessorKey = `${enclosingClass}_${propName}`;
       if (ctx.staticAccessorSet.has(accessorKey)) {
         const getterName = `${enclosingClass}_get_${propName}`;
-        const funcIdx = ctx.funcMap.get(getterName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
         if (funcIdx !== undefined) {
           const retType = emitGetterCallWithDummy(ctx, fctx, enclosingClass, getterName, funcIdx);
           if (retType) return retType;
@@ -1527,7 +2281,7 @@ export function compilePropertyAccess(
       // (same as ClassName.method path at line 992) — avoids generic
       // fallthrough cast of undefined.
       if (ctx.staticMethodSet.has(fullName)) {
-        const funcIdx = ctx.funcMap.get(fullName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName));
         if (funcIdx !== undefined) {
           fctx.body.push({ op: "ref.null.extern" });
           return { kind: "externref" };
@@ -1537,8 +2291,13 @@ export function compilePropertyAccess(
   }
 
   // Check for static property access: ClassName.staticProp
-  if (ts.isIdentifier(expr.expression)) {
-    const objName = expr.expression.text;
+  // #2020: unwrap outer expressions so `(B as any).count` / `(B).count` still
+  // resolve the receiver to the class identifier `B`. A cast to `any` otherwise
+  // hides the Identifier and the static-field lookup (incl. the inherited-field
+  // parent walk below) is skipped, falling through to the dynamic any path.
+  const staticReceiver = skipTransparentExpressions(expr.expression);
+  if (ts.isIdentifier(staticReceiver)) {
+    const objName = staticReceiver.text;
 
     // (#1639) `genFn.prototype` where `genFn` is a `function*` / `async function*`
     // declaration must return the intrinsic `%GeneratorPrototype%` /
@@ -1569,7 +2328,11 @@ export function compilePropertyAccess(
     const resolvedClass = ctx.classExprNameMap.get(objName) ?? objName;
     if (ctx.classSet.has(resolvedClass)) {
       const fullName = `${resolvedClass}_${propName}`;
-      const globalIdx = ctx.staticProps.get(fullName);
+      // #2020: static fields are inherited. `class B extends A {}; B.count`
+      // resolves to A's `A_count` global. The own-class lookup misses, so walk
+      // the parent chain (classParentMap) retrying `<Ancestor>_<prop>` — own
+      // statics still shadow because the own lookup runs first.
+      const globalIdx = ctx.staticProps.get(fullName) ?? resolveInheritedStaticProp(ctx, resolvedClass, propName);
       if (globalIdx !== undefined) {
         fctx.body.push({ op: "global.get", index: globalIdx });
         const globalDef = ctx.mod.globals[localGlobalIdx(ctx, globalIdx)];
@@ -1612,7 +2375,7 @@ export function compilePropertyAccess(
       // unblocking 273 test262 cases for class async-generator yield-star
       // tests that follow this exact extraction pattern.
       if (ctx.staticMethodSet.has(fullName)) {
-        const funcIdx = ctx.funcMap.get(fullName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName));
         if (funcIdx !== undefined) {
           const closureRef = emitFuncRefAsClosure(ctx, fctx, fullName, funcIdx);
           if (closureRef) {
@@ -1627,7 +2390,7 @@ export function compilePropertyAccess(
       // Instance method accessed as `ClassName.method` (without prototype) —
       // unusual; keep the legacy null placeholder to preserve existing behavior.
       if (ctx.classMethodSet.has(fullName)) {
-        const funcIdx = ctx.funcMap.get(fullName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName));
         if (funcIdx !== undefined) {
           fctx.body.push({ op: "ref.null.extern" });
           return { kind: "externref" };
@@ -1637,7 +2400,7 @@ export function compilePropertyAccess(
       const accessorKey = `${resolvedClass}_${propName}`;
       if (ctx.classAccessorSet.has(accessorKey)) {
         const getterName = `${resolvedClass}_get_${propName}`;
-        const funcIdx = ctx.funcMap.get(getterName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
         if (funcIdx !== undefined) {
           const retType = emitGetterCallWithDummy(ctx, fctx, resolvedClass, getterName, funcIdx);
           return retType ?? { kind: "externref" };
@@ -1667,7 +2430,7 @@ export function compilePropertyAccess(
       // (they live on the constructor, not the prototype) and
       // accessors (handled by the existing accessor path below).
       if (ctx.classMethodSet.has(fullName) && !ctx.staticMethodSet.has(fullName)) {
-        const funcIdx = ctx.funcMap.get(fullName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName));
         const structTypeIdx = ctx.structMap.get(className);
         if (funcIdx !== undefined && structTypeIdx !== undefined) {
           if (emitCachedMethodClosureAccess(ctx, fctx, fullName, funcIdx, structTypeIdx)) {
@@ -2122,6 +2885,37 @@ export function compilePropertyAccess(
       // Undo the compiled expression if it didn't match
       fctx.body.length = savedLen;
     }
+    // #1472 Phase B Blocker B Slice 2 — standalone `.length` on an `any`/unknown
+    // receiver. None of the vec fast-paths matched, so the receiver is an opaque
+    // externref at runtime (e.g. the $ObjVec result of `Object.keys(o)` stored
+    // in an `any`). In standalone, `__extern_length` is the native $ObjVec
+    // reader (Blocker B Slice 1), so routing here keeps `.length` host-free and
+    // correct instead of falling through to `__extern_get("length")` (which the
+    // native `__extern_get` would mis-handle by casting "length" → key lookup,
+    // yielding 0). JS-host mode is unchanged (this gate is standalone-only; the
+    // host path's generic `__extern_get("length")` already works there).
+    if (ctx.standalone) {
+      const isAnyOrUnknown = (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+      if (isAnyOrUnknown) {
+        const exprResult = compileExpression(ctx, fctx, expr.expression);
+        if (exprResult) {
+          if (exprResult.kind !== "externref") {
+            coerceType(ctx, fctx, exprResult, { kind: "externref" });
+          }
+          const lenFn = ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
+          flushLateImportShifts(ctx, fctx);
+          if (lenFn !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: lenFn } as Instr);
+            if (ctx.fast) fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+            return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+          }
+          // No helper available — drop and yield 0.
+          fctx.body.push({ op: "drop" } as Instr);
+          fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: 0 } as Instr);
+          return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+        }
+      }
+    }
   }
 
   // Handle .raw on tagged template strings arrays (template vec struct)
@@ -2262,8 +3056,16 @@ export function compilePropertyAccess(
 
   // Handle string.length
   if (isStringType(objType) && propName === "length") {
-    compileExpression(ctx, fctx, expr.expression);
+    const recvType = compileExpression(ctx, fctx, expr.expression);
     if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+      // The receiver must be a `$AnyString` ref before reading its `len`
+      // field. Some string producers (e.g. the native Error `.name`/`.message`
+      // reader, #1104/#1797) hand back an `externref`; coerce it to the GC
+      // string ref first, otherwise `struct.get $AnyString` validates against
+      // an externref operand → invalid Wasm (#1797).
+      if (recvType && recvType.kind === "externref") {
+        coerceType(ctx, fctx, recvType, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
+      }
       // len is field 0 of $AnyString — works for both FlatString and ConsString
       fctx.body.push({ op: "struct.get", typeIdx: ctx.anyStrTypeIdx, fieldIdx: 0 });
       return { kind: "i32" };
@@ -2281,7 +3083,13 @@ export function compilePropertyAccess(
     if (nativeResult !== undefined) return nativeResult;
     if (propName === "value") {
       compileExpression(ctx, fctx, expr.expression);
-      // Check the expected value type from the IteratorResult<T>
+      // Check the expected value type from the IteratorResult<T>. NOTE (#2030):
+      // an exhausted result's `.value` is `undefined`; the f64 fast path below
+      // runs `Number(undefined)` → NaN, so a string context of the
+      // value-after-done prints "NaN". Making that survive as "undefined"
+      // requires the value-buffer representation work tracked by #2035 and is
+      // intentionally NOT changed here — routing `.value` through externref
+      // breaks numeric consumers (illegal cast on the raw-f64 iteration path).
       const valueType = getIteratorResultValueType(ctx, objType);
       if (valueType && valueType.kind === "f64") {
         const funcIdx = ctx.funcMap.get("__gen_result_value_f64");
@@ -2301,7 +3109,9 @@ export function compilePropertyAccess(
       const funcIdx = ctx.funcMap.get("__gen_result_done");
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
-        return { kind: "i32" };
+        // #2030: `.done` is a boolean — brand it so string contexts render
+        // "true"/"false" rather than the raw i32 "1"/"0".
+        return { kind: "i32", boolean: true };
       }
     }
   }
@@ -2317,9 +3127,28 @@ export function compilePropertyAccess(
   const typeName = resolveStructNameForExpr(ctx, fctx, expr.expression);
   if (typeName) {
     const accessorKey = `${typeName}_${propName}`;
+    // (#1888 S5c / C3) Migrated struct accessor → route through the host-free
+    // closure (per-(struct,prop) global + shared S5b __call_accessor_get driver)
+    // so a getter that closes over outer scope observes its captures. The
+    // receiver is boxed to externref → threaded as `this` via __current_this.
+    // Result externref (boxed getter return); the caller coerces to the static
+    // member type. Class accessors are NOT migrated (no structAccessorClosure
+    // entry) so they keep the bare-fn path below.
+    const closureAccGet =
+      S5C_STRUCT_ACCESSOR_CLOSURE && ctx.standalone ? ctx.structAccessorClosure.get(accessorKey)?.getGlobal : undefined;
+    if (closureAccGet !== undefined) {
+      const recvType = compileExpression(ctx, fctx, expr.expression);
+      if (recvType && recvType.kind !== "externref") {
+        fctx.body.push({ op: "extern.convert_any" } as Instr);
+      }
+      fctx.body.push({ op: "global.get", index: closureAccGet });
+      const driverIdx = reserveAccessorGetDriver(ctx);
+      fctx.body.push({ op: "call", funcIdx: driverIdx });
+      return { kind: "externref" };
+    }
     if (ctx.classAccessorSet.has(accessorKey)) {
       const getterName = `${typeName}_get_${propName}`;
-      const funcIdx = ctx.funcMap.get(getterName);
+      const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
       if (funcIdx !== undefined) {
         compileExpression(ctx, fctx, expr.expression);
         fctx.body.push({ op: "call", funcIdx });
@@ -2337,6 +3166,11 @@ export function compilePropertyAccess(
         const propType = ctx.checker.getTypeAtLocation(expr);
         return resolveWasmType(ctx, propType);
       }
+    }
+
+    if (runtimeAccessorDescriptorKey(ctx, expr.expression, propName) !== undefined) {
+      const runtimeResult = emitRuntimeDescriptorGet(ctx, fctx, expr.expression, propName, expr);
+      if (runtimeResult !== null) return runtimeResult;
     }
 
     // Handle instance method accessed as value (not call): obj.method (#820, #1149)
@@ -2382,7 +3216,7 @@ export function compilePropertyAccess(
       const owner = ownerNameForChain(typeName);
       const methodFullName = `${owner}_${propName}`;
       if (ctx.classMethodSet.has(methodFullName) || ctx.staticMethodSet.has(methodFullName)) {
-        const funcIdx = ctx.funcMap.get(methodFullName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, methodFullName));
         if (funcIdx !== undefined) {
           // #1118: Object literal — read the struct field which holds the closure.
           // Detected by: typeName is a registered struct AND the struct has a
@@ -2444,13 +3278,28 @@ export function compilePropertyAccess(
       }
     }
 
-    // Handle .constructor on class instances — return constructor function ref
+    // Handle .constructor on class instances — return the class VALUE.
+    //
+    // (#2158 P1) `new A().constructor` must be reference-identical to the
+    // class identifier `A` so that `new A().constructor === A` holds. The
+    // class identifier resolves to the `__class_<Name>` singleton via
+    // `emitLazyClassObjectGet` (identifiers.ts:620). Routing `.constructor`
+    // through the SAME singleton makes both sides of the `===` the same
+    // externref — host-free, so it fixes the identity in standalone mode
+    // too (the previous `ref.func` + `extern.convert_any` produced a
+    // funcref-as-externref that never compared equal to the class object).
     if (propName === "constructor" && ctx.classSet.has(typeName)) {
       // Compile and drop the object expression (for side effects)
       const objResult = compileExpression(ctx, fctx, expr.expression);
       if (objResult) {
         fctx.body.push({ op: "drop" });
       }
+      if (emitLazyClassObjectGet(ctx, fctx, typeName)) {
+        return { kind: "externref" };
+      }
+      // No class-object singleton (e.g. externref-backed builtin subclass):
+      // fall back to the constructor funcref so callable identity is at least
+      // stable across reads of the same class.
       const ctorName = `${typeName}_constructor`;
       const funcIdx = ctx.funcMap.get(ctorName);
       if (funcIdx !== undefined) {
@@ -3008,6 +3857,15 @@ function compileExternPropertyGet(
     if (sizeResult !== undefined) return sizeResult as ValType;
   }
 
+  // (#2162) Native Set `.size` accessor in standalone / nativeStrings mode →
+  // `__map_size` (the Set reuses the Map backing store) instead of the
+  // `Set_get_size` host import.
+  if (className === "Set" && propName === "size" && ctx.nativeStrings) {
+    addUnionImports(ctx);
+    const sizeResult = tryCompileNativeSetSizeGet(ctx, fctx, expr.expression);
+    if (sizeResult !== undefined) return sizeResult as ValType;
+  }
+
   // Walk inheritance chain to find the class that declares the property
   const resolvedInfo = findExternInfoForMember(ctx, className, propName, "property");
   const propOwner = resolvedInfo ?? ctx.externClasses.get(className);
@@ -3224,13 +4082,111 @@ function isThisGuardIndexSafe(arg: ts.Expression): boolean {
   );
 }
 
+/**
+ * Optional element access `a?.[i]` (#2050). On a nullish base the index
+ * expression — and any side effects in it — must NOT evaluate, and the result
+ * is undefined-equivalent (§13.3.9 Optional Chains). Sibling of
+ * compileOptionalPropertyAccess: tee the base into a local, branch on
+ * `ref.is_null`, and emit the index + read only in the non-null arm.
+ */
+export function compileOptionalElementAccess(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.ElementAccessExpression,
+): ValType | null {
+  // Compile the base receiver.
+  const objType = compileExpression(ctx, fctx, expr.expression);
+  if (!objType) return null;
+
+  // Result type = the TS type of the whole `a?.[i]` expression. Ref types use
+  // externref as the block type to avoid null-subtyping mismatches.
+  const tsResultType = ctx.checker.getTypeAtLocation(expr);
+  let resultType: ValType = resolveWasmType(ctx, tsResultType);
+  if (resultType.kind === "ref" || resultType.kind === "ref_null") {
+    resultType = { kind: "externref" };
+  }
+
+  // A non-reference base is the compiler's representation of `undefined`/`null`
+  // (e.g. a `const a = null` stored as an i32 global). Such a base always
+  // short-circuits: drop it and emit the default result, never touching the
+  // index expression.
+  if (objType.kind !== "ref" && objType.kind !== "ref_null" && objType.kind !== "externref") {
+    fctx.body.push({ op: "drop" });
+    if (resultType.kind === "f64") {
+      fctx.body.push({ op: "f64.const", value: 0 });
+    } else if (resultType.kind === "i32") {
+      fctx.body.push({ op: "i32.const", value: 0 });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    return resultType;
+  }
+
+  const tmp = allocLocal(fctx, `__optelem_${fctx.locals.length}`, objType);
+  fctx.body.push({ op: "local.tee", index: tmp });
+  fctx.body.push({ op: "ref.is_null" });
+
+  const savedBody = fctx.body;
+  fctx.savedBodies.push(savedBody);
+
+  // then branch (null path): the short-circuit default.
+  let thenInstrs: Instr[];
+  if (resultType.kind === "f64") {
+    thenInstrs = [{ op: "f64.const", value: 0 }];
+  } else if (resultType.kind === "i32") {
+    thenInstrs = [{ op: "i32.const", value: 0 }];
+  } else {
+    thenInstrs = [{ op: "ref.null.extern" }];
+  }
+
+  // else branch (non-null path): push the now-known-non-null base, then run
+  // the ordinary element-access read (which compiles the index expression).
+  fctx.body = [];
+  fctx.body.push({ op: "local.get", index: tmp });
+  const nonNullObjType: ValType =
+    objType.kind === "ref_null" ? { kind: "ref", typeIdx: (objType as any).typeIdx } : objType;
+  let elseResultType = compileElementAccessBody(ctx, fctx, expr, nonNullObjType);
+  if (elseResultType === null) {
+    // Read could not resolve to a concrete value — coerce the base ref to the
+    // block result type so the `if` typechecks rather than leaking a mismatch.
+    elseResultType = objType;
+  }
+  if (!valTypesMatch(elseResultType, resultType)) {
+    coerceType(ctx, fctx, elseResultType, resultType);
+  }
+  const elseInstrs = fctx.body;
+
+  popBody(fctx, savedBody);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: resultType },
+    then: thenInstrs,
+    else: elseInstrs,
+  });
+
+  return resultType;
+}
+
 export function compileElementAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.ElementAccessExpression,
 ): ValType | null {
+  // Optional chaining: a?.[i] (#2050). Short-circuits on a nullish base — the
+  // index expression must NOT evaluate and the result must be undefined-
+  // equivalent (§13.3.9 Optional Chains). Mirrors compileOptionalPropertyAccess.
+  if (expr.questionDotToken) {
+    return compileOptionalElementAccess(ctx, fctx, expr);
+  }
+
   const jsonParseElementType = tryEmitJsonParseElementAccess(ctx, fctx, expr);
   if (jsonParseElementType !== undefined) return jsonParseElementType;
+
+  // #1886 Slice B: linear-backed Uint8Array read `buf[i]` → i32.load8_u(ptr+i).
+  // Only fires when `buf` is a registered linear-safe buffer in this function;
+  // every other receiver falls through to the GC element-access path unchanged.
+  const linU8Get = tryEmitLinearU8ElementGet(ctx, fctx, expr);
+  if (linU8Get !== null) return linU8Get;
 
   // Handle super[expr] — access parent class property via computed key on `this`
   if (expr.expression.kind === ts.SyntaxKind.SuperKeyword) {
@@ -3272,7 +4228,7 @@ export function compileElementAccess(
         const accessorKey = `${resolvedClass}_${key}`;
         if (ctx.classAccessorSet.has(accessorKey)) {
           const getterName = `${resolvedClass}_get_${key}`;
-          const funcIdx = ctx.funcMap.get(getterName);
+          const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
           if (funcIdx !== undefined) {
             const retType = emitGetterCallWithDummy(ctx, fctx, resolvedClass, getterName, funcIdx);
             return retType ?? { kind: "externref" };
@@ -3291,7 +4247,7 @@ export function compileElementAccess(
         // externref instead of the legacy `ref.null.extern` so that
         // `const f = C['method']; f()` actually invokes the method.
         if (ctx.staticMethodSet.has(fullName)) {
-          const funcIdx = ctx.funcMap.get(fullName);
+          const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName));
           if (funcIdx !== undefined) {
             const closureRef = emitFuncRefAsClosure(ctx, fctx, fullName, funcIdx);
             if (closureRef) {
@@ -3303,7 +4259,7 @@ export function compileElementAccess(
           }
         }
         if (ctx.classMethodSet.has(fullName)) {
-          const funcIdx = ctx.funcMap.get(fullName);
+          const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName));
           if (funcIdx !== undefined) {
             fctx.body.push({ op: "ref.null.extern" });
             return { kind: "externref" };
@@ -3329,7 +4285,7 @@ export function compileElementAccess(
         const accessorKey = `${className}_${key}`;
         if (ctx.classAccessorSet.has(accessorKey) && !ctx.staticAccessorSet.has(accessorKey)) {
           const getterName = `${className}_get_${key}`;
-          const funcIdx = ctx.funcMap.get(getterName);
+          const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
           if (funcIdx !== undefined) {
             const retType = emitGetterCallWithDummy(ctx, fctx, className, getterName, funcIdx);
             return retType ?? { kind: "externref" };
@@ -3341,7 +4297,7 @@ export function compileElementAccess(
         // dot-access path at property-access.ts:1361–1383.
         const methodFullName = `${className}_${key}`;
         if (ctx.classMethodSet.has(methodFullName) && !ctx.staticMethodSet.has(methodFullName)) {
-          const funcIdx = ctx.funcMap.get(methodFullName);
+          const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, methodFullName));
           const structTypeIdx = ctx.structMap.get(className);
           if (funcIdx !== undefined && structTypeIdx !== undefined) {
             if (emitCachedMethodClosureAccess(ctx, fctx, methodFullName, funcIdx, structTypeIdx)) {
@@ -3491,7 +4447,12 @@ export function compileElementAccessBody(
     const isVecStructAccess =
       typeDef.fields[0]?.name === "length" &&
       typeDef.fields[1]?.name === "data" &&
-      (typeDef.fields.length === 2 || (typeDef.fields.length === 3 && typeDef.fields[2]?.name === "raw"));
+      (typeDef.fields.length === 2 ||
+        (typeDef.fields.length === 3 && typeDef.fields[2]?.name === "raw") ||
+        // #1914 — $__regexp_match_vec: the vec subtype carrying the spec
+        // exec/match result fields. Indexed reads use the same {length, data}
+        // prefix; index/input are property reads, not elements.
+        (typeDef.fields.length === 4 && typeDef.fields[2]?.name === "index" && typeDef.fields[3]?.name === "input"));
 
     if (!isVecStructAccess) {
       // Check if this is a tuple struct (registered in tupleTypeMap)
@@ -3545,7 +4506,7 @@ export function compileElementAccessBody(
           const accessorKey = `${sName}_${fieldName}`;
           if (ctx.classAccessorSet.has(accessorKey)) {
             const getterName = `${sName}_get_${fieldName}`;
-            const funcIdx = ctx.funcMap.get(getterName);
+            const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName));
             if (funcIdx !== undefined) {
               fctx.body.push({ op: "call", funcIdx });
               // Use actual Wasm return type of the getter
@@ -3561,6 +4522,11 @@ export function compileElementAccessBody(
               return resolveWasmType(ctx, propType);
             }
           }
+        }
+
+        if (runtimeAccessorDescriptorKey(ctx, expr.expression, fieldName) !== undefined) {
+          const runtimeResult = emitRuntimeDescriptorGet(ctx, fctx, expr.expression, fieldName, expr);
+          if (runtimeResult !== null) return runtimeResult;
         }
 
         const fieldIdx = typeDef.fields.findIndex((f: { name?: string }) => f.name === fieldName);

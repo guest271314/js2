@@ -524,12 +524,20 @@ function isStaticNaN(ctx: CodegenContext, expr: ts.Expression): boolean {
     Number(expr.right.text) === 0
   )
     return true;
-  // Variable initialized with NaN: trace to declaration
+  // Variable initialized with NaN: trace to declaration — but ONLY for `const`
+  // bindings (#2057). A `let`/`var` initialized to NaN can be reassigned to a
+  // finite value (`let x = NaN; x = 5; Math.min(x, 3)`), so tracing the
+  // initializer unconditionally folded the live value away to a compile-time
+  // NaN. The runtime NaN guard emitted for the general Math.min/max path makes
+  // this static fold a pure optimization, so restricting it to `const` is safe.
   if (ts.isIdentifier(expr)) {
     const sym = ctx.checker.getSymbolAtLocation(expr);
     const decl = sym?.valueDeclaration;
     if (decl && ts.isVariableDeclaration(decl) && decl.initializer) {
-      return isStaticNaN(ctx, decl.initializer);
+      const declList = decl.parent;
+      if (ts.isVariableDeclarationList(declList) && (declList.flags & ts.NodeFlags.Const) !== 0) {
+        return isStaticNaN(ctx, decl.initializer);
+      }
     }
   }
   return false;

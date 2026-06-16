@@ -4,14 +4,53 @@ import type { FuncTypeDef, GlobalDef, Instr, ValType, WasmModule } from "../ir/t
 /** Heap starts at byte offset 1024 (leave low addresses for null/sentinel) */
 const HEAP_START = 1024;
 
+/** Wasm page size in bytes (64 KiB) — the unit `memory.grow` operates on. */
+const WASM_PAGE_SIZE = 65536;
+
+/**
+ * Options for the linear-memory bump/arena allocator (#1856).
+ *
+ * The linear backend owns allocation. Its allocator is a **bump/arena**:
+ * each `__malloc` advances a single heap pointer and **nothing is ever
+ * freed** — reclamation happens implicitly when the Wasm instance is
+ * dropped (process exit, for standalone/WASI CLI-style programs). This is
+ * the smallest-binary, fastest path and is exactly the "allocate-and-exit"
+ * mode recommended in R10 of `docs/architecture/compiler-design-lessons.md`.
+ *
+ * There is intentionally **no pluggable GC abstraction** (see ADR-0017):
+ * supporting tracing and reference-counting as swappable strategies is a
+ * documented trap. When reclamation is genuinely needed it will be a single
+ * fixed strategy added later; the bump arena is the default and only mode
+ * today.
+ */
+export interface ArenaOptions {
+  /**
+   * Emit the explicit arena-management exports `__arena_reset` and
+   * `__arena_used` (#1856). A host/embedder that reuses one instance across
+   * many short-lived tasks can call `__arena_reset()` to reclaim the whole
+   * arena in O(1) between tasks (it rewinds the bump pointer to
+   * `HEAP_START`). Off by default — most programs allocate and exit, so the
+   * exports are dead weight and are omitted to keep the binary minimal.
+   */
+  exposeArenaReset?: boolean;
+}
+
 /**
  * Add linear-memory runtime functions to the module.
- * - 1 page of memory (64 KiB)
- * - __heap_ptr global (mutable i32, starts at HEAP_START)
- * - __malloc(size: i32) → i32: bump allocator, 8-byte aligned
+ * - memory starts at 1 page (64 KiB) and grows on demand up to 256 pages
+ * - `__heap_ptr` global (mutable i32, starts at `HEAP_START`)
+ * - `__malloc(size: i32) → i32`: bump allocator, 8-byte aligned, grows
+ *   memory automatically when the request would overflow the current pages
+ *   (#1856 — previously it silently advanced the pointer past the addressable
+ *   region, corrupting memory for programs larger than one page)
+ * - optionally (`exposeArenaReset`) `__arena_reset()` / `__arena_used() → i32`
+ *
+ * This is the bump/arena "allocate-and-never-free" allocator — the single
+ * fixed strategy for the linear backend. See {@link ArenaOptions} and
+ * ADR-0017.
  */
-export function addRuntime(mod: WasmModule): void {
-  // Add memory (1 page = 64 KiB, growable to 256 pages)
+export function addRuntime(mod: WasmModule, opts: ArenaOptions = {}): void {
+  // Add memory (1 page = 64 KiB, growable to 256 pages = 16 MiB)
   if (mod.memories.length === 0) {
     mod.memories.push({ min: 1, max: 256 });
     // Export memory so tests can inspect it
@@ -41,34 +80,75 @@ export function addRuntime(mod: WasmModule): void {
   };
   mod.types.push(mallocType);
 
-  // __malloc implementation:
-  // 1. Get current heap pointer (this will be the returned address)
-  // 2. Add size to heap pointer
-  // 3. Align to 8 bytes: (ptr + 7) & ~7
-  // 4. Store new heap pointer
-  // 5. Return old pointer
+  // __malloc implementation (bump allocator with on-demand memory growth):
+  // 1. ret  = __heap_ptr (the address handed back to the caller)
+  // 2. next = align8(ret + size)            ; new bump position
+  // 3. if next > (memory.size * PAGE_SIZE)   ; would overflow current pages?
+  //       grow memory by ceil((next - cur_bytes) / PAGE_SIZE) pages
+  // 4. __heap_ptr = next
+  // 5. return ret
+  //
+  // The growth check is what makes the arena usable for non-trivial
+  // short-lived programs (#1856). `memory.grow` returns -1 on failure; we do
+  // not branch on that here — a -1 means the engine's max was hit, and the
+  // subsequent store traps cleanly rather than corrupting live data.
+  const local_ret = 1; // local 0 is the `size` param
+  const local_next = 2;
   const mallocBody: Instr[] = [
-    // Save current heap pointer as return value
+    // ret = __heap_ptr
     { op: "global.get", index: heapPtrGlobalIdx },
-    // Compute new heap pointer: old + size
-    { op: "global.get", index: heapPtrGlobalIdx },
-    { op: "local.get", index: 0 }, // size param
+    { op: "local.set", index: local_ret },
+    // next = align8(ret + size) = (ret + size + 7) & ~7
+    { op: "local.get", index: local_ret },
+    { op: "local.get", index: 0 }, // size
     { op: "i32.add" },
-    // Align to 8: (ptr + 7) & ~7
     { op: "i32.const", value: 7 },
     { op: "i32.add" },
-    { op: "i32.const", value: -8 }, // ~7 = 0xFFFFFFF8 = -8 in two's complement
+    { op: "i32.const", value: -8 }, // ~7 = 0xFFFFFFF8
     { op: "i32.and" },
-    // Store new heap pointer
+    { op: "local.set", index: local_next },
+    // if (next > memory.size * PAGE_SIZE) grow
+    { op: "local.get", index: local_next },
+    { op: "memory.size" },
+    { op: "i32.const", value: WASM_PAGE_SIZE },
+    { op: "i32.mul" },
+    { op: "i32.gt_u" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        // pages_needed = ceil((next - cur_bytes) / PAGE_SIZE)
+        //              = (next - cur_bytes + PAGE_SIZE - 1) / PAGE_SIZE
+        { op: "local.get", index: local_next },
+        { op: "memory.size" },
+        { op: "i32.const", value: WASM_PAGE_SIZE },
+        { op: "i32.mul" },
+        { op: "i32.sub" },
+        { op: "i32.const", value: WASM_PAGE_SIZE - 1 },
+        { op: "i32.add" },
+        { op: "i32.const", value: WASM_PAGE_SIZE },
+        { op: "i32.div_u" },
+        { op: "memory.grow" },
+        // discard memory.grow's result (prev page count, or -1 on failure)
+        { op: "drop" },
+      ],
+      else: [],
+    },
+    // __heap_ptr = next
+    { op: "local.get", index: local_next },
     { op: "global.set", index: heapPtrGlobalIdx },
-    // Return old pointer (already on stack from first global.get)
+    // return ret
+    { op: "local.get", index: local_ret },
   ];
 
   const mallocFuncIdx = mod.functions.length;
   mod.functions.push({
     name: "__malloc",
     typeIdx: mallocTypeIdx,
-    locals: [],
+    locals: [
+      { name: "__malloc_ret", type: { kind: "i32" } },
+      { name: "__malloc_next", type: { kind: "i32" } },
+    ],
     body: mallocBody,
     exported: false,
   });
@@ -76,6 +156,71 @@ export function addRuntime(mod: WasmModule): void {
   // Note: __malloc is NOT exported; it's internal. Register in a way
   // that codegen can find it. The function index will be:
   // numImportFuncs + mallocFuncIdx (but since we add early, it's just mallocFuncIdx for now)
+  void mallocFuncIdx;
+
+  if (opts.exposeArenaReset) {
+    addArenaManagementExports(mod, heapPtrGlobalIdx);
+  }
+}
+
+/**
+ * Emit the explicit arena-management exports (#1856):
+ * - `__arena_reset()`     — rewind the bump pointer to `HEAP_START`, freeing
+ *                           the entire arena in O(1). Lets a host reuse one
+ *                           instance across many short-lived tasks.
+ * - `__arena_used() → i32` — bytes currently allocated (`__heap_ptr - HEAP_START`),
+ *                           for diagnostics / high-water-mark tracking.
+ *
+ * These are off by default (see {@link ArenaOptions.exposeArenaReset}) so the
+ * "allocate-and-exit" common case pays nothing for them.
+ */
+function addArenaManagementExports(mod: WasmModule, heapPtrGlobalIdx: number): void {
+  // __arena_reset() -> void
+  const resetTypeIdx = mod.types.length;
+  mod.types.push({
+    kind: "func",
+    name: "$type___arena_reset",
+    params: [],
+    results: [],
+  });
+  const resetFuncIdx = mod.functions.length;
+  mod.functions.push({
+    name: "__arena_reset",
+    typeIdx: resetTypeIdx,
+    locals: [],
+    body: [
+      { op: "i32.const", value: HEAP_START },
+      { op: "global.set", index: heapPtrGlobalIdx },
+    ],
+    exported: false,
+  });
+
+  // __arena_used() -> i32
+  const usedTypeIdx = mod.types.length;
+  mod.types.push({
+    kind: "func",
+    name: "$type___arena_used",
+    params: [],
+    results: [{ kind: "i32" }],
+  });
+  const usedFuncIdx = mod.functions.length;
+  mod.functions.push({
+    name: "__arena_used",
+    typeIdx: usedTypeIdx,
+    locals: [],
+    body: [{ op: "global.get", index: heapPtrGlobalIdx }, { op: "i32.const", value: HEAP_START }, { op: "i32.sub" }],
+    exported: false,
+  });
+
+  const numImports = mod.imports.filter((i) => i.desc.kind === "func").length;
+  mod.exports.push({
+    name: "__arena_reset",
+    desc: { kind: "func", index: numImports + resetFuncIdx },
+  });
+  mod.exports.push({
+    name: "__arena_used",
+    desc: { kind: "func", index: numImports + usedFuncIdx },
+  });
 }
 
 /**
@@ -89,6 +234,7 @@ export function addRuntime(mod: WasmModule): void {
  * - __u8arr_len(ptr: i32) → i32
  */
 export function addUint8ArrayRuntime(mod: WasmModule): void {
+  ensureArrayResolveRuntime(mod); // __u8arr_from_arr resolves forwarded arrays (#1977)
   const mallocIdx = findFuncIndex(mod, "__malloc");
 
   // __u8arr_new: allocate header(8) + len(4) + bytes(len)
@@ -280,6 +426,11 @@ export function addUint8ArrayRuntime(mod: WasmModule): void {
       const newPtrLocal = local1Idx + 1;
       const iLocal = local1Idx + 2;
       return [
+        // arrPtr = __arr_resolve(arrPtr) — the source array may have been
+        // relocated by a growing push (#1977)
+        { op: "local.get", index: 0 },
+        { op: "call", funcIdx: findFuncIndex(mod, "__arr_resolve") },
+        { op: "local.set", index: 0 },
         // len = arrPtr.len (at +8)
         { op: "local.get", index: 0 },
         { op: "i32.load", align: 2, offset: 8 },
@@ -334,18 +485,65 @@ export function addUint8ArrayRuntime(mod: WasmModule): void {
   );
 }
 
+/** Tag byte marking a relocated (grown) array header — see addArrayResolveRuntime (#1977). */
+const ARR_FORWARDED_TAG = 0x06;
+
+/**
+ * Register the array forwarding resolver (#1977) — idempotent; called by
+ * every runtime builder whose functions touch array memory
+ * (addUint8ArrayRuntime's __u8arr_from_arr, addArrayRuntime).
+ *
+ * When __arr_push outgrows capacity it relocates the array to a fresh
+ * allocation and rewrites the OLD header into a forwarding record:
+ * tag ARR_FORWARDED_TAG at +0, the new pointer at +4. Aliased locals/fields
+ * still hold the old pointer, so every accessor first chases the forwarding
+ * chain: while (tag == ARR_FORWARDED_TAG) ptr = *(ptr+4).
+ */
+function ensureArrayResolveRuntime(mod: WasmModule): void {
+  if (mod.functions.some((f) => f.name === "__arr_resolve")) return;
+  addRuntimeFunc(mod, "__arr_resolve", [{ kind: "i32" }], [{ kind: "i32" }], [], () => [
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            // if tag != ARR_FORWARDED_TAG, break
+            { op: "local.get", index: 0 },
+            { op: "i32.load8_u", align: 0, offset: 0 },
+            { op: "i32.const", value: ARR_FORWARDED_TAG },
+            { op: "i32.ne" },
+            { op: "br_if", depth: 1 },
+            // ptr = *(ptr+4)
+            { op: "local.get", index: 0 },
+            { op: "i32.load", align: 2, offset: 4 },
+            { op: "local.set", index: 0 },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    { op: "local.get", index: 0 },
+  ]);
+}
+
 /**
  * Add Array runtime functions to the module.
  * Layout: [header 8B][len:u32 at +8][cap:u32 at +12][elements: i32×cap at +16...]
  *
  * Functions added:
  * - __arr_new(cap: i32) → i32 (pointer)
+ * - __arr_grow(ptr: i32, minCap: i32) → i32 (relocated pointer; forwards old header)
  * - __arr_push(ptr: i32, val: i32) → void
  * - __arr_get(ptr: i32, idx: i32) → i32
  * - __arr_set(ptr: i32, idx: i32, val: i32) → void
  * - __arr_len(ptr: i32) → i32
+ * - __arr_from_data(dataPtr: i32, len: i32) → i32 (header ptr)
  */
 export function addArrayRuntime(mod: WasmModule): void {
+  ensureArrayResolveRuntime(mod); // accessors below resolve forwarded arrays (#1977)
   const mallocIdx = findFuncIndex(mod, "__malloc");
 
   // __arr_new: allocate header(8) + len(4) + cap(4) + elements(cap*4)
@@ -384,7 +582,134 @@ export function addArrayRuntime(mod: WasmModule): void {
     1,
   );
 
-  // __arr_push: store val at ptr+16+len*4, increment len
+  const arrResolveIdx = findFuncIndex(mod, "__arr_resolve");
+
+  // __arr_grow(ptr, minCap) → newPtr (#1977)
+  // Relocate the array to a fresh allocation with cap = max(cap*2, minCap, 4),
+  // copy len elements, and rewrite the old header into a forwarding record
+  // (tag ARR_FORWARDED_TAG at +0, newPtr at +4) so stale aliases resolve.
+  // Caller must pass an already-resolved ptr.
+  addRuntimeFunc(
+    mod,
+    "__arr_grow",
+    [{ kind: "i32" }, { kind: "i32" }],
+    [{ kind: "i32" }],
+    [],
+    (firstLocalIdx) => {
+      const lenLocal = firstLocalIdx;
+      const newCapLocal = firstLocalIdx + 1;
+      const newPtrLocal = firstLocalIdx + 2;
+      const iLocal = firstLocalIdx + 3;
+      return [
+        // len = *(ptr+8)
+        { op: "local.get", index: 0 },
+        { op: "i32.load", align: 2, offset: 8 },
+        { op: "local.set", index: lenLocal },
+        // newCap = *(ptr+12) * 2
+        { op: "local.get", index: 0 },
+        { op: "i32.load", align: 2, offset: 12 },
+        { op: "i32.const", value: 2 },
+        { op: "i32.mul" },
+        { op: "local.set", index: newCapLocal },
+        // if newCap < minCap: newCap = minCap
+        { op: "local.get", index: newCapLocal },
+        { op: "local.get", index: 1 },
+        { op: "i32.lt_u" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 1 },
+            { op: "local.set", index: newCapLocal },
+          ],
+          else: [],
+        },
+        // if newCap < 4: newCap = 4
+        { op: "local.get", index: newCapLocal },
+        { op: "i32.const", value: 4 },
+        { op: "i32.lt_u" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "i32.const", value: 4 },
+            { op: "local.set", index: newCapLocal },
+          ],
+          else: [],
+        },
+        // newPtr = __malloc(16 + newCap*4)
+        { op: "i32.const", value: 16 },
+        { op: "local.get", index: newCapLocal },
+        { op: "i32.const", value: 4 },
+        { op: "i32.mul" },
+        { op: "i32.add" },
+        { op: "call", funcIdx: mallocIdx },
+        { op: "local.set", index: newPtrLocal },
+        // Header: tag 0x01 (Array), len, newCap
+        { op: "local.get", index: newPtrLocal },
+        { op: "i32.const", value: 0x01 },
+        { op: "i32.store8", align: 0, offset: 0 },
+        { op: "local.get", index: newPtrLocal },
+        { op: "local.get", index: lenLocal },
+        { op: "i32.store", align: 2, offset: 8 },
+        { op: "local.get", index: newPtrLocal },
+        { op: "local.get", index: newCapLocal },
+        { op: "i32.store", align: 2, offset: 12 },
+        // Copy elements: for (i = 0; i < len; i++) newPtr[i] = ptr[i]
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: iLocal },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: iLocal },
+                { op: "local.get", index: lenLocal },
+                { op: "i32.ge_u" },
+                { op: "br_if", depth: 1 },
+                { op: "local.get", index: newPtrLocal },
+                { op: "local.get", index: iLocal },
+                { op: "i32.const", value: 4 },
+                { op: "i32.mul" },
+                { op: "i32.add" },
+                { op: "local.get", index: 0 },
+                { op: "local.get", index: iLocal },
+                { op: "i32.const", value: 4 },
+                { op: "i32.mul" },
+                { op: "i32.add" },
+                { op: "i32.load", align: 2, offset: 16 },
+                { op: "i32.store", align: 2, offset: 16 },
+                { op: "local.get", index: iLocal },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: iLocal },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        // Forward the old header: tag ARR_FORWARDED_TAG, newPtr at +4
+        { op: "local.get", index: 0 },
+        { op: "i32.const", value: ARR_FORWARDED_TAG },
+        { op: "i32.store8", align: 0, offset: 0 },
+        { op: "local.get", index: 0 },
+        { op: "local.get", index: newPtrLocal },
+        { op: "i32.store", align: 2, offset: 4 },
+        // Return newPtr
+        { op: "local.get", index: newPtrLocal },
+      ];
+    },
+    4,
+  );
+
+  const arrGrowIdx = findFuncIndex(mod, "__arr_grow");
+
+  // __arr_push: store val at ptr+16+len*4, increment len.
+  // Resolves forwarding and grows when len == cap (#1977 — was an unbounded
+  // write into the bump arena that corrupted adjacent allocations).
   addRuntimeFunc(
     mod,
     "__arr_push",
@@ -392,10 +717,32 @@ export function addArrayRuntime(mod: WasmModule): void {
     [],
     [],
     (local2Idx) => [
+      // ptr = __arr_resolve(ptr)
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: arrResolveIdx },
+      { op: "local.set", index: 0 },
       // Load current len
       { op: "local.get", index: 0 }, // ptr
       { op: "i32.load", align: 2, offset: 8 },
       { op: "local.set", index: local2Idx },
+      // if len >= cap: ptr = __arr_grow(ptr, len+1)
+      { op: "local.get", index: local2Idx },
+      { op: "local.get", index: 0 },
+      { op: "i32.load", align: 2, offset: 12 },
+      { op: "i32.ge_u" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: local2Idx },
+          { op: "i32.const", value: 1 },
+          { op: "i32.add" },
+          { op: "call", funcIdx: arrGrowIdx },
+          { op: "local.set", index: 0 },
+        ],
+        else: [],
+      },
       // Store val at ptr + 16 + len*4
       { op: "local.get", index: 0 }, // ptr
       { op: "local.get", index: local2Idx }, // len
@@ -414,8 +761,26 @@ export function addArrayRuntime(mod: WasmModule): void {
     1,
   );
 
-  // __arr_get: load i32 at ptr + 16 + idx*4
+  // __arr_get: load i32 at ptr + 16 + idx*4.
+  // Resolves forwarding; OOB (idx >= len, unsigned — covers negative idx)
+  // returns 0, the backend's undefined representation (#1977 — was a raw
+  // load of neighbouring memory).
   addRuntimeFunc(mod, "__arr_get", [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], [], () => [
+    // ptr = __arr_resolve(ptr)
+    { op: "local.get", index: 0 },
+    { op: "call", funcIdx: arrResolveIdx },
+    { op: "local.set", index: 0 },
+    // if idx >= len (unsigned): return 0 (undefined)
+    { op: "local.get", index: 1 },
+    { op: "local.get", index: 0 },
+    { op: "i32.load", align: 2, offset: 8 },
+    { op: "i32.ge_u" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      else: [],
+    },
     { op: "local.get", index: 0 }, // ptr
     { op: "local.get", index: 1 }, // idx
     { op: "i32.const", value: 4 },
@@ -424,22 +789,204 @@ export function addArrayRuntime(mod: WasmModule): void {
     { op: "i32.load", align: 2, offset: 16 },
   ]);
 
-  // __arr_set: store i32 at ptr + 16 + idx*4
-  addRuntimeFunc(mod, "__arr_set", [{ kind: "i32" }, { kind: "i32" }, { kind: "i32" }], [], [], () => [
-    { op: "local.get", index: 0 }, // ptr
-    { op: "local.get", index: 1 }, // idx
-    { op: "i32.const", value: 4 },
-    { op: "i32.mul" },
-    { op: "i32.add" },
-    { op: "local.get", index: 2 }, // val
-    { op: "i32.store", align: 2, offset: 16 },
-  ]);
+  // __arr_set: store i32 at ptr + 16 + idx*4.
+  // Resolves forwarding; grows when idx >= cap; extends len (zero-filling
+  // the gap) when idx >= len, per JS store-beyond-length semantics (#1977).
+  // A negative idx is a JS non-index property write — dropped (no-op) rather
+  // than corrupting header/neighbour memory.
+  addRuntimeFunc(
+    mod,
+    "__arr_set",
+    [{ kind: "i32" }, { kind: "i32" }, { kind: "i32" }],
+    [],
+    [],
+    (firstLocalIdx) => {
+      const fillLocal = firstLocalIdx;
+      return [
+        // if idx < 0 (signed): no-op
+        { op: "local.get", index: 1 },
+        { op: "i32.const", value: 0 },
+        { op: "i32.lt_s" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "return" }],
+          else: [],
+        },
+        // ptr = __arr_resolve(ptr)
+        { op: "local.get", index: 0 },
+        { op: "call", funcIdx: arrResolveIdx },
+        { op: "local.set", index: 0 },
+        // if idx >= cap: ptr = __arr_grow(ptr, idx+1)
+        { op: "local.get", index: 1 },
+        { op: "local.get", index: 0 },
+        { op: "i32.load", align: 2, offset: 12 },
+        { op: "i32.ge_u" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 1 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "call", funcIdx: arrGrowIdx },
+            { op: "local.set", index: 0 },
+          ],
+          else: [],
+        },
+        // Zero-fill the gap: for (fill = len; fill < idx; fill++) ptr[fill] = 0
+        { op: "local.get", index: 0 },
+        { op: "i32.load", align: 2, offset: 8 },
+        { op: "local.set", index: fillLocal },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: fillLocal },
+                { op: "local.get", index: 1 },
+                { op: "i32.ge_u" },
+                { op: "br_if", depth: 1 },
+                { op: "local.get", index: 0 },
+                { op: "local.get", index: fillLocal },
+                { op: "i32.const", value: 4 },
+                { op: "i32.mul" },
+                { op: "i32.add" },
+                { op: "i32.const", value: 0 },
+                { op: "i32.store", align: 2, offset: 16 },
+                { op: "local.get", index: fillLocal },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: fillLocal },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        // if idx >= len: len = idx + 1
+        { op: "local.get", index: 1 },
+        { op: "local.get", index: 0 },
+        { op: "i32.load", align: 2, offset: 8 },
+        { op: "i32.ge_u" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 1 },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "i32.store", align: 2, offset: 8 },
+          ],
+          else: [],
+        },
+        // Store val
+        { op: "local.get", index: 0 }, // ptr
+        { op: "local.get", index: 1 }, // idx
+        { op: "i32.const", value: 4 },
+        { op: "i32.mul" },
+        { op: "i32.add" },
+        { op: "local.get", index: 2 }, // val
+        { op: "i32.store", align: 2, offset: 16 },
+      ];
+    },
+    1,
+  );
 
-  // __arr_len: load i32 at ptr+8
+  // __arr_len: load i32 at ptr+8 (resolving forwarding, #1977)
   addRuntimeFunc(mod, "__arr_len", [{ kind: "i32" }], [{ kind: "i32" }], [], () => [
     { op: "local.get", index: 0 }, // ptr
+    { op: "call", funcIdx: arrResolveIdx },
     { op: "i32.load", align: 2, offset: 8 },
   ]);
+
+  // __arr_from_data(dataPtr: i32, len: i32) → i32 (array header ptr)
+  // Build an internal array object from a raw, contiguous block of `len`
+  // i32 elements at `dataPtr`. Used by the C ABI wrapper to rehydrate an
+  // array parameter passed as a (ptr, len) pair (#1835).
+  // Layout written: [header 8B][len:u32 @ +8][cap:u32 @ +12][elems @ +16...]
+  // extra locals: local 2 = ptr (result), local 3 = i (loop counter)
+  addRuntimeFunc(
+    mod,
+    "__arr_from_data",
+    [{ kind: "i32" }, { kind: "i32" }],
+    [{ kind: "i32" }],
+    [],
+    (firstLocalIdx) => {
+      const ptrLocal = firstLocalIdx;
+      const iLocal = firstLocalIdx + 1;
+      return [
+        // Allocate: 16 + len*4
+        { op: "i32.const", value: 16 },
+        { op: "local.get", index: 1 }, // len
+        { op: "i32.const", value: 4 },
+        { op: "i32.mul" },
+        { op: "i32.add" },
+        { op: "call", funcIdx: mallocIdx },
+        { op: "local.set", index: ptrLocal },
+        // Tag byte 0x01 (Array) at ptr+0
+        { op: "local.get", index: ptrLocal },
+        { op: "i32.const", value: 0x01 },
+        { op: "i32.store8", align: 0, offset: 0 },
+        // len at ptr+8
+        { op: "local.get", index: ptrLocal },
+        { op: "local.get", index: 1 },
+        { op: "i32.store", align: 2, offset: 8 },
+        // cap = len at ptr+12
+        { op: "local.get", index: ptrLocal },
+        { op: "local.get", index: 1 },
+        { op: "i32.store", align: 2, offset: 12 },
+        // Copy elements: for i=0; i<len; i++ { mem[ptr+16+i*4] = mem[dataPtr+i*4] }
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: iLocal },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                // break if i >= len
+                { op: "local.get", index: iLocal },
+                { op: "local.get", index: 1 }, // len
+                { op: "i32.ge_u" },
+                { op: "br_if", depth: 1 },
+                // dest addr = ptr + i*4 (offset 16 applied at store)
+                { op: "local.get", index: ptrLocal },
+                { op: "local.get", index: iLocal },
+                { op: "i32.const", value: 4 },
+                { op: "i32.mul" },
+                { op: "i32.add" },
+                // value = mem[dataPtr + i*4]
+                { op: "local.get", index: 0 }, // dataPtr
+                { op: "local.get", index: iLocal },
+                { op: "i32.const", value: 4 },
+                { op: "i32.mul" },
+                { op: "i32.add" },
+                { op: "i32.load", align: 2, offset: 0 },
+                // store at dest+16
+                { op: "i32.store", align: 2, offset: 16 },
+                // i++
+                { op: "local.get", index: iLocal },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: iLocal },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        // Return ptr
+        { op: "local.get", index: ptrLocal },
+      ];
+    },
+    2,
+  ); // 2 extra locals
 
   // __arr_slice(arr: i32, start: i32, end: i32) → i32 (new array)
   // Creates a new array containing elements [start, end) from arr
@@ -580,11 +1127,137 @@ export function addStringRuntime(mod: WasmModule): void {
     2,
   ); // 2 extra locals
 
-  // __str_len: load i32 at ptr+8
+  // __str_len: load i32 at ptr+8 — the stored UTF-8 **byte** count. This is the
+  // internal primitive used by slice/indexOf/concat/eq, which all index by byte
+  // offset. It is NOT the JS `.length` (UTF-16 code units) — see
+  // __str_length_utf16 below.
   addRuntimeFunc(mod, "__str_len", [{ kind: "i32" }], [{ kind: "i32" }], [], () => [
     { op: "local.get", index: 0 },
     { op: "i32.load", align: 2, offset: 8 },
   ]);
+
+  // __str_length_utf16: JS `String.prototype.length` = number of UTF-16 code
+  // units (#1976). Linear strings are stored as UTF-8 bytes, so walk the leading
+  // bytes and count code units: a leading byte 0xxxxxxx/110xxxxx/1110xxxx starts
+  // a 1/2/3-byte sequence encoding a BMP code point (1 code unit), while
+  // 11110xxx starts a 4-byte sequence for an astral code point (a surrogate
+  // pair → 2 code units). ASCII strings count == byte length, matching the old
+  // behaviour. Continuation bytes (10xxxxxx) are skipped by advancing past the
+  // whole sequence.
+  // locals: byteLen(1), i(2 = byte cursor), count(3), b(4 = leading byte)
+  addRuntimeFunc(
+    mod,
+    "__str_length_utf16",
+    [{ kind: "i32" }],
+    [{ kind: "i32" }],
+    [],
+    (firstLocalIdx) => {
+      const byteLen = firstLocalIdx;
+      const i = firstLocalIdx + 1;
+      const count = firstLocalIdx + 2;
+      const b = firstLocalIdx + 3;
+      return [
+        // byteLen = mem[ptr+8]
+        { op: "local.get", index: 0 },
+        { op: "i32.load", align: 2, offset: 8 },
+        { op: "local.set", index: byteLen },
+        // i = 0; count = 0
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: i },
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: count },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                // break if i >= byteLen
+                { op: "local.get", index: i },
+                { op: "local.get", index: byteLen },
+                { op: "i32.ge_u" },
+                { op: "br_if", depth: 1 },
+                // b = mem[ptr+12+i]
+                { op: "local.get", index: 0 },
+                { op: "local.get", index: i },
+                { op: "i32.add" },
+                { op: "i32.load8_u", align: 0, offset: 12 },
+                { op: "local.set", index: b },
+                // Decide sequence length (advance i) and code units (advance
+                // count) by the leading byte's high bits. The `if` condition is
+                // taken from the stack, so push it just before each `if`.
+                // cond: b < 0x80  (1-byte ASCII)
+                { op: "local.get", index: b },
+                { op: "i32.const", value: 0x80 },
+                { op: "i32.lt_u" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    // 1-byte ASCII: i += 1, count += 1
+                    { op: "local.get", index: i },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.add" },
+                    { op: "local.set", index: i },
+                    { op: "local.get", index: count },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.add" },
+                    { op: "local.set", index: count },
+                  ],
+                  else: [
+                    // cond: b < 0xF0  (2- or 3-byte BMP sequence → 1 code unit;
+                    // else 4-byte astral sequence → 2 code units / surrogate pair)
+                    { op: "local.get", index: b },
+                    { op: "i32.const", value: 0xf0 },
+                    { op: "i32.lt_u" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: [
+                        // BMP: count += 1; i += (b < 0xE0 ? 2 : 3)
+                        { op: "local.get", index: count },
+                        { op: "i32.const", value: 1 },
+                        { op: "i32.add" },
+                        { op: "local.set", index: count },
+                        { op: "local.get", index: i },
+                        { op: "local.get", index: b },
+                        { op: "i32.const", value: 0xe0 },
+                        { op: "i32.lt_u" },
+                        {
+                          op: "if",
+                          blockType: { kind: "val", type: { kind: "i32" } },
+                          then: [{ op: "i32.const", value: 2 }],
+                          else: [{ op: "i32.const", value: 3 }],
+                        },
+                        { op: "i32.add" },
+                        { op: "local.set", index: i },
+                      ],
+                      else: [
+                        // Astral 4-byte: count += 2; i += 4
+                        { op: "local.get", index: count },
+                        { op: "i32.const", value: 2 },
+                        { op: "i32.add" },
+                        { op: "local.set", index: count },
+                        { op: "local.get", index: i },
+                        { op: "i32.const", value: 4 },
+                        { op: "i32.add" },
+                        { op: "local.set", index: i },
+                      ],
+                    },
+                  ],
+                },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        { op: "local.get", index: count },
+      ];
+    },
+    4,
+  );
 
   // __str_eq: compare two strings byte-by-byte
   // extra locals: local 2 = lenA, local 3 = i
@@ -650,6 +1323,106 @@ export function addStringRuntime(mod: WasmModule): void {
       ];
     },
     2,
+  );
+
+  // __str_cmp: lexicographic comparison → -1 / 0 / 1 (#1976).
+  // Compares byte-by-byte up to min(lenA, lenB); the first differing (unsigned)
+  // byte decides; if one is a prefix of the other, the shorter is "less". For
+  // ASCII this matches JS's UTF-16 code-unit ordering. (Multi-byte UTF-8 orders
+  // by byte, which can differ from UTF-16 order for astral/supplementary code
+  // points — tracked with the UTF-8↔UTF-16 storage decision in this issue.)
+  // locals: lenA(2), lenB(3), n(4 = min), i(5), ca(6), cb(7)
+  addRuntimeFunc(
+    mod,
+    "__str_cmp",
+    [{ kind: "i32" }, { kind: "i32" }],
+    [{ kind: "i32" }],
+    [],
+    (firstLocalIdx) => {
+      const lenA = firstLocalIdx;
+      const lenB = firstLocalIdx + 1;
+      const n = firstLocalIdx + 2;
+      const i = firstLocalIdx + 3;
+      const ca = firstLocalIdx + 4;
+      const cb = firstLocalIdx + 5;
+      return [
+        // lenA = a.len; lenB = b.len
+        { op: "local.get", index: 0 },
+        { op: "i32.load", align: 2, offset: 8 },
+        { op: "local.set", index: lenA },
+        { op: "local.get", index: 1 },
+        { op: "i32.load", align: 2, offset: 8 },
+        { op: "local.set", index: lenB },
+        // n = min(lenA, lenB)
+        { op: "local.get", index: lenA },
+        { op: "local.get", index: lenB },
+        { op: "i32.lt_u" },
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [{ op: "local.get", index: lenA }],
+          else: [{ op: "local.get", index: lenB }],
+        },
+        { op: "local.set", index: n },
+        // i = 0
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: i },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                // break if i >= n
+                { op: "local.get", index: i },
+                { op: "local.get", index: n },
+                { op: "i32.ge_u" },
+                { op: "br_if", depth: 1 },
+                // ca = a.bytes[i]; cb = b.bytes[i]
+                { op: "local.get", index: 0 },
+                { op: "local.get", index: i },
+                { op: "i32.add" },
+                { op: "i32.load8_u", align: 0, offset: 12 },
+                { op: "local.set", index: ca },
+                { op: "local.get", index: 1 },
+                { op: "local.get", index: i },
+                { op: "i32.add" },
+                { op: "i32.load8_u", align: 0, offset: 12 },
+                { op: "local.set", index: cb },
+                // if ca < cb → return -1 ; if ca > cb → return 1
+                { op: "local.get", index: ca },
+                { op: "local.get", index: cb },
+                { op: "i32.lt_u" },
+                { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: -1 }, { op: "return" }] },
+                { op: "local.get", index: ca },
+                { op: "local.get", index: cb },
+                { op: "i32.gt_u" },
+                { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 1 }, { op: "return" }] },
+                // i++
+                { op: "local.get", index: i },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: i },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        // Common prefix equal: shorter string is "less".
+        { op: "local.get", index: lenA },
+        { op: "local.get", index: lenB },
+        { op: "i32.lt_u" },
+        { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: -1 }, { op: "return" }] },
+        { op: "local.get", index: lenA },
+        { op: "local.get", index: lenB },
+        { op: "i32.gt_u" },
+        { op: "if", blockType: { kind: "empty" }, then: [{ op: "i32.const", value: 1 }, { op: "return" }] },
+        { op: "i32.const", value: 0 },
+      ];
+    },
+    6,
   );
 
   // __str_hash: FNV-1a hash
@@ -2662,6 +3435,178 @@ function addRuntimeFunc(
     name,
     typeIdx,
     locals,
+    body,
+    exported: false,
+  });
+}
+
+/** Reserved name for the linear-backend f64 remainder helper (#2144). */
+export const FMOD_FN = "__fmod";
+
+/**
+ * (#2144) Add the Wasm-native IEEE-754 remainder (`fmod`) helper to the linear
+ * backend, mirroring the WasmGC `src/codegen/fmod.ts` work (#2056).
+ *
+ * The linear `%` arm previously emitted the naive `a - trunc(a/b)*b` formula
+ * that the GC backend explicitly retired: it drifts by ULPs, collapses to 0
+ * when `trunc(a/b)*b` rounds back to `a`, and produces `±Infinity` when `a/b`
+ * overflows f64 (ratio ≳ 1e308). This is the textbook cross-backend divergence
+ * flagged in docs/architecture/codegen-axes.md — both backends must agree on
+ * `%`.
+ *
+ * Algorithm (exact, no host import — dual-mode standalone): classic binary
+ * long-division remainder operating purely in f64. All intermediates stay
+ * ≤ |a|, so nothing overflows, and every step is an exact f64 op, so there is
+ * zero rounding drift. See fmod.ts for the full derivation and the verified
+ * edge-case set (`x % Inf`, `-0 % x`, `Inf % x`, `x % 0`, `NaN % x`, …).
+ *
+ * Signature: `(f64 a, f64 b) -> f64`. Idempotent — a second call is a no-op.
+ */
+export function addFmodRuntime(mod: WasmModule): void {
+  if (mod.functions.some((f) => f.name === FMOD_FN)) return;
+
+  const typeIdx = mod.types.length;
+  mod.types.push({
+    kind: "func",
+    name: "$type___fmod",
+    params: [{ kind: "f64" }, { kind: "f64" }],
+    results: [{ kind: "f64" }],
+  });
+
+  // Locals: 0=a, 1=b (params); 2=x (|a|, running remainder), 3=y (|b|), 4=t.
+  const A = 0;
+  const B = 1;
+  const X = 2;
+  const Y = 3;
+  const T = 4;
+  const INF = Infinity;
+
+  const body: Instr[] = [
+    // if (b == 0) return NaN
+    { op: "local.get", index: B },
+    { op: "f64.const", value: 0 },
+    { op: "f64.eq" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "f64.const", value: NaN }, { op: "return" }] },
+    // if (|a| == Inf) return NaN  (Inf % x)
+    { op: "local.get", index: A },
+    { op: "f64.abs" },
+    { op: "f64.const", value: INF },
+    { op: "f64.eq" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "f64.const", value: NaN }, { op: "return" }] },
+    // if (a != a) return NaN  (NaN dividend)
+    { op: "local.get", index: A },
+    { op: "local.get", index: A },
+    { op: "f64.ne" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "f64.const", value: NaN }, { op: "return" }] },
+    // if (b != b) return NaN  (NaN divisor)
+    { op: "local.get", index: B },
+    { op: "local.get", index: B },
+    { op: "f64.ne" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "f64.const", value: NaN }, { op: "return" }] },
+    // if (|b| == Inf) return a  (a finite → remainder is a itself)
+    { op: "local.get", index: B },
+    { op: "f64.abs" },
+    { op: "f64.const", value: INF },
+    { op: "f64.eq" },
+    { op: "if", blockType: { kind: "empty" }, then: [{ op: "local.get", index: A }, { op: "return" }] },
+
+    // x = |a|; y = |b|
+    { op: "local.get", index: A },
+    { op: "f64.abs" },
+    { op: "local.set", index: X },
+    { op: "local.get", index: B },
+    { op: "f64.abs" },
+    { op: "local.set", index: Y },
+
+    // if (x < y) return copysign(x, a)  (covers x == 0 → ±0)
+    { op: "local.get", index: X },
+    { op: "local.get", index: Y },
+    { op: "f64.lt" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "local.get", index: X }, { op: "local.get", index: A }, { op: "f64.copysign" }, { op: "return" }],
+    },
+
+    // t = y; while (t * 2 <= x) t *= 2
+    { op: "local.get", index: Y },
+    { op: "local.set", index: T },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: T },
+            { op: "f64.const", value: 2 },
+            { op: "f64.mul" },
+            { op: "local.get", index: X },
+            { op: "f64.le" },
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: T },
+            { op: "f64.const", value: 2 },
+            { op: "f64.mul" },
+            { op: "local.set", index: T },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+
+    // while (t >= y) { if (x >= t) x -= t; t *= 0.5 }
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: T },
+            { op: "local.get", index: Y },
+            { op: "f64.ge" },
+            { op: "i32.eqz" },
+            { op: "br_if", depth: 1 },
+            { op: "local.get", index: X },
+            { op: "local.get", index: T },
+            { op: "f64.ge" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: X },
+                { op: "local.get", index: T },
+                { op: "f64.sub" },
+                { op: "local.set", index: X },
+              ],
+            },
+            { op: "local.get", index: T },
+            { op: "f64.const", value: 0.5 },
+            { op: "f64.mul" },
+            { op: "local.set", index: T },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+
+    // return copysign(x, a)
+    { op: "local.get", index: X },
+    { op: "local.get", index: A },
+    { op: "f64.copysign" },
+  ];
+
+  mod.functions.push({
+    name: FMOD_FN,
+    typeIdx,
+    locals: [
+      { name: "$x", type: { kind: "f64" } }, // X
+      { name: "$y", type: { kind: "f64" } }, // Y
+      { name: "$t", type: { kind: "f64" } }, // T
+    ],
     body,
     exported: false,
   });

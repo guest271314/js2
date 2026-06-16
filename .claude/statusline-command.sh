@@ -17,10 +17,21 @@ vim_mode=$(echo "$input" | jq -r '.vim.mode // empty')
 agent_name=$(echo "$input" | jq -r '.agent.name // empty')
 repo=$(echo "$input" | jq -r '.workspace.repo | if . then .owner + "/" + .name else empty end')
 case "$model_id" in
-  claude-opus-4-7*)   model='Opus';   price_in=15 ;;
-  claude-sonnet-4-6*) model='Sonnet'; price_in=3  ;;
-  claude-haiku-4-5*)  model='Haiku';  price_in=0  ;;
-  *)                  model='';       price_in=0  ;;
+  claude-fable-5*)    model='Fable 5';    price_in=15 ;;
+  claude-mythos-5*)   model='Mythos 5';   price_in=15 ;;
+  claude-opus-4-8*)   model='Opus 4.8';   price_in=15 ;;
+  claude-opus-4-7*)   model='Opus 4.7';   price_in=15 ;;
+  claude-opus-4-6*)   model='Opus 4.6';   price_in=15 ;;
+  claude-sonnet-4-6*) model='Sonnet 4.6'; price_in=3  ;;
+  claude-haiku-4-5*)  model='Haiku 4.5';  price_in=0  ;;
+  claude-opus*)       model='Opus';       price_in=15 ;;
+  claude-sonnet*)     model='Sonnet';     price_in=3  ;;
+  claude-haiku*)      model='Haiku';      price_in=0  ;;
+  *)                  model='';           price_in=0  ;;
+esac
+# 1M-context variant suffix (model id carries "1m", e.g. claude-opus-4-8[1m])
+case "$model_id" in
+  *1m*|*1M*) [ -n "$model" ] && model="$model 1M" ;;
 esac
 if [ "$price_in" -ge 5 ] 2>/dev/null; then   model_color='00;31'
 elif [ "$price_in" -ge 1 ] 2>/dev/null; then  model_color='00;33'
@@ -30,19 +41,8 @@ branch=$(git -C "${cwd:-$(pwd)}" rev-parse --abbrev-ref HEAD 2>/dev/null)
 issue=$(echo "$branch" | sed -n 's/^issue-\([a-zA-Z0-9]*\).*/\1/p')
 display_cwd=$(basename "${cwd:-$(pwd)}")
 printf '\033[01;34m%s\033[00m' "$display_cwd"
-# Session name (when /rename has been used)
-[ -n "$session_name" ] && printf ' \033[00;36m(%s)\033[00m' "$session_name"
-
-# PR badge from JSON (open PR for current branch — shown in both views)
-if [ -n "$pr_number" ]; then
-  case "$pr_state" in
-    approved)           pr_color="00;32" ;  pr_icon="✓" ;;
-    changes_requested)  pr_color="00;31" ;  pr_icon="✗" ;;
-    draft)              pr_color="00;90" ;  pr_icon="~" ;;
-    *)                  pr_color="00;33" ;  pr_icon="?" ;;
-  esac
-  printf ' \033[%smPR#%s%s\033[00m' "$pr_color" "$pr_number" "$pr_icon"
-fi
+# Model badge — before the ctx bar
+[ -n "$model" ] && printf ' \033[%sm%s\033[00m' "$model_color" "$model"
 
 # Agent PR badge — only shown when inside a worktree, for that worktree's own agent
 status_dir="/workspace/.claude/agent-status"
@@ -70,12 +70,12 @@ if [ -d "$status_dir" ] && [ -n "$in_worktree" ]; then
         if [ -n "$last_seen" ]; then
           fresh=$(( now_sec - last_seen ))
           [ "$fresh" -lt 0 ] && fresh=0
-          if [ "$fresh" -ge 600 ]; then   color="48;5;196;37"  # red: >10min since heartbeat = likely dead
+          if [ "$fresh" -ge 600 ]; then   color="48;5;196;30"  # red: >10min since heartbeat = likely dead
           elif [ "$fresh" -ge 180 ]; then color="43;30"         # yellow: 3-10min = slow/lagging
           else                            color="42;30"; fi      # green: <3min = alive
         else
           # No heartbeat yet — fall back to time-in-state coloring
-          if [ "$elapsed" -ge 900 ]; then   color="48;5;196;37"
+          if [ "$elapsed" -ge 900 ]; then   color="48;5;196;30"
           elif [ "$elapsed" -ge 300 ]; then color="43;30"
           else                              color="100;37"; fi
         fi
@@ -85,10 +85,42 @@ if [ -d "$status_dir" ] && [ -n "$in_worktree" ]; then
   fi
 fi
 
+# Days-left-in-week bar: derived from rate_limits.seven_day.resets_at (Unix ts).
+# Computed here so it can be emitted right after the wkly bar below.
+days_bar=""
+resets_at=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+if [ -n "$resets_at" ]; then
+  now_sec=$(date +%s)
+  remaining_sec=$((${resets_at%.*} - now_sec))
+  if [ "$remaining_sec" -gt 0 ]; then
+    days_left=$(awk "BEGIN {printf \"%.1f\", $remaining_sec / 86400}")
+    days_int=$(awk "BEGIN {printf \"%d\", $remaining_sec / 86400}")
+    elapsed_pct=$(awk "BEGIN {printf \"%.4f\", (7 - $remaining_sec / 86400) * 100 / 7}")
+    days_bar=$(awk -v left="$days_left" -v days_int="$days_int" -v elapsed_pct="$elapsed_pct" 'BEGIN {
+      if (days_int >= 4) {
+        # Green zone: plain green text, no background bar — less salient
+        printf " \033[32m%sd left\033[00m", left
+      } else {
+        if (days_int >= 2) { fill=43;         fg=30 }
+        else               { fill="48;5;196"; fg=30 }
+        width = 10
+        filled = int(elapsed_pct * width / 100 + 0.5)
+        label = sprintf(" %sd left", left)
+        bar = ""
+        for (i = 0; i < width; i++) bar = bar " "
+        bar = label substr(bar, length(label) + 1)
+        filled_part = substr(bar, 1, filled)
+        empty_part  = substr(bar, filled + 1)
+        printf " \033[%s;%sm%s\033[48;5;237;37m%s \033[00m", fill, fg, filled_part, empty_part
+      }
+    }' /dev/null)
+  fi
+fi
+
 if [ -n "$used" ] || [ -n "$weekly" ] || [ -n "$five_hour" ]; then
   if [ -n "$used" ]; then
     awk -v p="$used" 'BEGIN {
-      if (p >= 75)      { fill="48;5;196"; fg=37 }
+      if (p >= 75)      { fill="48;5;196"; fg=30 }
       else if (p >= 50) { fill=43; fg=30 }
       else              { fill=42; fg=30 }
       width = 9
@@ -104,10 +136,10 @@ if [ -n "$used" ] || [ -n "$weekly" ] || [ -n "$five_hour" ]; then
   fi
   if [ -n "$five_hour" ] && [ -z "$in_worktree" ]; then
     awk -v p="$five_hour" 'BEGIN {
-      if (p >= 75)      { fill="48;5;196"; fg=37 }
+      if (p >= 75)      { fill="48;5;196"; fg=30 }
       else if (p >= 50) { fill=43; fg=30 }
       else              { fill=42; fg=30 }
-      width = 9
+      width = 8
       filled = int(p * width / 100)
       label = sprintf(" %d%% 5h", int(p))
       bar = ""
@@ -120,7 +152,7 @@ if [ -n "$used" ] || [ -n "$weekly" ] || [ -n "$five_hour" ]; then
   fi
   if [ -n "$weekly" ] && [ -z "$in_worktree" ]; then
     awk -v p="$weekly" 'BEGIN {
-      if (p >= 75)      { fill="48;5;196"; fg=37 }
+      if (p >= 75)      { fill="48;5;196"; fg=30 }
       else if (p >= 50) { fill=43; fg=30 }
       else              { fill=42; fg=30 }
       width = 10
@@ -133,6 +165,7 @@ if [ -n "$used" ] || [ -n "$weekly" ] || [ -n "$five_hour" ]; then
       empty_part  = substr(bar, filled + 1)
       printf " \033[%s;%sm%s\033[48;5;237;37m%s\033[00m", fill, fg, filled_part, empty_part
     }' /dev/null
+    [ -n "$days_bar" ] && printf '%s' "$days_bar"
   fi
 fi
 # Test262 progress
@@ -161,7 +194,7 @@ pass_bar() {
   awk -v p="$1" -v label="$2" 'BEGIN {
     if (p >= 66.7)     { fill=42; fg=30 }
     else if (p >= 33.3){ fill=43; fg=30 }
-    else               { fill="48;5;196"; fg=37 }
+    else               { fill="48;5;196"; fg=30 }
   }
   END {
     width = 12
@@ -182,7 +215,7 @@ free_bar() {
     pct = free_g * 100 / total_g
     if (pct >= 66.7)      { fill=42; fg=30 }
     else if (pct >= 33.3) { fill=43; fg=30 }
-    else                  { fill="48;5;196"; fg=37 }
+    else                  { fill="48;5;196"; fg=30 }
     width = 10
     filled = int(pct * width / 100)
     label = " " free_g "G free"
@@ -237,7 +270,7 @@ if [ -z "$in_worktree" ] && [ "$branch" = "main" ]; then
   sprint_n=""
   sprint_done=0
   sprint_total=0
-  sprints_json="/workspace/dashboard/data/sprints.json"
+  sprints_json="/workspace/website/dashboard/data/sprints.json"
   if [ -f "$sprints_json" ]; then
     # Read from pre-built sprints.json (deduplicated, wont-fix counted as done)
     sprint_data=$(jq -r '
@@ -267,43 +300,12 @@ if [ -z "$in_worktree" ] && [ "$branch" = "main" ]; then
       fi
     fi
   fi
-  # Days-left-in-week bar: derived from rate_limits.seven_day.resets_at (Unix ts)
-  # Captured into $days_bar and emitted after the free memory indicator below.
-  days_bar=""
-  resets_at=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
-  if [ -n "$resets_at" ]; then
-    now_sec=$(date +%s)
-    remaining_sec=$((${resets_at%.*} - now_sec))
-    if [ "$remaining_sec" -gt 0 ]; then
-      days_left=$(awk "BEGIN {printf \"%.1f\", $remaining_sec / 86400}")
-      days_int=$(awk "BEGIN {printf \"%d\", $remaining_sec / 86400}")
-      elapsed_pct=$(awk "BEGIN {printf \"%.4f\", (7 - $remaining_sec / 86400) * 100 / 7}")
-      days_bar=$(awk -v left="$days_left" -v days_int="$days_int" -v elapsed_pct="$elapsed_pct" 'BEGIN {
-        if (days_int >= 4) {
-          # Green zone: plain green text, no background bar — less salient
-          printf " \033[32m%sd left\033[00m", left
-        } else {
-          if (days_int >= 2) { fill=43;         fg=30 }
-          else               { fill="48;5;196"; fg=37 }
-          width = 10
-          filled = int(elapsed_pct * width / 100 + 0.5)
-          label = sprintf(" %sd left", left)
-          bar = ""
-          for (i = 0; i < width; i++) bar = bar " "
-          bar = label substr(bar, length(label) + 1)
-          filled_part = substr(bar, 1, filled)
-          empty_part  = substr(bar, filled + 1)
-          printf " \033[%s;%sm%s\033[48;5;237;37m%s \033[00m", fill, fg, filled_part, empty_part
-        }
-      }' /dev/null)
-    fi
-  fi
   if [ -n "$sprint_n" ] && [ "$sprint_total" -gt 0 ]; then
     sprint_pct=$((sprint_done * 100 / sprint_total))
     awk -v p="$sprint_pct" -v n="$sprint_n" -v done="$sprint_done" -v total="$sprint_total" 'BEGIN {
       if (p >= 67)      { fill=42;         fg=30 }
       else if (p >= 33) { fill=43;         fg=30 }
-      else              { fill="48;5;196"; fg=37 }
+      else              { fill="48;5;196"; fg=30 }
       width = 12
       filled = int(p * width / 100)
       label = sprintf(" %d/%d s%d", done, total, n)
@@ -378,7 +380,6 @@ elif [ -n "$vitesting" ]; then
         p_bar=$(pass_bar "$pass_pct" "${pass_pct}% t262")
         f_bar=$(free_bar "$free_g")
         printf ' \033[00;33m⟳t262\033[00m %s %s %s' "$p_bar" "$d_bar" "$f_bar"
-        [ -n "$days_bar" ] && printf '%s' "$days_bar"
       else
         printf ' \033[00;33m⟳t262\033[00m %s' "$d_bar"
       fi
@@ -398,7 +399,6 @@ elif [ -f "$report" ]; then
     p_bar=$(pass_bar "$pass_pct" "${pass_pct}% t262")
     f_bar=$(free_bar "$free_g")
     printf ' %s %s' "$p_bar" "$f_bar"
-    [ -n "$days_bar" ] && printf '%s' "$days_bar"
   fi
 fi
 # Branch display:
@@ -412,7 +412,6 @@ else
 fi
 # Repo identity (owner/name) — shown only when available and not on main (already know the repo there)
 [ -n "$repo" ] && [ -n "$in_worktree" ] && printf ' \033[00;90m%s\033[00m' "$repo"
-[ -n "$model" ] && printf ' \033[%sm%s\033[00m' "$model_color" "$model"
 [ -n "$effort" ] && [ "$effort" != "none" ] && [ "$effort" != "disabled" ] && printf ' \033[00;33m%s\033[00m' "$effort"
 # Output style — shown when not "default" (non-default modes are worth flagging)
 [ -n "$output_style" ] && [ "$output_style" != "default" ] && [ "$output_style" != "Default" ] && printf ' \033[00;36m[%s]\033[00m' "$output_style"
@@ -420,4 +419,16 @@ fi
 [ -n "$vim_mode" ] && printf ' \033[00;35m%s\033[00m' "$vim_mode"
 # Agent name — shown when running under --agent flag
 [ -n "$agent_name" ] && printf ' \033[00;36magent:%s\033[00m' "$agent_name"
+# Session name (when /rename has been used) — near the end of the line
+[ -n "$session_name" ] && printf ' \033[00;36m(%s)\033[00m' "$session_name"
+# PR badge from JSON (open PR for current branch) — kept last so it ends the line
+if [ -n "$pr_number" ]; then
+  case "$pr_state" in
+    approved)           pr_color="00;32" ;  pr_icon="✓" ;;
+    changes_requested)  pr_color="00;31" ;  pr_icon="✗" ;;
+    draft)              pr_color="00;90" ;  pr_icon="~" ;;
+    *)                  pr_color="00;33" ;  pr_icon="?" ;;
+  esac
+  printf ' \033[%smPR#%s%s\033[00m' "$pr_color" "$pr_number" "$pr_icon"
+fi
 printf '\n'

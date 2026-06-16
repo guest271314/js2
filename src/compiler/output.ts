@@ -2,9 +2,10 @@
 import { ts } from "../ts-api.js";
 import type { TypedAST } from "../checker/index.js";
 import { analyzeSource } from "../checker/index.js";
-import type { CabiExportInfo, ParamDef } from "../codegen-linear/c-abi.js";
-import { emitCabiWrappers, mapParamsToCabi, mapResultToCabi } from "../codegen-linear/c-abi.js";
+import type { CabiExportInfo, ParamDef, TsSemanticType } from "../codegen-linear/c-abi.js";
+import { emitCabiWrappers, inferSemantic, mapParamsToCabi, mapResultToCabi } from "../codegen-linear/c-abi.js";
 import { generateModule } from "../codegen/index.js";
+import { isFatalCodegenDiagnostic } from "../codegen/context/errors.js";
 import { extractCHeaderExports, generateCHeader } from "../emit/c-header.js";
 import { emitObject } from "../emit/object.js";
 import { preprocessImports } from "../import-resolver.js";
@@ -13,12 +14,40 @@ import type { Instr, ValType, WasmModule } from "../ir/types.js";
 import { buildImportManifest, DOWNGRADE_DIAG_CODES } from "./import-manifest.js";
 import { hasExportModifier, pushSourceAnchoredDiagnostic } from "./validation.js";
 
+/** TS-level type text for an exported function's params + return. */
+interface CabiTsTypes {
+  paramTypes: (string | undefined)[];
+  returnType: string | undefined;
+}
+
+/**
+ * Collect TS param/return type text for each exported top-level function so
+ * the C ABI transform can classify string/array aggregates (which lower to
+ * an i32 header pointer indistinguishable from a plain number at the Wasm
+ * level). Keyed by exported function name (#1835).
+ */
+function collectCabiTsTypes(ast: TypedAST): Map<string, CabiTsTypes> {
+  const map = new Map<string, CabiTsTypes>();
+  const sf = ast.sourceFile;
+  for (const stmt of sf.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name && hasExportModifier(stmt)) {
+      const paramTypes = stmt.parameters.map((p) => p.type?.getText(sf));
+      map.set(stmt.name.text, {
+        paramTypes,
+        returnType: stmt.type?.getText(sf),
+      });
+    }
+  }
+  return map;
+}
+
 /**
  * Apply C ABI transformation to a compiled WasmModule.
  * Rewrites exported function signatures for C compatibility and generates a C header.
  */
-function applyCabiTransform(mod: WasmModule, moduleName: string): { cHeader: string } {
+function applyCabiTransform(mod: WasmModule, moduleName: string, ast?: TypedAST): { cHeader: string } {
   const numImportFuncs = mod.imports.filter((i) => i.desc.kind === "func").length;
+  const tsTypes = ast ? collectCabiTsTypes(ast) : new Map<string, CabiTsTypes>();
 
   // Build CabiExportInfo for each exported function
   const exportInfos: CabiExportInfo[] = [];
@@ -34,24 +63,45 @@ function applyCabiTransform(mod: WasmModule, moduleName: string): { cHeader: str
     const typeDef = mod.types[func.typeIdx];
     if (!typeDef || typeDef.kind !== "func") continue;
 
+    // String/array params + returns lower to i32 header pointers, so we can
+    // only distinguish them from plain numbers using the TS source types.
+    // Only apply TS-type inference when the declared param count matches the
+    // Wasm param count — otherwise a prepended `this`/closure param would skew
+    // the mapping, so we fall back to scalar treatment (#1835).
+    const declared = tsTypes.get(exp.name);
+    const useTsTypes = declared !== undefined && declared.paramTypes.length === typeDef.params.length;
+
     // Build ParamDefs from the function type
-    // In linear memory mode: f64 = number, i32 = pointer (string/array/object)
-    // We infer semantics from the function name and wasm types
     const paramDefs: ParamDef[] = typeDef.params.map((wt, i) => {
-      // Without TS type info at this stage, we infer from wasm types:
-      // f64 → number, i32 → could be string/array/object/boolean
-      // For now, treat all i32 params as direct (caller provides i32)
-      const semantic = wt.kind === "f64" ? ("number_f64" as const) : ("number_i32" as const);
+      let semantic: TsSemanticType;
+      if (useTsTypes) {
+        semantic = inferSemantic(wt, declared!.paramTypes[i]);
+        // string/array lower to i32; if the TS type disagrees with the Wasm
+        // type (e.g. a number that happens to be i32), inferSemantic already
+        // reconciles via the wasmType, so the result is consistent.
+      } else {
+        semantic = wt.kind === "f64" ? "number_f64" : "number_i32";
+      }
       return { name: `p${i}`, wasmType: wt, semantic };
     });
 
     const cabiParams = mapParamsToCabi(paramDefs);
-    const resultSemantic =
-      typeDef.results.length === 0
-        ? ("void" as const)
-        : typeDef.results[0].kind === "f64"
-          ? ("number_f64" as const)
-          : ("number_i32" as const);
+
+    let resultSemantic: TsSemanticType | "void";
+    if (typeDef.results.length === 0) {
+      resultSemantic = "void";
+    } else if (useTsTypes && declared!.returnType) {
+      const inferred = inferSemantic(typeDef.results[0], declared!.returnType);
+      // A string/array return must be backed by an i32 header pointer.
+      resultSemantic =
+        (inferred === "string" || inferred === "array") && typeDef.results[0].kind !== "i32"
+          ? typeDef.results[0].kind === "f64"
+            ? "number_f64"
+            : "number_i32"
+          : inferred;
+    } else {
+      resultSemantic = typeDef.results[0].kind === "f64" ? "number_f64" : "number_i32";
+    }
     const cabiResult = mapResultToCabi(typeDef.results.length > 0 ? typeDef.results[0] : null, resultSemantic);
 
     const cabiName = exp.name; // mangleCabiName is identity for simple names
@@ -249,15 +299,18 @@ export function compileToObjectSource(source: string, options: CompileOptions = 
   try {
     const result = generateModule(ast);
     mod = result.module;
+    // #1921 — surface each diagnostic with its real severity (a deliberate
+    // "degrade" becomes a non-fatal "warning"); gate on severity, not on a
+    // "Codegen error:" message prefix.
     for (const err of result.errors) {
       errors.push({
         message: err.message,
         line: err.line,
         column: err.column,
-        severity: "error",
+        severity: isFatalCodegenDiagnostic(err) ? "error" : "warning",
       });
     }
-    if (result.errors.some((err) => err.message.startsWith("Codegen error:"))) {
+    if (result.errors.some(isFatalCodegenDiagnostic)) {
       return { object: new Uint8Array(0), success: false, errors };
     }
   } catch (e) {

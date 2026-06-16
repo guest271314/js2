@@ -2,6 +2,77 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## Sprint-61 merged-PR code review (2026-06-10)
+
+Static review of all 24 sprint-61 merged PRs (9 issues). #1909/#1910/#1902/#6407
+clean; #1832 fix correct (test-only PR); the rest produced these follow-ups.
+Also backfilled `status: done` on the 7 merged-but-in-review issues
+(#1832, #1886, #1904, #1905, #1907, #1909, #1910).
+
+- [#2045](../2045-linear-uint8-soundness-holes.md) — linear Uint8Array silent-corruption holes: name-keyed scope-blind buffer registry, no bounds checks on linear element access; + escape-analysis demotion gaps that fail valid WASI programs (#1886 follow-up) — critical, medium, **ready (backlog)**.
+- [#2046](../2046-standalone-reflect-spec-gaps.md) — standalone Reflect: receiver arg silently dropped (wrong `this` for accessors), deleteProperty deletes frozen props and returns true, no ToPropertyKey (#1905 follow-up) — high, medium, **ready (backlog)**.
+- [#2047](../2047-unify-standalone-isarray-predicate.md) — unify standalone Array.isArray: live #1907 snapshot predicate diverges from direct calls; #1904's native finalize-filled helper is dead code; both misclassify ArrayBuffer/TypedArray carriers — high, medium, **ready (backlog)**.
+- [#2048](../2048-post-merge-issue-status-automation.md) — process: automate merged-PR ⇒ `status: done` flip; stale in-review issues caused 17/24 doc-churn PRs and merge-queue thrash in sprint 61 — medium, easy, **ready (backlog)**.
+
+## Standalone 38%→71% gap review (2026-06-10)
+
+Full standalone-vs-host baseline diff (2026-06-10 `test262-standalone-current.jsonl`
+vs `test262-current.jsonl` from `loopdive/js2wasm-baselines`): standalone is at
+**16,405/43,106 official (38.1%)** vs host **30,797/43,106 (71.4%)** — a gap of
+15,480 rows that pass host but not standalone (8,124 compile_error + 7,356 fail).
+Already-owned buckets: built-in static property reads 3,587 (#1907/#1888 S6-b),
+ToPrimitive 1,292 (#1910), RegExp ~1,190 (#1911–#1914), `__get_builtin`/
+`__defineProperty_desc` refusals 453 (#1472/#1888), borrowed-`.call` refusals
+~250 (#1888 S3/S4), Proxy/Reflect.construct ~180 (#1100/#1888 Phase C), direct
+eval ~180 (#1066). New issues for the unowned remainder (all repro-confirmed on
+main @ 936d1ac51):
+
+- [#2029](../2029-standalone-u32-out-of-range-binary-emit.md) — `Binary emit error: u32 out of range: -1` on builtin subclassing / await-using / Object.create / Iterator.prototype (497 tests; minimal repro `class A extends Uint8Array {}`) — critical, medium, **ready (backlog)**.
+- [#2036](../2036-standalone-array-generics-arraylike-invalid-wasm.md) — Array.prototype generics over array-like receivers: invalid Wasm + null-deref + silently wrong results instead of loud refusal (~500 tests) — high, medium, **ready (backlog)**.
+- [#2037](../2037-standalone-fn-name-destructuring-defaults.md) — NamedEvaluation `.name` wrong for destructuring-default-bound functions (683 tests) — high, medium, **ready (backlog)**.
+- [#2038](../2038-standalone-iterator-next-illegal-cast-async-dstr.md) — `illegal cast` in `__iterator_next` / async destructuring & `yield*` (~470 tests) — high, medium, **ready (backlog)**.
+- [#2039](../2039-standalone-invalid-wasm-residual-bucket.md) — invalid-Wasm residual bucket post-#1623/#1666/#1677, split by validator signature (async-gen i64 ABI, `__obj_find` externref key, `__str_flatten`, arguments arity; ~1,135 tests) — critical, hard, **ready (backlog)**.
+- [#2040](../2040-standalone-generator-dstr-runtime-semantics.md) — generator/destructuring runtime semantics: rest-pattern aliasing, lazy defaults, private generator methods (~1,750 tests) — critical, hard, **ready (backlog)**.
+- [#2041](../2041-standalone-temporal-null-deref-bucket.md) — Temporal compiles then traps with opaque null deref; needs fail-loud refusal + classifier bucket (544 tests) — medium, medium, **ready (backlog)**.
+- [#2042](../2042-standalone-defineproperty-descriptor-semantics.md) — defineProperty/defineProperties: `__obj_insert` illegal cast + ValidateAndApply descriptor semantics (~340 tests) — high, medium, **ready (backlog)**.
+
+Unfiled smaller residuals (classified, for later splitting): DataView abrupt/OOB
+closures ~204, String.prototype runtime ~180, Set.prototype ~124, Number/Date
+formatting ~110 — mostly downstream of #1907/#1910/#1888 slices; re-measure
+after those land.
+
+### Fable-tier issues (2026-06-10)
+
+`model: fable` frontmatter marks issues whose spec/decision work should run on
+Claude Fable 5 (spawn the architect/senior-dev with `model: "fable"`); the
+implementation slices they produce stay Opus-tier. Annotated: #1888, #2029,
+#2039, #1851, #1852, plus two new decision issues:
+
+- [#2043](../2043-retire-late-import-index-shift-class.md) — retire the late-import function-index-shift bug class structurally (always-on total emit-time index validation + stale-proof func references); 6th+ recurrence as #2029 — high, hard, **ready (backlog)**.
+- [#2044](../2044-bigint-i64-brand-valtype-decision.md) — architect decision: BigInt i64-bigint-brand ValType vs TS-type-driven boxing; gates #1644 slices, must attribute the #2039 i64/extern.convert_any bucket — high, hard, **ready (backlog)**.
+
+## RegExp residual split (2026-06-07)
+
+The standalone RegExp residual bucket was split under #1909 so the report no
+longer points the whole cluster at completed umbrellas:
+
+- [#1909](../1909-standalone-regexp-residual-bucket.md) — residual standalone
+  RegExp bucket split/fix, in review.
+- [#1911](../1911-standalone-regexp-phase-2d-unicode-lookaround.md) —
+  standalone RegExp Phase 2d: `u/v/d`, Unicode, lookaround, modifiers.
+- [#1912](../1912-standalone-regexp-phase-2b-boundaries-backrefs-classes.md) —
+  standalone RegExp Phase 2b: boundaries, backrefs, class compatibility.
+- [#1913](../1913-standalone-regexp-string-protocol-lastindex.md) —
+  standalone RegExp string protocol, `matchAll`, split/replace, lastIndex.
+- [#1914](../1914-standalone-regexp-native-engine-reflection-result-shape.md) —
+  standalone RegExp native-engine reflection and result-shape gaps.
+
+## Harvest re-run 2026-06-04 (post sprint-58/59 merge)
+
+Re-ran `/harvest-errors` after pulling 346 commits. Both prior-harvest issues are genuinely fixed (#1809 shift-walker 157→0; #1808 emit crash per-file clean). One baseline-accounting follow-up filed:
+
+- [#1862](../1862-residual-poison-burst-binary-emit-still-in-baseline.md) — residual poisoned-worker `Binary emit error` burst still in the published baseline (~269, barely down from 291) despite #1808's blast-radius cap; either the cap is incomplete or `promote-baseline` carried the entries forward without re-running. Over-counts the failure set by ~0.6%. medium, medium, **ready (backlog)**. Follow-up to #1808; ties to #1080 drift umbrella.
+
 ## Sprint 57 — acorn dogfood + backend-agnostic IR (2026-05-29)
 
 Architectural sprint (no pass-count target; zero-regression guard). Goals:
@@ -10,12 +81,14 @@ Architectural sprint (no pass-count target; zero-regression guard). Goals:
 [sprints/57.md](../sprints/57.md).
 
 Track 1 — acorn dogfood:
+
 - [#1710](../1710-acorn-dogfood-harness.md) — acorn harness: compile + validate + diff-AST vs node-acorn — high, medium, **ready (s57)**.
 - [#1711](../1711-acorn-failure-surface-triage.md) — triage harness surface → file sized child issues — high, medium, **ready (s57)**, depends on #1710.
 - [#1712](../1712-acorn-acceptance-differential-ast.md) — acceptance: compiled acorn AST == node-acorn — high, hard, **carried to sprint 59** (#1710/#1711 done; unblocked by #1745).
 - Prior blockers #1679/#1690/#1690b are **done**.
 
 Track 2 — backend-agnostic IR (all need architect spec; #1713 blocking):
+
 - [#1713](../1713-ir-backend-emitter-trait-seam.md) — BackendEmitter trait + WasmGC bias audit + WasmGcEmitter (pure refactor, zero conformance delta) — high, hard, **ready (s57), needs arch spec**.
 - [#1714](../1714-ir-two-backend-proof-linear.md) — lower one IR node kind to BOTH WasmGC + linear via the trait (primary proof) — high, hard, **backlog→ready** after #1713.
 - [#1715](../1715-ir-bytecode-proof-point.md) — minimal bytecode emitter + dispatch loop for an IR subset (stretch proof) — medium, hard, **backlog→ready** after #1713.
@@ -26,7 +99,7 @@ Track 2 — backend-agnostic IR (all need architect spec; #1713 blocking):
 Empirical per-construct audit of remaining JS-host (`env.*`) leaks under `--target wasi`. Audit record: [#1662](../1662-standalone-host-import-audit.md) (done). Each genuine remaining leak is owned by a tracking issue; new gaps filed where the cited issue was closed without coverage or no native-engine issue existed. Already-tracked: Map/Set → #1103, number→string → #1335, RegExp → #682/#1474, closures/callbacks → #1470, JSON Phase 2 → #1599. Expected/wont-fix (not filed): eval, Proxy, with, dynamic import, full Intl collation.
 
 - [#1662](../1662-standalone-host-import-audit.md) — Audit record + findings table (done) — high, easy.
-- [#1666](../1666-standalone-invalid-wasm-native-string-number-lowering.md) — **Bug**: `--target wasi` emits *invalid* (non-instantiable) wasm for class/closure/callback-array-methods/number→string/regex/generator/typed-array — `__str_flatten`/`__str_to_extern` type mismatch + unbound late global (`0xffffffff`). More severe than a leak (won't instantiate even with a host). Fix first — masks #1664. — high, hard, ready.
+- [#1666](../1666-standalone-invalid-wasm-native-string-number-lowering.md) — **Bug**: `--target wasi` emits _invalid_ (non-instantiable) wasm for class/closure/callback-array-methods/number→string/regex/generator/typed-array — `__str_flatten`/`__str_to_extern` type mismatch + unbound late global (`0xffffffff`). More severe than a leak (won't instantiate even with a host). Fix first — masks #1664. — high, hard, ready.
 - [#1663](../1663-standalone-parseint-parsefloat-native.md) — Pure-Wasm `parseInt`/`parseFloat`/`Number(string)`. `env.parseInt`/`env.parseFloat` still leak; #1471 (the cited owner) closed without implementing them. — medium, medium, ready.
 - [#1664](../1664-standalone-extern-object-iterator-residual.md) — Residual `__extern_*`/`__register_*`/`__iterator*`/`__array_*`/`__get_undefined` leaks after #1472 landed partial. class/super, typed-array `.set`/`.subarray`, Map/Set. — medium, hard, ready (after #1666).
 - [#1665](../1665-standalone-native-generators.md) — Wasm-native generators (state-machine lowering) to retire `__gen_*`/`__create_generator*`/`__iterator*` host scheduler. Currently only owned by the #1376 IR telemetry gate, not a native-engine issue. — medium, hard, **ready (sprint 58; after #1666)**.
@@ -36,6 +109,7 @@ Empirical per-construct audit of remaining JS-host (`env.*`) leaks under `--targ
 Decomposed the 1,367 `compile_error` results in `test262-current.jsonl`. The
 528 `invalid Wasm binary` CEs were sub-clustered by validator error; sub-causes
 already enumerated in #1522 / #1543 / #1556 are not re-filed.
+
 ## Harvest 2026-05-24 (new issues from test262 error analysis)
 
 - [#1591](1591-class-elements-same-line-multi-definition.md) — class/elements same-line / stacked member definitions lost or reordered — **~294 fails**, high priority (formerly 779b)
@@ -71,16 +145,32 @@ only one new root-cause issue was needed.
 
 - [#1782](../1782-standalone-numeric-separator-literals-wrong-values.md) — standalone numeric and BigInt separator literals evaluate to wrong values: 50 assertion failures under `language/literals/*/numeric-separators/` — medium, medium, **ready (backlog)**; follow-up to done #53.
 
+## Harvest 2026-06-03 (default-lane codegen crashes from baselines-repo run)
+
+- [#1808](../1808-binary-emit-offset-out-of-bounds-codegen-crash.md) — `Binary emit error: offset is out of bounds`: `emitBinary()` crashes identically on **290** default-lane tests (Array/String/TypedArray/Temporal/DataView/eval-code) — one emit-layer back-patch/offset overflow, not 290 distinct bugs. High, medium, **ready (sprint 59)**. Distinct from done #203 (varint overflow). Surfaced harvesting the fresh `loopdive/js2wasm-baselines` data (gitHash f692249d).
+- [#1809](../1809-method-trampoline-shift-walker-misses-import-funcidx.md) — `pendingMethodTrampolines … shift walker missed this (#1525b regression)`: late-import index-shift walker fails to rewrite a method-trampoline funcIdx pointing at an import (e.g. resizable-buffer `resizeTo`) — **157** default-lane compile errors. High, medium, **ready (sprint 59)**. Regression of done #1525b; distinct from done #1669.
+
+## Harvest 2026-06-04 (cross-lane error analysis, baselines-repo sha f692249d)
+
+Default lane:
+
+- [#1805](../1805-negative-test-fail-early-error-enforcement-gaps.md) — 75 `negative_test_fail` tests: early-error enforcement gaps (parse/TDZ/TypeError) not covered by done #774/#927 — medium, medium, **ready (sprint 59)**.
+
+Standalone lane:
+
+- [#1806](../1806-standalone-toprimitive-cannot-convert-object.md) — standalone `Cannot convert object to primitive value`: **2,136 tests** — `__toPrimitive` host import refused in standalone; needs Wasm-native ToPrimitive or a proper refusal cite — high, medium, **ready (sprint 59)**.
+- [#1807](../1807-standalone-issamevalue-async-gen-wasm-type-mismatch.md) — standalone isSameValue Wasm call type mismatch for async-generator parameters: **277 tests** — #1776 fixed the externref case but async-generator ref types produce a different call mismatch — medium, medium, **ready (sprint 59)**.
+
 ## IR / allowJs parity follow-ups (2026-06-03)
 
 - [#1783](../1783-ir-js-ts-native-messaging-wasm-parity.md) — IR inference parity: native-messaging `.js` and `.ts` emit divergent WASI Wasm; JS path boxes numeric values and loses numeric template interpolation despite valid WASI output — medium, medium, **ready (backlog)**; follow-up to #1768/#389.
 
 ## TypedArray packed-integer follow-ups (2026-06-03)
 
-- [#1784](../1784-typedarray-packed-lane-storage.md) — Generalize TypedArray storage to packed WasmGC lanes: `i8`/`i16`/`i32`/`f32`/`f64` backing instead of the legacy f64 representation for all numeric typed arrays — medium, hard, **ready (backlog)**; follow-up to #1767/#389.
-- [#1785](../1785-typedarray-element-metadata.md) — TypedArray element metadata for signedness, clamping, storage lanes, and load/store behavior so codegen stops inferring semantics from vec-key strings — high, hard, **ready (backlog)**; unlocks #1784/#1786.
-- [#1786](../1786-wrapexports-packed-typedarray-abi.md) — `wrapExports` ABI support for packed TypedArray vectors at the JS-host boundary, replacing the f64-only allocator/mutator assumption — medium, hard, **ready (backlog)**; follow-up to #1700/#1784.
-- [#1787](../1787-packed-typedarray-semantics-regressions.md) — Regression coverage for packed TypedArray integer semantics: unsigned/signed reads, clamping, and invalid `array.get` guards — medium, medium, **ready (backlog)**; test guardrails for #1784/#1785.
+- [#1810](../1810-typedarray-packed-lane-storage.md) — Generalize TypedArray storage to packed WasmGC lanes: `i8`/`i16`/`i32`/`f32`/`f64` backing instead of the legacy f64 representation for all numeric typed arrays — medium, hard, **ready (backlog)**; follow-up to #1767/#389.
+- [#1811](../1811-typedarray-element-metadata.md) — TypedArray element metadata for signedness, clamping, storage lanes, and load/store behavior so codegen stops inferring semantics from vec-key strings — high, hard, **ready (backlog)**; unlocks #1810/#1786.
+- [#1786](../1786-wrapexports-packed-typedarray-abi.md) — `wrapExports` ABI support for packed TypedArray vectors at the JS-host boundary, replacing the f64-only allocator/mutator assumption — medium, hard, **ready (backlog)**; follow-up to #1700/#1810.
+- [#1787](../1787-packed-typedarray-semantics-regressions.md) — Regression coverage for packed TypedArray integer semantics: unsigned/signed reads, clamping, and invalid `array.get` guards — medium, medium, **ready (backlog)**; test guardrails for #1810/#1811.
 
 ## Sprint 55 — repo structure / website (2026-05-24)
 
@@ -101,7 +191,7 @@ both others); #1653 is the keystone for the read side + continuous loop.
 
 ## Governance / legal — CLA gate (2026-05-24)
 
-- [#1660](../1660-real-cla-gate.md) — Replace the placeholder `cla-check` workflow with a real CLA signature/approval gate — **DONE**. Self-hosted in-repo gate: signatures recorded in `.github/cla/signatures.json` via an affirmative PR comment; internal authors (org members / maintainer / `*[bot]`) exempt, external humans sign by comment. CLA version tied to `CLA.md` hash for re-acceptance. Promotion to a *required* branch-protection check is deferred to an admin (documented follow-up in the issue) so the gate can't deadlock the internal merge queue before exemption is proven. Related: #1530.
+- [#1660](../1660-real-cla-gate.md) — Replace the placeholder `cla-check` workflow with a real CLA signature/approval gate — **DONE**. Self-hosted in-repo gate: signatures recorded in `.github/cla/signatures.json` via an affirmative PR comment; internal authors (org members / maintainer / `*[bot]`) exempt, external humans sign by comment. CLA version tied to `CLA.md` hash for re-acceptance. Promotion to a _required_ branch-protection check is deferred to an admin (documented follow-up in the issue) so the gate can't deadlock the internal merge queue before exemption is proven. Related: #1530.
 
 ## Spec-compliance easy wins (from #1563 gap analysis, 2026-05-21)
 
@@ -173,3 +263,128 @@ time (the i32 hash path lever is DONE and already faster/char than V8). Two size
 
 - [#1761](../1761-string-build-buffer-presize-static-trip-count.md) — Presize the string-build buffer from a static loop trip count to kill the reallocs + per-append cap-check (top AOT win, measured #1 of remaining levers) — **high**, medium, **ready (sprint 59)**
 - [#1762](../1762-linear-memory-string-backing-build-hash-hot-path.md) — Linear-memory string backing for the build/hash hot path — drop the WasmGC `(array i16)` GC barrier (strategic ceiling; dual-backend like #679/#682/#1714) — **high**, hard, **ready, likely needs arch spec**
+
+### Code-review findings — latent + redundancy (2026-06-04)
+
+From the full-codebase review on 2026-06-04
+(`plan/code-review/2026-06-04-compiler-review.md`). Reachable correctness bugs
+went into sprint 59 (#1815–#1839); these are latent (not-yet-wired paths),
+defense-in-depth, and cleanup:
+
+- [#1840](../1840-linker-leb-truncation-and-rewrite-gaps.md) — linker `writeLEB128` truncates growing indices; `call_indirect`/`memory` rewrite gaps (latent — `.o` linker) — low, medium, **backlog**
+- [#1841](../1841-element-section-flag-bitfield.md) — element-section flag bitfield only handles active flag-0 (latent — linker) — low, medium, **backlog**
+- [#1842](../1842-none-heaptype-constant-collides-with-any.md) — `none` heap-type constant collides with `any` (0x6e); `noextern`/`nofunc` missing (latent — emit) — low, low, **backlog**
+- [#1843](../1843-reloc-tag-index-leb-mismatch.md) — `R_WASM_TAG_INDEX_LEB` emitter (11) vs reader (10) mismatch (latent — linker) — low, low, **backlog**
+- [#1844](../1844-ir-verify-no-nested-buffer-recursion.md) — IR `verify` doesn't recurse nested if/try/loop buffers; return-type gate + SSA holes (residual #1798, defense-in-depth) — low, medium, **backlog**
+- [#1845](../1845-ir-propagate-bool-overclaim-seedconcrete.md) — IR propagate: `&&`/`||` over-claim `BOOL`; `seedConcrete` omits i32/u32 — low, low, **backlog**
+- [#1846](../1846-minor-typeof-conformance-notes.md) — minor `typeof`: i64→"number" in `with`-bindings; externref→null fallthrough — low, low, **backlog**
+- [#1847](../1847-forof-rollback-localmap-not-restored.md) — for-of tentative rollback doesn't restore `fctx.localMap` (robustness) — low, low, **backlog**
+- [#1848](../1848-dead-code-sweep.md) — dead-code sweep: identical branches, unused locals/params, obsolete scaffolding — low, low, **backlog**
+- [#1849](../1849-duplicate-logic-refactor.md) — refactor diverged copy-paste (super dispatch, closure drainers, `resolveVec`, `__extern_has`, typed-default) — low, medium, **backlog**
+
+### Compiler-design lessons — architectural recommendations (2026-06-04)
+
+From [`docs/architecture/compiler-design-lessons.md`](../../../docs/architecture/compiler-design-lessons.md)
+(vendor-neutral synthesis of general compiler/IR/runtime patterns) and
+[`docs/architecture/structure-and-language-assessment.md`](../../../docs/architecture/structure-and-language-assessment.md)
+(structure + language review). Net-new issues only; recommendations already
+tracked elsewhere are noted under "Already covered" below.
+
+- [#1850](../1850-ir-verifier-hardening-dominance-legality.md) — R1: harden the IR verifier into a hard between-pass contract (cross-block dominance + per-backend legality + fail-CI; umbrella over #1844) — high, medium, **backlog**
+- [#1851](../1851-backendemitter-legalization-boundary-type-converter.md) — R4: make `BackendEmitter` an explicit legalization boundary, extract a declared type-converter, add a backend-neutral mid-level — medium, hard, **backlog**
+- [#1852](../1852-per-backend-value-representation.md) — R5: per-backend dynamic-value representation (typed refs / `i31ref` on WasmGC; f64-value + i32-tag on linear) — medium, hard, **backlog**
+- [#1853](../1853-conformance-hard-error-stability-bucket.md) — R6: separate hard-error (compiler-crash / malformed-Wasm) stability bucket on the conformance dashboard — high, easy, **backlog**
+- [#1854](../1854-cross-backend-differential-testing.md) — R7a: cross-backend differential testing harness (WasmGC / linear / bytecode-VM must agree) — high, medium, **backlog**
+- [#1855](../1855-ub-free-ts-fuzzer-and-minimization.md) — R7b: UB-free TS program generator + automated validity-preserving minimization — medium, hard, **backlog**
+- [#1856](../1856-linear-bump-arena-allocator-mode.md) — R10: bump/arena allocator mode for short-lived linear programs; commit to one fixed linear-GC strategy — medium, medium, **backlog**
+- [#1857](../1857-ir-attributes-vs-operands-convention.md) — R11: carry compile-time-constant facts as IR node attributes, not synthetic SSA operands — low, easy, **backlog**
+- [#1860](../1860-backend-naming-symmetry-gc-linear.md) — structure review: rename `codegen/` + `codegen-linear/` → `backend/gc` + `backend/linear` so neither backend reads as the default (pure rename; consider bundling with #1172) — low, medium, **backlog**
+- [#1859](../1859-per-subdir-module-contract-readmes.md) — structure review: per-`src/`-subdir module-contract READMEs (responsibility, in/out, dependency direction) — low, easy, **backlog**
+
+**Already covered (no new issue):** R2 (make illegal states unrepresentable / retire `as unknown as Instr`) → **#1095**; R3 (finish the strangler: drive fallback buckets to zero, promote to strict) → **#1376** + the per-bucket program (#1370 done, #1371 done, #1372, #1373…) tracked in `plan/log/ir-adoption.md`; R8 (cheap mid-level SSA cleanup: fold/DCE/simplify-cfg + conservative inline) → **#1167a** / **#1167b**; R9 (host-import gate) → standing CLAUDE.md rule + audit **#1662**.
+
+### Real-world test coverage findings (2026-06-04)
+
+Found while adding `tests/real-world-*.test.ts` (real-world code patterns
+test262 doesn't cover: ESM, Web/WASI/Node/Deno APIs, Hono/React/Express):
+
+- [#1801](../1801-wasi-process-exit-invalid-binary.md) — WASI `process.exit(code)` emits an invalid binary: the exit code is compiled as i32 but an `i32.trunc_sat_f64_s` (expects f64) is pushed on top (`calls.ts:3180-3186`); `wasi-target.test.ts` only checks WAT so missed it. Sentinel via `it.fails` in `real-world-wasi.test.ts` — medium, easy, **sprint 60, DONE** (2026-06-05). _(Was mistakenly cited as phantom "#6407" — corrected.)_
+
+### Fable-team findings (2026-06-10)
+
+- [#1915](../1915-gc-host-string-spread-empty-array.md) — gc JS-host mode: `[...str]` / `Array.from(str)` returns an empty array (externref-spread gap; pre-existing, verified independent of #1470's standalone fix) — medium, medium, **backlog**
+
+### Compiler quality & architecture review (2026-06-10)
+
+From [`docs/architecture/compiler-quality-review-2026-06.md`](../../../docs/architecture/compiler-quality-review-2026-06.md)
+(seven-subsystem graded review; every finding file:line-evidenced, two
+probe-verified). Grades: WasmGC codegen C−, IR B−, front-end C+, runtime B,
+linear+emit C+, test/CI B+, optimization C+ — overall **B−**. Already-tracked
+overlaps (#1098/#1172/#1095/#1530/#1850/#1852/#1854/#1855/#1858–#1860) were
+not re-filed; the issues below are net-new.
+
+**Fail-loud / correctness (children of #1858):**
+- [#1937](../1937-linear-backend-fail-loud-break-continue.md) — linear backend: `break`/`continue` never compiled (silent infinite loops); dispatchers need default-arm diagnostics — **critical**, easy, **backlog**
+- [#1941](../1941-differential-testing-optimize-output.md) — differential testing of `--optimize` output (wasm-opt miscompiles currently invisible; 3 reviewers converged) — **critical**, easy, **backlog**
+- [#1939](../1939-encodeinstr-default-throw-funcref-validation.md) — emit: `encodeInstr` silently drops unknown ops; default-throw + un-gate `validateFuncRefs` + round-trip test — high, easy, **backlog**
+- [#1921](../1921-structured-compile-failure-gate.md) — replace the `"Codegen error:"` string-prefix failure gate with structured severity — high, easy, **backlog**
+- [#1938](../1938-linear-number-array-i32-truncation-double-eval.md) — linear: `number[]` i32 truncation (`[1.5]`→`[1]`) + element-assignment RHS double-eval — high, medium, **backlog**
+- [#1918](../1918-stack-balance-strict-mode-fixup-ratchet.md) — stack-balance strict mode + fixup ratchet (lossy `drop; const 0` repairs mask emitter bugs) — high, medium, **backlog**
+- [#1940](../1940-wit-generator-silent-param-drop.md) — WIT generator silently drops unmappable params (arity mismatch) — medium, easy, **backlog**
+
+**Consolidation (divergent copies already shipping bugs):**
+- [#1922](../1922-shared-ir-traversal-while-loop-dce-defect.md) — shared IR traversal module; fixes probe-verified live defect (ordinary `while` loops demote off the IR path) — high, medium, **backlog**
+- [#1917](../1917-single-coercion-engine.md) — one coercion engine (4 matrices disagree: externref→f64 unboxes vs `f64.const 0` by context) — high, medium, **backlog**
+- [#1927](../1927-single-pipeline-driver.md) — one front-end pipeline driver (3 divergent clones; multi-file silently skips early errors/hardened/IR/JSX) — high, medium, **backlog**
+- [#1920](../1920-unify-instruction-walkers-peephole-catchall.md) — one instruction walker; peephole misses `catchAll` bodies (bug); NaN-const + tee fusion — medium, easy, **backlog**
+- [#1919](../1919-transactional-speculative-compile.md) — transactional speculative-compile API (23 probe/rollback sites leak locals/imports/types) — medium, medium, **backlog**
+- [#1934](../1934-decompose-resolveimport-domain-tables.md) — decompose `resolveImport` (5,000-line fn, 188 name checks) into domain tables; unify 3 ToPrimitive walkers; unbundle test262 shim — medium, hard, **backlog**
+- [#1931](../1931-decompose-detect-early-errors-treeshake.md) — decompose `detectEarlyErrors` (3,350-line fn), run on every path; wire or delete dead `treeshake` option — medium, medium, **backlog**
+
+**Gates that don't match documentation:**
+- [#1943](../1943-enforce-ratio-bucket-thresholds-ci.md) — enforce the documented 10%-ratio / 50-per-bucket thresholds in CI (today only net ≥ 0 is enforced) — high, easy, **backlog**
+- [#1942](../1942-compile-time-regression-gate.md) — compile-time regression gate (`pass→compile_timeout` excluded from every gate today) — high, easy, **backlog**
+- [#1923](../1923-meter-ir-post-claim-demotions.md) — meter IR post-claim demotions in the fallback ratchet (build/verify/lower failures invisible to CI) — high, easy, **backlog**
+- [#1945](../1945-test262-oracle-precision.md) — test262 oracle precision (expected error types discarded; undefined-asserts stripped; 71.6% is an upper bound) — medium, medium, **backlog**
+- [#1949](../1949-representative-perf-gate.md) — representative perf gate (4 overfitted micros at 50% tolerance; honest suite ungated) — medium, easy, **backlog**
+- [#1944](../1944-ci-cost-bundle-once-pnpm-cache.md) — CI cost: bundle-once artifact + pnpm cache (~120–170 wasted runner-min/run) — medium, medium, **backlog**
+
+**Type information & performance:**
+- [#1946](../1946-closure-devirtualization-singleton-callees.md) — closure devirtualization for singleton callees (~15-instr dynamic dispatch Binaryen provably can't remove) — high, medium, **backlog**
+- [#1948](../1948-shared-numeric-i32-lattice.md) — shared numeric i32 lattice (3 duplicated matchers; `i-1` f64 round-trip survives -O3) — high, medium, **backlog**
+- [#1947](../1947-end-to-end-gc-ref-typing.md) — end-to-end GC-ref typing; externref at host boundary only (unlocks Binaryen GC passes) — high, hard, **backlog**, needs `/architect-spec`
+- [#1924](../1924-ir-verifier-instruction-type-rules.md) — instruction-level type rules in the IR verifier (operands/branch-arg types/resultType unchecked; extends #1850) — high, medium, **backlog**
+- [#1950](../1950-default-on-optimization-pipeline.md) — default-on optimization (CLI/playground `-O` default; tiny always-on cleanups; **blocked by #1941**) — medium, easy, **backlog**
+
+**Diagnostics & API quality:**
+- [#1928](../1928-source-position-remapping-preparse-rewrites.md) — source-position remapping for pre-parse rewrites (diagnostics report wrong lines whenever a rewrite fires) — high, medium, **backlog**
+- [#1929](../1929-compileerror-file-flatten-chains.md) — `CompileError.file` + flattened TS diagnostic chains — medium, easy, **backlog**
+
+**Runtime hygiene:**
+- [#1932](../1932-version-env-abi.md) — version the env ABI (~200 names, no handshake; regex engine already shows the pattern) — high, easy, **backlog**
+- [#1933](../1933-runtime-multi-instance-isolation-leak.md) — multi-instance isolation (symbol/RegExp state bleed) + `_subclassCtors` instance-retention leak — high, medium, **backlog**
+- [#1935](../1935-retire-undefined-sentinel-protocol.md) — retire the undefined-as-sentinel protocol (`MISS` symbol; getters returning `undefined` misread as absent) — medium, medium, **backlog**
+
+**Strategic (architect-spec first):**
+- [#1916](../1916-symbolic-function-references-codegen.md) — symbolic function references in WasmGC codegen; retire the late-import index-shift machinery (≥7 regressions trace to it) — high, hard, **backlog**, needs `/architect-spec`
+- [#1930](../1930-typeoracle-type-query-boundary.md) — TypeOracle: one type-query boundary (~397 raw checker sites; unblocks TS7; kills suppression heuristics) — high, hard, **backlog**, needs `/architect-spec`
+- [#1936](../1936-async-contract-migration-enable-cps.md) — async contract migration: enable the built-but-disabled CPS lowering via call-site census + await-elision — high, hard, **backlog**, needs `/architect-spec`
+- [#1925](../1925-ir-hygiene-passes-nested-buffers.md) — run IR hygiene passes inside nested buffers, or commit to one control-flow representation (do before #1370/#1373 waves) — medium, hard, **backlog**
+- [#1926](../1926-remove-valtype-typeidx-from-irtype.md) — remove backend `ValType`/`typeIdx` from `IrType` (blocks IR serialization + linear union adoption) — medium, medium, **backlog**
+
+## 2026-06-12 — Sprint-62 planning triage (Fable architecture sprint)
+
+Full record: `plan/issues/sprints/62.md` (+ pre-staged `63.md`). Summary:
+- Scheduled into 62 (architecture/Fable): #1804 #1853 #1854 #1855(spec)
+  #1899 #1919 #1921 #1922 #1923 #1924 #1925 #1926 #1927 #1931 #1950 #2085
+  #2089 #2090 #2092 #2100 #2101 #2104 #2105 #2106 #2107 + #1095(re-scoped)
+  + from sprint 61: #1916 #1917 #1930 #1965 #1979-#1981 #1983 #1988-#1990
+  #2009 #2015 #2022 #2051 #2059 #2072 #2079 #2080 #2081 #2084
+- New issues filed: #2134-#2143 (sprint 62), #2144-#2147 (sprint 63)
+- Moved 61→63 (routine): #1994 #2001 #2007 #2008 #2011-#2013 #2017 #2021
+  #2023-#2028 #2033 #2035 #2076 #2077 #2083 #2118 #2119; backlog→63:
+  #2086-#2088 #2093-#2099 #2102 #2103 #2108
+- Closed: #1624 (superseded by #2104-#2107 + #2141); duplicates
+  #2110-#2117 (≡ #2118-#2125, high series canonical)
+- Stale-ready → done (fix PRs merged): #1991 #2002-#2006 #2018-#2020
+  #2027 #2078

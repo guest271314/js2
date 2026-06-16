@@ -149,16 +149,27 @@ echo "Pre-push: typecheck + lint OK."
 
 if grep -q '"format:check"' package.json 2>/dev/null; then
   echo "Pre-push: prettier format:check ..."
-  fmt_out=$(pnpm run format:check 2>&1)
-  if [ $? -ne 0 ]; then
+  # Wrap in a hard timeout. In agent worktrees pnpm/prettier can hang
+  # (pnpm-store contention under concurrent worktrees, symlinked node_modules).
+  # A hung check used to SIGTERM at git's 300s limit and SILENTLY abort the push
+  # (it reported success but never updated the remote — stranding branches and
+  # wedging agents in push wait-loops). CI's `quality` job re-runs the exact same
+  # `format:check`, so on a LOCAL hang we degrade to a warning and let the push
+  # proceed; on a genuine format failure (prettier exits non-zero fast) we block.
+  fmt_out=$(timeout 90 pnpm run format:check 2>&1)
+  fmt_rc=$?
+  if [ "$fmt_rc" -eq 124 ]; then
+    echo "Pre-push: format:check TIMED OUT (90s) — skipping local check, CI 'quality' will enforce it."
+  elif [ "$fmt_rc" -ne 0 ]; then
     echo "Pre-push: format:check FAILED. Offending files:"
     echo "$fmt_out" | grep -iE '\[warn\]|^\S+\.ts$' | head -30
     echo ""
     echo "Fix with: pnpm run format:write   (or: npx prettier --write <file>)"
     echo "Then re-push. (Or --no-verify to defer to CI.)"
     exit 1
+  else
+    echo "Pre-push: format:check OK."
   fi
-  echo "Pre-push: format:check OK."
 fi
 
 # ---------- (4) sync conformance numbers in docs -------------------------

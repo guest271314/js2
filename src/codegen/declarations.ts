@@ -19,6 +19,7 @@ import {
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../ir/types.js";
 import { collectShapes } from "../shape-inference.js";
 import { ensureWrapperTypes } from "./any-helpers.js";
+import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps } from "./async-cps.js";
 import { collectClassDeclaration, compileClassBodies } from "./class-bodies.js";
 import { collectFunctionOwnLocals, collectReferencedIdentifiers } from "./closures.js";
 import { reportError } from "./context/errors.js";
@@ -45,6 +46,7 @@ import {
   MATH_HOST_METHODS_1ARG,
   MATH_HOST_METHODS_2ARG,
   parseRegExpLiteral,
+  resolveIdentifierType,
   resolveWasmType,
   STRING_METHODS,
   unwrapGeneratorYieldType,
@@ -68,6 +70,8 @@ import {
 import { computeElidableTopLevelTdzNames } from "./expressions/identifiers.js";
 import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.js";
 import { compileExpression, compileStatement } from "./shared.js";
+import { expandLinearU8ParamTypes } from "./linear-uint8-signatures.js";
+import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
 
 /** Accumulated state for the single-pass collector */
 interface UnifiedCollectorState {
@@ -104,6 +108,13 @@ interface UnifiedCollectorState {
   // -- collectCallbackImports --
   callbackFound: boolean;
   getterCallbackFound: boolean; // Object.defineProperty accessor descriptors (#929)
+  // -- collectAsyncCpsImports (#1042) --
+  // A CPS-eligible async function (single tail-await, no try-across-await) needs
+  // __make_callback + Promise_then2 + Promise_resolve registered UPFRONT so the
+  // outer-body driver gets stable funcMap indices (the outer body is not in
+  // ctx.liveBodies during emission, so a late import would not have its `call`
+  // opcodes shifted — the #1384 hazard). Only set when ASYNC_CPS_ENABLED.
+  asyncCpsFound: boolean;
   // -- collectFunctionalArrayImports --
   funcArrayNeed1: boolean;
   funcArrayNeed2: boolean;
@@ -190,6 +201,7 @@ export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedC
     jsonNeedParse: false,
     callbackFound: false,
     getterCallbackFound: false,
+    asyncCpsFound: false,
     funcArrayNeed1: false,
     funcArrayNeed2: false,
     unionFound: false,
@@ -295,6 +307,25 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       const elemType = receiverType.getNumberIndexType();
       if (elemType && (isNumberType(elemType) || isBooleanType(elemType) || isBigIntType(elemType))) {
         state.primitiveNeeded.add("number_toString");
+      }
+    }
+    // #1993 — the default (no-comparator) Array.prototype.sort compares by
+    // ToString (§23.1.3.30). Pre-register `string_compare` (and, for numeric
+    // arrays, `number_toString`) here so the codegen path can emit the
+    // stringify+compare without a late module-function shift.
+    if (methodName === "sort") {
+      const noComparator =
+        node.arguments.length === 0 ||
+        node.arguments[0]!.kind === ts.SyntaxKind.UndefinedKeyword ||
+        (ts.isIdentifier(node.arguments[0]!) && (node.arguments[0] as ts.Identifier).text === "undefined");
+      if (noComparator) {
+        const elemType = receiverType.getNumberIndexType();
+        if (elemType && (isNumberType(elemType) || isBooleanType(elemType))) {
+          state.primitiveNeeded.add("number_toString");
+          state.primitiveNeeded.add("string_compare");
+        } else if (elemType && isStringType(elemType)) {
+          state.primitiveNeeded.add("string_compare");
+        }
       }
     }
     if (isNumberType(receiverType) && methodName === "toString") {
@@ -475,6 +506,22 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       if (ctx.nativeStrings) state.parseNeeded.add("__str_to_number");
     }
   }
+  // #2160 — `Number.parseInt` / `Number.parseFloat` (§21.1.2.12-13) are the same
+  // functions as the global `parseInt` / `parseFloat` and lower through the same
+  // call-site routing (calls.ts), which reads `ctx.funcMap.get("parseInt"/"parseFloat")`.
+  // The collector above only saw the *bare* identifier form, so the
+  // namespaced form never registered the import / native scanner and standalone
+  // fell through to a `__get_builtin` compile error. Detect the property-access
+  // form here so the same parse helper is registered.
+  if (
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    ts.isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === "Number" &&
+    (node.expression.name.text === "parseInt" || node.expression.name.text === "parseFloat")
+  ) {
+    state.parseNeeded.add(node.expression.name.text);
+  }
   if (
     ts.isPrefixUnaryExpression(node) &&
     node.operator === ts.SyntaxKind.PlusToken &&
@@ -483,7 +530,7 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   ) {
     const operandType = ctx.checker.getTypeAtLocation(node.operand);
     if (operandType.flags & ts.TypeFlags.StringLike) {
-      state.parseNeeded.add("parseFloat");
+      state.parseNeeded.add(ctx.nativeStrings ? "__str_to_number" : "parseFloat");
     }
   }
   if (
@@ -524,7 +571,7 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
         const leftType = ctx.checker.getTypeAtLocation(node.left);
         const rightType = ctx.checker.getTypeAtLocation(node.right);
         if (isStringType(leftType) || isStringType(rightType)) {
-          state.parseNeeded.add("parseFloat");
+          state.parseNeeded.add(ctx.nativeStrings ? "__str_to_number" : "parseFloat");
         }
       } catch {
         // Type resolution may fail
@@ -594,6 +641,31 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   if (!state.callbackFound) {
     if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) {
       state.callbackFound = true;
+    }
+  }
+
+  // ── collectAsyncCpsImports (#1042) ──
+  // Detect a CPS-eligible async function so the host imports the driver emits
+  // (__make_callback / Promise_then2 / Promise_resolve) are registered upfront
+  // with STABLE funcMap indices. Mirrors the function-body.ts activation gate
+  // exactly (single tail-await canonical shape, no try-across-await, JS-host).
+  if (
+    ASYNC_CPS_ENABLED &&
+    !state.asyncCpsFound &&
+    !ctx.wasi &&
+    !ctx.standalone &&
+    ts.isFunctionDeclaration(node) &&
+    node.body !== undefined &&
+    hasAsyncModifier(node)
+  ) {
+    const plan = analyzeAsyncBody(ctx, node);
+    // Mirror the function-body.ts activation gate EXACTLY (#1936
+    // `asyncFnNeedsCps`): genuine suspension + single canonical tail-await
+    // shape. Pre-registering imports for a fn that won't actually be CPS-lowered
+    // would add unused imports (harmless) but a mismatch the other way would
+    // re-introduce the late-import shift hazard, so keep the predicates identical.
+    if (asyncFnNeedsCps(node, plan)) {
+      state.asyncCpsFound = true;
     }
   }
   // (#1239) Object literals carrying get/set accessor declarations also
@@ -1210,20 +1282,44 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     addImport(ctx, "env", "JSON_stringify", { kind: "func", typeIdx });
   }
   if (!jsonHostUnavailable && state.jsonNeedParse) {
-    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+    // #2013 — (text, reviver) so JSON.parse can apply §25.5.1
+    // InternalizeJSONProperty. The reviver is `ref.null.extern` when absent.
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "JSON_parse", { kind: "func", typeIdx });
   }
 
   // ── collectCallbackImports finalize ──
-  if (state.callbackFound || state.getterCallbackFound) {
+  if (state.callbackFound || state.getterCallbackFound || state.asyncCpsFound) {
     const typeIdx = addFuncType(ctx, [{ kind: "i32" }, { kind: "externref" }], [{ kind: "externref" }]);
-    if (state.callbackFound) {
+    if ((state.callbackFound || state.asyncCpsFound) && !ctx.funcMap.has("__make_callback")) {
       addImport(ctx, "env", "__make_callback", { kind: "func", typeIdx });
     }
     if (state.getterCallbackFound) {
       // __make_getter_callback: same signature — wraps a function so 'this' is bound (#929)
       // Used for Object.defineProperty accessor descriptors (getter/setter callbacks).
       addImport(ctx, "env", "__make_getter_callback", { kind: "func", typeIdx });
+    }
+  }
+
+  // ── collectAsyncCpsImports finalize (#1042) ──
+  // The CPS driver (emitAsyncStateMachine) emits `Promise_resolve` (wrap the
+  // awaited value) and `Promise_then2` (chain the continuation) by stable
+  // funcMap index. Register both upfront so the outer async body never takes
+  // the late-import path (its `call` opcodes would not be shifted — #1384).
+  // `__make_callback` is registered above. Idempotent via funcMap guard so a
+  // module that also uses `.then(cb1,cb2)` / `Promise.resolve` is unaffected.
+  if (state.asyncCpsFound) {
+    if (!ctx.funcMap.has("Promise_resolve")) {
+      const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+      addImport(ctx, "env", "Promise_resolve", { kind: "func", typeIdx });
+    }
+    if (!ctx.funcMap.has("Promise_then2")) {
+      const typeIdx = addFuncType(
+        ctx,
+        [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      addImport(ctx, "env", "Promise_then2", { kind: "func", typeIdx });
     }
   }
 
@@ -1993,6 +2089,7 @@ export function collectPropsFromStatements(
               }
             }
             extraProps.push({ name: propName, type: wasmType });
+            ctx.widenedDefinePropertyKeys.add(`${varName}:${propName}`);
           }
         }
       }
@@ -2028,6 +2125,7 @@ export function collectPropsFromStatements(
                   }
                 }
                 extraProps.push({ name: propName, type: wasmType });
+                ctx.widenedDefinePropertyKeys.add(`${varName}:${propName}`);
               }
             }
           }
@@ -2345,6 +2443,8 @@ function registerBodylessFunctionDeclaration(
     }
   }
 
+  params = expandLinearU8ParamTypes(ctx, stmt, params);
+
   const optionalParams: OptionalParamInfo[] = [];
   for (let i = 0; i < stmt.parameters.length; i++) {
     const param = stmt.parameters[i]!;
@@ -2652,6 +2752,11 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       const name = stmt.name ? stmt.name.text : "default";
       // Register the function's .name value for ES-spec compliance
       ctx.functionNameMap.set(name, name);
+      // (#1983) Record the top-level user-function name so class-member funcMap
+      // keys (`${className}_${member}`) that would collide with it can relocate.
+      // Only real `function` declarations participate — class names are tracked
+      // separately and must NOT poison the collision set.
+      if (stmt.name) ctx.topLevelFunctionNames.add(name);
       // #1463 — capture source text for Function.prototype.toString() so that
       // `someFn.toString()` returns the original declaration text instead of
       // the `function () { [native code] }` placeholder. Only top-level
@@ -2849,6 +2954,8 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
           results = isVoidType(rUnwrapped) ? [] : [resolveWasmType(ctx, rUnwrapped)];
         }
       }
+
+      params = expandLinearU8ParamTypes(ctx, stmt, params);
 
       const optionalParams: OptionalParamInfo[] = [];
       for (let i = 0; i < stmt.parameters.length; i++) {
@@ -3206,14 +3313,35 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     }
   }
 
+  /**
+   * (#2176) Resolve the wasm-relevant type of a module-level variable
+   * declaration. `getTypeAtLocation(decl)` returns the declaration's
+   * (initializer-inferred) type, but when the initializer is a bare identifier
+   * that collides with an ambient lib global (e.g. `const y = name` where
+   * `name` shadows lib.dom's `var name: string`), script-mode scoping makes the
+   * checker bind the initializer reference to the ambient symbol (`void`), so
+   * `y` is typed `void` → i32 global → value reads back as `0`/`undefined`.
+   * Prefer the user-resolved initializer type in that case.
+   */
+  function moduleVarDeclType(decl: ts.VariableDeclaration): ts.Type {
+    if (decl.initializer && ts.isIdentifier(decl.initializer)) {
+      return resolveIdentifierType(ctx, decl.initializer);
+    }
+    return ctx.checker.getTypeAtLocation(decl);
+  }
+
   /** Register var declarations from a variable declaration list as module globals. */
   function registerVarDeclListGlobals(list: ts.VariableDeclarationList): void {
     // Only hoist `var` (not let/const) — let/const are block-scoped
     if (list.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) return;
     for (const decl of list.declarations) {
       if (ts.isIdentifier(decl.name)) {
-        const varType = ctx.checker.getTypeAtLocation(decl);
-        const wasmType = resolveWasmType(ctx, varType);
+        const varType = moduleVarDeclType(decl);
+        // #1914 — `var m = re.exec(s)` under standalone gets the precise
+        // match-vec ref type so indexed reads stay on the static vec path
+        // (externref-widened globals round-trip through __extern_get_idx,
+        // which can't see typed vecs and returns null).
+        const wasmType = inferStandaloneRegExpMatchGlobalType(ctx, decl) ?? resolveWasmType(ctx, varType);
         registerModuleGlobal(decl.name.text, wasmType);
       } else if (ts.isObjectBindingPattern(decl.name) || ts.isArrayBindingPattern(decl.name)) {
         registerBindingNames(decl.name);
@@ -3292,8 +3420,12 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       const isLetOrConst = (stmt.declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) !== 0;
       for (const decl of stmt.declarationList.declarations) {
         if (ts.isIdentifier(decl.name)) {
-          const varType = ctx.checker.getTypeAtLocation(decl);
-          const wasmType = resolveWasmType(ctx, varType);
+          const varType = moduleVarDeclType(decl);
+          // #1914 — `var m = re.exec(s)` under standalone gets the precise
+          // match-vec ref type so indexed reads stay on the static vec path
+          // (externref-widened globals round-trip through __extern_get_idx,
+          // which can't see typed vecs and returns null).
+          const wasmType = inferStandaloneRegExpMatchGlobalType(ctx, decl) ?? resolveWasmType(ctx, varType);
           registerModuleGlobal(decl.name.text, wasmType);
           if (isLetOrConst) {
             ctx.tdzLetConstNames.add(decl.name.text);
@@ -3914,81 +4046,57 @@ export function compileDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     ctx.pendingInitBody = compiledInitFctx.body;
   }
 
-  // Clear pendingInitBody before injection (it will be in mod.functions or main body after this)
+  // Clear pendingInitBody before injection (it lands in mod.functions after this)
   ctx.pendingInitBody = null;
 
-  // Helper: recursively shift local indices in instruction trees
-  function shiftLocalIndices(instrs: Instr[], shift: number): void {
-    for (const instr of instrs) {
-      if (
-        (instr.op === "local.get" || instr.op === "local.set" || instr.op === "local.tee") &&
-        typeof (instr as any).index === "number"
-      ) {
-        (instr as any).index += shift;
-      }
-      // Recurse into nested blocks
-      const a = instr as any;
-      if (a.then) shiftLocalIndices(a.then, shift);
-      if (a.else) shiftLocalIndices(a.else, shift);
-      if (a.body) shiftLocalIndices(a.body, shift);
-      if (a.instrs) shiftLocalIndices(a.instrs, shift);
-    }
-  }
-
-  // Inject the compiled init body into the appropriate location
+  // Inject the compiled init body into a standalone `__module_init`.
+  //
+  // #1978: we deliberately do NOT splice the init body into a user function
+  // named `main`. Module-global initializers must run exactly ONCE (at module
+  // load / instantiation), but a user `main()` is a normal export the host may
+  // call repeatedly — splicing the init body in re-ran the global initializers
+  // on every call (top-level state reset to its initial value) and, under the
+  // `main()`-calls-itself WASI convention, prepended a call to `main`'s own
+  // index, causing unbounded self-recursion. `main` is just an ordinary export;
+  // it gets no special init treatment. The standalone `__module_init` runs once
+  // via the Wasm start section (or WASI `_start`), matching ES module semantics.
   if (compiledInitFctx && compiledInitFctx.body.length > 0) {
     ctx.mod.hasTopLevelStatements = true;
-    const mainIdx = funcByName.get("main");
-    if (mainIdx !== undefined) {
-      const mainFunc = ctx.mod.functions[mainIdx]!;
-      // Prepend init body + init locals to main's body
-      mainFunc.body = [...compiledInitFctx.body, ...mainFunc.body];
-      // Add init locals to main's locals (adjust any local indices in init body)
-      // Find number of existing main locals
-      const existingLocals = mainFunc.locals.length;
-      // Append init locals to main's locals
-      mainFunc.locals = [...mainFunc.locals, ...compiledInitFctx.locals];
-      // Adjust local indices in init body (shift by existing locals count in main)
-      // Must recurse into nested blocks (if/then/else, block, loop)
-      if (existingLocals > 0) {
-        shiftLocalIndices(compiledInitFctx.body, existingLocals);
-      }
-    } else {
-      // No main() function — create a standalone __module_init and run it
-      // automatically via the Wasm start section on instantiation (#907).
-      //
-      // This replaces both:
-      //   - the legacy `__init_done` runtime guard that injected a
-      //     `if (!done) { done = 1; __module_init(); }` preamble at the start
-      //     of every exported function, and
-      //   - the `_start` export wrapper used for module-init-only programs.
-      //
-      // Wasm `start` runs once during instantiation, before the host can call
-      // any export. That matches ES module semantics (top-level code runs at
-      // module load) and removes the per-call guard branch from every export.
-      //
-      // For WASI mode, we don't set the start section here — `addWasiStartExport`
-      // creates a dedicated `_start` export that wraps `__module_init`. Setting
-      // both would cause init to run twice (once during instantiation, once
-      // when the host calls `_start`).
 
-      const initTypeIdx = addFuncType(ctx, [], [], "__module_init_type");
-      const initFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-      ctx.mod.functions.push({
-        name: "__module_init",
-        typeIdx: initTypeIdx,
-        locals: compiledInitFctx.locals,
-        body: compiledInitFctx.body,
-        exported: false,
-      });
+    // Create a standalone __module_init and run it automatically via the Wasm
+    // start section on instantiation (#907).
+    //
+    // This replaces both:
+    //   - the legacy `__init_done` runtime guard that injected a
+    //     `if (!done) { done = 1; __module_init(); }` preamble at the start
+    //     of every exported function, and
+    //   - the `_start` export wrapper used for module-init-only programs.
+    //
+    // Wasm `start` runs once during instantiation, before the host can call
+    // any export. That matches ES module semantics (top-level code runs at
+    // module load) and removes the per-call guard branch from every export.
+    //
+    // For WASI mode, we don't set the start section here — `addWasiStartExport`
+    // creates a dedicated `_start` export that wraps `__module_init`. Setting
+    // both would cause init to run twice (once during instantiation, once
+    // when the host calls `_start`).
 
-      if (!ctx.wasi) {
-        // Use Wasm start section — init runs automatically on instantiation.
-        ctx.mod.startFuncIdx = initFuncIdx;
-      }
-      // else: WASI path — addWasiStartExport will export `_start` calling
-      // `__module_init`, and the host will invoke it explicitly.
+    const initTypeIdx = addFuncType(ctx, [], [], "__module_init_type");
+    const initFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.mod.functions.push({
+      name: "__module_init",
+      typeIdx: initTypeIdx,
+      locals: compiledInitFctx.locals,
+      body: compiledInitFctx.body,
+      exported: false,
+    });
+
+    if (!ctx.wasi) {
+      // Use Wasm start section — init runs automatically on instantiation.
+      ctx.mod.startFuncIdx = initFuncIdx;
     }
+    // else: WASI path — addWasiStartExport will export `_start` calling
+    // `__module_init`, and the host will invoke it explicitly.
   }
 }
 

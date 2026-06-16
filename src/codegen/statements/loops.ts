@@ -8,7 +8,8 @@ import { forEachChild, ts } from "../../ts-api.js";
 import { collectReferencedIdentifiers } from "../closures.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { reportError, reportErrorNoNode } from "../context/errors.js";
-import { allocLocal, getLocalType } from "../context/locals.js";
+import { reportSilentFallback } from "../fallback-telemetry.js";
+import { allocLocal, getLocalType, restoreLocals, snapshotLocals } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { emitExternrefDestructureGuard } from "../destructuring-params.js";
 import {
@@ -16,8 +17,8 @@ import {
   findUnresolvableInObjectPattern,
   isStrictContext,
 } from "../expressions/assignment.js";
-import { emitCoercedLocalSet } from "../expressions/helpers.js";
-import { shiftLateImportIndices } from "../expressions/late-imports.js";
+import { emitCoercedLocalSet, emitThrowTypeError } from "../expressions/helpers.js";
+import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "../expressions/late-imports.js";
 import {
   addIteratorImports,
   ensureI32Condition,
@@ -35,7 +36,9 @@ import {
   emitBoundsCheckedArrayGet,
   valTypesMatch,
 } from "../shared.js";
+import { containsLinearU8Allocation, emitLinearU8ArenaMark, linearU8ArenaResetInstrs } from "../linear-uint8-arena.js";
 import { nativeGeneratorInfoForForOfSubject, tryCompileNativeGeneratorForOf } from "../generators-native.js";
+import { ensureNativeIteratorRuntime } from "../iterator-native.js";
 import {
   compileArrayDestructuring,
   arrayDstrNeedsIdentity,
@@ -59,29 +62,39 @@ export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext
   //     <condition>
   //     i32.eqz
   //     br_if $break (depth to block)
-  //     <body>
+  //     block $continue_body { <body> }
+  //     <linear-u8 arena reset, if needed>
   //     br $continue (depth to loop)
   //   end
   // end
 
+  const arenaMark = containsLinearU8Allocation(ctx, stmt.statement)
+    ? emitLinearU8ArenaMark(ctx, fctx, "__linu8_loop_mark")
+    : undefined;
+  const arenaReset = linearU8ArenaResetInstrs(ctx, arenaMark);
   const savedBody = pushBody(fctx);
 
-  // Adjust existing break/continue depths: block+loop adds 2 nesting levels
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 2;
-  adjustRethrowDepth(fctx, 2);
+  // Adjust existing break/continue depths: block+loop+body-block adds 3 levels
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
+  adjustRethrowDepth(fctx, 3);
 
   // Track break/continue depths
-  // Inside the generated structure, br 1 = break, br 0 = continue
-  fctx.breakStack.push(1); // break: exit the outer block
-  fctx.continueStack.push(0); // continue: restart the loop
+  // From body inside $continue_body: break = br 2, continue = br 0.
+  fctx.breakStack.push(2); // break: exit the outer block
+  fctx.continueStack.push(0); // continue: exit body block, then reset/restart
 
   // Compile condition
+  const condInstrs: Instr[] = [];
+  ctx.liveBodies.add(condInstrs);
+  const condBody = fctx.body;
+  fctx.body = condInstrs;
   const condType = compileExpression(ctx, fctx, stmt.expression);
   ensureI32Condition(fctx, condType, ctx);
   fctx.body.push({ op: "i32.eqz" });
   fctx.body.push({ op: "br_if", depth: 1 }); // break out of block
+  fctx.body = condBody;
 
   // Compile body — must save/restore block-scoped shadows so that let/const
   // declarations inside the loop body do not leak into the outer scope (#817).
@@ -95,20 +108,25 @@ export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext
     compileStatement(ctx, fctx, stmt.statement);
   }
 
-  fctx.body.push({ op: "br", depth: 0 }); // continue loop
-  const loopBody = fctx.body;
+  const bodyInstrs = fctx.body;
 
   fctx.breakStack.pop();
   fctx.continueStack.pop();
 
   // Restore existing break/continue depths
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 2;
-  adjustRethrowDepth(fctx, -2);
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
+  adjustRethrowDepth(fctx, -3);
 
   popBody(fctx, savedBody);
 
+  const loopBody: Instr[] = [
+    ...condInstrs,
+    { op: "block", blockType: { kind: "empty" }, body: bodyInstrs },
+    ...arenaReset,
+    { op: "br", depth: 0 },
+  ];
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
@@ -120,6 +138,7 @@ export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext
       },
     ],
   });
+  ctx.liveBodies.delete(condInstrs);
 }
 
 /**
@@ -747,10 +766,15 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
   //     block $continue {             ; continue target (depth 0 from body)
   //       body
   //     }
+  //     <linear-u8 arena reset, if needed>
   //     incrementor
   //     br $loop
   //   }
   // }
+  const arenaMark = containsLinearU8Allocation(ctx, stmt.statement)
+    ? emitLinearU8ArenaMark(ctx, fctx, "__linu8_loop_mark")
+    : undefined;
+  const arenaReset = linearU8ArenaResetInstrs(ctx, arenaMark);
   const savedBody = pushBody(fctx);
 
   // Adjust existing break/continue depths: block+loop+block adds 3 nesting levels
@@ -903,6 +927,7 @@ export function compileForStatement(ctx: CodegenContext, fctx: FunctionContext, 
       blockType: { kind: "empty" },
       body: bodyInstrs,
     },
+    ...arenaReset,
     ...freshCellInstrs,
     ...incrInstrs,
     { op: "br", depth: 0 }, // restart $loop
@@ -991,11 +1016,16 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
   //     block $continue {             ; continue target (depth 0 from body)
   //       <body>
   //     }
+  //     <linear-u8 arena reset, if needed>
   //     <condition>
   //     br_if $loop                   ; true → restart loop (depth 0 from loop level)
   //   }
   // }
 
+  const arenaMark = containsLinearU8Allocation(ctx, stmt.statement)
+    ? emitLinearU8ArenaMark(ctx, fctx, "__linu8_loop_mark")
+    : undefined;
+  const arenaReset = linearU8ArenaResetInstrs(ctx, arenaMark);
   const savedBody = pushBody(fctx);
 
   // Adjust existing break/continue depths: block+loop+block adds 3 nesting levels
@@ -1050,6 +1080,7 @@ export function compileDoWhileStatement(ctx: CodegenContext, fctx: FunctionConte
       blockType: { kind: "empty" },
       body: bodyInstrs,
     },
+    ...arenaReset,
     ...condInstrs,
   ];
 
@@ -1278,7 +1309,19 @@ function compileForOfDestructuring(
         syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
         return;
       }
-      // Non-ref, non-externref (f64, i32): assign defaults or undefined sentinels
+      // #846: A non-ref, non-externref element (f64/i32 ⇒ number/boolean) is a
+      // primitive that lacks [Symbol.iterator]. ArrayBindingPattern initialization
+      // (§8.5.2 BindingInitialization → §8.5.3 IteratorBindingInitialization)
+      // first performs GetIterator(elem), which throws TypeError for a non-iterable
+      // primitive. This applies even to an EMPTY pattern (`for ([] of [1])`) because
+      // GetIterator runs before any binding element is read. Previously this branch
+      // silently assigned undefined sentinels and never threw. Strings are iterable
+      // but lower to a string ref / externref, so they take a different branch and
+      // are unaffected.
+      //
+      // The binding locals are still declared (allocated) so later references in
+      // the loop body type-check, but the throw makes the code after it
+      // unreachable in this iteration.
       for (const element of pattern.elements) {
         if (ts.isOmittedExpression(element)) continue;
         if (!ts.isBindingElement(element)) continue;
@@ -1286,27 +1329,9 @@ function compileForOfDestructuring(
         const localName = element.name.text;
         const bindingTsType = ctx.checker.getTypeAtLocation(element);
         const bindingType = resolveWasmType(ctx, bindingTsType);
-        const localIdx = allocLocal(fctx, localName, bindingType);
-        if (element.initializer) {
-          const instrs = collectInstrs(fctx, () => {
-            compileExpression(ctx, fctx, element.initializer!, bindingType);
-            fctx.body.push({ op: "local.set", index: localIdx } as Instr);
-          });
-          fctx.body.push(...instrs);
-        } else {
-          if (bindingType.kind === "f64") {
-            fctx.body.push({ op: "f64.const", value: NaN });
-          } else if (bindingType.kind === "i32") {
-            fctx.body.push({ op: "i32.const", value: 0 });
-          } else if (bindingType.kind === "ref_null" || bindingType.kind === "ref") {
-            const refTypeIdx = (bindingType as { typeIdx: number }).typeIdx;
-            fctx.body.push({ op: "ref.null", typeIdx: refTypeIdx });
-          } else {
-            fctx.body.push({ op: "ref.null.extern" });
-          }
-          fctx.body.push({ op: "local.set", index: localIdx });
-        }
+        allocLocal(fctx, localName, bindingType);
       }
+      emitThrowTypeError(ctx, fctx, "value is not iterable");
       return;
     }
 
@@ -1648,7 +1673,10 @@ function compileForOfAssignDestructuring(
           : propName;
 
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(ctx, "lookup-miss-skip", "loops:forof-assign-destructure-field-miss", prop);
+        continue;
+      }
 
       let targetLocal = fctx.localMap.get(targetName);
       let targetSyncGlobalIdx: number | undefined;
@@ -2058,15 +2086,12 @@ function compileForOfAssignDestructuringExternref(
   expr: ts.ArrayLiteralExpression,
   elemLocal: number,
 ): void {
-  // Ensure __extern_get is available
+  // Ensure __extern_get is available (#1866: ensureLateImport routes to the
+  // native object-runtime impl under --target standalone — no leaked
+  // `env::__extern_get` host import — and to the host import in JS-host mode).
+  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
   let getIdx = ctx.funcMap.get("__extern_get");
-  if (getIdx === undefined) {
-    const importsBefore = ctx.numImportFuncs;
-    const getType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__extern_get", { kind: "func", typeIdx: getType });
-    shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-    getIdx = ctx.funcMap.get("__extern_get");
-  }
   if (getIdx === undefined) return;
 
   // Ensure __box_number is available
@@ -2343,6 +2368,30 @@ export function compileForOfStatement(ctx: CodegenContext, fctx: FunctionContext
     return;
   }
 
+  // #681: `for (x of arr.values())` is semantically identical to `for (x of arr)`
+  // — Array.prototype.values() walks the element list in order. Recognize the
+  // CallExpression subject and drive the existing index loop over the inner
+  // receiver, so standalone/WASI iterate natively instead of hard-erroring in
+  // compileArrayIteratorMethod. JS-host mode benefits too (no __array_values).
+  //
+  // `arr.keys()` (§23.1.3.16 — yields each index) and `arr.entries()`
+  // (§23.1.3.4 — yields each `[index, value]` pair) share the same in-order
+  // index drive but project a different per-iteration value, so they go through
+  // compileForOfArrayKeys / compileForOfArrayEntries. All three eliminate the
+  // __array_values/__array_keys/__array_entries host imports in standalone/WASI.
+  const arrayIterRecv = arrayIteratorReceiverForForOf(ctx, fctx, stmt);
+  if (arrayIterRecv) {
+    if (arrayIterRecv.method === "values") {
+      if (compileForOfArrayTentative(ctx, fctx, stmt, arrayIterRecv.receiver)) return;
+    } else if (arrayIterRecv.method === "keys") {
+      compileForOfArrayKeys(ctx, fctx, stmt, arrayIterRecv.receiver);
+      return;
+    } else {
+      compileForOfArrayEntries(ctx, fctx, stmt, arrayIterRecv.receiver);
+      return;
+    }
+  }
+
   // The TS type resolving to `Array` is necessary but NOT sufficient to use the
   // fast vec-struct array path: an Array-typed iterable can still lower to a
   // non-vec value (a Symbol.iterator whose declared return widens to Array, an
@@ -2353,6 +2402,47 @@ export function compileForOfStatement(ctx: CodegenContext, fctx: FunctionContext
   if (!compileForOfArrayTentative(ctx, fctx, stmt)) {
     compileForOfIterator(ctx, fctx, stmt);
   }
+}
+
+/** #681: an `arr.values()/keys()/entries()` for-of subject resolved to a vec. */
+interface ArrayIteratorReceiver {
+  receiver: ts.Expression;
+  method: "values" | "keys" | "entries";
+}
+
+/**
+ * #681: detect `for (… of <recv>.<m>())` for `m` ∈ {values, keys, entries} and
+ * return the inner `<recv>` (plus which method) when it is a zero-argument call
+ * whose receiver resolves to a Wasm vec struct. The three Array iterator
+ * methods all walk the element list in order:
+ *   - `.values()`  yields each element  → identical to iterating the array.
+ *   - `.keys()`    yields each index    → compileForOfArrayKeys (§23.1.3.16).
+ *   - `.entries()` yields `[i, value]`  → compileForOfArrayEntries (§23.1.3.4).
+ * Recognizing them lets standalone/WASI drive a pure-Wasm index loop instead of
+ * hard-erroring in compileArrayIteratorMethod. Returns undefined when the
+ * subject is not a recognizable Array iterator-method call over a vec.
+ */
+function arrayIteratorReceiverForForOf(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+): ArrayIteratorReceiver | undefined {
+  const subject = stmt.expression;
+  if (!ts.isCallExpression(subject) || subject.arguments.length !== 0) return undefined;
+  const callee = subject.expression;
+  if (!ts.isPropertyAccessExpression(callee)) return undefined;
+  const method = callee.name.text;
+  if (method !== "values" && method !== "keys" && method !== "entries") return undefined;
+
+  // Confirm the receiver lowers to a vec struct without leaving any code behind.
+  const bodyLenBefore = fctx.body.length;
+  const localsSnap = snapshotLocals(fctx); // #1847
+  const recvType = compileExpression(ctx, fctx, callee.expression);
+  fctx.body.length = bodyLenBefore;
+  restoreLocals(fctx, localsSnap); // #1847 — also drops stale localMap entries
+  if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) return undefined;
+  if (getArrTypeIdxFromVec(ctx, recvType.typeIdx) < 0) return undefined;
+  return { receiver: callee.expression, method };
 }
 
 /** Compile for...of over a string — iterate characters using __str_charAt */
@@ -2375,20 +2465,20 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
   // The IR path (#1183) sidesteps this by walking
   // `ctx.mod.functions[i].name` at lowering time. Mirroring that here
   // for the legacy path:
-  let charAtIdx: number | undefined;
+  let flattenIdx: number | undefined;
+  let substringIdx: number | undefined;
   for (let i = 0; i < ctx.mod.functions.length; i++) {
-    if (ctx.mod.functions[i]!.name === "__str_charAt") {
-      charAtIdx = ctx.numImportFuncs + i;
-      break;
-    }
+    const name = ctx.mod.functions[i]!.name;
+    if (name === "__str_flatten") flattenIdx = ctx.numImportFuncs + i;
+    else if (name === "__str_substring") substringIdx = ctx.numImportFuncs + i;
+    if (flattenIdx !== undefined && substringIdx !== undefined) break;
   }
-  if (charAtIdx === undefined) {
-    reportError(ctx, stmt, "for-of on string: __str_charAt helper not available");
+  if (flattenIdx === undefined || substringIdx === undefined) {
+    reportError(ctx, stmt, "for-of on string: __str_flatten/__str_substring helpers not available");
     return;
   }
 
   const strType = nativeStringType(ctx);
-  const anyStrTypeIdx = ctx.anyStrTypeIdx;
 
   // Compile the iterable expression (string ref)
   const bodyLenBefore = fctx.body.length;
@@ -2406,13 +2496,42 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
   // Mark position for null guard wrapping
   const strNullGuardStart = fctx.body.length;
 
-  // Extract length from string (field 0 of AnyString struct)
+  // (#1470) Flatten ONCE up front and cache len/off/data: the loop reads raw
+  // code units to detect surrogate pairs (§22.1.5.1 — the String iterator
+  // yields code points, so a well-formed pair is one 2-code-unit element).
+  const flatLocal = allocLocal(fctx, `__forof_flat_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: ctx.nativeStrTypeIdx,
+  });
+  fctx.body.push({ op: "local.get", index: strLocal });
+  fctx.body.push({ op: "call", funcIdx: flattenIdx });
+  fctx.body.push({ op: "local.set", index: flatLocal });
+
   const lenLocal = allocLocal(fctx, `__forof_len_${fctx.locals.length}`, {
     kind: "i32",
   });
-  fctx.body.push({ op: "local.get", index: strLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: anyStrTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.get", index: flatLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 0 });
   fctx.body.push({ op: "local.set", index: lenLocal });
+
+  const offLocal = allocLocal(fctx, `__forof_off_${fctx.locals.length}`, {
+    kind: "i32",
+  });
+  fctx.body.push({ op: "local.get", index: flatLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: offLocal });
+
+  const dataLocal = allocLocal(fctx, `__forof_data_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: ctx.nativeStrDataTypeIdx,
+  });
+  fctx.body.push({ op: "local.get", index: flatLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 2 });
+  fctx.body.push({ op: "local.set", index: dataLocal });
+
+  const takeLocal = allocLocal(fctx, `__forof_take_${fctx.locals.length}`, {
+    kind: "i32",
+  });
 
   // Allocate counter local (i32)
   const iLocal = allocLocal(fctx, `__forof_i_${fctx.locals.length}`, {
@@ -2461,10 +2580,61 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
   fctx.body.push({ op: "i32.ge_s" });
   fctx.body.push({ op: "br_if", depth: 1 }); // break
 
-  // Get character: c = charAt(str, i)
-  fctx.body.push({ op: "local.get", index: strLocal });
+  // take = 1; if data[off+i] is a high surrogate followed by a low surrogate,
+  // take = 2 (the pair is one code point — §22.1.5.1).
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "local.set", index: takeLocal });
+  // (data[off + i] & 0xFC00) == 0xD800 && i + 1 < len
+  fctx.body.push({ op: "local.get", index: dataLocal });
+  fctx.body.push({ op: "local.get", index: offLocal });
   fctx.body.push({ op: "local.get", index: iLocal });
-  fctx.body.push({ op: "call", funcIdx: charAtIdx });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "array.get_u", typeIdx: ctx.nativeStrDataTypeIdx });
+  fctx.body.push({ op: "i32.const", value: 0xfc00 });
+  fctx.body.push({ op: "i32.and" });
+  fctx.body.push({ op: "i32.const", value: 0xd800 });
+  fctx.body.push({ op: "i32.eq" });
+  fctx.body.push({ op: "local.get", index: iLocal });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({ op: "i32.and" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      // (data[off + i + 1] & 0xFC00) == 0xDC00 → take = 2
+      { op: "local.get", index: dataLocal },
+      { op: "local.get", index: offLocal },
+      { op: "local.get", index: iLocal },
+      { op: "i32.add" },
+      { op: "i32.const", value: 1 },
+      { op: "i32.add" },
+      { op: "array.get_u", typeIdx: ctx.nativeStrDataTypeIdx },
+      { op: "i32.const", value: 0xfc00 },
+      { op: "i32.and" },
+      { op: "i32.const", value: 0xdc00 },
+      { op: "i32.eq" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "i32.const", value: 2 },
+          { op: "local.set", index: takeLocal },
+        ],
+      } as Instr,
+    ],
+  } as Instr);
+
+  // Get element: c = __str_substring(flat, i, i + take)
+  fctx.body.push({ op: "local.get", index: flatLocal });
+  fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  fctx.body.push({ op: "local.get", index: iLocal });
+  fctx.body.push({ op: "local.get", index: iLocal });
+  fctx.body.push({ op: "local.get", index: takeLocal });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "call", funcIdx: substringIdx });
   fctx.body.push({ op: "local.set", index: elemLocal });
 
   // Compile body — save/restore block-scoped shadows for let/const (#817).
@@ -2478,9 +2648,9 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
     compileStatement(ctx, fctx, stmt.statement);
   }
 
-  // Increment i
+  // Advance by the consumed code-unit count (1, or 2 for a surrogate pair)
   fctx.body.push({ op: "local.get", index: iLocal });
-  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "local.get", index: takeLocal });
   fctx.body.push({ op: "i32.add" });
   fctx.body.push({ op: "local.set", index: iLocal });
 
@@ -2532,11 +2702,17 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
  * and if so delegates to compileForOfArray (which re-compiles the expression).
  * Returns true if the array path was used, false if caller should fall back.
  */
-function compileForOfArrayTentative(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForOfStatement): boolean {
+function compileForOfArrayTentative(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  iterableOverride?: ts.Expression,
+): boolean {
+  const iterableExpr = iterableOverride ?? stmt.expression;
   // Tentatively compile just the expression to discover its Wasm type
   const bodyLenBefore = fctx.body.length;
-  const localsLenBefore = fctx.locals.length;
-  const exprType = compileExpression(ctx, fctx, stmt.expression);
+  const localsSnap = snapshotLocals(fctx); // #1847
+  const exprType = compileExpression(ctx, fctx, iterableExpr);
 
   // Check if it compiled to a ref to a vec struct (not just any struct —
   // a class instance is also a struct but not iterable via array access).
@@ -2547,23 +2723,29 @@ function compileForOfArrayTentative(ctx: CodegenContext, fctx: FunctionContext, 
       // Confirmed vec struct — undo the tentative compilation and use the
       // full array path (which compiles the expression again with proper setup)
       fctx.body.length = bodyLenBefore;
-      fctx.locals.length = localsLenBefore;
-      compileForOfArray(ctx, fctx, stmt);
+      restoreLocals(fctx, localsSnap); // #1847
+      compileForOfArray(ctx, fctx, stmt, iterableOverride);
       return true;
     }
   }
 
   // Not a vec struct — undo tentative compilation, let caller use iterator path
   fctx.body.length = bodyLenBefore;
-  fctx.locals.length = localsLenBefore;
+  restoreLocals(fctx, localsSnap); // #1847
   return false;
 }
 
 /** Compile for...of over an array using index-based loop (existing behavior) */
-function compileForOfArray(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForOfStatement): void {
-  // Compile the iterable expression (vec struct ref)
+function compileForOfArray(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  iterableOverride?: ts.Expression,
+): void {
+  // Compile the iterable expression (vec struct ref). `iterableOverride` is the
+  // inner receiver of a `.values()` call (#681) when present.
   const bodyLenBefore = fctx.body.length;
-  const vecType = compileExpression(ctx, fctx, stmt.expression);
+  const vecType = compileExpression(ctx, fctx, iterableOverride ?? stmt.expression);
   if (!vecType || (vecType.kind !== "ref" && vecType.kind !== "ref_null")) {
     fctx.body.length = bodyLenBefore;
     reportError(ctx, stmt, "for-of requires an array expression");
@@ -2591,6 +2773,17 @@ function compileForOfArray(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.
   // Save vec ref to temp local
   const vecLocal = allocLocal(fctx, `__forof_vec_${fctx.locals.length}`, vecType);
   fctx.body.push({ op: "local.set", index: vecLocal });
+
+  // #2065: Array iterators re-read the live length each step (§23.1.5.1), so a
+  // body that mutates the array (push/pop/splice/length=…/reassignment, or a
+  // closure that captures it) must observe the change. Hoisting `length`/`data`
+  // once before the loop misses pushes and over-iterates after pops (and a
+  // reallocated backing array leaves `data` stale). When the iterable is a plain
+  // identifier and the body may mutate it, re-read both fields from the vec local
+  // at the top of every iteration. Non-mutating loops keep the hoisted fast path.
+  const iterableSource = iterableOverride ?? stmt.expression;
+  const reReadLive =
+    ts.isIdentifier(iterableSource) && loopBodyMutatesIndexOrArray(stmt.statement, "", iterableSource.text);
 
   // Mark position for null guard wrapping (struct.get on null ref traps)
   const nullGuardStart = fctx.body.length;
@@ -2662,23 +2855,38 @@ function compileForOfArray(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.
   // Build loop body
   const savedBody = pushBody(fctx);
 
-  // Adjust existing break/continue depths: block+loop adds 2 nesting levels
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 2;
-  adjustRethrowDepth(fctx, 2);
+  // Structure: block { loop { guard/bind; block { body }; i++; br loop } }.
+  // `continue` exits the inner body block so the increment still runs.
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
+  adjustRethrowDepth(fctx, 3);
 
-  fctx.breakStack.push(1); // break = depth 1 (exit block)
-  fctx.continueStack.push(0); // continue = depth 0 (restart loop)
+  fctx.breakStack.push(2); // break = depth 2 (exit outer block)
+  fctx.continueStack.push(0); // continue = depth 0 (exit body block, then increment)
 
-  // Condition: i >= length → break
+  // Condition: i >= length → break. When the array may be mutated mid-loop
+  // (#2065), read the live length from the vec each iteration rather than the
+  // hoisted `lenLocal`.
   fctx.body.push({ op: "local.get", index: iLocal });
-  fctx.body.push({ op: "local.get", index: lenLocal });
+  if (reReadLive) {
+    fctx.body.push({ op: "local.get", index: vecLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  } else {
+    fctx.body.push({ op: "local.get", index: lenLocal });
+  }
   fctx.body.push({ op: "i32.ge_s" });
   fctx.body.push({ op: "br_if", depth: 1 }); // break
 
-  // Get element: x = data[i]
-  fctx.body.push({ op: "local.get", index: dataLocal });
+  // Get element: x = data[i]. Re-read the live data array when mutating (#2065):
+  // a growth that reallocated the backing array leaves the hoisted `dataLocal`
+  // stale.
+  if (reReadLive) {
+    fctx.body.push({ op: "local.get", index: vecLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  } else {
+    fctx.body.push({ op: "local.get", index: dataLocal });
+  }
   fctx.body.push({ op: "local.get", index: iLocal });
   fctx.body.push({ op: "array.get", typeIdx: arrTypeIdx });
   // Coerce from Wasm array element type to the local's declared type
@@ -2697,6 +2905,8 @@ function compileForOfArray(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.
     compileForOfAssignDestructuring(ctx, fctx, assignDestructExpr, elemLocal, elemType, vecTypeIdx, arrTypeIdx, stmt);
   }
 
+  const savedLoopBody = pushBody(fctx);
+
   // Compile body — save/restore block-scoped shadows for let/const (#817).
   if (ts.isBlock(stmt.statement)) {
     const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
@@ -2707,6 +2917,14 @@ function compileForOfArray(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.
   } else {
     compileStatement(ctx, fctx, stmt.statement);
   }
+  const bodyInstrs = fctx.body;
+  popBody(fctx, savedLoopBody);
+
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: bodyInstrs,
+  });
 
   // Increment i
   fctx.body.push({ op: "local.get", index: iLocal });
@@ -2721,10 +2939,10 @@ function compileForOfArray(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.
   fctx.continueStack.pop();
 
   // Restore existing break/continue depths
-  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 2;
-  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 2;
-  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 2;
-  adjustRethrowDepth(fctx, -2);
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
+  adjustRethrowDepth(fctx, -3);
 
   popBody(fctx, savedBody);
 
@@ -2779,6 +2997,305 @@ function compileForOfArray(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.
 }
 
 /**
+ * #681: `for (k of arr.keys())` — Array.prototype.keys() (§23.1.3.16) yields the
+ * array indices 0..length-1 in order. Drive a pure-Wasm index loop and bind the
+ * loop variable to `f64(i)` each iteration. The loop variable must be a plain
+ * identifier (number-typed); a binding/assignment pattern over a numeric key is
+ * not meaningful, so those fall through to the iterator protocol via the caller
+ * having already checked `method === "keys"`. Mirrors compileForOfArray's
+ * vec-length read, null guard and break/continue depth bookkeeping.
+ */
+function compileForOfArrayKeys(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  receiver: ts.Expression,
+): void {
+  // Resolve the loop variable. `.keys()` yields numbers, so only a simple
+  // identifier binding is supported; anything else falls back to the iterator
+  // path (which still hard-errors in standalone — an explicit, tracked gap).
+  let keyLocal: number;
+  let isConst = false;
+  if (ts.isVariableDeclarationList(stmt.initializer)) {
+    const decl = stmt.initializer.declarations[0]!;
+    if (!ts.isIdentifier(decl.name)) {
+      if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+      return;
+    }
+    isConst = !!(stmt.initializer.flags & ts.NodeFlags.Const);
+    keyLocal = allocLocal(fctx, decl.name.text, { kind: "f64" });
+    if (isConst) {
+      if (!fctx.constBindings) fctx.constBindings = new Set();
+      fctx.constBindings.add(decl.name.text);
+    }
+  } else if (ts.isIdentifier(stmt.initializer)) {
+    const varName = stmt.initializer.text;
+    keyLocal = fctx.localMap.get(varName) ?? allocLocal(fctx, varName, { kind: "f64" });
+  } else {
+    if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+    return;
+  }
+
+  emitArrayKeysEntriesLoop(ctx, fctx, stmt, receiver, (lenLocal, iLocal) => {
+    // key = f64(i)
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "f64.convert_i32_s" });
+    fctx.body.push({ op: "local.set", index: keyLocal });
+    void lenLocal;
+  });
+}
+
+/**
+ * #681: `for ([k, v] of arr.entries())` — Array.prototype.entries() (§23.1.3.4)
+ * yields a `[index, value]` pair for each element in order. The overwhelmingly
+ * common form destructures the pair directly, so bind `k = f64(i)` and
+ * `v = data[i]` per iteration without materializing a pair object. A
+ * non-destructured `for (pair of arr.entries())` would need a 2-tuple value —
+ * out of this slice — so it falls through to the iterator path.
+ */
+function compileForOfArrayEntries(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  receiver: ts.Expression,
+): void {
+  // Only support the destructured `[k, v]` binding/assignment form here.
+  let pattern: ts.ArrayBindingPattern | undefined;
+  let assignPattern: ts.ArrayLiteralExpression | undefined;
+  if (ts.isVariableDeclarationList(stmt.initializer)) {
+    const decl = stmt.initializer.declarations[0]!;
+    if (!ts.isArrayBindingPattern(decl.name)) {
+      if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+      return;
+    }
+    pattern = decl.name;
+    if (stmt.initializer.flags & ts.NodeFlags.Const) {
+      collectBindingNames(decl.name).forEach((n) => {
+        if (!fctx.constBindings) fctx.constBindings = new Set();
+        fctx.constBindings.add(n);
+      });
+    }
+  } else if (ts.isArrayLiteralExpression(stmt.initializer)) {
+    assignPattern = stmt.initializer;
+  } else {
+    if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+    return;
+  }
+
+  // Resolve the element (value) Wasm type from the receiver's vec/arr type.
+  const probeBody = fctx.body.length;
+  const probeLocals = snapshotLocals(fctx);
+  const recvType = compileExpression(ctx, fctx, receiver);
+  fctx.body.length = probeBody;
+  restoreLocals(fctx, probeLocals);
+  if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) {
+    if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+    return;
+  }
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, recvType.typeIdx);
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  if (!arrDef || arrDef.kind !== "array") {
+    if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+    return;
+  }
+  const elemType = arrDef.element;
+
+  // Identify the two binding targets [k, v]. Holes (`[, v]`) and rest
+  // (`[k, ...rest]`) are not handled in this slice → fall back.
+  const elements = pattern ? pattern.elements : assignPattern!.elements;
+  if (elements.length !== 2) {
+    if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+    return;
+  }
+
+  // Bind key target (a number identifier) and value target. Only simple
+  // identifier targets are supported here; nested patterns fall back.
+  const keyEl = elements[0]!;
+  const valEl = elements[1]!;
+  let keyLocal: number | undefined;
+  let valLocal: number | undefined;
+  if (pattern) {
+    if (
+      !ts.isBindingElement(keyEl) ||
+      keyEl.dotDotDotToken ||
+      !ts.isIdentifier(keyEl.name) ||
+      !ts.isBindingElement(valEl) ||
+      valEl.dotDotDotToken ||
+      !ts.isIdentifier(valEl.name)
+    ) {
+      if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+      return;
+    }
+    keyLocal = allocLocal(fctx, keyEl.name.text, { kind: "f64" });
+    valLocal = allocLocal(fctx, valEl.name.text, elemType);
+  } else {
+    if (!ts.isIdentifier(keyEl) || !ts.isIdentifier(valEl)) {
+      if (!compileForOfArrayTentative(ctx, fctx, stmt)) compileForOfIterator(ctx, fctx, stmt);
+      return;
+    }
+    keyLocal = fctx.localMap.get(keyEl.text) ?? allocLocal(fctx, keyEl.text, { kind: "f64" });
+    valLocal = fctx.localMap.get(valEl.text) ?? allocLocal(fctx, valEl.text, elemType);
+  }
+
+  emitArrayKeysEntriesLoop(ctx, fctx, stmt, receiver, (lenLocal, iLocal, dataLocal, loopArrTypeIdx) => {
+    // key = f64(i)
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "f64.convert_i32_s" });
+    fctx.body.push({ op: "local.set", index: keyLocal! });
+    // value = data[i]
+    fctx.body.push({ op: "local.get", index: dataLocal });
+    fctx.body.push({ op: "local.get", index: iLocal });
+    fctx.body.push({ op: "array.get", typeIdx: loopArrTypeIdx });
+    const valLocalType = getLocalType(fctx, valLocal!);
+    if (valLocalType && !valTypesMatch(elemType, valLocalType)) {
+      coerceType(ctx, fctx, elemType, valLocalType);
+    }
+    emitCoercedLocalSet(ctx, fctx, valLocal!, elemType);
+    void lenLocal;
+  });
+}
+
+/**
+ * #681 shared driver for `.keys()`/`.entries()` for-of: build a `block { loop }`
+ * index loop over the receiver vec, invoking `bindIteration` to project the
+ * per-iteration binding(s) before the user body runs. Mirrors compileForOfArray's
+ * length read, break/continue depth bookkeeping and null guard.
+ */
+function emitArrayKeysEntriesLoop(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  receiver: ts.Expression,
+  bindIteration: (lenLocal: number, iLocal: number, dataLocal: number, arrTypeIdx: number) => void,
+): void {
+  const bodyLenBefore = fctx.body.length;
+  const vecType = compileExpression(ctx, fctx, receiver);
+  if (!vecType || (vecType.kind !== "ref" && vecType.kind !== "ref_null")) {
+    fctx.body.length = bodyLenBefore;
+    reportError(ctx, stmt, "for-of requires an array expression");
+    return;
+  }
+  const vecTypeIdx = vecType.typeIdx;
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  if (!arrDef || arrDef.kind !== "array") {
+    fctx.body.length = bodyLenBefore;
+    reportError(ctx, stmt, "for-of requires an array type");
+    return;
+  }
+
+  // Save vec ref to temp local
+  const vecLocal = allocLocal(fctx, `__forof_vec_${fctx.locals.length}`, vecType);
+  fctx.body.push({ op: "local.set", index: vecLocal });
+
+  // Mark position for null guard wrapping (struct.get on null ref traps).
+  const nullGuardStart = fctx.body.length;
+
+  // data = vec.data
+  const dataLocal = allocLocal(fctx, `__forof_data_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: arrTypeIdx,
+  });
+  fctx.body.push({ op: "local.get", index: vecLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+  fctx.body.push({ op: "local.set", index: dataLocal });
+
+  // len = vec.length
+  const lenLocal = allocLocal(fctx, `__forof_len_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: vecLocal });
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+  fctx.body.push({ op: "local.set", index: lenLocal });
+
+  // i = 0
+  const iLocal = allocLocal(fctx, `__forof_i_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: iLocal });
+
+  // Build loop body
+  const savedBody = pushBody(fctx);
+
+  // block+loop+body-block adds 3 nesting levels. The inner body block makes
+  // `continue` fall through to the index increment instead of re-reading the
+  // same element forever.
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
+  adjustRethrowDepth(fctx, 3);
+
+  fctx.breakStack.push(2); // break = exit outer block
+  fctx.continueStack.push(0); // continue = exit body block, then increment
+
+  // i >= len → break
+  fctx.body.push({ op: "local.get", index: iLocal });
+  fctx.body.push({ op: "local.get", index: lenLocal });
+  fctx.body.push({ op: "i32.ge_s" });
+  fctx.body.push({ op: "br_if", depth: 1 });
+
+  // Project the per-iteration binding(s).
+  bindIteration(lenLocal, iLocal, dataLocal, arrTypeIdx);
+
+  const savedLoopBody = pushBody(fctx);
+
+  // Compile body — save/restore block-scoped shadows for let/const (#817).
+  if (ts.isBlock(stmt.statement)) {
+    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
+    for (const s of stmt.statement.statements) {
+      compileStatement(ctx, fctx, s);
+    }
+    restoreBlockScopedShadows(fctx, savedScope);
+  } else {
+    compileStatement(ctx, fctx, stmt.statement);
+  }
+  const bodyInstrs = fctx.body;
+  popBody(fctx, savedLoopBody);
+
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: bodyInstrs,
+  });
+
+  // i += 1
+  fctx.body.push({ op: "local.get", index: iLocal });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.set", index: iLocal });
+
+  fctx.body.push({ op: "br", depth: 0 }); // continue loop
+
+  const loopBody = fctx.body;
+  fctx.breakStack.pop();
+  fctx.continueStack.pop();
+
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
+  adjustRethrowDepth(fctx, -3);
+
+  popBody(fctx, savedBody);
+
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
+
+  // Null guard: throw TypeError for genuinely null receiver (`arr` is null).
+  if (vecType.kind === "ref_null") {
+    const guardedInstrs = fctx.body.splice(nullGuardStart);
+    const tagIdx = ensureExnTag(ctx);
+    fctx.body.push({ op: "local.get", index: vecLocal });
+    fctx.body.push({ op: "ref.is_null" } as Instr);
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "ref.null.extern" } as Instr, { op: "throw", tagIdx } as Instr],
+      else: guardedInstrs,
+    });
+  }
+}
+
+/**
  * Handle assignment destructuring for the iterator protocol path.
  * Element is externref — use __extern_get(elem, key) to extract properties/indices.
  */
@@ -2789,15 +3306,12 @@ function compileForOfIteratorAssignDestructuring(
   elemLocal: number,
   stmt: ts.ForOfStatement,
 ): void {
-  // Ensure __extern_get is available
+  // Ensure __extern_get is available (#1866: ensureLateImport routes to the
+  // native object-runtime impl under --target standalone — no leaked
+  // `env::__extern_get` host import — and to the host import in JS-host mode).
+  ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
   let getIdx = ctx.funcMap.get("__extern_get");
-  if (getIdx === undefined) {
-    const importsBefore = ctx.numImportFuncs;
-    const getType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__extern_get", { kind: "func", typeIdx: getType });
-    shiftLateImportIndices(ctx, fctx, importsBefore, ctx.numImportFuncs - importsBefore);
-    getIdx = ctx.funcMap.get("__extern_get");
-  }
   if (getIdx === undefined) return;
 
   if (ts.isObjectLiteralExpression(expr)) {
@@ -3227,15 +3741,10 @@ function compileForOfDirectIterator(
   fctx.breakStack.push(1);
   fctx.continueStack.push(0);
 
-  // Safety guard
-  const iterCountLocal = allocLocal(fctx, `__forit_guard_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: iterCountLocal });
-  fctx.body.push({ op: "i32.const", value: 1 });
-  fctx.body.push({ op: "i32.add" });
-  fctx.body.push({ op: "local.tee", index: iterCountLocal });
-  fctx.body.push({ op: "i32.const", value: 1_000_000 });
-  fctx.body.push({ op: "i32.gt_s" });
-  fctx.body.push({ op: "br_if", depth: 1 });
+  // #2067: no iteration cap — see the matching note in the __iterator_next path.
+  // The former 1,000,000-iteration `br_if` guard silently truncated long
+  // custom-iterator loops and accumulated across re-entries; the loop now runs
+  // to the iterator's own `done`.
 
   // Call next(): result = iter.next()
   fctx.body.push({ op: "local.get", index: iterLocal });
@@ -3392,7 +3901,7 @@ function findStructFieldsByTypeIdx(
 function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.ForOfStatement): void {
   // Compile the iterable expression
   const bodyLenBefore = fctx.body.length;
-  const localsLenBefore = fctx.locals.length;
+  const localsSnap = snapshotLocals(fctx); // #1847
   const iterableType = compileExpression(ctx, fctx, stmt.expression);
   if (!iterableType) {
     reportError(ctx, stmt, "for-of: failed to compile iterable expression");
@@ -3433,21 +3942,21 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     }
   }
 
-  // Fallback: host-delegated iterator protocol
+  // #1320 Slice 1: standalone/WASI binds the iterator protocol to emitted Wasm
+  // fns (no JS host). `ensureNativeIteratorRuntime` registers `__iterator` /
+  // `__iterator_next` / `__iterator_return` / `__iterator_rest`; the same
+  // consumer code below then drives the loop byte-identically to the host path.
+  // The native `__iterator` expects a canonical externref `$Vec` (the producer,
+  // e.g. `arr.values()`, builds one); for other shapes (generic class iterables,
+  // Map/Set) this is a later slice — `__iterator`'s `ref.cast` traps loudly
+  // rather than silently misbehaving, which is acceptable for Slice 1.
   if (ctx.standalone || ctx.wasi) {
-    fctx.body.length = bodyLenBefore;
-    fctx.locals.length = localsLenBefore;
-    reportError(
-      ctx,
-      stmt,
-      "Codegen error: #681 standalone/WASI for-of over this iterable still requires the JS-host iterator protocol; " +
-        "known array for-of lowers to an index loop, but generic/custom iterables need a future pure-Wasm Iterator Record path " +
-        "(ECMA-262 §7.4 IteratorStepValue/IteratorClose, §14.7.5 for-of).",
-    );
-    return;
+    ensureNativeIteratorRuntime(ctx);
+    // fall through to the shared __iterator/__iterator_next consumer path below
   }
 
-  // Ensure iterator host imports are registered before using them
+  // Ensure iterator host imports are registered before using them (no-op in
+  // standalone — ensureNativeIteratorRuntime already populated funcMap).
   addIteratorImports(ctx);
 
   // Coerce to externref if the iterable is a struct ref (GC type).
@@ -3591,39 +4100,44 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
     const capturedDoneFlag = doneFlag;
     const capturedIterLocal = iterLocal;
     const capturedReturnIdx = returnIdx;
+    // The iterator-close finally body contains no `br` to any outer label
+    // (only `local.get`/`call`/`if`), so the #2061 abrupt-site depth delta is a
+    // no-op here: `cloneFinallyAtDepth` ignores `extraDepth` and the baselines
+    // are unused. We still satisfy the finallyStack entry shape.
+    const cloneIterClose = (): Instr[] =>
+      structuredClone([
+        { op: "local.get", index: capturedDoneFlag } as Instr,
+        { op: "i32.eqz" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: capturedIterLocal } as Instr,
+            { op: "call", funcIdx: capturedReturnIdx } as Instr,
+          ],
+          else: [],
+        },
+      ]);
     if (!fctx.finallyStack) fctx.finallyStack = [];
     fctx.finallyStack.push({
-      cloneFinally: (): Instr[] =>
-        structuredClone([
-          { op: "local.get", index: capturedDoneFlag } as Instr,
-          { op: "i32.eqz" } as Instr,
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: capturedIterLocal } as Instr,
-              { op: "call", funcIdx: capturedReturnIdx } as Instr,
-            ],
-            else: [],
-          },
-        ]),
+      cloneFinally: cloneIterClose,
+      cloneFinallyAtDepth: cloneIterClose,
       breakStackLen: iterCloseBreakStackLen,
       continueStackLen: iterCloseContinueStackLen,
+      breakDepthBaseline: fctx.breakStack.slice(),
+      continueDepthBaseline: fctx.continueStack.slice(),
     });
   }
 
   fctx.breakStack.push(1); // break = depth 1 (exit block, inside try wrapper)
   fctx.continueStack.push(0); // continue = depth 0 (restart loop)
 
-  // Safety guard: max iteration counter to prevent infinite loops from collection mutation
-  const iterCountLocal = allocLocal(fctx, `__forof_guard_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: iterCountLocal });
-  fctx.body.push({ op: "i32.const", value: 1 });
-  fctx.body.push({ op: "i32.add" });
-  fctx.body.push({ op: "local.tee", index: iterCountLocal });
-  fctx.body.push({ op: "i32.const", value: 1_000_000 });
-  fctx.body.push({ op: "i32.gt_s" });
-  fctx.body.push({ op: "br_if", depth: 1 }); // break if >1M iterations
+  // #2067: no iteration cap. A prior 1,000,000-iteration `br_if` guard (#662,
+  // against collection-mutation hangs) silently truncated legitimately long
+  // iterations — and its counter local was never reset across re-entries of the
+  // same compiled loop, so repeated executions accumulated toward the cap.
+  // Silent wrong results violate "compile away, don't emulate"; the loop now
+  // runs to the iterator's own `done`, matching JS.
 
   // Call __iterator_next(iter) → (i32 done, externref value) [multi-value].
   // Results are pushed left-to-right, so value (externref) is on top of the
@@ -3876,6 +4390,7 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   const keysIdx = ctx.funcMap.get("__for_in_keys");
   const lenIdx = ctx.funcMap.get("__for_in_len");
   const getIdx = ctx.funcMap.get("__for_in_get");
+  const hasIdx = ctx.funcMap.get("__for_in_has");
 
   if (keysIdx === undefined || lenIdx === undefined || getIdx === undefined) {
     // Fallback: static unrolling when host imports are not available (standalone mode)
@@ -3892,11 +4407,17 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
     return;
   }
 
-  // Compile the object expression and coerce to externref for the host import
+  // Compile the object expression and coerce to externref for the host import.
+  // Retain the object ref in a local so the per-visit liveness check (#2066) can
+  // re-query whether a key deleted during the loop body should be skipped.
+  const objLocal = allocLocal(fctx, `__forin_obj_${fctx.locals.length}`, {
+    kind: "externref",
+  });
   const exprType = compileExpression(ctx, fctx, stmt.expression);
   if (exprType && exprType.kind !== "externref") {
     coerceType(ctx, fctx, exprType, { kind: "externref" });
   }
+  fctx.body.push({ op: "local.tee", index: objLocal });
   fctx.body.push({ op: "call", funcIdx: keysIdx }); // __for_in_keys(obj) -> keys array
 
   // Store keys array in a local
@@ -3994,11 +4515,34 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   loopBody.push({ op: "call", funcIdx: getIdx }); // __for_in_get(keys, i) -> externref
   loopBody.push({ op: "local.set", index: keyLocal });
 
+  // Per-visit liveness guard (#2066): if the key was deleted earlier in this
+  // enumeration, skip it. Emitted at the START of the $continue block so the
+  // `br 0` lands on the increment (same path as a user `continue`), never
+  // re-running the loop without advancing. Only when the host check is
+  // available (it always is when the snapshot imports are).
+  const guardedBody: Instr[] = userBody;
+  if (hasIdx !== undefined) {
+    // The guard sits inside `block $continue { … }`. From inside the `if`'s
+    // `then`, the enclosing labels are: if(0) → $continue(1). Skipping a deleted
+    // key means exiting $continue (which falls through to the increment), so the
+    // br target is depth 1, not 0 (br 0 would only exit the `if` and fall into
+    // the user body — re-visiting the deleted key).
+    guardedBody.unshift({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "br", depth: 1 } as Instr],
+    } as Instr);
+    guardedBody.unshift({ op: "i32.eqz" } as Instr);
+    guardedBody.unshift({ op: "call", funcIdx: hasIdx } as Instr);
+    guardedBody.unshift({ op: "local.get", index: keyLocal } as Instr);
+    guardedBody.unshift({ op: "local.get", index: objLocal } as Instr);
+  }
+
   // Wrap user body in block $continue so `continue` exits here
   loopBody.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: userBody,
+    body: guardedBody,
   });
 
   // Increment counter (reached after user body OR after continue)

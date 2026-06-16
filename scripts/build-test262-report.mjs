@@ -106,7 +106,84 @@ function pathHas(record, patterns) {
   return hasAny(path, patterns);
 }
 
+function isSameValueValidatorFailure(record, text) {
+  const isWasmValidatorFailure =
+    record.error_category === "wasm_compile" || hasAny(text, ["invalid wasm binary", "compiling function"]);
+  if (!isWasmValidatorFailure) return false;
+
+  return hasAny(text, [
+    /compiling function [^"\n]*"issamevalue" failed/,
+    /(^|[^a-z0-9_])issamevalue([^a-z0-9_]|$).*expected type/,
+    /(^|[^a-z0-9_])issamevalue([^a-z0-9_]|$).*type mismatch/,
+  ]);
+}
+
+function isStandaloneRegExpRecord(record, text) {
+  return (
+    record.host_import_leak_class === "regexp" ||
+    pathHas(record, ["built-ins/regexp", "regexpstringiteratorprototype"]) ||
+    hasAny(text, ["regexp", "regular expression"])
+  );
+}
+
+function isObjectToPrimitiveResidual(record, text) {
+  if (!hasAny(text, ["toprimitive", "to primitive", "valueof", "tostring", "symbol.toprimitive"])) {
+    return false;
+  }
+
+  return !pathHas(record, [
+    "built-ins/array/",
+    "built-ins/arraybuffer",
+    "built-ins/bigint",
+    "built-ins/dataview",
+    "built-ins/date",
+    "built-ins/decodeuri",
+    "built-ins/decodeuricomponent",
+    "built-ins/encodeuri",
+    "built-ins/encodeuricomponent",
+    "built-ins/function",
+    "built-ins/math",
+    "built-ins/number",
+    "built-ins/object",
+    "built-ins/regexp",
+    "built-ins/string",
+    "built-ins/symbol",
+    "built-ins/typedarray",
+    "language/expressions/arrow-function",
+    "language/expressions/tagged-template",
+    "language/function",
+    "language/literals/string",
+    "parsefloat",
+    "parseint",
+    "regexpstringiteratorprototype",
+    "stringiteratorprototype",
+    "tagged-template",
+    "template",
+    "typedarrayconstructors",
+  ]);
+}
+
 const STANDALONE_ROOT_CAUSE_BUCKETS = [
+  {
+    id: "binary-emit-u32-out-of-range",
+    issues: ["#1858", "#1862"],
+    label: "Binary emit u32 out of range (negative index/count emitted as u32) — instanceof / Error.isError fail-loud",
+    match: (_record, text) => hasAny(text, ["u32 out of range", "binary emit error: u32"]),
+  },
+  {
+    id: "late-import-index-shift",
+    issues: ["#2079", "#2043"],
+    label:
+      "Late-import index-shift fail-loud CE (stale captured index across flushLateImportShifts) — standalone generators, class globals",
+    match: (_record, text) => hasAny(text, ["late-import index-shift class"]),
+  },
+  {
+    id: "leaked-host-import",
+    issues: ["#2094", "#2073", "#2075"],
+    label:
+      "Leaked host import in standalone binary — emit-time scan CE (#2094): a host import bypassed the addImport gate (stale funcMap index / direct push). Was a silent instantiation failure (#2073/#2075); now a structured CE.",
+    match: (_record, text) => hasAny(text, ["leaked host import"]),
+  },
   {
     id: "numeric-separator-literal-values",
     issues: ["#1782", "#53"],
@@ -158,19 +235,110 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
       hasAny(text, ["json_parse", "json_stringify"]),
   },
   {
-    id: "standalone-regexp",
-    issues: ["#682", "#1474"],
-    label: "RegExp literals/constructor/String-RegExp paths still refused or missing native engine",
+    id: "standalone-regexp-phase-2d",
+    issues: ["#1911", "#1909", "#1539"],
+    label: "Standalone RegExp Phase 2d: u/v/d flags, Unicode escapes, lookaround, modifiers",
     match: (record, text) =>
-      record.host_import_leak_class === "regexp" ||
-      pathHas(record, ["built-ins/regexp", "regexpstringiteratorprototype"]) ||
-      hasAny(text, ["regexp", "regular expression"]),
+      isStandaloneRegExpRecord(record, text) &&
+      (pathHas(record, [
+        "built-ins/regexp/lookbehind",
+        "built-ins/regexp/property-escapes",
+        "built-ins/regexp/unicodesets",
+        "built-ins/regexp/regexp-modifiers",
+      ]) ||
+        hasAny(text, [
+          /flags "[uvd]"/,
+          "u/v/d are",
+          "phase 2d",
+          "lookahead",
+          "lookbehind",
+          "unicode property escape",
+          "code-point escape",
+          "unicode sets",
+          "unsupported group form '(?-",
+          "unsupported group form '(?i",
+          "unsupported group form '(?m",
+          "unsupported group form '(?s",
+        ])),
+  },
+  {
+    id: "standalone-regexp-phase-2b",
+    issues: ["#1912", "#1909", "#1539"],
+    label: "Standalone RegExp Phase 2b: word boundaries, backrefs, and character-class compatibility",
+    match: (record, text) =>
+      isStandaloneRegExpRecord(record, text) &&
+      hasAny(text, [
+        "word-boundary",
+        "backreference",
+        "named backreference",
+        "negated shorthand",
+        "class range out of order",
+        "class shorthand as range endpoint",
+      ]),
+  },
+  {
+    id: "standalone-regexp-string-protocol",
+    issues: ["#1913", "#1909", "#1539"],
+    label: "Standalone RegExp string protocol, global/sticky lastIndex, split, replace, and matchAll",
+    match: (record, text) =>
+      isStandaloneRegExpRecord(record, text) &&
+      (pathHas(record, [
+        "built-ins/regexp/prototype/symbol.",
+        "built-ins/regexpstringiteratorprototype",
+        "built-ins/string/prototype/match",
+        "built-ins/string/prototype/matchall",
+        "built-ins/string/prototype/replace",
+        "built-ins/string/prototype/split",
+      ]) ||
+        hasAny(text, [
+          "@@match",
+          "@@matchall",
+          "@@replace",
+          "@@search",
+          "@@split",
+          "symbol protocol",
+          "matchall",
+          "regexpstringiterator",
+          "lastindex",
+          "all-match",
+          "split(regexp, limit)",
+          "split with capturing",
+          "split with empty-match",
+          "$-substitution",
+          "function replacer",
+        ])),
+  },
+  {
+    id: "standalone-regexp-native-engine",
+    issues: ["#1914", "#1909", "#682"],
+    label: "Standalone RegExp native-engine/runtime gaps: source, constructors, prototype access, result shape",
+    match: (record, text) =>
+      isStandaloneRegExpRecord(record, text) &&
+      (["assertion_fail", "runtime_error", "null_deref", "wasm_compile", "illegal_cast", "oob"].includes(
+        record.error_category,
+      ) ||
+        hasAny(text, [
+          "__get_builtin",
+          "dynamic constructor patterns",
+          "pattern.source",
+          "__executed.input",
+          "__executed.index",
+          "source",
+          "flags accessor",
+          "regexp.prototype",
+        ])),
+  },
+  {
+    id: "standalone-regexp",
+    issues: ["#1909", "#1911", "#1912", "#1913", "#1914"],
+    label: "Residual standalone RegExp failures not matched by the narrower RegExp sub-buckets",
+    match: isStandaloneRegExpRecord,
   },
   {
     id: "issamevalue-invalid-wasm",
-    issues: ["#1776"],
+    issues: ["#1908", "#1776", "#1807"],
     label: "Residual standalone isSameValue invalid-Wasm validator failures",
-    match: (record, text) => hasAny(text, ["issamevalue", "samevalue"]),
+    match: (record, text) => isSameValueValidatorFailure(record, text),
   },
   {
     id: "standalone-dynamic-object-property",
@@ -192,6 +360,14 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
         "dynamic object",
         "no dependency provided for imported function",
       ]),
+  },
+  {
+    id: "standalone-reflect-refusal",
+    issues: ["#1472"],
+    label: "Reflect.* refused in standalone mode (#1472 Phase C)",
+    match: (record, text) =>
+      pathHas(record, ["built-ins/reflect"]) ||
+      hasAny(text, ["not supported in standalone mode (#1472 phase c)", "reflect."]),
   },
   {
     id: "standalone-iterator-protocol",
@@ -234,9 +410,9 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
   },
   {
     id: "object-to-primitive",
-    issues: ["#1525", "#1525b", "#1759"],
+    issues: ["#1910", "#1525b", "#1900", "#1472"],
     label: "ToPrimitive / object-to-string dispatch residuals",
-    match: (record, text) => hasAny(text, ["toprimitive", "to primitive", "valueof", "tostring", "symbol.toprimitive"]),
+    match: isObjectToPrimitiveResidual,
   },
   {
     id: "array-typedarray-buffer",
@@ -256,18 +432,33 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
       ]),
   },
   {
+    id: "template-literals",
+    issues: ["#1759", "#836"],
+    label: "Template literal and tagged-template semantics",
+    match: (record) => pathHas(record, ["template", "tagged-template"]),
+  },
+  {
     id: "object-property-semantics",
     issues: ["#1472", "#176", "#281", "#1466"],
     label: "Object/property/destructuring semantic mismatches behind the object model",
     match: (record, text) =>
-      pathHas(record, ["built-ins/object", "language/destructuring", "object-"]) ||
+      pathHas(record, ["built-ins/object", "language/destructuring", "language/expressions/object/dstr", "object-"]) ||
       hasAny(text, ["object.", "destructuring", "property"]),
   },
   {
     id: "string-methods-coercion",
-    issues: ["#1105", "#1442", "#1381"],
-    label: "String methods and string coercion residuals in standalone",
-    match: (record) => pathHas(record, ["built-ins/string", "stringiteratorprototype", "language/literals/string"]),
+    issues: ["#1470", "#1105", "#1442", "#1381"],
+    label: "String and URI methods/coercion residuals in standalone",
+    match: (record) =>
+      pathHas(record, [
+        "built-ins/decodeuri",
+        "built-ins/decodeuricomponent",
+        "built-ins/encodeuri",
+        "built-ins/encodeuricomponent",
+        "built-ins/string",
+        "language/literals/string",
+        "stringiteratorprototype",
+      ]),
   },
   {
     id: "annex-b-function-eval",
@@ -301,6 +492,18 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
     label: "Function object name/length/prototype/call semantics",
     match: (record) =>
       pathHas(record, ["built-ins/function", "language/function", "language/expressions/arrow-function"]),
+  },
+  {
+    id: "symbol-builtin-semantics",
+    issues: ["#483", "#487", "#1564"],
+    label: "Symbol built-in semantics (keyFor/for arg validation, well-known symbols, registry)",
+    // Standalone Symbol built-ins lower their argument-type checks to internal
+    // traps (e.g. `Symbol.keyFor(null)` traps with "null is not a symbol")
+    // instead of throwing a proper TypeError, so test262's `assert.throws`
+    // assertion fails. The path-based match keeps this scoped to genuine
+    // built-ins/Symbol tests and does not poach the `bigint`/`toprimitive`
+    // text-matched buckets that run earlier in this list.
+    match: (record) => pathHas(record, ["built-ins/symbol"]),
   },
   {
     id: "assignment-private-short-circuit",
@@ -396,12 +599,6 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
       ]),
   },
   {
-    id: "template-literals",
-    issues: ["#1759", "#836"],
-    label: "Template literal and tagged-template semantics",
-    match: (record) => pathHas(record, ["template", "tagged-template"]),
-  },
-  {
     id: "unicode-identifiers",
     issues: ["#832", "#270"],
     label: "Unicode/reserved-word identifier handling",
@@ -471,6 +668,13 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
         "late global",
         "wasm_compile",
       ]),
+  },
+  {
+    id: "standalone-getter-callback-bridge",
+    issues: ["#929", "#1027", "#1239"],
+    label:
+      "Standalone object-literal / defineProperty accessor needs the `__make_getter_callback` JS-host bridge (this-bound getter/setter); no pure-Wasm path yet, so the strict gate fails the build. Surfaced as a structured CE by #1921 (was a dropped-import / leaked-import failure).",
+    match: (_record, text) => hasAny(text, ["__make_getter_callback", "make_getter_callback import"]),
   },
   {
     id: "misc-spec-tail",
@@ -563,12 +767,21 @@ async function main() {
   const categories = new Map();
   const errorCategories = new Map();
   const skipReasons = new Map();
+  // #1853 — hard-error stability bucket (malformed_wasm / missing_test_export),
+  // aggregated separately from coverage so it can be gated as a regression.
+  const hardErrors = new Map();
   const scopeCounts = new Map([
     ["standard", createCounts()],
     ["annex_b", createCounts()],
     ["proposal", createCounts()],
   ]);
   const rootCauseRecords = [];
+  // #2096: capture the oracle_version stamped on the result rows so the
+  // merged report carries the same identity. If rows disagree (a merge of
+  // shards produced under different oracles) we keep the LOWEST seen and flag
+  // it as mixed — a mixed report should never be promoted to a baseline.
+  let oracleVersion;
+  let oracleVersionMixed = false;
 
   const rl = createInterface({
     input: createReadStream(args.input),
@@ -578,6 +791,14 @@ async function main() {
   for await (const line of rl) {
     if (!line.trim()) continue;
     const record = JSON.parse(line);
+    if (typeof record.oracle_version === "number") {
+      if (oracleVersion === undefined) {
+        oracleVersion = record.oracle_version;
+      } else if (oracleVersion !== record.oracle_version) {
+        oracleVersionMixed = true;
+        oracleVersion = Math.min(oracleVersion, record.oracle_version);
+      }
+    }
     const status = record.status;
     const scope = record.scope ?? "standard";
     const scopeOfficial = record.scope_official ?? scope !== "proposal";
@@ -609,6 +830,12 @@ async function main() {
     if (record.error_category) {
       errorCategories.set(record.error_category, (errorCategories.get(record.error_category) ?? 0) + 1);
     }
+    // #1853 — count hard errors (malformed Wasm / missing test export) into the
+    // stability bucket. `hard_error_kind` is set by the runner only where the
+    // outcome is unambiguously a compiler bug, never for unsupported-feature.
+    if (record.hard_error_kind) {
+      hardErrors.set(record.hard_error_kind, (hardErrors.get(record.hard_error_kind) ?? 0) + 1);
+    }
     if (status === "skip" && record.error) {
       skipReasons.set(record.error, (skipReasons.get(record.error) ?? 0) + 1);
     }
@@ -634,6 +861,12 @@ async function main() {
     timestamp: new Date().toISOString(),
     baseline_generated_at: args.baselineGeneratedAt || new Date().toISOString(),
     baseline_sha: args.baselineSha || "",
+    // #2096: oracle identity for the merged report. Carried so diff-test262
+    // can refuse cross-version comparisons. `oracle_version_mixed` flags a
+    // report assembled from shards run under different oracles — never promote
+    // such a report to a baseline.
+    oracle_version: oracleVersion ?? null,
+    ...(oracleVersionMixed ? { oracle_version_mixed: true } : {}),
     mode: {
       target,
       include_proposals: args.includeProposals ? 1 : 0,
@@ -668,6 +901,9 @@ async function main() {
         ...counter,
       })),
     error_categories: Object.fromEntries([...errorCategories.entries()].sort(([a], [b]) => a.localeCompare(b))),
+    // #1853 — hard-error stability bucket, surfaced separately from coverage and
+    // gated by scripts/check-test262-hard-errors.mjs against a committed baseline.
+    hard_errors: Object.fromEntries([...hardErrors.entries()].sort(([a], [b]) => a.localeCompare(b))),
     skip_reasons: Object.fromEntries([...skipReasons.entries()].sort(([a], [b]) => a.localeCompare(b))),
   };
 

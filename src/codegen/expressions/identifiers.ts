@@ -34,8 +34,10 @@ import { emitStringBuilderRead, getBuilderInfo } from "../string-builder.js";
 import { BUILTIN_TYPE_TAGS, isBuiltinSubtype, isBuiltinTypeName } from "../builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error-types.js";
 import { allocLocal } from "../context/locals.js";
+import { reportSilentFallback } from "../fallback-telemetry.js";
 import { emitThrowReferenceError, noJsHost } from "./helpers.js";
 import { emitWithBindingGet, findWithBinding } from "../with-scope.js";
+import { emitBuiltinNamespaceObject, isSupportedBuiltinNamespace } from "../builtin-static-globals.js";
 
 /**
  * #1473 — Build the set of `$Error_struct` `$tag` values compatible with an
@@ -573,6 +575,14 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
     return mType;
   }
 
+  // Standalone built-in namespace values (Array/Object) materialize as lazy
+  // open-object singletons before ambient lib declarations can route them to
+  // host globals.
+  if (ctx.standalone && isSupportedBuiltinNamespace(name)) {
+    const builtinObject = emitBuiltinNamespaceObject(ctx, fctx, name);
+    if (builtinObject) return builtinObject;
+  }
+
   // Check declared globals (e.g. document, window)
   const globalInfo = ctx.declaredGlobals.get(name);
   if (globalInfo) {
@@ -719,7 +729,23 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
   // in a variable and later called via call_ref.
   // Only wrap user-defined functions (skip internal helpers and class constructors).
   const funcRefIdx = ctx.funcMap.get(name);
-  if (funcRefIdx !== undefined && !name.startsWith("__") && !ctx.classSet.has(name)) {
+  // (#1809) Only wrap DEFINED functions (index >= numImportFuncs) in a funcref
+  // closure. A host import (e.g. the ambient DOM global `resizeTo`/`resizeBy`
+  // from lib.dom.d.ts) has no in-module body to forward to via `ref.func`, so
+  // building a cached/per-site closure trampoline around its import index is
+  // never correct. When the funcMap entry resolves to an import, the captured
+  // `methodFuncIdx` later trips the `finalizeMethodTrampolines` guard
+  // ("methodFuncIdx N points at import …— shift walker missed this") as a hard
+  // compile error (157 default-lane tests, #1525b-regression-tagged). This is
+  // not a shift-walker miss — the index was an import from the start. Skip the
+  // closure path for imports so the identifier falls through to the
+  // type-appropriate graceful default below (valid Wasm, no spurious throw).
+  if (
+    funcRefIdx !== undefined &&
+    funcRefIdx >= ctx.numImportFuncs &&
+    !name.startsWith("__") &&
+    !ctx.classSet.has(name)
+  ) {
     // Check if there's already a closure registered (e.g. from closureMap)
     const existingClosure = ctx.closureMap.get(name);
     if (existingClosure) {
@@ -795,6 +821,7 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
 
   // Graceful fallback for known but unimplemented globals (Symbol, Object,
   // Reflect, etc.) — emit a type-appropriate default so compilation continues.
+  reportSilentFallback(ctx, "const-fallback", "identifiers:unimplemented-global-default", id, id.text);
   const tsType = ctx.checker.getTypeAtLocation(id);
   const wasmType = resolveWasmType(ctx, tsType);
   if (wasmType.kind === "f64") {
@@ -1003,6 +1030,46 @@ function emitConstantInstanceOf(
   return { kind: "i32" };
 }
 
+function identifierHasSourceDeclaration(ctx: CodegenContext, id: ts.Identifier): boolean {
+  const symbol = ctx.checker.getSymbolAtLocation(id);
+  const declarations = symbol?.declarations ?? [];
+  return declarations.some((decl) => !decl.getSourceFile().isDeclarationFile);
+}
+
+function emitDynamicInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): ValType {
+  const instanceofIdx = ensureLateImport(
+    ctx,
+    "__instanceof_dyn",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "i32" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+
+  const leftType = compileExpression(ctx, fctx, expr.left);
+  if (!leftType) {
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (leftType.kind !== "externref") {
+    coerceType(ctx, fctx, leftType, { kind: "externref" });
+  }
+
+  const rightType = compileExpression(ctx, fctx, expr.right);
+  if (!rightType) {
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (rightType.kind !== "externref") {
+    coerceType(ctx, fctx, rightType, { kind: "externref" });
+  }
+
+  if (instanceofIdx === undefined) {
+    fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    return { kind: "i32" };
+  }
+
+  fctx.body.push({ op: "call", funcIdx: instanceofIdx });
+  return { kind: "i32" };
+}
+
 /**
  * Compile `expr instanceof RHS` using a host import when the RHS class is not
  * in our struct system (e.g., TypeError, Array, Function, Promise). (#738)
@@ -1030,11 +1097,7 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
   }
 
   if (!ctorName) {
-    // Cannot resolve constructor name — compile both sides, emit false
-    const leftType = compileExpression(ctx, fctx, expr.left);
-    if (leftType) fctx.body.push({ op: "drop" });
-    fctx.body.push({ op: "i32.const", value: 0 });
-    return { kind: "i32" };
+    return emitDynamicInstanceOf(ctx, fctx, expr);
   }
 
   // Static fast-path: try compile-time evaluation against the built-in
@@ -1042,6 +1105,10 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
   const staticResult = tryStaticInstanceOf(ctx, expr, ctorName);
   if (staticResult !== undefined) {
     return emitConstantInstanceOf(ctx, fctx, expr, staticResult);
+  }
+
+  if (ts.isIdentifier(expr.right) && !isBuiltinTypeName(ctorName) && identifierHasSourceDeclaration(ctx, expr.right)) {
+    return emitDynamicInstanceOf(ctx, fctx, expr);
   }
 
   // #1473 — no JS host: `e instanceof TypeError` (and other Error subtypes)

@@ -15,7 +15,9 @@ import { dirname, join, relative } from "path";
 import { afterAll, beforeAll, describe, it } from "vitest";
 import { availableParallelism } from "os";
 import { CompilerPool, type TestResult } from "../scripts/compiler-pool.js";
+import { isPoisonCompileError } from "../scripts/test262-poison-error.mjs";
 import { findNthAssert } from "./test262-assert-locator.js";
+import { ORACLE_VERSION } from "./test262-oracle-version.js";
 import {
   buildNegativeCompileSource,
   classifyError,
@@ -176,6 +178,7 @@ let pool: CompilerPool | null = null;
 const MAX_RETRIES_PER_SHARD = 10;
 const RETRY_TIMEOUT_MS = 10_000;
 let retriesUsed = 0;
+let poisonRetriesUsed = 0;
 // Mutex (serial Promise chain) — only one retry runs at a time so retries
 // are truly isolated from each other on the fork pool.
 let retryMutex: Promise<void> = Promise.resolve();
@@ -323,6 +326,11 @@ function recordResult(
 
   const entry = JSON.stringify({
     timestamp: new Date().toLocaleString("de-DE", { timeZone: "Europe/Berlin" }),
+    // #2096: oracle identity. Every row carries the version of the verdict
+    // logic that produced its status so diff-test262 can refuse cross-version
+    // comparisons (which would read oracle skew as regressions). Bump in
+    // tests/test262-oracle-version.ts when the oracle tightens (e.g. #1945).
+    oracle_version: ORACLE_VERSION,
     file,
     category,
     status,
@@ -482,9 +490,19 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
   }
 
   beforeAll(() => {
+    // #1957 — realm-contamination canary, default ON. Workers diff a broad
+    // intrinsic surface after every test (~0.2ms) and request a recycle when
+    // a test actually mutated shared realm state, so the next test gets a
+    // pristine process instead of someone else's Array.prototype/JSON/
+    // Iterator mutations (the order-dependent flip class that also poisoned
+    // the in-realm TS compiler, #1862). Forks inherit this env. Set
+    // TEST262_REALM_CANARY="" to disable, or "log" for measurement mode.
+    if (!("TEST262_REALM_CANARY" in process.env)) {
+      process.env.TEST262_REALM_CANARY = "recycle";
+    }
     pool = new CompilerPool(POOL_SIZE, "unified");
     console.log(
-      `Chunk ${chunkIndex + 1}/${totalChunks}: ${myTests.length} tests, est ${Math.round(chunk.weightMs / 1000)}s, ${POOL_SIZE} unified fork workers`,
+      `Chunk ${chunkIndex + 1}/${totalChunks}: ${myTests.length} tests, est ${Math.round(chunk.weightMs / 1000)}s, ${POOL_SIZE} unified fork workers (realm canary: ${process.env.TEST262_REALM_CANARY || "off"})`,
     );
   }, 30_000);
 
@@ -518,6 +536,9 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
     );
     if (retriesUsed > 0) {
       console.log(`Compile-timeout retries (#1589): ${retriesUsed}/${MAX_RETRIES_PER_SHARD} used`);
+    }
+    if (poisonRetriesUsed > 0) {
+      console.log(`Poison-error retries (#1862): ${poisonRetriesUsed} used`);
     }
   });
 
@@ -790,7 +811,82 @@ export function runTest262Chunk(chunkIndex: number, totalChunks: number) {
               return;
             }
 
-            if (r.status === "compile_error" || r.status === "compile_timeout") {
+            if (
+              r.status === "compile_error" ||
+              r.status === "compile_timeout" ||
+              (r.status === "fail" && isPoisonCompileError(r.error))
+            ) {
+              // #1862 — a poison-class compile_error from the unified worker
+              // is a contaminated verdict. The worker requests a recycle
+              // before the pool dispatches more work; retry this file once in
+              // a clean fork and record only the clean retry result.
+              // #1957 — the same poison signature can arrive with
+              // status="fail" ("wasm exception during compile (poisoned
+              // built-in)" is sent as fail, not compile_error), which used to
+              // bypass this retry entirely. Both statuses are contaminated
+              // verdicts; retry both.
+              if ((r.status === "compile_error" || r.status === "fail") && isPoisonCompileError(r.error)) {
+                poisonRetriesUsed++;
+                const retry = await runRetrySerial(() =>
+                  pool!.runTest(
+                    compileSource,
+                    {
+                      isNegative: isNegative || false,
+                      isRuntimeNegative: isRuntimeNegative || false,
+                      expectedErrorType: meta.negative?.type,
+                      wasmPath,
+                      metaPath,
+                      label: relPath + " [poison retry]",
+                      target: TEST262_TARGET,
+                    },
+                    RETRY_TIMEOUT_MS,
+                  ),
+                );
+                const retryTiming = { compileMs: retry.compileMs, execMs: retry.execMs };
+                const retryInfo = { retried: true, retryCount: 1 };
+
+                if (retry.status === "pass") {
+                  recordResult(
+                    relPath,
+                    category,
+                    "pass",
+                    undefined,
+                    retryTiming,
+                    scopeInfo,
+                    retryInfo,
+                    metadataFromWorkerResult(retry, true),
+                  );
+                  return;
+                }
+                if (retry.status === "fail") {
+                  const error = retry.error ? adjustErrorLines(retry.error, lineAdjustOffset) : "fail after retry";
+                  recordResult(
+                    relPath,
+                    category,
+                    "fail",
+                    error,
+                    retryTiming,
+                    scopeInfo,
+                    retryInfo,
+                    metadataFromWorkerResult(retry, true),
+                  );
+                  return;
+                }
+
+                const retryError = retry.error ? adjustErrorLines(retry.error, lineAdjustOffset) : retry.status;
+                recordResult(
+                  relPath,
+                  category,
+                  retry.status,
+                  retryError,
+                  retryTiming,
+                  scopeInfo,
+                  retryInfo,
+                  metadataFromWorkerResult(retry, false),
+                );
+                return;
+              }
+
               // #1589 — auto-retry compile_timeout in isolation. Most CI
               // timeouts are fork-pool contention flakes that pass in <300 ms
               // when not competing with siblings. Retry once with a tighter

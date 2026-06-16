@@ -27,6 +27,8 @@ export type ImportIntent =
   | { type: "declared_global"; name: string }
   | { type: "host_eq" }
   | { type: "host_loose_eq" }
+  | { type: "host_add" }
+  | { type: "host_compare" }
   | { type: "same_value_zero" }
   | { type: "dynamic_import" }
   | { type: "proxy_create" }
@@ -119,6 +121,27 @@ export interface CompileResult {
    * low-level `compile*Source` helpers in compiler.ts do not attach it.
    */
   readonly importObject?: WebAssembly.Imports;
+  /**
+   * #2089 — silent-fallback telemetry counters captured during codegen
+   * (per class → per site → count). Only populated when the
+   * `trackSilentFallbacks` option is set (the gate
+   * `scripts/check-codegen-fallbacks.ts` sets it); `undefined` otherwise so
+   * normal compiles pay nothing.
+   */
+  fallbackCounts?: import("./codegen/fallback-telemetry.js").FallbackCounts;
+  /**
+   * #1923 — IR post-claim demotions. When the IR selector *claims* a function
+   * but it then fails during build/verify/lower/backend-legality, it demotes to
+   * the legacy path through the warning channel (`codegen/index.ts`) and is
+   * counted by no selector-level metric (`IrFallbackReason` covers only
+   * selector-level rejections). Always collected on the WasmGC path (cheap,
+   * mirrors `fallbackCounts`); empty/absent for the linear backend (no IR path).
+   * Each entry carries the `IrIntegrationError.kind` (build/verify/lower/
+   * backend-legality) and the function/message so the ratchet gate
+   * `scripts/check-ir-fallbacks.ts` can bucket by kind + normalized message
+   * class.
+   */
+  irPostClaimErrors?: { kind: string; func: string; message: string }[];
 }
 
 export interface CompileError {
@@ -128,6 +151,14 @@ export interface CompileError {
   severity: "error" | "warning";
   /** TS diagnostic code (if from TypeScript diagnostics) */
   code?: number;
+  /**
+   * Source file the diagnostic originated in (#1929). Populated from
+   * `diag.file.fileName` for TypeScript diagnostics; absent for diagnostics
+   * with no associated file (global/options errors). Essential for the
+   * multi-file / files APIs where `line`/`column` alone can't say *which*
+   * file. Additive — existing single-file callers can ignore it.
+   */
+  file?: string;
 }
 
 export interface DomContainmentOptions {
@@ -235,6 +266,26 @@ export interface CompileOptions {
    * tracking issue that owns its Wasm-native replacement.
    */
   strictNoHostImports?: boolean;
+  /**
+   * Linear backend (`target: "linear"`) allocator behaviour (#1856).
+   *
+   * The linear backend always uses a **bump/arena** allocator — each
+   * allocation advances a single heap pointer and nothing is freed until
+   * the Wasm instance is dropped (the "allocate-and-exit" model that suits
+   * most standalone/WASI short-lived programs; see R10 in
+   * `docs/architecture/compiler-design-lessons.md` and ADR-0017). There is
+   * deliberately no pluggable GC abstraction.
+   *
+   * - `"bump"` (default): the plain allocate-and-exit arena, smallest binary.
+   * - `"arena-reset"`: same allocator, but also exports `__arena_reset()`
+   *   (O(1) rewind of the whole arena) and `__arena_used()` (bytes
+   *   allocated). Use this when an embedder reuses one instance across many
+   *   short-lived tasks and wants to reclaim between them.
+   *
+   * Ignored for non-`linear` targets — the WasmGC backends delegate object
+   * lifetime to the host GC and have no linear allocator.
+   */
+  allocator?: "bump" | "arena-reset";
 }
 
 import * as path from "path";
@@ -295,6 +346,23 @@ function withImportObject(result: CompileResult): CompileResult {
         "wasm:js-string": built["wasm:js-string"],
         string_constants: built.string_constants,
       } as unknown as WebAssembly.Imports;
+      // (#1712) Expose the runtime's exports hook. Without it, the host
+      // runtime's `callbackState.getExports()` is permanently undefined on
+      // this convenience path, silently disabling every exports-backed
+      // capability (closure wrapping via __call_fn_N/__call_fn_method_N,
+      // __sget_* struct reads, __is_closure gating). Callers wire it after
+      // instantiation:
+      //   const { instance } = await WebAssembly.instantiate(r.binary, r.importObject);
+      //   (r.importObject as any).__setExports?.(instance.exports);
+      // Non-enumerable so WebAssembly.instantiate's import resolution (which
+      // only reads the module-declared namespaces) never sees it.
+      if (built.setExports) {
+        Object.defineProperty(cached, "__setExports", {
+          value: built.setExports,
+          enumerable: false,
+          configurable: true,
+        });
+      }
       return cached;
     },
   });

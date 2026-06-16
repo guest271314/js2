@@ -5,7 +5,12 @@ import type { FieldDef, Instr, ValType } from "../../ir/types.js";
  */
 import { isSymbolType } from "../../checker/type-mapper.js";
 import { forEachChild, ts } from "../../ts-api.js";
-import { collectReferencedIdentifiers, collectWrittenIdentifiers, emitFuncRefAsClosure } from "../closures.js";
+import {
+  collectReferencedIdentifiers,
+  collectWrittenIdentifiers,
+  emitFuncRefAsClosure,
+  isOwnParamName,
+} from "../closures.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
@@ -20,7 +25,11 @@ import {
   resolveWasmType,
 } from "../index.js";
 import { ensureMapHelpers } from "../map-runtime.js";
-import { resolveComputedKeyExpression } from "../literals.js";
+import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
+import { ensureSetHelpers } from "../set-runtime.js";
+import { ensureWeakCollectionHelpers } from "../weak-collections-runtime.js";
+import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
+import { compileObjectLiteralAsExternref, resolveComputedKeyExpression } from "../literals.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
 import {
   compileStandaloneRegExpConstructor,
@@ -37,10 +46,12 @@ import {
   registerCompileSuperPropertyAccess,
   registerResolveEnclosingClassName,
 } from "../shared.js";
+import { maybeSetArgcForKnownCall } from "../statements/nested-declarations.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { coerceType as coerceTypeImpl, pushDefaultValue } from "../type-coercion.js";
 import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
 import { compileSpreadCallArgs } from "./extern.js";
+import { compileTemporalNewExpression } from "../temporal-native.js";
 import {
   emitThrowReferenceError,
   emitThrowString,
@@ -51,6 +62,7 @@ import {
   noJsHost,
   wasmFuncReturnsVoid,
 } from "./helpers.js";
+import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 
 function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
@@ -58,6 +70,32 @@ function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
   const underscoreIdx = fctx.name.indexOf("_");
   if (underscoreIdx > 0) return fctx.name.substring(0, underscoreIdx);
   return undefined;
+}
+
+function valTypeMatches(a: ValType, b: ValType): boolean {
+  if (a.kind !== b.kind) return false;
+  if ((a.kind === "ref" || a.kind === "ref_null") && (b.kind === "ref" || b.kind === "ref_null")) {
+    return a.typeIdx === b.typeIdx;
+  }
+  return true;
+}
+
+function compileCtorArgument(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression, expected?: ValType): void {
+  const result = compileExpression(ctx, fctx, arg, expected);
+  if (result === null) {
+    if (expected) pushDefaultValue(fctx, expected, ctx);
+    return;
+  }
+  if (expected && !valTypeMatches(result, expected)) {
+    coerceType(ctx, fctx, result, expected);
+  }
+}
+
+function evaluateCtorExtraArgument(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
+  const result = compileExpression(ctx, fctx, arg);
+  if (result !== null) {
+    fctx.body.push({ op: "drop" });
+  }
 }
 
 /**
@@ -302,6 +340,7 @@ function compileSuperMethodCall(ctx: CodegenContext, fctx: FunctionContext, expr
   // Re-lookup funcIdx: argument compilation may trigger addUnionImports
   const resolvedName = `${ancestor}_${methodName}`;
   const finalSuperIdx = ctx.funcMap.get(resolvedName) ?? funcIdx;
+  maybeSetArgcForKnownCall(ctx, fctx, resolvedName, expr.arguments.length, superParamCount);
   fctx.body.push({ op: "call", funcIdx: finalSuperIdx });
 
   // Determine return type
@@ -395,6 +434,7 @@ function compileSuperElementMethodCall(
   // Re-lookup funcIdx: argument compilation may trigger addUnionImports
   const resolvedName = `${ancestor}_${methodName}`;
   const finalSuperIdx = ctx.funcMap.get(resolvedName) ?? funcIdx;
+  maybeSetArgcForKnownCall(ctx, fctx, resolvedName, expr.arguments.length, superElemParamCount);
   fctx.body.push({ op: "call", funcIdx: finalSuperIdx });
 
   // Determine return type
@@ -897,7 +937,7 @@ function compileNewFunctionDeclaration(
   const ctorResults: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
   const ctorTypeIdx = addFuncType(ctx, ctorParams, ctorResults, `${ctorName}_type`);
   const ctorFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.funcMap.set(ctorName, ctorFuncIdx);
+  ctx.funcMap.set(classMemberFuncKey(ctx, ctorName), ctorFuncIdx); // (#1983) collision-free key
 
   const ctorFunc = {
     name: ctorName,
@@ -979,6 +1019,42 @@ function compileNewFunctionDeclaration(
   // Bind `this` to the struct
   ctorFctx.localMap.set("this", selfLocal);
 
+  // (#1712) Register the instance → constructor-closure link with the JS
+  // host so instance property misses resolve through the closure's vivified
+  // `.prototype` object (acorn's `Parser.prototype.m = fn; new Parser().m()`
+  // pattern). Emitted in the ctor PROLOGUE — before the user body compiles —
+  // because acorn-style ctors call prototype methods on `this` inside the
+  // ctor itself (`this.context = this.initialContext()`); an end-of-ctor
+  // registration left those in-ctor dispatches unresolvable. JS-host mode
+  // only — standalone/WASI construction stays pure Wasm; the native
+  // equivalent rides on the #1888 open-object runtime in a later dogfood lap.
+  // Buffer-reach note: the flush below walks ctx.currentFunc (still the
+  // OUTER call-site fctx here) plus ctorFctx.body explicitly; once the body
+  // compile switches ctx.currentFunc to ctorFctx, later shifts reach these
+  // prologue instrs through currentFunc.body, and after attachment through
+  // ctx.mod.functions.
+  if (!ctx.standalone && !ctx.wasi) {
+    const ctorGlobalIdx = ctx.moduleGlobals.get(funcName) ?? ctx.funcClosureGlobals.get(funcName);
+    if (ctorGlobalIdx !== undefined) {
+      ensureLateImport(ctx, "__register_fnctor_instance", [{ kind: "externref" }, { kind: "externref" }], []);
+      // Apply the deferred index shift NOW (same discipline as every other
+      // ensureLateImport caller in this file) so the `call` below targets the
+      // import's final index instead of being re-shifted onto a neighbour.
+      flushLateImportShifts(ctx, ctorFctx);
+      const regIdx = ctx.funcMap.get("__register_fnctor_instance");
+      if (regIdx !== undefined) {
+        ctorFctx.body.push({ op: "local.get", index: selfLocal });
+        ctorFctx.body.push({ op: "extern.convert_any" });
+        ctorFctx.body.push({ op: "global.get", index: ctorGlobalIdx } as Instr);
+        const gdef = ctx.mod.globals[localGlobalIdx(ctx, ctorGlobalIdx)];
+        if (gdef && gdef.type.kind !== "externref" && gdef.type.kind !== "ref_extern") {
+          ctorFctx.body.push({ op: "extern.convert_any" });
+        }
+        ctorFctx.body.push({ op: "call", funcIdx: regIdx });
+      }
+    }
+  }
+
   // Compile the function body
   const savedFunc = ctx.currentFunc;
   if (savedFunc) ctx.parentBodiesStack.push(savedFunc.body);
@@ -991,16 +1067,31 @@ function compileNewFunctionDeclaration(
   if (savedFunc) ctx.parentBodiesStack.pop();
   ctx.currentFunc = savedFunc;
 
-  // Return the struct instance
-  ctorFctx.body.push({ op: "local.get", index: selfLocal });
-
-  // Finalize the constructor function
+  // Attach the live body array to the registered function FIRST: the
+  // late-import registration below can shift function indices, and the shift
+  // walkers reach this body only through ctx.mod.functions (#1712 — same
+  // orphan-buffer class as the compileIfStatement then-branch fix).
   ctorFunc.locals = ctorFctx.locals;
   ctorFunc.body = ctorFctx.body;
 
+  // (#1712) The instance → constructor-closure registration
+  // (__register_fnctor_instance) is emitted in the ctor PROLOGUE above —
+  // before the user body — so in-ctor prototype-method calls on `this`
+  // (`this.context = this.initialContext()`) already resolve through the
+  // vivified prototype.
+
+  // Return the struct instance
+  ctorFctx.body.push({ op: "local.get", index: selfLocal });
+
   // 5. Emit the call to the constructor at the call site
   const args = expr.arguments ?? [];
-  const paramTypes = getFuncParamTypes(ctx, ctorFuncIdx);
+  // Use the in-scope ctorParams, NOT getFuncParamTypes(ctx, ctorFuncIdx): the
+  // (#1712) __register_fnctor_instance late import above opens a deferred
+  // index-shift window (#329/#1899) in which ctorFuncIdx is stale-low against
+  // the already-incremented numImportFuncs, so an index-based signature lookup
+  // would read the PREVIOUS function's params and coerce arguments against the
+  // wrong types (observed: `call[0] expected externref, found (ref null $N)`).
+  const paramTypes: ValType[] | undefined = ctorParams;
   for (let i = 0; i < args.length; i++) {
     compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
   }
@@ -1010,7 +1101,8 @@ function compileNewFunctionDeclaration(
     }
   }
   // Re-lookup funcIdx in case addUnionImports shifted indices
-  const finalCtorIdx = ctx.funcMap.get(ctorName) ?? ctorFuncIdx;
+  const finalCtorIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)) ?? ctorFuncIdx; // (#1983)
+  maybeSetArgcForKnownCall(ctx, fctx, ctorName, args.length, paramTypes?.length ?? args.length);
   fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
   return { kind: "ref", typeIdx: structTypeIdx };
 }
@@ -1081,8 +1173,12 @@ function compileNewFunctionExpression(
     const localIdx = fctx.localMap.get(name);
     if (localIdx === undefined) continue;
     if (ctx.funcMap.has(name)) continue;
-    const isOwnParam = funcExpr.parameters.some((p) => ts.isIdentifier(p.name) && p.name.text === name);
-    if (isOwnParam) continue;
+    // #1832 — `isOwnParamName` recognises names bound by a destructuring
+    // (object/array binding) parameter, not just identifier params. The old
+    // identifier-only check missed `function({a}){ return a }`, so a
+    // destructured param name was wrongly treated as a free variable and
+    // captured from an outer scope that also declared it.
+    if (isOwnParamName(funcExpr, name)) continue;
     if (name === "arguments") continue;
     const type =
       localIdx < fctx.params.length
@@ -1473,7 +1569,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
 
   if (syntheticName) {
     const ctorName = `${syntheticName}_new`;
-    const funcIdx = ctx.funcMap.get(ctorName);
+    const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
     if (funcIdx !== undefined) {
       return emitClassCtorValue(ctx, fctx, ctorName, funcIdx);
     }
@@ -1484,7 +1580,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
     const className = expr.name.text;
     if (ctx.classSet.has(className)) {
       const ctorName = `${className}_new`;
-      const funcIdx = ctx.funcMap.get(ctorName);
+      const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
       if (funcIdx !== undefined) {
         return emitClassCtorValue(ctx, fctx, ctorName, funcIdx);
       }
@@ -1542,6 +1638,11 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
+  {
+    const temporalResult = compileTemporalNewExpression(ctx, fctx, expr);
+    if (temporalResult !== undefined) return temporalResult;
+  }
+
   // (#1103a) `new Map()` in standalone / nativeStrings mode → the WasmGC-native
   // Map runtime (map-runtime.ts) instead of a `Map_new` host import. `new Map()`
   // is a NewExpression, so the interception must live here (not in the
@@ -1557,6 +1658,44 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   ) {
     addUnionImports(ctx);
     ensureMapHelpers(ctx);
+    const mapNewIdx = ctx.mapHelpers.get("__map_new");
+    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+  }
+
+  // (#2162) `new Set()` in standalone / nativeStrings mode → the WasmGC-native
+  // Set runtime, which reuses the Map backing store (`__map_new` yields the
+  // same empty `$Map` a Set wraps). No-arg form only; `new Set(iterable)` needs
+  // the iterator drive (follow-up slice) and falls through.
+  if (
+    ctx.nativeStrings &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "Set" &&
+    (expr.arguments?.length ?? 0) === 0
+  ) {
+    addUnionImports(ctx);
+    ensureSetHelpers(ctx);
+    const mapNewIdx = ctx.mapHelpers.get("__map_new");
+    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+  }
+
+  // (#2162) `new WeakMap()` / `new WeakSet()` in standalone / nativeStrings mode
+  // → the native weak-collection runtime, which reuses the Map backing store
+  // (`__map_new` yields the same empty `$Map`). No-arg form only; the iterable
+  // form falls through.
+  if (
+    ctx.nativeStrings &&
+    ts.isIdentifier(expr.expression) &&
+    (expr.expression.text === "WeakMap" || expr.expression.text === "WeakSet") &&
+    (expr.arguments?.length ?? 0) === 0
+  ) {
+    addUnionImports(ctx);
+    ensureWeakCollectionHelpers(ctx);
     const mapNewIdx = ctx.mapHelpers.get("__map_new");
     if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
       fctx.body.push({ op: "call", funcIdx: mapNewIdx });
@@ -1588,7 +1727,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const syntheticName = ctx.anonClassExprNames.get(unwrappedExpr);
       if (syntheticName) {
         const ctorName = `${syntheticName}_new`;
-        const funcIdx = ctx.funcMap.get(ctorName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
         if (funcIdx === undefined) {
           reportError(ctx, expr, `Missing constructor for anonymous class`);
           return null;
@@ -1969,14 +2108,67 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
-  // Handle `new Proxy(target, handler)` — delegate to __proxy_create host import.
-  // The host wraps the target in a real JS Proxy with the given handler object.
-  // Standalone has no JS Proxy machinery, so fail clearly instead of silently
-  // lowering to a half-working pass-through value (#1472 Phase C).
+  // Handle `new Proxy(target, handler)`.
+  //
+  // JS-host mode: delegate to the `__proxy_create(target, handler)` host import
+  // (the host wraps the target in a real JS Proxy with the given handler).
+  //
+  // Standalone mode (#1100 Phase 1): there is no host Proxy, so route through the
+  // Wasm-native `__proxy_create(target, handler)` emitted by `ensureObjectRuntime`
+  // (object-runtime.ts `ensureProxyRuntime`). It reads the get/set/has/apply trap
+  // closures off the handler object at runtime, allocates a `$Proxy` (subtype of
+  // `$Object`), and the property-runtime front-guards (`__extern_get/set/has`)
+  // dispatch reads/writes/has through the traps. Both modes share the same
+  // `(target, handler) -> externref` signature, so the call site is uniform.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Proxy") {
     if (ctx.standalone) {
-      reportError(ctx, expr, "Codegen error: Proxy not supported in standalone mode (#1472 Phase C).");
-      fctx.body.push({ op: "ref.null.extern" });
+      const args = expr.arguments ?? [];
+      // Force the object runtime (which registers the native __proxy_create +
+      // the trap dispatch helpers + the front-guards) before we look up the idx.
+      ensureObjectRuntime(ctx);
+      const compileToExternref = (arg: ts.Expression | undefined): void => {
+        if (arg === undefined) {
+          fctx.body.push({ op: "ref.null.extern" });
+          return;
+        }
+        // An OBJECT-LITERAL handler/target must lower to an OPEN `$Object`
+        // (`__new_plain_object` + `__extern_set` per prop) so the runtime
+        // `__proxy_create` can read the traps off the handler via `__extern_get`.
+        // A closed typed struct (the default for an inline literal) hides its
+        // fields from the open-object prop-map walk, so every trap reads null and
+        // never fires. `compileObjectLiteralAsExternref` builds the open form —
+        // the same shape a `const h: any = {…}` handler takes.
+        if (ts.isObjectLiteralExpression(arg)) {
+          const r = compileObjectLiteralAsExternref(ctx, fctx, arg);
+          if (r === null) {
+            // Builder unavailable — push undefined so the body stays valid.
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          return;
+        }
+        const r = compileExpression(ctx, fctx, arg, { kind: "externref" });
+        if (r && r.kind !== "externref") {
+          if (r.kind === "ref" || r.kind === "ref_null") {
+            fctx.body.push({ op: "extern.convert_any" });
+          } else {
+            coerceTypeImpl(ctx, fctx, r, { kind: "externref" });
+          }
+        } else if (!r) {
+          // void result (shouldn't happen for a value arg) — push undefined.
+          fctx.body.push({ op: "ref.null.extern" });
+        }
+      };
+      compileToExternref(args[0]);
+      compileToExternref(args[1]);
+      const proxyCreateIdx = ctx.funcMap.get("__proxy_create");
+      if (proxyCreateIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: proxyCreateIdx });
+      } else {
+        // Runtime not available (should not happen) — drop args, push undefined.
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "ref.null.extern" });
+      }
       return { kind: "externref" };
     }
     const args = expr.arguments ?? [];
@@ -2020,8 +2212,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
       return { kind: "externref" };
     }
-    // No arguments — null proxy
-    fctx.body.push({ op: "ref.null.extern" });
+    // No arguments — `new Proxy()`. Per §28.2.1.1 the missing target/handler
+    // are `undefined`, which are not objects, so construction throws TypeError.
+    // Route through __proxy_create(null, null) so the runtime raises it (#2180).
+    {
+      fctx.body.push({ op: "ref.null.extern" });
+      fctx.body.push({ op: "ref.null.extern" });
+      const proxyIdx = ensureLateImport(
+        ctx,
+        "__proxy_create",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (proxyIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: proxyIdx });
+      }
+    }
     return { kind: "externref" };
   }
 
@@ -2058,6 +2265,16 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           funcIdx: ctx.funcMap.get("__wasi_date_now")!,
         } as Instr);
         fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
+        return { kind: "ref", typeIdx: dateTypeIdx };
+      }
+      // (#2164) Pure standalone has no wall clock — emit the Unix epoch (0)
+      // directly instead of leaking the unsatisfiable env::__date_now host
+      // import (which made `new Date()` a hard instantiate failure standalone,
+      // breaking unrelated Date tests). See the matching Date.now() fallback in
+      // expressions/calls.ts.
+      if (ctx.standalone === true) {
+        fctx.body.push({ op: "i64.const", value: 0n });
         fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
         return { kind: "ref", typeIdx: dateTypeIdx };
       }
@@ -2545,6 +2762,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
             pushDefaultValue(fctx, paramTypes[i]!, ctx);
           }
         }
+        maybeSetArgcForKnownCall(ctx, fctx, cachedFnCtor.ctorFuncName, args.length, paramTypes?.length ?? args.length);
         fctx.body.push({ op: "call", funcIdx: ctorFuncIdx });
         return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
       }
@@ -2612,6 +2830,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           }
         }
         const finalIdx = ctx.funcMap.get(cachedFnCtor.ctorFuncName) ?? ctorFuncIdx;
+        maybeSetArgcForKnownCall(ctx, fctx, cachedFnCtor.ctorFuncName, args.length, paramTypes?.length ?? args.length);
         fctx.body.push({ op: "call", funcIdx: finalIdx });
         return { kind: "ref", typeIdx: cachedFnCtor.structTypeIdx };
       }
@@ -2901,7 +3120,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // Handle local class constructors
   if (ctx.classSet.has(className)) {
     const ctorName = `${className}_new`;
-    const funcIdx = ctx.funcMap.get(ctorName);
+    const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
     if (funcIdx === undefined) {
       reportError(ctx, expr, `Missing constructor for class: ${className}`);
       return null;
@@ -2911,6 +3130,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const paramTypes = getFuncParamTypes(ctx, funcIdx);
     const args = expr.arguments ?? [];
     const ctorRestInfo = ctx.funcRestParams.get(ctorName);
+    let ctorActualArgCount = args.length;
 
     // Check for spread arguments
     const hasSpreadCtorArg = args.some((a) => ts.isSpreadElement(a));
@@ -2918,8 +3138,12 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Flatten spread arguments for constructor call
       const flatCtorArgs = flattenCallArgs(args);
       if (flatCtorArgs) {
+        ctorActualArgCount = flatCtorArgs.length;
         for (let i = 0; i < flatCtorArgs.length && i < paramTypes.length; i++) {
-          compileExpression(ctx, fctx, flatCtorArgs[i]!, paramTypes[i]);
+          compileCtorArgument(ctx, fctx, flatCtorArgs[i]!, paramTypes[i]);
+        }
+        for (let i = paramTypes.length; i < flatCtorArgs.length; i++) {
+          evaluateCtorExtraArgument(ctx, fctx, flatCtorArgs[i]!);
         }
         // Pad missing args
         for (let i = flatCtorArgs.length; i < paramTypes.length; i++) {
@@ -2933,7 +3157,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Calling a rest-param constructor: pack trailing args into a GC array
       for (let i = 0; i < ctorRestInfo.restIndex; i++) {
         if (i < args.length) {
-          compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
+          compileCtorArgument(ctx, fctx, args[i]!, paramTypes?.[i]);
         } else {
           pushDefaultValue(fctx, paramTypes?.[i] ?? { kind: "f64" }, ctx);
         }
@@ -2942,7 +3166,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const restArgCount = Math.max(0, args.length - ctorRestInfo.restIndex);
       fctx.body.push({ op: "i32.const", value: restArgCount });
       for (let i = ctorRestInfo.restIndex; i < args.length; i++) {
-        compileExpression(ctx, fctx, args[i]!, ctorRestInfo.elemType);
+        compileCtorArgument(ctx, fctx, args[i]!, ctorRestInfo.elemType);
       }
       fctx.body.push({
         op: "array.new_fixed",
@@ -2951,8 +3175,12 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       });
       fctx.body.push({ op: "struct.new", typeIdx: ctorRestInfo.vecTypeIdx });
     } else {
-      for (let i = 0; i < args.length; i++) {
-        compileExpression(ctx, fctx, args[i]!, paramTypes?.[i]);
+      const positionalParamCount = paramTypes?.length ?? args.length;
+      for (let i = 0; i < args.length && i < positionalParamCount; i++) {
+        compileCtorArgument(ctx, fctx, args[i]!, paramTypes?.[i]);
+      }
+      for (let i = positionalParamCount; i < args.length; i++) {
+        evaluateCtorExtraArgument(ctx, fctx, args[i]!);
       }
       // Pad missing constructor arguments with defaults (arity mismatch)
       if (paramTypes) {
@@ -2964,7 +3192,8 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
     // Re-lookup funcIdx: argument compilation may trigger addUnionImports
     // which shifts defined-function indices, making the earlier lookup stale.
-    const finalCtorIdx = ctx.funcMap.get(ctorName) ?? funcIdx;
+    const finalCtorIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)) ?? funcIdx; // (#1983)
+    maybeSetArgcForKnownCall(ctx, fctx, ctorName, ctorActualArgCount, paramTypes?.length ?? ctorActualArgCount);
     fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
     // (#1366a) Externref-backed subclass instances (extends Error / TypeError
     // / ...) bubble up as externref, NOT as (ref $struct).

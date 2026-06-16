@@ -224,6 +224,92 @@ export function main(): void {
     }
     expect(firstMismatch).toBe(-1);
   });
+
+  // #389 — multi-message + large-array regression. guest271314's repro is a
+  // long-lived port loop fed repeated large JSON arrays (`Array(209715*64)`).
+  // Chrome deserializes EVERY host->extension message as JSON and caps each at
+  // 1 MiB, so a >1 MiB array can't be echoed in one frame and CANNOT be split at
+  // raw byte boundaries (that yields invalid-JSON fragments Chrome rejects with
+  // "The sender sent an invalid JSON message"). The host re-chunks a large array
+  // into a sequence of valid JSON arrays, each <=1 MiB, whose elements
+  // concatenate back to the original. We send THREE arrays just over the 1 MiB
+  // boundary, each filled with a distinct constant so loss/dup/reorder shows up,
+  // and assert: every response frame is a valid JSON array, no frame body
+  // exceeds the 1 MiB cap, and the flattened elements equal the inputs in order.
+  it("re-chunks large JSON arrays into valid <=1 MiB JSON frames across one session (#389)", async () => {
+    const src = readFileSync(hostPath, "utf-8");
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
+    expect(result.success).toBe(true);
+
+    const CHUNK = 1024 * 1024;
+    const PER_ARRAY = 700_000; // each `[m,m,...,m]` body is ~1.4 MiB → multi-frame
+    const MESSAGES = 3;
+
+    // One framed request per message; body is a JSON array of a distinct value.
+    const stdinParts: Uint8Array[] = [];
+    const expected: number[] = [];
+    for (let m = 0; m < MESSAGES; m++) {
+      const json = `[${Array(PER_ARRAY).fill(String(m)).join(",")}]`;
+      const body = new TextEncoder().encode(json);
+      const header = new Uint8Array(4);
+      new DataView(header.buffer).setUint32(0, body.length, true);
+      stdinParts.push(header, body);
+      for (let i = 0; i < PER_ARRAY; i++) expected.push(m);
+    }
+    const stdin = new Uint8Array(stdinParts.reduce((n, p) => n + p.length, 0));
+    let off = 0;
+    for (const p of stdinParts) {
+      stdin.set(p, off);
+      off += p.length;
+    }
+
+    const out = runWasiRaw(result.binary, stdin);
+
+    // Parse every response frame as JSON; flatten elements in arrival order.
+    const view = new DataView(out.buffer, out.byteOffset);
+    const flat: number[] = [];
+    let p = 0;
+    let frames = 0;
+    let maxFrameBody = 0;
+    let allValidArrays = true;
+    while (p + 4 <= out.length) {
+      const len = view.getUint32(p, true);
+      p += 4;
+      maxFrameBody = Math.max(maxFrameBody, len);
+      const text = new TextDecoder().decode(out.subarray(p, p + len));
+      p += len;
+      frames++;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        allValidArrays = false;
+        continue;
+      }
+      if (!Array.isArray(parsed)) {
+        allValidArrays = false;
+        continue;
+      }
+      for (const v of parsed as number[]) flat.push(v);
+    }
+
+    // A >1 MiB array must come back as several frames…
+    expect(frames).toBeGreaterThan(MESSAGES);
+    // …every frame is a valid JSON array (Chrome rejects anything else)…
+    expect(allValidArrays).toBe(true);
+    // …no frame body exceeds Chrome's 1 MiB per-message cap…
+    expect(maxFrameBody).toBeLessThanOrEqual(CHUNK);
+    // …and the elements reassemble to the inputs, in order, with no loss.
+    expect(flat.length).toBe(expected.length);
+    let firstMismatch = -1;
+    for (let i = 0; i < expected.length; i++) {
+      if (flat[i] !== expected[i]) {
+        firstMismatch = i;
+        break;
+      }
+    }
+    expect(firstMismatch).toBe(-1);
+  });
 });
 
 // #389 — direct regression for the compiler-side bug: a large

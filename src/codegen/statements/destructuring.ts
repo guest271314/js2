@@ -23,10 +23,12 @@ import {
   buildDestructureNullThrow,
   destructureParamArray,
   destructureParamObject,
+  emitExternrefDestructureGuard,
 } from "../destructuring-params.js";
 import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
 import { emitWasiErrorConstructor } from "../registry/error-types.js";
-import { addFuncType, getArrTypeIdxFromVec } from "../registry/types.js";
+import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "../registry/types.js";
+import { getVecInfo } from "../type-coercion.js";
 import {
   coerceType,
   compileExpression,
@@ -39,6 +41,8 @@ import {
 import { collectInstrs } from "./shared.js";
 import { emitLocalTdzInit, emitTdzInitForBindingPattern } from "./tdz.js";
 import { arrayIteratorOverrideGlobalIdx, emitArrayProtoIteratorDrive } from "../expressions/proto-override.js";
+import { ensureNativeIteratorRuntime } from "../iterator-native.js";
+import { emitDrainCustomIterableToVec, isCustomIterable } from "../custom-iterable.js";
 
 /**
  * (#1719 S1) Gate predicate for the array object-value representation track.
@@ -369,11 +373,30 @@ export function emitNullGuard(
 }
 
 /**
- * Ensure __async_iterator import is available.
- * Returns the function index, or undefined if registration failed.
- * JS impl: (obj) => obj[Symbol.asyncIterator]?.() ?? obj[Symbol.iterator]()
+ * Ensure __async_iterator is available; return its function index.
+ *
+ * JS-host mode: register `env.__async_iterator`
+ *   (obj) => obj[Symbol.asyncIterator]?.() ?? obj[Symbol.iterator]()
+ *
+ * (#2038) Standalone / WASI: there is no JS host to satisfy that import, and
+ * feeding the host carrier to the native `__iterator_next` traps `illegal cast`.
+ * Per §7.4.3 GetIterator(async) + §27.1.4.1 CreateAsyncFromSyncIterator, for a
+ * **sync-backed** async iterable (the dominant test262 shape — `for await (x of
+ * [literals])` and `for await (x of syncIterable)`) the async iterator is the
+ * sync iterator with each value `Await`-ed; for an already-settled value
+ * `Await(v) = v`, so the async wrapper degenerates to the *identity* native
+ * iterator. So in standalone we return the SAME native `__iterator` the sync
+ * for-of consumer uses (now USER-`{next()}`-carrier aware). The per-element
+ * `Await` is layered by the for-await CPS lowering around the loop body and is a
+ * no-op for settled values — no `env.__async_iterator` / `env.Promise_resolve`
+ * leak. Genuinely-pending-Promise async iterables stay deferred to the standalone
+ * Promise runtime (PR-C).
  */
 export function ensureAsyncIterator(ctx: CodegenContext, fctx: FunctionContext): number | undefined {
+  if (ctx.standalone || ctx.wasi) {
+    ensureNativeIteratorRuntime(ctx);
+    return ctx.funcMap.get("__iterator");
+  }
   const idx = ctx.funcMap.get("__async_iterator");
   if (idx !== undefined) return idx;
   const importsBefore = ctx.numImportFuncs;
@@ -876,13 +899,22 @@ export function compileExternrefObjectDestructuringDecl(
   const tmpLocal = allocLocal(fctx, `__ext_obj_destruct_${fctx.locals.length}`, resultType);
   fctx.body.push({ op: "local.set", index: tmpLocal });
 
-  // Per ECMA-262 §13.15.5.5, an empty ObjectBindingPattern `{}` performs no
-  // property access and therefore no RequireObjectCoercible: `const {} = null`
-  // must NOT throw. `destructureParamObject` emits an unconditional
-  // null/undefined guard for externref sources, so we must short-circuit the
-  // empty pattern here before delegating (the binding-locals pre-pass is a
-  // no-op for an empty pattern). (#1553c — preserves twin behaviour.)
+  // Per ECMA-262 8.6.2 BindingInitialization, the production
+  // `BindingPattern : ObjectBindingPattern` runs `Perform ?
+  // RequireObjectCoercible(value)` as step 1 — BEFORE the inner
+  // `ObjectBindingPattern : { }` rule (which returns unused). So `const {} =
+  // null` / `const {} = undefined` MUST throw a TypeError, while `const {} = 5`
+  // must NOT (a number is object-coercible). The earlier blanket short-circuit
+  // (#846) skipped the coercibility check for empty patterns, silently
+  // accepting null/undefined — observably wrong (test262
+  // dstr-binding/obj-init-null + for-of/dstr/const-obj-init-*). Emit the same
+  // null/undefined RequireObjectCoercible guard that the parameter path
+  // (`destructureParamObject`) and assignment path
+  // (`emitExternrefAssignDestructureGuard`) already use, then short-circuit the
+  // no-property-access empty body. The guard only fires for null/undefined, so
+  // primitive sources still pass through unchanged. (#846)
   if (pattern.elements.length === 0) {
+    emitExternrefDestructureGuard(ctx, fctx, tmpLocal);
     ensureBindingLocals(ctx, fctx, pattern);
     return;
   }
@@ -1003,6 +1035,60 @@ export function compileArrayDestructuring(
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, typeIdx);
   const arrDef = ctx.mod.types[arrTypeIdx];
   const isVecArray = arrDef && arrDef.kind === "array";
+
+  // (#2033) Array-destructuring a user-defined iterable — an object literal /
+  // class instance whose struct carries `[Symbol.iterator]()`. Without this it
+  // fell through to the vec/tuple field reads below and pulled non-existent
+  // numeric fields → NaN. Spec §8.5.2 IteratorBindingInitialization: array
+  // destructuring is a GetIterator consumer, exactly like for-of and spread.
+  // Coerce to externref and delegate to the externref decl path, whose helper
+  // runs the full GetIterator (@@iterator + .next()) protocol.
+  // (#2033) Array-destructuring a user-defined iterable — an object literal /
+  // class instance whose struct carries `[Symbol.iterator]()`. Without this it
+  // fell through to the vec/tuple field reads below (or the externref
+  // __extern_get fallback) and pulled non-existent numeric fields → NaN. Spec
+  // §8.5.2 IteratorBindingInitialization: array destructuring is a GetIterator
+  // consumer, exactly like for-of and spread (#2033 spread fix). Drain the
+  // iterator protocol into a vec (reusing the spread drain), then destructure
+  // that vec through the proven typed-vec path.
+  if (!isVecArray && isCustomIterable(ctx, resultType)) {
+    const drainVecTypeIdx = getOrRegisterVecType(ctx, "f64");
+    const drainVecInfo = getVecInfo(ctx, drainVecTypeIdx);
+    if (drainVecInfo) {
+      const iterableLocal = allocLocal(fctx, `__destr_citer_src_${fctx.locals.length}`, resultType);
+      fctx.body.push({ op: "local.set", index: iterableLocal });
+      if (emitDrainCustomIterableToVec(ctx, fctx, iterableLocal, resultType, drainVecTypeIdx)) {
+        // `struct.new` yields a non-null ref; type the local `ref` (not
+        // `ref_null`) so the typed-vec destructure's OOB→default logic matches
+        // the literal-array path (a `ref_null` source takes a different branch
+        // that mis-handles the binding default).
+        const vecLocal = allocLocal(fctx, `__destr_citer_vec_${fctx.locals.length}`, {
+          kind: "ref",
+          typeIdx: drainVecTypeIdx,
+        });
+        fctx.body.push({ op: "local.set", index: vecLocal });
+        destructureParamArray(
+          ctx,
+          fctx,
+          vecLocal,
+          pattern,
+          { kind: "ref", typeIdx: drainVecTypeIdx },
+          {
+            mode: "decl",
+            bindingKind: recoverBindingKind(pattern) ?? "var",
+          },
+        );
+        syncDestructuredLocalsToGlobals(ctx, fctx, pattern);
+        return;
+      }
+      // Drain unavailable — value already consumed into iterableLocal; fall
+      // back to the externref path on a fresh extern view is not possible here
+      // (value gone), so emit binding locals + a structured error.
+      ensureBindingLocals(ctx, fctx, pattern);
+      reportError(ctx, decl, "Cannot destructure custom iterable: iterator imports unavailable");
+      return;
+    }
+  }
 
   // Check if this is a tuple struct (fields named _0, _1, etc.)
   // Note: 0-field structs are treated as empty tuples so that defaults apply correctly

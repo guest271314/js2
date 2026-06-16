@@ -7,6 +7,7 @@
 import { ts, forEachChild } from "../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
+import { bodyReferencesOwnThis } from "./helpers/body-references-own-this.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, deduplicateLocals } from "./context/locals.js";
@@ -26,7 +27,7 @@ import {
   resolveWasmType,
 } from "./index.js";
 import { ensureExnTag } from "./registry/imports.js";
-import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
+import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
   compileExpression,
@@ -36,16 +37,100 @@ import {
   hoistFunctionDeclarations,
   valTypesMatch,
 } from "./shared.js";
-import { emitArgumentsVecBody } from "./statements/nested-declarations.js";
+import {
+  cacheParamDefaultArgc,
+  emitF64ParamSentinelCheck,
+  emitArgumentsVecBody,
+  emitParamDefaultArgMissingCheck,
+  paramDefaultNeedsArgc,
+} from "./statements/nested-declarations.js";
+import { emitThrowReferenceError } from "./expressions/helpers.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import { isStrictFunction } from "./helpers/is-strict-function.js";
-import { detectStringBuilders } from "./string-builder.js";
+import { detectStringBuilders, type StringBuilderPresizeInfo } from "./string-builder.js";
 import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
 import { compileNativeGeneratorFunction } from "./generators-native.js";
+import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps, emitAsyncStateMachine } from "./async-cps.js";
+import {
+  functionHasLinearU8Params,
+  getLinearU8ParamIndicesForDeclaration,
+  registerLinearU8Buffer,
+} from "./linear-uint8-signatures.js";
+import { containsLinearU8Allocation, emitLinearU8ArenaMark, emitLinearU8ArenaReset } from "./linear-uint8-arena.js";
 
 /** Maximum number of instructions for a function body to be considered inlinable */
 export const INLINE_MAX_INSTRS = 10;
+
+/**
+ * (#2121) Per §10.2.11 FunctionDeclarationInstantiation, parameter bindings are
+ * initialized left-to-right, so a default value that reads its own parameter or
+ * a *later* one observes that binding in the TDZ and must throw ReferenceError.
+ * Scan the default initializer of the parameter at `paramIndex` for an
+ * identifier naming a parameter at index ≥ `paramIndex`. Returns that name when
+ * found (the default would throw if it fired), else undefined. References to
+ * strictly-earlier params (e.g. `f(a, b = a)`) are valid and ignored.
+ */
+function findTdzViolatingParamRef(decl: ts.FunctionLikeDeclarationBase, paramIndex: number): string | undefined {
+  // Names of params bound at or after this one (the TDZ window). Skip binding
+  // patterns and the `this` pseudo-param — only plain identifier params can be
+  // referenced by name and observed in the TDZ here.
+  const poisoned = new Set<string>();
+  for (let j = paramIndex; j < decl.parameters.length; j++) {
+    const p = decl.parameters[j]!;
+    if (ts.isIdentifier(p.name) && p.name.text !== "this") poisoned.add(p.name.text);
+  }
+  if (poisoned.size === 0) return undefined;
+
+  const init = decl.parameters[paramIndex]!.initializer;
+  if (!init) return undefined;
+  let found: string | undefined;
+  const walk = (node: ts.Node): void => {
+    if (found) return;
+    // Do not descend into nested functions/arrows: a reference to the param
+    // there is a closure capture resolved after instantiation, not a TDZ read.
+    if (
+      ts.isFunctionExpression(node) ||
+      ts.isArrowFunction(node) ||
+      ts.isFunctionDeclaration(node) ||
+      ts.isClassDeclaration(node) ||
+      ts.isClassExpression(node)
+    ) {
+      return;
+    }
+    if (ts.isIdentifier(node) && poisoned.has(node.text)) {
+      // Exclude identifiers in non-reference positions (property names, etc.).
+      const parent = node.parent;
+      if (
+        parent &&
+        ((ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+          (ts.isPropertyAssignment(parent) && parent.name === node) ||
+          (ts.isBindingElement(parent) && parent.propertyName === node))
+      ) {
+        return;
+      }
+      found = node.text;
+      return;
+    }
+    forEachChild(node, walk);
+  };
+  walk(init);
+  return found;
+}
+
+/**
+ * (#1042) Re-point a function to a func type with the same params but a new
+ * result list. Func types are interned/shared, so we cannot mutate the existing
+ * one in place (that would corrupt every other function with the same shape);
+ * instead intern a fresh type and reassign `func.typeIdx`. Used by the async
+ * CPS hook to switch an async function's result from its unwrapped value type
+ * to `externref` (it returns a Promise object).
+ */
+function rewriteFuncResultType(ctx: CodegenContext, func: WasmFunction, result: ValType): void {
+  const ft = ctx.mod.types[func.typeIdx];
+  if (!ft || ft.kind !== "func") return;
+  func.typeIdx = addFuncType(ctx, ft.params.slice(), [result]);
+}
 
 /** Set of instruction ops that disqualify a function body from inlining */
 export const INLINE_DISALLOWED_OPS = new Set([
@@ -516,6 +601,7 @@ export function registerInlinableFunction(ctx: CodegenContext, funcName: string,
   // Skip functions with rest params or captures
   if (ctx.funcRestParams.has(funcName)) return;
   if (ctx.nestedFuncCaptures.has(funcName)) return;
+  if (functionHasLinearU8Params(ctx, funcName)) return;
 
   const body = func.body;
   if (body.length === 0 || body.length > INLINE_MAX_INSTRS) return;
@@ -575,23 +661,46 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
 
   const restInfo = ctx.funcRestParams.get(func.name);
   const params: { name: string; type: ValType }[] = [];
+  const linearParams = getLinearU8ParamIndicesForDeclaration(ctx, decl);
+  // #2045: carry the param's ts.Symbol so the buffer registry is keyed by
+  // symbol (scope-correct) rather than identifier text (shadow-blind).
+  const linearParamBuffers: { sym: ts.Symbol | undefined; ptrLocalIdx: number; lenLocalIdx: number }[] = [];
+  const funcType = ctx.mod.types[func.typeIdx];
+  const sigParamTypes = funcType?.kind === "func" ? funcType.params : undefined;
+  let wasmParamCursor = 0;
   for (let i = 0; i < decl.parameters.length; i++) {
     const param = decl.parameters[i]!;
     const paramName = ts.isIdentifier(param.name) ? param.name.text : `__param${i}`;
-    if (restInfo && i === restInfo.restIndex) {
+    if (linearParams?.has(i) && ts.isIdentifier(param.name)) {
+      const ptrLocalIdx = wasmParamCursor++;
+      const lenLocalIdx = wasmParamCursor++;
+      params.push(
+        {
+          name: `__linu8_ptr_${paramName}_${i}`,
+          type: sigParamTypes?.[ptrLocalIdx] ?? { kind: "i32" },
+        },
+        {
+          name: `__linu8_len_${paramName}_${i}`,
+          type: sigParamTypes?.[lenLocalIdx] ?? { kind: "i32" },
+        },
+      );
+      const paramSym = ts.isIdentifier(param.name) ? ctx.checker.getSymbolAtLocation(param.name) : undefined;
+      linearParamBuffers.push({ sym: paramSym, ptrLocalIdx, lenLocalIdx });
+    } else if (restInfo && i === restInfo.restIndex) {
       // Rest parameter — use the vec struct ref type from the function signature
       params.push({
         name: paramName,
         type: { kind: "ref_null", typeIdx: restInfo.vecTypeIdx },
       });
+      wasmParamCursor++;
     } else {
       // Prefer the type already established in the function signature (which
       // may have been inferred from call sites for untyped params).
-      const funcType = ctx.mod.types[func.typeIdx];
-      const sigParamType = funcType?.kind === "func" ? funcType.params[i] : undefined;
+      const sigParamType = sigParamTypes?.[wasmParamCursor];
       const paramType =
         resolved?.params[i] ?? sigParamType ?? resolveWasmType(ctx, ctx.checker.getTypeAtLocation(param));
       params.push({ name: paramName, type: paramType });
+      wasmParamCursor++;
     }
   }
 
@@ -624,6 +733,17 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   // counts as an i32-safe write.
   const i32SpecializedArrays = collectI32SpecializedArrays(decl, i32CoercedLocals);
 
+  // #2152 — a named function declaration whose body references `this` may be
+  // passed by reference as an array-HOF callback (e.g.
+  // `arr.filter(callbackfn, thisArg)`), which installs the spec `thisArg` into
+  // the `__current_this` module global before the `call_ref`. Allow such a
+  // body's `this` to read that global. For DIRECT calls `__current_this` is
+  // null, and the null-guarded read (#1702) falls back to `undefined` — exactly
+  // the spec-correct free-function `this`, so this is behavior-preserving for
+  // ordinary calls and only changes the value when a receiver was actually
+  // installed by an enclosing dispatch.
+  const readsThis = decl.body ? bodyReferencesOwnThis(decl.body) : false;
+
   const fctx: FunctionContext = {
     name: func.name,
     params,
@@ -637,6 +757,7 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     labelMap: new Map(),
     savedBodies: [],
     isGenerator,
+    readsCurrentThis: readsThis,
     i32CoercedLocals: i32CoercedLocals.size > 0 ? i32CoercedLocals : undefined,
     i32SpecializedArrays: i32SpecializedArrays.size > 0 ? i32SpecializedArrays : undefined,
   };
@@ -644,6 +765,11 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   // Register params as locals
   for (let i = 0; i < params.length; i++) {
     fctx.localMap.set(params[i]!.name, i);
+  }
+  for (const buf of linearParamBuffers) {
+    // A param with no resolvable symbol can't be looked up by element access
+    // either, so skipping registration is sound — it falls to the GC path.
+    if (buf.sym) registerLinearU8Buffer(fctx, buf.sym, buf.ptrLocalIdx, buf.lenLocalIdx);
   }
 
   ctx.currentFunc = fctx;
@@ -655,11 +781,21 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
     attachSourcePos(nop, funcPos);
     fctx.body.push(nop);
   }
+  if (containsLinearU8Allocation(ctx, decl.body)) {
+    fctx.linearU8ArenaMarkLocalIdx = emitLinearU8ArenaMark(ctx, fctx, "__linu8_fn_mark");
+  }
 
   // Emit default-value initialization for parameters with initializers.
   // For params with constant defaults (#869), the caller already inlined the value,
   // so we skip the check. For expression defaults, check if the caller sent a sentinel.
   const funcOptInfo = ctx.funcOptionalParams.get(func.name);
+  const defaultArgcLocal = decl.parameters.some((param, i) => {
+    if (!param.initializer) return false;
+    const optEntry = funcOptInfo?.find((o) => o.index === i);
+    return !optEntry?.constantDefault && paramDefaultNeedsArgc(params[i]?.type);
+  })
+    ? cacheParamDefaultArgc(ctx, fctx)
+    : undefined;
   for (let i = 0; i < decl.parameters.length; i++) {
     const param = decl.parameters[i]!;
     if (!param.initializer) continue;
@@ -690,9 +826,18 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       (ts.isObjectBindingPattern(param.name) || ts.isArrayBindingPattern(param.name)) &&
       isNullOrUndefinedLiteral(param.initializer);
 
+    // (#2121) TDZ: if this default reads its own parameter or a later one, the
+    // default — when it fires — observes that binding in the TDZ and must throw
+    // ReferenceError per §10.2.11, rather than reading the (still
+    // zero-/undefined-initialized) local. Emit the throw in the then-block.
+    const tdzViolatingName = findTdzViolatingParamRef(decl, i);
+
     // Build the "then" block: compile default expression, local.set
     const savedBody = pushBody(fctx);
-    if (dstrNullDefault) {
+    if (tdzViolatingName !== undefined) {
+      emitThrowReferenceError(ctx, fctx, `Cannot access '${tdzViolatingName}' before initialization`);
+      fctx.body.push({ op: "unreachable" } as Instr);
+    } else if (dstrNullDefault) {
       for (const ins of buildDestructureNullThrow(ctx, fctx)) fctx.body.push(ins);
     } else {
       // For destructuring patterns with externref param, force array literals in the
@@ -757,21 +902,18 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
         then: thenInstrs,
       });
     } else if (paramType.kind === "i32") {
-      fctx.body.push({ op: "local.get", index: paramIdx });
-      fctx.body.push({ op: "i32.eqz" });
+      emitParamDefaultArgMissingCheck(fctx, defaultArgcLocal!, i);
       fctx.body.push({
         op: "if",
         blockType: { kind: "empty" },
         then: thenInstrs,
       });
     } else if (paramType.kind === "f64") {
-      // Check if the f64 param holds the sentinel sNaN bit pattern (#866).
-      // This distinguishes missing args from explicit NaN/0/any other value.
-      // Sentinel: 0x7FF00000DEADC0DE (emitted by pushParamSentinel).
-      fctx.body.push({ op: "local.get", index: paramIdx });
-      fctx.body.push({ op: "i64.reinterpret_f64" });
-      fctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den });
-      fctx.body.push({ op: "i64.eq" });
+      emitParamDefaultArgMissingCheck(fctx, defaultArgcLocal!, i);
+      // Keep the f64 sNaN sentinel as a fallback for existing callers that
+      // materialize an explicit undefined/missing value.
+      emitF64ParamSentinelCheck(fctx, paramIdx);
+      fctx.body.push({ op: "i32.or" });
       fctx.body.push({
         op: "if",
         blockType: { kind: "empty" },
@@ -940,8 +1082,10 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       // synthetic buffer/len/cap/mat triple set up at declaration time.
       // Only runs in nativeStrings mode (JS-host concat avoids GC pressure).
       if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
-        const builders = detectStringBuilders(ctx, decl.body);
+        const presize = new Map<ts.VariableDeclaration, StringBuilderPresizeInfo>();
+        const builders = detectStringBuilders(ctx, decl.body, presize);
         if (builders.size > 0) fctx.pendingStringBuilders = builders;
+        if (presize.size > 0) fctx.stringBuilderPresize = presize; // #1761
       }
       // #1195: array-reduce-fusion — detect the fill+reduce shape and
       // rewrite the AST to eliminate the temporary array. Runs BEFORE
@@ -962,16 +1106,45 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       // Hoist function declarations: JS semantics require function declarations
       // to be available before their textual position in the enclosing scope.
       hoistFunctionDeclarations(ctx, fctx, bodyStatements);
-      for (const stmt of bodyStatements) {
-        compileStatement(ctx, fctx, stmt);
+
+      // (#1042/#1796) Async/await CPS state-machine activation hook. Gated by
+      // the per-function `asyncFnNeedsCps` predicate (#1936): a JS-host async
+      // function is CPS-lowered ONLY when it *genuinely suspends* — at least one
+      // await operand is not statically resolved AND the body matches a single
+      // tail-await canonical shape (no try-across-await / nested await). Fully
+      // await-elidable bodies (`return await Promise.resolve(42)`) fall through
+      // to the legacy synchronous path and keep returning the unwrapped value,
+      // preserving the `asyncFn() as any as number` "compile away" idiom
+      // (#1313/#1727). On a match we rewrite the result type to externref (the
+      // fn now returns a real Promise object), drive emitAsyncStateMachine, and
+      // skip the normal statement loop.
+      let asyncCpsHandled = false;
+      if (ASYNC_CPS_ENABLED && isAsync && !ctx.wasi && !ctx.standalone && ts.isFunctionDeclaration(decl) && decl.body) {
+        const asyncPlan = analyzeAsyncBody(ctx, decl);
+        if (asyncFnNeedsCps(decl, asyncPlan)) {
+          // The async function returns a Promise object (externref), not the
+          // unwrapped value. Rewrite the registered signature's result + fctx.
+          rewriteFuncResultType(ctx, func, { kind: "externref" });
+          fctx.returnType = { kind: "externref" };
+          fctx.asyncCpsActive = true;
+          emitAsyncStateMachine(ctx, fctx, decl, asyncPlan);
+          asyncCpsHandled = true;
+        }
+      }
+
+      if (!asyncCpsHandled) {
+        for (const stmt of bodyStatements) {
+          compileStatement(ctx, fctx, stmt);
+        }
       }
     }
 
-    // Ensure there's always a valid return value at the end for non-void functions
-    if (fctx.returnType) {
-      // Check if the last instruction is already a return
-      const lastInstr = fctx.body[fctx.body.length - 1];
-      if (!lastInstr || lastInstr.op !== "return") {
+    // Reset short-lived linear-U8 function allocations on fallthrough, then
+    // ensure there's always a valid return value at the end for non-void funcs.
+    const lastInstr = fctx.body[fctx.body.length - 1];
+    if (!lastInstr || lastInstr.op !== "return") {
+      emitLinearU8ArenaReset(ctx, fctx, fctx.linearU8ArenaMarkLocalIdx);
+      if (fctx.returnType) {
         // Add a default return value
         if (fctx.returnType.kind === "f64") {
           fctx.body.push({ op: "f64.const", value: 0 });

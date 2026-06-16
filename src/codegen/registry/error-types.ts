@@ -46,6 +46,8 @@ import type { Instr, ValType } from "../../ir/types.js";
 
 import { BUILTIN_TYPE_TAGS } from "../builtin-tags.js";
 import { addFuncType } from "./types.js";
+import { addStringConstantGlobal } from "./imports.js";
+import { stringConstantExternrefInstrs } from "../native-strings.js";
 
 /**
  * The 8 built-in JS Error constructors that Phase 1 supports as Wasm-native
@@ -85,6 +87,13 @@ export function getOrRegisterErrorStructType(ctx: CodegenContext): number {
       { name: "tag", type: { kind: "i32" }, mutable: false },
       { name: "message", type: { kind: "externref" }, mutable: true },
       { name: "name", type: { kind: "externref" }, mutable: false },
+      // (#1536) $stack — fieldIdx 3, kept AFTER message(1)/name(2) so their
+      // indices stay stable. `error.stack` is non-standard (no normative
+      // test262 coverage); materializing a real stack trace needs no Wasm
+      // primitive, so standalone constructs it as `ref.null.extern` (reads
+      // back as `undefined`, not a trap). Mutable so a future `err.stack = …`
+      // write can land here without a struct-type change.
+      { name: "stack", type: { kind: "externref" }, mutable: true },
     ],
   });
   ctx.errorStructTypeIdx = idx;
@@ -100,9 +109,17 @@ export function getOrRegisterErrorStructType(ctx: CodegenContext): number {
  * Idempotent — does nothing if `__new_<errorName>` is already registered
  * (whether as a host import or a previously-emitted internal function).
  *
- * Phase 1 stores `ref.null extern` for the `$name` field. Phase 2 will switch
- * to a real string constant once the dual-mode string materialization path
- * for nativeStrings → externref is verified to work inside helper functions.
+ * #1536 Phase 2 — the `$name` field is now materialized with the error
+ * class's name string ("Error" / "TypeError" / …) instead of the Phase-1
+ * `ref.null extern` placeholder, so `err.name` reads the correct value in
+ * standalone mode (the property-access fast path in `property-access.ts`
+ * already does `struct.get $Error_struct[2]` for `.name` under
+ * `ctx.wasi || ctx.standalone`). The constant is materialized via the
+ * shared `stringConstantExternrefInstrs` dual-mode helper: nativeStrings
+ * mode builds the FlatString struct inline + `extern.convert_any`;
+ * host-strings mode emits a `global.get` of the interned string constant.
+ * The string is registered via `addStringConstantGlobal` first so the
+ * helper finds it in `ctx.stringGlobalMap`.
  */
 export function emitWasiErrorConstructor(ctx: CodegenContext, errorName: WasiErrorName, argCount: number): void {
   const importName = `__new_${errorName}`;
@@ -110,6 +127,12 @@ export function emitWasiErrorConstructor(ctx: CodegenContext, errorName: WasiErr
 
   const structIdx = getOrRegisterErrorStructType(ctx);
   const tagValue = BUILTIN_TYPE_TAGS[errorName];
+
+  // #1536 Phase 2 — register the class-name string so the $name field can be
+  // materialized below. Must run BEFORE building the body so the dual-mode
+  // helper finds the interned global.
+  addStringConstantGlobal(ctx, errorName);
+  const nameInstrs = stringConstantExternrefInstrs(ctx, errorName);
 
   const params: ValType[] = Array.from({ length: argCount }, () => ({ kind: "externref" }) as ValType);
   const typeIdx = addFuncType(ctx, params, [{ kind: "externref" }], `${importName}_type`);
@@ -123,8 +146,11 @@ export function emitWasiErrorConstructor(ctx: CodegenContext, errorName: WasiErr
     { op: "i32.const", value: tagValue },
     // $message — first arg if present, else null
     argCount > 0 ? { op: "local.get", index: 0 } : { op: "ref.null.extern" },
-    // $name — Phase 1 placeholder; Phase 2 will materialize the constant
-    // string ("Error" / "TypeError" / ...) here.
+    // $name — #1536 Phase 2: materialized class-name string ("TypeError" …)
+    // as externref, replacing the Phase-1 `ref.null.extern` placeholder.
+    ...nameInstrs,
+    // $stack — (#1536) non-standard; standalone has no stack-capture
+    // primitive, so initialize to null (reads back as `undefined`).
     { op: "ref.null.extern" },
     { op: "struct.new", typeIdx: structIdx },
     { op: "extern.convert_any" },

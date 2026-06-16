@@ -15,6 +15,62 @@ export function allocLocal(fctx: FunctionContext, name: string, type: ValType): 
   return index;
 }
 
+/**
+ * #1847 — snapshot of the local-allocation state, for tentative compilation
+ * that may be rolled back. Captures the locals-vector length so callers can
+ * truncate, plus the `localMap` names present at snapshot time so we can drop
+ * any name `allocLocal` added afterwards (whose slot the truncation removes).
+ *
+ * Tentative-compile sites previously truncated `fctx.locals.length` (and
+ * `fctx.body.length`) but left `fctx.localMap` pointing at slots past the
+ * truncated vector — an unbalanced state. Snapshot/restore keeps the three in
+ * sync.
+ */
+export interface LocalsSnapshot {
+  readonly localsLen: number;
+  /** Names present in `localMap` at snapshot time (keys are stable strings). */
+  readonly mapNames: ReadonlySet<string>;
+}
+
+export function snapshotLocals(fctx: FunctionContext): LocalsSnapshot {
+  return {
+    localsLen: fctx.locals.length,
+    mapNames: new Set(fctx.localMap.keys()),
+  };
+}
+
+/**
+ * #1847 — undo allocations made since `snap`: truncate the locals vector and
+ * delete every `localMap` name that wasn't present at snapshot time. Does NOT
+ * touch `fctx.body` — callers truncate that themselves (the body length to
+ * roll back to is site-specific and often captured separately).
+ *
+ * `tempFreeList` is left as-is on purpose: it only ever holds indices that were
+ * valid at allocation time, and the temp-local reuse path keys buckets by type;
+ * a rolled-back tentative compile that released a temp would have pushed a slot
+ * index that is now beyond `locals.length`. To keep the free-list from handing
+ * out a truncated slot, we prune any bucket entry that points past the new
+ * locals length.
+ */
+export function restoreLocals(fctx: FunctionContext, snap: LocalsSnapshot): void {
+  if (fctx.locals.length > snap.localsLen) {
+    fctx.locals.length = snap.localsLen;
+  }
+  // Drop localMap names added after the snapshot.
+  for (const name of fctx.localMap.keys()) {
+    if (!snap.mapNames.has(name)) fctx.localMap.delete(name);
+  }
+  // Prune any temp-free-list entries that now point past the truncated vector.
+  if (fctx.tempFreeList) {
+    const maxValid = fctx.params.length + snap.localsLen;
+    for (const bucket of fctx.tempFreeList.values()) {
+      for (let i = bucket.length - 1; i >= 0; i--) {
+        if (bucket[i]! >= maxValid) bucket.splice(i, 1);
+      }
+    }
+  }
+}
+
 function valTypeKey(type: ValType): string {
   switch (type.kind) {
     case "ref":

@@ -90,16 +90,108 @@ describe("#681 standalone iterator protocol slice", () => {
     expectNoIteratorHostImports(result);
   });
 
-  it("refuses Array.prototype.values() in standalone without registering array iterator helpers", async () => {
-    const result = await expectIteratorRefused(`
-      export function f(): number {
-        let sum: number = 0;
-        for (const value of [1, 2, 3].values()) {
-          sum = sum + value;
+  it("drives Array.prototype.values() for-of natively in standalone (no host import)", async () => {
+    // `for (x of arr.values())` is semantically identical to `for (x of arr)`,
+    // so the array index loop drives it directly — no __array_values import.
+    const result = await compile(
+      `
+        export function f(): number {
+          let sum: number = 0;
+          for (const value of [1, 2, 3, 4].values()) {
+            sum = sum + value;
+          }
+          return sum;
         }
-        return sum;
-      }
-    `);
-    expect(result.errors.some((e) => /Array\.prototype\.values/.test(e.message))).toBe(true);
+      `,
+      { target: "standalone" },
+    );
+
+    expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
+    expectNoIteratorHostImports(result);
+
+    const { instance } = await WebAssembly.instantiate(result.binary, {});
+    expect((instance.exports as { f: () => number }).f()).toBe(10);
+  });
+
+  it("drives Array.prototype.keys() for-of natively in standalone (no host import)", async () => {
+    // `.keys()` (§23.1.3.16) yields the indices 0..length-1 in order.
+    const result = await compile(
+      `
+        export function f(): number {
+          let sum: number = 0;
+          for (const index of [10, 20, 30].keys()) {
+            sum = sum + index;
+          }
+          return sum;
+        }
+      `,
+      { target: "standalone" },
+    );
+
+    expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
+    expectNoIteratorHostImports(result);
+
+    const { instance } = await WebAssembly.instantiate(result.binary, {});
+    expect((instance.exports as { f: () => number }).f()).toBe(0 + 1 + 2);
+  });
+
+  it("drives Array.prototype.entries() destructured for-of natively in standalone (no host import)", async () => {
+    // `.entries()` (§23.1.3.4) yields `[index, value]` for each element.
+    const result = await compile(
+      `
+        export function f(): number {
+          let sum: number = 0;
+          for (const [index, value] of [10, 20, 30].entries()) {
+            sum = sum + index + value;
+          }
+          return sum;
+        }
+      `,
+      { target: "standalone" },
+    );
+
+    expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
+    expectNoIteratorHostImports(result);
+
+    const { instance } = await WebAssembly.instantiate(result.binary, {});
+    expect((instance.exports as { f: () => number }).f()).toBe(0 + 10 + (1 + 20) + (2 + 30));
+  });
+
+  it("keeps keys()/entries() for-of WASI-clean and honors break/continue", async () => {
+    const keys = await compile(
+      `
+        export function f(): number {
+          let sum: number = 0;
+          for (const i of [9, 9, 9, 9].keys()) {
+            if (i === 2) break;
+            sum = sum + i;
+          }
+          return sum;
+        }
+      `,
+      { target: "wasi" },
+    );
+    expect(keys.success, keys.errors.map((e) => e.message).join("\n")).toBe(true);
+    expectNoIteratorHostImports(keys);
+    const keysInst = (await WebAssembly.instantiate(keys.binary, {})).instance;
+    expect((keysInst.exports as { f: () => number }).f()).toBe(0 + 1);
+
+    const entries = await compile(
+      `
+        export function f(): number {
+          let sum: number = 0;
+          for (const [i, v] of [5, 6, 7].entries()) {
+            if (i === 1) continue;
+            sum = sum + v;
+          }
+          return sum;
+        }
+      `,
+      { target: "wasi" },
+    );
+    expect(entries.success, entries.errors.map((e) => e.message).join("\n")).toBe(true);
+    expectNoIteratorHostImports(entries);
+    const entriesInst = (await WebAssembly.instantiate(entries.binary, {})).instance;
+    expect((entriesInst.exports as { f: () => number }).f()).toBe(5 + 7);
   });
 });

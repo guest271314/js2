@@ -26,6 +26,7 @@ import { ts } from "../ts-api.js";
 
 import { getOrRegisterPromiseType } from "../codegen/async-scheduler.js";
 import { addGeneratorImports, addIteratorImports, addStringImports } from "../codegen/index.js";
+import { classMemberFuncKey } from "../codegen/class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import {
   ensureNativeStringHelpers,
   nativeStringLiteralInstrs,
@@ -75,7 +76,13 @@ import type { FieldDef, FuncTypeDef, Instr, StructTypeDef, ValType } from "./typ
 
 export interface IrIntegrationReport {
   readonly compiled: readonly string[];
-  readonly errors: readonly { func: string; message: string }[];
+  readonly errors: readonly IrIntegrationError[];
+}
+
+export interface IrIntegrationError {
+  readonly func: string;
+  readonly message: string;
+  readonly kind?: "verify" | "build" | "lower" | "backend-legality";
 }
 
 /**
@@ -120,7 +127,7 @@ export function compileIrPathFunctions(
   }
 
   const compiled: string[] = [];
-  const errors: { func: string; message: string }[] = [];
+  const errors: IrIntegrationError[] = [];
 
   // #1586: one allocation-site registry per module compile. Threaded into the
   // builder (mints ids on value-creating instrs) and every pass (preserve /
@@ -196,6 +203,12 @@ export function compileIrPathFunctions(
     if (!selected.funcs.has(name)) continue;
 
     try {
+      // #1923 — test-only seam: simulate a build-time demotion on a CLAIMED
+      // function so the post-claim metering + gate can be exercised without a
+      // real compiler regression in the corpus. Off in every normal build.
+      if (process.env.JS2WASM_TEST_INJECT_IR_BUILD_THROW) {
+        throw new Error(`ir/from-ast: injected test build failure (${name})`);
+      }
       const o = overrides?.get(name);
       const result = lowerFunctionAstToIr(stmt, {
         exported: hasExportModifier(stmt),
@@ -211,7 +224,7 @@ export function compileIrPathFunctions(
       });
       const mainErrors = verifyIrFunction(result.main);
       if (mainErrors.length > 0) {
-        for (const e of mainErrors) errors.push({ func: name, message: e.message });
+        for (const e of mainErrors) errors.push({ func: name, message: e.message, kind: "verify" });
         continue;
       }
       // Slice 3 (#1169c): verify each lifted function before pushing.
@@ -219,7 +232,7 @@ export function compileIrPathFunctions(
       for (const lifted of result.lifted) {
         const liftedErrors = verifyIrFunction(lifted);
         if (liftedErrors.length > 0) {
-          for (const e of liftedErrors) errors.push({ func: lifted.name, message: e.message });
+          for (const e of liftedErrors) errors.push({ func: lifted.name, message: e.message, kind: "verify" });
           anyLiftedFailed = true;
         }
       }
@@ -230,7 +243,7 @@ export function compileIrPathFunctions(
         built.push({ name: lifted.name, fn: lifted, synthesized: true });
       }
     } catch (e) {
-      errors.push({ func: name, message: e instanceof Error ? e.message : String(e) });
+      errors.push({ func: name, message: e instanceof Error ? e.message : String(e), kind: "build" });
     }
   }
 
@@ -308,7 +321,7 @@ export function compileIrPathFunctions(
           });
           const mainErrors = verifyIrFunction(result.main);
           if (mainErrors.length > 0) {
-            for (const e of mainErrors) errors.push({ func: memberName, message: e.message });
+            for (const e of mainErrors) errors.push({ func: memberName, message: e.message, kind: "verify" });
             continue;
           }
           // Class method bodies should not produce lifted closures in Phase B
@@ -318,7 +331,7 @@ export function compileIrPathFunctions(
           for (const lifted of result.lifted) {
             const liftedErrors = verifyIrFunction(lifted);
             if (liftedErrors.length > 0) {
-              for (const e of liftedErrors) errors.push({ func: lifted.name, message: e.message });
+              for (const e of liftedErrors) errors.push({ func: lifted.name, message: e.message, kind: "verify" });
               anyLiftedFailed = true;
             }
           }
@@ -329,7 +342,7 @@ export function compileIrPathFunctions(
             built.push({ name: lifted.name, fn: lifted, synthesized: true });
           }
         } catch (e) {
-          errors.push({ func: memberName, message: e instanceof Error ? e.message : String(e) });
+          errors.push({ func: memberName, message: e instanceof Error ? e.message : String(e), kind: "build" });
         }
       }
     }
@@ -349,7 +362,7 @@ export function compileIrPathFunctions(
     const postErrors = verifyIrFunction(optimized);
     if (postErrors.length > 0) {
       for (const e of postErrors) {
-        errors.push({ func: entry.name, message: `post-hygiene verify: ${e.message}` });
+        errors.push({ func: entry.name, message: `post-hygiene verify: ${e.message}`, kind: "verify" });
       }
       continue;
     }
@@ -390,7 +403,7 @@ export function compileIrPathFunctions(
     const verifyErrors = verifyIrFunction(final);
     if (verifyErrors.length > 0) {
       for (const e of verifyErrors) {
-        errors.push({ func: before.name, message: `post-inline verify: ${e.message}` });
+        errors.push({ func: before.name, message: `post-inline verify: ${e.message}`, kind: "verify" });
       }
       continue;
     }
@@ -443,7 +456,7 @@ export function compileIrPathFunctions(
     const verifyErrors = verifyIrFunction(final);
     if (verifyErrors.length > 0) {
       for (const e of verifyErrors) {
-        errors.push({ func: fn.name, message: `post-mono verify: ${e.message}` });
+        errors.push({ func: fn.name, message: `post-mono verify: ${e.message}`, kind: "verify" });
       }
       continue;
     }
@@ -698,7 +711,11 @@ export function compileIrPathFunctions(
       };
       compiled.push(name);
     } catch (e) {
-      errors.push({ func: name, message: e instanceof Error ? e.message : String(e) });
+      errors.push({
+        func: name,
+        message: e instanceof Error ? e.message : String(e),
+        kind: e instanceof Error && e.message.includes("backend legality failed") ? "backend-legality" : "lower",
+      });
     }
   }
 
@@ -1682,7 +1699,14 @@ class ClassRegistry {
       fieldIdxByName.set(legacyFields[i]!.name, i);
     }
 
-    const constructorFuncName = `${shape.className}_new`;
+    // (#1983) Route synthetic class-member names through `classMemberFuncKey`
+    // so the IR backend resolves the SAME (possibly relocated) funcMap key the
+    // legacy pass registered. Without this, a class whose `${className}_new` /
+    // `${className}_${method}` key collided with a user function resolves to the
+    // user function's funcIdx (wrong signature → validation trap). Identical to
+    // the legacy name for every non-colliding class.
+    const ctx = this.ctx;
+    const constructorFuncName = classMemberFuncKey(ctx, `${shape.className}_new`);
 
     const lowering: IrClassLowering = {
       structTypeIdx,
@@ -1697,8 +1721,8 @@ class ClassRegistry {
       methodFuncName: (name: string): string => {
         // Returns a NAME — the resolver's `resolveFunc` maps it to the
         // funcIdx via `ctx.funcMap`, which the legacy collection pass
-        // populated with stable indices.
-        return `${shape.className}_${name}`;
+        // populated with stable indices. (#1983) collision-free key.
+        return classMemberFuncKey(ctx, `${shape.className}_${name}`);
       },
     };
     this.cache.set(shape.className, lowering);

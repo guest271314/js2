@@ -96,6 +96,7 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   if (name === "__typeof_number") return { type: "typeof_check", targetType: "number" };
   if (name === "__typeof_string") return { type: "typeof_check", targetType: "string" };
   if (name === "__typeof_boolean") return { type: "typeof_check", targetType: "boolean" };
+  if (name === "__typeof_bigint") return { type: "typeof_check", targetType: "bigint" };
   if (name === "__typeof_undefined") return { type: "typeof_check", targetType: "undefined" };
   if (name === "__typeof_object") return { type: "typeof_check", targetType: "object" };
   if (name === "__typeof_function") return { type: "typeof_check", targetType: "function" };
@@ -126,6 +127,18 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // Host loose-equality for two externref operands (§7.2.15 Abstract Equality).
   // Used for `any`-typed loose equality where null == undefined must be true. (#1134)
   if (name === "__host_loose_eq") return { type: "host_loose_eq" };
+
+  // Host `+` for two externref operands (§13.15.3 ApplyStringOrNumericBinaryOperator).
+  // Used for `any`/externref-typed `+`/`+=` where a runtime string must concatenate
+  // rather than coerce to f64 (`1 + "2"` → `"12"`, not `3`). ToPrimitive + the
+  // string-if-either-is-string rule come free from JS `+`. (#2058)
+  if (name === "__host_add") return { type: "host_add" };
+
+  // Host relational compare for two externref operands (§7.2.13 IsLessThan).
+  // Returns a 4-way result -1/0/1/2 (2 = NaN/undefined-incomparable) so the
+  // four relational operators (<,<=,>,>=) map without separate imports, and
+  // string operands compare lexicographically rather than coercing to NaN. (#2059)
+  if (name === "__host_compare") return { type: "host_compare" };
 
   // SameValueZero comparison (§7.2.11) — like === except NaN equals NaN.
   // Used by Array.prototype.includes on array-like receivers (#1360).

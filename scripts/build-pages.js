@@ -240,6 +240,12 @@ mkdirSync(PAGES_DIST, { recursive: true });
 copyDirectory(PLAYGROUND_DIST, PAGES_DIST);
 copyDirectory(PLAYGROUND_EXAMPLES_DIR, join(PAGES_DIST, "examples"));
 
+// Static "Get started" docs page (public — always published, unlike the
+// dashboard which is gated behind private planning artifacts). It is a
+// self-contained HTML page that references the shared /components/site-nav.js
+// copied below, so no Vite processing is required.
+copyFile(join(WEBSITE, "getting-started", "index.html"), join(PAGES_DIST, "getting-started", "index.html"));
+
 // Overwrite Vite-built report pages with the latest public/ versions (which include
 // web components like <t262-donut> that Vite doesn't process).
 const PUBLIC_REPORT = join(WEBSITE, "public", "benchmarks", "results", "report.html");
@@ -382,6 +388,25 @@ if (hasDashboardBundle) {
     join(WEBSITE, "dashboard", "data", "sprint-stats.json"),
     join(PAGES_DIST, "dashboard", "data", "sprint-stats.json"),
   );
+}
+
+// Copy plan/issues markdown files so dashboard issue.html can fetch them
+// client-side via the URL /plan/issues/<slug>.md
+copyDirectoryIfExists(join(PLAN_DIR, "issues"), join(PAGES_DIST, "plan", "issues"));
+
+// Write a lightweight id → filename index next to the copied issue files so the
+// dashboard issue page can resolve a bare id (?slug=681) to its full filename.
+// (Dev serves the equivalent on the fly via website/playground/vite-plugin-dashboard.ts.)
+{
+  const issuesOut = join(PAGES_DIST, "plan", "issues");
+  if (existsSync(issuesOut)) {
+    const idIndex = {};
+    for (const name of readdirSync(issuesOut)) {
+      const m = name.match(/^(\d+[a-z]?)(?:-.*)?\.md$/i);
+      if (m) idIndex[m[1]] = name.replace(/\.md$/, "");
+    }
+    writeFileSync(join(issuesOut, "index.json"), JSON.stringify(idIndex));
+  }
 }
 
 console.log(`GitHub Pages artifact ready at ${PAGES_DIST}`);

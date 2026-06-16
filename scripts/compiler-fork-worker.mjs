@@ -8,12 +8,26 @@
  */
 import { writeFileSync } from "node:fs";
 import { compile, createIncrementalCompiler } from "./compiler-bundle.mjs";
+import { isPoisonCompileError } from "./test262-poison-error.mjs";
 
 let compileCount = 0;
 const GC_INTERVAL = 25;
 // With #973 fix (no oldProgram reuse), there's no type leakage between
 // compilations. Recreate interval is now purely for memory management.
 const RECREATE_INTERVAL = 500;
+
+// #1808: emit-layer failures ("Binary emit error: …" and allocation-class
+// RangeErrors such as "offset is out of bounds" / "Array buffer allocation
+// failed" / "Maximum call stack size exceeded") can leave the long-lived
+// incremental compiler or the V8 heap in a degraded state. Without an immediate
+// recreate, one poisoned worker keeps producing the same emit-error RESULT for
+// every subsequent file until its scheduled RECREATE_INTERVAL recycle — which is
+// the exact signature of the #1808 cluster: ~290 identical "Binary emit error:
+// offset is out of bounds" failures bunched into a single ~30s window on one
+// worker, all of which compile cleanly on a fresh run. Force an early recreate
+// whenever such an error is observed so the bad state cannot cascade across the
+// remainder of the batch.
+let forceRecreate = false;
 
 let incrementalCompiler = null;
 function createFreshCompiler() {
@@ -57,6 +71,11 @@ process.on("message", async (msg) => {
         const errorCodes = result.errors
           .filter(e => e.severity === "error" && e.code)
           .map(e => e.code);
+
+        // #1808: an emit-class error result means the compiler/heap may be in a
+        // degraded state — schedule an immediate recreate so it cannot poison
+        // the rest of this worker's batch.
+        if (isPoisonCompileError(errMsg)) forceRecreate = true;
 
         // Write error to disk if cachePath provided
         if (msg.wasmPath && msg.metaPath) {
@@ -103,10 +122,14 @@ process.on("message", async (msg) => {
         });
       }
     } catch (err) {
+      const errStr = err && err.message ? err.message : String(err);
+      // #1808: a thrown emit/allocation-class error likely corrupted shared
+      // state — recreate before the next file.
+      if (isPoisonCompileError(errStr)) forceRecreate = true;
       process.send({
         id: msg.id,
         ok: false,
-        error: err.message || String(err),
+        error: errStr,
         compileMs: performance.now() - start,
       });
     }
@@ -115,7 +138,10 @@ process.on("message", async (msg) => {
     // error-result, or thrown exception. The prior early-return after
     // error-result bypassed this, starving RECREATE on error-dense chunks.
     compileCount++;
-    if (compileCount % RECREATE_INTERVAL === 0) {
+    // #1808: recreate eagerly on the scheduled interval OR as soon as an
+    // emit-class poison error was seen, so a single bad worker state cannot
+    // cascade into hundreds of false "Binary emit error" results.
+    if (compileCount % RECREATE_INTERVAL === 0 || forceRecreate) {
       try {
         incrementalCompiler?.dispose?.();
       } catch (_e) {
@@ -124,7 +150,9 @@ process.on("message", async (msg) => {
       }
       incrementalCompiler = null;
       const heapMB = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
-      console.error(`[fork-worker] RECREATE at compile ${compileCount}, heap=${heapMB}MB`);
+      const why = forceRecreate ? "poison-error" : "interval";
+      console.error(`[fork-worker] RECREATE (${why}) at compile ${compileCount}, heap=${heapMB}MB`);
+      forceRecreate = false;
       if (typeof globalThis.gc === "function") globalThis.gc();
       createFreshCompiler();
     } else if (compileCount % GC_INTERVAL === 0 && typeof globalThis.gc === "function") {

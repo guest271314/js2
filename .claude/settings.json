@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/teammate-idle-retry.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/teammate-idle-retry.sh",
             "timeout": 8
           }
         ]
@@ -39,6 +39,24 @@
             "type": "command",
             "command": "REPO_ROOT=/workspace node /workspace/scripts/reconcile-tasklist.mjs --quiet 2>/dev/null || true",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bash /workspace/scripts/sync-workspace-main.sh 2>/dev/null || true",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash /workspace/scripts/sync-workspace-main.sh 2>/dev/null || true",
+            "timeout": 20,
+            "async": true
           }
         ]
       }
@@ -49,7 +67,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/notify-gate.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/notify-gate.sh",
             "timeout": 8
           }
         ]
@@ -74,7 +92,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/check-cwd.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/check-cwd.sh",
             "timeout": 5
           }
         ]
@@ -85,7 +103,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/pre-git-commit.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/pre-git-commit.sh",
             "timeout": 5
           }
         ]
@@ -96,7 +114,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/pre-git-commit.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/pre-git-commit.sh",
             "timeout": 5
           }
         ]
@@ -107,7 +125,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/pre-merge.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/pre-merge.sh",
             "timeout": 5
           }
         ]
@@ -118,7 +136,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/check-worktree-path.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/check-worktree-path.sh",
             "timeout": 5
           }
         ]
@@ -128,7 +146,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/pre-agent-spawn.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/pre-agent-spawn.sh",
             "timeout": 5
           }
         ]
@@ -140,7 +158,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/post-file-edit.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/post-file-edit.sh",
             "timeout": 10
           }
         ]
@@ -150,7 +168,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/post-file-edit.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/post-file-edit.sh",
             "timeout": 10
           }
         ]
@@ -161,7 +179,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/provision-worktree.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/provision-worktree.sh",
             "timeout": 30
           }
         ]
@@ -173,7 +191,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/ci-status-watcher.sh",
+            "command": "\"${CLAUDE_PROJECT_DIR:-/workspace}\"/.claude/hooks/ci-status-watcher.sh",
             "timeout": 10
           }
         ]

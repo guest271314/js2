@@ -48,6 +48,79 @@ function _getNodeRequire(): ((id: string) => any) | undefined {
 const _wasmStructProps = new WeakMap<object, Record<string | symbol, any>>();
 
 /**
+ * (#1712) Function-style-constructor prototype bridge.
+ *
+ * `var Parser = function Parser() {…}; new Parser()` compiles construction
+ * away to a synthesized struct ctor (`__fnctor_Parser_new`) — the host never
+ * sees it. But acorn-style code then does `Parser.prototype.m = fn`,
+ * `Object.defineProperties(Parser.prototype, …)` and calls `m` on instances,
+ * which DOES route through the host (`__extern_get` / `__extern_method_call`).
+ * Two pieces make that work in JS-host mode:
+ *  - `_fnctorInstanceCtor` links each constructed instance struct to its
+ *    constructor closure struct (registered by the synthesized ctor via the
+ *    `__register_fnctor_instance` import).
+ *  - reading `.prototype` off a closure struct auto-vivifies a real JS object
+ *    in the closure's sidecar (`_getOrVivifyFnPrototype`), so prototype-method
+ *    writes / defineProperties / `var pp = P.prototype` aliasing all hit one
+ *    identity-stable object.
+ * Instance property misses then fall through to the ctor's vivified prototype
+ * (`_fnctorProtoLookup`). Standalone/WASI is intentionally NOT covered here —
+ * the #1712 acceptance is JS-host-first; the native equivalent rides on the
+ * #1888 open-object runtime in a later lap.
+ */
+const _fnctorInstanceCtor = new WeakMap<object, object>();
+
+/** (#1712) Resolve a property through the instance's fnctor prototype chain. */
+function _fnctorProtoLookup(obj: any, key: any): PropertyDescriptor | undefined {
+  if (!_canBeWeakKey(obj)) return undefined;
+  const ctor = _fnctorInstanceCtor.get(obj);
+  if (ctor == null) return undefined;
+  const proto = _sidecarGet(ctor, "prototype");
+  if (proto == null || typeof proto !== "object") return undefined;
+  let cur: any = proto;
+  let guard = 0;
+  while (cur != null && typeof cur === "object" && guard++ < 16) {
+    const desc = Object.getOwnPropertyDescriptor(cur, key);
+    if (desc) return desc;
+    cur = Object.getPrototypeOf(cur);
+    if (cur === Object.prototype) break;
+  }
+  return undefined;
+}
+
+/**
+ * (#1712) Read or auto-vivify the `.prototype` object of a Wasm closure
+ * struct. Only closures (per the `__is_closure` export) vivify; everything
+ * else returns undefined so plain structs keep `obj.prototype === undefined`.
+ */
+function _getOrVivifyFnPrototype(
+  obj: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
+  if (!_isWasmStruct(obj)) return undefined;
+  const existing = _sidecarGet(obj, "prototype");
+  if (existing !== undefined) return existing;
+  // Gate on `__is_closure` when exports are reachable. During the module
+  // START function (where acorn's `Parser.prototype.m = fn` writes run)
+  // `getExports()` is still undefined — WebAssembly.instantiate has not
+  // returned yet — so fall back to the struct-only heuristic there. Post-
+  // instantiation reads (e.g. test262 `({}).prototype === undefined`
+  // checks) always have exports and keep the precise gate.
+  const exports = callbackState?.getExports();
+  const isClosureFn = exports?.__is_closure as ((v: any) => number) | undefined;
+  if (typeof isClosureFn === "function") {
+    try {
+      if (isClosureFn(obj) !== 1) return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  const proto: Record<string | symbol, any> = {};
+  _sidecarSet(obj, "prototype", proto);
+  return proto;
+}
+
+/**
  * (#1516) Per-generator-instance state: `{buf, index, pendingThrow}`.
  *
  * Storing state in a WeakMap (keyed by the generator instance) instead of as
@@ -64,12 +137,26 @@ const _wasmStructProps = new WeakMap<object, Record<string | symbol, any>>();
  *   pendingThrow: any     — exception captured by the generator body, to be
  *                            re-thrown on the first `next()` after the
  *                            buffer is drained (#928)
+ *   retVal: any           — the generator's `return` value (#2035). Per
+ *                            §27.5.3.3 / §27.5.1.2 the return value belongs
+ *                            ONLY to the terminal `{value, done:true}` result;
+ *                            it must NOT appear as a yielded (`done:false`)
+ *                            element. Surfaced once when the buffer drains.
+ *   retDone: boolean      — `true` once the terminal `{retVal, done:true}`
+ *                            result has been handed out, so subsequent
+ *                            `next()` calls return `{value:undefined,done:true}`
  *   asyncWrap?: boolean   — `true` for async-generator state (so the same
  *                            map can back both `%GeneratorPrototype%` and
  *                            `%AsyncGeneratorPrototype%` methods)
  */
-const _GeneratorState = new WeakMap<object, { buf: any[]; index: number; pendingThrow: any }>();
-const _AsyncGeneratorState = new WeakMap<object, { buf: any[]; index: number; pendingThrow: any }>();
+const _GeneratorState = new WeakMap<
+  object,
+  { buf: any[]; index: number; pendingThrow: any; retVal?: any; retDone?: boolean }
+>();
+const _AsyncGeneratorState = new WeakMap<
+  object,
+  { buf: any[]; index: number; pendingThrow: any; retVal?: any; retDone?: boolean }
+>();
 
 let _GeneratorPrototypeCache: any = null;
 let _GeneratorFunctionPrototypeCache: any = null;
@@ -114,6 +201,41 @@ function _installBuiltinMethod(
     configurable: true,
   });
   Object.defineProperty(proto, name, {
+    value: impl,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+}
+
+/**
+ * Install a static helper (e.g. `Iterator.zip`) with spec-correct property
+ * descriptors. The function's own `length` and `name` are reset to the
+ * spec-mandated values with attributes `{writable:false, enumerable:false,
+ * configurable:true}` (§17 — built-in function `length`/`name`), and the
+ * property on `target` itself is `{writable:true, enumerable:false,
+ * configurable:true}` (§17 default data-property attributes). TS optional
+ * params (`options?`) inflate `fn.length`, so we override it explicitly.
+ */
+function _installStaticHelper(
+  target: object,
+  name: string,
+  length: number,
+  impl: (this: any, ...args: any[]) => any,
+): void {
+  Object.defineProperty(impl, "length", {
+    value: length,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(impl, "name", {
+    value: name,
+    writable: false,
+    enumerable: false,
+    configurable: true,
+  });
+  Object.defineProperty(target, name, {
     value: impl,
     writable: true,
     enumerable: false,
@@ -201,6 +323,13 @@ function _getGeneratorPrototype(): any {
       state.pendingThrow = null;
       throw e;
     }
+    // Buffer drained: surface the generator's `return` value ONCE as the
+    // terminal `{value, done:true}` result (#2035, §27.5.1.2 step 6). After
+    // that, every further `next()` returns `{value:undefined, done:true}`.
+    if (!state.retDone) {
+      state.retDone = true;
+      return { value: state.retVal, done: true };
+    }
     return { value: undefined, done: true };
   });
 
@@ -209,7 +338,11 @@ function _getGeneratorPrototype(): any {
     if (!state) {
       throw new TypeError("Generator.prototype.return called on incompatible receiver");
     }
+    // Early termination: skip the rest of the buffer AND suppress the
+    // generator's own return value — the caller-supplied `value` becomes the
+    // terminal result (§27.5.3.3). Mark retDone so a later next() is terminal.
     state.index = state.buf.length;
+    state.retDone = true;
     return { value, done: true };
   });
 
@@ -477,6 +610,7 @@ const _wasmStructAccessors = new WeakMap<object, Map<string | symbol, { get?: Fu
  * when the method is missing.
  */
 let _iteratorHelpersInstalled = false;
+const _intrinsicStringIterator = String.prototype[Symbol.iterator];
 function _installIteratorHelperPolyfills(): void {
   if (_iteratorHelpersInstalled) return;
   _iteratorHelpersInstalled = true;
@@ -509,13 +643,59 @@ function _installIteratorHelperPolyfills(): void {
     }
   }
 
+  function _isObject(value: any): boolean {
+    return (typeof value === "object" && value !== null) || typeof value === "function";
+  }
+
+  function _getIteratorDirect(iter: any): any {
+    if (!_isObject(iter)) {
+      throw new TypeError("Iterator helper: iterator is not an object");
+    }
+    if (typeof iter.next !== "function") {
+      throw new TypeError("Iterator helper: iterator has no next()");
+    }
+    return iter;
+  }
+
+  function _getIterator(iterable: any): any {
+    if (!_isObject(iterable)) {
+      throw new TypeError("Iterator helper: argument is not iterable");
+    }
+    const method = iterable[Symbol.iterator];
+    if (typeof method !== "function") {
+      throw new TypeError("Iterator helper: argument is not iterable");
+    }
+    return _getIteratorDirect(method.call(iterable));
+  }
+
+  function _iteratorStepValue(iter: any): { done: true; value?: undefined } | { done: false; value: any } {
+    const result = iter.next();
+    if (!_isObject(result)) {
+      throw new TypeError("Iterator result is not an object");
+    }
+    if (result.done) return { done: true };
+    return { value: result.value, done: false };
+  }
+
   // ES2025 GetIteratorFlattenable — accepts an iterable OR a raw iterator.
-  function _getFlattenable(obj: any): any {
+  // `Iterator.from` uses iterate-string-primitives; iterator helper flattening
+  // (e.g. flatMap) uses reject-primitives.
+  function _getFlattenable(obj: any, primitiveHandling: "iterate-string-primitives" | "reject-primitives"): any {
     if (obj == null) {
       throw new TypeError("Iterator helper: argument is null or undefined");
     }
+    const primitive = typeof obj !== "object" && typeof obj !== "function";
+    if (primitive) {
+      if (primitiveHandling === "reject-primitives" || typeof obj !== "string") {
+        throw new TypeError("Iterator helper: argument is not iterable");
+      }
+    }
     let it: any;
-    const sym = obj[Symbol.iterator];
+    const stringLike = typeof obj === "string" || obj instanceof String;
+    let sym = primitive ? Reflect.get(Object(obj), Symbol.iterator, obj) : obj[Symbol.iterator];
+    if (typeof sym !== "function" && stringLike && typeof _intrinsicStringIterator === "function") {
+      sym = _intrinsicStringIterator;
+    }
     if (typeof sym === "function") {
       it = sym.call(obj);
     } else if (typeof obj.next === "function") {
@@ -523,10 +703,17 @@ function _installIteratorHelperPolyfills(): void {
     } else {
       throw new TypeError("Iterator helper: argument is not iterable");
     }
-    if (it == null || typeof it.next !== "function") {
-      throw new TypeError("Iterator helper: iterator has no next()");
-    }
-    return it;
+    return _getIteratorDirect(it);
+  }
+
+  // ES2025 GetOptionsObject (iterator-sequencing / joint-iteration proposal):
+  // undefined → fresh null-proto object; Object → returned as-is; any other
+  // value (null, boolean, number, string, symbol, bigint) throws TypeError.
+  function _getOptionsObject(options: any): any {
+    if (options === undefined) return Object.create(null);
+    if (typeof options === "object" && options !== null) return options;
+    if (typeof options === "function") return options;
+    throw new TypeError("Iterator options must be undefined or an object");
   }
 
   function _makeHelperIterator(nextFn: () => any, returnFn: (v?: any) => any): any {
@@ -552,15 +739,119 @@ function _installIteratorHelperPolyfills(): void {
     } catch {}
   }
 
-  if (typeof I.from !== "function") {
-    Object.defineProperty(I, "from", {
-      value: function from(iterable: any) {
-        return _getFlattenable(iterable);
-      },
-      writable: true,
-      configurable: true,
-    });
+  function _closeIterators(iters: any[], open?: boolean[], except = -1): void {
+    for (let i = 0; i < iters.length; i++) {
+      if (i === except) continue;
+      if (open && !open[i]) continue;
+      if (open) open[i] = false;
+      _closeIterator(iters[i]);
+    }
   }
+
+  function _readZipOptions(options: any): { mode: "shortest" | "longest" | "strict"; paddingOption: any } {
+    options = _getOptionsObject(options);
+    let mode = options.mode;
+    if (mode === undefined) mode = "shortest";
+    if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
+      throw new TypeError("Iterator.zip: invalid mode " + String(mode));
+    }
+    let paddingOption: any = undefined;
+    if (mode === "longest") {
+      paddingOption = options.padding;
+      if (paddingOption !== undefined && !_isObject(paddingOption)) {
+        throw new TypeError("Iterator.zip: padding must be an object");
+      }
+    }
+    return { mode, paddingOption };
+  }
+
+  function _makeIteratorZip(
+    iters: any[],
+    mode: "shortest" | "longest" | "strict",
+    padding: any[],
+    finishResults: (results: any[]) => any,
+  ): any {
+    const open = iters.map(() => true);
+    let exhausted = false;
+
+    return _makeHelperIterator(
+      function next() {
+        if (exhausted || iters.length === 0) return { value: undefined, done: true };
+        const results: any[] = [];
+        for (let i = 0; i < iters.length; i++) {
+          let result: any;
+          if (!open[i]) {
+            result = padding[i];
+          } else {
+            let step: { done: true; value?: undefined } | { done: false; value: any };
+            try {
+              step = _iteratorStepValue(iters[i]);
+            } catch (e) {
+              exhausted = true;
+              open[i] = false;
+              _closeIterators(iters, open);
+              throw e;
+            }
+
+            if (step.done) {
+              open[i] = false;
+              if (mode === "shortest") {
+                exhausted = true;
+                _closeIterators(iters, open);
+                return { value: undefined, done: true };
+              }
+              if (mode === "strict") {
+                exhausted = true;
+                if (i !== 0) {
+                  _closeIterators(iters, open);
+                  throw new TypeError("Iterator.zip strict mode: length mismatch");
+                }
+                for (let k = 1; k < iters.length; k++) {
+                  let openStep: { done: true; value?: undefined } | { done: false; value: any };
+                  try {
+                    openStep = _iteratorStepValue(iters[k]);
+                  } catch (e) {
+                    open[k] = false;
+                    _closeIterators(iters, open);
+                    throw e;
+                  }
+                  if (openStep.done) {
+                    open[k] = false;
+                  } else {
+                    _closeIterators(iters, open);
+                    throw new TypeError("Iterator.zip strict mode: length mismatch");
+                  }
+                }
+                return { value: undefined, done: true };
+              }
+
+              if (!open.some(Boolean)) {
+                exhausted = true;
+                return { value: undefined, done: true };
+              }
+              result = padding[i];
+            } else {
+              result = step.value;
+            }
+          }
+          results.push(result);
+        }
+        return { value: finishResults(results), done: false };
+      },
+      function returnFn() {
+        exhausted = true;
+        _closeIterators(iters, open);
+        return { value: undefined, done: true };
+      },
+    );
+  }
+
+  // (#1320) Always route Iterator.from through the bridge implementation. Host
+  // natives cannot call compiled accessor closures installed on primitive
+  // prototypes reliably after the Wasm closure crosses externref.
+  _installStaticHelper(I, "from", 1, function from(iterable: any) {
+    return _getFlattenable(iterable, "iterate-string-primitives");
+  });
 
   if (typeof Iproto.map !== "function") {
     _installBuiltinMethod(Iproto, "map", 1, function (this: any, mapper: any) {
@@ -829,194 +1120,178 @@ function _installIteratorHelperPolyfills(): void {
   }
 
   if (typeof I.zip !== "function") {
-    Object.defineProperty(I, "zip", {
-      value: function zip(iterables: any, options?: any) {
-        if (iterables == null) {
-          throw new TypeError("Iterator.zip: iterables required");
-        }
-        const mode: string = (options && options.mode) || "shortest";
-        if (mode !== "shortest" && mode !== "longest" && mode !== "strict") {
-          throw new TypeError("Iterator.zip: invalid mode " + String(mode));
-        }
-        const padding: any[] = options && options.padding ? Array.from(options.padding) : [];
-        const iters: any[] = [];
-        // Open all iterators eagerly; on failure, close already-opened ones.
-        try {
-          for (const iterable of iterables) {
-            iters.push(_getFlattenable(iterable));
+    _installStaticHelper(I, "zip", 1, function zip(iterables: any, options?: any) {
+      if (!_isObject(iterables)) {
+        throw new TypeError("Iterator.zip: iterables must be an object");
+      }
+      const { mode, paddingOption } = _readZipOptions(options);
+      const iters: any[] = [];
+      let inputIter: any;
+      try {
+        inputIter = _getIterator(iterables);
+        for (;;) {
+          const next = _iteratorStepValue(inputIter);
+          if (next.done) break;
+          try {
+            iters.push(_getFlattenable(next.value, "reject-primitives"));
+          } catch (e) {
+            _closeIterator(inputIter);
+            _closeIterators(iters);
+            throw e;
           }
-        } catch (e) {
-          for (const it of iters) {
-            try {
-              it.return?.();
-            } catch {}
-          }
-          throw e;
         }
-        const closed: boolean[] = iters.map(() => false);
-        let exhausted = false;
+      } catch (e) {
+        _closeIterators(iters);
+        throw e;
+      }
 
-        function closeAllExcept(except: number): void {
-          for (let i = 0; i < iters.length; i++) {
-            if (i !== except && !closed[i]) {
-              closed[i] = true;
-              try {
-                iters[i].return?.();
-              } catch {}
-            }
-          }
-        }
-
-        return _makeHelperIterator(
-          function next() {
-            if (exhausted || iters.length === 0) return { value: undefined, done: true };
-            const tuple: any[] = new Array(iters.length);
-            let liveCount = 0;
+      const padding: any[] = [];
+      if (mode === "longest") {
+        if (paddingOption === undefined) {
+          for (let i = 0; i < iters.length; i++) padding.push(undefined);
+        } else {
+          let paddingIter: any;
+          try {
+            paddingIter = _getIterator(paddingOption);
+            let usingIterator = true;
             for (let i = 0; i < iters.length; i++) {
-              if (closed[i]) {
-                tuple[i] = padding[i];
-                continue;
-              }
-              let r: any;
-              try {
-                r = iters[i].next();
-              } catch (e) {
-                exhausted = true;
-                closeAllExcept(i);
-                throw e;
-              }
-              if (r && r.done) {
-                closed[i] = true;
-                if (mode === "shortest") {
-                  exhausted = true;
-                  closeAllExcept(i);
-                  return { value: undefined, done: true };
+              if (usingIterator) {
+                const next = _iteratorStepValue(paddingIter);
+                if (next.done) {
+                  usingIterator = false;
+                } else {
+                  padding.push(next.value);
+                  continue;
                 }
-                if (mode === "strict") {
-                  // Strict: every other iterator must also be done.
-                  for (let j = 0; j < iters.length; j++) {
-                    if (j === i || closed[j]) continue;
-                    let r2: any;
-                    try {
-                      r2 = iters[j].next();
-                    } catch (e) {
-                      closeAllExcept(-1);
-                      throw e;
-                    }
-                    if (r2 && !r2.done) {
-                      closeAllExcept(-1);
-                      throw new RangeError("Iterator.zip strict mode: length mismatch");
-                    }
-                    closed[j] = true;
-                  }
-                  exhausted = true;
-                  return { value: undefined, done: true };
-                }
-                tuple[i] = padding[i];
-              } else {
-                tuple[i] = r.value;
-                liveCount++;
               }
+              padding.push(undefined);
             }
-            if (mode === "longest" && liveCount === 0) {
-              exhausted = true;
-              return { value: undefined, done: true };
+            if (usingIterator) {
+              paddingIter.return?.();
             }
-            return { value: tuple, done: false };
-          },
-          function returnFn() {
-            exhausted = true;
-            closeAllExcept(-1);
-            return { value: undefined, done: true };
-          },
-        );
-      },
-      writable: true,
-      configurable: true,
+          } catch (e) {
+            _closeIterators(iters);
+            throw e;
+          }
+        }
+      }
+
+      return _makeIteratorZip(iters, mode, padding, (results) => results.slice());
     });
   }
 
   if (typeof I.zipKeyed !== "function") {
-    Object.defineProperty(I, "zipKeyed", {
-      value: function zipKeyed(iterables: any, options?: any) {
-        if (iterables == null || typeof iterables !== "object") {
-          throw new TypeError("Iterator.zipKeyed: iterables must be an object");
+    _installStaticHelper(I, "zipKeyed", 1, function zipKeyed(iterables: any, options?: any) {
+      if (!_isObject(iterables)) {
+        throw new TypeError("Iterator.zipKeyed: iterables must be an object");
+      }
+      const { mode, paddingOption } = _readZipOptions(options);
+      const keys: PropertyKey[] = [];
+      const iters: any[] = [];
+      try {
+        for (const key of Reflect.ownKeys(iterables)) {
+          const desc = Object.getOwnPropertyDescriptor(iterables, key);
+          if (desc && desc.enumerable) {
+            const value = iterables[key];
+            if (value !== undefined) {
+              keys.push(key);
+              iters.push(_getFlattenable(value, "reject-primitives"));
+            }
+          }
         }
-        const keys = Object.keys(iterables);
-        const iterArr: any[] = keys.map((k) => iterables[k]);
-        const zipped = (I as any).zip(iterArr, options);
-        return _makeHelperIterator(
-          function next() {
-            const r = zipped.next();
-            if (r.done) return { value: undefined, done: true };
-            const out: any = {};
-            for (let i = 0; i < keys.length; i++) out[keys[i]!] = r.value[i];
-            return { value: out, done: false };
-          },
-          function returnFn() {
-            try {
-              zipped.return?.();
-            } catch {}
-            return { value: undefined, done: true };
-          },
-        );
-      },
-      writable: true,
-      configurable: true,
+      } catch (e) {
+        _closeIterators(iters);
+        throw e;
+      }
+
+      const padding: any[] = [];
+      if (mode === "longest") {
+        if (paddingOption === undefined) {
+          for (let i = 0; i < iters.length; i++) padding.push(undefined);
+        } else {
+          try {
+            for (const key of keys) {
+              padding.push(paddingOption[key]);
+            }
+          } catch (e) {
+            _closeIterators(iters);
+            throw e;
+          }
+        }
+      }
+
+      return _makeIteratorZip(iters, mode, padding, (results) => {
+        const out: any = Object.create(null);
+        for (let i = 0; i < keys.length; i++) {
+          Object.defineProperty(out, keys[i]!, {
+            value: results[i],
+            writable: true,
+            enumerable: true,
+            configurable: true,
+          });
+        }
+        return out;
+      });
     });
   }
 
   if (typeof I.concat !== "function") {
-    Object.defineProperty(I, "concat", {
-      value: function concat(...iterables: any[]) {
-        // Eagerly validate the iterable-ness of each argument; open lazily.
-        for (const iterable of iterables) {
-          if (iterable == null) {
-            throw new TypeError("Iterator.concat: argument is null or undefined");
-          }
-          const sym = iterable[Symbol.iterator];
-          if (typeof sym !== "function" && typeof iterable.next !== "function") {
-            throw new TypeError("Iterator.concat: argument is not iterable");
-          }
+    _installStaticHelper(I, "concat", 0, function concat(...iterables: any[]) {
+      const records: { iterable: any; method: any }[] = [];
+      for (const iterable of iterables) {
+        if (!_isObject(iterable)) {
+          throw new TypeError("Iterator.concat: argument is not an object");
         }
-        let idx = 0;
-        let current: any = null;
-        return _makeHelperIterator(
-          function next() {
-            while (true) {
-              if (current == null) {
-                if (idx >= iterables.length) return { value: undefined, done: true };
-                current = _getFlattenable(iterables[idx++]);
-              }
-              let r: any;
-              try {
-                r = current.next();
-              } catch (e) {
-                current = null;
-                idx = iterables.length;
-                throw e;
-              }
-              if (r && r.done) {
-                current = null;
-                continue;
-              }
-              return r;
+        const method = iterable[Symbol.iterator];
+        if (method === undefined) {
+          throw new TypeError("Iterator.concat: argument is not iterable");
+        }
+        if (typeof method !== "function") {
+          throw new TypeError("Iterator.concat: argument is not iterable");
+        }
+        records.push({ iterable, method });
+      }
+      let idx = 0;
+      let current: any = null;
+      return _makeHelperIterator(
+        function next() {
+          while (true) {
+            if (current == null) {
+              if (idx >= records.length) return { value: undefined, done: true };
+              const record = records[idx++]!;
+              current = _getIteratorDirect(record.method.call(record.iterable));
             }
-          },
-          function returnFn() {
-            if (current != null) {
-              try {
-                current.return?.();
-              } catch {}
+            let r: any;
+            try {
+              r = current.next();
+            } catch (e) {
+              current = null;
+              idx = records.length;
+              throw e;
             }
-            idx = iterables.length;
-            current = null;
-            return { value: undefined, done: true };
-          },
-        );
-      },
-      writable: true,
-      configurable: true,
+            if (!_isObject(r)) {
+              current = null;
+              idx = records.length;
+              throw new TypeError("Iterator result is not an object");
+            }
+            if (r.done) {
+              current = null;
+              continue;
+            }
+            return { value: r.value, done: false };
+          }
+        },
+        function returnFn() {
+          if (current != null) {
+            try {
+              current.return?.();
+            } catch {}
+          }
+          idx = iterables.length;
+          current = null;
+          return { value: undefined, done: true };
+        },
+      );
     });
   }
 
@@ -1082,21 +1357,8 @@ function _installIteratorHelperPolyfills(): void {
                   throw e;
                 }
                 counter++;
-                // GetIteratorFlattenable(mapped, reject-primitives): a primitive
-                // (incl. strings? — no, strings ARE iterable and accepted) — but
-                // a non-object non-string primitive rejects.
-                if (
-                  mapped == null ||
-                  (typeof mapped !== "object" && typeof mapped !== "string" && typeof mapped !== "function")
-                ) {
-                  done = true;
-                  try {
-                    outer.return?.();
-                  } catch {}
-                  throw new TypeError("Iterator.prototype.flatMap: mapper result is not an object");
-                }
                 try {
-                  inner = _getFlattenable(mapped);
+                  inner = _getFlattenable(mapped, "reject-primitives");
                 } catch (e) {
                   done = true;
                   try {
@@ -1166,6 +1428,25 @@ const _wasmNonExtensibleObjs = new WeakSet<object>();
 const _userClassTags = new WeakMap<object, string>();
 const _userClassParents = new Map<string, string | null>();
 
+// (#1991) Object.prototype's own enumerable+non-enumerable data/accessor keys.
+// `key in obj` walks to Object.prototype (§13.10.1 → §7.3.12), so every object
+// value has these regardless of own properties — used by `__extern_has` to
+// answer e.g. `"toString" in ({} as any)` for opaque WasmGC-struct receivers.
+const _OBJECT_PROTO_KEYS: ReadonlySet<string> = new Set([
+  "constructor",
+  "hasOwnProperty",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  "toLocaleString",
+  "toString",
+  "valueOf",
+  "__proto__",
+  "__defineGetter__",
+  "__defineSetter__",
+  "__lookupGetter__",
+  "__lookupSetter__",
+]);
+
 /**
  * DataView subview metadata (#1064).
  *
@@ -1227,25 +1508,56 @@ function _validatePropertyDescriptor(
   prop: string | symbol,
   desc: PropertyDescriptor,
   existingValue?: any,
+  existingDesc?: PropertyDescriptor,
 ): number {
   const existing = descs.get(_normalizeDescKey(prop));
-  // Compute new flags — for Object.defineProperty, unspecified attributes default to false
-  let newFlags = _SC_DEFINED;
-  if (desc.writable) newFlags |= _SC_WRITABLE;
-  if (desc.enumerable) newFlags |= _SC_ENUMERABLE;
-  if (desc.configurable) newFlags |= _SC_CONFIGURABLE;
-  if (desc.get !== undefined || desc.set !== undefined) newFlags |= _SC_ACCESSOR;
+  const hasValue = Object.prototype.hasOwnProperty.call(desc, "value");
+  const hasWritable = Object.prototype.hasOwnProperty.call(desc, "writable");
+  const hasEnumerable = Object.prototype.hasOwnProperty.call(desc, "enumerable");
+  const hasConfigurable = Object.prototype.hasOwnProperty.call(desc, "configurable");
+  const hasGet = Object.prototype.hasOwnProperty.call(desc, "get");
+  const hasSet = Object.prototype.hasOwnProperty.call(desc, "set");
+
+  // Compute new flags. ECMA-262 §10.1.6.3 ValidateAndApplyPropertyDescriptor:
+  // a *redefine* keeps every attribute the descriptor omits — only fields
+  // explicitly present in `desc` overwrite the existing descriptor (#1831).
+  // On first definition, omitted attributes default to false. The previous code
+  // rebuilt the flags purely from `desc` truthiness, so a partial redefine like
+  // `Object.defineProperty(o,"k",{value:5})` wrongly cleared a previously-set
+  // writable/enumerable/configurable.
+  let newFlags = existing === undefined ? _SC_DEFINED : existing | _SC_DEFINED;
+  // helper: set/clear `bit` when the descriptor field is present; on first
+  // definition, an omitted field defaults to false (cleared).
+  const applyFlag = (present: boolean, value: boolean | undefined, bit: number): void => {
+    if (present) {
+      newFlags = value ? newFlags | bit : newFlags & ~bit;
+    } else if (existing === undefined) {
+      newFlags &= ~bit;
+    }
+  };
+  applyFlag(hasWritable, desc.writable, _SC_WRITABLE);
+  applyFlag(hasEnumerable, desc.enumerable, _SC_ENUMERABLE);
+  applyFlag(hasConfigurable, desc.configurable, _SC_CONFIGURABLE);
+  // Data<->accessor kind: explicit get/set ⇒ accessor; explicit value/writable
+  // ⇒ data; otherwise keep the existing kind (or default data on first def).
+  if (hasGet || hasSet) {
+    newFlags |= _SC_ACCESSOR;
+  } else if (hasValue || hasWritable) {
+    newFlags &= ~_SC_ACCESSOR;
+  } else if (existing === undefined) {
+    newFlags &= ~_SC_ACCESSOR;
+  }
 
   if (existing === undefined) return newFlags; // First definition
 
   const isConfigurable = !!(existing & _SC_CONFIGURABLE);
-  if (isConfigurable) return newFlags; // Configurable — any change OK
+  if (isConfigurable) return newFlags; // Configurable — change OK (omitted fields preserved above)
 
   // Non-configurable: validate constraints (ES spec 9.1.6.3 step 7)
   if (desc.configurable === true) {
     throw new TypeError("Cannot redefine property: " + String(prop));
   }
-  if (desc.enumerable !== undefined) {
+  if (hasEnumerable) {
     const wasEnumerable = !!(existing & _SC_ENUMERABLE);
     if (desc.enumerable !== wasEnumerable) {
       throw new TypeError("Cannot redefine property: " + String(prop));
@@ -1253,12 +1565,20 @@ function _validatePropertyDescriptor(
   }
   // Cannot change data<->accessor on non-configurable
   const wasAccessor = !!(existing & _SC_ACCESSOR);
-  const isAccessor = desc.get !== undefined || desc.set !== undefined;
+  const isAccessor = hasGet || hasSet;
   if (isAccessor && !wasAccessor) {
     throw new TypeError("Cannot redefine property: " + String(prop));
   }
-  if (!isAccessor && wasAccessor && (desc.value !== undefined || desc.writable !== undefined)) {
+  if (!isAccessor && wasAccessor && (hasValue || hasWritable)) {
     throw new TypeError("Cannot redefine property: " + String(prop));
+  }
+  if (wasAccessor && isAccessor) {
+    if (hasGet && !Object.is(desc.get, existingDesc?.get)) {
+      throw new TypeError("Cannot redefine property: " + String(prop));
+    }
+    if (hasSet && !Object.is(desc.set, existingDesc?.set)) {
+      throw new TypeError("Cannot redefine property: " + String(prop));
+    }
   }
   // Data property: writable checks
   if (!wasAccessor && !isAccessor) {
@@ -1269,7 +1589,7 @@ function _validatePropertyDescriptor(
       }
       // ES spec 9.1.6.3: can set value only if SameValue(desc.value, existing.value).
       // Use Object.is for SameValue semantics (distinguishes +0/-0, NaN===NaN).
-      if (desc.value !== undefined && !Object.is(desc.value, existingValue)) {
+      if (hasValue && !Object.is(desc.value, existingValue)) {
         throw new TypeError("Cannot redefine property: " + String(prop));
       }
     }
@@ -1285,6 +1605,7 @@ function _toPropertyDescriptorValidate(
   rawDesc: any,
   getField: (o: any, f: string) => any,
   wrapCallable?: (v: any, arity: number) => any,
+  hasField?: (o: any, f: string) => boolean,
 ): PropertyDescriptor {
   // Primitive rawDesc (number/string/boolean/symbol/bigint) violates
   // ECMA-262 10.1 step 1 — throw TypeError. We intentionally allow null/undefined
@@ -1298,12 +1619,22 @@ function _toPropertyDescriptorValidate(
   }
   const desc: PropertyDescriptor = {};
   if (rawDesc == null) return desc;
-  const val = getField(rawDesc, "value");
-  const wr = getField(rawDesc, "writable");
-  const en = getField(rawDesc, "enumerable");
-  const conf = getField(rawDesc, "configurable");
-  let getFn = getField(rawDesc, "get");
-  let setFn = getField(rawDesc, "set");
+  const has = (field: string): boolean => {
+    if (hasField) return hasField(rawDesc, field);
+    return field in Object(rawDesc);
+  };
+  const hasEnumerable = has("enumerable");
+  const hasConfigurable = has("configurable");
+  const hasValue = has("value");
+  const hasWritable = has("writable");
+  const hasGet = has("get");
+  const hasSet = has("set");
+  const val = hasValue ? getField(rawDesc, "value") : undefined;
+  const wr = hasWritable ? getField(rawDesc, "writable") : undefined;
+  const en = hasEnumerable ? getField(rawDesc, "enumerable") : undefined;
+  const conf = hasConfigurable ? getField(rawDesc, "configurable") : undefined;
+  let getFn = hasGet ? getField(rawDesc, "get") : undefined;
+  let setFn = hasSet ? getField(rawDesc, "set") : undefined;
   // (#1629a) When the source descriptor is a WasmGC struct, `get`/`set` arrive
   // as Wasm-closure structs (not JS callables). Wrap them into JS Functions so
   // the spec-mandated `typeof === "function"` checks below pass and so that the
@@ -1312,37 +1643,41 @@ function _toPropertyDescriptorValidate(
     if (getFn != null && typeof getFn !== "function") getFn = wrapCallable(getFn, 0);
     if (setFn != null && typeof setFn !== "function") setFn = wrapCallable(setFn, 1);
   }
-  // Treat null getter/setter as "field absent" — reading a WasmGC struct field
-  // whose accessor source read out to null (no value stored) is functionally
-  // identical to the field being missing. The spec only throws for present
-  // non-callable values, and our caller path uses null as the "unset" sentinel.
-  const hasGet = getFn !== undefined && getFn !== null;
-  const hasSet = setFn !== undefined && setFn !== null;
-  const hasData = val !== undefined || wr !== undefined;
+  const hasData = hasValue || hasWritable;
   const hasAccessor = hasGet || hasSet;
   if (hasData && hasAccessor) {
     throw new TypeError(
       "TypeError: Invalid property descriptor. Cannot both specify accessors and a value or writable attribute",
     );
   }
-  if (hasGet && typeof getFn !== "function") {
+  if (hasGet && getFn !== undefined && typeof getFn !== "function") {
     throw new TypeError("TypeError: Getter must be a function: " + String(getFn));
   }
-  if (hasSet && typeof setFn !== "function") {
+  if (hasSet && setFn !== undefined && typeof setFn !== "function") {
     throw new TypeError("TypeError: Setter must be a function: " + String(setFn));
   }
-  if (val !== undefined) desc.value = val;
-  if (wr !== undefined) desc.writable = !!wr;
-  if (en !== undefined) desc.enumerable = !!en;
-  if (conf !== undefined) desc.configurable = !!conf;
+  if (hasValue) desc.value = val;
+  if (hasWritable) desc.writable = !!wr;
+  if (hasEnumerable) desc.enumerable = !!en;
+  if (hasConfigurable) desc.configurable = !!conf;
   if (hasGet) desc.get = getFn;
   if (hasSet) desc.set = setFn;
   return desc;
 }
 
 /** Return true when `obj` is a WasmGC struct (opaque to JS). */
+// #2180 — user `new Proxy` / `Proxy.revocable` objects we construct. A Proxy
+// over a WasmGC-struct target otherwise trips `_isWasmStruct`'s probe: it has a
+// null prototype (inherited from the struct target) and a property set on it
+// forwards to the opaque struct and throws "opaque" — so the heuristic
+// misclassifies the Proxy AS a struct, routing `delete`/`in`/etc. to the
+// sidecar instead of letting the host fire the user trap. Excluding registered
+// user proxies keeps them on the host MOP path.
+const _userProxies = new WeakSet<object>();
+
 function _isWasmStruct(obj: any): boolean {
   if (obj == null || typeof obj !== "object") return false;
+  if (_userProxies.has(obj)) return false;
   // WasmGC structs have a null prototype and no own keys — quick heuristic
   // that avoids try/catch on normal objects.
   try {
@@ -1369,6 +1704,33 @@ function _canBeWeakKey(obj: any): boolean {
 }
 
 /**
+ * IsConcatSpreadable (§23.1.3.1.1) for an opaque WasmGC struct receiver: true
+ * iff `Symbol.isConcatSpreadable` resolves to a truthy value. The flag is stored
+ * in the sidecar under both the real symbol and the `@@isConcatSpreadable`
+ * string mirror (see `_symbolIdToKeys`). Returns false when the property is
+ * absent or falsy, so a plain array-like is NOT spread unless explicitly tagged.
+ */
+function _isConcatSpreadable(
+  obj: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): boolean {
+  const v = _safeGet(obj, Symbol.isConcatSpreadable, callbackState) ?? _sidecarGet(obj, "@@isConcatSpreadable");
+  return v !== undefined && v !== null && !!v;
+}
+
+const _wasmClosureWrapperSource = new WeakMap<Function, { closure: any; arity: number }>();
+const _wasmClosureDynamicWrapperCache = new WeakMap<object, Function>();
+const _wasmClosureWrapperCache = new WeakMap<object, Map<number, Function>>();
+const _wasmClosureWrapperTargets = new WeakMap<Function, object>();
+
+function _hostEqComparableValue(v: any): any {
+  if (typeof v === "function") {
+    return _wasmClosureWrapperTargets.get(v as Function) ?? v;
+  }
+  return v;
+}
+
+/**
  * (#1382) Wrap a Wasm closure struct in a JS Function so it can be called
  * from JS host code (e.g. `Array.from(iter, mapFn)` where mapFn is a Wasm
  * closure rather than a real `function`).
@@ -1386,7 +1748,9 @@ function _canBeWeakKey(obj: any): boolean {
  *
  * Arity matches the number of JS args the host will pass; the JS wrapper
  * forwards exactly that count to `__call_fn_N`. Args beyond `arity` are
- * dropped, matching JS's "extra args ignored" semantics.
+ * dropped, matching JS's "extra args ignored" semantics. If the wrapper is
+ * invoked as a method, prefer `__call_fn_method_N` so prototype-installed
+ * methods such as `Number.prototype[Symbol.iterator]` observe the receiver.
  */
 function _wrapWasmClosure(
   closure: any,
@@ -1394,21 +1758,123 @@ function _wrapWasmClosure(
   callbackState?: { getExports: () => Record<string, Function> | undefined },
 ): ((...args: any[]) => any) | null {
   if (!callbackState) return null;
-  const exports = callbackState.getExports();
-  if (!exports) return null;
-  const callFn = exports[`__call_fn_${arity}`];
-  if (typeof callFn !== "function") return null;
+  // (#1712) Resolve the dispatcher exports at CALL time, not wrap time. The
+  // module START function (where acorn-style `Object.defineProperties(
+  // P.prototype, accessors)` runs) executes before WebAssembly.instantiate
+  // returns, so `getExports()` is still undefined while the wrap happens —
+  // an eager lookup silently dropped the wrapper and the accessor with it.
+  // `callbackState` is a stable live object; by the time the wrapper is
+  // actually invoked (post-instantiation), the exports are wired.
+  if (callbackState.getExports() !== undefined) {
+    const eager = callbackState.getExports()!;
+    if (typeof eager[`__call_fn_${arity}`] !== "function") return null;
+  }
+  let byArity: Map<number, Function> | undefined;
+  if (_canBeWeakKey(closure)) {
+    byArity = _wasmClosureWrapperCache.get(closure as object);
+    const cached = byArity?.get(arity);
+    if (cached) return cached as (...args: any[]) => any;
+  }
   // Closure parameter is captured by reference; the wrapper holds it alive
   // for as long as the JS Function is reachable from the host. JS Function
   // identity is preserved across multiple invocations (host may capture a
   // reference, e.g. callbacks stored on plain objects).
-  return function wasmClosureBridge(...args: any[]): any {
+  //
+  // (#1712 / #1320) Method-call `this` threading: when the wrapper is
+  // invoked with a meaningful receiver — a Wasm struct (or its proxy, e.g.
+  // `fn.apply(wrappedObj,…)` in `__extern_method_call` or a vivified fnctor
+  // prototype method), or a plain JS object holder (#1320 iterator objects
+  // whose `next` is a Wasm closure) — dispatch through
+  // `__call_fn_method_<arity>` so the closure body's `ThisKeyword` (via the
+  // `__current_this` global, #1636-S1) observes the receiver. Wasm-struct
+  // proxies are unwrapped so the body sees the raw struct. Undefined /
+  // globalThis receivers keep the plain `__call_fn_<arity>` path, so bare
+  // callback invocations are byte-for-byte unchanged.
+  const wrapped = function wasmClosureBridge(this: any, ...args: any[]): any {
+    const exports = callbackState.getExports();
+    const callFn = exports?.[`__call_fn_${arity}`];
+    if (typeof callFn !== "function") {
+      throw new TypeError("wasm closure dispatcher __call_fn_" + arity + " is not available");
+    }
     // Pad with undefined to exactly `arity` positional args. Extra args
     // dropped (JS spec for fewer/more args than declared params).
     const padded: any[] = [];
     for (let i = 0; i < arity; i++) padded.push(args[i]);
+    const methodCallFn = exports?.[`__call_fn_method_${arity}`];
+    if (typeof methodCallFn === "function" && this !== undefined && this !== globalThis) {
+      const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
+      return methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...padded);
+    }
     return callFn(closure, ...padded);
   };
+  _wasmClosureWrapperSource.set(wrapped, { closure, arity });
+  if (_canBeWeakKey(closure)) {
+    if (!byArity) {
+      byArity = new Map();
+      _wasmClosureWrapperCache.set(closure as object, byArity);
+    }
+    byArity.set(arity, wrapped);
+    _wasmClosureWrapperTargets.set(wrapped, closure as object);
+  }
+  return wrapped;
+}
+
+function _wrapWasmClosureUnknownArity(
+  closure: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): ((...args: any[]) => any) | null {
+  if (closure != null && typeof closure === "object") {
+    const cached = _wasmClosureDynamicWrapperCache.get(closure);
+    if (cached) return cached as (...args: any[]) => any;
+  }
+  if (!callbackState) return null;
+  const exports = callbackState.getExports();
+  if (!exports) return null;
+  const available: number[] = [];
+  for (let arity = 0; arity <= 4; arity++) {
+    if (typeof exports[`__call_fn_${arity}`] === "function") available.push(arity);
+  }
+  if (available.length === 0) return null;
+  const maxArity = available[available.length - 1]!;
+  const wrapped = function wasmClosureDynamicBridge(this: any, ...args: any[]): any {
+    let arity = Math.min(args.length, maxArity);
+    while (arity > 0 && typeof exports[`__call_fn_${arity}`] !== "function") arity--;
+    const callFn = exports[`__call_fn_${arity}`];
+    if (typeof callFn !== "function") return undefined;
+    const padded: any[] = [];
+    for (let i = 0; i < arity; i++) padded.push(args[i]);
+    const methodCallFn = exports[`__call_fn_method_${arity}`];
+    if (typeof methodCallFn === "function" && this !== undefined && this !== globalThis) {
+      // (#2015) Unwrap a `_wrapForHost` proxy receiver back to its raw WasmGC
+      // struct before installing it as `__current_this`. `__extern_method_call`
+      // dispatches `fn.apply(wrappedObj, …)` with `wrappedObj` being the host
+      // proxy, so without this unwrap `__call_fn_method_N` would install the
+      // opaque Proxy as `__current_this`; the object-literal method trampoline's
+      // `ref.test (ref objStruct)` then fails and the body's `this.<field>` traps.
+      // Mirrors the known-arity bridge in `_wrapWasmClosure` (#1712 / #1320).
+      const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
+      return methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...padded);
+    }
+    return callFn(closure, ...padded);
+  };
+  try {
+    if (wrapped.prototype && closure != null) {
+      Object.defineProperty(wrapped.prototype, "constructor", {
+        value: closure,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+    }
+  } catch {
+    /* best-effort constructor identity for function-expression wrappers */
+  }
+  _wasmClosureWrapperSource.set(wrapped, { closure, arity: -1 });
+  if (closure != null && typeof closure === "object") {
+    _wasmClosureDynamicWrapperCache.set(closure, wrapped);
+    _wasmClosureWrapperTargets.set(wrapped, closure);
+  }
+  return wrapped;
 }
 
 /**
@@ -1418,13 +1884,11 @@ function _wrapWasmClosure(
  * check that the per-host-import call sites need before handing the value
  * to the native engine. Returns the value unchanged when it's already
  * JS-callable, null/undefined (caller-side TypeError is correct), or any
- * non-struct value. Returns a freshly-allocated JS Function bridging into
+ * non-struct value. Returns a cached JS Function bridging into
  * `__call_fn_<arity>` for Wasm closure structs.
  *
- * The returned wrapper is **fresh per call** — callers must not rely on
- * identity (`p.then(cb) === p.then(cb)` is not preserved). This matches
- * how `__array_from` mapFn wrapping already behaves and is benign in spec
- * terms (no protocol observes callback identity across host roundtrips).
+ * The wrapper is cached per (closure, arity), which preserves accessor
+ * descriptor identity for `Object.getOwnPropertyDescriptor(...).get`.
  */
 function _maybeWrapCallable(
   val: any,
@@ -1433,6 +1897,20 @@ function _maybeWrapCallable(
 ): any {
   if (val == null) return val;
   if (typeof val === "function") return val;
+  if (typeof val === "object" && callbackState) {
+    const exports = callbackState.getExports();
+    const isClosureFn = exports?.__is_closure as ((v: any) => number) | undefined;
+    if (typeof isClosureFn === "function") {
+      try {
+        if (isClosureFn(val) === 1) {
+          const wrapped = _wrapWasmClosure(val, arity, callbackState);
+          return wrapped ?? val;
+        }
+      } catch {
+        // Fall through to the older opaque-struct heuristic below.
+      }
+    }
+  }
   if (!_isWasmStruct(val)) return val;
   const wrapped = _wrapWasmClosure(val, arity, callbackState);
   return wrapped ?? val;
@@ -1471,13 +1949,7 @@ function _maybeWrapCallableUnknownArity(
   } catch {
     return val;
   }
-  for (let arity = 4; arity >= 0; arity--) {
-    if (typeof exports[`__call_fn_${arity}`] === "function") {
-      const wrapped = _wrapWasmClosure(val, arity, callbackState);
-      if (wrapped) return wrapped;
-    }
-  }
-  return val;
+  return _wrapWasmClosureUnknownArity(val, callbackState) ?? val;
 }
 
 /**
@@ -1656,17 +2128,16 @@ function _materializeIterable(
 
 /**
  * (#1320) Drain a plain JS object whose own `[Symbol.iterator]` is a compiled
- * **Wasm closure struct** (typeof "object", not a JS function). Native
- * `Array.from` / `Iterator.from` reject such an object with
- * `items[Symbol.iterator] … must be a function`, because V8 sees a non-callable
- * iterator method. We invoke the closure (and its returned iterator's `.next`,
- * which is typically also a Wasm closure) through the `__call_fn_0` export and
- * collect the yielded values into a real JS array.
+ * Wasm closure. Depending on the assignment path, the property may hold either
+ * the raw closure struct or a JS wrapper produced by `_wrapWasmClosure`. Native
+ * `Array.from` / `Iterator.from` cannot drive the raw Wasm iterator/result
+ * structs, so we invoke the closure-backed protocol manually and collect the
+ * yielded values into a real JS array.
  *
  * Returns `null` when this path does not apply — caller falls back to native
  * `Array.from`:
  *   - the value has no own/inherited `@@iterator`, OR
- *   - the `@@iterator` is already a real JS function (native path is correct), OR
+ *   - the `@@iterator` is already a real non-Wasm-wrapper JS function, OR
  *   - the closure-call export is unavailable.
  *
  * Throws from the user's `@@iterator()` / `.next()` propagate unchanged (a
@@ -1683,20 +2154,34 @@ function _drainWasmClosureIterable(
   } catch {
     return null;
   }
-  // Only handle the broken case: an @@iterator that exists but is a Wasm
-  // closure struct (non-function object). Real JS functions / generators take
-  // the native path.
-  if (iterFn == null || typeof iterFn === "function" || !_isWasmStruct(iterFn)) return null;
+  const iterWrapper = typeof iterFn === "function" ? _wasmClosureWrapperSource.get(iterFn) : undefined;
+  const iterIsRawClosure = iterFn != null && typeof iterFn === "object" && _isWasmStruct(iterFn);
+  // Only handle the broken case: an @@iterator that came from a Wasm closure.
+  // Real JS functions / generators take the native path.
+  if (iterFn == null || (!iterWrapper && !iterIsRawClosure)) return null;
   const exports = callbackState?.getExports();
   const callFn0 = exports?.["__call_fn_0"];
-  if (typeof callFn0 !== "function") return null;
-  const iteratorObj = callFn0(iterFn);
+  if (iterIsRawClosure && typeof callFn0 !== "function") return null;
+  let iteratorObj = iterWrapper ? iterFn.call(obj) : callFn0!(iterFn);
+  if ((iteratorObj == null || typeof iteratorObj !== "object") && iterWrapper && typeof callFn0 === "function") {
+    try {
+      const fallbackIterator = callFn0(iterWrapper.closure);
+      if (fallbackIterator != null && typeof fallbackIterator === "object") iteratorObj = fallbackIterator;
+    } catch {
+      // Preserve the native failure path below when the fallback also fails.
+    }
+  }
   if (iteratorObj == null || typeof iteratorObj !== "object") return null;
   const out: any[] = [];
   const MAX_ITER = 1 << 16;
   let iterCount = 0;
   const resolveProp = (target: any, key: string): any => {
-    const direct = target?.[key];
+    let direct: any;
+    try {
+      direct = target?.[key];
+    } catch {
+      direct = undefined;
+    }
     if (direct !== undefined) return direct;
     const safe = _safeGet(target, key);
     if (safe !== undefined) return safe;
@@ -1710,6 +2195,7 @@ function _drainWasmClosureIterable(
     if (typeof nextFn === "function") {
       result = nextFn.call(iteratorObj);
     } else if (nextFn != null && typeof nextFn === "object" && _isWasmStruct(nextFn)) {
+      if (typeof callFn0 !== "function") return null;
       result = callFn0(nextFn);
     } else {
       break;
@@ -1821,6 +2307,26 @@ function _sidecarDelete(obj: any, key: any): boolean {
 }
 
 /**
+ * Sentinel for OrdinaryToPrimitive's `tryMethod`: distinguishes "method is
+ * absent / returned an Object / dispatch trapped" (try the next method) from a
+ * method that legitimately returned the primitive `undefined`. Without it, a
+ * real `undefined` return is wrongly treated as "absent" and the next method is
+ * consulted (#1826). Per §7.1.1.1 steps 5-6, any non-Object return is the result.
+ */
+// #1935 — single in-band "absent" sentinel for the host runtime. Returning
+// `undefined` to signal "no such getter / method / property" is a bug: user
+// code can legitimately return `undefined`, and the in-band signal then
+// misreads that as absence (a getter returning `undefined` shadowed by the
+// underlying field; a `valueOf` returning `undefined` treated as "no valueOf").
+// `_MISS` is a unique symbol that user code can never produce, so it
+// unambiguously means absence. (Was `_PRIM_ABSENT`, scoped to ToPrimitive;
+// unified here and now also used by the property-getter lookup path.)
+const _MISS: unique symbol = Symbol("runtime-absent-sentinel");
+// Back-compat alias so the existing ToPrimitive call sites keep reading
+// naturally; both names refer to the same unique symbol.
+const _PRIM_ABSENT: typeof _MISS = _MISS;
+
+/**
  * ToPrimitive for WasmGC structs (#850).
  *
  * Implements the JS ToPrimitive abstract operation for opaque WasmGC struct
@@ -1894,7 +2400,11 @@ function _toPrimitive(
 
   const exports = callbackState?.getExports();
 
-  // Helper: try valueOf or toString from sidecar then Wasm exports
+  // Helper: try valueOf or toString from sidecar then Wasm exports.
+  // Returns the produced primitive (including a real `undefined`!) or the
+  // `_PRIM_ABSENT` sentinel when the method is absent, returned an Object, or
+  // dispatch trapped — only then should the caller consult the next method
+  // (§7.1.1.1 steps 5-6, #1826).
   const tryMethod = (name: string): any => {
     // Sidecar property (set via __extern_set)
     // User-thrown errors propagate — spec requires assert.throws to observe them.
@@ -1903,7 +2413,7 @@ function _toPrimitive(
       const prim = scFn.call(raw);
       if (prim == null || typeof prim !== "object") return prim;
       // Returned an object — not a valid primitive, try next method
-      return undefined;
+      return _PRIM_ABSENT;
     }
     // Sidecar value is a WasmGC closure struct — dispatch via generic callers (#1090)
     if (scFn != null && typeof scFn === "object" && _isWasmStruct(scFn) && exports) {
@@ -1913,7 +2423,7 @@ function _toPrimitive(
         try {
           const prim = callFn0(scFn);
           if (prim == null || typeof prim !== "object") return prim;
-          return undefined; // returned an object — not valid
+          return _PRIM_ABSENT; // returned an object — not valid
         } catch (e: any) {
           if (!(e instanceof WebAssembly.RuntimeError)) throw e;
         }
@@ -1924,7 +2434,7 @@ function _toPrimitive(
         try {
           const prim = callFn(raw);
           if (prim == null || typeof prim !== "object") return prim;
-          return undefined;
+          return _PRIM_ABSENT;
         } catch (e: any) {
           if (!(e instanceof WebAssembly.RuntimeError)) throw e;
         }
@@ -1940,7 +2450,7 @@ function _toPrimitive(
         try {
           field = sget(raw);
         } catch (e: any) {
-          if (e instanceof WebAssembly.RuntimeError) return undefined;
+          if (e instanceof WebAssembly.RuntimeError) return _PRIM_ABSENT;
           throw e;
         }
         if (typeof field === "function") {
@@ -1974,20 +2484,22 @@ function _toPrimitive(
         }
       }
     }
-    return undefined;
+    return _PRIM_ABSENT;
   };
 
-  // Per JS spec: "string" hint -> toString first; "number"/"default" -> valueOf first
+  // Per JS spec: "string" hint -> toString first; "number"/"default" -> valueOf first.
+  // A method that produces ANY primitive (including `undefined`) is the result;
+  // only `_PRIM_ABSENT` means "consult the next method" (#1826).
   if (hint === "string") {
     const ts = tryMethod("toString");
-    if (ts !== undefined) return ts;
+    if (ts !== _PRIM_ABSENT) return ts;
     const vo = tryMethod("valueOf");
-    if (vo !== undefined) return vo;
+    if (vo !== _PRIM_ABSENT) return vo;
   } else {
     const vo = tryMethod("valueOf");
-    if (vo !== undefined) return vo;
+    if (vo !== _PRIM_ABSENT) return vo;
     const ts = tryMethod("toString");
-    if (ts !== undefined) return ts;
+    if (ts !== _PRIM_ABSENT) return ts;
   }
 
   return undefined;
@@ -2331,6 +2843,49 @@ function _getStructFieldNames(obj: any, exports: Record<string, Function> | unde
 }
 
 /**
+ * (#2130) Shared own-property presence predicate for a WasmGC struct receiver.
+ * This is the single source of truth for "does `obj` have its OWN property
+ * `key`", combining — in spec order — the runtime delete tombstone, the sidecar
+ * store, the descriptor table (accessor-only properties), registered class
+ * proto/static method names, and finally the static struct field shape. It is
+ * the WasmGC branch of `__hasOwnProperty` extracted verbatim so that
+ * `__extern_has` (the `in` operator) and `__hasOwnProperty` answer identically
+ * and BOTH consult the tombstone (`delete o.a; "a" in o` → false).
+ *
+ * The caller must have already established `_isWasmStruct(obj)` is true.
+ * `key` may be a string or a symbol; tombstone/sidecar comparisons preserve
+ * symbol identity (a symbol key is never stringified).
+ */
+function _wasmStructHasOwn(obj: any, key: any, exports: Record<string, Function> | undefined): boolean {
+  // (#1334) Property explicitly deleted — treat as absent regardless of the
+  // struct shape having the field name.
+  const tomb = _wasmStructDeletedKeys.get(obj);
+  if (tomb && tomb.has(typeof key === "symbol" ? key : String(key))) return false;
+  // Sidecar properties (user-assigned dynamic props). Key-based — HasProperty
+  // (§7.3.12) is value-independent, so `o.x = undefined; "x" in o` is true (A8).
+  const sc = _wasmStructProps.get(obj);
+  if (sc && key in sc) return true;
+  // Descriptor map (accessor properties set via Object.defineProperty, #929).
+  const descs = _wasmPropDescs.get(obj);
+  if (descs && descs.has(String(key))) return true;
+  // (#1047) registered class prototype — only allowlisted methods qualify.
+  const protoMethods = _prototypeMethodNames.get(obj);
+  if (protoMethods !== undefined) {
+    const prop = String(key);
+    return protoMethods.includes(prop) && !_isDeletedClassProp(obj, prop);
+  }
+  const staticMethods = _staticMethodNames.get(obj);
+  if (staticMethods !== undefined) {
+    const prop = String(key);
+    return staticMethods.includes(prop) && !_isDeletedClassProp(obj, prop);
+  }
+  // Static struct field shape (the per-receiver oracle, A1 — NOT a module-global
+  // `__sget_<key>` existence probe).
+  const fieldNames = _getStructFieldNames(obj, exports) ?? [];
+  return fieldNames.includes(String(key));
+}
+
+/**
  * Convert a WasmGC struct to a plain JS object using exported getters.
  * Returns undefined if the struct type is not recognized.
  */
@@ -2643,13 +3198,25 @@ function _invokeJsonCallable(
   if (typeof fn === "function") {
     return fn.apply(thisVal, args);
   }
-  // WasmGC closure — dispatch via __call_fn_<arity>. The closure's `this`
-  // is not observable on the Wasm side (Slice C work, blocked on #1308/#1382);
-  // for Slice A we accept that `this` is the bridge's `thisVal` only when
-  // `fn` is a real JS function.
+  // WasmGC closure. #2013/#2015 — when a meaningful receiver is supplied
+  // (`thisVal`), dispatch through `__call_fn_method_<arity>` so the closure
+  // body's `this` (the `__current_this` global) observes it. The JSON.parse
+  // reviver's `this` IS the holder (§25.5.1.1 step 3 — InternalizeJSONProperty
+  // calls reviver with the holder as receiver), so a reviver that does
+  // `Object.defineProperty(this, …)` / `this.x` now sees the holder instead of
+  // throwing "called on non-object". Bare-callback semantics (undefined /
+  // globalThis receiver) keep the plain `__call_fn_<arity>` path unchanged.
   const exports = callbackState?.getExports();
   if (!exports) return undefined;
   const arity = args.length;
+  const hasReceiver = thisVal !== undefined && thisVal !== null && thisVal !== globalThis;
+  if (hasReceiver) {
+    const methodCallFn = exports[`__call_fn_method_${arity}`];
+    if (typeof methodCallFn === "function") {
+      const rawThis = typeof thisVal === "object" ? _unwrapForHost(thisVal) : thisVal;
+      return methodCallFn(_isWasmStruct(rawThis) ? rawThis : thisVal, fn, ...args);
+    }
+  }
   const callFn = exports[`__call_fn_${arity}`];
   if (typeof callFn === "function") {
     return callFn(fn, ...args);
@@ -2664,6 +3231,85 @@ function _invokeJsonCallable(
     }
   }
   return undefined;
+}
+
+/**
+ * #2013 — true when `reviver` is a usable JSON.parse reviver callback: a JS
+ * function, or a WasmGC closure struct the host can dispatch via `__call_fn_2`.
+ * A `null`/`undefined` reviver (the common no-arg / explicit-undefined case)
+ * returns false so `JSON.parse` returns the unfiltered value unchanged.
+ */
+function _isCallableReviver(
+  reviver: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): boolean {
+  if (reviver == null) return false;
+  if (typeof reviver === "function") return true;
+  // WasmGC closure → callable via the __call_fn_2 bridge.
+  if (typeof reviver === "object" && _isWasmStruct(reviver)) {
+    const exports = callbackState?.getExports();
+    return typeof exports?.__call_fn_2 === "function";
+  }
+  return false;
+}
+
+/**
+ * #2013 — §25.5.1.1 InternalizeJSONProperty. `holder` is a plain JS object (the
+ * parse result is host `JSON.parse` output, so values are plain JS — no WasmGC
+ * walking needed). For each own enumerable property of the value at
+ * `holder[key]` (array indices in order, then object keys in insertion order),
+ * recurse, then write the recursive result back — via CreateDataProperty when
+ * it is defined (step 2.b.iii.4 / 2.c.iii.3.a) or `[[Delete]]` when it is
+ * `undefined` (step 2.b.iii.3.a / 2.c.iii.2.a). **Both operations are
+ * spec-silent on failure**: `CreateDataProperty`/`[[Delete]]` return a boolean
+ * that InternalizeJSONProperty ignores ("If status is false … no exception").
+ * A reviver that makes a property non-configurable mid-walk must therefore NOT
+ * throw and must leave the old value in place — so we use `Reflect.defineProperty`
+ * with a fresh fully-configurable data descriptor (CreateDataProperty) and
+ * `Reflect.deleteProperty` (both return false without throwing), NOT plain
+ * assignment / `delete` (which would succeed on a writable non-configurable prop
+ * and diverge from the spec). Finally call the reviver with `(key, value)` on
+ * `holder` as `this` and return its result. The reviver may be a JS function or
+ * a WasmGC closure (dispatched via `_invokeJsonCallable`).
+ */
+function _internalizeJSONProperty(
+  holder: any,
+  key: string,
+  reviver: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
+  const value = holder[key];
+  if (value !== null && typeof value === "object") {
+    // CreateDataProperty(O, P, V) — §7.3.5: define a fresh {writable, enumerable,
+    // configurable} data property; returns the [[DefineOwnProperty]] status,
+    // which the caller ignores (silent on a non-configurable existing prop).
+    const createDataProperty = (o: any, p: string, v: any): void => {
+      Reflect.defineProperty(o, p, { value: v, writable: true, enumerable: true, configurable: true });
+    };
+    if (Array.isArray(value)) {
+      for (let i = 0; i < value.length; i++) {
+        const elem = _internalizeJSONProperty(value, String(i), reviver, callbackState);
+        if (elem === undefined) {
+          Reflect.deleteProperty(value, String(i));
+        } else {
+          createDataProperty(value, String(i), elem);
+        }
+      }
+    } else {
+      // Own enumerable string keys, insertion order (JSON.parse yields plain
+      // objects whose key order is the source/text order).
+      for (const k of Object.keys(value)) {
+        const newElem = _internalizeJSONProperty(value, k, reviver, callbackState);
+        if (newElem === undefined) {
+          Reflect.deleteProperty(value, k);
+        } else {
+          createDataProperty(value, k, newElem);
+        }
+      }
+    }
+  }
+  // §25.5.1.1 step 3 — call reviver(key, value) with `this` = holder.
+  return _invokeJsonCallable(reviver, holder, [key, value], callbackState);
 }
 
 function _liveGetEnumerableKeys(obj: any, exports: Record<string, Function> | undefined): string[] {
@@ -2889,42 +3535,55 @@ const _legacyRegExpState: LegacyRegExpState = {
 };
 const _legacyRegExpInstalledOn: WeakSet<object> = new WeakSet();
 
-function _updateLegacyRegExpState(input: string, m: RegExpExecArray | RegExpMatchArray | null): void {
+function _makeLegacyRegExpState(): LegacyRegExpState {
+  return { input: "", lastMatch: "", lastParen: "", leftContext: "", rightContext: "", parens: new Array(9).fill("") };
+}
+
+// #1933 — update the legacy RegExp static state. `state` is the per-instance
+// slot (threaded from `instanceState.legacyRegExpState`); falls back to the
+// shared module-level slot for legacy callers without an instanceState.
+function _updateLegacyRegExpState(
+  input: string,
+  m: RegExpExecArray | RegExpMatchArray | null,
+  state: LegacyRegExpState = _legacyRegExpState,
+): void {
   if (m == null) return;
   const idx = m.index ?? 0;
   const matchStr = m[0] ?? "";
-  _legacyRegExpState.input = input;
-  _legacyRegExpState.lastMatch = matchStr;
-  _legacyRegExpState.leftContext = input.substring(0, idx);
-  _legacyRegExpState.rightContext = input.substring(idx + matchStr.length);
+  state.input = input;
+  state.lastMatch = matchStr;
+  state.leftContext = input.substring(0, idx);
+  state.rightContext = input.substring(idx + matchStr.length);
   let lastNonEmptyParen = "";
   for (let i = 0; i < 9; i++) {
     const cap = m[i + 1];
     const v = cap == null ? "" : String(cap);
-    _legacyRegExpState.parens[i] = v;
+    state.parens[i] = v;
     if (cap != null) lastNonEmptyParen = v;
   }
-  _legacyRegExpState.lastParen = lastNonEmptyParen;
+  state.lastParen = lastNonEmptyParen;
 }
 
-function _installLegacyRegExpAccessors(C: unknown): void {
+function _installLegacyRegExpAccessors(C: unknown, state: LegacyRegExpState = _legacyRegExpState): void {
   if (C == null || (typeof C !== "function" && typeof C !== "object")) return;
   if (_legacyRegExpInstalledOn.has(C as object)) return;
   _legacyRegExpInstalledOn.add(C as object);
+  // #1933 — the accessors read/write the per-instance `state` (threaded from
+  // instanceState), so `RegExp.$1`/`$_` etc. don't cross instances.
   type Slot = readonly [string, readonly string[], () => string, ((v: unknown) => void)?];
   const slots: Slot[] = [
     [
       "input",
       ["$_"],
-      () => _legacyRegExpState.input,
+      () => state.input,
       (v) => {
-        _legacyRegExpState.input = String(v);
+        state.input = String(v);
       },
     ],
-    ["lastMatch", ["$&"], () => _legacyRegExpState.lastMatch],
-    ["lastParen", ["$+"], () => _legacyRegExpState.lastParen],
-    ["leftContext", ["$`"], () => _legacyRegExpState.leftContext],
-    ["rightContext", ["$'"], () => _legacyRegExpState.rightContext],
+    ["lastMatch", ["$&"], () => state.lastMatch],
+    ["lastParen", ["$+"], () => state.lastParen],
+    ["leftContext", ["$`"], () => state.leftContext],
+    ["rightContext", ["$'"], () => state.rightContext],
   ];
   for (const [name, aliases, getter, setter] of slots) {
     // (#1333) Note: `set` must be explicitly `undefined` for read-only slots.
@@ -2968,7 +3627,7 @@ function _installLegacyRegExpAccessors(C: unknown): void {
       Object.defineProperty(C, `$${i}`, {
         get(this: unknown) {
           if (this !== C) throw new TypeError(`RegExp.$${i} getter requires the RegExp constructor as this`);
-          return _legacyRegExpState.parens[idx];
+          return state.parens[idx];
         },
         set: undefined,
         enumerable: false,
@@ -3052,9 +3711,21 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
     if (prim != null && typeof prim !== "object") key = prim;
   }
   // Well-known symbol ID (i32 from compiler): only apply to WasmGC structs.
-  // For regular JS objects/arrays, numeric keys 1-12 are actual indices, not symbol IDs
+  // For regular JS objects/arrays, numeric keys 1-15 are actual indices, not symbol IDs
   // (e.g. getOwnPropertyNames conversion loop uses __extern_get with integer indices).
-  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 14) {
+  // #1830 — the range must cover every id in `_symbolIdToKeys` (1-15, 15 =
+  // @@matchAll); `<= 14` silently dropped Symbol.matchAll on WasmGC structs.
+  // #2014: a small integer key (1-15) collides with the well-known-symbol ID
+  // range below. A genuine numeric data property (`o[2]` on `{ 2: "two" }`) is
+  // stored under the string field name "2" and exposed as `__sget_2`, so try
+  // that real-property getter BEFORE interpreting the key as a symbol ID —
+  // otherwise `o[2]` is mis-resolved as Symbol(2) and returns undefined.
+  if (_isWasmStruct(obj) && typeof key === "number" && Number.isInteger(key) && key >= 0) {
+    const exports = callbackState?.getExports();
+    const getter = exports?.[`__sget_${String(key)}`];
+    if (typeof getter === "function") return getter(obj);
+  }
+  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 15) {
     const symKeys = _symbolIdToKeys.get(key);
     if (symKeys) {
       const v = obj[symKeys.sym];
@@ -3067,6 +3738,13 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
     }
   }
   if (_isWasmStruct(obj)) {
+    // (#2130) A deleted property reads as `undefined` even when the static
+    // struct shape still carries the field (the `__sget_<key>` getter would
+    // otherwise return the stale field value). The tombstone is cleared by
+    // `_safeSet` on re-add, so a re-added key never reaches here as tombstoned.
+    // Symbol keys preserve identity; everything else compares stringified.
+    const tomb = _wasmStructDeletedKeys.get(obj);
+    if (tomb && tomb.has(typeof key === "symbol" ? key : String(key))) return undefined;
     // For WasmGC structs, user-assigned properties live in the sidecar.
     // Check sidecar FIRST — native JS property access on WasmGC structs can return
     // built-in artifacts (e.g. `obj.constructor` returns the Wasm struct constructor),
@@ -3089,6 +3767,16 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
         const sc2 = _sidecarGet(obj, wasmKey);
         if (sc2 !== undefined) return sc2;
       }
+    }
+    // (#1712) fnctor instances: resolve through the constructor's vivified
+    // prototype object before giving up. Accessors run with the instance
+    // (proxy-wrapped when one exists) as the receiver per §6.2.5.5 Get.
+    // Raw closure structs (stored during the module START function, before
+    // exports existed for the write-side wrap) are wrapped at read time.
+    const protoDesc = _fnctorProtoLookup(obj, key);
+    if (protoDesc) {
+      if (protoDesc.get) return protoDesc.get.call(_hostProxyCache.get(obj) ?? obj);
+      return _maybeWrapCallableUnknownArity(protoDesc.value, callbackState);
     }
     // Fall back to native access (e.g. Symbol.iterator set directly on the struct)
     return obj[key];
@@ -3133,14 +3821,25 @@ function _safeSet(
     const prim = _toPrimitiveSync(key, "string", cbState);
     if (prim != null && typeof prim !== "object") key = prim;
   }
+  // (#2130) Re-adding a previously-deleted property clears its tombstone, so
+  // `delete o.a; o.a = 5; o.a` reads `5` and `"a" in o` is `true` again. This
+  // is the single choke point for every WasmGC write arm (sidecar setter,
+  // descriptor write, symbol-id, struct field) — placing the clear here rather
+  // than only in `_sidecarSet` covers the `__sset_<name>`/native-write paths
+  // that bypass the sidecar (A3).
+  if (_isWasmStruct(obj)) {
+    const tomb = _wasmStructDeletedKeys.get(obj);
+    if (tomb) tomb.delete(typeof key === "symbol" ? key : String(key));
+  }
   // Well-known symbol ID (i32 from compiler): store under both real Symbol and "@@name".
   // ONLY apply this remapping to WasmGC structs — for regular JS objects/arrays,
-  // numeric keys 1-14 are actual indices (e.g. `srcArr[1] = undefined` from a test).
+  // numeric keys 1-15 are actual indices (e.g. `srcArr[1] = undefined` from a test).
+  // #1830 — range covers every id in `_symbolIdToKeys` (1-15, 15 = @@matchAll).
   // Without the _isWasmStruct guard, we would mis-route `arr[1]=v` to
   // `arr[Symbol.iterator]=v`, which under accumulated fork state could leak to
   // `Object.prototype[Symbol.iterator] = <number>` and trip every subsequent
   // compile that calls Array.from on a plain object (#1160 follow-up).
-  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 14) {
+  if (_isWasmStruct(obj) && typeof key === "number" && key >= 1 && key <= 15) {
     const symKeys = _symbolIdToKeys.get(key);
     if (symKeys) {
       try {
@@ -3223,6 +3922,9 @@ function _safeSet(
   try {
     obj[key] = val;
   } catch (e) {
+    // #2180 — writing to a revoked proxy throws TypeError; propagate it
+    // instead of silently diverting to the sidecar.
+    if (_isRevokedProxyError(e)) throw e;
     // For non-WasmGC objects (frozen/sealed JS objects),
     // fall through to sidecar set — preserves original behavior for non-strict callers.
     _sidecarSet(obj, key, val);
@@ -3422,9 +4124,11 @@ function _readOwnDescriptor(
 ): PropertyDescriptor | undefined {
   // 1. Sidecar (dynamically added / defineProperty'd props).
   const sc = _wasmStructProps.get(obj);
-  if (sc && prop in sc) {
-    const descs = _wasmPropDescs.get(obj);
-    const flags = descs?.get(_normalizeDescKey(prop)) ?? _SC_WRITABLE | _SC_ENUMERABLE | _SC_CONFIGURABLE | _SC_DEFINED;
+  const descs = _wasmPropDescs.get(obj);
+  const flagsFromTable = descs?.get(_normalizeDescKey(prop));
+  const hasSidecarValue = !!sc && prop in sc;
+  if (hasSidecarValue || flagsFromTable !== undefined) {
+    const flags = flagsFromTable ?? _SC_WRITABLE | _SC_ENUMERABLE | _SC_CONFIGURABLE | _SC_DEFINED;
     if (flags & _SC_ACCESSOR) {
       if (typeof prop === "symbol") {
         const accessor = _wasmStructAccessors.get(obj)?.get(prop) as
@@ -3444,8 +4148,19 @@ function _readOwnDescriptor(
         configurable: !!(flags & _SC_CONFIGURABLE),
       };
     }
+    let value = hasSidecarValue ? (sc as any)[prop as any] : undefined;
+    if (!hasSidecarValue && typeof prop === "string") {
+      const getter = exports?.[`__sget_${prop}`];
+      if (typeof getter === "function") {
+        try {
+          value = getter(obj);
+        } catch {
+          value = undefined;
+        }
+      }
+    }
     return {
-      value: (sc as any)[prop as any],
+      value,
       writable: !!(flags & _SC_WRITABLE),
       enumerable: !!(flags & _SC_ENUMERABLE),
       configurable: !!(flags & _SC_CONFIGURABLE),
@@ -3490,6 +4205,22 @@ function _readOwnDescriptor(
   return undefined; // not an own property
 }
 
+function _wasmStructPropertyIsEnumerable(obj: any, key: any, exports: Record<string, Function> | undefined): number {
+  const prop = typeof key === "symbol" ? key : String(key);
+  const tomb = _wasmStructDeletedKeys.get(obj);
+  if (tomb && tomb.has(prop)) return 0;
+
+  const descs = _wasmPropDescs.get(obj);
+  const flags = descs?.get(_normalizeDescKey(prop));
+  if (flags !== undefined) return flags & _SC_ENUMERABLE ? 1 : 0;
+
+  const sc = _wasmStructProps.get(obj);
+  if (sc && prop in sc) return 1;
+
+  const desc = _readOwnDescriptor(obj, prop, exports);
+  return desc?.enumerable ? 1 : 0;
+}
+
 /**
  * (#1629 S1) Own-key enumeration for a WasmGC struct, mirroring the union of
  * `__getOwnPropertyNames` (string keys) and `__getOwnPropertySymbols`. Used by
@@ -3500,6 +4231,49 @@ function _readOwnDescriptor(
  * reachable via `_getStructFieldNames` + `__sget_<key>`), so a plain struct
  * would enumerate as `[]`.
  */
+/**
+ * (#2131) True for a CANONICAL array-index key per ES §6.1.7: a string that
+ * is the canonical numeric representation of an integer in [0, 2^32-2]
+ * (no leading zeros, no sign, no exponent).
+ */
+function _isCanonicalArrayIndexKey(k: string): boolean {
+  if (k.length === 0 || k.length > 10) return false;
+  if (k === "0") return true;
+  if (k.charCodeAt(0) === 48) return false; // leading zero → not canonical
+  for (let i = 0; i < k.length; i++) {
+    const c = k.charCodeAt(i);
+    if (c < 48 || c > 57) return false;
+  }
+  return Number(k) <= 4294967294; // 2^32 - 2
+}
+
+/**
+ * (#2131) Apply the OrdinaryOwnPropertyKeys ordering (ES §10.1.11.1) to a
+ * key list: canonical array-index keys first in ascending numeric order,
+ * then the remaining keys in their existing (insertion) order. Mirrors the
+ * #1837 standalone fix for the JS-host enumeration paths, which previously
+ * emitted raw struct-field declaration order. Returns the input array
+ * unchanged when no array-index key is present (the common pure-string case).
+ */
+function _orderOwnKeysSpec<T extends string | symbol>(keys: T[]): T[] {
+  let hasIndexKey = false;
+  for (const k of keys) {
+    if (typeof k === "string" && _isCanonicalArrayIndexKey(k)) {
+      hasIndexKey = true;
+      break;
+    }
+  }
+  if (!hasIndexKey) return keys;
+  const indices: string[] = [];
+  const rest: T[] = [];
+  for (const k of keys) {
+    if (typeof k === "string" && _isCanonicalArrayIndexKey(k)) indices.push(k);
+    else rest.push(k);
+  }
+  indices.sort((a, b) => Number(a) - Number(b));
+  return [...(indices as unknown as T[]), ...rest];
+}
+
 function _ownStructKeys(obj: any, exports: Record<string, Function> | undefined): (string | symbol)[] {
   const keys: (string | symbol)[] = [];
   const push = (k: string | symbol) => {
@@ -3541,7 +4315,7 @@ function _ownStructKeys(obj: any, exports: Record<string, Function> | undefined)
   } catch {
     // ignore
   }
-  return keys;
+  return _orderOwnKeysSpec(keys); // (#2131) array-index keys first, ascending
 }
 
 function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): any {
@@ -3559,27 +4333,32 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
     // function under `__get_<k>` (string) or in `_wasmStructAccessors` (symbol).
     // Note: getters defined in a TS object literal compile to a Wasm closure
     // (typeof === "object"); call those via __call_fn_0 export.
-    const invokeGetter = (g: any): any | undefined => {
-      if (g == null) return undefined;
+    // #1935 — return `_MISS` ONLY when no getter is actually callable. When a
+    // getter runs, its result (even `undefined`) is a genuine HIT and is
+    // returned as-is; the caller must distinguish `_MISS` from `undefined` so a
+    // getter that returns `undefined` shadows the underlying field per spec,
+    // instead of silently falling through to the sidecar/struct value.
+    const invokeGetter = (g: any): any => {
+      if (g == null) return _MISS;
       if (typeof g === "function") return (g as Function).call(obj);
       if (typeof g === "object" && _isWasmStruct(g) && exports) {
         const callFn0 = exports["__call_fn_0"];
         if (typeof callFn0 === "function") return callFn0(g);
       }
-      return undefined;
+      return _MISS;
     };
     if (typeof key === "string") {
       const wasmSc = _wasmStructProps.get(obj);
       const getter = wasmSc?.[`__get_${key}` as string];
       if (getter !== undefined) {
         const v = invokeGetter(getter);
-        if (v !== undefined) return v;
+        if (v !== _MISS) return v;
       }
     } else if (typeof key === "symbol") {
       const accessor = _wasmStructAccessors.get(obj)?.get(key);
       if (accessor?.get !== undefined) {
         const v = invokeGetter(accessor.get);
-        if (v !== undefined) return v;
+        if (v !== _MISS) return v;
       }
     }
     // Sidecar first (handles both string and symbol keys)
@@ -3590,7 +4369,16 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       const getter = exports[`__sget_${String(key)}`];
       if (typeof getter === "function") {
         try {
-          return getter(obj);
+          // (#1712) Treat a nullish result as a MISS, not a hit: the
+          // __sget_<name> per-shape dispatcher yields null/undefined when the
+          // receiver's struct shape doesn't carry the field at all (fnctor
+          // ctor-shape instances vs the wider checker shape that generated
+          // the export). Returning it unconditionally short-circuited the
+          // vivified-prototype fallback below and made every prototype
+          // method on a fnctor instance unreachable whenever the checker
+          // shape had synthesized a same-named field.
+          const v = getter(obj);
+          if (v !== undefined && v !== null) return v;
         } catch {
           /* not a field of this struct type */
         }
@@ -3606,6 +4394,28 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
         const v = _sidecarGet(obj, wasmKey);
         if (v !== undefined) return v;
       }
+    }
+    // (#1712) fnctor instances: resolve through the constructor's vivified
+    // prototype object. Accessors run with the live-mirror proxy as the
+    // receiver so getter bodies reading `this.<field>` reach the struct.
+    // Values stored during the module START function were written before
+    // exports existed, so the write-side closure wrap no-op'd — wrap raw
+    // closure structs here, at read time, instead.
+    const protoDesc = _fnctorProtoLookup(obj, key);
+    if (protoDesc) {
+      if (process.env.DEBUG_1712)
+        console.error(
+          "[protoHook]",
+          String(key),
+          "valType=",
+          typeof protoDesc.value,
+          "exports?",
+          exports != null,
+          "is_closure?",
+          typeof exports?.__is_closure,
+        );
+      if (protoDesc.get) return protoDesc.get.call(_hostProxyCache.get(obj) ?? obj);
+      return _maybeWrapCallableUnknownArity(protoDesc.value, { getExports: () => exports });
     }
     return undefined;
   };
@@ -3661,6 +4471,19 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       // can invoke it. Without this, JS sees `typeof val === "object"` and
       // ToPrimitive fails with "Cannot convert object to primitive value".
       if (val != null && typeof val === "object" && _isWasmStruct(val) && exports) {
+        // (#1712) Vec structs are DATA, never callables — wrapping one in the
+        // closureBridge below made acorn's `this.scopeStack` field read return
+        // a JS function, so `scopeStack.push(…)` threw "push is not a
+        // function". `__is_vec` is the positive discriminator (`__is_closure`
+        // can false-positive on layout-canonicalization collisions).
+        try {
+          const isVecFn = exports.__is_vec as ((v: any) => number) | undefined;
+          if (typeof isVecFn === "function" && isVecFn(val) === 1) {
+            return _wrapForHost(val, exports);
+          }
+        } catch {
+          // fall through to the closure-bridge heuristics
+        }
         // Resolve the export key — for string keys use directly, for well-known
         // symbols use the @@name form (e.g. Symbol.toPrimitive → "@@toPrimitive") (#1090)
         const exportKey = typeof key === "string" ? key : typeof key === "symbol" ? _symbolToWasm.get(key) : undefined;
@@ -3684,7 +4507,32 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
         const callFn1 = exports["__call_fn_1"];
         const callFn2 = exports["__call_fn_2"];
         if (typeof callFn0 === "function" || typeof callFn1 === "function" || typeof callFn2 === "function") {
+          // (#2015) Method-`this` threading. When this closure field is invoked
+          // as a METHOD (`o.m()` on an any/externref receiver routes through
+          // `__extern_method_call` → `fn.apply(wrappedObj, …)`), the bridge's
+          // `this` is the host-mirror proxy for the receiver struct. Dispatch
+          // through `__call_fn_method_N` so the compiled method body's
+          // `this.<field>` observes the receiver via the `__current_this` global
+          // (#1636-S1) / the object-method trampoline's receiver slot. Unwrap
+          // the proxy to the raw struct first (mirrors `_wrapWasmClosure`).
+          // A bare/undefined/globalThis `this` (extraction call `const f = o.m;
+          // f()`) keeps the plain `__call_fn_N` path so the spec-mandated
+          // unbound-`this` semantics are preserved unchanged.
+          const mcall0 = exports["__call_fn_method_0"];
+          const mcall1 = exports["__call_fn_method_1"];
+          const mcall2 = exports["__call_fn_method_2"];
           return function closureBridge(this: any, ...args: any[]) {
+            const hasRecv = this !== undefined && this !== null && this !== globalThis;
+            const rawThis = hasRecv && typeof this === "object" ? _unwrapForHost(this) : this;
+            const recv = _isWasmStruct(rawThis) ? rawThis : undefined;
+            if (recv !== undefined) {
+              if (args.length === 0 && typeof mcall0 === "function") return mcall0(recv, val);
+              if (args.length === 1 && typeof mcall1 === "function") return mcall1(recv, val, args[0]);
+              if (args.length >= 2 && typeof mcall2 === "function") return mcall2(recv, val, args[0], args[1]);
+              if (typeof mcall1 === "function") return mcall1(recv, val, args[0]);
+              if (typeof mcall0 === "function") return mcall0(recv, val);
+              if (typeof mcall2 === "function") return mcall2(recv, val, args[0], args[1]);
+            }
             if (args.length === 0 && typeof callFn0 === "function") return callFn0(val);
             if (args.length === 1 && typeof callFn1 === "function") return callFn1(val, args[0]);
             if (args.length >= 2 && typeof callFn2 === "function") return callFn2(val, args[0], args[1]);
@@ -3796,7 +4644,13 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
       const nKey = _normalizeDescKey(key);
       const sDescs = _getSidecarDescs(obj);
       const existingVal = _sidecarGet(obj, key);
-      const newFlags = _validatePropertyDescriptor(sDescs, nKey, descriptor, existingVal);
+      // (#1629) Pass the current descriptor so the same-getter/setter identity
+      // exception (§10.1.6.3) can recognise an idempotent redefine of a
+      // non-configurable accessor through the proxy. Omitting it made
+      // `Object.is(desc.get, undefined)` always false → spurious "Cannot
+      // redefine property" when redefining with the SAME getter/setter.
+      const existingDesc = _readOwnDescriptor(obj, nKey, exports);
+      const newFlags = _validatePropertyDescriptor(sDescs, nKey, descriptor, existingVal, existingDesc);
       sDescs.set(nKey, newFlags);
       if (descriptor.value !== undefined) _sidecarSet(obj, key, descriptor.value);
       if (descriptor.get !== undefined || descriptor.set !== undefined) {
@@ -3833,6 +4687,170 @@ function _unwrapForHost(v: any): any {
   if (v == null || typeof v !== "object") return v;
   const orig = _hostProxyReverse.get(v);
   return orig ?? v;
+}
+
+// ── #2180 — host-mode user `new Proxy` / `Proxy.revocable` construction ──────
+//
+// A compiled `new Proxy(target, handler)` reaches the host with `target` and
+// `handler` as raw WasmGC structs (object literals compile to opaque structs).
+// Two problems must be solved for the host's native Proxy MOP to behave per
+// §10.5 / §28.2:
+//
+//  1. **Trap discovery.** The host reads `handler[trapName]` to find each trap.
+//     On a raw struct every read returns `undefined` (opaque), so NO trap ever
+//     fires and every operation silently falls through to the target. We build
+//     a plain-object *bridge handler* whose trap methods forward to the Wasm
+//     closures stored on the struct, invoked via `_wrapForHost`'s closure
+//     bridge (which threads `this` = the original handler struct).
+//
+//  2. **Identity.** Spec trap signatures hand the user `target`/`handler`
+//     identities (`get(t, p, recv)` with `t === target`, `this === handler`).
+//     The user's source holds the *raw* structs, so the values the trap sees
+//     must compare equal to those raw structs. We therefore use the raw struct
+//     as the host `[[ProxyTarget]]` (preserving `t === target`) and re-thread
+//     `this`/the target arg back to the raw handler/target inside each bridge.
+//
+// Construction also enforces the §28.2.1.1 step-1/2 `TypeError`s: both target
+// and handler must be objects (a WasmGC struct counts as an object).
+const _PROXY_TRAP_NAMES = [
+  "apply",
+  "construct",
+  "defineProperty",
+  "deleteProperty",
+  "get",
+  "getOwnPropertyDescriptor",
+  "getPrototypeOf",
+  "has",
+  "isExtensible",
+  "ownKeys",
+  "preventExtensions",
+  "set",
+  "setPrototypeOf",
+] as const;
+
+function _isObjectLike(v: any): boolean {
+  if (v === null || v === undefined) return false;
+  const t = typeof v;
+  return t === "object" || t === "function";
+}
+
+/**
+ * #2180 — a revoked Proxy throws a `TypeError` from EVERY internal method
+ * ("Cannot perform 'get' on a proxy that has been revoked"). The boundary
+ * helpers (`__extern_get` etc.) wrap their host reads in a try/catch that
+ * silently falls through to a struct-getter path — which would swallow this
+ * spec-mandated TypeError and return `undefined` instead. Detect it so callers
+ * can re-throw, letting the user program's `assert.throws(TypeError, …)` see it.
+ */
+function _isRevokedProxyError(e: any): boolean {
+  return e instanceof TypeError && typeof e.message === "string" && e.message.includes("proxy that has been revoked");
+}
+
+/**
+ * #2180 — build a real host Proxy from a user `new Proxy(target, handler)`.
+ * `ctor` is "Proxy" or "Proxy.revocable" for the spec-mandated TypeError text.
+ * Returns the constructed Proxy (revocable=false) — callers that need the
+ * `{proxy, revoke}` pair call `_hostProxyConstructRevocable`.
+ */
+function _hostProxyConstruct(
+  target: any,
+  handler: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+  ctor: string,
+): any {
+  if (!_isObjectLike(target)) {
+    throw new TypeError(`Cannot create ${ctor} with a non-object as target`);
+  }
+  if (!_isObjectLike(handler)) {
+    throw new TypeError(`Cannot create ${ctor} with a non-object as handler`);
+  }
+  const bridgeHandler = _buildProxyBridgeHandler(handler, callbackState);
+  // Use the raw target as [[ProxyTarget]] so `t === target` holds in traps and
+  // `proxy`-vs-`target` identity probes resolve. WasmGC structs are valid
+  // exotic targets for the host engine; the bridge handler routes every MOP
+  // operation through the user trap (or, when a trap is absent, the host's
+  // default which reads the struct via the same boundary helpers).
+  const proxy = new Proxy(target, bridgeHandler);
+  _userProxies.add(proxy);
+  return proxy;
+}
+
+/** #2180 — `Proxy.revocable(target, handler)` → `{ proxy, revoke }`. */
+function _hostProxyConstructRevocable(
+  target: any,
+  handler: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+): any {
+  if (!_isObjectLike(target)) {
+    throw new TypeError("Cannot create proxy with a non-object as target");
+  }
+  if (!_isObjectLike(handler)) {
+    throw new TypeError("Cannot create proxy with a non-object as handler");
+  }
+  const bridgeHandler = _buildProxyBridgeHandler(handler, callbackState);
+  const rv = Proxy.revocable(target, bridgeHandler);
+  if (rv && typeof rv.proxy === "object" && rv.proxy !== null) _userProxies.add(rv.proxy);
+  return rv;
+}
+
+/**
+ * #2180 — read a (possibly closure-valued) field off a WasmGC struct WITHOUT
+ * routing through `_wrapForHost` (whose mirror double-wraps a closure field
+ * into a non-callable object — the very bug that left every user trap
+ * undiscovered). Prefers the per-shape `__sget_<name>` field getter, then the
+ * sidecar store. Returns `undefined` when the field is absent.
+ */
+function _structFieldRaw(obj: any, name: string, exports: Record<string, Function> | undefined): any {
+  if (exports) {
+    const getter = exports[`__sget_${name}`];
+    if (typeof getter === "function") {
+      try {
+        const v = getter(obj);
+        if (v !== undefined && v !== null) return v;
+      } catch {
+        /* field not present on this struct shape */
+      }
+    }
+  }
+  return _sidecarGet(obj, name);
+}
+
+/**
+ * #2180 — translate a (possibly WasmGC-struct) user handler into a plain-object
+ * handler the host engine can read trap functions from. Each present trap is
+ * read directly off the struct and wrapped into a JS callable that dispatches
+ * the underlying Wasm closure with `this` = the raw handler struct (so the
+ * user-observable `this` inside the trap is identity-equal to the `handler`
+ * value the compiled program holds). A trap the user did not define is omitted,
+ * so the host falls back to its default (ordinary) behavior for that operation
+ * — matching the spec, where a missing trap means "use the target's internal
+ * method".
+ */
+function _buildProxyBridgeHandler(
+  handler: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+): any {
+  // Plain JS handler (created host-side, not a WasmGC struct) already exposes
+  // its traps directly — use it verbatim so identity/`this` are untouched.
+  if (!_isWasmStruct(handler)) return handler;
+
+  const exports = callbackState?.getExports();
+  const bridge: Record<string, any> = {};
+  for (const name of _PROXY_TRAP_NAMES) {
+    const rawTrap = _structFieldRaw(handler, name, exports);
+    if (rawTrap == null) continue;
+    const callable = _maybeWrapCallableUnknownArity(rawTrap, callbackState);
+    if (typeof callable !== "function") continue;
+    // Forward to the user trap with `this` = the raw handler struct. The
+    // closure bridge installs that struct as `__current_this`, so the trap
+    // body's `this` is the same value the program sees as `handler` and
+    // `assert.sameValue(this, handler)` passes. Spec-correct args (raw target,
+    // property key, receiver = our user Proxy) flow through unchanged.
+    bridge[name] = function (this: any, ...args: any[]): any {
+      return (callable as Function).apply(handler, args);
+    };
+  }
+  return bridge;
 }
 
 // ── #1234 — sparse-aware Array.prototype fast paths ─────────────────────────
@@ -4068,12 +5086,70 @@ function _toJsArray(arr: any, exports: Record<string, Function> | undefined): an
   return [arr]; // Fallback: wrap single value
 }
 
+/**
+ * (#1996) Recursion cap for `_toJsArrayDeep`. Generous enough for any
+ * realistic nesting while preventing unbounded recursion on a pathological
+ * input. Vec refs are acyclic, so this is a safety ceiling, not a semantic
+ * limit.
+ */
+const VEC_UNWRAP_MAX_DEPTH = 64;
+
+/**
+ * (#1996) Recursively materialize a WasmGC vec into a JS array, unwrapping
+ * any nested vec-ref elements into real JS arrays so native `Array.prototype`
+ * methods (`flat`, `flatMap`, `JSON.stringify`) recognize them via
+ * `Array.isArray`. Without this, `_toJsArray` converts only the outer vec and
+ * leaves inner elements as opaque WasmGC refs, which `flat()` cannot flatten
+ * and `JSON.stringify` renders as `null`.
+ *
+ * `maxDepth` bounds the recursion so already-flat scalar elements aren't probed
+ * past the depth the caller cares about (flat's depth argument). A non-vec
+ * value passes through unchanged.
+ */
+function _toJsArrayDeep(arr: any, exports: Record<string, Function> | undefined, maxDepth: number): any {
+  if (arr == null) return arr;
+  if (Array.isArray(arr)) {
+    if (maxDepth <= 0) return arr;
+    return arr.map((el) => _toJsArrayDeep(el, exports, maxDepth - 1));
+  }
+  // Only probe opaque WasmGC structs as candidate vecs — scalars (numbers,
+  // strings, booleans) and JS objects pass straight through.
+  if (maxDepth <= 0 || !_isWasmStruct(arr) || !exports) return arr;
+  const vecLen = exports.__vec_len;
+  const vecGet = exports.__vec_get;
+  if (typeof vecLen !== "function" || typeof vecGet !== "function") return arr;
+  try {
+    const len = vecLen(arr) as number;
+    if (typeof len !== "number" || len < 0) return arr;
+    const result: any[] = new Array(len);
+    for (let i = 0; i < len; i++) {
+      result[i] = _toJsArrayDeep(vecGet(arr, i), exports, maxDepth - 1);
+    }
+    return result;
+  } catch {
+    return arr; // Not a vec — pass through
+  }
+}
+
 /** Per-instance state shared across imports inside one `buildImports()`
  *  call. Currently used by the `web_storage` intent so localStorage /
  *  sessionStorage resolve to a stable per-instance polyfill in standalone
  *  mode (Node, Bun, WASI). */
 interface InstanceState {
   webStorage: { local?: any; session?: any };
+  // #1933 — per-instance state that previously lived at module scope and bled
+  // across (or retained) concurrently-live instances. Threaded through
+  // `resolveImport` (which already receives `instanceState`).
+  /** symbol id → boxed symbol (lazily seeded with the well-known symbols). */
+  symbolCache?: Map<number, symbol>;
+  /** symbol id → user-registered description (`null` = Symbol() w/ no desc). */
+  symbolDescRegistry?: Map<number, string | null>;
+  /** legacy RegExp static state (`RegExp.$1` etc.) — per instance, not shared. */
+  legacyRegExpState?: LegacyRegExpState;
+  /** user-class name → registered subclass constructors (#1933 retention leak). */
+  subclassCtors?: Map<string, Function[]>;
+  /** user-class name → parent class name (or null). */
+  userClassParents?: Map<string, string | null>;
 }
 
 function makeWebStoragePolyfill(): any {
@@ -4257,8 +5333,11 @@ function _formatDate(ts: bigint, mode: number): string {
 
   const wday = _DATE_DAY_NAMES[day];
   const mon = _DATE_MONTH_NAMES[month];
-  // Years < 0 keep the sign and pad to 4 digits of magnitude (e.g. "-000001").
-  const yearStr = year < 0 ? "-" + _datePad(year, 6) : _datePad(year, 4);
+  // DateString / UTCString family (§21.4.4.41.1, §21.4.4.43) require a minimum
+  // of four digits with a leading sign on negative years: -1 → "-0001",
+  // -12345 → "-12345". The ISO path (toISOString) uses its own ±YYYYYY 6-digit
+  // form and is handled by `d.toISOString()` above, so it is unaffected.
+  const yearStr = year < 0 ? "-" + _datePad(year, 4) : _datePad(year, 4);
   const dd = _datePad(date, 2);
   const hh = _datePad(hours, 2);
   const mm = _datePad(minutes, 2);
@@ -4290,6 +5369,516 @@ function _formatDate(ts: bigint, mode: number): string {
     default:
       return `${dateStr} ${timeStr}`;
   }
+}
+
+function _temporalTrunc(v: any): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.trunc(n);
+}
+
+function _temporalPad(n: number, width: number): string {
+  return String(Math.abs(Math.trunc(n))).padStart(width, "0");
+}
+
+function _temporalYearString(yearRaw: any): string {
+  const year = _temporalTrunc(yearRaw);
+  if (year >= 0 && year <= 9999) return _temporalPad(year, 4);
+  return (year < 0 ? "-" : "+") + _temporalPad(year, 6);
+}
+
+function _temporalPlainDateToString(year: any, month: any, day: any): string {
+  return `${_temporalYearString(year)}-${_temporalPad(_temporalTrunc(month), 2)}-${_temporalPad(_temporalTrunc(day), 2)}`;
+}
+
+function _temporalPlainDateMonthCode(month: any): string {
+  return `M${_temporalPad(_temporalTrunc(month), 2)}`;
+}
+
+function _temporalPlainTimeToString(
+  hour: any,
+  minute: any,
+  second: any,
+  millisecond: any,
+  microsecond: any,
+  nanosecond: any,
+): string {
+  const base = `${_temporalPad(_temporalTrunc(hour), 2)}:${_temporalPad(_temporalTrunc(minute), 2)}:${_temporalPad(
+    _temporalTrunc(second),
+    2,
+  )}`;
+  const fraction =
+    _temporalPad(_temporalTrunc(millisecond), 3) +
+    _temporalPad(_temporalTrunc(microsecond), 3) +
+    _temporalPad(_temporalTrunc(nanosecond), 3);
+  const trimmed = fraction.replace(/0+$/, "");
+  return trimmed.length > 0 ? `${base}.${trimmed}` : base;
+}
+
+// ---- Temporal ISO 8601 / RFC 9557 strict string parsing (#661 / PR #1274) ----
+//
+// Spec-first implementation of the string grammar from tc39/proposal-temporal:
+//   - "RFC 9557 / ISO 8601 grammar" (sec-temporal-iso8601grammar), incl. the
+//     early errors: DateYear "-000000" is a Syntax Error; IsValidDate rejects
+//     impossible month/day combos and Feb 29 in non-leap years.
+//   - ParseISODateTime (sec-temporal-parseisodatetime): annotation handling —
+//     a second `u-ca` calendar annotation throws RangeError when either has
+//     the `!` critical flag; any unknown annotation key with the critical
+//     flag throws RangeError; TimeSecond 60 is clamped to 59.
+//   - ParseTemporalDurationString (sec-temporal-parsetemporaldurationstring):
+//     fractions only on the smallest present time unit, 1-9 digits, period
+//     or comma; fractional hours/minutes/seconds balance into smaller units;
+//     magnitudes are floored before the sign factor is applied.
+//   - IsValidDuration (sec-temporal-isvalidduration): mixed signs are
+//     invalid; |years|/|months|/|weeks| must be < 2^32; the normalized
+//     nanosecond total must be < 10^9 * 2^53 (computed exactly via BigInt
+//     per the spec NOTE about 64-bit float imprecision).
+//
+// Grammar fragments (sec-temporal-iso8601grammar). Each of the date, time,
+// and offset parts may independently use basic (no separators) or extended
+// (mandatory separators) format.
+const _tYearSrc = "(\\d{4}|[+-]\\d{6})";
+const _tMonthSrc = "(0[1-9]|1[0-2])";
+const _tDaySrc = "(0[1-9]|[12]\\d|3[01])";
+const _tHourSrc = "([01]\\d|2[0-3])";
+const _tMinuteSrc = "([0-5]\\d)";
+const _tSecondSrc = "([0-5]\\d|60)";
+const _tFracSrc = "(?:[.,](\\d{1,9}))";
+const _tDateExtSrc = `${_tYearSrc}-${_tMonthSrc}-${_tDaySrc}`;
+const _tDateBasicSrc = `${_tYearSrc}${_tMonthSrc}${_tDaySrc}`;
+const _tTimeExtSrc = `${_tHourSrc}(?::${_tMinuteSrc}(?::${_tSecondSrc}${_tFracSrc}?)?)?`;
+const _tTimeBasicSrc = `${_tHourSrc}(?:${_tMinuteSrc}(?:${_tSecondSrc}${_tFracSrc}?)?)?`;
+// UTCOffset[+SubMinutePrecision] — parsed for validity, value ignored.
+const _tOffsetSrc =
+  "[+-](?:[01]\\d|2[0-3])(?::[0-5]\\d(?::[0-5]\\d(?:[.,]\\d{1,9})?)?|[0-5]\\d(?:[0-5]\\d(?:[.,]\\d{1,9})?)?)?";
+// TimeZoneAnnotation ::: `[` `!`? (UTCOffset[~SubMinutePrecision] | TimeZoneIANAName) `]`
+const _tTzAnnotationRe = new RegExp(
+  "^\\[!?(?:[+-](?:[01]\\d|2[0-3])(?::?[0-5]\\d)?|[A-Za-z._][A-Za-z._0-9+-]*(?:\\/[A-Za-z._][A-Za-z._0-9+-]*)*)\\]$",
+);
+// Annotation ::: `[` `!`? AnnotationKey `=` AnnotationValue `]`
+const _tAnnotationRe = /^\[(!?)([a-z_][a-z0-9_-]*)=([A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)\]$/;
+const _tBracketSplitRe = /\[[^\]]*\]/g;
+
+/**
+ * Validate the bracketed suffix of an ISO string per the grammar
+ * `TimeZoneAnnotation? Annotations?` and the ParseISODateTime annotation
+ * rules (duplicate critical u-ca, unknown critical key). Throws RangeError.
+ */
+function _temporalValidateBrackets(suffix: string): void {
+  if (suffix.length === 0) return;
+  const brackets = suffix.match(_tBracketSplitRe) ?? [];
+  if (brackets.join("") !== suffix) throw new RangeError("invalid annotation syntax in Temporal string");
+  let calendar: string | undefined;
+  let calendarWasCritical = false;
+  for (let i = 0; i < brackets.length; i++) {
+    const bracket = brackets[i]!;
+    if (i === 0 && _tTzAnnotationRe.test(bracket) && !_tAnnotationRe.test(bracket)) {
+      continue; // single leading TimeZoneAnnotation
+    }
+    const annotation = _tAnnotationRe.exec(bracket);
+    if (!annotation) throw new RangeError("invalid annotation in Temporal string");
+    const critical = annotation[1] === "!";
+    const key = annotation[2]!;
+    if (key === "u-ca") {
+      if (calendar === undefined) {
+        calendar = annotation[3]!;
+        calendarWasCritical = critical;
+      } else if (critical || calendarWasCritical) {
+        throw new RangeError("duplicate critical calendar annotation in Temporal string");
+      }
+    } else if (critical) {
+      throw new RangeError(`unknown critical annotation key "${key}" in Temporal string`);
+    }
+  }
+  // CanonicalizeCalendar / CalendarFromIdentifier: an unrecognized calendar
+  // type is a RangeError. Recognized set = CLDR/BCP 47 calendar types used
+  // by test262 (ASCII case-insensitive).
+  if (calendar !== undefined && !_temporalKnownCalendars.has(calendar.toLowerCase())) {
+    throw new RangeError(`unknown calendar "${calendar}" in Temporal string`);
+  }
+}
+
+const _temporalKnownCalendars = new Set([
+  "iso8601",
+  "buddhist",
+  "chinese",
+  "coptic",
+  "dangi",
+  "ethioaa",
+  "ethiopic",
+  "ethiopic-amete-alem",
+  "gregory",
+  "hebrew",
+  "indian",
+  "islamic",
+  "islamic-civil",
+  "islamic-rgsa",
+  "islamic-tbla",
+  "islamic-umalqura",
+  "islamicc",
+  "japanese",
+  "persian",
+  "roc",
+]);
+
+/** IsValidDate (sec-temporal-iso8601grammar-static-semantics-isvaliddate). */
+function _temporalCheckDateValid(yearText: string, year: number, month: number, day: number): void {
+  if (yearText === "-000000") throw new RangeError("Temporal year -000000 is not allowed");
+  if (day === 31 && (month === 2 || month === 4 || month === 6 || month === 9 || month === 11)) {
+    throw new RangeError("invalid day of month in Temporal string");
+  }
+  if (month === 2 && day === 30) throw new RangeError("invalid day of month in Temporal string");
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  if (month === 2 && day === 29 && !leap) throw new RangeError("invalid day of month in Temporal string");
+}
+
+/** ParseISODateTime fraction handling: 1-9 digits padded to ms/us/ns. */
+function _temporalFractionParts(frac: string | undefined): [number, number, number] {
+  const padded = (frac ?? "").padEnd(9, "0");
+  return [Number(padded.slice(0, 3) || "0"), Number(padded.slice(3, 6) || "0"), Number(padded.slice(6, 9) || "0")];
+}
+
+const _tPlainDateRe = new RegExp(
+  `^(?:${_tDateExtSrc}|${_tDateBasicSrc})(?:[Tt ](?:${_tTimeExtSrc}|${_tTimeBasicSrc})(${_tOffsetSrc}|[Zz])?)?`,
+);
+
+/**
+ * ToTemporalDate(string) → ParseISODateTime with TemporalDateTimeString[~Zoned]
+ * (sec-temporal-totemporaldate / sec-temporal-parseisodatetime). The [~Zoned]
+ * goal has no UTCDesignator alternative, so a `Z`/`z` suffix is a RangeError.
+ */
+/**
+ * ToTemporalDate / ToTemporalTime / ToTemporalDuration accept only Objects
+ * (property bags, handled at compile time) or Strings here; any other
+ * primitive is a TypeError before parsing (e.g. PlainDate.from(19761118)).
+ * Dynamic (non-literal) object bags are not supported by the minimal native
+ * lowering — they also throw here, as they did before strict parsing.
+ */
+function _temporalRequireString(item: any, what: string): string {
+  if (typeof item !== "string") {
+    throw new TypeError(`${what} must be a string or property bag, not ${typeof item}`);
+  }
+  return item;
+}
+
+function _temporalParsePlainDate(item: any): [number, number, number] {
+  const text = _temporalRequireString(item, "Temporal.PlainDate argument");
+  const bracketStart = text.indexOf("[");
+  const core = bracketStart < 0 ? text : text.slice(0, bracketStart);
+  const suffix = bracketStart < 0 ? "" : text.slice(bracketStart);
+  const match = _tPlainDateRe.exec(core);
+  if (!match || match[0] !== core) throw new RangeError("invalid Temporal.PlainDate string");
+  const yearText = match[1] ?? match[4]!;
+  // Groups: date-ext 1-3, date-basic 4-6, time-ext 7-10, time-basic 11-14, offset/Z 15.
+  const offsetOrZ = match[15];
+  if (offsetOrZ === "Z" || offsetOrZ === "z") {
+    throw new RangeError("UTC designator Z is not valid for Temporal.PlainDate");
+  }
+  _temporalValidateBrackets(suffix);
+  const year = Number(yearText);
+  const month = Number(match[2] ?? match[5]!);
+  const day = Number(match[3] ?? match[6]!);
+  _temporalCheckDateValid(yearText, year, month, day);
+  // ISODateTimeWithinLimits / ISODateWithinLimits: the representable
+  // PlainDate range is -271821-04-19 .. +275760-09-13 (epoch ±10^8 days).
+  if (
+    year < -271821 ||
+    year > 275760 ||
+    (year === -271821 && (month < 4 || (month === 4 && day < 19))) ||
+    (year === 275760 && (month > 9 || (month === 9 && day > 13)))
+  ) {
+    throw new RangeError("Temporal.PlainDate is outside the representable range");
+  }
+  return [year, month, day];
+}
+
+function _temporalPlainDateFromStringField(item: any, field: any): number {
+  return _temporalParsePlainDate(item)[_temporalTrunc(field)] ?? 0;
+}
+
+const _tPlainTimeDateTimeRe = new RegExp(
+  `^(?:${_tDateExtSrc}|${_tDateBasicSrc})[Tt ](?:${_tTimeExtSrc}|${_tTimeBasicSrc})(${_tOffsetSrc}|[Zz])?$`,
+);
+const _tPlainTimeOnlyRe = new RegExp(`^([Tt])?(?:${_tTimeExtSrc}|${_tTimeBasicSrc})(${_tOffsetSrc}|[Zz])?$`);
+// Early errors for AnnotatedTime without a TimeDesignator: the source text
+// must not also parse as DateSpecMonthDay or DateSpecYearMonth.
+const _tMonthDayAmbiguityRe = /^(?:--)?(?:0[1-9]|1[0-2])-?(?:0[1-9]|[12]\d|3[01])$/;
+const _tYearMonthAmbiguityRe = /^(?:\d{4}|[+-]\d{6})-?(?:0[1-9]|1[0-2])$/;
+
+/**
+ * ToTemporalTime(string) → ParseTemporalTimeString with
+ * TemporalTimeString ::: AnnotatedTime | AnnotatedDateTime[~Zoned, +TimeRequired]
+ * (sec-temporal-iso8601grammar). Z is rejected ([~Z] / [~Zoned]); a
+ * date-only string is rejected (+TimeRequired); TimeSecond 60 clamps to 59
+ * (ParseISODateTime).
+ */
+function _temporalParsePlainTime(item: any): [number, number, number, number, number, number] {
+  const text = _temporalRequireString(item, "Temporal.PlainTime argument");
+  const bracketStart = text.indexOf("[");
+  const core = bracketStart < 0 ? text : text.slice(0, bracketStart);
+  const suffix = bracketStart < 0 ? "" : text.slice(bracketStart);
+  _temporalValidateBrackets(suffix);
+
+  let hour: string | undefined;
+  let minute: string | undefined;
+  let second: string | undefined;
+  let frac: string | undefined;
+  let offsetOrZ: string | undefined;
+
+  const dt = _tPlainTimeDateTimeRe.exec(core);
+  if (dt) {
+    const yearText = dt[1] ?? dt[4]!;
+    _temporalCheckDateValid(yearText, Number(yearText), Number(dt[2] ?? dt[5]!), Number(dt[3] ?? dt[6]!));
+    hour = dt[7] ?? dt[11];
+    minute = dt[8] ?? dt[12];
+    second = dt[9] ?? dt[13];
+    frac = dt[10] ?? dt[14];
+    offsetOrZ = dt[15];
+  } else {
+    const t = _tPlainTimeOnlyRe.exec(core);
+    if (!t) throw new RangeError("invalid Temporal.PlainTime string");
+    const designator = t[1];
+    hour = t[2] ?? t[6];
+    minute = t[3] ?? t[7];
+    second = t[4] ?? t[8];
+    frac = t[5] ?? t[9];
+    offsetOrZ = t[10];
+    if (!designator) {
+      const timeAndOffset = core;
+      if (_tMonthDayAmbiguityRe.test(timeAndOffset) || _tYearMonthAmbiguityRe.test(timeAndOffset)) {
+        throw new RangeError("ambiguous Temporal.PlainTime string");
+      }
+    }
+  }
+  if (offsetOrZ === "Z" || offsetOrZ === "z") {
+    throw new RangeError("UTC designator Z is not valid for Temporal.PlainTime");
+  }
+  let secondNum = second === undefined ? 0 : Number(second);
+  if (secondNum === 60) secondNum = 59;
+  const [ms, us, ns] = _temporalFractionParts(frac);
+  return [Number(hour ?? "0"), minute === undefined ? 0 : Number(minute), secondNum, ms, us, ns];
+}
+
+function _temporalPlainTimeFromStringField(item: any, field: any): number {
+  return _temporalParsePlainTime(item)[_temporalTrunc(field)] ?? 0;
+}
+
+/** IsValidDuration (sec-temporal-isvalidduration). */
+function _temporalIsValidDuration(values: readonly number[]): boolean {
+  let sign = 0;
+  for (const v of values) {
+    if (!Number.isFinite(v)) return false;
+    if (v < 0) {
+      if (sign > 0) return false;
+      sign = -1;
+    } else if (v > 0) {
+      if (sign < 0) return false;
+      sign = 1;
+    }
+  }
+  const TWO_32 = 4294967296;
+  if (Math.abs(values[0]!) >= TWO_32 || Math.abs(values[1]!) >= TWO_32 || Math.abs(values[2]!) >= TWO_32) {
+    return false;
+  }
+  // Normalized nanoseconds, computed exactly with BigInt per the spec NOTE.
+  try {
+    const big = (n: number): bigint => BigInt(n);
+    const total =
+      big(values[3]!) * 86400000000000n +
+      big(values[4]!) * 3600000000000n +
+      big(values[5]!) * 60000000000n +
+      big(values[6]!) * 1000000000n +
+      big(values[7]!) * 1000000n +
+      big(values[8]!) * 1000n +
+      big(values[9]!);
+    const limit = 1000000000n * 9007199254740992n; // 10^9 * 2^53
+    const abs = total < 0n ? -total : total;
+    if (abs >= limit) return false;
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+const _tDurationRe =
+  /^([+-])?[Pp](?:(\d+)[Yy])?(?:(\d+)[Mm])?(?:(\d+)[Ww])?(?:(\d+)[Dd])?(?:([Tt])(?:(\d+)(?:[.,](\d{1,9}))?[Hh])?(?:(\d+)(?:[.,](\d{1,9}))?[Mm])?(?:(\d+)(?:[.,](\d{1,9}))?[Ss])?)?$/;
+
+/**
+ * ParseTemporalDurationString (sec-temporal-parsetemporaldurationstring).
+ * The grammar requires at least one unit, a time unit after `T`, and allows
+ * a fraction only on the smallest (last) present time unit. Fractional
+ * hours/minutes/seconds balance into smaller units; magnitudes are floored
+ * before the sign factor. The result must satisfy IsValidDuration.
+ */
+function _temporalParseDuration(item: any): number[] {
+  const text = _temporalRequireString(item, "Temporal.Duration argument");
+  const match = _tDurationRe.exec(text);
+  if (!match) throw new RangeError("invalid Temporal.Duration string");
+  const [, signText, years, months, weeks, days, timeDesignator, hours, fHours, minutes, fMinutes, seconds, fSeconds] =
+    match;
+  const hasDatePart = years !== undefined || months !== undefined || weeks !== undefined || days !== undefined;
+  const hasTimePart = hours !== undefined || minutes !== undefined || seconds !== undefined;
+  if (!hasDatePart && !hasTimePart) throw new RangeError("invalid Temporal.Duration string");
+  if (timeDesignator !== undefined && !hasTimePart) throw new RangeError("invalid Temporal.Duration string");
+  // Grammar: DurationHoursPart with a fraction admits no minutes/seconds;
+  // DurationMinutesPart with a fraction admits no seconds.
+  if (fHours !== undefined && (minutes !== undefined || seconds !== undefined)) {
+    throw new RangeError("invalid Temporal.Duration string: fraction is only allowed on the smallest unit");
+  }
+  if (fMinutes !== undefined && seconds !== undefined) {
+    throw new RangeError("invalid Temporal.Duration string: fraction is only allowed on the smallest unit");
+  }
+  const toInt = (digits: string | undefined): number => (digits === undefined || digits === "" ? 0 : Number(digits));
+  const yearsMV = toInt(years);
+  const monthsMV = toInt(months);
+  const weeksMV = toInt(weeks);
+  const daysMV = toInt(days);
+  const hoursMV = toInt(hours);
+  // The spec computes the fractional balancing with exact mathematical
+  // values. Equivalent here: convert the single fractional part to an exact
+  // integer count of nanoseconds (the division is exact because 10^scale
+  // with scale <= 9 divides unit * 10^11), then distribute by integer
+  // division — this matches floor(minutesMV), remainder(...)*60, etc.
+  const exactFracNs = (digits: string, unitNs: bigint): number =>
+    Number((BigInt(digits) * unitNs) / 10n ** BigInt(digits.length));
+  let minutesMV = toInt(minutes);
+  let secondsMV = seconds !== undefined ? toInt(seconds) : 0;
+  let remNs = 0;
+  if (fHours !== undefined) {
+    let fracNs = exactFracNs(fHours, 3600000000000n);
+    minutesMV = Math.floor(fracNs / 60000000000);
+    fracNs %= 60000000000;
+    secondsMV = Math.floor(fracNs / 1000000000);
+    remNs = fracNs % 1000000000;
+  } else if (fMinutes !== undefined) {
+    const fracNs = exactFracNs(fMinutes, 60000000000n);
+    secondsMV = Math.floor(fracNs / 1000000000);
+    remNs = fracNs % 1000000000;
+  } else if (fSeconds !== undefined) {
+    remNs = exactFracNs(fSeconds, 1000000000n);
+  }
+  const millisecondsMV = Math.floor(remNs / 1000000);
+  const microsecondsMV = Math.floor((remNs % 1000000) / 1000);
+  const nanosecondsMV = remNs % 1000;
+  const factor = signText === "-" ? -1 : 1;
+  const values = [
+    yearsMV * factor,
+    monthsMV * factor,
+    weeksMV * factor,
+    daysMV * factor,
+    hoursMV * factor,
+    minutesMV * factor,
+    secondsMV * factor,
+    millisecondsMV * factor,
+    microsecondsMV * factor,
+    nanosecondsMV * factor,
+  ];
+  if (!_temporalIsValidDuration(values)) throw new RangeError("Temporal.Duration out of range");
+  return values;
+}
+
+function _temporalDurationFromStringField(item: any, field: any): number {
+  return _temporalParseDuration(item)[_temporalTrunc(field)] ?? 0;
+}
+
+function _temporalDurationSign(...fields: any[]): number {
+  for (const field of fields) {
+    const n = Number(field);
+    if (n > 0) return 1;
+    if (n < 0) return -1;
+  }
+  return 0;
+}
+
+function _temporalDurationToString(...fieldsRaw: any[]): string {
+  const fields = fieldsRaw.map(_temporalTrunc);
+  const sign = _temporalDurationSign(...fields) < 0 ? "-" : "";
+  const abs = fields.map((field) => Math.abs(field));
+  const [years, months, weeks, days, hours, minutes, seconds, milliseconds, microseconds, nanoseconds] = abs;
+  let result = `${sign}P`;
+  if (years) result += `${years}Y`;
+  if (months) result += `${months}M`;
+  if (weeks) result += `${weeks}W`;
+  if (days) result += `${days}D`;
+  const fraction =
+    _temporalPad(milliseconds ?? 0, 3) + _temporalPad(microseconds ?? 0, 3) + _temporalPad(nanoseconds ?? 0, 3);
+  const fractionTrimmed = fraction.replace(/0+$/, "");
+  const secondPart = fractionTrimmed.length > 0 ? `${seconds ?? 0}.${fractionTrimmed}` : `${seconds ?? 0}`;
+  const hasTime = !!hours || !!minutes || !!seconds || fractionTrimmed.length > 0;
+  if (hasTime) {
+    result += "T";
+    if (hours) result += `${hours}H`;
+    if (minutes) result += `${minutes}M`;
+    if (seconds || fractionTrimmed.length > 0) result += `${secondPart}S`;
+  }
+  return result === `${sign}P` ? `${sign}PT0S` : result;
+}
+
+function _temporalDateFromParts(year: number, month: number, day: number): Date {
+  const d = new Date(0);
+  d.setUTCHours(0, 0, 0, 0);
+  d.setUTCFullYear(year, month - 1, day);
+  return d;
+}
+
+function _temporalDaysInMonth(year: number, month: number): number {
+  return _temporalDateFromParts(year, month + 1, 0).getUTCDate();
+}
+
+function _temporalPlainDateAddField(
+  yearRaw: any,
+  monthRaw: any,
+  dayRaw: any,
+  yearsRaw: any,
+  monthsRaw: any,
+  weeksRaw: any,
+  daysRaw: any,
+  signRaw: any,
+  fieldRaw: any,
+): number {
+  const sign = _temporalTrunc(signRaw) < 0 ? -1 : 1;
+  let year = _temporalTrunc(yearRaw) + sign * _temporalTrunc(yearsRaw);
+  let month = _temporalTrunc(monthRaw) + sign * _temporalTrunc(monthsRaw);
+  year += Math.floor((month - 1) / 12);
+  month = ((((month - 1) % 12) + 12) % 12) + 1;
+  const constrainedDay = Math.min(_temporalTrunc(dayRaw), _temporalDaysInMonth(year, month));
+  const date = _temporalDateFromParts(
+    year,
+    month,
+    constrainedDay + sign * (_temporalTrunc(daysRaw) + 7 * _temporalTrunc(weeksRaw)),
+  );
+  const field = _temporalTrunc(fieldRaw);
+  if (field === 0) return date.getUTCFullYear();
+  if (field === 1) return date.getUTCMonth() + 1;
+  return date.getUTCDate();
+}
+
+function _temporalPlainTimeAddField(...args: any[]): number {
+  const [hour, minute, second, millisecond, microsecond, nanosecond, dh, dm, ds, dms, dus, dns, signRaw, fieldRaw] =
+    args.map(_temporalTrunc);
+  const sign = signRaw < 0 ? -1 : 1;
+  const dayNs = 86_400_000_000_000;
+  let total =
+    hour * 3_600_000_000_000 +
+    minute * 60_000_000_000 +
+    second * 1_000_000_000 +
+    millisecond * 1_000_000 +
+    microsecond * 1_000 +
+    nanosecond;
+  total +=
+    sign * (dh * 3_600_000_000_000 + dm * 60_000_000_000 + ds * 1_000_000_000 + dms * 1_000_000 + dus * 1_000 + dns);
+  total = ((total % dayNs) + dayNs) % dayNs;
+  const hourOut = Math.floor(total / 3_600_000_000_000);
+  total %= 3_600_000_000_000;
+  const minuteOut = Math.floor(total / 60_000_000_000);
+  total %= 60_000_000_000;
+  const secondOut = Math.floor(total / 1_000_000_000);
+  total %= 1_000_000_000;
+  const millisecondOut = Math.floor(total / 1_000_000);
+  total %= 1_000_000;
+  const microsecondOut = Math.floor(total / 1_000);
+  const nanosecondOut = total % 1_000;
+  return [hourOut, minuteOut, secondOut, millisecondOut, microsecondOut, nanosecondOut][_temporalTrunc(fieldRaw)] ?? 0;
 }
 
 function resolveImport(
@@ -4376,7 +5965,15 @@ function resolveImport(
         // ToUint32(NaN) is 0, which would produce an empty array; per spec
         // (22.1.3.21 step 8) a missing limit means 2^32 - 1, so we drop the
         // trailing NaN and let the JS host apply the default.
-        if (method === "split" && args.length >= 2) {
+        // #2002 — includes/startsWith/endsWith use NaN as the "position not
+        // provided" sentinel for the same reason: a trailing NaN means the
+        // arg was omitted, so drop it and let the JS method apply its spec
+        // default (0 for includes/startsWith, length for endsWith) instead of
+        // ToInteger(NaN)=0.
+        if (
+          (method === "split" || method === "includes" || method === "startsWith" || method === "endsWith") &&
+          args.length >= 2
+        ) {
           const last = args[args.length - 1];
           if (typeof last === "number" && Number.isNaN(last)) {
             args.pop();
@@ -4394,7 +5991,7 @@ function resolveImport(
             const re = args[0] as RegExp;
             const probe = new RegExp(re.source, re.flags.replace(/[gy]/g, ""));
             const m2 = probe.exec(recvStr);
-            if (m2) _updateLegacyRegExpState(recvStr, m2);
+            if (m2) _updateLegacyRegExpState(recvStr, m2, instanceState?.legacyRegExpState);
           } catch {
             // ignore — best-effort
           }
@@ -4665,14 +6262,14 @@ function resolveImport(
           if ((m === "exec" || m === "test") && self instanceof RegExp && typeof callArgs[0] === "string") {
             const input = callArgs[0] as string;
             if (m === "exec" && ret != null) {
-              _updateLegacyRegExpState(input, ret as RegExpExecArray);
+              _updateLegacyRegExpState(input, ret as RegExpExecArray, instanceState?.legacyRegExpState);
             } else if (m === "test" && ret === true) {
               // .test() also updates the slots per spec. Re-run exec on a
               // non-sticky/non-global clone so we don't perturb self.lastIndex.
               try {
                 const clone = new RegExp(self.source, self.flags.replace(/[gy]/g, ""));
                 const m2 = clone.exec(input);
-                if (m2) _updateLegacyRegExpState(input, m2);
+                if (m2) _updateLegacyRegExpState(input, m2, instanceState?.legacyRegExpState);
               } catch {
                 // best-effort — bad source/flags shouldn't break .test()
               }
@@ -4845,7 +6442,18 @@ function resolveImport(
           const wrapper: any = { "": v };
           return _serializeJSONProperty("", wrapper, rep, gap, "", new Set(), callbackState);
         };
-      if (name === "JSON_parse") return (s: any) => JSON.parse(s);
+      if (name === "JSON_parse")
+        return (s: any, reviver?: any) => {
+          // #2013 — §25.5.1 JSON.parse(text, reviver). Parse first, then if a
+          // callable reviver is supplied apply InternalizeJSONProperty so the
+          // callback observes (key, value) per holder and its return value
+          // substitutes (or, when `undefined`, deletes) each property.
+          const unfiltered = JSON.parse(s);
+          if (!_isCallableReviver(reviver, callbackState)) return unfiltered;
+          // §25.5.1 steps 7-10: root holder is { "": unfiltered }.
+          const root: any = { "": unfiltered };
+          return _internalizeJSONProperty(root, "", reviver, callbackState);
+        };
       if (name === "__extern_eval") {
         // #1164: dynamic eval via Wasm module compilation.  The primary
         // path compiles the eval string through js2wasm and instantiates
@@ -5039,15 +6647,51 @@ assert._isSameValue = isSameValue;
       }
       if (name === "__extern_get")
         return (obj: any, key: any) => {
+          if (obj != null && typeof obj === "object") {
+            try {
+              if (Object.getPrototypeOf(obj) !== null && key in Object(obj)) return obj[key];
+            } catch (e) {
+              // #2180 — a revoked-proxy TypeError must propagate, not be
+              // swallowed by the struct-getter fallback below.
+              if (_isRevokedProxyError(e)) throw e;
+              /* otherwise fall through to the generic path */
+            }
+          }
           const val = _safeGet(obj, key, callbackState);
           if (val !== undefined) return val;
+          // (#1712) `<fn>.prototype` on a Wasm closure struct: auto-vivify an
+          // identity-stable real JS object in the closure's sidecar so
+          // prototype-method writes, Object.defineProperties, and
+          // `var pp = P.prototype` aliasing all see one live object.
+          if (key === "prototype") {
+            const proto = _getOrVivifyFnPrototype(obj, callbackState);
+            if (proto !== undefined) return proto;
+          }
           // Try struct getter exports as fallback for WasmGC opaque fields
-          if (typeof key === "string") {
+          if (obj == null || typeof obj !== "object") return undefined;
+          try {
+            if (Object.getPrototypeOf(obj) !== null) return undefined;
+          } catch {
+            return undefined;
+          }
+          if (_isWasmStruct(obj)) {
+            const sc = _wasmStructProps.get(obj);
+            const descs = _wasmPropDescs.get(obj);
+            if ((sc && key in sc) || descs?.has(_normalizeDescKey(key))) return undefined;
+          }
+          if (_isWasmStruct(obj) && typeof key === "string") {
             const exports = callbackState?.getExports();
             const getter = exports?.[`__sget_${key}`];
             if (typeof getter === "function") return getter(obj);
           }
           return undefined;
+        };
+      // (#1712) Synthesized fnctor constructors register each instance →
+      // constructor-closure link so instance property misses can resolve
+      // through the closure's vivified `.prototype` object.
+      if (name === "__register_fnctor_instance")
+        return (inst: any, ctor: any) => {
+          if (_canBeWeakKey(inst) && ctor != null) _fnctorInstanceCtor.set(inst, ctor);
         };
       if (name === "__extern_set")
         return (obj: any, key: any, val: any) => {
@@ -5169,9 +6813,10 @@ assert._isSameValue = isSameValue;
           }
           if (_sidecarGet(obj, idx) !== undefined) return 1;
           if (_sidecarGet(obj, strKey) !== undefined) return 1;
-          // _safeSet routes numeric keys 1-14 onto Symbol.<wellKnown> sidecar
-          // entries. Reverse that mapping so index 1-14 values remain visible.
-          if (idx >= 1 && idx <= 14) {
+          // _safeSet routes numeric keys 1-15 onto Symbol.<wellKnown> sidecar
+          // entries. Reverse that mapping so index 1-15 values remain visible.
+          // #1830 — range covers every id in `_symbolIdToKeys` (15 = @@matchAll).
+          if (idx >= 1 && idx <= 15) {
             const symKeys = _symbolIdToKeys.get(idx);
             if (symKeys) {
               if (_sidecarGet(obj, symKeys.sym) !== undefined) return 1;
@@ -5210,28 +6855,36 @@ assert._isSameValue = isSameValue;
             const prim = _toPrimitiveSync(key, "string", callbackState);
             if (prim != null && typeof prim !== "object") key = prim;
           }
+          // (#2130) WasmGC struct receivers route through the shared own-property
+          // predicate (tombstone-aware, per-receiver shape oracle) — NOT a
+          // module-global `__sget_<key>` existence probe, which reported every
+          // receiver as having any field name present in any struct type and
+          // never consulted the delete tombstone. So `delete o.a; "a" in o` is
+          // now `false`, and object-rest `"e" in rest` is `false` (rest's plain
+          // object never has `e`; the source struct's shape no longer leaks).
+          if (typeof obj === "object" && _isWasmStruct(obj)) {
+            if (_wasmStructHasOwn(obj, key, callbackState?.getExports())) return 1;
+            // (#1991) `in` walks the [[Prototype]] chain (§13.10.1 → §7.3.12):
+            // every object inherits the Object.prototype members.
+            if (typeof key === "string" && _OBJECT_PROTO_KEYS.has(key)) return 1;
+            return 0;
+          }
+          // Plain JS object (or host-supplied object) — native HasProperty walks
+          // its own prototype chain. HasProperty is value-independent (§7.3.12),
+          // so the sidecar fallback is key-based, not value-based (A8): a
+          // user-assigned `o.x = undefined` must still report present.
           try {
             if (key in obj) return 1;
-          } catch {
+          } catch (e) {
+            // #2180 — `key in revokedProxy` throws TypeError; propagate it.
+            if (_isRevokedProxyError(e)) throw e;
             /* opaque struct or non-object obj */
           }
-          // Fall back to sidecar (user-assigned properties on host objects)
-          if (_sidecarGet(obj, key) !== undefined) return 1;
-          // Wasm struct getter (defineProperty accessor)
-          if (typeof key === "string") {
-            const exports = callbackState?.getExports();
-            if (typeof exports?.[`__sget_${key}`] === "function") {
-              try {
-                // (#1589A) Mirror __extern_has_idx: a getter that returns at
-                // all (even null/undefined) proves the field exists on this
-                // struct shape — HasProperty (§7.3.12) is value-independent.
-                // Only a throw signals "field not defined on this variant".
-                exports[`__sget_${key}`](obj);
-                return 1;
-              } catch {
-                /* getter not defined for this struct variant — fall through */
-              }
-            }
+          const sc = _wasmStructProps.get(obj);
+          if (sc && key in sc) return 1;
+          // Inherited Object.prototype members for any non-null object value.
+          if (typeof key === "string" && (typeof obj === "object" || typeof obj === "function") && obj !== null) {
+            if (_OBJECT_PROTO_KEYS.has(key)) return 1;
           }
           return 0;
         };
@@ -5263,6 +6916,92 @@ assert._isSameValue = isSameValue;
             return "[object Object]";
           }
         };
+      // (#2022) ToString of a `+`-concat operand. `+` applies ToPrimitive with
+      // the DEFAULT hint (valueOf before toString), even when the other operand
+      // is a string — unlike `String(x)` / template literals which use the
+      // string hint. So `({ toString:()=>"P!", valueOf:()=>7 }) + ""` is "7",
+      // not "P!". Mirrors `__extern_toString` but with the "default" hint.
+      if (name === "__extern_to_string_default")
+        return (v: any) => {
+          if (v == null) return String(v);
+          if (typeof v === "object" && _isWasmStruct(v)) {
+            const prim = _toPrimitive(v, "default", callbackState);
+            if (prim !== undefined) {
+              if (typeof prim === "symbol") throw new TypeError("Cannot convert a Symbol value to a string");
+              return String(prim);
+            }
+            try {
+              const prim2 = _hostToPrimitive(v, "default", callbackState);
+              if (typeof prim2 === "symbol") throw new TypeError("Cannot convert a Symbol value to a string");
+              return String(prim2);
+            } catch {
+              return "[object Object]";
+            }
+          }
+          if (typeof v === "object") {
+            const prim = _toPrimitive(v, "default", callbackState);
+            if (prim !== undefined) {
+              if (typeof prim === "symbol") throw new TypeError("Cannot convert a Symbol value to a string");
+              return String(prim);
+            }
+          }
+          try {
+            return String(v);
+          } catch {
+            return "[object Object]";
+          }
+        };
+      // (#1998/#1997) Array.prototype.join / toString element stringifier. Per
+      // ES2024 §23.1.3.18 step 7.c/d, `undefined` and `null` elements join as
+      // the empty String; every other element goes through ToString. This
+      // differs from `__extern_toString` (used by `+`), where null/undefined
+      // yield "null"/"undefined". A boxed `null`/`undefined` element arrives as
+      // a defined externref, so the empty-string rule is applied here, in JS.
+      // Nested arrays (`[[1,2],[3]].toString()` → "1,2,3") are WasmGC vec
+      // structs; ToString on a vec recurses into Array.prototype.join, which we
+      // reproduce by materialising the vec and joining with the default ",".
+      if (name === "__extern_join_str") {
+        const joinElem = (v: any): string => {
+          if (v == null) return "";
+          if (typeof v === "object" && _isWasmStruct(v)) {
+            // A WasmGC vec → recurse: ToString(array) === array.join(",").
+            const exports = callbackState?.getExports();
+            if (exports && typeof exports.__vec_len === "function" && typeof exports.__vec_get === "function") {
+              try {
+                const len = exports.__vec_len(v) as number;
+                if (typeof len === "number" && len >= 0) {
+                  let out = "";
+                  for (let i = 0; i < len; i++) {
+                    if (i > 0) out += ",";
+                    out += joinElem(exports.__vec_get(v, i));
+                  }
+                  return out;
+                }
+              } catch {
+                /* not a vec — fall through to ToPrimitive */
+              }
+            }
+            const prim = _toPrimitive(v, "string", callbackState);
+            if (prim !== undefined) return String(prim);
+            try {
+              return String(_hostToPrimitive(v, "string", callbackState));
+            } catch {
+              return "[object Object]";
+            }
+          }
+          if (typeof v.toString === "function") return v.toString();
+          if (typeof v === "object") {
+            const prim = _toPrimitive(v, "string", callbackState);
+            if (prim !== undefined) return String(prim);
+          }
+          try {
+            return String(v);
+          } catch {
+            return "[object Object]";
+          }
+        };
+        return joinElem;
+      }
       // (#1638) Date.prototype string formatters. The Wasm side holds the
       // timestamp as an i64 and passes it here with a mode selector; we build
       // the spec-correct string from a UTC Date. The invalid-Date sentinel
@@ -5270,6 +7009,16 @@ assert._isSameValue = isSameValue;
       if (name === "__date_format") {
         return (ts: bigint, mode: number): string => _formatDate(ts, mode);
       }
+      if (name === "__temporal_plain_date_to_string") return _temporalPlainDateToString;
+      if (name === "__temporal_plain_date_month_code") return _temporalPlainDateMonthCode;
+      if (name === "__temporal_plain_date_from_string_field") return _temporalPlainDateFromStringField;
+      if (name === "__temporal_plain_date_add_field") return _temporalPlainDateAddField;
+      if (name === "__temporal_plain_time_to_string") return _temporalPlainTimeToString;
+      if (name === "__temporal_plain_time_from_string_field") return _temporalPlainTimeFromStringField;
+      if (name === "__temporal_plain_time_add_field") return _temporalPlainTimeAddField;
+      if (name === "__temporal_duration_to_string") return _temporalDurationToString;
+      if (name === "__temporal_duration_from_string_field") return _temporalDurationFromStringField;
+      if (name === "__temporal_duration_sign") return _temporalDurationSign;
       if (name === "__extern_toLocaleString")
         return (v: any) => {
           if (v == null) return String(v);
@@ -5336,33 +7085,42 @@ assert._isSameValue = isSameValue;
       // `''` (empty string) marks "Symbol() called with no arg" so
       // `.description === undefined` works distinctly from "uninitialized".
       if (name === "__box_symbol") {
-        if (!_symbolCache) {
-          _symbolCache = new Map<number, symbol>([
-            [1, Symbol.iterator],
-            [2, Symbol.hasInstance],
-            [3, Symbol.toPrimitive],
-            [4, Symbol.toStringTag],
-            [5, Symbol.species],
-            [6, Symbol.isConcatSpreadable],
-            [7, Symbol.match],
-            [8, Symbol.replace],
-            [9, Symbol.search],
-            [10, Symbol.split],
-            [11, Symbol.unscopables],
-            [12, Symbol.asyncIterator],
-            [13, _disposeSym],
-            [14, _asyncDisposeSym],
-          ]);
+        // #1933 — per-instance symbol cache (was module-level `_symbolCache`,
+        // reset per buildImports → clobbered concurrent instances). Falls back
+        // to a local map when no instanceState is threaded (legacy callers).
+        const symbolCache =
+          instanceState?.symbolCache ??
+          (instanceState ? (instanceState.symbolCache = new Map<number, symbol>()) : new Map<number, symbol>());
+        if (symbolCache.size === 0) {
+          symbolCache.set(1, Symbol.iterator);
+          symbolCache.set(2, Symbol.hasInstance);
+          symbolCache.set(3, Symbol.toPrimitive);
+          symbolCache.set(4, Symbol.toStringTag);
+          symbolCache.set(5, Symbol.species);
+          symbolCache.set(6, Symbol.isConcatSpreadable);
+          symbolCache.set(7, Symbol.match);
+          symbolCache.set(8, Symbol.replace);
+          symbolCache.set(9, Symbol.search);
+          symbolCache.set(10, Symbol.split);
+          symbolCache.set(11, Symbol.unscopables);
+          symbolCache.set(12, Symbol.asyncIterator);
+          symbolCache.set(13, _disposeSym);
+          symbolCache.set(14, _asyncDisposeSym);
         }
+        const symbolDescRegistry =
+          instanceState?.symbolDescRegistry ??
+          (instanceState
+            ? (instanceState.symbolDescRegistry = new Map<number, string | null>())
+            : new Map<number, string | null>());
         return (id: number) => {
-          let sym = _symbolCache!.get(id);
+          let sym = symbolCache.get(id);
           if (sym === undefined) {
-            const reg = _symbolDescRegistry.get(id);
+            const reg = symbolDescRegistry.get(id);
             // reg === undefined → caller never registered (use legacy wasm_<id>)
             // reg === null     → Symbol() with no description → undefined
             // reg is a string  → user-supplied description
             sym = reg === undefined ? Symbol(`wasm_${id}`) : reg === null ? Symbol() : Symbol(reg);
-            _symbolCache!.set(id, sym);
+            symbolCache.set(id, sym);
           }
           return sym;
         };
@@ -5371,12 +7129,18 @@ assert._isSameValue = isSameValue;
       // `__box_symbol(id)` calls produce Symbol(desc) preserving Description.
       // Pass `null` (ref.null extern) to mark "Symbol() with no description".
       if (name === "__symbol_register_desc") {
+        // #1933 — per-instance description registry (was module-level).
+        const symbolDescRegistry =
+          instanceState?.symbolDescRegistry ??
+          (instanceState
+            ? (instanceState.symbolDescRegistry = new Map<number, string | null>())
+            : new Map<number, string | null>());
         return (id: number, desc: any): void => {
-          if (id <= 14) return; // never override well-known symbols
+          if (id <= 15) return; // never override well-known symbols (#1830: 15 = @@matchAll)
           if (desc == null) {
-            _symbolDescRegistry.set(id, null);
+            symbolDescRegistry.set(id, null);
           } else {
-            _symbolDescRegistry.set(id, String(desc));
+            symbolDescRegistry.set(id, String(desc));
           }
         };
       }
@@ -5531,11 +7295,13 @@ assert._isSameValue = isSameValue;
             const fieldNames = _getStructFieldNames(obj, exports);
             if (fieldNames) {
               const descs = _wasmPropDescs.get(obj);
-              return fieldNames.filter((k) => {
-                if (!descs) return true;
-                const flags = descs.get(k);
-                return flags === undefined || !!(flags & _SC_ENUMERABLE);
-              });
+              return _orderOwnKeysSpec(
+                fieldNames.filter((k) => {
+                  if (!descs) return true;
+                  const flags = descs.get(k);
+                  return flags === undefined || !!(flags & _SC_ENUMERABLE);
+                }),
+              ); // (#2131)
             }
           }
           return Object.keys(obj);
@@ -5549,16 +7315,16 @@ assert._isSameValue = isSameValue;
             const fieldNames = _getStructFieldNames(obj, exports);
             if (fieldNames) {
               const descs = _wasmPropDescs.get(obj);
-              return fieldNames
-                .filter((k) => {
+              return _orderOwnKeysSpec(
+                fieldNames.filter((k) => {
                   if (!descs) return true;
                   const flags = descs.get(k);
                   return flags === undefined || !!(flags & _SC_ENUMERABLE);
-                })
-                .map((key) => {
-                  const getter = exports?.[`__sget_${key}`];
-                  return typeof getter === "function" ? getter(obj) : undefined;
-                });
+                }),
+              ).map((key) => {
+                const getter = exports?.[`__sget_${key}`];
+                return typeof getter === "function" ? getter(obj) : undefined;
+              }); // (#2131) value order follows spec key order
             }
           }
           return Object.values(obj);
@@ -5572,17 +7338,17 @@ assert._isSameValue = isSameValue;
             const fieldNames = _getStructFieldNames(obj, exports);
             if (fieldNames) {
               const descs = _wasmPropDescs.get(obj);
-              return fieldNames
-                .filter((k) => {
+              return _orderOwnKeysSpec(
+                fieldNames.filter((k) => {
                   if (!descs) return true;
                   const flags = descs.get(k);
                   return flags === undefined || !!(flags & _SC_ENUMERABLE);
-                })
-                .map((key) => {
-                  const getter = exports?.[`__sget_${key}`];
-                  const val = typeof getter === "function" ? getter(obj) : undefined;
-                  return [key, val];
-                });
+                }),
+              ).map((key) => {
+                const getter = exports?.[`__sget_${key}`];
+                const val = typeof getter === "function" ? getter(obj) : undefined;
+                return [key, val];
+              }); // (#2131) entry order follows spec key order
             }
           }
           return Object.entries(obj);
@@ -5889,6 +7655,8 @@ assert._isSameValue = isSameValue;
           // never reach the sidecar). Mirrors the reader in __defineProperties.
           const getField = (o: any, f: string): any => {
             if (!_isWasmStruct(o)) return o[f];
+            const sc = _wasmStructProps.get(o);
+            if (sc && f in sc) return sc[f];
             // _safeGet fires struct accessor getters (__get_<f>) and the
             // sidecar; fall back to the compiled module's __sget_<field>
             // export for typed struct fields that never reach the sidecar.
@@ -5898,6 +7666,21 @@ assert._isSameValue = isSameValue;
               if (typeof g === "function") v = g(o);
             }
             return v;
+          };
+          const hasField = (o: any, f: string): boolean => {
+            if (!_isWasmStruct(o)) return f in Object(o);
+            const sc = _wasmStructProps.get(o);
+            if (sc && f in sc) return true;
+            // (#1629) Presence MUST consult the struct's real shape, not a probe
+            // through `__sget_${f}`. A `__sget_*` getter is module-global (one per
+            // field NAME across all struct types) and DOES NOT trap on a struct
+            // that lacks the field — it falls through to ref.null/0. So a try/catch
+            // probe returns `true` for every ubiquitous descriptor name (value/get
+            // /set/writable) on any struct, producing spurious ToPropertyDescriptor
+            // data⇄accessor conflicts. `__struct_field_names(o)` returns the field
+            // names of THIS instance's concrete type — the precise membership test.
+            const names = _getStructFieldNames(o, callbackState?.getExports());
+            return names !== null && names.includes(f);
           };
           // (#1629a) When the descriptor is a WasmGC struct, its get/set fields
           // are Wasm-closure structs, not JS callables. Wrap them so the spec
@@ -5915,18 +7698,51 @@ assert._isSameValue = isSameValue;
           // Object.defineProperty sees it as null-proto/no-keys and drops every
           // attribute. Materialize a plain descriptor via getField first.
           if (!_isWasmStruct(obj)) {
-            const d2 = _toPropertyDescriptorValidate(desc, getField, wrap);
+            const d2 = _toPropertyDescriptorValidate(desc, getField, wrap, hasField);
             Object.defineProperty(obj, key, d2);
             return obj;
           }
           // WasmGC struct obj: apply via sidecar
-          const d = _toPropertyDescriptorValidate(desc, getField, wrap);
+          const d = _toPropertyDescriptorValidate(desc, getField, wrap, hasField);
           const sDescs = _getSidecarDescs(obj);
           const nKey = _normalizeDescKey(key);
+          const existingDesc = _readOwnDescriptor(obj, nKey, callbackState?.getExports());
           const existingVal = _sidecarGet(obj, key);
-          const newFlags = _validatePropertyDescriptor(sDescs, nKey, d, existingVal);
+          const newFlags = _validatePropertyDescriptor(sDescs, nKey, d, existingVal, existingDesc);
           sDescs.set(nKey, newFlags);
-          if (d.value !== undefined) _sidecarSet(obj, key, d.value);
+          const hasValue = Object.prototype.hasOwnProperty.call(d, "value");
+          const hasGet = Object.prototype.hasOwnProperty.call(d, "get");
+          const hasSet = Object.prototype.hasOwnProperty.call(d, "set");
+          if (hasValue) _sidecarSet(obj, key, d.value);
+          else if (!(newFlags & _SC_ACCESSOR) && existingDesc === undefined) _sidecarSet(obj, key, undefined);
+          if (hasGet || hasSet) {
+            const sc = _wasmStructProps.get(obj) ?? {};
+            _wasmStructProps.set(obj, sc);
+            if (typeof key === "symbol") {
+              let accMap = _wasmStructAccessors.get(obj);
+              if (!accMap) {
+                accMap = new Map();
+                _wasmStructAccessors.set(obj, accMap);
+              }
+              const prev = accMap.get(key) ?? {};
+              accMap.set(key, {
+                get: hasGet ? d.get : prev.get,
+                set: hasSet ? d.set : prev.set,
+              });
+              _sidecarSet(obj, key, undefined);
+            } else {
+              if (key in sc && typeof sc[key] !== "function") delete sc[key];
+              if (hasGet) {
+                if (d.get === undefined) delete sc[`__get_${key}`];
+                else sc[`__get_${key}`] = d.get;
+              }
+              if (hasSet) {
+                if (d.set === undefined) delete sc[`__set_${key}`];
+                else sc[`__set_${key}`] = d.set;
+              }
+              if (!(key in sc)) sc[key] = undefined;
+            }
+          }
           return obj;
         };
       if (name === "__defineProperty_value")
@@ -5951,10 +7767,12 @@ assert._isSameValue = isSameValue;
                 // Pass existing sidecar value for SameValue check on non-writable props.
                 const sDescs = _getSidecarDescs(obj);
                 const nProp = _normalizeDescKey(prop);
+                const existingDesc = _readOwnDescriptor(obj, nProp, callbackState?.getExports());
                 const existingVal = _sidecarGet(obj, prop);
-                const newFlags = _validatePropertyDescriptor(sDescs, nProp, desc, existingVal);
+                const newFlags = _validatePropertyDescriptor(sDescs, nProp, desc, existingVal, existingDesc);
                 sDescs.set(nProp, newFlags);
-                if (desc.value !== undefined) _sidecarSet(obj, prop, desc.value);
+                if (Object.prototype.hasOwnProperty.call(desc, "value")) _sidecarSet(obj, prop, desc.value);
+                else if (!(newFlags & _SC_ACCESSOR) && existingDesc === undefined) _sidecarSet(obj, prop, undefined);
               } else {
                 // Spec-mandated TypeError (non-configurable redefinition on real JS objects)
                 throw e;
@@ -6000,7 +7818,8 @@ assert._isSameValue = isSameValue;
                 // WasmGC struct — store accessor in sidecar
                 const sDescs = _getSidecarDescs(obj);
                 const nProp = _normalizeDescKey(prop);
-                const newFlags = _validatePropertyDescriptor(sDescs, nProp, desc, undefined);
+                const existingDesc = _readOwnDescriptor(obj, nProp, callbackState?.getExports());
+                const newFlags = _validatePropertyDescriptor(sDescs, nProp, desc, undefined, existingDesc);
                 sDescs.set(nProp, newFlags);
                 const sc = _wasmStructProps.get(obj) ?? {};
                 _wasmStructProps.set(obj, sc);
@@ -6041,9 +7860,25 @@ assert._isSameValue = isSameValue;
           return obj;
         };
       if (name === "__defineProperties")
-        return (obj: any, descsObj: any) => {
+        return function definePropertiesHandler(obj: any, descsObj: any) {
           if (obj == null || (typeof obj !== "object" && typeof obj !== "function")) {
             throw new TypeError("Object.defineProperties called on non-object");
+          }
+          // (#1712) A WasmGC-struct descriptor map is only readable through
+          // the __struct_field_names / __sget_* exports. During the module
+          // START function those don't exist yet (WebAssembly.instantiate
+          // hasn't returned), which previously made acorn's module-level
+          // `Object.defineProperties(Parser.prototype, prototypeAccessors)`
+          // a silent no-op (zero keys found). Park the application and let
+          // setExports replay it once the instance is wired.
+          if (
+            descsObj != null &&
+            _isWasmStruct(descsObj) &&
+            callbackState?.getExports() === undefined &&
+            typeof (callbackState as any)?.deferToExports === "function"
+          ) {
+            (callbackState as any).deferToExports(() => definePropertiesHandler(obj, descsObj));
+            return obj;
           }
           // #1362 — §20.1.2.3 step 2: `props = ToObject(Properties)` throws
           // TypeError on null/undefined. Previously the runtime silently
@@ -6078,6 +7913,8 @@ assert._isSameValue = isSameValue;
           // spans both per §20.1.2.3 / [[OwnPropertyKeys]]).
           const getField = (o: any, field: string | symbol): any => {
             if (!_isWasmStruct(o)) return o[field];
+            const sc = _wasmStructProps.get(o);
+            if (sc && field in sc) return sc[field];
             let v = _sidecarGet(o, field);
             if (v === undefined && typeof field === "string") {
               const exps = callbackState?.getExports();
@@ -6085,6 +7922,18 @@ assert._isSameValue = isSameValue;
               if (typeof g === "function") v = g(o);
             }
             return v;
+          };
+          const hasField = (o: any, field: string | symbol): boolean => {
+            if (!_isWasmStruct(o)) return field in Object(o);
+            const sc = _wasmStructProps.get(o);
+            if (sc && field in sc) return true;
+            if (typeof field !== "string") return false;
+            // (#1629) See the matching probe in __defineProperty_desc: `__sget_*`
+            // getters are global per field-name and don't trap on a struct missing
+            // the field, so a try/catch probe falsely reports presence. Use the
+            // concrete struct shape via __struct_field_names instead.
+            const names = _getStructFieldNames(o, callbackState?.getExports());
+            return names !== null && names.includes(field);
           };
           // (#1629 S2) When a per-property descriptor is itself a WasmGC struct,
           // its `get`/`set` fields arrive as Wasm-closure structs, not JS
@@ -6110,7 +7959,7 @@ assert._isSameValue = isSameValue;
             const gathered: { key: string | symbol; desc: PropertyDescriptor }[] = [];
             for (const key of keys) {
               const rawDesc = getField(descsObj, key as string);
-              gathered.push({ key, desc: _toPropertyDescriptorValidate(rawDesc, getField, wrap) });
+              gathered.push({ key, desc: _toPropertyDescriptorValidate(rawDesc, getField, wrap, hasField) });
             }
             // Pass 2 — apply each (DefinePropertyOrThrow). Validation against an
             // existing non-configurable property may still throw here, matching
@@ -6118,10 +7967,13 @@ assert._isSameValue = isSameValue;
             for (const { key, desc } of gathered) {
               if (isObjWasm) {
                 const nKey = _normalizeDescKey(key as string);
+                const existingDesc2 = _readOwnDescriptor(obj, nKey, callbackState?.getExports());
                 const existingVal2 = _sidecarGet(obj, key as string);
-                const newFlags = _validatePropertyDescriptor(sDescs!, nKey, desc, existingVal2);
+                const newFlags = _validatePropertyDescriptor(sDescs!, nKey, desc, existingVal2, existingDesc2);
                 sDescs!.set(nKey, newFlags);
-                if (desc.value !== undefined) _sidecarSet(obj, key as string, desc.value);
+                if (Object.prototype.hasOwnProperty.call(desc, "value")) _sidecarSet(obj, key as string, desc.value);
+                else if (!(newFlags & _SC_ACCESSOR) && existingDesc2 === undefined)
+                  _sidecarSet(obj, key as string, undefined);
               } else {
                 Object.defineProperty(obj, key, desc);
               }
@@ -6141,15 +7993,17 @@ assert._isSameValue = isSameValue;
                 const validated: { key: string | symbol; desc: PropertyDescriptor }[] = [];
                 for (const key of keys) {
                   const rawDesc = getField(descsObj, key as string);
-                  const desc = _toPropertyDescriptorValidate(rawDesc, getField, wrap);
+                  const desc = _toPropertyDescriptorValidate(rawDesc, getField, wrap, hasField);
                   validated.push({ key: key as string, desc });
                 }
                 for (const { key, desc } of validated) {
                   const nKey = _normalizeDescKey(key);
+                  const existingDesc2 = _readOwnDescriptor(obj, nKey, callbackState?.getExports());
                   const existingVal2 = _sidecarGet(obj, key);
-                  const newFlags = _validatePropertyDescriptor(sDescs, nKey, desc, existingVal2);
+                  const newFlags = _validatePropertyDescriptor(sDescs, nKey, desc, existingVal2, existingDesc2);
                   sDescs.set(nKey, newFlags);
-                  if (desc.value !== undefined) _sidecarSet(obj, key, desc.value);
+                  if (Object.prototype.hasOwnProperty.call(desc, "value")) _sidecarSet(obj, key, desc.value);
+                  else if (!(newFlags & _SC_ACCESSOR) && existingDesc2 === undefined) _sidecarSet(obj, key, undefined);
                 }
               } else {
                 // Spec-mandated TypeError on real JS objects
@@ -6342,8 +8196,13 @@ assert._isSameValue = isSameValue;
           // callable JS functions, so JS ToPrimitive / Array built-ins can
           // invoke poisoned valueOf/toString and let errors propagate.
           const exports = callbackState?.getExports();
-          const wrappedObj = _isWasmStruct(obj) ? _wrapForHost(obj, exports) : obj;
-          const wrappedArgs = (args ?? []).map((a) => (_isWasmStruct(a) ? _wrapForHost(a, exports) : a));
+          const wrapHostValue = (v: any): any => {
+            if (!_isWasmStruct(v)) return v;
+            const callable = _maybeWrapCallableUnknownArity(v, callbackState);
+            return callable !== v ? callable : _wrapForHost(v, exports);
+          };
+          const wrappedObj = wrapHostValue(obj);
+          const wrappedArgs = (args ?? []).map(wrapHostValue);
           // (#1382) Wrap a Wasm-closure callback arg into a JS Function
           // before the native engine dispatches. Looks up the same slot
           // table as `__proto_method_call` so Array.prototype.map.call
@@ -6396,7 +8255,85 @@ assert._isSameValue = isSameValue;
             }
           }
           const fn = wrappedObj[method];
+          // (#1320) Some chained `Array.from.call(C, items)` shapes lower as a
+          // generic `method="from"` dispatch on `Array`. Drain Wasm-closure
+          // iterables before the native Array.from performs GetMethod(items,
+          // @@iterator), while preserving the native receiver.
+          if (method === "from" && fn === Array.from && wrappedArgs.length > 0) {
+            const callArgs = wrappedArgs.slice();
+            const drained = _drainWasmClosureIterable(callArgs[0], callbackState);
+            if (drained !== null) callArgs[0] = drained;
+            const ret = (Array.from as (...xs: any[]) => any).apply(wrappedObj, callArgs);
+            return ret === wrappedObj ? obj : _unwrapForHost(ret);
+          }
           if (typeof fn !== "function") {
+            // (#1712) Static method on a callable closure struct (function-style
+            // constructor): `wrapHostValue` wrapped the receiver into a bare JS
+            // function bridge (`_wrapWasmClosureUnknownArity`), which has no view
+            // of sidecar statics — `Parser.parse = function …` lands in the
+            // struct's sidecar via __extern_set. Resolve the method through
+            // `_safeGet` on the RAW struct (sidecar → accessors → vivified
+            // fnctor prototype) and dispatch with the raw closure struct as the
+            // receiver so `this` inside the static body (acorn's
+            // `Parser.parse = function(i,o){ return new this(o,i).parse() }`)
+            // observes the constructor closure.
+            if (typeof wrappedObj === "function" && _isWasmStruct(obj)) {
+              const resolved = _maybeWrapCallableUnknownArity(_safeGet(obj, method, callbackState), callbackState);
+              if (typeof resolved === "function") {
+                const ret = resolved.apply(obj, wrappedArgs);
+                return ret === obj || ret === wrappedObj ? obj : _unwrapForHost(ret);
+              }
+            }
+            // (#1712) Array mutators on WasmGC vec structs. acorn mutates
+            // instance array fields through dynamic `this` dispatch
+            // (`this.scopeStack.push(new Scope(flags))`); the receiver is an
+            // opaque vec struct the host cannot grow. Route push/pop through
+            // the Wasm-side __vec_push/__vec_pop exports (per-vec-type
+            // dispatch, grow on the Wasm side). __vec_mut_supported is the
+            // discriminator — __vec_len's not-a-vec default is 0 and can't
+            // tell an empty vec from a non-vec. Push the RAW args (not host
+            // proxies) so Wasm-side reads of the elements see the structs.
+            {
+              // The receiver may be a _wrapForHost proxy (the field read that
+              // produced it wrapped the struct for host visibility) — unwrap
+              // to the raw vec struct before the export round-trip.
+              let rawVec = _unwrapForHost(obj);
+              // A vec struct whose canonicalized layout collides with a
+              // closure capture struct false-positives __is_closure, so
+              // wrapHostValue wrapped it into a callable bridge — reverse
+              // that through the wrapper→closure map.
+              if (typeof rawVec === "function") {
+                const wrapperTarget = _wasmClosureWrapperTargets.get(rawVec);
+                if (wrapperTarget) rawVec = wrapperTarget;
+              }
+              if (_isWasmStruct(rawVec) && exports) {
+                const mutSupFn = exports.__vec_mut_supported as ((v: any) => number) | undefined;
+                let vecSupported = false;
+                try {
+                  vecSupported = typeof mutSupFn === "function" && mutSupFn(rawVec) === 1;
+                } catch {
+                  vecSupported = false;
+                }
+                if (vecSupported) {
+                  if (method === "push" && typeof exports.__vec_push === "function") {
+                    const pushFn = exports.__vec_push as (v: any, x: any) => number;
+                    const rawArgs = args ?? [];
+                    let newLen = (exports.__vec_len as (v: any) => number)(rawVec);
+                    let ok = true;
+                    for (const a of rawArgs) {
+                      newLen = pushFn(rawVec, _unwrapForHost(a));
+                      if (newLen < 0) {
+                        ok = false;
+                        break;
+                      }
+                    }
+                    if (ok) return newLen;
+                  } else if (method === "pop" && typeof exports.__vec_pop === "function") {
+                    return (exports.__vec_pop as (v: any) => any)(rawVec);
+                  }
+                }
+              }
+            }
             // (#837) Map/WeakMap upsert proposal polyfill — Node 25 / V8
             // currently don't ship `getOrInsert` / `getOrInsertComputed`
             // (TC39 Stage 3). Implement the spec algorithm here so the
@@ -6547,12 +8484,12 @@ assert._isSameValue = isSameValue;
           ) {
             const input = wrappedArgs[0] as string;
             if (method === "exec" && ret != null) {
-              _updateLegacyRegExpState(input, ret as RegExpExecArray);
+              _updateLegacyRegExpState(input, ret as RegExpExecArray, instanceState?.legacyRegExpState);
             } else if (method === "test" && ret === true) {
               try {
                 const clone = new RegExp(wrappedObj.source, wrappedObj.flags.replace(/[gy]/g, ""));
                 const m2 = clone.exec(input);
-                if (m2) _updateLegacyRegExpState(input, m2);
+                if (m2) _updateLegacyRegExpState(input, m2, instanceState?.legacyRegExpState);
               } catch {
                 // ignore
               }
@@ -6788,7 +8725,15 @@ assert._isSameValue = isSameValue;
         return (iterable: any, keyFn: any): any =>
           (Object as any).groupBy(iterable, _maybeWrapCallable(keyFn, 2, callbackState));
       // Proxy.revocable(target, handler) — creates a revocable Proxy (#965)
-      if (name === "__proxy_revocable") return (target: any, handler: any): any => Proxy.revocable(target, handler);
+      if (name === "__proxy_revocable")
+        return (target: any, handler: any): any => {
+          // #2180 — same construction path as `new Proxy`: validate the
+          // target/handler are objects (else TypeError), bridge a WasmGC-struct
+          // handler so the host can read its traps, and keep the raw target as
+          // [[ProxyTarget]] for identity. Host enforces revoked-throws +
+          // revoke idempotence on the returned pair.
+          return _hostProxyConstructRevocable(target, handler, callbackState);
+        };
       // ── Reflect.* host dispatch (#1466) ─────────────────────────────────
       // Each handler delegates to the host's Reflect.X so Proxy targets see
       // their traps fire and boolean returns are preserved. Wasm structs
@@ -6995,17 +8940,32 @@ assert._isSameValue = isSameValue;
       if (name === "__call_function")
         return (fn: any, thisArg: any, argsArray: any): any => {
           if (typeof fn !== "function") {
-            // Unwrap a wasm-struct closure if one slipped through.
+            // Wrap a wasm-struct closure if one slipped through. Arity-aware
+            // (#1712): the previous arity-0 wrap dropped every argument.
             if (_isWasmStruct(fn)) {
-              const wrapped = _wrapWasmClosure(fn, 0, callbackState);
-              if (wrapped) fn = wrapped;
+              const wrapped = _maybeWrapCallableUnknownArity(fn, callbackState);
+              if (typeof wrapped === "function") fn = wrapped;
             }
           }
           if (typeof fn !== "function") {
             throw new TypeError(String(fn) + " is not a function");
           }
           const args: any[] = Array.isArray(argsArray) ? argsArray : [];
-          return Reflect.apply(fn, thisArg, args);
+          // (#1712) Host-marshal wasmGC struct args the same way
+          // __extern_method_call does: callable closures become JS functions
+          // (so host higher-order callees can invoke them), plain structs get
+          // the live-mirror proxy (so `Object.hasOwn(o, "a")`-style builtins
+          // observe struct fields as real properties).
+          const exports = callbackState?.getExports();
+          const wrapHostValue = (v: any): any => {
+            if (!_isWasmStruct(v)) return v;
+            const callable = _maybeWrapCallableUnknownArity(v, callbackState);
+            return callable !== v ? callable : _wrapForHost(v, exports);
+          };
+          const wrappedThis = wrapHostValue(thisArg);
+          const wrappedArgs = args.map(wrapHostValue);
+          const ret = Reflect.apply(fn, wrappedThis, wrappedArgs);
+          return _unwrapForHost(ret);
         };
       if (name === "__reflect_construct")
         return (ctor: any, args: any, newTarget: any): any => {
@@ -7381,21 +9341,7 @@ assert._isSameValue = isSameValue;
       if (name === "Object_propertyIsEnumerable")
         return (obj: any, key: any) => {
           if (_isWasmStruct(obj)) {
-            const descs = _wasmPropDescs.get(obj);
-            if (descs) {
-              const flags = descs.get(String(key));
-              if (flags !== undefined) return flags & _SC_ENUMERABLE ? 1 : 0;
-            }
-            const sc = _wasmStructProps.get(obj);
-            if (sc && String(key) in sc) return 1;
-            // #1047 — registered class prototype: only allowlisted methods
-            const protoMethods = _prototypeMethodNames.get(obj);
-            if (protoMethods !== undefined) {
-              return protoMethods.includes(String(key)) ? 1 : 0;
-            }
-            const exports = callbackState?.getExports();
-            const fieldNames = _getStructFieldNames(obj, exports) ?? [];
-            return fieldNames.includes(String(key)) ? 1 : 0;
+            return _wasmStructPropertyIsEnumerable(obj, key, callbackState?.getExports());
           }
           return Object.prototype.propertyIsEnumerable.call(obj, key) ? 1 : 0;
         };
@@ -7451,7 +9397,9 @@ assert._isSameValue = isSameValue;
             try {
               const k = typeof key === "symbol" ? key : String(key);
               return delete obj[k] ? 1 : 0;
-            } catch {
+            } catch (e) {
+              // #2180 — deleting from a revoked proxy throws TypeError; propagate it.
+              if (_isRevokedProxyError(e)) throw e;
               // Non-configurable in strict mode throws TypeError; report failure.
               return 0;
             }
@@ -7507,27 +9455,9 @@ assert._isSameValue = isSameValue;
               return 0;
             }
           }
-          // (#1334) Property explicitly deleted — treat as absent regardless
-          // of the struct shape having the field name.
-          const tomb = _wasmStructDeletedKeys.get(obj);
-          if (tomb && tomb.has(typeof key === "symbol" ? key : String(key))) return 0;
-          // WasmGC struct: check sidecar properties
-          const sc = _wasmStructProps.get(obj);
-          if (sc && key in sc) return 1;
-          // Check descriptor map (for accessor properties set via Object.defineProperty)
-          // __defineProperty_accessor stores flags in _wasmPropDescs so that
-          // hasOwnProperty returns true for accessor-only properties. (#929)
-          const descs = _wasmPropDescs.get(obj);
-          if (descs && descs.has(String(key))) return 1;
-          // #1047 — registered class prototype: only allowlisted methods qualify
-          const protoMethods = _prototypeMethodNames.get(obj);
-          if (protoMethods !== undefined) {
-            return protoMethods.includes(String(key)) ? 1 : 0;
-          }
-          // Check struct field names via exported helpers
-          const exports = callbackState?.getExports();
-          const fieldNames = _getStructFieldNames(obj, exports) ?? [];
-          return fieldNames.includes(String(key)) ? 1 : 0;
+          // (#2130) Single shared own-property predicate — tombstone, sidecar,
+          // descriptor, class methods, struct shape.
+          return _wasmStructHasOwn(obj, key, callbackState?.getExports()) ? 1 : 0;
         };
       // propertyIsEnumerable runtime check for externref/any receivers
       if (name === "__propertyIsEnumerable")
@@ -7541,26 +9471,7 @@ assert._isSameValue = isSameValue;
             }
           }
           // (#1334) Deleted property — not own, hence not enumerable.
-          const tomb = _wasmStructDeletedKeys.get(obj);
-          if (tomb && tomb.has(typeof key === "symbol" ? key : String(key))) return 0;
-          // WasmGC struct: check sidecar descriptor flags
-          const descs = _wasmPropDescs.get(obj);
-          if (descs) {
-            const flags = descs.get(String(key));
-            if (flags !== undefined) return flags & _SC_ENUMERABLE ? 1 : 0;
-          }
-          // Sidecar props without explicit descriptor are enumerable
-          const sc = _wasmStructProps.get(obj);
-          if (sc && String(key) in sc) return 1;
-          // #1047 — registered class prototype: only allowlisted methods
-          const protoMethods = _prototypeMethodNames.get(obj);
-          if (protoMethods !== undefined) {
-            return protoMethods.includes(String(key)) ? 1 : 0;
-          }
-          // Check struct field names (always enumerable)
-          const exports = callbackState?.getExports();
-          const fieldNames = _getStructFieldNames(obj, exports) ?? [];
-          return fieldNames.includes(String(key)) ? 1 : 0;
+          return _wasmStructPropertyIsEnumerable(obj, key, callbackState?.getExports());
         };
       // for-in key enumeration: returns a JS array of enumerable string keys
       if (name === "__for_in_keys")
@@ -7589,28 +9500,32 @@ assert._isSameValue = isSameValue;
           let current: any = obj;
           while (current != null) {
             if (_isWasmStruct(current)) {
-              // WasmGC struct — get field names from exported helper
+              // WasmGC struct — get field names from exported helper.
+              // (#2131) Per spec, EnumerateObjectProperties visits each
+              // chain level's own keys in OrdinaryOwnPropertyKeys order:
+              // collect this level's keys first, order, then push.
+              const levelKeys: string[] = [];
               const fieldNames = _getStructFieldNames(current, exports) ?? [];
               for (const k of fieldNames) {
-                if (!seen.has(k)) {
-                  keys.push(k);
-                  seen.add(k);
-                }
+                if (!seen.has(k) && !levelKeys.includes(k)) levelKeys.push(k);
               }
               // Also include enumerable sidecar properties
               const sc = _wasmStructProps.get(current);
               if (sc) {
                 const descs = _wasmPropDescs.get(current);
                 for (const k of Object.keys(sc)) {
-                  if (seen.has(k)) continue;
+                  if (seen.has(k) || levelKeys.includes(k)) continue;
                   // Check enumerability — sidecar props without explicit descriptor are enumerable
                   if (descs) {
                     const flags = descs.get(k);
                     if (flags !== undefined && flags & _SC_DEFINED && !(flags & _SC_ENUMERABLE)) continue;
                   }
-                  keys.push(k);
-                  seen.add(k);
+                  levelKeys.push(k);
                 }
+              }
+              for (const k of _orderOwnKeysSpec(levelKeys)) {
+                keys.push(k);
+                seen.add(k);
               }
             } else {
               // Plain JS object — use Object.keys for own enumerable, respecting shadowing
@@ -7646,6 +9561,30 @@ assert._isSameValue = isSameValue;
         return (keys: any, i: number) => {
           if (keys == null || !Array.isArray(keys)) return undefined;
           return keys[i];
+        };
+      // Per-visit liveness check for for-in (#2066). The key set is snapshotted
+      // up front (spec-permitted), but §14.7.5.10 requires that a property
+      // deleted before it is visited is skipped. This re-tests, at visit time,
+      // whether `key` still exists on the (own-or-inherited) live object — the
+      // `in`-operator semantics that match for-in's enumeration set. Returns 1
+      // if still present, 0 if it has since been deleted.
+      if (name === "__for_in_has")
+        return (obj: any, key: any): number => {
+          if (obj == null) return 0;
+          const k = typeof key === "symbol" ? key : String(key);
+          if (!_isWasmStruct(obj)) {
+            try {
+              return k in (obj as object) ? 1 : 0;
+            } catch {
+              return 0;
+            }
+          }
+          // WasmGC struct: an explicit delete records a tombstone — honor it.
+          const tomb = _wasmStructDeletedKeys.get(obj);
+          if (tomb && tomb.has(k)) return 0;
+          // Otherwise the key was enumerated from the live shape and has not been
+          // deleted, so it is still present.
+          return 1;
         };
       // Promise combinators and constructors
       // Helper: convert WasmGC vec struct to JS array (vec structs are opaque
@@ -7834,6 +9773,31 @@ assert._isSameValue = isSameValue;
         };
       if (name === "Promise_resolve") return (val: any) => Promise.resolve(val);
       if (name === "Promise_reject") return (val: any) => Promise.reject(val);
+      // (#1042) async/await CPS scheduling primitives. The state machine
+      // allocates one pending outer Promise per async function, then settles
+      // it from a continuation that runs as a microtask. We stash the
+      // resolve/reject capabilities on the promise object so the settle
+      // imports can fire them by reference.
+      if (name === "Promise_new_pending")
+        return () => {
+          let r: (v: any) => void = () => {};
+          let j: (e: any) => void = () => {};
+          const p: any = new Promise((res, rej) => {
+            r = res;
+            j = rej;
+          });
+          p.__r = r;
+          p.__j = j;
+          return p;
+        };
+      if (name === "Promise_settle_resolve")
+        return (p: any, val: any) => {
+          if (p && typeof p.__r === "function") p.__r(val);
+        };
+      if (name === "Promise_settle_reject")
+        return (p: any, reason: any) => {
+          if (p && typeof p.__j === "function") p.__j(reason);
+        };
       // (#1382) `executor` is called as `executor(resolve, reject)` — arity 2.
       if (name === "Promise_new") return (executor: any) => new Promise(_maybeWrapCallable(executor, 2, callbackState));
       // (#1382) `onFulfilled` / `onRejected` callbacks are arity-1 (the value or reason).
@@ -7879,7 +9843,12 @@ assert._isSameValue = isSameValue;
         };
       if (name === "__gen_yield_star")
         return (buf: any[], iterable: any) => {
-          // Iterate the inner iterable and push all values into the outer buffer
+          // Iterate the inner iterable and push all values into the outer buffer.
+          // Per §27.5.3 yield* output, the inner generator's RETURN value is the
+          // value of the `yield*` expression and must NOT leak into the outer
+          // stream — `for...of`/manual iteration already stops at the inner
+          // `done:true` result, so only the yielded (`done:false`) values are
+          // pushed here. (#2035)
           if (iterable != null && typeof iterable[Symbol.iterator] === "function") {
             for (const v of iterable) {
               if (buf.length >= __EAGER_GEN_LIMIT) {
@@ -7887,6 +9856,22 @@ assert._isSameValue = isSameValue;
               }
               buf.push(v);
             }
+          }
+        };
+      // __gen_set_return: (buf, value) → void. Stashes the generator's `return`
+      // value on the buffer object (a non-enumerable side property) rather than
+      // pushing it as a yielded element. `__create_generator` reads it into
+      // `_GeneratorState.retVal` so the terminal `{value, done:true}` result
+      // carries it exactly once. (#2035)
+      if (name === "__gen_set_return")
+        return (buf: any, v: any) => {
+          if (buf != null) {
+            Object.defineProperty(buf, "__genReturn", {
+              value: v,
+              writable: true,
+              enumerable: false,
+              configurable: true,
+            });
           }
         };
       if (name === "__create_generator")
@@ -7912,7 +9897,16 @@ assert._isSameValue = isSameValue;
           // (`_GeneratorState.get(this)`) is unaffected.
           const proto = _getGeneratorInstancePrototype();
           const obj: any = Object.create(proto);
-          _GeneratorState.set(obj, { buf, index: 0, pendingThrow });
+          // (#2035) Read the generator's return value off the buffer's side
+          // property (set by `__gen_set_return`) into the instance state so the
+          // terminal `{value, done:true}` result carries it — without it ever
+          // appearing as a yielded element.
+          _GeneratorState.set(obj, {
+            buf,
+            index: 0,
+            pendingThrow,
+            retVal: (buf as any)?.__genReturn,
+          });
           return obj;
         };
       if (name === "__create_async_generator")
@@ -8321,15 +10315,117 @@ assert._isSameValue = isSameValue;
           const exports = callbackState?.getExports();
           const vecLen = exports?.__vec_len;
           const vecGet = exports?.__vec_get;
+          // §23.1.3.1 step 5.b / IsConcatSpreadable: an argument that is not a
+          // native Array is still spread when its Symbol.isConcatSpreadable
+          // property is truthy. Native concat reads that flag for plain JS
+          // objects already, but for an opaque WasmGC struct array-like (e.g.
+          // `{0:'a', length:2}` with the flag set in the sidecar) it sees a
+          // single opaque object and appends it whole — so spread those here.
+          const concatLen = (x: any): number => {
+            let raw = _safeGet(x, "length", callbackState);
+            // `length` on a struct-backed array-like is a real WasmGC field, not
+            // a sidecar entry — read it via the __sget_length getter export, the
+            // same path __extern_length uses.
+            if (raw === undefined) {
+              const getter = exports?.__sget_length;
+              if (typeof getter === "function") {
+                try {
+                  raw = (getter as (o: any) => unknown)(x);
+                } catch {
+                  /* not a field on this struct variant */
+                }
+              }
+            }
+            const n = typeof raw === "number" ? raw : Number(raw);
+            if (Number.isNaN(n) || n <= 0) return 0;
+            return Math.min(Math.trunc(n), 0x1fffffffffffff);
+          };
+          // §23.1.3.1.1 IsConcatSpreadable step 2: a true Array is ALWAYS
+          // spread (the `@@isConcatSpreadable` sidecar only governs non-Array
+          // objects). A WasmGC vec is the compiled representation of a true
+          // Array, so an argument that responds to `__vec_len` must be spread
+          // element-by-element via `__vec_get` — mirroring the receiver
+          // conversion below. Without this a vec argument that doesn't carry a
+          // sidecar flag falls through to `out.push(x)` and is appended whole
+          // (#1969 — data loss → NaN). Returns the spread length, or -1 when
+          // `x` is not a vec.
+          const tryVecLen = (x: any): number => {
+            if (
+              x == null ||
+              typeof x !== "object" ||
+              Array.isArray(x) ||
+              !_isWasmStruct(x) ||
+              typeof vecLen !== "function" ||
+              typeof vecGet !== "function"
+            ) {
+              return -1;
+            }
+            try {
+              const n = vecLen(x);
+              return typeof n === "number" && n >= 0 ? n : -1;
+            } catch {
+              return -1; // not a vec struct variant
+            }
+          };
+          const applyConcat = (out: any[], xs: any[]): any[] => {
+            for (const x of xs) {
+              // §23.1.3.1.1 IsConcatSpreadable step 2: a real Array (or a WasmGC
+              // vec, the compiled form of one) is ALWAYS spread regardless of
+              // the `@@isConcatSpreadable` sidecar. An `any`-typed array argument
+              // reaches this custom concat as either a JS array (literals lower
+              // to externref JS arrays) or an opaque vec struct — both must be
+              // spread element-by-element, else the argument is appended whole
+              // (#1969 — data loss → NaN).
+              if (Array.isArray(x)) {
+                for (let i = 0; i < x.length; i++) out.push(x[i]);
+                continue;
+              }
+              const vlen = tryVecLen(x);
+              if (vlen >= 0) {
+                // tryVecLen only returns >= 0 when vecGet is a function.
+                const get = vecGet as (v: any, i: number) => unknown;
+                for (let i = 0; i < vlen; i++) out.push(get(x, i));
+                continue;
+              }
+              if (
+                x != null &&
+                typeof x === "object" &&
+                !Array.isArray(x) &&
+                _isWasmStruct(x) &&
+                _isConcatSpreadable(x, callbackState)
+              ) {
+                const n = concatLen(x);
+                for (let i = 0; i < n; i++) {
+                  let v = _safeGet(x, i, callbackState);
+                  // Indexed struct fields ("0", "1", …) live in WasmGC fields, not
+                  // the sidecar — fall back to the __sget_<i> getter export.
+                  if (v === undefined) {
+                    const idxGetter = exports?.[`__sget_${i}`];
+                    if (typeof idxGetter === "function") {
+                      try {
+                        v = (idxGetter as (o: any) => unknown)(x);
+                      } catch {
+                        /* not a field on this struct variant */
+                      }
+                    }
+                  }
+                  out.push(v);
+                }
+              } else {
+                out.push(x);
+              }
+            }
+            return out;
+          };
           if (typeof vecLen !== "function" || typeof vecGet !== "function") {
-            return ([] as any[]).concat(...args);
+            return applyConcat([], args);
           }
           const len = vecLen(arr) as number;
           const jsArr: any[] = new Array(len);
           for (let i = 0; i < len; i++) {
             jsArr[i] = vecGet(arr, i);
           }
-          return jsArr.concat(...args);
+          return applyConcat(jsArr, args);
         };
       // Array.prototype.join(sep?) fallback for externref receivers (#1286).
       // When the receiver is a JS array (e.g., from Object.keys host import),
@@ -8356,15 +10452,23 @@ assert._isSameValue = isSameValue;
       if (name === "__array_flat")
         return (arr: any, depth: any) => {
           const exports = callbackState?.getExports();
-          const jsArr = _toJsArray(arr, exports);
-          return jsArr.flat(depth === undefined ? undefined : depth);
+          // (#1996) Deeply unwrap nested vec refs so native flat() can flatten
+          // them and JSON.stringify renders them as arrays, not null.
+          const jsArr = _toJsArrayDeep(arr, exports, VEC_UNWRAP_MAX_DEPTH) as any[];
+          // (#1995) An omitted depth arrives as JS null (ref.null.extern), not
+          // undefined. `null` would coerce to depth 0 via ToIntegerOrInfinity,
+          // so treat both null and undefined as "use the spec default of 1".
+          return depth == null ? jsArr.flat() : jsArr.flat(depth);
         };
       // Array.prototype.flatMap(callback, thisArg?) — map then flatten (#1136)
       if (name === "__array_flatMap")
         return (arr: any, fn: Function, thisArg: any) => {
           const exports = callbackState?.getExports();
           const jsArr = _toJsArray(arr, exports);
-          return thisArg !== undefined ? jsArr.flatMap(fn as any, thisArg) : jsArr.flatMap(fn as any);
+          // (#1996) The callback may return a WasmGC vec; unwrap its result so
+          // flatMap's single-level flatten recognizes it as an array.
+          const wrapped = (...args: any[]): any => _toJsArrayDeep((fn as any)(...args), exports, VEC_UNWRAP_MAX_DEPTH);
+          return thisArg !== undefined ? jsArr.flatMap(wrapped, thisArg) : jsArr.flatMap(wrapped);
         };
       // Callback bridges for functional array methods
       if (name === "__call_1_f64") return (fn: Function, a: number) => fn(a);
@@ -8398,7 +10502,11 @@ assert._isSameValue = isSameValue;
             // For a given v, walk its proto chain looking for any registered
             // sub-ctor whose prototype matches — this avoids ambiguity when
             // the same `subName` is used across multiple parents (test fixtures).
-            const bucket = _subclassCtors.get(ctorName);
+            // #1933 — per-instance subclass registry (was module-level
+            // `_subclassCtors`, which leaked instances via retained ctor
+            // closures and crossed instances). Falls back to the module map for
+            // legacy callers without an instanceState.
+            const bucket = (instanceState?.subclassCtors ?? _subclassCtors).get(ctorName);
             if (bucket !== undefined && bucket.length > 0) {
               for (const subCtor of bucket) {
                 if (v instanceof subCtor) return 1;
@@ -8419,7 +10527,7 @@ assert._isSameValue = isSameValue;
             while (tag != null && !guard.has(tag)) {
               if (tag === ctorName) return 1;
               guard.add(tag);
-              tag = _userClassParents.get(tag) ?? null;
+              tag = (instanceState?.userClassParents ?? _userClassParents).get(tag) ?? null;
             }
           }
           // (#1729) `<obj> instanceof Object` is true for every object value
@@ -8431,6 +10539,35 @@ assert._isSameValue = isSameValue;
           // never reach this branch as wasm structs.
           if (ctorName === "Object" && v != null && _isWasmStruct(v)) {
             return 1;
+          }
+          // (#1992) `<fn> instanceof Function` — a compiled closure is a WasmGC
+          // struct, so V8's `v instanceof Function` above returns false for the
+          // opaque externref. Recognise it via `__is_closure` (the same callable
+          // discriminator `__typeof` uses to report "function"), so an
+          // `any`-typed callable answers `true` as the spec requires. Closures
+          // also have `Object` in their prototype chain — but only the explicit
+          // `Function` / `Object` RHS reaches here as a wasm struct.
+          if (ctorName === "Function" && v != null && typeof v === "object" && _isWasmStruct(v)) {
+            const exports = callbackState?.getExports();
+            const isClosureFn = exports?.__is_closure as ((x: any) => number) | undefined;
+            if (typeof isClosureFn === "function") {
+              try {
+                if (isClosureFn(v) === 1) return 1;
+              } catch {
+                /* fall through to false */
+              }
+            }
+          }
+          return 0;
+        };
+      if (name === "__instanceof_dyn")
+        return (v: any, ctor: any) => {
+          try {
+            const wrappedCtor = _maybeWrapCallableUnknownArity(ctor, callbackState);
+            if (typeof wrappedCtor === "function") return v instanceof wrappedCtor ? 1 : 0;
+            if (typeof ctor === "function") return v instanceof ctor ? 1 : 0;
+          } catch {
+            return 0;
           }
           return 0;
         };
@@ -8444,8 +10581,9 @@ assert._isSameValue = isSameValue;
           _userClassTags.set(instance as object, className);
           // Register the parent edge (idempotent). Null parent indicates the
           // direct parent is a builtin, so the chain terminates.
-          if (!_userClassParents.has(className)) {
-            _userClassParents.set(className, parentName == null ? null : parentName);
+          const userClassParents = instanceState?.userClassParents ?? _userClassParents;
+          if (!userClassParents.has(className)) {
+            userClassParents.set(className, parentName == null ? null : parentName);
           }
         };
       // (#1455) Subclasses of host builtins: after `__new_<Parent>(args)`
@@ -8468,7 +10606,10 @@ assert._isSameValue = isSameValue;
           // Find a cached synthetic ctor whose parent matches. The cache is a
           // small array per `subName` so multiple parents (e.g. across test
           // fixtures that reuse the same class name) don't collide.
-          let bucket = _subclassCtors.get(subName);
+          // #1933 — per-instance registry so the synthetic ctors (which close
+          // over this instance) don't retain it forever across hot-reloads.
+          const subclassCtors = instanceState?.subclassCtors ?? _subclassCtors;
+          let bucket = subclassCtors.get(subName);
           let Sub: any;
           if (bucket !== undefined) {
             for (const candidate of bucket) {
@@ -8490,7 +10631,7 @@ assert._isSameValue = isSameValue;
               }
               if (bucket === undefined) {
                 bucket = [];
-                _subclassCtors.set(subName, bucket);
+                subclassCtors.set(subName, bucket);
               }
               bucket.push(Sub);
             } catch {
@@ -8740,6 +10881,24 @@ assert._isSameValue = isSameValue;
         // eslint-disable-next-line func-names
         function (this: any, ...args: any[]) {
           const exports = callbackState?.getExports();
+          // (#2128) Setter invoked during the module START function (top-level
+          // `o.v = 9` runs before WebAssembly.instantiate returns, so
+          // `getExports()` is still undefined and the dispatch would silently
+          // no-op). Park the write and replay it the moment setExports wires
+          // the instance — same mechanism as #1712's deferred
+          // defineProperties. Only setter calls (args present) are parkable;
+          // a getter needs its value synchronously and keeps returning
+          // undefined pre-wiring.
+          if (exports === undefined && args.length > 0 && callbackState) {
+            const defer = (callbackState as { deferToExports?: (fn: () => void) => void }).deferToExports;
+            if (defer) {
+              const self = this;
+              defer(() => {
+                callbackState.getExports()?.[`__cb_${id}`]?.(cap, self, ...args);
+              });
+              return undefined;
+            }
+          }
           return exports?.[`__cb_${id}`]?.(cap, this, ...args);
         };
     case "await":
@@ -8805,6 +10964,13 @@ assert._isSameValue = isSameValue;
       return (v: any) => (v ? 1 : 0);
     case "extern_get":
       return (obj: any, key: any) => {
+        if (obj != null && typeof obj === "object") {
+          try {
+            if (Object.getPrototypeOf(obj) !== null && key in Object(obj)) return obj[key];
+          } catch {
+            /* fall through to the generic path */
+          }
+        }
         const val = _safeGet(obj, key, callbackState);
         if (val !== undefined) {
           // (#779c) Sandbox-aware constructor identity. When a
@@ -8822,6 +10988,15 @@ assert._isSameValue = isSameValue;
           }
           return val;
         }
+        if (obj == null || typeof obj !== "object") return undefined;
+        try {
+          if (Object.getPrototypeOf(obj) !== null) return undefined;
+        } catch {
+          return undefined;
+        }
+        const sc = _wasmStructProps.get(obj);
+        const descs = _wasmPropDescs.get(obj);
+        if ((sc && key in sc) || descs?.has(_normalizeDescKey(key))) return undefined;
         if (typeof key === "string") {
           const exports = callbackState?.getExports();
           const getter = exports?.[`__sget_${key}`];
@@ -8851,6 +11026,13 @@ assert._isSameValue = isSameValue;
             }
           }
         }
+        // (#1712) `<fn>.prototype` on a Wasm closure struct: auto-vivify an
+        // identity-stable real JS object in the closure's sidecar (mirrors
+        // the by-name __extern_get binding).
+        if (key === "prototype") {
+          const proto = _getOrVivifyFnPrototype(obj, callbackState);
+          if (proto !== undefined) return proto;
+        }
         return undefined;
       };
     case "extern_set":
@@ -8863,12 +11045,72 @@ assert._isSameValue = isSameValue;
     case "host_eq":
       // #1065 — strict equality for two externref operands that the GC path
       // could not compare via ref.eq (e.g. host functions like `Array === Array`).
-      return (a: any, b: any) => (a === b ? 1 : 0);
+      return (a: any, b: any) => (_hostEqComparableValue(a) === _hostEqComparableValue(b) ? 1 : 0);
     case "host_loose_eq":
       // #1134 — loose equality for two externref operands (§7.2.15).
       // Handles null == undefined → true and other JS coercion rules.
-      // biome-ignore lint/suspicious/noDoubleEquals: §7.2.15 IsLooselyEqual requires == semantics (null == undefined, type coercion)
-      return (a: any, b: any) => (a == b ? 1 : 0);
+      return (a: any, b: any) => {
+        // #1990 — IsLooselyEqual §7.2.15 steps 8-9: `object == primitive`
+        // coerces the object via ToPrimitive (no hint → "default"). For a
+        // WasmGC struct carrying a compiled valueOf/toString, host `==` would
+        // throw "Cannot convert object to primitive value" because the funcref
+        // field isn't a JS-callable method. Route struct operands through
+        // `_toPrimitiveSync` first — the same fix `__extern_has` already uses —
+        // BUT only when the other operand is a primitive (object == object is
+        // reference identity per steps 1-2, no coercion). A no-method struct
+        // resolves to "[object Object]", preserving `{} == "[object Object]"`.
+        const aStruct = a != null && typeof a === "object" && _isWasmStruct(a);
+        const bStruct = b != null && typeof b === "object" && _isWasmStruct(b);
+        let av = a;
+        let bv = b;
+        if (aStruct && !bStruct && (b == null || typeof b !== "object")) {
+          av = _toPrimitiveSync(a, "default", callbackState);
+        }
+        if (bStruct && !aStruct && (a == null || typeof a !== "object")) {
+          bv = _toPrimitiveSync(b, "default", callbackState);
+        }
+        // biome-ignore lint/suspicious/noDoubleEquals: §7.2.15 IsLooselyEqual requires == semantics (null == undefined, type coercion)
+        return av == bv ? 1 : 0;
+      };
+    case "host_add":
+      // #2058 — `+` for two externref operands (§13.15.3
+      // ApplyStringOrNumericBinaryOperator). JS `+` gives us the "concatenate if
+      // either primitive is a string" rule and primitive valueOf/toString
+      // ordering for free, so `1 + "2"` → `"12"` and `1 + 2` → `3`. Returns a
+      // boxed any (number or string) the caller stores back into the `any` slot.
+      //
+      // #1989/#1988 — but a WasmGC struct operand carrying a COMPILED
+      // valueOf/toString (the funcref field isn't a JS-callable method) makes
+      // native JS `a + b` throw "Cannot convert object to primitive value". Per
+      // §13.15.3 step 1, `+` runs ToPrimitive(operand, "default") on each side
+      // FIRST. Route struct operands through `_toPrimitiveSync` (the same proxy
+      // `host_loose_eq` uses) so the per-instance compiled valueOf/toString is
+      // dispatched in-module; a no-method struct resolves to "[object Object]".
+      return (a: any, b: any) => {
+        const av =
+          a != null && typeof a === "object" && _isWasmStruct(a) ? _toPrimitiveSync(a, "default", callbackState) : a;
+        const bv =
+          b != null && typeof b === "object" && _isWasmStruct(b) ? _toPrimitiveSync(b, "default", callbackState) : b;
+        return av + bv;
+      };
+    case "host_compare":
+      // #2059 — relational compare for two externref operands (§7.2.13
+      // IsLessThan). JS `<`/`>` give ToPrimitive (hint "number"), the
+      // string-vs-string lexicographic / string-vs-number numeric dispatch, and
+      // object valueOf ordering for free. Returns a 4-way result so all four
+      // relational operators map from one import:
+      //   -1  a < b      0  a == b (neither < nor >)      1  a > b
+      //    2  incomparable — a NaN/undefined ToNumber operand. Per §7.2.13 a
+      //        comparison yielding `undefined` makes the relational expression
+      //        false, so callers treat 2 as "no operator matches".
+      return (a: any, b: any) => {
+        if (a < b) return -1;
+        if (a > b) return 1;
+        // Equal, OR incomparable (NaN involved). `a <= b` distinguishes:
+        // `a <= b` is true only when equal; false when a NaN/undefined operand
+        // makes every comparison false.
+        return a <= b ? 0 : 2;
+      };
     case "same_value_zero":
       // #1360 — SameValueZero comparison (§7.2.11).
       // Same as Strict Equality except NaN === NaN is true.
@@ -9119,22 +11361,13 @@ assert._isSameValue = isSameValue;
       });
     }
     case "proxy_create":
-      return (target: any, handler: any) => {
-        // Wrap the Wasm struct target in a real JS Proxy with the given handler.
-        // If handler is null/undefined, use an empty handler (transparent proxy).
-        // If target is null/undefined, fall back to an empty object as target.
-        const t = target ?? {};
-        const h = handler ?? {};
-        try {
-          return new Proxy(t, h);
-        } catch {
-          // If Proxy construction fails (e.g. handler is not an object),
-          // return target as-is (standalone fallback behavior).
-          return t;
-        }
-      };
+      return (target: any, handler: any) => _hostProxyConstruct(target, handler, callbackState, "Proxy");
     default:
-      return () => {};
+      // #1858 C9a: fail loud instead of silently binding an unhandled import
+      // intent to a no-op. A no-op `() => {}` returns `undefined` for every
+      // call, so a missing/misnamed intent produced a wrong answer with no
+      // diagnostic. Throw so the unhandled type surfaces at instantiation.
+      throw new Error(`Unhandled ImportIntent type: ${(intent as any).type}`);
   }
 }
 
@@ -9555,6 +11788,19 @@ export function buildImports(
   string_constants: Record<string, WebAssembly.Global>;
   setExports?: (exports: Record<string, Function>) => void;
 } {
+  // (#1933) Per-instance state for stateful imports. Created FIRST so the
+  // RegExp-accessor install below (and every `resolveImport` call) can thread
+  // it. Everything here was previously module-level and bled across / retained
+  // concurrently-live instances; the per-instance Maps/state fix that.
+  const instanceState: InstanceState = {
+    webStorage: {},
+    symbolCache: new Map<number, symbol>(),
+    symbolDescRegistry: new Map<number, string | null>(),
+    legacyRegExpState: _makeLegacyRegExpState(),
+    subclassCtors: new Map<string, Function[]>(),
+    userClassParents: new Map<string, string | null>(),
+  };
+
   // #1464 — install ES2025 Iterator.zip / zipKeyed / concat polyfills on
   // the host's `Iterator` global if missing. Idempotent and safe to call
   // unconditionally; older Node / V8 versions need it, newer hosts skip.
@@ -9567,20 +11813,30 @@ export function buildImports(
   // the spec requires TypeError, so we override. Idempotent per RegExp identity.
   {
     const RegExpCtor = (deps?.RegExp ?? (typeof RegExp !== "undefined" ? RegExp : undefined)) as unknown;
-    if (RegExpCtor) _installLegacyRegExpAccessors(RegExpCtor);
+    if (RegExpCtor) _installLegacyRegExpAccessors(RegExpCtor, instanceState.legacyRegExpState);
   }
 
   const env: Record<string, Function> = {};
   let wasmExports: Record<string, Function> | undefined;
-  const callbackState = { getExports: () => wasmExports };
+  // (#1712) Operations that NEED exports (e.g. Object.defineProperties with a
+  // WasmGC-struct descriptor map — its keys/fields are only readable via the
+  // __struct_field_names / __sget_* exports) but run during the module START
+  // function park themselves here and are replayed the moment setExports
+  // wires the instance.
+  const pendingExportsDeferred: Array<() => void> = [];
+  const callbackState = {
+    getExports: () => wasmExports,
+    deferToExports: (fn: () => void) => {
+      pendingExportsDeferred.push(fn);
+    },
+  };
   let hasCallbacks = false;
   let lastCaughtException: any = undefined;
 
-  // (#1467) Each instantiated module gets its own symbol id space (counter
-  // resets to 14 per module). Reset the shared registry + cache so symbol
-  // ids from a prior module don't leak descriptions into this one.
-  _symbolCache = undefined;
-  _symbolDescRegistry.clear();
+  // (#1467 / #1933) Each instantiated module gets its own symbol id space and
+  // per-instance symbol cache/registry, RegExp legacy state, and subclass/
+  // parent registries — initialized in `instanceState` above (was module-level,
+  // which crossed and retained concurrently-live instances).
 
   // Recursion depth guard: host imports can call back into Wasm exports
   // (e.g. callback_maker, valueOf/toString coercion, iterator protocol),
@@ -9588,9 +11844,6 @@ export function buildImports(
   // Track depth across ALL host imports sharing a single counter.
   const MAX_HOST_RECURSION_DEPTH = 100;
   let hostCallDepth = 0;
-
-  // Per-instance state for stateful imports (e.g. localStorage polyfill).
-  const instanceState: InstanceState = { webStorage: {} };
 
   for (const imp of manifest) {
     if (imp.module !== "env") continue;
@@ -9656,6 +11909,13 @@ export function buildImports(
   // and struct field getter discovery (__sget_*).
   result.setExports = (exports: Record<string, Function>) => {
     wasmExports = exports;
+    // (#1712) Replay operations parked during the module START function (see
+    // pendingExportsDeferred above) now that struct introspection exports
+    // are reachable.
+    while (pendingExportsDeferred.length > 0) {
+      const fn = pendingExportsDeferred.shift()!;
+      fn();
+    }
   };
   return result;
 }
@@ -9738,10 +11998,17 @@ function marshalTypedArrayArgs(
     const src = arg as ArrayLike<number>;
     const len = src.length | 0;
     const vec = newVecF64(len);
+    // #1829 — only byte-mask for Uint8Array. For any other TypedArray the
+    // `& 0xff` truncated every element to its low byte, silently corrupting
+    // Uint16Array/Uint32Array (and signed/float) inputs. The vec backing store
+    // is f64 and `__vec_set_byte` widens its i32 value arg via
+    // `f64.convert_i32_u`, so an unmasked write round-trips unsigned integers
+    // up to 2^32-1 at full precision. (Signed-negative and fractional float
+    // elements still need a full-f64 vec setter — tracked as a follow-up; this
+    // strictly improves on truncating every element to a byte.)
+    const maskByte = kind === "uint8array";
     for (let j = 0; j < len; j++) {
-      // Mask to byte range — matches `new Uint8Array(arr)` indexed-write
-      // semantics (and __vec_set_byte's i32-byte contract).
-      vecSetByte(vec, j, src[j]! & 0xff);
+      vecSetByte(vec, j, maskByte ? src[j]! & 0xff : src[j]!);
     }
     out[i] = vec;
   }

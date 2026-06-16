@@ -10,18 +10,45 @@ import { ts } from "../../ts-api.js";
 import type { FieldDef, Instr, LocalDef, SourcePos, ValType, WasmModule } from "../../ir/types.js";
 import type { StandaloneRegExpEngineConfig } from "../regexp-standalone.js";
 import type { ObjectRuntimeTypes } from "../object-runtime.js";
+import type { FallbackCounts } from "../fallback-telemetry.js";
 
 export interface CodegenError {
   message: string;
   line: number;
   column: number;
-  severity?: "error" | "warning";
+  /**
+   * #1921 — the compile-failure gate keys on this field, not on a magic
+   * `"Codegen error:"` message prefix.
+   *
+   * - `"error"` (the default for {@link reportError} / {@link reportErrorNoNode})
+   *   fails the build (`success: false`).
+   * - `"warning"` is non-blocking and used by the IR-fallback channel for
+   *   "we tried the IR path, it didn't fit, the legacy body still works" events.
+   * - `"degrade"` is a *deliberate* compile-with-fallback-value diagnostic: the
+   *   expression compiled to a placeholder (stack-balancer hole, identity bind,
+   *   etc.) and the build is intentionally allowed to succeed. Each degrade site
+   *   must reference a tracking issue, mirroring the host-import allowlist
+   *   discipline.
+   *
+   * An omitted severity is treated as `"error"` by the gate (see
+   * `isFatalCodegenDiagnostic` in src/compiler.ts) so that a forgotten
+   * classification fails loudly instead of silently degrading.
+   */
+  severity?: "error" | "warning" | "degrade";
 }
 
 /** Result returned by generateModule / generateMultiModule. */
 export interface CodegenResult {
   module: WasmModule;
   errors: CodegenError[];
+  /**
+   * #2089 — silent-fallback telemetry counters captured during this codegen
+   * run (per class → per site → count). Surfaced so the gate
+   * (`scripts/check-codegen-fallbacks.ts`) can aggregate structured counts
+   * rather than parsing warning strings. Optional so existing callers that
+   * destructure `{ module, errors }` are unaffected.
+   */
+  fallbackCounts?: FallbackCounts;
 }
 
 /** Public options for backend code generation. */
@@ -50,6 +77,13 @@ export interface CodegenOptions {
    * reaches parity with the legacy direct-emission path.
    */
   experimentalIR?: boolean;
+  /**
+   * #2089 — count silent codegen fallbacks via `reportSilentFallback` and, when
+   * set, surface each as a warning diagnostic. Used by
+   * `scripts/check-codegen-fallbacks.ts`. Default off (counts are still kept;
+   * only the warning emission is gated).
+   */
+  trackSilentFallbacks?: boolean;
   /** Node builtin modules detected during import preprocessing (#1044) */
   nodeBuiltins?: import("../../import-resolver.js").NodeBuiltinImport[];
   /** Set of function names imported from node:fs (detected pre-preprocessing).
@@ -144,10 +178,35 @@ export interface NativeGeneratorInfo {
   paramTypes: ValType[];
   /** Field index where captured params start in the state struct. */
   paramFieldOffset: number;
+  /** Field index for the value passed to `.next(value)`. */
+  sentFieldIdx: number;
+  /** Field index for resume mode: 0 = next, 1 = return. */
+  modeFieldIdx: number;
+  /** Field index for the value passed to `.return(value)`. */
+  abruptFieldIdx: number;
+  /** Function-local names spilled into the state struct across suspensions. */
+  spillNames: string[];
+  /** Field index where spilled locals start in the state struct. */
+  spillFieldOffset: number;
   /** Number of top-level yield suspension points. */
   yieldCount: number;
   /** Terminal state value. */
   doneState: number;
+  /**
+   * (#2171) ValType of the generator's yielded values. `{kind:"f64"}` for the
+   * numeric path (default); the native-string ref for a generator whose yields
+   * are all strings. The result struct's `value` field and the for-of / .next()
+   * extraction read this. Mixed / object yields are not yet supported (the plan
+   * bails before a generator with disagreeing yield types is registered).
+   */
+  elemValType: ValType;
+  /**
+   * (#2170) `yield*` delegation slots, in source `siteIndex` order. Each slot is
+   * a mutable `ref null $InnerState` field in the state struct that persists the
+   * inner generator's state across the outer generator's host re-entries.
+   * `innerName` resolves to the inner's `NativeGeneratorInfo` at emit time.
+   */
+  delegationSlots?: { fieldIdx: number; innerName: string }[];
 }
 
 export type NullishExclusion = "null" | "undefined" | "nullish";
@@ -194,6 +253,18 @@ export interface FunctionContext {
   /** Whether this function is a generator (function*) */
   isGenerator?: boolean;
   /**
+   * (#2007/#1448) Set once a closure-allocating array method
+   * (`map`/`filter`/`flatMap`/`forEach`/`reduce`/`find`/`sort`) has been
+   * lowered in this function body. The standalone vec-concat join fast-path
+   * (`tryCompileNativeVecConcatOperand`) reads it: once such a method has
+   * emitted its closure setup, a LATE `number_toString` registration triggered
+   * by the join would `addUnionImports`-shift and corrupt the already-emitted
+   * closure code (a pre-existing hazard `a.join(",")` also exhibits). So the
+   * join falls back to `$__any_to_string` ("[object Object]", the baseline
+   * behaviour) when this flag is set — no regression.
+   */
+  emittedClosureArrayMethod?: boolean;
+  /**
    * (#1042) True while {@link emitAsyncStateMachine} is driving an async
    * function body through the CPS transform. Read by the `AwaitExpression`
    * dispatcher in expressions.ts to decide between the legacy pass-through and
@@ -208,6 +279,12 @@ export interface FunctionContext {
   constBindings?: Set<string>;
   /** Stack of saved body arrays for addUnionImports index shifting */
   savedBodies: Instr[][];
+  /**
+   * Raw `__argc` cached at function entry for parameter defaults. Defaults need
+   * to clear the global before initializer expressions can make nested calls;
+   * `arguments` construction reuses this local when both features are present.
+   */
+  argcCachedLocal?: number;
   /** Set of function names successfully hoisted during THIS function body's hoisting pass */
   hoistedFuncs?: Set<string>;
   /** Enclosing class name — propagated to closures for super keyword resolution */
@@ -317,7 +394,34 @@ export interface FunctionContext {
     cloneFinally: () => Instr[];
     breakStackLen: number;
     continueStackLen: number;
+    /**
+     * Clone the finally body and bump every `br`/`br_if`/`br_table` in it that
+     * targets a label OUTSIDE the finally body by `extraDepth`. The pre-compiled
+     * finally was lowered at the try-frame depth (+1); inlining it at an
+     * abrupt-completion site nested deeper than the try frame (inside an
+     * `if`/`switch`/inner-`try` within the try) requires bumping those
+     * outer-targeting branches by the extra nesting delta. (#2061)
+     */
+    cloneFinallyAtDepth: (extraDepth: number) => Instr[];
+    /**
+     * Snapshot of `breakStack` taken when this entry was pushed (i.e. at the
+     * try-frame depth). At an inline site the nesting delta is
+     * `current breakStack value − this snapshot value` for any outer label
+     * (every label op bumps all outer entries uniformly, so the delta is the
+     * same across entries). (#2061)
+     */
+    breakDepthBaseline: number[];
+    /** Snapshot of `continueStack` at push time — see `breakDepthBaseline`. (#2061) */
+    continueDepthBaseline: number[];
   }[];
+  /**
+   * Number of enclosing `try` blocks WITH a catch clause currently being
+   * compiled. Wasm `return_call` replaces the caller frame, so a callee's
+   * throw would unwind past the enclosing handler — the tail-call rewrite
+   * must be suppressed while this is > 0, exactly like `finallyStack`
+   * suppresses it for pending finally blocks. (#1972)
+   */
+  tryCatchDepth?: number;
   /**
    * Pending writeback instructions for mutable callback captures (#859).
    */
@@ -360,6 +464,20 @@ export interface FunctionContext {
    */
   pendingStringBuilders?: Set<ts.VariableDeclaration>;
   /**
+   * #1761: presize info for those `pendingStringBuilders` whose final length
+   * is a provably runtime-known linear function of a loop bound. Keyed by the
+   * same declaration node. When present at the init site, the buffer is
+   * allocated once at `bound * unitsPerIter` and the append sites drop the
+   * per-append cap-check. Populated by `detectStringBuilders` (presize out-param).
+   */
+  stringBuilderPresize?: Map<
+    ts.VariableDeclaration,
+    {
+      boundExpr: ts.Expression; // loop-invariant bound, evaluated once at init
+      unitsPerIter: number; // constant code-units appended per iteration
+    }
+  >;
+  /**
    * #1210: live string-builder bindings keyed by binding name. While
    * present, `s += <expr>` routes to `compileStringBuilderAppend`
    * (in-place buffer write), and identifier reads materialize a fresh
@@ -373,8 +491,33 @@ export interface FunctionContext {
       lenLocalIdx: number; // i32 — current logical length
       capLocalIdx: number; // i32 — current physical capacity (== buf.length)
       materializedLocalIdx: number; // ref_null $AnyString — reserved for future cache
+      presized?: boolean; // #1761: true when buffer presized; appends skip cap-check
     }
   >;
+  /**
+   * #1886 Slice B — live linear-backed `Uint8Array` buffers in this function. A
+   * buffer proven linear-safe by the #1886 analysis
+   * (`ctx.linearUint8.safeBindings`) is represented as a `(ptr, len)` pair of
+   * i32 locals instead of a GC vec, so `buf[i]`, `buf.length`, and
+   * `process.std*.{read,write}(buf)` operate on linear memory with zero
+   * GC↔linear copies. Absent entry ⇒ the binding uses the existing GC-vec path
+   * unchanged.
+   *
+   * #2045: keyed by the binding's `ts.Symbol`, NOT by identifier text. A
+   * name-keyed registry was scope-blind — a linear param `buf` plus an
+   * inner-block `const buf = new Uint8Array(...)` (a distinct symbol with the
+   * same name) collided, so element access addressed the wrong buffer in both
+   * shadowing directions (silent corruption). Symbol identity is scope-correct.
+   */
+  linearU8Buffers?: Map<
+    ts.Symbol,
+    {
+      ptrLocalIdx: number; // i32 — base byte offset into the page-4 linear arena
+      lenLocalIdx: number; // i32 — element length (== byte length for Uint8Array)
+    }
+  >;
+  /** #1886 — function-entry arena mark for rewinding short-lived linear-U8 locals. */
+  linearU8ArenaMarkLocalIdx?: number;
 }
 
 /** Context shared across all codegen. */
@@ -400,6 +543,28 @@ export interface CodegenContext {
   funcStack: FunctionContext[];
   /** Errors accumulated during codegen */
   errors: CodegenError[];
+  /**
+   * #2089 — silent-fallback telemetry counters (per class → per site → count).
+   * Populated by `reportSilentFallback` (fallback-telemetry.ts) at instrumented
+   * fallback sites; aggregated by `scripts/check-codegen-fallbacks.ts` into the
+   * baseline. Phase 0 is pure telemetry — no behavior depends on these counts.
+   */
+  fallbackCounts: FallbackCounts;
+  /**
+   * #2089 — when true, every `reportSilentFallback` also pushes a warning
+   * diagnostic (in addition to counting). Off by default; the gate script and
+   * `JS2WASM_LOG_CODEGEN_FALLBACKS=1` turn it on.
+   */
+  trackSilentFallbacks?: boolean;
+  /**
+   * #1923 — captured IR post-claim demotions (build/verify/lower/backend-
+   * legality failures on a function the selector claimed, which fall back to
+   * legacy through the warning channel). Always collected (cheap), mirroring
+   * `fallbackCounts`; surfaced on `CompileResult.irPostClaimErrors` for the
+   * ratchet gate. Each entry carries the IR integration error's `kind` and the
+   * function/message.
+   */
+  irPostClaimErrors: { kind: string; func: string; message: string }[];
   /** Last AST node with a valid source position — used as fallback for error reporting
    * when the immediate node lacks source file context (synthetic/detached nodes). */
   lastKnownNode: ts.Node | null;
@@ -471,12 +636,32 @@ export interface CodegenContext {
   classSet: Set<string>;
   /** Classes that must throw TypeError at evaluation time */
   classThrowsOnEval: Set<string>;
+  /**
+   * (#1983) Names of top-level user `function` declarations in the source. Used
+   * by `classMemberFuncKey` to detect when a synthetic class-member key
+   * (`${className}_${member}`) would collide with a user function of the same
+   * name (e.g. `class A { m() {} }` + `function A_m() {}`), so the class
+   * member's **funcMap** entry can take a collision-free key. Populated in
+   * `collectDeclarations` (runs before any class body compiles).
+   */
+  topLevelFunctionNames: Set<string>;
   /** Map from "ClassName_methodName" → method info for local classes */
   classMethodSet: Set<string>;
   /** Classes inside function bodies whose body compilation is deferred */
   deferredClassBodies: Set<string>;
   /** Set of "ClassName_propName" for getter/setter accessor properties */
   classAccessorSet: Set<string>;
+  /**
+   * (#1888 S5c) Set of "structName_propName" whose getter/setter is compiled as
+   * a host-free CLOSURE (capturing env, call_ref-invoked) rather than the bare
+   * `${struct}_get_${prop}(this)` fn. Populated by the C2 define-site when
+   * `S5C_STRUCT_ACCESSOR_CLOSURE` is on; the C3 read / C4 write sites dispatch
+   * through the per-(struct,prop) `$__acc_get/set_<struct>_<prop>` globals +
+   * the S5b `__call_accessor_get/set` drivers ONLY when this set has the key, so
+   * class-accessor emission (#459/#1680/#1681/#1605) stays on the proven bare-fn
+   * path. Maps the key → the get/set global indices.
+   */
+  structAccessorClosure: Map<string, { getGlobal?: number; setGlobal?: number }>;
   /** Set of "ClassName_propName" for static getter/setter accessor properties */
   staticAccessorSet: Set<string>;
   /** Set of "ClassName_methodName" for static methods (no self param) */
@@ -523,6 +708,76 @@ export interface CodegenContext {
    * a late-import index shift never desyncs the reservation.
    */
   protoIteratorDriverReserved?: boolean;
+  /**
+   * (#1888 S5b accessor live get/set) Set when `ensureObjectRuntime` reserves the
+   * `__call_accessor_get` / `__call_accessor_set` driver placeholders so the
+   * `__extern_get` / `__extern_set` accessor arms can `call` them. The bodies are
+   * filled in post-processing by `fillAccessorDrivers` AFTER
+   * `emitClosureMethodCallExportN(0/1)` registers `__call_fn_method_0/1` — same
+   * reserve/fill funcIdx-authority pattern as `protoIteratorDriverReserved`
+   * (proto-override.ts). Never reserved when the object runtime is not emitted
+   * (non-standalone), so host/GC modules stay byte-identical.
+   */
+  accessorGetDriverReserved?: boolean;
+  accessorSetDriverReserved?: boolean;
+  /**
+   * (#1888 Slice 1) True once the standalone open-any method-dispatch bridge
+   * `__apply_closure(fn, recv, args) -> externref` has reserved its funcIdx via
+   * a placeholder function pushed during `ensureObjectRuntime` (registered in
+   * `funcMap` under `"__apply_closure"`). The bridge calls the
+   * `__call_fn_method_0..4` exports, which are only emitted at FINALIZE (after
+   * the full `closureInfoByTypeIdx` is known), so the placeholder body is filled
+   * by `fillApplyClosure` in post-processing — mirroring the
+   * `protoIteratorDriverReserved` reserve-then-fill pattern (#1719). Only set
+   * under `--target standalone`, so the GC/host path stays byte-identical.
+   */
+  applyClosureReserved?: boolean;
+  /**
+   * (#1100) Set when the standalone Proxy trap-dispatch runtime reserved its
+   * `__proxy_call_{get,set,has}` driver placeholders (in `ensureProxyRuntime`).
+   * Those drivers invoke the user trap closures through the `__call_fn_method_N`
+   * exports, which are only emitted at FINALIZE, so their bodies are filled by
+   * `fillProxyDispatch` in post-processing — same reserve-then-fill pattern as
+   * `applyClosureReserved` / the accessor drivers (#1719). Only set under
+   * `--target standalone`, so the GC/host path stays byte-identical.
+   */
+  proxyDispatchReserved?: boolean;
+  /**
+   * (#2151) Method names for which a closed-struct `__call_m_<name>` dispatcher
+   * was reserved at an any-receiver call site (standalone/wasi). The placeholder
+   * body is filled by `fillClosedMethodDispatch` at FINALIZE (after all
+   * object-literal struct types + their `<Struct>_<name>` methods are known),
+   * mirroring the `fillApplyClosure` reserve-then-fill pattern (#1719). Each
+   * dispatcher does a `ref.test/ref.cast/call <Struct>_<name>` type-switch over
+   * every closed struct that has the method (threading the struct as `this`),
+   * falling through to the open-`$Object` `__extern_method_call` otherwise. Only
+   * populated under `--target standalone || --target wasi`.
+   */
+  closedMethodDispatchNames?: Set<string>;
+  /**
+   * (#1904) True once the standalone `__extern_is_array(externref) -> i32`
+   * helper placeholder has been emitted by the object runtime. Its body is
+   * filled in post-processing after all Wasm array carrier types (`__vec_*`
+   * plus `$ObjVec`) are known.
+   */
+  externIsArrayReserved?: boolean;
+  /**
+   * (#2038) True once the native iterator runtime (`ensureNativeIteratorRuntime`,
+   * iterator-native.ts) has emitted `__iterator` / `__iterator_next` with a
+   * vec-only body and is awaiting its USER-iterator arm. The USER arm dispatches
+   * a custom `{[Symbol.iterator]()}` / `{next()}` object through the closed-struct
+   * method dispatchers `__call_@@iterator` / `__call_next` and the field getters
+   * `__sget_value` / `__sget_done`, all of which are emitted at FINALIZE (after
+   * every user struct is known — `emitIteratorMethodExport` /
+   * `emitStructFieldGetters`). So the carrier bodies are rebuilt with the USER arm
+   * by `fillNativeIteratorUserArms` in post-processing — same reserve-then-fill
+   * funcIdx-authority discipline as `protoIteratorDriverReserved` (#1719). The
+   * eager body is a valid vec-only carrier (byte-identical to the pre-#2038
+   * runtime), so if the fill is ever skipped (e.g. multi-module) custom iterables
+   * keep trapping as before rather than shipping a broken module. Only set under
+   * `--target standalone` / `wasi`.
+   */
+  nativeIteratorUserArmPending?: boolean;
   /**
    * Static property initializer expressions to compile into __module_init.
    * `className` (#1395) is the owning class name — used to set
@@ -577,6 +832,30 @@ export interface CodegenContext {
   currentThisGlobalIdx: number;
   /** Map from struct name → set of closure type indices used for valueOf fields */
   valueOfClosureTypes: Map<string, number[]>;
+  /**
+   * (#1989) Set of `${structName}_${valueOf|toString|@@toPrimitive}` method full
+   * names whose SHARED func body has already been claimed by the first object
+   * literal of a deduped anon-struct type. Same-shape literals share a struct
+   * type, so the first literal compiled keeps the shared `${name}_valueOf` func
+   * (referenced by the host `__call_*`/`__sget_*` exports and name-keyed coercion
+   * fallbacks); every LATER same-shape literal forks its own per-literal method
+   * func and stores its own funcref in the struct field, so per-instance
+   * `call_ref` dispatch resolves to the correct method body per object.
+   */
+  toPrimitiveSharedClaimed: Set<string>;
+  /**
+   * (#1989) Set of anon-struct type names that have MORE THAN ONE object literal
+   * sharing the deduped struct type and carrying a `valueOf`/`toString`/
+   * `@@toPrimitive` method — i.e. the same-shape collision case where each
+   * literal stores its own method funcref. Only these structs route the host
+   * `__call_*` ToPrimitive dispatch through the per-instance struct-field closure
+   * (instead of the name-keyed standalone func, which is the first literal's body
+   * and is correct + simpler for the single-literal case). This keeps the
+   * single-literal path — including the §7.1.1.1 step-6 TypeError walk — on the
+   * well-tested standalone arm, and only opts the genuine collision case into
+   * per-instance dispatch.
+   */
+  toPrimitiveForkedStructs: Set<string>;
   /** Tag index for the exception tag (-1 if not yet registered) */
   exnTagIdx: number;
   /** Whether union type helper imports have been registered */
@@ -745,6 +1024,17 @@ export interface CodegenContext {
   /** (#1789) Whether the WASI module-init guard (idempotent __module_init +
    *  prepended init call on exports) has been applied. */
   moduleInitGuardApplied: boolean;
+  /**
+   * #1984 — freeze-point discipline (child of #2043 Option 3). Set to `true`
+   * by `generateModule`/`generateMultiModule` once the module's index spaces
+   * are final (right before `stackBalance`, after the last legitimate
+   * `addUnionImports`/`addStringImports`/`reconcileNativeStrFinalizeShift`
+   * mutation in every mode). While set, `addImport`/`ensureLateImport` throw a
+   * named producer-site error instead of silently mutating a finalized import
+   * space — so the producer that added an import too late self-identifies with
+   * its own stack, rather than #2043's emit-time validation only naming the
+   * downstream symptom. Default `false`. */
+  indexSpaceFrozen: boolean;
   /** Shape-inferred array-like variables */
   shapeMap: Map<string, { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType }>;
   /** Set of function names that failed during hoisting pre-pass */
@@ -759,6 +1049,8 @@ export interface CodegenContext {
   widenedTypeProperties: Map<string, { name: string; type: ValType }[]>;
   /** Map from widened variable name to its registered struct name */
   widenedVarStructMap: Map<string, string>;
+  /** Widened empty-object fields introduced by Object.defineProperty rather than assignment. */
+  widenedDefinePropertyKeys: Set<string>;
   /**
    * (#1239) Variable names whose initializer is an object literal carrying
    * `get`/`set` accessors. Such variables are stored as plain JS host
@@ -811,6 +1103,18 @@ export interface CodegenContext {
      * `this`-drop behaviour.
      */
     noThisParam?: boolean;
+    /**
+     * (#1809) True when `methodFuncIdx` already pointed at a host IMPORT at
+     * registration time — e.g. a DOM/host global (`resizeTo`, `scrollBy`) or
+     * any `declare`d function used as a first-class value, where the trampoline
+     * legitimately forwards into an imported function. The late-import shift
+     * walker keeps import indices stable (new imports append at the end, so it
+     * only bumps indices `>= importsBefore` and leaves existing import targets
+     * untouched), so an import target at finalize is EXPECTED here, not a missed
+     * shift. The #1525b guard must only fire when a target that was a DEFINED
+     * function at registration resolves to an import at finalize.
+     */
+    methodTargetsImport?: boolean;
   }[];
   /** True if Math.clz32 or Math.imul is used — requires ToUint32 Wasm helper */
   needsToUint32: boolean;
@@ -822,6 +1126,10 @@ export interface CodegenContext {
   wrapperNumberTypeIdx: number;
   wrapperStringTypeIdx: number;
   wrapperBooleanTypeIdx: number;
+  /** Native union-helper carrier type indices, present under WASI/standalone. */
+  nativeBoxNumberTypeIdx: number;
+  nativeBoxBooleanTypeIdx: number;
+  nativeBigIntTypeIdx: number;
   /** Cache for function reference wrappers: signature key → ClosureInfo */
   funcRefWrapperCache: Map<string, ClosureInfo>;
   /** Pending module-init body (not yet in mod.functions) that needs global index fixup */
@@ -841,6 +1149,20 @@ export interface CodegenContext {
   liveBodies: Set<Instr[]>;
   /** Hash-based lookup for anonymous struct deduplication */
   anonStructHash: Map<string, string>;
+  /**
+   * (#2009) Result of the same-structural-shape collision-resolution post-pass:
+   * anon struct name → its shape-id. Populated ONLY for structs that genuinely
+   * collide (a different-named struct shares the same field TYPES, making them
+   * runtime-indistinguishable under WasmGC iso-recursive canonicalization). Such
+   * structs get a hidden trailing `$shape` i32 field retro-stamped per-instance;
+   * the host `__struct_field_names`/`__sset_*` exports read it to recover the
+   * instance's real field names by VALUE. Non-colliding structs are absent here
+   * and keep their original layout (zero blast radius — the common case, incl.
+   * all IR-path construction, is byte-identical to main).
+   */
+  shapeIdByStructName: Map<string, number>;
+  /** (#2009) shape-id → ordered field-name CSV, for the host name export. */
+  shapeNameCsvById: string[];
   /** Pending late import shift state */
   pendingLateImportShift: { importsBefore: number } | null;
   /** Map from class name → global index of the prototype externref singleton */
@@ -855,6 +1177,9 @@ export interface CodegenContext {
   classStaticMethodNames: Map<string, string[]>;
   /** Map from class name → global idx of the static-method-name CSV string constant (#1395) */
   classStaticMethodsCsvGlobal: Map<string, number>;
+  /** #1888 S6 — lazily materialized built-in namespace singleton globals
+   *  (Array/Object static method surface under standalone). */
+  builtinObjectGlobals: Map<string, number>;
   /** (#1394) Map from `${className}_${methodName}` → global idx of the cached
    *  externref singleton closure for the method. Lazily allocated on first
    *  property-access of `C.prototype.<method>` or `instance.<method>` (as
@@ -888,6 +1213,23 @@ export interface CodegenContext {
    *  in object-runtime.ts. Undefined until first open-object op under
    *  --target standalone. */
   objectRuntimeTypes?: ObjectRuntimeTypes;
+  /** (#2175 S0) Module-type index of the single shared `$NativeProto` struct —
+   *  the host-free builtin/class prototype-object representation. Registered
+   *  once by `registerNativeProtoType` (property-access.ts) the first time a
+   *  `.prototype`-as-value read demands a native proto object under
+   *  `--target standalone`. Undefined until then. */
+  nativeProtoTypeIdx?: number;
+  /** (#2175 S0) Builtin-brand id table — a reserved high-negative i32 band
+   *  disjoint from `classTagMap`'s range, so a `$NativeProto.$brand` (or the
+   *  `$ClassMeta.$parentTag` externref-backed-subclass slot from #2101) is a
+   *  single i32 namespace shared with class tags without collision. Seeded
+   *  lazily from the BUILTIN_BRAND_TABLE constant by `getBuiltinBrand`. */
+  builtinBrandMap?: Map<string, number>;
+  /** (#2175 S0) Per-funcIdx metadata for native-method-closure values, so the
+   *  existing `.length`/`.name`-on-function reads resolve a closure's arity and
+   *  member name (e.g. `RegExp.prototype.test.length === 1`,
+   *  `.name === "test"`). Populated by `ensureStandaloneNativeMethodClosure`. */
+  nativeClosureMeta?: Map<number, { name: string; length: number }>;
   /** (#682) Native standalone RegExp engine hook. Standalone mode currently
    *  enables the reduced literal-substring backend; null means RegExp lowering
    *  must stay on the explicit #1474 refusal path. */
@@ -934,6 +1276,37 @@ export interface CodegenContext {
   wasiPendingSleepMsHelper?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
   wasiNodeFsFuncs: Set<string>;
+  /**
+   * #1886 — Linear-safe `Uint8Array` analysis result. Populated (WASI/standalone
+   * only) by `analyzeLinearUint8` as a pre-pass; `undefined` otherwise. Symbols
+   * in `linearUint8.safeBindings` are byte buffers proven to never escape the
+   * GC heap, so codegen backs them by linear memory (a `(ptr,len)` pair) with
+   * zero-copy `fd_read`/`fd_write`. Every consumer is additive — when this is
+   * `undefined` or a binding is absent, the existing GC-vec path is used
+   * unchanged. (Codegen consumers land in later slices; the analysis itself is
+   * side-effect free and safe to run unconditionally behind the WASI gate.)
+   */
+  linearUint8?: import("../linear-uint8-analysis.js").LinearUint8Result;
+  /**
+   * #1886 Slice B — Func index of the lazily-emitted
+   * `__lin_u8_alloc(len:i32)->i32` bump allocator for linear-backed Uint8Array
+   * buffers (`undefined` = not yet emitted). Allocates from a dedicated page-4
+   * arena pointed at by `$__lin_u8_arena_ptr` (NOT the page-0 string-literal
+   * `$__wasi_bump_ptr`, which would alias literal data). Reuses the #1856
+   * align8 + on-demand `memory.grow` idiom (see `codegen-linear/runtime.ts
+   * addRuntime`), emitted here because the WasmGC front-end owns its own
+   * memory/globals and cannot call the linear backend's module bootstrap.
+   */
+  linearU8AllocFuncIdx?: number;
+  /**
+   * #1886 Slice B — func-type index for `__lin_u8_alloc`'s `(i32)->(i32)`
+   * signature, reserved eagerly (before any GC struct/array or native-string
+   * helper type) so the shared type-table prefix stays stable. The allocator
+   * function is emitted later and reuses this slot. See reserveLinearU8AllocType.
+   */
+  linearU8AllocTypeIdx?: number;
+  /** #1886 Slice B — global index of the page-4 linear-U8 arena bump pointer. */
+  linearU8ArenaGlobalIdx?: number;
   /** Whether `node:fs` JS-host imports are permitted (non-WASI target only, #1491). */
   allowFs: boolean;
   /**
@@ -950,6 +1323,8 @@ export interface CodegenContext {
   tdzLetConstNames: Set<string>;
   /** Compile-time property descriptor flags */
   definedPropertyFlags: Map<string, number>;
+  /** Properties whose descriptor/value lives in the runtime sidecar. */
+  sidecarDefinedPropertyKeys: Set<string>;
   /** Object mutability state sets */
   nonExtensibleVars: Set<string>;
   frozenVars: Set<string>;
@@ -972,6 +1347,13 @@ export interface CodegenContext {
    * declared externref.
    */
   jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
+  /**
+   * #1261 — module-wide worst-case eval tier (1=no eval … 5=direct sloppy).
+   * Computed read-only by `classifyEvalTier`; downstream optimization gating
+   * (#1262–#1265) consumes it. Optional because not every context constructs
+   * from a full source file.
+   */
+  evalTier?: import("../eval-tiering.js").EvalTier;
 }
 
 export type { SourcePos };

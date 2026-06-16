@@ -148,8 +148,12 @@ export function compileDeleteExpression(
           fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
 
           // (b) Sidecar / descriptor-map cleanup. Push receiver as externref +
-          // key as externref, then call __delete_property and drop its result —
-          // we always report `true` from the static struct-field path.
+          // key as externref, then call __delete_property and RETURN its result
+          // (#1821). The helper reports `false` (0) for a non-configurable
+          // descriptor entry (ECMA-262 §13.5.1 step 5) and `true` (1) otherwise
+          // — including a plain struct field with no descriptor (deletable).
+          // The previous code dropped the result and hardcoded `true`, so
+          // `delete obj.nonConfigurable` wrongly returned `true`.
           fctx.body.push({ op: "local.get", index: recvLocal });
           if (recvType.kind === "ref" || recvType.kind === "ref_null") {
             fctx.body.push({ op: "extern.convert_any" } as Instr);
@@ -171,11 +175,14 @@ export function compileDeleteExpression(
             flushLateImportShifts(ctx, fctx);
             if (delIdx !== undefined) {
               fctx.body.push({ op: "call", funcIdx: delIdx });
-              fctx.body.push({ op: "drop" });
-            } else {
-              fctx.body.push({ op: "drop" });
-              fctx.body.push({ op: "drop" });
+              // Leave __delete_property's i32 result on the stack as the
+              // `delete` expression value (spec-correct configurability check).
+              return { kind: "i32" };
             }
+            // No host import (standalone): drop receiver + key; struct.set
+            // already cleared the field, so report `true`.
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "drop" });
           } else {
             // String literal failed (shouldn't happen for a static field name);
             // discard the receiver/key and continue.
@@ -203,9 +210,53 @@ export function compileDeleteExpression(
         const fieldIdx = fields.findIndex((f) => f.name === fieldName);
         if (fieldIdx !== -1 && fields[fieldIdx]!.mutable) {
           const fieldType = fields[fieldIdx]!.type;
-          compileExpression(ctx, fctx, inner.expression);
+          // (#1821) Mirror the property-access arm above: clear the struct
+          // field AND the sidecar/descriptor entry, then return
+          // __delete_property's result. The previous element-access arm only
+          // did the struct.set + hardcoded `true`, so `delete obj["x"]`
+          // diverged from `delete obj.x` — it left the `Object.defineProperty`
+          // descriptor in place (`hasOwnProperty("x")` stayed true) and
+          // reported `true` even for a non-configurable property.
+          const recvType = compileExpression(ctx, fctx, inner.expression);
+          if (!recvType) {
+            fctx.body.push({ op: "i32.const", value: 1 });
+            return { kind: "i32" };
+          }
+          const recvLocal = allocLocal(fctx, `__del_recv_${fctx.locals.length}`, recvType);
+          fctx.body.push({ op: "local.set", index: recvLocal });
+
+          // (a) struct.set with sentinel — restores the field to undefined.
+          fctx.body.push({ op: "local.get", index: recvLocal });
           emitDeleteSentinel(fctx, fieldType);
           fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
+
+          // (b) sidecar / descriptor-map cleanup, returning the helper result.
+          fctx.body.push({ op: "local.get", index: recvLocal });
+          if (recvType.kind === "ref" || recvType.kind === "ref_null") {
+            fctx.body.push({ op: "extern.convert_any" } as Instr);
+          } else if (recvType.kind !== "externref") {
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "i32.const", value: 1 });
+            return { kind: "i32" };
+          }
+          const keyResult = compileStringLiteral(ctx, fctx, fieldName, inner.argumentExpression);
+          if (keyResult) {
+            const delIdx = ensureLateImport(
+              ctx,
+              "__delete_property",
+              [{ kind: "externref" }, { kind: "externref" }],
+              [{ kind: "i32" }],
+            );
+            flushLateImportShifts(ctx, fctx);
+            if (delIdx !== undefined) {
+              fctx.body.push({ op: "call", funcIdx: delIdx });
+              return { kind: "i32" };
+            }
+            fctx.body.push({ op: "drop" });
+            fctx.body.push({ op: "drop" });
+          } else {
+            fctx.body.push({ op: "drop" });
+          }
           fctx.body.push({ op: "i32.const", value: 1 });
           return { kind: "i32" };
         }
@@ -418,11 +469,29 @@ export function compileInstanceOf(
   // Resolve the right operand class name (supports identifiers, expressions, class expressions)
   const className = resolveInstanceOfClassName(ctx, expr.right);
   if (className === undefined) {
-    // Cannot resolve the class — emit false (i32.const 0) as a graceful fallback
-    // We still need to compile the left operand for side effects, then drop it
-    const leftType = compileExpression(ctx, fctx, expr.left);
-    if (leftType) {
-      fctx.body.push({ op: "drop" });
+    const dynIdx = ensureLateImport(
+      ctx,
+      "__instanceof_dyn",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    if (dynIdx !== undefined) {
+      const leftType = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
+      if (leftType && leftType.kind !== "externref") {
+        fctx.body.push({ op: "extern.convert_any" });
+      }
+      if (leftType === null) fctx.body.push({ op: "ref.null.extern" });
+
+      const rightType = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
+      if (rightType && rightType.kind !== "externref") {
+        fctx.body.push({ op: "extern.convert_any" });
+      }
+      if (rightType === null) fctx.body.push({ op: "ref.null.extern" });
+
+      const finalDynIdx = ctx.funcMap.get("__instanceof_dyn") ?? dynIdx;
+      fctx.body.push({ op: "call", funcIdx: finalDynIdx });
+      return { kind: "i32" };
     }
     fctx.body.push({ op: "i32.const", value: 0 });
     return { kind: "i32" };
@@ -648,6 +717,23 @@ function staticTypeofForType(ctx: CodegenContext, tsType: ts.Type): string | nul
   if (tsType.flags & ts.TypeFlags.Undefined || tsType.flags & ts.TypeFlags.Void) return "undefined";
   if (tsType.flags & ts.TypeFlags.BigInt || tsType.flags & ts.TypeFlags.BigIntLiteral) return "bigint";
 
+  // (#2051) Resolve unions BEFORE the `resolveWasmType` collapse below. A
+  // nullable primitive like `number | undefined` (the static type of `o?.v`)
+  // collapses to a bare f64 under `resolveWasmType`, which would mis-fold
+  // `typeof o?.v` to the constant "number" — wrong when the chain short-circuits
+  // to `undefined`. Per §13.5.3 the union's typeof is only statically known if
+  // every member agrees; `number` + `undefined` disagree (size 2) → dynamic
+  // (`null`), so it reaches the runtime `__typeof` which reads host undefined.
+  if (tsType.isUnion?.()) {
+    const results = new Set<string>();
+    for (const member of (tsType as ts.UnionType).types) {
+      const r = staticTypeofForType(ctx, member);
+      if (r === null) return null;
+      results.add(r);
+    }
+    return results.size === 1 ? [...results][0]! : null;
+  }
+
   // Wrapper objects (new String/Number/Boolean) are "object" not their primitive type (#929)
   if (tsType.flags & ts.TypeFlags.Object) {
     const sym = tsType.getSymbol?.();
@@ -689,17 +775,7 @@ function staticTypeofForType(ctx: CodegenContext, tsType: ts.Type): string | nul
     if (tsType.flags & ts.TypeFlags.Object) return "object";
   }
 
-  // For union types, check if all members resolve to the same result
-  if (tsType.isUnion?.()) {
-    const results = new Set<string>();
-    for (const member of (tsType as ts.UnionType).types) {
-      const r = staticTypeofForType(ctx, member);
-      if (r === null) return null;
-      results.add(r);
-    }
-    if (results.size === 1) return [...results][0]!;
-  }
-
+  // (Unions are resolved up-front above, before the resolveWasmType collapse.)
   return null;
 }
 
@@ -789,9 +865,22 @@ export function compileTypeofExpression(
     return compileStringLiteral(ctx, fctx, staticResult);
   }
 
-  // Fast mode: any-typed operand -> runtime typeof via __any_typeof
+  // $AnyValue operand → runtime typeof via __any_typeof, which tag-dispatches
+  // and returns a native `ref $AnyString`. This fires for fast mode AND for
+  // standalone/WASI: the latter previously fell through to the `__typeof` host
+  // helper below, whose standalone native form is a `ref.null.extern` stub
+  // (index.ts registerNative), so `typeof (v: any)` returned null and every
+  // `typeof v === "…"` string compare failed (#2107). __any_typeof needs the
+  // native-string machinery (nativeStrings + a registered $AnyString type), so
+  // it's only consulted when those are present; otherwise we keep the legacy
+  // __typeof path so non-native-string builds stay byte-identical.
   const wasmType = resolveWasmType(ctx, tsType);
-  if (ctx.fast && (wasmType.kind === "ref" || wasmType.kind === "ref_null") && isAnyValue(wasmType, ctx)) {
+  if (
+    (wasmType.kind === "ref" || wasmType.kind === "ref_null") &&
+    isAnyValue(wasmType, ctx) &&
+    ctx.nativeStrings &&
+    ctx.anyStrTypeIdx >= 0
+  ) {
     ensureAnyHelpers(ctx);
     const typeofIdx = ctx.funcMap.get("__any_typeof");
     if (typeofIdx !== undefined) {
@@ -919,15 +1008,23 @@ export function compileTypeofComparison(
   // on the $AnyValue struct. This avoids pulling in the full native string helpers.
   if (isAnyValue(resolveWasmType(ctx, tsType), ctx)) {
     ensureAnyHelpers(ctx);
-    // Map the string literal to tag check(s)
+    // Map the string literal to canonical JsTag (#2104) tag check(s):
+    //   0 Null · 1 Undefined · 2 NumberI32 · 3 NumberF64 · 4 Boolean ·
+    //   5 String · 6 Object · 7 Function.
+    // (#2107) Pre-canonical this used `string -> [5,6]` and `object -> [0]`,
+    // which conflated tag 6 (Object) with strings and dropped real objects
+    // from the `object` arm — so `typeof (s: any-string) === "object"` was
+    // true and `typeof (o: any-object) === "object"` was false. Corrected:
+    // string is tag 5 only; object is null (0) or Object (6); function is 7.
     let tagChecks: number[] | null = null;
     if (stringLiteral === "number")
       tagChecks = [2, 3]; // i32 or f64
     else if (stringLiteral === "boolean") tagChecks = [4];
-    else if (stringLiteral === "string")
-      tagChecks = [5, 6]; // externref string or gcref string
+    else if (stringLiteral === "string") tagChecks = [5];
     else if (stringLiteral === "undefined") tagChecks = [1];
-    else if (stringLiteral === "object") tagChecks = [0]; // null -> "object"
+    else if (stringLiteral === "object")
+      tagChecks = [0, 6]; // null -> "object", plain object ref
+    else if (stringLiteral === "function") tagChecks = [7];
 
     if (tagChecks !== null) {
       // Compile the operand
@@ -969,6 +1066,7 @@ export function compileTypeofComparison(
   if (stringLiteral === "number") helperName = "__typeof_number";
   else if (stringLiteral === "string") helperName = "__typeof_string";
   else if (stringLiteral === "boolean") helperName = "__typeof_boolean";
+  else if (stringLiteral === "bigint") helperName = "__typeof_bigint";
   else if (stringLiteral === "undefined") helperName = "__typeof_undefined";
   else if (stringLiteral === "object") helperName = "__typeof_object";
   else if (stringLiteral === "function") helperName = "__typeof_function";

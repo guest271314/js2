@@ -27,17 +27,33 @@ const C_FF = 12;
 const C_CR = 13;
 const C_SPACE = 32;
 const C_NBSP = 0xa0;
+// §11.2 WhiteSpace (Zs category beyond NBSP) + §11.3 LineTerminator extras and
+// the BOM/ZWNBSP. StrWhiteSpace for ToNumber/parseInt/parseFloat (§19.2.4/.5,
+// §7.1.4.1) is WhiteSpace ∪ LineTerminator.
+const C_OGHAM_SP = 0x1680; // Zs OGHAM SPACE MARK
+const C_ENQUAD = 0x2000; // Zs range start (EN QUAD … HAIR SPACE)
+const C_HAIR_SP = 0x200a; // Zs range end
+const C_LS = 0x2028; // LINE SEPARATOR (LineTerminator)
+const C_PS = 0x2029; // PARAGRAPH SEPARATOR (LineTerminator)
+const C_NNBSP = 0x202f; // Zs NARROW NO-BREAK SPACE
+const C_MMSP = 0x205f; // Zs MEDIUM MATHEMATICAL SPACE
+const C_IDEO_SP = 0x3000; // Zs IDEOGRAPHIC SPACE
+const C_BOM = 0xfeff; // ZERO WIDTH NO-BREAK SPACE (BOM)
 const C_PLUS = 43;
 const C_MINUS = 45;
 const C_DOT = 46;
 const C_ZERO = 48;
 const C_NINE = 57;
 const C_UC_A = 65;
+const C_UC_B = 66;
 const C_UC_E = 69;
+const C_UC_O = 79;
 const C_UC_X = 88;
 const C_UC_Z = 90;
 const C_LC_A = 97;
+const C_LC_B = 98;
 const C_LC_E = 101;
+const C_LC_O = 111;
 const C_LC_X = 120;
 const C_LC_Z = 122;
 
@@ -55,16 +71,26 @@ function externToFlat(ctx: CodegenContext, flattenIdx: number): Instr[] {
 }
 
 /**
- * `isWhiteSpace(c)` inline test: c==space|tab|LF|VT|FF|CR|NBSP. Leaves i32 bool.
- * Operand: the code unit on the stack is consumed via a local.
+ * `isWhiteSpace(c)` inline test — the StrWhiteSpace set consumed by ToNumber /
+ * parseInt / parseFloat (ECMA-262 §19.2.4/.5, §7.1.4.1) = WhiteSpace (§11.2) ∪
+ * LineTerminator (§11.3): TAB, LF, VT, FF, CR, SP, NBSP, the BOM/ZWNBSP, the
+ * LS/PS line terminators, and the Zs (space-separator) category — OGHAM SPACE,
+ * the EN-QUAD..HAIR-SPACE range (U+2000–U+200A), NARROW/MEDIUM/IDEOGRAPHIC space.
+ * Leaves i32 bool. Operand: the code unit is consumed via a local.
  */
 function isWsBody(cLocal: number): Instr[] {
-  const eq = (code: number): Instr[] => [
-    { op: "local.get", index: cLocal } as Instr,
-    { op: "i32.const", value: code } as Instr,
-    { op: "i32.eq" } as Instr,
+  const get = (): Instr => ({ op: "local.get", index: cLocal }) as Instr;
+  const eq = (code: number): Instr[] => [get(), { op: "i32.const", value: code } as Instr, { op: "i32.eq" } as Instr];
+  // c >= lo && c <= hi  (the contiguous Zs run U+2000..U+200A).
+  const inRange = (lo: number, hi: number): Instr[] => [
+    get(),
+    { op: "i32.const", value: lo } as Instr,
+    { op: "i32.ge_u" } as Instr,
+    get(),
+    { op: "i32.const", value: hi } as Instr,
+    { op: "i32.le_u" } as Instr,
+    { op: "i32.and" } as Instr,
   ];
-  // c==space || c==tab || c==LF || c==VT || c==FF || c==CR || c==NBSP
   return [
     ...eq(C_SPACE),
     ...eq(C_TAB),
@@ -78,6 +104,22 @@ function isWsBody(cLocal: number): Instr[] {
     ...eq(C_CR),
     { op: "i32.or" } as Instr,
     ...eq(C_NBSP),
+    { op: "i32.or" } as Instr,
+    ...eq(C_BOM),
+    { op: "i32.or" } as Instr,
+    ...eq(C_LS),
+    { op: "i32.or" } as Instr,
+    ...eq(C_PS),
+    { op: "i32.or" } as Instr,
+    ...eq(C_OGHAM_SP),
+    { op: "i32.or" } as Instr,
+    ...inRange(C_ENQUAD, C_HAIR_SP),
+    { op: "i32.or" } as Instr,
+    ...eq(C_NNBSP),
+    { op: "i32.or" } as Instr,
+    ...eq(C_MMSP),
+    { op: "i32.or" } as Instr,
+    ...eq(C_IDEO_SP),
     { op: "i32.or" } as Instr,
   ];
 }
@@ -834,100 +876,100 @@ function emitRadixPrefixParse(
   L_SAW: number,
   strDataTypeIdx: number,
 ): Instr[] {
-  const buildArm = (lc: number, uc: number, radix: number): Instr => ({
-    op: "if",
-    blockType: { kind: "empty" },
-    then: [
-      // second char is lc/uc?
-      { op: "local.get", index: L_DATA },
-      { op: "local.get", index: L_I },
-      { op: "i32.const", value: 1 },
-      { op: "i32.add" },
-      { op: "array.get_u", typeIdx: strDataTypeIdx },
-      { op: "local.tee", index: L_C },
-      { op: "i32.const", value: lc },
-      { op: "i32.eq" },
-      { op: "local.get", index: L_C },
-      { op: "i32.const", value: uc },
-      { op: "i32.eq" },
-      { op: "i32.or" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          { op: "i32.const", value: radix },
-          { op: "local.set", index: L_RADIX },
-          // advance past "0x"
-          { op: "local.get", index: L_I },
-          { op: "i32.const", value: 2 },
-          { op: "i32.add" },
-          { op: "local.set", index: L_I },
-          // require at least one digit
-          { op: "local.get", index: L_I },
-          { op: "local.get", index: L_END },
-          { op: "i32.ge_s" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [{ op: "f64.const", value: NaN }, { op: "return" }],
-          },
-          { op: "f64.const", value: 0 },
-          { op: "local.set", index: L_RESULT },
-          // digit loop over [i, end)
-          {
-            op: "block",
-            blockType: { kind: "empty" },
-            body: [
-              {
-                op: "loop",
-                blockType: { kind: "empty" },
-                body: [
+  // Build a single prefix arm. Self-conditioned: it reads data[i+1] and uses
+  // the (== lc || == uc) test as its own `if` condition, so multiple arms can
+  // be sequenced inside the shared `0`-prefix guard — a non-matching arm is a
+  // no-op and control falls through to the next arm.
+  const buildArm = (lc: number, uc: number, radix: number): Instr[] => [
+    // second char is lc/uc?
+    { op: "local.get", index: L_DATA },
+    { op: "local.get", index: L_I },
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" },
+    { op: "array.get_u", typeIdx: strDataTypeIdx },
+    { op: "local.tee", index: L_C },
+    { op: "i32.const", value: lc },
+    { op: "i32.eq" },
+    { op: "local.get", index: L_C },
+    { op: "i32.const", value: uc },
+    { op: "i32.eq" },
+    { op: "i32.or" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "i32.const", value: radix },
+        { op: "local.set", index: L_RADIX },
+        // advance past "0x"/"0o"/"0b"
+        { op: "local.get", index: L_I },
+        { op: "i32.const", value: 2 },
+        { op: "i32.add" },
+        { op: "local.set", index: L_I },
+        // require at least one digit
+        { op: "local.get", index: L_I },
+        { op: "local.get", index: L_END },
+        { op: "i32.ge_s" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "f64.const", value: NaN }, { op: "return" }],
+        },
+        { op: "f64.const", value: 0 },
+        { op: "local.set", index: L_RESULT },
+        // digit loop over [i, end)
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: L_I },
+                { op: "local.get", index: L_END },
+                { op: "i32.ge_s" },
+                { op: "br_if", depth: 1 },
+                ...([
+                  { op: "local.get", index: L_DATA },
                   { op: "local.get", index: L_I },
-                  { op: "local.get", index: L_END },
-                  { op: "i32.ge_s" },
-                  { op: "br_if", depth: 1 },
-                  ...([
-                    { op: "local.get", index: L_DATA },
-                    { op: "local.get", index: L_I },
-                    { op: "array.get_u", typeIdx: strDataTypeIdx },
-                    { op: "local.set", index: L_C },
-                  ] as Instr[]),
-                  ...emitDigitValue(L_C, L_DIG),
-                  // invalid digit or >= radix → NaN
-                  { op: "local.get", index: L_DIG },
-                  { op: "i32.const", value: 0 },
-                  { op: "i32.lt_s" },
-                  { op: "local.get", index: L_DIG },
-                  { op: "i32.const", value: radix },
-                  { op: "i32.ge_s" },
-                  { op: "i32.or" },
-                  {
-                    op: "if",
-                    blockType: { kind: "empty" },
-                    then: [{ op: "f64.const", value: NaN }, { op: "return" }],
-                  },
-                  { op: "local.get", index: L_RESULT },
-                  { op: "f64.const", value: radix },
-                  { op: "f64.mul" },
-                  { op: "local.get", index: L_DIG },
-                  { op: "f64.convert_i32_s" },
-                  { op: "f64.add" },
-                  { op: "local.set", index: L_RESULT },
-                  { op: "local.get", index: L_I },
-                  { op: "i32.const", value: 1 },
-                  { op: "i32.add" },
-                  { op: "local.set", index: L_I },
-                  { op: "br", depth: 0 },
-                ],
-              },
-            ],
-          },
-          { op: "local.get", index: L_RESULT },
-          { op: "return" },
-        ],
-      },
-    ],
-  });
+                  { op: "array.get_u", typeIdx: strDataTypeIdx },
+                  { op: "local.set", index: L_C },
+                ] as Instr[]),
+                ...emitDigitValue(L_C, L_DIG),
+                // invalid digit or >= radix → NaN
+                { op: "local.get", index: L_DIG },
+                { op: "i32.const", value: 0 },
+                { op: "i32.lt_s" },
+                { op: "local.get", index: L_DIG },
+                { op: "i32.const", value: radix },
+                { op: "i32.ge_s" },
+                { op: "i32.or" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [{ op: "f64.const", value: NaN }, { op: "return" }],
+                },
+                { op: "local.get", index: L_RESULT },
+                { op: "f64.const", value: radix },
+                { op: "f64.mul" },
+                { op: "local.get", index: L_DIG },
+                { op: "f64.convert_i32_s" },
+                { op: "f64.add" },
+                { op: "local.set", index: L_RESULT },
+                { op: "local.get", index: L_I },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_I },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        { op: "local.get", index: L_RESULT },
+        { op: "return" },
+      ],
+    },
+  ];
   void L_SAW;
   return [
     // guard: sign==1 (no sign consumed) && i+1 < end && data[i]=='0'
@@ -946,7 +988,14 @@ function emitRadixPrefixParse(
     { op: "i32.const", value: C_ZERO },
     { op: "i32.eq" },
     { op: "i32.and" },
-    buildArm(C_LC_X, C_UC_X, 16),
+    // §7.1.4.1 StringToNumber: 0x/0X → hex, 0o/0O → octal, 0b/0B → binary.
+    // Each arm re-reads data[i+1] and only acts on its prefix letter, so a
+    // non-matching arm is a no-op and control falls through to the next.
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...buildArm(C_LC_X, C_UC_X, 16), ...buildArm(C_LC_O, C_UC_O, 8), ...buildArm(C_LC_B, C_UC_B, 2)],
+    },
   ];
 }
 

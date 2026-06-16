@@ -7,9 +7,12 @@
  */
 
 import type { ArrayTypeDef, Instr, StructTypeDef, TypeDef, ValType } from "../ir/types.js";
+import { coercionPlan } from "./coercion-plan.js";
+import { boxToAny } from "./value-tags.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext, OptionalParamInfo } from "./context/types.js";
-import { addUnionImports, ensureAnyHelpers, isAnyValue } from "./index.js";
+import { addUnionImports, ensureAnyHelpers, ensureAnyToExternHelper, isAnyValue } from "./index.js";
+import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { getArrTypeIdxFromVec } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts, registerCoerceType } from "./shared.js";
@@ -78,10 +81,7 @@ export type CompileStringLiteralFn = (ctx: CodegenContext, fctx: FunctionContext
  */
 function pushStringHint(ctx: CodegenContext, fctx: FunctionContext, hint: string): void {
   addStringConstantGlobal(ctx, hint);
-  const globalIdx = ctx.stringGlobalMap.get(hint);
-  if (globalIdx !== undefined) {
-    fctx.body.push({ op: "global.get", index: globalIdx });
-  }
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, hint));
 }
 
 /**
@@ -200,11 +200,31 @@ export function buildVecFromExternref(
   flushLateImportShifts(ctx, fctx);
   const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
-  // Materialize iterables (generators, custom @@iterator) via Array.from so
-  // the length/indexed-access loop below walks a real array. Throws from
-  // iterator .next() propagate to the caller (#1150).
-  const iterIdx = ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
-  flushLateImportShifts(ctx, fctx);
+  // #1472 Phase B Blocker B Slice 2 — standalone enumeration consumer.
+  //
+  // `__array_from_iter` is a JS-host import (it invokes the Symbol.iterator
+  // protocol via the runtime). In standalone there is no host, and the source
+  // we are coercing here is already an indexable externref — the native
+  // `$ObjVec` produced by `__object_keys`/`values`/`entries` (Slice 1), which
+  // `__extern_length` + `__extern_get_idx` read directly. So under
+  // `ctx.standalone` we SKIP the materialization step (pass the externref
+  // through unchanged) and read it with the native indexed accessor below,
+  // never leaking `env::__array_from_iter`. (Generators / custom @@iterator
+  // standalone materialization is a separate slice — those don't reach an
+  // $ObjVec source.) The JS-host path is unchanged.
+  const useNativeObjVec = ctx.standalone;
+  const iterIdx = useNativeObjVec
+    ? undefined
+    : ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }]);
+  if (!useNativeObjVec) flushLateImportShifts(ctx, fctx);
+  // In standalone, indexed reads go through the native `__extern_get_idx`
+  // (f64 index → element) instead of `__extern_get(obj, boxed-index)` — the
+  // native `__extern_get` casts its key to $AnyString and would trap on a
+  // boxed number. (#1472 Phase B Blocker B Slice 2)
+  const getIdxIdx = useNativeObjVec
+    ? ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }])
+    : undefined;
+  if (useNativeObjVec) flushLateImportShifts(ctx, fctx);
 
   if (lenIdx === undefined || getIdx === undefined) {
     return [{ op: "ref.null", typeIdx: vecTypeIdx } as Instr];
@@ -304,14 +324,25 @@ export function buildVecFromExternref(
             { op: "local.get", index: arrLocal } as Instr,
             { op: "local.get", index: idxLocal } as Instr,
             { op: "local.get", index: matLocal } as Instr,
-            ...(boxIdx !== undefined
+            // Standalone: native __extern_get_idx(obj, f64(idx)) — reads the
+            // $ObjVec element by index without a boxed-string key. JS-host:
+            // __extern_get(obj, boxed-numeric-index) (host handles numeric keys).
+            ...(useNativeObjVec && getIdxIdx !== undefined
               ? [
                   { op: "local.get", index: idxLocal } as Instr,
                   { op: "f64.convert_i32_s" } as Instr,
-                  { op: "call", funcIdx: boxIdx } as Instr,
+                  { op: "call", funcIdx: getIdxIdx } as Instr,
                 ]
-              : [{ op: "ref.null.extern" } as Instr]),
-            { op: "call", funcIdx: getIdx } as Instr,
+              : [
+                  ...(boxIdx !== undefined
+                    ? [
+                        { op: "local.get", index: idxLocal } as Instr,
+                        { op: "f64.convert_i32_s" } as Instr,
+                        { op: "call", funcIdx: boxIdx } as Instr,
+                      ]
+                    : [{ op: "ref.null.extern" } as Instr]),
+                  { op: "call", funcIdx: getIdx } as Instr,
+                ]),
             ...buildElemCoerce(),
             { op: "array.set", typeIdx: vecInfo.arrTypeIdx } as Instr,
             { op: "local.get", index: idxLocal } as Instr,
@@ -976,12 +1007,10 @@ export function coerceType(
       const fromIdx = (from as { typeIdx: number }).typeIdx;
       const toIdx = (to as { typeIdx: number }).typeIdx;
       if (fromIdx === toIdx) return;
-      // Boxing: non-any ref → any ref
+      // Boxing: non-any ref → any ref (#2104: via boxToAny → __any_box_ref)
       if (isAnyValue(to, ctx) && !isAnyValue(from, ctx)) {
         ensureAnyHelpers(ctx);
-        const funcIdx = ctx.funcMap.get("__any_box_ref");
-        if (funcIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx });
+        if (boxToAny(ctx, fctx, from, "unknown")) {
           return;
         }
       }
@@ -1065,12 +1094,10 @@ export function coerceType(
   }
   // ref is a subtype of ref_null — no coercion needed for same typeIdx
   if (from.kind === "ref" && to.kind === "ref_null") {
-    // But check for any-value boxing (ref $X → ref_null $AnyValue)
+    // But check for any-value boxing (ref $X → ref_null $AnyValue) (#2104)
     if (isAnyValue(to, ctx) && !isAnyValue(from, ctx)) {
       ensureAnyHelpers(ctx);
-      const funcIdx = ctx.funcMap.get("__any_box_ref");
-      if (funcIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx });
+      if (boxToAny(ctx, fctx, from, "unknown")) {
         return;
       }
     }
@@ -1103,6 +1130,35 @@ export function coerceType(
     if (isAnyValue(from, ctx) && !isAnyValue(to, ctx)) {
       ensureAnyHelpers(ctx);
       const toIdx = (to as { typeIdx: number }).typeIdx;
+      // (#1988) A native string is boxed into $AnyValue tag 5 with its payload
+      // in `externval` (field 4, externref-wrapped $AnyString) — NOT `refval`
+      // (field 3, eqref). The generic unbox below reads field 3, so a tag-5
+      // string box (e.g. the result of the `__any_add` concat arm) deref'd null.
+      // When the target is a native-string type, pull the string out of
+      // externval and cast it; fall through to the field-3 eqref path for every
+      // other GC ref target (objects/arrays/tag 6).
+      const isNativeStrTarget =
+        ctx.nativeStrings &&
+        (toIdx === ctx.anyStrTypeIdx || (ctx.nativeStrTypeIdx >= 0 && toIdx === ctx.nativeStrTypeIdx));
+      if (isNativeStrTarget) {
+        const tmpStr = allocTempLocal(fctx, { kind: "anyref" } as ValType);
+        fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 4 }); // externval
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        fctx.body.push({ op: "local.tee", index: tmpStr });
+        fctx.body.push({ op: "ref.test", typeIdx: toIdx });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: { kind: "ref_null", typeIdx: toIdx } as ValType },
+          then: [
+            { op: "local.get", index: tmpStr },
+            { op: "ref.cast_null", typeIdx: toIdx },
+          ],
+          else: [{ op: "ref.null", typeIdx: toIdx }],
+        });
+        fctx.body.push({ op: "ref.as_non_null" } as Instr);
+        releaseTempLocal(fctx, tmpStr);
+        return;
+      }
       fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 3 });
       // Guarded cast: eqref → ref $X
       const tmpUnbox = allocTempLocal(fctx, { kind: "eqref" } as ValType);
@@ -1147,44 +1203,19 @@ export function coerceType(
   }
 
   // ── Boxing: primitive → ref $AnyValue ──
+  // #2104: tag-selection policy now lives in `boxToAny` (value-tags.ts) — the
+  // single home so the type-aware boxing fix (#2072/#2080 P0) can't erode. This
+  // arm keeps the `addUnionImports`/`ensureAnyHelpers` setup (helper
+  // registration is the caller's job, so resolution+call stays shift-safe) and
+  // delegates the kind-keyed dispatch. `jsType: "unknown"` reproduces the
+  // historical externref→tag-5 (#1888) / ref→tag-6 behaviour exactly.
   if (isAnyValue(to, ctx)) {
+    if (from.kind === "externref" && (ctx.standalone || ctx.wasi)) {
+      addUnionImports(ctx);
+    }
     ensureAnyHelpers(ctx);
-    if (from.kind === "i32") {
-      const funcIdx = ctx.funcMap.get("__any_box_i32");
-      if (funcIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx });
-        return;
-      }
-    }
-    if (from.kind === "f64") {
-      const funcIdx = ctx.funcMap.get("__any_box_f64");
-      if (funcIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx });
-        return;
-      }
-    }
-    if (from.kind === "i64") {
-      // i64 → AnyValue: convert to f64 first, then box as f64
-      const funcIdx = ctx.funcMap.get("__any_box_f64");
-      if (funcIdx !== undefined) {
-        fctx.body.push({ op: "f64.convert_i64_s" });
-        fctx.body.push({ op: "call", funcIdx });
-        return;
-      }
-    }
-    if (from.kind === "externref") {
-      const funcIdx = ctx.funcMap.get("__any_box_string");
-      if (funcIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx });
-        return;
-      }
-    }
-    if (from.kind === "ref" || from.kind === "ref_null") {
-      const funcIdx = ctx.funcMap.get("__any_box_ref");
-      if (funcIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx });
-        return;
-      }
+    if (boxToAny(ctx, fctx, from, "unknown")) {
+      return;
     }
   }
 
@@ -1266,7 +1297,15 @@ export function coerceType(
       }
     }
     if (to.kind === "externref") {
-      // Convert GC ref (AnyValue struct) to externref via extern.convert_any
+      if (ctx.standalone || ctx.wasi) {
+        addUnionImports(ctx);
+        const anyToExternIdx = ensureAnyToExternHelper(ctx);
+        if (anyToExternIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: anyToExternIdx });
+          return;
+        }
+      }
+      // Convert GC ref (AnyValue struct) to externref via extern.convert_any.
       fctx.body.push({ op: "extern.convert_any" });
       return;
     }
@@ -1319,6 +1358,29 @@ export function coerceType(
   }
   // externref → f64 (unbox number)
   if (from.kind === "externref" && to.kind === "f64") {
+    if (ctx.standalone) {
+      const hint = toPrimitiveHint ?? "number";
+      pushStringHint(ctx, fctx, hint);
+      const toPrimIdx = ensureLateImport(
+        ctx,
+        "__to_primitive",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (toPrimIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: toPrimIdx });
+      }
+      addUnionImports(ctx);
+      const funcIdx = ctx.funcMap.get("__unbox_number");
+      if (funcIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx });
+        return;
+      }
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "f64.const", value: NaN });
+      return;
+    }
     addUnionImports(ctx);
     const funcIdx = ctx.funcMap.get("__unbox_number");
     if (funcIdx !== undefined) {
@@ -1514,7 +1576,21 @@ export function coerceType(
     // Skip i32_byte vec structs (ArrayBuffer/DataView backing) — neither is
     // iterable in JS and converting them to a JS array loses the wasmGC
     // struct identity that DataView method dispatch depends on (#1056).
-    if (getArrTypeIdxFromVec(ctx, typeIdx) >= 0 && ctx.vecTypeMap.get("i32_byte") !== typeIdx) {
+    //
+    // #1539/#1470/#1664: `__make_iterable` is a JS HOST import. In standalone /
+    // WASI mode there is no JS runtime, so attaching it (a) breaks standalone
+    // purity and (b) shifts already-emitted function indices (the late-import
+    // hazard — observed corrupting `__str_flatten`). Standalone keeps the vec as
+    // a WasmGC `$Vec` and the consumer uses the native array ops
+    // (`.length`/index/for-of) that already operate on it directly (this is why
+    // `String.prototype.split` works standalone). So only attach the JS-host
+    // iterable shim in JS-host mode.
+    if (
+      !ctx.standalone &&
+      !ctx.wasi &&
+      getArrTypeIdxFromVec(ctx, typeIdx) >= 0 &&
+      ctx.vecTypeMap.get("i32_byte") !== typeIdx
+    ) {
       const makeIterIdx = ensureLateImport(ctx, "__make_iterable", [{ kind: "externref" }], [{ kind: "externref" }]);
       if (makeIterIdx !== undefined) {
         flushLateImportShifts(ctx, fctx);
@@ -1647,6 +1723,32 @@ export function coerceType(
   // ref (struct) → f64: JS ToNumber semantics — check @@toPrimitive("number") first, then valueOf
   // Re-entrancy guard: prevent infinite recursion when valueOf itself returns a struct.
   if ((from.kind === "ref" || from.kind === "ref_null") && to.kind === "f64") {
+    const typeIdx = (from as { typeIdx: number }).typeIdx;
+    if (
+      ctx.nativeStrings &&
+      (typeIdx === ctx.anyStrTypeIdx || (ctx.nativeStrTypeIdx >= 0 && typeIdx === ctx.nativeStrTypeIdx))
+    ) {
+      let strToNumberIdx = ctx.funcMap.get("__str_to_number");
+      if (strToNumberIdx === undefined) {
+        addUnionImports(ctx);
+        strToNumberIdx = ctx.funcMap.get("__str_to_number");
+      }
+      if (strToNumberIdx !== undefined) {
+        fctx.body.push({ op: "extern.convert_any" });
+        fctx.body.push({ op: "call", funcIdx: strToNumberIdx });
+        return;
+      }
+      addUnionImports(ctx);
+      const unboxIdx = ctx.funcMap.get("__unbox_number");
+      if (unboxIdx !== undefined) {
+        fctx.body.push({ op: "extern.convert_any" });
+        fctx.body.push({ op: "call", funcIdx: unboxIdx });
+        return;
+      }
+      fctx.body.push({ op: "drop" });
+      fctx.body.push({ op: "f64.const", value: NaN });
+      return;
+    }
     const wasInsideValueOf = (ctx as any).__insideValueOfCoercion ?? false;
     if (wasInsideValueOf) {
       // Already inside a valueOf coercion — don't recurse, return NaN
@@ -1660,7 +1762,6 @@ export function coerceType(
     const cleanup = () => {
       (ctx as any).__insideValueOfCoercion = wasInsideValueOf;
     };
-    const typeIdx = (from as { typeIdx: number }).typeIdx;
     const name = ctx.typeIdxToStructName.get(typeIdx);
     if (name !== undefined) {
       // Check for [Symbol.toPrimitive] method first — takes precedence over valueOf
@@ -1937,6 +2038,13 @@ export function coerceType(
             for (const instr of buildDispatch(0)) {
               fctx.body.push(instr);
             }
+            // (#1989) Restore the re-entrancy guard before returning. Without
+            // this, coercing the FIRST of two struct operands (e.g. `a < b`)
+            // leaves `__insideValueOfCoercion` set, so the SECOND operand's
+            // coercion takes the recursion-guard early-return and silently
+            // yields NaN. (Latent since this eqref-closure path was rarely
+            // reached for method-shorthand before per-instance dispatch.)
+            cleanup();
             return;
           }
           // No closure types found — check for a standalone ClassName_valueOf function (#433)
@@ -2144,6 +2252,228 @@ function tryToStringFallback(
     const funcType = ctx.mod.types[ctx.mod.functions[toStrFuncIdx - ctx.numImportFuncs]?.typeIdx ?? -1];
     const retKind = funcType?.kind === "func" ? funcType.results?.[0]?.kind : undefined;
     emitToStringResultToF64ByKind(ctx, fctx, retKind);
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * #1806 Phase 1 (string-hint slice) — OrdinaryToPrimitive over a compile-time
+ * resolvable object struct in the **string** direction, for `--target standalone`
+ * / WASI (native-strings) mode where there is no JS host `__to_primitive`.
+ *
+ * Mirrors the closure/method dispatch of {@link tryToStringFallback} (the
+ * numeric-hint walker) but produces a string instead of an f64, so that
+ * `obj + "s"`, `` `${obj}` `` and `String(obj)` invoke the object's own
+ * `@@toPrimitive("string")` / `toString` instead of falling through to the
+ * `$__any_to_string` helper, which can only emit `"[object Object]"` for a
+ * struct it cannot introspect.
+ *
+ * Per ECMA-262 §7.1.1.1 OrdinaryToPrimitive with hint "string": try `toString`
+ * first, then `valueOf`. We dispatch (in precedence order):
+ *   1. the `toString` closure field (object-literal method) via call_ref
+ *   2. a named `${name}_toString` method in funcMap
+ * Each result is normalised to a `ref $AnyString` (the native string the concat
+ * / template path expects). On success the struct ref on top of the stack is
+ * consumed and a `ref $AnyString` is left; returns true. When neither form is
+ * statically resolvable, the struct ref is left untouched and the function
+ * returns false so the caller can fall back to `$__any_to_string`.
+ *
+ * NOTE: a user `[Symbol.toPrimitive]` ("string"-hint precedence over toString)
+ * is intentionally NOT handled here yet — its hint argument must be marshalled
+ * as a native string in standalone/native-strings mode, which the existing
+ * `pushStringHint` (externref-global) path does not satisfy. Left to a follow-up
+ * so this slice stays regression-free; objects with only `toString`/`valueOf`
+ * (the dominant cluster) are covered.
+ *
+ * Expects the struct ref on top of the Wasm stack; consumes it only on success.
+ */
+export function tryStructToString(ctx: CodegenContext, fctx: FunctionContext, from: ValType): boolean {
+  if (from.kind !== "ref" && from.kind !== "ref_null") return false;
+  const typeIdx = (from as { typeIdx: number }).typeIdx;
+  const name = ctx.typeIdxToStructName.get(typeIdx);
+  if (name === undefined) return false;
+  // The native string type indices (`anyStrTypeIdx`, used by the result
+  // normaliser + `$__any_to_string`) are populated lazily; ensure they exist
+  // before any `ref.cast`/helper emission below references them.
+  ensureAnyToStringHelper(ctx);
+  if (ctx.anyStrTypeIdx < 0) return false;
+
+  // Normalise whatever the dispatched method left on the stack into a
+  // `ref $AnyString`. Strings come back as externref / ref $AnyString; numbers
+  // and booleans are routed through the standalone `$__any_to_string` dispatcher
+  // (which handles AnyValue boxes + AnyString passthrough). A bare ref_null
+  // string is cast to the concrete $AnyString so the value type is exact.
+  const normaliseToString = (retKind: string | undefined): void => {
+    if (retKind === "externref" || retKind === "ref_extern") {
+      // externref holding a native string → any.convert_extern + cast.
+      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+    } else if (retKind === "ref" || retKind === "ref_null") {
+      // Already an anyref subtype (the native `$AnyString` is `ref null 5`).
+      // ref.cast to the concrete $AnyString so the value type is exact.
+      fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+    } else {
+      // f64 / i32 / boolean / void → box and route through $__any_to_string.
+      const anyToStrIdx = ensureAnyToStringHelper(ctx);
+      if (retKind === "i32") {
+        // Could be a bare number or a boolean; treat as number for ToString.
+        fctx.body.push({ op: "f64.convert_i32_s" });
+        addUnionImports(ctx);
+        const boxIdx = ctx.funcMap.get("__box_number");
+        if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+      } else if (retKind === "f64") {
+        addUnionImports(ctx);
+        const boxIdx = ctx.funcMap.get("__box_number");
+        if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+      }
+      fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+    }
+  };
+
+  const funcResultKind = (funcIdx: number): string | undefined => {
+    const defIdx = funcIdx - ctx.numImportFuncs;
+    const def = defIdx >= 0 ? ctx.mod.functions[defIdx] : undefined;
+    const ft = def ? ctx.mod.types[def.typeIdx] : undefined;
+    return ft?.kind === "func" ? ft.results?.[0]?.kind : undefined;
+  };
+
+  // 1. `toString` closure field (object-literal method) via call_ref.
+  // (A user `[Symbol.toPrimitive]` would take precedence per §7.1.1.1, but its
+  // native-string hint marshalling is deferred — see the function doc comment.)
+  const fields = ctx.structFields.get(name);
+  if (fields) {
+    const toStrFieldIdx = fields.findIndex((f) => f.name === "toString");
+    if (toStrFieldIdx >= 0) {
+      const toStrField = fields[toStrFieldIdx]!;
+      if (toStrField.type.kind === "ref" || toStrField.type.kind === "ref_null") {
+        const closureTypeIdx = (toStrField.type as { typeIdx: number }).typeIdx;
+        const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
+        if (closureInfo) {
+          const structLocal = allocLocal(fctx, `__sts_struct_${fctx.locals.length}`, from);
+          fctx.body.push({ op: "local.set", index: structLocal });
+          fctx.body.push({ op: "local.get", index: structLocal });
+          fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: toStrFieldIdx });
+          const closureLocal = allocLocal(fctx, `__sts_closure_${fctx.locals.length}`, toStrField.type);
+          fctx.body.push({ op: "local.tee", index: closureLocal });
+          fctx.body.push({ op: "local.get", index: closureLocal });
+          fctx.body.push({ op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 });
+          {
+            const tmpFunc = allocTempLocal(fctx, { kind: "funcref" } as ValType);
+            fctx.body.push({ op: "local.tee", index: tmpFunc });
+            fctx.body.push({ op: "ref.test", typeIdx: closureInfo.funcTypeIdx });
+            fctx.body.push({
+              op: "if",
+              blockType: { kind: "val", type: { kind: "ref_null", typeIdx: closureInfo.funcTypeIdx } as ValType },
+              then: [
+                { op: "local.get", index: tmpFunc },
+                { op: "ref.cast_null", typeIdx: closureInfo.funcTypeIdx },
+              ],
+              else: [{ op: "ref.null", typeIdx: closureInfo.funcTypeIdx }],
+            } as Instr);
+            releaseTempLocal(fctx, tmpFunc);
+          }
+          fctx.body.push({ op: "ref.as_non_null" });
+          fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx });
+          normaliseToString(closureInfo.returnType?.kind);
+          return true;
+        }
+      }
+      // eqref-stored closure (object-literal method) — recover the concrete
+      // closure type from the tracked list (populated in literals.ts; the map
+      // name covers toString too) and call it. Mirrors the numeric-hint eqref
+      // dispatch (ref→f64) but normalises the result to a native string.
+      if (toStrField.type.kind === "eqref") {
+        const trackedTypes = ctx.valueOfClosureTypes.get(name) ?? [];
+        const allCallable: { closureTypeIdx: number; info: ClosureInfo }[] = [];
+        for (const closureTypeIdx of trackedTypes) {
+          const info = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
+          if (info && info.paramTypes.length === 0) allCallable.push({ closureTypeIdx, info });
+        }
+        // The tracked list mixes the `valueOf` (f64-returning) and `toString`
+        // (string-returning) closure types for this struct, and structurally
+        // identical closure structs are indistinguishable by `ref.test`. For a
+        // string hint prefer the string-returning closure(s) so we never call a
+        // number-returning `valueOf` with the wrong signature (a null-deref /
+        // illegal cast). If none return a string, fall back to all candidates.
+        const isStringReturn = (rt: ValType | null | undefined): boolean =>
+          rt?.kind === "externref" || rt?.kind === "ref_extern" || rt?.kind === "ref" || rt?.kind === "ref_null";
+        const stringReturning = allCallable.filter((c) => isStringReturn(c.info.returnType));
+        const callable = stringReturning.length > 0 ? stringReturning : allCallable;
+        if (callable.length === 0) return false;
+        const structLocal = allocLocal(fctx, `__sts_estruct_${fctx.locals.length}`, from);
+        fctx.body.push({ op: "local.set", index: structLocal });
+        fctx.body.push({ op: "local.get", index: structLocal });
+        fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: toStrFieldIdx });
+        const eqLocal = allocLocal(fctx, `__sts_eq_${fctx.locals.length}`, { kind: "eqref" });
+        fctx.body.push({ op: "local.set", index: eqLocal });
+        // Build a nested if/else that tries each candidate closure type. Every
+        // arm produces a `ref $AnyString`; the final fallback is "[object Object]".
+        const buildDispatch = (idx: number): Instr[] => {
+          if (idx >= callable.length) {
+            return [
+              { op: "local.get", index: structLocal } as Instr,
+              { op: "call", funcIdx: ensureAnyToStringHelper(ctx) } as Instr,
+            ];
+          }
+          const { closureTypeIdx, info } = callable[idx]!;
+          const closureLocal = allocLocal(fctx, `__sts_cl_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: closureTypeIdx,
+          });
+          const funcTmp = allocLocal(fctx, `__sts_fn_${fctx.locals.length}`, { kind: "funcref" } as ValType);
+          const thenInstrs: Instr[] = [
+            { op: "local.get", index: eqLocal } as Instr,
+            { op: "ref.cast", typeIdx: closureTypeIdx },
+            { op: "local.tee", index: closureLocal } as Instr,
+            { op: "local.get", index: closureLocal } as Instr,
+            { op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 } as Instr,
+            { op: "local.tee", index: funcTmp },
+            { op: "ref.test", typeIdx: info.funcTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "ref_null", typeIdx: info.funcTypeIdx } as ValType },
+              then: [
+                { op: "local.get", index: funcTmp },
+                { op: "ref.cast_null", typeIdx: info.funcTypeIdx },
+              ],
+              else: [{ op: "ref.null", typeIdx: info.funcTypeIdx }],
+            } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "call_ref", typeIdx: info.funcTypeIdx } as Instr,
+          ];
+          // Inline the result normalisation into this arm's instruction list.
+          const savedBody = fctx.body;
+          const scratch: Instr[] = [];
+          fctx.body = scratch;
+          normaliseToString(info.returnType?.kind);
+          fctx.body = savedBody;
+          thenInstrs.push(...scratch);
+          return [
+            { op: "local.get", index: eqLocal } as Instr,
+            { op: "ref.test", typeIdx: closureTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "ref", typeIdx: ctx.anyStrTypeIdx } as ValType },
+              then: thenInstrs,
+              else: buildDispatch(idx + 1),
+            } as Instr,
+          ];
+        };
+        for (const instr of buildDispatch(0)) fctx.body.push(instr);
+        return true;
+      }
+    }
+  }
+
+  // 2. Named `${name}_toString` method.
+  const toStrFuncIdx = ctx.funcMap.get(`${name}_toString`);
+  if (toStrFuncIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: toStrFuncIdx });
+    normaliseToString(funcResultKind(toStrFuncIdx));
     return true;
   }
 
@@ -2388,44 +2718,40 @@ export function coercionInstrs(ctx: CodegenContext, from: ValType, to: ValType, 
     if (fromKind === "f64" && toKind === "i32") return [{ op: "i32.trunc_sat_f64_s" } as Instr];
   }
   if (from.kind === to.kind) return [];
-  // f64 → externref: box number
-  if (from.kind === "f64" && to.kind === "externref") {
-    addUnionImports(ctx);
-    const funcIdx = ctx.funcMap.get("__box_number");
-    if (funcIdx !== undefined) {
-      return [{ op: "call", funcIdx } as Instr];
-    }
+
+  // #1917 Step 0: scalar / numeric / box-unbox rows come from the single
+  // coercion table. Excluded here (kept as the original rows below): `from`
+  // ref/ref_null — coercionInstrs intentionally NaNs/0s a bare GC ref ToNumber
+  // (object without valueOf, §7.1.4) and has its own AnyValue→externref helper
+  // + guarded ref.cast arms that need `ctx`/`fctx`.
+  if (from.kind !== "ref" && from.kind !== "ref_null") {
+    const needsBox =
+      (to.kind === "externref" || to.kind === "ref_extern") &&
+      (fromKind === "f64" || fromKind === "i32" || fromKind === "i64");
+    const needsUnbox =
+      (from.kind === "externref" || from.kind === "ref_extern") &&
+      (toKind === "f64" || toKind === "i32" || toKind === "i64");
+    if (needsBox || needsUnbox) addUnionImports(ctx);
+    const plan = coercionPlan(from, to, {
+      boxNumberIdx: ctx.funcMap.get("__box_number") ?? null,
+      unboxNumberIdx: ctx.funcMap.get("__unbox_number") ?? null,
+    });
+    if (plan && !plan.lossy) return plan.instrs;
   }
-  // i32 → externref: convert to f64 then box
-  if (from.kind === "i32" && to.kind === "externref") {
-    addUnionImports(ctx);
-    const funcIdx = ctx.funcMap.get("__box_number");
-    if (funcIdx !== undefined) {
-      return [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx } as Instr];
-    }
-  }
-  // i32 → f64
-  if (from.kind === "i32" && to.kind === "f64") {
-    return [{ op: "f64.convert_i32_s" } as Instr];
-  }
-  // f64 → i32
-  if (from.kind === "f64" && to.kind === "i32") {
-    return [{ op: "i32.trunc_sat_f64_s" } as Instr];
-  }
-  // externref → f64: unbox number
-  if (from.kind === "externref" && to.kind === "f64") {
-    addUnionImports(ctx);
-    const funcIdx = ctx.funcMap.get("__unbox_number");
-    if (funcIdx !== undefined) {
-      return [{ op: "call", funcIdx } as Instr];
-    }
-  }
+
   // ref_null → ref: assert non-null
   if (from.kind === "ref_null" && to.kind === "ref") {
     return [{ op: "ref.as_non_null" } as Instr];
   }
   // ref/ref_null → externref: extern.convert_any
   if ((from.kind === "ref" || from.kind === "ref_null") && to.kind === "externref") {
+    if ((ctx.standalone || ctx.wasi) && isAnyValue(from, ctx)) {
+      addUnionImports(ctx);
+      const anyToExternIdx = ensureAnyToExternHelper(ctx);
+      if (anyToExternIdx !== undefined) {
+        return [{ op: "call", funcIdx: anyToExternIdx } as Instr];
+      }
+    }
     return [{ op: "extern.convert_any" } as Instr];
   }
   // externref → i32: unbox number then truncate

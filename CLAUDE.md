@@ -187,15 +187,17 @@ Default rule: if the agent's job is "produce one document and exit," it's a suba
 
 **IMPORTANT: Always use team name `"js2wasm"`** — this is the single permanent team. Never create ad-hoc team names (e.g. `"wasi-conflicts"`, `"s52-wave2"`). One team, one task queue, always.
 
-**Key numbers**: 16GB RAM + 16GB swap (container, set in `.devcontainer/devcontainer.json`). `free -m` may report ~20GB but Docker enforces 16GB hard limit. **Up to 8 dev teammates** (no local test262 — CI handles it). All agents use `bypassPermissions` mode + worktree isolation. Work driven by `plan/log/dependency-graph.md`.
+**Key numbers**: 16GB RAM + 16GB swap (container, set in `.devcontainer/devcontainer.json`), **8 cores**. `free -m` may report ~20GB but Docker enforces 16GB hard limit. **CPU is the binding constraint, not RAM** — keep concurrent *active* agents to ~`cores − 2` (≈6 here) so the box stays interactive; the `pre-agent-spawn.sh` load gate enforces this. All agents use `bypassPermissions` mode + worktree isolation. Work driven by `plan/log/dependency-graph.md`.
 
 **RAM monitoring**: Use `free -m` "available" column (not "free"). "free" excludes reclaimable disk cache. Hooks check "available" before allowing agent spawns.
+
+**CPU / concurrency cap (the binding limit)**: The real bottleneck on this box is CPU, not RAM — agents are cheap while idle (waiting on the API) but each *active* one bursts a core during compile/test. With no ceiling, load oversubscribes (it hit 13–16 on 8 cores), which starves sshd and drops interactive SSH sessions. `pre-agent-spawn.sh` therefore hard-blocks a new spawn when the **1-min load average ≥ `cores − 2`** (the `JS2WASM_MAX_LOAD` env var; default leaves ~2 cores for the lead/IDE/sshd/system). It gates on *load*, not a process count, because the harness keeps a warm `claude.exe` pool (`--bg-spare`/`--bg-pty-host`) that makes process-counting a poor proxy for active agents. Raise `JS2WASM_MAX_LOAD` to trade SSH responsiveness for throughput.
 
 **Memory budget** (measured peaks via `/proc/[pid]/status` VmHWM):
 - Fixed: Cursor ~1,400MB + system ~1,200MB + tech lead ~1,400MB = **~4,000MB**
 - Dev agent: ~700MB peak (no local test262)
 - Test262 (CI only): ~4,300MB peak per shard — runs in GitHub Actions, not locally
-- **Max 8 devs** (~9.6GB headroom). Check `free -m` available before spawning.
+- RAM allows ~8 devs (~9.6GB headroom), but **CPU is the tighter limit**: target ~`cores − 2` (≈6) concurrent *active* agents. The `pre-agent-spawn.sh` load gate (see "CPU / concurrency cap" above) enforces it; `free -m` available is still a secondary floor.
 
 ### Agent lifecycle — when to spawn, skill, or terminate
 
@@ -311,7 +313,7 @@ GitHub branch protection is the hard block.
    - Planning artifact conflicts (`dashboard/`, `plan/`, `public/`) → `git checkout --theirs` + regen
    - Compiler source conflicts (`src/**/*.ts`) → create a priority `[CONFLICT]` TaskList item; assign to `senior-developer` (Opus); do NOT resolve inline
 2. **Dev runs scoped local checks** — issue-targeted compile/run checks for confidence
-3. **Dev pushes the branch to origin and opens a PR against `main`**
+3. **Dev pushes the branch to origin and opens a PR against `main`** — PRs MUST target the **upstream** repo (`loopdive/js2`), never the fork (`ttraenkler/js2`). **Always pass `-R loopdive/js2 --head ttraenkler:<branch>` to `gh pr create`** — the container's gh 2.23 ignores the pinned default (`remote.upstream.gh-resolved=base`) for `pr create` and silently opens the PR on the fork (verified 2026-06-11: fork PRs #6/#7 both had to be closed as misrouted). After creating, verify the PR URL starts with `github.com/loopdive/`. Note the pre-push integrity gate chokes on the fork/upstream divergence — `git push --no-verify` is sanctioned (CI runs the real gate).
 4. **Dev blocks on CI** — polls `gh pr checks <N>` every 30s for ~2 min wall time, in-context (Sonnet idle is nearly free). Use `gh run watch <run-id>` or a `while ! done; do sleep 30; done` loop with a max timeout (~10 min before noting unusual wait, ~20 min before escalating).
 5. **On CI completion**:
    - **All required checks green** → run `/dev-self-merge`; if MERGE, enqueue via GraphQL `enqueuePullRequest` (NOT `gh pr merge --auto` — it silently no-ops on already-green `CLEAN` PRs and never queues them), then proceed to step 8
@@ -337,7 +339,7 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 30,214 / 43,135 (70.0 %) — baseline 9ee8e921, 2026-05-29T00:58:42Z
+**test262 conformance**: 31,353 / 43,135 (72.7 %) — baseline a3fd74c7, 2026-06-16T10:35:16Z
 <!-- AUTO:conformance-end -->
 
 ### Sprint History

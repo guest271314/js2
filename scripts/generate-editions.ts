@@ -1,6 +1,6 @@
 #!/usr/bin/env npx tsx
 /**
- * Generate public/benchmarks/results/test262-editions.json from actual test262 runner results.
+ * Generate website/public/benchmarks/results/test262-editions.json from actual test262 runner results.
  *
  * Reads benchmarks/results/test262-results.jsonl (one JSON record per test) and classifies
  * each test into an ES edition by reading its YAML frontmatter.

@@ -1,9 +1,10 @@
 ---
 id: 1087
 title: "codegen: iterative walkInstructions + patchStructNewForAddedField to stop recursive walker composing with compile stack under tight CI stack budgets"
-status: ready
+status: done
 created: 2026-04-11
-updated: 2026-04-11
+updated: 2026-06-03
+completed: 2026-06-03
 priority: critical
 feasibility: easy
 reasoning_effort: low

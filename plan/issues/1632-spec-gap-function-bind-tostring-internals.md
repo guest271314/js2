@@ -242,3 +242,239 @@ Implemented per the architect spec above. Changes:
   on #1596 (Function.prototype.apply/.call on compiled Wasm functions). The
   immediate-call shape `fn.bind(...)(args)` works via the existing static
   reduction; storage-and-call is the gap.
+
+---
+
+# #1632b — host-callable/constructible compiled-fn representation (architect spec)
+
+`status: ready` · `feasibility: hard` · `reasoning_effort: high` ·
+`area: runtime` · spec authored 2026-06-03 (senior-developer)
+
+## Why this is one central spec, not many local patches
+
+Several open gaps share a single root cause: **a compiled Wasm function (a
+WasmGC closure struct) has no host representation that is both `[[Call]]`-able
+and `[[Construct]]`-able.** When such a value reaches a host built-in that needs
+to *call* or *construct* it, the host wraps it via `_wrapForHost`
+(`src/runtime.ts:3592`), whose Proxy target is `Object.create(null)` — a plain,
+non-callable object with only `get`/`set`/`has`/`ownKeys`/… traps. V8 therefore
+rejects both `wrapped(args)` (`apply`) and `new wrapped(args)` / `Construct`
+(`construct`).
+
+Confirmed dependents (do **not** patch these individually — they all resolve
+once the representation lands):
+
+- **#1694 A.i** — `Promise.all.call(NotPromise, […])` where `NotPromise` is a
+  compiled Wasm function. The combinator path is spec-correct
+  (`_resolveCtor` → `Promise.METHOD.call(C, _toIterable(arr))`,
+  runtime.ts:7822/7863); it fails only because V8's
+  `NewPromiseCapability(C)` does `Construct(C, [executor])` on the
+  non-constructible wrapper. This is the *sole* remaining #1694 failure
+  (B + A.ii + ctx-non-object/ctx-non-ctor all pass on current main — see #1694
+  re-validation 2026-06-03).
+- **#1632a residual** — `const b = fn.bind(...); new b(...)`: the host
+  `__bind_function` (runtime.ts:~5478) already wraps the target via
+  `_wrapWasmClosure` for `[[Call]]`, but the bound result's `[[Construct]]`
+  on a compiled-fn target dead-ends the same way.
+- **#1596 residual** — `Reflect.apply` / `Function.prototype.apply.call` on a
+  compiled fn stored in an externref local. `__call_function`
+  (runtime.ts:7043) already covers the `[[Call]]` half via `_wrapWasmClosure`;
+  `new`-through-a-local hits the construct dead-end.
+- **#1732 S1 `__construct`** (runtime.ts:7078) and **`__reflect_construct`**
+  (runtime.ts:7058) — both wrap a struct callee via `_wrapForHost` then call
+  `Reflect.construct(wrappedCallee, …)`. Today this throws "not a constructor"
+  for a real compiled-class constructor passed dynamically, because the wrapper
+  is not constructible.
+
+## Core design — `_wrapCallableForHost(closure, exports)`
+
+Add a sibling to `_wrapForHost` that wraps a **closure** struct in a Proxy
+**whose target is a real `function`**, so the Proxy may legally carry `apply`
+and `construct` traps (a Proxy is callable/constructible iff its *target* is).
+
+```ts
+// src/runtime.ts — near _wrapForHost (~3592) and _wrapWasmClosure (~1436)
+const _hostCallableCache = new WeakMap<object, Function>();
+
+function _wrapCallableForHost(
+  closure: any,
+  exports: Record<string, Function> | undefined,
+): any {
+  if (closure == null || typeof closure !== "object") return closure;
+  if (!_isWasmStruct(closure)) return closure;
+  const cached = _hostCallableCache.get(closure);
+  if (cached) return cached;
+
+  // The Proxy target must itself be callable+constructible for the traps to
+  // be installable and for `typeof proxy === "function"` to hold. A bare
+  // `function(){}` is both [[Call]] and [[Construct]] capable.
+  const fnTarget = function compiledFnTarget() {};
+
+  // Surface .name / .length when the codegen stamped them on the closure
+  // sidecar (see #1632a __bind_function), so Function.prototype.toString /
+  // .name reads stay spec-shaped. Best-effort; non-fatal if absent.
+  const meta = _wasmStructProps.get(closure);
+  if (meta) {
+    if (typeof meta.name === "string")
+      try { Object.defineProperty(fnTarget, "name", { value: meta.name, configurable: true }); } catch {}
+    if (typeof meta.length === "number")
+      try { Object.defineProperty(fnTarget, "length", { value: meta.length, configurable: true }); } catch {}
+  }
+
+  const handler: ProxyHandler<any> = {
+    apply(_t, thisArg, args) {
+      // Dispatch through __call_fn_<arity>. Pick the arity bucket from the
+      // actual JS arg count, falling back exactly like _maybeWrapCallableUnknownArity.
+      const wrapped = _wrapWasmClosureByArgCount(closure, args.length, exports);
+      // thisArg is dropped: compiled closures capture their environment; they
+      // do not consume a JS `this` (matches _wrapWasmClosure semantics).
+      return wrapped(...args);
+    },
+    construct(_t, args, _newTarget) {
+      // [[Construct]] of a compiled function. Two sub-cases:
+      //  (1) compiled CLASS constructor — route to the class's construct export
+      //      `__new_<Class>` / `__construct_closure` (see below).
+      //  (2) ordinary function used with `new` — ECMA-262 §10.2.2: run the body
+      //      with a fresh ordinary object as `this`, return it unless the body
+      //      returns an object. For a compiled closure with no [[Construct]] of
+      //      its own we emulate OrdinaryCallEvaluateBody by invoking the call
+      //      export and applying the "return value if object else new this".
+      const ctor = exports?.__construct_closure as
+        | ((c: any, argsArr: any[]) => any) | undefined;
+      if (typeof ctor === "function") {
+        const r = ctor(closure, args);
+        return (r != null && typeof r === "object") ? r : Object.create(null);
+      }
+      // Fallback: treat as ordinary [[Construct]] over the call export.
+      const wrapped = _wrapWasmClosureByArgCount(closure, args.length, exports);
+      const self = Object.create(null);
+      const r = wrapped.apply(self, args);
+      return (r != null && typeof r === "object") ? r : self;
+    },
+    // Property reads (.prototype, .name, .length, static members) delegate to
+    // the SAME safeGetField machinery _wrapForHost uses. Factor that helper out
+    // of _wrapForHost so both wrappers share one implementation (see step 2).
+    get(_t, key, recv) { return _wrapForHostGet(closure, exports, key, recv); },
+    set(_t, key, val) { _safeSet(closure, key, val, exports); return true; },
+    has(_t, key) { return _wrapForHostHas(closure, exports, key); },
+    getPrototypeOf() { return Function.prototype; },
+  };
+
+  const proxy = new Proxy(fnTarget, handler);
+  _hostCallableCache.set(closure, proxy);
+  _hostProxyReverse.set(proxy, closure); // so _unwrapForHost round-trips
+  return proxy;
+}
+```
+
+`_wrapWasmClosureByArgCount(closure, n, exports)` is a thin helper over the
+existing `_wrapWasmClosure` that selects `__call_fn_min(n, maxArity)` rather
+than a fixed arity — reuse the `for (arity = 4; arity >= 0; arity--)` discovery
+loop already in `_maybeWrapCallableUnknownArity` (runtime.ts:1519) to find the
+highest emitted `__call_fn_*`, then clamp to `n`.
+
+## Step-by-step implementation
+
+1. **Factor shared read/has logic out of `_wrapForHost`.** Extract the
+   `safeGetField` + closure-bridge `get` body (runtime.ts:3601-3748) and the
+   `has` body (3754-3772) into free functions `_wrapForHostGet(obj, exports,
+   key, recv)` and `_wrapForHostHas(obj, exports, key)`. `_wrapForHost`'s
+   existing handler calls them; the new callable wrapper reuses them verbatim.
+   No behavior change to `_wrapForHost` — pure extraction (verify by running
+   the existing `_wrapForHost`-dependent suites unchanged).
+
+2. **Add `_wrapCallableForHost` + `_hostCallableCache` + the arity helper** as
+   above.
+
+3. **Route the construct sites to the callable wrapper when the target is a
+   closure.** In each of these, when `_isWasmStruct(x)` *and* `__is_closure(x)
+   === 1` (the authoritative closure discriminator, runtime.ts:1512), use
+   `_wrapCallableForHost` instead of `_wrapForHost`:
+   - `__reflect_construct` (7061): `wrappedCtor`.
+   - `__construct` (7081): `wrappedCallee` — the `isCtor` probe
+     (`Reflect.construct(function(){}, [], wrappedCallee)`) then *passes*
+     because the callable wrapper is constructible, so the spec TypeError for
+     genuinely-non-constructible values is still thrown for non-closure
+     structs (which keep going through `_wrapForHost`).
+   - **Promise combinators** are the subtle one: the wrapped `C` is *not*
+     constructed by our code — V8 does it inside `Promise.all.call(C, …)`. So
+     `_resolveCtor` (runtime.ts:7822) must return a **constructible** `C` for
+     the `.call(closure, …)` case. Add: if `directCall === 0` and
+     `_isWasmStruct(thisArg)` and it is a closure, return
+     `_wrapCallableForHost(thisArg, exports)`; else return `thisArg`
+     unchanged (preserves the correct ctx-non-object / ctx-non-ctor throws —
+     a plain object or non-closure struct stays non-constructible, so V8's
+     NewPromiseCapability still throws TypeError per §27.2.4.X step 2).
+
+4. **`__construct_closure` export (compiled-class path).** For sub-case (1) of
+   the `construct` trap — a compiled *class* constructor used dynamically — the
+   codegen must expose a construct entry. Check whether `__new_<Class>` exports
+   already exist for declared classes (grep `__new_` in
+   `src/codegen/class-bodies.ts`); if a generic `__construct_closure(closureRef,
+   argsVec)` dispatcher does not exist, emit one analogous to `__call_fn_N`:
+   a `br_table`/if-chain over the closure's class tag that calls the matching
+   constructor body with the materialized args, returning the new instance
+   externref. If the compiled-class-as-dynamic-ctor case has **no test262
+   coverage in the target suites** (A.i's `NotPromise` is an *ordinary*
+   function, not a class), gate sub-case (1) behind a follow-up and ship the
+   ordinary-[[Construct]] fallback (sub-case 2) first — that alone closes A.i.
+
+## Edge cases
+
+- **`typeof` must be `"function"`.** Because the Proxy target is a `function`,
+  `typeof proxy === "function"` holds automatically — required for V8's
+  `IsConstructor` / `IsCallable` internal checks and for any host code that
+  branches on `typeof`.
+- **Identity / caching.** Cache per closure (`WeakMap`) so repeated wraps of
+  the same closure return the same Proxy — `Promise.all.call(C,…)` then
+  `C === C` holds across calls, and `@@species` lookups that compare
+  constructors stay stable. Mirror into `_hostProxyReverse` so
+  `_unwrapForHost` (runtime.ts:3877) returns the original closure when the
+  value flows back into Wasm.
+- **`.prototype` access.** `NewPromiseCapability` and `OrdinarySpeciesConstructor`
+  read `C.prototype`. The `get` trap delegates to `_wrapForHostGet`; if the
+  closure has no `prototype` sidecar, return a fresh ordinary object once and
+  cache it on the sidecar so `instanceof`/proto identity is stable. (For the
+  ordinary-function A.i case V8 only needs `.prototype` to exist as an object.)
+- **Non-closure structs keep the old wrapper.** Only values where
+  `__is_closure === 1` get the callable wrapper. A plain wasm-struct instance
+  passed where a constructor is expected must still be non-constructible so the
+  spec TypeError fires (this is what keeps ctx-non-object / ctx-non-ctor green).
+- **Standalone / no-JS-host mode.** This wrapper is JS-host-only (it is a
+  `Proxy` over host `Reflect.construct`). Under `ctx.standalone ||
+  noJsHost(ctx)` there is no host to call/construct through; the existing
+  standalone degrade paths (identity-bind, etc.) are unchanged. No new host
+  import is added — `_wrapCallableForHost` lives inside the existing host glue,
+  reachable only when `callbackState`/`exports` are present, so the
+  host-import-allowlist budget is untouched.
+- **Abrupt completion / executor throw.** The `construct` trap must let a throw
+  from the compiled body propagate (do not swallow) so
+  `capability-executor-not-callable` / `capability-resolve-throws` ordering is
+  observed by V8's NewPromiseCapability.
+
+## Test262 buckets to re-run after landing
+
+- `built-ins/Promise/{all,allSettled,any,race}/*ctor*`,
+  `*resolve-from-same-constructor*`, `*species*`,
+  `*capability-executor*` — confirm A.i `NotPromise` family flips
+  (the #1694 sole-remaining gap).
+- `built-ins/Function/prototype/bind/*` `new (fn.bind(...))()` cases —
+  #1632a construct residual.
+- `built-ins/Reflect/construct/*` dynamic compiled-fn cases — #1596 / #1732 S1.
+
+## Verification harness note (carried from #1694 re-validation)
+
+Use the **two-step** `WebAssembly.compile(binary)` then
+`instantiate(mod, importObject)` (the one-step `instantiate(binary, …)` races
+the lazy `importObject` getter and gives false "no export" failures), and
+assert any TypeError outcome **inside** the compiled function returning a
+sentinel — a host-side `try` around `inst.exports.go()` is unreliable.
+
+## Suggested split
+
+- **#1632b-1** (closes #1694 A.i, dev-appropriate once specced): steps 1–3 +
+  the ordinary-`[[Construct]]` fallback (sub-case 2). No codegen change — pure
+  `src/runtime.ts`. This alone flips the A.i `NotPromise` family.
+- **#1632b-2** (compiled-class-as-dynamic-ctor, needs codegen): step 4
+  (`__construct_closure` export). Only if test262 evidence shows a
+  compiled-*class* reaching a dynamic construct site uncovered by #1682.
