@@ -51,7 +51,7 @@ import { detectStringBuilders, type StringBuilderPresizeInfo } from "./string-bu
 import { collectI32SpecializedArrays } from "./array-element-typing.js";
 import { detectArrayReduceFusion, applyArrayReduceFusion } from "./array-reduce-fusion.js";
 import { compileNativeGeneratorFunction } from "./generators-native.js";
-import { ASYNC_CPS_ENABLED, analyzeAsyncBody, splitBodyAtAwait, emitAsyncStateMachine } from "./async-cps.js";
+import { ASYNC_CPS_ENABLED, analyzeAsyncBody, asyncFnNeedsCps, emitAsyncStateMachine } from "./async-cps.js";
 import {
   functionHasLinearU8Params,
   getLinearU8ParamIndicesForDeclaration,
@@ -1107,20 +1107,21 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
       // to be available before their textual position in the enclosing scope.
       hoistFunctionDeclarations(ctx, fctx, bodyStatements);
 
-      // (#1042) Async/await CPS state-machine activation hook. Gated behind
-      // ASYNC_CPS_ENABLED (off by default → byte-identical legacy codegen).
-      // Eligible only for a JS-host async function whose body matches a single
-      // tail-await canonical shape with no try-across-await / nested await. On
-      // a match we rewrite the result type to externref (the fn returns a
-      // Promise object), drive emitAsyncStateMachine, and skip the normal loop.
+      // (#1042/#1796) Async/await CPS state-machine activation hook. Gated by
+      // the per-function `asyncFnNeedsCps` predicate (#1936): a JS-host async
+      // function is CPS-lowered ONLY when it *genuinely suspends* — at least one
+      // await operand is not statically resolved AND the body matches a single
+      // tail-await canonical shape (no try-across-await / nested await). Fully
+      // await-elidable bodies (`return await Promise.resolve(42)`) fall through
+      // to the legacy synchronous path and keep returning the unwrapped value,
+      // preserving the `asyncFn() as any as number` "compile away" idiom
+      // (#1313/#1727). On a match we rewrite the result type to externref (the
+      // fn now returns a real Promise object), drive emitAsyncStateMachine, and
+      // skip the normal statement loop.
       let asyncCpsHandled = false;
       if (ASYNC_CPS_ENABLED && isAsync && !ctx.wasi && !ctx.standalone && ts.isFunctionDeclaration(decl) && decl.body) {
         const asyncPlan = analyzeAsyncBody(ctx, decl);
-        if (
-          asyncPlan.awaitPoints.length === 1 &&
-          !asyncPlan.hasTryAcrossAwait &&
-          splitBodyAtAwait(decl, asyncPlan) !== null
-        ) {
+        if (asyncFnNeedsCps(decl, asyncPlan)) {
           // The async function returns a Promise object (externref), not the
           // unwrapped value. Rewrite the registered signature's result + fctx.
           rewriteFuncResultType(ctx, func, { kind: "externref" });
