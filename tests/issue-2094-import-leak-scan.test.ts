@@ -84,6 +84,22 @@ describe("#2094 — emit-time leak surfaces as a compile error", () => {
   });
 });
 
+describe("#2094 — strict builds (the gated path) stay clean", () => {
+  // The in-compiler scan fires only under `strictNoHostImports` (matching the
+  // addImport gate). Confirm a strict build of a host-import-free program does
+  // NOT emit a spurious leak CE — the backstop must have zero false positives
+  // on the path it actually guards.
+  it("a strict (strictNoHostImports) build of clean code emits no leak CE", async () => {
+    const r = await compile(`export function test(): number { return (1 + 2) * 3; }`, {
+      fileName: "test.ts",
+      strictNoHostImports: true,
+    } as Parameters<typeof compile>[1]);
+    const leakErrs = (r.errors ?? []).filter((e) => e.message.includes("leaked host import"));
+    expect(leakErrs).toEqual([]);
+    expect(r.success).toBe(true);
+  });
+});
+
 describe("#2094 — standalone leak budget (zero)", () => {
   // A representative corpus that must compile to a standalone binary with NO
   // leaked host imports. Each snippet exercises a feature whose host imports

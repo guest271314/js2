@@ -1652,18 +1652,26 @@ export function generateModule(
 }
 
 /**
- * (#2094) Post-link import-section scan. Under `--target standalone` (or any
- * `strictNoHostImports` build), no JS host exists to satisfy `env`/`wasm:*`
- * imports, so any host import that survived dead-import elimination would fail
- * instantiation (#2073/#2075). The per-call `addImport` gate is bypassable
- * (stale funcMap indices, direct `mod.imports.push`), so this scan inspects the
- * finished binary and pushes a structured compile error for each non-allowlisted
- * leak — turning a runtime instantiation failure into a clean `success: false`.
+ * (#2094) Post-link import-section scan — the emit-time backstop for the
+ * `addImport` gate.
  *
- * No-op for host-mode / WasmGC builds, where host imports are expected.
+ * Gated on `ctx.strictNoHostImports` ONLY, deliberately matching the per-call
+ * `addImport` gate's trigger (`src/codegen/registry/imports.ts`). Under strict
+ * mode (auto-on for `--target wasi`, opt-in via `--no-host-imports`) the build
+ * contract is "no JS-host imports", so a host import that survived dead-import
+ * elimination bypassed the gate (stale funcMap index / direct `mod.imports.push`)
+ * and would fail instantiation in a hostless runtime (#2073/#2075). This scan
+ * turns that into a clean `success: false` CE instead.
+ *
+ * It does NOT fire on plain `--target standalone` (which is NOT strict by
+ * default): standalone builds today still tolerate a set of `env` imports that
+ * the test harness satisfies, and rejecting them here would regress thousands
+ * of currently-passing standalone tests. The scan is a backstop for the strict
+ * contract, not a new policy — when standalone is run strictly
+ * (`strictNoHostImports`) it is covered. No-op for host/WasmGC builds.
  */
 function assertNoLeakedHostImports(ctx: CodegenContext, mod: WasmModule): void {
-  if (!ctx.strictNoHostImports && !ctx.standalone) return;
+  if (!ctx.strictNoHostImports) return;
   const leaks = scanForLeakedHostImports(mod.imports);
   for (const leak of leaks) {
     reportErrorNoNode(ctx, buildLeakedHostImportError(leak));
