@@ -308,10 +308,15 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       name: "$Proxy",
       fields: [
         ...objectFields,
-        // proxy-specific fields:
+        // proxy-specific fields. ptarget/phandler are `anyref` (not
+        // `ref null $Object`) so they hold ANY value the proxy wraps — a
+        // function, array, or host externref target, not only a plain $Object
+        // (§28.2.1.1 only requires target/handler to be objects, but the
+        // standalone value model carries them as anyref; the dispatch forwards
+        // via `extern.convert_any`).
         { name: "ptag", type: { kind: "i32" }, mutable: false },
-        { name: "ptarget", type: { kind: "ref_null", typeIdx: objectTypeIdx }, mutable: true },
-        { name: "phandler", type: { kind: "ref_null", typeIdx: objectTypeIdx }, mutable: true },
+        { name: "ptarget", type: { kind: "anyref" }, mutable: true },
+        { name: "phandler", type: { kind: "anyref" }, mutable: true },
         { name: "ptraps", type: { kind: "ref_null", typeIdx: proxyTrapsTypeIdx }, mutable: true },
         { name: "revoked", type: { kind: "i32" }, mutable: true },
       ],
