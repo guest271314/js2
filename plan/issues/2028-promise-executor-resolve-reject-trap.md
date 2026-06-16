@@ -180,3 +180,19 @@ unrelated to the closure-call `struct.get` trap the spec targeted.
   fresh `## Implementation Plan` against current main before re-dispatch.
 - Acceptance criteria (resolve "ok" / reject reason / resolve-twice ignored)
   remain UNMET; left at `ready` with this updated analysis.
+
+### Blocks dropping the #1796 combinator exclusion (sen-b, 2026-06-16)
+
+#1796 (flip `ASYNC_CPS_ENABLED` on) shipped with `await Promise.all/race/any/allSettled(...)`
+**excluded from CPS** (`awaitedExprIsPromiseCombinator` in `async-cps.ts`) because
+routing those through the CPS state machine surfaces a host-method
+argument-marshaling gap: `await Promise.all(src.getPromises())` mis-marshals the
+`declare`-class method `getPromises()` (it compiles to `__get_undefined`, so
+`Promise.all` receives `undefined` → "undefined is not iterable"). The same
+defect already fails `tests/promise-combinators.test.ts` ×2 on main today
+(verified gate-off), independent of #1796 — so these are #2028's failures, not a
+#1796 regression. **Once #2028 lands, drop the `awaitedExprIsPromiseCombinator`
+exclusion** so combinator awaits CPS-lower too, and the 2 combinator tests should
+go green. This is the concrete consumer that re-spec should keep in scope:
+host-`declare`-class-method values flowing as arguments into a wasm-side
+combinator/host call, not only the executor `resolve`/`reject` callable-param case.
