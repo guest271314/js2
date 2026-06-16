@@ -1,10 +1,10 @@
 ---
 id: 2162
 title: "Standalone Map/Set/WeakMap/WeakSet conformance residual (~532 tests)"
-status: ready
+status: in-progress
 sprint: 62
 created: 2026-06-15
-updated: 2026-06-15
+updated: 2026-06-16
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -40,3 +40,41 @@ collection types — currently **untracked/unscheduled**.
 
 Parent (done): #1103. Part of sprint-62 standalone catch-up (rank 7 by gap
 impact).
+
+## Slice progress
+
+- **Slice 1 — native Set runtime** (PR #1510): `new Set()`/add/has/delete/
+  clear/size now host-import-free in standalone, reusing the #1103a Map backing
+  store (Set = Map with value===key) via `src/codegen/set-runtime.ts`.
+- **Slice 2 — native WeakMap/WeakSet runtime** (this PR): `new WeakMap()` /
+  get/set/has/delete and `new WeakSet()` / add/has/delete now host-import-free
+  in standalone (~101+ `built-ins/WeakMap` + WeakSet tests). New
+  `src/codegen/weak-collections-runtime.ts` reuses the Map backing store with
+  **object-identity keys** (the Map runtime already compares object keys by
+  `ref.eq`) and adds only `__weakset_add(m,v)=__map_set(m,v,v)`; WeakMap
+  get/set/has/delete and WeakSet has/delete route to `__map_*`. Wiring mirrors
+  Map/Set: `new` → `__map_new` (new-super.ts); methods →
+  `tryCompileNativeWeakMethodCall` (extern.ts); `WeakMap`/`WeakSet` resolve to
+  `ref $Map` (index.ts); externClass registration skipped under `nativeStrings`.
+  Weak collections have **no iteration and no `.size`** (spec), so none is
+  wired. The *weak* (collectable) reference is not modelled — WasmGC has no weak
+  refs, so entries are strongly retained; that is a memory property, not an
+  observable one (only WeakRef/FinalizationRegistry liveness, skip-filtered,
+  could tell). Host/gc mode unchanged.
+
+  **Verified** (`tests/issue-2162-standalone-weak.test.ts`, 6/6, `--target wasi`,
+  zero `WeakMap_*`/`WeakSet_*`/`Map_*` imports): WeakMap set+get / has / distinct
+  keys / overwrite / delete; WeakSet add+has / delete / chained add.
+
+### Triage note
+
+Standalone **Map was already fully functional** — the apparent Map failures were
+`m.get(k) === <literal>` boxed-compare confounds (the `any === literal` gap,
+owned by value-rep #2104/#2106), not Map.
+
+### Remaining slices (issue stays in-progress)
+
+- Map/Set **iteration**: `forEach`, `for-of`, `keys`/`values`/`entries`,
+  `new Map(iterable)` / `new Set(iterable)` — needs the `$MapIter` drive +
+  `__map_new_from_arr`.
+- ES2025 set-algebra: `union`/`intersection`/`difference`/… .
