@@ -90,35 +90,92 @@ as one coordinated change with the test corpus.
   (`1792-node-url-builtin-impl.md`); the lead's dispatch said "1792" but that
   collides — using the next free id.
 
-## Implementation Plan
+## Implementation Plan (refreshed 2026-06-16, arch1 — against upstream/main 319d43460)
+
+### What landed since the prior spec (verified on current main)
+- **#1936 DONE** (se1, completed 2026-06-16). `analyzeAsyncBody`,
+  `awaitIsStaticallyResolved`, `asyncFnNeedsCps(fn, plan)`, `AsyncConsumerKind`,
+  and `classifyAsyncConsumer(checker, expr)` all exist in
+  `src/codegen/async-cps.ts` (lines 60, 104, 182, 256, 279, 297). The call-site
+  classifier IS wired: `asyncResultConsumedAsValue` (`expressions.ts:259-266`)
+  now delegates to `classifyAsyncConsumer(...) !== "thenable"` — a
+  behaviour-preserving refactor (parity note at async-cps.ts:292).
+- **`ASYNC_CPS_ENABLED` is STILL `false`** (`async-cps.ts:60`) and
+  `asyncFnNeedsCps` short-circuits on it (line 257). The global flip has NOT
+  happened.
+- **The activation gates have NOT yet been migrated to `asyncFnNeedsCps`.**
+  Both `function-body.ts:1117-1132` and the `collectAsyncCpsImports` prepass at
+  `declarations.ts:652-665` still use the *inline* duplicated shape check
+  (`ASYNC_CPS_ENABLED && … && plan.awaitPoints.length === 1 &&
+  !plan.hasTryAcrossAwait && splitBodyAtAwait(...) !== null`). This issue is
+  what migrates them onto the single predicate.
+- **#1326c DONE** — standalone microtask queue + chained `.then` landed; the
+  standalone Promise substrate referenced below is live.
 
 ### Root cause
-Execution of the #1936 census: flip `ASYNC_CPS_ENABLED` (`async-cps.ts:59`) on,
-route every async fn through `asyncFnNeedsCps` (#1936), and migrate the test
-corpus + remaining synchronous-consumption call sites off the raw-value contract
-onto the real-Promise contract. Machinery is present and verified-when-run
+Execution of the #1936 census: flip `ASYNC_CPS_ENABLED` (`async-cps.ts:60`) on,
+route both activation gates through the now-existing `asyncFnNeedsCps` predicate
+(replacing the two inline duplicated shape checks), and migrate the test corpus +
+remaining synchronous-consumption (`value`-bucket) call sites off the raw-value
+contract onto the real-Promise contract. Machinery is present and verified-when-run
 (`tests/issue-1042.test.ts` Slice-2A); the work is contract migration, not new
 lowering.
+
+### Sequencing dependency note (read before flipping)
+The interaction with **#2028** (Promise executor body never dispatches) and the
+**#1042 staleness note** (`await Promise.resolve(41)` yields NaN today — issue
+file lines 63-68) means the *host-mode Promise substrate itself is partially
+broken right now*. Confirm #2028's `__make_callback`/`Promise_new` dispatch fix
+has landed (or that the executor path is not on the critical path for the 5
+canonical #1042 cases) BEFORE flipping — otherwise the migrated equivalence
+tests will fail on a substrate bug, not a migration bug, and the net-delta
+signal is unreadable. Recommend: land #2028 first, then this flip.
 
 ### Sequencing
 Gated on #1936 (census + `asyncFnNeedsCps` + elision) and #1373b (CPS/IR
 adoption). Do NOT flip before #1936's census report exists.
 
-### Changes
-- `async-cps.ts`: `ASYNC_CPS_ENABLED` → true (59), then REMOVE the constant;
-  `function-body.ts:1117` + `declarations.ts:636` consult `asyncFnNeedsCps`
-  (removal is acceptance criterion 3).
-- `function-body.ts:1116-1132`: replace the `ASYNC_CPS_ENABLED && … &&
-  splitBodyAtAwait!==null` gate with `asyncFnNeedsCps(ctx,decl)`; drop the
-  `!wasi && !standalone` exclusion only once the standalone substrate is wired.
-- `declarations.ts:630-648`: mirror the gate in `collectAsyncCpsImports` prepass
-  so Promise_resolve/__make_callback/Promise_then2 get stable funcMap indices
-  (the #1384 late-import-shift hazard).
-- `expressions.ts`: `asyncResultConsumedAsValue` (252) stops taking the raw-value
-  elision for CPS callees (they now return real Promises); keep elision only for
-  statically-resolved callees. await arm (1207-1225): non-tail await under an
-  active state machine still `reportError`s (PR1 limit) — widen per step 6 or keep
-  the explicit error, never silent mis-lowering.
+### Changes (file:line verified on upstream/main 319d43460)
+- **`async-cps.ts:60`**: `ASYNC_CPS_ENABLED` → `true`. Step 2 (after green):
+  REMOVE the constant and the `if (!ASYNC_CPS_ENABLED) return false;` line at
+  `async-cps.ts:257` (removal is acceptance criterion 3).
+- **`function-body.ts:1117-1132`**: replace the inline duplicated shape check
+  ```ts
+  if (ASYNC_CPS_ENABLED && isAsync && !ctx.wasi && !ctx.standalone && ts.isFunctionDeclaration(decl) && decl.body) {
+    const asyncPlan = analyzeAsyncBody(ctx, decl);
+    if (asyncPlan.awaitPoints.length === 1 && !asyncPlan.hasTryAcrossAwait && splitBodyAtAwait(decl, asyncPlan) !== null) { … }
+  }
+  ```
+  with the single predicate:
+  ```ts
+  if (isAsync && !ctx.wasi && !ctx.standalone && ts.isFunctionDeclaration(decl) && decl.body) {
+    const asyncPlan = analyzeAsyncBody(ctx, decl);
+    if (asyncFnNeedsCps(decl, asyncPlan)) { … }
+  }
+  ```
+  `asyncFnNeedsCps` already folds in `awaitPoints.length > 0`, the
+  any-real-suspension check, AND `splitBodyAtAwait !== null` — so this is
+  strictly equal-or-narrower (it ALSO elides fully-static-await bodies, which is
+  the intended #1936 behaviour). Keep the `!ctx.wasi && !ctx.standalone`
+  exclusion until the standalone substrate (#1326c) is wired into this gate;
+  drop it in a follow-up.
+- **`declarations.ts:652-665`** (`collectAsyncCpsImports` prepass): mirror the
+  exact same migration — replace the inline `plan.awaitPoints.length === 1 &&
+  !plan.hasTryAcrossAwait && splitBodyAtAwait(...) !== null` with
+  `asyncFnNeedsCps(node, plan)`. The two gates MUST stay byte-identical in their
+  decision or the prepass under/over-registers `Promise_resolve` /
+  `__make_callback` / `Promise_then2` imports → the #1384 late-import-shift
+  hazard or a missing-import `reportError` at `async-cps.ts:373-379`. Using one
+  predicate in both places is the durable fix for that duplication.
+- **`expressions.ts:259-266`** (`asyncResultConsumedAsValue`): already routes
+  through `classifyAsyncConsumer`. After the flip, the `"value"` bucket
+  (`f() as any as number`) is the set that BREAKS — those callees now return a
+  real Promise and the cast yields NaN. Migrate those sites per the Migration
+  surface below; the `"thenable"` and `"await"` buckets are already correct.
+  Keep raw-value elision ONLY for statically-resolved callees (await-elided
+  sync fns). The non-tail await arm (`expressions.ts` await handling under an
+  active state machine) must keep its explicit `reportError` (PR1 limit) — widen
+  per scope step 6 or keep erroring; **never silently mis-lower**.
 
 ### Migration surface (from #1936 census)
 1. `value`-bucket sites (`f() as any as number`): rewrite to `await f()` /
