@@ -2882,10 +2882,14 @@ function compilePropertyAccess(ctx: LinearContext, fctx: LinearFuncContext, expr
     return;
   }
 
-  // string.length → call __str_len(str) → i32, convert to f64
+  // string.length → number of UTF-16 code units (JS semantics), NOT the
+  // UTF-8 byte count (#1976). Linear strings are stored as UTF-8, so route the
+  // user-facing `.length` through __str_length_utf16, which scans the bytes and
+  // counts code units (astral code points = 2). __str_len (byte count) stays
+  // the internal primitive for slice/indexOf, which index by byte offset.
   if (propName === "length" && isStringExpr(ctx, fctx, expr.expression)) {
     compileExpression(ctx, fctx, expr.expression);
-    const strLenIdx = ctx.funcMap.get("__str_len")!;
+    const strLenIdx = ctx.funcMap.get("__str_length_utf16")!;
     fctx.body.push({ op: "call", funcIdx: strLenIdx });
     fctx.body.push({ op: "f64.convert_i32_s" });
     return;
