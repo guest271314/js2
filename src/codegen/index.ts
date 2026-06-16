@@ -1313,11 +1313,19 @@ export function generateModule(
           // at `formatIrPathFallbackDiagnostic` below). Defaulting to "error"
           // would fail every program with a class-typed cross-function return
           // that the IR lowerer can't yet represent (e.g. a `Builder` chain).
-          reportErrorNoNode(
-            ctx,
-            `IR path: could not resolve types for ${name}: ${e instanceof Error ? e.message : String(e)}`,
-            "warning",
-          );
+          //
+          // #2137 — also record this on the structured `irPostClaimErrors`
+          // channel (kind "resolve") so consumers (bridge tests, the
+          // check:ir-fallbacks gate) can query IR-path fallbacks without
+          // string-matching the diagnostics array. The warning line below is
+          // retained one sprint for back-compat.
+          const resolveMsg = e instanceof Error ? e.message : String(e);
+          (ctx.irPostClaimErrors ??= []).push({
+            kind: "resolve",
+            func: name,
+            message: resolveMsg,
+          });
+          reportErrorNoNode(ctx, `IR path: could not resolve types for ${name}: ${resolveMsg}`, "warning");
         }
       }
       // Only request IR compilation for functions we successfully built
