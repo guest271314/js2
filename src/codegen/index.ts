@@ -29,6 +29,7 @@ import { allocLocal, getLocalType } from "./context/locals.js";
 import type {
   ClosureInfo,
   CodegenContext,
+  CodegenError,
   CodegenOptions,
   ExternClassInfo,
   FunctionContext,
@@ -956,7 +957,7 @@ export function generateModule(
   options?: CodegenOptions,
 ): {
   module: WasmModule;
-  errors: { message: string; line: number; column: number; severity?: "error" | "warning" }[];
+  errors: CodegenError[];
   // #2089 — silent-fallback telemetry counters (per class → per site → count).
   fallbackCounts?: FallbackCounts;
 } {
@@ -4929,7 +4930,7 @@ export function generateMultiModule(
   options?: CodegenOptions,
 ): {
   module: WasmModule;
-  errors: { message: string; line: number; column: number; severity?: "error" | "warning" }[];
+  errors: CodegenError[];
   // #2089 — silent-fallback telemetry counters (per class → per site → count).
   fallbackCounts?: FallbackCounts;
 } {

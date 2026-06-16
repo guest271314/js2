@@ -59,7 +59,7 @@ export interface WasmModule {
    * emitting a structurally invalid binary (e.g. a stack-underflowing
    * `local.set` after an unhandled `String.prototype.repeat`).
    */
-  codegenErrors?: { message: string; line: number; column: number }[];
+  codegenErrors?: { message: string; line: number; column: number; severity?: "error" | "warning" | "degrade" }[];
 }
 
 /** TS-level kind hint for a single export parameter or result (#1700). */
