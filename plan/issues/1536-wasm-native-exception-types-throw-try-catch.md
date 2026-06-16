@@ -1,9 +1,11 @@
 ---
 id: 1536
 title: "Wasm-native exception types: $Error WasmGC struct + throw / try_table / catch_ref"
-status: ready
+status: done
+completed: 2026-06-16
+assignee: ttraenkler/dv3
 created: 2026-05-20
-updated: 2026-05-20
+updated: 2026-06-16
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -82,3 +84,32 @@ All gated `ctx.wasi || ctx.standalone`; JS-host unchanged (V8 gives real `.stack
 
 ### test262 gate
 `built-ins/Error/`, `built-ins/NativeErrors/{TypeError,RangeError,SyntaxError,ReferenceError,EvalError,URIError}/`, `language/statements/{try,throw}/` standalone; `.stack` has no normative coverage — unit-test that reads return undefined without trapping. `tests/issue-1536.test.ts` `{target:"standalone", testRuntime:true}`.
+
+## Resolution (2026-06-16, dv3) — shippable scope already on main; gap #2 → #1536c
+
+Recon against the architect plan: the entire shippable scope of #1536 is
+**already landed on `upstream/main`** (no commits ahead on the claim branch):
+
+- **gap #1 `error.stack`** — `$Error_struct` carries a `stack` field (fieldIdx
+  3, `registry/error-types.ts:96`), `emitWasiErrorConstructor` inits it to
+  `ref.null.extern`, and the `(wasi||standalone)` property-access fast path
+  reads `message`/`name`/`stack` (`property-access.ts:1582`). Done.
+- **decision #3** — single `__exn(externref)` tag + struct-`$tag`
+  discrimination shipped (per-class tags rejected, as planned).
+- **decision #4** — legacy `try`/`catch`/`catch_all`/`rethrow` emission shipped;
+  `try_table`/`catch_ref` migration deferred (separate `#1536b`).
+- Host-mode Error subclasses verified working (`instanceof Error` → 1,
+  `.message` → "boom").
+
+**Only the architect's gap #2 remains, and it is split out to #1536c.** A user
+`class MyError extends Error {}` is marked externref-backed
+(`class-bodies.ts:434`), so in **standalone** it leaks `env::__new_Error` +
+`env::__tag_user_class` and the module fails to instantiate (verified). Making
+it standalone-native requires (a) routing subclass instance-creation through the
+native `__new_<Parent>` (`emitWasiErrorConstructor`) under `wasi||standalone`
+instead of the host import, and (b) a standalone-native `instanceof` tag chain
+replacing the host `__tag_user_class`/`__instanceof`. That is a
+**high-blast-radius rework of the externref-backed-subclass core** — exactly the
+escape hatch the architect named ("ship gap #1 + decisions #3/#4 here and split
+user subclasses to #1536c"). Tracked as **#1536c** (feasibility:hard, sprint 63,
+routed to senior-dev).
