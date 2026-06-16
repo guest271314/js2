@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-16T04:43:58.606Z",
-  "baseline_generated_at": "2026-06-16T04:43:58Z",
-  "baseline_sha": "e424a7d3a6fc1062bb3dca2e5f999f01d0307644",
+  "timestamp": "2026-06-16T06:12:15.739Z",
+  "baseline_generated_at": "2026-06-16T06:12:15Z",
+  "baseline_sha": "2a628478084a0c5332096dfaa976f035295562c5",
   "mode": {
     "target": "standalone",
     "include_proposals": 1,
@@ -10,21 +10,21 @@
   "summary": {
     "total": 43135,
     "pass": 20205,
-    "fail": 10387,
-    "compile_error": 12519,
+    "fail": 10386,
+    "compile_error": 12520,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 30592,
+    "compilable": 30591,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42049,
         "pass": 19713,
-        "fail": 10017,
-        "compile_error": 12295,
+        "fail": 10016,
+        "compile_error": 12296,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 29730,
+        "compilable": 29729,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -53,22 +53,22 @@
       "official": {
         "total": 43135,
         "pass": 20205,
-        "fail": 10387,
-        "compile_error": 12519,
+        "fail": 10386,
+        "compile_error": 12520,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 30592,
+        "compilable": 30591,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48117,
         "pass": 21184,
-        "fail": 11551,
-        "compile_error": 15261,
+        "fail": 11550,
+        "compile_error": 15262,
         "compile_timeout": 7,
         "skip": 114,
-        "compilable": 32735,
+        "compilable": 32734,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -77,31 +77,31 @@
   "official_summary": {
     "total": 43135,
     "pass": 20205,
-    "fail": 10387,
-    "compile_error": 12519,
+    "fail": 10386,
+    "compile_error": 12520,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 30592,
+    "compilable": 30591,
     "stale": 0
   },
   "full_summary": {
     "total": 48117,
     "pass": 21184,
-    "fail": 11551,
-    "compile_error": 15261,
+    "fail": 11550,
+    "compile_error": 15262,
     "compile_timeout": 7,
     "skip": 114,
-    "compilable": 32735,
+    "compilable": 32734,
     "stale": 0
   },
   "strict_summary": {
     "total": 40626,
     "pass": 19204,
-    "fail": 9556,
-    "compile_error": 11842,
+    "fail": 9555,
+    "compile_error": 11843,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 28760,
+    "compilable": 28759,
     "stale": 0
   },
   "scope_summaries": {
@@ -128,11 +128,11 @@
     "standard": {
       "total": 42049,
       "pass": 19713,
-      "fail": 10017,
-      "compile_error": 12295,
+      "fail": 10016,
+      "compile_error": 12296,
       "compile_timeout": 6,
       "skip": 18,
-      "compilable": 29730,
+      "compilable": 29729,
       "stale": 0
     }
   },
@@ -341,8 +341,8 @@
       "name": "built-ins/DisposableStack",
       "path": "built-ins/DisposableStack",
       "pass": 27,
-      "fail": 26,
-      "compile_error": 38,
+      "fail": 25,
+      "compile_error": 39,
       "compile_timeout": 0,
       "skip": 0,
       "total": 91
@@ -1082,15 +1082,15 @@
     "assertion_fail": 8414,
     "illegal_cast": 434,
     "negative_test_fail": 77,
-    "null_deref": 613,
+    "null_deref": 612,
     "oob": 86,
     "other": 9975,
     "promise_error": 178,
     "range_error": 22,
-    "runtime_error": 4764,
+    "runtime_error": 4766,
     "type_error": 2,
     "unreachable": 25,
-    "wasm_compile": 2222
+    "wasm_compile": 2221
   },
   "skip_reasons": {
     "dynamic-import + sloppy-script var/fn redecl + fixture path (#1696)": 18,
@@ -1226,9 +1226,9 @@
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
+          "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js",
-          "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
-          "test/built-ins/Temporal/PlainMonthDay/refisoyear-undefined.js"
+          "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js"
         ],
         "sample_signatures": [
           "runtime_error:Cannot convert object to primitive value",
@@ -1248,8 +1248,8 @@
         "count": 45,
         "statuses": {
           "pass": 0,
-          "fail": 29,
-          "compile_error": 16,
+          "fail": 28,
+          "compile_error": 17,
           "compile_timeout": 0,
           "skip": 0,
           "total": 45
@@ -1258,23 +1258,22 @@
           "assertion_fail": 12,
           "wasm_compile": 13,
           "other": 15,
-          "null_deref": 1,
-          "illegal_cast": 1,
-          "runtime_error": 3
+          "runtime_error": 4,
+          "illegal_cast": 1
         },
         "sample_files": [
           "test/built-ins/DisposableStack/prototype/adopt/returns-value.js",
           "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js",
           "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js",
-          "test/built-ins/AsyncDisposableStack/undefined-newtarget-throws.js",
-          "test/built-ins/AsyncDisposableStack/newtarget-prototype-is-not-object.js"
+          "test/built-ins/AsyncDisposableStack/newtarget-prototype-is-not-object.js",
+          "test/built-ins/AsyncDisposableStack/undefined-newtarget-throws.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(stack.adopt(resource, _ => {}), resource);",
           "wasm_compile:L#:## Symbol(Symbol.dispose) is not a function",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { AsyncDisposableStack(); });",
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: Reflect.construct not supported in standalone",
-          "null_deref:L#:## dereferencing a null pointer [in __cb_0() ← test]"
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { AsyncDisposableStack(); });",
+          "runtime_error:Cannot convert object to primitive value"
         ]
       },
       {
@@ -1371,20 +1370,20 @@
           "total": 129
         },
         "error_categories": {
-          "other": 97,
           "unreachable": 25,
+          "other": 97,
           "assertion_fail": 7
         },
         "sample_files": [
-          "test/built-ins/JSON/stringify/space-wrong-type.js",
           "test/built-ins/JSON/parse/15.12.1.1-g2-3.js",
+          "test/built-ins/JSON/stringify/space-wrong-type.js",
           "test/built-ins/JSON/stringify/replacer-function-result.js",
           "test/built-ins/JSON/parse/15.12.1.1-0-8.js",
           "test/built-ins/JSON/parse/reviver-array-define-prop-err.js"
         ],
         "sample_signatures": [
-          "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "unreachable:L#:## unreachable [in __json_parse_primitive() ← __closure_2 ← assert_throws ← test]",
+          "other:L#:## Codegen error: JSON.stringify of this value is not yet supported in --target standalone/wasi (##). Pure-Wasm JSON.stringify of null/undefined/boolean works standalone; numbers, objects, arrays, strings, and JSON.parse require the Phas",
           "other:L#:## Codegen error: Proxy not supported in standalone mode (## Phase C).",
           "assertion_fail:returned # — assert ## at L#: assert.throws(Test262Error, function() { JSON.parse('#', function() { throw new Test262Error(); }); });",
           "assertion_fail:returned # — assert ## at L#: assert.throws(SyntaxError, function() { JSON.parse('#\\r34'); }, '<CR> should produce a syntax error as whitespace results in two tokens');"
@@ -1598,21 +1597,21 @@
           "total": 291
         },
         "error_categories": {
-          "other": 269,
           "assertion_fail": 17,
+          "other": 269,
           "illegal_cast": 1,
           "runtime_error": 4
         },
         "sample_files": [
-          "test/built-ins/Reflect/getOwnPropertyDescriptor/undefined-own-property.js",
           "test/built-ins/Reflect/has/return-boolean.js",
+          "test/built-ins/Reflect/getOwnPropertyDescriptor/undefined-own-property.js",
           "test/built-ins/Reflect/construct/length.js",
           "test/built-ins/Reflect/enumerate/undefined.js",
           "test/built-ins/Object/prototype/setPrototypeOf-with-non-circular-values-__proto__.js"
         ],
         "sample_signatures": [
-          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C).",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(Reflect.has(o1, 'p'), true, 'true from own property');",
+          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Reflect.construct built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
           "other:L#:## Codegen error: Reflect.hasOwnProperty not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Object.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.; L#:## Codegen error: Reflect.setPrototypeOf not supported"
@@ -1651,13 +1650,13 @@
           "test/language/expressions/class/async-gen-method/forbidden-ext/b2/cls-expr-async-gen-meth-forbidden-ext-indirect-access-prop-caller.js",
           "test/language/expressions/class/dstr/async-private-gen-meth-dflt-ary-init-iter-close.js",
           "test/language/expressions/class/dstr/gen-meth-static-ary-ptrn-elem-id-iter-val-err.js",
-          "test/language/expressions/object/dstr/gen-meth-dflt-ary-ptrn-rest-id.js"
+          "test/language/expressions/class/dstr/async-private-gen-meth-ary-ptrn-elem-ary-rest-init.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: Symbol.iterator built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"inner\" failed: call[#] expected type externref, found ref.cast of type (ref #) @+#) [in inner()] [@+#] [wat: (func $inner (type #) (local $__nullchk_0 externref) g",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(x.length, #);",
           "assertion_fail:returned # — assert ## at L#: assert.notSameValue(x, values);",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(x.length, #);",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(result.value, undefined);"
         ]
       },
@@ -1720,11 +1719,11 @@
         "error_categories": {
           "other": 3798,
           "assertion_fail": 2146,
-          "wasm_compile": 465,
+          "wasm_compile": 464,
           "oob": 74,
           "illegal_cast": 84,
           "null_deref": 186,
-          "runtime_error": 315,
+          "runtime_error": 316,
           "promise_error": 54,
           "negative_test_fail": 13
         },
@@ -1963,23 +1962,23 @@
         },
         "error_categories": {
           "assertion_fail": 196,
-          "other": 10,
           "runtime_error": 8,
+          "other": 10,
           "wasm_compile": 4
         },
         "sample_files": [
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
-          "test/annexB/language/global-code/switch-case-global-update.js",
+          "test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-of-lhs.js",
           "test/annexB/language/comments/single-line-html-close-first-line-3.js",
-          "test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-of-lhs.js"
+          "test/annexB/language/global-code/switch-case-global-update.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( f, undefined, 'Initialized binding created prior to evaluation' );",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');",
+          "runtime_error:L#:## Invalid left-hand side in for-in/for-of",
           "other:L#:## ';' expected.",
-          "runtime_error:L#:## Invalid left-hand side in for-in/for-of"
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');"
         ]
       },
       {
@@ -2157,8 +2156,8 @@
           "assertion_fail": 90,
           "null_deref": 6,
           "other": 1,
-          "negative_test_fail": 4,
           "wasm_compile": 5,
+          "negative_test_fail": 4,
           "illegal_cast": 1
         },
         "sample_files": [
@@ -2195,8 +2194,8 @@
           "assertion_fail": 10,
           "other": 4,
           "wasm_compile": 2,
-          "illegal_cast": 1,
-          "null_deref": 1
+          "null_deref": 1,
+          "illegal_cast": 1
         },
         "sample_files": [
           "test/built-ins/WeakMap/undefined-newtarget.js",
@@ -2690,7 +2689,7 @@
           "test/built-ins/SharedArrayBuffer/allocation-limit.js",
           "test/built-ins/SharedArrayBuffer/init-zero.js",
           "test/built-ins/SharedArrayBuffer/options-maxbytelength-undefined.js",
-          "test/built-ins/SharedArrayBuffer/options-maxbytelength-negative.js"
+          "test/built-ins/SharedArrayBuffer/toindex-length.js"
         ],
         "sample_signatures": [
           "other:L#:## Unsupported new expression for class: SharedArrayBuffer",
