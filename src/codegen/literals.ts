@@ -1209,7 +1209,19 @@ export function compileSymbolCall(ctx: CodegenContext, fctx: FunctionContext, ar
   // Standalone-mode fallback: if the host import isn't available, the symbol
   // is still constructed (with the legacy `wasm_<id>` description); only the
   // `.description` accessor in JS-host mode benefits.
-  const regIdx = ensureLateImport(ctx, "__symbol_register_desc", [{ kind: "i32" }, { kind: "externref" }], []);
+  //
+  // (#2163) In no-JS-host mode (`--target standalone` / `--target wasi`) there
+  // is no host to register the description with, so emitting the
+  // `env::__symbol_register_desc` import leaves it unsatisfiable and the module
+  // fails to instantiate — making EVERY `Symbol()` call a runtime failure
+  // standalone. The symbol value itself is just the i32 counter id (which is
+  // all `typeof s === "symbol"` and symbol identity/distinctness need), so the
+  // host registration is a pure JS-host fast path. Skip it standalone and only
+  // evaluate the description argument for side effects.
+  const noJsHost = ctx.standalone === true || ctx.wasi === true;
+  const regIdx = noJsHost
+    ? undefined
+    : ensureLateImport(ctx, "__symbol_register_desc", [{ kind: "i32" }, { kind: "externref" }], []);
   if (regIdx !== undefined) {
     fctx.body.push({ op: "global.get", index: counterIdx });
     if (args.length > 0) {
@@ -2926,6 +2938,33 @@ export function compileArrayLiteral(
           return t.kind === "ref" || t.kind === "ref_null" || t.kind === "externref";
         });
         if (hasObjectElem) {
+          elemWasm = { kind: "externref" };
+        }
+      }
+    }
+  }
+  // (#2106 S0) `any[]` element tag-recovery. When the contextual element type is
+  // `any`, the first-element heuristic above can pick a bare primitive ValType
+  // (e.g. `[true]` → i32, because `boolean` lowers to i32 and the contextual-type
+  // adoption at the ref branch never fires for a non-ref first element). The vec
+  // is then built as `__vec_i32` and later coerced to the `any[]` externref vec
+  // by Wasm KIND (`f64.convert_i32_s; __box_number`), so a boolean read back as
+  // `a[0]` reports `typeof === "number"` / `"" + a[0] === "1"` — the JS tag is
+  // lost. Booleans, mixed-primitive heterogeneity, and any non-string ref all
+  // need the per-element JS-type-aware boxing that `compileExpression(el,
+  // externref)` already performs (`__box_boolean` for bool, `__box_number` for
+  // number, native-string for string — the same path the `a.push(true)` route
+  // uses, which is already correct). Widen the element type to externref so each
+  // element is boxed by its own static type at construction, not by Wasm kind
+  // after the fact. Scoped strictly to `any` contextual elements: number[] /
+  // string[] / struct[] literals are untouched (byte-identical).
+  if (!hasSpread && (elemWasm.kind === "i32" || elemWasm.kind === "f64")) {
+    const ctxArrType = ctx.checker.getContextualType(expr);
+    if (ctxArrType) {
+      const ctxArrSym = (ctxArrType as ts.TypeReference).symbol ?? ctxArrType.symbol;
+      if (ctxArrSym?.name === "Array" || ctxArrSym?.name === "ReadonlyArray") {
+        const ctxElemType = ctx.checker.getTypeArguments(ctxArrType as ts.TypeReference)[0];
+        if (ctxElemType && (ctxElemType.flags & ts.TypeFlags.Any) !== 0) {
           elemWasm = { kind: "externref" };
         }
       }

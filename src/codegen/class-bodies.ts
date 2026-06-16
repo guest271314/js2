@@ -8,6 +8,7 @@ import { ts } from "../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, StructTypeDef, ValType } from "../ir/types.js";
 import { isHostConstructibleBuiltin } from "./builtin-tags.js";
+import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, deduplicateLocals } from "./context/locals.js";
@@ -373,6 +374,11 @@ export function resolveClassMemberName(ctx: CodegenContext, name: ts.PropertyNam
   return undefined;
 }
 
+// (#1983) `classMemberFuncKey` lives in the leaf module `class-member-keys.ts`
+// (imported above) so consumer files can use it without an import cycle; it is
+// re-exported here for callers that already import from `class-bodies.js`.
+export { classMemberFuncKey } from "./class-member-keys.js";
+
 /** Collect all function declarations and interfaces */
 /** Collect a class declaration or class expression: register struct type, constructor, and methods */
 export function collectClassDeclaration(
@@ -675,10 +681,13 @@ export function collectClassDeclaration(
   }
   const ctorTypeIdx = addFuncType(ctx, ctorParams, ctorResults, `${className}_new_type`);
   const ctorFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.funcMap.set(ctorName, ctorFuncIdx);
+  // (#1983) collision-free key — also the wasm display name so the funcByName
+  // body-fill lookup doesn't collide with a user `function ClassName_new()`.
+  const ctorKey = classMemberFuncKey(ctx, ctorName);
+  ctx.funcMap.set(ctorKey, ctorFuncIdx);
 
   ctx.mod.functions.push({
-    name: ctorName,
+    name: ctorKey,
     typeIdx: ctorTypeIdx,
     locals: [],
     body: [],
@@ -702,9 +711,10 @@ export function collectClassDeclaration(
     const initParams: ValType[] = [...ctorParams, { kind: "ref", typeIdx: structTypeIdx }];
     const initTypeIdx = addFuncType(ctx, initParams, [{ kind: "ref", typeIdx: structTypeIdx }], `${initName}_type`);
     const initFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.funcMap.set(initName, initFuncIdx);
+    const initKey = classMemberFuncKey(ctx, initName); // (#1983) collision-free key + display name
+    ctx.funcMap.set(initKey, initFuncIdx);
     ctx.mod.functions.push({
-      name: initName,
+      name: initKey,
       typeIdx: initTypeIdx,
       locals: [],
       body: [],
@@ -754,7 +764,9 @@ export function collectClassDeclaration(
       // Skip if a function with this name is already registered (e.g., when
       // both a static and instance method share the same name, they produce
       // the same function name — avoid creating duplicate placeholders).
-      if (ctx.funcMap.has(fullName)) continue;
+      // (#1983) check the relocated key so a user `function ClassName_m()` does
+      // not look like an already-registered method and suppress the real one.
+      if (ctx.funcMap.has(classMemberFuncKey(ctx, fullName))) continue;
 
       // Static methods have no self parameter; instance methods get self: (ref $structTypeIdx)
       const methodParams: ValType[] = isStatic ? [] : [{ kind: "ref", typeIdx: structTypeIdx }];
@@ -800,10 +812,14 @@ export function collectClassDeclaration(
 
       const methodTypeIdx = addFuncType(ctx, methodParams, methodResults, `${fullName}_type`);
       const methodFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-      ctx.funcMap.set(fullName, methodFuncIdx);
+      // (#1983) Use the collision-free key for the funcMap entry AND the wasm
+      // display name, so the `funcByName` body-fill lookup (which keys on the
+      // display name) does not collide with a user `function ClassName_m()`.
+      const methodKey = classMemberFuncKey(ctx, fullName);
+      ctx.funcMap.set(methodKey, methodFuncIdx);
 
       ctx.mod.functions.push({
-        name: fullName,
+        name: methodKey,
         typeIdx: methodTypeIdx,
         locals: [],
         body: [],
@@ -840,7 +856,7 @@ export function collectClassDeclaration(
       // both a static and instance getter share the same computed property name,
       // they produce the same function name — avoid creating duplicates that
       // leave empty-body placeholders causing "stack fallthru" validation errors).
-      if (ctx.funcMap.has(getterName)) continue;
+      if (ctx.funcMap.has(classMemberFuncKey(ctx, getterName))) continue; // (#1983)
       // Getter takes self, returns the accessor return type
       const getterParams: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
       const sig = ctx.checker.getSignatureFromDeclaration(member);
@@ -854,10 +870,11 @@ export function collectClassDeclaration(
 
       const getterTypeIdx = addFuncType(ctx, getterParams, getterResults, `${getterName}_type`);
       const getterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-      ctx.funcMap.set(getterName, getterFuncIdx);
+      const getterKey = classMemberFuncKey(ctx, getterName); // (#1983) key + display name
+      ctx.funcMap.set(getterKey, getterFuncIdx);
 
       ctx.mod.functions.push({
-        name: getterName,
+        name: getterKey,
         typeIdx: getterTypeIdx,
         locals: [],
         body: [],
@@ -876,7 +893,7 @@ export function collectClassDeclaration(
 
       const setterName = `${className}_set_${propName}`;
       // Skip if already registered (same collision guard as getter above)
-      if (ctx.funcMap.has(setterName)) continue;
+      if (ctx.funcMap.has(classMemberFuncKey(ctx, setterName))) continue; // (#1983)
       // Setter takes self + value, returns void
       const setterParams: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
       for (const param of member.parameters) {
@@ -887,10 +904,11 @@ export function collectClassDeclaration(
 
       const setterTypeIdx = addFuncType(ctx, setterParams, [], `${setterName}_type`);
       const setterFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-      ctx.funcMap.set(setterName, setterFuncIdx);
+      const setterKey = classMemberFuncKey(ctx, setterName); // (#1983) key + display name
+      ctx.funcMap.set(setterKey, setterFuncIdx);
 
       ctx.mod.functions.push({
-        name: setterName,
+        name: setterKey,
         typeIdx: setterTypeIdx,
         locals: [],
         body: [],
@@ -919,8 +937,13 @@ export function collectClassDeclaration(
       visitedAncestors.add(ancestor);
       // Inherit methods
       for (const [key, funcIdx] of ctx.funcMap) {
-        if (key.startsWith(`${ancestor}_`) && !key.endsWith("_new") && !key.endsWith("_type")) {
-          const suffix = key.substring(ancestor.length + 1);
+        // (#1983) A parent member whose legacy `${ancestor}_${member}` key
+        // collided with a user function is registered under the relocated
+        // `__cm$${ancestor}_${member}` key. Recover the legacy form first so the
+        // prefix-scan below sees inherited members regardless of relocation.
+        const legacyKey = key.startsWith("__cm$") ? key.slice("__cm$".length) : key;
+        if (legacyKey.startsWith(`${ancestor}_`) && !legacyKey.endsWith("_new") && !legacyKey.endsWith("_type")) {
+          const suffix = legacyKey.substring(ancestor.length + 1);
           // Skip constructor-related entries
           if (suffix === "new" || suffix.startsWith("new_")) continue;
           // Check if this is a getter/setter (get_X or set_X)
@@ -931,8 +954,9 @@ export function collectClassDeclaration(
             const accPropName = (getMatch || setMatch)![1]!;
             if (!ownAccessorNames.has(accPropName)) {
               const childFullName = `${className}_${suffix}`;
-              if (!ctx.funcMap.has(childFullName)) {
-                ctx.funcMap.set(childFullName, funcIdx);
+              const childKey = classMemberFuncKey(ctx, childFullName); // (#1983)
+              if (!ctx.funcMap.has(childKey)) {
+                ctx.funcMap.set(childKey, funcIdx);
               }
               // Also inherit accessor set entry
               const parentAccessorKey = `${ancestor}_${accPropName}`;
@@ -945,8 +969,9 @@ export function collectClassDeclaration(
             // Regular method — inherit from parent (works for all method names,
             // including those with underscores like my_method) (#799 WI6)
             const childFullName = `${className}_${suffix}`;
-            if (!ownMethodNames.has(suffix) && !ctx.funcMap.has(childFullName)) {
-              ctx.funcMap.set(childFullName, funcIdx);
+            const childKey = classMemberFuncKey(ctx, childFullName); // (#1983)
+            if (!ownMethodNames.has(suffix) && !ctx.funcMap.has(childKey)) {
+              ctx.funcMap.set(childKey, funcIdx);
               ctx.classMethodSet.add(childFullName);
             }
           }
@@ -1207,7 +1232,7 @@ function compileClassBodiesInner(
   // Compile constructor
   const ctor = decl.members.find(ts.isConstructorDeclaration) as ts.ConstructorDeclaration | undefined;
   const ctorName = `${className}_new`;
-  const ctorLocalIdx = funcByName.get(ctorName);
+  const ctorLocalIdx = funcByName.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
   if (ctorLocalIdx !== undefined) {
     const func = ctx.mod.functions[ctorLocalIdx]!;
     const params: { name: string; type: ValType }[] = [];
@@ -1262,7 +1287,7 @@ function compileClassBodiesInner(
     // calls the parent's init on the derived instance, so the parent ctor
     // body actually executes. Externref-backed classes keep the legacy
     // single-function shape (their instance comes from a host import).
-    const initLocalIdx = isExternrefBacked ? undefined : funcByName.get(`${className}_init`);
+    const initLocalIdx = isExternrefBacked ? undefined : funcByName.get(classMemberFuncKey(ctx, `${className}_init`)); // (#1983)
     const initFunc = initLocalIdx !== undefined ? ctx.mod.functions[initLocalIdx] : undefined;
     const splitInit = !isExternrefBacked && initFunc !== undefined;
 
@@ -1270,6 +1295,8 @@ function compileClassBodiesInner(
       ? [...params, { name: "__self", type: { kind: "ref", typeIdx: structTypeIdx } as ValType }]
       : params;
     const fctx: FunctionContext = {
+      // display name only — cosmetic; the relocated funcMap/funcByName keys
+      // above carry the actual identity (#1983).
       name: splitInit ? `${className}_init` : ctorName,
       params: fctxParams,
       locals: [],
@@ -1366,7 +1393,9 @@ function compileClassBodiesInner(
     // effects would run twice, and the raw args + untouched `__argc` global
     // flow through to the parent's own check).
     const implicitParentInitIdx =
-      splitInit && !ctor ? ctx.funcMap.get(`${ctx.classParentMap.get(className) ?? ""}_init`) : undefined;
+      splitInit && !ctor
+        ? ctx.funcMap.get(classMemberFuncKey(ctx, `${ctx.classParentMap.get(className) ?? ""}_init`)) // (#1983)
+        : undefined;
 
     // Emit default-value initialization for constructor parameters with initializers.
     // For primitive params, __argc distinguishes an omitted argument from a
@@ -1678,7 +1707,7 @@ function compileClassBodiesInner(
         newBody.push({ op: "local.get", index: i });
       }
       newBody.push({ op: "local.get", index: newSelfLocal });
-      const initIdxNow = ctx.funcMap.get(`${className}_init`);
+      const initIdxNow = ctx.funcMap.get(classMemberFuncKey(ctx, `${className}_init`)); // (#1983)
       newBody.push({ op: "return_call", funcIdx: initIdxNow! } as Instr);
       func.locals = [{ name: "__self", type: { kind: "ref", typeIdx: structTypeIdx } }];
       func.body = newBody;
@@ -1701,7 +1730,7 @@ function compileClassBodiesInner(
       if (compiledMethods.has(fullName)) continue; // already compiled
       compiledMethods.add(fullName);
       const isStatic = ctx.staticMethodSet.has(fullName);
-      const methodLocalIdx = funcByName.get(fullName);
+      const methodLocalIdx = funcByName.get(classMemberFuncKey(ctx, fullName)); // (#1983)
       if (methodLocalIdx === undefined) continue;
 
       const func = ctx.mod.functions[methodLocalIdx]!;
@@ -1969,7 +1998,7 @@ function compileClassBodiesInner(
       const getterName = `${className}_get_${propName}`;
       if (compiledAccessors.has(getterName)) continue; // already compiled
       compiledAccessors.add(getterName);
-      const getterLocalIdx = funcByName.get(getterName);
+      const getterLocalIdx = funcByName.get(classMemberFuncKey(ctx, getterName)); // (#1983)
       if (getterLocalIdx === undefined) continue;
 
       const func = ctx.mod.functions[getterLocalIdx]!;
@@ -2057,7 +2086,7 @@ function compileClassBodiesInner(
       const setterName = `${className}_set_${propName}`;
       if (compiledAccessors.has(setterName)) continue; // already compiled
       compiledAccessors.add(setterName);
-      const setterLocalIdx = funcByName.get(setterName);
+      const setterLocalIdx = funcByName.get(classMemberFuncKey(ctx, setterName)); // (#1983)
       if (setterLocalIdx === undefined) continue;
 
       const func = ctx.mod.functions[setterLocalIdx]!;
