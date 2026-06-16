@@ -20,10 +20,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.ts";
-import {
-  buildLeakedHostImportError,
-  scanForLeakedHostImports,
-} from "../src/codegen/host-import-allowlist.ts";
+import { buildLeakedHostImportError, scanForLeakedHostImports } from "../src/codegen/host-import-allowlist.ts";
 
 describe("#2094 — scanForLeakedHostImports (unit)", () => {
   it("returns no leaks for allowlisted env imports and WASI imports", () => {
@@ -80,9 +77,7 @@ describe("#2094 — emit-time leak surfaces as a compile error", () => {
     // which is exactly what generateModule's finalize does. (A whole-pipeline
     // injection would require reaching into private codegen state; the scan is
     // pure over mod.imports, so this is the faithful contract.)
-    const leaks = scanForLeakedHostImports([
-      { module: "env", name: "__leaked_via_stale_funcmap_index" },
-    ]);
+    const leaks = scanForLeakedHostImports([{ module: "env", name: "__leaked_via_stale_funcmap_index" }]);
     expect(leaks).toHaveLength(1);
     const msg = buildLeakedHostImportError(leaks[0]!);
     expect(msg.startsWith("Codegen error:")).toBe(true);
@@ -97,7 +92,10 @@ describe("#2094 — standalone leak budget (zero)", () => {
   // ratchet: a regression that leaks a non-allowlisted import fails here.
   const CORPUS: ReadonlyArray<{ name: string; src: string }> = [
     { name: "arithmetic", src: `export function test(): number { return (1 + 2) * 3 - 4 / 2; }` },
-    { name: "loop-sum", src: `export function test(): number { let s = 0; for (let i = 0; i < 10; i++) s += i; return s; }` },
+    {
+      name: "loop-sum",
+      src: `export function test(): number { let s = 0; for (let i = 0; i < 10; i++) s += i; return s; }`,
+    },
     { name: "math", src: `export function test(): number { return Math.sqrt(16) + Math.abs(-3); }` },
     { name: "string-concat", src: `export function test(): string { return "a" + "b" + "c"; }` },
     { name: "console-log", src: `export function test(): void { console.log("hi"); }` },

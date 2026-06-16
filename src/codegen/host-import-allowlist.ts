@@ -495,9 +495,7 @@ export interface LeakedHostImport {
  * `module` / `name` fields are read, so the caller may pass any shape carrying
  * those two strings. Duplicate `module.name` pairs are de-duplicated.
  */
-export function scanForLeakedHostImports(
-  imports: ReadonlyArray<{ module: string; name: string }>,
-): LeakedHostImport[] {
+export function scanForLeakedHostImports(imports: ReadonlyArray<{ module: string; name: string }>): LeakedHostImport[] {
   const leaks: LeakedHostImport[] = [];
   const seen = new Set<string>();
   for (const imp of imports) {
