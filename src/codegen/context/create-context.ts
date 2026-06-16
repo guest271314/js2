@@ -152,6 +152,7 @@ export function createCodegenContext(
     anyHelpers: new Map(),
     anyHelpersEmitted: false,
     moduleInitGuardApplied: false,
+    indexSpaceFrozen: false, // #1984 — set true at the per-mode finalize boundary
     shapeMap: new Map(),
     templateCacheCounter: 0,
     templateVecTypeIdx: -1,

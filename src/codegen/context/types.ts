@@ -1024,6 +1024,17 @@ export interface CodegenContext {
   /** (#1789) Whether the WASI module-init guard (idempotent __module_init +
    *  prepended init call on exports) has been applied. */
   moduleInitGuardApplied: boolean;
+  /**
+   * #1984 — freeze-point discipline (child of #2043 Option 3). Set to `true`
+   * by `generateModule`/`generateMultiModule` once the module's index spaces
+   * are final (right before `stackBalance`, after the last legitimate
+   * `addUnionImports`/`addStringImports`/`reconcileNativeStrFinalizeShift`
+   * mutation in every mode). While set, `addImport`/`ensureLateImport` throw a
+   * named producer-site error instead of silently mutating a finalized import
+   * space — so the producer that added an import too late self-identifies with
+   * its own stack, rather than #2043's emit-time validation only naming the
+   * downstream symptom. Default `false`. */
+  indexSpaceFrozen: boolean;
   /** Shape-inferred array-like variables */
   shapeMap: Map<string, { vecTypeIdx: number; arrTypeIdx: number; elemType: ValType }>;
   /** Set of function names that failed during hoisting pre-pass */
