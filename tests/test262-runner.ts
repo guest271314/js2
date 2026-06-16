@@ -2554,6 +2554,7 @@ export async function handleNegativeTest(
       const result = await compile(minimalWrapped, {
         fileName: "test.ts",
         emitWat: false,
+        ...(target ? { target } : {}),
       });
       compileMs = performance.now() - compileStart;
       const totalMs = performance.now() - totalStart;
@@ -2877,6 +2878,12 @@ export async function runTest262File(
   filePath: string,
   category: string,
   timeoutMs = TEST_TIMEOUT_MS,
+  // (#2095) Optional compile target so the baseline validator can exercise the
+  // STANDALONE lane, not just the default JS-host (gc) lane. `undefined` keeps
+  // the historical host-mode behaviour. The instantiation path below is
+  // mode-agnostic — `buildImports` produces an empty import object for a
+  // standalone binary — so only the `compile()` target needs to change.
+  target?: "standalone",
 ): Promise<TestResult> {
   const totalStart = performance.now();
   const relPath = relative(TEST262_ROOT, filePath);
@@ -2973,6 +2980,8 @@ export async function runTest262File(
       fileName: "test.ts",
       sourceMap: true,
       emitWat: false,
+      // (#2095) standalone lane for the baseline validator (default host/gc).
+      ...(target ? { target } : {}),
       // #1251: align with the sharded runner — both `scripts/compiler-fork-worker.mjs`
       // (the production path that records the committed JSONL) and `tests/test262-vitest.test.ts`
       // FIXTURE multi-compile pass `skipSemanticDiagnostics: true`. Without this flag,
