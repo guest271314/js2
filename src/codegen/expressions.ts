@@ -13,6 +13,7 @@
  */
 import { ts } from "../ts-api.js";
 import { isBooleanType, isPromiseType, mapTsTypeToWasm } from "../checker/type-mapper.js";
+import { classifyAsyncConsumer } from "./async-cps.js";
 import type { Instr, ValType } from "../ir/types.js";
 import {
   emitStandalonePromiseReject,
@@ -250,28 +251,13 @@ function isAsyncCallExpression(ctx: CodegenContext, expr: ts.CallExpression): bo
  * minimal-diff variant — scope 2).
  */
 function asyncResultConsumedAsValue(ctx: CodegenContext, expr: ts.CallExpression): boolean {
-  let sawNonPromiseCast = false;
-  let parent: ts.Node | undefined = expr.parent;
-  while (
-    parent &&
-    (ts.isParenthesizedExpression(parent) ||
-      ts.isAsExpression(parent) ||
-      ts.isNonNullExpression(parent) ||
-      ts.isTypeAssertionExpression(parent))
-  ) {
-    if (ts.isAsExpression(parent) || ts.isNonNullExpression(parent) || ts.isTypeAssertionExpression(parent)) {
-      // The cast/assertion's resolved type. For `f() as unknown as number`,
-      // each layer is inspected; the value-consumer signal is that at least one
-      // cast in the chain targets a non-Promise type.
-      const castType = ctx.checker.getTypeAtLocation(parent);
-      if (!isPromiseType(castType)) sawNonPromiseCast = true;
-    }
-    parent = parent.parent;
-  }
-  // (case 1) await consumer — raw-T passthrough (folds in the existing skip).
-  if (parent && ts.isAwaitExpression(parent)) return true;
-  // (case 2) non-Promise cast/assertion sink — raw value wanted.
-  return sawNonPromiseCast;
+  // (#1936) Single source of truth: the three-state census classifier lives in
+  // async-cps.ts so the offline census script reuses the same logic. The legacy
+  // boolean is exactly `kind !== "thenable"` — `await` and `value` consumers
+  // both take the raw-T passthrough today; only the `thenable` consumer wraps.
+  // This stays behaviour-identical until #1796 changes the value/thenable
+  // dispatch. The rich rationale for each case is documented above.
+  return classifyAsyncConsumer(ctx.checker, expr) !== "thenable";
 }
 
 /**
