@@ -26,6 +26,8 @@
 import {
   asBlockId,
   collectUses,
+  forEachNestedBuffer,
+  mapNestedBuffers,
   type IrBlock,
   type IrBranch,
   type IrFunction,
@@ -48,13 +50,25 @@ export function deadCode(fn: IrFunction, registry?: AllocSiteRegistry): IrFuncti
   // --- Phase 2: compute live values within reachable blocks. -------------
   const live = computeLiveValues(fn, reachable);
 
+  // (#1925) Does this instr or anything inside its nested buffers get removed?
+  // The `live` set is already deep (#1922), so an interior instr's keep-status
+  // is globally correct; we just have to look inside buffers to detect it.
+  const removesAnything = (instr: IrInstr): boolean => {
+    if (!shouldKeep(instr, live)) return true;
+    let found = false;
+    forEachNestedBuffer(instr, (buffer) => {
+      for (const sub of buffer) if (removesAnything(sub)) found = true;
+    });
+    return found;
+  };
+
   // --- Phase 3: detect whether we actually changed anything. -------------
   const willRemoveBlocks = reachable.size !== fn.blocks.length;
   let willRemoveInstrs = false;
   for (const id of reachable) {
     const block = fn.blocks[id]!;
     for (const instr of block.instrs) {
-      if (!shouldKeep(instr, live)) {
+      if (removesAnything(instr)) {
         willRemoveInstrs = true;
         break;
       }
@@ -64,19 +78,49 @@ export function deadCode(fn: IrFunction, registry?: AllocSiteRegistry): IrFuncti
   if (!willRemoveBlocks && !willRemoveInstrs) return fn;
 
   // Rule 3 (retire): inform the registry of every allocation we are about to
-  // delete — both whole unreachable blocks and individually dead instrs — so
-  // downstream passes / the provenance checker do not see stale ids.
+  // delete — whole unreachable blocks, and dead instrs at top level OR inside
+  // any nested buffer (#1925) — so downstream passes / the provenance checker
+  // do not see stale ids.
   if (registry) {
+    const retireDead = (instr: IrInstr): void => {
+      if (!shouldKeep(instr, live)) {
+        retireAllocsIn(instr, registry); // retires the instr + everything nested
+        return;
+      }
+      forEachNestedBuffer(instr, (buffer) => {
+        for (const sub of buffer) retireDead(sub);
+      });
+    };
     for (let id = 0; id < fn.blocks.length; id++) {
       const block = fn.blocks[id]!;
       const blockReachable = reachable.has(id);
       for (const instr of block.instrs) {
-        if (!blockReachable || !shouldKeep(instr, live)) {
+        if (!blockReachable) {
           retireAllocsIn(instr, registry);
+        } else {
+          retireDead(instr);
         }
       }
     }
   }
+
+  // Recursively drop dead instrs inside a buffer, then recurse into the buffers
+  // of the kept instrs. Returns the same array reference when nothing changed
+  // (so mapNestedBuffers preserves instr identity and the fixpoint terminates).
+  const filterBuffer = (buffer: readonly IrInstr[]): readonly IrInstr[] => {
+    let changed = false;
+    const kept: IrInstr[] = [];
+    for (const instr of buffer) {
+      if (!shouldKeep(instr, live)) {
+        changed = true;
+        continue;
+      }
+      const rebuilt = mapNestedBuffers(instr, filterBuffer);
+      if (rebuilt !== instr) changed = true;
+      kept.push(rebuilt);
+    }
+    return changed ? kept : buffer;
+  };
 
   // --- Phase 4: rebuild blocks. ------------------------------------------
   // Sort reachable block IDs ascending, then remap old → new index.
@@ -86,7 +130,7 @@ export function deadCode(fn: IrFunction, registry?: AllocSiteRegistry): IrFuncti
 
   const newBlocks: IrBlock[] = sortedReachable.map((oldId) => {
     const block = fn.blocks[oldId]!;
-    const newInstrs = block.instrs.filter((i) => shouldKeep(i, live));
+    const newInstrs = filterBuffer(block.instrs);
     return {
       id: asBlockId(oldToNew.get(oldId)!),
       blockArgs: block.blockArgs,
