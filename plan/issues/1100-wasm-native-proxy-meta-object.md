@@ -230,9 +230,30 @@ $Object` — full standalone equivalence suite must stay green.
 every `struct.get $Object` site to `ref.test $Proxy` first; reuse the
 closure→funcref bridge, do not invent a calling convention.
 
-## Implementation Progress (se1, 2026-06-16, sprint 62) — WIP, foundation landed
+## Implementation Progress (se1, 2026-06-16, → sprint 63) — WIP, 5 layers landed
 
-### Done (validated, on branch `issue-1100-standalone-proxy-phase1`)
+**Branch `issue-1100-standalone-proxy-phase1` (pushed); parked for sprint 63.**
+Five validated layers committed — each tsc-clean, `WebAssembly.validate` true on
+a standalone object program, and object-runtime suites (issue-2084) green:
+
+1. **Types** — `$Object` non-final `sub`; `$ProxyTraps`; `$Proxy <: $Object`.
+2. **Dispatch runtime** — `ensureProxyRuntime` with `__proxy_{get,set,has}_dispatch`
+   (revoked-throw, trap read, forward-to-`__extern_*`, `call_ref` trap).
+3. **Guard wiring** — `ref.test $Proxy` front-guard prepended to `__extern_get` /
+   `__extern_set` bodies (has deferred: needs i32 ToBoolean coercion).
+4. **anyref refinement** — `$Proxy.ptarget`/`phandler` are `anyref` (hold any
+   wrapped value, not only `$Object`).
+5. **Construction helpers** — `__proxy_create(target, get/set/has/applyFn) →
+   externref` and `__proxy_revoke(proxy)`.
+
+**THE NEXT STEP (s63) is the calling-convention fix**, not new surface: see step
+3's "CALLING-CONVENTION MISMATCH" note below — user trap handlers are GC closure
+structs, so `$ProxyTraps` must store closure **externrefs** (not raw funcrefs)
+and the dispatch must invoke via the closure-call bridge (the `.then` path),
+NOT a bare `call_ref` of the closure funcref. Resolve that, then wire the
+`new Proxy` call site + `Proxy.revocable` + apply + tests.
+
+### Done — layer 1 detail (validated, on branch `issue-1100-standalone-proxy-phase1`)
 
 The **highest-risk piece is resolved**: the WasmGC `$Proxy <: $Object` subtype
 question. In `src/codegen/object-runtime.ts` (`ensureObjectRuntime`):
