@@ -9334,45 +9334,59 @@ function compileCallExpression(
               fcCallBody.push({ op: "ref.cast", typeIdx: fc.funcTypeIdx });
               fcCallBody.push({ op: "call_ref", typeIdx: fc.funcTypeIdx });
 
-              // Coerce return to expected type
+              // Coerce return to expected type.
+              //
+              // The `if`-block declares `(result <expectedReturn>)`, so EVERY
+              // arm must leave a value of that exact type. But only the arm
+              // whose `funcTypeIdx` matches `retFn`'s runtime funcref actually
+              // executes — the rest are synthesized type-validity padding that
+              // never runs. So the coercion MUST be side-effect-free for those
+              // dead arms: pulling a late host import (e.g. `__unbox_number`)
+              // from a never-matching candidate shifts function indices mid-body
+              // and desyncs an already-baked `ref.func` operand → the closure
+              // ends up wrapping the wrong function (#2174 regression: a plain
+              // `var fn = makeAdder(10); fn(32)` had its adder `ref.func`
+              // rewritten to a freshly-imported `__typeof_boolean`, throwing at
+              // runtime). The live arm always matches `expectedReturn` exactly
+              // (so `valTypesMatch` is true and this block is skipped for it).
+              const matchedDispatch = expectedReturn !== null && fc.returnType !== null;
+              const numericKind = (t: ValType): boolean => t.kind === "i32" || t.kind === "f64" || t.kind === "i64";
               if (expectedReturn === null && fc.returnType !== null) {
                 fcCallBody.push({ op: "drop" } as Instr);
               } else if (expectedReturn !== null && fc.returnType === null) {
                 fcCallBody.push(...defaultValueInstrs(expectedReturn));
               } else if (
-                expectedReturn !== null &&
-                fc.returnType !== null &&
-                !valTypesMatch(fc.returnType, expectedReturn)
+                matchedDispatch &&
+                !valTypesMatch(fc.returnType!, expectedReturn!) &&
+                numericKind(expectedReturn!) &&
+                numericKind(fc.returnType!)
               ) {
-                // (#1693 / #2174) Return-type mismatch in the multi-funcref
-                // dispatch ladder. The if-block declares `(result
-                // <expectedReturn>)`, so EVERY arm must leave a value of that
-                // exact type. Each dispatch candidate may have a different
-                // funcref return type than the matched signature:
-                //
-                //  - #1693: numeric-primitive divergence (expected i32,
-                //    candidate returns f64) — axios/lib/utils.js packs ~30
-                //    same-arity arrow predicates with diverging numeric returns
-                //    into ctx.closureInfoByTypeIdx.
-                //  - #2174: externref/primitive divergence — an *async* closure
-                //    candidate (synthesized via `tryAltFuncType([externref])`)
-                //    returns a Promise (externref) while the awaited-value
-                //    signature resolves to f64/i32. Leaving externref in an
-                //    `(result f64)` block emits invalid Wasm
-                //    (`__closure_N fallthru expected f64, got externref`).
-                //    When the callee is async, `expectedReturn` is widened to
-                //    externref above so this arm boxes the f64 candidates up and
-                //    the externref Promise passes through untouched.
-                //
-                // `coerceType` validly bridges every reachable pair
-                // (numeric↔numeric, externref↔primitive via __box/__unbox_number,
-                // ref↔externref via extern.convert_any). Synthesized
-                // never-matching candidates still get a type-valid (if dead) arm,
-                // which keeps the module well-formed.
+                // (#1693) Numeric-primitive divergence between a real matching
+                // candidate and the declared block type (e.g. expected i32,
+                // candidate returns f64). `coerceType` between numeric kinds
+                // emits ONLY pure ops (`f64.convert_i32_s` / `i32.trunc_sat_f64_s`
+                // / …) — no late imports, no index shift — so it is safe even on
+                // a dead arm. Surfaces at full-module scale in axios/lib/utils.js
+                // where ~30 same-arity arrow predicates with diverging numeric
+                // returns populate ctx.closureInfoByTypeIdx.
                 const savedBody = fctx.body;
                 fctx.body = fcCallBody;
-                coerceType(ctx, fctx, fc.returnType, expectedReturn);
+                coerceType(ctx, fctx, fc.returnType!, expectedReturn!);
                 fctx.body = savedBody;
+              } else if (matchedDispatch && !valTypesMatch(fc.returnType!, expectedReturn!)) {
+                // (#2174) Any remaining mismatch is externref/ref ↔ primitive on
+                // a candidate that does NOT match the runtime funcref (the live
+                // arm matched `expectedReturn` and skipped this block). Bridging
+                // these via `coerceType` would pull `__box_number`/`__unbox_number`
+                // — a late import that shifts indices and corrupts earlier
+                // `ref.func`s. Since this arm never executes, drop its value and
+                // push a type-valid default for the block result instead — no
+                // import, no shift. (The async case from #2174 is handled by
+                // widening `expectedReturn` to externref above, which makes the
+                // live async/Promise arm `valTypesMatch` and pass through; the
+                // dead f64 candidates land here and get a null-extern default.)
+                fcCallBody.push({ op: "drop" } as Instr);
+                fcCallBody.push(...defaultValueInstrs(expectedReturn!));
               }
 
               funcDispatch = [

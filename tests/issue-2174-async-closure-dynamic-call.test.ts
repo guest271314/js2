@@ -157,4 +157,66 @@ describe("#2174 — async closure returned then called via value-call dispatch",
     if (typeof importObj.setExports === "function") importObj.setExports(instance.exports);
     expect((instance.exports as any).test()).toBe(1);
   });
+
+  // Regression guard for the first cut of this fix: generalising the
+  // multi-funcref dispatch coercion to `coerceType` for ALL mismatches pulled
+  // a late host import (`__unbox_number`/`__typeof_boolean`) from a *dead*
+  // never-matching candidate arm, which shifted function indices mid-body and
+  // rewrote an already-baked `ref.func` operand. A plain non-async
+  // function-reference-in-a-variable call (`var fn = makeAdder(10); fn(32)`)
+  // then wrapped the wrong function and threw at runtime. The narrowed fix
+  // keeps numeric coercion (pure ops) and uses drop+default (no imports) for
+  // the dead externref/ref arms. These must compile AND run correct.
+  async function runHost(src: string): Promise<number> {
+    const res: any = await compile(src, { skipSemanticDiagnostics: true });
+    expect(res.success).toBe(true);
+    await WebAssembly.compile(res.binary);
+    const importObj: any = buildImports(res.imports, undefined, res.stringPool);
+    const { instance } = await WebAssembly.instantiate(res.binary, importObj);
+    if (typeof importObj.setExports === "function") importObj.setExports(instance.exports);
+    return (instance.exports as any).test() as number;
+  }
+
+  it("non-async closure returned and called (was: wrong ref.func, threw)", async () => {
+    expect(
+      await runHost(`
+        function makeAdder(x: number): (y: number) => number {
+          return (y: number): number => x + y;
+        }
+        export function test(): number {
+          var fn = makeAdder(10);
+          return fn(32);
+        }
+      `),
+    ).toBe(42);
+  });
+
+  it("plain function assigned to a var and called with args", async () => {
+    expect(
+      await runHost(`
+        function add(a: number, b: number): number { return a + b; }
+        export function test(): number {
+          var fn = add;
+          return fn(10, 20);
+        }
+      `),
+    ).toBe(30);
+  });
+
+  it("counter closure returned and called repeatedly (stateful)", async () => {
+    expect(
+      await runHost(`
+        function counter(): () => number {
+          var count: number = 0;
+          return (): number => { count = count + 1; return count; };
+        }
+        export function test(): number {
+          var inc = counter();
+          inc();
+          inc();
+          return inc();
+        }
+      `),
+    ).toBe(3);
+  });
 });

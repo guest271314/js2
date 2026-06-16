@@ -193,3 +193,38 @@ ECMAScript anchor: the value flowing is the `Promise` created per
 **PerformPromiseThen** / async function evaluation (the inner async function's
 result), so the call must yield the Promise object, not its awaited value —
 the widening preserves that.
+
+### Follow-up: narrowing the coercion to avoid a late-import-shift regression
+
+The first cut of fix-step 2 generalised the per-candidate coercion to call
+`coerceType(fc.returnType, expectedReturn)` for **any** mismatch. That
+over-broadened: PR #1548 CI's `equivalence-gate` flagged 8 NEW regressions in
+`tests/equivalence/fn-variable-call.test.ts` (plain non-async
+function-reference-in-a-variable calls — `var fn = makeAdder(10); fn(32)`).
+
+Root cause of the regression: the multi-funcref dispatch ladder emits one arm
+per candidate funcref type, but **only the arm matching `retFn`'s runtime
+funcref executes** — the rest are synthesized type-validity padding. The
+generalised `coerceType` ran on those **dead** arms too, and for an
+externref↔primitive mismatch it pulls a **late host import**
+(`__unbox_number`/`__box_number`, and transitively `__typeof_boolean`). A late
+import inserted mid-body shifts function indices and **desyncs an already-baked
+`ref.func` operand** (the #2043 / late-shift hazard class): the earlier
+`makeAdder` closure's `ref.func $__closure_0` got rewritten to the freshly
+imported `__typeof_boolean`, so `fn` wrapped the wrong function and threw at
+runtime.
+
+Narrowed fix (final): in the dispatch coercion,
+- **numeric↔numeric** mismatch → `coerceType` (emits only pure
+  `f64.convert_i32_s`/`i32.trunc_sat_f64_s` ops — no imports, no shift; keeps
+  the #1693 axios case working);
+- **any other mismatch** (externref/ref ↔ primitive, only ever on a dead
+  never-matching arm) → `drop + defaultValueInstrs(expectedReturn)` — type-valid
+  and **side-effect-free** (no late imports). The *live* async/Promise arm is
+  unaffected because the widening makes `expectedReturn` externref, so it
+  `valTypesMatch`es and skips coercion entirely (the Promise passes through).
+
+Verified after narrowing: `node scripts/equivalence-gate.mjs` → **+53 newly
+fixed, 0 new regressions** (exit 0); `fn-variable-call.test.ts` 5/5 pass; the
+#2174 cluster still 18/18 (wasi) + 22/22 (gc); regression test extended to 7
+cases (4 async + 3 non-async-closure guards). `tsc`/`biome` clean.
