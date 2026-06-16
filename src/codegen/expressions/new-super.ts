@@ -2158,8 +2158,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
       return { kind: "externref" };
     }
-    // No arguments — null proxy
-    fctx.body.push({ op: "ref.null.extern" });
+    // No arguments — `new Proxy()`. Per §28.2.1.1 the missing target/handler
+    // are `undefined`, which are not objects, so construction throws TypeError.
+    // Route through __proxy_create(null, null) so the runtime raises it (#2180).
+    {
+      fctx.body.push({ op: "ref.null.extern" });
+      fctx.body.push({ op: "ref.null.extern" });
+      const proxyIdx = ensureLateImport(
+        ctx,
+        "__proxy_create",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (proxyIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: proxyIdx });
+      }
+    }
     return { kind: "externref" };
   }
 

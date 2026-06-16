@@ -1666,8 +1666,18 @@ function _toPropertyDescriptorValidate(
 }
 
 /** Return true when `obj` is a WasmGC struct (opaque to JS). */
+// #2180 — user `new Proxy` / `Proxy.revocable` objects we construct. A Proxy
+// over a WasmGC-struct target otherwise trips `_isWasmStruct`'s probe: it has a
+// null prototype (inherited from the struct target) and a property set on it
+// forwards to the opaque struct and throws "opaque" — so the heuristic
+// misclassifies the Proxy AS a struct, routing `delete`/`in`/etc. to the
+// sidecar instead of letting the host fire the user trap. Excluding registered
+// user proxies keeps them on the host MOP path.
+const _userProxies = new WeakSet<object>();
+
 function _isWasmStruct(obj: any): boolean {
   if (obj == null || typeof obj !== "object") return false;
+  if (_userProxies.has(obj)) return false;
   // WasmGC structs have a null prototype and no own keys — quick heuristic
   // that avoids try/catch on normal objects.
   try {
@@ -3888,6 +3898,9 @@ function _safeSet(
   try {
     obj[key] = val;
   } catch (e) {
+    // #2180 — writing to a revoked proxy throws TypeError; propagate it
+    // instead of silently diverting to the sidecar.
+    if (_isRevokedProxyError(e)) throw e;
     // For non-WasmGC objects (frozen/sealed JS objects),
     // fall through to sidecar set — preserves original behavior for non-strict callers.
     _sidecarSet(obj, key, val);
@@ -4645,6 +4658,170 @@ function _unwrapForHost(v: any): any {
   if (v == null || typeof v !== "object") return v;
   const orig = _hostProxyReverse.get(v);
   return orig ?? v;
+}
+
+// ── #2180 — host-mode user `new Proxy` / `Proxy.revocable` construction ──────
+//
+// A compiled `new Proxy(target, handler)` reaches the host with `target` and
+// `handler` as raw WasmGC structs (object literals compile to opaque structs).
+// Two problems must be solved for the host's native Proxy MOP to behave per
+// §10.5 / §28.2:
+//
+//  1. **Trap discovery.** The host reads `handler[trapName]` to find each trap.
+//     On a raw struct every read returns `undefined` (opaque), so NO trap ever
+//     fires and every operation silently falls through to the target. We build
+//     a plain-object *bridge handler* whose trap methods forward to the Wasm
+//     closures stored on the struct, invoked via `_wrapForHost`'s closure
+//     bridge (which threads `this` = the original handler struct).
+//
+//  2. **Identity.** Spec trap signatures hand the user `target`/`handler`
+//     identities (`get(t, p, recv)` with `t === target`, `this === handler`).
+//     The user's source holds the *raw* structs, so the values the trap sees
+//     must compare equal to those raw structs. We therefore use the raw struct
+//     as the host `[[ProxyTarget]]` (preserving `t === target`) and re-thread
+//     `this`/the target arg back to the raw handler/target inside each bridge.
+//
+// Construction also enforces the §28.2.1.1 step-1/2 `TypeError`s: both target
+// and handler must be objects (a WasmGC struct counts as an object).
+const _PROXY_TRAP_NAMES = [
+  "apply",
+  "construct",
+  "defineProperty",
+  "deleteProperty",
+  "get",
+  "getOwnPropertyDescriptor",
+  "getPrototypeOf",
+  "has",
+  "isExtensible",
+  "ownKeys",
+  "preventExtensions",
+  "set",
+  "setPrototypeOf",
+] as const;
+
+function _isObjectLike(v: any): boolean {
+  if (v === null || v === undefined) return false;
+  const t = typeof v;
+  return t === "object" || t === "function";
+}
+
+/**
+ * #2180 — a revoked Proxy throws a `TypeError` from EVERY internal method
+ * ("Cannot perform 'get' on a proxy that has been revoked"). The boundary
+ * helpers (`__extern_get` etc.) wrap their host reads in a try/catch that
+ * silently falls through to a struct-getter path — which would swallow this
+ * spec-mandated TypeError and return `undefined` instead. Detect it so callers
+ * can re-throw, letting the user program's `assert.throws(TypeError, …)` see it.
+ */
+function _isRevokedProxyError(e: any): boolean {
+  return e instanceof TypeError && typeof e.message === "string" && e.message.includes("proxy that has been revoked");
+}
+
+/**
+ * #2180 — build a real host Proxy from a user `new Proxy(target, handler)`.
+ * `ctor` is "Proxy" or "Proxy.revocable" for the spec-mandated TypeError text.
+ * Returns the constructed Proxy (revocable=false) — callers that need the
+ * `{proxy, revoke}` pair call `_hostProxyConstructRevocable`.
+ */
+function _hostProxyConstruct(
+  target: any,
+  handler: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+  ctor: string,
+): any {
+  if (!_isObjectLike(target)) {
+    throw new TypeError(`Cannot create ${ctor} with a non-object as target`);
+  }
+  if (!_isObjectLike(handler)) {
+    throw new TypeError(`Cannot create ${ctor} with a non-object as handler`);
+  }
+  const bridgeHandler = _buildProxyBridgeHandler(handler, callbackState);
+  // Use the raw target as [[ProxyTarget]] so `t === target` holds in traps and
+  // `proxy`-vs-`target` identity probes resolve. WasmGC structs are valid
+  // exotic targets for the host engine; the bridge handler routes every MOP
+  // operation through the user trap (or, when a trap is absent, the host's
+  // default which reads the struct via the same boundary helpers).
+  const proxy = new Proxy(target, bridgeHandler);
+  _userProxies.add(proxy);
+  return proxy;
+}
+
+/** #2180 — `Proxy.revocable(target, handler)` → `{ proxy, revoke }`. */
+function _hostProxyConstructRevocable(
+  target: any,
+  handler: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+): any {
+  if (!_isObjectLike(target)) {
+    throw new TypeError("Cannot create proxy with a non-object as target");
+  }
+  if (!_isObjectLike(handler)) {
+    throw new TypeError("Cannot create proxy with a non-object as handler");
+  }
+  const bridgeHandler = _buildProxyBridgeHandler(handler, callbackState);
+  const rv = Proxy.revocable(target, bridgeHandler);
+  if (rv && typeof rv.proxy === "object" && rv.proxy !== null) _userProxies.add(rv.proxy);
+  return rv;
+}
+
+/**
+ * #2180 — read a (possibly closure-valued) field off a WasmGC struct WITHOUT
+ * routing through `_wrapForHost` (whose mirror double-wraps a closure field
+ * into a non-callable object — the very bug that left every user trap
+ * undiscovered). Prefers the per-shape `__sget_<name>` field getter, then the
+ * sidecar store. Returns `undefined` when the field is absent.
+ */
+function _structFieldRaw(obj: any, name: string, exports: Record<string, Function> | undefined): any {
+  if (exports) {
+    const getter = exports[`__sget_${name}`];
+    if (typeof getter === "function") {
+      try {
+        const v = getter(obj);
+        if (v !== undefined && v !== null) return v;
+      } catch {
+        /* field not present on this struct shape */
+      }
+    }
+  }
+  return _sidecarGet(obj, name);
+}
+
+/**
+ * #2180 — translate a (possibly WasmGC-struct) user handler into a plain-object
+ * handler the host engine can read trap functions from. Each present trap is
+ * read directly off the struct and wrapped into a JS callable that dispatches
+ * the underlying Wasm closure with `this` = the raw handler struct (so the
+ * user-observable `this` inside the trap is identity-equal to the `handler`
+ * value the compiled program holds). A trap the user did not define is omitted,
+ * so the host falls back to its default (ordinary) behavior for that operation
+ * — matching the spec, where a missing trap means "use the target's internal
+ * method".
+ */
+function _buildProxyBridgeHandler(
+  handler: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+): any {
+  // Plain JS handler (created host-side, not a WasmGC struct) already exposes
+  // its traps directly — use it verbatim so identity/`this` are untouched.
+  if (!_isWasmStruct(handler)) return handler;
+
+  const exports = callbackState?.getExports();
+  const bridge: Record<string, any> = {};
+  for (const name of _PROXY_TRAP_NAMES) {
+    const rawTrap = _structFieldRaw(handler, name, exports);
+    if (rawTrap == null) continue;
+    const callable = _maybeWrapCallableUnknownArity(rawTrap, callbackState);
+    if (typeof callable !== "function") continue;
+    // Forward to the user trap with `this` = the raw handler struct. The
+    // closure bridge installs that struct as `__current_this`, so the trap
+    // body's `this` is the same value the program sees as `handler` and
+    // `assert.sameValue(this, handler)` passes. Spec-correct args (raw target,
+    // property key, receiver = our user Proxy) flow through unchanged.
+    bridge[name] = function (this: any, ...args: any[]): any {
+      return (callable as Function).apply(handler, args);
+    };
+  }
+  return bridge;
 }
 
 // ── #1234 — sparse-aware Array.prototype fast paths ─────────────────────────
@@ -6431,8 +6608,11 @@ assert._isSameValue = isSameValue;
           if (obj != null && typeof obj === "object") {
             try {
               if (Object.getPrototypeOf(obj) !== null && key in Object(obj)) return obj[key];
-            } catch {
-              /* fall through to the generic path */
+            } catch (e) {
+              // #2180 — a revoked-proxy TypeError must propagate, not be
+              // swallowed by the struct-getter fallback below.
+              if (_isRevokedProxyError(e)) throw e;
+              /* otherwise fall through to the generic path */
             }
           }
           const val = _safeGet(obj, key, callbackState);
@@ -6653,7 +6833,9 @@ assert._isSameValue = isSameValue;
           // user-assigned `o.x = undefined` must still report present.
           try {
             if (key in obj) return 1;
-          } catch {
+          } catch (e) {
+            // #2180 — `key in revokedProxy` throws TypeError; propagate it.
+            if (_isRevokedProxyError(e)) throw e;
             /* opaque struct or non-object obj */
           }
           const sc = _wasmStructProps.get(obj);
@@ -8486,7 +8668,15 @@ assert._isSameValue = isSameValue;
         return (iterable: any, keyFn: any): any =>
           (Object as any).groupBy(iterable, _maybeWrapCallable(keyFn, 2, callbackState));
       // Proxy.revocable(target, handler) — creates a revocable Proxy (#965)
-      if (name === "__proxy_revocable") return (target: any, handler: any): any => Proxy.revocable(target, handler);
+      if (name === "__proxy_revocable")
+        return (target: any, handler: any): any => {
+          // #2180 — same construction path as `new Proxy`: validate the
+          // target/handler are objects (else TypeError), bridge a WasmGC-struct
+          // handler so the host can read its traps, and keep the raw target as
+          // [[ProxyTarget]] for identity. Host enforces revoked-throws +
+          // revoke idempotence on the returned pair.
+          return _hostProxyConstructRevocable(target, handler, callbackState);
+        };
       // ── Reflect.* host dispatch (#1466) ─────────────────────────────────
       // Each handler delegates to the host's Reflect.X so Proxy targets see
       // their traps fire and boolean returns are preserved. Wasm structs
@@ -9150,7 +9340,9 @@ assert._isSameValue = isSameValue;
             try {
               const k = typeof key === "symbol" ? key : String(key);
               return delete obj[k] ? 1 : 0;
-            } catch {
+            } catch (e) {
+              // #2180 — deleting from a revoked proxy throws TypeError; propagate it.
+              if (_isRevokedProxyError(e)) throw e;
               // Non-configurable in strict mode throws TypeError; report failure.
               return 0;
             }
@@ -11104,20 +11296,7 @@ assert._isSameValue = isSameValue;
       });
     }
     case "proxy_create":
-      return (target: any, handler: any) => {
-        // Wrap the Wasm struct target in a real JS Proxy with the given handler.
-        // If handler is null/undefined, use an empty handler (transparent proxy).
-        // If target is null/undefined, fall back to an empty object as target.
-        const t = target ?? {};
-        const h = handler ?? {};
-        try {
-          return new Proxy(t, h);
-        } catch {
-          // If Proxy construction fails (e.g. handler is not an object),
-          // return target as-is (standalone fallback behavior).
-          return t;
-        }
-      };
+      return (target: any, handler: any) => _hostProxyConstruct(target, handler, callbackState, "Proxy");
     default:
       // #1858 C9a: fail loud instead of silently binding an unhandled import
       // intent to a no-op. A no-op `() => {}` returns `undefined` for every

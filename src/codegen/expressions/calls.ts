@@ -2159,7 +2159,12 @@ function compileCallExpression(
             : (unwrapped as ts.TypeAssertion).expression;
     }
     if (ts.isIdentifier(unwrapped)) {
-      const NAMESPACE_NON_CALLABLE = new Set(["Math", "JSON", "Reflect", "Atomics"]);
+      // #2180 — `Proxy(t,h)` without `new` must throw TypeError: the Proxy
+      // exotic has [[Construct]] but no [[Call]]. The `new Proxy` form is
+      // handled separately in new-super.ts; member calls like
+      // `Proxy.revocable(...)` reach a different branch (this guard only fires
+      // for a bare-identifier callee), so listing it here is safe.
+      const NAMESPACE_NON_CALLABLE = new Set(["Math", "JSON", "Reflect", "Atomics", "Proxy"]);
       if (NAMESPACE_NON_CALLABLE.has(unwrapped.text)) {
         // Evaluate arguments for their side effects (spec: argument list is
         // evaluated before the [[Call]] check would normally run), then throw.
