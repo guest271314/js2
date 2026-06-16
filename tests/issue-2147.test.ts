@@ -29,7 +29,13 @@ process.exit(0);
   chmodSync(join(binDir, "gh"), 0o755);
 }
 
-function run(fx: Fixture): { stdout: string; json: any } {
+interface ReconcileJson {
+  mergedPrCheckSkipped: boolean | string;
+  mergedPrFixed: Array<{ id: string; issueStatus: string; prTitle: string; title: string }>;
+  stale: unknown[];
+}
+
+function run(fx: Fixture): { stdout: string; json: ReconcileJson } {
   // --no-merged-prs is NOT passed; we want the gh-backed path. The team task
   // store is unlikely to exist in CI, but the merged-PR section runs regardless.
   const stdout = execFileSync("node", [SCRIPT, "--json"], {
@@ -81,7 +87,7 @@ describe("#2147 reconcile-tasklist flags ready issues fixed by a merged PR", () 
     );
     const { json } = run(f);
     expect(json.mergedPrCheckSkipped).toBe(false);
-    expect(json.mergedPrFixed.map((x: any) => x.id)).toContain("2002");
+    expect(json.mergedPrFixed.map((x) => x.id)).toContain("2002");
   });
 
   it("does NOT flag an issue only mentioned by a plan/docs PR", () => {
@@ -90,7 +96,7 @@ describe("#2147 reconcile-tasklist flags ready issues fixed by a merged PR", () 
       ["plan(s63): triage #2003 into the sprint", "docs: note #2003 in the changelog"],
     );
     const { json } = run(f);
-    expect(json.mergedPrFixed.map((x: any) => x.id)).not.toContain("2003");
+    expect(json.mergedPrFixed.map((x) => x.id)).not.toContain("2003");
   });
 
   it("does NOT flag an issue already marked done", () => {
@@ -99,20 +105,20 @@ describe("#2147 reconcile-tasklist flags ready issues fixed by a merged PR", () 
       ["fix(#2004): correct the other thing"],
     );
     const { json } = run(f);
-    expect(json.mergedPrFixed.map((x: any) => x.id)).not.toContain("2004");
+    expect(json.mergedPrFixed.map((x) => x.id)).not.toContain("2004");
   });
 
   it("flags in-progress issues too, and reports skipped when --no-merged-prs", () => {
     const f = setup([["2005", "in-progress", "wip bug"]], ["fix(#2005): land it"]);
     const { json } = run(f);
-    expect(json.mergedPrFixed.map((x: any) => x.id)).toContain("2005");
+    expect(json.mergedPrFixed.map((x) => x.id)).toContain("2005");
 
     // --no-merged-prs path
     const stdout = execFileSync("node", [SCRIPT, "--json", "--no-merged-prs"], {
       encoding: "utf8",
       env: { ...process.env, REPO_ROOT: f.dir, CLAUDE_HOME: join(f.dir, "empty-claude-home") },
     });
-    const parsed = JSON.parse(stdout);
+    const parsed = JSON.parse(stdout) as ReconcileJson;
     expect(parsed.mergedPrCheckSkipped).toBe("--no-merged-prs");
     expect(parsed.mergedPrFixed).toEqual([]);
   });
