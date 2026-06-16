@@ -100,17 +100,42 @@ interface TestResult {
    * per-test `compile_timeout` exclusion otherwise hides.
    */
   compile_ms?: number;
+  /**
+   * #2096: opaque monotonic integer identifying the conformance oracle (the
+   * verdict logic: error classification + negative-expectation matching +
+   * required error precision). Stamped on every row by `recordResult`. Two
+   * runs with the same `oracle_version` apply identical verdict logic, so
+   * their rows are directly comparable; differing versions are not, and the
+   * diff is refused unless `ORACLE_REBASE=1`. Defined in
+   * tests/test262-oracle-version.ts.
+   */
+  oracle_version?: number;
 }
 
 type StatusMap = Map<string, TestResult>;
 
-async function loadJsonl(path: string): Promise<StatusMap> {
+interface LoadedJsonl {
+  map: StatusMap;
+  /**
+   * The oracle_version observed in the file. `undefined` if no row carried
+   * one (a pre-#2096 file). `"mixed"` if rows disagreed — a file assembled
+   * from shards run under different oracles, which must never be compared.
+   */
+  oracleVersion: number | "mixed" | undefined;
+}
+
+async function loadJsonl(path: string): Promise<LoadedJsonl> {
   const map: StatusMap = new Map();
+  let oracleVersion: number | "mixed" | undefined;
   const rl = createInterface({ input: createReadStream(path) });
   for await (const line of rl) {
     if (!line.trim()) continue;
     try {
       const entry = JSON.parse(line) as TestResult;
+      if (typeof entry.oracle_version === "number" && oracleVersion !== "mixed") {
+        if (oracleVersion === undefined) oracleVersion = entry.oracle_version;
+        else if (oracleVersion !== entry.oracle_version) oracleVersion = "mixed";
+      }
       if (entry.file) {
         map.set(entry.file, entry);
       }
@@ -118,7 +143,7 @@ async function loadJsonl(path: string): Promise<StatusMap> {
       // skip malformed lines
     }
   }
-  return map;
+  return { map, oracleVersion };
 }
 
 // Reads baseline metadata (baseline_generated_at, baseline_sha) from a report.json.
@@ -156,6 +181,14 @@ Options:
   --all                         Show all transitions (no limit)
   --quiet, -q                   Only show summary counts
   --baseline-meta <report.json> Read baseline_generated_at + baseline_sha to warn on stale baseline
+
+Environment:
+  ORACLE_REBASE=1               Allow a cross-oracle-version diff (#2096). By default a diff
+                                between two JSONL files whose rows carry different oracle_version
+                                stamps is refused (exit 2), because the verdict logic differed and
+                                the diff would read oracle skew as regressions. Set this only on the
+                                oracle-flip PR (e.g. #1945) to intentionally re-seed the baseline at
+                                the new oracle version.
   --path-filter <patterns>      Restrict the diff to tests whose path contains any of the
                                 pipe-separated substrings (same semantics as TEST262_PATH_FILTER).
                                 Used by #1954 scoped PR-time runs: the candidate JSONL only covers
@@ -207,7 +240,63 @@ async function run(
   baselineMetaPath?: string,
   pathFilter: string[] = [],
 ) {
-  let [baseline, newer] = await Promise.all([loadJsonl(baselinePath), loadJsonl(newPath)]);
+  const [baselineLoaded, newerLoaded] = await Promise.all([loadJsonl(baselinePath), loadJsonl(newPath)]);
+  let baseline = baselineLoaded.map;
+  let newer = newerLoaded.map;
+
+  // #2096: cross-version oracle guard. The oracle (verdict logic) decides
+  // pass/fail/CE; when it tightens (e.g. the #1945 trap-vs-TypeError upgrade)
+  // rows flip for the SAME compiler output. Diffing a baseline against a
+  // candidate produced under a DIFFERENT oracle reads that skew as regressions
+  // and trips the gate on oracle change, not code change. Refuse such a diff
+  // unless ORACLE_REBASE=1 — which is how the oracle-flip PR re-seeds the
+  // baseline at the new version (promote-baseline picks it up on merge).
+  const oracleRebase = process.env.ORACLE_REBASE === "1";
+  const baseOracle = baselineLoaded.oracleVersion;
+  const newOracle = newerLoaded.oracleVersion;
+  const fmtOracle = (v: number | "mixed" | undefined) =>
+    v === undefined ? "unstamped (pre-#2096)" : v === "mixed" ? "mixed (multiple versions)" : `v${v}`;
+
+  // A "mixed" file is never comparable: it was assembled from shards run under
+  // different oracles, so even a same-version peer can't be trusted. This is a
+  // hard error regardless of ORACLE_REBASE.
+  if (baseOracle === "mixed" || newOracle === "mixed") {
+    console.error(
+      `\n✖ Oracle-version guard (#2096): one side carries MIXED oracle versions ` +
+        `(baseline=${fmtOracle(baseOracle)}, new=${fmtOracle(newOracle)}).\n` +
+        `  A result file assembled from shards run under different oracles cannot be diffed.\n` +
+        `  Re-run all shards under a single oracle version, then diff again.\n`,
+    );
+    process.exit(2);
+  }
+
+  // Differing single versions: refuse unless explicitly rebasing. Treat an
+  // unstamped (pre-#2096) file as comparable to anything — there is no
+  // recorded oracle to conflict with, so we fall back to the legacy behaviour
+  // and only emit an informational note.
+  if (baseOracle !== undefined && newOracle !== undefined && baseOracle !== newOracle) {
+    if (!oracleRebase) {
+      console.error(
+        `\n✖ Oracle-version guard (#2096): cross-version diff refused.\n` +
+          `  baseline oracle = ${fmtOracle(baseOracle)}, new oracle = ${fmtOracle(newOracle)}.\n` +
+          `  These rows were produced by different verdict logic, so the diff would read\n` +
+          `  oracle skew as regressions. To intentionally re-seed the baseline at the new\n` +
+          `  oracle version (e.g. the #1945 flip PR), re-run with ORACLE_REBASE=1.\n`,
+      );
+      process.exit(2);
+    }
+    console.log(
+      `ORACLE_REBASE=1 — comparing across oracle versions ` +
+        `(baseline ${fmtOracle(baseOracle)} → new ${fmtOracle(newOracle)}). ` +
+        `Regression numbers below mix oracle skew with code changes; use only to re-seed.`,
+    );
+  } else if (baseOracle === undefined || newOracle === undefined) {
+    console.log(
+      `Oracle-version note (#2096): ${fmtOracle(baseOracle)} (baseline) vs ${fmtOracle(newOracle)} (new) — ` +
+        `at least one side is unstamped, comparing as legacy same-oracle.`,
+    );
+  }
+
   if (pathFilter.length > 0) {
     const before = baseline.size;
     baseline = applyPathFilter(baseline, pathFilter);

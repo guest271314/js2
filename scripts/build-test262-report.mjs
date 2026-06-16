@@ -766,6 +766,12 @@ async function main() {
     ["proposal", createCounts()],
   ]);
   const rootCauseRecords = [];
+  // #2096: capture the oracle_version stamped on the result rows so the
+  // merged report carries the same identity. If rows disagree (a merge of
+  // shards produced under different oracles) we keep the LOWEST seen and flag
+  // it as mixed — a mixed report should never be promoted to a baseline.
+  let oracleVersion;
+  let oracleVersionMixed = false;
 
   const rl = createInterface({
     input: createReadStream(args.input),
@@ -775,6 +781,14 @@ async function main() {
   for await (const line of rl) {
     if (!line.trim()) continue;
     const record = JSON.parse(line);
+    if (typeof record.oracle_version === "number") {
+      if (oracleVersion === undefined) {
+        oracleVersion = record.oracle_version;
+      } else if (oracleVersion !== record.oracle_version) {
+        oracleVersionMixed = true;
+        oracleVersion = Math.min(oracleVersion, record.oracle_version);
+      }
+    }
     const status = record.status;
     const scope = record.scope ?? "standard";
     const scopeOfficial = record.scope_official ?? scope !== "proposal";
@@ -831,6 +845,12 @@ async function main() {
     timestamp: new Date().toISOString(),
     baseline_generated_at: args.baselineGeneratedAt || new Date().toISOString(),
     baseline_sha: args.baselineSha || "",
+    // #2096: oracle identity for the merged report. Carried so diff-test262
+    // can refuse cross-version comparisons. `oracle_version_mixed` flags a
+    // report assembled from shards run under different oracles — never promote
+    // such a report to a baseline.
+    oracle_version: oracleVersion ?? null,
+    ...(oracleVersionMixed ? { oracle_version_mixed: true } : {}),
     mode: {
       target,
       include_proposals: args.includeProposals ? 1 : 0,
