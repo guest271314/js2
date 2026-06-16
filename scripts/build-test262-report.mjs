@@ -760,6 +760,9 @@ async function main() {
   const categories = new Map();
   const errorCategories = new Map();
   const skipReasons = new Map();
+  // #1853 — hard-error stability bucket (malformed_wasm / missing_test_export),
+  // aggregated separately from coverage so it can be gated as a regression.
+  const hardErrors = new Map();
   const scopeCounts = new Map([
     ["standard", createCounts()],
     ["annex_b", createCounts()],
@@ -819,6 +822,12 @@ async function main() {
 
     if (record.error_category) {
       errorCategories.set(record.error_category, (errorCategories.get(record.error_category) ?? 0) + 1);
+    }
+    // #1853 — count hard errors (malformed Wasm / missing test export) into the
+    // stability bucket. `hard_error_kind` is set by the runner only where the
+    // outcome is unambiguously a compiler bug, never for unsupported-feature.
+    if (record.hard_error_kind) {
+      hardErrors.set(record.hard_error_kind, (hardErrors.get(record.hard_error_kind) ?? 0) + 1);
     }
     if (status === "skip" && record.error) {
       skipReasons.set(record.error, (skipReasons.get(record.error) ?? 0) + 1);
@@ -885,6 +894,9 @@ async function main() {
         ...counter,
       })),
     error_categories: Object.fromEntries([...errorCategories.entries()].sort(([a], [b]) => a.localeCompare(b))),
+    // #1853 — hard-error stability bucket, surfaced separately from coverage and
+    // gated by scripts/check-test262-hard-errors.mjs against a committed baseline.
+    hard_errors: Object.fromEntries([...hardErrors.entries()].sort(([a], [b]) => a.localeCompare(b))),
     skip_reasons: Object.fromEntries([...skipReasons.entries()].sort(([a], [b]) => a.localeCompare(b))),
   };
 
