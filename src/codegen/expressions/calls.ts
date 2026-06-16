@@ -6569,6 +6569,24 @@ function compileCallExpression(
             return { kind: "externref" };
           }
 
+          // (#2165) Standalone `.catch(onRejected)` ≡ `.then(undefined, onRejected)`
+          // per §27.2.5.1. Reuse the native `$Promise` then-machinery so WASI
+          // mode doesn't leak the `Promise_catch` / `__make_callback` host
+          // imports. The chained promise still propagates a fulfilled receiver
+          // unchanged (onFulfilled = null) and routes a rejection through the
+          // user's onRejected continuation.
+          if (isStandalonePromiseActive(ctx) && method === "catch") {
+            const liveBuffers: Instr[][] = [];
+            try {
+              const promiseInstrs = compilePromiseThenReceiverBuffer(ctx, fctx, propAccess.expression, liveBuffers);
+              const onRejected = compileStandalonePromiseThenCallback(ctx, fctx, expr.arguments[0], liveBuffers);
+              emitStandalonePromiseThen(ctx, fctx, promiseInstrs, null, onRejected);
+            } finally {
+              for (const b of liveBuffers) ctx.liveBodies.delete(b);
+            }
+            return { kind: "externref" };
+          }
+
           // Determine import name: use Promise_then2 for .then(cb1, cb2)
           const useThen2 = method === "then" && expr.arguments.length >= 2;
           const importName = useThen2 ? "Promise_then2" : `Promise_${method}`;
