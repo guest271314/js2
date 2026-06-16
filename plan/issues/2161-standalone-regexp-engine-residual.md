@@ -181,3 +181,36 @@ RegExp @@symbol protocol calls` (~128, reuses #1504), (c) `feat: standalone
 RegExp engine v-flag / dynamic-ctor features` (~97, regex backend). Each is a
 dispatchable issue with a concrete test gate; none is a tail-end slice. Sub (a)
 + (b) together recover ~250 standalone tests.
+
+### Refinement on sub-bucket (a) — REVISED scope (2026-06-16, sdev5, #2161a)
+
+On implementation entry I pinpointed the exact refusal: it is **reading
+`RegExp.prototype` itself** (the prototype OBJECT), not the individual
+method/getter. `RegExp.prototype.test`, `RegExp.prototype.flags`,
+`RegExp.prototype.flags.length`, `Object.getOwnPropertyDescriptor(RegExp.
+prototype, "flags").get` — ALL fail at the inner `RegExp.prototype` read
+(`property-access.ts:1969-1976`: `RegExp` is a `BUILTIN_CTOR_NAME` identifier,
+`propName === "prototype"` has no native handler → `reportUnsupported…`). There
+is **no isolated slice** (not even `.length`/`.name`) that avoids it: every form
+chains off `RegExp.prototype`.
+
+Sub-categories of the 126 (by test form): 52 legacy `.call` (`RegExp.prototype.
+test.call(re, s)`), 57 Symbol.* protocol members, 31 this-val brand-check, 26
+`.length`/`.name`, 7 prop-desc reflection.
+
+**This means (a) is NOT self-contained** — it requires `RegExp.prototype` to be a
+**standalone-queryable object** whose members resolve to native method/getter
+closures + descriptors. That is the **same architecture as #2158's standalone
+builtin-prototype readers** (representing a builtin's `.prototype` host-free,
+replacing the `__register_prototype` host-Proxy that `nativeStrings` skips). The
+method closures additionally need the native RegExp engine generalized to a
+**runtime (externref) regex receiver** (today `emitRegexExecArrayCall` takes a
+statically-typed `$NativeRegExp` from a known expression).
+
+**Recommendation (revised):** (a) is NOT a bounded point-fix; fold it into
+#2158's standalone-prototype-reader phase (or architect-spec it as "standalone
+builtin-prototype object + native-method-closure dispatch", which #2159
+TypedArray and other builtins will also need). The cleanly-isolated wins inside
+(a) are gated on the same `RegExp.prototype`-object representation, so there is
+no tail-end slice to peel off. sdev5 flagged this at the implementation boundary
+rather than half-building the prototype-object representation at session tail.
