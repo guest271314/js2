@@ -1453,6 +1453,30 @@ export function compileArrowAsClosure(
   collectFunctionOwnLocals(arrow, ownLocals);
   if (ts.isFunctionExpression(arrow) && arrow.name) ownLocals.add(arrow.name.text);
 
+  // (#2118) Self-recursive const/let arrow: `const f = (n) => ... f(n-1)`.
+  // The closure references its own binding `f`. Without special handling the
+  // binding is captured as an ordinary variable; but the outer slot for `f` is
+  // typed `externref` (function types resolve to externref) and is still
+  // uninitialized at the moment the closure is constructed, so the capture is
+  // boxed into a `__ref_cell_externref` and the construction path emits an
+  // invalid `ref.cast` between the ref-cell struct and the closure struct
+  // (struct.get type-mismatch validation failure). Detect the self-binding and
+  // route the self-reference through `__self` (lifted param 0) — exactly the
+  // mechanism named function expressions already use — so the recursive call
+  // dispatches through the closure's own struct and the name is NOT captured.
+  let selfBindingName: string | undefined;
+  if (ts.isArrowFunction(arrow) || (ts.isFunctionExpression(arrow) && !arrow.name)) {
+    const declParent = arrow.parent;
+    if (
+      declParent &&
+      ts.isVariableDeclaration(declParent) &&
+      declParent.initializer === arrow &&
+      ts.isIdentifier(declParent.name)
+    ) {
+      selfBindingName = declParent.name.text;
+    }
+  }
+
   const referencedNames = new Set<string>();
   if (ts.isBlock(body)) {
     for (const stmt of body.statements) {
@@ -1595,6 +1619,8 @@ export function compileArrowAsClosure(
     if (isOwnParamName(arrow, name)) continue;
     // Skip if the name is a named function expression's own name (self-reference)
     if (ts.isFunctionExpression(arrow) && arrow.name && arrow.name.text === name) continue;
+    // (#2118) Skip the self-recursive const/let arrow binding — routed via __self.
+    if (selfBindingName !== undefined && name === selfBindingName) continue;
     // #1177: Also fall back to scanning for a `__tdz_<name>` slot when
     // tdzFlagLocals was cleared by block-scope shadow management.
     if (!fctx.tdzFlagLocals?.has(name)) {
@@ -1906,6 +1932,16 @@ export function compileArrowAsClosure(
     liftedFctx.readOnlyBindings.add(funcExprName);
   }
 
+  // (#2118) Self-recursive const/let arrow binding: map the binding name to the
+  // __self param so recursive `f(...)` calls inside the body dispatch through
+  // the closure's own struct via call_ref (mirrors the named-funcexpr path).
+  // The name is NOT registered as read-only — unlike a funcexpr's own name, a
+  // `let f` binding may legitimately be reassigned in the outer scope; inside
+  // the closure body, however, the reference is the recursive self.
+  if (selfBindingName !== undefined && !liftedFctx.localMap.has(selfBindingName)) {
+    liftedFctx.localMap.set(selfBindingName, 0);
+  }
+
   const savedFunc = ctx.currentFunc;
   if (savedFunc) ctx.parentBodiesStack.push(savedFunc.body);
   if (savedFunc) ctx.funcStack.push(savedFunc);
@@ -1921,6 +1957,26 @@ export function compileArrowAsClosure(
   };
   if (funcExprName) {
     ctx.closureMap.set(funcExprName, closureInfoForSelf);
+  }
+
+  // (#2118) Register the self-recursive const/let arrow binding so recursive
+  // calls compile as closure calls dispatched through __self. The struct.get
+  // that fetches the funcref runs against __self's *actual* param type
+  // (selfTypeIdx — the wrapper base struct when capture-subtyping is used, else
+  // the specific struct), not necessarily the concrete subtype, so use
+  // selfTypeIdx as the call-site struct type. Field 0 (funcref) is inherited
+  // from the wrapper base, so the lifted func type still drives call_ref.
+  let savedSelfBindingClosureInfo: ClosureInfo | undefined;
+  let hadSavedSelfBindingClosureInfo = false;
+  if (selfBindingName !== undefined && selfBindingName !== funcExprName) {
+    hadSavedSelfBindingClosureInfo = ctx.closureMap.has(selfBindingName);
+    savedSelfBindingClosureInfo = ctx.closureMap.get(selfBindingName);
+    ctx.closureMap.set(selfBindingName, {
+      structTypeIdx: selfTypeIdx,
+      funcTypeIdx: liftedFuncTypeIdx,
+      returnType: closureReturnType,
+      paramTypes: arrowParams,
+    });
   }
 
   // Emit default-value initialization for simple params with defaults
@@ -2327,6 +2383,17 @@ export function compileArrowAsClosure(
   // Clean up the temporary closure map entry for named function expressions
   if (funcExprName) {
     ctx.closureMap.delete(funcExprName);
+  }
+
+  // (#2118) Restore the outer closureMap entry for the self-recursive binding —
+  // the temporary self entry must not leak into the enclosing scope's view of
+  // the name (where the binding still resolves to the local/global slot).
+  if (selfBindingName !== undefined && selfBindingName !== funcExprName) {
+    if (hadSavedSelfBindingClosureInfo) {
+      ctx.closureMap.set(selfBindingName, savedSelfBindingClosureInfo!);
+    } else {
+      ctx.closureMap.delete(selfBindingName);
+    }
   }
 
   // Ensure return value for non-void functions (skip if concise body already left a value)
