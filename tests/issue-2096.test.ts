@@ -13,11 +13,7 @@ function writeJsonl(path: string, records: Record<string, unknown>[]) {
  * Run scripts/diff-test262.ts on two JSONL files and capture exit code + output,
  * so the oracle-version guard can be asserted without throwing on non-zero exit.
  */
-function runDiff(
-  baseline: string,
-  candidate: string,
-  env: Record<string, string> = {},
-): { code: number; out: string } {
+function runDiff(baseline: string, candidate: string, env: Record<string, string> = {}): { code: number; out: string } {
   try {
     const out = execFileSync("npx", ["tsx", "scripts/diff-test262.ts", baseline, candidate, "--quiet"], {
       encoding: "utf8",
