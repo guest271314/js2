@@ -145,7 +145,9 @@ describe("#2158 no regression to existing class behaviour (standalone)", () => {
 
   it("native string equality is unaffected", async () => {
     expect(
-      await runStandalone(`export function test(): boolean { const a: any = "hello"; const b: any = "hel" + "lo"; return a === b; }`),
+      await runStandalone(
+        `export function test(): boolean { const a: any = "hello"; const b: any = "hel" + "lo"; return a === b; }`,
+      ),
     ).toBe(1);
   });
 });
