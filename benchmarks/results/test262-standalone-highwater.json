@@ -1,7 +1,6 @@
 {
-  "pass": 21184,
-  "sha": "b74ddfda6c70dc8707419de55cafd72a544b3083",
-  "generated_at": "2026-06-16T00:00:00Z",
-  "tolerance": 50,
-  "_comment": "#2097 absolute standalone pass-count high-water mark. Floor = pass - tolerance. Auto-raised on improvement by check-standalone-highwater.mjs --update in the promote-baseline job; only ever moves UP. Seeded from test262-standalone-current.jsonl (loopdive/js2wasm-baselines)."
+  "pass": 21195,
+  "sha": "1350818e85b2cf852605566dcb0357e4983ba2a8",
+  "generated_at": "2026-06-16T06:45:48Z",
+  "tolerance": 50
 }
