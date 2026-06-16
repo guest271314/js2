@@ -1,8 +1,8 @@
 ---
 id: 2162
 title: "Standalone Map/Set/WeakMap/WeakSet conformance residual (~532 tests)"
-status: done
-sprint: 62
+status: in-progress
+sprint: 63
 created: 2026-06-15
 updated: 2026-06-16
 priority: high
