@@ -56,8 +56,8 @@
   {
     "edition": "ES2019",
     "pass": 86,
-    "fail": 48,
-    "ce": 2,
+    "fail": 49,
+    "ce": 1,
     "skip": 0,
     "total": 136,
     "pct": 63
