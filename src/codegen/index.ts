@@ -9798,6 +9798,14 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
       if (ctx.mapTypeIdx >= 0) return { kind: "ref", typeIdx: ctx.mapTypeIdx };
     }
 
+    // (#2162) WeakMap / WeakSet → the SAME native `$Map` struct in standalone /
+    // nativeStrings mode (they reuse the Map backing store with object-identity
+    // keys and no iteration). JS-host mode keeps them as externref externClasses.
+    if ((sym?.name === "WeakMap" || sym?.name === "WeakSet") && ctx.nativeStrings) {
+      ensureMapRuntimeTypes(ctx);
+      if (ctx.mapTypeIdx >= 0) return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+
     // Check externref AFTER Array check — Array is declared in lib but should use wasm GC arrays
     if (isExternalDeclaredClass(tsType, ctx.checker)) return { kind: "externref" };
 
@@ -10305,8 +10313,11 @@ export function registerBuiltinExternClasses(ctx: CodegenContext): void {
     });
   }
 
-  // WeakMap methods
-  if (!ctx.externClasses.has("WeakMap")) {
+  // WeakMap methods.
+  // (#2162) Skip under nativeStrings — the native weak-collection runtime
+  // (weak-collections-runtime.ts, reusing the Map backing store) serves it, so
+  // registering the externClass would leak a `WeakMap_new` host import.
+  if (!ctx.externClasses.has("WeakMap") && !ctx.nativeStrings) {
     const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
     methods.set("get", externMethod(1));
     methods.set("set", externMethod(2));
@@ -10327,8 +10338,10 @@ export function registerBuiltinExternClasses(ctx: CodegenContext): void {
     });
   }
 
-  // WeakSet methods
-  if (!ctx.externClasses.has("WeakSet")) {
+  // WeakSet methods.
+  // (#2162) Skip under nativeStrings — served by the native weak-collection
+  // runtime; registering the externClass would leak a `WeakSet_new` host import.
+  if (!ctx.externClasses.has("WeakSet") && !ctx.nativeStrings) {
     const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
     methods.set("add", externMethod(1));
     methods.set("has", externMethod(1));
