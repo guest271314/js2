@@ -9293,6 +9293,22 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
+      // (#2107) native string ($AnyString) → "string", NOT "object". Under
+      // nativeStrings/standalone a string value is a `$AnyString` GC struct
+      // carried as externref; without this guard `typeof (s: any) === "object"`
+      // wrongly held and `=== "string"` was the only true arm via the separate
+      // __typeof_string helper, so both string-tagged comparisons disagreed.
+      ...(ctx.anyStrTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+            },
+          ] as Instr[])
+        : []),
       // non-null, not a boxed primitive → object
       { op: "i32.const", value: 1 },
     ],

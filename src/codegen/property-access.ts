@@ -22,7 +22,7 @@ import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
-import { emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
+import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
 import {
   classifyPrivateMember,
   emitPrivateBrandPredicate,
@@ -3101,13 +3101,28 @@ export function compilePropertyAccess(
       }
     }
 
-    // Handle .constructor on class instances — return constructor function ref
+    // Handle .constructor on class instances — return the class VALUE.
+    //
+    // (#2158 P1) `new A().constructor` must be reference-identical to the
+    // class identifier `A` so that `new A().constructor === A` holds. The
+    // class identifier resolves to the `__class_<Name>` singleton via
+    // `emitLazyClassObjectGet` (identifiers.ts:620). Routing `.constructor`
+    // through the SAME singleton makes both sides of the `===` the same
+    // externref — host-free, so it fixes the identity in standalone mode
+    // too (the previous `ref.func` + `extern.convert_any` produced a
+    // funcref-as-externref that never compared equal to the class object).
     if (propName === "constructor" && ctx.classSet.has(typeName)) {
       // Compile and drop the object expression (for side effects)
       const objResult = compileExpression(ctx, fctx, expr.expression);
       if (objResult) {
         fctx.body.push({ op: "drop" });
       }
+      if (emitLazyClassObjectGet(ctx, fctx, typeName)) {
+        return { kind: "externref" };
+      }
+      // No class-object singleton (e.g. externref-backed builtin subclass):
+      // fall back to the constructor funcref so callable identity is at least
+      // stable across reads of the same class.
       const ctorName = `${typeName}_constructor`;
       const funcIdx = ctx.funcMap.get(ctorName);
       if (funcIdx !== undefined) {

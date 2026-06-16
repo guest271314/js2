@@ -1,18 +1,20 @@
 ---
 id: 1355
 title: "spec backlog: Proxy implementation beyond JS-host fallback (235 test262 fails)"
-status: backlog
+status: ready
 created: 2026-05-08
-updated: 2026-05-08
-priority: low
+updated: 2026-06-15
+priority: top
 feasibility: hard
 reasoning_effort: high
 task_type: feature
 area: runtime, codegen
 language_feature: proxy
 goal: spec-completeness
-sprint: Backlog
+sprint: 63
 parent: 1334
+depends_on: [1100]
+note: "2026-06-15: elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). Remaining 10 traps + invariant checks to drive Proxy past host-fallback toward 100% (standalone). Follows #1100 Phase 1. Needs architect spec."
 ---
 # #1355 — Proxy: pure-Wasm implementation
 
