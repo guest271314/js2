@@ -272,6 +272,60 @@ function findNearestAncestorCtorParams(
   return undefined;
 }
 
+/**
+ * #2086: single source of truth for the parameter prefix synthesized for an
+ * implicit derived constructor (`constructor(...args){ super(...args) }`,
+ * §15.7.14). The rule was previously realized twice — once for func-type
+ * registration and once for the `FunctionContext` build — and the two copies
+ * drifted (each point fix #1833/#2082/#2078 landed in one phase or one
+ * representation lane). Both phases now derive the prefix from this function.
+ *
+ * `implicitForwarderArity` (the externref-backed built-in lane, #1833) and
+ * `implicitStructCtorParams` (the WasmGC-struct lane, #2082) are mutually
+ * exclusive by construction (`implicitStructCtorParams` is only computed for a
+ * non-builtin parent), so the returned list has at most one of the two shapes.
+ * `ctor` (the explicit-constructor case) is handled by the callers, not here —
+ * this helper covers only the *implicit* (no own ctor) synthesis.
+ */
+function computeImplicitDerivedCtorPrefix(
+  ctx: CodegenContext,
+  decl: ts.ClassDeclaration | ts.ClassExpression,
+  className: string,
+  ctor: ts.ConstructorDeclaration | undefined,
+): {
+  implicitBuiltinParent: string | undefined;
+  implicitForwarderArity: number;
+  implicitStructCtorParams: ts.NodeArray<ts.ParameterDeclaration> | undefined;
+  prefixParams: { name: string; type: ValType }[];
+} {
+  const implicitBuiltinParent = !ctor ? ctx.classBuiltinParentMap.get(className) : undefined;
+  const implicitForwarderArity = implicitBuiltinParent
+    ? getImplicitExternrefForwarderArity(ctx, decl, className, implicitBuiltinParent)
+    : 0;
+  const implicitStructCtorParams =
+    !ctor && !implicitBuiltinParent ? findNearestAncestorCtorParams(ctx, className) : undefined;
+
+  const prefixParams: { name: string; type: ValType }[] = [];
+  for (let i = 0; i < implicitForwarderArity; i++) {
+    prefixParams.push({ name: `__arg${i}`, type: { kind: "externref" } });
+  }
+  if (implicitStructCtorParams) {
+    for (let pi = 0; pi < implicitStructCtorParams.length; pi++) {
+      const param = implicitStructCtorParams[pi]!;
+      const paramName = ts.isIdentifier(param.name) ? param.name.text : `__param${pi}`;
+      const paramType = ctx.checker.getTypeAtLocation(param);
+      let wasmType = resolveWasmType(ctx, paramType);
+      // Widen ref→ref_null for params with defaults (caller passes ref.null as
+      // the omitted-arg sentinel). Must match the explicit-ctor widening below.
+      if (param.initializer && wasmType.kind === "ref") {
+        wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
+      }
+      prefixParams.push({ name: paramName, type: wasmType });
+    }
+  }
+  return { implicitBuiltinParent, implicitForwarderArity, implicitStructCtorParams, prefixParams };
+}
+
 function compileExternrefArgument(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
   const argResult = compileExpression(ctx, fctx, arg, { kind: "externref" });
   if (argResult === null) {
@@ -609,29 +663,16 @@ export function collectClassDeclaration(
   // `constructor(...args) { super(...args); }` as an externref forwarder whose
   // arity matches the parent constructor shape. Missing caller args are padded
   // as JS undefined and stripped by the runtime's `__new_<Parent>` resolver.
-  const implicitBuiltinParent = !ctor ? ctx.classBuiltinParentMap.get(className) : undefined;
-  const implicitForwarderArity = implicitBuiltinParent
-    ? getImplicitExternrefForwarderArity(ctx, decl, className, implicitBuiltinParent)
-    : 0;
-  if (implicitForwarderArity > 0) {
-    ctorParams.push(...externrefParams(implicitForwarderArity));
-  }
-  // #2082: implicit ctor of a WasmGC-struct-backed derived class (no explicit
-  // ctor, non-builtin parent) — forward the nearest ancestor ctor's params so
-  // `new Dog("rex")` actually passes "rex" through to the replayed
-  // `this.name = name` (spec §15.7.14 `constructor(...args){ super(...args) }`).
-  const implicitStructCtorParams =
-    !ctor && !implicitBuiltinParent ? findNearestAncestorCtorParams(ctx, className) : undefined;
-  if (implicitStructCtorParams) {
-    for (const param of implicitStructCtorParams) {
-      const paramType = ctx.checker.getTypeAtLocation(param);
-      let wasmType = resolveWasmType(ctx, paramType);
-      if (param.initializer && wasmType.kind === "ref") {
-        wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
-      }
-      ctorParams.push(wasmType);
-    }
-  }
+  // (#2086) Synthesize the implicit derived-ctor parameter prefix from the one
+  // shared rule. `implicitForwarderArity` (#1833, externref-backed built-in
+  // parent) and `implicitStructCtorParams` (#2082, WasmGC-struct parent) are
+  // the two lanes; the fctx-build phase below reuses the same helper.
+  const {
+    implicitForwarderArity,
+    implicitStructCtorParams,
+    prefixParams: implicitPrefixParams,
+  } = computeImplicitDerivedCtorPrefix(ctx, decl, className, ctor);
+  ctorParams.push(...implicitPrefixParams.map((p) => p.type));
   if (ctor) {
     for (let i = 0; i < ctor.parameters.length; i++) {
       const param = ctor.parameters[i]!;
@@ -1236,31 +1277,17 @@ function compileClassBodiesInner(
   if (ctorLocalIdx !== undefined) {
     const func = ctx.mod.functions[ctorLocalIdx]!;
     const params: { name: string; type: ValType }[] = [];
-    // (#1833) Match the synthetic forwarder params added during pre-registration.
-    const implicitBuiltinParent = !ctor ? ctx.classBuiltinParentMap.get(className) : undefined;
-    const implicitForwarderArity = implicitBuiltinParent
-      ? getImplicitExternrefForwarderArity(ctx, decl, className, implicitBuiltinParent)
-      : 0;
-    for (let i = 0; i < implicitForwarderArity; i++) {
-      params.push({ name: `__arg${i}`, type: { kind: "externref" } });
-    }
-    // #2082: bind the forwarded ancestor-ctor params as named locals so the
-    // replayed parent `this.x = name` assignments below resolve `name`. Must
-    // mirror the func-type registration (the implicitStructCtorParams block).
-    const implicitStructCtorParams =
-      !ctor && !implicitBuiltinParent ? findNearestAncestorCtorParams(ctx, className) : undefined;
-    if (implicitStructCtorParams) {
-      for (let pi = 0; pi < implicitStructCtorParams.length; pi++) {
-        const param = implicitStructCtorParams[pi]!;
-        const paramName = ts.isIdentifier(param.name) ? param.name.text : `__param${pi}`;
-        const paramType = ctx.checker.getTypeAtLocation(param);
-        let wasmType = resolveWasmType(ctx, paramType);
-        if (param.initializer && wasmType.kind === "ref") {
-          wasmType = { kind: "ref_null", typeIdx: (wasmType as { kind: "ref"; typeIdx: number }).typeIdx };
-        }
-        params.push({ name: paramName, type: wasmType });
-      }
-    }
+    // (#2086) Match the synthetic forwarder params added during pre-registration
+    // from the SAME shared rule — `__arg{i}` externref forwarders (#1833) and/or
+    // the bound ancestor-ctor params (#2082) so the replayed parent
+    // `this.x = name` assignments below resolve `name`. `implicitForwarderArity`
+    // / `implicitStructCtorParams` are reused later in the body-emission phase.
+    const {
+      implicitForwarderArity,
+      implicitStructCtorParams,
+      prefixParams: implicitPrefixParams,
+    } = computeImplicitDerivedCtorPrefix(ctx, decl, className, ctor);
+    params.push(...implicitPrefixParams);
     if (ctor) {
       for (let pi = 0; pi < ctor.parameters.length; pi++) {
         const param = ctor.parameters[pi]!;
