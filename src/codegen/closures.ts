@@ -19,6 +19,7 @@ import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, LocalDef, StructTypeDef, ValType } from "../ir/types.js";
 import { pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
+import { reportSilentFallback } from "./fallback-telemetry.js";
 import { allocLocal, allocTempLocal, getLocalType } from "./context/locals.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
 import {
@@ -530,7 +531,10 @@ export function emitArrowParamDestructuring(
           if (!ts.isIdentifier(propNameNode) && !ts.isStringLiteral(propNameNode)) continue;
           const propName = propNameNode.text;
           const fieldIdx = fields.findIndex((f) => f.name === propName);
-          if (fieldIdx === -1) continue;
+          if (fieldIdx === -1) {
+            reportSilentFallback(ctx, "lookup-miss-skip", "closures:capture-object-pattern-field-miss", element);
+            continue;
+          }
           const fieldType = fields[fieldIdx]!.type;
           const localIdx = allocLocal(fctx, localName, fieldType);
           fctx.body.push({ op: "local.get", index: convertedIdx });
@@ -574,7 +578,10 @@ export function emitArrowParamDestructuring(
       const localName = element.name.text;
 
       const fieldIdx = fields.findIndex((f) => f.name === propName.text);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(ctx, "lookup-miss-skip", "closures:capture-binding-element-field-miss", element);
+        continue;
+      }
 
       const fieldType = fields[fieldIdx]!.type;
       const localIdx = allocLocal(fctx, localName, fieldType);

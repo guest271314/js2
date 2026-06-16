@@ -22,6 +22,7 @@ import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
+import type { FallbackCounts } from "./fallback-telemetry.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import type {
@@ -954,6 +955,8 @@ export function generateModule(
 ): {
   module: WasmModule;
   errors: { message: string; line: number; column: number; severity?: "error" | "warning" }[];
+  // #2089 — silent-fallback telemetry counters (per class → per site → count).
+  fallbackCounts?: FallbackCounts;
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, ast.checker, options);
@@ -1628,7 +1631,7 @@ export function generateModule(
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  return { module: mod, errors: ctx.errors };
+  return { module: mod, errors: ctx.errors, fallbackCounts: ctx.fallbackCounts };
 }
 
 /**
@@ -4876,6 +4879,8 @@ export function generateMultiModule(
 ): {
   module: WasmModule;
   errors: { message: string; line: number; column: number; severity?: "error" | "warning" }[];
+  // #2089 — silent-fallback telemetry counters (per class → per site → count).
+  fallbackCounts?: FallbackCounts;
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, multiAst.checker, options);
@@ -5150,7 +5155,7 @@ export function generateMultiModule(
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  return { module: mod, errors: ctx.errors };
+  return { module: mod, errors: ctx.errors, fallbackCounts: ctx.fallbackCounts };
 }
 
 // ── Unified single-pass import collector (#592) ─────────────────────

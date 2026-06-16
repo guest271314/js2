@@ -57,6 +57,9 @@ jobs:
       - name: IR fallback gate (#1376)
         run: pnpm run check:ir-fallbacks
 
+      - name: Codegen silent-fallback gate (#2089)
+        run: pnpm run check:codegen-fallbacks
+
       - name: Issue integrity + link gate (#1616)
         # Fails on duplicate IDs, filename/frontmatter ID mismatch, dangling
         # depends_on, or broken plan/issues/<id>-<slug>.md links in tracked *.md.
