@@ -4442,7 +4442,175 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   void objVecArrRef;
   void nativeStrRef;
 
+  // (#1100) Register the standalone Proxy dispatch runtime. Must run AFTER
+  // __extern_get/set/has are registered (the trap dispatch helpers forward to
+  // them when a trap is absent) and only adds DEFINED functions, so no index
+  // shift (same invariant as the rest of this runtime).
+  ensureProxyRuntime(ctx, types, registerNative);
+
   return types;
+}
+
+/**
+ * (#1100) Standalone Proxy meta-object dispatch runtime — Phase 1.
+ *
+ * Registers a uniform trap func type `(externref,externref,externref) ->
+ * externref` and the per-operation dispatch helpers. Each helper takes the
+ * proxy (as externref), the key, and the receiver; it (1) casts to `$Proxy`,
+ * (2) throws a TypeError if the proxy is revoked, (3) reads the relevant trap
+ * funcref from `$ptraps`, (4) forwards to the ordinary operation on `$ptarget`
+ * when the trap is absent, else `call_ref`s the trap with
+ * `(target, key, receiver)`.
+ *
+ * Phase 1 performs NO §10.5 result-invariant checks (deferred to #1355) — it
+ * only enforces the revoked-proxy invariant.
+ *
+ * Caller (`__extern_get`/`set`/`has` body, patched separately) is responsible
+ * for the `ref.test $Proxy` guard that routes here; these helpers assume the
+ * incoming externref IS a proxy.
+ */
+function ensureProxyRuntime(
+  ctx: CodegenContext,
+  types: ObjectRuntimeTypes,
+  registerNative: (
+    name: string,
+    paramTypes: ValType[],
+    resultTypes: ValType[],
+    locals: { name: string; type: ValType }[],
+    body: Instr[],
+  ) => number,
+): void {
+  if (ctx.funcMap.has("__proxy_get_dispatch")) return;
+
+  const { objectTypeIdx, proxyTypeIdx, proxyTrapsTypeIdx } = types;
+  const externref: ValType = { kind: "externref" };
+
+  // Uniform trap signature: (target, key, receiver) -> result.
+  const trapTypeIdx = addFuncType(ctx, [externref, externref, externref], [externref]);
+
+  // Revoked-proxy TypeError. Reuse the WASI error constructor + exn tag like
+  // the ToPrimitive path does (object-runtime.ts ~1695).
+  const revokedMsg = "Cannot perform operation on a proxy that has been revoked";
+  addStringConstantGlobal(ctx, revokedMsg);
+  emitWasiErrorConstructor(ctx, "TypeError", 1);
+  const typeErrorCtorIdx = ctx.funcMap.get("__new_TypeError")!;
+  const exnTagIdx = ensureExnTag(ctx);
+  const throwRevoked: Instr[] = [
+    ...stringConstantExternrefInstrs(ctx, revokedMsg),
+    { op: "call", funcIdx: typeErrorCtorIdx },
+    { op: "throw", tagIdx: exnTagIdx } as Instr,
+  ];
+
+  // Field indices on $Proxy: the 6 $Object fields come first (0..5), then
+  // ptag(6) ptarget(7) phandler(8) ptraps(9) revoked(10).
+  const F_PTARGET = 7;
+  const F_PTRAPS = 9;
+  const F_REVOKED = 10;
+  // Field indices on $ProxyTraps: get(0) set(1) has(2) apply(3).
+  const TRAP_GET = 0;
+  const TRAP_SET = 1;
+  const TRAP_HAS = 2;
+
+  // Builds a dispatch helper body. `trapFieldIdx` selects the trap; `forwardName`
+  // is the ordinary operation to call when the trap is absent; `forwardArgc` is
+  // 2 (get/has: target,key) or 3 (set: target,key,value-in-receiver-slot).
+  // params: 0=proxyExtern 1=key 2=receiver(get)/value(set)
+  // locals: 3=p (ref $Proxy)  4=trap (funcref)
+  const buildDispatch = (trapFieldIdx: number, forwardName: string, isSet: boolean): Instr[] => {
+    const forwardIdx = ctx.funcMap.get(forwardName)!;
+    const body: Instr[] = [
+      // p = ref.cast $Proxy(any.convert_extern(proxyExtern))
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: proxyTypeIdx },
+      { op: "local.set", index: 3 },
+      // if p.revoked: throw TypeError
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_REVOKED },
+      { op: "if", blockType: { kind: "empty" }, then: throwRevoked } as Instr,
+      // trap = p.ptraps==null ? null : p.ptraps.<field>
+      { op: "local.get", index: 3 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "funcref" } },
+        then: [{ op: "ref.null.func" } as Instr],
+        else: [
+          { op: "local.get", index: 3 },
+          { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: trapFieldIdx },
+        ],
+      } as Instr,
+      { op: "local.set", index: 4 },
+      // if trap == null: forward to ordinary op on target
+      { op: "local.get", index: 4 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: externref },
+        then: isSet
+          ? [
+              // __extern_set(target, key, value) -> (void) ; push undefined
+              { op: "local.get", index: 3 },
+              { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+              { op: "extern.convert_any" } as Instr,
+              { op: "local.get", index: 1 },
+              { op: "local.get", index: 2 },
+              { op: "call", funcIdx: forwardIdx },
+              { op: "ref.null.extern" },
+            ]
+          : [
+              // __extern_get/has(target, key) -> externref
+              { op: "local.get", index: 3 },
+              { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+              { op: "extern.convert_any" } as Instr,
+              { op: "local.get", index: 1 },
+              { op: "call", funcIdx: forwardIdx },
+            ],
+        else: [
+          // call_ref trap (target, key, receiver/value)
+          { op: "local.get", index: 3 },
+          { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+          { op: "extern.convert_any" } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 2 },
+          { op: "local.get", index: 4 },
+          { op: "ref.cast", typeIdx: trapTypeIdx } as Instr,
+          { op: "call_ref", typeIdx: trapTypeIdx } as Instr,
+        ],
+      } as Instr,
+    ];
+    return body;
+  };
+
+  const dispatchLocals = [
+    { name: "p", type: { kind: "ref", typeIdx: proxyTypeIdx } as ValType },
+    { name: "trap", type: { kind: "funcref" } as ValType },
+  ];
+
+  registerNative(
+    "__proxy_get_dispatch",
+    [externref, externref, externref],
+    [externref],
+    dispatchLocals,
+    buildDispatch(TRAP_GET, "__extern_get", false),
+  );
+  registerNative(
+    "__proxy_set_dispatch",
+    [externref, externref, externref],
+    [externref],
+    dispatchLocals,
+    buildDispatch(TRAP_SET, "__extern_set", true),
+  );
+  registerNative(
+    "__proxy_has_dispatch",
+    [externref, externref, externref],
+    [externref],
+    dispatchLocals,
+    buildDispatch(TRAP_HAS, "__extern_has", false),
+  );
 }
 
 /**
