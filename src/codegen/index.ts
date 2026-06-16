@@ -42,7 +42,7 @@ import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
-import { fillApplyClosure, fillExternIsArray } from "./object-runtime.js";
+import { fillApplyClosure, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -1572,6 +1572,13 @@ export function generateModule(
     // `__call_fn_method_0..4` are registered. No-op when no standalone open-any
     // method-dispatch site reserved the bridge (`ctx.applyClosureReserved`).
     fillApplyClosure(ctx);
+
+    // (#1100) Fill the reserved standalone Proxy trap-invoke drivers
+    // (`__proxy_call_{get,set,has}`) now that `__call_fn_method_2/3/4` are
+    // registered. Each driver wraps the matching closure-method dispatcher so a
+    // user trap closure runs with the handler bound as `this`. No-op when no
+    // standalone `new Proxy` site reserved the runtime (`ctx.proxyDispatchReserved`).
+    fillProxyDispatch(ctx);
 
     // (#2151) Fill the reserved `__call_m_<name>` closed-struct method
     // dispatchers now that every object-literal struct + its `<Struct>_<name>`
