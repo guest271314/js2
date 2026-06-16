@@ -4574,14 +4574,7 @@ function ensureProxyRuntime(
     return funcIdx;
   };
   const callGetIdx = reserveDriver(PROXY_CALL_GET, [externref, externref, externref, externref, externref]);
-  const callSetIdx = reserveDriver(PROXY_CALL_SET, [
-    externref,
-    externref,
-    externref,
-    externref,
-    externref,
-    externref,
-  ]);
+  const callSetIdx = reserveDriver(PROXY_CALL_SET, [externref, externref, externref, externref, externref, externref]);
   const callHasIdx = reserveDriver(PROXY_CALL_HAS, [externref, externref, externref, externref]);
   ctx.proxyDispatchReserved = true;
 

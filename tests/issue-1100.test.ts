@@ -106,10 +106,9 @@ describe("#1100 standalone Proxy Phase 1 — has trap", () => {
 describe("#1100 standalone Proxy Phase 1 — construction", () => {
   it("a standalone `new Proxy` compiles and validates (no hard error)", async () => {
     // Previously emitted "Codegen error: Proxy not supported in standalone mode".
-    const r = await compile(
-      `export function test(): number { const p: any = new Proxy({ x: 1 }, {}); return p.x; }`,
-      { target: "standalone" },
-    );
+    const r = await compile(`export function test(): number { const p: any = new Proxy({ x: 1 }, {}); return p.x; }`, {
+      target: "standalone",
+    });
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     expect(WebAssembly.validate(r.binary)).toBe(true);
   });
