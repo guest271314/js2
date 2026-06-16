@@ -2,7 +2,7 @@
 id: 2103
 title: "shared binding-info analysis — one mutation/capture/declaration-order oracle for all lowerings"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-11
 updated: 2026-06-12
 priority: medium

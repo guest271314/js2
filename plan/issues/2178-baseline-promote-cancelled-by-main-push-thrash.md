@@ -2,7 +2,7 @@
 id: 2178
 title: "standalone baseline floor goes stale because push:main promote-baseline is cancelled by later main pushes (thrash) → standalone-guard blocks every PR on current main"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-16
 updated: 2026-06-16
 priority: high

@@ -1,7 +1,7 @@
 ---
 id: 2161
 title: "Standalone RegExp engine conformance residual (~579 tests)"
-status: ready
+status: done
 sprint: 62
 created: 2026-06-15
 updated: 2026-06-15
