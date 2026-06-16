@@ -48,10 +48,7 @@ describe("#2090 stack-balance refuses to invent a value", () => {
       // none. fixBranch sees expected=2, actual=0, blockType.kind==="type" →
       // the #2090 arm. Then the function still needs an i32 to satisfy its own
       // result; the recorded error fails the compile regardless.
-      body: [
-        { op: "block", blockType: { kind: "type", typeIdx: 1 }, body: [] },
-        { op: "drop" },
-      ],
+      body: [{ op: "block", blockType: { kind: "type", typeIdx: 1 }, body: [] }, { op: "drop" }],
       exported: false,
     } as never);
 
