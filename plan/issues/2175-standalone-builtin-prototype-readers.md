@@ -1,7 +1,8 @@
 ---
 id: 2175
 title: "architect spec: standalone builtin-prototype object representation + native-method-closure dispatch"
-status: ready
+status: in-progress
+assignee: ttraenkler/se-2175
 sprint: Backlog
 created: 2026-06-16
 updated: 2026-06-16
@@ -471,3 +472,118 @@ guards this).
 - Does not fork #2101 — it composes with `$ClassMeta` and the shared tag space.
 - Does not add a host import — every new path is pure-Wasm (`struct.new`,
   `call_ref`, native strings, catchable exception tags).
+
+---
+
+## Implementation log — S0 + S1 (sdev se-2175, 2026-06-16)
+
+PR: **S0 + S1 of 4** (S2 class / S3 TypedArray follow). Branch
+`issue-2175-standalone-builtin-prototype-readers`.
+
+### S0 — shared core (inert), what landed and WHY
+
+New module **`src/codegen/native-proto.ts`** owns the host-free core:
+- `registerNativeProtoType(ctx)` — the single `$NativeProto` struct
+  (`$brand i32, $isClass i32, $ctor externref, $parent externref, $memberCsv
+  externref, $name externref`), stashed on `ctx.nativeProtoTypeIdx`. One heap
+  type ⇒ canonicalization is a non-issue for the metadata; identity rides the
+  `$brand` **value** (the #2101/#2009 discipline).
+- **Brand space**: `BUILTIN_BRAND_BASE = -0x40000000`, a HIGH-NEGATIVE band, so a
+  builtin brand can never collide with a class tag (class tags are `>= 0`).
+  `getBuiltinBrand` asserts disjointness at registration (Risk 2 — invariant
+  check). `ctx.builtinBrandMap` seeded from `BUILTIN_BRAND_TABLE` (RegExp wired;
+  %TypedArray%/views reserved as comments).
+- `emitLazyNativeProtoGet(ctx, fctx, brand)` — pure-Wasm lazy materializer
+  (`struct.new` + native-string member CSV + a `__native_proto_<brand>` module
+  global), mirroring `emitLazyProtoGet` (extern.ts) **minus** the
+  `__register_prototype` host call. Reference identity via the singleton global.
+- `ensureStandaloneNativeMethodClosure(ctx, brand, member, kind)` — the
+  brand-keyed factory. **WHY the wrapper indirection in property-access.ts**: to
+  keep the existing `Array.isArray`/`Object.keys`/`getOwnPropertyDescriptor`
+  static closures **byte-identical**, I did NOT fold them into the new factory.
+  `ensureStandaloneBuiltinStaticMethodClosure` is untouched (same signature,
+  same body); a thin `ensureStandaloneNativeMethodClosureLocal(...,kind)`
+  delegates `static` → the old fn verbatim, `method`/`getter` → the new factory.
+  **S0 acceptance verified**: the static-closure program compiles to the exact
+  same 27028 bytes / sha256 `c09d0d34…` before and after S0+S1.
+- Per-builtin glue is a **registry** (`registerNativeProtoBuiltin` /
+  `getNativeProtoBuiltinGlue`) so the core has no RegExp/TypedArray import
+  dependency — RegExp glue lives in `regexp-standalone.ts` and registers itself.
+
+### S1 — RegExp, what landed and WHY
+
+- **Refactor (required by spec)**: extracted the externref→`$NativeRegExp`
+  narrower out of `loadStandaloneRegExpStruct` into
+  `recoverRegExpStructFromExternref(ctx, fctx, thisExternLocal)` — the
+  brand-recovery prologue. It does the identical `any.convert_extern` +
+  `ref.test` + `ref.cast`, but driven from an externref **local** (the closure's
+  `this`). On `ref.test` failure it throws a **catchable TypeError** via the
+  shared in-module `__new_TypeError` + `$exc` tag (NOT a `ref.cast` trap — #2100
+  M2 / §22.2.6.4.1 step 2). `loadStandaloneRegExpStruct`'s expression entry is
+  unchanged ⇒ the static fast path stays byte-identical.
+- **RegExp glue** (`ensureRegExpNativeProtoGlue`): brand, member CSV (string
+  members + `@@7/@@8/@@9/@@10` symbol sentinels), getter/method classification,
+  arity table, and `emitRegExpProtoMemberBody` which runs the prologue then the
+  member body off the recovered struct local.
+  - Getters (`flags`/`source`/flag-bools/lastIndex) reuse the **exact** static
+    field-read sequence via the new `emitRegExpReflectionFieldRead` (factored out
+    of `tryCompileStandaloneRegExpPropertyRead`, which now calls it — so the
+    static path is unchanged). **WHY box string results to externref**: the
+    `call_ref` closure ABI is uniform on externref/i32/f64; a native-string
+    `ref` result (`.flags`/`.source`) must be `extern.convert_any`-boxed to
+    survive the call boundary + the receiving `any` comparison. i32/f64 results
+    pass through.
+  - `.test` runs a **self-contained** search (`emitRegExpTestFromLocals`) driven
+    by the recovered struct local + a flattened subject local — deliberately NOT
+    routed through the expression-driven `emitRegexSearchCall`, so the static
+    path is provably byte-identical (zero edits to it).
+- **Routing** (`property-access.ts`): three handlers, all `ctx.standalone`-gated
+  (JS-host mode is provably unchanged — still `__get_builtin`/`__extern_get`):
+  1. inner `<Builtin>.prototype` value read → `emitLazyNativeProtoGet` at the
+     #1907 refusal site (before the refusal);
+  2. `<Builtin>.prototype.<member>` → native-method/getter **closure value**
+     (`tryCompileStandaloneBuiltinProtoMemberRead`), placed **before** the #1914
+     instance-reflection read — because `RegExp.prototype`'s static type is
+     `RegExp`, #1914's `isGlobalRegExpType` guard would otherwise capture
+     `RegExp.prototype.flags` and refuse (proto is not a backend-created *value*);
+  3. `<Builtin>.prototype.<member>.length`/`.name` → compile-time fold from the
+     glue (`tryCompileStandaloneBuiltinProtoMemberMeta`), tagged in
+     `ctx.nativeClosureMeta`.
+
+### Verified (standalone, zero `env` imports throughout)
+
+`RegExp.prototype` value read · `.test`/`.exec`/getters as closure values · **direct
+dispatch** `m(/ab/,"zab")===true` & non-match · all flag-bool getters
+(`global`/`ignoreCase`/`multiline`/`sticky`) · `.flags`→"gi" & `.source`→"abc"
+getters · `.test.length===1`/`.exec.length===1`/`.toString.length===0` ·
+`.test.name==="test"` (typed binding) · **wrong-`this` → catchable TypeError** ·
+instance `re.flags`/`re.test(s)` unchanged · S0 static closures byte-identical ·
+JS-host `RegExp.prototype` unchanged (4 host imports). Tests:
+`tests/issue-2175-regexp-proto-readers.test.ts` (12/12). Regression: #1914 (11),
+#682 ABI (4), #1474 (14), #1539 regex (195), #2158 class-identity (15),
+#2161 matchall (7), host regexp.test (10) — all green.
+
+### Known boundaries (NOT regressions; in-scope follow-ups within S1's lane)
+
+- **`.call(re,s)` on a closure value** routes through the existing
+  `Function.prototype.call`-on-closure-VALUE lowering, which is a separate
+  subsystem that does not yet fully wire the `(ref $wrap, externref this, …)`
+  lifted signature — and is **broken at baseline even for the pre-existing
+  builtin-static closures** (`const f = Array.isArray; f(x)` traps a Wasm
+  validation error on unmodified main). S1 therefore proves the representation +
+  dispatch contract via the **direct closure-call** form (`const m =
+  RegExp.prototype.test; m(re,s)`), which exercises the identical brand-recovery
+  prologue + native member body. Wiring `.call`/`.apply` end-to-end is the
+  closure-call subsystem's job, tracked as the next S1 refinement.
+- **`re[Symbol.match](s)` instance-element dispatch** hits a separate existing
+  `@@match` engine refusal (`property-access`/`element-access` symbol-call path),
+  not the proto read path; the `@@<id>` CSV sentinels + the closure table are in
+  place for it, dispatch wiring is the next S1 refinement.
+- `exec`/`toString`/`compile`/`@@match`/`@@replace`/`@@split` closures
+  **materialize + brand-recover** (the reflective READ compiles, host-free) but
+  emit a spec-shaped placeholder result body — their full engine bodies are the
+  next S1 refinement (delegate to the existing `tryCompileStandaloneString*`
+  paths + `emitRegexExecArrayCall`).
+- `$NativeProto.$ctor`/`$parent` are null-init in S1 (`.constructor` identity +
+  `[[Prototype]]` chain walk land with S2's class composition, which owns the
+  shared `$ctor`/`$parent` semantics).
