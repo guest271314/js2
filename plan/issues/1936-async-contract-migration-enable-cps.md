@@ -1,10 +1,12 @@
 ---
 id: 1936
 title: "Async contract migration — teach call sites to drive Promises, then enable the built-but-disabled CPS lowering"
-status: ready
+status: done
+assignee: ttraenkler/se1
+completed: 2026-06-16
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-15
+updated: 2026-06-16
 priority: top
 feasibility: hard
 reasoning_effort: max
@@ -144,3 +146,69 @@ banks gains).
 ### Spec citations
 await V = PromiseResolve(%Promise%,V) §27.7.5.3/§27.7.5.1; async-fn rejection on
 sync throw §27.7.5.2 step 4 / §27.7.5.4.
+
+## Implementation Notes (se1, 2026-06-16, sprint 62)
+
+Shipped the **scaffold + census** deliverable (NOT the global flip — that is
+#1796). Net-neutral by construction: the gate stays off, the call-site dispatch
+is a behaviour-preserving refactor.
+
+### What landed
+
+1. **`awaitIsStaticallyResolved(operand)`** (`src/codegen/async-cps.ts`) — pure,
+   conservative predicate for settled-at-compile-time await operands (literals,
+   arithmetic-over-literals, unary, `void`, `Promise.resolve(<static>)` /
+   `Promise.resolve()`). Anything else (call result, member read, bare
+   identifier) is `false` so the safe path is chosen. Per §27.7.5.3 `await V`
+   carries `V` unchanged when `V` is not a thenable, which is what makes these
+   awaits elision-safe.
+
+2. **`AsyncCpsPlan.awaitedStaticallyResolved`** map, populated in
+   `analyzeAsyncBody` per await point. Drives the per-function decision.
+
+3. **`asyncFnNeedsCps(fn, plan)`** — the `ASYNC_CPS_ENABLED`-replacing per-fn
+   predicate: true only when (a) ≥1 await, (b) ≥1 await is NOT statically
+   resolved (a genuine suspension; fully-static bodies are await-elidable →
+   sync + fulfilled Promise), and (c) `splitBodyAtAwait` accepts the shape.
+   `ASYNC_CPS_ENABLED` is retained as a transitional master kill-switch routed
+   through the predicate — while it is `false` the predicate is always `false`,
+   so behaviour is byte-identical to today. #1796 removes the constant.
+
+4. **`classifyAsyncConsumer(checker, expr)` → `"await" | "value" | "thenable"`**
+   — the 3-state census classifier (the per-call-site half). The shipped
+   `asyncResultConsumedAsValue` in `expressions.ts:252` now delegates to it
+   (`!== "thenable"` is exactly the legacy boolean), making async-cps.ts the
+   single source of truth. `tests/async-census.test.ts` pins the parity so a
+   future refactor can't silently diverge the two. **No live dispatch change** —
+   the `value`/`thenable` split is recorded but not yet acted on; #1796 changes
+   how `value` is lowered.
+
+5. **`scripts/async-call-census.mjs`** (`pnpm run census:async`) — mirrors
+   `check:ir-fallbacks`; walks `website/playground/examples/**` +
+   `tests/**/*async*.ts`. Buckets consumers (await/value/thenable) and async
+   function definitions (no-await / await-elidable / cps-able / cps-unsupported).
+   Current corpus snapshot: 35 await, 0 value, 1 thenable consumers; 37 cps-able,
+   6 cps-unsupported definitions. The `value`-consumed set is the #1796
+   migration surface; `cps-unsupported` is the legacy-fallback diagnostic bucket.
+
+### Validation
+
+- `tests/async-census.test.ts` — 13/13 pass (predicate, classifier, gate-off
+  parity).
+- `tests/issue-1042.test.ts`, `tests/async-await.test.ts` — unchanged, pass
+  (behaviour-neutral refactor confirmed).
+- `pnpm exec tsc --noEmit` — clean.
+- `biome lint` on changed files — clean.
+- Pre-existing, unrelated to this change: 2 `promise-combinators.test.ts`
+  failures (`Promise.race` host `_toIterable` returns undefined — reproduces on
+  clean main) and `async-function.test.ts` failing to load a missing
+  `tests/helpers.js` (missing fixture on main).
+
+### Acceptance-criteria status
+
+The issue's top-level ACs ("`asyncFn()` returns a thenable in both modes",
+"`ASYNC_CPS_ENABLED` removed") are the **#1796** end-state, not this scaffold
+issue's deliverable (the Implementation Plan scopes this to "SPEC + per-function
+decision scaffold (NOT the global flip)"). This PR delivers exactly items 1–3 of
+that scaffold + the census tool. #1796 consumes them to perform the flip and
+satisfy the top-level ACs.
