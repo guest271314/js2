@@ -2822,6 +2822,49 @@ function _getStructFieldNames(obj: any, exports: Record<string, Function> | unde
 }
 
 /**
+ * (#2130) Shared own-property presence predicate for a WasmGC struct receiver.
+ * This is the single source of truth for "does `obj` have its OWN property
+ * `key`", combining — in spec order — the runtime delete tombstone, the sidecar
+ * store, the descriptor table (accessor-only properties), registered class
+ * proto/static method names, and finally the static struct field shape. It is
+ * the WasmGC branch of `__hasOwnProperty` extracted verbatim so that
+ * `__extern_has` (the `in` operator) and `__hasOwnProperty` answer identically
+ * and BOTH consult the tombstone (`delete o.a; "a" in o` → false).
+ *
+ * The caller must have already established `_isWasmStruct(obj)` is true.
+ * `key` may be a string or a symbol; tombstone/sidecar comparisons preserve
+ * symbol identity (a symbol key is never stringified).
+ */
+function _wasmStructHasOwn(obj: any, key: any, exports: Record<string, Function> | undefined): boolean {
+  // (#1334) Property explicitly deleted — treat as absent regardless of the
+  // struct shape having the field name.
+  const tomb = _wasmStructDeletedKeys.get(obj);
+  if (tomb && tomb.has(typeof key === "symbol" ? key : String(key))) return false;
+  // Sidecar properties (user-assigned dynamic props). Key-based — HasProperty
+  // (§7.3.12) is value-independent, so `o.x = undefined; "x" in o` is true (A8).
+  const sc = _wasmStructProps.get(obj);
+  if (sc && key in sc) return true;
+  // Descriptor map (accessor properties set via Object.defineProperty, #929).
+  const descs = _wasmPropDescs.get(obj);
+  if (descs && descs.has(String(key))) return true;
+  // (#1047) registered class prototype — only allowlisted methods qualify.
+  const protoMethods = _prototypeMethodNames.get(obj);
+  if (protoMethods !== undefined) {
+    const prop = String(key);
+    return protoMethods.includes(prop) && !_isDeletedClassProp(obj, prop);
+  }
+  const staticMethods = _staticMethodNames.get(obj);
+  if (staticMethods !== undefined) {
+    const prop = String(key);
+    return staticMethods.includes(prop) && !_isDeletedClassProp(obj, prop);
+  }
+  // Static struct field shape (the per-receiver oracle, A1 — NOT a module-global
+  // `__sget_<key>` existence probe).
+  const fieldNames = _getStructFieldNames(obj, exports) ?? [];
+  return fieldNames.includes(String(key));
+}
+
+/**
  * Convert a WasmGC struct to a plain JS object using exported getters.
  * Returns undefined if the struct type is not recognized.
  */
@@ -3661,6 +3704,13 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
     }
   }
   if (_isWasmStruct(obj)) {
+    // (#2130) A deleted property reads as `undefined` even when the static
+    // struct shape still carries the field (the `__sget_<key>` getter would
+    // otherwise return the stale field value). The tombstone is cleared by
+    // `_safeSet` on re-add, so a re-added key never reaches here as tombstoned.
+    // Symbol keys preserve identity; everything else compares stringified.
+    const tomb = _wasmStructDeletedKeys.get(obj);
+    if (tomb && tomb.has(typeof key === "symbol" ? key : String(key))) return undefined;
     // For WasmGC structs, user-assigned properties live in the sidecar.
     // Check sidecar FIRST — native JS property access on WasmGC structs can return
     // built-in artifacts (e.g. `obj.constructor` returns the Wasm struct constructor),
@@ -3736,6 +3786,16 @@ function _safeSet(
     const cbState = callbackState ?? (exports ? { getExports: () => exports } : undefined);
     const prim = _toPrimitiveSync(key, "string", cbState);
     if (prim != null && typeof prim !== "object") key = prim;
+  }
+  // (#2130) Re-adding a previously-deleted property clears its tombstone, so
+  // `delete o.a; o.a = 5; o.a` reads `5` and `"a" in o` is `true` again. This
+  // is the single choke point for every WasmGC write arm (sidecar setter,
+  // descriptor write, symbol-id, struct field) — placing the clear here rather
+  // than only in `_sidecarSet` covers the `__sset_<name>`/native-write paths
+  // that bypass the sidecar (A3).
+  if (_isWasmStruct(obj)) {
+    const tomb = _wasmStructDeletedKeys.get(obj);
+    if (tomb) tomb.delete(typeof key === "symbol" ? key : String(key));
   }
   // Well-known symbol ID (i32 from compiler): store under both real Symbol and "@@name".
   // ONLY apply this remapping to WasmGC structs — for regular JS objects/arrays,
@@ -6573,37 +6633,32 @@ assert._isSameValue = isSameValue;
             const prim = _toPrimitiveSync(key, "string", callbackState);
             if (prim != null && typeof prim !== "object") key = prim;
           }
+          // (#2130) WasmGC struct receivers route through the shared own-property
+          // predicate (tombstone-aware, per-receiver shape oracle) — NOT a
+          // module-global `__sget_<key>` existence probe, which reported every
+          // receiver as having any field name present in any struct type and
+          // never consulted the delete tombstone. So `delete o.a; "a" in o` is
+          // now `false`, and object-rest `"e" in rest` is `false` (rest's plain
+          // object never has `e`; the source struct's shape no longer leaks).
+          if (typeof obj === "object" && _isWasmStruct(obj)) {
+            if (_wasmStructHasOwn(obj, key, callbackState?.getExports())) return 1;
+            // (#1991) `in` walks the [[Prototype]] chain (§13.10.1 → §7.3.12):
+            // every object inherits the Object.prototype members.
+            if (typeof key === "string" && _OBJECT_PROTO_KEYS.has(key)) return 1;
+            return 0;
+          }
+          // Plain JS object (or host-supplied object) — native HasProperty walks
+          // its own prototype chain. HasProperty is value-independent (§7.3.12),
+          // so the sidecar fallback is key-based, not value-based (A8): a
+          // user-assigned `o.x = undefined` must still report present.
           try {
             if (key in obj) return 1;
           } catch {
             /* opaque struct or non-object obj */
           }
-          // Fall back to sidecar (user-assigned properties on host objects)
-          if (_sidecarGet(obj, key) !== undefined) return 1;
-          // Wasm struct getter (defineProperty accessor)
-          if (typeof key === "string") {
-            const exports = callbackState?.getExports();
-            if (typeof exports?.[`__sget_${key}`] === "function") {
-              try {
-                // (#1589A) Mirror __extern_has_idx: a getter that returns at
-                // all (even null/undefined) proves the field exists on this
-                // struct shape — HasProperty (§7.3.12) is value-independent.
-                // Only a throw signals "field not defined on this variant".
-                exports[`__sget_${key}`](obj);
-                return 1;
-              } catch {
-                /* getter not defined for this struct variant — fall through */
-              }
-            }
-          }
-          // (#1991) `in` walks the [[Prototype]] chain (§13.10.1 → §7.3.12), so
-          // EVERY object value inherits the Object.prototype members. A WasmGC
-          // struct (object literal / class instance / array) arrives here as an
-          // opaque externref whose `key in obj` above can't see Object.prototype,
-          // so `"toString" in ({} as any)` wrongly returned 0. Recognise the
-          // well-known Object.prototype keys explicitly for any non-null object.
-          // (Inherited *user-class* methods still need a method registry — not
-          // covered here.)
+          const sc = _wasmStructProps.get(obj);
+          if (sc && key in sc) return 1;
+          // Inherited Object.prototype members for any non-null object value.
           if (typeof key === "string" && (typeof obj === "object" || typeof obj === "function") && obj !== null) {
             if (_OBJECT_PROTO_KEYS.has(key)) return 1;
           }
@@ -9151,33 +9206,9 @@ assert._isSameValue = isSameValue;
               return 0;
             }
           }
-          // (#1334) Property explicitly deleted — treat as absent regardless
-          // of the struct shape having the field name.
-          const tomb = _wasmStructDeletedKeys.get(obj);
-          if (tomb && tomb.has(typeof key === "symbol" ? key : String(key))) return 0;
-          // WasmGC struct: check sidecar properties
-          const sc = _wasmStructProps.get(obj);
-          if (sc && key in sc) return 1;
-          // Check descriptor map (for accessor properties set via Object.defineProperty)
-          // __defineProperty_accessor stores flags in _wasmPropDescs so that
-          // hasOwnProperty returns true for accessor-only properties. (#929)
-          const descs = _wasmPropDescs.get(obj);
-          if (descs && descs.has(String(key))) return 1;
-          // #1047 — registered class prototype: only allowlisted methods qualify
-          const protoMethods = _prototypeMethodNames.get(obj);
-          if (protoMethods !== undefined) {
-            const prop = String(key);
-            return protoMethods.includes(prop) && !_isDeletedClassProp(obj, prop) ? 1 : 0;
-          }
-          const staticMethods = _staticMethodNames.get(obj);
-          if (staticMethods !== undefined) {
-            const prop = String(key);
-            return staticMethods.includes(prop) && !_isDeletedClassProp(obj, prop) ? 1 : 0;
-          }
-          // Check struct field names via exported helpers
-          const exports = callbackState?.getExports();
-          const fieldNames = _getStructFieldNames(obj, exports) ?? [];
-          return fieldNames.includes(String(key)) ? 1 : 0;
+          // (#2130) Single shared own-property predicate — tombstone, sidecar,
+          // descriptor, class methods, struct shape.
+          return _wasmStructHasOwn(obj, key, callbackState?.getExports()) ? 1 : 0;
         };
       // propertyIsEnumerable runtime check for externref/any receivers
       if (name === "__propertyIsEnumerable")
