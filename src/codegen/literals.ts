@@ -1209,7 +1209,19 @@ export function compileSymbolCall(ctx: CodegenContext, fctx: FunctionContext, ar
   // Standalone-mode fallback: if the host import isn't available, the symbol
   // is still constructed (with the legacy `wasm_<id>` description); only the
   // `.description` accessor in JS-host mode benefits.
-  const regIdx = ensureLateImport(ctx, "__symbol_register_desc", [{ kind: "i32" }, { kind: "externref" }], []);
+  //
+  // (#2163) In no-JS-host mode (`--target standalone` / `--target wasi`) there
+  // is no host to register the description with, so emitting the
+  // `env::__symbol_register_desc` import leaves it unsatisfiable and the module
+  // fails to instantiate — making EVERY `Symbol()` call a runtime failure
+  // standalone. The symbol value itself is just the i32 counter id (which is
+  // all `typeof s === "symbol"` and symbol identity/distinctness need), so the
+  // host registration is a pure JS-host fast path. Skip it standalone and only
+  // evaluate the description argument for side effects.
+  const noJsHost = ctx.standalone === true || ctx.wasi === true;
+  const regIdx = noJsHost
+    ? undefined
+    : ensureLateImport(ctx, "__symbol_register_desc", [{ kind: "i32" }, { kind: "externref" }], []);
   if (regIdx !== undefined) {
     fctx.body.push({ op: "global.get", index: counterIdx });
     if (args.length > 0) {
