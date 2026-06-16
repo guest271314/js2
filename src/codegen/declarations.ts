@@ -505,6 +505,22 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       if (ctx.nativeStrings) state.parseNeeded.add("__str_to_number");
     }
   }
+  // #2160 — `Number.parseInt` / `Number.parseFloat` (§21.1.2.12-13) are the same
+  // functions as the global `parseInt` / `parseFloat` and lower through the same
+  // call-site routing (calls.ts), which reads `ctx.funcMap.get("parseInt"/"parseFloat")`.
+  // The collector above only saw the *bare* identifier form, so the
+  // namespaced form never registered the import / native scanner and standalone
+  // fell through to a `__get_builtin` compile error. Detect the property-access
+  // form here so the same parse helper is registered.
+  if (
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    ts.isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === "Number" &&
+    (node.expression.name.text === "parseInt" || node.expression.name.text === "parseFloat")
+  ) {
+    state.parseNeeded.add(node.expression.name.text);
+  }
   if (
     ts.isPrefixUnaryExpression(node) &&
     node.operator === ts.SyntaxKind.PlusToken &&
