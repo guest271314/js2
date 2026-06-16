@@ -57,7 +57,7 @@ STATUS.md rather than duplicating numbers that go stale. Standalone
 README until the current standalone regression is fixed.
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 31,281 / 43,135 (72.5 %) — baseline 2a628478, 2026-06-16T06:12:15Z
+**test262 conformance**: 31,347 / 43,135 (72.7 %) — baseline 1350818e, 2026-06-16T06:44:32Z
 <!-- AUTO:conformance-end -->
 
 ## Current Status

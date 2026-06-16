@@ -19,12 +19,12 @@
   },
   {
     "edition": "ES2015",
-    "pass": 10815,
-    "fail": 4324,
-    "ce": 258,
+    "pass": 10877,
+    "fail": 4261,
+    "ce": 259,
     "skip": 0,
     "total": 15397,
-    "pct": 70
+    "pct": 71
   },
   {
     "edition": "ES2016",
@@ -37,8 +37,8 @@
   },
   {
     "edition": "ES2017",
-    "pass": 450,
-    "fail": 164,
+    "pass": 449,
+    "fail": 165,
     "ce": 53,
     "skip": 0,
     "total": 667,
@@ -46,8 +46,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3459,
-    "fail": 718,
+    "pass": 3464,
+    "fail": 713,
     "ce": 74,
     "skip": 0,
     "total": 4251,
