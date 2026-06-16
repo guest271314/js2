@@ -1,10 +1,12 @@
 ---
 id: 2028
 title: "new Promise(executor): invoking the host-provided resolve/reject from wasm traps null deref — executor pattern fully broken in JS-host mode"
-status: ready
-sprint: 62
+status: done
+assignee: ttraenkler/sen-b
+completed: 2026-06-16
+sprint: 63
 created: 2026-06-10
-updated: 2026-06-12
+updated: 2026-06-16
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -359,3 +361,61 @@ resolve/reject §27.2.1.3.2 / §27.2.1.3.1.
 **Dispatchable to senior-dev.** Single, well-isolated codegen change with a
 verified WAT-level root cause. Lower risk than the prior analyses suggested —
 no `__make_callback` bridge surgery required.
+
+---
+
+## Implementation (sen-b, 2026-06-16) — DONE
+
+Implemented arch1's fix in `src/codegen/expressions/calls.ts`. Repro confirmed
+on main first (`new Promise((resolve)=>resolve("ok"))` → "dereferencing a null
+pointer" when awaited), then fixed.
+
+### What landed
+- New helper `calleeIsPromiseExecutorParam(ctx, expr)` next to
+  `calleeMayBeHostCallable`. Returns true when the callee identifier resolves to
+  a parameter of a **Promise executor** — an arrow/function-expression that is a
+  direct argument of `new Promise(...)`. Those params (`resolve`/`reject`) are
+  host-supplied JS functions arriving as externref.
+- Wired into the `hostCallFallback` gate (`calls.ts` ~9257) as
+  `calleeMayBeHostCallable(...) || calleeIsPromiseExecutorParam(...)`. The
+  existing `#1712` dispatch block then emits both arms: the closure-struct
+  `ref.test` fast path AND the `__call_function(fn, undefined, args)` arm taken
+  when the cast nulls (the host-fn case). Arm stays gated `!standalone && !wasi`.
+- `tests/issue-2028.test.ts`: resolve→"ok", reject→reason, resolve-twice→first
+  wins, resolve+await→derived value, and the #1941 dual-mode guard.
+
+### Critical refinement vs the spec (arch1's externref-type gate was too broad)
+arch1's spec proposed gating on "param whose lowered wasm type is externref +
+has a call signature". **That is NOT a safe discriminator** — I verified that an
+*ordinary* callable param (`cb` in `function apply(cb, v){ return cb(v); }`) is
+ALSO lowered as `externref` (the closure struct is recovered dynamically at the
+call site via `ref.test (ref $closure)`). Gating on externref-typed-callable
+re-emitted the `__call_function`/`__js_array_new` arm for pure local-closure
+programs — the exact **#1941 dual-mode regression** the spec warned against
+(confirmed: the imports reappeared). The precise, safe discriminator is that the
+param's *declaring function is a Promise executor* (direct `new Promise` arg),
+whose params are genuinely host-bound. The final helper gates on that.
+
+### Scope finding — the 2 `promise-combinators.test.ts` failures are NOT in scope
+The lead/spec expected this fix to recover `tests/promise-combinators.test.ts`
+×2 (`Promise.all(src.getPromises())`). It does **not**, and they are a *separate*
+defect: `src.getPromises()` is a `declare class` **instance-method** call whose
+return value compiles to `__get_undefined` (no host import is even emitted for
+the method — verified in WAT). That is host-`declare`-class-method-return
+marshaling, unrelated to the executor `resolve`/`reject` *parameter* dispatch
+fixed here. Those 2 tests pre-exist red on main and remain red — they need a
+distinct fix. **Consequence: the #1796 `awaitedExprIsPromiseCombinator`
+exclusion must STAY** until that separate host-method-return marshaling gap is
+fixed; #2028 does not enable dropping it. Recommend filing the combinator-arg
+marshaling as its own issue.
+
+### Edge cases verified
+- resolve → fulfils; reject(Error) → `.catch`/rejects with the Error; resolve
+  twice → first wins (native `[[AlreadyResolved]]`).
+- sync `throw` in executor → promise rejects (correct), but the rejection reason
+  is the bare `WebAssembly.Exception` (message undefined), identical to main —
+  a pre-existing #1536 exception-boundary fidelity detail, out of #2028 scope.
+- #1941 dual-mode: pure local-closure program pulls NO
+  `__call_function`/`__js_array_new` imports (asserted in the test).
+- tsc clean; no regressions across async-await / promise-chains / async-function
+  / issue-1042 suites (43 passed).

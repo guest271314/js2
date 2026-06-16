@@ -11,7 +11,7 @@ task_type: feature
 area: runtime
 language_feature: number
 goal: standalone-wasm
-sprint: 62
+sprint: 63
 related: [1535, 1321, 1335, 1759]
 ---
 # #1537 — Wasm-native number formatting: shortest-roundtrip Ryū core (#1335 Phase 2)

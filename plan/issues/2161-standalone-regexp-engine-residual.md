@@ -2,7 +2,7 @@
 id: 2161
 title: "Standalone RegExp engine conformance residual (~579 tests)"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-15
 updated: 2026-06-15
 priority: high

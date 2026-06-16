@@ -2,7 +2,7 @@
 id: 2171
 title: "standalone: native generator only supports numeric yields — string/boolean/object yields bail (#680)"
 status: ready
-sprint: 62
+sprint: 63
 created: 2026-06-15
 priority: medium
 feasibility: hard

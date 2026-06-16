@@ -12,7 +12,7 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: promises, subclassing
 goal: spec-completeness
-sprint: 62
+sprint: 63
 needs_architect_spec: true
 related: [1368, 1465, 1528, 1116, 1644, 1682, 1596, 1632b]
 ---

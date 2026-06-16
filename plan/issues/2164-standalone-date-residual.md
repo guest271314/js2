@@ -2,7 +2,7 @@
 id: 2164
 title: "Standalone Date conformance residual (~234 tests)"
 status: in-progress
-sprint: 62
+sprint: 63
 created: 2026-06-15
 updated: 2026-06-16
 priority: medium

@@ -1,16 +1,18 @@
 ---
 id: 1100
 title: "Wasm-native Proxy: meta-object protocol without JS host"
-status: ready
+status: done
+assignee: ttraenkler/sen-a
 created: 2026-04-12
-updated: 2026-06-15
+updated: 2026-06-16
+completed: 2026-06-16
 priority: top
 feasibility: hard
 reasoning_effort: max
 task_type: feature
 language_feature: proxy
 goal: spec-completeness
-sprint: 62
+sprint: 63
 es_edition: ES2015
 note: "2026-06-15: elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). Standalone Proxy Phase 1 (get/set/has/apply + revocable). Needs architect spec before dev dispatch; precedes #1355 (remaining traps to 100%)."
 ---
@@ -228,3 +230,87 @@ $Object` — full standalone equivalence suite must stay green.
 #1325 tag registry (or bare `ref.test $Proxy`); #1355 depends on this; audit
 every `struct.get $Object` site to `ref.test $Proxy` first; reuse the
 closure→funcref bridge, do not invent a calling convention.
+
+
+## Implementation — Phase 1 COMPLETE (sen-a, 2026-06-16, sprint 63)
+
+Standalone `new Proxy(target, handler)` with **get / set / has** traps + the
+§28.2.1.1 non-object construction throw + missing-trap forwarding. All in
+`src/codegen/object-runtime.ts` (`ensureProxyRuntime` + `fillProxyDispatch`),
+`src/codegen/expressions/new-super.ts` (call site), `src/codegen/index.ts`
+(finalize wiring), `src/codegen/context/types.ts` (`proxyDispatchReserved`).
+`tests/issue-1100.test.ts` (9 tests, all green; tsc clean; every program
+`WebAssembly.validate`s true).
+
+### WasmGC representation
+- `$Object` stays a **plain (final) struct** — the earlier `$Object` non-final
+  `sub` (so `$Proxy` could extend it) tripped WasmGC iso-recursive
+  canonicalization (#2009): the opened single-shape struct merged with another
+  module type and a baked `struct.new`/index resolved to a wrong-arity type, so
+  `__new_plain_object` failed to validate ("not enough arguments on the stack
+  for drop") for EVERY standalone object program. Same hazard #2158 hit.
+- `$Proxy` is a **standalone struct** `(ptag i32, ptarget anyref, phandler
+  anyref, ptraps (ref null $ProxyTraps), revoked i32)`, discriminated by its own
+  `ref.test $Proxy` (NOT subtyping). `$ProxyTraps` holds the 4 traps as
+  **externref closures** (get/set/has/apply), not funcrefs.
+
+### Calling convention (the crux the prior senior flagged)
+A user trap `(t,k,r)=>…` lowers to a GC closure-wrapper struct boxed as
+externref; its funcref takes the closure-self as arg0, so it can't be
+`call_ref`-ed with `(target,key,receiver)`. Phase 1 invokes traps through the
+**proven open-`any` closure bridge `__apply_closure(fn, recv, argsVec)`** (the
+same path `__extern_method_call` uses) — NOT `__call_fn_method_N` (whose
+per-arity wrapper-type + result-boxing ABI mismatched the trap closure). The
+trap-invoke drivers `__proxy_call_{get,set,has}` are reserved in
+`ensureProxyRuntime` and filled at FINALIZE by `fillProxyDispatch` (reserve-then-
+fill, #1719) to build a `$ObjVec` of the spec args and call `__apply_closure`
+with the **handler as `recv`/`this`** (§10.5.x). `reserveApplyClosure(ctx)` is
+called so the bridge exists when `new Proxy` is the only closure-call site.
+
+### Dispatch + guards
+`ensureProxyRuntime` registers `__proxy_{get,set,has}_dispatch` (cast `$Proxy` →
+revoked-throw → read trap closure → forward to `__extern_*` on the target when
+null, else invoke the driver) and prepends a `ref.test $Proxy` **front-guard**
+to `__extern_get`/`__extern_set`/`__extern_has`. The `has` guard coerces the
+trap's booleanish externref result back to i32 via `__is_truthy`; the
+trap-absent `has` arm boxes the i32 `__extern_has` result via `__box_boolean`.
+
+### Construction
+`__proxy_create(target, handler) -> externref`: §28.2.1.1 null-target/handler →
+TypeError; reads get/set/has/apply off the handler via `__extern_get`. **The
+call site (`new-super.ts`) builds object-literal target/handler as OPEN objects
+(`compileObjectLiteralAsExternref`)** — a closed typed struct hides its fields
+from the open-object `__extern_get` prop-map walk, so every trap would read null
+and never fire. `__proxy_revoke` retained for revocable (step below).
+
+### THREE shared-mutable-array hazards found & fixed (root-cause notes)
+The bring-up exposed three latent index/type-corruption bugs, all from SHARED
+mutable objects mutated by FINALIZE passes:
+1. **Shared `dispatchLocals`** array reused across the 3 dispatch helpers →
+   FINALIZE dead-type-elim `func.locals[i] = …` over-remapped the shared
+   ValType, desyncing the local's type index from the body (`struct.get expected
+   (ref null A) found (ref null B)`). Fix: fresh locals array per function.
+2. **Shared `throwRevoked`/`throwNotObject`** Instr arrays reused across helpers
+   AND twice within one `__proxy_create` body → `remapFuncIdxInBody`
+   (no dedup Set) double-remapped the baked `call __new_TypeError`, pointing it
+   at `__unbox_boolean`. Fix: fresh array per use (factory functions).
+3. Both classes are the general "shared mutable IR object visited by a
+   multi-pass FINALIZE remapper" trap — build fresh arrays/objects per emission.
+
+### Deferred to follow-ups (NOT in this PR)
+- **`Proxy.revocable`** — `__proxy_revoke` runtime helper is in place, but
+  synthesising the `{proxy, revoke}` closure pair at the call site is deferred.
+  `Proxy.revocable` still hard-errors standalone (calls.ts) — Phase 1b.
+- **apply trap** (`proxy()` call) — deferred; `$ProxyTraps.apply` field reserved.
+- **Statically-typed proxy locals** — a non-`any` proxy local lowers to a closed
+  `struct.get` against the target's inferred shape, bypassing the meta-object.
+  test262 (untyped JS) always takes the dynamic `__extern_*` path, so this does
+  not affect conformance; documented in the test header.
+- **§10.5 result invariants** — #1355.
+
+### Regression surface
+`$Object` reverted to plain struct + 3 front-guards on `__extern_*` touch every
+standalone object program. Verified clean: issue-2084/2086/2105/2107/2130/2158/
+2164/2166/1536 standalone suites all green; the only failing nearby suites
+(struct-proxy-wrappers, proxy-passthrough, issue-907) fail identically on the
+pre-edit merged base (pre-existing, unrelated to this work).

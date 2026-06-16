@@ -2,7 +2,7 @@
 id: 2163
 title: "Standalone Symbol conformance residual (~240 tests)"
 status: in-progress
-sprint: 62
+sprint: 63
 created: 2026-06-15
 updated: 2026-06-16
 priority: medium

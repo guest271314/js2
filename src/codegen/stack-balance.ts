@@ -31,6 +31,18 @@ import type { BlockType, FuncTypeDef, Instr, TypeDef, ValType, WasmFunction, Was
 /** Sentinel: the instruction sequence is unreachable (after return/br/throw/unreachable). */
 const UNREACHABLE = -999;
 
+// #2090 — the stack-repair pass exists to fix *known* count/type mismatches by
+// adding `drop`s or typed zero-defaults. But two arms below patched an
+// UNKNOWN-typed missing slot with an invented `ref.null.extern` "safe default".
+// That masks the producing codegen bug twice (once at the producer, once in the
+// pass that should have flagged it) and ships a silent null. Report 04 §2a/§5
+// concluded there is no legitimate trigger. We now record any such site and
+// `stackBalance` converts it into a structured hard compile error instead of
+// inventing a value. The collector is module-scoped (the recursive fix* helpers
+// don't thread `mod`); `stackBalance` resets it per run and drains it at the end.
+let inventedValueSites: { func: string; detail: string }[] = [];
+let currentDiagFunc = "<unknown>";
+
 /**
  * Check if an instruction is a terminator (makes subsequent code unreachable).
  */
@@ -799,13 +811,26 @@ function fixBranch(
             body.push({ op: "ref.null", typeIdx: t.typeIdx });
             break;
           default:
-            // Unknown type -- push ref.null.extern as safe default
+            // #2090 — unknown value type: we cannot pick a correct default, so
+            // inventing one would mask a real producer bug. Record the site;
+            // stackBalance turns it into a hard compile error. Still push a
+            // placeholder so the rest of the pass can finish walking (the
+            // compile fails via the recorded error regardless).
+            inventedValueSites.push({
+              func: currentDiagFunc,
+              detail: `missing value of unknown valtype kind "${(t as { kind?: string }).kind ?? "?"}" in a val-typed block`,
+            });
             body.push({ op: "ref.null.extern" } as Instr);
             break;
         }
       } else {
-        // For type-indexed block types, we can't easily determine individual value types.
-        // Push ref.null.extern as a safe default (avoids runtime trap).
+        // #2090 — type-indexed block type: individual value types aren't
+        // recoverable here, so a default is necessarily a guess. Record it as a
+        // hard error rather than inventing a ref.null.extern (see above).
+        inventedValueSites.push({
+          func: currentDiagFunc,
+          detail: "missing value in a type-indexed (multi-value) block whose element types are not recoverable",
+        });
         body.push({ op: "ref.null.extern" } as Instr);
       }
       fixups++;
@@ -2216,6 +2241,9 @@ export function stackBalance(mod: WasmModule): number {
   const tags = mod.tags || [];
   let totalFixups = 0;
 
+  // #2090 — reset the invented-value collector for this run.
+  inventedValueSites = [];
+
   // Count import functions and find __box_number/__unbox_number indices
   let numImports = 0;
   let boxNumberIdx: number | null = null;
@@ -2241,6 +2269,8 @@ export function stackBalance(mod: WasmModule): number {
 
   for (let fi = 0; fi < mod.functions.length; fi++) {
     const func = mod.functions[fi]!;
+    // #2090 — attribute any invented-value site to this function in diagnostics.
+    currentDiagFunc = func.name || `func#${numImports + fi}`;
     // Build local types array (params + locals)
     const ft = resolveFuncType(mod.types, func.typeIdx);
     const localTypes: ValType[] = [];
@@ -2318,6 +2348,29 @@ export function stackBalance(mod: WasmModule): number {
       );
     }
   }
+
+  // #2090 — drain the invented-value collector into structured compile errors.
+  // Any entry means the repair pass hit a missing slot of unrecoverable type:
+  // a real producing-codegen bug that must NOT ship as a silent null. We fail
+  // the compile here instead. Report 04 §5 Phase 1 concluded there is no
+  // legitimate trigger, so in practice this list is empty for every module the
+  // equivalence suite + playground examples compile.
+  if (inventedValueSites.length > 0) {
+    if (!mod.codegenErrors) mod.codegenErrors = [];
+    for (const site of inventedValueSites) {
+      mod.codegenErrors.push({
+        message:
+          `stack-balance (#2090): cannot supply a missing stack value in function "${site.func}" — ` +
+          `${site.detail}. The repair pass refuses to invent a value here because doing so would ` +
+          `mask a producing codegen bug as a silent null. This is a compiler defect at the value ` +
+          `producer; report the failing input.`,
+        line: 0,
+        column: 0,
+      });
+    }
+    inventedValueSites = [];
+  }
+
   return totalFixups;
 }
 
