@@ -913,6 +913,14 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
  * externrefs externalize via `any.convert_extern`.
  */
 /**
+ * (#2162) Re-exported for the Set runtime, which reuses the Map backing store
+ * and needs the identical key/value → anyref boxing for its element arg.
+ */
+export function coerceSetArgToAnyref(ctx: CodegenContext, fctx: FunctionContext, t: ValType | null): void {
+  coerceArgToAnyref(ctx, fctx, t);
+}
+
+/**
  * (#2162) Re-exported for the WeakMap/WeakSet runtime, which reuses the Map
  * backing store and needs the identical key/value → anyref boxing.
  */

@@ -9293,6 +9293,22 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
+      // (#2107) native string ($AnyString) → "string", NOT "object". Under
+      // nativeStrings/standalone a string value is a `$AnyString` GC struct
+      // carried as externref; without this guard `typeof (s: any) === "object"`
+      // wrongly held and `=== "string"` was the only true arm via the separate
+      // __typeof_string helper, so both string-tagged comparisons disagreed.
+      ...(ctx.anyStrTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+            },
+          ] as Instr[])
+        : []),
       // non-null, not a boxed primitive → object
       { op: "i32.const", value: 1 },
     ],
@@ -9773,6 +9789,15 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
       if (ctx.mapTypeIdx >= 0) return { kind: "ref", typeIdx: ctx.mapTypeIdx };
     }
 
+    // (#2162) Set → the SAME native `$Map` struct in standalone / nativeStrings
+    // mode (a Set is a Map with key === value). A `Set`-typed binding becomes
+    // `ref $Map` so `new Set()` stores directly and method/.size dispatch reads
+    // a typed receiver. JS-host mode keeps Set as an externref externClass.
+    if (sym?.name === "Set" && ctx.nativeStrings) {
+      ensureMapRuntimeTypes(ctx);
+      if (ctx.mapTypeIdx >= 0) return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+
     // (#2162) WeakMap / WeakSet → the SAME native `$Map` struct in standalone /
     // nativeStrings mode (they reuse the Map backing store with object-identity
     // keys and no iteration). JS-host mode keeps them as externref externClasses.
@@ -10215,8 +10240,14 @@ function externMethod(
  * (e.g., bundled/browser environments where readLibFile returns empty strings).
  */
 export function registerBuiltinExternClasses(ctx: CodegenContext): void {
-  // Set methods — all take (self: externref, ...args: externref) → externref
-  if (!ctx.externClasses.has("Set")) {
+  // Set methods — all take (self: externref, ...args: externref) → externref.
+  // (#2162) In standalone / nativeStrings mode `Set` is served by the
+  // WasmGC-native runtime (src/codegen/set-runtime.ts, reusing the Map backing
+  // store), intercepted at the new-expression / method-call / .size sites.
+  // Registering it as an externClass here would eagerly emit a `Set_new` host
+  // import the standalone module can't satisfy, so skip it in that mode (mirrors
+  // the Map gating below). JS-host mode keeps the externClass path unchanged.
+  if (!ctx.externClasses.has("Set") && !ctx.nativeStrings) {
     const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
     // ES2015 methods
     methods.set("add", externMethod(1)); // add(value) → Set
