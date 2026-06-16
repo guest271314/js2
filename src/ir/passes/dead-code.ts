@@ -371,6 +371,8 @@ function collectInstrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.vec];
     case "vec.get":
       return [instr.vec, instr.index];
+    case "vec.new_fixed":
+      return instr.elements; // #1804
     case "forof.vec": {
       // Body uses count too — DCE must keep outer values referenced
       // inside a for-of body. Walk recursively.
