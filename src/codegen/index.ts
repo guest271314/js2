@@ -9676,6 +9676,119 @@ export function resolveNativeTypeAnnotation(tsType: ts.Type): ValType | null {
 }
 
 /**
+ * (#2176) Resolve the type of an identifier reference, preferring the user's
+ * own declaration over an ambient lib (`.d.ts`) global of the same name.
+ *
+ * Root cause: js2wasm analyzes a top-level program as a **script** (no
+ * import/export ⇒ not a module). In script mode a top-level `const name = …`
+ * does NOT shadow the writable global `var name: string` declared in
+ * `lib.dom.d.ts` (both live in the global scope, and TypeScript resolves a
+ * bare reference to the ambient symbol). So `const y = name` types `y` as
+ * `void` (the ambient `name`) instead of `string`, and the colliding-name
+ * read (`` `${name}` ``, `"x" + name`, `const y = name`) loses its real type —
+ * the codegen then registers `y` as an i32 global and the value reads back as
+ * `0`/`undefined`. Runtime values are stored correctly under `$__mod_name`;
+ * only the *type* is poisoned. Common colliders: `name` (→ undefined),
+ * `length`, `top`, `status`, `origin`, etc. from lib.dom.
+ *
+ * Fix: when `getTypeAtLocation(id)` binds to a symbol whose declarations live
+ * ONLY in lib `.d.ts` files, but a user-level binding of that exact name is in
+ * scope (a non-lib declaration), re-derive the type from the user binding so
+ * the read/declaration sees the real type. Falls back to the original type
+ * when no user binding shadows the ambient — zero behavior change for genuine
+ * host-global reads (`window.name`, bare `length` with no user binding).
+ */
+export function resolveIdentifierType(ctx: CodegenContext, id: ts.Identifier): ts.Type {
+  const sym = ctx.checker.getSymbolAtLocation(id);
+  const decls = sym?.declarations;
+  // Only intervene when the bound symbol is purely ambient (every declaration
+  // lives in a lib/declaration file). A user declaration mixed in means TS
+  // already resolved (at least partly) to the user — leave it alone.
+  const isPurelyAmbient =
+    decls !== undefined && decls.length > 0 && decls.every((d) => d.getSourceFile().isDeclarationFile);
+  if (!isPurelyAmbient) {
+    return ctx.checker.getTypeAtLocation(id);
+  }
+  // A same-name user binding shadows the ambient global, but in script mode the
+  // checker's scope contains ONLY the ambient symbol — `getSymbolsInScope`
+  // never surfaces the user binding. So walk the AST enclosing scopes for a
+  // user-source declaration (var/let/const, function, class, or param) of the
+  // same name and re-derive the type from it.
+  const userDecl = findUserBindingDecl(id);
+  if (userDecl) {
+    return ctx.checker.getTypeAtLocation(userDecl);
+  }
+  return ctx.checker.getTypeAtLocation(id);
+}
+
+/**
+ * (#2176) Walk enclosing scopes from `id` outward to find a user-source
+ * declaration that binds `id.text` (a `var`/`let`/`const` declaration,
+ * function/class declaration, or parameter). Returns the binding node whose
+ * `getTypeAtLocation` gives the real type, or undefined if no user binding
+ * shadows the ambient global.
+ */
+function findUserBindingDecl(id: ts.Identifier): ts.Node | undefined {
+  const name = id.text;
+  const bindsName = (node: ts.Node): ts.Node | undefined => {
+    if (
+      (ts.isVariableDeclaration(node) || ts.isParameter(node)) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === name &&
+      !node.getSourceFile().isDeclarationFile
+    ) {
+      return node;
+    }
+    if (
+      (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) &&
+      node.name?.text === name &&
+      !node.getSourceFile().isDeclarationFile
+    ) {
+      return node;
+    }
+    return undefined;
+  };
+  // Search a statement list (block / source file body) for a binding.
+  const searchStatements = (statements: readonly ts.Statement[]): ts.Node | undefined => {
+    for (const stmt of statements) {
+      if (ts.isVariableStatement(stmt)) {
+        for (const d of stmt.declarationList.declarations) {
+          const found = bindsName(d);
+          if (found) return found;
+        }
+      } else {
+        const found = bindsName(stmt);
+        if (found) return found;
+      }
+    }
+    return undefined;
+  };
+  let scope: ts.Node | undefined = id.parent;
+  while (scope) {
+    if (ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope)) {
+      const found = searchStatements(scope.statements);
+      if (found) return found;
+    }
+    // Function/arrow/method parameters bind names in their body scope.
+    if (
+      (ts.isFunctionDeclaration(scope) ||
+        ts.isFunctionExpression(scope) ||
+        ts.isArrowFunction(scope) ||
+        ts.isMethodDeclaration(scope) ||
+        ts.isConstructorDeclaration(scope)) &&
+      scope.parameters
+    ) {
+      for (const p of scope.parameters) {
+        const found = bindsName(p);
+        if (found) return found;
+      }
+    }
+    scope = scope.parent;
+  }
+  return undefined;
+}
+
+/**
  * Resolve a ts.Type to a ValType, using the struct registry and anonymous type map.
  * Use this instead of mapTsTypeToWasm in the codegen to get real type indices.
  */

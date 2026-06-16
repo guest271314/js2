@@ -46,6 +46,7 @@ import {
   MATH_HOST_METHODS_1ARG,
   MATH_HOST_METHODS_2ARG,
   parseRegExpLiteral,
+  resolveIdentifierType,
   resolveWasmType,
   STRING_METHODS,
   unwrapGeneratorYieldType,
@@ -3291,13 +3292,30 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     }
   }
 
+  /**
+   * (#2176) Resolve the wasm-relevant type of a module-level variable
+   * declaration. `getTypeAtLocation(decl)` returns the declaration's
+   * (initializer-inferred) type, but when the initializer is a bare identifier
+   * that collides with an ambient lib global (e.g. `const y = name` where
+   * `name` shadows lib.dom's `var name: string`), script-mode scoping makes the
+   * checker bind the initializer reference to the ambient symbol (`void`), so
+   * `y` is typed `void` → i32 global → value reads back as `0`/`undefined`.
+   * Prefer the user-resolved initializer type in that case.
+   */
+  function moduleVarDeclType(decl: ts.VariableDeclaration): ts.Type {
+    if (decl.initializer && ts.isIdentifier(decl.initializer)) {
+      return resolveIdentifierType(ctx, decl.initializer);
+    }
+    return ctx.checker.getTypeAtLocation(decl);
+  }
+
   /** Register var declarations from a variable declaration list as module globals. */
   function registerVarDeclListGlobals(list: ts.VariableDeclarationList): void {
     // Only hoist `var` (not let/const) — let/const are block-scoped
     if (list.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) return;
     for (const decl of list.declarations) {
       if (ts.isIdentifier(decl.name)) {
-        const varType = ctx.checker.getTypeAtLocation(decl);
+        const varType = moduleVarDeclType(decl);
         // #1914 — `var m = re.exec(s)` under standalone gets the precise
         // match-vec ref type so indexed reads stay on the static vec path
         // (externref-widened globals round-trip through __extern_get_idx,
@@ -3381,7 +3399,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       const isLetOrConst = (stmt.declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) !== 0;
       for (const decl of stmt.declarationList.declarations) {
         if (ts.isIdentifier(decl.name)) {
-          const varType = ctx.checker.getTypeAtLocation(decl);
+          const varType = moduleVarDeclType(decl);
           // #1914 — `var m = re.exec(s)` under standalone gets the precise
           // match-vec ref type so indexed reads stay on the static vec path
           // (externref-widened globals round-trip through __extern_get_idx,
