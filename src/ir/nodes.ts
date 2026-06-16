@@ -1088,6 +1088,28 @@ export interface IrInstrVecGet extends IrInstrBase {
 }
 
 /**
+ * #1804 — Construct a vec from a fixed, statically-known set of element SSA
+ * values. All `elements` share the IrType `elementType` (the from-ast lowerer
+ * coerces each element to this type before emitting). `resultType` is the vec
+ * ref IrType (a `ref` to the registered vec struct for `elementType`).
+ *
+ * Lowering (WasmGC): push e0…eN, `array.new_fixed $arr N`, stash the data ref
+ * in a scratch local, push `i32.const N` (length, field 0), re-load the data
+ * ref (field 1), `struct.new $vec`. The backend emitter owns the exact op
+ * sequence (see `emitVecNewFixed`) so the linear backend can realize the same
+ * node over its `[header][len][cap][elements…]` layout.
+ *
+ * Empty literals (`[]`) carry `elements: []`; the `elementType` is supplied by
+ * the from-ast layer from the declared/inferred array type (it cannot be
+ * inferred from zero elements).
+ */
+export interface IrInstrVecNewFixed extends IrInstrBase {
+  readonly kind: "vec.new_fixed";
+  readonly elements: readonly IrValueId[];
+  readonly elementType: IrType;
+}
+
+/**
  * Statement-level `for (const <bind> of <vec>) <body>` loop instruction.
  *
  * Encodes the array fast path declaratively. The lowerer emits:
@@ -1773,6 +1795,7 @@ export type IrInstr =
   | IrInstrSlotWrite
   | IrInstrVecLen
   | IrInstrVecGet
+  | IrInstrVecNewFixed
   | IrInstrForOfVec
   | IrInstrCoerceToExternref
   | IrInstrIterNew

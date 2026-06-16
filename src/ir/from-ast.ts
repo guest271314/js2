@@ -107,6 +107,12 @@ export interface IrFromAstResolver {
   resolveString?(): ValType;
   resolveVec?(valType: ValType): IrVecLowering | null;
   /**
+   * #1804 — register-or-recover the vec struct for an element ValType so
+   * `lowerArrayLiteral` can type a constructed `vec.new_fixed`'s result SSA
+   * value as `{ kind: "ref", typeIdx: vecStructTypeIdx }`.
+   */
+  resolveVecForElement?(elementValType: ValType): IrVecLowering | null;
+  /**
    * Slice 10 (#1169i) — return metadata for the named extern class, or
    * `undefined` if no such class is registered.
    */
@@ -1296,7 +1302,7 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
   // don't drop their callee from the IR claim set via the call-graph
   // closure.
   if (ts.isArrayLiteralExpression(expr)) {
-    throw new Error(`ir/from-ast: ArrayLiteralExpression not in slice 12 (${cx.funcName})`);
+    return lowerArrayLiteral(expr, cx, hint);
   }
   // #1370 Phase B: `this` reference inside an instance method body.
   // The integration loop binds `this` in scope to the synthetic
@@ -1410,6 +1416,71 @@ function lowerExpr(expr: ts.Expression, cx: LowerCtx, hint: IrType): IrValueId {
     return cx.builder.emitConst({ kind: "f64", value: NaN }, irVal({ kind: "f64" }));
   }
   throw new Error(`ir/from-ast: unsupported expression kind ${ts.SyntaxKind[expr.kind]} in ${cx.funcName}`);
+}
+
+/**
+ * #1804 — lower a fixed-length, non-spread, non-sparse, same-typed array
+ * literal to a `vec.new_fixed` IR node. Out of scope (clean fallback to
+ * legacy): spread elements (`[...xs]`), elision holes (`[1, , 3]`), mixed
+ * element types, and empty literals with no usable element-type hint.
+ *
+ * Element type resolution: prefer the `hint` (a vec ref whose element IrType
+ * the resolver can recover) — covers `const a: number[] = [1,2,3]` and the
+ * empty `const a: number[] = []`; otherwise infer from the first element and
+ * require every element to share that IrType.
+ */
+function lowerArrayLiteral(expr: ts.ArrayLiteralExpression, cx: LowerCtx, hint: IrType): IrValueId {
+  // Reject spread / sparse — out of scope, keep on legacy.
+  for (const el of expr.elements) {
+    if (ts.isSpreadElement(el) || ts.isOmittedExpression(el)) {
+      throw new Error(`ir/from-ast: array literal with spread/elision not in #1804 scope (${cx.funcName})`);
+    }
+  }
+
+  // Recover an element IrType from the hint when it is (or wraps) a vec ref.
+  const hintVal = asVal(hint);
+  const hintElem = hintVal ? (cx.resolver?.resolveVec?.(hintVal)?.elementValType ?? null) : null;
+  const hintElemIr: IrType | null = hintElem ? irVal(hintElem) : null;
+
+  if (expr.elements.length === 0) {
+    // Empty literal — element type must come from the hint.
+    if (!hintElemIr) {
+      throw new Error(`ir/from-ast: empty array literal needs a vec-typed hint to infer element type (${cx.funcName})`);
+    }
+    const elemVT = asVal(hintElemIr)!;
+    const vec = cx.resolver?.resolveVecForElement?.(elemVT);
+    if (!vec) {
+      throw new Error(`ir/from-ast: resolver cannot register vec for empty literal (${cx.funcName})`);
+    }
+    return cx.builder.emitVecNewFixed([], hintElemIr, irVal({ kind: "ref", typeIdx: vec.vecStructTypeIdx }));
+  }
+
+  // Lower each element. Use the hint element type as each element's hint when
+  // we have one (so e.g. number elements stay f64).
+  const elementIds: IrValueId[] = [];
+  for (const el of expr.elements) {
+    elementIds.push(lowerExpr(el as ts.Expression, cx, hintElemIr ?? irVal({ kind: "f64" })));
+  }
+
+  // Determine the shared element IrType: the hint's element type if present,
+  // else the first element's type. Require every element to share it.
+  const elementType = hintElemIr ?? cx.builder.typeOf(elementIds[0]!);
+  for (const id of elementIds) {
+    if (!irTypeEquals(cx.builder.typeOf(id), elementType)) {
+      throw new Error(`ir/from-ast: mixed-type array literal not in #1804 scope (${cx.funcName})`);
+    }
+  }
+
+  const elemVT = asVal(elementType);
+  if (!elemVT) {
+    // Non-scalar (object/closure/...) element types are out of scope for this slice.
+    throw new Error(`ir/from-ast: array literal element type ${elementType.kind} not in #1804 scope (${cx.funcName})`);
+  }
+  const vec = cx.resolver?.resolveVecForElement?.(elemVT);
+  if (!vec) {
+    throw new Error(`ir/from-ast: resolver cannot register vec for array literal (${cx.funcName})`);
+  }
+  return cx.builder.emitVecNewFixed(elementIds, elementType, irVal({ kind: "ref", typeIdx: vec.vecStructTypeIdx }));
 }
 
 /**

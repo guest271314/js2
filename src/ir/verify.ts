@@ -545,6 +545,9 @@ function collectUses(instr: IrBlock["instrs"][number]): readonly IrValueId[] {
       return [instr.vec];
     case "vec.get":
       return [instr.vec, instr.index];
+    case "vec.new_fixed":
+      // #1804 — every element is an SSA use (like object.new's values).
+      return instr.elements;
     case "forof.vec":
       // The body executes inside a Wasm loop and is not part of the
       // straight-line use-before-def walk. We only surface `vec` here so

@@ -1701,10 +1701,20 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
       isPhase1Expr(expr.expression, scope, localClasses) && isPhase1Expr(expr.argumentExpression, scope, localClasses)
     );
   }
-  // Slice 12 (#1169o) — array literals not yet selector-accepted in
-  // expression position. `f([1, 2, 3])` keeps falling back to legacy
-  // because the call-graph closure drops the caller. A follow-up
-  // slice that adds a `vec.new_fixed` IR instr can flip this on.
+  // #1804 — fixed-length, non-spread, non-sparse array literals are now
+  // selector-accepted (lowered via `vec.new_fixed`). This keeps `f([1,2,3])`'s
+  // callee in the IR claim set instead of dropping it via the call-graph
+  // closure. Shape-only here; element-type uniformity is enforced at lowering
+  // (mixed-type / non-scalar literals clean-fall-back there). Spread/sparse
+  // stay out of scope (legacy fallback).
+  if (ts.isArrayLiteralExpression(expr)) {
+    for (const el of expr.elements) {
+      if (ts.isSpreadElement(el)) return false; // out of scope
+      if (ts.isOmittedExpression(el)) return false; // sparse — out of scope
+      if (!isPhase1Expr(el, scope, localClasses)) return false;
+    }
+    return true;
+  }
   // Slice 11 (#1169n) — `delete <expr>` and `void <expr>`. Both are
   // accepted at the selector level when their operand is a Phase-1
   // expression. Lowering emits:

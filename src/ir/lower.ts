@@ -156,6 +156,16 @@ export interface IrLowerResolver {
    */
   resolveVec?(valType: ValType): IrVecLowering | null;
   /**
+   * #1804 — resolve (registering if needed) the vec struct for an *element*
+   * ValType, used by `vec.new_fixed` construction where a fresh literal has no
+   * vec typeIdx yet. Unlike `resolveVec` (read-only — recognizes an existing
+   * `(ref $vec)`), this get-or-creates the `$arr`/`$vec` types for the element
+   * via the legacy registry so the constructed vec shares identity with the
+   * legacy `compileArrayLiteral` output (===, instanceof Array, the for-of fast
+   * path). Returns the same `IrVecLowering` shape as `resolveVec`.
+   */
+  resolveVecForElement?(elementValType: ValType): IrVecLowering | null;
+  /**
    * Resolve the Wasm value type used for `IrType.string` in the active
    * backend.
    *   - `wasm:js-string` mode → `{ kind: "externref" }`.
@@ -723,6 +733,19 @@ export function lowerIrFunctionBody<S>(
   // lazily on the first await in the function; reused across subsequent
   // awaits in the same function body.
   let awaitScratchPromiseIdx: number | null = null;
+  // #1804 — scratch locals for `vec.new_fixed`: one per (array typeIdx) to stash
+  // the `array.new_fixed` data ref while the length is pushed below it for the
+  // (length, data) struct.new field order. Keyed by arrayTypeIdx so distinct
+  // element types get distinctly-typed data locals; reused across literals.
+  const vecNewFixedDataScratch = new Map<number, number>();
+  const ensureVecDataScratch = (arrayTypeIdx: number): number => {
+    const existing = vecNewFixedDataScratch.get(arrayTypeIdx);
+    if (existing !== undefined) return existing;
+    const idx = func.params.length + locals.length;
+    locals.push({ name: `$vec_data_${arrayTypeIdx}`, type: { kind: "ref_null", typeIdx: arrayTypeIdx } });
+    vecNewFixedDataScratch.set(arrayTypeIdx, idx);
+    return idx;
+  };
   const ensureJsBitwiseScratch = (rhsIsI32: boolean): { rhs: number; tmp: number } => {
     if (jsBitwiseTmpIdx === null) {
       jsBitwiseTmpIdx = func.params.length + locals.length;
@@ -1406,6 +1429,24 @@ export function lowerIrFunctionBody<S>(
         emitter.emitVecDataPtr(vec, out);
         emitValue(instr.index, out);
         emitter.emitElemGet(vec, out);
+        return;
+      }
+      case "vec.new_fixed": {
+        // #1804 — build a fixed-length vec from its element SSA values.
+        const elemVT = asVal(instr.elementType);
+        if (!elemVT) {
+          throw new Error(`ir/lower: vec.new_fixed elementType must be a val IrType (${func.name})`);
+        }
+        const vec = resolver.resolveVecForElement?.(elemVT);
+        if (!vec) {
+          throw new Error(`ir/lower: resolver cannot lower vec for vec.new_fixed (${func.name})`);
+        }
+        // Push e0…eN in order (deepest first), then build the data array +
+        // wrap in the vec struct via a scratch local for the (length, data)
+        // field order.
+        for (const el of instr.elements) emitValue(el, out);
+        const dataScratch = ensureVecDataScratch(vec.arrayTypeIdx);
+        emitter.emitVecNewFixed(vec, instr.elements.length, dataScratch, out);
         return;
       }
       // Slice 7a/7b (#1169f): generator ops.
@@ -2438,6 +2479,7 @@ function schedFxOf(instr: IrInstr, cache: Map<IrInstr, SchedFx>): SchedFx {
     case "string.eq":
     case "string.len":
     case "object.new":
+    case "vec.new_fixed": // #1804 — fresh vec allocation, pure (like object.new)
     case "refcell.new":
     case "closure.new":
     case "extern.regex":
@@ -2657,6 +2699,8 @@ function collectIrUses(instr: IrInstr): readonly IrValueId[] {
       return [instr.vec];
     case "vec.get":
       return [instr.vec, instr.index];
+    case "vec.new_fixed":
+      return instr.elements; // #1804
     case "forof.vec":
       // Body uses are collected separately and merged in by
       // `lowerIrFunctionToWasm`.
