@@ -4714,11 +4714,7 @@ function _isObjectLike(v: any): boolean {
  * can re-throw, letting the user program's `assert.throws(TypeError, …)` see it.
  */
 function _isRevokedProxyError(e: any): boolean {
-  return (
-    e instanceof TypeError &&
-    typeof e.message === "string" &&
-    e.message.includes("proxy that has been revoked")
-  );
+  return e instanceof TypeError && typeof e.message === "string" && e.message.includes("proxy that has been revoked");
 }
 
 /**

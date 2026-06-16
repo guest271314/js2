@@ -52,11 +52,7 @@ const constructionThrows = [
 
 // Trap dispatch + receiver/argument fidelity — the host now finds the struct
 // handler's traps and fires them with spec-correct arguments.
-const trapDispatch = [
-  "get/call-parameters.js",
-  "set/call-parameters.js",
-  "getPrototypeOf/call-parameters.js",
-];
+const trapDispatch = ["get/call-parameters.js", "set/call-parameters.js", "getPrototypeOf/call-parameters.js"];
 
 const maybe = existsSync(TEST262) ? describe : describe.skip;
 
