@@ -3,8 +3,8 @@ id: 1100
 title: "Wasm-native Proxy: meta-object protocol without JS host"
 status: ready
 created: 2026-04-12
-updated: 2026-04-12
-priority: medium
+updated: 2026-06-15
+priority: top
 feasibility: hard
 reasoning_effort: max
 task_type: feature
@@ -12,6 +12,7 @@ language_feature: proxy
 goal: spec-completeness
 sprint: 62
 es_edition: ES2015
+note: "2026-06-15: elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). Standalone Proxy Phase 1 (get/set/has/apply + revocable). Needs architect spec before dev dispatch; precedes #1355 (remaining traps to 100%)."
 ---
 # #1100 — Wasm-native Proxy: meta-object protocol without JS host
 
@@ -156,7 +157,7 @@ Phase 1 acceptance: ≥30% of non-skipped Proxy tests pass.
 
 (Supersedes the earlier draft above. Standalone/pure-Wasm only. Phase 1 =
 get/set/has/apply + revocable. Remaining traps + full invariants are #1355.
-Host-mode companion is #2175.)
+Host-mode companion is #2180.)
 
 ### Root cause / gap
 

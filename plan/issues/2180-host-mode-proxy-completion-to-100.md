@@ -1,9 +1,9 @@
 ---
-id: 2175
+id: 2180
 title: "Host-mode Proxy: close remaining test262 failures toward 100% (invariant checks, Wasm-typed targets, revocation lifecycle)"
 status: ready
 created: 2026-06-15
-updated: 2026-06-16
+updated: 2026-06-15
 priority: top
 feasibility: hard
 reasoning_effort: high
@@ -13,10 +13,10 @@ language_feature: proxy
 goal: spec-completeness
 sprint: 62
 related: [1466, 1100, 1355]
-note: "2026-06-15: created + elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). #1466 (Proxy+Reflect trap fidelity, done) was the last host-mode Proxy issue; built-ins/Proxy still sits at ~23% (71/311). No tracker existed for the remaining host-mode failures — this is it. 2026-06-16: renumbered from #2156 (collided with upstream treemap issue) to #2175; pulled into sprint 62 with an architect Implementation Plan."
+note: "2026-06-15: created + elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). #1466 (Proxy+Reflect trap fidelity, done) was the last host-mode Proxy issue; built-ins/Proxy still sits at ~23% (71/311). No tracker existed for the remaining host-mode failures — this is it. Needs architect triage of the failing buckets before dev dispatch."
 ---
 
-# #2175 — Host-mode Proxy: close remaining test262 failures toward 100%
+# #2180 — Host-mode Proxy: close remaining test262 failures toward 100%
 
 ## Problem
 
@@ -65,10 +65,9 @@ suspect areas from prior analysis:
   (#1100 Phase 1 + #1355 remaining traps). The two share trap-dispatch
   semantics; coordinate so the standalone meta-object protocol reuses the
   host-mode invariant logic where possible.
-- All three Proxy issues (#2175 host, #1100 + #1355 standalone) are part of
-  the 2026-06-15 stakeholder-elevated **Proxy/Promise/async → 100% epic**,
-  pulled into sprint 62 (`plan/issues/sprints/62.md`, Lane E).
-
+- All three Proxy issues (#2180 host, #1100 + #1355 standalone) are part of
+  the 2026-06-15 stakeholder-elevated **Proxy/Promise/async → 100% epic**
+  (see `plan/issues/sprints/63.md`).
 ## Implementation Plan
 
 (Author: architect, 2026-06-16. Host-mode-only. The standalone track is #1100/#1355.)
@@ -144,10 +143,10 @@ validation as `proxy_create`. Add a post-revoke probe.
 `built-ins/Proxy/create-*-is-not-object-throws.js`, `revocable/*-is-not-object-throws.js`
 (construction); `built-ins/Proxy/{get,set,has,deleteProperty,ownKeys,getOwnPropertyDescriptor,defineProperty,getPrototypeOf,setPrototypeOf,isExtensible,preventExtensions,apply,construct}/**`
 (boundary, host-enforced); `built-ins/Proxy/revocable/**`. Regression-guard
-`built-ins/Reflect/**` (stay ≥72%). Add `tests/issue-2175.test.ts`. Target ≥90% of
+`built-ins/Reflect/**` (stay ≥72%). Add `tests/issue-2180.test.ts`. Target ≥90% of
 non-skipped `built-ins/Proxy`.
 
 ### Risks
-File overlap with #1100/#1355 in `new-super.ts`/`calls.ts`/`runtime.ts` — land #2175
+File overlap with #1100/#1355 in `new-super.ts`/`calls.ts`/`runtime.ts` — land #2180
 first (small additive runtime fixes); standalone tracks branch on `ctx.standalone`.
 Adding `Proxy` to `NAMESPACE_NON_CALLABLE` must not shadow `new Proxy`.

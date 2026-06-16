@@ -4,7 +4,7 @@ title: "IR async Phase C: CPS lowering for await + async-return + async-throw"
 status: blocked
 created: 2026-05-09
 updated: 2026-05-21
-priority: medium
+priority: top
 feasibility: hard
 reasoning_effort: max
 task_type: feature

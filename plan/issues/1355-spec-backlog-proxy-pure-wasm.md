@@ -3,8 +3,8 @@ id: 1355
 title: "spec backlog: Proxy implementation beyond JS-host fallback (235 test262 fails)"
 status: ready
 created: 2026-05-08
-updated: 2026-05-08
-priority: low
+updated: 2026-06-15
+priority: top
 feasibility: hard
 reasoning_effort: high
 task_type: feature
@@ -13,6 +13,8 @@ language_feature: proxy
 goal: spec-completeness
 sprint: 62
 parent: 1334
+depends_on: [1100]
+note: "2026-06-15: elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). Remaining 10 traps + invariant checks to drive Proxy past host-fallback toward 100% (standalone). Follows #1100 Phase 1. Needs architect spec."
 ---
 # #1355 — Proxy: pure-Wasm implementation
 
@@ -71,7 +73,7 @@ Cascade-blocks Reflect.* invariant tests (#1346). Until landed, Proxy stays at h
 
 (Standalone/pure-Wasm. Builds on #1100 Phase 1. Adds the remaining 10 trap
 dispatchers + full §10.5 invariant enforcement; drives standalone
-`built-ins/Proxy` from ~21% to ≥75%. Host-mode companion is #2175.)
+`built-ins/Proxy` from ~21% to ≥75%. Host-mode companion is #2180.)
 
 ### Root cause / gap
 
@@ -112,7 +114,7 @@ keys; non-extensible→exactly target keys), §10.5.1/2 [[GetPrototypeOf]]/
 configurable/writable/enumerable attribute bits first if absent.
 
 ### Standalone vs host scoping
-Standalone only. Host (#2175) gets invariants free from the engine. Keep §10.5
+Standalone only. Host (#2180) gets invariants free from the engine. Keep §10.5
 invariant predicates + trap-name list in one shared module
 (`src/codegen/registry/proxy.ts`) as single source of truth.
 
@@ -129,7 +131,7 @@ symbol keys through every key-taking trap; construct only when target has
 `getOwnPropertyDescriptor/non-existent-property-throws.js`,
 `ownKeys/return-not-list-object-throws.js`, `revocable/return-is-object.js`, and
 all `built-ins/Proxy/{deleteProperty,ownKeys,getOwnPropertyDescriptor,defineProperty,getPrototypeOf,setPrototypeOf,isExtensible,preventExtensions,construct}/**`;
-`tests/issue-1355.test.ts`. Regression: standalone equivalence green; host #2175
+`tests/issue-1355.test.ts`. Regression: standalone equivalence green; host #2180
 unchanged.
 
 ### Dependencies / risks
