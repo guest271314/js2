@@ -108,7 +108,7 @@ describe("#2130 — `in` / hasOwnProperty consult the delete tombstone", () => {
     ).toBe(1);
   });
 
-  it("HasProperty is value-independent: `o.x = undefined; \"x\" in o` is true", async () => {
+  it('HasProperty is value-independent: `o.x = undefined; "x" in o` is true', async () => {
     expect(
       await run(
         `export function test(): number {
