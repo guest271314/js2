@@ -23,6 +23,7 @@ import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
+import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import type {
@@ -1642,7 +1643,31 @@ export function generateModule(
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
+  // (#2094) Emit-time backstop for the addImport gate: scan the finished
+  // import section for host imports that leaked into a standalone/strict
+  // binary and report each as a structured compile error.
+  assertNoLeakedHostImports(ctx, mod);
+
   return { module: mod, errors: ctx.errors, fallbackCounts: ctx.fallbackCounts };
+}
+
+/**
+ * (#2094) Post-link import-section scan. Under `--target standalone` (or any
+ * `strictNoHostImports` build), no JS host exists to satisfy `env`/`wasm:*`
+ * imports, so any host import that survived dead-import elimination would fail
+ * instantiation (#2073/#2075). The per-call `addImport` gate is bypassable
+ * (stale funcMap indices, direct `mod.imports.push`), so this scan inspects the
+ * finished binary and pushes a structured compile error for each non-allowlisted
+ * leak — turning a runtime instantiation failure into a clean `success: false`.
+ *
+ * No-op for host-mode / WasmGC builds, where host imports are expected.
+ */
+function assertNoLeakedHostImports(ctx: CodegenContext, mod: WasmModule): void {
+  if (!ctx.strictNoHostImports && !ctx.standalone) return;
+  const leaks = scanForLeakedHostImports(mod.imports);
+  for (const leak of leaks) {
+    reportErrorNoNode(ctx, buildLeakedHostImportError(leak));
+  }
 }
 
 /**
@@ -5165,6 +5190,9 @@ export function generateMultiModule(
   } catch (e) {
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
+
+  // (#2094) Emit-time backstop for the addImport gate — see generateModule.
+  assertNoLeakedHostImports(ctx, mod);
 
   return { module: mod, errors: ctx.errors, fallbackCounts: ctx.fallbackCounts };
 }
