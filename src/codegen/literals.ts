@@ -49,6 +49,7 @@ import {
   resolveWasmType,
 } from "./index.js";
 import { ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
+import { emitNativeGeneratorToVec, nativeGeneratorInfoForForOfSubject } from "./generators-native.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
@@ -1392,12 +1393,36 @@ export function compileObjectLiteralForStruct(
     return null;
   }
 
-  // Check if there are any spread assignments — if so, compile spread sources into locals
-  const spreadSources: { local: number; srcStructTypeIdx: number; srcFields: { name: string }[] }[] = [];
-  for (const prop of expr.properties) {
+  // Check if there are any spread assignments — if so, compile spread sources into locals.
+  // (#2009 R3) `propIndex` records each spread's position in `expr.properties` so the
+  // field-assembly loop can honour SOURCE ORDER between a named prop and a spread that
+  // both write the same key (later writer wins — `{ x:1, ...{x:5} }` → `x:5`).
+  const spreadSources: {
+    local: number;
+    srcStructTypeIdx: number;
+    srcFields: { name: string }[];
+    propIndex: number;
+  }[] = [];
+  for (let propIndex = 0; propIndex < expr.properties.length; propIndex++) {
+    const prop = expr.properties[propIndex]!;
     if (ts.isSpreadAssignment(prop)) {
       const srcType = ctx.checker.getTypeAtLocation(prop.expression);
-      const srcStructName = resolveStructName(ctx, srcType);
+      // (#2009 R3) An INLINE object-literal spread source (`{ ...{ x: 1 } }`)
+      // is never independently declared, so its anonymous object type was never
+      // registered as a struct — `resolveStructName` returns undefined, the
+      // source is dropped from `spreadSources`, and every spread-sourced field
+      // falls through to the undefined-default branch below (the observed
+      // `{ ...{x:1,y:2} }` → `{x:null,y:null}` bug). Register a struct for the
+      // source type first (mirroring the outer-literal registration at the
+      // `compileObjectLiteral` entry, lines ~921/938/950) so both
+      // `resolveStructName` AND the `compileExpression` below lower it to a real
+      // struct instance whose fields can be read. NAMED sources already work
+      // (their declaration registered the struct), so this is a no-op for them.
+      let srcStructName = resolveStructName(ctx, srcType);
+      if (!srcStructName) {
+        ensureStructForType(ctx, srcType);
+        srcStructName = resolveStructName(ctx, srcType);
+      }
       if (srcStructName) {
         const srcStructTypeIdx = ctx.structMap.get(srcStructName);
         const srcFields = ctx.structFields.get(srcStructName);
@@ -1407,7 +1432,7 @@ export function compileObjectLiteralForStruct(
           const spreadResult = compileExpression(ctx, fctx, prop.expression);
           if (!spreadResult) continue;
           fctx.body.push({ op: "local.set", index: srcLocal });
-          spreadSources.push({ local: srcLocal, srcStructTypeIdx, srcFields });
+          spreadSources.push({ local: srcLocal, srcStructTypeIdx, srcFields, propIndex });
         }
       }
     }
@@ -1651,6 +1676,40 @@ export function compileObjectLiteralForStruct(
         const dupType = compileExpression(ctx, fctx, dup.initializer);
         if (dupType) fctx.body.push({ op: "drop" });
       }
+    }
+    // (#2009 R3) Source-order override: when a spread appears AFTER the last
+    // named/shorthand/method writer of this key, the spread wins
+    // (`{ x:1, ...{x:5} }` → `x:5`). Find the position of the winning named
+    // writer and the LAST spread (by source position) that also defines this
+    // field; if that spread comes later, take its value instead of the named
+    // prop. When there is no named writer this is a no-op (the existing
+    // "fall through to spread" path below handles it). The named prop's
+    // initializer is still evaluated above for its observable side effects.
+    const lastMatchIndex = lastMatch ? expr.properties.indexOf(lastMatch) : -1;
+    let overridingSpread:
+      | { local: number; srcStructTypeIdx: number; srcFields: { name: string }[]; propIndex: number }
+      | undefined;
+    for (const src of spreadSources) {
+      if (src.propIndex <= lastMatchIndex) continue;
+      if (src.srcFields.some((f) => f.name === field.name)) {
+        if (!overridingSpread || src.propIndex > overridingSpread.propIndex) {
+          overridingSpread = src;
+        }
+      }
+    }
+    if (overridingSpread) {
+      // (§13.2.5.5) The overridden named prop is still evaluated for its
+      // observable side effects, then its value is dropped — only a
+      // PropertyAssignment has an initializer to run (shorthand/method have
+      // none). The earlier duplicates were already evaluated+dropped above.
+      if (lastMatch && ts.isPropertyAssignment(lastMatch)) {
+        const overriddenType = compileExpression(ctx, fctx, lastMatch.initializer);
+        if (overriddenType) fctx.body.push({ op: "drop" });
+      }
+      const fieldIdx = overridingSpread.srcFields.findIndex((f) => f.name === field.name);
+      fctx.body.push({ op: "local.get", index: overridingSpread.local });
+      fctx.body.push({ op: "struct.get", typeIdx: overridingSpread.srcStructTypeIdx, fieldIdx });
+      continue;
     }
     const prop =
       lastMatch && !ts.isShorthandPropertyAssignment(lastMatch) && !ts.isMethodDeclaration(lastMatch)
@@ -2916,6 +2975,36 @@ export function compileArrayLiteral(
     if (ts.isSpreadElement(el)) {
       const srcType = compileExpression(ctx, fctx, el.expression);
       if (!srcType) continue;
+      // (#2169) Spread of a Wasm-native generator (`[...g()]`). The subject is a
+      // ref to the generator state struct, NOT a __vec — without this it fell
+      // into the generic vec branch below (struct.get field 0 read as $length →
+      // garbage-length array of defaults / host-import leak). Drain the
+      // generator into an f64 vec via the native resume loop, then treat it as a
+      // normal materialized vec spread (same shape as the externref path).
+      const genInfo = nativeGeneratorInfoForForOfSubject(ctx, srcType);
+      if (genInfo) {
+        const genVecTypeIdx = getOrRegisterVecType(ctx, "f64");
+        const genArrTypeIdx = getArrTypeIdxFromVec(ctx, genVecTypeIdx);
+        if (vecTypeIdx !== genVecTypeIdx) {
+          // Result element type isn't f64 (mixed literal whose first-element
+          // heuristic picked another type) — copying f64s into that array would
+          // be invalid Wasm. Preserve the conservative skip for this rare shape.
+          fctx.body.push({ op: "drop" });
+          continue;
+        }
+        // Stack: [running-length(i32), genState]. emitNativeGeneratorToVec
+        // consumes genState and leaves (ref $vec_f64).
+        emitNativeGeneratorToVec(ctx, fctx, genInfo, srcType, genVecTypeIdx, genArrTypeIdx);
+        const srcLocal = allocLocal(fctx, `__spread_gen_${fctx.locals.length}`, {
+          kind: "ref_null",
+          typeIdx: genVecTypeIdx,
+        });
+        fctx.body.push({ op: "local.tee", index: srcLocal });
+        fctx.body.push({ op: "struct.get", typeIdx: genVecTypeIdx, fieldIdx: 0 });
+        fctx.body.push({ op: "i32.add" });
+        spreadLocals.push({ local: srcLocal, elemIdx: i, srcVecTypeIdx: genVecTypeIdx });
+        continue;
+      }
       if (
         (srcType.kind === "ref" || srcType.kind === "ref_null") &&
         ctx.nativeStrings &&
@@ -3226,10 +3315,19 @@ export function compileArrayConstructorCall(
   let elemWasm: ValType;
   const rawTypeArgs = ctx.checker.getTypeArguments(exprType as ts.TypeReference);
   const elemTsType = rawTypeArgs?.[0];
-  if (elemTsType && !(elemTsType.flags & ts.TypeFlags.Any)) {
-    elemWasm = resolveWasmType(ctx, elemTsType);
+  const untypedElem = !elemTsType || (elemTsType.flags & ts.TypeFlags.Any) !== 0;
+  if (!untypedElem) {
+    elemWasm = resolveWasmType(ctx, elemTsType!);
+  } else if (args.length === 1 && !ts.isSpreadElement(args[0]!)) {
+    // #1998: `Array(n)` with an untyped element type is a *sparse* array of `n`
+    // holes (§23.1.1.1 step 4) — every slot is `undefined`. An f64 backing
+    // (`array.new_default`) defaults those holes to `0`, so `Array(3).join(",")`
+    // wrongly rendered "0,0,0". Mirror the `new Array(n)` path (new-super.ts):
+    // back untyped sparse arrays with externref, whose default is `ref.null`,
+    // which `join`/`toString` render as "" (§23.1.3.18 step 7.c/d) → ",,".
+    elemWasm = { kind: "externref" };
   } else {
-    // Default to f64 for untyped arrays
+    // Default to f64 for untyped dense arrays (`Array()`, `Array(a, b, c)`).
     elemWasm = { kind: "f64" };
   }
 

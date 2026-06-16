@@ -46,8 +46,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3452,
-    "fail": 725,
+    "pass": 3455,
+    "fail": 722,
     "ce": 74,
     "skip": 0,
     "total": 4251,

@@ -8,7 +8,12 @@
  */
 
 import { ts } from "../ts-api.js";
-import { isExternalDeclaredClass, isIteratorResultType, isStringType } from "../checker/type-mapper.js";
+import {
+  isExternalDeclaredClass,
+  isIteratorResultType,
+  isNullablePrimitiveType,
+  isStringType,
+} from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import { emitBoundsCheckedArrayGet } from "./array-methods.js";
 import { popBody } from "./context/bodies.js";
@@ -24,7 +29,7 @@ import {
   noJsHost,
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
-import { patchStructNewForAddedField } from "./expressions/late-imports.js";
+import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { addUnionImports, resolveWasmType } from "./index.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
@@ -1192,6 +1197,24 @@ export function compileOptionalPropertyAccess(
   if (resultType.kind === "ref" || resultType.kind === "ref_null") {
     resultType = { kind: "externref" };
   }
+  // (#2051) A short-circuited `?.` must yield `undefined`, not the property
+  // type's default. When the whole-chain static type is a nullable primitive
+  // (`number | undefined` etc., which `resolveWasmType` collapses to a bare
+  // f64/i32 that cannot represent `undefined`), widen the result to externref so
+  // the null arm can carry host `undefined` (via `emitUndefined`) and the
+  // non-null arm boxes the primitive (`__box_number`/`__box_boolean`) — both
+  // arms then agree on externref. The rest of the pipeline already discriminates
+  // host undefined in this slot: `=== undefined` (`__extern_is_undefined`),
+  // `typeof` (`__typeof`), and ToString (`__extern_toString`). Gated on the
+  // nullable static type so non-nullable optional accesses (e.g. `s?.length`
+  // where `s: string`) keep their bare f64/i32 codegen — no boxing, no perf hit.
+  // This boxes into a plain externref, NOT the AnyValue struct, so the #1888
+  // tag-5 comparator ABI is untouched.
+  const widenToUndefinedExternref =
+    (resultType.kind === "f64" || resultType.kind === "i32") && isNullablePrimitiveType(tsPropType);
+  if (widenToUndefinedExternref) {
+    resultType = { kind: "externref" };
+  }
 
   // `?.` short-circuits on null/undefined. `ref.is_null` only validates on a
   // reference operand, but the receiver can lower to a non-reference value
@@ -1206,7 +1229,10 @@ export function compileOptionalPropertyAccess(
     } else if (resultType.kind === "i32") {
       fctx.body.push({ op: "i32.const", value: 0 });
     } else {
-      fctx.body.push({ op: "ref.null.extern" });
+      // (#2051) externref result (incl. the nullable-primitive widening above)
+      // → host `undefined`, so `=== undefined` / `typeof` / `+` read it as
+      // undefined rather than a bare null.
+      emitUndefined(ctx, fctx);
     }
     return resultType;
   }
@@ -1225,7 +1251,14 @@ export function compileOptionalPropertyAccess(
   } else if (resultType.kind === "i32") {
     thenInstrs = [{ op: "i32.const", value: 0 }];
   } else {
-    thenInstrs = [{ op: "ref.null.extern" }];
+    // (#2051) externref result (incl. the nullable-primitive widening above) →
+    // host `undefined`. Build via a body-swap because `emitUndefined` pushes to
+    // `fctx.body` and may flush late imports; do not hand-roll the instr array.
+    const savedForThen = fctx.body;
+    fctx.body = [];
+    emitUndefined(ctx, fctx);
+    thenInstrs = fctx.body;
+    fctx.body = savedForThen;
   }
 
   // else branch (non-null path): get the property from the temp

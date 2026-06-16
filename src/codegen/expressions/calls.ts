@@ -365,8 +365,22 @@ function tryEmitJsonStringifyPrimitive(
   }
   const flags = argType.flags;
 
+  // (#2166) TypeScript models the `boolean` primitive as the union
+  // `true | false`, so a `boolean`-typed value (e.g. `const b: boolean = x`)
+  // carries the `Union` flag and was wrongly skipped by the ambiguous-mask
+  // early-return below — so `JSON.stringify(b)` refused in standalone instead
+  // of serializing to "true"/"false". A `BooleanLike` type (the boolean union
+  // or a boolean literal) is unambiguously serializable, so recognize it before
+  // the mask. Guard on `intrinsicName === "boolean"` for the union so we don't
+  // misfire on a mixed union that merely contains a boolean member.
+  const isBooleanType =
+    (flags & ts.TypeFlags.BooleanLiteral) !== 0 ||
+    ((flags & ts.TypeFlags.Boolean) !== 0 &&
+      (argType as ts.Type & { intrinsicName?: string }).intrinsicName === "boolean");
+
   // Skip ambiguous shapes (any/unknown/union/object/intersection) — let
-  // the caller fall through to the host import which handles them.
+  // the caller fall through to the host import which handles them. The
+  // `boolean` union is the documented exception (see above).
   const ambiguousMask =
     ts.TypeFlags.Any |
     ts.TypeFlags.Unknown |
@@ -375,7 +389,7 @@ function tryEmitJsonStringifyPrimitive(
     ts.TypeFlags.Object |
     ts.TypeFlags.NonPrimitive |
     ts.TypeFlags.TypeParameter;
-  if (flags & ambiguousMask) return undefined;
+  if (!isBooleanType && flags & ambiguousMask) return undefined;
 
   // null literal
   if (flags & ts.TypeFlags.Null) {
@@ -8097,14 +8111,28 @@ function compileCallExpression(
         // with arguments keep the existing generic path below.
         const recvIsBuiltinClass =
           ts.isIdentifier(propAccess.expression) && BUILTIN_CLASS_NAMES.has(propAccess.expression.text);
-        if ((ctx.standalone || ctx.wasi) && expr.arguments.length === 0 && !recvIsBuiltinClass) {
-          const dispatchIdx = reserveClosedMethodDispatch(ctx, methodName);
+        // (#2151 Slice 2) N-ary: the dispatcher is arity-specialized
+        // `__call_m_<name>_<arity>(recv, arg0..arg{arity-1})` (all externref).
+        // Spread args fall through to the generic path (the dispatcher has a
+        // fixed arity).
+        const hasSpreadArg = expr.arguments.some((a) => ts.isSpreadElement(a));
+        if ((ctx.standalone || ctx.wasi) && !hasSpreadArg && !recvIsBuiltinClass) {
+          const arity = expr.arguments.length;
+          const dispatchIdx = reserveClosedMethodDispatch(ctx, methodName, arity);
           flushLateImportShifts(ctx, fctx);
+          // Receiver as externref.
           const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
           if (recvType && recvType.kind !== "externref") {
             fctx.body.push({ op: "extern.convert_any" });
           } else if (recvType === null) {
             fctx.body.push({ op: "ref.null.extern" });
+          }
+          // Each argument compiled and boxed to externref (the dispatcher unboxes
+          // to the method's declared param type per candidate struct).
+          for (const arg of expr.arguments) {
+            const at = compileExpression(ctx, fctx, arg, { kind: "externref" });
+            if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+            else if (at === null) fctx.body.push({ op: "ref.null.extern" });
           }
           fctx.body.push({ op: "call", funcIdx: dispatchIdx });
           return { kind: "externref" };

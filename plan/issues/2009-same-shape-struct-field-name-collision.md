@@ -1,10 +1,10 @@
 ---
 id: 2009
 title: "structurally identical struct types share field names at the host boundary — Object.assign/spread/JSON.stringify mislabel keys, spread override order broken"
-status: ready
+status: in-progress
 sprint: 62
 created: 2026-06-10
-updated: 2026-06-12
+updated: 2026-06-15
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -372,3 +372,52 @@ adds a non-colliding sanity case + the writeback case.
 R3 (spread source-order value resolution) remains — separate PR-2 (inline spread
 sources don't get struct types → resolveStructName undefined → values lost; needs
 the plan's lastWriter rewrite). Names + Object.assign values done here.
+
+## PR-2 landed (2026-06-15, sdev3) — R3 spread-source value resolution + source-order override
+
+Fixed R3 VALUES (`compileObjectLiteralForStruct`, `src/codegen/literals.ts`):
+
+1. **Inline spread-source value resolution.** An INLINE object-literal spread
+   source (`{ ...{x:1,y:2} }`) is never independently declared, so its anon
+   object type was never registered as a struct: `resolveStructName` returned
+   undefined, the source was dropped from `spreadSources`, and every
+   spread-sourced field fell through to the undefined-default branch
+   (`{ ...{x:1,y:2} }` → `{x:null,y:null}`, observed on main; WAT-confirmed even
+   a *single* inline spread lost all values, broader than the spec's recorded R3).
+   Fix: when `resolveStructName(srcType)` is undefined, call
+   `ensureStructForType(ctx, srcType)` then re-resolve — mirrors the
+   outer-literal registration at the `compileObjectLiteral` entry. NAMED sources
+   already worked (their declaration registered the struct), so this is a no-op
+   for them.
+
+2. **Source-order override (the plan's `lastWriter`).** The field-assembly loop
+   computed the winning writer (`lastMatch`) only from named/shorthand/method
+   props, ignoring spread position, so `{ x:1, ...{x:5} }` kept `x:1`. Fix:
+   record each spread's `propIndex` (position in `expr.properties`); per field,
+   if a spread that defines the key sits AFTER the last named writer, take the
+   spread's value. The overridden named prop's initializer is still evaluated +
+   dropped for §13.2.5.5 side effects (verified: `{ x: se(), ...{x:5} }` calls
+   `se()` once and yields 5).
+
+Test: `tests/issue-2009.test.ts` +10 cases (9 value/override on `toEqual`
+key-order-insensitive, 1 side-effect-order). Zero regressions —
+`json-stringify`/`json`/`object-literals`/`computed-props`/`destructuring`
+equiv suites identical to main (their incidental FAILs — `spread-rest`,
+`basic-destructuring` "no tests", a couple json cases — are all PRE-EXISTING on
+main, bisected). `tsc --noEmit` clean.
+
+### R3b STILL OPEN — spread-result key INSERTION ORDER (issue stays in-progress)
+`{ ...{x:1,y:2}, ...{y:3,z:4} }` now has correct VALUES but stringifies as
+`{"y":3,"z":4,"x":1}` instead of Node's `{"x":1,"y":3,"z":4}`. Root cause: the
+spread-result anon struct's `fields` array is ordered last-spread-first by the
+TypeChecker's `getProperties()` (WAT: `$__anon (struct $y $z $x)`); JSON /
+Object.keys read that order. **Pre-existing on main** — affects NAMED-source
+spreads too, independent of PR-2 (bisected against pre-#1462 and against current
+main with named sources). Plain (non-spread) literals already preserve source
+order, so the defect is specific to how the spread-result struct's fields are
+registered. Fix needs `ensureStructForType` (or a literal-aware registration
+pass) to order an anon object-literal type's fields by JS insertion order
+(first-occurrence position across spread evaluation) rather than checker order —
+higher blast radius (shared/canonical struct types, $shape, getters, dedup), so
+scoped OUT of PR-2. Tracked as `it.todo` in `tests/issue-2009.test.ts`. Keep
+#2009 in-progress until R3b lands.
