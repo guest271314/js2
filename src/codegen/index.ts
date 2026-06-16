@@ -23,6 +23,7 @@ import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
 import type { FallbackCounts } from "./fallback-telemetry.js";
+import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import type {
@@ -1642,7 +1643,39 @@ export function generateModule(
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
+  // (#2094) Emit-time backstop for the addImport gate: scan the finished
+  // import section for host imports that leaked into a standalone/strict
+  // binary and report each as a structured compile error.
+  assertNoLeakedHostImports(ctx, mod);
+
   return { module: mod, errors: ctx.errors, fallbackCounts: ctx.fallbackCounts };
+}
+
+/**
+ * (#2094) Post-link import-section scan — the emit-time backstop for the
+ * `addImport` gate.
+ *
+ * Gated on `ctx.strictNoHostImports` ONLY, deliberately matching the per-call
+ * `addImport` gate's trigger (`src/codegen/registry/imports.ts`). Under strict
+ * mode (auto-on for `--target wasi`, opt-in via `--no-host-imports`) the build
+ * contract is "no JS-host imports", so a host import that survived dead-import
+ * elimination bypassed the gate (stale funcMap index / direct `mod.imports.push`)
+ * and would fail instantiation in a hostless runtime (#2073/#2075). This scan
+ * turns that into a clean `success: false` CE instead.
+ *
+ * It does NOT fire on plain `--target standalone` (which is NOT strict by
+ * default): standalone builds today still tolerate a set of `env` imports that
+ * the test harness satisfies, and rejecting them here would regress thousands
+ * of currently-passing standalone tests. The scan is a backstop for the strict
+ * contract, not a new policy — when standalone is run strictly
+ * (`strictNoHostImports`) it is covered. No-op for host/WasmGC builds.
+ */
+function assertNoLeakedHostImports(ctx: CodegenContext, mod: WasmModule): void {
+  if (!ctx.strictNoHostImports) return;
+  const leaks = scanForLeakedHostImports(mod.imports);
+  for (const leak of leaks) {
+    reportErrorNoNode(ctx, buildLeakedHostImportError(leak));
+  }
 }
 
 /**
@@ -5165,6 +5198,9 @@ export function generateMultiModule(
   } catch (e) {
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
+
+  // (#2094) Emit-time backstop for the addImport gate — see generateModule.
+  assertNoLeakedHostImports(ctx, mod);
 
   return { module: mod, errors: ctx.errors, fallbackCounts: ctx.fallbackCounts };
 }

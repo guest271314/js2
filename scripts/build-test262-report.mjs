@@ -178,6 +178,13 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
     match: (_record, text) => hasAny(text, ["late-import index-shift class"]),
   },
   {
+    id: "leaked-host-import",
+    issues: ["#2094", "#2073", "#2075"],
+    label:
+      "Leaked host import in standalone binary — emit-time scan CE (#2094): a host import bypassed the addImport gate (stale funcMap index / direct push). Was a silent instantiation failure (#2073/#2075); now a structured CE.",
+    match: (_record, text) => hasAny(text, ["leaked host import"]),
+  },
+  {
     id: "numeric-separator-literal-values",
     issues: ["#1782", "#53"],
     label: "Numeric and BigInt separator literals evaluate to wrong values",
