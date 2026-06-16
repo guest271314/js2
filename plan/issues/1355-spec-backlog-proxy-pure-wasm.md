@@ -69,11 +69,30 @@ prove the target isn't a Proxy; for typed locals where we know the type, skip th
 
 Cascade-blocks Reflect.* invariant tests (#1346). Until landed, Proxy stays at host-mode only.
 
-## Implementation Plan (architect, 2026-06-16)
+## Implementation Plan (architect, 2026-06-16; sequencing re-confirmed arch1 2026-06-16)
 
 (Standalone/pure-Wasm. Builds on #1100 Phase 1. Adds the remaining 10 trap
 dispatchers + full §10.5 invariant enforcement; drives standalone
 `built-ins/Proxy` from ~21% to ≥75%. Host-mode companion is #2180.)
+
+### BLOCKED — hard dependency on #1100 (verified against upstream/main 319d43460)
+The standalone substrate this plan extends **does not exist on main yet**:
+`grep` for `$Proxy` / `$ProxyTraps` / `registerProxyType` / `__proxy_*_dispatch`
+in `src/codegen/object-runtime.ts` and `src/codegen/registry/proxy.ts` returns
+nothing — `src/codegen/registry/proxy.ts` is not created, and the only `__proxy`
+references are the **host-mode** path in `runtime.ts`/`calls.ts`. #1100
+(`status: ready`, senior-dev WIP on a branch per s63 task #21) lands
+`$Proxy` + `$ProxyTraps` + get/set/has/apply + revocable. **Do NOT dispatch
+#1355 until #1100 has merged to main** — every section below presumes
+`$ProxyTraps` (the 4 base trap fields) and the standalone Proxy struct exist.
+When #1100 lands, re-grep to confirm the field layout of `$ProxyTraps` and the
+`$Proxy` struct before extending — coordinate the 9 added funcref fields with
+whatever #1100 shipped (append, do not renumber the base 4).
+
+Also note `$PropEntry` exists (`object-runtime.ts:16`) but the
+descriptor-attribute bits (configurable/writable/enumerable) needed for §10.5
+invariant enforcement may not be present — verify and extend per the Invariant
+section below, coordinating with #797/#1460/#1462.
 
 ### Root cause / gap
 

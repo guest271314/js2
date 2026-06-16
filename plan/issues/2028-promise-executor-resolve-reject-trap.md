@@ -180,3 +180,166 @@ unrelated to the closure-call `struct.get` trap the spec targeted.
   fresh `## Implementation Plan` against current main before re-dispatch.
 - Acceptance criteria (resolve "ok" / reject reason / resolve-twice ignored)
   remain UNMET; left at `ready` with this updated analysis.
+
+## Re-spec (arch1, 2026-06-16 — against upstream/main 319d43460, with live WAT repro)
+
+**Both prior analyses are partly wrong. Live repro corrects them.** I compiled
+`new Promise<string>((resolve) => { resolve("ok"); })` with `compileToWat` on
+current main and inspected `$__cb_0`:
+
+- The executor lowers to an exported synthetic callback `$__cb_0` with signature
+  `(param externref externref)` = `(captures, resolve)`. It **IS exported**
+  (`(export "__cb_0" (func 5))`) and **the host wrapper DOES invoke it** — so the
+  se1 "executor body never runs" conclusion is an artifact of the test only
+  observing a side-effect that is itself skipped by the trap (see below). The
+  body runs.
+- Inside `$__cb_0`, the call `resolve("ok")` is compiled through the **WasmGC
+  closure-struct dispatch**, NOT a host call:
+  ```wat
+  local.get 1            ;; the `resolve` param (externref host fn)
+  any.convert_extern
+  local.tee 4
+  ref.test (ref 14)      ;; is it a $closure struct? NO — it's a host JS fn
+  (if (result (ref null 14))
+    (then ... ref.cast null (ref null 14))
+    (else ref.null 14))  ;; cast fails → null
+  local.set 2            ;; $__callable_param_0 = null
+  ...
+  local.get 2
+  ref.is_null
+  (if (then local.get 4 ref.is_null (if (then global.get 4 throw 0))))  ;; THROWS $__exn
+  local.get 6
+  struct.get 14 0        ;; (or traps null-deref here on the non-throw path)
+  ```
+  The `resolve` param holds a real host JS function. `ref.test (ref 14)` (the
+  `$closure` struct test) fails, the guarded cast yields null, and the body
+  **throws `$__exn` (the #1536 wasm exception) at the null-guard** — which the
+  host wrapper propagates as a thrown JS value into native `new Promise`'s
+  executor invocation. Native Promise catches it and **rejects the promise with
+  that wasm RuntimeError**; `resolve("ok")` is never reached, so the promise
+  never fulfils and any post-`resolve` side-effect is skipped. That is precisely
+  why se1 saw `log === 0` (the `throw` aborts the body before the second
+  assignment) and why the `.then`/`.catch` fulfil path never fires.
+
+### Root cause (definitive)
+The **original spec's root cause was correct**: `resolve`/`reject` arrive into
+`$__cb_0` as plain externref host functions and the in-body call site dispatches
+them through the closure-struct `ref.test`/`ref.cast`/`struct.get`/`call_ref`
+path, which fails on a foreign callable. The **fix location** the original spec
+named (`calleeMayBeHostCallable`) is also correct, but the gate widening it
+prescribed was **not actually implemented in a way that fires for this case** —
+`calleeMayBeHostCallable` (`expressions/calls.ts:975-1007`) requires the callee
+to be a **`VariableDeclaration` with an initializer referencing a host builtin**
+(line 979: `!ts.isVariableDeclaration(decl) || !decl.initializer → return
+false`). The executor's `resolve`/`reject` are **`ParameterDeclaration`s**, so
+the gate returns `false`, no `__call_function` arm is emitted, and the call
+traps. se1's "implemented then reverted as inert" was because the widening they
+tried did not cover the parameter case (or covered it but the test's observation
+masked the now-correct behaviour).
+
+### Fix (definitive)
+Widen `calleeMayBeHostCallable` (`src/codegen/expressions/calls.ts:975`) to ALSO
+return `true` when the callee identifier resolves to a **function parameter**
+(`decl` is a `ts.ParameterDeclaration`) whose **lowered wasm local type is
+`externref`** (NOT a `ref $closure` — a closure-struct param keeps the fast
+`call_ref` path) and whose **declared TS type has a call signature**
+(`checker.getTypeAtLocation(expr).getCallSignatures().length > 0`). Be
+conservative — the externref-typed restriction is what preserves the #1941
+dual-mode guarantee (pure local-closure programs whose params are wrapped as
+closure structs must NOT pull `__js_array_new`/`__call_function` host imports).
+
+With the gate widened, the existing dispatch arm at
+`expressions/calls.ts:9227-9300` (the #1712 `hostCallFallback` block) emits BOTH
+arms automatically: the guarded `ref.test (ref 14)` succeeds → `call_ref` fast
+path; the cast nulls (host fn) → `__call_function(resolve, undefined, ["ok"])`.
+The arm is already gated `!ctx.standalone && !ctx.wasi` (line 9247-9248), so
+standalone stays on the native `$Promise` path (#1326) — no change there. **No
+new host import**: `__call_function` / `__js_array_new` / `__js_array_push` are
+all already wired.
+
+### Why this is sufficient now (vs se1's doubt)
+se1 doubted the fix because they believed the body never ran. The WAT proves it
+does — the ONLY thing wrong is the in-body `resolve`/`reject` dispatch. Widening
+the gate so those two calls take the `__call_function` arm makes `resolve("ok")`
+actually invoke the host resolve function, settling the promise. No
+`__make_callback`/`Promise_new` bridge change is needed — that bridge already
+correctly hands the executor wrapper to native `new Promise`, and native Promise
+already passes real host `resolve`/`reject` into `$__cb_0`. The defect is purely
+the closure-struct mis-dispatch of those two externref params.
+
+### Changes (file:line, verified on 319d43460)
+- **`src/codegen/expressions/calls.ts:975-1007`** (`calleeMayBeHostCallable`):
+  after the existing `VariableDeclaration` clause, add:
+  ```ts
+  // (#2028) A function parameter typed as an externref callable (e.g. the
+  // `resolve`/`reject` params of a `new Promise(executor)` — host JS fns
+  // arriving as plain externref) must take the __call_function arm, not the
+  // closure-struct call_ref path which traps on a foreign callable.
+  if (decl && ts.isParameter(decl)) {
+    const localIdx = /* resolve via fctx.localMap or symbol */;
+    // Only externref-typed params (NOT ref $closure) — preserves #1941.
+    const wasmType = /* the param's lowered ValType */;
+    if (wasmType?.kind === "externref") {
+      const t = ctx.checker.getTypeAtLocation(expr);
+      if ((t?.getCallSignatures?.()?.length ?? 0) > 0) return true;
+    }
+  }
+  ```
+  NOTE: `calleeMayBeHostCallable` currently takes only `(ctx, expr)` and has no
+  `fctx`; the param's lowered wasm type must be obtained from the call site that
+  invokes it (the dispatch block at 9227 has `fctx` + `matchedClosureInfo`).
+  Implementer choice: either thread `fctx` into `calleeMayBeHostCallable`, or
+  add the parameter-callable check inline at the `hostCallFallback` computation
+  (line 9245-9257) where `fctx` and the matched closure shape are already in
+  scope (this is the lower-risk option — keeps `calleeMayBeHostCallable` pure).
+- **`src/codegen/expressions/calls.ts:9245-9257`** (`hostCallFallback`
+  computation): this is the recommended single edit point — replace the
+  `calleeMayBeHostCallable(ctx, expr.expression)` conjunct with
+  `(calleeMayBeHostCallable(ctx, expr.expression) || calleeIsExternrefCallableParam(ctx, fctx, expr.expression))`
+  where the new helper does the parameter-typed-externref + call-signature check
+  using `fctx.localMap` / `fctx.params` for the lowered type.
+- **`src/codegen/expressions/new-super.ts:1848-1867`**: no change to the bridge;
+  add a comment cross-referencing this fix.
+- **`src/runtime.ts`** `__call_function`: confirm it tolerates a host fn (it
+  already does `typeof fn === "function"` direct-call). No change expected.
+
+### Edge cases
+- sync `resolve("ok")` → promise fulfils "ok"; `.then` fires.
+- `reject(reason)` → `.catch` receives `reason`, not a RuntimeError.
+- resolve-twice / reject-after-resolve → ignored. Native `new Promise` enforces
+  `[[AlreadyResolved]]` (§27.2.1.3) once the call reaches the host resolve fn —
+  no wasm guard needed.
+- sync `throw` in executor → with `resolve`/`reject` now dispatching correctly,
+  a genuine `throw` in the executor body still surfaces as `$__exn`; the host
+  wrapper propagates it and native `new Promise` rejects per §27.2.3.1 step 9.
+  Verify the wasm exception crosses `exports.__cb_0(...)` as a thrown JS value
+  (it does — #1536 maps `$__exn` to a thrown JS value at the export boundary).
+- non-callable executor → native `new Promise` throws TypeError (host-enforced).
+- **#1941 dual-mode guard**: a pure local-closure program (`const f = (cb) =>
+  cb(); f((x) => x)`) must NOT pull `__call_function` — the externref-only param
+  restriction ensures the closure-struct param keeps the `call_ref` path.
+  Regression-assert no `__js_array_new` import for such programs.
+- **standalone**: the arm is gated `!ctx.standalone && !ctx.wasi`; standalone
+  `new Promise` is the native-`$Promise` path (#1326) — confirm the widened
+  clause does not fire there.
+
+### Test-gate plan
+`tests/issue-2028.test.ts`:
+`new Promise<string>((resolve) => resolve("ok"))` → "ok";
+`new Promise((_,reject) => reject(new Error("x")))` → `.catch` gets the Error;
+resolve-twice → first wins; throw-in-executor → rejects.
+test262: `built-ins/Promise/executor-*.js`, `resolve-function-*`,
+`reject-function-*`, `create-resolving-functions-resolve.js`/`-reject.js`,
+`exception-after-resolve-in-executor.js`.
+Regression: `tests/equivalence/*closure*` — assert NO new `__js_array_new` /
+`__call_function` imports for pure local-closure cases.
+
+### Spec citations
+Promise constructor + resolving functions §27.2.3.1 steps 8-10;
+CreateResolvingFunctions `[[AlreadyResolved]]` §27.2.1.3;
+resolve/reject §27.2.1.3.2 / §27.2.1.3.1.
+
+### Disposition
+**Dispatchable to senior-dev.** Single, well-isolated codegen change with a
+verified WAT-level root cause. Lower risk than the prior analyses suggested —
+no `__make_callback` bridge surgery required.
