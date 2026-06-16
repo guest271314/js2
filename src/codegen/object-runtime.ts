@@ -4617,6 +4617,83 @@ function ensureProxyRuntime(
     buildDispatch(TRAP_HAS, "__extern_has", false),
   );
 
+  // ── __proxy_create(target, getFn, setFn, hasFn, applyFn) -> externref ─────
+  //
+  // Allocate a `$Proxy` struct (§28.2.1.1 ProxyCreate, minus the non-object
+  // target/handler TypeError which the construction site checks before calling
+  // here). Builds `$ProxyTraps` from the 4 funcrefs (all-null funcrefs still
+  // get a $ProxyTraps with null fields → dispatch forwards to the target). The
+  // `$Object` base fields are initialised exactly like `__new_plain_object`
+  // (proto null, fresh $PropMap, zeroed counters) so the proxy is a valid
+  // $Object for any code that reaches the ordinary path on the proxy struct
+  // itself (it shouldn't, but keeps the struct well-formed). Returns the proxy
+  // as externref via `extern.convert_any`.
+  //
+  // params: 0=target(externref) 1=getFn 2=setFn 3=hasFn 4=applyFn (all funcref)
+  {
+    const proxyCreateBody: Instr[] = [
+      // $Object base fields:
+      { op: "ref.null", typeIdx: objectTypeIdx }, // proto
+      { op: "i32.const", value: INITIAL_CAP }, // props: new $PropMap[INITIAL_CAP]
+      { op: "array.new_default", typeIdx: types.propMapTypeIdx },
+      { op: "i32.const", value: 0 }, // count
+      { op: "i32.const", value: 0 }, // tombstones
+      { op: "i32.const", value: 0 }, // flags
+      { op: "i32.const", value: 0 }, // nextSeq
+      // proxy fields:
+      { op: "i32.const", value: 1 }, // ptag = PROXY_TAG (1; bare ref.test $Proxy is the real discriminator)
+      { op: "local.get", index: 0 }, // ptarget (externref → anyref)
+      { op: "any.convert_extern" } as Instr,
+      { op: "ref.null.extern" }, // phandler (anyref; Phase 1 stores traps directly, handler unused)
+      { op: "any.convert_extern" } as Instr,
+      // ptraps = struct.new $ProxyTraps (getFn, setFn, hasFn, applyFn)
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: 2 },
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 4 },
+      { op: "struct.new", typeIdx: proxyTrapsTypeIdx } as Instr,
+      { op: "i32.const", value: 0 }, // revoked = 0
+      { op: "struct.new", typeIdx: proxyTypeIdx } as Instr,
+      { op: "extern.convert_any" } as Instr,
+    ];
+    registerNative(
+      "__proxy_create",
+      [externref, { kind: "funcref" }, { kind: "funcref" }, { kind: "funcref" }, { kind: "funcref" }],
+      [externref],
+      [],
+      proxyCreateBody,
+    );
+  }
+
+  // ── __proxy_revoke(proxyExtern) -> () : set revoked=1, null target/handler/traps ──
+  // params: 0=proxyExtern(externref) ; locals: 1=p(ref $Proxy)
+  {
+    const revokeBody: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: proxyTypeIdx },
+      { op: "local.set", index: 1 },
+      { op: "local.get", index: 1 },
+      { op: "i32.const", value: 1 },
+      { op: "struct.set", typeIdx: proxyTypeIdx, fieldIdx: F_REVOKED },
+      // null out target/handler/traps (§28.2.2.1.1 RevocableProxy revoke).
+      { op: "local.get", index: 1 },
+      { op: "ref.null.extern" },
+      { op: "any.convert_extern" } as Instr,
+      { op: "struct.set", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+      { op: "local.get", index: 1 },
+      { op: "ref.null", typeIdx: proxyTrapsTypeIdx },
+      { op: "struct.set", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
+    ];
+    registerNative(
+      "__proxy_revoke",
+      [externref],
+      [],
+      [{ name: "p", type: { kind: "ref", typeIdx: proxyTypeIdx } as ValType }],
+      revokeBody,
+    );
+  }
+
   // ── Patch the `ref.test $Proxy` guard onto the FRONT of __extern_get/set ──
   //
   // Every standalone property read/write routes through these helpers, so a

@@ -278,33 +278,46 @@ is accepted by the engine — the `$Object`-non-final change is regression-safe)
    `__proxy_has_dispatch` returns an externref (the trap's booleanish result) —
    needs a ToBoolean/truthiness coercion (reuse `__typeof_*`/a `__to_boolean`
    helper) before the guard can `return` an i32. Wire that in the `has` slice.
-3. **Construction (NEXT — the crux)** — `new Proxy(t,h)` in `new-super.ts`,
+3. **Construction (the crux)** — `new Proxy(t,h)` in `new-super.ts`,
    standalone branch (currently hard-errors at the `expr.expression.text ===
-   "Proxy"` block ~2114-2119). Recommended shape:
-   - Add a `__proxy_create(target externref, getFn funcref, setFn funcref,
-     hasFn funcref, applyFn funcref) -> externref` runtime helper in
-     `ensureProxyRuntime`: `struct.new $ProxyTraps` from the 4 funcrefs (or a
-     null `$ProxyTraps` when all four are null), then `struct.new $Proxy` with
-     the `$Object` base fields built like `__new_plain_object` (proto
-     `ref.null $Object`, a fresh `$PropMap` of INITIAL_CAP, count/tombstones/
-     nextSeq 0, flags 0), `ptag`=PROXY_TAG, `ptarget`=`ref.cast $Object`(target)
-     [or ref.null when non-object — but §28.2.1.1 requires object t, so the
-     callsite throws first], `phandler` likewise, `ptraps`, `revoked`=0; return
-     `extern.convert_any`.
-   - **The hard part = extracting trap funcrefs from the handler closures at the
-     call site.** `h.get` etc. are GC closure structs. At the `new Proxy` call
-     site (compile-time), for each of get/set/has/apply: if `h` is an object
-     literal with that property being an arrow/method, compile it via
-     `compileArrowAsClosure` (same path #1326c's `.then` uses — see
-     `compileStandalonePromiseThenCallback` in calls.ts) to get the closure
-     struct, then `struct.get $func` (field 0) for the funcref; else push
-     `ref.null func`. This statically resolves the common
-     `new Proxy(t, { get(...){...} })` shape. Dynamic handlers (a handler
-     variable) → Phase 2 (need a runtime closure→funcref reader). Gate the
-     standalone branch on the handler being an object literal; otherwise keep
-     the hard-error with a "dynamic handler not yet supported standalone" msg.
-   - §28.2.1.1: before building, if `t` or `h` is not an object → throw
-     TypeError (reuse the revoked-throw pattern / `__new_TypeError`).
+   "Proxy"` block ~2114-2119).
+   - ~~`__proxy_create(target externref, getFn funcref, setFn funcref, hasFn
+     funcref, applyFn funcref) -> externref` runtime helper~~ **DONE** (se1,
+     2026-06-16) — added to `ensureProxyRuntime`: builds the `$Object` base
+     fields like `__new_plain_object`, `struct.new $ProxyTraps` from the 4
+     funcrefs, `struct.new $Proxy` (ptag=1, ptarget=target as anyref,
+     phandler=null, ptraps, revoked=0), returns `extern.convert_any`. Also added
+     **`__proxy_revoke(proxyExtern)`** (sets revoked=1, nulls target/traps).
+     tsc clean; validates.
+   - **STILL TODO — call-site funcref extraction + the CALLING-CONVENTION
+     MISMATCH (must resolve before wiring construction).** `h.get` etc. are GC
+     closure structs `__fn_wrap_N_struct {func: funcref, ...captures}`. The
+     dispatch helper does `ref.cast trapType` + `call_ref trapType` where
+     `trapType = (target,key,receiver)->externref`. But a user closure's funcref
+     has signature `(closureStructRef, ...userParams)->ret` — its FIRST param is
+     the closure self, NOT target. So passing the bare `struct.get $func` funcref
+     to `__proxy_create` and `call_ref`-ing it with `(target,key,receiver)` is a
+     **signature mismatch** (and drops the closure captures). TWO options for
+     the next session:
+       (a) **Store the closure externref in `$ProxyTraps`, not a raw funcref**:
+       change `$ProxyTraps` fields from `funcref` to `externref`; in the
+       dispatch helper invoke via the SAME closure-call path the standalone
+       `.then` uses (`emitStandalonePromiseThen`/`compileStandalonePromiseThenCallback`
+       in calls.ts route a closure externref through `call_ref` on the closure's
+       own funcType with the closure self as arg0). This is the architect's
+       "reuse the closure→funcref bridge, don't invent a calling convention" —
+       PREFERRED. `__proxy_create` then takes 4 externrefs.
+       (b) Synthesize a per-trap trampoline funcref of `trapType` that adapts
+       `(target,key,receiver)` → `(closureSelf, key)` and forwards — more codegen.
+     Recommend (a). It also means `$ProxyTraps`/`__proxy_create`/the dispatch
+     `call_ref` all change from funcref→externref+closure-call; re-validate.
+   - Call-site (after the convention is fixed): for get/set/has/apply, if `h` is
+     an object literal with that property an arrow/method, `compileArrowAsClosure`
+     → closure externref; else null. Dynamic (non-literal) handler → Phase 2;
+     gate standalone on object-literal handler, else keep a "dynamic handler not
+     yet supported standalone" hard-error.
+   - §28.2.1.1: if `t` or `h` not an object → throw TypeError (revoked-throw
+     pattern / `__new_TypeError`).
    - Validate end-to-end: `new Proxy({}, {get:(t,k)=>42}).anyKey === 42` in WASI.
 4. **`Proxy.revocable(t,h)`** in `calls.ts` (replace hard-error ~5339, gated on
    standalone): build the `$Proxy`, build a `revoke` closure capturing it that
