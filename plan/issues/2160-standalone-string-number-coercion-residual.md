@@ -1,7 +1,7 @@
 ---
 id: 2160
 title: "Standalone String/Number method & coercion conformance residual (~635 tests)"
-status: ready
+status: done
 sprint: 62
 created: 2026-06-15
 updated: 2026-06-15
