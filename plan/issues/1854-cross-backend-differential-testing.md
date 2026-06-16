@@ -53,13 +53,29 @@ trait-migration work (#1851).
 
 ## Sprint-62 planning amendment (2026-06-12)
 
-Concretized approach: implement as a `DIFF_TEST_TARGET=linear` lane in
+> **Superseded during implementation (2026-06-16).** The approach below was
+> found infeasible and replaced — see the Resolution section. Kept for history.
+
+~~Concretized approach: implement as a `DIFF_TEST_TARGET=linear` lane in
 `scripts/diff-test.ts` against the same V8 oracle (oracle-agreement per
 backend ⇒ cross-backend agreement transitively), with a per-lane baseline
 like the optimize lane — most of the 104 corpus programs won't compile on
-linear yet, so baseline the gap and gate the delta. The bytecode-VM leg is
+linear yet, so baseline the gap and gate the delta.~~ **This stdout lane is
+infeasible: the linear backend (`target:"linear"`, non-WASI) has no
+`console.log` host import and silently drops stdout (see Resolution), so the
+stdout-driven diff-test corpus cannot exercise it.** The bytecode-VM leg is
 demoted to "where applicable" (it is test-only today). Prerequisite: #2139
 (linear tests in CI at all). Scheduled sprint 62.
+
+**Shipped approach (2026-06-16):** a **return-value** cross-backend
+differential (`tests/cross-backend-diff.test.ts` + `tests/cross-backend/
+corpus.ts`) — compile each corpus program to both WasmGC and linear and assert
+identical exported-function return values. The linear backend is
+return-value-oriented (its only observable without WASI), and WasmGC↔linear
+return-value agreement is transitively agreement with the V8 oracle the WasmGC
+lane already tracks. The "baseline the gap" intent is preserved via
+`expectLinearUnsupported` per-program skips (assert-still-unsupported, so the
+gap can only shrink). Full design + rationale in the Resolution section below.
 
 ## Resolution (2026-06-16)
 
