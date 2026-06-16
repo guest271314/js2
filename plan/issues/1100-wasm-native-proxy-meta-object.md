@@ -269,21 +269,43 @@ is accepted by the engine — the `$Object`-non-final change is regression-safe)
    the guard — expected. STILL TODO in this bucket: the `apply` trap (only at a
    CallExpression on a proxy whose `ptarget` is callable — needs the
    closure-call site, deferred to step 5).
-2. **Dispatch injection** — at the TOP of `__extern_get` / `__extern_set` /
-   `__extern_has` bodies (object-runtime.ts ~702/1141/1659), prepend
-   `local.get $objParam; ref.test $Proxy; if → return __proxy_*_dispatch(...)`.
-   This is the architect's "branch at the helper" approach (minimal churn vs.
-   editing every property-access.ts call site). NOTE the helpers take the obj
-   as externref param 0 — test the **raw externref** via `any.convert_extern;
-   ref.test $Proxy` before the existing `ref.cast $Object`.
-3. **Construction** — `new Proxy(t,h)` in `new-super.ts` (replace the
-   hard-error at the `expr.expression.text === "Proxy"` block, ~2114, gated on
-   `ctx.standalone`): §28.2.1.1 non-object t/h → TypeError; build `$ProxyTraps`
-   reading get/set/has/apply off `h` via `__extern_get` (callable→funcref via
-   the existing closure-call bridge — find it in calls.ts, reuse; null
-   otherwise); `struct.new $Proxy` (pass dummy $Object base fields: an empty
-   PropMap like `__new_plain_object` does, proto null, counts 0); return via
-   `extern.convert_any`.
+2. ~~**Dispatch injection**~~ **DONE** (se1, 2026-06-16) — `ensureProxyRuntime`
+   now patches a `ref.test $Proxy` front-guard onto `__extern_get` and
+   `__extern_set` bodies (via `ctx.mod.functions.find(name).body.unshift(...)`):
+   raw externref param 0 → `any.convert_extern; ref.test $Proxy; if → return
+   __proxy_{get,set}_dispatch(obj,key[,value], obj)`. tsc clean; validates.
+   **`__extern_has` guard DEFERRED**: `__extern_has` returns `i32` but
+   `__proxy_has_dispatch` returns an externref (the trap's booleanish result) —
+   needs a ToBoolean/truthiness coercion (reuse `__typeof_*`/a `__to_boolean`
+   helper) before the guard can `return` an i32. Wire that in the `has` slice.
+3. **Construction (NEXT — the crux)** — `new Proxy(t,h)` in `new-super.ts`,
+   standalone branch (currently hard-errors at the `expr.expression.text ===
+   "Proxy"` block ~2114-2119). Recommended shape:
+   - Add a `__proxy_create(target externref, getFn funcref, setFn funcref,
+     hasFn funcref, applyFn funcref) -> externref` runtime helper in
+     `ensureProxyRuntime`: `struct.new $ProxyTraps` from the 4 funcrefs (or a
+     null `$ProxyTraps` when all four are null), then `struct.new $Proxy` with
+     the `$Object` base fields built like `__new_plain_object` (proto
+     `ref.null $Object`, a fresh `$PropMap` of INITIAL_CAP, count/tombstones/
+     nextSeq 0, flags 0), `ptag`=PROXY_TAG, `ptarget`=`ref.cast $Object`(target)
+     [or ref.null when non-object — but §28.2.1.1 requires object t, so the
+     callsite throws first], `phandler` likewise, `ptraps`, `revoked`=0; return
+     `extern.convert_any`.
+   - **The hard part = extracting trap funcrefs from the handler closures at the
+     call site.** `h.get` etc. are GC closure structs. At the `new Proxy` call
+     site (compile-time), for each of get/set/has/apply: if `h` is an object
+     literal with that property being an arrow/method, compile it via
+     `compileArrowAsClosure` (same path #1326c's `.then` uses — see
+     `compileStandalonePromiseThenCallback` in calls.ts) to get the closure
+     struct, then `struct.get $func` (field 0) for the funcref; else push
+     `ref.null func`. This statically resolves the common
+     `new Proxy(t, { get(...){...} })` shape. Dynamic handlers (a handler
+     variable) → Phase 2 (need a runtime closure→funcref reader). Gate the
+     standalone branch on the handler being an object literal; otherwise keep
+     the hard-error with a "dynamic handler not yet supported standalone" msg.
+   - §28.2.1.1: before building, if `t` or `h` is not an object → throw
+     TypeError (reuse the revoked-throw pattern / `__new_TypeError`).
+   - Validate end-to-end: `new Proxy({}, {get:(t,k)=>42}).anyKey === 42` in WASI.
 4. **`Proxy.revocable(t,h)`** in `calls.ts` (replace hard-error ~5339, gated on
    standalone): build the `$Proxy`, build a `revoke` closure capturing it that
    sets `revoked=1` + nulls target/handler/traps, return `{proxy,revoke}` 2-field
