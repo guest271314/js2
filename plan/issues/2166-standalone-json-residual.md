@@ -1,8 +1,8 @@
 ---
 id: 2166
 title: "Standalone JSON conformance residual (~76 tests)"
-status: done
-sprint: 62
+status: ready
+sprint: 63
 created: 2026-06-15
 updated: 2026-06-15
 priority: low
