@@ -1,9 +1,10 @@
 ---
 id: 1100
 title: "Wasm-native Proxy: meta-object protocol without JS host"
-status: ready
+status: in-progress
+assignee: ttraenkler/se1
 created: 2026-04-12
-updated: 2026-06-15
+updated: 2026-06-16
 priority: top
 feasibility: hard
 reasoning_effort: max
@@ -228,3 +229,74 @@ $Object` — full standalone equivalence suite must stay green.
 #1325 tag registry (or bare `ref.test $Proxy`); #1355 depends on this; audit
 every `struct.get $Object` site to `ref.test $Proxy` first; reuse the
 closure→funcref bridge, do not invent a calling convention.
+
+## Implementation Progress (se1, 2026-06-16, sprint 62) — WIP, foundation landed
+
+### Done (validated, on branch `issue-1100-standalone-proxy-phase1`)
+
+The **highest-risk piece is resolved**: the WasmGC `$Proxy <: $Object` subtype
+question. In `src/codegen/object-runtime.ts` (`ensureObjectRuntime`):
+
+- `$Object` is now declared as a **non-final `sub` type** (`{ kind: "sub",
+  superType: null, final: false, type: <struct> }`) with its field list
+  factored into a reusable `objectFields` const — **layout/field-indices
+  unchanged**.
+- Added `$ProxyTraps` (struct of 4 `funcref` fields: get/set/has/apply) and
+  `$Proxy` as `{ kind: "sub", superType: objectTypeIdx, final: false }` whose
+  struct repeats `objectFields` then appends `ptag` (i32), `ptarget`
+  (ref null $Object), `phandler` (ref null $Object), `ptraps` (ref null
+  $ProxyTraps), `revoked` (mut i32).
+- `ObjectRuntimeTypes` extended with `proxyTrapsTypeIdx` + `proxyTypeIdx`.
+
+**Verified:** `tsc` clean; a standalone object program (`{}` + `o.x=7`)
+compiles AND `WebAssembly.validate` returns true (so the subtype declaration
+is accepted by the engine — the `$Object`-non-final change is regression-safe);
+`tests/issue-2084`/`issue-2086` object-runtime suites pass.
+
+### Remaining (resume here)
+
+1. **`ensureProxyRuntime(ctx)`** (new slice in object-runtime.ts or a new
+   `proxy-runtime.ts`): register a uniform trap func type
+   `(externref,externref,externref)->externref` and the dispatch helpers:
+   - `__proxy_get_dispatch(proxyExtern, key, receiver)`: unwrap → `ref.cast
+     $Proxy`; if `revoked` → throw TypeError (reuse `ensureExnTag` + the
+     `__new_TypeError`/string-throw path used elsewhere in this file); read
+     `ptraps.get`; if null → forward `__extern_get(ptarget, key)`; else
+     `ref.cast` the funcref to the trap type and `call_ref (ptarget,key,receiver)`.
+   - `__proxy_set_dispatch` / `__proxy_has_dispatch` symmetric (has returns the
+     trap result as a boolean-ish externref; set returns void/undefined).
+   - apply: only at a CallExpression on a proxy whose `ptarget` is callable.
+2. **Dispatch injection** — at the TOP of `__extern_get` / `__extern_set` /
+   `__extern_has` bodies (object-runtime.ts ~702/1141/1659), prepend
+   `local.get $objParam; ref.test $Proxy; if → return __proxy_*_dispatch(...)`.
+   This is the architect's "branch at the helper" approach (minimal churn vs.
+   editing every property-access.ts call site). NOTE the helpers take the obj
+   as externref param 0 — test the **raw externref** via `any.convert_extern;
+   ref.test $Proxy` before the existing `ref.cast $Object`.
+3. **Construction** — `new Proxy(t,h)` in `new-super.ts` (replace the
+   hard-error at the `expr.expression.text === "Proxy"` block, ~2114, gated on
+   `ctx.standalone`): §28.2.1.1 non-object t/h → TypeError; build `$ProxyTraps`
+   reading get/set/has/apply off `h` via `__extern_get` (callable→funcref via
+   the existing closure-call bridge — find it in calls.ts, reuse; null
+   otherwise); `struct.new $Proxy` (pass dummy $Object base fields: an empty
+   PropMap like `__new_plain_object` does, proto null, counts 0); return via
+   `extern.convert_any`.
+4. **`Proxy.revocable(t,h)`** in `calls.ts` (replace hard-error ~5339, gated on
+   standalone): build the `$Proxy`, build a `revoke` closure capturing it that
+   sets `revoked=1` + nulls target/handler/traps, return `{proxy,revoke}` 2-field
+   object.
+5. **apply trap** — at the CallExpression dispatch in calls.ts, when the callee
+   is a proxy (`ref.test $Proxy`) and `ptraps.apply` non-null, route through it.
+6. **Tests** — `tests/issue-1100.test.ts`: WASI-mode get/set/has/apply +
+   revocable (revoked → TypeError), missing-trap forwarding, non-object target
+   → TypeError.
+
+### Resume steps
+Worktree: `/workspace/.claude/worktrees/issue-1100-standalone-proxy-phase1`
+(branch `issue-1100-standalone-proxy-phase1`). `git merge upstream/main` first
+(may have drifted), then continue at step 1 above. Reuse the closure→funcref
+bridge and the exn-throw helpers already in object-runtime.ts; do NOT invent a
+calling convention (architect risk note). Validate each step with
+`WebAssembly.validate` on a scoped repro before moving on. Full standalone
+equivalence suite must stay green (the `$Object` non-final change is the
+regression-surface — already smoke-clean here).

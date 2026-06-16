@@ -56,7 +56,7 @@
  * runtime — it emits `struct.get`/`struct.set` directly and never calls
  * `ensureLateImport` for these names.
  */
-import type { Instr, ValType } from "../ir/types.js";
+import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import {
   ensureAnyToStringHelper,
@@ -117,6 +117,14 @@ export interface ObjectRuntimeTypes {
   objVecTypeIdx: number;
   /** Backing `(array (mut externref))` for `$ObjVec.data`. */
   objVecArrTypeIdx: number;
+  /** (#1100) `$ProxyTraps` struct — 4 funcref fields (get/set/has/apply) for the
+   *  standalone Proxy meta-object Phase 1. Null fields forward to the ordinary
+   *  [[Get]]/[[Set]]/[[Has]]/[[Call]] on the target. */
+  proxyTrapsTypeIdx: number;
+  /** (#1100) `$Proxy` struct — subtype of `$Object` carrying the proxy tag,
+   *  target, handler, traps, and revoked bit. A proxy IS-A object, so every
+   *  `ref.test $Object` still matches it. */
+  proxyTypeIdx: number;
 }
 
 /**
@@ -208,21 +216,36 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   });
 
   const objectTypeIdx = ctx.mod.types.length;
+  const objectFields: FieldDef[] = [
+    { name: "proto", type: { kind: "ref_null", typeIdx: objectTypeIdx }, mutable: true },
+    { name: "props", type: { kind: "ref", typeIdx: propMapTypeIdx }, mutable: true },
+    { name: "count", type: { kind: "i32" }, mutable: true },
+    { name: "tombstones", type: { kind: "i32" }, mutable: true },
+    { name: "flags", type: { kind: "i32" }, mutable: true },
+    // #1837 — next insertion sequence number. Incremented (never reset, not
+    // even on rehash) on every NEW key so $PropEntry.seq records the order
+    // string keys were first added. Powers OrdinaryOwnPropertyKeys insertion
+    // ordering for Object.keys/values/entries/for-in/spread/JSON.stringify.
+    { name: "nextSeq", type: { kind: "i32" }, mutable: true },
+  ];
+  // (#1100) `$Object` is declared as a NON-FINAL sub type (no explicit
+  // supertype) so the standalone Proxy meta-object (`$Proxy`) can extend it.
+  // Subtyping is the lowest-churn discriminator: every existing
+  // `ref.test $Object` / `ref.cast $Object` keeps matching a `$Proxy` instance
+  // (a proxy IS-A object), and the Proxy dispatch only adds one extra
+  // `ref.test $Proxy` ahead of the ordinary path. The field list is identical
+  // to the previous plain-struct form, so the layout (and every field index)
+  // is unchanged.
   ctx.mod.types.push({
-    kind: "struct",
+    kind: "sub",
     name: "$Object",
-    fields: [
-      { name: "proto", type: { kind: "ref_null", typeIdx: objectTypeIdx }, mutable: true },
-      { name: "props", type: { kind: "ref", typeIdx: propMapTypeIdx }, mutable: true },
-      { name: "count", type: { kind: "i32" }, mutable: true },
-      { name: "tombstones", type: { kind: "i32" }, mutable: true },
-      { name: "flags", type: { kind: "i32" }, mutable: true },
-      // #1837 — next insertion sequence number. Incremented (never reset, not
-      // even on rehash) on every NEW key so $PropEntry.seq records the order
-      // string keys were first added. Powers OrdinaryOwnPropertyKeys insertion
-      // ordering for Object.keys/values/entries/for-in/spread/JSON.stringify.
-      { name: "nextSeq", type: { kind: "i32" }, mutable: true },
-    ],
+    superType: null,
+    final: false,
+    type: {
+      kind: "struct",
+      name: "$Object",
+      fields: objectFields,
+    },
   });
 
   // $ObjVec backing array: (array (mut externref)) — holds enumeration results
@@ -250,12 +273,59 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     ],
   });
 
+  // (#1100) `$ProxyTraps` — 4 funcref fields for the standalone Proxy Phase 1
+  // traps (get/set/has/apply). A null field means "no trap" → forward to the
+  // ordinary operation on the proxy target. Each trap funcref has the uniform
+  // shape `(externref...) -> externref` and is `call_ref`-dispatched via a
+  // registered func type in `ensureProxyRuntime`; here we only reserve the
+  // struct shape (the fields hold bare `funcref`, cast at the dispatch site).
+  const proxyTrapsTypeIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: "$ProxyTraps",
+    fields: [
+      { name: "get", type: { kind: "funcref" }, mutable: false },
+      { name: "set", type: { kind: "funcref" }, mutable: false },
+      { name: "has", type: { kind: "funcref" }, mutable: false },
+      { name: "apply", type: { kind: "funcref" }, mutable: false },
+    ],
+  });
+
+  // (#1100) `$Proxy` — subtype of `$Object`. It repeats `$Object`'s fields
+  // (required for WasmGC struct subtyping) then appends the proxy-specific
+  // fields. Because it extends `$Object`, every existing `ref.test $Object` /
+  // `ref.cast $Object` keeps matching a proxy instance, so the ordinary
+  // property/enumeration paths still work on the proxy struct itself; the
+  // Proxy dispatch only adds a `ref.test $Proxy` ahead of those paths.
+  const proxyTypeIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "sub",
+    name: "$Proxy",
+    superType: objectTypeIdx,
+    final: false,
+    type: {
+      kind: "struct",
+      name: "$Proxy",
+      fields: [
+        ...objectFields,
+        // proxy-specific fields:
+        { name: "ptag", type: { kind: "i32" }, mutable: false },
+        { name: "ptarget", type: { kind: "ref_null", typeIdx: objectTypeIdx }, mutable: true },
+        { name: "phandler", type: { kind: "ref_null", typeIdx: objectTypeIdx }, mutable: true },
+        { name: "ptraps", type: { kind: "ref_null", typeIdx: proxyTrapsTypeIdx }, mutable: true },
+        { name: "revoked", type: { kind: "i32" }, mutable: true },
+      ],
+    },
+  });
+
   const types: ObjectRuntimeTypes = {
     propEntryTypeIdx,
     propMapTypeIdx,
     objectTypeIdx,
     objVecTypeIdx,
     objVecArrTypeIdx,
+    proxyTrapsTypeIdx,
+    proxyTypeIdx,
   };
   ctx.objectRuntimeTypes = types;
 
