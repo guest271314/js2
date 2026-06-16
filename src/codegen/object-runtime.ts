@@ -4611,6 +4611,71 @@ function ensureProxyRuntime(
     dispatchLocals,
     buildDispatch(TRAP_HAS, "__extern_has", false),
   );
+
+  // ── Patch the `ref.test $Proxy` guard onto the FRONT of __extern_get/set ──
+  //
+  // Every standalone property read/write routes through these helpers, so a
+  // single front-guard covers `p.x`, `p[k]`, etc. uniformly (the architect's
+  // "branch at the helper" approach — far less churn than editing every
+  // property-access.ts call site). The guard tests the RAW externref param 0
+  // (any.convert_extern → ref.test $Proxy) BEFORE the ordinary body's
+  // `ref.cast $Object` runs; a proxy IS-A $Object so it would otherwise take
+  // the plain-object path and miss its traps.
+  //
+  // `has` is deferred to the next slice: __extern_has returns i32 but
+  // __proxy_has_dispatch returns an externref (the trap's booleanish result),
+  // which needs a ToBoolean coercion not yet wired here.
+  const getDispatchIdx = ctx.funcMap.get("__proxy_get_dispatch")!;
+  const setDispatchIdx = ctx.funcMap.get("__proxy_set_dispatch")!;
+
+  const findBody = (name: string): Instr[] | undefined => ctx.mod.functions.find((f) => f.name === name)?.body;
+
+  // __extern_get(obj, key) -> externref : if proxy → return get_dispatch(obj,key,obj)
+  const getBody = findBody("__extern_get");
+  if (getBody) {
+    const guard: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: proxyTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 0 }, // receiver = the proxy itself
+          { op: "call", funcIdx: getDispatchIdx },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    getBody.unshift(...guard);
+  }
+
+  // __extern_set(obj, key, value) -> () : if proxy → set_dispatch(obj,key,value); drop; return
+  const setBody = findBody("__extern_set");
+  if (setBody) {
+    const guard: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: proxyTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 2 },
+          { op: "call", funcIdx: setDispatchIdx },
+          { op: "drop" },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    setBody.unshift(...guard);
+  }
+
+  void objectTypeIdx;
 }
 
 /**
