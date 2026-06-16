@@ -68,6 +68,18 @@ jobs:
         # depends_on, or broken plan/issues/<id>-<slug>.md links in tracked *.md.
         run: pnpm run check:issues
 
+      - name: Issue→probe coverage gate (#2093)
+        # A bugfix issue (created on/after the cutoff) cannot flip to
+        # `status: done` without a permanent probe/test reference — either a
+        # tests/issue-<id>.test.ts file or a cited tests/…test… / test262/… path.
+        # WARNING-only at `ready`; HARD FAIL on the done-flip. Diffs the changed
+        # issue files against the PR base so only this PR's flips are gated.
+        # Skips cleanly when no diff base resolves (never blocks a build it can't
+        # reason about). Needs the base ref present for the diff.
+        run: |
+          git fetch --no-tags --depth=1 origin main 2>/dev/null || true
+          ISSUE_COVERAGE_BASE=origin/main pnpm run check:issue-spec-coverage
+
       - name: Host-import allowlist + strict-mode gate (#1524)
         env:
           # PRs that intentionally grow the allowlist must include

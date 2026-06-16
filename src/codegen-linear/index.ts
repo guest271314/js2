@@ -9,6 +9,7 @@ import type { ClassLayout } from "./layout.js";
 import { computeClassLayout } from "./layout.js";
 import {
   addArrayRuntime,
+  addFmodRuntime,
   addMapRuntime,
   addNumericMapRuntime,
   addNumericSetRuntime,
@@ -16,6 +17,7 @@ import {
   addSetRuntime,
   addStringRuntime,
   addUint8ArrayRuntime,
+  FMOD_FN,
 } from "./runtime.js";
 
 /** Type tag for class instances in linear memory */
@@ -81,6 +83,7 @@ export function generateLinearModule(ast: TypedAST, opts: LinearOptions = {}): W
   addSetRuntime(mod);
   addNumericMapRuntime(mod);
   addNumericSetRuntime(mod);
+  addFmodRuntime(mod); // #2144 — exact f64 remainder for the `%` arm
 
   // Add __closure_env global (mutable i32, init 0) for closure support
   const closureEnvGlobalIdx = mod.globals.length;
@@ -215,6 +218,7 @@ export function generateLinearMultiModule(multiAst: MultiTypedAST, opts: LinearO
   addSetRuntime(mod);
   addNumericMapRuntime(mod);
   addNumericSetRuntime(mod);
+  addFmodRuntime(mod); // #2144 — exact f64 remainder for the `%` arm
 
   // Add __closure_env global for closure support
   const closureEnvGlobalIdx = mod.globals.length;
@@ -2243,24 +2247,16 @@ function compileBinaryExpression(ctx: LinearContext, fctx: LinearFuncContext, ex
       fctx.body.push({ op: "f64.div" });
       break;
     case ts.SyntaxKind.PercentToken: {
-      // #1937 — this arm used to be EMPTY: `a % b` compiled both operands and
-      // no operator, leaving two values on the stack (the expression's
-      // "result" was just `b`, and the leftover `a` broke stack arity).
-      // Wasm has no f64.rem; emit a - trunc(a/b) * b via temp locals, which
-      // matches JS % (sign of the dividend) for finite operands. Known
-      // divergence: b = ±Infinity yields NaN instead of a (0*Inf = NaN).
-      const bLocal = addLocal(fctx, `__mod_b_${fctx.locals.length}`, { kind: "f64" });
-      const aLocal = addLocal(fctx, `__mod_a_${fctx.locals.length}`, { kind: "f64" });
-      fctx.body.push({ op: "local.set", index: bLocal });
-      fctx.body.push({ op: "local.set", index: aLocal });
-      fctx.body.push({ op: "local.get", index: aLocal });
-      fctx.body.push({ op: "local.get", index: aLocal });
-      fctx.body.push({ op: "local.get", index: bLocal });
-      fctx.body.push({ op: "f64.div" });
-      fctx.body.push({ op: "f64.trunc" });
-      fctx.body.push({ op: "local.get", index: bLocal });
-      fctx.body.push({ op: "f64.mul" });
-      fctx.body.push({ op: "f64.sub" });
+      // #2144 — call the `__fmod` runtime helper (exact IEEE-754 remainder,
+      // shared algorithm with the WasmGC backend's #2056 work). The previous
+      // inline `a - trunc(a/b)*b` formula (#1937) diverged from JS / the GC
+      // backend: it produced `±Infinity` for extreme ratios (ratio ≳ 1e308,
+      // e.g. `1e308 % 1e-308`), `NaN` for `x % Infinity` (0*Inf), and drifted
+      // by ULPs / collapsed to 0 when the intermediate rounded. `__fmod`
+      // handles all those cases exactly. Operands are already on the stack in
+      // (a, b) order — the helper's signature is `(f64 a, f64 b) -> f64`.
+      const fmodIdx = ctx.funcMap.get(FMOD_FN)!;
+      fctx.body.push({ op: "call", funcIdx: fmodIdx });
       break;
     }
     case ts.SyntaxKind.LessThanToken:
