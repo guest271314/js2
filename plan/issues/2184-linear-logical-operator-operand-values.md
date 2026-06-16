@@ -1,10 +1,12 @@
 ---
 id: 2184
 title: "linear backend: &&/|| yield 0/1 constants instead of operand values (needs result-type unification)"
-status: ready
+status: done
+completed: 2026-06-17
+assignee: ttraenkler/dev-resume
 sprint: 63
 created: 2026-06-16
-updated: 2026-06-16
+updated: 2026-06-17
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -76,3 +78,33 @@ shipped; this is the carved-out remainder.
 ## Notes
 
 GC backend already yields operand values correctly; this is linear-only.
+
+## Resolution (2026-06-17, PR for #2184)
+
+Fixed in `src/codegen-linear/index.ts`:
+
+- **Same-typed operands** (`string||string`, `number||number`, `bool&&bool`):
+  the lowering now tees the LHS into a temp, runs `emitTruthyCoercion` on the
+  tee'd value for the branch condition, and yields the **actual operand** —
+  `local.get leftTemp` on the short-circuit arm, the RHS on the other. The `if`
+  result ValType is the operand's native type (string `i32`-pointer / `f64` /
+  bool `i32`), so no `0`/`1` constants and no value loss. `inferExprType` gained
+  a matching `&&`/`||` case so callers (var decl, return) allocate a local of
+  the same type.
+- **Mixed-type operands** (e.g. string `i32` vs number `f64`): kept the legacy
+  boolean-producing lowering. Coercing a string pointer to `f64` to share one
+  `if` result type would corrupt both the value and downstream truthiness (a
+  nonzero pointer reads truthy even for `""`). This is the documented
+  same-typed-first scope; covering mixed-type *values* needs a boxed/`any`
+  representation and is left as a follow-up. Boolean-context mixed use stays
+  correct (the #1975 path).
+
+## Test Results
+
+`tests/issue-2184.test.ts` — 12/12 pass (operand-value `&&`/`||` for numeric +
+string operands, chains, typed-local flow, plus #1975 boolean-context regression
+guards). `tests/issue-1975.test.ts` — 8/8 still pass.
+`tests/equivalence/{logical-operators,coalesce-operator,boolean-relational-comparison}.test.ts`
+pass unchanged. (Pre-existing, unrelated failures confirmed on pristine
+upstream/main: `ir-numeric-bool-equivalence` `__unbox_number` link errors;
+`logical-conditional-identity` `void x` NaN cases.)
