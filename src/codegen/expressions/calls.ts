@@ -12,6 +12,7 @@ import {
   isGeneratorType,
   isNumberType,
   isNumberWrapperType,
+  isPromiseType,
   isStringType,
   isStringWrapperType,
   isSymbolType,
@@ -8983,7 +8984,24 @@ function compileCallExpression(
         if (wrapperTypes) {
           const matchedClosureInfo = wrapperTypes.closureInfo;
           const matchedStructTypeIdx = wrapperTypes.structTypeIdx;
-          const expectedReturn = matchedClosureInfo.returnType; // null for void
+          // (#2174) When the callee's signature returns `Promise<T>`,
+          // `resolveWasmType` strips the Promise wrapper and yields the awaited
+          // value's wasm type (e.g. f64 for `() => Promise<number>`). But an
+          // *internal* call to an async closure leaves the **Promise object**
+          // (externref) on the stack — the async closure's real funcref type
+          // returns externref, which is registered as a separate dispatch
+          // candidate below (`tryAltFuncType([externref])`). If the dispatch
+          // block were typed `(result f64)`, the async candidate's `call_ref`
+          // (externref) would mismatch the block result → invalid Wasm
+          // (`__closure_N fallthru expected f64/i32, got externref`). Worse, a
+          // type-only externref→f64 coercion would unbox the Promise to NaN and
+          // corrupt the value. So when the callee is async, widen the dispatch
+          // result to externref: the Promise flows through intact and the
+          // surrounding `wrapAsyncReturn` (expressions.ts) consumes it as the
+          // call expression's value. Surfaced by the test262 cluster
+          // `async-function/returns-async-function-returns-arguments-*`.
+          const calleeIsAsync = isPromiseType(sigRetType);
+          const expectedReturn: ValType | null = calleeIsAsync ? { kind: "externref" } : matchedClosureInfo.returnType; // null for void
 
           // (#1131) Preemptively create alternative closure wrapper types.
           // TypeScript allows covariant return types in callbacks, e.g.
@@ -9324,23 +9342,33 @@ function compileCallExpression(
               } else if (
                 expectedReturn !== null &&
                 fc.returnType !== null &&
-                !valTypesMatch(fc.returnType, expectedReturn) &&
-                (expectedReturn.kind === "i32" || expectedReturn.kind === "f64" || expectedReturn.kind === "i64") &&
-                (fc.returnType.kind === "i32" || fc.returnType.kind === "f64" || fc.returnType.kind === "i64")
+                !valTypesMatch(fc.returnType, expectedReturn)
               ) {
-                // (#1693) Numeric-primitive return-type mismatch in the multi-
-                // funcref dispatch ladder (e.g. expected i32, candidate returns
-                // f64). The if-block declares `(result <expectedReturn>)`, so we
-                // must coerce the call_ref result inline. Surfaces at full-module
-                // scale in axios/lib/utils.js where ~30 same-arity arrow
-                // predicates with diverging numeric returns populate
-                // ctx.closureInfoByTypeIdx.
+                // (#1693 / #2174) Return-type mismatch in the multi-funcref
+                // dispatch ladder. The if-block declares `(result
+                // <expectedReturn>)`, so EVERY arm must leave a value of that
+                // exact type. Each dispatch candidate may have a different
+                // funcref return type than the matched signature:
                 //
-                // Narrowly gated to numeric-primitive pairs only — externref/
-                // ref/ref_null mismatches stay on the existing lossy-but-valid
-                // drop+default path that already validates and never executes
-                // (those synthesized candidates only catch funcrefs that the
-                // real signature didn't match).
+                //  - #1693: numeric-primitive divergence (expected i32,
+                //    candidate returns f64) — axios/lib/utils.js packs ~30
+                //    same-arity arrow predicates with diverging numeric returns
+                //    into ctx.closureInfoByTypeIdx.
+                //  - #2174: externref/primitive divergence — an *async* closure
+                //    candidate (synthesized via `tryAltFuncType([externref])`)
+                //    returns a Promise (externref) while the awaited-value
+                //    signature resolves to f64/i32. Leaving externref in an
+                //    `(result f64)` block emits invalid Wasm
+                //    (`__closure_N fallthru expected f64, got externref`).
+                //    When the callee is async, `expectedReturn` is widened to
+                //    externref above so this arm boxes the f64 candidates up and
+                //    the externref Promise passes through untouched.
+                //
+                // `coerceType` validly bridges every reachable pair
+                // (numeric↔numeric, externref↔primitive via __box/__unbox_number,
+                // ref↔externref via extern.convert_any). Synthesized
+                // never-matching candidates still get a type-valid (if dead) arm,
+                // which keeps the module well-formed.
                 const savedBody = fctx.body;
                 fctx.body = fcCallBody;
                 coerceType(ctx, fctx, fc.returnType, expectedReturn);
