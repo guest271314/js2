@@ -1579,7 +1579,7 @@ export function compilePropertyAccess(
   // $Error_struct) + struct.get`. If the receiver is already null at
   // runtime, `ref.cast` traps — but native JS has the same behaviour
   // (`null.message` throws), so the trap is acceptable Phase 1/2 semantics.
-  if ((ctx.wasi || ctx.standalone) && (propName === "message" || propName === "name")) {
+  if ((ctx.wasi || ctx.standalone) && (propName === "message" || propName === "name" || propName === "stack")) {
     const lhsTsName = objType.getSymbol()?.name;
     const isErrorLhs =
       lhsTsName !== undefined &&
@@ -1607,7 +1607,8 @@ export function compilePropertyAccess(
       !isErrorLhs && isCatchBindingReceiver && (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
     if (isErrorLhs || isErrorLikeRuntimeLhs) {
       const structIdx = getOrRegisterErrorStructType(ctx);
-      const fieldIdx = propName === "message" ? 1 : 2;
+      // $Error_struct field layout: 1=message, 2=name, 3=stack (#1536).
+      const fieldIdx = propName === "message" ? 1 : propName === "name" ? 2 : 3;
       // Compile receiver. Mirror the standalone instanceof lowering
       // (identifiers.ts): compile WITHOUT forcing externref, then coerce, so a
       // catch-binding externref holding an `$Error` struct keeps its identity
