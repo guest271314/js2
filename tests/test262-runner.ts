@@ -1754,7 +1754,7 @@ let $262: any = {
   }
 
   if (needsProxyTraps) {
-    // #2181: test262 harness/proxyTrapsHelper.js. Returns a Proxy handler where
+    // #2183: test262 harness/proxyTrapsHelper.js. Returns a Proxy handler where
     // every trap defaults to a stub that throws a Test262Error when invoked
     // (so a test asserting "trap T must NOT be called" fails if it fires), with
     // each trap overridable via the `overrides` argument. Mirrors the upstream
@@ -2083,7 +2083,7 @@ export function wrapTest(source: string, meta?: Test262Meta): WrapResult {
   // sets a sidecar `__detached__` marker the runtime DataView dispatch checks.
   const needsDetachBuffer = /\$DETACHBUFFER\b/.test(body);
 
-  // #2181: proxyTrapsHelper.js — `allowProxyTraps(overrides)` returns a Proxy
+  // #2183: proxyTrapsHelper.js — `allowProxyTraps(overrides)` returns a Proxy
   // handler whose every trap defaults to a throwing stub (so a test asserting
   // "this trap is never called" fails loudly if it fires) and is overridable.
   // Not injected before, so `allowProxyTraps` was undefined and `new Proxy(t,

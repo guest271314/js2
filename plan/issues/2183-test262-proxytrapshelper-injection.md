@@ -1,5 +1,5 @@
 ---
-id: 2181
+id: 2183
 title: "test262 runner: inject proxyTrapsHelper.js (allowProxyTraps) so Proxy trap tests construct a real handler"
 status: done
 assignee: se2
@@ -16,7 +16,7 @@ sprint: 62
 related: [2180, 1466]
 ---
 
-# #2181 — test262 runner: inject `proxyTrapsHelper.js` (`allowProxyTraps`)
+# #2183 — test262 runner: inject `proxyTrapsHelper.js` (`allowProxyTraps`)
 
 ## Problem
 
@@ -58,5 +58,5 @@ extern-class proxy targets) tracked elsewhere.
 ## Files
 - `tests/test262-runner.ts` — `needsProxyTraps` flag + preamble injection +
   cache-key / `buildPreamble` signature wiring.
-- `tests/issue-2181.test.ts` — asserts the 3 `built-ins/Proxy` cases that flip
+- `tests/issue-2183.test.ts` — asserts the 3 `built-ins/Proxy` cases that flip
   to pass.

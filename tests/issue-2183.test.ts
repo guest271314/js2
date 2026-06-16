@@ -3,7 +3,7 @@ import { existsSync } from "fs";
 import { runTest262File } from "./test262-runner.js";
 
 /**
- * #2181 — The test262 runner never injected `proxyTrapsHelper.js`'s
+ * #2183 — The test262 runner never injected `proxyTrapsHelper.js`'s
  * `allowProxyTraps` helper, so every `built-ins/Proxy/*` test that includes it
  * saw `allowProxyTraps` as undefined → `null` handler → construction TypeError
  * (after #2180), masking the actual assertion. Injecting the helper (gated on
@@ -22,7 +22,7 @@ const cases = [
 
 const maybe = existsSync(TEST262) ? describe : describe.skip;
 
-maybe("#2181 proxyTrapsHelper injection", () => {
+maybe("#2183 proxyTrapsHelper injection", () => {
   for (const rel of cases) {
     it(rel, async () => {
       const r = await runTest262File(`${ROOT}/${rel}`, "built-ins/Proxy");
