@@ -274,11 +274,7 @@ async function run(
   // unstamped (pre-#2096) file as comparable to anything — there is no
   // recorded oracle to conflict with, so we fall back to the legacy behaviour
   // and only emit an informational note.
-  if (
-    baseOracle !== undefined &&
-    newOracle !== undefined &&
-    baseOracle !== newOracle
-  ) {
+  if (baseOracle !== undefined && newOracle !== undefined && baseOracle !== newOracle) {
     if (!oracleRebase) {
       console.error(
         `\n✖ Oracle-version guard (#2096): cross-version diff refused.\n` +
