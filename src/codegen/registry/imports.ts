@@ -32,6 +32,21 @@ import { addFuncType } from "./types.js";
  * dedicated error pointing the user at the nativeStrings option.
  */
 export function addImport(ctx: CodegenContext, module: string, name: string, desc: Import["desc"]): void {
+  // #1984 — freeze-point discipline. Once the module's index spaces are
+  // declared final (set right before `stackBalance` in generateModule/
+  // generateMultiModule), any further import mutation is a producer bug:
+  // it shifts indices that downstream code already emitted as final, the
+  // #2043-class poisoning. Throw HERE so the offending producer self-identifies
+  // with its own stack, instead of #2043's emit-time validation only naming the
+  // downstream symptom. The throw is caught by the generate* try/catch and
+  // surfaced as a `Codegen error:` (the compile fails loudly, never ships a
+  // poisoned binary).
+  if (ctx.indexSpaceFrozen) {
+    throw new Error(
+      `import space frozen (#1984): '${module}.${name}' added after finalize — ` +
+        `this producer must register its import before the freeze point or refuse loudly`,
+    );
+  }
   if (ctx.strictNoHostImports) {
     const decision = isHostImportAllowed(module, name);
     if (!decision.allowed) {
