@@ -298,7 +298,9 @@ if (JSON_OUT) {
       : ` | ${mergedPr.flagged.length} merged-but-ready: ${mergedPr.flagged.map((s) => "#" + s.id).join(",")}`;
   console.log(staleLine + prLine);
 } else {
-  out(`\nreconcile-tasklist: ${tasks.length} tasks, ${open.length} open, ${stale.length} STALE (done-but-not-completed)\n`);
+  out(
+    `\nreconcile-tasklist: ${tasks.length} tasks, ${open.length} open, ${stale.length} STALE (done-but-not-completed)\n`,
+  );
   for (const s of stale) {
     out(`  #${s.id}  [${s.reason}]  ${s.subject}`);
   }

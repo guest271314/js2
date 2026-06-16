@@ -81,10 +81,7 @@ describe("#2147 reconcile-tasklist flags ready issues fixed by a merged PR", () 
   }
 
   it("flags a ready issue cited by a merged code PR", () => {
-    const f = setup(
-      [["2002", "ready", "some bug"]],
-      ["fix(#2002): correct the thing", "feat(#9999): unrelated"],
-    );
+    const f = setup([["2002", "ready", "some bug"]], ["fix(#2002): correct the thing", "feat(#9999): unrelated"]);
     const { json } = run(f);
     expect(json.mergedPrCheckSkipped).toBe(false);
     expect(json.mergedPrFixed.map((x) => x.id)).toContain("2002");
@@ -100,10 +97,7 @@ describe("#2147 reconcile-tasklist flags ready issues fixed by a merged PR", () 
   });
 
   it("does NOT flag an issue already marked done", () => {
-    const f = setup(
-      [["2004", "done", "fixed bug"]],
-      ["fix(#2004): correct the other thing"],
-    );
+    const f = setup([["2004", "done", "fixed bug"]], ["fix(#2004): correct the other thing"]);
     const { json } = run(f);
     expect(json.mergedPrFixed.map((x) => x.id)).not.toContain("2004");
   });
