@@ -15,6 +15,7 @@
 
 import { createReadStream, readFileSync } from "fs";
 import { createInterface } from "readline";
+import { createHash } from "crypto";
 
 // #1943 — single source of truth for the documented merge thresholds, so the
 // CI regression-gate ENFORCES the same numbers the dev-self-merge skill
@@ -319,6 +320,16 @@ async function run(
      * transition is CI runner noise (#1222).
      */
     wasmUnchanged: boolean;
+    /**
+     * #2098: the baseline-side `compile_ms` for this test, when recorded.
+     * Used to split `pass → compile_timeout` regressions into `ct_flake`
+     * (baseline already compiled near the 30s boundary in well under the
+     * 5s flake threshold → the timeout is runner-load noise) vs `ct_suspect`
+     * (baseline compile already > 5s → the PR may have pushed a genuinely
+     * slow compile over the edge, worth a look). Encodes the tribal rule
+     * "pass→compile_timeout is runner-load flake unless baseline compile >5s".
+     */
+    baselineCompileMs?: number;
   }[] = [];
   const improvements: { file: string; from: string; to: string }[] = [];
   const otherChanges: { file: string; from: string; to: string }[] = [];
@@ -362,6 +373,7 @@ async function run(
         error: cur?.error,
         error_category: cur?.error_category,
         wasmUnchanged,
+        baselineCompileMs: typeof base?.compile_ms === "number" ? base.compile_ms : undefined,
       });
     } else if (baseStatus !== "pass" && curStatus === "pass") {
       improvements.push({ file, from: baseStatus, to: curStatus });
@@ -426,6 +438,42 @@ async function run(
   const regressionsReal = regressions.length - regressionsCT;
   console.log(`=== Compile timeouts (pass → compile_timeout): ${regressionsCT} ===`);
   console.log(`=== Regressions excluding compile_timeout: ${regressionsReal} ===`);
+
+  // #2098: split compile_timeout regressions by baseline compile cost, encoding
+  // the triage rule that lived only in memory files
+  // (feedback_regression_analysis): "pass→compile_timeout is runner-load flake
+  // unless baseline compile >5s". A test whose baseline already compiled in
+  // well under the threshold can only have timed out from CI runner load
+  // (`ct_flake`); one whose baseline was already slow may have been pushed over
+  // the 30s wall by the PR and deserves a look (`ct_suspect`). A timeout with no
+  // recorded baseline compile_ms is conservatively counted as suspect (we can't
+  // prove it was fast). Output-only — no gate behaviour change; the workflow
+  // already excludes ALL compile_timeout from the ratio (#1192/#1942).
+  const CT_FLAKE_THRESHOLD_MS = 5000;
+  const ctRegressions = regressions.filter((r) => r.to === "compile_timeout");
+  let ctFlake = 0;
+  let ctSuspect = 0;
+  for (const r of ctRegressions) {
+    if (typeof r.baselineCompileMs === "number" && r.baselineCompileMs <= CT_FLAKE_THRESHOLD_MS) {
+      ctFlake += 1;
+    } else {
+      ctSuspect += 1;
+    }
+  }
+  console.log(
+    `=== ct_flake (compile_timeout, baseline ≤${CT_FLAKE_THRESHOLD_MS}ms — runner-load noise): ${ctFlake} ===`,
+  );
+  console.log(
+    `=== ct_suspect (compile_timeout, baseline >${CT_FLAKE_THRESHOLD_MS}ms or unknown — investigate): ${ctSuspect} ===`,
+  );
+  if (!quiet && ctSuspect > 0) {
+    for (const r of ctRegressions.filter(
+      (r) => !(typeof r.baselineCompileMs === "number" && r.baselineCompileMs <= CT_FLAKE_THRESHOLD_MS),
+    )) {
+      const ms = typeof r.baselineCompileMs === "number" ? `${Math.round(r.baselineCompileMs)}ms` : "unknown";
+      console.log(`  ct_suspect ${r.file} (baseline compile ${ms})`);
+    }
+  }
 
   // #1942: compile-time regression signals. `pass → compile_timeout` is
   // excluded from every regression gate (it's runner-load flake — see the
@@ -542,6 +590,30 @@ async function run(
     for (const [cat, count] of sorted) {
       console.log(`  ${cat}: ${count}`);
     }
+    console.log();
+  }
+
+  // #2098: stable bucket-signature hash. Encodes the triage rule from
+  // feedback_baseline_drift_cross_check: "identical regression clusters across
+  // unrelated PRs are baseline drift, not real regressions." The signature is
+  // a sha256 over the SORTED set of regressing test paths plus their
+  // destination status — it is independent of the PR, the run order, and the
+  // counts, so two PRs that regress the exact same cluster emit the SAME hash.
+  // An agent (or a future cross-PR drift detector) can compare the hash across
+  // open PRs: a match means the cluster is pre-existing drift to triage once,
+  // not N independent regressions. compile_timeout flake is excluded so a
+  // single flapping test can't perturb the signature. Output-only — no gate
+  // behaviour change.
+  const signatureFiles = regressions
+    .filter((r) => r.to !== "compile_timeout")
+    .map((r) => `${r.file} ${r.to}`)
+    .sort();
+  if (signatureFiles.length > 0) {
+    const bucketSignature = createHash("sha256").update(signatureFiles.join("\n")).digest("hex").slice(0, 16);
+    console.log(`=== Regression bucket signature: ${bucketSignature} (${signatureFiles.length} non-CT files) ===`);
+    console.log(
+      `  (Same signature on another PR ⇒ identical cluster ⇒ likely baseline drift — see feedback_baseline_drift_cross_check.)`,
+    );
     console.log();
   }
 
