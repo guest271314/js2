@@ -2158,6 +2158,16 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
         return { kind: "ref", typeIdx: dateTypeIdx };
       }
+      // (#2164) Pure standalone has no wall clock — emit the Unix epoch (0)
+      // directly instead of leaking the unsatisfiable env::__date_now host
+      // import (which made `new Date()` a hard instantiate failure standalone,
+      // breaking unrelated Date tests). See the matching Date.now() fallback in
+      // expressions/calls.ts.
+      if (ctx.standalone === true) {
+        fctx.body.push({ op: "i64.const", value: 0n });
+        fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
+        return { kind: "ref", typeIdx: dateTypeIdx };
+      }
       const dateNowIdx = ensureLateImport(ctx, "__date_now", [], [{ kind: "f64" }]);
       if (dateNowIdx !== undefined) {
         flushLateImportShifts(ctx, fctx);

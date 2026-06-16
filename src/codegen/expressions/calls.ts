@@ -6091,6 +6091,20 @@ function compileCallExpression(
           fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_date_now")! } as Instr);
           return { kind: "f64" };
         }
+        // (#2164) Pure standalone (--target standalone, no JS host AND no WASI
+        // clock) has no wall-clock source, so the env::__date_now host import is
+        // unsatisfiable — every module that calls Date.now() (or new Date() with
+        // no args) failed to instantiate standalone, breaking unrelated Date
+        // tests that only touch Date.now() in setup. Emit the Unix epoch (0)
+        // directly: deterministic, no import leak, module instantiates. Tests
+        // that construct explicit timestamps (the bulk of the gap) then work;
+        // only tests asserting a *real* current time (which standalone WasmGC
+        // cannot provide) stay failing — and those need a clock source, not a
+        // host import.
+        if (ctx.standalone === true) {
+          fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+          return { kind: "f64" };
+        }
         const dateNowIdx = ensureLateImport(ctx, "__date_now", [], [{ kind: "f64" }]);
         if (dateNowIdx !== undefined) {
           flushLateImportShifts(ctx, fctx);
