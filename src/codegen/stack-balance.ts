@@ -43,6 +43,121 @@ const UNREACHABLE = -999;
 let inventedValueSites: { func: string; detail: string }[] = [];
 let currentDiagFunc = "<unknown>";
 
+// #1918 — Stack-balance fixup telemetry.
+//
+// Every fixup this pass applies is a *repair of the emitter's own output*: a
+// masked codegen bug. Historically the per-function fixup count was summed,
+// returned by `stackBalance`, and then discarded by both call sites
+// (`src/codegen/index.ts`). Nothing reported, gated, or ratcheted it, so the
+// safety net silently absorbed new emitter regressions — and some repairs are
+// *lossy* (a wrong-typed/missing branch value patched with a `const` default
+// becomes a silently-wrong runtime value).
+//
+// We now classify each leaf fixup by `FixupKind` and collect a located event
+// per occurrence. `stackBalance` resets the collector per run and exposes it
+// via `getFixupEvents()`; `src/codegen/index.ts` drains it into a per-compile
+// summary and, under `JS2WASM_STRICT_BALANCE`, into compiler warnings (=1) or
+// hard errors (=error). The `scripts/check-stack-balance.ts` corpus gate
+// aggregates the kinds into `scripts/stack-balance-baseline.json` and fails CI
+// when any bucket grows (ratchet mechanics mirror `check-ir-fallbacks.ts`).
+export type FixupKind =
+  // count repairs
+  | "drop-excess" // branch left too many values; surplus dropped
+  | "default-value-lossy" // branch left too few values; missing slot filled with a typed const/null default (LOSSY)
+  // type repairs
+  | "branch-type-coerce" // branch result coerced to the block type via the coercion table
+  | "branch-type-cast" // branch result externref→ref/ref_null via any.convert_extern + ref.cast_null
+  | "call-arg-coerce" // call argument coerced to the callee's declared param type
+  | "struct-field-coerce" // struct.new field value coerced to the field's declared type
+  | "local-set-coerce"; // local.set/local.tee value coerced to the local's declared type
+
+/** A single located fixup the pass applied while repairing emitter output. */
+export interface FixupEvent {
+  readonly kind: FixupKind;
+  /** Name of the function (or `func#N`) the fixup was applied in. */
+  readonly func: string;
+  /** Human-readable detail (e.g. `f64 default for missing branch value`). */
+  readonly detail: string;
+  /** True for repairs that can change runtime semantics (currently the const-default arm). */
+  readonly lossy: boolean;
+}
+
+let fixupEvents: FixupEvent[] = [];
+
+/** Record a fixup the pass just applied, attributed to the current function. */
+function recordFixup(kind: FixupKind, detail: string, lossy = false): void {
+  fixupEvents.push({ kind, func: currentDiagFunc, detail, lossy });
+}
+
+/**
+ * Events collected during the most recent `stackBalance(mod)` run (#1918).
+ * Returns a copy so callers can't mutate the collector. `stackBalance` resets
+ * it at the start of every run, so this reflects exactly one module's repairs.
+ */
+export function getFixupEvents(): FixupEvent[] {
+  return fixupEvents.slice();
+}
+
+/** Aggregate fixup events into per-kind counts (#1918). Always includes every kind. */
+export function summarizeFixups(events: readonly FixupEvent[]): Record<FixupKind, number> {
+  const counts: Record<FixupKind, number> = {
+    "drop-excess": 0,
+    "default-value-lossy": 0,
+    "branch-type-coerce": 0,
+    "branch-type-cast": 0,
+    "call-arg-coerce": 0,
+    "struct-field-coerce": 0,
+    "local-set-coerce": 0,
+  };
+  for (const e of events) counts[e.kind]++;
+  return counts;
+}
+
+/** A strict-balance diagnostic ready to push onto a codegen error sink (#1918). */
+export interface StrictBalanceDiagnostic {
+  readonly message: string;
+  readonly line: 0;
+  readonly column: 0;
+  readonly severity: "error" | "warning";
+}
+
+/**
+ * Strict-balance mode (#1918). Controlled by `JS2WASM_STRICT_BALANCE`:
+ *
+ *   unset / "0" / "off"  — silent (default; preserves existing behaviour)
+ *   "1" / "true" / "warn" — every fixup becomes a located severity-"warning"
+ *   "error" / "strict"    — every fixup becomes a severity-"error" (fails the
+ *                            compile); for CI experiments and new code that
+ *                            should never need a repair.
+ *
+ * Returns the diagnostics to surface. The caller (`src/codegen/index.ts`,
+ * which holds `ctx`) pushes them onto `ctx.errors` — strict errors then fail
+ * the WasmGC compile through the existing `severity === "error"` gate, which
+ * `mod.codegenErrors` does NOT reach on the WasmGC path (see #2090).
+ */
+export function strictBalanceDiagnostics(events: readonly FixupEvent[]): StrictBalanceDiagnostic[] {
+  const mode = (process.env.JS2WASM_STRICT_BALANCE ?? "").toLowerCase();
+  const enabled = mode === "1" || mode === "true" || mode === "warn" || mode === "error" || mode === "strict";
+  if (!enabled || events.length === 0) return [];
+  const severity: "error" | "warning" = mode === "error" || mode === "strict" ? "error" : "warning";
+  return events.map((e) => {
+    const body =
+      `Stack-balance fixup [${e.kind}]${e.lossy ? " (LOSSY)" : ""} in function "${e.func}": ${e.detail}. ` +
+      `This repairs an emitter bug; the producing codegen should emit a balanced, correctly-typed stack ` +
+      `instead of relying on the stack-balance pass. (#1918)`;
+    // For severity "error" prefix with "Codegen error:" so the compiler's
+    // existing WasmGC success gate (compiler.ts: `message.startsWith("Codegen
+    // error:")`) actually fails the compile. Warnings stay unprefixed so they
+    // remain visible diagnostics without affecting `success`.
+    return {
+      message: severity === "error" ? `Codegen error: ${body}` : body,
+      line: 0 as const,
+      column: 0 as const,
+      severity,
+    };
+  });
+}
+
 /**
  * Check if an instruction is a terminator (makes subsequent code unreachable).
  */
@@ -739,6 +854,7 @@ function fixBranchType(
     const plan = coercionPlan(fromVT, expectedType, { boxNumberIdx, unboxNumberIdx });
     if (plan) {
       body.push(...plan.instrs);
+      recordFixup("branch-type-coerce", `coerced branch result ${produced} → ${expectedType.kind}`); // #1918
       return 1;
     }
   }
@@ -751,6 +867,7 @@ function fixBranchType(
   if ((expectedType.kind === "ref" || expectedType.kind === "ref_null") && produced === "externref") {
     body.push({ op: "any.convert_extern" } as Instr);
     body.push({ op: "ref.cast_null", typeIdx: expectedType.typeIdx });
+    recordFixup("branch-type-cast", `cast branch result externref → ${expectedType.kind} #${expectedType.typeIdx}`); // #1918
     return 1;
   }
 
@@ -782,6 +899,7 @@ function fixBranch(
     // Too many values -- add drops
     for (let i = 0; i < actual - expected; i++) {
       body.push({ op: "drop" });
+      recordFixup("drop-excess", `dropped 1 surplus value (had ${actual}, block expects ${expected})`); // #1918
       fixups++;
     }
   } else if (actual < expected) {
@@ -793,22 +911,35 @@ function fixBranch(
         switch (t.kind) {
           case "i32":
             body.push({ op: "i32.const", value: 0 });
+            // #1918 — LOSSY: a missing branch value is filled with a typed
+            // const default. If the producer was *supposed* to push a value,
+            // this silently substitutes 0 at runtime. AC #3: warning-visible.
+            recordFixup("default-value-lossy", "i32.const 0 default for a missing branch value", true);
             break;
           case "i64":
             body.push({ op: "i64.const", value: 0n });
+            recordFixup("default-value-lossy", "i64.const 0 default for a missing branch value", true);
             break;
           case "f64":
             body.push({ op: "f64.const", value: 0 });
+            recordFixup("default-value-lossy", "f64.const 0 default for a missing branch value", true);
             break;
           case "f32":
             body.push({ op: "f32.const", value: 0 });
+            recordFixup("default-value-lossy", "f32.const 0 default for a missing branch value", true);
             break;
           case "externref":
             body.push({ op: "ref.null.extern" });
+            recordFixup("default-value-lossy", "ref.null.extern default for a missing branch value", true);
             break;
           case "ref":
           case "ref_null":
             body.push({ op: "ref.null", typeIdx: t.typeIdx });
+            recordFixup(
+              "default-value-lossy",
+              `ref.null (type #${t.typeIdx}) default for a missing branch value`,
+              true,
+            );
             break;
           default:
             // #2090 — unknown value type: we cannot pick a correct default, so
@@ -1652,6 +1783,7 @@ function fixCallArgTypesInBody(
       for (let k = insertions.length - 1; k >= 0; k--) {
         const { afterPos, instrs } = insertions[k]!;
         body.splice(afterPos + 1, 0, ...instrs);
+        recordFixup("call-arg-coerce", `coerced a call argument (${instrs.length} instr(s))`); // #1918
         ci += instrs.length;
         fixups += instrs.length;
       }
@@ -1777,6 +1909,7 @@ function fixStructNewFieldCoercion(
               // Insert save+restore before the struct.new
               const insertedInstrs = [...saveInstrs, ...restoreInstrs];
               body.splice(ci, 0, ...insertedInstrs);
+              recordFixup("struct-field-coerce", `coerced ${numFields} struct.new field value(s)`); // #1918
               ci += insertedInstrs.length; // skip past inserted + struct.new
               fixups += insertedInstrs.length;
             }
@@ -2243,6 +2376,8 @@ export function stackBalance(mod: WasmModule): number {
 
   // #2090 — reset the invented-value collector for this run.
   inventedValueSites = [];
+  // #1918 — reset the fixup-telemetry collector for this run.
+  fixupEvents = [];
 
   // Count import functions and find __box_number/__unbox_number indices
   let numImports = 0;
@@ -2505,6 +2640,7 @@ function fixLocalSetCoercion(
     if (coercion.length > 0) {
       // Insert coercion instructions before the local.set
       body.splice(i, 0, ...coercion);
+      recordFixup("local-set-coerce", `coerced ${instr.op} value ${stackType.kind} → ${localType.kind}`); // #1918
       i += coercion.length;
       fixups += coercion.length;
     }
