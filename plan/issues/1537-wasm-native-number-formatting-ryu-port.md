@@ -1,7 +1,7 @@
 ---
 id: 1537
 title: "Wasm-native number formatting (Ryū port): toString/toFixed/toPrecision/toExponential"
-status: backlog
+status: ready
 created: 2026-05-20
 updated: 2026-06-03
 priority: high
@@ -11,7 +11,7 @@ task_type: feature
 area: runtime
 language_feature: number
 goal: standalone-wasm
-sprint: Backlog
+sprint: 62
 related: [1535, 1321, 1335, 1759]
 ---
 # #1537 — Wasm-native number formatting: shortest-roundtrip Ryū core (#1335 Phase 2)
@@ -169,3 +169,33 @@ Boundary values to pin in the focused unit test:
 - Start CLEAN-CONTEXT: this is a numeric-correctness port where small errors
   silently fail boundary tests; pair it with the oracle test from the first
   commit and grow the value set as each case passes.
+
+## Implementation Plan — Architect addendum (2026-06-16)
+
+(The issue may already carry a `#1335 Phase 2 — Ryū core swap` plan. This addendum confirms it against current source, sharpens the seam, and pins the i64-primitive plan.)
+
+### Confirmation
+- Host-import elimination is DONE: all five formatters Wasm-native in `src/codegen/number-format-native.ts`, wired via `emitNativeNumberFormat` (`declarations.ts:~946-959`), gated `ctx.wasi || ctx.standalone`.
+- Gap stands: `emitToString` (number-format-native.ts:410, "Algorithm strategy (no Ryu)") + `emitExponential` (~432, `SIG_DIGITS=15`) use fixed ~15-digit f64 expansion → non-round-tripping shortest output (`String(0.1)`, `0.1+0.2`) and ~50 boundary fails.
+- All Wasm primitives present: `i64.reinterpret_f64` (0xbd) for bit decomposition; `i64.mul/shr_u/shl/and/or` for hand-rolled 128-bit `mulShift` (no i128 — limb-split).
+
+### Integration seam
+Keep untouched: `emitNonFinitePrologue` (NaN/±Inf/sign), safe-integer fast path (`abs==floor && abs<=2^53-1` → `number_toString_radix`), `emitIntegerDigits`, `__num_fmt_finalize`. Replace ONLY the fractional/unsafe-magnitude branch of `emitToString` with a call into new `__num_ryu_digits`. Put the port in a new `src/codegen/number-ryu.ts` (imported by number-format-native.ts) to avoid growing the 1704-line file.
+
+### `__num_ryu_digits` contract
+`(value:f64, outBuf:ref $__str_data, outOffset:i32) -> (i32 k, i32 n)` (multi-value return): writes shortest decimal digits (ASCII, no sign/dot) at outOffset, returns digit count `k` and decimal exponent `n` (§6.1.6.1.13). `emitToString` keeps the fixed-vs-exponential framing (fixed when `-6 < n <= 21`, else `D.DDDe±N`) and calls `__num_fmt_finalize`. No extra allocation — operate on the caller's buf.
+
+### Ryū core — i64 limb plan (highest risk)
+Port `dtolnay/ryu` `ryu-ecmascript` variant line-for-line (do NOT reconstruct from memory): (1) `bits=i64.reinterpret_f64`; extract mantissa/exponent; build `(m2,e2)`. (2) halfway bounds mv/mp/mm. (3) `mulShift` via `umul128` = split each i64 into two 32-bit limbs, four 32×32→64 partials, recombine, `shiftright128`. (4) pow5 tables `DOUBLE_POW5_SPLIT`/`DOUBLE_POW5_INV_SPLIT` as a WasmGC `(array i64)` global (~2KB) indexed by `q`. (5) digit loop with vr/vm trailing-zero round-to-even tie-break.
+
+### Other formatters
+Route only shortest-significand needs (`toExponential()` no-arg, `toPrecision` auto) through Ryū. Explicit-count `toFixed(d)`/`toExponential(d)`/`toPrecision(p)` keep the fixed expansion unless a boundary test fails. `(7.7).toFixed(20)` (needs bignum) is an accepted documented gap unless forced.
+
+### Edge cases (tests/issue-1537.test.ts)
+`0`,`-0`→"0", NaN, ±Infinity, `0.1`,`0.2`,`0.3`, `0.1+0.2`→"0.30000000000000004", `1/3`, `1.005`, `5e-324`, `1.7976931348623157e308`, `1e21`→"1e+21", `1e-7`→"1e-7", `1e20`→fixed, `9007199254740993`.
+
+### Validation
+Unit oracle: compile `{target:"standalone",testRuntime:true}`, decode via `__test_str_to_externref`, assert `=== String(value)`. Property test ~10k random f64 (fixed seed): round-trip + shortest.
+
+### test262 gate
+`built-ins/Number/prototype/{toString,toFixed,toExponential,toPrecision}/`, `language/types/number/`, String(n) coercion. Est. +200-400 standalone passes. All gated `ctx.wasi || ctx.standalone`; JS-host keeps host imports (V8 does shortest correctly).

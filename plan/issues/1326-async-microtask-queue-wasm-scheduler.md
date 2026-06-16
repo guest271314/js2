@@ -11,7 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: async, promises, generators
 goal: standalone-mode
-sprint: 58
+sprint: 62
 required_by: [1326c, 1766, 1774]
 ---
 # #1326 — Async standalone: Wasm microtask queue + CPS desugaring

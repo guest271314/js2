@@ -2,7 +2,7 @@
 id: 2097
 title: "absolute standalone pass-count floor — high-water-mark backstop against compounding small regressions"
 status: ready
-sprint: 63
+sprint: 62
 created: 2026-06-11
 updated: 2026-06-12
 priority: medium

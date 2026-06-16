@@ -1,14 +1,14 @@
 ---
 id: 1257
 title: "async-gen + obj-ptrn default-init throws: funcIdx shift misses detached thenInstrs"
-status: backlog
+status: ready
 created: 2026-04-19
 updated: 2026-05-21
 priority: medium
 feasibility: hard
 reasoning_effort: high
 goal: error-model
-sprint: Backlog
+sprint: 62
 ---
 ## Problem
 

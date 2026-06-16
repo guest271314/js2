@@ -2,7 +2,7 @@
 id: 1936
 title: "Async contract migration — teach call sites to drive Promises, then enable the built-but-disabled CPS lowering"
 status: ready
-sprint: 63
+sprint: 62
 created: 2026-06-10
 updated: 2026-06-15
 priority: top
@@ -66,3 +66,81 @@ Architect spec first (this is the review's #1 architect-level item):
 Compiler quality review 2026-06. Related: #1373 (IR async adoption — align
 so IR adopts the CPS form, not the legacy form), async-scheduler phases.
 Needs `/architect-spec`.
+
+## Implementation Plan
+
+### Root cause
+
+The compiler ships two incompatible async return contracts and resolves the
+conflict per-definition while the conflict is actually per-call-site:
+
+- **Definition side** — an async function is lowered *synchronously*: its wasm
+  body returns the unwrapped `T`, not a `Promise`. The async-return rewrite is in
+  `src/codegen/declarations.ts` (`unwrapPromiseType` at 173, 2332, 2774, 2917
+  strips `Promise<T>` so the registered result type is `T`).
+- **Call site** — `compileExpressionInner` (`src/codegen/expressions.ts:1118`,
+  `isAsyncCallExpression` def at 154) decides per-consumer whether to wrap the raw
+  `T` in a real Promise via `wrapAsyncReturn` (287) or to elide the wrap
+  (`asyncResultConsumedAsValue`, 252). `await` and non-Promise casts take the
+  raw-value path; `.then`/`Promise.all`/typed-Promise bindings take the wrap path.
+
+The sound CPS state machine (`src/codegen/async-cps.ts`) is fully built but inert
+behind `ASYNC_CPS_ENABLED = false` (`async-cps.ts:59`) — flipping it globally makes
+every async fn return a Promise (externref) which synchronous-consumption sites
+unbox as `Number(Promise) === NaN` (async-cps.ts:46-57). This issue is the
+census + elision spec that makes a per-function flip safe; #1796 does the flip.
+
+### Deliverable = SPEC + per-function decision scaffold (NOT the global flip)
+
+1. the call-site census classifier, 2. the compile-time await-elision rule,
+3. the `ASYNC_CPS_ENABLED`-replacing predicate `asyncFnNeedsCps`.
+
+### Changes
+
+- `src/codegen/async-cps.ts`: add `asyncFnNeedsCps(ctx, fn): boolean` — true only
+  when the fn genuinely suspends: `analyzeAsyncBody().awaitPoints.length >= 1`,
+  at least one awaited expr is not statically resolved, and `splitBodyAtAwait`
+  succeeds. Keep `ASYNC_CPS_ENABLED` as a transitional kill-switch routed through
+  the predicate (final removal is #1796).
+- `analyzeAsyncBody`: add `awaitedStaticallyResolved` map. An await is statically
+  resolved when its operand is a literal/arithmetic over literals, a call to a
+  transitively-resolved async fn (worklist over the SCC), or `Promise.resolve(<static>)`.
+- `src/codegen/expressions.ts`: `asyncResultConsumedAsValue` (252) becomes a
+  3-state census classifier `classifyAsyncConsumer` → `{value|thenable|await}`.
+  Compile-time await-elision: when `asyncFnNeedsCps` is false (all awaits static),
+  compile the callee as a sync fn that returns a resolved thenable (force
+  `wrapAsyncReturn`, no raw-value elision) — spec shape without CPS cost.
+
+### Census deliverable
+Add `scripts/async-call-census.mjs` (mirrors `check:ir-fallbacks`): walk
+`playground/examples/**` + `tests/**/*async*.ts`, bucket every async-callee
+consumer (await / thenable / value). The `value`-bucket-not-statically-resolved
+set is exactly what #1796 must migrate.
+
+### CPS lowering (already built; this spec only re-gates it)
+`emitAsyncStateMachine` (async-cps.ts:164): prefix runs sync → `Promise_resolve`
+of awaited (await V == PromiseResolve §27.7.5.3) → build captures struct →
+`__make_callback` → `Promise_then2` (chained promise is the fn result) → return.
+**Standalone substrate**: when `isStandalonePromiseActive` (async-scheduler.ts:1258),
+use native `$Promise` + microtask queue (`emitStandalonePromiseResolve`/`Then`
+at 1089/1132), continuation via `__microtask_enqueue` drained after `_start`.
+This is the #1326→#1326c→#1373b engine — reference, don't re-spec.
+
+### Edge cases
+await in loops/branches → `splitBodyAtAwait` returns null → stay on legacy sync
+path with a migration diagnostic, NOT silent mis-lowering (census bucket
+`cps-unsupported-shape`); try/catch across await → legacy fallback (#1373c);
+`return await P` → handled (async-cps.ts:248); async throw → uncaught throw in
+prefix must `Promise.reject` (§27.7.5.2 step 4); nested async arrow/method → each
+gets its own decision.
+
+### Test-gate plan
+`tests/async-census.test.ts` (classifier buckets a fixed corpus); `tests/issue-1042.test.ts`
+skipIf block becomes the per-function regression suite; test262
+`built-ins/Promise/**`, `language/expressions/await/**`,
+`language/statements/async-function/**`. Net async delta ≥ 0 (net-neutral; #1796
+banks gains).
+
+### Spec citations
+await V = PromiseResolve(%Promise%,V) §27.7.5.3/§27.7.5.1; async-fn rejection on
+sync throw §27.7.5.2 step 4 / §27.7.5.4.

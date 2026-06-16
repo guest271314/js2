@@ -10,7 +10,7 @@ task_type: feature
 area: codegen
 language_feature: async, promises
 goal: spec-completeness
-sprint: 63
+sprint: 62
 related: [1042, 1326, 1373, 1373b]
 note: "2026-06-15: elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). Host-mode Promise/async completion linchpin. Needs architect spec + senior-dev; sequenced after #1936 census, gated on #1373b CPS lowering."
 ---
@@ -87,3 +87,72 @@ as one coordinated change with the test corpus.
 - **ID note:** filed as #1796 because #1792 was already taken
   (`1792-node-url-builtin-impl.md`); the lead's dispatch said "1792" but that
   collides — using the next free id.
+
+## Implementation Plan
+
+### Root cause
+Execution of the #1936 census: flip `ASYNC_CPS_ENABLED` (`async-cps.ts:59`) on,
+route every async fn through `asyncFnNeedsCps` (#1936), and migrate the test
+corpus + remaining synchronous-consumption call sites off the raw-value contract
+onto the real-Promise contract. Machinery is present and verified-when-run
+(`tests/issue-1042.test.ts` Slice-2A); the work is contract migration, not new
+lowering.
+
+### Sequencing
+Gated on #1936 (census + `asyncFnNeedsCps` + elision) and #1373b (CPS/IR
+adoption). Do NOT flip before #1936's census report exists.
+
+### Changes
+- `async-cps.ts`: `ASYNC_CPS_ENABLED` → true (59), then REMOVE the constant;
+  `function-body.ts:1117` + `declarations.ts:636` consult `asyncFnNeedsCps`
+  (removal is acceptance criterion 3).
+- `function-body.ts:1116-1132`: replace the `ASYNC_CPS_ENABLED && … &&
+  splitBodyAtAwait!==null` gate with `asyncFnNeedsCps(ctx,decl)`; drop the
+  `!wasi && !standalone` exclusion only once the standalone substrate is wired.
+- `declarations.ts:630-648`: mirror the gate in `collectAsyncCpsImports` prepass
+  so Promise_resolve/__make_callback/Promise_then2 get stable funcMap indices
+  (the #1384 late-import-shift hazard).
+- `expressions.ts`: `asyncResultConsumedAsValue` (252) stops taking the raw-value
+  elision for CPS callees (they now return real Promises); keep elision only for
+  statically-resolved callees. await arm (1207-1225): non-tail await under an
+  active state machine still `reportError`s (PR1 limit) — widen per step 6 or keep
+  the explicit error, never silent mis-lowering.
+
+### Migration surface (from #1936 census)
+1. `value`-bucket sites (`f() as any as number`): rewrite to `await f()` /
+   unwrap Promise; inventory via grep `as any as`/`as unknown as` on async results.
+2. Test corpus → Promise model: `tests/equivalence/async-function.test.ts`,
+   `async-await.test.ts`, `promise-chains.test.ts`, `async-iteration.test.ts`,
+   `ir-slice10-promise.test.ts` — harness must `await exports.main()` (or drain
+   microtasks in standalone).
+3. `tests/issue-1042.test.ts`: promote skipIf block to always-on; add 5 canonical
+   CPS cases (identity await=42; sequential ordering; try/catch reject;
+   Promise.all interleave; return-await collapse).
+
+### Standalone vs JS-host
+host: Promise_resolve/__make_callback/Promise_then2 imports (runtime.ts:9494,9525).
+standalone: native `$Promise` + microtask queue —
+`emitStandalonePromiseResolve` (async-scheduler.ts:1089) for Promise_resolve,
+`emitStandalonePromiseThen` (1132) for Promise_then2, synthesized `$__mt_func_type`
+`ref.func` for __make_callback; continuations are `__microtask_enqueue` tasks,
+FIFO drained after `_start` (line 1066). The #1326 engine — do not re-spec.
+
+### Edge cases (acceptance: spec-correct ordering)
+sequential side effects `a();await x;b()` → "132" not "123"; try/catch reject →
+`hasTryAcrossAwait` PR1-unsupported, keep legacy + follow-up #1373c; Promise.all
+interleave → standalone combinator on native queue (#1326 follow-up); return-await
+collapse handled; async throw/reject → sync throw in prefix settles result promise
+rejected (§27.7.5.2); awaits in loops/branches/multiple/arrows → step 6 legacy
+fallback unless `asyncFnNeedsCps` + widened `splitBodyAtAwait` accept; no silent
+mis-lowering (expressions.ts:1216 keeps erroring under an active machine).
+
+### Test-gate plan
+`tests/issue-1042.test.ts` ASYNC_CPS_ENABLED assertion (25) flips to the predicate;
+5 canonical cases green; full `tests/equivalence/async-*.test.ts` migrated green;
+test262 `built-ins/Promise/**`, `language/expressions/await/**`,
+`language/statements/async-function/**`, `language/expressions/async-arrow-function/**`;
+net delta ≥ 0 (criterion 3). Run `/analyze-regression` on async buckets.
+
+### Spec citations
+Await §27.7.5.3/§27.7.5.1; AsyncFunctionStart/rejection §27.7.5.2/§27.7.5.4;
+microtask FIFO PerformPromiseThen §27.2.5.4.1, Jobs §9.5.

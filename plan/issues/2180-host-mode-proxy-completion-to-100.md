@@ -11,7 +11,7 @@ task_type: feature
 area: codegen, runtime
 language_feature: proxy
 goal: spec-completeness
-sprint: 63
+sprint: 62
 related: [1466, 1100, 1355]
 note: "2026-06-15: created + elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). #1466 (Proxy+Reflect trap fidelity, done) was the last host-mode Proxy issue; built-ins/Proxy still sits at ~23% (71/311). No tracker existed for the remaining host-mode failures — this is it. Needs architect triage of the failing buckets before dev dispatch."
 ---
@@ -68,3 +68,85 @@ suspect areas from prior analysis:
 - All three Proxy issues (#2180 host, #1100 + #1355 standalone) are part of
   the 2026-06-15 stakeholder-elevated **Proxy/Promise/async → 100% epic**
   (see `plan/issues/sprints/63.md`).
+## Implementation Plan
+
+(Author: architect, 2026-06-16. Host-mode-only. The standalone track is #1100/#1355.)
+
+### Root cause / gap analysis
+
+After #1466, host mode already routes the full MOP through the host's native
+`Proxy`/`Reflect`, so the host engine enforces §10.5 invariants for us. The
+remaining `built-ins/Proxy` failures (~231 of 311) are **not** missing trap
+dispatch — they are defects at the Wasm↔host boundary and in construction:
+
+1. **Construction does not throw the spec-mandated TypeErrors.**
+   `proxy_create` in `src/runtime.ts:11075-11089` does
+   `const t = target ?? {}; const h = handler ?? {}; try { new Proxy(t,h) } catch { return t }`.
+   Per §28.2.1.1 `Proxy(target, handler)` step 1-2, **both** target and
+   handler must be objects or a `TypeError` is thrown *before* allocation.
+   Today `new Proxy(null, {})`, `new Proxy({}, null)`, `new Proxy(1, {})`,
+   `new Proxy({}, 5)` all silently succeed. Accounts for the entire
+   `built-ins/Proxy/create-target-*` / `create-handler-*` bucket (~14 tests).
+
+2. **`new Proxy` requires `[[Construct]]`/`[[Call]]` distinction.**
+   `Proxy(t,h)` without `new` must throw `TypeError` (no `[[Call]]`). The
+   codegen handles only the `new` form (`new-super.ts:2073`); the call form
+   falls through and `Proxy` is **not** in `NAMESPACE_NON_CALLABLE`
+   (`calls.ts:2097`). Add it there. (~2-3 tests.)
+
+3. **WasmGC-typed targets are opaque to the host MOP unless wrapped.**
+   `__reflect_*` already wraps via `_wrapForHost` (`runtime.ts:8444`) but
+   `__proxy_create`/`__proxy_revocable` do **not**. Wrap a Wasm-struct target
+   with `_wrapForHost(target, exports)` when `_isWasmStruct(target)` and record
+   the reverse mapping so `proxy.target === orig` probes resolve. (~20-40 tests.)
+
+4. **Trap result / argument coercion at the boundary.** Direct
+   (`Object.keys(proxy)`, `delete proxy.x`, `Object.getPrototypeOf(proxy)`)
+   paths must reach the host proxy intact. The `_hostProxyReverse.get(obj) ?? obj`
+   unwrap (runtime.ts:2326, 2582, 4586) is for our live-mirror proxies and must
+   NOT strip a user `new Proxy` (a user proxy isn't in the map, so `?? obj` keeps
+   it — verify no path casts it to a struct).
+
+### Trap-dispatch architecture (host mode)
+
+The host engine owns trap dispatch, invariant checks, and recursion. Our job is
+only to (a) construct a correct proxy (TypeErrors + wrapped targets) and (b) keep
+the proxy externref intact across every operation. `proxy.x` → `__extern_get(proxy,"x")`
+→ host fires `handler.get(target,"x",proxy)`; `Reflect.get(proxy,...)` → `__reflect_get`.
+
+### Invariant enforcement (§10.5)
+
+**Delegated to the host.** Do not reimplement invariant logic in host mode; just
+ensure the operation reaches the host proxy.
+
+### Revocation lifecycle
+
+`Proxy.revocable` → `__proxy_revocable` (runtime.ts:8434) → native; host enforces
+revoked-throws + revoke idempotence. Apply the same target-wrapping + no-swallow
+validation as `proxy_create`. Add a post-revoke probe.
+
+### Changes
+- `src/runtime.ts` `proxy_create` (11075): spec-validate target/handler (let
+  `new Proxy` throw natively, don't swallow); wrap Wasm-struct targets via
+  `_wrapForHost`.
+- `src/runtime.ts` `__proxy_revocable` (8434): same validation + wrapping.
+- `src/codegen/expressions/calls.ts` (2097): add `"Proxy"` to `NAMESPACE_NON_CALLABLE`.
+- `src/codegen/expressions/new-super.ts` (2073): ensure missing-handler passes
+  `ref.null.extern` so runtime validation fires.
+
+### Edge cases
+`new Proxy(null,{})`/`({},null)`/`(1,{})` → TypeError; `Proxy(t,h)` without `new`
+→ TypeError; `new Proxy(wasmStruct,h)` → enumerable wrapped target; revoked proxy
+→ TypeError; `proxy === proxy` identity holds; `proxy[sym]` fires trap.
+
+### Test-gate plan (test262)
+`built-ins/Proxy/create-*-is-not-object-throws.js`, `revocable/*-is-not-object-throws.js`
+(construction); `built-ins/Proxy/{get,set,has,deleteProperty,ownKeys,getOwnPropertyDescriptor,defineProperty,getPrototypeOf,setPrototypeOf,isExtensible,preventExtensions,apply,construct}/**`
+(boundary, host-enforced); `built-ins/Proxy/revocable/**`. Regression-guard
+`built-ins/Reflect/**` (stay ≥72%). Add `tests/issue-2180.test.ts`. Target ≥90% of
+non-skipped `built-ins/Proxy`.
+
+### Risks
+File overlap with #1100/#1355 in `new-super.ts`/`calls.ts`/`runtime.ts` — land #2180
+first (small additive runtime fixes); standalone tracks branch on `ctx.standalone`.
+Adding `Proxy` to `NAMESPACE_NON_CALLABLE` must not shadow `new Proxy`.
