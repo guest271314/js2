@@ -1,5 +1,5 @@
 ---
-id: 2156
+id: 2180
 title: "Host-mode Proxy: close remaining test262 failures toward 100% (invariant checks, Wasm-typed targets, revocation lifecycle)"
 status: ready
 created: 2026-06-15
@@ -16,7 +16,7 @@ related: [1466, 1100, 1355]
 note: "2026-06-15: created + elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). #1466 (Proxy+Reflect trap fidelity, done) was the last host-mode Proxy issue; built-ins/Proxy still sits at ~23% (71/311). No tracker existed for the remaining host-mode failures — this is it. Needs architect triage of the failing buckets before dev dispatch."
 ---
 
-# #2156 — Host-mode Proxy: close remaining test262 failures toward 100%
+# #2180 — Host-mode Proxy: close remaining test262 failures toward 100%
 
 ## Problem
 
@@ -65,6 +65,6 @@ suspect areas from prior analysis:
   (#1100 Phase 1 + #1355 remaining traps). The two share trap-dispatch
   semantics; coordinate so the standalone meta-object protocol reuses the
   host-mode invariant logic where possible.
-- All three Proxy issues (#2156 host, #1100 + #1355 standalone) are part of
+- All three Proxy issues (#2180 host, #1100 + #1355 standalone) are part of
   the 2026-06-15 stakeholder-elevated **Proxy/Promise/async → 100% epic**
   (see `plan/issues/sprints/63.md`).
