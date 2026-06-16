@@ -152,4 +152,38 @@ describe("#1804 — IR vec.new_fixed array-literal construction", () => {
       0,
     );
   });
+
+  // #1804 regression guard (PR #1585 equivalence-gate FAIL): a constructed vec
+  // read inside a C-style while/for loop fails SSA hygiene (the vec value isn't
+  // threaded into the loop's cond/body blocks). The selector withholds the
+  // claim when the function has such a loop, so it reverts to legacy and runs
+  // correctly. (for-of works — different node. Non-loop vec reads work.)
+  it("(6e) vec read inside a while loop stays legacy and runs correctly", async () => {
+    await expectFallbackRuns(
+      `export function whileSum(): number {
+        let arr = [1, 2, 3, 4, 5];
+        let sum = 0;
+        let i = 0;
+        while (i < arr.length) { sum += arr[i]; i++; }
+        return sum;
+      }`,
+      "whileSum",
+      [],
+      15,
+    );
+  });
+
+  it("(6f) vec read inside a C-style for loop stays legacy and runs correctly", async () => {
+    await expectFallbackRuns(
+      `export function forSum(): number {
+        let arr = [10, 20, 30];
+        let sum = 0;
+        for (let i = 0; i < arr.length; i++) { sum += arr[i]; }
+        return sum;
+      }`,
+      "forSum",
+      [],
+      60,
+    );
+  });
 });

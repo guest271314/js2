@@ -464,6 +464,46 @@ type IrClaimableSubject = ts.FunctionDeclaration | ts.MethodDeclaration | ts.Con
  * this call so the existing reasons (`body-shape-rejected`,
  * `deferred-feature`) cover them).
  */
+/**
+ * #1804 regression guard: a `vec.new_fixed`-constructed vec read inside a
+ * C-style `while`/`for` loop produces an invalid SSA program — the vec value
+ * defined in the entry block is not threaded as a block-arg into the loop's
+ * cond/body blocks (the `while.loop`/`for.loop` lowering, distinct from the
+ * `forof.vec` path which handles it). So when the function body contains a
+ * C-style loop, the array-literal selector arm withholds the claim and the
+ * function reverts to the (correct) legacy path — exactly as it did before
+ * #1804. `for...of` and non-loop array-literal uses are unaffected. The proper
+ * fix (thread the constructed vec through the loop block-args) is a follow-up.
+ */
+let currentFnHasCStyleLoop = false;
+
+/** True if `node` (a function body) contains a `while`/`for` (C-style) loop
+ *  anywhere, NOT descending into nested function/class scopes. */
+function bodyHasCStyleLoop(node: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    // Don't descend into nested functions — their loops have their own scope.
+    if (
+      ts.isFunctionDeclaration(n) ||
+      ts.isFunctionExpression(n) ||
+      ts.isArrowFunction(n) ||
+      ts.isMethodDeclaration(n) ||
+      ts.isClassDeclaration(n) ||
+      ts.isClassExpression(n)
+    ) {
+      if (n !== node) return;
+    }
+    if (ts.isWhileStatement(n) || ts.isForStatement(n) || ts.isDoStatement(n)) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  ts.forEachChild(node, visit);
+  return found;
+}
+
 function whyNotIrClaimable(
   fn: IrClaimableSubject,
   typeMap: TypeMap | undefined,
@@ -589,6 +629,11 @@ function whyNotIrClaimable(
 
   const body = fn.body;
   if (!body) return "body-shape-rejected";
+  // #1804 regression guard — record whether this function has a C-style loop,
+  // so the array-literal arm of isPhase1Expr withholds the vec.new_fixed claim
+  // (see bodyHasCStyleLoop). Scoped per-function; the body walk below runs
+  // synchronously so the flag is valid for the duration of this call.
+  currentFnHasCStyleLoop = bodyHasCStyleLoop(body);
   // #1370 Phase A: constructor bodies don't have a return-statement tail —
   // the legacy lowerer (and Phase C) synthesise the implicit `return this;`.
   // Accept the body as a list of Phase-1 body statements instead, which
@@ -1708,6 +1753,12 @@ function isPhase1Expr(expr: ts.Expression, scope: ReadonlySet<string>, localClas
   // (mixed-type / non-scalar literals clean-fall-back there). Spread/sparse
   // stay out of scope (legacy fallback).
   if (ts.isArrayLiteralExpression(expr)) {
+    // #1804 regression guard: a constructed vec read inside a C-style
+    // while/for loop fails SSA hygiene (the vec value isn't threaded into the
+    // loop's cond/body blocks — distinct from the working forof.vec path). When
+    // this function contains such a loop, withhold the claim so the whole
+    // function reverts to the (correct) legacy path, as it did pre-#1804.
+    if (currentFnHasCStyleLoop) return false;
     for (const el of expr.elements) {
       if (ts.isSpreadElement(el)) return false; // out of scope
       if (ts.isOmittedExpression(el)) return false; // sparse — out of scope
