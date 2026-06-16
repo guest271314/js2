@@ -129,3 +129,54 @@ show no new host imports for pure local-closure cases (assert no `__js_array_new
 ### Spec citations
 Promise constructor + resolving functions §27.2.3.1 steps 8-10; CreateResolvingFunctions
 `[[AlreadyResolved]]` §27.2.1.3; resolve/reject §27.2.1.3.2/§27.2.1.3.1.
+
+## Root-cause re-analysis (se1, 2026-06-16, sprint 62) — SPEC IS STALE
+
+The documented root cause ("`resolve("ok")` traps null-deref via the closure-
+struct dispatch; widen `calleeMayBeHostCallable`") **no longer reproduces on
+current main** (`90d965220`). Verified end-to-end:
+
+- The synchronous `RuntimeError: dereferencing a null pointer` is **gone**.
+  `new Promise<string>((resolve) => resolve("ok"))` now returns a real host
+  `Promise` (instanceof Promise) that **never settles** — no trap, no throw,
+  the `.then`/`.catch` callbacks never fire.
+- Instrumenting an observable side effect in the executor body (`log = 1;
+  resolve("ok"); log = 2;`) shows **`log === 0` after `makeOk()`** — i.e. the
+  **executor body never runs at all**.
+
+### What actually happens
+
+`new-super.ts:1848-1867` lowers `new Promise(executor)` as
+`compileExpression(executor, externref)` → `call Promise_new`. The executor
+arrow is compiled to a **synthetic callback** (`$__cb_0`, registered via
+`__make_callback`), NOT a closure struct. At runtime the raw value arriving at
+the host `Promise_new` is already `typeof === "function"` (the `__make_callback`
+wrapper), so `_maybeWrapCallable(fn, 2)` returns it as-is and native
+`new Promise(fn)` calls `fn(resolve, reject)`.
+
+But calling that `__make_callback`-produced wrapper with two real JS functions
+**does not dispatch `exports.__cb_0`** — resolve/reject are never invoked and no
+exception is thrown (confirmed by hooking every host import: only
+`__make_callback` fires during `makeOk()`; `__js_array_new` / `__call_function`
+never fire even though `$__cb_0`'s body contains the host-call arm). So the bug
+is in the **`__make_callback` id-dispatch / `Promise_new` executor-invocation
+bridge** (the #1042/#1326 synthetic-callback machinery), upstream of and
+unrelated to the closure-call `struct.get` trap the spec targeted.
+
+### Disposition
+
+- The spec's `calleeMayBeHostCallable` widening was implemented and **does
+  correctly remove the (no-longer-occurring) null-deref trap class** for an
+  externref-typed callable parameter — a safe hardening — but it is **not
+  sufficient**: the executor body never executes, so widening the in-body call
+  dispatch can't make resolve/reject settle the promise. Implemented change
+  reverted to avoid shipping a behaviourally-inert diff under a "fixed" label.
+- **Needs re-spec.** The real fix lives in the `__make_callback` /
+  `compileSyntheticAsyncContinuation` host-side dispatch (why does invoking the
+  wrapper not reach `__cb_0`?) and/or the `new-super.ts` Promise-executor bridge
+  (should the executor be lowered as a closure struct passed to `Promise_new`
+  rather than a synthetic `__cb` callback?). This is entangled with the
+  async-cps continuation infrastructure (#1042/#1326) — route to architect for a
+  fresh `## Implementation Plan` against current main before re-dispatch.
+- Acceptance criteria (resolve "ok" / reject reason / resolve-twice ignored)
+  remain UNMET; left at `ready` with this updated analysis.
