@@ -17,6 +17,69 @@ import { createReadStream, readFileSync } from "fs";
 import { createInterface } from "readline";
 import { createHash } from "crypto";
 
+// #1943 — single source of truth for the documented merge thresholds, so the
+// CI regression-gate ENFORCES the same numbers the dev-self-merge skill
+// documents (previously the hard gate was only `net_per_test >= 0`; the 10%
+// ratio and 50-per-bucket limits lived solely in skill text an agent could
+// skip). `.claude/skills/dev-self-merge.md` references these constants.
+//
+// - REGRESSION_RATIO_LIMIT: fail when regressions / improvements >= 10%.
+// - REGRESSION_BUCKET_LIMIT: fail when any single path bucket has > 50
+//   regressions.
+// - REGRESSION_BUCKET_PATH_DEPTH: a "bucket" is the first N path segments of a
+//   test file (e.g. `test/built-ins/Array/prototype/every`), matching the
+//   skill's `'/'.join(f.split('/')[:5])`.
+export const REGRESSION_RATIO_LIMIT = 0.1;
+export const REGRESSION_BUCKET_LIMIT = 50;
+export const REGRESSION_BUCKET_PATH_DEPTH = 5;
+
+/**
+ * Group regressed test files into path buckets (first
+ * `REGRESSION_BUCKET_PATH_DEPTH` segments) and return them sorted by count
+ * descending. Mirrors the dev-self-merge skill's bucket grouping exactly so
+ * the documented and enforced definitions stay byte-identical (#1943).
+ */
+export function bucketRegressions(files: string[]): { bucket: string; count: number }[] {
+  const counts = new Map<string, number>();
+  for (const file of files) {
+    const bucket = file.split("/").slice(0, REGRESSION_BUCKET_PATH_DEPTH).join("/");
+    counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+  }
+  return [...counts.entries()].map(([bucket, count]) => ({ bucket, count })).sort((a, b) => b.count - a.count);
+}
+
+/**
+ * Evaluate the documented merge thresholds against the wasm-hash-filtered
+ * counts. Returns the list of human-readable failure reasons (empty ⇒ pass).
+ * Pure (no I/O) so the unit test can drive it directly with fixture data
+ * (#1943 acceptance criteria). The ratio gate only fires when there is at
+ * least one regression — a clean PR (R == 0) always passes regardless of how
+ * few improvements it carries.
+ */
+export function evaluateRegressionThresholds(opts: {
+  improvements: number;
+  regressionsWasmChange: number;
+  regressedFiles: string[];
+}): string[] {
+  const failures: string[] = [];
+  const { improvements, regressionsWasmChange, regressedFiles } = opts;
+  if (regressionsWasmChange > 0) {
+    const ratio = improvements > 0 ? regressionsWasmChange / improvements : Infinity;
+    if (ratio >= REGRESSION_RATIO_LIMIT) {
+      const pct = improvements > 0 ? (ratio * 100).toFixed(1) + "%" : "∞ (0 improvements)";
+      failures.push(
+        `regression ratio ${pct} (${regressionsWasmChange}/${improvements}) meets/exceeds the ${(REGRESSION_RATIO_LIMIT * 100).toFixed(0)}% limit`,
+      );
+    }
+  }
+  for (const { bucket, count } of bucketRegressions(regressedFiles)) {
+    if (count > REGRESSION_BUCKET_LIMIT) {
+      failures.push(`bucket "${bucket}" has ${count} regressions, exceeds the ${REGRESSION_BUCKET_LIMIT}-test limit`);
+    }
+  }
+  return failures;
+}
+
 interface TestResult {
   file: string;
   status: string;
@@ -590,7 +653,29 @@ async function run(
   // Compile_timeout flaps (timing noise) and wasm-identical flips are excluded via
   // regressionsWasmChange. Gate: improvements.length - regressionsWasmChange < 0.
   const netPerTest = improvements.length - regressionsWasmChange;
+  let gateFailed = false;
   if (netPerTest < 0) {
+    console.log(
+      `=== GATE FAIL: net_per_test ${netPerTest} < 0 (${improvements.length} improvements − ${regressionsWasmChange} regressions) ===`,
+    );
+    gateFailed = true;
+  }
+
+  // #1943 — enforce the documented ratio (10%) and per-bucket (50) thresholds
+  // that previously lived only in the dev-self-merge skill text. Same
+  // wasm-hash-filtered count the net gate uses (`noiseFiltered`), so
+  // compile_timeout flaps and byte-identical flips never trip these either.
+  const thresholdFailures = evaluateRegressionThresholds({
+    improvements: improvements.length,
+    regressionsWasmChange,
+    regressedFiles: noiseFiltered.map((r) => r.file),
+  });
+  for (const reason of thresholdFailures) {
+    console.log(`=== GATE FAIL: ${reason} ===`);
+    gateFailed = true;
+  }
+
+  if (gateFailed) {
     process.exit(1);
   }
 }
@@ -600,4 +685,10 @@ function truncate(s: string, maxLen: number): string {
   return s.slice(0, maxLen - 3) + "...";
 }
 
-main();
+// Only run the CLI when invoked directly (not when imported by the unit test
+// for the exported threshold helpers — #1943). `process.argv[1]` is the
+// executed script path under tsx/node.
+const invokedPath = process.argv[1] ?? "";
+if (invokedPath.endsWith("diff-test262.ts") || invokedPath.endsWith("diff-test262.js")) {
+  main();
+}
