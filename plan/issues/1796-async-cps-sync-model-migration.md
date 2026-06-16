@@ -1,7 +1,9 @@
 ---
 id: 1796
 title: "Migrate synchronous-async contract to CPS Promise model (flip ASYNC_CPS_ENABLED)"
-status: ready
+status: done
+assignee: ttraenkler/sen-b
+completed: 2026-06-16
 created: 2026-06-03
 priority: top
 feasibility: hard
@@ -10,7 +12,7 @@ task_type: feature
 area: codegen
 language_feature: async, promises
 goal: spec-completeness
-sprint: 62
+sprint: 63
 related: [1042, 1326, 1373, 1373b]
 note: "2026-06-15: elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). Host-mode Promise/async completion linchpin. Needs architect spec + senior-dev; sequenced after #1936 census, gated on #1373b CPS lowering."
 ---
@@ -156,3 +158,75 @@ net delta ≥ 0 (criterion 3). Run `/analyze-regression` on async buckets.
 ### Spec citations
 Await §27.7.5.3/§27.7.5.1; AsyncFunctionStart/rejection §27.7.5.2/§27.7.5.4;
 microtask FIFO PerformPromiseThen §27.2.5.4.1, Jobs §9.5.
+
+---
+
+## Implementation (sen-b, 2026-06-16) — gate flipped ON
+
+Branch `issue-1796-async-cps-flip` off upstream/main `319d43460`. PR routes the
+flip through the #1936 census predicate exactly as the plan above specified.
+
+### What landed
+1. **`ASYNC_CPS_ENABLED = true`** (`src/codegen/async-cps.ts`). The
+   synchronous-consumption regression that kept it off is resolved structurally
+   by **`asyncFnNeedsCps`**: an async fn is CPS-lowered (returns a real Promise)
+   ONLY when it *genuinely suspends* — at least one await operand is not
+   statically resolved. Fully await-elidable bodies
+   (`return await Promise.resolve(42)`) stay on the legacy synchronous path and
+   keep returning the unwrapped value, so the `asyncFn() as any as number`
+   "compile away" idiom (#1313/#1727) is preserved for those.
+2. **Both activation gates now consult `asyncFnNeedsCps`** — the function-body
+   hook (`function-body.ts:~1117`) and the `collectAsyncCpsImports` prepass
+   (`declarations.ts:~652`). Keeping them identical preserves the stable-funcMap
+   pre-registration that removes the #1384 late-import-shift hazard.
+3. **Promise-combinator awaits excluded from CPS** (`awaitedExprIsPromiseCombinator`
+   in async-cps.ts). `await Promise.all/race/any/allSettled(...)` already yields
+   a real Promise, so the legacy `await`-identity path produces a correct result
+   Promise with no CPS benefit; routing them through CPS would also surface the
+   host-`declare`-class-method argument-marshaling gap that **#2028** owns
+   (`Promise.all(src.getPromises())`). This keeps those on the legacy path.
+
+### Root-cause finding — the "design wall" was the per-call-site contract
+The blocker recorded across #1042's notes was: the gate is per-definition but
+the consumption contract is per-call-site, so a global flip cannot serve both a
+`value` consumer (wants unwrapped T) and a `thenable` consumer (wants a Promise)
+of the same fn. The resolution is that `asyncFnNeedsCps` makes the *flip itself*
+per-function and conditioned on genuine suspension: a fn that truly suspends
+*cannot* synchronously produce its value, so a `value`-consumer of it was already
+semantically broken under the legacy fakery (the cast yielded a value only
+because the runtime had nothing to suspend on). Those few tests are migrated to
+the Promise model (`await exports.main()`); everything that stays synchronous
+(await-elidable) is untouched.
+
+### Test migration (corpus → Promise model, plan criterion 2)
+Migrated the cases that consumed a genuinely-suspending async fn as a raw value
+to `await … resolves`:
+- `tests/equivalence/async-function.test.ts` — "await … identity (pass-through)"
+- `tests/equivalence/promise-chains.test.ts` — "await … passes through value",
+  "nested async calls"
+- `tests/async-await.test.ts` — "await on an internal async value"
+- `tests/async-census.test.ts` — gate-on assertions + true/false shape coverage
+- `tests/issue-1042.test.ts` — gate-on assertion; the 8 Slice-2A CPS
+  resolved-value cases (previously `skipIf` skipped) now run and pass.
+
+### Regression posture (verified locally)
+- Full async suite green except for failures that **pre-exist on upstream/main**
+  (verified by running the same files on the `/workspace` main checkout):
+  `tests/promise-combinators.test.ts` ×2 (host `declare`-class method marshaling,
+  #2028 — fails identically with the gate off) and
+  `tests/symbol-async-iterator.test.ts` ×2 (for-await-of, pre-existing). The
+  stale duplicate root files `tests/async-function.test.ts` /
+  `tests/for-await-of.test.ts` fail to load `./helpers.js` on main too (broken
+  import path, not async-related).
+- `tests/equivalence/` full directory: see PR CI (run locally pre-push).
+- Net new regressions from this PR: **0**.
+
+### Deferred / follow-up
+- Multi-await sequencing, awaits in branches/loops, try-across-await (#1373c),
+  async arrows/methods, standalone/WASI CPS — all remain on the legacy path via
+  `splitBodyAtAwait → null` (plan step 6). They are not regressed; they are
+  simply not yet CPS-lowered.
+- **#2028** (host `declare`-class-method marshaling) unblocks the
+  `await Promise.combinator(hostMethod())` shape; once it lands, drop the
+  `awaitedExprIsPromiseCombinator` exclusion so those combinators can CPS-lower
+  too (and re-evaluate the 2 pre-existing combinator test failures).
