@@ -2132,6 +2132,124 @@ export function forEachInstrDeep(instr: IrInstr, visit: (i: IrInstr) => void): v
 }
 
 /**
+ * Rebuild `instr` with each nested buffer replaced by `mapBuffer(buffer)` — the
+ * write-side companion to `forEachNestedBuffer`, used by the hygiene passes
+ * (#1925) to fold / DCE *inside* control-flow buffers. Buffers are passed in the
+ * same evaluation order `forEachNestedBuffer` yields them.
+ *
+ * Reference-equality preserving: when `mapBuffer` returns each buffer unchanged
+ * (same array reference), the original `instr` is returned as-is, so callers can
+ * detect "no change" by `===` and keep their fixpoint contract. A non-buffer
+ * instr is always returned unchanged.
+ */
+export function mapNestedBuffers(
+  instr: IrInstr,
+  mapBuffer: (buffer: readonly IrInstr[]) => readonly IrInstr[],
+): IrInstr {
+  switch (instr.kind) {
+    case "if": {
+      const then_ = mapBuffer(instr.then);
+      const else_ = mapBuffer(instr.else);
+      if (then_ === instr.then && else_ === instr.else) return instr;
+      return { ...instr, then: then_, else: else_ };
+    }
+    case "forof.vec":
+    case "forof.iter":
+    case "forof.string": {
+      const body = mapBuffer(instr.body);
+      if (body === instr.body) return instr;
+      return { ...instr, body };
+    }
+    case "while.loop": {
+      const cond = mapBuffer(instr.cond);
+      const body = mapBuffer(instr.body);
+      if (cond === instr.cond && body === instr.body) return instr;
+      return { ...instr, cond, body };
+    }
+    case "for.loop": {
+      const cond = mapBuffer(instr.cond);
+      const body = mapBuffer(instr.body);
+      const update = mapBuffer(instr.update);
+      if (cond === instr.cond && body === instr.body && update === instr.update) return instr;
+      return { ...instr, cond, body, update };
+    }
+    case "try": {
+      const body = mapBuffer(instr.body);
+      const catchBody = instr.catchClause ? mapBuffer(instr.catchClause.body) : undefined;
+      const finallyBody = instr.finallyBody ? mapBuffer(instr.finallyBody) : undefined;
+      const catchUnchanged = !instr.catchClause || catchBody === instr.catchClause.body;
+      const finallyUnchanged = !instr.finallyBody || finallyBody === instr.finallyBody;
+      if (body === instr.body && catchUnchanged && finallyUnchanged) return instr;
+      return {
+        ...instr,
+        body,
+        catchClause: instr.catchClause && catchBody ? { ...instr.catchClause, body: catchBody } : instr.catchClause,
+        finallyBody: instr.finallyBody && finallyBody ? finallyBody : instr.finallyBody,
+      };
+    }
+    // Leaf kinds carry no nested buffer — returned unchanged. (Same exhaustive
+    // set as forEachNestedBuffer; the never-check enforces parity.)
+    case "const":
+    case "call":
+    case "global.get":
+    case "global.set":
+    case "binary":
+    case "unary":
+    case "select":
+    case "raw.wasm":
+    case "box":
+    case "unbox":
+    case "tag.test":
+    case "string.const":
+    case "string.concat":
+    case "string.eq":
+    case "string.len":
+    case "object.new":
+    case "object.get":
+    case "object.set":
+    case "closure.new":
+    case "closure.cap":
+    case "closure.call":
+    case "refcell.new":
+    case "refcell.get":
+    case "refcell.set":
+    case "class.new":
+    case "class.get":
+    case "class.set":
+    case "class.call":
+    case "slot.read":
+    case "slot.write":
+    case "vec.len":
+    case "vec.get":
+    case "vec.new_fixed":
+    case "coerce.to_externref":
+    case "iter.new":
+    case "iter.next":
+    case "iter.done":
+    case "iter.value":
+    case "iter.return":
+    case "gen.push":
+    case "gen.epilogue":
+    case "gen.yieldStar":
+    case "throw":
+    case "extern.new":
+    case "extern.call":
+    case "extern.prop":
+    case "extern.propSet":
+    case "extern.regex":
+    case "await":
+    case "async.return":
+    case "async.throw":
+      return instr;
+    default: {
+      const _exhaustive: never = instr;
+      void _exhaustive;
+      return instr;
+    }
+  }
+}
+
+/**
  * The direct SSA-value operands of `instr` — the values it reads at its own
  * level, NOT including operands buried in nested buffers. This is the canonical
  * single-count mapping used by the verifier and DCE (so e.g. `closure.call`'s
