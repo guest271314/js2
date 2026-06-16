@@ -57,6 +57,12 @@ jobs:
       - name: IR fallback gate (#1376)
         run: pnpm run check:ir-fallbacks
 
+      - name: IR adoption table freshness (#2145)
+        # Fails when plan/log/ir-adoption.md drifts from its generator data or
+        # from the IrFallbackReason union in src/ir/select.ts. Regenerate with
+        # `pnpm run gen:ir-adoption`.
+        run: pnpm run check:ir-adoption
+
       - name: Codegen silent-fallback gate (#2089)
         run: pnpm run check:codegen-fallbacks
 
