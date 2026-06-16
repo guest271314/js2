@@ -103,4 +103,47 @@ describe("#2059 any/any relational comparisons (standalone / pure WasmGC)", () =
   it("any string < validates (no host import leak)", async () => {
     await compileStandalone(`export function f(a: any, b: any): number { return (a < b) ? 1 : 0; }`);
   });
+
+  // The in-module §7.2.13 path must produce the SAME lexicographic/numeric
+  // results at runtime as JS-host mode — not just validate. These run on native
+  // `$AnyString` values flowing entirely within wasm (no JS host strings), which
+  // is how standalone/WASI builds actually exercise the helper. Earlier the
+  // standalone section only checked numeric runtime + string compile-validate, so
+  // a regression in `__str_compare` dispatch would have stayed invisible.
+  it("any string/numeric relationals match §7.2.13 at runtime (native strings)", async () => {
+    const r = await compileStandalone(`
+      export function lt_ab(): number { const a: any = "a"; const b: any = "b"; return (a < b) ? 1 : 0; }
+      export function lt_10_9(): number { const a: any = "10"; const b: any = "9"; return (a < b) ? 1 : 0; }
+      export function lt_mixed(): number { const a: any = "10"; const b: any = 9; return (a < b) ? 1 : 0; }
+      export function gt_ba(): number { const a: any = "b"; const b: any = "a"; return (a > b) ? 1 : 0; }
+      export function le_aa(): number { const a: any = "a"; const b: any = "a"; return (a <= b) ? 1 : 0; }
+      export function ge_abc_abd(): number { const a: any = "abc"; const b: any = "abd"; return (a >= b) ? 1 : 0; }
+    `);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    const exp = instance.exports as Record<string, () => number>;
+    expect(exp.lt_ab(), 'lt("a","b")').toBe(1); // lexicographic
+    expect(exp.lt_10_9(), 'lt("10","9")').toBe(1); // "1" < "9" — NOT numeric 10<9
+    expect(exp.lt_mixed(), 'lt("10",9)').toBe(0); // mixed → numeric 10<9 → false
+    expect(exp.gt_ba(), 'gt("b","a")').toBe(1);
+    expect(exp.le_aa(), 'le("a","a")').toBe(1);
+    expect(exp.ge_abc_abd(), 'ge("abc","abd")').toBe(0);
+  });
+
+  // `any` PARAMETERS (not const locals) carrying native strings must also dispatch
+  // through the in-module compare. Pass values via an exported caller so the
+  // strings stay native (host-injected JS strings are not a standalone scenario).
+  it("any-PARAMETER relationals dispatch correctly (native strings via caller)", async () => {
+    const r = await compileStandalone(`
+      function cmp_lt(a: any, b: any): number { return (a < b) ? 1 : 0; }
+      function cmp_ge(a: any, b: any): number { return (a >= b) ? 1 : 0; }
+      export function lt_ab(): number { const a: any = "a"; const b: any = "b"; return cmp_lt(a, b); }
+      export function lt_nums(): number { const a: any = 1; const b: any = 2; return cmp_lt(a, b); }
+      export function ge_abc_abd(): number { const a: any = "abc"; const b: any = "abd"; return cmp_ge(a, b); }
+    `);
+    const { instance } = await WebAssembly.instantiate(r.binary, {});
+    const exp = instance.exports as Record<string, () => number>;
+    expect(exp.lt_ab(), "cmp_lt(any,any) string").toBe(1);
+    expect(exp.lt_nums(), "cmp_lt(any,any) numeric").toBe(1);
+    expect(exp.ge_abc_abd(), "cmp_ge(any,any) string").toBe(0);
+  });
 });

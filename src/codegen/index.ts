@@ -22,6 +22,7 @@ import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
+import type { FallbackCounts } from "./fallback-telemetry.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import type {
@@ -89,6 +90,7 @@ import {
   collectDeclaredFuncRefs,
   compileClassBodies,
 } from "./class-bodies.js";
+import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983)
 import {
   applyShapeInference,
   collectDeclarations,
@@ -954,9 +956,21 @@ export function generateModule(
 ): {
   module: WasmModule;
   errors: { message: string; line: number; column: number; severity?: "error" | "warning" }[];
+  // #2089 — silent-fallback telemetry counters (per class → per site → count).
+  fallbackCounts?: FallbackCounts;
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, ast.checker, options);
+  // (#1983) Pre-scan top-level user `function` declaration names BEFORE any
+  // class member registers a funcMap key, so `classMemberFuncKey` can detect a
+  // `${className}_${member}` ↔ user-function collision (e.g. `class A { m() {} }`
+  // + `function A_m() {}`) and relocate the class member's key. Must run here —
+  // ahead of class collection/compile — because the producers query this set.
+  for (const stmt of ast.sourceFile.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body && !hasDeclareModifier(stmt)) {
+      ctx.topLevelFunctionNames.add(stmt.name.text);
+    }
+  }
   try {
     // WASI target: register linear memory, bump pointer global, and WASI imports
     if (ctx.wasi) {
@@ -1628,7 +1642,7 @@ export function generateModule(
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  return { module: mod, errors: ctx.errors };
+  return { module: mod, errors: ctx.errors, fallbackCounts: ctx.fallbackCounts };
 }
 
 /**
@@ -2662,7 +2676,7 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
     )
       continue;
 
-    const funcIdx = ctx.funcMap.get(`${structName}_${methodSuffix}`);
+    const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`)); // (#1983)
     if (funcIdx === undefined) continue;
 
     const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
@@ -4876,6 +4890,8 @@ export function generateMultiModule(
 ): {
   module: WasmModule;
   errors: { message: string; line: number; column: number; severity?: "error" | "warning" }[];
+  // #2089 — silent-fallback telemetry counters (per class → per site → count).
+  fallbackCounts?: FallbackCounts;
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, multiAst.checker, options);
@@ -5150,7 +5166,7 @@ export function generateMultiModule(
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  return { module: mod, errors: ctx.errors };
+  return { module: mod, errors: ctx.errors, fallbackCounts: ctx.fallbackCounts };
 }
 
 // ── Unified single-pass import collector (#592) ─────────────────────
@@ -9138,6 +9154,31 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
           { op: "return" },
         ],
       },
+      // (#2080) native string? → length !== 0 (ToBoolean §7.1.2: "" → false).
+      // In standalone/nativeStrings mode an `any`-held string is a $AnyString
+      // (the supertype of $NativeString / $ConsString, all carrying $len at
+      // field 0) wrapped as externref — NOT a $AnyValue box. Without this arm
+      // it falls through to the "any non-null ref → truthy" default, so the
+      // empty string is wrongly truthy. Guarded on anyStrTypeIdx so the GC /
+      // host-string path (no native-string type registered) is unaffected.
+      ...(ctx.anyStrTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+                { op: "struct.get", typeIdx: ctx.anyStrTypeIdx, fieldIdx: 0 },
+                { op: "i32.const", value: 0 },
+                { op: "i32.ne" },
+                { op: "return" },
+              ],
+            },
+          ] as Instr[])
+        : []),
       // any other non-null ref → truthy
       { op: "i32.const", value: 1 },
     ],
@@ -10083,7 +10124,8 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
     if (declSourceFile && declSourceFile.isDeclarationFile) continue;
 
     const fullName = `${structName}_${prop.name}`;
-    if (ctx.funcMap.has(fullName)) continue; // already registered
+    const methodKey = classMemberFuncKey(ctx, fullName); // (#1983) collision-free key + display name
+    if (ctx.funcMap.has(methodKey)) continue; // already registered
 
     const sig = callSigs[0]!;
     // Build parameter types: self (ref $structTypeIdx) + declared params.
@@ -10129,10 +10171,10 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
 
     const methodTypeIdx = addFuncType(ctx, methodParams, methodResults, `${fullName}_type`);
     const methodFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.funcMap.set(fullName, methodFuncIdx);
+    ctx.funcMap.set(methodKey, methodFuncIdx); // (#1983) relocated key
 
     const methodFunc: WasmFunction = {
-      name: fullName,
+      name: methodKey, // (#1983) display name matches relocated funcMap key for body-fill
       typeIdx: methodTypeIdx,
       locals: [],
       body: [],

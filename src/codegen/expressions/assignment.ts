@@ -10,6 +10,7 @@ import { tryEmitLinearU8ElementSet } from "../linear-uint8-codegen.js";
 import { emitAnyAdd, emitModulo, emitToInt32 } from "../binary-ops.js";
 import { pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
+import { reportSilentFallback } from "../fallback-telemetry.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
@@ -871,7 +872,10 @@ function compileDestructuringAssignment(
       }
       if (!propName) continue; // truly unresolvable property name — skip
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(ctx, "lookup-miss-skip", "assignment:destructure-assign-property-field-miss", prop);
+        continue;
+      }
       const fieldType = fields[fieldIdx]!.type;
 
       // Determine the target and optional default value
@@ -1876,7 +1880,10 @@ function emitObjectDestructureFromLocal(
     if (ts.isShorthandPropertyAssignment(prop)) {
       const propName = prop.name.text;
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(ctx, "lookup-miss-skip", "assignment:object-destructure-shorthand-field-miss", prop);
+        continue;
+      }
 
       let localIdx = fctx.localMap.get(propName);
       if (localIdx === undefined) {
@@ -1905,7 +1912,15 @@ function emitObjectDestructureFromLocal(
       }
       if (!propName) continue; // truly unresolvable property name — skip
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(
+          ctx,
+          "lookup-miss-skip",
+          "assignment:object-destructure-from-local-property-field-miss",
+          prop,
+        );
+        continue;
+      }
       const fieldType = fields[fieldIdx]!.type;
 
       const targetExpr = prop.initializer;
@@ -2855,7 +2870,17 @@ function compileElementAssignment(
       reportError(ctx, target, "Failed to compile element value");
       return null;
     }
-    const valLocal = allocLocal(fctx, `__val_${fctx.locals.length}`, arrDef.element);
+    // #2159 — `i8`/`i16` are *packed storage* types, valid only inside array
+    // elements / struct fields. The value temp holds the unpacked Wasm value
+    // (an `i32`) that `array.set` re-packs; allocating the local with the raw
+    // packed `arrDef.element` leaked an `i8`/`i16` into a local (value position),
+    // which Wasm has no encoding for and the binary emitter rejects. This is the
+    // standalone Uint8Array/Int8Array/Int16Array/Uint16Array element-write CE.
+    // The matching read path already unpacks via array.get_u/_s → i32
+    // (property-access.ts). Mirror it here for the store value local.
+    const valLocalType: ValType =
+      arrDef.element.kind === "i8" || arrDef.element.kind === "i16" ? { kind: "i32" } : arrDef.element;
+    const valLocal = allocLocal(fctx, `__val_${fctx.locals.length}`, valLocalType);
     fctx.body.push({ op: "local.set", index: valLocal });
 
     // #1196: Bounds-check elimination on writes — when the for-loop pattern

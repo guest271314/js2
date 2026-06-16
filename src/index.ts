@@ -121,6 +121,14 @@ export interface CompileResult {
    * low-level `compile*Source` helpers in compiler.ts do not attach it.
    */
   readonly importObject?: WebAssembly.Imports;
+  /**
+   * #2089 — silent-fallback telemetry counters captured during codegen
+   * (per class → per site → count). Only populated when the
+   * `trackSilentFallbacks` option is set (the gate
+   * `scripts/check-codegen-fallbacks.ts` sets it); `undefined` otherwise so
+   * normal compiles pay nothing.
+   */
+  fallbackCounts?: import("./codegen/fallback-telemetry.js").FallbackCounts;
 }
 
 export interface CompileError {

@@ -9,6 +9,7 @@ import { ts } from "../../ts-api.js";
 import type { WasmModule } from "../../ir/types.js";
 import { getOrRegisterVecType, registerNativeStringTypes } from "../registry/types.js";
 import { nativeLiteralRegExpEngineConfig } from "../regexp-standalone.js";
+import { createFallbackCounts } from "../fallback-telemetry.js";
 import type { CodegenContext, CodegenOptions } from "./types.js";
 
 export function createCodegenContext(
@@ -43,6 +44,9 @@ export function createCodegenContext(
     currentFunc: null,
     funcStack: [],
     errors: [],
+    // #2089 — silent-fallback telemetry counters.
+    fallbackCounts: createFallbackCounts(),
+    trackSilentFallbacks: options?.trackSilentFallbacks,
     lastKnownNode: null,
     externClasses: new Map(),
     pseudoExternClasses: new Map(),
@@ -68,6 +72,7 @@ export function createCodegenContext(
     capturedGlobalsWidened: new Set(),
     classSet: new Set(),
     classThrowsOnEval: new Set(),
+    topLevelFunctionNames: new Set(), // (#1983) for class-member funcMap key collision detection
     classMethodSet: new Set(),
     deferredClassBodies: new Set(),
     classAccessorSet: new Set(),

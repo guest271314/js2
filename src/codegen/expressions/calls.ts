@@ -19,6 +19,7 @@ import {
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
+import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { reserveClosedMethodDispatch } from "../closed-method-dispatch.js";
 import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
 import {
@@ -365,8 +366,22 @@ function tryEmitJsonStringifyPrimitive(
   }
   const flags = argType.flags;
 
+  // (#2166) TypeScript models the `boolean` primitive as the union
+  // `true | false`, so a `boolean`-typed value (e.g. `const b: boolean = x`)
+  // carries the `Union` flag and was wrongly skipped by the ambiguous-mask
+  // early-return below — so `JSON.stringify(b)` refused in standalone instead
+  // of serializing to "true"/"false". A `BooleanLike` type (the boolean union
+  // or a boolean literal) is unambiguously serializable, so recognize it before
+  // the mask. Guard on `intrinsicName === "boolean"` for the union so we don't
+  // misfire on a mixed union that merely contains a boolean member.
+  const isBooleanType =
+    (flags & ts.TypeFlags.BooleanLiteral) !== 0 ||
+    ((flags & ts.TypeFlags.Boolean) !== 0 &&
+      (argType as ts.Type & { intrinsicName?: string }).intrinsicName === "boolean");
+
   // Skip ambiguous shapes (any/unknown/union/object/intersection) — let
-  // the caller fall through to the host import which handles them.
+  // the caller fall through to the host import which handles them. The
+  // `boolean` union is the documented exception (see above).
   const ambiguousMask =
     ts.TypeFlags.Any |
     ts.TypeFlags.Unknown |
@@ -375,7 +390,7 @@ function tryEmitJsonStringifyPrimitive(
     ts.TypeFlags.Object |
     ts.TypeFlags.NonPrimitive |
     ts.TypeFlags.TypeParameter;
-  if (flags & ambiguousMask) return undefined;
+  if (!isBooleanType && flags & ambiguousMask) return undefined;
 
   // null literal
   if (flags & ts.TypeFlags.Null) {
@@ -6077,6 +6092,20 @@ function compileCallExpression(
           fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_date_now")! } as Instr);
           return { kind: "f64" };
         }
+        // (#2164) Pure standalone (--target standalone, no JS host AND no WASI
+        // clock) has no wall-clock source, so the env::__date_now host import is
+        // unsatisfiable — every module that calls Date.now() (or new Date() with
+        // no args) failed to instantiate standalone, breaking unrelated Date
+        // tests that only touch Date.now() in setup. Emit the Unix epoch (0)
+        // directly: deterministic, no import leak, module instantiates. Tests
+        // that construct explicit timestamps (the bulk of the gap) then work;
+        // only tests asserting a *real* current time (which standalone WasmGC
+        // cannot provide) stay failing — and those need a clock source, not a
+        // host import.
+        if (ctx.standalone === true) {
+          fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+          return { kind: "f64" };
+        }
         const dateNowIdx = ensureLateImport(ctx, "__date_now", [], [{ kind: "f64" }]);
         if (dateNowIdx !== undefined) {
           flushLateImportShifts(ctx, fctx);
@@ -6217,7 +6246,7 @@ function compileCallExpression(
       const methodName = propAccess.name.text;
       const fullName = `${clsName}_${methodName}`;
       if (ctx.staticMethodSet.has(fullName)) {
-        const funcIdx = ctx.funcMap.get(fullName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)); // (#1983)
         if (funcIdx !== undefined) {
           // No self parameter for static methods
           const paramTypes = getFuncParamTypes(ctx, funcIdx);
@@ -6247,7 +6276,7 @@ function compileCallExpression(
           // Set __argc before the call so the callee knows the actual arg count
           maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, staticParamCount);
           // Re-lookup funcIdx: argument compilation may trigger addUnionImports
-          const finalStaticIdx = ctx.funcMap.get(fullName) ?? funcIdx;
+          const finalStaticIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)) ?? funcIdx; // (#1983)
           fctx.body.push({ op: "call", funcIdx: finalStaticIdx });
 
           const sig = ctx.checker.getResolvedSignature(expr);
@@ -6677,13 +6706,13 @@ function compileCallExpression(
         ? "__priv_" + propAccess.name.text.slice(1)
         : propAccess.name.text;
       let fullName = `${receiverClassName}_${methodName}`;
-      let funcIdx = ctx.funcMap.get(fullName);
+      let funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)); // (#1983)
       // Walk inheritance chain to find the method in a parent class
       if (funcIdx === undefined) {
         let ancestor = ctx.classParentMap.get(receiverClassName);
         while (ancestor && funcIdx === undefined) {
           fullName = `${ancestor}_${methodName}`;
-          funcIdx = ctx.funcMap.get(fullName);
+          funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)); // (#1983)
           ancestor = ctx.classParentMap.get(ancestor);
         }
       }
@@ -6699,7 +6728,7 @@ function compileCallExpression(
         for (const [childClass, parentClass] of ctx.classParentMap) {
           if (parentClass === receiverClassName || parentClass === baseClass) {
             const childFullName = `${childClass}_${methodName}`;
-            const childFuncIdx = ctx.funcMap.get(childFullName);
+            const childFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, childFullName)); // (#1983)
             const childTag = ctx.classTagMap.get(childClass);
             if (childFuncIdx !== undefined && childTag !== undefined) {
               candidates.push({ className: childClass, funcIdx: childFuncIdx, classTag: childTag });
@@ -6730,7 +6759,7 @@ function compileCallExpression(
           }
           if (cur === receiverClassName && childClass !== receiverClassName) {
             const childFullName = `${childClass}_${methodName}`;
-            const childFuncIdx = ctx.funcMap.get(childFullName);
+            const childFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, childFullName)); // (#1983)
             const childTag = ctx.classTagMap.get(childClass);
             if (
               childFuncIdx !== undefined &&
@@ -6769,7 +6798,7 @@ function compileCallExpression(
       // We call the getter first, then invoke the returned callable.
       if (funcIdx === undefined) {
         const getterName = `${receiverClassName}_get_${methodName}`;
-        const getterIdx = ctx.funcMap.get(getterName);
+        const getterIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName)); // (#1983)
         if (getterIdx !== undefined) {
           const getterCallResult = compileGetterCallable(ctx, fctx, expr, propAccess, receiverClassName, getterIdx);
           if (getterCallResult !== undefined) return getterCallResult;
@@ -6799,7 +6828,7 @@ function compileCallExpression(
           }
           // Re-resolve funcIdx after receiver compilation — emitUndefined (for `this` in static
           // context) triggers addUnionImports which shifts all function indices (#998)
-          const resolvedStaticIdx = ctx.funcMap.get(fullName) ?? funcIdx;
+          const resolvedStaticIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)) ?? funcIdx; // (#1983)
           const paramTypes = getFuncParamTypes(ctx, resolvedStaticIdx);
           const paramCount = paramTypes ? paramTypes.length : expr.arguments.length;
           const calleeReadsArgsStatic = ctx.funcUsesArguments.has(fullName);
@@ -6825,7 +6854,7 @@ function compileCallExpression(
           }
           // Set __argc before the call so the callee knows the actual arg count
           maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, paramCount);
-          const finalMethodIdx = ctx.funcMap.get(fullName) ?? resolvedStaticIdx;
+          const finalMethodIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)) ?? resolvedStaticIdx; // (#1983)
           fctx.body.push({ op: "call", funcIdx: finalMethodIdx });
           const sig = ctx.checker.getResolvedSignature(expr);
           if (sig) {
@@ -6956,7 +6985,7 @@ function compileCallExpression(
           }
           // Set __argc before the call so the callee knows the actual arg count
           maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, ngParamCount);
-          const finalMethodIdx = ctx.funcMap.get(fullName) ?? funcIdx;
+          const finalMethodIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)) ?? funcIdx; // (#1983)
           fctx.body.push({ op: "call", funcIdx: finalMethodIdx });
           const elseInstrs = fctx.body;
           fctx.body = savedBody;
@@ -7020,7 +7049,7 @@ function compileCallExpression(
         // Set __argc before the call so the callee knows the actual arg count
         maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, methodParamCount);
         // Re-lookup funcIdx: argument compilation may trigger addUnionImports
-        const finalMethodIdx = ctx.funcMap.get(fullName) ?? funcIdx;
+        const finalMethodIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)) ?? funcIdx; // (#1983)
         fctx.body.push({ op: "call", funcIdx: finalMethodIdx });
 
         // Determine return type
@@ -8097,14 +8126,28 @@ function compileCallExpression(
         // with arguments keep the existing generic path below.
         const recvIsBuiltinClass =
           ts.isIdentifier(propAccess.expression) && BUILTIN_CLASS_NAMES.has(propAccess.expression.text);
-        if ((ctx.standalone || ctx.wasi) && expr.arguments.length === 0 && !recvIsBuiltinClass) {
-          const dispatchIdx = reserveClosedMethodDispatch(ctx, methodName);
+        // (#2151 Slice 2) N-ary: the dispatcher is arity-specialized
+        // `__call_m_<name>_<arity>(recv, arg0..arg{arity-1})` (all externref).
+        // Spread args fall through to the generic path (the dispatcher has a
+        // fixed arity).
+        const hasSpreadArg = expr.arguments.some((a) => ts.isSpreadElement(a));
+        if ((ctx.standalone || ctx.wasi) && !hasSpreadArg && !recvIsBuiltinClass) {
+          const arity = expr.arguments.length;
+          const dispatchIdx = reserveClosedMethodDispatch(ctx, methodName, arity);
           flushLateImportShifts(ctx, fctx);
+          // Receiver as externref.
           const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
           if (recvType && recvType.kind !== "externref") {
             fctx.body.push({ op: "extern.convert_any" });
           } else if (recvType === null) {
             fctx.body.push({ op: "ref.null.extern" });
+          }
+          // Each argument compiled and boxed to externref (the dispatcher unboxes
+          // to the method's declared param type per candidate struct).
+          for (const arg of expr.arguments) {
+            const at = compileExpression(ctx, fctx, arg, { kind: "externref" });
+            if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+            else if (at === null) fctx.body.push({ op: "ref.null.extern" });
           }
           fctx.body.push({ op: "call", funcIdx: dispatchIdx });
           return { kind: "externref" };
