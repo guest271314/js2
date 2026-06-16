@@ -53,6 +53,7 @@ import { compilePostfixUnary, compilePrefixUnary } from "./expressions/unary.js"
 import { compileCallExpression } from "./expressions/calls.js";
 
 import { compileClassExpression, compileNewExpression } from "./expressions/new-super.js";
+import { emitNewTargetClassId } from "./new-target.js"; // (#2023)
 
 import { compileConditionalExpression, compileYieldExpression } from "./expressions/misc.js";
 
@@ -1242,6 +1243,15 @@ function compileExpressionInner(
 
   if (ts.isMetaProperty(expr) && expr.keywordToken === ts.SyntaxKind.NewKeyword && expr.name.text === "target") {
     if (fctx.isConstructor) {
+      // (#2023) Read the live new.target class-id (set at the outermost `new`
+      // site, preserved through super()). Non-zero inside a construction, so
+      // truthiness uses (`if (new.target)`) stay correct; identity comparisons
+      // (`new.target === SomeClass`) are handled in compileBinaryExpression and
+      // never reach here.
+      if (ctx.usesNewTarget) {
+        emitNewTargetClassId(ctx, fctx.body);
+        return { kind: "i32" };
+      }
       fctx.body.push({ op: "i32.const", value: 1 });
       return { kind: "i32" };
     } else {

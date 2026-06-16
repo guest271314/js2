@@ -38,6 +38,7 @@ import type {
 import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
+import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
@@ -1176,6 +1177,11 @@ export function generateModule(
     if (sourceOverridesArrayIterator(ast.sourceFile)) {
       ctx.arrayIteratorMaybeOverridden = true;
     }
+
+    // (#2023) Detect any `new.target` use up front so class collection assigns
+    // class-ids and `new`/comparison sites emit the threading global. Off by
+    // default — programs without `new.target` are byte-identical.
+    scanForNewTarget(ctx, ast.sourceFile);
 
     collectDeclarations(ctx, ast.sourceFile);
 
@@ -5113,6 +5119,11 @@ export function generateMultiModule(
     }
 
     // Phase 2: Collect all declarations — only entry file gets Wasm exports
+    // (#2023) Whole-realm new.target detection — OR across all source files.
+    for (const sf of multiAst.sourceFiles) {
+      scanForNewTarget(ctx, sf);
+    }
+
     for (const sf of multiAst.sourceFiles) {
       const isEntry = sf === multiAst.entryFile;
       collectDeclarations(ctx, sf, isEntry);

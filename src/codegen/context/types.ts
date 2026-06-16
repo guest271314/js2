@@ -634,6 +634,20 @@ export interface CodegenContext {
   capturedGlobalsWidened: Set<string>;
   /** Set of class names (local classes compiled to Wasm GC structs) */
   classSet: Set<string>;
+  /**
+   * (#2023) `new.target` support. When the program references `new.target`
+   * anywhere, a single mutable i32 module global holds the class-id of the
+   * class named at the *outermost* `new` site (set/restored around each `new`
+   * call; `super()` deliberately leaves it untouched so it reflects the
+   * derived-most constructor). `classNewTargetIds` assigns each local class a
+   * stable 1-based i32 id so `new.target === SomeClass` lowers to an i32
+   * compare against this global. `newTargetGlobalIdx` is the global's index
+   * (undefined until allocated). Gated on `usesNewTarget` so programs without
+   * `new.target` emit none of this machinery.
+   */
+  usesNewTarget: boolean;
+  newTargetGlobalIdx: number | undefined;
+  classNewTargetIds: Map<string, number>;
   /** Classes that must throw TypeError at evaluation time */
   classThrowsOnEval: Set<string>;
   /**
