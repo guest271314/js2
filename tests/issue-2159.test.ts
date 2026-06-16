@@ -70,7 +70,9 @@ describe("#2159 standalone typed-array element write (packed i8/i16 local leak)"
 
   it("Uint8Array compound assignment (read-modify-write)", async () => {
     expect(
-      await runStandalone(`export function run(): number { const a = new Uint8Array(2); a[0] = 5; a[0] += 3; return a[0]; }`),
+      await runStandalone(
+        `export function run(): number { const a = new Uint8Array(2); a[0] = 5; a[0] += 3; return a[0]; }`,
+      ),
     ).toBe(8);
   });
 
