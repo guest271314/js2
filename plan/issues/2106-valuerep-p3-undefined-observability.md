@@ -100,34 +100,163 @@ perf/size blast-radius measurement as the acceptance criteria require.
 Symptom issues filed; the representation phase is unfiled. New (analysis
 program).
 
-## Slice S0 — `any[]` array-element tag recovery (sdev7, 2026-06-16) — SHIPPED
+## Implementation Plan — 4 slices (sdev1, 2026-06-15)
 
-First slice of P3 (the multi-slice S0–S4 plan lives in the #1503/value-rep doc
-commits). **Independent of #1503** — it does not depend on `value-tags.ts`.
+Decomposed per the #2142 authoritative reconcile (3 disjoint pieces + the
+flag-gated reversal). Each slice is an independently green-mergeable PR. Built
+on #2104's `value-tags.ts` (`JsTag.Undefined`, `boxToAny`). Slice order is
+risk-ascending.
 
-**Bug (host)**: a boolean (or any non-string primitive) stored in an `any[]`
-ARRAY LITERAL lost its JS tag on read-back — `typeof [true][0]` → `"number"`,
-`"" + [true][0]` → `"1"` (value preserved: `[true][0] === true`). Root cause:
-`[true]` builds `__vec_i32` (booleans lower to i32 and the `any[]` contextual
-element type is dropped at the ref-only adoption guard `literals.ts:2886`), then
-the i32-vec→`any[]` externref vec coercion boxes by Wasm KIND
-(`f64.convert_i32_s; __box_number`) → a JS number.
+### S0 — array-element boolean tag-recovery (cleanest first slice; tag-recovery root)  ← START HERE
 
-**Fix** (`src/codegen/literals.ts`, `compileArrayLiteral`, before
-`elemKind`/`vecTypeIdx`): when `!hasSpread && elemWasm.kind ∈ {i32,f64}` AND the
-literal's `getContextualType` is `Array<any>`/`ReadonlyArray<any>` (type-arg flags
-carry `ts.TypeFlags.Any`), widen `elemWasm` to externref. Each element is then
-boxed by its own static type via the existing `compileExpression(el, externref)`
-path (`__box_boolean` for bool, `__box_number` for number, native string for
-string) — the same already-correct route `a.push(true)` uses. No `boxToAny` call
-needed. Scoped strictly to `any[]` literals → number[]/string[]/struct[]
-byte-identical.
+Per the tech-lead's reframe (own the `any`=externref / tag-recovery root, not the
+literal "undefined" text), the cleanest highest-leverage entry point is a pure
+`boxToAny(jsStaticType)` application — no representation widening, no flag.
 
-**Validated**: `tests/issue-2106-any-array-element-tag.test.ts` (7/7 host); tsc
-clean. **Standalone/WASI unchanged**: `typeof [true][0]` was already `null` and
-`"" + [true][0]` already trapped on the base (the standalone `any`-boolean tag
-gap is pre-existing, owned by S1/S3) — neither fixed nor worsened here.
+**Concrete bug (host mode, verified @ 2026-06-16):** a boolean stored in `any[]`
+loses its tag on read-back —
+- `const a: any[] = [true]; typeof a[0]` → `"number"` (should be `"boolean"`)
+- `const a: any[] = [true]; "" + a[0]` → `"1"` (should be `"true"`)
+- string/number elements are fine; `a[0] === true` is fine (so the value is
+  stored, only the TAG is wrong).
 
-Remaining slices S1 (standalone `$undefined`), S2 (sNaN carve-out), S3
-(number|undefined→externref), S4 (flag-gated collapse reversal) stay open under
-this issue.
+**Root cause (WAT-confirmed):** the array-literal `[true]` builds an i32 array,
+then the typed-array→`any[]` promotion copy-loop boxes each element by **Wasm
+kind**: `array.get; f64.convert_i32_s; call __box_f64` → tag-3 **number** instead
+of tag-4 boolean. This is the §1.1 "i32 boxes as number" disease at the
+**vec→any-vec coercion** site (a `coerceType(elem→AnyValue)` inside the array
+promotion, NOT the literal fast-paths).
+
+**Fix:** thread the source array's **element static type** into that box site and
+call `boxToAny(ctx, fctx, from, jsStaticType(elemType))` (#2104 API) — `[true]`'s
+element type is `boolean` → `__box_bool` (tag 4). Find the vec→any-vec promotion
+copy-loop emitter (grep the `array.new_default` + per-element box near the
+typed-array→`any[]` coercion in `type-coercion.ts`/`literals.ts`); pass the TS
+element type already available at the coercion call site. Smallest, safest
+tag-recovery slice; pure #2104 composition; host-reproducible test gate.
+
+#### S0 fix-site correction (sdev7, 2026-06-16 — investigated before #1503 merged)
+
+The plan's "thread the TS element type into the vec→any-vec copy-loop
+(`emitVecToVecBody`)" is **not viable at that site** — I traced it end to end:
+
+- The actual lossy box is at `type-coercion.ts:887`, inside `emitVecToVecBody`,
+  reached via `coerceType → emitSafeStructConversion (type-coercion.ts:680-704)`.
+  That whole path is **purely Wasm-type-driven** (it works from `fromTypeIdx`/
+  `toTypeIdx` and `getVecInfo`'s `ValType` element only). The TS `boolean` type is
+  already fully erased there.
+- **WAT-confirmed the disease**: `[true]` builds `__vec_i32` (`array.new_fixed
+  10 1`), then the copy-loop does `array.get 10; f64.convert_i32_s; call 1`
+  (`__box_number`, tag 3). And critically: **`boolean[]` and `number[]` SHARE
+  `__vec_i32`** — the vec types are named by Wasm kind (`__vec_i32`/`__vec_f64`/
+  `__vec_externref`), there is NO `__vec_boolean`. So the boolean tag is
+  irrecoverable from the source vec type alone at `emitVecToVecBody`.
+
+**Correct fix site = `compileArrayLiteral` (`literals.ts:2691`), not the
+coercion.** The literal already calls `getContextualType(expr)` and the
+per-element TS types are available there (`getTypeAtLocation(el)`). For `[true]`
+the contextual type IS `any[]`, but the element-type selection at
+`literals.ts:2872-2933` only adopts the contextual element type when the first
+element resolves to a **ref** (`:2886` guard) — `boolean→i32` is not a ref, so
+the `any` context is dropped and `elemWasm` stays `i32`, building `__vec_i32` and
+deferring the lossy coercion. **Fix:** when the contextual element type is `any`
+(`isAnyValue` of the resolved contextual element, or `getContextualType` element
+= `any`), set `elemWasm` to the `$AnyValue` ref type and, in the non-spread
+element loop (`:2942-2961`), box each element with
+`boxToAny(ctx, fctx, <elemWasm-of-el>, jsStaticType(getTypeAtLocation(el)))`
+instead of `compileExpression(…, elemWasm)` + a downstream Wasm-kind coerce. This
+builds an AnyValue-vec directly with the right per-element tag (`true`→tag-4),
+eliminating the i32-vec→any-vec coercion for this shape entirely. It is the spec
+§2.2 literal-fast-path pattern #2104 already preserves, extended to the `any[]`
+target. Scope strictly to `contextual elem === any` so number[]/string[]/struct[]
+vecs are byte-identical (no blast radius outside `any[]` literals). Test gate:
+the host repros above + a standalone variant; guard the heterogeneous mixed case
+`[true,1,"x"]` (each element boxed by its own `jsStaticType`).
+
+### S1 — standalone `$undefined` singleton (so undefined ≠ null in standalone)
+
+- **Today**: `emitUndefined` (`src/codegen/expressions/late-imports.ts:563`)
+  falls back to `ref.null.extern` in `nativeStrings`/standalone — undefined and
+  null share the bit pattern. `ensureGetUndefined` (:553) returns undefined in
+  standalone; `__extern_is_undefined` standalone convention is bare
+  `ref.is_null` (so it can't tell them apart).
+- **Change**: add an immutable module global `$undefined : ref $AnyValue` (tag 1,
+  built via the tag-1 box / `JsTag.Undefined`), emitted once lazily (like
+  `ensureAnyValueType`). Standalone `emitUndefined` returns `global.get
+  $undefined` instead of `ref.null.extern`. Standalone `__extern_is_undefined`
+  becomes "ref.eq against `$undefined`" (or tag==1 check) rather than
+  `ref.is_null`. `null` stays `ref.null.extern`.
+- **HAZARD (#329, documented at late-imports.ts:545)**: introducing a
+  standalone undefined value that is NOT `ref.null.extern` must NOT add a late
+  import *after* the native-string helpers are emitted — that drives
+  `reconcileNativeStrFinalizeShift` an extra time and off-by-ones the baked
+  `__str_flatten`→`__str_copy_tree` call. Mitigation: the `$undefined` global is
+  a GLOBAL (not a func import) and must be reserved up-front (at
+  `ensureAnyValueType` time), so no late func-index shift. Verify with the #329
+  repro (`let g: any; g = function(){…}; g()`) standalone.
+- **Blast radius**: `emitUndefined` callers (28 `__get_undefined` sites) +
+  standalone `__extern_is_undefined` consumers (~10 files). Gate every change on
+  `ctx.standalone`/`nativeStrings` so host mode is byte-identical.
+- **Test gate**: `(undefined === null)` → false, `(undefined == null)` → true,
+  `typeof undefined` → "undefined" vs `typeof null` → "object", all standalone.
+
+### S2 — codify the sNaN sentinel carve-out (erasure stays)
+
+- Document + guard the existing `0x7FF00000DEADC0DE` sentinel
+  (`type-coercion.ts:2672`, `emitDefaultValueCheck` at `shared.ts:418`,
+  consumers at `destructuring-params.ts:830`, `literals.ts:1759/2317/2886`) as
+  the ONE sanctioned f64-undefined channel — sole consumer
+  `emitDefaultValueCheck`. Route it through `value-tags.ts`'s `UNDEF_F64_BITS` /
+  `pushUndefF64` / `emitIsUndefF64` (P1 already centralized these). No behaviour
+  change — consolidation + a comment/invariant that these f64 carriers are
+  default-check-only and must not be widened. Small.
+
+### S3 — general `number|undefined` → externref widening (NON-optional-chain)  ← HIGHEST IMPACT, host-reproducible
+
+**Concrete failing cases (host mode, verified on the #2104 branch @ 2026-06-16)
+— these are the S3 test gates:**
+
+| Repro | Got | Expect | Why |
+|---|---|---|---|
+| `[1,2,3].find(x=>x>5) === undefined` | `0` (false) | `1` | `find` miss returns the f64 NaN-sentinel, not observable undefined |
+| `function f(x?: number){return x ?? -1} f()` | `NaN` | `-1` | optional numeric param absent → f64 NaN-sentinel; `??` short-circuits "never nullish" on f64 (`logical-ops.ts:188-191`) |
+| `typeof [1].find(x=>x>5) === "undefined"` | `0` | `1` | typeof of the f64 carrier can't observe undefined |
+
+`Map.get` miss already works (returns externref). So the broken producers are
+the ones carrying `T|undefined` as **bare f64**: `Array.find`/`findLast`-family
+(`array-methods.ts`) and **optional numeric parameters** (param prologue /
+`destructuring-params.ts`). NOT optional-chain (#2051), NOT default-check
+carriers (S2 keeps the sentinel there).
+
+- **Fix (per #2142 rule)**: widen these carriers to externref + host `undefined`
+  (host) / `$undefined` tag-1 (standalone, needs S1), composing with
+  #2072/#2104 `boxToAny`. Producers emit `emitUndefined` (externref) for the
+  absent case instead of `f64.const NaN`; their result ValType becomes externref
+  so the existing externref-aware `===`/`??`/`typeof` observers (already
+  discriminate, #2142 fact 1) light up with zero new observer code. Reuse
+  #2051's widening mechanism (`variables.ts:100-102` `isNullablePrimitiveType`).
+- **Watch**: changes `find`/optional-param result type f64→externref — measure
+  the test262 delta (arithmetic-on-find-result may need an unbox). Medium-risk;
+  gate carefully.
+- **Decision rule (from #2142)**: widen when observable to the general
+  nullish/identity/stringify set; sentinel only for the S2 default-check carriers.
+
+### S4 — flag-gated union-collapse reversal (RISKY, last)
+
+- The blanket `T|undefined`/`T|null` → bare `T` collapse at
+  `index.ts:9108-9117` (`resolveWasmType`) / `type-mapper.ts:79-99`
+  (`mapTsTypeToWasm`) is the erasure factory. Reverse it **behind a feature
+  flag**, only for Null/undefined-bearing unions where observability is needed
+  (rule §2.4(3)), and **measure perf/size + test262 blast radius before
+  default-on** (acceptance criterion). This is the only slice with uncertain
+  test262 delta — flag + measure-first protocol is mandatory.
+
+### Sequencing / notes
+
+- All slices need #2104 (`value-tags.ts`) merged. Build stacked on the #2104
+  branch until #1503 lands, then branch from origin/main.
+- S1 + S2 are clean/self-contained; S3 is medium; S4 is the risky flagged one
+  and should land last with measurements. Recommend S3/S4 get fresh
+  max-reasoning context.
+- `codePointAt(oob) ?? rhs` is already done (#2004, `logical-ops.ts:208`) —
+  do NOT re-represent it. Optional-chain sites are #2051 — do NOT touch.
