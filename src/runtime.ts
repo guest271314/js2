@@ -3524,42 +3524,55 @@ const _legacyRegExpState: LegacyRegExpState = {
 };
 const _legacyRegExpInstalledOn: WeakSet<object> = new WeakSet();
 
-function _updateLegacyRegExpState(input: string, m: RegExpExecArray | RegExpMatchArray | null): void {
+function _makeLegacyRegExpState(): LegacyRegExpState {
+  return { input: "", lastMatch: "", lastParen: "", leftContext: "", rightContext: "", parens: new Array(9).fill("") };
+}
+
+// #1933 — update the legacy RegExp static state. `state` is the per-instance
+// slot (threaded from `instanceState.legacyRegExpState`); falls back to the
+// shared module-level slot for legacy callers without an instanceState.
+function _updateLegacyRegExpState(
+  input: string,
+  m: RegExpExecArray | RegExpMatchArray | null,
+  state: LegacyRegExpState = _legacyRegExpState,
+): void {
   if (m == null) return;
   const idx = m.index ?? 0;
   const matchStr = m[0] ?? "";
-  _legacyRegExpState.input = input;
-  _legacyRegExpState.lastMatch = matchStr;
-  _legacyRegExpState.leftContext = input.substring(0, idx);
-  _legacyRegExpState.rightContext = input.substring(idx + matchStr.length);
+  state.input = input;
+  state.lastMatch = matchStr;
+  state.leftContext = input.substring(0, idx);
+  state.rightContext = input.substring(idx + matchStr.length);
   let lastNonEmptyParen = "";
   for (let i = 0; i < 9; i++) {
     const cap = m[i + 1];
     const v = cap == null ? "" : String(cap);
-    _legacyRegExpState.parens[i] = v;
+    state.parens[i] = v;
     if (cap != null) lastNonEmptyParen = v;
   }
-  _legacyRegExpState.lastParen = lastNonEmptyParen;
+  state.lastParen = lastNonEmptyParen;
 }
 
-function _installLegacyRegExpAccessors(C: unknown): void {
+function _installLegacyRegExpAccessors(C: unknown, state: LegacyRegExpState = _legacyRegExpState): void {
   if (C == null || (typeof C !== "function" && typeof C !== "object")) return;
   if (_legacyRegExpInstalledOn.has(C as object)) return;
   _legacyRegExpInstalledOn.add(C as object);
+  // #1933 — the accessors read/write the per-instance `state` (threaded from
+  // instanceState), so `RegExp.$1`/`$_` etc. don't cross instances.
   type Slot = readonly [string, readonly string[], () => string, ((v: unknown) => void)?];
   const slots: Slot[] = [
     [
       "input",
       ["$_"],
-      () => _legacyRegExpState.input,
+      () => state.input,
       (v) => {
-        _legacyRegExpState.input = String(v);
+        state.input = String(v);
       },
     ],
-    ["lastMatch", ["$&"], () => _legacyRegExpState.lastMatch],
-    ["lastParen", ["$+"], () => _legacyRegExpState.lastParen],
-    ["leftContext", ["$`"], () => _legacyRegExpState.leftContext],
-    ["rightContext", ["$'"], () => _legacyRegExpState.rightContext],
+    ["lastMatch", ["$&"], () => state.lastMatch],
+    ["lastParen", ["$+"], () => state.lastParen],
+    ["leftContext", ["$`"], () => state.leftContext],
+    ["rightContext", ["$'"], () => state.rightContext],
   ];
   for (const [name, aliases, getter, setter] of slots) {
     // (#1333) Note: `set` must be explicitly `undefined` for read-only slots.
@@ -3603,7 +3616,7 @@ function _installLegacyRegExpAccessors(C: unknown): void {
       Object.defineProperty(C, `$${i}`, {
         get(this: unknown) {
           if (this !== C) throw new TypeError(`RegExp.$${i} getter requires the RegExp constructor as this`);
-          return _legacyRegExpState.parens[idx];
+          return state.parens[idx];
         },
         set: undefined,
         enumerable: false,
@@ -5108,6 +5121,19 @@ function _toJsArrayDeep(arr: any, exports: Record<string, Function> | undefined,
  *  mode (Node, Bun, WASI). */
 interface InstanceState {
   webStorage: { local?: any; session?: any };
+  // #1933 — per-instance state that previously lived at module scope and bled
+  // across (or retained) concurrently-live instances. Threaded through
+  // `resolveImport` (which already receives `instanceState`).
+  /** symbol id → boxed symbol (lazily seeded with the well-known symbols). */
+  symbolCache?: Map<number, symbol>;
+  /** symbol id → user-registered description (`null` = Symbol() w/ no desc). */
+  symbolDescRegistry?: Map<number, string | null>;
+  /** legacy RegExp static state (`RegExp.$1` etc.) — per instance, not shared. */
+  legacyRegExpState?: LegacyRegExpState;
+  /** user-class name → registered subclass constructors (#1933 retention leak). */
+  subclassCtors?: Map<string, Function[]>;
+  /** user-class name → parent class name (or null). */
+  userClassParents?: Map<string, string | null>;
 }
 
 function makeWebStoragePolyfill(): any {
@@ -5949,7 +5975,7 @@ function resolveImport(
             const re = args[0] as RegExp;
             const probe = new RegExp(re.source, re.flags.replace(/[gy]/g, ""));
             const m2 = probe.exec(recvStr);
-            if (m2) _updateLegacyRegExpState(recvStr, m2);
+            if (m2) _updateLegacyRegExpState(recvStr, m2, instanceState?.legacyRegExpState);
           } catch {
             // ignore — best-effort
           }
@@ -6220,14 +6246,14 @@ function resolveImport(
           if ((m === "exec" || m === "test") && self instanceof RegExp && typeof callArgs[0] === "string") {
             const input = callArgs[0] as string;
             if (m === "exec" && ret != null) {
-              _updateLegacyRegExpState(input, ret as RegExpExecArray);
+              _updateLegacyRegExpState(input, ret as RegExpExecArray, instanceState?.legacyRegExpState);
             } else if (m === "test" && ret === true) {
               // .test() also updates the slots per spec. Re-run exec on a
               // non-sticky/non-global clone so we don't perturb self.lastIndex.
               try {
                 const clone = new RegExp(self.source, self.flags.replace(/[gy]/g, ""));
                 const m2 = clone.exec(input);
-                if (m2) _updateLegacyRegExpState(input, m2);
+                if (m2) _updateLegacyRegExpState(input, m2, instanceState?.legacyRegExpState);
               } catch {
                 // best-effort — bad source/flags shouldn't break .test()
               }
@@ -7043,33 +7069,42 @@ assert._isSameValue = isSameValue;
       // `''` (empty string) marks "Symbol() called with no arg" so
       // `.description === undefined` works distinctly from "uninitialized".
       if (name === "__box_symbol") {
-        if (!_symbolCache) {
-          _symbolCache = new Map<number, symbol>([
-            [1, Symbol.iterator],
-            [2, Symbol.hasInstance],
-            [3, Symbol.toPrimitive],
-            [4, Symbol.toStringTag],
-            [5, Symbol.species],
-            [6, Symbol.isConcatSpreadable],
-            [7, Symbol.match],
-            [8, Symbol.replace],
-            [9, Symbol.search],
-            [10, Symbol.split],
-            [11, Symbol.unscopables],
-            [12, Symbol.asyncIterator],
-            [13, _disposeSym],
-            [14, _asyncDisposeSym],
-          ]);
+        // #1933 — per-instance symbol cache (was module-level `_symbolCache`,
+        // reset per buildImports → clobbered concurrent instances). Falls back
+        // to a local map when no instanceState is threaded (legacy callers).
+        const symbolCache =
+          instanceState?.symbolCache ??
+          (instanceState ? (instanceState.symbolCache = new Map<number, symbol>()) : new Map<number, symbol>());
+        if (symbolCache.size === 0) {
+          symbolCache.set(1, Symbol.iterator);
+          symbolCache.set(2, Symbol.hasInstance);
+          symbolCache.set(3, Symbol.toPrimitive);
+          symbolCache.set(4, Symbol.toStringTag);
+          symbolCache.set(5, Symbol.species);
+          symbolCache.set(6, Symbol.isConcatSpreadable);
+          symbolCache.set(7, Symbol.match);
+          symbolCache.set(8, Symbol.replace);
+          symbolCache.set(9, Symbol.search);
+          symbolCache.set(10, Symbol.split);
+          symbolCache.set(11, Symbol.unscopables);
+          symbolCache.set(12, Symbol.asyncIterator);
+          symbolCache.set(13, _disposeSym);
+          symbolCache.set(14, _asyncDisposeSym);
         }
+        const symbolDescRegistry =
+          instanceState?.symbolDescRegistry ??
+          (instanceState
+            ? (instanceState.symbolDescRegistry = new Map<number, string | null>())
+            : new Map<number, string | null>());
         return (id: number) => {
-          let sym = _symbolCache!.get(id);
+          let sym = symbolCache.get(id);
           if (sym === undefined) {
-            const reg = _symbolDescRegistry.get(id);
+            const reg = symbolDescRegistry.get(id);
             // reg === undefined → caller never registered (use legacy wasm_<id>)
             // reg === null     → Symbol() with no description → undefined
             // reg is a string  → user-supplied description
             sym = reg === undefined ? Symbol(`wasm_${id}`) : reg === null ? Symbol() : Symbol(reg);
-            _symbolCache!.set(id, sym);
+            symbolCache.set(id, sym);
           }
           return sym;
         };
@@ -7078,12 +7113,18 @@ assert._isSameValue = isSameValue;
       // `__box_symbol(id)` calls produce Symbol(desc) preserving Description.
       // Pass `null` (ref.null extern) to mark "Symbol() with no description".
       if (name === "__symbol_register_desc") {
+        // #1933 — per-instance description registry (was module-level).
+        const symbolDescRegistry =
+          instanceState?.symbolDescRegistry ??
+          (instanceState
+            ? (instanceState.symbolDescRegistry = new Map<number, string | null>())
+            : new Map<number, string | null>());
         return (id: number, desc: any): void => {
           if (id <= 15) return; // never override well-known symbols (#1830: 15 = @@matchAll)
           if (desc == null) {
-            _symbolDescRegistry.set(id, null);
+            symbolDescRegistry.set(id, null);
           } else {
-            _symbolDescRegistry.set(id, String(desc));
+            symbolDescRegistry.set(id, String(desc));
           }
         };
       }
@@ -8427,12 +8468,12 @@ assert._isSameValue = isSameValue;
           ) {
             const input = wrappedArgs[0] as string;
             if (method === "exec" && ret != null) {
-              _updateLegacyRegExpState(input, ret as RegExpExecArray);
+              _updateLegacyRegExpState(input, ret as RegExpExecArray, instanceState?.legacyRegExpState);
             } else if (method === "test" && ret === true) {
               try {
                 const clone = new RegExp(wrappedObj.source, wrappedObj.flags.replace(/[gy]/g, ""));
                 const m2 = clone.exec(input);
-                if (m2) _updateLegacyRegExpState(input, m2);
+                if (m2) _updateLegacyRegExpState(input, m2, instanceState?.legacyRegExpState);
               } catch {
                 // ignore
               }
@@ -10445,7 +10486,11 @@ assert._isSameValue = isSameValue;
             // For a given v, walk its proto chain looking for any registered
             // sub-ctor whose prototype matches — this avoids ambiguity when
             // the same `subName` is used across multiple parents (test fixtures).
-            const bucket = _subclassCtors.get(ctorName);
+            // #1933 — per-instance subclass registry (was module-level
+            // `_subclassCtors`, which leaked instances via retained ctor
+            // closures and crossed instances). Falls back to the module map for
+            // legacy callers without an instanceState.
+            const bucket = (instanceState?.subclassCtors ?? _subclassCtors).get(ctorName);
             if (bucket !== undefined && bucket.length > 0) {
               for (const subCtor of bucket) {
                 if (v instanceof subCtor) return 1;
@@ -10466,7 +10511,7 @@ assert._isSameValue = isSameValue;
             while (tag != null && !guard.has(tag)) {
               if (tag === ctorName) return 1;
               guard.add(tag);
-              tag = _userClassParents.get(tag) ?? null;
+              tag = (instanceState?.userClassParents ?? _userClassParents).get(tag) ?? null;
             }
           }
           // (#1729) `<obj> instanceof Object` is true for every object value
@@ -10520,8 +10565,9 @@ assert._isSameValue = isSameValue;
           _userClassTags.set(instance as object, className);
           // Register the parent edge (idempotent). Null parent indicates the
           // direct parent is a builtin, so the chain terminates.
-          if (!_userClassParents.has(className)) {
-            _userClassParents.set(className, parentName == null ? null : parentName);
+          const userClassParents = instanceState?.userClassParents ?? _userClassParents;
+          if (!userClassParents.has(className)) {
+            userClassParents.set(className, parentName == null ? null : parentName);
           }
         };
       // (#1455) Subclasses of host builtins: after `__new_<Parent>(args)`
@@ -10544,7 +10590,10 @@ assert._isSameValue = isSameValue;
           // Find a cached synthetic ctor whose parent matches. The cache is a
           // small array per `subName` so multiple parents (e.g. across test
           // fixtures that reuse the same class name) don't collide.
-          let bucket = _subclassCtors.get(subName);
+          // #1933 — per-instance registry so the synthetic ctors (which close
+          // over this instance) don't retain it forever across hot-reloads.
+          const subclassCtors = instanceState?.subclassCtors ?? _subclassCtors;
+          let bucket = subclassCtors.get(subName);
           let Sub: any;
           if (bucket !== undefined) {
             for (const candidate of bucket) {
@@ -10566,7 +10615,7 @@ assert._isSameValue = isSameValue;
               }
               if (bucket === undefined) {
                 bucket = [];
-                _subclassCtors.set(subName, bucket);
+                subclassCtors.set(subName, bucket);
               }
               bucket.push(Sub);
             } catch {
@@ -11723,6 +11772,19 @@ export function buildImports(
   string_constants: Record<string, WebAssembly.Global>;
   setExports?: (exports: Record<string, Function>) => void;
 } {
+  // (#1933) Per-instance state for stateful imports. Created FIRST so the
+  // RegExp-accessor install below (and every `resolveImport` call) can thread
+  // it. Everything here was previously module-level and bled across / retained
+  // concurrently-live instances; the per-instance Maps/state fix that.
+  const instanceState: InstanceState = {
+    webStorage: {},
+    symbolCache: new Map<number, symbol>(),
+    symbolDescRegistry: new Map<number, string | null>(),
+    legacyRegExpState: _makeLegacyRegExpState(),
+    subclassCtors: new Map<string, Function[]>(),
+    userClassParents: new Map<string, string | null>(),
+  };
+
   // #1464 — install ES2025 Iterator.zip / zipKeyed / concat polyfills on
   // the host's `Iterator` global if missing. Idempotent and safe to call
   // unconditionally; older Node / V8 versions need it, newer hosts skip.
@@ -11735,7 +11797,7 @@ export function buildImports(
   // the spec requires TypeError, so we override. Idempotent per RegExp identity.
   {
     const RegExpCtor = (deps?.RegExp ?? (typeof RegExp !== "undefined" ? RegExp : undefined)) as unknown;
-    if (RegExpCtor) _installLegacyRegExpAccessors(RegExpCtor);
+    if (RegExpCtor) _installLegacyRegExpAccessors(RegExpCtor, instanceState.legacyRegExpState);
   }
 
   const env: Record<string, Function> = {};
@@ -11755,11 +11817,10 @@ export function buildImports(
   let hasCallbacks = false;
   let lastCaughtException: any = undefined;
 
-  // (#1467) Each instantiated module gets its own symbol id space (counter
-  // resets to 14 per module). Reset the shared registry + cache so symbol
-  // ids from a prior module don't leak descriptions into this one.
-  _symbolCache = undefined;
-  _symbolDescRegistry.clear();
+  // (#1467 / #1933) Each instantiated module gets its own symbol id space and
+  // per-instance symbol cache/registry, RegExp legacy state, and subclass/
+  // parent registries — initialized in `instanceState` above (was module-level,
+  // which crossed and retained concurrently-live instances).
 
   // Recursion depth guard: host imports can call back into Wasm exports
   // (e.g. callback_maker, valueOf/toString coercion, iterator protocol),
@@ -11767,9 +11828,6 @@ export function buildImports(
   // Track depth across ALL host imports sharing a single counter.
   const MAX_HOST_RECURSION_DEPTH = 100;
   let hostCallDepth = 0;
-
-  // Per-instance state for stateful imports (e.g. localStorage polyfill).
-  const instanceState: InstanceState = { webStorage: {} };
 
   for (const imp of manifest) {
     if (imp.module !== "env") continue;

@@ -670,6 +670,13 @@ const STANDALONE_ROOT_CAUSE_BUCKETS = [
       ]),
   },
   {
+    id: "standalone-getter-callback-bridge",
+    issues: ["#929", "#1027", "#1239"],
+    label:
+      "Standalone object-literal / defineProperty accessor needs the `__make_getter_callback` JS-host bridge (this-bound getter/setter); no pure-Wasm path yet, so the strict gate fails the build. Surfaced as a structured CE by #1921 (was a dropped-import / leaked-import failure).",
+    match: (_record, text) => hasAny(text, ["__make_getter_callback", "make_getter_callback import"]),
+  },
+  {
     id: "misc-spec-tail",
     issues: ["#1577", "#779"],
     label: "Miscellaneous low-volume spec-completeness tail",

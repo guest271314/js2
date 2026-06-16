@@ -1127,11 +1127,137 @@ export function addStringRuntime(mod: WasmModule): void {
     2,
   ); // 2 extra locals
 
-  // __str_len: load i32 at ptr+8
+  // __str_len: load i32 at ptr+8 — the stored UTF-8 **byte** count. This is the
+  // internal primitive used by slice/indexOf/concat/eq, which all index by byte
+  // offset. It is NOT the JS `.length` (UTF-16 code units) — see
+  // __str_length_utf16 below.
   addRuntimeFunc(mod, "__str_len", [{ kind: "i32" }], [{ kind: "i32" }], [], () => [
     { op: "local.get", index: 0 },
     { op: "i32.load", align: 2, offset: 8 },
   ]);
+
+  // __str_length_utf16: JS `String.prototype.length` = number of UTF-16 code
+  // units (#1976). Linear strings are stored as UTF-8 bytes, so walk the leading
+  // bytes and count code units: a leading byte 0xxxxxxx/110xxxxx/1110xxxx starts
+  // a 1/2/3-byte sequence encoding a BMP code point (1 code unit), while
+  // 11110xxx starts a 4-byte sequence for an astral code point (a surrogate
+  // pair → 2 code units). ASCII strings count == byte length, matching the old
+  // behaviour. Continuation bytes (10xxxxxx) are skipped by advancing past the
+  // whole sequence.
+  // locals: byteLen(1), i(2 = byte cursor), count(3), b(4 = leading byte)
+  addRuntimeFunc(
+    mod,
+    "__str_length_utf16",
+    [{ kind: "i32" }],
+    [{ kind: "i32" }],
+    [],
+    (firstLocalIdx) => {
+      const byteLen = firstLocalIdx;
+      const i = firstLocalIdx + 1;
+      const count = firstLocalIdx + 2;
+      const b = firstLocalIdx + 3;
+      return [
+        // byteLen = mem[ptr+8]
+        { op: "local.get", index: 0 },
+        { op: "i32.load", align: 2, offset: 8 },
+        { op: "local.set", index: byteLen },
+        // i = 0; count = 0
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: i },
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: count },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                // break if i >= byteLen
+                { op: "local.get", index: i },
+                { op: "local.get", index: byteLen },
+                { op: "i32.ge_u" },
+                { op: "br_if", depth: 1 },
+                // b = mem[ptr+12+i]
+                { op: "local.get", index: 0 },
+                { op: "local.get", index: i },
+                { op: "i32.add" },
+                { op: "i32.load8_u", align: 0, offset: 12 },
+                { op: "local.set", index: b },
+                // Decide sequence length (advance i) and code units (advance
+                // count) by the leading byte's high bits. The `if` condition is
+                // taken from the stack, so push it just before each `if`.
+                // cond: b < 0x80  (1-byte ASCII)
+                { op: "local.get", index: b },
+                { op: "i32.const", value: 0x80 },
+                { op: "i32.lt_u" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    // 1-byte ASCII: i += 1, count += 1
+                    { op: "local.get", index: i },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.add" },
+                    { op: "local.set", index: i },
+                    { op: "local.get", index: count },
+                    { op: "i32.const", value: 1 },
+                    { op: "i32.add" },
+                    { op: "local.set", index: count },
+                  ],
+                  else: [
+                    // cond: b < 0xF0  (2- or 3-byte BMP sequence → 1 code unit;
+                    // else 4-byte astral sequence → 2 code units / surrogate pair)
+                    { op: "local.get", index: b },
+                    { op: "i32.const", value: 0xf0 },
+                    { op: "i32.lt_u" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: [
+                        // BMP: count += 1; i += (b < 0xE0 ? 2 : 3)
+                        { op: "local.get", index: count },
+                        { op: "i32.const", value: 1 },
+                        { op: "i32.add" },
+                        { op: "local.set", index: count },
+                        { op: "local.get", index: i },
+                        { op: "local.get", index: b },
+                        { op: "i32.const", value: 0xe0 },
+                        { op: "i32.lt_u" },
+                        {
+                          op: "if",
+                          blockType: { kind: "val", type: { kind: "i32" } },
+                          then: [{ op: "i32.const", value: 2 }],
+                          else: [{ op: "i32.const", value: 3 }],
+                        },
+                        { op: "i32.add" },
+                        { op: "local.set", index: i },
+                      ],
+                      else: [
+                        // Astral 4-byte: count += 2; i += 4
+                        { op: "local.get", index: count },
+                        { op: "i32.const", value: 2 },
+                        { op: "i32.add" },
+                        { op: "local.set", index: count },
+                        { op: "local.get", index: i },
+                        { op: "i32.const", value: 4 },
+                        { op: "i32.add" },
+                        { op: "local.set", index: i },
+                      ],
+                    },
+                  ],
+                },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        { op: "local.get", index: count },
+      ];
+    },
+    4,
+  );
 
   // __str_eq: compare two strings byte-by-byte
   // extra locals: local 2 = lenA, local 3 = i
