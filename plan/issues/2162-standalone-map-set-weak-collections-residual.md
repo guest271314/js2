@@ -49,65 +49,50 @@ Probed each collection in standalone (`target: standalone`). Findings:
   delete/size/clear` all return correct values when the result is read into a
   typed binding. The apparent Map failures in casual probing were
   `m.get(k) === <literal>` confounds (the `any === literal` boxed-compare gap,
-  not Map). No Map work needed for the core methods.
-- **Set had NO native standalone runtime** — `new Set()` / `add` / `has` /
-  `size` leaked `Set_new` / `Set_add` / `Set_has` / `Set_get_size` host imports
-  the standalone module can't satisfy, so every Set program failed. This is the
-  dominant slice of the gap (`built-ins/Set` ≈ 286).
+  owned by value-rep #2104/#2106, not Map). No Map work needed for the core
+  methods.
+- **Set had NO native standalone runtime** — leaked `Set_new`/`Set_add`/… host
+  imports, so every Set program failed (`built-ins/Set` ≈ 286, the dominant
+  slice). Same for WeakMap/WeakSet (101+).
 
 ## Slice 1 — native Set runtime (PR #1510, merged)
 
 A Set is a Map with `value === key`, so the entire #1103a Map backing store
-(`map-runtime.ts`: ordered hash table, SameValueZero key equality, tombstone
-deletion) is reused. New module `src/codegen/set-runtime.ts` adds only
-`__set_add(m, v) = __map_set(m, v, v)` and the dispatch interceptors; `has` /
-`delete` / `clear` / `size` route straight to the `__map_*` helpers.
-
-Wiring (mirrors Map): `new Set()` → `__map_new` (new-super.ts); method calls →
+(ordered hash table, SameValueZero key equality, tombstone deletion) is reused.
+New `src/codegen/set-runtime.ts` adds only `__set_add(m, v) = __map_set(m, v, v)`
+and the dispatch interceptors; `has`/`delete`/`clear`/`size` route to `__map_*`.
+Wiring mirrors Map: `new Set()` → `__map_new` (new-super.ts); methods →
 `tryCompileNativeSetMethodCall` (extern.ts); `.size` →
 `tryCompileNativeSetSizeGet` (property-access.ts); `Set` resolves to `ref $Map`
-(resolveWasmType, index.ts); and the `Set` externClass registration is skipped
-under `nativeStrings` so no `Set_*` host import is emitted. Host/gc mode is
-unchanged (still uses the externClass path).
+(index.ts); externClass skipped under `nativeStrings`. Host/gc unchanged.
+**Verified** `tests/issue-2162-standalone-set.test.ts` 6/6.
 
-**Verified** (`tests/issue-2162-standalone-set.test.ts`, 6/6, `--target wasi`,
-zero `Set_*`/`Map_*` imports): add+has, size dedup, delete + return value,
-clear, string-element dedup, chained `add().add()`.
+## Slice 2 — native WeakMap/WeakSet runtime (this PR)
 
-## Slice 2 — native WeakMap/WeakSet runtime (PR #1524)
+`new WeakMap()` / get/set/has/delete and `new WeakSet()` / add/has/delete now
+host-import-free in standalone (~101+ tests). New
+`src/codegen/weak-collections-runtime.ts` reuses the Map backing store with
+**object-identity keys** (the Map runtime already compares object keys by
+`ref.eq`) and adds only `__weakset_add(m,v)=__map_set(m,v,v)`; the rest route to
+`__map_*`. Wiring mirrors Map/Set: `new` → `__map_new` (new-super.ts); methods →
+`tryCompileNativeWeakMethodCall` (extern.ts); `WeakMap`/`WeakSet` resolve to
+`ref $Map` (index.ts); externClass skipped under `nativeStrings`. Weak
+collections have **no iteration and no `.size`** (spec), so none is wired. The
+*weak* (collectable) reference is not modelled — WasmGC has no weak refs, so
+entries are strongly retained; a memory property, not observable (only WeakRef/
+FinalizationRegistry liveness, skip-filtered, could tell). Host/gc unchanged.
+**Verified** (`tests/issue-2162-standalone-weak.test.ts`, 6/6, `--target wasi`,
+zero `WeakMap_*`/`WeakSet_*`/`Map_*` imports): WeakMap set+get / has / distinct
+keys / overwrite / delete; WeakSet add+has / delete / chained add.
 
-WeakMap is a Map and WeakSet is a Set with `key === value`, both over
-object-identity keys (the Map runtime already compares object keys by `ref.eq`).
-New `src/codegen/weak-collections-runtime.ts` reuses the Map backing store and
-adds only `__weakset_add`; get/set/has/delete route to `__map_*`. No iteration,
-no `.size` (spec). Strong retention (WasmGC has no weak refs) is a memory
-property, not observable.
+### Remaining slices (issue stays in-progress)
 
-## Slice 3 — native Map.forEach iteration (this PR)
-
-The #1103a Map runtime served get/set/has/delete/clear/size but **not**
-iteration, so `m.forEach(cb)` leaked a `Map_forEach` host import in standalone
-(and silently no-op'd). This drives the callback over the `$Map` entries vector
-directly — the same insertion-ordered, tombstone-skipping walk
-`__map_iter_next` uses — invoking `cb(value, key, map)` per live entry
-(§24.1.3.5). `tryCompileNativeCollectionForEach` in `map-runtime.ts` resolves
-the callback to a Wasm closure (`compileArrowAsClosure`), externalizes each
-`anyref` value/key to `externref` and coerces to the callback's param types,
-and `call_ref`s the closure (result dropped). Wired into
-`tryCompileNativeMapMethodCall`'s `forEach` arm.
-
-**Verified** (`tests/issue-2162-map-foreach.test.ts`, 6/6, `--target wasi`, zero
-`Map_*` imports): sum values, value+key, insertion order, tombstone-skip after
-delete, empty map, string keys.
-
-### Remaining slices (follow-up; issue stays in-progress)
-
-- **Set.forEach** — the `isSet` parameter of `tryCompileNativeCollectionForEach`
-  is ready; wire it into `set-runtime.ts`'s dispatch (now on main).
-- `keys()`/`values()`/`entries()` + `for-of` over Map/Set — exposing a
-  JS-iterable iterator object that the for-of drive consumes.
-- `new Map(iterable)` / `new Set(iterable)` constructors.
+- **Map.forEach** (PR #1527) and **Set.forEach** (follow-up) — entries-vector
+  drive over the callback closure.
+- `keys()`/`values()`/`entries()` + `for-of` over Map/Set — needs a JS-iterable
+  iterator object; `new Map(iterable)` / `new Set(iterable)` — needs
+  `__map_new_from_arr`.
 - ES2025 set-algebra: `union`/`intersection`/`difference`/
   `symmetricDifference`/`isSubsetOf`/`isSupersetOf`/`isDisjointFrom`.
-- The `Set === literal` / Set-of-`any` comparison confounds depend on the
+- The `Set === literal` / collection-of-`any` comparison confounds depend on the
   value-rep work (#2104/#2106), out of scope here.
