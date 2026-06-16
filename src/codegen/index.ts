@@ -70,7 +70,7 @@ import {
 } from "./registry/types.js";
 import { exportDrainMicrotasksIfRegistered, getDrainFuncIdxForWasiStart } from "./async-scheduler.js";
 import { flushLateImportShifts, registerAddStringImports, registerAddUnionImports } from "./shared.js";
-import { stackBalance } from "./stack-balance.js";
+import { stackBalance, getFixupEvents, summarizeFixups, strictBalanceDiagnostics } from "./stack-balance.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
 import { ensureRegexMatchVecType } from "./native-regex.js";
 import { STANDALONE_REGEXP_REFLECTION_PROPS } from "./regexp-standalone.js";
@@ -1658,6 +1658,8 @@ export function generateModule(
 
     // Stack-balancing fixup: ensure all branches in if/try/block have matching stack states
     stackBalance(mod);
+    // #1918 — drain fixup telemetry: per-compile debug log + optional strict mode.
+    drainStackBalanceTelemetry(ctx, ast.sourceFile.fileName);
 
     // Late fixup: repair extern.convert_any applied to non-anyref values.
     // Must run after all other passes since they can introduce invalid coercions.
@@ -1703,6 +1705,37 @@ function assertNoLeakedHostImports(ctx: CodegenContext, mod: WasmModule): void {
   const leaks = scanForLeakedHostImports(mod.imports);
   for (const leak of leaks) {
     reportErrorNoNode(ctx, buildLeakedHostImportError(leak));
+  }
+}
+
+/**
+ * #1918 — Drain stack-balance fixup telemetry after a `stackBalance(mod)` run.
+ *
+ * Every fixup the pass applied is a masked emitter bug. Previously the count
+ * was returned and discarded. Now we:
+ *   - Under `JS2WASM_LOG_STACK_BALANCE=1`, log a one-line per-kind histogram to
+ *     stderr (per-compile debug visibility — AC #1).
+ *   - Under `JS2WASM_STRICT_BALANCE`, push each fixup as a located
+ *     severity-"warning" (=1) or severity-"error" (=error) onto `ctx.errors`
+ *     (AC #3 — the lossy const-default arm is warning-visible). Strict errors
+ *     fail the WasmGC compile through the existing `severity === "error"` gate.
+ *
+ * MUST be called immediately after `stackBalance(mod)` — the collector is
+ * module-scoped and reset on the next `stackBalance` call.
+ */
+function drainStackBalanceTelemetry(ctx: CodegenContext, fileLabel: string): void {
+  const events = getFixupEvents();
+  if (process.env.JS2WASM_LOG_STACK_BALANCE === "1") {
+    const counts = summarizeFixups(events);
+    const hist = Object.entries(counts)
+      .filter(([, n]) => n > 0)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${k}=${n}`)
+      .join(",");
+    process.stderr.write(`[stack-balance] file=${fileLabel || "<source>"} fixups=${events.length} ${hist}\n`);
+  }
+  for (const diag of strictBalanceDiagnostics(events)) {
+    ctx.errors.push({ message: diag.message, line: diag.line, column: diag.column, severity: diag.severity });
   }
 }
 
@@ -5215,6 +5248,8 @@ export function generateMultiModule(
 
     // Stack-balancing fixup: ensure all branches in if/try/block have matching stack states
     stackBalance(mod);
+    // #1918 — drain fixup telemetry: per-compile debug log + optional strict mode.
+    drainStackBalanceTelemetry(ctx, multiAst.entryFile.fileName);
 
     // Late fixup: repair extern.convert_any applied to non-anyref values.
     // Must run after stackBalance since fixCallArgTypesInBody can insert

@@ -2541,6 +2541,24 @@ export interface TestResult {
    * unchanged between base and branch are CI noise, not real regressions.
    */
   wasm_sha?: string | null;
+  /**
+   * (#1853) Hard-error stability bucket. `true` marks a result as a compiler
+   * BUG — the compiler produced output the Wasm engine rejected, or trapped on
+   * its own malformed codegen — as opposed to an expected coverage gap
+   * ("unsupported feature"). Stability is gated separately from coverage: this
+   * bucket must stay near-zero and any growth is treated as a release-blocking
+   * regression, not absorbed into the not-passing total. `hardErrorKind` names
+   * the sub-bucket. Set ONLY where the signal is unambiguously a bug:
+   *   - `malformed_wasm` — `WebAssembly.CompileError`/`LinkError` instantiating a
+   *     binary the compiler reported as a SUCCESS (the compiler claimed it was
+   *     valid). Includes the #1850 verifier-failure-on-a-claimed-function case.
+   *   - `missing_test_export` — compile succeeded but no `test` export exists
+   *     (the wrapper contract was silently violated by codegen).
+   * Plain `compile_error` (the compiler explicitly refused) is NOT a hard error
+   * — that is the coverage signal and stays out of this bucket.
+   */
+  hardError?: boolean;
+  hardErrorKind?: "malformed_wasm" | "missing_test_export";
 }
 
 /** Default per-test timeout in milliseconds (prevents infinite-loop hangs) */
@@ -3176,6 +3194,9 @@ export async function runTest262File(
     const testFn = (instance.exports as any).test;
     if (typeof testFn !== "function") {
       const totalMs = performance.now() - totalStart;
+      // (#1853) Compile + instantiate both succeeded but the module is missing
+      // the `test` export the harness contract requires — codegen silently
+      // dropped it. A bug, not a coverage gap → hard-error bucket.
       return {
         file: relPath,
         category,
@@ -3188,6 +3209,8 @@ export async function runTest262File(
           executeMs: 0,
         },
         wasm_sha,
+        hardError: true,
+        hardErrorKind: "missing_test_export",
       };
     }
 
@@ -3314,6 +3337,13 @@ export async function runTest262File(
       err instanceof (WebAssembly as any).LinkError ||
       err?.constructor?.name === "LinkError"
     ) {
+      // (#1853) The compiler reported `result.success` for this binary, yet the
+      // Wasm engine rejected it — that is malformed output (a BUG), not an
+      // unsupported-feature gap. Mark it for the hard-error stability bucket so
+      // it is gated as a regression rather than absorbed into the coverage
+      // count. Subsumes the #1850 verifier-failure-on-a-claimed-function case:
+      // a verifier rejection of a function the compiler claimed valid surfaces
+      // here as a CompileError.
       return {
         file: relPath,
         category,
@@ -3321,6 +3351,8 @@ export async function runTest262File(
         error: enrichErrorMessage(err.message, err, result.sourceMap, bodyLineOffset),
         timing,
         wasm_sha,
+        hardError: true,
+        hardErrorKind: "malformed_wasm",
       };
     }
     // (#1155) Use extractWasmExceptionMessage so a `WebAssembly.Exception`
