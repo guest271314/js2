@@ -9299,8 +9299,7 @@ function compileCallExpression(
             // (which traps on the null cast). Narrowly gated to Promise-executor
             // params so the #1941 dual-mode guarantee for ordinary callable
             // params is preserved.
-            (calleeMayBeHostCallable(ctx, expr.expression) ||
-              calleeIsPromiseExecutorParam(ctx, expr.expression));
+            (calleeMayBeHostCallable(ctx, expr.expression) || calleeIsPromiseExecutorParam(ctx, expr.expression));
 
           let fallbackInstrs: Instr[] | null = null;
           let dispatchOuterBody: Instr[] | null = null;

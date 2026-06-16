@@ -12,10 +12,9 @@ import { buildImports } from "../src/runtime.js";
 
 async function instantiate(src: string): Promise<Record<string, (...a: unknown[]) => unknown>> {
   const result = await compile(src);
-  expect(
-    result.success,
-    `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`,
-  ).toBe(true);
+  expect(result.success, `Compile failed:\n${result.errors.map((e) => `  L${e.line}: ${e.message}`).join("\n")}`).toBe(
+    true,
+  );
   const imports = buildImports(result.imports, {}, result.stringPool);
   const { instance } = await WebAssembly.instantiate(result.binary, imports as WebAssembly.Imports);
   const exports = instance.exports as Record<string, (...a: unknown[]) => unknown>;
