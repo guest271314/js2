@@ -61,8 +61,9 @@ a standalone fallback) for the whole user-Error-subclass surface.
 
 The externref-backed-subclass path is the most fragile class-construction code
 (host-alloc instance, prototype tagging, `instanceof` host chain). #1536's
-shippable scope (gap #1 `.stack` + decisions #3/#4) already landed on main and
-host mode is unaffected; doing this rework inside #1536 risked a class-ctor
+shippable scope (gap #1 `.stack`, landed in the #1536 PR on top of the
+#1104/#1473/#2077 machinery already on main, plus decisions #3/#4) leaves host
+mode unaffected; doing this subclass rework inside #1536 risked a class-ctor
 regression. The architect's plan explicitly sanctioned splitting it here.
 
 ## Acceptance criteria
