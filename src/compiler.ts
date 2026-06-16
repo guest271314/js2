@@ -678,6 +678,7 @@ export function compileSourceSync(
 
   // Step 2: Generate IR
   let mod;
+  let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
   try {
     if (useLinear) {
       mod = generateLinearModule(ast, { exposeArenaReset: options.allocator === "arena-reset" });
@@ -719,6 +720,7 @@ export function compileSourceSync(
         jsxRuntime: preprocessed.jsxRuntime,
       });
       mod = result.module;
+      capturedFallbackCounts = result.fallbackCounts;
       // Propagate codegen errors with source locations
       for (const err of result.errors) {
         errors.push({
@@ -884,6 +886,7 @@ export function compileSourceSync(
     hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
     exportSignatures: mod.exportSignatures,
+    fallbackCounts: capturedFallbackCounts,
   };
 }
 
@@ -990,6 +993,7 @@ export async function compileMultiSource(
   const useLinear = options.target === "linear";
 
   let mod;
+  let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
   try {
     if (useLinear) {
       mod = generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" });
@@ -1021,6 +1025,7 @@ export async function compileMultiSource(
         standalone: options.target === "standalone",
       });
       mod = result.module;
+      capturedFallbackCounts = result.fallbackCounts;
       // Propagate codegen errors with source locations
       for (const err of result.errors) {
         errors.push({
@@ -1184,6 +1189,7 @@ export async function compileMultiSource(
     hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
     exportSignatures: mod.exportSignatures,
+    fallbackCounts: capturedFallbackCounts,
   };
 }
 
@@ -1264,6 +1270,7 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
   const useLinear = options.target === "linear";
 
   let mod;
+  let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
   try {
     if (useLinear) {
       mod = generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" });
@@ -1295,6 +1302,7 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
         standalone: options.target === "standalone",
       });
       mod = result.module;
+      capturedFallbackCounts = result.fallbackCounts;
       for (const err of result.errors) {
         errors.push({
           message: err.message,
@@ -1450,5 +1458,6 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
     hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
     hasTopLevelStatements: mod.hasTopLevelStatements === true,
     exportSignatures: mod.exportSignatures,
+    fallbackCounts: capturedFallbackCounts,
   };
 }

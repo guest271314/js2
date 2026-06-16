@@ -22,6 +22,7 @@ import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
+import type { FallbackCounts } from "./fallback-telemetry.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import type {
@@ -89,6 +90,7 @@ import {
   collectDeclaredFuncRefs,
   compileClassBodies,
 } from "./class-bodies.js";
+import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983)
 import {
   applyShapeInference,
   collectDeclarations,
@@ -954,9 +956,21 @@ export function generateModule(
 ): {
   module: WasmModule;
   errors: { message: string; line: number; column: number; severity?: "error" | "warning" }[];
+  // #2089 — silent-fallback telemetry counters (per class → per site → count).
+  fallbackCounts?: FallbackCounts;
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, ast.checker, options);
+  // (#1983) Pre-scan top-level user `function` declaration names BEFORE any
+  // class member registers a funcMap key, so `classMemberFuncKey` can detect a
+  // `${className}_${member}` ↔ user-function collision (e.g. `class A { m() {} }`
+  // + `function A_m() {}`) and relocate the class member's key. Must run here —
+  // ahead of class collection/compile — because the producers query this set.
+  for (const stmt of ast.sourceFile.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body && !hasDeclareModifier(stmt)) {
+      ctx.topLevelFunctionNames.add(stmt.name.text);
+    }
+  }
   try {
     // WASI target: register linear memory, bump pointer global, and WASI imports
     if (ctx.wasi) {
@@ -1628,7 +1642,7 @@ export function generateModule(
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  return { module: mod, errors: ctx.errors };
+  return { module: mod, errors: ctx.errors, fallbackCounts: ctx.fallbackCounts };
 }
 
 /**
@@ -2662,7 +2676,7 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
     )
       continue;
 
-    const funcIdx = ctx.funcMap.get(`${structName}_${methodSuffix}`);
+    const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`)); // (#1983)
     if (funcIdx === undefined) continue;
 
     const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
@@ -4876,6 +4890,8 @@ export function generateMultiModule(
 ): {
   module: WasmModule;
   errors: { message: string; line: number; column: number; severity?: "error" | "warning" }[];
+  // #2089 — silent-fallback telemetry counters (per class → per site → count).
+  fallbackCounts?: FallbackCounts;
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, multiAst.checker, options);
@@ -5150,7 +5166,7 @@ export function generateMultiModule(
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  return { module: mod, errors: ctx.errors };
+  return { module: mod, errors: ctx.errors, fallbackCounts: ctx.fallbackCounts };
 }
 
 // ── Unified single-pass import collector (#592) ─────────────────────
@@ -9757,6 +9773,15 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
       if (ctx.mapTypeIdx >= 0) return { kind: "ref", typeIdx: ctx.mapTypeIdx };
     }
 
+    // (#2162) Set → the SAME native `$Map` struct in standalone / nativeStrings
+    // mode (a Set is a Map with key === value). A `Set`-typed binding becomes
+    // `ref $Map` so `new Set()` stores directly and method/.size dispatch reads
+    // a typed receiver. JS-host mode keeps Set as an externref externClass.
+    if (sym?.name === "Set" && ctx.nativeStrings) {
+      ensureMapRuntimeTypes(ctx);
+      if (ctx.mapTypeIdx >= 0) return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+
     // Check externref AFTER Array check — Array is declared in lib but should use wasm GC arrays
     if (isExternalDeclaredClass(tsType, ctx.checker)) return { kind: "externref" };
 
@@ -10108,7 +10133,8 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
     if (declSourceFile && declSourceFile.isDeclarationFile) continue;
 
     const fullName = `${structName}_${prop.name}`;
-    if (ctx.funcMap.has(fullName)) continue; // already registered
+    const methodKey = classMemberFuncKey(ctx, fullName); // (#1983) collision-free key + display name
+    if (ctx.funcMap.has(methodKey)) continue; // already registered
 
     const sig = callSigs[0]!;
     // Build parameter types: self (ref $structTypeIdx) + declared params.
@@ -10154,10 +10180,10 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
 
     const methodTypeIdx = addFuncType(ctx, methodParams, methodResults, `${fullName}_type`);
     const methodFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.funcMap.set(fullName, methodFuncIdx);
+    ctx.funcMap.set(methodKey, methodFuncIdx); // (#1983) relocated key
 
     const methodFunc: WasmFunction = {
-      name: fullName,
+      name: methodKey, // (#1983) display name matches relocated funcMap key for body-fill
       typeIdx: methodTypeIdx,
       locals: [],
       body: [],
@@ -10190,8 +10216,14 @@ function externMethod(
  * (e.g., bundled/browser environments where readLibFile returns empty strings).
  */
 export function registerBuiltinExternClasses(ctx: CodegenContext): void {
-  // Set methods — all take (self: externref, ...args: externref) → externref
-  if (!ctx.externClasses.has("Set")) {
+  // Set methods — all take (self: externref, ...args: externref) → externref.
+  // (#2162) In standalone / nativeStrings mode `Set` is served by the
+  // WasmGC-native runtime (src/codegen/set-runtime.ts, reusing the Map backing
+  // store), intercepted at the new-expression / method-call / .size sites.
+  // Registering it as an externClass here would eagerly emit a `Set_new` host
+  // import the standalone module can't satisfy, so skip it in that mode (mirrors
+  // the Map gating below). JS-host mode keeps the externClass path unchanged.
+  if (!ctx.externClasses.has("Set") && !ctx.nativeStrings) {
     const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
     // ES2015 methods
     methods.set("add", externMethod(1)); // add(value) → Set

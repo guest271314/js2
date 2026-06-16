@@ -25,6 +25,8 @@ import {
   resolveWasmType,
 } from "../index.js";
 import { ensureMapHelpers } from "../map-runtime.js";
+import { ensureSetHelpers } from "../set-runtime.js";
+import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { resolveComputedKeyExpression } from "../literals.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
 import {
@@ -933,7 +935,7 @@ function compileNewFunctionDeclaration(
   const ctorResults: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
   const ctorTypeIdx = addFuncType(ctx, ctorParams, ctorResults, `${ctorName}_type`);
   const ctorFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.funcMap.set(ctorName, ctorFuncIdx);
+  ctx.funcMap.set(classMemberFuncKey(ctx, ctorName), ctorFuncIdx); // (#1983) collision-free key
 
   const ctorFunc = {
     name: ctorName,
@@ -1097,7 +1099,7 @@ function compileNewFunctionDeclaration(
     }
   }
   // Re-lookup funcIdx in case addUnionImports shifted indices
-  const finalCtorIdx = ctx.funcMap.get(ctorName) ?? ctorFuncIdx;
+  const finalCtorIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)) ?? ctorFuncIdx; // (#1983)
   maybeSetArgcForKnownCall(ctx, fctx, ctorName, args.length, paramTypes?.length ?? args.length);
   fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
   return { kind: "ref", typeIdx: structTypeIdx };
@@ -1565,7 +1567,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
 
   if (syntheticName) {
     const ctorName = `${syntheticName}_new`;
-    const funcIdx = ctx.funcMap.get(ctorName);
+    const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
     if (funcIdx !== undefined) {
       return emitClassCtorValue(ctx, fctx, ctorName, funcIdx);
     }
@@ -1576,7 +1578,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
     const className = expr.name.text;
     if (ctx.classSet.has(className)) {
       const ctorName = `${className}_new`;
-      const funcIdx = ctx.funcMap.get(ctorName);
+      const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
       if (funcIdx !== undefined) {
         return emitClassCtorValue(ctx, fctx, ctorName, funcIdx);
       }
@@ -1661,6 +1663,25 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
+  // (#2162) `new Set()` in standalone / nativeStrings mode → the WasmGC-native
+  // Set runtime, which reuses the Map backing store (`__map_new` yields the
+  // same empty `$Map` a Set wraps). No-arg form only; `new Set(iterable)` needs
+  // the iterator drive (follow-up slice) and falls through.
+  if (
+    ctx.nativeStrings &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "Set" &&
+    (expr.arguments?.length ?? 0) === 0
+  ) {
+    addUnionImports(ctx);
+    ensureSetHelpers(ctx);
+    const mapNewIdx = ctx.mapHelpers.get("__map_new");
+    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+  }
+
   // Arrow functions are NOT constructors — `new (() => {})` throws TypeError (#730)
   {
     const unwrappedNew = unwrapNewTarget(expr.expression);
@@ -1685,7 +1706,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const syntheticName = ctx.anonClassExprNames.get(unwrappedExpr);
       if (syntheticName) {
         const ctorName = `${syntheticName}_new`;
-        const funcIdx = ctx.funcMap.get(ctorName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
         if (funcIdx === undefined) {
           reportError(ctx, expr, `Missing constructor for anonymous class`);
           return null;
@@ -2155,6 +2176,16 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           funcIdx: ctx.funcMap.get("__wasi_date_now")!,
         } as Instr);
         fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
+        return { kind: "ref", typeIdx: dateTypeIdx };
+      }
+      // (#2164) Pure standalone has no wall clock — emit the Unix epoch (0)
+      // directly instead of leaking the unsatisfiable env::__date_now host
+      // import (which made `new Date()` a hard instantiate failure standalone,
+      // breaking unrelated Date tests). See the matching Date.now() fallback in
+      // expressions/calls.ts.
+      if (ctx.standalone === true) {
+        fctx.body.push({ op: "i64.const", value: 0n });
         fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
         return { kind: "ref", typeIdx: dateTypeIdx };
       }
@@ -3000,7 +3031,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // Handle local class constructors
   if (ctx.classSet.has(className)) {
     const ctorName = `${className}_new`;
-    const funcIdx = ctx.funcMap.get(ctorName);
+    const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
     if (funcIdx === undefined) {
       reportError(ctx, expr, `Missing constructor for class: ${className}`);
       return null;
@@ -3072,7 +3103,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
     // Re-lookup funcIdx: argument compilation may trigger addUnionImports
     // which shifts defined-function indices, making the earlier lookup stale.
-    const finalCtorIdx = ctx.funcMap.get(ctorName) ?? funcIdx;
+    const finalCtorIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)) ?? funcIdx; // (#1983)
     maybeSetArgcForKnownCall(ctx, fctx, ctorName, ctorActualArgCount, paramTypes?.length ?? ctorActualArgCount);
     fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
     // (#1366a) Externref-backed subclass instances (extends Error / TypeError

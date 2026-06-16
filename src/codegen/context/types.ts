@@ -10,6 +10,7 @@ import { ts } from "../../ts-api.js";
 import type { FieldDef, Instr, LocalDef, SourcePos, ValType, WasmModule } from "../../ir/types.js";
 import type { StandaloneRegExpEngineConfig } from "../regexp-standalone.js";
 import type { ObjectRuntimeTypes } from "../object-runtime.js";
+import type { FallbackCounts } from "../fallback-telemetry.js";
 
 export interface CodegenError {
   message: string;
@@ -22,6 +23,14 @@ export interface CodegenError {
 export interface CodegenResult {
   module: WasmModule;
   errors: CodegenError[];
+  /**
+   * #2089 — silent-fallback telemetry counters captured during this codegen
+   * run (per class → per site → count). Surfaced so the gate
+   * (`scripts/check-codegen-fallbacks.ts`) can aggregate structured counts
+   * rather than parsing warning strings. Optional so existing callers that
+   * destructure `{ module, errors }` are unaffected.
+   */
+  fallbackCounts?: FallbackCounts;
 }
 
 /** Public options for backend code generation. */
@@ -50,6 +59,13 @@ export interface CodegenOptions {
    * reaches parity with the legacy direct-emission path.
    */
   experimentalIR?: boolean;
+  /**
+   * #2089 — count silent codegen fallbacks via `reportSilentFallback` and, when
+   * set, surface each as a warning diagnostic. Used by
+   * `scripts/check-codegen-fallbacks.ts`. Default off (counts are still kept;
+   * only the warning emission is gated).
+   */
+  trackSilentFallbacks?: boolean;
   /** Node builtin modules detected during import preprocessing (#1044) */
   nodeBuiltins?: import("../../import-resolver.js").NodeBuiltinImport[];
   /** Set of function names imported from node:fs (detected pre-preprocessing).
@@ -509,6 +525,19 @@ export interface CodegenContext {
   funcStack: FunctionContext[];
   /** Errors accumulated during codegen */
   errors: CodegenError[];
+  /**
+   * #2089 — silent-fallback telemetry counters (per class → per site → count).
+   * Populated by `reportSilentFallback` (fallback-telemetry.ts) at instrumented
+   * fallback sites; aggregated by `scripts/check-codegen-fallbacks.ts` into the
+   * baseline. Phase 0 is pure telemetry — no behavior depends on these counts.
+   */
+  fallbackCounts: FallbackCounts;
+  /**
+   * #2089 — when true, every `reportSilentFallback` also pushes a warning
+   * diagnostic (in addition to counting). Off by default; the gate script and
+   * `JS2WASM_LOG_CODEGEN_FALLBACKS=1` turn it on.
+   */
+  trackSilentFallbacks?: boolean;
   /** Last AST node with a valid source position — used as fallback for error reporting
    * when the immediate node lacks source file context (synthetic/detached nodes). */
   lastKnownNode: ts.Node | null;
@@ -580,6 +609,15 @@ export interface CodegenContext {
   classSet: Set<string>;
   /** Classes that must throw TypeError at evaluation time */
   classThrowsOnEval: Set<string>;
+  /**
+   * (#1983) Names of top-level user `function` declarations in the source. Used
+   * by `classMemberFuncKey` to detect when a synthetic class-member key
+   * (`${className}_${member}`) would collide with a user function of the same
+   * name (e.g. `class A { m() {} }` + `function A_m() {}`), so the class
+   * member's **funcMap** entry can take a collision-free key. Populated in
+   * `collectDeclarations` (runs before any class body compiles).
+   */
+  topLevelFunctionNames: Set<string>;
   /** Map from "ClassName_methodName" → method info for local classes */
   classMethodSet: Set<string>;
   /** Classes inside function bodies whose body compilation is deferred */

@@ -7,6 +7,7 @@
 import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { popBody, pushBody } from "./context/bodies.js";
+import { reportSilentFallback } from "./fallback-telemetry.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { shiftLateImportIndices } from "./expressions/late-imports.js";
@@ -783,7 +784,10 @@ export function destructureParamObject(
       // Nested pattern — recurse
       if (ts.isObjectBindingPattern(element.name) || ts.isArrayBindingPattern(element.name)) {
         const fieldIdx = fields.findIndex((f) => f.name === propKey);
-        if (fieldIdx === -1) continue;
+        if (fieldIdx === -1) {
+          reportSilentFallback(ctx, "lookup-miss-skip", "destructuring-params:nested-pattern-field-miss", element);
+          continue;
+        }
         const fieldType = fields[fieldIdx]!.type;
         const tmpLocal = allocLocal(fctx, `__dparam_${fctx.locals.length}`, fieldType);
         fctx.body.push({ op: "local.get", index: paramIdx });

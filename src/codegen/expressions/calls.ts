@@ -19,6 +19,7 @@ import {
 } from "../../checker/type-mapper.js";
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
+import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { reserveClosedMethodDispatch } from "../closed-method-dispatch.js";
 import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
 import {
@@ -6091,6 +6092,20 @@ function compileCallExpression(
           fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__wasi_date_now")! } as Instr);
           return { kind: "f64" };
         }
+        // (#2164) Pure standalone (--target standalone, no JS host AND no WASI
+        // clock) has no wall-clock source, so the env::__date_now host import is
+        // unsatisfiable — every module that calls Date.now() (or new Date() with
+        // no args) failed to instantiate standalone, breaking unrelated Date
+        // tests that only touch Date.now() in setup. Emit the Unix epoch (0)
+        // directly: deterministic, no import leak, module instantiates. Tests
+        // that construct explicit timestamps (the bulk of the gap) then work;
+        // only tests asserting a *real* current time (which standalone WasmGC
+        // cannot provide) stay failing — and those need a clock source, not a
+        // host import.
+        if (ctx.standalone === true) {
+          fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+          return { kind: "f64" };
+        }
         const dateNowIdx = ensureLateImport(ctx, "__date_now", [], [{ kind: "f64" }]);
         if (dateNowIdx !== undefined) {
           flushLateImportShifts(ctx, fctx);
@@ -6231,7 +6246,7 @@ function compileCallExpression(
       const methodName = propAccess.name.text;
       const fullName = `${clsName}_${methodName}`;
       if (ctx.staticMethodSet.has(fullName)) {
-        const funcIdx = ctx.funcMap.get(fullName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)); // (#1983)
         if (funcIdx !== undefined) {
           // No self parameter for static methods
           const paramTypes = getFuncParamTypes(ctx, funcIdx);
@@ -6261,7 +6276,7 @@ function compileCallExpression(
           // Set __argc before the call so the callee knows the actual arg count
           maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, staticParamCount);
           // Re-lookup funcIdx: argument compilation may trigger addUnionImports
-          const finalStaticIdx = ctx.funcMap.get(fullName) ?? funcIdx;
+          const finalStaticIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)) ?? funcIdx; // (#1983)
           fctx.body.push({ op: "call", funcIdx: finalStaticIdx });
 
           const sig = ctx.checker.getResolvedSignature(expr);
@@ -6691,13 +6706,13 @@ function compileCallExpression(
         ? "__priv_" + propAccess.name.text.slice(1)
         : propAccess.name.text;
       let fullName = `${receiverClassName}_${methodName}`;
-      let funcIdx = ctx.funcMap.get(fullName);
+      let funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)); // (#1983)
       // Walk inheritance chain to find the method in a parent class
       if (funcIdx === undefined) {
         let ancestor = ctx.classParentMap.get(receiverClassName);
         while (ancestor && funcIdx === undefined) {
           fullName = `${ancestor}_${methodName}`;
-          funcIdx = ctx.funcMap.get(fullName);
+          funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)); // (#1983)
           ancestor = ctx.classParentMap.get(ancestor);
         }
       }
@@ -6713,7 +6728,7 @@ function compileCallExpression(
         for (const [childClass, parentClass] of ctx.classParentMap) {
           if (parentClass === receiverClassName || parentClass === baseClass) {
             const childFullName = `${childClass}_${methodName}`;
-            const childFuncIdx = ctx.funcMap.get(childFullName);
+            const childFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, childFullName)); // (#1983)
             const childTag = ctx.classTagMap.get(childClass);
             if (childFuncIdx !== undefined && childTag !== undefined) {
               candidates.push({ className: childClass, funcIdx: childFuncIdx, classTag: childTag });
@@ -6744,7 +6759,7 @@ function compileCallExpression(
           }
           if (cur === receiverClassName && childClass !== receiverClassName) {
             const childFullName = `${childClass}_${methodName}`;
-            const childFuncIdx = ctx.funcMap.get(childFullName);
+            const childFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, childFullName)); // (#1983)
             const childTag = ctx.classTagMap.get(childClass);
             if (
               childFuncIdx !== undefined &&
@@ -6783,7 +6798,7 @@ function compileCallExpression(
       // We call the getter first, then invoke the returned callable.
       if (funcIdx === undefined) {
         const getterName = `${receiverClassName}_get_${methodName}`;
-        const getterIdx = ctx.funcMap.get(getterName);
+        const getterIdx = ctx.funcMap.get(classMemberFuncKey(ctx, getterName)); // (#1983)
         if (getterIdx !== undefined) {
           const getterCallResult = compileGetterCallable(ctx, fctx, expr, propAccess, receiverClassName, getterIdx);
           if (getterCallResult !== undefined) return getterCallResult;
@@ -6813,7 +6828,7 @@ function compileCallExpression(
           }
           // Re-resolve funcIdx after receiver compilation — emitUndefined (for `this` in static
           // context) triggers addUnionImports which shifts all function indices (#998)
-          const resolvedStaticIdx = ctx.funcMap.get(fullName) ?? funcIdx;
+          const resolvedStaticIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)) ?? funcIdx; // (#1983)
           const paramTypes = getFuncParamTypes(ctx, resolvedStaticIdx);
           const paramCount = paramTypes ? paramTypes.length : expr.arguments.length;
           const calleeReadsArgsStatic = ctx.funcUsesArguments.has(fullName);
@@ -6839,7 +6854,7 @@ function compileCallExpression(
           }
           // Set __argc before the call so the callee knows the actual arg count
           maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, paramCount);
-          const finalMethodIdx = ctx.funcMap.get(fullName) ?? resolvedStaticIdx;
+          const finalMethodIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)) ?? resolvedStaticIdx; // (#1983)
           fctx.body.push({ op: "call", funcIdx: finalMethodIdx });
           const sig = ctx.checker.getResolvedSignature(expr);
           if (sig) {
@@ -6970,7 +6985,7 @@ function compileCallExpression(
           }
           // Set __argc before the call so the callee knows the actual arg count
           maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, ngParamCount);
-          const finalMethodIdx = ctx.funcMap.get(fullName) ?? funcIdx;
+          const finalMethodIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)) ?? funcIdx; // (#1983)
           fctx.body.push({ op: "call", funcIdx: finalMethodIdx });
           const elseInstrs = fctx.body;
           fctx.body = savedBody;
@@ -7034,7 +7049,7 @@ function compileCallExpression(
         // Set __argc before the call so the callee knows the actual arg count
         maybeSetArgcForKnownCall(ctx, fctx, fullName, expr.arguments.length, methodParamCount);
         // Re-lookup funcIdx: argument compilation may trigger addUnionImports
-        const finalMethodIdx = ctx.funcMap.get(fullName) ?? funcIdx;
+        const finalMethodIdx = ctx.funcMap.get(classMemberFuncKey(ctx, fullName)) ?? funcIdx; // (#1983)
         fctx.body.push({ op: "call", funcIdx: finalMethodIdx });
 
         // Determine return type
