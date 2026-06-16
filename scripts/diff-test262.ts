@@ -275,11 +275,7 @@ async function run(
   // unstamped (pre-#2096) file as comparable to anything — there is no
   // recorded oracle to conflict with, so we fall back to the legacy behaviour
   // and only emit an informational note.
-  if (
-    baseOracle !== undefined &&
-    newOracle !== undefined &&
-    baseOracle !== newOracle
-  ) {
+  if (baseOracle !== undefined && newOracle !== undefined && baseOracle !== newOracle) {
     if (!oracleRebase) {
       console.error(
         `\n✖ Oracle-version guard (#2096): cross-version diff refused.\n` +
@@ -464,8 +460,12 @@ async function run(
       ctSuspect += 1;
     }
   }
-  console.log(`=== ct_flake (compile_timeout, baseline ≤${CT_FLAKE_THRESHOLD_MS}ms — runner-load noise): ${ctFlake} ===`);
-  console.log(`=== ct_suspect (compile_timeout, baseline >${CT_FLAKE_THRESHOLD_MS}ms or unknown — investigate): ${ctSuspect} ===`);
+  console.log(
+    `=== ct_flake (compile_timeout, baseline ≤${CT_FLAKE_THRESHOLD_MS}ms — runner-load noise): ${ctFlake} ===`,
+  );
+  console.log(
+    `=== ct_suspect (compile_timeout, baseline >${CT_FLAKE_THRESHOLD_MS}ms or unknown — investigate): ${ctSuspect} ===`,
+  );
   if (!quiet && ctSuspect > 0) {
     for (const r of ctRegressions.filter(
       (r) => !(typeof r.baselineCompileMs === "number" && r.baselineCompileMs <= CT_FLAKE_THRESHOLD_MS),
@@ -610,9 +610,7 @@ async function run(
     .sort();
   if (signatureFiles.length > 0) {
     const bucketSignature = createHash("sha256").update(signatureFiles.join("\n")).digest("hex").slice(0, 16);
-    console.log(
-      `=== Regression bucket signature: ${bucketSignature} (${signatureFiles.length} non-CT files) ===`,
-    );
+    console.log(`=== Regression bucket signature: ${bucketSignature} (${signatureFiles.length} non-CT files) ===`);
     console.log(
       `  (Same signature on another PR ⇒ identical cluster ⇒ likely baseline drift — see feedback_baseline_drift_cross_check.)`,
     );
