@@ -2313,7 +2313,18 @@ function _sidecarDelete(obj: any, key: any): boolean {
  * real `undefined` return is wrongly treated as "absent" and the next method is
  * consulted (#1826). Per §7.1.1.1 steps 5-6, any non-Object return is the result.
  */
-const _PRIM_ABSENT: unique symbol = Symbol("toPrimitive-method-absent");
+// #1935 — single in-band "absent" sentinel for the host runtime. Returning
+// `undefined` to signal "no such getter / method / property" is a bug: user
+// code can legitimately return `undefined`, and the in-band signal then
+// misreads that as absence (a getter returning `undefined` shadowed by the
+// underlying field; a `valueOf` returning `undefined` treated as "no valueOf").
+// `_MISS` is a unique symbol that user code can never produce, so it
+// unambiguously means absence. (Was `_PRIM_ABSENT`, scoped to ToPrimitive;
+// unified here and now also used by the property-getter lookup path.)
+const _MISS: unique symbol = Symbol("runtime-absent-sentinel");
+// Back-compat alias so the existing ToPrimitive call sites keep reading
+// naturally; both names refer to the same unique symbol.
+const _PRIM_ABSENT: typeof _MISS = _MISS;
 
 /**
  * ToPrimitive for WasmGC structs (#850).
@@ -4322,27 +4333,32 @@ function _wrapForHost(obj: any, exports: Record<string, Function> | undefined): 
     // function under `__get_<k>` (string) or in `_wasmStructAccessors` (symbol).
     // Note: getters defined in a TS object literal compile to a Wasm closure
     // (typeof === "object"); call those via __call_fn_0 export.
-    const invokeGetter = (g: any): any | undefined => {
-      if (g == null) return undefined;
+    // #1935 — return `_MISS` ONLY when no getter is actually callable. When a
+    // getter runs, its result (even `undefined`) is a genuine HIT and is
+    // returned as-is; the caller must distinguish `_MISS` from `undefined` so a
+    // getter that returns `undefined` shadows the underlying field per spec,
+    // instead of silently falling through to the sidecar/struct value.
+    const invokeGetter = (g: any): any => {
+      if (g == null) return _MISS;
       if (typeof g === "function") return (g as Function).call(obj);
       if (typeof g === "object" && _isWasmStruct(g) && exports) {
         const callFn0 = exports["__call_fn_0"];
         if (typeof callFn0 === "function") return callFn0(g);
       }
-      return undefined;
+      return _MISS;
     };
     if (typeof key === "string") {
       const wasmSc = _wasmStructProps.get(obj);
       const getter = wasmSc?.[`__get_${key}` as string];
       if (getter !== undefined) {
         const v = invokeGetter(getter);
-        if (v !== undefined) return v;
+        if (v !== _MISS) return v;
       }
     } else if (typeof key === "symbol") {
       const accessor = _wasmStructAccessors.get(obj)?.get(key);
       if (accessor?.get !== undefined) {
         const v = invokeGetter(accessor.get);
-        if (v !== undefined) return v;
+        if (v !== _MISS) return v;
       }
     }
     // Sidecar first (handles both string and symbol keys)
