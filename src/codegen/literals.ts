@@ -170,7 +170,7 @@ export function ensureComputedPropertyFields(
  *
  * Returns externref, or null if the host import is unavailable.
  */
-function compileObjectLiteralAsExternref(
+export function compileObjectLiteralAsExternref(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.ObjectLiteralExpression,

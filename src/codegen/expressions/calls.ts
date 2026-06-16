@@ -56,7 +56,13 @@ import {
   nativeStringType,
   resolveWasmType,
 } from "../index.js";
-import { compileArrayConstructorCall, compileSymbolCall, resolveComputedKeyExpression } from "../literals.js";
+import {
+  compileArrayConstructorCall,
+  compileObjectLiteralAsExternref,
+  compileSymbolCall,
+  resolveComputedKeyExpression,
+  resolvePropertyNameText,
+} from "../literals.js";
 import { tryEmitJsonParseLiteral, tryEmitJsonStringifyStatic } from "../json-standalone.js";
 import { emitJsonParsePrimitive, emitJsonQuoteString } from "../json-runtime.js";
 import {
@@ -203,6 +209,46 @@ const BUILTIN_CLASS_NAMES = new Set([
  * literal to `false`. Returns `undefined` when the value isn't statically
  * resolvable (caller should fall back to the runtime path).
  */
+/**
+ * (#2076) Compile an `Object.assign(target, ...sources)` argument, pushing an
+ * externref onto the stack. Under `--target standalone`, the native
+ * `__object_assign` reads each operand by `ref.test $Object` and iterates its
+ * `$PropEntry` table; a *closed-struct* literal fails that test, so its
+ * properties are silently dropped and `Object.keys` on the result sees nothing
+ * (the bug). The struct path is what `compileObjectLiteral` picks for a literal
+ * argument whose TS contextual type — here `Object.assign`'s generic signature
+ * resolves it to a CONCRETE object type, not `any` — so the open-`$Object`
+ * diversion (literals.ts) never fires.
+ *
+ * Fix: when the argument is a *plain data-property / spread* object literal
+ * (no accessors, methods, or computed/symbol keys — the same shapes the
+ * `$Object` builder accepts at literals.ts:870-874), build it directly as a
+ * native `$Object` via `compileObjectLiteralAsExternref` so `__object_assign`
+ * recognises it. Any other argument (identifiers, calls, accessor-bearing
+ * literals) keeps the ordinary `compileExpression` path. Standalone-only — host
+ * / WASI mode owns the `__object_assign` JS import and is untouched.
+ */
+function compileObjectAssignArg(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
+  if (
+    ctx.standalone &&
+    ts.isObjectLiteralExpression(arg) &&
+    arg.properties.length > 0 &&
+    arg.properties.every(
+      (p) => ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) || ts.isSpreadAssignment(p),
+    ) &&
+    arg.properties.every((p) => ts.isSpreadAssignment(p) || resolvePropertyNameText(ctx, p) !== undefined)
+  ) {
+    const objResult = compileObjectLiteralAsExternref(ctx, fctx, arg);
+    if (objResult) {
+      if (objResult.kind !== "externref") coerceType(ctx, fctx, objResult, { kind: "externref" });
+      return;
+    }
+    // fall through to the ordinary path if the $Object builder declined.
+  }
+  const t = compileExpression(ctx, fctx, arg, { kind: "externref" });
+  if (t && t.kind !== "externref") coerceType(ctx, fctx, t, { kind: "externref" });
+}
+
 function staticToBoolean(expr: ts.Expression): boolean | undefined {
   while (
     ts.isAsExpression(expr) ||
@@ -5161,8 +5207,9 @@ function compileCallExpression(
       expr.arguments.length >= 1
     ) {
       const targetArg = expr.arguments[0]!;
-      const targetType = compileExpression(ctx, fctx, targetArg, { kind: "externref" });
-      if (targetType && targetType.kind !== "externref") coerceType(ctx, fctx, targetType, { kind: "externref" });
+      // (#2076) Object-literal operands must build as native $Objects in
+      // standalone so __object_assign's `ref.test $Object` recognises them.
+      compileObjectAssignArg(ctx, fctx, targetArg);
       // Build the variadic `...sources` list. Under --target standalone there is
       // no JS array, so the native __object_assign iterates a $ObjVec built by
       // the native $ObjVec builders (__objvec_new / __objvec_push) instead of the
@@ -5195,8 +5242,7 @@ function compileCallExpression(
         fctx.body.push({ op: "local.set", index: sourcesLocal });
         for (let i = 1; i < expr.arguments.length; i++) {
           fctx.body.push({ op: "local.get", index: sourcesLocal });
-          const srcType = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "externref" });
-          if (srcType && srcType.kind !== "externref") coerceType(ctx, fctx, srcType, { kind: "externref" });
+          compileObjectAssignArg(ctx, fctx, expr.arguments[i]!);
           fctx.body.push({ op: "call", funcIdx: arrPushIdx });
         }
         fctx.body.push({ op: "local.get", index: targetLocal });
