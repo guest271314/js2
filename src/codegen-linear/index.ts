@@ -2163,30 +2163,90 @@ function compileBinaryExpression(ctx: LinearContext, fctx: LinearFuncContext, ex
     }
   }
 
-  // Logical AND / OR: short-circuit evaluation producing f64
+  // Logical AND / OR: short-circuit evaluation yielding the OPERAND value
+  // (#2184). JS `a || b` ⇒ `ToBoolean(a) ? a : b`; `a && b` ⇒
+  // `ToBoolean(a) ? b : a`. The result is an *operand*, not a 0/1 boolean —
+  // earlier lowering coerced to f64 and pushed `0`/`1` constants on the
+  // short-circuit arm, which discarded the value (`"" || "x"` returned `0`
+  // instead of `"x"`, `0 || 42` returned `1` instead of `42`).
+  //
+  // The boolean-context use (`if (a || b)`, `while`, `?:` condition) is handled
+  // by callers that run emitTruthyCoercion on the result, so yielding the real
+  // operand value stays correct there too (ToBoolean(operand) is what JS does).
   if (op === ts.SyntaxKind.AmpersandAmpersandToken || op === ts.SyntaxKind.BarBarToken) {
-    compileExpression(ctx, fctx, expr.left);
     const leftType = inferExprType(ctx, fctx, expr.left);
+    const rightType = inferExprType(ctx, fctx, expr.right);
+
+    // Mixed-type operands (e.g. string `i32` vs number `f64`) can't share a
+    // single `if` result ValType without a boxed/`any` representation: coercing
+    // a string POINTER to f64 would corrupt both the value and its downstream
+    // truthiness (a nonzero pointer reads as truthy even for `""`). This is the
+    // documented same-typed-first scope (#2184) — for mixed types keep the
+    // legacy boolean-producing lowering, which is correct in boolean context
+    // (the dominant mixed-type use; #1975). A follow-up covers mixed values.
+    if (leftType.kind !== rightType.kind) {
+      compileExpression(ctx, fctx, expr.left);
+      emitTruthyCoercion(fctx, leftType, { ctx, expr: expr.left });
+      const thenBodyM: Instr[] = [];
+      const elseBodyM: Instr[] = [];
+      const savedBodyM = fctx.body;
+      if (op === ts.SyntaxKind.AmpersandAmpersandToken) {
+        fctx.body = thenBodyM;
+        compileExprToF64(ctx, fctx, expr.right);
+        fctx.body = savedBodyM;
+        elseBodyM.push({ op: "f64.const", value: 0 });
+      } else {
+        thenBodyM.push({ op: "f64.const", value: 1 });
+        fctx.body = elseBodyM;
+        compileExprToF64(ctx, fctx, expr.right);
+        fctx.body = savedBodyM;
+      }
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "f64" } },
+        then: thenBodyM,
+        else: elseBodyM,
+      });
+      return;
+    }
+
+    // Same-typed operands carry their native value type (string i32-pointer,
+    // f64, bool i32). Hold the LHS in a temp so its value is available on the
+    // short-circuit arm after it has been consumed by the truthiness test.
+    const resultType: ValType = leftType;
+    const leftTemp = addLocal(fctx, `__logical_lhs_${fctx.locals.length}`, leftType);
+    compileExpression(ctx, fctx, expr.left);
+    fctx.body.push({ op: "local.tee", index: leftTemp });
     emitTruthyCoercion(fctx, leftType, { ctx, expr: expr.left });
+
+    const emitLeftAsResult = () => {
+      fctx.body.push({ op: "local.get", index: leftTemp });
+    };
+    const emitRightAsResult = () => {
+      compileExpression(ctx, fctx, expr.right);
+    };
+
     const thenBody: Instr[] = [];
     const elseBody: Instr[] = [];
     const savedBody = fctx.body;
     if (op === ts.SyntaxKind.AmpersandAmpersandToken) {
-      // &&: if left truthy → evaluate right; else → 0
+      // &&: left truthy → right; else → left
       fctx.body = thenBody;
-      compileExprToF64(ctx, fctx, expr.right);
-      fctx.body = savedBody;
-      elseBody.push({ op: "f64.const", value: 0 });
-    } else {
-      // ||: if left truthy → 1; else → evaluate right
-      thenBody.push({ op: "f64.const", value: 1 });
+      emitRightAsResult();
       fctx.body = elseBody;
-      compileExprToF64(ctx, fctx, expr.right);
+      emitLeftAsResult();
+      fctx.body = savedBody;
+    } else {
+      // ||: left truthy → left; else → right
+      fctx.body = thenBody;
+      emitLeftAsResult();
+      fctx.body = elseBody;
+      emitRightAsResult();
       fctx.body = savedBody;
     }
     fctx.body.push({
       op: "if",
-      blockType: { kind: "val", type: { kind: "f64" } },
+      blockType: { kind: "val", type: resultType },
       then: thenBody,
       else: elseBody,
     });
@@ -3888,6 +3948,21 @@ function inferExprType(ctx: LinearContext, fctx: LinearFuncContext, expr: ts.Exp
     if (isStringExpr(ctx, fctx, expr.left) || isStringExpr(ctx, fctx, expr.right)) {
       return { kind: "i32" };
     }
+  }
+
+  // #2184: `&&`/`||` yield an OPERAND value, not a 0/1 boolean. The codegen
+  // emits an `if` whose result ValType is the unified operand type (same-typed
+  // operands carry their native type; mixed i32/f64 falls back to f64). This
+  // inference MUST mirror the `resultType` computed in the lowering above so
+  // callers (variable declaration, return) allocate a matching local.
+  if (
+    ts.isBinaryExpression(expr) &&
+    (expr.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
+      expr.operatorToken.kind === ts.SyntaxKind.BarBarToken)
+  ) {
+    const lt = inferExprType(ctx, fctx, expr.left);
+    const rt = inferExprType(ctx, fctx, expr.right);
+    return lt.kind === rt.kind ? lt : { kind: "f64" };
   }
 
   // `this` is always an i32 pointer
