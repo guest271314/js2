@@ -47,6 +47,9 @@ export function createCodegenContext(
     // #2089 — silent-fallback telemetry counters.
     fallbackCounts: createFallbackCounts(),
     trackSilentFallbacks: options?.trackSilentFallbacks,
+    // #1923 — IR post-claim demotions; always collected (cheap), mirroring
+    // fallbackCounts. Surfaced on CompileResult.irPostClaimErrors for the gate.
+    irPostClaimErrors: [],
     lastKnownNode: null,
     externClasses: new Map(),
     pseudoExternClasses: new Map(),

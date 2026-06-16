@@ -203,6 +203,12 @@ export function compileIrPathFunctions(
     if (!selected.funcs.has(name)) continue;
 
     try {
+      // #1923 — test-only seam: simulate a build-time demotion on a CLAIMED
+      // function so the post-claim metering + gate can be exercised without a
+      // real compiler regression in the corpus. Off in every normal build.
+      if (process.env.JS2WASM_TEST_INJECT_IR_BUILD_THROW) {
+        throw new Error(`ir/from-ast: injected test build failure (${name})`);
+      }
       const o = overrides?.get(name);
       const result = lowerFunctionAstToIr(stmt, {
         exported: hasExportModifier(stmt),
