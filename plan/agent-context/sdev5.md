@@ -36,12 +36,12 @@ for a fresh senior resuming any of my threads.
 - **#2158** (1,388-test class/proto/descriptor standalone lane) —
   **status: suspended**, branch **`issue-2158-classmeta`** (commits 2c5bb9fef +
   0d21b6282). Inert P0 scaffolding landed (`classMetaTypeIdx` + `classMetaGlobals`
-  context state). Full resume steps in `plan/issues/2158-*.md` `## Suspended Work`:
+  context state). Full resume steps in #2158 `## Suspended Work`:
   P0 `$ClassMeta` registration at `class-bodies.ts:546-573` (byte-identical, lazy
   populator mirroring `emitLazyProtoGet`), #2009 tag-VALUE discipline, use
-  `classMemberFuncKey` for `$ctorFunc`. Authoritative spec: `plan/issues/2101-*.md`.
+  `classMemberFuncKey` for `$ctorFunc`. Authoritative spec: #2101.
 - **#2161a** (RegExp.prototype reflection closures) — **task #46, parked
-  blocked-on-arch**. KEY FINDING (in #1521 / `plan/issues/2161-*.md`): the refusal
+  blocked-on-arch**. KEY FINDING (in #1521 / #2161): the refusal
   is reading **`RegExp.prototype` itself** (the prototype OBJECT,
   `property-access.ts:1969`), not the method/getter — every form chains off it,
   NO isolated slice. It needs `RegExp.prototype` as a standalone-queryable object
@@ -58,7 +58,7 @@ for a fresh senior resuming any of my threads.
 Standalone test262 baseline pulled to
 `/home/node/.claude/jobs/<job>/tmp/standalone.jsonl` (48,117 entries; source
 `loopdive/js2wasm-baselines/test262-standalone-current.jsonl`). The #2161 triage
-table (1,120 RegExp failures bucketed) is in `plan/issues/2161-*.md`. Re-fetch
+table (1,120 RegExp failures bucketed) is in #2161. Re-fetch
 the standalone baseline the same way to scope other Lane-B residuals.
 
 ## Other open tasks I touched
