@@ -527,6 +527,35 @@ export function collectClassDeclaration(
   // struct type registered), since built-ins have no Wasm struct fields to inherit.
   if (!parentClassName || parentStructTypeIdx === undefined) {
     fields.unshift({ name: "__tag", type: { kind: "i32" }, mutable: false });
+
+    // (#2158 / #2009) Structural-collision guard. An empty class root struct
+    // is exactly `(struct (field $__tag i32))`. The native-string supertype
+    // `$AnyString` is also a single-i32-field open struct
+    // (`(struct (field $len i32))`). When such a class is a hierarchy ROOT
+    // (it has subclasses, so it is left non-final/open), WasmGC iso-recursive
+    // canonicalization merges it with `$AnyString` — both are structurally
+    // identical open singletons. The class's (final) subclasses then become
+    // subtypes of `$AnyString`, so `ref.test $AnyString` on a subclass
+    // instance (or class-object singleton) returns TRUE. That false positive
+    // drives the standalone `===` / `typeof` string arm to
+    // `ref.cast $AnyString` + `__str_flatten` on a non-string struct →
+    // `RuntimeError: illegal cast`, breaking every strict-equality and
+    // string-typeof over a subclass value in --target standalone (a large
+    // slice of the #2158 class/prototype residual). Lone empty classes do not
+    // hit this because `markLeafStructsFinal` makes them `final`, and a final
+    // struct is not subtype-compatible with the non-final `$AnyString`.
+    //
+    // Fix: append a hidden immutable sentinel i32 so the root struct is
+    // `(struct (field i32) (field i32))` — structurally distinct from the
+    // single-field `$AnyString`, breaking the canonical merge. Appended LAST
+    // so every existing positional `fieldIdx` for real instance fields is
+    // unaffected; constructors / lazy proto+class-object inits iterate the
+    // field list and default it to 0 automatically. Cost: +4 bytes only on
+    // empty class instances (the rare case). A class with any instance field
+    // is already structurally distinct and needs no sentinel.
+    if (fields.length === 1) {
+      fields.push({ name: "__shape_brand", type: { kind: "i32" }, mutable: false });
+    }
   }
 
   // Update the placeholder struct type with resolved fields
