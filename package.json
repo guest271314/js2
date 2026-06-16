@@ -88,6 +88,7 @@
     "test:262:validate-baseline": "npx tsx scripts/validate-test262-baseline.ts",
     "baseline:fetch": "node scripts/fetch-baseline-jsonl.mjs",
     "check:ir-fallbacks": "npx tsx scripts/check-ir-fallbacks.ts",
+    "check:stack-balance": "npx tsx scripts/check-stack-balance.ts",
     "census:async": "node scripts/async-call-census.mjs",
     "check:codegen-fallbacks": "npx tsx scripts/check-codegen-fallbacks.ts",
     "check:any-box-sites": "node scripts/check-any-box-sites.mjs",
