@@ -34,6 +34,7 @@ import {
 import { compileExpression, compileStatement, coerceType } from "./shared.js";
 import { allocLocal } from "./context/locals.js";
 import { resolveWasmType } from "./index.js";
+import { isPromiseType } from "../checker/type-mapper.js";
 
 /**
  * Master gate for the AST-side async CPS lowering.
@@ -75,6 +76,22 @@ export interface AsyncCpsPlan {
   readonly hasTryAcrossAwait: boolean;
   /** Does the body contain a `throw` that must reject the outer Promise? */
   readonly hasUncaughtThrow: boolean;
+  /**
+   * For each await point: `true` when its operand is *statically resolved* —
+   * i.e. the awaited value is already settled at compile time and the suspension
+   * is observably a no-op (`await 1`, `await Promise.resolve(x)`, `await` over a
+   * literal/arithmetic-of-literals). When EVERY await in a body is statically
+   * resolved (and the body otherwise matches a CPS-able shape), the function does
+   * not genuinely suspend: it can be compiled as a synchronous function that
+   * returns a fulfilled Promise (compile-time await-elision) instead of paying
+   * the CPS state-machine cost. See {@link asyncFnNeedsCps} (#1936).
+   *
+   * Conservative: only the forms enumerated in {@link awaitIsStaticallyResolved}
+   * count as resolved; anything else (a call result, a member read, an
+   * identifier that might hold a pending Promise) is `false` so the safe CPS /
+   * legacy path is chosen.
+   */
+  readonly awaitedStaticallyResolved: ReadonlyMap<ts.AwaitExpression, boolean>;
 }
 
 /**
@@ -122,12 +139,179 @@ export function analyzeAsyncBody(_ctx: CodegenContext, fn: ts.FunctionLikeDeclar
     liveAfterAwait.set(awaitExpr, live);
   }
 
+  // Static-resolution census (#1936): classify each await operand as
+  // settled-at-compile-time or not. Drives `asyncFnNeedsCps` and the
+  // compile-time await-elision decision in #1796.
+  const awaitedStaticallyResolved = new Map<ts.AwaitExpression, boolean>();
+  for (const awaitExpr of awaitPoints) {
+    awaitedStaticallyResolved.set(awaitExpr, awaitIsStaticallyResolved(awaitExpr.expression));
+  }
+
   return {
     awaitPoints,
     liveAfterAwait,
     hasTryAcrossAwait: awaitPoints.length > 0 && bodyHasTryAcrossAwait(body),
     hasUncaughtThrow: body !== undefined && bodyHasUncaughtThrow(body),
+    awaitedStaticallyResolved,
   };
+}
+
+/**
+ * Conservative compile-time predicate: is the operand of an `await` already a
+ * *settled* value, so that `await operand` performs no observable suspension?
+ *
+ * Per §27.7.5.3, `await V` ≡ `PromiseResolve(%Promise%, V)` then a job. When `V`
+ * is not a thenable the resumption is a single microtask carrying `V` unchanged;
+ * when `V` is `Promise.resolve(x)` with a non-thenable `x` it likewise settles
+ * to `x`. In both cases the *value* is statically known to be the operand (or
+ * its resolve-argument); only the scheduling differs. js2wasm's synchronous
+ * model already collapses that scheduling, so these awaits are safe to treat as
+ * pass-through.
+ *
+ * Recognised static forms (intentionally narrow — over-approximating here would
+ * mis-elide a genuinely-suspending await):
+ *   - numeric / string / boolean / null literals
+ *   - `void`-prefixed, unary `+`/`-`/`!` over a static operand
+ *   - binary arithmetic / comparison where BOTH operands are static
+ *   - parenthesised / `as`-cast wrappers around a static operand
+ *   - `Promise.resolve(<static>)` and `Promise.resolve()` (settles to undefined)
+ *
+ * Everything else — a call result, a member access, a bare identifier (which may
+ * hold a pending Promise) — returns `false`.
+ */
+export function awaitIsStaticallyResolved(operand: ts.Expression): boolean {
+  // Unwrap transparent wrappers first.
+  let expr: ts.Expression = operand;
+  while (
+    ts.isParenthesizedExpression(expr) ||
+    ts.isAsExpression(expr) ||
+    ts.isTypeAssertionExpression(expr) ||
+    ts.isNonNullExpression(expr)
+  ) {
+    expr = expr.expression;
+  }
+
+  // Literals: numeric / string / no-substitution template / true / false / null.
+  if (
+    ts.isNumericLiteral(expr) ||
+    ts.isStringLiteral(expr) ||
+    ts.isNoSubstitutionTemplateLiteral(expr) ||
+    expr.kind === ts.SyntaxKind.TrueKeyword ||
+    expr.kind === ts.SyntaxKind.FalseKeyword ||
+    expr.kind === ts.SyntaxKind.NullKeyword
+  ) {
+    return true;
+  }
+
+  // `undefined` as an identifier is a settled value too.
+  if (ts.isIdentifier(expr) && expr.text === "undefined") return true;
+
+  // Unary `+x` / `-x` / `!x` / `void x` over a static operand.
+  if (ts.isPrefixUnaryExpression(expr)) {
+    return awaitIsStaticallyResolved(expr.operand);
+  }
+  if (ts.isVoidExpression(expr)) {
+    return awaitIsStaticallyResolved(expr.expression);
+  }
+
+  // Binary arithmetic/comparison where both sides are static.
+  if (ts.isBinaryExpression(expr)) {
+    return awaitIsStaticallyResolved(expr.left) && awaitIsStaticallyResolved(expr.right);
+  }
+
+  // `Promise.resolve(<static?>)` — settles to the (static) argument, or undefined.
+  if (
+    ts.isCallExpression(expr) &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    ts.isIdentifier(expr.expression.expression) &&
+    expr.expression.expression.text === "Promise" &&
+    expr.expression.name.text === "resolve"
+  ) {
+    if (expr.arguments.length === 0) return true; // resolves to undefined
+    if (expr.arguments.length === 1) return awaitIsStaticallyResolved(expr.arguments[0]!);
+    return false;
+  }
+
+  return false;
+}
+
+/**
+ * The per-function CPS decision (#1936) — replaces the global
+ * {@link ASYNC_CPS_ENABLED} kill-switch with a per-function predicate. Returns
+ * `true` only when the function *genuinely suspends* and the suspension is in a
+ * shape the state machine can lower:
+ *
+ *   1. at least one await point exists,
+ *   2. at least one await operand is NOT statically resolved (a real suspension —
+ *      otherwise the body is await-elidable and compiles as a sync fn returning
+ *      a fulfilled Promise), and
+ *   3. {@link splitBodyAtAwait} accepts the body shape (single top-level await in
+ *      a canonical position; richer control flow stays on the legacy path with a
+ *      `cps-unsupported-shape` census bucket).
+ *
+ * `ASYNC_CPS_ENABLED` is retained as a transitional master kill-switch routed
+ * through this predicate so the global flip stays inert until #1796; when it is
+ * `false` the predicate always returns `false` (current shipped behaviour).
+ */
+export function asyncFnNeedsCps(fn: ts.FunctionLikeDeclaration, plan: AsyncCpsPlan): boolean {
+  if (!ASYNC_CPS_ENABLED) return false;
+  if (plan.awaitPoints.length === 0) return false;
+  const anyRealSuspension = plan.awaitPoints.some((a) => plan.awaitedStaticallyResolved.get(a) !== true);
+  if (!anyRealSuspension) return false; // fully await-elidable → sync + resolved Promise
+  return splitBodyAtAwait(fn, plan) !== null;
+}
+
+/**
+ * Classification of how an async call's result is consumed at its call site —
+ * the per-call-site half of the async contract migration (#1936). The legacy
+ * boolean `asyncResultConsumedAsValue` only distinguished "raw value" from
+ * "everything else"; the census needs the three-way split so #1796 can migrate
+ * exactly the `value`-but-not-statically-resolved set.
+ *
+ *   - `await`    — consumed by an enclosing `await` (raw-T passthrough today).
+ *   - `value`    — consumed through a non-Promise cast/assertion sink
+ *                  (`f() as number`, `as unknown as number`, `as any`): the
+ *                  synchronous-consumption contract that blocks the global flip.
+ *   - `thenable` — consumed as a real Promise (`.then`, `Promise.all([f()])`,
+ *                  `const p: Promise<T> = f()`, bare `return f()`): already
+ *                  spec-correct, takes the wrap path.
+ */
+export type AsyncConsumerKind = "await" | "value" | "thenable";
+
+/**
+ * Census classifier for an async call result's consumer (#1936). Pure: depends
+ * only on the AST shape around `expr` and the `checker` for cast target types,
+ * so the offline census script can reuse it without a full `CodegenContext`.
+ *
+ * Walks the transparent wrapper chain (`(...)`, `as`, `!`, `<T>`) from
+ * `expr.parent` exactly as the shipped `asyncResultConsumedAsValue` does, then:
+ *   - if the semantic consumer is an `AwaitExpression` → `await`,
+ *   - else if any wrapper cast targets a non-Promise type → `value`,
+ *   - else → `thenable`.
+ *
+ * Behaviour parity note: `classifyAsyncConsumer(...) !== "thenable"` is exactly
+ * the boolean the legacy `asyncResultConsumedAsValue` returns, so routing the
+ * call site through this classifier is a behaviour-preserving refactor until the
+ * #1796 flip changes the `value`/`thenable` dispatch.
+ */
+export function classifyAsyncConsumer(checker: ts.TypeChecker, expr: ts.CallExpression): AsyncConsumerKind {
+  let sawNonPromiseCast = false;
+  let parent: ts.Node | undefined = expr.parent;
+  while (
+    parent &&
+    (ts.isParenthesizedExpression(parent) ||
+      ts.isAsExpression(parent) ||
+      ts.isNonNullExpression(parent) ||
+      ts.isTypeAssertionExpression(parent))
+  ) {
+    if (ts.isAsExpression(parent) || ts.isNonNullExpression(parent) || ts.isTypeAssertionExpression(parent)) {
+      const castType = checker.getTypeAtLocation(parent);
+      if (!isPromiseType(castType)) sawNonPromiseCast = true;
+    }
+    parent = parent.parent;
+  }
+  if (parent && ts.isAwaitExpression(parent)) return "await";
+  return sawNonPromiseCast ? "value" : "thenable";
 }
 
 /**
