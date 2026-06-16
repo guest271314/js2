@@ -42,6 +42,7 @@
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { ensureNativeStringHelpers } from "./native-strings.js";
+import { emitRyuToBuf } from "./number-ryu.js";
 import { addFuncType } from "./registry/types.js";
 
 const BUF_CAP = 256;
@@ -419,10 +420,12 @@ function emitToString(
   if (radixIdx === undefined) return;
   const finalizeIdx = ctx.funcMap.get("__num_fmt_finalize");
   if (finalizeIdx === undefined) return;
+  // #1537: shortest-roundtrip Ryū formatter for the fractional / unsafe branch.
+  const ryuToBufIdx = emitRyuToBuf(ctx, strDataTypeIdx);
 
   // params: 0 value:f64
-  // locals: 1 buf 2 pos 3 tmp 4 neg 5 abs 6 scale 7 scaled 8 intpart
-  //         9 fracpart 10 pow 11 digit 12 k
+  // locals: 1 buf 2 pos 3 tmp 4 neg 5 abs  (6..12 retained for layout parity
+  //   with the other formatters; the Ryū branch uses none of them)
   const L_VALUE = 0;
   const L_BUF = 1;
   const L_POS = 2;
@@ -467,157 +470,17 @@ function emitToString(
       ],
     },
 
-    // Fractional fallback: round to 6 fractional digits and trim trailing zeros.
-    { op: "f64.const", value: 1000000 },
-    { op: "local.set", index: L_SCALE },
+    // Fractional / unsafe-magnitude branch: shortest-roundtrip Ryū (#1537).
+    // `__num_ryu_to_buf(abs, neg, buf, pos)` writes the §6.1.6.1.13-formatted
+    // shortest decimal (including the leading '-' when neg) and returns the new
+    // write position. Passing `abs` keeps the sign bit clear so the Ryū core
+    // sees a positive value; the sign is reapplied by the formatter from `neg`.
     { op: "local.get", index: L_ABS },
-    { op: "local.get", index: L_SCALE },
-    { op: "f64.mul" },
-    { op: "f64.const", value: 0.5 },
-    { op: "f64.add" },
-    { op: "f64.floor" },
-    { op: "local.set", index: L_SCALED },
-    { op: "local.get", index: L_SCALED },
-    { op: "local.get", index: L_SCALE },
-    { op: "f64.div" },
-    { op: "f64.floor" },
-    { op: "local.set", index: L_INT },
-    { op: "local.get", index: L_SCALED },
-    { op: "local.get", index: L_INT },
-    { op: "local.get", index: L_SCALE },
-    { op: "f64.mul" },
-    { op: "f64.sub" },
-    { op: "local.set", index: L_FRAC },
-
     { op: "local.get", index: L_NEG },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: putConst(strDataTypeIdx, L_BUF, L_POS, C_MINUS),
-    },
-    ...emitIntegerDigits(strDataTypeIdx, L_INT, L_BUF, L_POS, L_TMP, L_POW, L_DIGIT),
-
-    { op: "local.get", index: L_FRAC },
-    { op: "f64.const", value: 0 },
-    { op: "f64.ne" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [
-        ...putConst(strDataTypeIdx, L_BUF, L_POS, C_DOT),
-        { op: "local.get", index: L_SCALE },
-        { op: "f64.const", value: 10 },
-        { op: "f64.div" },
-        { op: "f64.floor" },
-        { op: "local.set", index: L_POW },
-        { op: "i32.const", value: 0 },
-        { op: "local.set", index: L_K },
-        {
-          op: "block",
-          blockType: { kind: "empty" },
-          body: [
-            {
-              op: "loop",
-              blockType: { kind: "empty" },
-              body: [
-                { op: "local.get", index: L_K },
-                { op: "i32.const", value: 6 },
-                { op: "i32.ge_s" },
-                { op: "br_if", depth: 1 },
-                { op: "local.get", index: L_FRAC },
-                { op: "local.get", index: L_POW },
-                { op: "f64.div" },
-                { op: "f64.floor" },
-                { op: "local.set", index: L_DIGIT },
-                { op: "local.get", index: L_BUF },
-                { op: "local.get", index: L_POS },
-                { op: "i32.const", value: C_ZERO },
-                { op: "local.get", index: L_DIGIT },
-                { op: "i32.trunc_f64_s" },
-                { op: "i32.add" },
-                { op: "array.set", typeIdx: strDataTypeIdx },
-                { op: "local.get", index: L_POS },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "local.set", index: L_POS },
-                { op: "local.get", index: L_FRAC },
-                { op: "local.get", index: L_DIGIT },
-                { op: "local.get", index: L_POW },
-                { op: "f64.mul" },
-                { op: "f64.sub" },
-                { op: "local.set", index: L_FRAC },
-                { op: "local.get", index: L_POW },
-                { op: "f64.const", value: 10 },
-                { op: "f64.div" },
-                { op: "f64.floor" },
-                { op: "local.set", index: L_POW },
-                { op: "local.get", index: L_K },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "local.set", index: L_K },
-                { op: "br", depth: 0 },
-              ],
-            },
-          ],
-        },
-        // while pos>0 && buf[pos-1]=='0': pos--
-        {
-          op: "block",
-          blockType: { kind: "empty" },
-          body: [
-            {
-              op: "loop",
-              blockType: { kind: "empty" },
-              body: [
-                { op: "local.get", index: L_POS },
-                { op: "i32.eqz" },
-                { op: "br_if", depth: 1 },
-                { op: "local.get", index: L_BUF },
-                { op: "local.get", index: L_POS },
-                { op: "i32.const", value: 1 },
-                { op: "i32.sub" },
-                { op: "array.get_u", typeIdx: strDataTypeIdx },
-                { op: "i32.const", value: C_ZERO },
-                { op: "i32.ne" },
-                { op: "br_if", depth: 1 },
-                { op: "local.get", index: L_POS },
-                { op: "i32.const", value: 1 },
-                { op: "i32.sub" },
-                { op: "local.set", index: L_POS },
-                { op: "br", depth: 0 },
-              ],
-            },
-          ],
-        },
-        // If trimming removed all fractional digits, remove the decimal point.
-        { op: "local.get", index: L_POS },
-        { op: "i32.const", value: 0 },
-        { op: "i32.gt_s" },
-        {
-          op: "if",
-          blockType: { kind: "empty" },
-          then: [
-            { op: "local.get", index: L_BUF },
-            { op: "local.get", index: L_POS },
-            { op: "i32.const", value: 1 },
-            { op: "i32.sub" },
-            { op: "array.get_u", typeIdx: strDataTypeIdx },
-            { op: "i32.const", value: C_DOT },
-            { op: "i32.eq" },
-            {
-              op: "if",
-              blockType: { kind: "empty" },
-              then: [
-                { op: "local.get", index: L_POS },
-                { op: "i32.const", value: 1 },
-                { op: "i32.sub" },
-                { op: "local.set", index: L_POS },
-              ],
-            },
-          ],
-        },
-      ],
-    },
+    { op: "local.get", index: L_BUF },
+    { op: "local.get", index: L_POS },
+    { op: "call", funcIdx: ryuToBufIdx },
+    { op: "local.set", index: L_POS },
     ...finalizeReturn(),
   ];
 

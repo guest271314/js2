@@ -1,9 +1,11 @@
 ---
 id: 1537
 title: "Wasm-native number formatting (Ryū port): toString/toFixed/toPrecision/toExponential"
-status: backlog
+status: done
+assignee: ttraenkler/sdev-1537
+completed: 2026-06-16
 created: 2026-05-20
-updated: 2026-06-03
+updated: 2026-06-16
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -169,3 +171,73 @@ Boundary values to pin in the focused unit test:
 - Start CLEAN-CONTEXT: this is a numeric-correctness port where small errors
   silently fail boundary tests; pair it with the oracle test from the first
   commit and grow the value set as each case passes.
+
+## Implementation Notes (sdev-1537, 2026-06-16)
+
+**Delivered.** Shortest-roundtrip Ryū `d2d` core replaces the fixed-6-digit
+fractional branch of `number_toString` in standalone/WASI mode. New file
+`src/codegen/number-ryu.ts`; `emitToString` (number-format-native.ts) now calls
+`__num_ryu_to_buf` for the fractional / unsafe-magnitude branch. The non-finite
+prologue + safe-integer fast path + radix formatter are untouched.
+
+### Key decisions (the WHY)
+
+1. **Validate the algorithm in JS BigInt *before* writing any Wasm.** The
+   architect warned the failure mode is silent. I transcribed `ryu-ecmascript`
+   `d2d` to a BigInt reference (`.tmp/ryu-ref.mjs`) and ran it against
+   `String(x)` over 200k random f64 + the boundary set until 0 mismatches. The
+   Wasm is a mechanical translation of *that validated reference*, not of the C
+   source from memory. The single bug this caught: `computeInvPow5`'s shift was
+   off by one (`b - 1 + BITCOUNT` vs the correct `b + BITCOUNT`), which produced
+   exactly-half values for all large numbers — invisible on small inputs.
+
+2. **`mulShift` via 32-bit limbs (`umul128` + `shiftright128`), validated
+   separately.** No i128 in Wasm. A second probe (`.tmp/ryu-limbs.mjs`) proved
+   the limb-based `mulShift` is bit-identical to the BigInt `(m*factor)>>j` over
+   300k cases AND that the shift `j` is always in [118,125] (≥64), so the
+   optimized `shiftright128(_, _, j-64)` (dist ∈ [54,61], a valid 0<dist<64
+   shift) is always taken. Unsigned-overflow carry in `b0.hi + b2.lo` is
+   detected with `i64.lt_u` (the sum wrapping below an addend ⇒ carry).
+
+3. **Full (not compact) pow5 tables, generated at codegen time.** I use the full
+   `DOUBLE_POW5_INV_SPLIT` (291 entries, q∈[0,290]) and `DOUBLE_POW5_SPLIT`
+   (326 entries) — byte-identical to dtolnay's `d2s_full_table.h`. The compact
+   variant trades table size for extra runtime bignum work and more places to
+   get wrong; correctness > ~6 KB. Tables are computed by the same BigInt
+   `computePow5`/`computeInvPow5` the reference uses (so they cannot drift from
+   the validated algorithm) and emitted as two immutable `(array i64)` globals
+   via `array.new_fixed` init exprs, interleaved `[lo,hi,...]`.
+
+4. **New i64 ops added to the IR.** The digit loop and `mulShift` need unsigned
+   i64 division/remainder/compare: added `i64.{div_u,rem_u,lt_u,le_u,gt_u,ge_u}`
+   to the `Instr` union (`src/ir/types.ts`), the binary emitter
+   (`src/emit/binary.ts` — opcodes already existed in `opcodes.ts`), and
+   `src/codegen/stack-balance.ts` (net delta + type producers). `i64.clz` is NOT
+   needed — the ecmascript variant uses the integer `pow5bits`/`log10Pow*`
+   multiply-shift formulas, no count-leading-zeros.
+
+5. **Formatter writes digits to a scratch region of the same buffer.** Digits of
+   the i64 mantissa are extracted LSB-first into `buf[200..200+k)` (BUF_CAP=256,
+   k≤17, never overlaps the ≤24-char output that starts near pos 0), then emitted
+   MSB-first via `dig[k-1-j]`. §6.1.6.1.13 framing chooses integer / fixed /
+   leading-zero-fixed / exponential by the decimal point position n=exp+k.
+
+### Scope honored
+Only the shortest-significand path (`toString` default radix) was rerouted, per
+the plan. `toFixed(d)`/`toExponential(d)`/`toPrecision(p)` with explicit digit
+counts keep the existing fixed expansion (no boundary test required them to
+change). `(7.7).toFixed(20)` (needs bignum) remains the documented gap.
+
+### Validation
+- `tests/issue-1537.test.ts`: 33 tests — boundary set (0.1+0.2, 1/3, 1e21, 1e-7,
+  1e20, 2^53+1, min/max/subnormal, negatives) + a seeded 30k-value property test
+  (random bit patterns + scaled magnitudes + subnormals) asserting
+  `Wasm === String(x)`. All green.
+- Out-of-band sweep through the compiled Wasm: **152,997** random f64 matched V8
+  exactly (`.tmp/probe-random.mjs`, gitignored).
+- Existing `issue-1321-standalone`, `issue-49-number-format-nonfinite`,
+  `native-strings-*`, `issue-1759`, `bigint` suites still pass; full `tsc` and
+  `npm run lint` clean.
+- Binary-size delta: +~15.6 KB, emitted only when `number_toString` is used in a
+  standalone/WASI module (zero impact otherwise; verified no `__ryu_*` globals in
+  a module that doesn't stringify numbers).

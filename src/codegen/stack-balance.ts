@@ -247,7 +247,9 @@ function instrDelta(instr: Instr, types: TypeDef[], funcSigs: FuncSigInfo): numb
     op === "i64.sub" ||
     op === "i64.mul" ||
     op === "i64.div_s" ||
+    op === "i64.div_u" ||
     op === "i64.rem_s" ||
+    op === "i64.rem_u" ||
     op === "i64.and" ||
     op === "i64.or" ||
     op === "i64.xor" ||
@@ -257,9 +259,13 @@ function instrDelta(instr: Instr, types: TypeDef[], funcSigs: FuncSigInfo): numb
     op === "i64.eq" ||
     op === "i64.ne" ||
     op === "i64.lt_s" ||
+    op === "i64.lt_u" ||
     op === "i64.le_s" ||
+    op === "i64.le_u" ||
     op === "i64.gt_s" ||
+    op === "i64.gt_u" ||
     op === "i64.ge_s" ||
+    op === "i64.ge_u" ||
     op === "f64.add" ||
     op === "f64.sub" ||
     op === "f64.mul" ||
@@ -536,7 +542,15 @@ function inferLastType(body: Instr[], types: TypeDef[], sigs: FuncSigInfo): stri
       op === "f64.gt" ||
       op === "f64.ge" ||
       op === "i64.eq" ||
-      op === "i64.ne"
+      op === "i64.ne" ||
+      op === "i64.lt_s" ||
+      op === "i64.lt_u" ||
+      op === "i64.le_s" ||
+      op === "i64.le_u" ||
+      op === "i64.gt_s" ||
+      op === "i64.gt_u" ||
+      op === "i64.ge_s" ||
+      op === "i64.ge_u"
     ) {
       return "i32";
     }
@@ -547,6 +561,10 @@ function inferLastType(body: Instr[], types: TypeDef[], sigs: FuncSigInfo): stri
       op === "i64.add" ||
       op === "i64.sub" ||
       op === "i64.mul" ||
+      op === "i64.div_s" ||
+      op === "i64.div_u" ||
+      op === "i64.rem_s" ||
+      op === "i64.rem_u" ||
       op === "i64.and" ||
       op === "i64.or" ||
       op === "i64.xor" ||
