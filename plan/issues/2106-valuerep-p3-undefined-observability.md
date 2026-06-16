@@ -1,10 +1,11 @@
 ---
 id: 2106
 title: "value-rep P3: undefined observability — UNDEF_F64 sentinel, union-collapse reversal (flagged), standalone $undefined singleton"
-status: ready
+status: in-progress
+assignee: ttraenkler/sdev7
 sprint: 62
 created: 2026-06-11
-updated: 2026-06-15
+updated: 2026-06-16
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -98,3 +99,35 @@ perf/size blast-radius measurement as the acceptance criteria require.
 
 Symptom issues filed; the representation phase is unfiled. New (analysis
 program).
+
+## Slice S0 — `any[]` array-element tag recovery (sdev7, 2026-06-16) — SHIPPED
+
+First slice of P3 (the multi-slice S0–S4 plan lives in the #1503/value-rep doc
+commits). **Independent of #1503** — it does not depend on `value-tags.ts`.
+
+**Bug (host)**: a boolean (or any non-string primitive) stored in an `any[]`
+ARRAY LITERAL lost its JS tag on read-back — `typeof [true][0]` → `"number"`,
+`"" + [true][0]` → `"1"` (value preserved: `[true][0] === true`). Root cause:
+`[true]` builds `__vec_i32` (booleans lower to i32 and the `any[]` contextual
+element type is dropped at the ref-only adoption guard `literals.ts:2886`), then
+the i32-vec→`any[]` externref vec coercion boxes by Wasm KIND
+(`f64.convert_i32_s; __box_number`) → a JS number.
+
+**Fix** (`src/codegen/literals.ts`, `compileArrayLiteral`, before
+`elemKind`/`vecTypeIdx`): when `!hasSpread && elemWasm.kind ∈ {i32,f64}` AND the
+literal's `getContextualType` is `Array<any>`/`ReadonlyArray<any>` (type-arg flags
+carry `ts.TypeFlags.Any`), widen `elemWasm` to externref. Each element is then
+boxed by its own static type via the existing `compileExpression(el, externref)`
+path (`__box_boolean` for bool, `__box_number` for number, native string for
+string) — the same already-correct route `a.push(true)` uses. No `boxToAny` call
+needed. Scoped strictly to `any[]` literals → number[]/string[]/struct[]
+byte-identical.
+
+**Validated**: `tests/issue-2106-any-array-element-tag.test.ts` (7/7 host); tsc
+clean. **Standalone/WASI unchanged**: `typeof [true][0]` was already `null` and
+`"" + [true][0]` already trapped on the base (the standalone `any`-boolean tag
+gap is pre-existing, owned by S1/S3) — neither fixed nor worsened here.
+
+Remaining slices S1 (standalone `$undefined`), S2 (sNaN carve-out), S3
+(number|undefined→externref), S4 (flag-gated collapse reversal) stay open under
+this issue.
