@@ -200,8 +200,8 @@ verified-closed regression net: each asserts valid Wasm + a caught TypeError
 (return 1), the property the issue's "Risks → mitigate with a stress test" note
 asks for.
 
-**Deferred to a sprint-63 follow-up** (filed separately,
-`feasibility: medium`, `related: [1257]`): the *completeness* half of the
+**Deferred to sprint-63 follow-up #2182** (`feasibility: medium`,
+`related: [1257]`): the *completeness* half of the
 acceptance criteria — (a) a full audit of every `collectInstrs` caller /
 body-swap site to confirm each detached array is `liveBodies`-registered for
 its late-import window, and (b) a defensive end-of-compilation assertion that
