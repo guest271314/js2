@@ -134,3 +134,33 @@ bucket. Larger; likely a senior-dev slice.
 **Not a slice:** Int8Array signed-read of an out-of-range store (`a[0]=200` →
 expect `-56`) reads unsigned — a separate signed/wrap concern, orthogonal to the
 above.
+
+---
+
+## Slice (2026-06-17) — standalone TypedArray.prototype.fill packed-local leak
+
+**Landed.** Re-validation of the TypedArray-method surface standalone found that
+`set` / `subarray` / `copyWithin` / `slice` already work natively on byte/short
+typed arrays, but **`.fill()` was a hard compile error** for every byte/short
+typed array (`Uint8Array` / `Int8Array` / `Uint8ClampedArray` / `Int16Array` /
+`Uint16Array`).
+
+**Root cause** (`src/codegen/array-methods.ts` `compileArrayFill`): the
+fill-value temp local was allocated with the array's RAW element type — `i8`/`i16`,
+which are *packed storage* types valid only in array elements / struct fields,
+never in a value position (param/result/local/global). The binary emitter rejected
+the leaked local with `encodeValType: packed storage type "i8" is not valid in a
+value position` — the same class as the element-WRITE leak fixed in Slice 1, but
+in the `fill` path. `Int32Array`/`Float64Array` were unaffected (value-type
+elements).
+
+**Fix:** unpack the fill-value local type `i8`/`i16` → `i32` (and pass the
+unpacked type as the value-arg compile hint); `array.set` re-packs the `i32` into
+the element on store. Verified standalone: Uint8/Int8/Int16/Uint16 fill, negative
+signed round-trip, start/end range, modulo-256 wrap, and Int32Array no-regression.
+Test: `tests/issue-2159-ta-fill.test.ts`.
+
+**Out of this slice:** `subarray` aliasing (the returned view should share the
+parent buffer; standalone currently returns a copy) requires offset-windowing —
+the shared representation gap with DataView offset / TypedArray-on-buffer
+windowing — and is a separate follow-up.

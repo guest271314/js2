@@ -7414,7 +7414,16 @@ function compileArrayFill(
   const vecTmp = allocLocal(fctx, `__arr_fill_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_fill_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const lenTmp = allocLocal(fctx, `__arr_fill_len_${fctx.locals.length}`, { kind: "i32" });
-  const valTmp = allocLocal(fctx, `__arr_fill_val_${fctx.locals.length}`, elemType);
+  // (#2159) Byte/short typed arrays (Uint8Array/Int8Array/Int16Array/…) have a
+  // PACKED `i8`/`i16` element type, valid only in array elements / struct
+  // fields — never in a value position. Allocating the fill-value local with the
+  // raw packed `elemType` leaked it into a local, which the binary emitter
+  // rejects (`packed storage type "i8" is not valid in a value position`),
+  // making `.fill()` a hard compile error for every byte/short typed array
+  // standalone. Hold the value as the unpacked `i32`; `array.set` re-packs it on
+  // store (mirrors the element-assignment fix in assignment.ts).
+  const valType: ValType = elemType.kind === "i8" || elemType.kind === "i16" ? { kind: "i32" } : elemType;
+  const valTmp = allocLocal(fctx, `__arr_fill_val_${fctx.locals.length}`, valType);
   const startTmp = allocLocal(fctx, `__arr_fill_s_${fctx.locals.length}`, { kind: "i32" });
   const endTmp = allocLocal(fctx, `__arr_fill_e_${fctx.locals.length}`, { kind: "i32" });
   const iTmp = allocLocal(fctx, `__arr_fill_i_${fctx.locals.length}`, { kind: "i32" });
@@ -7433,8 +7442,8 @@ function compileArrayFill(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
 
-  // Compile value argument
-  compileExpression(ctx, fctx, callExpr.arguments[0]!, elemType);
+  // Compile value argument (unpacked hint — never pass the packed i8/i16).
+  compileExpression(ctx, fctx, callExpr.arguments[0]!, valType);
   fctx.body.push({ op: "local.set", index: valTmp });
 
   // start (default: 0) -- clamp negative
