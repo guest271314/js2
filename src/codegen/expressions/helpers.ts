@@ -226,6 +226,28 @@ export function emitThrowReferenceError(ctx: CodegenContext, fctx: FunctionConte
 }
 
 /**
+ * #2164 — Emit a throw of a RangeError INSTANCE. Mirrors `emitThrowTypeError`.
+ * Used by `Date.prototype.toISOString` on an Invalid Date receiver
+ * (ECMA-262 §21.4.4.36 — RangeError "Invalid time value"). In no-JS-host mode
+ * the RangeError is built via the in-module `__new_RangeError` constructor; in
+ * JS-host mode the import resolves to the JS `RangeError`.
+ */
+export function emitThrowRangeError(ctx: CodegenContext, fctx: FunctionContext, message: string): void {
+  if (noJsHost(ctx)) {
+    emitWasiErrorConstructor(ctx, "RangeError", 1);
+  }
+  addStringConstantGlobal(ctx, message);
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, message));
+  const newRangeErrorIdx = ensureLateImport(ctx, "__new_RangeError", [{ kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (newRangeErrorIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: newRangeErrorIdx });
+  }
+  const tagIdx = ensureExnTag(ctx);
+  fctx.body.push({ op: "throw", tagIdx });
+}
+
+/**
  * #1456 — Classify a private property reference for assignment/compound-assignment.
  *
  * Per ES2022 §7.3.18 (PrivateElementSet) and §13.15.2
