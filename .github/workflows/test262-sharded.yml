@@ -72,7 +72,7 @@ concurrency:
   # whenever main moves, which cascaded through the shared concurrency group to
   # abort the unrelated push:main runs queued behind them.
   #
-  # The fix has two parts and BOTH are load-bearing for baseline-refresh:
+  # The fix has THREE parts and ALL are load-bearing for baseline-refresh:
   #   1. The group key includes github.event_name, so a push:main run can never
   #      share a slot with a merge_group run (they previously collided on
   #      refs/heads/main vs the merge_group ref via a global group). A push:main
@@ -86,10 +86,28 @@ concurrency:
   #      completion and reaches promote-baseline. PR-level pushes still cancel
   #      previous in-flight runs for the same PR (the right behavior for PR
   #      iteration; PRs never promote a baseline).
+  #   3. (#2178) The PUSH group key includes github.sha, so EACH push:main
+  #      commit gets its OWN concurrency group. This is load-bearing because
+  #      cancel-in-progress:false alone is NOT enough: GitHub keeps at most ONE
+  #      *pending* run per group, so when run A is in-flight and B then C queue
+  #      behind it in the SAME group, B is silently CANCELLED the instant C
+  #      arrives (only the newest pending run survives). During rapid main
+  #      pushes (the merge-queue "thrash" of 2026-06-16, #2178) that cancels the
+  #      promote-baseline run for the intermediate SHA — a standalone-shifting
+  #      change (#2104/#1503) lands but its floor is never promoted, so every PR
+  #      on current main is blocked by the #1897 standalone guard against a
+  #      stale floor. Per-SHA push groups remove the shared queue entirely: no
+  #      push:main run can cancel another, so every push:main run reaches
+  #      promote-baseline and the floor always catches up. Latest-wins
+  #      serialization at the promote layer is handled by the baselines-repo
+  #      fetch+rebase retry loop and the main-repo Option-A re-anchor loop
+  #      (already present below). merge_group/workflow_dispatch/PR keys are
+  #      UNCHANGED — only push gets the per-SHA suffix.
   #
-  # DO NOT reintroduce a single global group or set cancel-in-progress: true for
-  # push/workflow_dispatch — either change re-breaks the baseline refresh.
-  group: test262-sharded-${{ github.event_name }}-${{ github.ref }}
+  # DO NOT reintroduce a single global group, set cancel-in-progress: true for
+  # push/workflow_dispatch, or drop the github.sha suffix from the push group
+  # key — any of those re-breaks the baseline refresh (#2178).
+  group: test262-sharded-${{ github.event_name }}-${{ github.ref }}${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
