@@ -4,7 +4,7 @@ title: "standalone: Array.prototype generics over array-like receivers emit inva
 status: in-progress
 sprint: Backlog
 created: 2026-06-10
-updated: 2026-06-17
+updated: 2026-06-14
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -140,64 +140,41 @@ indices visited); holes are skipped.
 - The broader generic-arm work (#1888 Slice 4) and the ~308 residual
   callback-evaluation assertion rows — re-measure after PR-1.
 
-## Implementation Plan (architect, 2026-06-17) — s63 gate slice S6
+## S6 Step 1 — LANDED (2026-06-17, dev-2)
 
-This issue owns slice **S6** of the #1472 gate (see #1472 coordinating spec).
-PR-1 already taught the **callback** array-like helpers (`forEach`/`some`/
-`every`/`findIndex`) to read a real `$Object` array-like. S6 closes the two
-remaining outcomes PR-1 documented as out of scope.
+Implemented the loud-refusal step per the architect spec. In
+`compileArrayLikePrototypeCall` (`src/codegen/array-methods.ts`), when the
+receiver is a **borrowed array-like `$Object`** (real `__vec_`/`__arr_` arrays
+already take the dedicated native path and return earlier) and the target is a
+not-yet-native method, standalone/WASI now emits a `Codegen error:` naming the
+method + `#2036 S6` instead of leaking a host import or emitting invalid Wasm:
 
-### Two remaining outcomes (from PR-1's "Remaining" note, confirmed on main)
-1. **Invalid Wasm (compile-time)** — `indexOf`/`lastIndexOf`/`includes` and
-   `filter` over an `$Object` receiver still emit
-   `local.set[0] expected type f64, found call of type externref` (and the dual
-   `call[0] expected externref, found f64.convert_i32_s`). PR-1 traced this to a
-   binary-emitter / local-type-layout bug in the search/`filter` call-site loop
-   (NOT the helper), reproducing on origin/main with the helper fix reverted.
-2. **Residual callback-eval assertion rows (~308)** — re-measure after the
-   compile-time bleed stops.
+- `STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS = {indexOf, lastIndexOf, includes,
+  filter, map, reduce, reduceRight}` — search methods leaked
+  `__host_eq`/`__same_value_zero` + tripped the `local.set expected f64, found
+  call externref` binary-emitter bug; result-builders leaked
+  `__js_array_new`/`__js_array_push`.
+- Callback-iteration methods (`forEach`/`some`/`every`/`find`/`findIndex`) got a
+  native `$Object` arm in PR-1 and are intentionally NOT in the set (control test
+  asserts they keep compiling + running).
+- Gated on `ctx.standalone || ctx.wasi`; host/gc output byte-identical.
 
-### S6 — two-step plan
+Tests: `tests/issue-2036.test.ts` (+9 cases — each of the 7 methods refuses
+loudly over an array-like `$Object`; controls: `forEach` still works, real native
+array still works, host mode still compiles the borrowed call). All 16 in the
+file pass; prettier/biome/tsc clean. Re-validated through the real
+`runTest262File` standalone harness: `15.4.4.20-9-c-iii-3.js` now refuses cleanly
+(was invalid Wasm).
 
-**Step 1 (small, ship first): stop the invalid-Wasm bleed.** Make the
-`indexOf`/`lastIndexOf`/`includes`/`filter` Array-brand arms that cannot yet
-handle a non-array receiver route to the **same loud `#1888 Slice 3/4` refusal**
-that `map`/`reduce` already use (`Codegen error: Array.prototype.X.call(...) is
-not yet supported in --target standalone …`). This converts ~195 invalid-Wasm
-rows (+ the silent `-1` wrong-result rows) into honest refusals and removes the
-`local.set expected f64, found externref` class from the standalone baseline —
-protecting the conformance number from silent wrongness. Locate the brand-arm
-routing in `src/codegen/expressions/late-imports.ts` / the #1888 Slice 3 dispatch
-and add the missing arms to the refusal set.
+### Remaining true-invalid-Wasm (NOT this slice — separate follow-up)
 
-**Step 2 (senior/infra): fix the local-type-layout emit bug + real generic arm.**
-The `local.set expected f64, found call externref` is a genuine binary-emitter
-bug in the search/`filter` loop where an element local is declared f64 but the
-generic `$Object` arm produces an externref. Two parts:
-- Fix the local typing so the search loop uses an **externref** element local on
-  the generic path (mirror PR-1's helper signatures), with strict-equality
-  comparison on JS values (§23.1.3.17 `indexOf` uses `IsStrictlyEqual`, NOT
-  numeric `===`), reading `length` via `__extern_length` and elements via
-  `__extern_get_idx` (both native since PR-1 / Blocker B).
-- `filter` builds its result via the native `$ObjVec` builders (Blocker B), not
-  the host `__js_array_new`/`__js_array_push`.
-This needs the same binary-emitter attention PR-1 escalated; pair with senior-dev.
+Three `built-ins/Array/prototype/filter` rows still emit genuine invalid Wasm but
+are NOT borrowed-receiver array-likes (out of S6 scope): `15.4.4.20-4-7.js`
+(`arr.filter(new Object())` — non-callable callback on a real array),
+`create-ctor-non-object.js`, `create-ctor-poisoned.js` (`Symbol.species`
+constructor reflection). All fail in a `__closure_N` with `call[1] expected type
+f64, found local.get` — a distinct native-`filter`-closure / species bug, not the
+generic-receiver root. Fold into Step 2 (senior/infra) or file separately.
 
-### Edge cases
-- Array-like with non-integer / missing `length` → ToLength clamps to 0 (PR-1's
-  `__extern_length` `$Object` arm already does this).
-- Holes (`{0:x, 2:y, length:3}`) → `__extern_has_idx` distinguishes hole from
-  present-undefined; `indexOf` skips holes, `includes` treats them as undefined
-  (§23.1.3.17 vs §23.1.3.16 — different hole semantics, get them right).
-- Negative `fromIndex` → existing array fast-path logic; ensure the generic arm
-  reuses it.
-
-### Acceptance signatures
-- Minimal repro (`Array.prototype.indexOf.call({0:5,5:'length',length:6},
-  'length')`) returns `5` (Step 2) or refuses loudly (Step 1) — never invalid
-  Wasm, never `-1`.
-- `15.4.4.14-3-*`, `15.4.4.14-5-*`, `15.4.4.20-3-*` standalone rows move from
-  `compile_error`(invalid Wasm)/`fail`(null deref) → pass or loud refusal.
-- No `local.set expected f64, found externref` rows remain under
-  `built-ins/Array/prototype` standalone.
-- Host mode unchanged.
+Issue stays `in-progress` — Step 2 (the real generic `$Object` arm +
+binary-emitter local-type fix) is senior/infra and unshipped.

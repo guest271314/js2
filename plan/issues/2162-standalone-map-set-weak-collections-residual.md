@@ -46,7 +46,7 @@ impact).
 Probed each collection in standalone (`target: standalone`). Findings:
 
 - **Map is already fully functional** in standalone — `new/set/get/has/
-  delete/size/clear` all return correct values when the result is read into a
+delete/size/clear` all return correct values when the result is read into a
   typed binding. The apparent Map failures in casual probing were
   `m.get(k) === <literal>` confounds (the `any === literal` boxed-compare gap,
   owned by value-rep #2104/#2106, not Map). No Map work needed for the core
@@ -78,12 +78,38 @@ host-import-free in standalone (~101+ tests). New
 `tryCompileNativeWeakMethodCall` (extern.ts); `WeakMap`/`WeakSet` resolve to
 `ref $Map` (index.ts); externClass skipped under `nativeStrings`. Weak
 collections have **no iteration and no `.size`** (spec), so none is wired. The
-*weak* (collectable) reference is not modelled — WasmGC has no weak refs, so
+_weak_ (collectable) reference is not modelled — WasmGC has no weak refs, so
 entries are strongly retained; a memory property, not observable (only WeakRef/
 FinalizationRegistry liveness, skip-filtered, could tell). Host/gc unchanged.
 **Verified** (`tests/issue-2162-standalone-weak.test.ts`, 6/6, `--target wasi`,
 zero `WeakMap_*`/`WeakSet_*`/`Map_*` imports): WeakMap set+get / has / distinct
 keys / overwrite / delete; WeakSet add+has / delete / chained add.
+
+## Slice — Map/Set `keys()`/`values()` + for-of iteration (this PR)
+
+`keys()` / `values()` and bare `for-of` over a native Map/Set now lower without
+a `Map_*`/`Set_*` host import. The projection is materialized eagerly into a
+**canonical externref `$Vec`** (mirroring the array `.values()`/`.keys()` path,
+`array-methods.ts`): a new `emitCollectionIteratorVec` (map-runtime.ts) walks the
+entries vector once, sizing the result to `liveCount` and skipping tombstones,
+and projects each live entry to its key (`keys`) or value (`values` — for a Set,
+key === value). The for-of array fast path then drives it, so `for (const v of
+m.values())`, `for (const k of m.keys())`, `for (const v of set)` and `[…]`
+indexing all work.
+
+**Latent bug fixed:** the `$Map` struct's `entries` field is a ref-to-array, so
+`getArrTypeIdxFromVec($Map)` returns a valid array index — which made
+`arrayIteratorReceiverForForOf` misidentify a native Map/Set as a plain vec and
+iterate its raw struct as garbage. `compileForOfStatement` now intercepts native
+collections (`compileForOfNativeCollection`) **before** the array-receiver
+detection.
+
+`Set.forEach` (the shared `tryCompileNativeCollectionForEach` helper, previously
+only wired for Map) is enabled here too.
+
+**Verified** (`tests/issue-2162-iterators.test.ts`, 7/7, `--target wasi`, zero
+`Map_*`/`Set_*` imports): Map/Set `keys()`/`values()` for-of, bare Set for-of,
+tombstone-skip, Set.forEach.
 
 ## Slice 3 — native Set.forEach (PR, dev-1, 2026-06-17)
 
@@ -115,11 +141,13 @@ control. Test: `tests/issue-2162-collection-from-array.test.ts` (10/10).
 
 ### Remaining slices (issue stays in-progress)
 
-- `keys()`/`values()`/`entries()` + `for-of` over Map/Set — needs a JS-iterable
-  iterator object. (Confirmed still broken standalone 2026-06-17:
-  `for (const v of set)` yields 0.) The general `new Map(iterable)` /
-  `new Set(iterable)` over a NON-literal iterable also needs this drive (Slice 4
-  covers only array literals).
+- **`entries()` `[k, v]`-pair iteration + value spread** (`[...map.values()]`) —
+  the `$ObjVec` pair / spread consumer needs the `__iterator` pair route, not the
+  array fast path. The `entries` projection builder is in place
+  (`emitCollectionIteratorVec`, `kind: "entries"`) but not yet wired to a
+  consumer. Tracked as a #2162 follow-up.
+- `new Map(iterable)` / `new Set(iterable)` over a NON-literal iterable — needs
+  the general iterator drive (Slice 4 from-array covers only array literals).
 - ES2025 set-algebra: `union`/`intersection`/`difference`/
   `symmetricDifference`/`isSubsetOf`/`isSupersetOf`/`isDisjointFrom`.
 - The `Set === literal` / collection-of-`any` comparison confounds depend on the
@@ -143,3 +171,36 @@ true+false predicate cases, content checks, dedup. Test:
 `tests/issue-2162-set-algebra.test.ts` (10/10, operands built via `.add()` so the
 slice is independent of the `new Set([...])` constructor slice). tsc + prettier
 clean; Set Slice-1 unaffected.
+
+## Slice — WeakMap/WeakSet stale-`mapHelpers`-index fix (PR, dev-mech1, 2026-06-17)
+
+Standalone WeakMap/WeakSet **construction + methods already existed** upstream
+(`new WeakMap()`/`new WeakSet()` → `__map_new`; get/set/has/delete/add via
+`tryCompileNativeWeakMethodCall`, reusing the `$Map` backing store). But on the
+`standalone:true, nativeStrings:true` path they emitted **invalid Wasm**: e.g.
+`wm.has(k)` validated-failed with `if[0] expected i32, found call of anyref`.
+
+**Root cause** (not weak-specific — a latent bug in the function-index shift
+machinery): `shiftLateImportIndices` (`expressions/late-imports.ts`) and the two
+`addUnionImports` shift sites (`index.ts`) keep `funcMap` / `nativeStrHelpers`
+(#1677) / `nativeRegexHelpers` (#1913) in lockstep with the defined-function
+shift, but **never shifted `ctx.mapHelpers`**. So when a late import
+(`__box_number`, pulled in to coerce a numeric key/value) lands BETWEEN a
+map-helper's registration and its `call` site, every defined function moves up by
+`added` but the `mapHelpers` entries stay stale-low — `wm.has` then emits a
+`call` to `__map_get` (the function one slot lower, returning `anyref` where an
+`i32` boolean was expected) → invalid Wasm. WeakMap exposed it because its first
+method call is often the first `__box_number` trigger; plain Map/Set hit the same
+window whenever a numeric key/value forces a late box. `--target wasi` dodged it
+(box helpers import eagerly), which is why the wasi-compiled
+`issue-2162-standalone-weak` suite passed before.
+
+**Fix** (mirrors #1677/#1913 exactly): add a `mapHelpers` lockstep shift at all
+three shift sites. After the fix, all weak methods produce valid Wasm and correct
+runtime values (get=42, has/miss/delete correct, add/has/delete correct).
+
+Tests: `tests/issue-2162-weak-mapHelpers-shift.test.ts` (5/5) — compiles each
+WeakMap/WeakSet/Map case `standalone+nativeStrings` and asserts valid Wasm; the
+assertion is `false` without the three-site fix (verified by reverting). tsc
+clean; existing Map/Set/Weak standalone suites (34) + shift-sensitive #2131 +
+foreach/algebra (29) unaffected.

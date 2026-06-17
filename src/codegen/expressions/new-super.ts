@@ -3613,7 +3613,20 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Always register, even for externref buffers — ArrayBuffer variables
       // in user code are lowered to externref (see checker/type-mapper.ts),
       // but the actual wasmGC struct is what the bridge dispatches on.
-      {
+      //
+      // (#2159) Standalone / WASI mode has no JS host: the accessor
+      // (`get/set{Int,Uint,Float}N`) is lowered to pure-Wasm byte reads/writes
+      // directly on the i32_byte backing struct (see dataview-native.ts), so
+      // there is no runtime bridge to register with. Emitting the host call
+      // unconditionally leaked an unsatisfiable `env::__dv_register_view`
+      // import, making EVERY `new DataView(...)` a hard instantiate failure
+      // standalone. Gate the registration on JS-host mode; standalone evaluates
+      // the offset/length args above for their side effects + RangeError checks
+      // and then operates on the struct directly. (The view-window base offset
+      // for `new DataView(buf, n>0)` is a separate representation slice, shared
+      // with TypedArray-on-buffer windowing; offset-0 views — the dominant
+      // case — are fully native here.)
+      if (!noJsHost(ctx)) {
         const regIdx = ensureLateImport(
           ctx,
           "__dv_register_view",
