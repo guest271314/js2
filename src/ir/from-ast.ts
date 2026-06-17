@@ -3073,24 +3073,52 @@ function lowerForOfStatement(stmt: ts.ForOfStatement, cx: LowerCtx): void {
  * the body reassigns as slot-bound, so cross-iteration writes go
  * through `slot.read` / `slot.write` and survive the loop.
  */
+/**
+ * #2136 — coerce a loop condition SSA value to an i32 boolean via ToBoolean.
+ *
+ * The `{while,for}.loop` lowerer emits `<condValue>; i32.eqz; br_if 1`, which
+ * requires an i32 condValue. An f64 (numeric) condition is converted with the
+ * NaN-safe ToBoolean `abs(x) > 0` — `f64.abs` folds `-0` to `0` and `NaN > 0`
+ * is false, so `0`, `-0` and `NaN` are all falsy (matching JS ToBoolean and
+ * the linear backend's `emitTruthyCoercion`, #1937). An i32 value is already a
+ * bool and passes through. Any other value type (ref/string) is out of scope
+ * for this slice and keeps the legacy fallback by throwing the same diagnostic
+ * the loops used before (#1980).
+ *
+ * MUST be called inside the `collectBodyInstrs` closure that builds the cond
+ * buffer so the coercion instructions re-run each iteration.
+ */
+function coerceLoopCondToBool(condValue: IrValueId, cx: LowerCtx, loopKind: "while" | "for"): IrValueId {
+  const kind = asVal(cx.builder.typeOf(condValue))?.kind;
+  if (kind === "i32") return condValue;
+  if (kind === "f64") {
+    // ToBoolean(f64) = abs(x) > 0  (false for 0, -0, NaN; true otherwise).
+    const absV = cx.builder.emitUnary("f64.abs", condValue, irVal({ kind: "f64" }));
+    const zero = cx.builder.emitConst({ kind: "f64", value: 0 }, irVal({ kind: "f64" }));
+    return cx.builder.emitBinary("f64.gt", absV, zero, irVal({ kind: "i32" }));
+  }
+  // ref/string/other — not yet supported; bail to legacy (#2136 scopes numeric).
+  throw new Error(`ir/from-ast: ${loopKind} condition must be bool in ${cx.funcName}`);
+}
+
 function lowerWhileStatement(stmt: ts.WhileStatement, cx: LowerCtx): void {
   // Capture the value id `lowerExpr` returns rather than the cond buffer's
   // last instruction result — the latter is fragile (e.g. a trailing store
   // produces no value). (#1980)
-  let condResult: number | null = null;
+  let condResult: IrValueId | null = null;
   const condInstrs = cx.builder.collectBodyInstrs(() => {
-    condResult = lowerExpr(stmt.expression, cx, irVal({ kind: "i32" }));
+    const raw = lowerExpr(stmt.expression, cx, irVal({ kind: "i32" }));
+    // #2136 — an f64 (numeric-truthiness) condition was previously bailed to
+    // legacy (#1980) because the lowerer's unconditional `i32.eqz` on an f64
+    // emitted invalid Wasm. Instead, coerce it to an i32 bool via ToBoolean
+    // INSIDE the cond buffer (so the coercion re-runs each iteration) and use
+    // the coerced value as `condValue`. Non-numeric, non-bool conditions
+    // (ref/string) still bail — those need a different ToBoolean path (#2136
+    // scopes to numeric).
+    condResult = coerceLoopCondToBool(raw, cx, "while");
   });
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: while cond produced no SSA value (${cx.funcName})`);
-  }
-  // `if`/ternary throw a clean fallback when the condition isn't already an
-  // i32 bool; loops skipped that check and the lowerer's unconditional
-  // `i32.eqz` then emitted invalid Wasm (e.g. a numeric-truthiness `while (k)`
-  // with an f64 `k`). Throw the same fallback so the legacy path handles
-  // ToBoolean lowering until the IR grows its own. (#1980)
-  if (asVal(cx.builder.typeOf(condResult))?.kind !== "i32") {
-    throw new Error(`ir/from-ast: while condition must be bool in ${cx.funcName}`);
   }
   const bodyCx: LowerCtx = { ...cx, scope: new Map(cx.scope) };
   const bodyInstrs = cx.builder.collectBodyInstrs(() => {
@@ -3136,18 +3164,16 @@ function lowerForStatement(stmt: ts.ForStatement, cx: LowerCtx): void {
   // 2. Cond — collect its IR into a buffer.
   // Capture the value id `lowerExpr` returns rather than the buffer's last
   // instruction result (fragile — see #1980).
-  let condResult: number | null = null;
+  let condResult: IrValueId | null = null;
   const condInstrs = innerCx.builder.collectBodyInstrs(() => {
-    condResult = lowerExpr(stmt.condition!, innerCx, irVal({ kind: "i32" }));
+    const raw = lowerExpr(stmt.condition!, innerCx, irVal({ kind: "i32" }));
+    // #2136 — coerce a numeric-truthiness `for` cond (e.g. `for (...; k; ...)`
+    // with f64 `k`) to an i32 bool via ToBoolean inside the cond buffer,
+    // instead of bailing to legacy (#1980). Mirrors the while-loop arm.
+    condResult = coerceLoopCondToBool(raw, innerCx, "for");
   });
   if (condResult === null || condResult === undefined) {
     throw new Error(`ir/from-ast: for cond produced no SSA value (${cx.funcName})`);
-  }
-  // Same i32-bool fallback as `if`/ternary — a numeric-truthiness `for` cond
-  // (e.g. `for (...; k; ...)` with f64 `k`) otherwise reaches the lowerer's
-  // unconditional `i32.eqz` and emits invalid Wasm. (#1980)
-  if (asVal(innerCx.builder.typeOf(condResult))?.kind !== "i32") {
-    throw new Error(`ir/from-ast: for condition must be bool in ${cx.funcName}`);
   }
 
   // 3. Body — collect into a buffer.

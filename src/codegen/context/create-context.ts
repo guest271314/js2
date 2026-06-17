@@ -74,6 +74,9 @@ export function createCodegenContext(
     capturedGlobals: new Map(),
     capturedGlobalsWidened: new Set(),
     classSet: new Set(),
+    usesNewTarget: false, // (#2023) set by the pre-scan in generateModule
+    newTargetGlobalIdx: undefined, // (#2023)
+    classNewTargetIds: new Map(), // (#2023) className → stable 1-based i32 id
     classThrowsOnEval: new Set(),
     topLevelFunctionNames: new Set(), // (#1983) for class-member funcMap key collision detection
     classMethodSet: new Set(),
@@ -190,6 +193,7 @@ export function createCodegenContext(
     classStaticMethodsCsvGlobal: new Map(),
     builtinObjectGlobals: new Map(),
     methodClosureGlobals: new Map(),
+    nullThisTypeErrorReady: false, // (#2025)
     funcClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
     standalone: options?.standalone ?? false,

@@ -651,6 +651,16 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   }
   const retType = ctx.checker.getReturnTypeOfSignature(sig);
 
+  // (#2182) Defensive balance check for the detached-body funcIdx-shift hazard.
+  // Every `ctx.liveBodies.add(...)` during this function's compilation MUST be
+  // matched by a `.delete(...)`. A missing delete leaves a stale detached array
+  // registered, which a LATER late import would over-shift (silent funcIdx
+  // corruption — the #1257 bug class). Snapshot the size here and assert it's
+  // restored at the end. Scoped to the delta (not "must be empty") so it never
+  // false-positives on a parent body legitimately registered by an enclosing
+  // compile while a lifted closure / nested function compiles.
+  const liveBodiesAtEntry = ctx.liveBodies.size;
+
   // For async functions, unwrap Promise<T> to get T
   const isAsync = ctx.asyncFunctions.has(func.name);
   const isGenerator = ctx.generatorFunctions.has(func.name);
@@ -1163,6 +1173,18 @@ export function compileFunctionBody(ctx: CodegenContext, decl: ts.FunctionDeclar
   deduplicateLocals(fctx);
   func.locals = fctx.locals;
   func.body = fctx.body;
+
+  // (#2182) See the snapshot at function entry. A non-zero delta means a
+  // detached-body `liveBodies.add` was not balanced by a `.delete` — a
+  // funcIdx-shift hazard. Throw in dev/test builds so it surfaces immediately
+  // rather than corrupting a later late import silently.
+  if (ctx.liveBodies.size !== liveBodiesAtEntry) {
+    throw new Error(
+      `codegen invariant (#2182): liveBodies unbalanced after compiling '${func.name}' ` +
+        `(entry=${liveBodiesAtEntry}, exit=${ctx.liveBodies.size}) — a detached-body ` +
+        `liveBodies.add() is missing its matching .delete(), risking funcIdx over-shift.`,
+    );
+  }
 
   ctx.currentFunc = null;
 }
