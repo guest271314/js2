@@ -27,34 +27,46 @@ async function runStandalone(src: string): Promise<number> {
 
 describe("#2163 native Symbol.for / Symbol.keyFor registry (standalone)", () => {
   it("Symbol.for returns the same symbol for the same key", async () => {
-    expect(await runStandalone(`export function test(): number { return Symbol.for("k") === Symbol.for("k") ? 1 : 0; }`)).toBe(1);
+    expect(
+      await runStandalone(`export function test(): number { return Symbol.for("k") === Symbol.for("k") ? 1 : 0; }`),
+    ).toBe(1);
   });
 
   it("Symbol.for returns distinct symbols for distinct keys", async () => {
-    expect(await runStandalone(`export function test(): number { return Symbol.for("a") === Symbol.for("b") ? 0 : 1; }`)).toBe(1);
+    expect(
+      await runStandalone(`export function test(): number { return Symbol.for("a") === Symbol.for("b") ? 0 : 1; }`),
+    ).toBe(1);
   });
 
   it("Symbol.keyFor returns the registration key of a registered symbol", async () => {
     expect(
-      await runStandalone(`export function test(): number { const s = Symbol.for("key"); return Symbol.keyFor(s) === "key" ? 1 : 0; }`),
+      await runStandalone(
+        `export function test(): number { const s = Symbol.for("key"); return Symbol.keyFor(s) === "key" ? 1 : 0; }`,
+      ),
     ).toBe(1);
   });
 
   it("Symbol.keyFor returns undefined for an unregistered symbol", async () => {
     expect(
-      await runStandalone(`export function test(): number { const s = Symbol("x"); return Symbol.keyFor(s) === undefined ? 1 : 0; }`),
+      await runStandalone(
+        `export function test(): number { const s = Symbol("x"); return Symbol.keyFor(s) === undefined ? 1 : 0; }`,
+      ),
     ).toBe(1);
   });
 
   it("a registered symbol's description is its key (§20.4.2.2)", async () => {
     expect(
-      await runStandalone(`export function test(): number { const s = Symbol.for("hello"); return s.description === "hello" ? 1 : 0; }`),
+      await runStandalone(
+        `export function test(): number { const s = Symbol.for("hello"); return s.description === "hello" ? 1 : 0; }`,
+      ),
     ).toBe(1);
   });
 
   it("Symbol.for and Symbol.keyFor round-trip", async () => {
     expect(
-      await runStandalone(`export function test(): number { const s = Symbol.for("rt"); return Symbol.keyFor(s) === "rt" ? 1 : 0; }`),
+      await runStandalone(
+        `export function test(): number { const s = Symbol.for("rt"); return Symbol.keyFor(s) === "rt" ? 1 : 0; }`,
+      ),
     ).toBe(1);
   });
 
@@ -68,7 +80,9 @@ describe("#2163 native Symbol.for / Symbol.keyFor registry (standalone)", () => 
 
   it("a Symbol.for symbol is distinct from a plain Symbol with the same description", async () => {
     expect(
-      await runStandalone(`export function test(): number { const a = Symbol.for("k"); const b = Symbol("k"); return a === b ? 0 : 1; }`),
+      await runStandalone(
+        `export function test(): number { const a = Symbol.for("k"); const b = Symbol("k"); return a === b ? 0 : 1; }`,
+      ),
     ).toBe(1);
   });
 

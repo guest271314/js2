@@ -1247,7 +1247,9 @@ export function compileSymbolCall(ctx: CodegenContext, fctx: FunctionContext, ar
     // evaluates the argument for side effects.
     const argExpr = args[0]!;
     const isUndefinedLiteral =
-      ts.isIdentifier(argExpr) && argExpr.text === "undefined" && ctx.checker.getSymbolAtLocation(argExpr) === undefined;
+      ts.isIdentifier(argExpr) &&
+      argExpr.text === "undefined" &&
+      ctx.checker.getSymbolAtLocation(argExpr) === undefined;
     const argType = compileExpression(ctx, fctx, argExpr, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
     if (argType === null) {
       // expression produced no value — nothing to store.

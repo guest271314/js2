@@ -504,7 +504,12 @@ export function ensureSymbolRegistry(ctx: CodegenContext): {
       // if keys==null → undefined
       { op: "local.get", index: KEYS },
       { op: "ref.is_null" },
-      { op: "if", blockType: { kind: "empty" }, then: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr, { op: "return" } as Instr], else: [] },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "ref.null", typeIdx: anyStrTypeIdx } as Instr, { op: "return" } as Instr],
+        else: [],
+      },
       { op: "i32.const", value: 0 },
       { op: "local.set", index: I },
       {
