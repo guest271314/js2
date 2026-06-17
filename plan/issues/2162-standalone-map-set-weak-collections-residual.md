@@ -171,3 +171,36 @@ true+false predicate cases, content checks, dedup. Test:
 `tests/issue-2162-set-algebra.test.ts` (10/10, operands built via `.add()` so the
 slice is independent of the `new Set([...])` constructor slice). tsc + prettier
 clean; Set Slice-1 unaffected.
+
+## Slice — WeakMap/WeakSet stale-`mapHelpers`-index fix (PR, dev-mech1, 2026-06-17)
+
+Standalone WeakMap/WeakSet **construction + methods already existed** upstream
+(`new WeakMap()`/`new WeakSet()` → `__map_new`; get/set/has/delete/add via
+`tryCompileNativeWeakMethodCall`, reusing the `$Map` backing store). But on the
+`standalone:true, nativeStrings:true` path they emitted **invalid Wasm**: e.g.
+`wm.has(k)` validated-failed with `if[0] expected i32, found call of anyref`.
+
+**Root cause** (not weak-specific — a latent bug in the function-index shift
+machinery): `shiftLateImportIndices` (`expressions/late-imports.ts`) and the two
+`addUnionImports` shift sites (`index.ts`) keep `funcMap` / `nativeStrHelpers`
+(#1677) / `nativeRegexHelpers` (#1913) in lockstep with the defined-function
+shift, but **never shifted `ctx.mapHelpers`**. So when a late import
+(`__box_number`, pulled in to coerce a numeric key/value) lands BETWEEN a
+map-helper's registration and its `call` site, every defined function moves up by
+`added` but the `mapHelpers` entries stay stale-low — `wm.has` then emits a
+`call` to `__map_get` (the function one slot lower, returning `anyref` where an
+`i32` boolean was expected) → invalid Wasm. WeakMap exposed it because its first
+method call is often the first `__box_number` trigger; plain Map/Set hit the same
+window whenever a numeric key/value forces a late box. `--target wasi` dodged it
+(box helpers import eagerly), which is why the wasi-compiled
+`issue-2162-standalone-weak` suite passed before.
+
+**Fix** (mirrors #1677/#1913 exactly): add a `mapHelpers` lockstep shift at all
+three shift sites. After the fix, all weak methods produce valid Wasm and correct
+runtime values (get=42, has/miss/delete correct, add/has/delete correct).
+
+Tests: `tests/issue-2162-weak-mapHelpers-shift.test.ts` (5/5) — compiles each
+WeakMap/WeakSet/Map case `standalone+nativeStrings` and asserts valid Wasm; the
+assertion is `false` without the three-site fix (verified by reverting). tsc
+clean; existing Map/Set/Weak standalone suites (34) + shift-sensitive #2131 +
+foreach/algebra (29) unaffected.
