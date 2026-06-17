@@ -1,7 +1,8 @@
 ---
 id: 2166
 title: "Standalone JSON conformance residual (~76 tests)"
-status: ready
+status: in-progress
+assignee: sdev-json
 sprint: 63
 created: 2026-06-15
 updated: 2026-06-17
@@ -324,3 +325,54 @@ In `compileCallExpression`'s JSON arm (`src/codegen/expressions/calls.ts`
   near-parity as PR-A/PR-C land (verify via CI test262 bucket).
 - No regression to the existing #1599/#1636 static-fold suites or the boolean/
   space slices already merged.
+
+---
+
+## Progress (2026-06-17, sdev-json) — PR-A: dynamic object-graph stringify codec
+
+PR-A of the Implementation Plan above. New module
+`src/codegen/json-codec-native.ts` emits a recursive pure-Wasm
+`__json_stringify_value(v: anyref, depth) -> ref null $AnyString` (+ a
+`__json_stringify_root` entry that coalesces a top-level undefined-serialisation
+to `"null"`) over the **existing** standalone value rep — no new representation
+work:
+
+- `$Object` graphs: own enumerable string keys in insertion order via the
+  existing `__obj_ordered`; recurses on `$PropEntry.value` (anyref); omits a
+  property whose value serialises to undefined (§25.5.2).
+- nested `$Object`, native-string values (`__json_quote_string` reused verbatim
+  for keys + string values), `$box_number_struct` numbers (NaN/±Inf → `null`,
+  `-0` → `0` via `number_toString`), `null`, and `$AnyValue`-carried primitives.
+- `$ObjVec` array arm (enumeration-vector arrays).
+
+Routing (`src/codegen/expressions/calls.ts`, the standalone/wasi JSON arm): when
+the static fold (`tryEmitJsonStringifyStatic`) declines and the call is the
+1-arg / null-replacer-no-space shape, compile arg0 to `anyref` and call the
+codec. **Arrays/tuples (closed `__vec_*` structs) are NOT routed** — they are not
+`$ObjVec` and stay on the #1599 refusal path until the array sub-slice (PR-A2).
+
+**Correctness bug also fixed (`src/codegen/json-standalone.ts`):** `staticJsonValue`
+followed a `const` identifier into an object/array literal initializer and folded
+it, but such bindings are **mutable in place** (`const o = {}; o.x = f()`), so it
+silently dropped runtime mutations and emitted `"{}"`. Now a `const` is only
+followed to a **primitive** initializer; object/array bindings route to the codec
+(or the refusal) instead of a wrong static fold.
+
+Regression tests: `tests/issue-2166.test.ts` (+10 PR-A cases — runtime `let`/param
+object, nested graph, QuoteJSONString escaping, NaN/Inf→null, -0→0, null value,
+empty object, wasi host-import-free, reassigned-`let` no-stale-fold). Updated
+`tests/issue-1599-json-standalone-refuse.test.ts`: dynamic **object** now compiles
+(was refused); dynamic **array** still refuses (PR-A2). All 40 cases green; the
+two pre-existing host-mode failures (`json.test.ts` number→host-import,
+`issue-json-stringify-structs.test.ts` array-of-structs) are upstream, not from
+this PR (verified by stashing). PR #1653.
+
+**PR-A known limitations → follow-up slices:**
+- **PR-A2:** closed typed-array (`number[]`) serialisation — a separate vec-struct
+  discrimination, not `$ObjVec`.
+- **boolean object-property values** serialise as `1`/`0`: the i32→externref
+  coercion boxes a boolean as `$box_number` (indistinguishable from a number).
+  A proper fix needs `__box_boolean` + an `__unbox_number` boolean arm — broad
+  blast radius, overlaps #1917; deferred.
+- **PR-B:** dynamic-space indentation. **PR-C:** `__json_parse_text`. **PR-D:**
+  instance fields + toJSON + reviver/replacer.
