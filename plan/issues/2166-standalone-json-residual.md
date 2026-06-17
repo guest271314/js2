@@ -678,3 +678,53 @@ is pre-existing on the base (verified by stashing).
 
 **Remaining PR-D:** D2 (`toJSON`) + D3 (function/array replacer) — same driver
 infra, on the stringify side.
+
+---
+
+## Progress (2026-06-18, sdev-json3) — PR-D2: standalone JSON.stringify toJSON
+
+PR-D2 of the PR-D plan. `JSON.stringify` now honours a value's callable own
+`toJSON` (§25.5.2 SerializeJSONProperty step 2.b) under `--target standalone`,
+running entirely in Wasm on the same `__call_*` driver infra PR-D1 introduced.
+
+**Files:**
+- `src/codegen/json-codec-native.ts` — `__json_stringify_value` gains a 4th param
+  `key: externref` (the property key for toJSON); threaded at all 4 recursion
+  sites (object arm = `e.key`; array arm = `number_toString(i)`; both roots = "").
+  A toJSON dispatch block at the top: if the value is an `$Object` with a non-null
+  own `toJSON` (via `__extern_get`), call `__call_to_json(value, method, key)` and
+  re-dispatch the result (a null/undefined return → `"null"`).
+- `src/codegen/accessor-driver.ts` — `reserveToJsonDriver` + fill arm: the
+  `__call_to_json(value, method, key)` driver wraps `__call_fn_method_1` (value
+  bound as `this`). Same reserve/fill funcIdx pattern as PR-D1's `__call_reviver`.
+- `src/codegen/context/types.ts` — `toJsonDriverReserved` flag.
+
+**The funcIdx-stability fix (WHY `deepCloneInstrs`):** `__json_stringify_value`
+spreads SHARED helper `Instr[]` arrays (appendPiece/appendSep/appendLit) at many
+sites. Before this PR the body was used directly; with the new lazily-reserved
+`__call_to_json` call in it, a later union-import shift (triggered by ANY
+method-shorthand closure elsewhere in the module) desynced the driver call —
+`shiftLateImportIndices` de-dupes shared objects via a `shifted` Set and skipped
+their other occurrences. Symptom: `__json_stringify_value` failed Wasm validation
+"need 3, got 1". Fix: deep-clone the body so every occurrence is independent and
+shifted exactly once (the #1302 hazard the parse codec already clones around). A
+**JSON round-trip clone is WRONG** here — the number arm holds `f64.const Infinity`
+and `JSON.stringify(Infinity)→null` would corrupt it to 0 — so `deepCloneInstrs`
+is a structure-preserving recursive clone (preserves ±Infinity/NaN, breaks
+aliasing).
+
+Tests: `tests/issue-2166.test.ts` (+11 PR-D2 cases — arrow/function-expression
+toJSON, `this` binding, key passing, primitive + captured-object results, nested,
+array-element, indented (PR-B) form, no-toJSON regression, method-shorthand-
+present no-corruption guard, wasi host-import-free). 72/72 in the suite green;
+all PR-A/B/C/C2/D1 suites stay green.
+
+**Known limitation (deferred):** a toJSON returning a FRESH object literal built
+inside the closure (`() => ({...})`) serialises as "null" — a pre-existing
+standalone closure-return-representation gap (a plain `(() => ({x:1}))()` then
+stringify also yields "null"), independent of toJSON; ties to the
+`$Array`/`$ObjVec` externref-boundary work (TaskList #35). Captured/pre-existing
+object returns work.
+
+**Remaining PR-D:** D3 (function/array replacer) — same driver infra, last slice;
+after it, #2166 is fully closed.

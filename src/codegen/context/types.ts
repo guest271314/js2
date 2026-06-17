@@ -742,6 +742,13 @@ export interface CodegenContext {
    */
   reviverDriverReserved?: boolean;
   /**
+   * (#2166 PR-D2) True once the standalone `JSON.stringify` codec reserved its
+   * `__call_to_json(value, method, key) -> externref` driver funcIdx — filled in
+   * finalize to wrap `__call_fn_method_1` (value bound as the `toJSON`
+   * receiver).
+   */
+  toJsonDriverReserved?: boolean;
+  /**
    * (#1888 Slice 1) True once the standalone open-any method-dispatch bridge
    * `__apply_closure(fn, recv, args) -> externref` has reserved its funcIdx via
    * a placeholder function pushed during `ensureObjectRuntime` (registered in
