@@ -24,7 +24,7 @@ import {
   getOrRegisterVecType,
   resolveWasmType,
 } from "../index.js";
-import { ensureMapHelpers } from "../map-runtime.js";
+import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
 import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
 import { ensureSetHelpers } from "../set-runtime.js";
@@ -1651,37 +1651,84 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // needs `__map_new_from_arr` (slice 2) and falls through. Returns `ref $Map`
   // so the binding/receiver is typed (see resolveWasmType Map case + the
   // method/.size dispatch in extern.ts / property-access.ts).
-  if (
-    ctx.nativeStrings &&
-    ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "Map" &&
-    (expr.arguments?.length ?? 0) === 0
-  ) {
-    addUnionImports(ctx);
-    ensureMapHelpers(ctx);
-    const mapNewIdx = ctx.mapHelpers.get("__map_new");
-    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
-      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
-      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+  if (ctx.nativeStrings && ts.isIdentifier(expr.expression) && expr.expression.text === "Map") {
+    const args = expr.arguments ?? ([] as readonly ts.Expression[]);
+    // `new Map([[k,v],...])` — an array literal of 2-element array-literal pairs
+    // (the dominant iterable form). Each pair seeds the map via `__map_set`. Any
+    // non-array-literal element (spread, a variable, a non-pair) makes us fall
+    // back to the empty map (the general iterator drive is a follow-up slice).
+    const arrArg = args.length === 1 && ts.isArrayLiteralExpression(args[0]!) ? args[0]! : undefined;
+    const seedablePairs =
+      arrArg !== undefined &&
+      arrArg.elements.every(
+        (e) => ts.isArrayLiteralExpression(e) && e.elements.length === 2 && !e.elements.some(ts.isSpreadElement),
+      );
+    if (args.length === 0 || seedablePairs) {
+      addUnionImports(ctx);
+      ensureMapHelpers(ctx);
+      const mapNewIdx = ctx.mapHelpers.get("__map_new");
+      const mapSetIdx = ctx.mapHelpers.get("__map_set");
+      if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+        fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+        if (seedablePairs && arrArg !== undefined && arrArg.elements.length > 0 && mapSetIdx !== undefined) {
+          const mTmp = allocLocal(fctx, `__mapctor_m_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: ctx.mapTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: mTmp });
+          for (const el of arrArg.elements) {
+            // every() above narrowed each element to a 2-element array literal.
+            const pair = el as ts.ArrayLiteralExpression;
+            fctx.body.push({ op: "local.get", index: mTmp });
+            const kt = compileExpression(ctx, fctx, pair.elements[0]!);
+            coerceMapKeyToAnyref(ctx, fctx, kt);
+            const vt = compileExpression(ctx, fctx, pair.elements[1]!);
+            coerceMapKeyToAnyref(ctx, fctx, vt);
+            fctx.body.push({ op: "call", funcIdx: mapSetIdx }); // returns ref $Map
+            fctx.body.push({ op: "drop" });
+          }
+          fctx.body.push({ op: "local.get", index: mTmp });
+        }
+        return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+      }
     }
   }
 
-  // (#2162) `new Set()` in standalone / nativeStrings mode → the WasmGC-native
-  // Set runtime, which reuses the Map backing store (`__map_new` yields the
-  // same empty `$Map` a Set wraps). No-arg form only; `new Set(iterable)` needs
-  // the iterator drive (follow-up slice) and falls through.
-  if (
-    ctx.nativeStrings &&
-    ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "Set" &&
-    (expr.arguments?.length ?? 0) === 0
-  ) {
-    addUnionImports(ctx);
-    ensureSetHelpers(ctx);
-    const mapNewIdx = ctx.mapHelpers.get("__map_new");
-    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
-      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
-      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+  // (#2162) `new Set()` / `new Set([...])` in standalone / nativeStrings mode →
+  // the WasmGC-native Set runtime, which reuses the Map backing store
+  // (`__map_new` yields the same empty `$Map` a Set wraps). The no-arg form
+  // builds an empty Set; an ARRAY-LITERAL argument (`new Set([1,2,3])`, the
+  // dominant iterable form) seeds it element-by-element via `__set_add` (which
+  // dedups through the shared Map insert). A non-literal iterable still needs
+  // the general iterator drive (follow-up slice) and falls through.
+  if (ctx.nativeStrings && ts.isIdentifier(expr.expression) && expr.expression.text === "Set") {
+    const args = expr.arguments ?? ([] as readonly ts.Expression[]);
+    const arrArg = args.length === 1 && ts.isArrayLiteralExpression(args[0]!) ? args[0]! : undefined;
+    if (args.length === 0 || arrArg) {
+      addUnionImports(ctx);
+      ensureSetHelpers(ctx);
+      const mapNewIdx = ctx.mapHelpers.get("__map_new");
+      const setAddIdx = ctx.mapHelpers.get("__set_add");
+      if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+        fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+        if (arrArg && setAddIdx !== undefined && !arrArg.elements.some((e) => ts.isSpreadElement(e))) {
+          const mTmp = allocLocal(fctx, `__setctor_m_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: ctx.mapTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: mTmp });
+          for (const el of arrArg.elements) {
+            if (ts.isOmittedExpression(el)) continue; // hole → undefined element
+            fctx.body.push({ op: "local.get", index: mTmp });
+            const et = compileExpression(ctx, fctx, el);
+            coerceMapKeyToAnyref(ctx, fctx, et);
+            fctx.body.push({ op: "call", funcIdx: setAddIdx }); // returns ref $Map
+            fctx.body.push({ op: "drop" }); // discard chained set
+          }
+          fctx.body.push({ op: "local.get", index: mTmp });
+        }
+        return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+      }
     }
   }
 
