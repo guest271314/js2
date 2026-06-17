@@ -65,26 +65,6 @@ null is then erased). `emitBoundsCheckedArrayGetUndef`
 undefined for externref element types. Fold into the same
 representation decision as the hole semantics above (#1852/#1931).
 
-## Re-validation (dev-1, 2026-06-17, against main @330b3cb66)
-
-Re-ran the issue's repro cases on current main — **all still fail**, the bug
-is NOT fixed by sprint-62 value-rep work:
-
-| Case | wasm | node | status |
-|---|---|---|---|
-| `[1,,3].forEach(()=>c++)` count | 3 | 2 | FAIL |
-| `[1,,3].map(...)` callback count | 3 | 2 | FAIL |
-| `b=[1]; b[5]=9; b.join(",")` | `1,0,0,0,0,9` | `1,,,,,9` | FAIL |
-| `const [a=5,b=6]=[undefined,null]; String(b)` | `0` | `null` | FAIL |
-| `const [p,q]=[1]; String(q)` | (CE: tuple length) | undefined | CE |
-
-Confirms the dense WasmGC vec representation still has no hole concept.
-This is NOT a quick point-fix: per the "Fix direction" above it needs a
-representation decision (hole sentinel vs side bitmap) and intersects #1852
-per-backend value representation. Deferred per s63 queue re-prioritisation
-(standalone-mode work first); re-route to architect for the representation
-decision before dev dispatch.
-
 ## Re-validation (2026-06-17, dev-1, against origin/main @330b3cb66)
 
 RE-VALIDATED per the s63 verify-still-repros-first discipline. The repro is
