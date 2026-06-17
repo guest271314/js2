@@ -22,10 +22,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  pathsTouchTest262,
-  countRelevantDrift,
-} from "../scripts/check-baseline-floor-staleness.mjs";
+import { pathsTouchTest262, countRelevantDrift } from "../scripts/check-baseline-floor-staleness.mjs";
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 
@@ -35,9 +32,7 @@ describe("#2178 — pathsTouchTest262 mirrors the test262-paths allowlist", () =
     expect(pathsTouchTest262("tests/test262-chunk7.test.ts")).toBe(true);
     expect(pathsTouchTest262("package.json")).toBe(true);
     expect(pathsTouchTest262("pnpm-lock.yaml")).toBe(true);
-    expect(pathsTouchTest262(".github/workflows/test262-sharded.yml")).toBe(
-      true,
-    );
+    expect(pathsTouchTest262(".github/workflows/test262-sharded.yml")).toBe(true);
     expect(pathsTouchTest262("tests/test262-slow-tests.json")).toBe(true);
     // A mixed blob: any single relevant line makes the commit relevant.
     expect(pathsTouchTest262("README.md\nsrc/foo.ts\ndocs/x.md")).toBe(true);
@@ -47,9 +42,7 @@ describe("#2178 — pathsTouchTest262 mirrors the test262-paths allowlist", () =
     expect(pathsTouchTest262("README.md")).toBe(false);
     expect(pathsTouchTest262("docs/architecture/codegen-axes.md")).toBe(false);
     expect(pathsTouchTest262("plan/issues/2178-x.md")).toBe(false);
-    expect(
-      pathsTouchTest262("benchmarks/results/test262-current.json"),
-    ).toBe(false);
+    expect(pathsTouchTest262("benchmarks/results/test262-current.json")).toBe(false);
     expect(pathsTouchTest262("")).toBe(false);
     // The [skip ci] baseline-refresh commits touch only summary JSON + docs —
     // they must NOT count as drift (that's the whole point of the relevant
@@ -76,9 +69,7 @@ describe("#2178 — pathsTouchTest262 mirrors the test262-paths allowlist", () =
     ];
     const sh = resolve(ROOT, "scripts/test262-paths-match.sh");
     for (const p of cases) {
-      const shellVerdict =
-        execFileSync("bash", [sh], { input: p, encoding: "utf8" }).trim() ===
-        "true";
+      const shellVerdict = execFileSync("bash", [sh], { input: p, encoding: "utf8" }).trim() === "true";
       expect(pathsTouchTest262(p)).toBe(shellVerdict);
     }
   });
@@ -86,11 +77,7 @@ describe("#2178 — pathsTouchTest262 mirrors the test262-paths allowlist", () =
 
 describe("#2178 — countRelevantDrift counts relevant lag with early-exit", () => {
   it("returns null for an unreachable floor SHA (staleness undetermined)", () => {
-    const drift = countRelevantDrift(
-      "0000000000000000000000000000000000000000",
-      "HEAD",
-      25,
-    );
+    const drift = countRelevantDrift("0000000000000000000000000000000000000000", "HEAD", 25);
     expect(drift).toBeNull();
   });
 
@@ -134,17 +121,12 @@ describe("#2178 — countRelevantDrift counts relevant lag with early-exit", () 
 
 describe("#2178 — push:main concurrency group is per-SHA (non-cancellable)", () => {
   it("test262-sharded.yml keys the push group by github.sha so push runs never cancel each other", () => {
-    const yml = readFileSync(
-      resolve(ROOT, ".github/workflows/test262-sharded.yml"),
-      "utf8",
-    );
+    const yml = readFileSync(resolve(ROOT, ".github/workflows/test262-sharded.yml"), "utf8");
     // The group expression must add a per-SHA suffix ONLY for push events.
     expect(yml).toMatch(
       /group:\s*test262-sharded-\$\{\{ github\.event_name \}\}-\$\{\{ github\.ref \}\}\$\{\{ github\.event_name == 'push' && format\('-\{0\}', github\.sha\) \|\| '' \}\}/,
     );
     // PR-only cancellation must be preserved (push/dispatch/merge_group queue).
-    expect(yml).toMatch(
-      /cancel-in-progress:\s*\$\{\{ github\.event_name == 'pull_request' \}\}/,
-    );
+    expect(yml).toMatch(/cancel-in-progress:\s*\$\{\{ github\.event_name == 'pull_request' \}\}/);
   });
 });

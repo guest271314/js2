@@ -138,17 +138,10 @@ export function countRelevantDrift(floorSha, ref, maxBehind) {
   }
   let out;
   try {
-    out = execFileSync(
-      "git",
-      [
-        "log",
-        "--no-renames",
-        "--name-only",
-        "--pretty=format:%x00%H",
-        `${floorSha}..${ref}`,
-      ],
-      { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 },
-    );
+    out = execFileSync("git", ["log", "--no-renames", "--name-only", "--pretty=format:%x00%H", `${floorSha}..${ref}`], {
+      encoding: "utf8",
+      maxBuffer: 256 * 1024 * 1024,
+    });
   } catch {
     return null;
   }
@@ -270,10 +263,7 @@ async function main() {
   }
 
   if (args.json) {
-    process.stdout.write(
-      JSON.stringify({ breach, maxBehind: args.maxBehind, lanes: results }) +
-        "\n",
-    );
+    process.stdout.write(JSON.stringify({ breach, maxBehind: args.maxBehind, lanes: results }) + "\n");
   }
 
   process.exit(breach ? 2 : 0);
