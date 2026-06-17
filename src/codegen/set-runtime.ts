@@ -25,9 +25,10 @@
  * active (`ctx.nativeStrings`). The JS-host path is untouched.
  *
  * Slice 1 covers number/string/object elements with
- * new/add/has/delete/clear/size. Iteration (`forEach`, `for-of`,
- * `new Set(iterable)`, `keys`/`values`/`entries`) and ES2025 set-algebra
- * (`union`/`intersection`/…) are follow-up slices.
+ * new/add/has/delete/clear/size. `forEach` (#2162 follow-up) routes to the
+ * shared `tryCompileNativeCollectionForEach` (isSet=true). Remaining iteration
+ * (`for-of`, `new Set(iterable)`, `keys`/`values`/`entries`) and ES2025
+ * set-algebra (`union`/`intersection`/…) are follow-up slices.
  */
 import { ts } from "../ts-api.js";
 import type { Instr, ValType } from "../ir/types.js";
@@ -35,7 +36,7 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
 import { compileExpression, VOID_RESULT } from "./shared.js";
-import { coerceSetArgToAnyref, ensureMapHelpers } from "./map-runtime.js";
+import { coerceSetArgToAnyref, ensureMapHelpers, tryCompileNativeCollectionForEach } from "./map-runtime.js";
 
 /**
  * Emit the `__set_add(m, v) -> ref $Map` helper (idempotent). `Set.add` stores
@@ -100,6 +101,14 @@ export function tryCompileNativeSetMethodCall(
 ): InnerResult | undefined {
   if (!ctx.nativeStrings) return undefined;
   const methodName = propAccess.name.text;
+
+  // forEach drives the callback over the entries vector (spec 24.2.3.6) — the
+  // shared collection-forEach path handles it with isSet=true (the callback
+  // receives `value` as both value and key). Same helper as Map.forEach (#1527).
+  if (methodName === "forEach") {
+    return tryCompileNativeCollectionForEach(ctx, fctx, propAccess, callExpr, /* isSet */ true);
+  }
+
   const handled = methodName === "add" || methodName === "has" || methodName === "delete" || methodName === "clear";
   if (!handled) return undefined;
 

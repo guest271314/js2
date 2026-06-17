@@ -4,7 +4,7 @@ title: "standalone: `Binary emit error: u32 out of range: -1` on builtin subclas
 status: in-progress
 sprint: 63
 created: 2026-06-10
-updated: 2026-06-15
+updated: 2026-06-17
 priority: critical
 feasibility: medium
 reasoning_effort: high

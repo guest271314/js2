@@ -100,7 +100,10 @@ describe("#2159 standalone DataView typed accessors (no __dv_register_view leak)
       { target: "standalone" },
     );
     expect(r.success, JSON.stringify(r.errors)).toBe(true);
-    expect((r.imports ?? []).some((i) => i.name === "__dv_register_view"), "no host-import leak").toBe(false);
+    expect(
+      (r.imports ?? []).some((i) => i.name === "__dv_register_view"),
+      "no host-import leak",
+    ).toBe(false);
     expect(WebAssembly.validate(r.binary)).toBe(true);
     const { instance } = await WebAssembly.instantiate(r.binary, {});
     expect((instance.exports as Record<string, () => number>).run()).toBe(7);
@@ -178,5 +181,58 @@ describe("#2159 standalone DataView typed accessors (no __dv_register_view leak)
          }`,
       ),
     ).toBe(0);
+  });
+});
+
+// #2159 Slice 2 — standalone `byteLength` / `byteOffset` view-semantics.
+//
+// In standalone/WASI mode ArrayBuffer/SharedArrayBuffer are an `i32_byte` vec
+// (field 0 = byte length) and TypedArrays are an f64 vec (or i8_byte for native
+// Uint8Array) with field 0 = element COUNT. `byteLength` is element-size-scaled
+// (`count * BYTES_PER_ELEMENT`); pre-fix it fell through to a 0 default. See
+// src/codegen/property-access.ts (byteLength/byteOffset interception).
+describe("#2159 standalone TypedArray/ArrayBuffer byteLength + byteOffset", () => {
+  it("ArrayBuffer.byteLength is the byte count", async () => {
+    expect(await runStandalone(`export function run(): number { return new ArrayBuffer(8).byteLength; }`)).toBe(8);
+  });
+
+  it("Int32Array.byteLength = length * 4", async () => {
+    expect(await runStandalone(`export function run(): number { return new Int32Array(4).byteLength; }`)).toBe(16);
+  });
+
+  it("Float64Array.byteLength = length * 8", async () => {
+    expect(await runStandalone(`export function run(): number { return new Float64Array(3).byteLength; }`)).toBe(24);
+  });
+
+  it("Int16Array.byteLength = length * 2", async () => {
+    expect(await runStandalone(`export function run(): number { return new Int16Array(5).byteLength; }`)).toBe(10);
+  });
+
+  it("Uint8Array.byteLength = length * 1", async () => {
+    expect(await runStandalone(`export function run(): number { return new Uint8Array(4).byteLength; }`)).toBe(4);
+  });
+
+  it("byteLength reads through a typed local", async () => {
+    expect(
+      await runStandalone(
+        `export function run(): number { const a: Int32Array = new Int32Array(3); return a.byteLength; }`,
+      ),
+    ).toBe(12);
+  });
+
+  it("byteLength reads through a typed parameter", async () => {
+    expect(
+      await runStandalone(
+        `function g(a: Float64Array): number { return a.byteLength; } export function run(): number { return g(new Float64Array(2)); }`,
+      ),
+    ).toBe(16);
+  });
+
+  it("empty TypedArray byteLength is 0", async () => {
+    expect(await runStandalone(`export function run(): number { return new Int32Array(0).byteLength; }`)).toBe(0);
+  });
+
+  it("byteOffset on a fresh view is 0", async () => {
+    expect(await runStandalone(`export function run(): number { return new Int32Array(4).byteOffset; }`)).toBe(0);
   });
 });

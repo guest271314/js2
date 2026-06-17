@@ -4,7 +4,7 @@ title: "Standalone TypedArray/DataView/ArrayBuffer conformance residual (~1,308 
 status: in-progress
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-16
+updated: 2026-06-17
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -100,6 +100,31 @@ element byte-size; (b) a `buffer` accessor returning the backing i32_byte vec;
 (c) the `new TA(ArrayBuffer)` constructor to set element count =
 `buffer.byteLength / BYTES_PER_ELEMENT`. Medium-sized, representation-aware —
 self-contained from slice 1.
+
+#### Slice 2a (LANDED 2026-06-17) — `byteLength` / `byteOffset` interception
+
+**Done — part (a) + `byteOffset`.** Added a standalone/WASI `byteLength` /
+`byteOffset` interception in `property-access.ts` (right after the
+TextEncoder/TextDecoder block). For an ArrayBuffer/SharedArrayBuffer receiver
+`byteLength` = field-0 directly (already a byte count); for a TypedArray
+receiver `byteLength` = field-0 (element count) `* BYTES_PER_ELEMENT`, where the
+per-name byte size is statically known (Int8/Uint8/Uint8Clamped=1, Int16/Uint16=2,
+Int32/Uint32/Float32=4, Float64=8). `byteOffset` is 0 on a fresh-backing view.
+Gated on `ctx.wasi || ctx.standalone || ctx.strictNoHostImports` so host mode is
+untouched. Verified: ArrayBuffer + all 9 TypedArray kinds, typed locals, typed
+params, empty arrays — all correct. Tests: `tests/issue-2159.test.ts`
+("byteLength + byteOffset" describe block, 9 cases).
+
+**Still remaining for Slice 2:**
+- (b) `.buffer` accessor returning the backing vec (needs a buffer object;
+  trickier under the f64-vec representation — the TA backing is NOT an i32_byte
+  buffer, so `.buffer` must synthesize/track one).
+- (c) `new TA(ArrayBuffer)` element-count + multi-byte reinterpret:
+  `emitTypedArrayFromByteBuffer` (new-super.ts) currently treats each source
+  *byte* as one destination *element* (`dstArr[i] = srcArr[i] & 0xff`), so an
+  8-byte buffer makes an 8-element Int32Array instead of 2. Correct behaviour
+  needs length = `buffer.byteLength / BYTES_PER_ELEMENT` and a 4-/8-byte
+  little-endian reassembly per element. Representation-heavy; a separate slice.
 
 **Slice 3 — DataView standalone** leaks `env::` host imports
 (`new DataView(buf)` + `getInt32`/`setInt32`/`getFloat64`/… not wired to the
