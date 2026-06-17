@@ -109,3 +109,47 @@ bucket. Larger; likely a senior-dev slice.
 **Not a slice:** Int8Array signed-read of an out-of-range store (`a[0]=200` →
 expect `-56`) reads unsigned — a separate signed/wrap concern, orthogonal to the
 above.
+
+---
+
+## Slice 3 (2026-06-17) — standalone DataView typed accessors (no host-import leak)
+
+**Landed.** `new DataView(buffer[, offset[, len]])` emitted the host
+`__dv_register_view` import **unconditionally** (so the JS-host runtime bridge
+could window a real native `DataView` on method dispatch). Under
+`--target standalone` / `--target wasi` there is no JS host, so the module
+carried an unsatisfiable `env::__dv_register_view` import and **every**
+`new DataView(...)` was a hard instantiate failure — the dominant `(none)`-leak
+class in the 336-test `built-ins/DataView` bucket.
+
+**Root cause** (`src/codegen/expressions/new-super.ts`, `new DataView` branch):
+the `ensureLateImport("__dv_register_view", …)` + call was emitted with no
+host-mode guard. The accessors themselves (`get/set{Int,Uint,Float}{8,16,32,64}`)
+already have a complete pure-Wasm lowering in `src/codegen/dataview-native.ts`
+(`emitDataViewAccessor`, wired for `noJsHost(ctx)` in `calls.ts`), reading/writing
+bytes directly on the `i32_byte` backing struct with a runtime `littleEndian`
+branch — so the host registration was pure dead weight standalone.
+
+**Fix:**
+1. Gate the `__dv_register_view` emission on `!noJsHost(ctx)`. Standalone still
+   evaluates the `byteOffset`/`byteLength` args for side-effects + the
+   ToIndex/RangeError checks, then operates on the struct directly.
+2. `emitWriteBytes` integer setters used `i32.trunc_sat_f64_s`, which
+   **saturates** (e.g. `setUint32(_, 4e9)` → `0x7FFFFFFF`). The spec
+   (`SetValueInBuffer` → `ToInt{8,16,32}`/`ToUint{8,16,32}`) is **modular**.
+   Switched to `i64.trunc_sat_f64_s` + `i32.wrap_i64` (value mod 2^32; the low
+   `bytes` are then stored), correct for 1/2/4-byte signed+unsigned setters
+   across the ±2^53 integer range, and NaN→0.
+
+Verified standalone: Int8/Uint8 (signed↔unsigned reinterpret), Int16/Uint16/
+Int32/Uint32 (both endiannesses, values ≥ 2^31), Float32/Float64 (both
+endiannesses), byte-order distinctness, modular wrap, NaN→0. Host mode emits the
+registration unchanged (no regression). Tests: `tests/issue-2159.test.ts`
+(`#2159 standalone DataView typed accessors`).
+
+**Out of this slice (offset windowing):** `new DataView(buf, n>0)` base-offset
+windowing is not yet applied to the standalone accessors (the i32_byte vec struct
+has no offset field). Offset-0 views — the dominant accessor-test pattern, where
+the index is the *accessor* argument — are fully native. Windowed-view base
+offset is a shared representation concern with TypedArray-on-buffer windowing
+(Slice 2c) and is a separate follow-up.
