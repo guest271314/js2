@@ -182,12 +182,7 @@ export type JsErrorKind = "TypeError" | "RangeError" | "ReferenceError" | "Synta
  *
  * Leaves nothing on the value stack (the `throw` is terminal / stack-polymorphic).
  */
-export function emitThrowJsError(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  kind: JsErrorKind,
-  message: string,
-): void {
+export function emitThrowJsError(ctx: CodegenContext, fctx: FunctionContext, kind: JsErrorKind, message: string): void {
   if (noJsHost(ctx)) {
     emitWasiErrorConstructor(ctx, kind, 1);
   }
