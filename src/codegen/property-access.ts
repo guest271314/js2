@@ -1573,6 +1573,70 @@ function receiverIsCatchClauseBinding(ctx: CodegenContext, recv: ts.Expression):
   );
 }
 
+/**
+ * (#2179) When the module uses `delete <member>` (JS-host mode only), route an
+ * `any`/`unknown`-typed property READ through the tombstone-aware `__extern_get`
+ * host helper instead of the inline `ref.test`+`struct.get` fast-path. Returns
+ * the emitted result type (always `externref`) when it handled the read, or
+ * `undefined` to let the normal path run.
+ *
+ * Tightly scoped so it never hijacks reads that the fast-path handles correctly:
+ * only `any`/`unknown` receivers, never a method/function-typed access, never a
+ * reserved accessor (`length`/`constructor`/`__proto__`/`prototype`), and never
+ * when the receiver resolves to a concrete (non-`any`) struct/class/array type.
+ */
+function tryEmitDeleteAwareDynamicGet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.PropertyAccessExpression,
+  objType: ts.Type,
+  propName: string,
+): ValType | null | undefined {
+  if (!ctx.moduleUsesDelete || ctx.standalone) return undefined;
+  // Only dynamic (`any`/`unknown`) receivers take the bypassed fast-path that
+  // ignores the tombstone. Concrete struct/class/array receivers are typed and
+  // unaffected by the `any`-read path this guards.
+  const isAnyOrUnknown = (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+  if (!isAnyOrUnknown) return undefined;
+  // Reserved accessors have dedicated lowerings (array length, proto walk,
+  // constructor identity) — never reroute them.
+  if (
+    propName === "length" ||
+    propName === "constructor" ||
+    propName === "__proto__" ||
+    propName === "prototype" ||
+    propName === "name"
+  ) {
+    return undefined;
+  }
+  // A method/function-typed access (e.g. `o.fn` where `fn` is callable, or a
+  // built-in method) must keep its closure/funcref lowering — `__extern_get`
+  // would box it as a plain value.
+  const accessType = ctx.checker.getTypeAtLocation(expr);
+  if (accessType.getCallSignatures && accessType.getCallSignatures().length > 0) return undefined;
+
+  const getIdx = ensureLateImport(
+    ctx,
+    "__extern_get",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (getIdx === undefined) return undefined;
+
+  // Evaluate the receiver, coerce to externref, then __extern_get(obj, "prop").
+  const objResult = compileExpression(ctx, fctx, expr.expression);
+  if (objResult && objResult.kind !== "externref") {
+    coerceType(ctx, fctx, objResult, { kind: "externref" });
+  } else if (!objResult) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+  addStringConstantGlobal(ctx, propName);
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+  fctx.body.push({ op: "call", funcIdx: getIdx } as Instr);
+  return { kind: "externref" };
+}
+
 export function compilePropertyAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1591,6 +1655,23 @@ export function compilePropertyAccess(
 
   const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
+
+  // (#2179) Tombstone-aware read for `any`/`unknown` receivers in delete-using
+  // JS-host modules. The default `any`-receiver read resolves to an inline
+  // `ref.test`+`struct.get` fast-path that reads the LIVE WasmGC field, ignoring
+  // the runtime delete tombstone — so `delete o.a; o.a` returned the stale
+  // value, and `o.a === undefined` constant-folded to `false` because the
+  // field's static type is `f64` (never undefined). Route the read through the
+  // tombstone-aware `__extern_get` host helper, which returns an `externref`
+  // (real `undefined` when tombstoned, so `=== undefined` is no longer folded)
+  // and re-add via `__extern_set`/`_safeSet` clears the tombstone. Gated on the
+  // `moduleUsesDelete` pre-scan so delete-free modules keep the byte-identical
+  // fast-path; standalone has no `__extern_get` host import (#2179 A7 covers it
+  // via $Object representation steering — separate follow-up).
+  {
+    const dyn = tryEmitDeleteAwareDynamicGet(ctx, fctx, expr, objType, propName);
+    if (dyn !== undefined) return dyn;
+  }
 
   const jsonParsePropertyType = tryEmitJsonParsePropertyAccess(ctx, fctx, expr);
   if (jsonParsePropertyType !== undefined) return jsonParsePropertyType;

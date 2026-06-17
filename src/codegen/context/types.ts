@@ -1115,6 +1115,14 @@ export interface CodegenContext {
      * function at registration resolves to an import at finalize.
      */
     methodTargetsImport?: boolean;
+    /**
+     * (#2025) Whether the method body reads `this` (param 0), computed at
+     * registration BEFORE the TypeError-helper late import shifts function
+     * indices (which would make a finalize-time `methodFuncIdx` lookup point at
+     * the wrong function). Finalize reuses this captured value to decide whether
+     * the trampoline's null-`this` arm throws a catchable TypeError.
+     */
+    methodUsesThis?: boolean;
   }[];
   /** True if Math.clz32 or Math.imul is used — requires ToUint32 Wasm helper */
   needsToUint32: boolean;
@@ -1189,6 +1197,14 @@ export interface CodegenContext {
    *  `__obj_meth_tramp_${className}_${methodName}_cached` and is also reused
    *  across all access sites to avoid bloating mod.functions. */
   methodClosureGlobals: Map<string, number>;
+  /**
+   * (#2025) Once an extractable method-as-closure trampoline is emitted, the
+   * `__new_TypeError` import + message string are registered eagerly so the
+   * trampoline's null-`this` arm can throw a CATCHABLE TypeError (instead of
+   * trapping on a null `struct.get`) with stable, shift-tracked indices.
+   * Pure-lookup after that — the trampoline never registers mid-finalize.
+   */
+  nullThisTypeErrorReady: boolean;
   /** (#1340) Singleton closure-struct externref globals for top-level function
    *  declarations used as first-class values. Keyed by function name. Ensures
    *  `foo === foo` and so sidecar writes on `foo.prototype` are observed by
@@ -1203,6 +1219,15 @@ export interface CodegenContext {
    *  `__unbox_string`, `__str_from_mem`, `__str_to_mem`,
    *  `__str_extern_len`). Implies `nativeStrings === true`. */
   standalone: boolean;
+  /** (#2179) True when the module body contains any `delete` of a property or
+   *  element access (e.g. `delete o.a` / `delete o[k]`). Pre-scanned once at
+   *  module setup. When true, `any`/`unknown`-typed property READS in JS-host
+   *  mode are routed through the tombstone-aware `__extern_get` host helper
+   *  instead of the inline `ref.test`+`struct.get` fast-path — the fast-path
+   *  reads the live WasmGC field and bypasses the runtime delete tombstone, so
+   *  a post-delete read returned the stale value (#2179). Delete-free modules
+   *  keep the byte-identical inline fast-path (zero overhead). */
+  moduleUsesDelete?: boolean;
   /** (#1472 Phase A) Set of dynamic-shape object/property host-import names
    *  already refused under `--target standalone`, used to deduplicate the
    *  compile-error so a single source construct emits at most one error per
