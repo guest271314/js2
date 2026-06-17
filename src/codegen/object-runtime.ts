@@ -2704,7 +2704,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         ],
       },
     ];
-    const body: Instr[] = [
+    // #2042 S3 — factory so `__obj_ordered` keeps the enumerable filter
+    // (Object.keys/values/entries) while sibling `__obj_ordered_all` drops it
+    // (Object.getOwnPropertyNames needs non-enumerable own string keys too).
+    // Each registration gets a FRESH body + locals array — `registerNative`
+    // stores the locals array by reference and a later lowering pass may mutate
+    // it, so the two functions must not share one (that cross-corrupted both).
+    const buildOrderedBody = (includeNonEnum: boolean): Instr[] => [
       // arr = o.props ; cap = arr.len
       { op: "local.get", index: 0 },
       { op: "struct.get", typeIdx: objectTypeIdx, fieldIdx: 1 },
@@ -2745,21 +2751,26 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 op: "if",
                 blockType: { kind: "empty" },
                 then: [
-                  // (not tombstone) && enumerable
+                  // (not tombstone) [&& enumerable, unless includeNonEnum]
                   { op: "local.get", index: 4 },
                   { op: "ref.as_non_null" },
                   { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
                   { op: "i32.const", value: FLAG_TOMBSTONE },
                   { op: "i32.and" },
                   { op: "i32.eqz" },
-                  { op: "local.get", index: 4 },
-                  { op: "ref.as_non_null" },
-                  { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
-                  { op: "i32.const", value: FLAG_ENUMERABLE },
-                  { op: "i32.and" },
-                  { op: "i32.eqz" },
-                  { op: "i32.eqz" },
-                  { op: "i32.and" },
+                  // enumerable check — omitted for __obj_ordered_all (#2042 S3)
+                  ...(includeNonEnum
+                    ? []
+                    : ([
+                        { op: "local.get", index: 4 },
+                        { op: "ref.as_non_null" },
+                        { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+                        { op: "i32.const", value: FLAG_ENUMERABLE },
+                        { op: "i32.and" },
+                        { op: "i32.eqz" },
+                        { op: "i32.eqz" },
+                        { op: "i32.and" },
+                      ] as Instr[])),
                   {
                     op: "if",
                     blockType: { kind: "empty" },
@@ -2908,33 +2919,34 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       },
       { op: "local.get", index: 5 },
     ];
-    registerNative(
-      "__obj_ordered",
-      [objRef],
-      [propMapRef],
-      [
-        { name: "arr", type: propMapRef },
-        { name: "cap", type: { kind: "i32" } },
-        { name: "i", type: { kind: "i32" } },
-        { name: "e", type: entryRefNull },
-        { name: "out", type: propMapRef },
-        { name: "m", type: { kind: "i32" } },
-        { name: "j", type: { kind: "i32" } },
-        { name: "best", type: { kind: "i32" } },
-        { name: "k", type: { kind: "i32" } },
-        { name: "cand", type: entryRefNull },
-        { name: "bestE", type: entryRefNull },
-        { name: "candIdx", type: { kind: "i32" } },
-        { name: "bestIdx", type: { kind: "i32" } },
-        { name: "candSeq", type: { kind: "i32" } },
-        { name: "bestSeq", type: { kind: "i32" } },
-        { name: "tmp", type: entryRefNull },
-      ],
-      body,
-    );
+    // Fresh locals array per registration (registerNative stores it by reference).
+    const makeOrderedLocals = (): { name: string; type: ValType }[] => [
+      { name: "arr", type: propMapRef },
+      { name: "cap", type: { kind: "i32" } },
+      { name: "i", type: { kind: "i32" } },
+      { name: "e", type: entryRefNull },
+      { name: "out", type: propMapRef },
+      { name: "m", type: { kind: "i32" } },
+      { name: "j", type: { kind: "i32" } },
+      { name: "best", type: { kind: "i32" } },
+      { name: "k", type: { kind: "i32" } },
+      { name: "cand", type: entryRefNull },
+      { name: "bestE", type: entryRefNull },
+      { name: "candIdx", type: { kind: "i32" } },
+      { name: "bestIdx", type: { kind: "i32" } },
+      { name: "candSeq", type: { kind: "i32" } },
+      { name: "bestSeq", type: { kind: "i32" } },
+      { name: "tmp", type: entryRefNull },
+    ];
+    // __obj_ordered — live + enumerable (Object.keys/values/entries).
+    registerNative("__obj_ordered", [objRef], [propMapRef], makeOrderedLocals(), buildOrderedBody(false));
+    // __obj_ordered_all — live, INCLUDING non-enumerable (#2042 S3,
+    // Object.getOwnPropertyNames). Same ordering + sort; enumerable filter off.
+    registerNative("__obj_ordered_all", [objRef], [propMapRef], makeOrderedLocals(), buildOrderedBody(true));
     void entryRef;
   }
   const objOrderedIdx = ctx.funcMap.get("__obj_ordered")!;
+  const objOrderedAllIdx = ctx.funcMap.get("__obj_ordered_all")!;
 
   // ── __object_keys(externref obj) -> externref ────────────────────────────
   //
@@ -4538,6 +4550,213 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── __getOwnPropertyNames(externref obj) -> externref (#2042 S3) ──────────
+  //
+  // `Object.getOwnPropertyNames(obj)` / `Reflect.ownKeys(obj)` (string subset)
+  // under standalone. Mirrors `__object_keys` but **drops the enumerable
+  // filter** — every LIVE (non-tombstone) own string entry is included, in
+  // OrdinaryOwnPropertyKeys order, via `__obj_ordered_all`. A non-`$Object`
+  // receiver returns an empty `$ObjVec` (`getOwnPropertyNames` on a primitive
+  // throws ToObject at the call site; this is the open-object path). Symbol keys
+  // are not represented by the string-keyed `$Object` runtime, so the result is
+  // string keys only (matching the host `getOwnPropertyNames`, which never
+  // returns symbols).
+  //
+  // params: 0=obj(externref)
+  // locals: 1=any 2=o 3=arr(ordered) 4=cap 5=i 6=e 7=vec
+  {
+    const body: Instr[] = [
+      { op: "call", funcIdx: objVecNewIdx },
+      { op: "local.set", index: 7 },
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 7 }, { op: "return" }],
+      },
+      // o = cast<$Object>(any) ; arr = __obj_ordered_all(o) ; cap = arr.len
+      { op: "local.get", index: 1 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.tee", index: 2 },
+      { op: "call", funcIdx: objOrderedAllIdx },
+      { op: "local.tee", index: 3 },
+      { op: "array.len" },
+      { op: "local.set", index: 4 },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 5 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              { op: "local.get", index: 5 },
+              { op: "local.get", index: 4 },
+              { op: "i32.ge_s" },
+              { op: "br_if", depth: 1 },
+              { op: "local.get", index: 3 },
+              { op: "local.get", index: 5 },
+              { op: "array.get", typeIdx: propMapTypeIdx },
+              { op: "local.tee", index: 6 },
+              { op: "ref.is_null" },
+              { op: "br_if", depth: 1 },
+              { op: "local.get", index: 7 },
+              { op: "local.get", index: 6 },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 },
+              { op: "extern.convert_any" },
+              { op: "call", funcIdx: objVecPushIdx },
+              { op: "local.get", index: 5 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 5 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      { op: "local.get", index: 7 },
+    ];
+    registerNative(
+      "__getOwnPropertyNames",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "o", type: objRefNull },
+        { name: "arr", type: propMapRef },
+        { name: "cap", type: { kind: "i32" } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "e", type: entryRefNull },
+        { name: "vec", type: { kind: "externref" } },
+      ],
+      body,
+    );
+  }
+
+  // ── __getOwnPropertySymbols(externref obj) -> externref (#2042 S3) ────────
+  //
+  // The string-keyed `$Object` runtime holds NO symbol keys, so the own-symbol
+  // list is always empty. Returning an empty `$ObjVec` (rather than refusing)
+  // lets the large body of symbol-free `getOwnPropertySymbols` tests pass —
+  // §20.1.2.9 returns [] for an object with no symbol-keyed own properties,
+  // which is every `$Object` here. (When symbol keys are added to the open-object
+  // runtime this helper grows a real body.)
+  //
+  // params: 0=obj(externref) — unused (always [] for the string-keyed runtime)
+  {
+    const body: Instr[] = [{ op: "call", funcIdx: objVecNewIdx }];
+    registerNative("__getOwnPropertySymbols", [{ kind: "externref" }], [{ kind: "externref" }], [], body);
+  }
+
+  // ── __getOwnPropertyDescriptors(externref obj) -> externref (#2042 S3) ────
+  //
+  // `Object.getOwnPropertyDescriptors(obj)` — a fresh `$Object` mapping each own
+  // string key to its descriptor object. For each own key (from
+  // `__getOwnPropertyNames`) set `out[key] = __getOwnPropertyDescriptor(o, key)`.
+  // A non-`$Object` receiver yields an empty result object (the per-key loop runs
+  // zero times). Reuses the same enumeration + per-key descriptor builders, so
+  // accessor vs data shape and attribute flags are exactly consistent with the
+  // singular `getOwnPropertyDescriptor`.
+  //
+  // params: 0=obj(externref)
+  // locals: 1=names(externref $ObjVec) 2=cap(f64) 3=i(i32) 4=key(externref)
+  //         5=out(externref)
+  {
+    const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
+    const externLengthIdx = ctx.funcMap.get("__extern_length")!;
+    const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx")!;
+    const getOwnNamesIdx = ctx.funcMap.get("__getOwnPropertyNames")!;
+    const getOwnDescIdx = ctx.funcMap.get("__getOwnPropertyDescriptor")!;
+    const externSetLocalIdx = ctx.funcMap.get("__extern_set")!;
+    const body: Instr[] = [
+      // out = __new_plain_object()
+      { op: "call", funcIdx: newPlainObjectIdx },
+      { op: "local.set", index: 5 },
+      // names = __getOwnPropertyNames(obj)
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: getOwnNamesIdx },
+      { op: "local.tee", index: 1 },
+      // cap = __extern_length(names)
+      { op: "call", funcIdx: externLengthIdx },
+      { op: "local.set", index: 2 },
+      // i = 0
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 3 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              // if i >= cap break  (cap is f64; compare as f64)
+              { op: "local.get", index: 3 },
+              { op: "f64.convert_i32_s" },
+              { op: "local.get", index: 2 },
+              { op: "f64.ge" },
+              { op: "br_if", depth: 1 },
+              // key = __extern_get_idx(names, i)
+              { op: "local.get", index: 1 },
+              { op: "local.get", index: 3 },
+              { op: "f64.convert_i32_s" },
+              { op: "call", funcIdx: externGetIdxIdx },
+              { op: "local.set", index: 4 },
+              // __extern_set(out, key, __getOwnPropertyDescriptor(obj, key))
+              { op: "local.get", index: 5 },
+              { op: "local.get", index: 4 },
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: 4 },
+              { op: "call", funcIdx: getOwnDescIdx },
+              { op: "call", funcIdx: externSetLocalIdx },
+              // i++
+              { op: "local.get", index: 3 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 3 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      { op: "local.get", index: 5 },
+    ];
+    registerNative(
+      // Call site (calls.ts) requests this with the `__object_` prefix.
+      "__object_getOwnPropertyDescriptors",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "names", type: { kind: "externref" } },
+        { name: "cap", type: { kind: "f64" } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "key", type: { kind: "externref" } },
+        { name: "out", type: { kind: "externref" } },
+      ],
+      body,
+    );
+  }
+
+  // NOTE (#2042 S3): `__defineProperty_desc` (generic
+  // `Object.defineProperty(o, k, runtimeDescObj)`) is intentionally NOT
+  // registered here yet. Its body would delegate to the working native
+  // `__defineProperties` (a one-entry `{ [key]: desc }` map — verified to work
+  // via `Object.defineProperties` directly), but its sole call site
+  // (`Object.create(o, descs)` with an identifier descriptor value) currently
+  // trips the #2043 late-import index-shift emit bug, so registering it converts
+  // a clean #1472-Phase-B refusal into a messier #2043 binary-emit error with no
+  // test gain. It stays a loud refusal until #2043 is fixed (then this helper +
+  // its OBJECT_RUNTIME_HELPER_NAMES entry land as a follow-up). The read-side
+  // reflection natives above (__getOwnPropertyNames / __getOwnPropertySymbols /
+  // __object_getOwnPropertyDescriptors) are the shipped S3 slice.
+
   // ── Object integrity predicates (#1472 Phase B Blocker A Half 1, PR #1074) ─
   //
   // __object_isFrozen / __object_isSealed / __object_isExtensible read the
@@ -6073,6 +6292,16 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   // invocation are #329-gated follow-ups. Landing the helpers + the R3
   // $PropEntry $get/$set layout now de-risks the layout change in isolation.
   "__getOwnPropertyDescriptor",
+  // #2042 S3 — read-side descriptor-reflection natives over $Object/$PropEntry:
+  //   __getOwnPropertyNames               — own string keys incl. non-enumerable
+  //                                         (via __obj_ordered_all), index/insert order
+  //   __getOwnPropertySymbols             — always [] (string-keyed runtime, no symbols)
+  //   __object_getOwnPropertyDescriptors  — { key: descriptor } over __getOwnPropertyNames
+  // (`__defineProperty_desc` — the write side — is deferred until #2043; see the
+  //  NOTE near __getOwnPropertyDescriptor's registration.)
+  "__getOwnPropertyNames",
+  "__getOwnPropertySymbols",
+  "__object_getOwnPropertyDescriptors",
   // #1472 Phase C — `x === undefined` / default-parameter / destructuring-default
   // undefinedness check. Native impl is `ref.is_null` (standalone conflates
   // undefined and null, same as __typeof_undefined). This is the single largest
