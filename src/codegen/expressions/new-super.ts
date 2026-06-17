@@ -51,6 +51,7 @@ import { maybeSetArgcForKnownCall } from "../statements/nested-declarations.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { coerceType as coerceTypeImpl, pushDefaultValue } from "../type-coercion.js";
 import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
+import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm new Date(str)
 import { compileSpreadCallArgs } from "./extern.js";
 import { compileTemporalNewExpression } from "../temporal-native.js";
 import {
@@ -79,6 +80,23 @@ function valTypeMatches(a: ValType, b: ValType): boolean {
     return a.typeIdx === b.typeIdx;
   }
   return true;
+}
+
+/**
+ * (#2164) Is `arg` statically a String value? `new Date(value)` parses a String
+ * (§21.4.2.1) but ToNumbers anything else, so we only route to __date_parse when
+ * the arg is a string literal or has a string-like static type. Anything else
+ * (number, Date, any) keeps the existing ToNumber(ms) path.
+ */
+function isStringTypedArg(ctx: CodegenContext, arg: ts.Expression): boolean {
+  if (ts.isStringLiteralLike(arg) || ts.isTemplateExpression(arg)) return true;
+  try {
+    const t = ctx.checker.getTypeAtLocation(arg);
+    // StringLike covers string, string literal types, and unions thereof.
+    return (t.flags & ts.TypeFlags.StringLike) !== 0;
+  } catch {
+    return false;
+  }
 }
 
 function compileCtorArgument(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression, expected?: ValType): void {
@@ -2302,7 +2320,22 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // (#1343) TimeClip per §21.4.1.31: if !isFinite(ms) or abs(ms) > 8.64e15,
       // return NaN. Both NaN and out-of-range get the sentinel. ±Infinity is
       // out-of-range (abs > 8.64e15), so the single magnitude check covers it.
-      compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+      //
+      // (#2164) new Date(str) — §21.4.2.1: a String value is parsed as if by
+      // Date.parse. Route a statically-string-typed arg through the pure-Wasm
+      // __date_parse helper (yields an f64 ms, NaN on failure), then fall
+      // through the same TimeClip path below. Gated to standalone / WASI for the
+      // same reason as Date.parse (host strings + lazy helper wiring trip the
+      // late-import shift class #2043); host keeps the prior ToNumber(str)→NaN.
+      if ((ctx.standalone || ctx.wasi) && isStringTypedArg(ctx, args[0]!)) {
+        emitNativeDateParse(ctx);
+        const argType = compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+        flushLateImportShifts(ctx, fctx);
+        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__date_parse")! } as Instr);
+      } else {
+        compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+      }
       const msLocal = allocTempLocal(fctx, { kind: "f64" });
       fctx.body.push({ op: "local.tee", index: msLocal } as Instr);
       // isInvalid = (ms != ms) || (abs(ms) > 8.64e15)

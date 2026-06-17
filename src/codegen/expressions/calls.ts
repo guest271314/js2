@@ -22,6 +22,7 @@ import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { reserveClosedMethodDispatch } from "../closed-method-dispatch.js";
+import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
 import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
 import {
   emitStandalonePromiseReject,
@@ -6353,14 +6354,38 @@ function compileCallExpression(
 
         return { kind: "f64" };
       }
-      // Date.parse — stub: return NaN
+      // Date.parse(str) — pure-Wasm ISO 8601 parser (#2164). Returns the time
+      // value in ms (NaN on parse failure).
+      //
+      // Gated to standalone / WASI: those targets carry the WasmGC-native string
+      // backend (`nativeStrings`), so the flatten + char-scan helper links
+      // cleanly. In JS-host mode strings are `wasm:js-string` externrefs and
+      // wiring the helper lazily mid-body trips the late-import index-shift class
+      // (#2043: "heap type index out of range"); host mode keeps the prior NaN
+      // stub (no regression — host Date.parse was always a NaN stub). A follow-up
+      // can register __date_parse up-front (like parseInt in index.ts) to extend
+      // native parsing to host mode.
       if (method === "parse") {
-        // Drop argument if any
-        for (const arg of expr.arguments) {
-          const t = compileExpression(ctx, fctx, arg);
+        if (expr.arguments.length === 0 || !(ctx.standalone || ctx.wasi)) {
+          for (const arg of expr.arguments) {
+            const t = compileExpression(ctx, fctx, arg);
+            if (t) fctx.body.push({ op: "drop" } as Instr);
+          }
+          fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+          return { kind: "f64" };
+        }
+        // Register the native parser, then push the (sole) argument as externref.
+        emitNativeDateParse(ctx);
+        const dateParseIdx = ctx.funcMap.get("__date_parse")!;
+        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+        // Evaluate any extra args for side effects, then drop.
+        for (let i = 1; i < expr.arguments.length; i++) {
+          const t = compileExpression(ctx, fctx, expr.arguments[i]!);
           if (t) fctx.body.push({ op: "drop" } as Instr);
         }
-        fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+        flushLateImportShifts(ctx, fctx);
+        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__date_parse") ?? dateParseIdx } as Instr);
         return { kind: "f64" };
       }
     }
