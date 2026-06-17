@@ -8271,11 +8271,17 @@ function compileCallExpression(
           ts.isIdentifier(propAccess.expression) && BUILTIN_CLASS_NAMES.has(propAccess.expression.text);
         // (#2151 Slice 2) N-ary: the dispatcher is arity-specialized
         // `__call_m_<name>_<arity>(recv, arg0..arg{arity-1})` (all externref).
-        // Spread args fall through to the generic path (the dispatcher has a
-        // fixed arity).
+        // (#2151 Slice 3) Spread of an ARRAY LITERAL (`o.m(...[2,3])`) flattens
+        // to a fixed argument list at compile time, so it can use the same
+        // arity-specialized dispatcher. A spread of a DYNAMIC source
+        // (`o.m(...xs)`) has no statically-known arity → flattenCallArgs returns
+        // null and it falls through to the generic path.
         const hasSpreadArg = expr.arguments.some((a) => ts.isSpreadElement(a));
-        if ((ctx.standalone || ctx.wasi) && !hasSpreadArg && !recvIsBuiltinClass) {
-          const arity = expr.arguments.length;
+        const dispatchArgs: ts.Expression[] | null = hasSpreadArg
+          ? flattenCallArgs(expr.arguments)
+          : [...expr.arguments];
+        if ((ctx.standalone || ctx.wasi) && dispatchArgs !== null && !recvIsBuiltinClass) {
+          const arity = dispatchArgs.length;
           const dispatchIdx = reserveClosedMethodDispatch(ctx, methodName, arity);
           flushLateImportShifts(ctx, fctx);
           // Receiver as externref.
@@ -8287,7 +8293,7 @@ function compileCallExpression(
           }
           // Each argument compiled and boxed to externref (the dispatcher unboxes
           // to the method's declared param type per candidate struct).
-          for (const arg of expr.arguments) {
+          for (const arg of dispatchArgs) {
             const at = compileExpression(ctx, fctx, arg, { kind: "externref" });
             if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
             else if (at === null) fctx.body.push({ op: "ref.null.extern" });
