@@ -1,5 +1,5 @@
 ---
-id: 2186
+id: 2189
 title: "standalone: array .length reads 0 through the externref boundary (latent $Array introspection gap)"
 status: done
 assignee: ttraenkler/sdev-proxy3
@@ -13,7 +13,12 @@ area: codegen, runtime
 goal: standalone-conformance
 sprint: 63
 ---
-# #2186 — standalone array `.length` through the externref boundary
+# #2189 — standalone array `.length` through the externref boundary
+
+> Note: originally drafted as #2186; renumbered to #2189 because an unrelated
+> issue (`2186-standalone-delete-touched-object-representation-steering`) landed
+> on main first and owns ID #2186. The `(#2186)` markers in the committed
+> codegen comments refer to *this* work and are left intact to match the PR.
 
 ## Problem
 
