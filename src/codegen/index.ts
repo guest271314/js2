@@ -225,6 +225,31 @@ function sourceContainsClass(sourceFile: ts.SourceFile): boolean {
 }
 
 /**
+ * (#2179) True when the source contains a `delete` operating on a property or
+ * element access (`delete o.a` / `delete o[k]`). `delete x` of a bare
+ * identifier and `delete <other expr>` (no-op deletes) do NOT count — only
+ * member deletes can leave a runtime tombstone that the inline struct.get
+ * read fast-path would bypass. Used to gate the tombstone-aware read routing
+ * so delete-free modules emit byte-identical wasm.
+ */
+function sourceContainsDelete(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  function walk(node: ts.Node): void {
+    if (found) return;
+    if (
+      ts.isDeleteExpression(node) &&
+      (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))
+    ) {
+      found = true;
+      return;
+    }
+    forEachChild(node, walk);
+  }
+  walk(sourceFile);
+  return found;
+}
+
+/**
  * #1623 — true when the source contains any object/array binding pattern
  * (destructuring) in a parameter, variable declaration, or assignment target.
  * Used to decide whether to pre-emit the WASI/standalone TypeError constructor
@@ -975,6 +1000,11 @@ export function generateModule(
       ctx.topLevelFunctionNames.add(stmt.name.text);
     }
   }
+  // (#2179) Pre-scan for `delete <member>` so `any`-receiver property reads can
+  // be routed through the tombstone-aware `__extern_get` host helper instead of
+  // the inline struct.get fast-path (which reads the live field and ignores the
+  // runtime delete tombstone). Delete-free modules keep byte-identical output.
+  ctx.moduleUsesDelete = sourceContainsDelete(ast.sourceFile);
   try {
     // WASI target: register linear memory, bump pointer global, and WASI imports
     if (ctx.wasi) {

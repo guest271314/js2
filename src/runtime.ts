@@ -6680,6 +6680,12 @@ assert._isSameValue = isSameValue;
             if ((sc && key in sc) || descs?.has(_normalizeDescKey(key))) return undefined;
           }
           if (_isWasmStruct(obj) && typeof key === "string") {
+            // (#2179) A deleted key must NOT be resurrected by the struct-field
+            // getter fast-path: `delete o.a` sets the tombstone but cannot clear
+            // the underlying WasmGC field, so `__sget_a` still returns the stale
+            // value. Consult the tombstone before reading the live field.
+            const tomb = _wasmStructDeletedKeys.get(obj);
+            if (tomb && tomb.has(key)) return undefined;
             const exports = callbackState?.getExports();
             const getter = exports?.[`__sget_${key}`];
             if (typeof getter === "function") return getter(obj);
@@ -7295,8 +7301,12 @@ assert._isSameValue = isSameValue;
             const fieldNames = _getStructFieldNames(obj, exports);
             if (fieldNames) {
               const descs = _wasmPropDescs.get(obj);
+              // (#2179) Drop deleted keys — the static struct shape still carries
+              // the field, but `delete o.k` tombstoned it.
+              const tomb = _wasmStructDeletedKeys.get(obj);
               return _orderOwnKeysSpec(
                 fieldNames.filter((k) => {
+                  if (tomb && tomb.has(k)) return false;
                   if (!descs) return true;
                   const flags = descs.get(k);
                   return flags === undefined || !!(flags & _SC_ENUMERABLE);
@@ -7315,8 +7325,10 @@ assert._isSameValue = isSameValue;
             const fieldNames = _getStructFieldNames(obj, exports);
             if (fieldNames) {
               const descs = _wasmPropDescs.get(obj);
+              const tomb = _wasmStructDeletedKeys.get(obj); // (#2179) skip deleted keys
               return _orderOwnKeysSpec(
                 fieldNames.filter((k) => {
+                  if (tomb && tomb.has(k)) return false;
                   if (!descs) return true;
                   const flags = descs.get(k);
                   return flags === undefined || !!(flags & _SC_ENUMERABLE);
@@ -7338,8 +7350,10 @@ assert._isSameValue = isSameValue;
             const fieldNames = _getStructFieldNames(obj, exports);
             if (fieldNames) {
               const descs = _wasmPropDescs.get(obj);
+              const tomb = _wasmStructDeletedKeys.get(obj); // (#2179) skip deleted keys
               return _orderOwnKeysSpec(
                 fieldNames.filter((k) => {
+                  if (tomb && tomb.has(k)) return false;
                   if (!descs) return true;
                   const flags = descs.get(k);
                   return flags === undefined || !!(flags & _SC_ENUMERABLE);
@@ -10998,6 +11012,12 @@ assert._isSameValue = isSameValue;
         const descs = _wasmPropDescs.get(obj);
         if ((sc && key in sc) || descs?.has(_normalizeDescKey(key))) return undefined;
         if (typeof key === "string") {
+          // (#2179) A deleted key must NOT be resurrected by the struct-field
+          // getter fast-path: `delete o.a` sets the tombstone but cannot clear
+          // the underlying WasmGC field, so `__sget_a` still returns the stale
+          // value. Consult the tombstone before reading the live field.
+          const tomb = _wasmStructDeletedKeys.get(obj);
+          if (tomb && tomb.has(key)) return undefined;
           const exports = callbackState?.getExports();
           const getter = exports?.[`__sget_${key}`];
           if (typeof getter === "function") return getter(obj);
