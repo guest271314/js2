@@ -241,33 +241,52 @@ Follow §10.1.6.3 step order exactly — `verifyProperty` makes ordering observa
 - Host/gc mode byte-identical (all changes `ctx.standalone`-gated or inside
   `ensureObjectRuntime`).
 
-### S1 — `__to_property_key` key hardening (2026-06-17, dev-1) — DONE
+## S3 — descriptor-reflection natives, READ SIDE (2026-06-17, dev-2)
 
-Central runtime key coercion, per the architect S1 plan. PR-A only ToPropertyKey'd
-the `Object.defineProperty` *call site*; every OTHER caller (computed numeric
-member access `o[0]`, `Reflect.get(o, 1)`, `Object.getOwnPropertyDescriptor(o, 0)`,
-`delete o[0]`, `0 in o`) still fed a boxed number straight into the
-`ref.cast $AnyString` and trapped `illegal cast [in __obj_find()]` (~170-230 rows).
+Landed the read-side descriptor-reflection natives over `$Object`/`$PropEntry`,
+host-free under `--target standalone`/`wasi` (previously refused #1472 Phase B):
 
-- New `__to_property_key(externref) -> externref` native in
-  `src/codegen/object-runtime.ts` (standalone-gated): `$AnyString` → unchanged
-  (fast path); boxed number → `number_toString(__unbox_number(key))` (canonical
-  decimal, `-0`→`"0"`, `1.5`→`"1.5"`); Symbol/opaque → unchanged (no NEW trap;
-  Symbol keys stay a compile-time #1472 refusal).
-- Wired via a guarded `withKeyCoercion` prologue at the top of **`__obj_find`,
-  `__obj_hash`, AND `__obj_insert`** (the write path `__obj_insert` has its own
-  key `ref.cast` + stores the key into `$PropEntry.key`, so it needed the same
-  coercion — the architect's "find/hash only" claim missed the insert path; the
-  write side `o[0]=v` trapped until insert was covered too). Inner re-coercion
-  (e.g. `__obj_find`→`__obj_hash`) is idempotent (already-`$AnyString` fast-return).
-- Verified standalone: numeric get/set round-trip, literal numeric key read,
-  `getOwnPropertyDescriptor(o,0)`, `Reflect.get(o,1)`, decimal/`-0` keys, `in`,
-  `delete` — all were `illegal cast`, now pass. tsc + prettier clean; host/gc
-  mode untouched (`ctx.standalone`-gated). Tests: `tests/issue-2042.test.ts`
-  ("S1 numeric-key ToPropertyKey hardening" block, 9 cases; 14/14 file total).
-- **Out of S1 scope (separate pre-existing bug):** `o[0] + o[1]` still traps in
-  `__any_add`→`__any_to_string` on the retrieved *values* (a value-coercion path,
-  not a key cast) — confirmed identical on clean main. Likely folds into S2
-  (#1910/#1472 boxed-primitive ToPrimitive). S1 is KEY hardening only.
-- Provides the shared `__to_property_key` helper that #2046 PR-D / S3 should
-  consume rather than adding their own coercion.
+- **`__getOwnPropertyNames`** — own string keys INCLUDING non-enumerable, in
+  OrdinaryOwnPropertyKeys order (§10.1.11.1: integer indices ascending, then
+  string keys by insertion). Backed by a new **`__obj_ordered_all`** sibling of
+  `__obj_ordered` (same compaction + selection sort; the `FLAG_ENUMERABLE`
+  filter dropped). The two register from a shared `buildOrderedBody(includeNonEnum)`
+  factory but each gets a FRESH locals array — `registerNative` stores the locals
+  array by reference and a later lowering pass mutates it, so sharing one
+  cross-corrupted both (root-caused an `array.len expected arrayref` emit error).
+- **`__getOwnPropertySymbols`** — always `[]` (the string-keyed `$Object` runtime
+  holds no symbol keys; correct for every symbol-free object, which is all of
+  them here). Lets symbol-free tests pass instead of refusing.
+- **`__object_getOwnPropertyDescriptors`** (the `__object_`-prefixed name the
+  call site requests) — fresh `$Object` mapping each own key (from
+  `__getOwnPropertyNames`) to `__getOwnPropertyDescriptor(o, key)`. Reuses the
+  singular descriptor builder so accessor/data shape + flags stay consistent.
+
+All in `src/codegen/object-runtime.ts`; names added to
+`OBJECT_RUNTIME_HELPER_NAMES` so they resolve native (define ⇒ no import ⇒ no
+index shift) ahead of the Phase-A refuse gate. Host/gc output byte-identical
+(the JS imports own those paths there).
+
+Tests: `tests/issue-2042-s3.test.ts` (9 cases — names count/non-enumerable
+inclusion/int+string keys, symbols [], descriptors per-key + coverage, empty
+receiver, Object.keys-unregressed control, host-free compile). All pass;
+prettier/biome/tsc clean. Sampled real test262: `getOwnPropertyNames` 10/20,
+`getOwnPropertyDescriptors` 5/18 now pass standalone (were ~all refused).
+
+**Deferred — WRITE SIDE (`__defineProperty_desc`):** implemented in principle
+(delegate to the working native `__defineProperties` via a one-entry
+`{ [key]: desc }` map — verified `Object.defineProperties` works), but its sole
+call site (`Object.create(o, descs)` with an identifier descriptor value) trips
+the **#2043** late-import index-shift emit bug, so registering it converts a
+clean refusal into a messier #2043 binary-emit error with NO test gain. Left as
+a loud refusal until #2043 is fixed; the helper + its set entry land then as a
+follow-up. Issue stays `in-progress` for S4 (ValidateAndApplyPropertyDescriptor)
+and the deferred write side.
+
+Coordination: S1 (task #33, PR #1629) and S3 are BOTH authored by dev-2 and both
+edit `object-runtime.ts` (the `OBJECT_RUNTIME_HELPER_NAMES` set +
+`ensureObjectRuntime`). S1 edits the `__obj_find`/`__obj_hash` region + adds
+`__to_property_key`; S3 adds new helper functions (read-side reflection +
+`__obj_ordered_all`) and appends to the helper-names set. The two regions are
+disjoint except the append-only set; whichever PR merges second does the small
+`object-runtime.ts` merge resolution (same author, so no cross-agent handoff).
