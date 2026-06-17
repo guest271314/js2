@@ -106,3 +106,49 @@ eliminating the `illegal cast` trap (class A, 37+ rows).
   (`o[0]`) and enumeration (`Object.keys` / `getOwnPropertyNames`) over
   defineProperty'd keys are separate pre-existing gaps (the latter is refused
   loud under #1472 Phase B) — not introduced by PR-A.
+
+## S3 — descriptor-reflection natives, READ SIDE (2026-06-17, dev-2)
+
+Landed the read-side descriptor-reflection natives over `$Object`/`$PropEntry`,
+host-free under `--target standalone`/`wasi` (previously refused #1472 Phase B):
+
+- **`__getOwnPropertyNames`** — own string keys INCLUDING non-enumerable, in
+  OrdinaryOwnPropertyKeys order (§10.1.11.1: integer indices ascending, then
+  string keys by insertion). Backed by a new **`__obj_ordered_all`** sibling of
+  `__obj_ordered` (same compaction + selection sort; the `FLAG_ENUMERABLE`
+  filter dropped). The two register from a shared `buildOrderedBody(includeNonEnum)`
+  factory but each gets a FRESH locals array — `registerNative` stores the locals
+  array by reference and a later lowering pass mutates it, so sharing one
+  cross-corrupted both (root-caused an `array.len expected arrayref` emit error).
+- **`__getOwnPropertySymbols`** — always `[]` (the string-keyed `$Object` runtime
+  holds no symbol keys; correct for every symbol-free object, which is all of
+  them here). Lets symbol-free tests pass instead of refusing.
+- **`__object_getOwnPropertyDescriptors`** (the `__object_`-prefixed name the
+  call site requests) — fresh `$Object` mapping each own key (from
+  `__getOwnPropertyNames`) to `__getOwnPropertyDescriptor(o, key)`. Reuses the
+  singular descriptor builder so accessor/data shape + flags stay consistent.
+
+All in `src/codegen/object-runtime.ts`; names added to
+`OBJECT_RUNTIME_HELPER_NAMES` so they resolve native (define ⇒ no import ⇒ no
+index shift) ahead of the Phase-A refuse gate. Host/gc output byte-identical
+(the JS imports own those paths there).
+
+Tests: `tests/issue-2042-s3.test.ts` (9 cases — names count/non-enumerable
+inclusion/int+string keys, symbols [], descriptors per-key + coverage, empty
+receiver, Object.keys-unregressed control, host-free compile). All pass;
+prettier/biome/tsc clean. Sampled real test262: `getOwnPropertyNames` 10/20,
+`getOwnPropertyDescriptors` 5/18 now pass standalone (were ~all refused).
+
+**Deferred — WRITE SIDE (`__defineProperty_desc`):** implemented in principle
+(delegate to the working native `__defineProperties` via a one-entry
+`{ [key]: desc }` map — verified `Object.defineProperties` works), but its sole
+call site (`Object.create(o, descs)` with an identifier descriptor value) trips
+the **#2043** late-import index-shift emit bug, so registering it converts a
+clean refusal into a messier #2043 binary-emit error with NO test gain. Left as
+a loud refusal until #2043 is fixed; the helper + its set entry land then as a
+follow-up. Issue stays `in-progress` for S4 (ValidateAndApplyPropertyDescriptor)
+and the deferred write side.
+
+Coordination: S1 (#33, dev-1) and S3 both edit `object-runtime.ts` (the
+`OBJECT_RUNTIME_HELPER_NAMES` set + `ensureObjectRuntime`); my entries append at
+the end to minimize overlap. Whoever merges second resolves the small conflict.
