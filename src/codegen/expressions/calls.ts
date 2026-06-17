@@ -8705,26 +8705,12 @@ function compileCallExpression(
         return { kind: "f64" };
       }
 
-      // #2160 — Number(arr) in standalone: ToNumber(arr) = ToNumber(ToString(arr))
-      // (§7.1.4 → §7.1.1.1 ToPrimitive(number) on an Array has no valueOf, so it
-      // falls to toString). Route the array through its native toString, then
-      // StringToNumber via __str_to_number. The generic ref→f64 coerce below has
-      // no array case and yields NaN (`Number([5])` → NaN instead of 5). Must run
-      // BEFORE compileExpression so the array-join lowering compiles the receiver.
-      {
-        const numArg0 = expr.arguments[0]!;
-        const numArg0TsType = ctx.checker.getTypeAtLocation(numArg0);
-        const s2nIdx = ctx.nativeStrings ? ctx.funcMap.get("__str_to_number") : undefined;
-        if (s2nIdx !== undefined && resolveArrayInfo(ctx, numArg0TsType)) {
-          const arrToStr = tryEmitArrayToStringNative(ctx, fctx, numArg0, numArg0TsType);
-          if (arrToStr !== undefined && arrToStr !== null) {
-            // toString result is a native-string ref → externref → __str_to_number.
-            fctx.body.push({ op: "extern.convert_any" });
-            fctx.body.push({ op: "call", funcIdx: s2nIdx });
-            return { kind: "f64" };
-          }
-        }
-      }
+      // #2160 — Number(arr) array→primitive coercion is intentionally NOT
+      // handled here: it requires running string→number through the #1917
+      // single coercion engine rather than a hand-rolled `__str_to_number` call
+      // site (the Coercion-site drift gate #2108 rejects a new ad-hoc site).
+      // Tracked as a separate senior-dev/engine task. `String(arr)` (the
+      // string half) is lowered in the `funcName === "String"` block below.
 
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (argType?.kind === "i64") {

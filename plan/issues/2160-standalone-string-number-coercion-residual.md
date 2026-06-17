@@ -93,21 +93,24 @@ a CHAR COUNT, negative `start` counts from end — delegating to `__str_substrin
 plus a `substr` dispatch branch. Verified standalone/WASI/gc.
 Test: `tests/issue-2160-substr-standalone.test.ts`.
 
-## Sub-slice (dev-strnum) — `String()`/`Number()` array→primitive coercion
+## Sub-slice (dev-strnum) — `String()` array→primitive coercion (PR #1640, String-only)
 
-`String([1,2,3])` null-dereffed and `Number([5])`/`Number([])` returned NaN in
-standalone. **Root cause:** the `String()`/`Number()` builtin handlers
-(`src/codegen/expressions/calls.ts`, the `funcName === "String"` and
-`funcName === "Number"` blocks) route a ref/array argument through the generic
-`coerceType` ref→string/number path, which has no array case — arrays aren't
-classes with `valueOf`/`@@toPrimitive` funcMap entries, so it null-derefs / NaNs.
-`[1,2,3].toString()` already lowers natively via `compileArrayJoinNative`.
-**Fix (additive, no shared-coercion-engine change):** a `tryEmitArrayToStringNative`
-helper synthesizes `arg.toString()` and dispatches through `compileArrayMethodCall`
-BEFORE the coerceType fall-through; `Number()` then runs `__str_to_number` on the
-result (ToNumber(ToString(arr)) per §7.1.4 → §7.1.1.1). Covers numeric/string
-arrays + empty typed arrays; **boolean-element arrays are intentionally skipped**
-(the join path packs them i8 and synthetic-dispatch element-type resolution
-diverges — they fall through with no regression, out of this slice's scope).
+`String([1,2,3])` null-dereffed in standalone. **Root cause:** the `String()`
+builtin handler (`src/codegen/expressions/calls.ts`, the `funcName === "String"`
+block) routes a ref/array argument through the generic `coerceType` ref→string
+path, which has no array case — arrays aren't classes with `valueOf`/`@@toPrimitive`
+funcMap entries, so it null-derefs. `[1,2,3].toString()` already lowers natively
+via `compileArrayJoinNative`. **Fix (additive, no shared-coercion-engine change):**
+a `tryEmitArrayToStringNative` helper synthesizes `arg.toString()` and dispatches
+through `compileArrayMethodCall` BEFORE the coerceType fall-through. Covers
+numeric/string arrays + empty typed arrays; **boolean-element arrays are
+intentionally skipped** (the join path packs them i8 and synthetic-dispatch
+element-type resolution diverges — they fall through with no regression).
 Verified standalone/WASI; gc/host mode untouched (guard is `nativeStrings`-only).
 Test: `tests/issue-2160-array-coercion-standalone.test.ts`.
+
+**`Number(array)` deferred to senior-dev/engine:** the `Number(arr)` half
+(ToNumber(ToString(arr)) per §7.1.4 → §7.1.1.1) must route string→number through
+the **#1917 single coercion engine**, not a hand-rolled `__str_to_number` call
+site — the Coercion-site drift gate (#2108) rejects a new ad-hoc site (18→19).
+Tracked separately as a senior-dev task.

@@ -3,23 +3,25 @@ import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
 /**
- * #2160 — `String(arr)` / `Number(arr)` array→primitive coercion in standalone.
+ * #2160 — `String(arr)` array→primitive coercion in standalone.
  *
  * In native-strings (standalone / WASI) mode there is no JS-host
- * `__extern_toString`/`__unbox_number` to run ToPrimitive on a WasmGC array
- * struct, so the generic `coerceType` ref→string / ref→number path null-derefed
- * (`String([1,2,3])`) or yielded NaN (`Number([5])` → NaN instead of 5).
+ * `__extern_toString` to run ToPrimitive on a WasmGC array struct, so the
+ * generic `coerceType` ref→string path null-dereferenced (`String([1,2,3])`).
  *
- * The fix (calls.ts String()/Number() handlers) routes an array argument
- * through its native `Array.prototype.toString` (§23.1.3.36 → join(",")) via
- * the existing `compileArrayJoinNative` lowering — additive, before the
- * coerceType fall-through, and NOT touching the shared coercion engine (#1917).
- * For Number() the resulting native string is run through `__str_to_number`
- * (ToNumber(ToString(arr)) per §7.1.4 → §7.1.1.1).
+ * The fix (calls.ts `String()` handler) routes an array argument through its
+ * native `Array.prototype.toString` (§23.1.3.36 → join(",")) via the existing
+ * `compileArrayJoinNative` lowering — additive, before the coerceType
+ * fall-through, and NOT touching the shared coercion engine (#1917).
  *
- * Boolean-element arrays are intentionally NOT covered (the join path packs
- * them i8 and synthetic-dispatch element-type resolution diverges) — they fall
- * through to existing behavior with no regression; out of this slice's scope.
+ * `Number(arr)` (ToNumber(ToString(arr))) is deliberately OUT OF SCOPE here:
+ * it must route string→number through the #1917 coercion engine rather than a
+ * hand-rolled `__str_to_number` call site (the Coercion-site drift gate #2108
+ * rejects a new ad-hoc site). Tracked as a separate senior-dev/engine task.
+ *
+ * Boolean-element arrays are also intentionally NOT covered (the join path
+ * packs them i8 and synthetic-dispatch element-type resolution diverges) —
+ * they fall through to existing behavior with no regression.
  *
  * All standalone/WASI cases instantiate with an EMPTY import object, proving no
  * JS host is needed.
@@ -41,20 +43,10 @@ const CASES: ReadonlyArray<Case> = [
   },
   // String(empty typed array) — "" length 0
   { name: "strEmpty", src: `const a: number[] = []; const s = String(a); return s.length;`, want: 0 },
-  // Number([5]) → ToNumber("5") = 5
-  { name: "numSingle", src: `return Number([5]);`, want: 5 },
-  // Number(["7"]) → ToNumber("7") = 7
-  { name: "numStr", src: `return Number(["7"]);`, want: 7 },
-  // Number([3.5]) → 3.5 → *10 = 35
-  { name: "numFloat", src: `return Number([3.5]) * 10;`, want: 35 },
-  // Number(empty typed array) → ToNumber("") = 0
-  { name: "numEmpty", src: `const a: number[] = []; return Number(a);`, want: 0 },
-  // Number([1,2]) → ToNumber("1,2") = NaN
-  { name: "numNaN", src: `return Number.isNaN(Number([1,2])) ? 1 : 0;`, want: 1 },
-  // Regression: scalar String/Number still correct
+  // Regression: scalar String still correct
   { name: "regStrNum", src: `return String(42).length;`, want: 2 },
   { name: "regStrNull", src: `return String(null).length;`, want: 4 },
-  { name: "regNumStr", src: `return Number("3.5") * 10;`, want: 35 },
+  { name: "regStrBool", src: `return String(true).length;`, want: 4 },
   // Regression: direct arr.toString() unaffected
   { name: "regArrToString", src: `return [1,2,3].toString().length;`, want: 5 },
 ];
@@ -67,13 +59,13 @@ function expectAll(ex: Record<string, () => number>, label: string): void {
   }
 }
 
-describe("#2160 String()/Number() array→primitive coercion — standalone", () => {
+describe("#2160 String() array→primitive coercion — standalone", () => {
   it("coerces arrays via native toString (standalone, no host imports)", async () => {
     const r = await compile(MODULE_SRC, { target: "standalone" });
     expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
     // No JS-host coercion imports must leak.
     const labels = r.imports.map((im) => `${im.module}::${im.name}`);
-    for (const re of [/^env::__extern_toString$/, /^env::__unbox_number$/, /^wasm:js-string::/]) {
+    for (const re of [/^env::__extern_toString$/, /^wasm:js-string::/]) {
       expect(
         labels.filter((l) => re.test(l)),
         `leaked ${re}`,
