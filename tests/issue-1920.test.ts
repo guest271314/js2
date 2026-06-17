@@ -150,10 +150,7 @@ describe("#1920 peephole pattern 8 — local.set N; local.get N → local.tee N"
   });
 
   it("does NOT fuse when the reloaded local index differs", () => {
-    const mod = moduleWithBody([
-      { op: "local.set", index: 3 } as Instr,
-      { op: "local.get", index: 4 } as Instr,
-    ]);
+    const mod = moduleWithBody([{ op: "local.set", index: 3 } as Instr, { op: "local.get", index: 4 } as Instr]);
     expect(peepholeOptimize(mod)).toBe(0);
   });
 });

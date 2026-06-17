@@ -190,11 +190,7 @@ function optimizeBody(body: Instr[], localTypes?: ValType[]): number {
     // local immediately followed by a reload of the SAME local is precisely
     // `local.tee` (store + leave a copy on the stack). Nothing observes the
     // stack between them, so the fusion is value- and effect-preserving.
-    if (
-      cur.op === "local.set" &&
-      next.op === "local.get" &&
-      (next as any).index === (cur as any).index
-    ) {
+    if (cur.op === "local.set" && next.op === "local.get" && (next as any).index === (cur as any).index) {
       body.splice(i, 2, { op: "local.tee", index: (cur as any).index });
       removed++; // net: 2 removed, 1 added = 1 instruction saved
       // Don't increment i — the new `local.tee N` may pair with a following
