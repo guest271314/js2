@@ -3964,6 +3964,11 @@ function _safeSet(
  */
 const _hostProxyCache = new WeakMap<object, any>();
 const _hostProxyReverse = new WeakMap<object, any>();
+// (#1694 A.i / #1632b-1) Per-closure cache of the callable+constructible
+// host wrapper produced by `_wrapCallableForHost`, so repeated wraps of the
+// same closure return the same Proxy (constructor identity / @@species stays
+// stable).
+const _hostCallableCache = new WeakMap<object, any>();
 
 /**
  * #1047 — registered prototype refs → method-only own-key list. Populated by
@@ -4687,6 +4692,140 @@ function _unwrapForHost(v: any): any {
   if (v == null || typeof v !== "object") return v;
   const orig = _hostProxyReverse.get(v);
   return orig ?? v;
+}
+
+// (#1694 A.i / #1632b-1) Host-callable/constructible representation of a
+// compiled Wasm closure.
+//
+// `_wrapForHost` wraps an opaque WasmGC struct in a Proxy whose target is
+// `Object.create(null)` — a plain, NON-callable object. A JS Proxy is
+// `[[Call]]`-able / `[[Construct]]`-able only when its *target* is itself
+// callable, so a closure wrapped that way is neither callable nor
+// constructible. When such a value reaches a host built-in that must call or
+// construct it — the canonical case is `Promise.all.call(NotPromise, …)`,
+// where V8's NewPromiseCapability(C) performs `Construct(C, «executor»)` — V8
+// rejects it with "… is not a constructor".
+//
+// `_wrapCallableForHost` wraps the closure in a Proxy whose target is a real
+// `function`, so the Proxy may legally carry `apply` and `construct` traps and
+// `typeof proxy === "function"` holds (required for V8's IsCallable /
+// IsConstructor checks). All property operations (.prototype, .name, static
+// members, has, ownKeys, …) delegate to the SAME `_wrapForHost(closure)` proxy,
+// reusing its read/has/enumerate machinery verbatim — no logic is duplicated or
+// extracted. Cached per closure so repeated wraps return the same Proxy
+// (constructor identity / @@species comparisons stay stable) and mirrored into
+// `_hostProxyReverse` so `_unwrapForHost` round-trips the value back to the raw
+// struct when it flows back into Wasm.
+//
+// This is the ordinary-`[[Construct]]` representation (#1632b-1, runtime-only):
+// the `construct` trap emulates ECMA-262 §10.2.2 OrdinaryCallEvaluateBody for a
+// plain compiled function used with `new` — invoke the closure body with a
+// fresh ordinary object as the implicit receiver, then return the body's value
+// if it is an object, else the fresh receiver. The compiled-*class*-as-dynamic-
+// constructor case (a dedicated `__construct_closure` export) is the separate
+// codegen follow-up #1632b-2 and is intentionally NOT handled here; A.i's
+// `NotPromise` is always an ordinary function, so this fallback closes it.
+function _wrapCallableForHost(
+  closure: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+): any {
+  if (closure == null || typeof closure !== "object") return closure;
+  if (!_isWasmStruct(closure)) return closure;
+  const cached = _hostCallableCache.get(closure);
+  if (cached) return cached;
+
+  // Reuse the full property-read/has/enumerate proxy unchanged: the callable
+  // wrapper forwards every non-call/construct trap to it.
+  const exports = callbackState?.getExports();
+  const propProxy = _wrapForHost(closure, exports);
+
+  // The Proxy target must itself be callable+constructible for the traps to be
+  // installable and for `typeof proxy === "function"` to hold. A bare
+  // `function(){}` is both [[Call]] and [[Construct]] capable.
+  const fnTarget = function compiledFnTarget() {};
+  // Surface .name / .length when the codegen stamped them on the closure
+  // sidecar, so Function.prototype.toString / .name stay spec-shaped.
+  // Best-effort; non-fatal if absent.
+  const meta = _wasmStructProps.get(closure);
+  if (meta) {
+    if (typeof meta.name === "string") {
+      try {
+        Object.defineProperty(fnTarget, "name", { value: meta.name, configurable: true });
+      } catch {
+        /* Function.name redefinition is best-effort. */
+      }
+    }
+    if (typeof meta.length === "number") {
+      try {
+        Object.defineProperty(fnTarget, "length", { value: meta.length, configurable: true });
+      } catch {
+        /* Function.length redefinition is best-effort. */
+      }
+    }
+  }
+
+  const handler: ProxyHandler<any> = {
+    apply(_t, thisArg, args) {
+      // Dispatch through the dynamic-arity bridge: it selects the highest
+      // emitted `__call_fn_<arity>` and threads `thisArg` via the method
+      // variant exactly like the rest of the host glue.
+      const wrapped = _wrapWasmClosureUnknownArity(closure, callbackState);
+      if (typeof wrapped !== "function") {
+        throw new TypeError("compiled function is not callable (no __call_fn_* export)");
+      }
+      return wrapped.apply(thisArg, args);
+    },
+    construct(_t, args, _newTarget) {
+      // Ordinary [[Construct]] (ECMA-262 §10.2.2) for a compiled function used
+      // with `new` — the case V8 reaches inside NewPromiseCapability(C). Run the
+      // body with a fresh ordinary object as the implicit `this`; return the
+      // body's result if it is an object, else the fresh object. A throw from
+      // the compiled body (e.g. the executor protocol abrupt-completion paths in
+      // `capability-*` tests) MUST propagate so V8 observes spec ordering.
+      const wrapped = _wrapWasmClosureUnknownArity(closure, callbackState);
+      if (typeof wrapped !== "function") {
+        throw new TypeError("compiled function is not a constructor (no __call_fn_* export)");
+      }
+      const self: Record<string, any> = {};
+      const r = wrapped.apply(self, args);
+      return r != null && typeof r === "object" ? r : self;
+    },
+    // Property reads / writes / enumeration delegate to the standard
+    // `_wrapForHost` proxy so `.prototype`, `.name`, static members, `has`,
+    // `ownKeys`, descriptors, etc. behave identically to a non-callable wrap.
+    get(_t, key, _recv) {
+      return (propProxy as any)[key];
+    },
+    set(_t, key, val) {
+      (propProxy as any)[key] = val;
+      return true;
+    },
+    has(_t, key) {
+      return key in (propProxy as any);
+    },
+    getOwnPropertyDescriptor(_t, key) {
+      const d = Object.getOwnPropertyDescriptor(propProxy as any, key);
+      if (d) d.configurable = true; // a Proxy target's non-config props must be reported configurable
+      return d;
+    },
+    defineProperty(_t, key, desc) {
+      return Reflect.defineProperty(propProxy as any, key, desc);
+    },
+    deleteProperty(_t, key) {
+      return Reflect.deleteProperty(propProxy as any, key);
+    },
+    ownKeys() {
+      return Reflect.ownKeys(propProxy as any);
+    },
+    getPrototypeOf() {
+      return Function.prototype;
+    },
+  };
+
+  const proxy = new Proxy(fnTarget, handler);
+  _hostCallableCache.set(closure, proxy);
+  _hostProxyReverse.set(proxy, closure); // so _unwrapForHost round-trips
+  return proxy;
 }
 
 // ── #2180 — host-mode user `new Proxy` / `Proxy.revocable` construction ──────
@@ -9736,6 +9875,30 @@ assert._isSameValue = isSameValue;
         // `ctx-non-object.js` / `ctx-non-ctor.js` files exercise for
         // undefined/null/primitive/non-constructor values.
         if (directCall) return Promise;
+        // (#1694 A.i / #1632b-1) When the user passes a COMPILED FUNCTION as the
+        // capability constructor — `Promise.all.call(NotPromise, …)` where
+        // `NotPromise` is an ordinary `function` lowered to a Wasm closure
+        // struct — V8's NewPromiseCapability(C) does `Construct(C, «executor»)`.
+        // A bare `_wrapForHost` proxy is non-constructible, so V8 throws
+        // "… is not a constructor". Wrap it in the callable/constructible proxy
+        // so the construct succeeds and the closure body runs (executor
+        // protocol). Only genuine closures (`__is_closure === 1`) get the
+        // callable wrap; a plain object or non-closure struct stays
+        // non-constructible, so the spec TypeError for `ctx-non-object` /
+        // `ctx-non-ctor` still fires per §27.2.4.X step 2.
+        if (thisArg != null && typeof thisArg === "object" && _isWasmStruct(thisArg)) {
+          const exports = callbackState?.getExports();
+          const isClosureFn = exports?.__is_closure as ((v: any) => number) | undefined;
+          let isClosure = false;
+          if (typeof isClosureFn === "function") {
+            try {
+              isClosure = isClosureFn(thisArg) === 1;
+            } catch {
+              isClosure = false;
+            }
+          }
+          if (isClosure) return _wrapCallableForHost(thisArg, callbackState);
+        }
         return thisArg;
       };
       // (#1116b) Synthesize (and cache) a JS subclass of Promise for a
