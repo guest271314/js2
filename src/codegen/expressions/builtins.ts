@@ -475,7 +475,13 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
   //  5 $msOfDay (i64)         [0, 86399999]
   //  6 $days (i64)            floor(ts / MS_PER_DAY)
   //  7 $tmp  (i64)            scratch for digit extraction
-  const L_BUF = 1, L_POS = 2, L_PACKED = 3, L_YEAR = 4, L_MSDAY = 5, L_DAYS = 6, L_TMP = 7;
+  const L_BUF = 1,
+    L_POS = 2,
+    L_PACKED = 3,
+    L_YEAR = 4,
+    L_MSDAY = 5,
+    L_DAYS = 6,
+    L_TMP = 7;
   const body: Instr[] = [];
 
   // buf = array.new_default(27)
@@ -559,10 +565,7 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
     // (value / 10^(width-1-d)) % 10 and store '0' + digit.
     for (let d = 0; d < width; d++) {
       const div = 10n ** BigInt(width - 1 - d);
-      body.push(
-        { op: "local.get", index: L_BUF } as Instr,
-        { op: "local.get", index: L_POS } as Instr,
-      );
+      body.push({ op: "local.get", index: L_BUF } as Instr, { op: "local.get", index: L_POS } as Instr);
       // digit = (src / div) % 10
       body.push({ op: "local.get", index: srcLocal } as Instr);
       if (div !== 1n) {
@@ -1806,10 +1809,7 @@ function compileDateMethodCall(
             op: "if",
             blockType: { kind: "val", type: { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx } },
             then: [{ op: "ref.null", typeIdx: ctx.anyStrTypeIdx } as Instr],
-            else: [
-              { op: "local.get", index: tsLocalShared } as Instr,
-              { op: "call", funcIdx: isoIdx } as Instr,
-            ],
+            else: [{ op: "local.get", index: tsLocalShared } as Instr, { op: "call", funcIdx: isoIdx } as Instr],
           } as unknown as Instr);
           releaseTempLocal(fctx, tsLocalShared);
           return { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
@@ -1828,10 +1828,7 @@ function compileDateMethodCall(
           then: thenThrow,
           else: [],
         } as unknown as Instr);
-        fctx.body.push(
-          { op: "local.get", index: tsLocalShared } as Instr,
-          { op: "call", funcIdx: isoIdx } as Instr,
-        );
+        fctx.body.push({ op: "local.get", index: tsLocalShared } as Instr, { op: "call", funcIdx: isoIdx } as Instr);
         releaseTempLocal(fctx, tsLocalShared);
         return anyStrType;
       }

@@ -93,9 +93,7 @@ describe("#2164 standalone Date.prototype.toISOString / toJSON", () => {
 
   it("toJSON returns null for an Invalid Date", async () => {
     expect(
-      await runStandalone(
-        `export function run(): number { return new Date(NaN).toJSON() === null ? 1 : 0; }`,
-      ),
+      await runStandalone(`export function run(): number { return new Date(NaN).toJSON() === null ? 1 : 0; }`),
     ).toBe(1);
   });
 
