@@ -327,7 +327,7 @@ function buildIteratorBody(types: IterRuntimeTypes, deps: UserCarrierDeps | unde
           // No @@iterator → obj is itself the iterator (has `next`).
           then: [{ op: "local.get", index: 0 }],
           else: [{ op: "local.get", index: 2 }],
-        } as unknown as Instr,
+        },
         { op: "local.set", index: 2 },
         // $IterRec{USER, vec:null, idx:0, userIter}
         { op: "i32.const", value: ITER_KIND_USER },
@@ -352,7 +352,7 @@ function buildIteratorBody(types: IterRuntimeTypes, deps: UserCarrierDeps | unde
       blockType: { kind: "val", type: { kind: "externref" } },
       then: vecArm,
       else: elseArm,
-    } as unknown as Instr,
+    },
   ];
 }
 
@@ -414,7 +414,7 @@ function buildIteratorNextBody(types: IterRuntimeTypes, deps: UserCarrierDeps | 
         { op: "struct.set", typeIdx: iterRecTypeIdx, fieldIdx: 2 } as Instr,
       ],
       else: [],
-    } as unknown as Instr,
+    },
   ];
 
   if (!deps) {
@@ -452,7 +452,7 @@ function buildIteratorNextBody(types: IterRuntimeTypes, deps: UserCarrierDeps | 
       blockType: { kind: "val", type: { kind: "externref" } },
       then: [{ op: "ref.null.extern" } as Instr],
       else: [{ op: "local.get", index: 6 }, { op: "call", funcIdx: deps.sgetValueIdx } as Instr],
-    } as unknown as Instr,
+    },
     { op: "local.set", index: 5 },
   ];
 
@@ -472,7 +472,7 @@ function buildIteratorNextBody(types: IterRuntimeTypes, deps: UserCarrierDeps | 
       blockType: { kind: "empty" },
       then: userStep,
       else: vecStep,
-    } as unknown as Instr,
+    },
     // results in ABI order: (done, value)
     { op: "local.get", index: 4 },
     { op: "local.get", index: 5 },
@@ -510,7 +510,7 @@ function buildIteratorRestBody(iterRecTypeIdx: number, vecTypeIdx: number, arrTy
         { op: "ref.as_non_null" } as Instr,
         { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 },
       ],
-    } as unknown as Instr,
+    },
     { op: "local.set", index: 4 },
     // out = new externref[ (i < len) ? len - i : 0 ]   (clamp negative to 0).
     // Compute the count cleanly: the if's condition (i < len) is the ONLY value
@@ -523,7 +523,7 @@ function buildIteratorRestBody(iterRecTypeIdx: number, vecTypeIdx: number, arrTy
       blockType: { kind: "val", type: { kind: "i32" } },
       then: [{ op: "local.get", index: 4 }, { op: "local.get", index: 3 }, { op: "i32.sub" }],
       else: [{ op: "i32.const", value: 0 }],
-    } as unknown as Instr,
+    },
     { op: "array.new_default", typeIdx: arrTypeIdx },
     { op: "local.set", index: 5 },
     // j = 0

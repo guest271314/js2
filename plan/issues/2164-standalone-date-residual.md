@@ -61,7 +61,7 @@ instantiates. WASI still uses its clock; host mode unchanged (gated on
 Date()/performance.now() instantiate, mixed setup+explicit-timestamp works,
 explicit dates unaffected (5/5). Host date-basic equiv unchanged (12/12).
 
-## Slice 2 (2026-06-17) — standalone `toISOString()` / `toJSON()` pure-Wasm formatter
+## Slice 3 (2026-06-17) — standalone `toISOString()` / `toJSON()` pure-Wasm formatter
 
 **Landed.** The Date string formatters delegate to the `__date_format(ts, mode)`
 host import. In standalone / nativeStrings mode there is no JS host, so the
@@ -92,11 +92,50 @@ RangeError-on-invalid, pre-epoch (1969), ms round-trip. Existing `issue-1638`
 
 ### Remaining slices (issue stays open)
 
-- **`Date.parse(str)`** returns 0 standalone — date-string parser not wired
-  standalone (PR #1633 slice). Medium.
 - **Negative-year calendar getters** (`getUTCFullYear()` etc.) are wrong for
   pre-year-0 timestamps standalone (`__date_civil_from_days` negative-`days`
   gap, pre-existing) — so `toISOString` of a negative *year* is also off. The
-  formatter itself is correct given a correct year; this is upstream of Slice 2.
+  formatter itself is correct given a correct year; this is upstream of Slice 3.
 - Real current-time semantics standalone are intentionally NOT provided (no
   clock source); only the instantiate-blocking leak is fixed (Slice 1).
+- `Date.parse(str)` / `new Date(str)` standalone parsing landed in Slice 2
+  below (PR #1633).
+
+---
+
+## Slice 2 (2026-06-17) — pure-Wasm `Date.parse(str)` / `new Date(str)`
+
+**Landed.** `Date.parse` was a NaN stub and `new Date("…")` coerced the string
+to f64 (→ NaN), so neither parsed a date string in ANY mode — fatal standalone
+(no host fallback).
+
+**Fix.** New module `src/codegen/date-parse-native.ts` emits a WasmGC-native
+parser `__date_parse (externref) -> f64` for the ECMAScript Date Time String
+Format (§21.4.1.32): `YYYY[-MM[-DD]]` date forms, `THH:mm[:ss[.sss]]` time,
+`Z`/`±HH:mm` timezone, and `±YYYYYY` expanded years. It flattens the string via
+`__str_flatten` and scans code units (same foundation as
+`parse-number-native.ts`), validates field ranges, and composes the time value
+through the existing `__date_days_from_civil` helper. Returns NaN on any parse
+failure or out-of-range field. A no-timezone date-time form is treated as UTC
+(standalone has no timezone database — matches slice 1's deterministic-clock
+decision); date-only forms are UTC per spec.
+
+Wired at `expressions/calls.ts` (`Date.parse`) and `expressions/new-super.ts`
+(`new Date(str)` when the arg is statically string-typed).
+
+**Gating.** Native parse is enabled for `--target standalone` / `--target wasi`
+only. Those carry the `nativeStrings` WasmGC string backend so the helper links
+cleanly. In JS-host mode, lazily wiring the helper mid-body trips the
+late-import index-shift class (#2043: "heap type index out of range"), so host
+mode keeps the prior NaN stub — **no regression** (host `Date.parse` was always
+a NaN stub). Follow-up: register `__date_parse` up-front (like `parseInt` in
+`index.ts`) to extend native parsing to host mode.
+
+**Validation.** `tests/issue-2164.test.ts` +15 cases (ISO full/date-only/
+year-only, ms component, ±TZ offsets, no-TZ-as-UTC, leap day, expanded ±years,
+invalid month/day/hour, garbage → NaN, `new Date(str)` round-trips through UTC
+getters) — 21/21 green. Verified against Node `Date.parse` across 18 formats
+(18/18 under `TZ=UTC`; the 2 no-TZ cases differ from a Berlin-TZ Node only by
+the host TZ offset, which is the intended UTC-for-local standalone behavior).
+Host-mode Date code no longer compile-errors. tsc + biome lint + prettier +
+stack-balance gates clean.

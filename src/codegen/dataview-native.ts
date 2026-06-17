@@ -153,7 +153,7 @@ export function emitArrayBufferSlice(
     blockType: { kind: "empty" },
     then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: sliceLenLocal } as Instr],
     else: [],
-  } as unknown as Instr);
+  });
 
   // dstArr = new i32[sliceLen]
   const dstArrLocal = allocLocal(fctx, `__abs_dstarr_${fctx.locals.length}`, {
@@ -225,7 +225,7 @@ function emitNormalizeIndex(fctx: FunctionContext, idxLocal: number, lenLocal: n
       blockType: { kind: "empty" },
       then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: idxLocal } as Instr],
       else: [],
-    } as unknown as Instr,
+    },
   ];
   const posBranch: Instr[] = [
     // if (idx > srcLen) idx = srcLen
@@ -237,14 +237,14 @@ function emitNormalizeIndex(fctx: FunctionContext, idxLocal: number, lenLocal: n
       blockType: { kind: "empty" },
       then: [{ op: "local.get", index: lenLocal } as Instr, { op: "local.set", index: idxLocal } as Instr],
       else: [],
-    } as unknown as Instr,
+    },
   ];
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: negBranch,
     else: posBranch,
-  } as unknown as Instr);
+  });
 }
 
 /** Lazily ensure the i32_byte vec type exists and return its struct/array indices. */
@@ -459,7 +459,7 @@ function emitReadI32(
     blockType: { kind: "val", type: { kind: "i32" } },
     then: leInstrs,
     else: beInstrs,
-  } as unknown as Instr);
+  });
 }
 
 /**
@@ -543,7 +543,7 @@ function emitReadI64(
     blockType: { kind: "val", type: { kind: "i64" } },
     then: build(true),
     else: build(false),
-  } as unknown as Instr);
+  });
 }
 
 /** Store `arr[off + k] = byte` (byte already an i32 0..255 on caller's responsibility). */
@@ -628,7 +628,7 @@ function emitWriteBytes(
       blockType: { kind: "empty" },
       then: storeAll(true),
       else: storeAll(false),
-    } as unknown as Instr);
+    });
     return;
   }
 
@@ -667,5 +667,5 @@ function emitWriteBytes(
     blockType: { kind: "empty" },
     then: storeAll(true),
     else: storeAll(false),
-  } as unknown as Instr);
+  });
 }
