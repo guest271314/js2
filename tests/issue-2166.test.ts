@@ -386,3 +386,125 @@ describe("#2166 PR-B — standalone dynamic object-graph JSON.stringify indentat
     );
   });
 });
+
+/**
+ * #2166 PR-C — dynamic JSON.parse via the pure-Wasm recursive-descent codec
+ * (`__json_parse_text`, src/codegen/json-codec-native.ts). Parses a runtime JSON
+ * *text* into the SAME standalone value representation the object runtime and
+ * the PR-A stringify codec consume — `$Object` graphs (via `__new_plain_object`
+ * + `__extern_set`), boxed-number/boolean primitives (`$__box_*` structs, what
+ * the property-read coercion unboxes), native-string values (full §25.5.1
+ * escape handling incl. `\uXXXX`), and `null`. A round-trip
+ * `JSON.parse(JSON.stringify(o))` and downstream `r.x` reads work. Malformed
+ * input throws a runtime SyntaxError (§25.5.1 step 3) rather than trapping.
+ *
+ * Scope (PR-C): object graphs + primitives. Arrays are parsed structurally
+ * (`.length` works, nested arrays serialise as property values), but direct
+ * numeric element indexing on a parsed array (`a[i]`) needs the standalone
+ * element-access path to route `$ObjVec` reads through `__extern_get_idx`,
+ * tracked as the PR-C2 follow-up. A `reviver` argument is deferred to PR-D.
+ *
+ * Native strings don't marshal across the JS export boundary in standalone, so
+ * the harness compiles the assertion INTERNALLY and returns a number from
+ * `test()` (1 = pass), the same internal-comparison shape test262 needs.
+ */
+async function parseInternal(body: string, target: "standalone" | "wasi" = "standalone"): Promise<number> {
+  const src = `export function test(): number { ${body} }`;
+  const r = await compile(src, { target });
+  expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+  const labels = r.imports.map((i) => `${i.module}::${i.name}`);
+  expect(labels.some((l) => /JSON_stringify|JSON_parse/.test(l))).toBe(false);
+  const importObject: Record<string, unknown> = {};
+  const { instance } = await WebAssembly.instantiate(r.binary, importObject);
+  (importObject as { __setExports?: (e: unknown) => void }).__setExports?.(instance.exports);
+  return (instance.exports as { test(): number }).test();
+}
+
+describe("#2166 PR-C — standalone dynamic JSON.parse (object graphs + primitives)", () => {
+  it("parses an object number property", async () => {
+    expect(await parseInternal(`const o: any = JSON.parse('{"x":7}'); return (o.x as number) === 7 ? 1 : 0;`)).toBe(1);
+  });
+
+  it("parses a nested object graph", async () => {
+    expect(
+      await parseInternal(`const o: any = JSON.parse('{"a":{"b":3}}'); return (o.a.b as number) === 3 ? 1 : 0;`),
+    ).toBe(1);
+  });
+
+  it("parses a string value", async () => {
+    expect(
+      await parseInternal(`const o: any = JSON.parse('{"s":"hi"}'); return (o.s as string) === "hi" ? 1 : 0;`),
+    ).toBe(1);
+  });
+
+  it('parses §25.5.1 string escapes (\\n, \\", \\\\, \\uXXXX)', async () => {
+    // {"s":"a\nb\"c\\dA"}  →  a<LF>b"c\dA
+    expect(
+      await parseInternal(
+        `const o: any = JSON.parse('{"s":"a\\\\nb\\\\"c\\\\\\\\d\\\\u0041"}'); return (o.s as string) === "a\\nb\\"c\\\\dA" ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("parses a boolean property (truthy round-trip)", async () => {
+    expect(
+      await parseInternal(`const o: any = JSON.parse('{"t":true,"f":false}'); return (o.t as boolean) ? 1 : 0;`),
+    ).toBe(1);
+  });
+
+  it("parses a null property", async () => {
+    expect(await parseInternal(`const o: any = JSON.parse('{"n":null}'); return (o.n as any) === null ? 1 : 0;`)).toBe(
+      1,
+    );
+  });
+
+  it("parses a top-level primitive (number)", async () => {
+    expect(await parseInternal(`return (JSON.parse("42") as number) === 42 ? 1 : 0;`)).toBe(1);
+  });
+
+  it("parses negative / fractional / exponent numbers", async () => {
+    expect(
+      await parseInternal(
+        `const o: any = JSON.parse('{"a":-2.5,"b":1e3,"c":1.5e-2}'); return ((o.a as number) === -2.5 && (o.b as number) === 1000 && (o.c as number) === 0.015) ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("tolerates leading/trailing whitespace", async () => {
+    expect(await parseInternal(`const o: any = JSON.parse('  {"x":1}  '); return (o.x as number) === 1 ? 1 : 0;`)).toBe(
+      1,
+    );
+  });
+
+  it("round-trips JSON.parse(JSON.stringify(o)) for an object graph", async () => {
+    expect(
+      await parseInternal(
+        `let o: any = { x: 5, y: 9 }; const r: any = JSON.parse(JSON.stringify(o)); return ((r.x as number) + (r.y as number)) === 14 ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("round-trips a nested object graph", async () => {
+    expect(
+      await parseInternal(
+        `let o: any = { a: { b: 3 } }; const r: any = JSON.parse(JSON.stringify(o)); return (r.a.b as number) === 3 ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("parses an empty object", async () => {
+    expect(await parseInternal(`const o: any = JSON.parse('{}'); const r: any = o; return 1;`)).toBe(1);
+  });
+
+  it("works under --target wasi too (host-import-free)", async () => {
+    expect(
+      await parseInternal(`const o: any = JSON.parse('{"x":7}'); return (o.x as number) === 7 ? 1 : 0;`, "wasi"),
+    ).toBe(1);
+  });
+
+  it("throws a SyntaxError on malformed input (trailing junk)", async () => {
+    // The codec throws a standalone SyntaxError at runtime; the trap surfaces as
+    // a WebAssembly runtime error when test() runs.
+    await expect(parseInternal(`const o: any = JSON.parse('{"x":1} bogus'); return 1;`)).rejects.toThrow();
+  });
+});
