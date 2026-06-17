@@ -65,8 +65,14 @@ import {
   resolveComputedKeyExpression,
   resolvePropertyNameText,
 } from "../literals.js";
-import { tryEmitJsonParseLiteral, tryEmitJsonStringifyStatic } from "../json-standalone.js";
+import {
+  jsonGapFromStaticSpace,
+  staticSpaceValue,
+  tryEmitJsonParseLiteral,
+  tryEmitJsonStringifyStatic,
+} from "../json-standalone.js";
 import { emitJsonParsePrimitive, emitJsonQuoteString } from "../json-runtime.js";
+import { emitJsonParseText, emitJsonStringifyValue } from "../json-codec-native.js";
 import {
   compileObjectDefineProperties,
   compileObjectDefineProperty,
@@ -116,6 +122,7 @@ import {
   compileStandaloneRegExpConstructor,
   isGlobalRegExpIdentifier,
   tryCompileStandaloneRegExpExec,
+  tryCompileStandaloneRegExpSymbolCall,
   tryCompileStandaloneRegExpTest,
 } from "../regexp-standalone.js";
 import {
@@ -146,6 +153,7 @@ import {
   ensureNativeStringExternBridge,
   ensureStrToCharVecHelper,
   ensureTextEncodingHelpers,
+  nativeStringLiteralInstrs,
   stringConstantExternrefInstrs,
 } from "../native-strings.js";
 import { emitVariadicStringConcat, hostStringRepr, nativeStringRepr } from "../builtin-scaffold.js";
@@ -5992,6 +6000,71 @@ function compileCallExpression(
             if (staticStringType !== undefined) {
               return staticStringType;
             }
+            // (#2166 PR-A/PR-B) Dynamic object-graph stringify. The static fold
+            // declined (runtime-built graph), so serialise with the pure-Wasm
+            // recursive codec over the standalone value rep ($Object/$ObjVec/
+            // boxed primitives) instead of refusing or silently wrong-folding.
+            // PR-B threads a *static* `space` argument (number/string literal)
+            // into the codec's indent path; a function/array replacer or a
+            // *dynamic* space still keeps the refusal below.
+            const replacerArg = expr.arguments[1];
+            const spaceArg = expr.arguments[2];
+            const replacerNullish =
+              replacerArg === undefined ||
+              replacerArg.kind === ts.SyntaxKind.NullKeyword ||
+              (ts.isIdentifier(replacerArg) && replacerArg.text === "undefined");
+            // PR-A serialises `$Object` graphs only. Arrays (closed typed-vec
+            // structs `number[]` etc.) and tuples are a separate sub-slice
+            // (PR-A2) — they are NOT `$ObjVec`, so routing them to the codec
+            // would emit wrong output. Detect an array/tuple static type via the
+            // checker and keep it on the refusal path below.
+            const arg0Type = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
+            const checkerArr = ctx.checker as unknown as {
+              isArrayType?: (t: unknown) => boolean;
+              isTupleType?: (t: unknown) => boolean;
+            };
+            const isArrayLike =
+              (checkerArr.isArrayType?.(arg0Type) ?? false) ||
+              (checkerArr.isTupleType?.(arg0Type) ?? false) ||
+              // Fallback when the internal predicates are unavailable: a numeric
+              // index type with only integer / `length` own keys looks array-like.
+              (arg0Type.getNumberIndexType() !== undefined &&
+                arg0Type.getProperties().every((p) => /^\d+$/.test(p.name) || p.name === "length"));
+            // (#2166 PR-B) Resolve a static `space` argument to the §25.5.2
+            // indent unit ("gap"). `undefined` space → compact (gap ""). A
+            // *dynamic* space arg stays unresolved → keep the refusal below
+            // (rare shape). An empty gap (space ≤0 / "") routes through the
+            // compact path.
+            let gap: string | undefined = "";
+            if (spaceArg !== undefined) {
+              const staticSpace = staticSpaceValue(ctx, spaceArg);
+              gap = staticSpace === undefined ? undefined : jsonGapFromStaticSpace(staticSpace);
+            }
+            if (replacerNullish && gap !== undefined && !isArrayLike) {
+              const argResult = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "anyref" });
+              if (argResult === null) return null;
+              // Bring the value to anyref so the codec can ref.test-discriminate
+              // it. Externref-typed object/array values widen via any.convert_extern.
+              if (argResult.kind === "externref" || argResult.kind === "ref_extern") {
+                fctx.body.push({ op: "any.convert_extern" } as Instr);
+              } else if (argResult.kind !== "anyref") {
+                coerceType(ctx, fctx, argResult, { kind: "anyref" });
+              }
+              emitJsonStringifyValue(ctx);
+              flushLateImportShifts(ctx, fctx);
+              if (gap === "") {
+                // No indentation — the compact root (cheapest path).
+                fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_stringify_root")! } as Instr);
+              } else {
+                // Pretty-print: push the gap string and call the indent root.
+                for (const instr of nativeStringLiteralInstrs(ctx, gap)) fctx.body.push(instr);
+                fctx.body.push({
+                  op: "call",
+                  funcIdx: ctx.funcMap.get("__json_stringify_root_indent")!,
+                } as Instr);
+              }
+              return nativeStringType(ctx);
+            }
           }
         }
         if (method === "parse" && (ctx.standalone || ctx.wasi)) {
@@ -5999,14 +6072,51 @@ function compileCallExpression(
           if (parsedType !== undefined) {
             return parsedType;
           }
-          // (#1599 Phase 2) Runtime string-value JSON.parse → primitive slice
-          // (number / true / false / null) via pure-Wasm helper, boxed as
-          // $AnyValue. Strings / objects / arrays still fall through to refusal.
-          const primitiveParsed = tryEmitJsonParsePrimitive(ctx, fctx, expr, expr.arguments[0]!);
-          if (primitiveParsed !== undefined) {
-            return primitiveParsed;
+          // (#2166 PR-C) Dynamic-graph JSON.parse: a runtime JSON *text* →
+          // object / array / string / primitive value, parsed entirely in Wasm
+          // (no `env::JSON_parse` host import). The full recursive-descent
+          // grammar in json-codec-native.ts (`__json_parse_text`) builds the
+          // SAME value rep the object runtime + stringify codec consume, so a
+          // round-trip `JSON.parse(JSON.stringify(o))` and downstream property
+          // reads work. It is a strict superset of the older primitive-only
+          // `__json_parse_primitive` slice — which could only parse a lone
+          // number / true / false / null and *traps* on `{`/`[`/`"` — so it
+          // takes over the whole runtime-string case (the primitive helper
+          // stays for any caller that still routes to it directly). A `reviver`
+          // (2nd arg) is deferred to PR-D: refuse it rather than silently ignore
+          // it (§25.5.1 InternalizeJSONProperty is a post-parse walk).
+          if (expr.arguments.length === 1) {
+            let parseArgType: ts.Type | undefined;
+            try {
+              parseArgType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
+            } catch {
+              parseArgType = undefined;
+            }
+            // Route string-typed and `any`/`unknown`-typed (the common
+            // `JSON.parse(text)` where `text: string`) arguments. A non-string
+            // statically-typed arg (e.g. a number) is a type error in user code;
+            // let it fall through to the refusal below.
+            const isStringOrAny =
+              parseArgType === undefined ||
+              (parseArgType.flags & (ts.TypeFlags.StringLike | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+            if (isStringOrAny) {
+              const argResult = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+              if (argResult === null) return null;
+              if (argResult.kind !== "externref") {
+                coerceType(ctx, fctx, argResult, { kind: "externref" });
+              }
+              emitJsonParseText(ctx);
+              flushLateImportShifts(ctx, fctx);
+              fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_parse_text")! } as Instr);
+              // The codec returns the value graph as anyref ($Object/$ObjVec/
+              // $NativeString widened, or a ref $AnyValue for primitives). The
+              // downstream coercion paths (object property read, AnyValue→
+              // primitive) dispatch on the concrete ref via ref.test.
+              return { kind: "anyref" };
+            }
           }
         }
+        void tryEmitJsonParsePrimitive;
         // (#1599 Phase 1) Refuse-and-document: in standalone (no-JS-host) /
         // WASI mode there is no `env::JSON_*` host import to fall back to.
         // The primitive `JSON.stringify` slice above (#1324) already handles
@@ -10413,6 +10523,21 @@ function compileCallExpression(
           const recvIsUnresolved = (receiverType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
           if ((isRegExpRecv || recvIsUnresolved) && !recvIsUserClass) {
             if (ctx.standalone) {
+              // (#2161) Route the well-known-symbol protocol READ forms
+              // (`re[Symbol.match/matchAll/search](str)`) to the native engine
+              // for static / backend-created RegExp receivers — the
+              // operand-swapped dual of the String.prototype.* native path.
+              // Returns undefined for forms not yet wired (dynamic receivers,
+              // @@replace/@@split, string-coercion args), which fall through to
+              // the refusal below.
+              const symResult = tryCompileStandaloneRegExpSymbolCall(
+                ctx,
+                fctx,
+                expr,
+                elemAccess.expression,
+                methodName,
+              );
+              if (symResult !== undefined) return symResult;
               reportError(
                 ctx,
                 expr,

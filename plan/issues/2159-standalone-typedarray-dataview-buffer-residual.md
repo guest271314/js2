@@ -137,44 +137,30 @@ above.
 
 ---
 
-## Slice 3 (2026-06-17) — standalone DataView typed accessors (no host-import leak)
+## Slice (2026-06-17) — standalone TypedArray.prototype.fill packed-local leak
 
-**Landed.** `new DataView(buffer[, offset[, len]])` emitted the host
-`__dv_register_view` import **unconditionally** (so the JS-host runtime bridge
-could window a real native `DataView` on method dispatch). Under
-`--target standalone` / `--target wasi` there is no JS host, so the module
-carried an unsatisfiable `env::__dv_register_view` import and **every**
-`new DataView(...)` was a hard instantiate failure — the dominant `(none)`-leak
-class in the 336-test `built-ins/DataView` bucket.
+**Landed.** Re-validation of the TypedArray-method surface standalone found that
+`set` / `subarray` / `copyWithin` / `slice` already work natively on byte/short
+typed arrays, but **`.fill()` was a hard compile error** for every byte/short
+typed array (`Uint8Array` / `Int8Array` / `Uint8ClampedArray` / `Int16Array` /
+`Uint16Array`).
 
-**Root cause** (`src/codegen/expressions/new-super.ts`, `new DataView` branch):
-the `ensureLateImport("__dv_register_view", …)` + call was emitted with no
-host-mode guard. The accessors themselves (`get/set{Int,Uint,Float}{8,16,32,64}`)
-already have a complete pure-Wasm lowering in `src/codegen/dataview-native.ts`
-(`emitDataViewAccessor`, wired for `noJsHost(ctx)` in `calls.ts`), reading/writing
-bytes directly on the `i32_byte` backing struct with a runtime `littleEndian`
-branch — so the host registration was pure dead weight standalone.
+**Root cause** (`src/codegen/array-methods.ts` `compileArrayFill`): the
+fill-value temp local was allocated with the array's RAW element type — `i8`/`i16`,
+which are *packed storage* types valid only in array elements / struct fields,
+never in a value position (param/result/local/global). The binary emitter rejected
+the leaked local with `encodeValType: packed storage type "i8" is not valid in a
+value position` — the same class as the element-WRITE leak fixed in Slice 1, but
+in the `fill` path. `Int32Array`/`Float64Array` were unaffected (value-type
+elements).
 
-**Fix:**
-1. Gate the `__dv_register_view` emission on `!noJsHost(ctx)`. Standalone still
-   evaluates the `byteOffset`/`byteLength` args for side-effects + the
-   ToIndex/RangeError checks, then operates on the struct directly.
-2. `emitWriteBytes` integer setters used `i32.trunc_sat_f64_s`, which
-   **saturates** (e.g. `setUint32(_, 4e9)` → `0x7FFFFFFF`). The spec
-   (`SetValueInBuffer` → `ToInt{8,16,32}`/`ToUint{8,16,32}`) is **modular**.
-   Switched to `i64.trunc_sat_f64_s` + `i32.wrap_i64` (value mod 2^32; the low
-   `bytes` are then stored), correct for 1/2/4-byte signed+unsigned setters
-   across the ±2^53 integer range, and NaN→0.
+**Fix:** unpack the fill-value local type `i8`/`i16` → `i32` (and pass the
+unpacked type as the value-arg compile hint); `array.set` re-packs the `i32` into
+the element on store. Verified standalone: Uint8/Int8/Int16/Uint16 fill, negative
+signed round-trip, start/end range, modulo-256 wrap, and Int32Array no-regression.
+Test: `tests/issue-2159-ta-fill.test.ts`.
 
-Verified standalone: Int8/Uint8 (signed↔unsigned reinterpret), Int16/Uint16/
-Int32/Uint32 (both endiannesses, values ≥ 2^31), Float32/Float64 (both
-endiannesses), byte-order distinctness, modular wrap, NaN→0. Host mode emits the
-registration unchanged (no regression). Tests: `tests/issue-2159.test.ts`
-(`#2159 standalone DataView typed accessors`).
-
-**Out of this slice (offset windowing):** `new DataView(buf, n>0)` base-offset
-windowing is not yet applied to the standalone accessors (the i32_byte vec struct
-has no offset field). Offset-0 views — the dominant accessor-test pattern, where
-the index is the *accessor* argument — are fully native. Windowed-view base
-offset is a shared representation concern with TypedArray-on-buffer windowing
-(Slice 2c) and is a separate follow-up.
+**Out of this slice:** `subarray` aliasing (the returned view should share the
+parent buffer; standalone currently returns a copy) requires offset-windowing —
+the shared representation gap with DataView offset / TypedArray-on-buffer
+windowing — and is a separate follow-up.
