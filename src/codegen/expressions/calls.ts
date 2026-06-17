@@ -250,6 +250,60 @@ function compileObjectAssignArg(ctx: CodegenContext, fctx: FunctionContext, arg:
   if (t && t.kind !== "externref") coerceType(ctx, fctx, t, { kind: "externref" });
 }
 
+/**
+ * #2160 — `String(arr)` / `Number(arr)` array→primitive coercion in standalone.
+ *
+ * In native-strings (standalone / WASI) mode there is no JS host
+ * `__extern_toString` to run ToPrimitive on a WasmGC array struct, so the
+ * generic `coerceType` ref→string/number path null-derefs (`String([1,2,3])`)
+ * or yields NaN (`Number([5])`). Arrays already have a native ToString — the
+ * `Array.prototype.toString` lowering (§23.1.3.36 → `join(",")`) via
+ * `compileArrayJoinNative`. This routes the array argument through that path by
+ * synthesizing `arg.toString()` and dispatching to the array-method compiler
+ * (mirroring `compileArrayPrototypeCall`'s synthesis at array-methods.ts:1856).
+ *
+ * Returns the emitted native-string ValType on success, or `undefined` when the
+ * argument is not a resolvable array (caller then keeps its existing behavior).
+ * Does NOT touch the shared coercion engine (#1917) — purely additive.
+ */
+function tryEmitArrayToStringNative(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  argExpr: ts.Expression,
+  argTsType: ts.Type,
+): ValType | null | undefined {
+  // Only meaningful where the native array-join path applies (standalone /
+  // WASI native strings). In JS-host mode the existing __extern_toString path
+  // already handles arrays, so leave that untouched.
+  if (!(ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0)) return undefined;
+  if (!resolveArrayInfo(ctx, argTsType)) return undefined;
+
+  // Skip boolean-element arrays: the join-native lowering packs them as i8 and
+  // the synthetic-dispatch element-type resolution diverges from the direct
+  // `arr.toString()` receiver path, tripping an "invalid array type" validation
+  // error. Booleans are a rare String()/Number() argument; leaving them to the
+  // existing fall-through avoids touching the shared array-element machinery
+  // (the #2160 slice targets numeric/string arrays). `arr.toString()` on a
+  // boolean array still works via the direct property-access path.
+  const elemIdxType = argTsType.getNumberIndexType();
+  if (elemIdxType && isBooleanType(elemIdxType)) return undefined;
+
+  // Synthesize `argExpr.toString()` and route through the array-method
+  // compiler. compileArrayJoinNative reads only `propAccess.expression`
+  // (the real, type-resolvable array node) and `callExpr.arguments`
+  // (empty → default "," separator), so the synthetic wrappers are safe.
+  const syntheticPropAccess = ts.factory.createPropertyAccessExpression(argExpr, "toString");
+  (syntheticPropAccess as unknown as { parent: ts.Node }).parent = argExpr.parent;
+  const syntheticCall = ts.factory.createCallExpression(syntheticPropAccess, undefined, []);
+  (syntheticCall as unknown as { parent: ts.Node }).parent = argExpr.parent;
+
+  const result = compileArrayMethodCall(ctx, fctx, syntheticPropAccess, syntheticCall, argTsType, "toString");
+  // `undefined` means the dispatcher declined (not an array shape it handles) —
+  // surface that so the caller falls back. VOID_RESULT can't occur for toString.
+  if (result === undefined || result === VOID_RESULT) return undefined;
+  return result;
+}
+
 function staticToBoolean(expr: ts.Expression): boolean | undefined {
   while (
     ts.isAsExpression(expr) ||
@@ -8616,6 +8670,28 @@ function compileCallExpression(
         emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a number");
         return { kind: "f64" };
       }
+
+      // #2160 — Number(arr) in standalone: ToNumber(arr) = ToNumber(ToString(arr))
+      // (§7.1.4 → §7.1.1.1 ToPrimitive(number) on an Array has no valueOf, so it
+      // falls to toString). Route the array through its native toString, then
+      // StringToNumber via __str_to_number. The generic ref→f64 coerce below has
+      // no array case and yields NaN (`Number([5])` → NaN instead of 5). Must run
+      // BEFORE compileExpression so the array-join lowering compiles the receiver.
+      {
+        const numArg0 = expr.arguments[0]!;
+        const numArg0TsType = ctx.checker.getTypeAtLocation(numArg0);
+        const s2nIdx = ctx.nativeStrings ? ctx.funcMap.get("__str_to_number") : undefined;
+        if (s2nIdx !== undefined && resolveArrayInfo(ctx, numArg0TsType)) {
+          const arrToStr = tryEmitArrayToStringNative(ctx, fctx, numArg0, numArg0TsType);
+          if (arrToStr !== undefined && arrToStr !== null) {
+            // toString result is a native-string ref → externref → __str_to_number.
+            fctx.body.push({ op: "extern.convert_any" });
+            fctx.body.push({ op: "call", funcIdx: s2nIdx });
+            return { kind: "f64" };
+          }
+        }
+      }
+
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (argType?.kind === "i64") {
         // BigInt → number: f64.convert_i64_s
@@ -8780,6 +8856,18 @@ function compileCallExpression(
       if (strArg0IsUndefined) {
         // String(undefined) → "undefined"
         return compileStringLiteral(ctx, fctx, "undefined", strArg0) ?? { kind: "externref" };
+      }
+
+      // #2160 — String(arr) in standalone: route an array argument through its
+      // native Array.prototype.toString (§23.1.3.36) instead of the generic
+      // ref→string coercion, which null-derefs on WasmGC array structs in
+      // native-strings mode. Must run BEFORE compileExpression so the
+      // array-join lowering compiles the receiver itself. Additive: falls
+      // through unchanged when the arg is not a resolvable array.
+      {
+        const strArg0TsType = ctx.checker.getTypeAtLocation(strArg0);
+        const arrToStr = tryEmitArrayToStringNative(ctx, fctx, strArg0, strArg0TsType);
+        if (arrToStr !== undefined) return arrToStr;
       }
 
       const argType = compileExpression(ctx, fctx, strArg0);
