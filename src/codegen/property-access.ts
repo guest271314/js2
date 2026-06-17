@@ -4177,7 +4177,7 @@ export function emitThisReceiverGuardConvert(
         blockType: { kind: "val", type: resultType },
         then: thenBody,
         else: buildArm(i + 1),
-      } as unknown as Instr,
+      },
     ];
   };
 

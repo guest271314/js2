@@ -2549,7 +2549,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           blockType: { kind: "val", type: { kind: "i64" } },
           then: [{ op: "i64.const", value: -9223372036854775808n } as Instr],
           else: [{ op: "local.get", index: tsResultLocal } as Instr],
-        } as unknown as Instr,
+        },
       );
       releaseTempLocal(fctx, tsResultLocal);
       releaseTempLocal(fctx, nonFiniteLocal);

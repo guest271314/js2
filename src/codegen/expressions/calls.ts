@@ -683,7 +683,7 @@ function emitIterableArg(ctx: CodegenContext, fctx: FunctionContext, argExpr: ts
           if (elType && elType.kind !== "externref") {
             // compileExpression with target externref should coerce already;
             // belt-and-braces fallback.
-            fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+            fctx.body.push({ op: "extern.convert_any" });
           }
         }
         fctx.body.push({ op: "call", funcIdx: arrPushIdx });
@@ -822,7 +822,7 @@ function compileFunctionBind(
     if (recvType === null) {
       fctx.body.push({ op: "ref.null.extern" });
     } else if (recvType.kind !== "externref") {
-      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     }
     return externRef;
   }
@@ -836,7 +836,7 @@ function compileFunctionBind(
   if (recvType === null) {
     fctx.body.push({ op: "ref.null.extern" });
   } else if (recvType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
 
   // 2. Push thisArg externref (or ref.null.extern when omitted).
@@ -846,7 +846,7 @@ function compileFunctionBind(
     if (t === null) {
       fctx.body.push({ op: "ref.null.extern" });
     } else if (t.kind !== "externref") {
-      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     }
   } else {
     fctx.body.push({ op: "ref.null.extern" });
@@ -877,14 +877,14 @@ function compileFunctionBind(
       if (t === null) {
         fctx.body.push({ op: "ref.null.extern" });
       } else if (t.kind !== "externref") {
-        fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+        fctx.body.push({ op: "extern.convert_any" });
       }
     } else {
       const t = compileExpression(ctx, fctx, argExpr, externRef);
       if (t === null) {
         fctx.body.push({ op: "ref.null.extern" });
       } else if (t.kind !== "externref") {
-        fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+        fctx.body.push({ op: "extern.convert_any" });
       }
     }
     fctx.body.push({ op: "call", funcIdx: arrPushResolvedIdx });
@@ -1075,7 +1075,7 @@ function emitBoundFunctionCall(
   if (calleeType === null) {
     fctx.body.push({ op: "ref.null.extern" });
   } else if (calleeType.kind !== "externref") {
-    fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+    fctx.body.push({ op: "extern.convert_any" });
   }
   const calleeLocal = allocLocal(fctx, `__bfn_callee_${fctx.locals.length}`, externRef);
   fctx.body.push({ op: "local.set", index: calleeLocal });
@@ -1098,7 +1098,7 @@ function emitBoundFunctionCall(
     if (t === null) {
       fctx.body.push({ op: "ref.null.extern" });
     } else if (t.kind !== "externref") {
-      fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+      fctx.body.push({ op: "extern.convert_any" });
     }
     fctx.body.push({ op: "call", funcIdx: arrPushResolvedIdx });
   }
@@ -2327,12 +2327,7 @@ function compileCallExpression(
       if (expr.arguments.length === 0) {
         // eval() with no args returns undefined per spec.  Avoid the host
         // round-trip entirely.
-        // NOTE(#1095): preserved as-is — original used `{ op: "ref.null", refType: "extern" }`
-        // with `as unknown as Instr` to bypass typecheck. The `refType` field is not part of
-        // the Instr union and is ignored by the emitter (which would read `typeIdx` as undefined).
-        // The semantically-correct form is `{ op: "ref.null.extern" }`; left as legacy to keep
-        // this refactor byte-identical. See follow-up.
-        fctx.body.push({ op: "ref.null", refType: "extern" } as unknown as Instr);
+        fctx.body.push({ op: "ref.null.extern" });
         return { kind: "externref" };
       }
       const srcArg = expr.arguments[0]!;
@@ -2398,9 +2393,7 @@ function compileCallExpression(
       }
     } else {
       // No argument — pass undefined (null externref)
-      // NOTE(#1095): see eval() note above; original used `{ op: "ref.null", refType: "extern" }`
-      // bypass-cast. Preserved verbatim for byte-identical output.
-      fctx.body.push({ op: "ref.null", refType: "extern" } as unknown as Instr);
+      fctx.body.push({ op: "ref.null.extern" });
     }
 
     // Evaluate remaining arguments (e.g. import attributes/options) for side effects.
@@ -10360,7 +10353,7 @@ function compileCallExpression(
             const recvType = compileExpression(ctx, fctx, elemAccess.expression);
             if (recvType) {
               if (recvType.kind === "ref" || recvType.kind === "ref_null") {
-                fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                fctx.body.push({ op: "extern.convert_any" });
               } else if (recvType.kind === "f64") {
                 const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
                 if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
@@ -10379,7 +10372,7 @@ function compileCallExpression(
               const a0 = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
               if (a0) {
                 if (a0.kind === "ref" || a0.kind === "ref_null") {
-                  fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                  fctx.body.push({ op: "extern.convert_any" });
                 } else if (a0.kind === "f64") {
                   const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
                   if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
@@ -10402,7 +10395,7 @@ function compileCallExpression(
               const a1 = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
               if (a1) {
                 if (a1.kind === "ref" || a1.kind === "ref_null") {
-                  fctx.body.push({ op: "extern.convert_any" } as unknown as Instr);
+                  fctx.body.push({ op: "extern.convert_any" });
                 } else if (a1.kind === "f64") {
                   const boxIdx = ensureLateImport(ctx, "__box_number", [{ kind: "f64" }], [{ kind: "externref" }]);
                   if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
