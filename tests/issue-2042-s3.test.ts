@@ -102,19 +102,18 @@ describe("#2042 S3 standalone descriptor-reflection natives", () => {
   });
 
   it("getOwnPropertyDescriptors covers all own keys", async () => {
-    // Cast each descriptor value to `number` before adding — `any + any` hits the
-    // unrelated boxed-add gap (#42); the descriptor reads themselves are correct.
+    // Verify both keys' descriptors via `===` (avoid `+` on two `any` values,
+    // which hits the unrelated boxed-add gap #42). The descriptor reads
+    // themselves are correct (see the single-key value test above).
     expect(
       await runStandalone(
         `export function test(): number {
            const o: any = { a: 1, b: 2 };
            const d: any = Object.getOwnPropertyDescriptors(o);
-           const a: number = d.a.value;
-           const b: number = d.b.value;
-           return a + b; // 1 + 2
+           return d.a.value === 1 && d.b.value === 2 ? 1 : 0;
          }`,
       ),
-    ).toBe(3);
+    ).toBe(1);
   });
 
   it("getOwnPropertyNames on a non-object-shaped receiver compiles (empty result path)", async () => {

@@ -149,6 +149,10 @@ a loud refusal until #2043 is fixed; the helper + its set entry land then as a
 follow-up. Issue stays `in-progress` for S4 (ValidateAndApplyPropertyDescriptor)
 and the deferred write side.
 
-Coordination: S1 (#33, dev-1) and S3 both edit `object-runtime.ts` (the
-`OBJECT_RUNTIME_HELPER_NAMES` set + `ensureObjectRuntime`); my entries append at
-the end to minimize overlap. Whoever merges second resolves the small conflict.
+Coordination: S1 (task #33, PR #1629) and S3 are BOTH authored by dev-2 and both
+edit `object-runtime.ts` (the `OBJECT_RUNTIME_HELPER_NAMES` set +
+`ensureObjectRuntime`). S1 edits the `__obj_find`/`__obj_hash` region + adds
+`__to_property_key`; S3 adds new helper functions (read-side reflection +
+`__obj_ordered_all`) and appends to the helper-names set. The two regions are
+disjoint except the append-only set; whichever PR merges second does the small
+`object-runtime.ts` merge resolution (same author, so no cross-agent handoff).
