@@ -7450,6 +7450,15 @@ export function addStringImports(ctx: CodegenContext): void {
         ctx.nativeRegexHelpers.set(name, idx + delta);
       }
     }
+    // (#2162) Map/Set/WeakMap/WeakSet helper map moves in lockstep too —
+    // map-runtime.ts / weak-collections-runtime.ts call sites bake `call`
+    // indices straight from this map (see shiftLateImportIndices for the full
+    // rationale / the WeakMap stale-index validation failure it fixes).
+    for (const [name, idx] of ctx.mapHelpers) {
+      if (idx >= importsBefore) {
+        ctx.mapHelpers.set(name, idx + delta);
+      }
+    }
     // (#2039 slice 2) Re-base so reconcileNativeStrFinalizeShift doesn't apply
     // the same `delta` a second time — this inline shift already repaired the
     // helper bodies and the map. Matches addUnionImports (#1677-fast-path) and
@@ -8780,6 +8789,19 @@ export function addUnionImports(ctx: CodegenContext): void {
     for (const [name, idx] of ctx.funcMap) {
       if (!newImportNames.has(name) && idx >= importsBefore) {
         ctx.funcMap.set(name, idx + delta);
+      }
+    }
+    // (#2162) `mapHelpers` (Map/Set/WeakMap/WeakSet helper funcIdx) is NOT a
+    // copy of funcMap — its entries are read directly by map-runtime.ts /
+    // weak-collections-runtime.ts call sites to bake `call` funcIdx. It must be
+    // shifted UNCONDITIONALLY in lockstep with the defined-function shift (the
+    // nativeStr/nativeRegex shifts below are gated on the string-helper base and
+    // would miss this in plain-Map programs). Leaving it stale let a late import
+    // (e.g. `__box_number` for a numeric key/value) land between helper
+    // registration and the call, so `wm.has` called `__map_get` → invalid Wasm.
+    for (const [name, idx] of ctx.mapHelpers) {
+      if (idx >= importsBefore) {
+        ctx.mapHelpers.set(name, idx + delta);
       }
     }
     // Update export indices

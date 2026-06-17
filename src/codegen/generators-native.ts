@@ -2072,6 +2072,17 @@ export function tryCompileNativeGeneratorForOf(
  * The vec struct layout matches `getVecInfo`: field 0 = `$length` (i32),
  * field 1 = `$data` (ref $arr). `vecTypeIdx`/`arrTypeIdx` are supplied by the
  * caller (an f64 vec from `getOrRegisterVecType`).
+ *
+ * `trimToLength` (#2169 destructure consumer): when true, the backing array is
+ * resized to EXACTLY `len` before the final `struct.new`, so `array.len(data)`
+ * equals the logical `$length`. The default (false) leaves the capacity-padded
+ * array in place — fine for consumers that read the `$length` field (spread,
+ * Array.from), but the array-destructuring path bounds-checks against
+ * `array.len(data)` (`emitBoundsCheckedArrayGet`), so a capacity-padded array
+ * would make an out-of-length index read a default-initialized `0.0` slot
+ * instead of being OOB, silently skipping binding defaults (`const [a,b=9]=g()`
+ * with one yield). Trimming restores the literal-array invariant the destructure
+ * machinery relies on (backing-array length == logical length).
  */
 export function emitNativeGeneratorToVec(
   ctx: CodegenContext,
@@ -2080,6 +2091,7 @@ export function emitNativeGeneratorToVec(
   subjectType: ValType,
   vecTypeIdx: number,
   arrTypeIdx: number,
+  trimToLength = false,
 ): void {
   const resumeIdx = ensureNativeGeneratorResumeFunction(ctx, info);
   const resultRef: ValType = { kind: "ref", typeIdx: info.resultTypeIdx };
@@ -2168,9 +2180,29 @@ export function emitNativeGeneratorToVec(
     body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
   });
 
-  // Construct ref $vec { length: len, data }. Note: the backing array may be
-  // larger than len (capacity); the vec's $length field is the authoritative
-  // element count, matching every other materialized vec in the codebase.
+  // (#2169) Trim the backing array to exactly `len` when the consumer
+  // bounds-checks against `array.len(data)` rather than the `$length` field
+  // (array-destructuring). trimmed = new f64[len]; array.copy trimmed = data[0..len];
+  // data = trimmed.
+  if (trimToLength) {
+    const trimLocal = allocLocal(fctx, `__gen2vec_trim_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+    fctx.body.push({ op: "local.get", index: lenLocal });
+    fctx.body.push({ op: "array.new_default", typeIdx: arrTypeIdx });
+    fctx.body.push({ op: "local.set", index: trimLocal });
+    fctx.body.push({ op: "local.get", index: trimLocal });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.get", index: dataLocal });
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.get", index: lenLocal });
+    fctx.body.push({ op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: trimLocal });
+    fctx.body.push({ op: "local.set", index: dataLocal });
+  }
+
+  // Construct ref $vec { length: len, data }. When `trimToLength` is false the
+  // backing array may be larger than len (capacity); the vec's $length field is
+  // the authoritative element count, matching every other materialized vec in
+  // the codebase. When true, array.len(data) == len as well.
   fctx.body.push({ op: "local.get", index: lenLocal });
   fctx.body.push({ op: "local.get", index: dataLocal });
   fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx });
