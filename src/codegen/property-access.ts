@@ -31,7 +31,8 @@ import {
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
 import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
-import { addUnionImports, resolveWasmType } from "./index.js";
+import { emitSymbolDescLoad } from "./symbol-native.js";
+import { addUnionImports, resolveWasmType, TYPED_ARRAY_NAMES } from "./index.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
 import { tryCompileNativeSetSizeGet } from "./set-runtime.js";
@@ -1708,6 +1709,78 @@ export function compilePropertyAccess(
     }
   }
 
+  // (#2159 Slice 2) Standalone/WASI `byteLength` / `byteOffset` view-semantics
+  // for ArrayBuffer / SharedArrayBuffer / TypedArrays. In JS-host mode the JS
+  // runtime supplies these; with no host they fell through to `__extern_length`
+  // / a 0 default. The backing representation (see dataview-native.ts):
+  //   ArrayBuffer / SharedArrayBuffer  → vec "i32_byte" (field 0 = *byte* length)
+  //   Uint8Array (native)              → vec "i8_byte"  (field 0 = element count)
+  //   other TypedArrays                → vec "f64"      (field 0 = element count)
+  // `byteLength` is element-size-scaled: ArrayBuffer/Uint8Array byteLength ==
+  // field0; Int32Array == field0*4, Float64Array == field0*8, etc. `byteOffset`
+  // is always 0 for our non-offset views (a fresh backing store per view), which
+  // already reads correctly today — handled here only for the externref-receiver
+  // case so it doesn't leak `__extern_get`.
+  if (
+    (ctx.wasi || ctx.standalone || ctx.strictNoHostImports) &&
+    (propName === "byteLength" || propName === "byteOffset")
+  ) {
+    const recvName =
+      objType.getSymbol()?.name ??
+      (ts.isNewExpression(expr.expression) && ts.isIdentifier(expr.expression.expression)
+        ? expr.expression.expression.text
+        : undefined);
+    const isBuffer = recvName === "ArrayBuffer" || recvName === "SharedArrayBuffer";
+    const isTypedArr = recvName !== undefined && TYPED_ARRAY_NAMES.has(recvName);
+    if (isBuffer || isTypedArr) {
+      // byteOffset on a fresh-backing view is always 0.
+      if (propName === "byteOffset") {
+        const recvType = compileExpression(ctx, fctx, expr.expression);
+        if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
+        fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: 0 } as Instr);
+        return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+      }
+      // byteLength = field0 * BYTES_PER_ELEMENT. ArrayBuffer's field0 is already
+      // a byte count, so its element size is 1.
+      const TYPED_ARRAY_BYTES_PER_ELEMENT: Record<string, number> = {
+        Int8Array: 1,
+        Uint8Array: 1,
+        Uint8ClampedArray: 1,
+        Int16Array: 2,
+        Uint16Array: 2,
+        Int32Array: 4,
+        Uint32Array: 4,
+        Float32Array: 4,
+        Float64Array: 8,
+      };
+      const bytesPerElem = isBuffer ? 1 : (TYPED_ARRAY_BYTES_PER_ELEMENT[recvName!] ?? 1);
+      const elemKey = isBuffer ? "i32_byte" : noJsHost(ctx) && recvName === "Uint8Array" ? "i8_byte" : "f64";
+      const elemType: ValType =
+        elemKey === "i8_byte" ? { kind: "i8" } : elemKey === "i32_byte" ? { kind: "i32" } : { kind: "f64" };
+      const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
+      // Compile the receiver and recover the vec struct ref.
+      const recvType = compileExpression(ctx, fctx, expr.expression);
+      if (recvType?.kind === "externref") {
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+      } else if (
+        (recvType?.kind === "ref" || recvType?.kind === "ref_null") &&
+        "typeIdx" in recvType &&
+        recvType.typeIdx !== vecTypeIdx
+      ) {
+        fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+      }
+      // field 0 → i32 (element count or byte count).
+      fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+      if (bytesPerElem !== 1) {
+        fctx.body.push({ op: "i32.const", value: bytesPerElem } as Instr);
+        fctx.body.push({ op: "i32.mul" } as Instr);
+      }
+      if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+    }
+  }
+
   // #1914 — standalone RegExp reflection (`re.source`/`.flags`/`.global`/…/
   // `.lastIndex`) and match-result fields (`m.index`/`m.input`). Must run
   // BEFORE the extern-class property path, which would otherwise emit an
@@ -1826,11 +1899,20 @@ export function compilePropertyAccess(
   // (`null.message` throws), so the trap is acceptable Phase 1/2 semantics.
   if ((ctx.wasi || ctx.standalone) && (propName === "message" || propName === "name" || propName === "stack")) {
     const lhsTsName = objType.getSymbol()?.name;
+    // (#1536c) A user subclass of a built-in Error (`class MyError extends
+    // Error {}`) is externref-backed; its instance is the parent's
+    // `$Error_struct` (created natively by `__new_<Parent>`). Treat it as an
+    // Error LHS so `.message`/`.name`/`.stack` read the struct field directly
+    // instead of the generic `__extern_get` host path (unavailable standalone,
+    // returns null). The struct field layout is the parent's.
+    const lhsUserErrorParent =
+      lhsTsName !== undefined && !isBuiltinTypeName(lhsTsName) ? ctx.classBuiltinParentMap.get(lhsTsName) : undefined;
     const isErrorLhs =
-      lhsTsName !== undefined &&
-      isBuiltinTypeName(lhsTsName) &&
-      isWasiErrorName(lhsTsName) &&
-      isBuiltinSubtype(lhsTsName, "Error");
+      (lhsTsName !== undefined &&
+        isBuiltinTypeName(lhsTsName) &&
+        isWasiErrorName(lhsTsName) &&
+        isBuiltinSubtype(lhsTsName, "Error")) ||
+      (lhsUserErrorParent !== undefined && (lhsUserErrorParent === "Error" || isWasiErrorName(lhsUserErrorParent)));
     // #2077: a `catch (e)` binding is typed `any` (or `unknown`), so the static
     // `isErrorLhs` gate above never fires even though the caught value IS the
     // `$Error` struct at runtime — the field read then fell through to the
@@ -3123,6 +3205,19 @@ export function compilePropertyAccess(
   // Generic __extern_get works for plain JS hosts but bypasses the spec
   // accessor (which V8 implements specially), so we route directly.
   if (propName === "description" && (objType.flags & ts.TypeFlags.ESSymbolLike) !== 0) {
+    // (#2163) No-JS-host mode: the symbol is a bare i32 id and there is no host
+    // accessor — read the description from the native id→string side table
+    // (populated by `compileSymbolCall`). A null slot / out-of-range id reads as
+    // `undefined`, matching `Symbol().description === undefined`.
+    if (noJsHost(ctx)) {
+      const recvType = compileExpression(ctx, fctx, expr.expression, { kind: "i32" });
+      if (recvType && recvType.kind !== "i32") {
+        coerceType(ctx, fctx, recvType, { kind: "i32" });
+      }
+      emitSymbolDescLoad(ctx, fctx);
+      // Result is `ref_null $AnyString` — a native string (or null⇒undefined).
+      return { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
+    }
     const symDescIdx = ensureLateImport(ctx, "__symbol_description", [{ kind: "externref" }], [{ kind: "externref" }]);
     if (symDescIdx !== undefined) {
       const recvType = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
@@ -4082,7 +4177,7 @@ export function emitThisReceiverGuardConvert(
         blockType: { kind: "val", type: resultType },
         then: thenBody,
         else: buildArm(i + 1),
-      } as unknown as Instr,
+      },
     ];
   };
 

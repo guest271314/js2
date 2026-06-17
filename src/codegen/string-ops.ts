@@ -2251,6 +2251,31 @@ export function compileNativeStringMethodCall(
     return nativeStringType(ctx);
   }
 
+  // substr: native helper (Annex B §B.2.2.1). Second arg is a *count*, not an
+  // end index; an absent length means "to the end" → pass 0x7fffffff sentinel
+  // and let __str_substr clamp to `len - start`.
+  if (method === "substr") {
+    compileExpression(ctx, fctx, propAccess.expression);
+    emitFlatten();
+    // start
+    if (expr.arguments.length > 0 && !isStaticUndefinedArg(expr.arguments[0])) {
+      compileStringIntegerArg(ctx, fctx, expr.arguments[0]!);
+    } else {
+      // §B.2.2.1 step 3: ToIntegerOrInfinity(start ?? undefined) → 0.
+      fctx.body.push({ op: "i32.const", value: 0 });
+    }
+    // length — absent or explicit `undefined` means "to the end" (§B.2.2.1
+    // step 4 sets length = +∞ when the arg is undefined).
+    if (expr.arguments.length > 1 && !isStaticUndefinedArg(expr.arguments[1])) {
+      compileStringIntegerArg(ctx, fctx, expr.arguments[1]!);
+    } else {
+      fctx.body.push({ op: "i32.const", value: 0x7fffffff });
+    }
+    const funcIdx = ctx.nativeStrHelpers.get("__str_substr")!;
+    fctx.body.push({ op: "call", funcIdx });
+    return nativeStringType(ctx);
+  }
+
   // indexOf: native helper
   if (method === "indexOf") {
     const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_indexOf_recv");

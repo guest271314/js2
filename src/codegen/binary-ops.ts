@@ -1111,7 +1111,7 @@ export function compileBinaryExpression(
         //      (trunc_sat_f64_s(nf) == bi)
         // integral & finite check (NaN/±Inf fail nearest==self or the range test)
         fctx.body.push({ op: "local.get", index: nf });
-        fctx.body.push({ op: "f64.nearest" } as unknown as Instr);
+        fctx.body.push({ op: "f64.nearest" });
         fctx.body.push({ op: "local.get", index: nf });
         fctx.body.push({ op: "f64.eq" }); // integral?
         // range low: nf >= -2^63 (= -9223372036854775808). Written as
