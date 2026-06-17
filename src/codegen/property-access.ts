@@ -1826,11 +1826,20 @@ export function compilePropertyAccess(
   // (`null.message` throws), so the trap is acceptable Phase 1/2 semantics.
   if ((ctx.wasi || ctx.standalone) && (propName === "message" || propName === "name" || propName === "stack")) {
     const lhsTsName = objType.getSymbol()?.name;
+    // (#1536c) A user subclass of a built-in Error (`class MyError extends
+    // Error {}`) is externref-backed; its instance is the parent's
+    // `$Error_struct` (created natively by `__new_<Parent>`). Treat it as an
+    // Error LHS so `.message`/`.name`/`.stack` read the struct field directly
+    // instead of the generic `__extern_get` host path (unavailable standalone,
+    // returns null). The struct field layout is the parent's.
+    const lhsUserErrorParent =
+      lhsTsName !== undefined && !isBuiltinTypeName(lhsTsName) ? ctx.classBuiltinParentMap.get(lhsTsName) : undefined;
     const isErrorLhs =
-      lhsTsName !== undefined &&
-      isBuiltinTypeName(lhsTsName) &&
-      isWasiErrorName(lhsTsName) &&
-      isBuiltinSubtype(lhsTsName, "Error");
+      (lhsTsName !== undefined &&
+        isBuiltinTypeName(lhsTsName) &&
+        isWasiErrorName(lhsTsName) &&
+        isBuiltinSubtype(lhsTsName, "Error")) ||
+      (lhsUserErrorParent !== undefined && (lhsUserErrorParent === "Error" || isWasiErrorName(lhsUserErrorParent)));
     // #2077: a `catch (e)` binding is typed `any` (or `unknown`), so the static
     // `isErrorLhs` gate above never fires even though the caught value IS the
     // `$Error` struct at runtime — the field read then fell through to the
