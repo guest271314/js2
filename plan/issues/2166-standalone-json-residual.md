@@ -2,10 +2,12 @@
 id: 2166
 title: "Standalone JSON conformance residual (~76 tests)"
 status: in-progress
-assignee: sdev-json
+assignee: sdev-json3
 sprint: 63
 created: 2026-06-15
 updated: 2026-06-17
+dev_complete: true
+remaining: "PR-D (reviver/replacer/toJSON) — tracked as architect follow-up; see ## Status (2026-06-17)"
 priority: low
 feasibility: medium
 reasoning_effort: medium
@@ -495,3 +497,50 @@ through `__extern_get_idx` (the helper already ref.tests `$ObjVec` and returns
 - **PR-C2:** parsed-array element indexing (`a[i]`) via `__extern_get_idx`.
 - **PR-D:** instance fields + `toJSON` + reviver/replacer.
 - **PR-A2:** closed typed-array (`number[]`) stringify; proper boolean boxing.
+
+---
+
+## Status (2026-06-17, sdev-json3) — dev residual CLOSED; PR-D = architect follow-up
+
+All four pure-Wasm codec slices of the #1599 Phase-2 dynamic JSON codec have
+**landed on main**:
+
+- **PR-A** (#1653) — dynamic object-graph `JSON.stringify` (compact).
+- **PR-C** (#1657) — dynamic `JSON.parse` recursive-descent codec
+  (`__json_parse_text`); round-trip `JSON.parse(JSON.stringify(o))` works.
+- **PR-C2** (#1658) — parsed-array element indexing `a[i]` via `__extern_get_idx`.
+- **PR-B** (#1660) — `JSON.stringify(value, null, space)` §25.5.2 indentation.
+
+Standalone JSON now does **dynamic object-graph stringify (compact + indented) +
+parse + round-trip + parsed-array indexing**, pure-Wasm, host-import-free under
+`--target standalone`/`wasi`. The dev-completable residual is closed.
+
+### Remaining: PR-D (reviver / replacer / `toJSON`) → architect follow-up
+
+`JSON.parse(text, reviver)`, a function/array `replacer`, and `toJSON` are NOT
+yet supported standalone (they currently **refuse**, not silently mis-behave).
+
+**Feasibility (timeboxed assessment, sdev-json3):** PR-D is **dev-tractable in
+standalone — NOT host-only.** The closure-invocation machinery it needs already
+exists and runs under `--target standalone`: `__call_fn_method_N` (N=0..5,
+`emitClosureMethodCallExportN` in `index.ts`) threads `this`/holder via the
+`__current_this` global and is already consumed by the open-`$Object` accessor
+drivers (`__call_accessor_get`/`_set`, `accessor-driver.ts`) and the Proxy/
+`__apply_closure` bridges via the **reserve/fill driver** pattern (funcIdx-ordering
+safe across late-import shifts).
+
+So PR-D is a real, sizeable but doable feature, broken into:
+- **PR-D1 (reviver):** thread the reviver closure-ref from the `JSON.parse`
+  call site into `__json_parse_text`; after building the value, run the
+  §25.5.1 InternalizeJSONProperty post-walk, calling `reviver(key, value)` via a
+  reserved `__call_reviver` driver → `__call_fn_method_2`.
+- **PR-D2 (`toJSON`):** in `__json_stringify_value`, before serialising a
+  `$Object`/instance, `HasProperty`-check `toJSON` and call it with the holder
+  `this`; reuse `__call_fn_method_1` via a reserved driver.
+- **PR-D3 (function/array replacer):** mirror PR-D2's call path for the
+  replacer during the stringify walk.
+
+This is multi-PR and overlaps #1636 (`__call_fn_method`) + #2042 (instance-field
+reflection), so it's tracked as the **architect-scoped follow-up (TaskList #32)**
+rather than appended to this issue's dev queue. The compiler primitives are
+in place; the work is the codec-side plumbing + the InternalizeJSONProperty walk.
