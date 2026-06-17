@@ -4,7 +4,7 @@ title: "One instruction walker — peephole misses catchAll bodies; ≥4 diverge
 status: ready
 sprint: 63
 created: 2026-06-10
-updated: 2026-06-12
+updated: 2026-06-17
 priority: medium
 feasibility: easy
 reasoning_effort: medium

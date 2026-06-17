@@ -253,7 +253,7 @@ export function fillClosedMethodDispatch(ctx: CodegenContext): void {
           blockType: { kind: "val", type: { kind: "externref" } },
           then: callAndCoerce,
           else: current,
-        } as unknown as Instr,
+        },
       ];
     }
 

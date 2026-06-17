@@ -568,9 +568,9 @@ function compileDateMethodCall(
       //          OR (f64.abs(arg) > 8.64e15)  // TimeClip out-of-range / ±Inf
       fctx.body.push({ op: "local.get", index: tempArg } as Instr);
       fctx.body.push({ op: "local.get", index: tempArg } as Instr);
-      fctx.body.push({ op: "f64.ne" } as unknown as Instr);
+      fctx.body.push({ op: "f64.ne" });
       fctx.body.push({ op: "local.get", index: tempArg } as Instr);
-      fctx.body.push({ op: "f64.abs" } as unknown as Instr);
+      fctx.body.push({ op: "f64.abs" });
       fctx.body.push({ op: "f64.const", value: 8.64e15 } as Instr);
       fctx.body.push({ op: "f64.gt" } as Instr);
       fctx.body.push({ op: "i32.or" } as Instr);
@@ -611,7 +611,7 @@ function compileDateMethodCall(
         blockType: { kind: "val", type: { kind: "f64" } },
         then: thenInstrs,
         else: elseInstrs,
-      } as unknown as Instr);
+      });
 
       releaseTempLocal(fctx, tempArg);
     } else {
@@ -622,7 +622,7 @@ function compileDateMethodCall(
         op: "struct.set",
         typeIdx: dateTypeIdx,
         fieldIdx: 0,
-      } as unknown as Instr);
+      });
       fctx.body.push({ op: "f64.const", value: NaN } as Instr);
     }
     releaseTempLocal(fctx, tempRef);
@@ -720,9 +720,9 @@ function compileDateMethodCall(
       // invalid_i = (x != x) | (f64.abs(x) > 8.64e15)
       fctx.body.push({ op: "local.get", index: local } as Instr);
       fctx.body.push({ op: "local.get", index: local } as Instr);
-      fctx.body.push({ op: "f64.ne" } as unknown as Instr);
+      fctx.body.push({ op: "f64.ne" });
       fctx.body.push({ op: "local.get", index: local } as Instr);
-      fctx.body.push({ op: "f64.abs" } as unknown as Instr);
+      fctx.body.push({ op: "f64.abs" });
       fctx.body.push({ op: "f64.const", value: 8.64e15 } as Instr);
       fctx.body.push({ op: "f64.gt" } as Instr);
       fctx.body.push({ op: "i32.or" } as Instr);
@@ -746,7 +746,7 @@ function compileDateMethodCall(
       op: "struct.set",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
-    } as unknown as Instr);
+    });
     fctx.body.push({ op: "f64.const", value: NaN } as Instr);
     const thenInstrs = fctx.body;
     popBody(fctx, savedThen);
@@ -843,7 +843,7 @@ function compileDateMethodCall(
       op: "struct.set",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
-    } as unknown as Instr);
+    });
     fctx.body.push({ op: "f64.const", value: NaN } as Instr);
     const clipThenInstrs = fctx.body;
     popBody(fctx, savedClipThen);
@@ -855,7 +855,7 @@ function compileDateMethodCall(
       op: "struct.set",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
-    } as unknown as Instr);
+    });
     fctx.body.push({ op: "local.get", index: tempNewTs } as Instr);
     fctx.body.push({ op: "f64.convert_i64_s" } as Instr);
     const clipElseInstrs = fctx.body;
@@ -866,7 +866,7 @@ function compileDateMethodCall(
       blockType: { kind: "val", type: { kind: "f64" } },
       then: clipThenInstrs,
       else: clipElseInstrs,
-    } as unknown as Instr);
+    });
 
     releaseTempLocal(fctx, tempMsOfDay);
     releaseTempLocal(fctx, tempDayMs);
@@ -880,7 +880,7 @@ function compileDateMethodCall(
       blockType: { kind: "val", type: { kind: "f64" } },
       then: thenInstrs,
       else: elseInstrs,
-    } as unknown as Instr);
+    });
 
     releaseTempLocal(fctx, tempRef);
     releaseTempLocal(fctx, tempCurTs);
@@ -923,7 +923,7 @@ function compileDateMethodCall(
       op: "struct.get",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
-    } as unknown as Instr);
+    });
     fctx.body.push({ op: "local.set", index: tempCurTs } as Instr);
 
     // Mapping: setDate(d) → [d], setMonth(mo, d?) → [mo, d],
@@ -947,9 +947,9 @@ function compileDateMethodCall(
       // invalid_i = (x != x) | (f64.abs(x) > 8.64e15)
       fctx.body.push({ op: "local.get", index: local } as Instr);
       fctx.body.push({ op: "local.get", index: local } as Instr);
-      fctx.body.push({ op: "f64.ne" } as unknown as Instr);
+      fctx.body.push({ op: "f64.ne" });
       fctx.body.push({ op: "local.get", index: local } as Instr);
-      fctx.body.push({ op: "f64.abs" } as unknown as Instr);
+      fctx.body.push({ op: "f64.abs" });
       fctx.body.push({ op: "f64.const", value: 8.64e15 } as Instr);
       fctx.body.push({ op: "f64.gt" } as Instr);
       fctx.body.push({ op: "i32.or" } as Instr);
@@ -983,7 +983,7 @@ function compileDateMethodCall(
         blockType: { kind: "val", type: { kind: "f64" } },
         then: yThenInstrs,
         else: yElseInstrs,
-      } as unknown as Instr);
+      });
       fctx.body.push({ op: "local.set", index: yLocal } as Instr);
     }
 
@@ -1006,7 +1006,7 @@ function compileDateMethodCall(
       op: "struct.set",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
-    } as unknown as Instr);
+    });
     fctx.body.push({ op: "f64.const", value: NaN } as Instr);
     const thenInstrs = fctx.body;
     popBody(fctx, savedThen);
@@ -1033,7 +1033,7 @@ function compileDateMethodCall(
         blockType: { kind: "val", type: { kind: "i64" } },
         then: revalThen,
         else: revalElse,
-      } as unknown as Instr);
+      });
       fctx.body.push({ op: "local.set", index: tempEffTs } as Instr);
     } else {
       fctx.body.push({ op: "local.get", index: tempCurTs } as Instr);
@@ -1078,7 +1078,7 @@ function compileDateMethodCall(
       blockType: { kind: "val", type: { kind: "i64" } },
       then: flrThenInstrs,
       else: flrElseInstrs,
-    } as unknown as Instr);
+    });
     fctx.body.push({ op: "local.set", index: tempCurDays } as Instr);
 
     // packed = civil_from_days(curDays)  (year*10000 + month*100 + day, month 1-12)
@@ -1172,7 +1172,7 @@ function compileDateMethodCall(
       op: "struct.set",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
-    } as unknown as Instr);
+    });
     fctx.body.push({ op: "f64.const", value: NaN } as Instr);
     const clipThenInstrs = fctx.body;
     popBody(fctx, savedClipThen);
@@ -1184,7 +1184,7 @@ function compileDateMethodCall(
       op: "struct.set",
       typeIdx: dateTypeIdx,
       fieldIdx: 0,
-    } as unknown as Instr);
+    });
     fctx.body.push({ op: "local.get", index: tempNewTs } as Instr);
     fctx.body.push({ op: "f64.convert_i64_s" } as Instr);
     const clipElseInstrs = fctx.body;
@@ -1195,7 +1195,7 @@ function compileDateMethodCall(
       blockType: { kind: "val", type: { kind: "f64" } },
       then: clipThenInstrs,
       else: clipElseInstrs,
-    } as unknown as Instr);
+    });
 
     releaseTempLocal(fctx, tempEffTs);
     releaseTempLocal(fctx, tempMsOfDay);
@@ -1214,7 +1214,7 @@ function compileDateMethodCall(
       blockType: { kind: "val", type: { kind: "f64" } },
       then: thenInstrs,
       else: elseInstrs,
-    } as unknown as Instr);
+    });
 
     releaseTempLocal(fctx, tempRef);
     releaseTempLocal(fctx, tempCurTs);
@@ -1466,7 +1466,7 @@ function compileDateMethodCall(
         blockType: { kind: "val", type: { kind: "externref" } },
         then: thenInstrs,
         else: elseInstrs,
-      } as unknown as Instr);
+      });
       releaseTempLocal(fctx, tsLocalShared);
       return { kind: "externref" };
     }
@@ -2195,7 +2195,7 @@ function compileMathCall(
     for (let i = 1; i < hypotLocals.length; i++) {
       elseBlock.push({ op: "local.get", index: hypotLocals[i]! } as Instr);
       elseBlock.push({ op: "f64.abs" } as Instr);
-      elseBlock.push({ op: "f64.max" } as unknown as Instr);
+      elseBlock.push({ op: "f64.max" });
     }
     elseBlock.push({ op: "local.set", index: mLocal } as Instr);
 

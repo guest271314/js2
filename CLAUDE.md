@@ -61,7 +61,7 @@ TypeScript-to-WebAssembly compiler using WasmGC.
 - `VOID_RESULT` sentinel in expressions.ts — `InnerResult = ValType | null | typeof VOID_RESULT`
 - Ref cells for mutable closure captures — `struct (field $value (mut T))`
 - FunctionContext must include `labelMap: new Map()` and `isGenerator?: boolean` in all object literals
-- `as unknown as Instr` for Wasm ops not yet in the Instr union (f64.copysign, f64.min/max) — 158 occurrences, tracked for cleanup
+- `as unknown as Instr` double-casts eliminated (#1095) — the `Instr` union now covers every emitted opcode (i64.store added) and the emitter's `default` case is a `never` exhaustiveness check, so a new union variant without an encoding case is a compile error. Prefer adding the op to the union over any cast; `as Instr` single-assertions remain for the few computed-`op` sites.
 - f64.promote_f32 IS now in the Instr union (added for Math.fround)
 - `return_call` / `return_call_ref` for tail call optimization in return position
 - Peephole pass removes redundant `ref.as_non_null` after `ref.cast`
@@ -339,7 +339,7 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 31,357 / 43,135 (72.7 %) — baseline unknown, 2026-06-17T03:16:20.635Z
+**test262 conformance**: 31,357 / 43,135 (72.7 %) — baseline unknown
 <!-- AUTO:conformance-end -->
 
 ### Sprint History

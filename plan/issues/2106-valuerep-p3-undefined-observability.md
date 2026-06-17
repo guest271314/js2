@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/sdev7
 sprint: 63
 created: 2026-06-11
-updated: 2026-06-16
+updated: 2026-06-17
 priority: high
 feasibility: hard
 reasoning_effort: max

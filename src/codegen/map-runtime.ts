@@ -341,7 +341,7 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
           { op: "f64.add" } as Instr,
           { op: "i64.reinterpret_f64" } as Instr,
           { op: "local.tee", index: 2 },
-          { op: "i64.const", value: 32n } as unknown as Instr,
+          { op: "i64.const", value: 32n },
           { op: "i64.shr_u" } as Instr,
           { op: "local.get", index: 2 },
           { op: "i64.xor" } as Instr,
@@ -376,7 +376,7 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
             { op: "local.tee", index: 5 },
             // data array (field 3 of NativeString: len,byteLen?,off,data — use struct.get by name index)
             // NativeString layout: { len(i32), ..., data }. We read length via array.len of data.
-            { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: nativeStrDataFieldIdx(ctx) } as unknown as Instr,
+            { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: nativeStrDataFieldIdx(ctx) },
             { op: "local.tee", index: 6 },
             { op: "array.len" } as Instr,
             { op: "local.set", index: 7 },
@@ -400,7 +400,7 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
                     { op: "local.get", index: 3 },
                     { op: "local.get", index: 6 },
                     { op: "local.get", index: 4 },
-                    { op: "array.get_u", typeIdx: dataTypeIdx } as unknown as Instr,
+                    { op: "array.get_u", typeIdx: dataTypeIdx },
                     { op: "i32.xor" } as Instr,
                     // h *= 16777619
                     { op: "i32.const", value: 16777619 },
@@ -456,10 +456,10 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
       // buckets: array.new i32 of length INIT_CAP, all -1
       { op: "i32.const", value: -1 },
       { op: "i32.const", value: INIT_CAP },
-      { op: "array.new", typeIdx: ctx.mapBucketsTypeIdx } as unknown as Instr,
+      { op: "array.new", typeIdx: ctx.mapBucketsTypeIdx },
       // entries: array.new_default ref null $MapEntry, length INIT_CAP
       { op: "i32.const", value: INIT_CAP },
-      { op: "array.new_default", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
+      { op: "array.new_default", typeIdx: ctx.mapEntriesTypeIdx },
       // entryCount=0, liveCount=0
       { op: "i32.const", value: 0 },
       { op: "i32.const", value: 0 },
@@ -480,7 +480,7 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
       { op: "local.tee", index: 2 },
       // bucket = hash & (cap-1)
       { op: "local.get", index: 0 },
-      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS } as unknown as Instr,
+      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS },
       { op: "array.len" } as Instr,
       { op: "i32.const", value: 1 },
       { op: "i32.sub" } as Instr,
@@ -488,9 +488,9 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
       { op: "local.set", index: 3 },
       // cur = buckets[bucket]
       { op: "local.get", index: 0 },
-      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS } as unknown as Instr,
+      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS },
       { op: "local.get", index: 3 },
-      { op: "array.get", typeIdx: ctx.mapBucketsTypeIdx } as unknown as Instr,
+      { op: "array.get", typeIdx: ctx.mapBucketsTypeIdx },
       { op: "local.set", index: 4 },
       {
         op: "block",
@@ -506,14 +506,14 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
               { op: "br_if", depth: 1 }, // cur<0 → miss
               // entry = entries[cur]
               { op: "local.get", index: 0 },
-              { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+              { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
               { op: "local.get", index: 4 },
-              { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
+              { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx },
               { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
               { op: "local.set", index: 5 },
               // if !tombstone && hash matches && SVZ(key, entry.key) → return cur
               { op: "local.get", index: 5 },
-              { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH } as unknown as Instr,
+              { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH },
               { op: "i32.const", value: TOMBSTONE_BIT },
               { op: "i32.and" } as Instr,
               { op: "i32.eqz" } as Instr,
@@ -523,7 +523,7 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
                 then: [
                   { op: "local.get", index: 1 },
                   { op: "local.get", index: 5 },
-                  { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_KEY } as unknown as Instr,
+                  { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_KEY },
                   { op: "call", funcIdx: svzIdx } as Instr,
                   {
                     op: "if",
@@ -536,7 +536,7 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
               } as Instr,
               // cur = entry.next
               { op: "local.get", index: 5 },
-              { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_NEXT } as unknown as Instr,
+              { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_NEXT },
               { op: "local.set", index: 4 },
               { op: "br", depth: 0 },
             ],
@@ -578,11 +578,11 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
         then: [{ op: "ref.null", typeIdx: NONE_HEAP }], // undefined → null
         else: [
           { op: "local.get", index: 0 },
-          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
           { op: "local.get", index: 2 },
-          { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
+          { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx },
           { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
-          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE } as unknown as Instr,
+          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE },
         ],
       } as Instr,
     ];
@@ -605,7 +605,7 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
   {
     const body: Instr[] = [
       { op: "local.get", index: 0 },
-      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT } as unknown as Instr,
+      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT },
     ];
     addMapFunc(ctx, "__map_size", [mref], [i32], [], body);
   }
@@ -629,12 +629,12 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
         then: [
           // entries[idx].value = value; return m
           { op: "local.get", index: 0 },
-          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
           { op: "local.get", index: 3 },
-          { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
+          { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx },
           { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
           { op: "local.get", index: 2 },
-          { op: "struct.set", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE } as unknown as Instr,
+          { op: "struct.set", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE },
           { op: "local.get", index: 0 },
           { op: "return" },
         ],
@@ -642,10 +642,10 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
       } as Instr,
       // grow entries vector if full (entryCount == entries.len)
       { op: "local.get", index: 0 },
-      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT } as unknown as Instr,
+      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT },
       { op: "local.tee", index: 8 },
       { op: "local.get", index: 0 },
-      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
       { op: "array.len" } as Instr,
       { op: "i32.ge_s" } as Instr,
       {
@@ -659,7 +659,7 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
       { op: "call", funcIdx: hashIdx } as Instr,
       { op: "local.tee", index: 4 },
       { op: "local.get", index: 0 },
-      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS } as unknown as Instr,
+      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS },
       { op: "array.len" } as Instr,
       { op: "i32.const", value: 1 },
       { op: "i32.sub" } as Instr,
@@ -669,36 +669,36 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 1 },
       { op: "local.get", index: 2 },
       { op: "local.get", index: 0 },
-      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS } as unknown as Instr,
+      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS },
       { op: "local.get", index: 5 },
-      { op: "array.get", typeIdx: ctx.mapBucketsTypeIdx } as unknown as Instr,
+      { op: "array.get", typeIdx: ctx.mapBucketsTypeIdx },
       { op: "local.get", index: 4 },
       { op: "struct.new", typeIdx: ctx.mapEntryTypeIdx },
       { op: "local.set", index: 6 },
       // entries[entryCount] = entry
       { op: "local.get", index: 0 },
-      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
       { op: "local.get", index: 8 },
       { op: "local.get", index: 6 },
-      { op: "array.set", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
+      { op: "array.set", typeIdx: ctx.mapEntriesTypeIdx },
       // buckets[bucket] = entryCount
       { op: "local.get", index: 0 },
-      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS } as unknown as Instr,
+      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS },
       { op: "local.get", index: 5 },
       { op: "local.get", index: 8 },
-      { op: "array.set", typeIdx: ctx.mapBucketsTypeIdx } as unknown as Instr,
+      { op: "array.set", typeIdx: ctx.mapBucketsTypeIdx },
       // entryCount++ ; liveCount++
       { op: "local.get", index: 0 },
       { op: "local.get", index: 8 },
       { op: "i32.const", value: 1 },
       { op: "i32.add" } as Instr,
-      { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT } as unknown as Instr,
+      { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT },
       { op: "local.get", index: 0 },
       { op: "local.get", index: 0 },
-      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT } as unknown as Instr,
+      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT },
       { op: "i32.const", value: 1 },
       { op: "i32.add" } as Instr,
-      { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT } as unknown as Instr,
+      { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT },
       // rehash if liveCount*4 > buckets.len*3
       ...rehashIfNeededInstrs(ctx, M_BUCKETS, M_LIVECOUNT),
       { op: "local.get", index: 0 },
@@ -740,31 +740,31 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
         else: [
           // entry = entries[idx]
           { op: "local.get", index: 0 },
-          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
           { op: "local.get", index: 2 },
-          { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
+          { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx },
           { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
           { op: "local.tee", index: 3 },
           // hash |= TOMBSTONE_BIT
           { op: "local.get", index: 3 },
-          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH } as unknown as Instr,
+          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH },
           { op: "i32.const", value: TOMBSTONE_BIT },
           { op: "i32.or" } as Instr,
-          { op: "struct.set", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH } as unknown as Instr,
+          { op: "struct.set", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH },
           // key=null, value=null
           { op: "local.get", index: 3 },
           { op: "ref.null", typeIdx: NONE_HEAP },
-          { op: "struct.set", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_KEY } as unknown as Instr,
+          { op: "struct.set", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_KEY },
           { op: "local.get", index: 3 },
           { op: "ref.null", typeIdx: NONE_HEAP },
-          { op: "struct.set", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE } as unknown as Instr,
+          { op: "struct.set", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE },
           // liveCount--
           { op: "local.get", index: 0 },
           { op: "local.get", index: 0 },
-          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT } as unknown as Instr,
+          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT },
           { op: "i32.const", value: 1 },
           { op: "i32.sub" } as Instr,
-          { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT } as unknown as Instr,
+          { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT },
           { op: "i32.const", value: 1 },
         ],
       } as Instr,
@@ -789,20 +789,20 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
       { op: "local.get", index: 0 },
       { op: "i32.const", value: -1 },
       { op: "i32.const", value: INIT_CAP },
-      { op: "array.new", typeIdx: ctx.mapBucketsTypeIdx } as unknown as Instr,
-      { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS } as unknown as Instr,
+      { op: "array.new", typeIdx: ctx.mapBucketsTypeIdx },
+      { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS },
       // entries = new default array INIT_CAP
       { op: "local.get", index: 0 },
       { op: "i32.const", value: INIT_CAP },
-      { op: "array.new_default", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
-      { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+      { op: "array.new_default", typeIdx: ctx.mapEntriesTypeIdx },
+      { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
       // entryCount=0, liveCount=0
       { op: "local.get", index: 0 },
       { op: "i32.const", value: 0 },
-      { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT } as unknown as Instr,
+      { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT },
       { op: "local.get", index: 0 },
       { op: "i32.const", value: 0 },
-      { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT } as unknown as Instr,
+      { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT },
     ];
     addMapFunc(ctx, "__map_clear", [mref], [], [], body);
   }
@@ -826,9 +826,9 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
     // locals: m(1), idx(2), entries(3), entry(4)
     const body: Instr[] = [
       { op: "local.get", index: 0 },
-      { op: "struct.get", typeIdx: ctx.mapIterTypeIdx, fieldIdx: IT_MAP } as unknown as Instr,
+      { op: "struct.get", typeIdx: ctx.mapIterTypeIdx, fieldIdx: IT_MAP },
       { op: "local.tee", index: 1 },
-      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+      { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
       { op: "local.set", index: 3 },
       {
         op: "block",
@@ -839,16 +839,16 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
             blockType: { kind: "empty" },
             body: [
               { op: "local.get", index: 0 },
-              { op: "struct.get", typeIdx: ctx.mapIterTypeIdx, fieldIdx: IT_INDEX } as unknown as Instr,
+              { op: "struct.get", typeIdx: ctx.mapIterTypeIdx, fieldIdx: IT_INDEX },
               { op: "local.tee", index: 2 },
               { op: "local.get", index: 1 },
-              { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT } as unknown as Instr,
+              { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT },
               { op: "i32.ge_s" } as Instr,
               { op: "br_if", depth: 1 }, // done
               // entry = entries[idx]
               { op: "local.get", index: 3 },
               { op: "local.get", index: 2 },
-              { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
+              { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx },
               { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
               { op: "local.tee", index: 4 },
               // index++
@@ -856,27 +856,27 @@ export function ensureMapHelpers(ctx: CodegenContext): void {
               { op: "local.get", index: 2 },
               { op: "i32.const", value: 1 },
               { op: "i32.add" } as Instr,
-              { op: "struct.set", typeIdx: ctx.mapIterTypeIdx, fieldIdx: IT_INDEX } as unknown as Instr,
+              { op: "struct.set", typeIdx: ctx.mapIterTypeIdx, fieldIdx: IT_INDEX },
               // tombstone? skip
               { op: "local.get", index: 4 },
-              { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH } as unknown as Instr,
+              { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH },
               { op: "i32.const", value: TOMBSTONE_BIT },
               { op: "i32.and" } as Instr,
               { op: "br_if", depth: 0 },
               // result: kind 0=key,1=value (entries→value for now)
               { op: "local.get", index: 0 },
-              { op: "struct.get", typeIdx: ctx.mapIterTypeIdx, fieldIdx: IT_KIND } as unknown as Instr,
+              { op: "struct.get", typeIdx: ctx.mapIterTypeIdx, fieldIdx: IT_KIND },
               { op: "i32.eqz" } as Instr,
               {
                 op: "if",
                 blockType: { kind: "val", type: anyref },
                 then: [
                   { op: "local.get", index: 4 },
-                  { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_KEY } as unknown as Instr,
+                  { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_KEY },
                 ],
                 else: [
                   { op: "local.get", index: 4 },
-                  { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE } as unknown as Instr,
+                  { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE },
                 ],
               } as Instr,
               { op: "i32.const", value: 0 },
@@ -1181,9 +1181,9 @@ export function tryCompileNativeCollectionForEach(
   // entry = m.entries[i]  (cast to $MapEntry, stored in entryTmp)
   const loadEntry: Instr[] = [
     { op: "local.get", index: mTmp } as Instr,
-    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
     { op: "local.get", index: iTmp } as Instr,
-    { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
+    { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx },
     { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
     { op: "local.set", index: entryTmp } as Instr,
   ];
@@ -1198,27 +1198,27 @@ export function tryCompileNativeCollectionForEach(
     // externref first, then coerce to the param type — externref→f64 unboxes via
     // `__unbox_number`, externref→string casts to the native string, etc.
     ...(numParams >= 1
-      ? [
-          { op: "local.get", index: entryTmp } as Instr,
-          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE } as unknown as Instr,
-          { op: "extern.convert_any" } as Instr,
+      ? ([
+          { op: "local.get", index: entryTmp },
+          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_VALUE },
+          { op: "extern.convert_any" },
           ...coercionInstrs(ctx, { kind: "externref" }, closureInfo.paramTypes[0] ?? anyref, fctx),
-        ]
+        ] as Instr[])
       : []),
     ...(numParams >= 2
-      ? [
+      ? ([
           // Map: key field; Set: value === key.
-          { op: "local.get", index: entryTmp } as Instr,
-          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: isSet ? F_VALUE : F_KEY } as unknown as Instr,
-          { op: "extern.convert_any" } as Instr,
+          { op: "local.get", index: entryTmp },
+          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: isSet ? F_VALUE : F_KEY },
+          { op: "extern.convert_any" },
           ...coercionInstrs(ctx, { kind: "externref" }, closureInfo.paramTypes[1] ?? anyref, fctx),
-        ]
+        ] as Instr[])
       : []),
     ...(numParams >= 3
-      ? [
-          { op: "local.get", index: mTmp } as Instr,
+      ? ([
+          { op: "local.get", index: mTmp },
           ...coercionInstrs(ctx, { kind: "ref", typeIdx: ctx.mapTypeIdx }, closureInfo.paramTypes[2] ?? anyref, fctx),
-        ]
+        ] as Instr[])
       : []),
     { op: "local.get", index: closureTmp } as Instr,
     { op: "struct.get", typeIdx: closureTypeIdx, fieldIdx: 0 } as Instr,
@@ -1244,7 +1244,7 @@ export function tryCompileNativeCollectionForEach(
           // if i >= entryCount → break
           { op: "local.get", index: iTmp } as Instr,
           { op: "local.get", index: mTmp } as Instr,
-          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT } as unknown as Instr,
+          { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT },
           { op: "i32.ge_s" } as Instr,
           { op: "br_if", depth: 1 } as Instr,
           ...loadEntry,
@@ -1255,7 +1255,7 @@ export function tryCompileNativeCollectionForEach(
           { op: "local.set", index: iTmp } as Instr,
           // tombstone? skip (continue the loop)
           { op: "local.get", index: entryTmp } as Instr,
-          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH } as unknown as Instr,
+          { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH },
           { op: "i32.const", value: TOMBSTONE_BIT } as Instr,
           { op: "i32.and" } as Instr,
           { op: "br_if", depth: 0 } as Instr,
@@ -1325,25 +1325,25 @@ function growEntriesInstrs(
   return [
     // newEntries = array.new_default len*2
     { op: "local.get", index: 0 },
-    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
     { op: "array.len" } as Instr,
     { op: "i32.const", value: 2 },
     { op: "i32.mul" } as Instr,
-    { op: "array.new_default", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
+    { op: "array.new_default", typeIdx: ctx.mapEntriesTypeIdx },
     { op: "local.tee", index: newLocal },
     // array.copy(newEntries, 0, oldEntries, 0, oldLen)
     { op: "i32.const", value: 0 },
     { op: "local.get", index: 0 },
-    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
     { op: "i32.const", value: 0 },
     { op: "local.get", index: 0 },
-    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
     { op: "array.len" } as Instr,
     { op: "array.copy", dstTypeIdx: ctx.mapEntriesTypeIdx, srcTypeIdx: ctx.mapEntriesTypeIdx },
     // map.entries = newEntries
     { op: "local.get", index: 0 },
     { op: "local.get", index: newLocal },
-    { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+    { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
   ];
 }
 
@@ -1363,11 +1363,11 @@ function rehashIfNeededInstrs(ctx: CodegenContext, M_BUCKETS: number, M_LIVECOUN
   const M_ENTRYCOUNT = 2;
   return [
     { op: "local.get", index: 0 },
-    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT } as unknown as Instr,
+    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_LIVECOUNT },
     { op: "i32.const", value: 4 },
     { op: "i32.mul" } as Instr,
     { op: "local.get", index: 0 },
-    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS } as unknown as Instr,
+    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS },
     { op: "array.len" } as Instr,
     { op: "i32.const", value: 3 },
     { op: "i32.mul" } as Instr,
@@ -1378,7 +1378,7 @@ function rehashIfNeededInstrs(ctx: CodegenContext, M_BUCKETS: number, M_LIVECOUN
       then: [
         // cap = buckets.len*2
         { op: "local.get", index: 0 },
-        { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS } as unknown as Instr,
+        { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS },
         { op: "array.len" } as Instr,
         { op: "i32.const", value: 2 },
         { op: "i32.mul" } as Instr,
@@ -1387,8 +1387,8 @@ function rehashIfNeededInstrs(ctx: CodegenContext, M_BUCKETS: number, M_LIVECOUN
         { op: "local.get", index: 0 },
         { op: "i32.const", value: -1 },
         { op: "local.get", index: 9 },
-        { op: "array.new", typeIdx: ctx.mapBucketsTypeIdx } as unknown as Instr,
-        { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS } as unknown as Instr,
+        { op: "array.new", typeIdx: ctx.mapBucketsTypeIdx },
+        { op: "struct.set", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS },
         // for i in 0..entryCount: relink non-tombstoned
         { op: "i32.const", value: 0 },
         { op: "local.set", index: 8 },
@@ -1402,19 +1402,19 @@ function rehashIfNeededInstrs(ctx: CodegenContext, M_BUCKETS: number, M_LIVECOUN
               body: [
                 { op: "local.get", index: 8 },
                 { op: "local.get", index: 0 },
-                { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT } as unknown as Instr,
+                { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT },
                 { op: "i32.ge_s" } as Instr,
                 { op: "br_if", depth: 1 },
                 // entry = entries[i]
                 { op: "local.get", index: 0 },
-                { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+                { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES },
                 { op: "local.get", index: 8 },
-                { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
+                { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx },
                 { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
                 { op: "local.set", index: 6 },
                 // if !tombstone: bucket = (hash & TOMBSTONE? no) & (cap-1); relink
                 { op: "local.get", index: 6 },
-                { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH } as unknown as Instr,
+                { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH },
                 { op: "i32.const", value: 0x40000000 },
                 { op: "i32.and" } as Instr,
                 { op: "i32.eqz" } as Instr,
@@ -1424,7 +1424,7 @@ function rehashIfNeededInstrs(ctx: CodegenContext, M_BUCKETS: number, M_LIVECOUN
                   then: [
                     // bucket = hash & (cap-1)
                     { op: "local.get", index: 6 },
-                    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH } as unknown as Instr,
+                    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH },
                     { op: "local.get", index: 9 },
                     { op: "i32.const", value: 1 },
                     { op: "i32.sub" } as Instr,
@@ -1433,16 +1433,16 @@ function rehashIfNeededInstrs(ctx: CodegenContext, M_BUCKETS: number, M_LIVECOUN
                     // entry.next = buckets[bucket]
                     { op: "local.get", index: 6 },
                     { op: "local.get", index: 0 },
-                    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS } as unknown as Instr,
+                    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS },
                     { op: "local.get", index: 5 },
-                    { op: "array.get", typeIdx: ctx.mapBucketsTypeIdx } as unknown as Instr,
-                    { op: "struct.set", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_NEXT } as unknown as Instr,
+                    { op: "array.get", typeIdx: ctx.mapBucketsTypeIdx },
+                    { op: "struct.set", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_NEXT },
                     // buckets[bucket] = i
                     { op: "local.get", index: 0 },
-                    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS } as unknown as Instr,
+                    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_BUCKETS },
                     { op: "local.get", index: 5 },
                     { op: "local.get", index: 8 },
-                    { op: "array.set", typeIdx: ctx.mapBucketsTypeIdx } as unknown as Instr,
+                    { op: "array.set", typeIdx: ctx.mapBucketsTypeIdx },
                   ],
                   else: [],
                 } as Instr,
