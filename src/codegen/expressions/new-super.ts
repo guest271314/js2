@@ -1611,6 +1611,200 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
   return { kind: "externref" };
 }
 
+/**
+ * (#2026) Dynamic-new fallback: `new K(...)` where `K` is a value-bound
+ * identifier (a class flowing through a parameter / variable of type `any`)
+ * that the static resolution arms could not pin to a known class. The value in
+ * `K` is the `__class_<Name>` class-object singleton — an `extern.convert_any`'d
+ * `$ClassName` struct (the SAME struct type as instances of that class). We
+ * dispatch by a `ref.test $ClassName` type-test chain over every WasmGC-struct
+ * class with a class-object descriptor (`ctx.classObjectGlobals`): on the first
+ * matching struct type, call its `<Class>_new` with the (pre-evaluated, boxed)
+ * arguments coerced to each ctor param's ValType, then box the instance to
+ * externref. Returns `true` when the fallback emitted code (caller returns
+ * `{ kind: "externref" }`), `false` when no candidate classes exist (caller
+ * keeps the legacy `__new_` host-import path so genuine host builtins such as
+ * `Test262Error` still work).
+ *
+ * Pure-Wasm (no host import): works in standalone / WASI. The static
+ * `new C()` path (the `classSet` arm) is untouched — only this value-bound
+ * fallback is new, so there is no perf or shape change for statically-resolved
+ * construction.
+ */
+function emitDynamicNewFallback(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.NewExpression,
+  calleeExpr: ts.Expression,
+  ctorName: string,
+): boolean {
+  // Candidate classes: those with a class-object descriptor singleton and a
+  // WasmGC struct (externref-backed builtin subclasses are excluded — they have
+  // no `$ClassName` struct and no `<Class>_new` returning a ref).
+  const candidates: string[] = [];
+  for (const className of ctx.classObjectGlobals.keys()) {
+    if (ctx.classBuiltinParentMap.has(className)) continue;
+    if (ctx.structMap.get(className) === undefined) continue;
+    if (ctx.funcMap.get(classMemberFuncKey(ctx, `${className}_new`)) === undefined) continue;
+    candidates.push(className);
+  }
+  if (candidates.length === 0) return false;
+
+  const args = expr.arguments ?? [];
+
+  // Evaluate the callee descriptor once into an anyref local (the value to
+  // type-test). null/undefined descriptors leave a null anyref → every
+  // `ref.test` is false → falls through to the trailing no-match arm.
+  const calleeTy = compileExpression(ctx, fctx, calleeExpr, { kind: "externref" });
+  if (calleeTy && calleeTy.kind !== "externref") {
+    coerceType(ctx, fctx, calleeTy, { kind: "externref" });
+  } else if (calleeTy === null) {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  const descLocal = allocLocal(fctx, `__dynnew_desc_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "local.set", index: descLocal });
+
+  // Pre-evaluate each argument once into an externref temp (boxed). Each
+  // dispatch arm reads these and coerces to the matched ctor's param ValType,
+  // so argument expressions run exactly once regardless of which class matches.
+  const argLocals: number[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const aTy = compileExpression(ctx, fctx, args[i]!, { kind: "externref" });
+    if (aTy && aTy.kind !== "externref") {
+      coerceType(ctx, fctx, aTy, { kind: "externref" });
+    } else if (aTy === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    const aLocal = allocLocal(fctx, `__dynnew_arg${i}_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: aLocal });
+    argLocals.push(aLocal);
+  }
+
+  // Discriminate by the class TAG, never by struct type alone. WasmGC
+  // iso-recursive canonicalization merges structurally-identical class structs
+  // (two classes `{ x: number }` collapse to one runtime `(struct (__tag i32)
+  // (x f64))` type even though they keep distinct `structMap` indices), so
+  // `ref.test $A` is ALSO true for a `$B` descriptor of the same shape (#2009).
+  // The `__tag` field (index 0) carries the unique class id.
+  //
+  // Strategy: (1) read the descriptor's `__tag` ONCE — a `ref.test`/`ref.cast`
+  // against any one candidate struct type yields a layout that exposes field 0
+  // for every shape-compatible class (canonicalization guarantees the read is
+  // valid whenever the test passes); we OR together a test per distinct struct
+  // shape so descriptors of any candidate shape get their tag read. (2) Dispatch
+  // on the tag value with a single flat chain over ALL candidates, independent
+  // of struct grouping — this is what makes shape-colliding classes correct.
+  const distinctStructIdxs = [...new Set(candidates.map((c) => ctx.structMap.get(c)!))];
+  const tagLocal = allocLocal(fctx, `__dynnew_tag_${fctx.locals.length}`, { kind: "i32" });
+
+  // (1) Read the tag. Default -1 (no match) so a non-class / null descriptor
+  // selects no ctor and yields null. For each distinct struct type, if the tag
+  // is still unread (-1) AND the descriptor `ref.test`s as that struct, read
+  // field 0 into `tagLocal`. Canonicalization makes the first shape-compatible
+  // test succeed and expose a valid field-0 layout for the descriptor.
+  fctx.body.push({ op: "i32.const", value: -1 });
+  fctx.body.push({ op: "local.set", index: tagLocal });
+  for (const structIdx of distinctStructIdxs) {
+    fctx.body.push({ op: "local.get", index: tagLocal });
+    fctx.body.push({ op: "i32.const", value: -1 });
+    fctx.body.push({ op: "i32.eq" });
+    fctx.body.push({ op: "local.get", index: descLocal });
+    fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+    fctx.body.push({ op: "i32.and" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: descLocal },
+        { op: "ref.cast", typeIdx: structIdx } as Instr,
+        { op: "struct.get", typeIdx: structIdx, fieldIdx: 0 } as Instr,
+        { op: "local.set", index: tagLocal },
+      ],
+      else: [],
+    } as Instr);
+  }
+
+  // Build a then-arm (coerce args → call <Class>_new → box) for one class.
+  // `coerceType` / `pushDefaultValue` only emit into `fctx.body`, so build the
+  // arm by temporarily redirecting `fctx.body` (the savedBody/swap pattern).
+  const buildCtorArm = (className: string): Instr[] => {
+    const ctorFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${className}_new`))!;
+    const paramTypes = getFuncParamTypes(ctx, ctorFuncIdx) ?? [];
+    const arm: Instr[] = [];
+    const savedBody = fctx.body;
+    fctx.body = arm;
+    for (let i = 0; i < paramTypes.length; i++) {
+      const pType = paramTypes[i]!;
+      if (i < argLocals.length) {
+        fctx.body.push({ op: "local.get", index: argLocals[i]! });
+        if (pType.kind !== "externref") {
+          coerceType(ctx, fctx, { kind: "externref" }, pType);
+        }
+      } else {
+        pushDefaultValue(fctx, pType, ctx);
+      }
+    }
+    fctx.body.push({ op: "call", funcIdx: ctorFuncIdx });
+    // <Class>_new returns (ref $structIdx); box to externref. (externref-backed
+    // classes are excluded above, so the result is always a struct ref.)
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body = savedBody;
+    return arm;
+  };
+
+  // No-match base: the descriptor is not a known user class (tag == -1) — e.g.
+  // a genuine host builtin like `Test262Error` that also reached the unknown-ctor
+  // branch. Fall through to the legacy `__new_${ctorName}` host import using the
+  // pre-evaluated externref args, so host builtins keep working. When no such
+  // import exists, yield null (the legacy `else` branch did the same).
+  // In standalone / WASI strict mode there is no `__new_` host import to fall
+  // back to (it is not on the dual-mode allowlist), so the no-match base stays
+  // pure-Wasm (null). Host mode falls through to the existing import so genuine
+  // builtins (Test262Error, …) keep working.
+  const hostImportName = `__new_${ctorName}`;
+  const hostFuncIdx = noJsHost(ctx) ? undefined : ctx.funcMap.get(hostImportName);
+  let noMatchBase: Instr[];
+  if (hostFuncIdx !== undefined) {
+    const base: Instr[] = [];
+    const savedBody2 = fctx.body;
+    fctx.body = base;
+    const hostParamTypes = getFuncParamTypes(ctx, hostFuncIdx) ?? [];
+    for (let i = 0; i < argLocals.length; i++) {
+      fctx.body.push({ op: "local.get", index: argLocals[i]! });
+    }
+    for (let i = argLocals.length; i < hostParamTypes.length; i++) {
+      pushDefaultValue(fctx, hostParamTypes[i]!, ctx);
+    }
+    fctx.body.push({ op: "call", funcIdx: hostFuncIdx });
+    fctx.body = savedBody2;
+    noMatchBase = base;
+  } else {
+    noMatchBase = [{ op: "ref.null.extern" }];
+  }
+
+  // (2) Flat tag-equality dispatch over every candidate (innermost → host base).
+  let chain: Instr[] = noMatchBase;
+  for (const className of candidates) {
+    const classTag = ctx.classTagMap.get(className) ?? 0;
+    const thenArm = buildCtorArm(className);
+    const elseArm = chain;
+    chain = [
+      { op: "local.get", index: tagLocal },
+      { op: "i32.const", value: classTag },
+      { op: "i32.eq" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: thenArm,
+        else: elseArm,
+      } as Instr,
+    ];
+  }
+  for (const instr of chain) fctx.body.push(instr);
+  return true;
+}
+
 function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.NewExpression): ValType | null {
   // Handle `new function() { ... }(args)` — constructor with function expression
   if (ts.isFunctionExpression(expr.expression)) {
@@ -3162,6 +3356,34 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           then: [...stringConstantExternrefInstrs(ctx, rangeErrMsg), { op: "throw", tagIdx } as Instr],
           else: [],
         });
+      }
+    }
+
+    // (#2026) Dynamic-new fallback: `new K(...)` where `K` is a value-bound
+    // class identifier (type `any`) the static arms could not resolve. Dispatch
+    // through the class-object descriptor's struct type to the right
+    // `<Class>_new`, with a threaded argument list. Only fires for a bare
+    // identifier callee (so `new (expr)()` / member-callee forms keep their
+    // existing handling) and only when there is at least one struct-backed class
+    // to dispatch to; otherwise falls through to the legacy `__new_` host import
+    // (which still serves genuine host builtins like Test262Error).
+    {
+      let dynCallee: ts.Expression = expr.expression;
+      while (
+        ts.isParenthesizedExpression(dynCallee) ||
+        ts.isAsExpression(dynCallee) ||
+        ts.isNonNullExpression(dynCallee)
+      ) {
+        dynCallee = ts.isParenthesizedExpression(dynCallee)
+          ? dynCallee.expression
+          : ts.isAsExpression(dynCallee)
+            ? dynCallee.expression
+            : (dynCallee as ts.NonNullExpression).expression;
+      }
+      if (ts.isIdentifier(dynCallee) && !ctx.classSet.has(dynCallee.text)) {
+        if (emitDynamicNewFallback(ctx, fctx, expr, dynCallee, ctorName)) {
+          return { kind: "externref" };
+        }
       }
     }
 

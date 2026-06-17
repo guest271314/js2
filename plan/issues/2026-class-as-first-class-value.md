@@ -306,16 +306,36 @@ provided for extern class "K"` — confirmed. Traced the live path precisely:
 
 ### Slice plan (PR-1 → PR-3)
 
-- **PR-1 (core):** `$ClassTagBase` supertype wiring + `$UniformCtor` type +
-  per-class `__ctor_uniform_<Name>` trampoline (lazy, `ctx.uniformCtorFuncIdx`)
-  + module `(table $ctorTable funcref)` slotted at class registration + the
-  dynamic-new fallback arm (tag read → `table.get`/`call_ref`, else fall through
-  to `__new_`). Repro returns 6. Static `new C()` path untouched (regression
-  guard test). Host + standalone.
+- **PR-1 (core) — DONE (host mode).** Implemented as a tag-dispatch chain in
+  `emitDynamicNewFallback` (`new-super.ts`), NOT the `$ClassTagBase` supertype
+  + `(table funcref)` from the original sketch. Rationale discovered during
+  implementation: `ref.test $Class` cannot distinguish structurally-identical
+  classes (WasmGC iso-recursive canonicalization merges two `{x:number}`
+  classes; a `ref.test` matches both — verified, it mis-constructed B for A).
+  So discrimination MUST be by the `__tag` value, not the struct type. The
+  shipped design avoids any struct-hierarchy change (lower regression surface
+  than a shared base supertype): read `__tag` (field 0) via a
+  `ref.test`/`ref.cast` against any shape-compatible candidate struct (valid
+  under canonicalization), then a flat `tag == classTag` if/else chain selects
+  `<Class>_new`, threading boxed args coerced to each ctor param's ValType. No
+  host import → pure-Wasm. No-match base falls through to the legacy `__new_`
+  host import (host mode) so genuine builtins (Test262Error) keep working;
+  gated off in `noJsHost` mode. Static `new C()` path UNCHANGED (the
+  `classSet` arm is never touched). Repro → 6. Tests: `tests/issue-2026-dynamic-new.test.ts`
+  (6 cases incl. shape-collision dispatch, arg threading, static regression
+  guard, builtin fallthrough). tsc + biome clean; stack-balance gate OK.
+  **Standalone (`--target wasi`) deferred:** `new K()` already failed on main
+  in standalone (the unused `__new_K` import trips the WASI allowlist at
+  module-build, independent of dispatch). Fixing it needs suppressing that
+  import registration in `collectUnknownConstructorImports` for value-bound
+  class identifiers — split out to avoid PR-1 regression risk (PR-1b).
+- **PR-1b:** standalone parity — suppress the `__new_<name>` host-import
+  registration for value-bound class callees so the pure-Wasm tag dispatch is
+  the only path in `--target wasi` / standalone.
 - **PR-2:** `.constructor === A` for the externref/`any`-typed receiver via the
   same tag→`__class_<Name>` map (statically-typed receiver already works).
-- **PR-3:** spread/arity/derived-class args in `$argv` (reuse `flattenCallArgs`);
-  new.target threading inside the trampoline; non-constructor / null descriptor
+- **PR-3:** spread/arity/derived-class args in the dynamic path (reuse
+  `flattenCallArgs`); new.target threading; non-constructor / null descriptor
   TypeError edge cases.
 
 ### Test files to verify
