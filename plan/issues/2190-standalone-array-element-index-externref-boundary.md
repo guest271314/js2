@@ -1,9 +1,10 @@
 ---
 id: 2190
 title: "standalone: array element indexing (arr as any)[i] returns null/0 through the externref boundary"
-status: in-progress
+status: done
 assignee: ttraenkler/sdev-proxy3
 created: 2026-06-18
+completed: 2026-06-18
 priority: high
 feasibility: medium
 reasoning_effort: high
