@@ -36,14 +36,16 @@ function f(a: number): string {
   a = 99;
   return "" + arguments[0] + "," + arguments.length;
 }
-export function test(): string { return f(5); }
+export function test(): string {
+  return f(5);
+}
 ```
 
-| probe | wasm | node (.mjs) |
-|-------|------|------|
-| above | `"99,1"` | `"5,1"` |
-| two-param variant | `"9,7"` | `"1,2"` |
-| with `"use strict"` directive inside `f` | `"5,1"` ✓ | `"5,1"` |
+| probe                                    | wasm      | node (.mjs) |
+| ---------------------------------------- | --------- | ----------- |
+| above                                    | `"99,1"`  | `"5,1"`     |
+| two-param variant                        | `"9,7"`   | `"1,2"`     |
+| with `"use strict"` directive inside `f` | `"5,1"` ✓ | `"5,1"`     |
 
 The control shows the unmapping logic exists and works — only module
 strictness is ignored.
@@ -94,7 +96,7 @@ over-unmap the old comment feared:
   existing `"use strict"`-prologue check.
 - It deliberately does **NOT** key on `scriptKind`: the test262 harness
   compiles every sloppy `.js` case with `fileName: "test.ts"` (→ `scriptKind:
-  TS`), so keying on that would wrongly unmap all of them. Verified empirically
+TS`), so keying on that would wrongly unmap all of them. Verified empirically
   that a sloppy `.js` source compiled as `test.ts` has
   `externalModuleIndicator === undefined` → stays sloppy/mapped, while a source
   with a top-level `export` has it set → unmaps. (This is the distinction the
@@ -108,11 +110,11 @@ does not alter function-declaration scoping or other strict-mode behaviours.
 ### Acceptance criteria
 
 - [x] Module-input repro matches Node — the numeric variant (`a = 99;
-  arguments[0]*10 + arguments.length` with `f(5)`) returns `51` (unmapped, =
-  Node), not `991` (mapped). Verified via `assertEquivalent`.
+arguments[0]*10 + arguments.length` with `f(5)`) returns `51` (unmapped, =
+      Node), not `991` (mapped). Verified via `assertEquivalent`.
 - [x] test262 sloppy-mode arguments-mapping does not regress — a sloppy source
-  with no import/export stays mapped (`isStrictFunction` returns false; unit
-  test pins this). Broad test262 conformance delta verified by sharded CI.
+      with no import/export stays mapped (`isStrictFunction` returns false; unit
+      test pins this). Broad test262 conformance delta verified by sharded CI.
 - [x] `"use strict"`-directive path unchanged (unit test).
 
 ### Test Results
