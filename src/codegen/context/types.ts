@@ -790,6 +790,17 @@ export interface CodegenContext {
    */
   externIsArrayReserved?: boolean;
   /**
+   * (#2190) True once `__extern_get_idx` is registered with its static
+   * `$Object`/`$ObjVec` arms (standalone only). The per-element-kind
+   * `__vec_<k>` dispatch arms are appended at FINALIZE by
+   * `fillExternGetIdxVecArms`, after every `__vec_*` carrier type is known —
+   * the same reserve/fill pattern as `externIsArrayReserved`. Without the
+   * deferred fill, an array literal of an element kind compiled after
+   * `ensureObjectRuntime` would have no indexing arm and `(arr as any)[i]`
+   * would read back null/0 (sibling of the #2189 `.length` gap).
+   */
+  externGetIdxReserved?: boolean;
+  /**
    * (#2038) True once the native iterator runtime (`ensureNativeIteratorRuntime`,
    * iterator-native.ts) has emitted `__iterator` / `__iterator_next` with a
    * vec-only body and is awaiting its USER-iterator arm. The USER arm dispatches

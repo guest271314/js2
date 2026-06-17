@@ -44,7 +44,7 @@ import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
-import { fillApplyClosure, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
+import { fillApplyClosure, fillExternGetIdxVecArms, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -1670,6 +1670,12 @@ export function generateModule(
     // (#1904) Fill the standalone native Array.isArray predicate after all
     // module-local array carriers have been registered.
     fillExternIsArray(ctx);
+
+    // (#2190) Fill `__extern_get_idx`'s typed-`__vec_<elemKind>` indexing arms
+    // now that every array-literal carrier type is known — sibling of #2189's
+    // `.length` fix, so `(arr as any)[i]` through the externref boundary reads
+    // the element instead of null/0. Standalone only (no-op otherwise).
+    fillExternGetIdxVecArms(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return
