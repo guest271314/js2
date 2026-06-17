@@ -23,8 +23,16 @@ async function standaloneExports(source: string) {
   expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
   // No JS-host string / regex protocol import may leak in standalone.
   const labels = r.imports.map((i) => `${i.module}::${i.name}`);
-  for (const re of [/^env::__extern_toString$/, /^wasm:js-string::/, /^env::__regex_symbol_call$/, /^env::__extern_get$/]) {
-    expect(labels.filter((l) => re.test(l)), `leaked ${re}`).toEqual([]);
+  for (const re of [
+    /^env::__extern_toString$/,
+    /^wasm:js-string::/,
+    /^env::__regex_symbol_call$/,
+    /^env::__extern_get$/,
+  ]) {
+    expect(
+      labels.filter((l) => re.test(l)),
+      `leaked ${re}`,
+    ).toEqual([]);
   }
   const { instance } = await WebAssembly.instantiate(r.binary, {});
   return instance.exports as Record<string, (...a: unknown[]) => number>;
