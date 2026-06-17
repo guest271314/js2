@@ -22,6 +22,16 @@
 //   node scripts/claim-issue.mjs --complete <id>
 //   node scripts/claim-issue.mjs --list
 //
+// SLICE-LEVEL LOCKING (#41): for an issue the architect decomposed into
+// FILE-DISJOINT parallel slices, pass a slice-qualified id `<issue>:<slice>`
+// (e.g. `2158:glue1`). Each distinct `<issue>:<slice>` takes its OWN lock
+// (`<issue>-<slice>.json` on the ref), so the slices can be held concurrently
+// instead of serializing on one issue-level lock — while two agents still can't
+// grab the SAME slice. A plain `<issue>` (no `:`) keeps the issue-level lock
+// (`<issue>.json`), which stays the default for single-slice issues. The
+// done/wont-fix-on-main pre-flight resolves the BASE issue number from the
+// qualified id, so a slice claim is still refused once the parent issue closes.
+//
 // Assignee convention: humans use their name/handle; dev AGENTS use their
 // github-account-prefixed name, e.g. `ttraenkler/senior-dev-1`. The default
 // account prefix for an unqualified agent name can be supplied via
@@ -83,6 +93,28 @@ function normalizeAssignee(raw) {
   if (raw.includes("/")) return raw;
   const acct = process.env.CLAIM_GITHUB_ACCOUNT;
   return acct ? `${acct}/${raw}` : raw;
+}
+
+// Parse a (possibly slice-qualified) target id (#41).
+//   "2158"        -> { base: "2158", slice: "",       key: "2158",       label: "#2158" }
+//   "2158:glue1"  -> { base: "2158", slice: "glue1",  key: "2158-glue1", label: "#2158:glue1" }
+// `base` is the numeric issue id used for the main done/wont-fix pre-flight and
+// dependency-graph lookups; `key` is the per-lock filename stem on the ref so
+// distinct slices of one issue hold independent locks. The slice tag is
+// sanitized to keep the lock filename git/path-safe.
+function parseTarget(raw) {
+  if (!raw) return null;
+  const sep = raw.indexOf(":");
+  if (sep < 0) {
+    return { base: raw, slice: "", key: raw, label: `#${raw}` };
+  }
+  const base = raw.slice(0, sep);
+  const sliceRaw = raw.slice(sep + 1);
+  const slice = sliceRaw.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^-+|-+$/g, "");
+  if (!base || !slice) {
+    die(2, `invalid slice-qualified id "${raw}" — expected "<issue>:<slice>" with a non-empty slice tag`);
+  }
+  return { base, slice, key: `${base}-${slice}`, label: `#${base}:${slice}` };
 }
 
 // --- remote ref plumbing ----------------------------------------------------
@@ -173,26 +205,26 @@ function doList() {
     const e = readEntry(sha, id);
     if (isHeld(e)) rows.push(e);
   }
-  rows.sort((a, b) => Number(a.id) - Number(b.id));
+  rows.sort((a, b) => Number(a.id) - Number(b.id) || String(a.slice || "").localeCompare(String(b.slice || "")));
   if (!rows.length) {
     console.log("No active claims.");
     return;
   }
-  console.log("id\tassignee\tstatus\tbranch\tclaimed_at");
+  console.log("id\tslice\tassignee\tstatus\tbranch\tclaimed_at");
   for (const e of rows) {
-    console.log(`${e.id}\t${e.assignee}\t${e.status}\t${e.branch || "-"}\t${e.claimed_at || "-"}`);
+    console.log(`${e.id}\t${e.slice || "-"}\t${e.assignee}\t${e.status}\t${e.branch || "-"}\t${e.claimed_at || "-"}`);
   }
 }
 
-function doCheck(id) {
+function doCheck(target) {
   const sha = remoteAssignSha();
   fetchAssign(sha);
-  const e = readEntry(sha, id);
+  const e = readEntry(sha, target.key);
   if (isHeld(e)) {
-    console.log(`#${id} is CLAIMED by ${e.assignee} (since ${e.claimed_at || "?"}).`);
+    console.log(`${target.label} is CLAIMED by ${e.assignee} (since ${e.claimed_at || "?"}).`);
     process.exit(3);
   }
-  console.log(`#${id} is UNASSIGNED.`);
+  console.log(`${target.label} is UNASSIGNED.`);
   process.exit(0);
 }
 
@@ -202,43 +234,46 @@ function nowIso() {
   return new Date().toISOString().replace(/\.\d+Z$/, "Z");
 }
 
-function writeMode(id, assignee, kind) {
-  // Pre-flight: refuse claiming an issue already closed on main.
+function writeMode(target, assignee, kind) {
+  const { base, slice, key, label } = target;
+  // Pre-flight: refuse claiming an issue already closed on main. Resolve the
+  // BASE issue number so a slice claim is still refused once the parent closes.
   if (kind === "claim") {
-    const main = mainIssueStatus(id);
+    const main = mainIssueStatus(base);
     if (main && (main.status === "done" || main.status === "wont-fix")) {
-      die(4, `#${id} is already ${main.status} on ${MAIN_REF} (${main.file}). Nothing to claim.`);
+      die(4, `${label} is already ${main.status} on ${MAIN_REF} (${main.file}). Nothing to claim.`);
     }
     if (!main) {
-      console.error(`warning: no issue file for #${id} found on ${MAIN_REF}; claiming anyway.`);
+      console.error(`warning: no issue file for #${base} found on ${MAIN_REF}; claiming anyway.`);
     }
   }
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     const sha = remoteAssignSha();
     fetchAssign(sha);
-    const existing = readEntry(sha, id);
+    const existing = readEntry(sha, key);
 
     if (kind === "claim") {
       if (isHeld(existing) && existing.assignee !== assignee && !flags.has("--force")) {
         die(
           3,
-          `#${id} is already claimed by ${existing.assignee} (since ${existing.claimed_at || "?"}). Pick another issue, or pass --force to steal.`,
+          `${label} is already claimed by ${existing.assignee} (since ${existing.claimed_at || "?"}). Pick another issue${slice ? "/slice" : ""}, or pass --force to steal.`,
         );
       }
     }
     if (kind === "release" || kind === "complete") {
       if (!isHeld(existing)) {
-        console.log(`#${id} is not currently claimed — nothing to ${kind}.`);
+        console.log(`${label} is not currently claimed — nothing to ${kind}.`);
         return;
       }
       if (assignee && existing.assignee !== assignee && !flags.has("--force")) {
-        die(3, `#${id} is held by ${existing.assignee}, not ${assignee}. Pass --force to override.`);
+        die(3, `${label} is held by ${existing.assignee}, not ${assignee}. Pass --force to override.`);
       }
     }
 
     const entry = {
-      id: String(id),
+      id: base,
+      ...(slice ? { slice } : {}),
       assignee: kind === "claim" ? assignee : existing ? existing.assignee : assignee,
       status: kind === "claim" ? "in-progress" : kind === "complete" ? "done" : "released",
       branch: kind === "claim" ? branch || (existing && existing.branch) || "" : (existing && existing.branch) || "",
@@ -248,16 +283,16 @@ function writeMode(id, assignee, kind) {
     if (kind !== "claim") entry.released_at = nowIso();
 
     const verb = kind === "claim" ? "claim" : kind;
-    const msg = `chore(assign): ${verb} #${id} -> ${entry.assignee} [skip ci]`;
+    const msg = `chore(assign): ${verb} ${label} -> ${entry.assignee} [skip ci]`;
     const content = JSON.stringify(entry, null, 2) + "\n";
 
-    if (commitAndPush(sha, id, content, msg)) {
+    if (commitAndPush(sha, key, content, msg)) {
       const human =
         kind === "claim"
-          ? `Claimed #${id} for ${entry.assignee}${entry.branch ? ` (branch ${entry.branch})` : ""}.`
+          ? `Claimed ${label} for ${entry.assignee}${entry.branch ? ` (branch ${entry.branch})` : ""}.`
           : kind === "complete"
-            ? `Marked #${id} complete (was ${entry.assignee}).`
-            : `Released #${id} (was ${entry.assignee}).`;
+            ? `Marked ${label} complete (was ${entry.assignee}).`
+            : `Released ${label} (was ${entry.assignee}).`;
       console.log(human);
       console.log(`(pushed to ${REMOTE}/${ASSIGN_REF}; main untouched, no CI triggered)`);
       return;
@@ -272,20 +307,20 @@ if (mode === "list") {
   doList();
 } else if (mode === "check") {
   const id = positional[0];
-  if (!id) die(2, "usage: claim-issue.mjs --check <id>");
-  doCheck(id);
+  if (!id) die(2, "usage: claim-issue.mjs --check <id[:slice]>");
+  doCheck(parseTarget(id));
 } else if (mode === "release" || mode === "complete") {
   const id = positional[0];
-  if (!id) die(2, `usage: claim-issue.mjs --${mode} <id> [<assignee>]`);
-  writeMode(id, normalizeAssignee(positional[1] || process.env.CLAIM_ASSIGNEE || ""), mode);
+  if (!id) die(2, `usage: claim-issue.mjs --${mode} <id[:slice]> [<assignee>]`);
+  writeMode(parseTarget(id), normalizeAssignee(positional[1] || process.env.CLAIM_ASSIGNEE || ""), mode);
 } else {
   const id = positional[0];
   const assignee = normalizeAssignee(positional[1] || process.env.CLAIM_ASSIGNEE || "");
   if (!id || !assignee) {
     die(
       2,
-      "usage: claim-issue.mjs <id> <assignee> [--branch <b>] [--force]\n  (assignee may also come from $CLAIM_ASSIGNEE; agents use ttraenkler/<agent-name>)",
+      "usage: claim-issue.mjs <id[:slice]> <assignee> [--branch <b>] [--force]\n  (assignee may also come from $CLAIM_ASSIGNEE; agents use ttraenkler/<agent-name>)",
     );
   }
-  writeMode(id, assignee, "claim");
+  writeMode(parseTarget(id), assignee, "claim");
 }
