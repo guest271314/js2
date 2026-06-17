@@ -678,3 +678,111 @@ is pre-existing on the base (verified by stashing).
 
 **Remaining PR-D:** D2 (`toJSON`) + D3 (function/array replacer) — same driver
 infra, on the stringify side.
+
+---
+
+## Progress (2026-06-18, sdev-json3) — PR-D2: standalone JSON.stringify toJSON (data-property forms)
+
+PR-D2 of the PR-D plan (PR #1666). `JSON.stringify` now honours a value's
+callable own `toJSON` (§25.5.2 SerializeJSONProperty step 2.b) under `--target
+standalone`/`wasi`, entirely in Wasm on the same `__call_*` driver infra PR-D1
+introduced.
+
+**Files:**
+- `src/codegen/json-codec-native.ts` — `__json_stringify_value` gains a 4th param
+  `key: externref` (threaded at all 4 recursion sites + both roots). A toJSON
+  dispatch block at the top: if the value is an `$Object` with a **non-null own
+  `toJSON`** (read via `__extern_get`), call `__call_to_json(value, method, key)`
+  and re-dispatch the result.
+- `src/codegen/accessor-driver.ts` — `reserveToJsonDriver` + a fill arm wrapping
+  `__call_fn_method_1` (value bound as `this`). Same reserve/fill funcIdx pattern
+  as PR-D1's reviver driver.
+- `src/codegen/context/types.ts` — `toJsonDriverReserved` flag.
+- `scripts/coercion-sites-baseline.json` — `json-codec-native.ts` 6→8: the two
+  new sites reuse the existing `number_toString` helper to format an array index
+  `i` as its string property key (the key threaded into toJSON for array
+  elements). Reuse of the JSON number-serialization helper, not a hand-rolled
+  ToString matrix — a sanctioned migration bump.
+
+Tests: `tests/issue-2166.test.ts` (+11 PR-D2 cases — arrow / function-expression
+toJSON, `this` binding, key passing, numeric/object-graph results, nested
+property, array element, indented form, no-regression for a plain object, a
+method-shorthand-toJSON-elsewhere codec-stability guard, `--target wasi`).
+72/72 in the suite green.
+
+### KNOWN RESIDUAL → separate method-lookup follow-up (NOT in #1666)
+
+PR-D2 covers **data-property** `toJSON` forms — `{ toJSON: () => …, … }` and
+`{ toJSON: function () { … }, … }` — because those are real **runtime own
+properties** the codec finds via `__extern_get`. It does **NOT** cover:
+
+- **method-shorthand** `{ toJSON() { … } }`, and
+- **class-method** `class C { toJSON() { … } }` instances.
+
+Both serialize as if no `toJSON` exists (a plain object with the other fields;
+an instance currently serializes per its normal arm). Root cause: a
+method-shorthand / class method is **not a runtime own data-property** on the
+object — it lives on the static object shape / prototype, so the codec's
+`__extern_get(value, "toJSON")` returns null and the dispatch is skipped. This
+is a **method-lookup** gap, not a `toJSON`-specific one: it is the same
+static-shape / prototype reflection-through-the-externref-boundary problem that
+blocks instance-field stringify and overlaps the closed-struct reflection work
+in #2042 and the `$Array`/`$ObjVec` introspection work (TaskList #35). It is
+**architect-scale** (prototype/own-shape method resolution through the codec's
+`anyref` boundary), not a point fix, and is tracked as a follow-up rather than
+folded into #1666. Once standalone method-lookup-through-the-boundary lands,
+the codec's existing toJSON dispatch arm covers the shorthand/class forms with
+no codec change (the `__extern_get` simply has to find the method).
+
+**Remaining PR-D:** D3 (function / array replacer) — same `__call_*` driver
+infra, on the stringify side. After D3, #2166 is fully closed.
+
+---
+
+## Progress (2026-06-18, sdev-json3) — PR-D2: standalone JSON.stringify toJSON
+
+PR-D2 of the PR-D plan. `JSON.stringify` now honours a value's callable own
+`toJSON` (§25.5.2 SerializeJSONProperty step 2.b) under `--target standalone`,
+running entirely in Wasm on the same `__call_*` driver infra PR-D1 introduced.
+
+**Files:**
+- `src/codegen/json-codec-native.ts` — `__json_stringify_value` gains a 4th param
+  `key: externref` (the property key for toJSON); threaded at all 4 recursion
+  sites (object arm = `e.key`; array arm = `number_toString(i)`; both roots = "").
+  A toJSON dispatch block at the top: if the value is an `$Object` with a non-null
+  own `toJSON` (via `__extern_get`), call `__call_to_json(value, method, key)` and
+  re-dispatch the result (a null/undefined return → `"null"`).
+- `src/codegen/accessor-driver.ts` — `reserveToJsonDriver` + fill arm: the
+  `__call_to_json(value, method, key)` driver wraps `__call_fn_method_1` (value
+  bound as `this`). Same reserve/fill funcIdx pattern as PR-D1's `__call_reviver`.
+- `src/codegen/context/types.ts` — `toJsonDriverReserved` flag.
+
+**The funcIdx-stability fix (WHY `deepCloneInstrs`):** `__json_stringify_value`
+spreads SHARED helper `Instr[]` arrays (appendPiece/appendSep/appendLit) at many
+sites. Before this PR the body was used directly; with the new lazily-reserved
+`__call_to_json` call in it, a later union-import shift (triggered by ANY
+method-shorthand closure elsewhere in the module) desynced the driver call —
+`shiftLateImportIndices` de-dupes shared objects via a `shifted` Set and skipped
+their other occurrences. Symptom: `__json_stringify_value` failed Wasm validation
+"need 3, got 1". Fix: deep-clone the body so every occurrence is independent and
+shifted exactly once (the #1302 hazard the parse codec already clones around). A
+**JSON round-trip clone is WRONG** here — the number arm holds `f64.const Infinity`
+and `JSON.stringify(Infinity)→null` would corrupt it to 0 — so `deepCloneInstrs`
+is a structure-preserving recursive clone (preserves ±Infinity/NaN, breaks
+aliasing).
+
+Tests: `tests/issue-2166.test.ts` (+11 PR-D2 cases — arrow/function-expression
+toJSON, `this` binding, key passing, primitive + captured-object results, nested,
+array-element, indented (PR-B) form, no-toJSON regression, method-shorthand-
+present no-corruption guard, wasi host-import-free). 72/72 in the suite green;
+all PR-A/B/C/C2/D1 suites stay green.
+
+**Known limitation (deferred):** a toJSON returning a FRESH object literal built
+inside the closure (`() => ({...})`) serialises as "null" — a pre-existing
+standalone closure-return-representation gap (a plain `(() => ({x:1}))()` then
+stringify also yields "null"), independent of toJSON; ties to the
+`$Array`/`$ObjVec` externref-boundary work (TaskList #35). Captured/pre-existing
+object returns work.
+
+**Remaining PR-D:** D3 (function/array replacer) — same driver infra, last slice;
+after it, #2166 is fully closed.

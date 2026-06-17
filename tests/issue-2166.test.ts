@@ -602,3 +602,110 @@ describe("#2166 PR-D1 — standalone JSON.parse reviver (InternalizeJSONProperty
     ).toBe(1);
   });
 });
+
+/*
+ * #2166 PR-D2 — standalone `JSON.stringify` toJSON support (§25.5.2
+ * SerializeJSONProperty step 2.b). Before serialising a value, if it is an
+ * $Object with a callable own `toJSON`, the codec calls `value.toJSON(key)` via
+ * the reserve/fill `__call_to_json` driver → `__call_fn_method_1` (value bound
+ * as `this`) and serialises the result instead. The property key is threaded
+ * through `__json_stringify_value`'s new 4th param.
+ *
+ * `standaloneNum` runs an internal boolean comparison (standalone native strings
+ * don't marshal across the export boundary) and also asserts no JSON host-import
+ * leak.
+ */
+describe("#2166 PR-D2 — standalone JSON.stringify toJSON", () => {
+  it("calls toJSON (arrow) and serialises its string result", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { x: 1, toJSON: () => "custom" }; return JSON.stringify(o) === '"custom"' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("serialises a numeric toJSON result", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { toJSON: () => 42 }; return JSON.stringify(o) === "42" ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("passes the property key to toJSON", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { p: { toJSON: (k: string) => k } }; return JSON.stringify(o) === '{"p":"p"}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("binds the value as `this` inside a function-expression toJSON", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { v: 7, toJSON: function() { return (this as any).v; } }; return JSON.stringify(o) === "7" ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("serialises a toJSON result that is a (captured) object graph", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const r: any = { w: 9 }; const o: any = { toJSON: () => r }; return JSON.stringify(o) === '{"w":9}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("applies toJSON to a nested property value", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const inner: any = { toJSON: () => 42 }; const o: any = { a: inner }; return JSON.stringify(o) === '{"a":42}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("applies toJSON to an array element", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const e: any = { toJSON: () => 5 }; const o: any = { arr: [e] }; return JSON.stringify(o) === '{"arr":[5]}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("honours toJSON under the indented (space) form", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { v: { toJSON: () => 1 } }; return JSON.stringify(o, null, 2) === '{\\n  "v": 1\\n}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("does not regress a plain object with no toJSON", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { x: 1, y: 2 }; return JSON.stringify(o) === '{"x":1,"y":2}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("a method-shorthand toJSON elsewhere does not corrupt the codec", async () => {
+    // Regression guard: a method-shorthand closure forces a late import/index
+    // shift; the codec body is deep-cloned (preserving f64.const Infinity) so the
+    // lazily-reserved __call_to_json call stays in sync and the module verifies.
+    expect(
+      await standaloneNum(
+        `export function test(): number { const m: any = { v: 7, toJSON() { return this.v; } }; const p: any = { a: 1 }; return JSON.stringify(p) === '{"a":1}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("stays host-import-free under --target wasi (toJSON path)", async () => {
+    // As with PR-A/PR-B, the wasi object-rep differs, so we don't assert the
+    // toJSON result value here — only that the codec path compiles host-import-
+    // free under wasi. `standaloneNum` throws if a JSON_* host import leaks.
+    await standaloneNum(
+      `export function test(): number { const o: any = { toJSON: () => 3 }; const s: string = JSON.stringify(o); return s.length; }`,
+      "wasi",
+    );
+  });
+});
