@@ -127,6 +127,7 @@ import {
 } from "./helpers.js";
 import { analyzeTdzAccessByPos, emitLocalTdzCheck, emitStaticTdzThrow } from "./identifiers.js";
 import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
+import { ensureSymbolRegistry } from "../symbol-native.js";
 import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
 import {
@@ -5425,6 +5426,23 @@ function compileCallExpression(
           emitThrowTypeError(ctx, fctx, "Cannot convert a Symbol value to a string");
           return { kind: "externref" };
         }
+        // (#2163) No-JS-host mode: use the Wasm-native registry. The key lowers
+        // to a `ref $AnyString`; `__symbol_for_native` does the content-equality
+        // lookup / insert and returns the i32 symbol id (also recording the key
+        // as the registered symbol's description). Zero host imports.
+        if (noJsHost(ctx)) {
+          const { forIdx } = ensureSymbolRegistry(ctx);
+          const keyType = compileExpression(ctx, fctx, expr.arguments[0]!, {
+            kind: "ref",
+            typeIdx: ctx.anyStrTypeIdx,
+          });
+          if (keyType && (keyType.kind !== "ref" || keyType.typeIdx !== ctx.anyStrTypeIdx)) {
+            coerceType(ctx, fctx, keyType, { kind: "ref", typeIdx: ctx.anyStrTypeIdx });
+          }
+          fctx.body.push({ op: "ref.as_non_null" } as Instr);
+          fctx.body.push({ op: "call", funcIdx: forIdx });
+          return { kind: "i32" };
+        }
         const keyType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
         if (keyType && keyType.kind !== "externref") coerceType(ctx, fctx, keyType, { kind: "externref" });
         const funcIdx = ensureLateImport(ctx, "__symbol_for", [{ kind: "externref" }], [{ kind: "externref" }]);
@@ -5438,6 +5456,16 @@ function compileCallExpression(
         return { kind: "externref" };
       }
       if (symMethod === "keyFor" && expr.arguments.length >= 1) {
+        // (#2163) No-JS-host mode: the symbol is an i32 id; the native registry
+        // returns its registration key (`ref_null $AnyString`, i.e. a native
+        // string or undefined for an unregistered symbol). Zero host imports.
+        if (noJsHost(ctx)) {
+          const { keyForIdx } = ensureSymbolRegistry(ctx);
+          const symType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "i32" });
+          if (symType && symType.kind !== "i32") coerceType(ctx, fctx, symType, { kind: "i32" });
+          fctx.body.push({ op: "call", funcIdx: keyForIdx });
+          return { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
+        }
         const symType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
         if (symType && symType.kind !== "externref") coerceType(ctx, fctx, symType, { kind: "externref" });
         const funcIdx = ensureLateImport(ctx, "__symbol_keyFor", [{ kind: "externref" }], [{ kind: "externref" }]);

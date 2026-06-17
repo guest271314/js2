@@ -1167,6 +1167,15 @@ export interface CodegenContext {
   /** (#2163) Type index of the symbol description table's array type
    *  (`array (mut (ref null $AnyString))`). -1 until created. */
   symbolDescArrTypeIdx: number;
+  /** (#2163) Native `Symbol.for`/`Symbol.keyFor` registry (standalone mode).
+   *  Two parallel growable arrays — slot→key string (reuses
+   *  `symbolDescArrTypeIdx`) and slot→symbol id (`array (mut i32)`) — plus a
+   *  count global. All -1 until the first `Symbol.for`/`keyFor`. */
+  symbolRegKeysGlobalIdx: number;
+  symbolRegIdsGlobalIdx: number;
+  symbolRegCountGlobalIdx: number;
+  /** (#2163) Type index of the registry ids array (`array (mut i32)`). */
+  symbolRegIdsArrTypeIdx: number;
   /** Stack of in-progress parent function bodies for index shifting during closure compilation */
   parentBodiesStack: Instr[][];
   /** All live (allocated but not yet attached to ctx.mod.functions) FunctionContext bodies.

@@ -131,6 +131,54 @@ Wiring:
 
 ### Still carried forward (issue stays open)
 
-- `Symbol.for` / `Symbol.keyFor` registry (native id↔key registry — can reuse
-  this slice's native-storage approach).
+- ~~`Symbol.for` / `Symbol.keyFor` registry~~ — **done in slice 3 below.**
 - `Symbol#toString()` late-import index-shift CE (#2043 class).
+
+## Slice 3 (2026-06-17, dev-3) — native `Symbol.for` / `Symbol.keyFor` registry
+
+**Landed.** `Symbol.for` / `Symbol.keyFor` now use a Wasm-native global symbol
+registry in `noJsHost` mode, with **zero host imports** — previously `Symbol.for`
+leaked `__symbol_for` and `Symbol.keyFor` leaked `__symbol_keyFor` + `__box_symbol`
+and failed zero-import instantiation.
+
+Added to `src/codegen/symbol-native.ts`:
+
+- `ensureSymbolRegistry(ctx)` registers two parallel growable globals —
+  `__symbol_reg_keys : ref_null (array (mut (ref null $AnyString)))` (reuses
+  `symbolDescArrTypeIdx`) and `__symbol_reg_ids : ref_null (array (mut i32))` —
+  plus a `__symbol_reg_count : i32` global, and two runtime helper functions:
+  - `__symbol_for_native(key: ref $AnyString) -> i32`: linear content-equality
+    scan via the native `__str_equals` (flattens cons-strings); on miss,
+    `++__symbol_counter`, append `(key, id)` (growing both arrays ×2 with
+    `array.copy`), record `key` as the new symbol's description in the slice-2
+    table, and return the id.
+  - `__symbol_keyfor_native(id: i32) -> ref_null $AnyString`: linear scan by id,
+    returns the registration key or null (⇒ `undefined`).
+  New context fields `symbolReg{Keys,Ids,Count}GlobalIdx` + `symbolRegIdsArrTypeIdx`
+  (init -1; the three globals shifted in `registry/imports.ts` alongside
+  `symbolCounterGlobalIdx`).
+
+Wiring (`expressions/calls.ts`): the `Symbol.for` / `Symbol.keyFor` handlers gain
+a `noJsHost` branch that compiles the key as `ref $AnyString` (resp. the symbol
+as i32) and calls the native helper. Host mode is unchanged (still routes through
+`__symbol_for` / `__symbol_keyFor` — verified the imports are still present in
+host mode).
+
+### Acceptance criteria (slice 3)
+
+- [x] `Symbol.for(k) === Symbol.for(k)` (identity), distinct keys distinct,
+  `Symbol.keyFor` round-trip, `keyFor` of an unregistered symbol is `undefined`,
+  registered symbol's `.description === key` (§20.4.2.2), `Symbol.for(k) !==
+  Symbol(k)`, registry grows past initial capacity (20 registrations).
+- [x] No `__symbol_for` / `__symbol_keyFor` / `__box_symbol` host-import leak —
+  standalone modules instantiate with **zero** imports.
+- [x] Host mode registry path unchanged.
+
+### Test Results (slice 3)
+
+- `tests/issue-2163-registry-standalone.test.ts` — 9/9 (identity, distinct,
+  keyFor, unregistered→undefined, description==key, round-trip, re-register,
+  for≠plain, grow). All assert zero host imports.
+- `tests/issue-2163.test.ts` slice-1/2 — 14/14, unchanged.
+- `npm run typecheck` + Biome lint clean (`symbol-native.ts` 0 warnings).
+- Host-mode `Symbol.for` still emits `__symbol_for` (regression guard).
