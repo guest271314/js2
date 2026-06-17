@@ -96,3 +96,22 @@ keys / overwrite / delete; WeakSet add+has / delete / chained add.
   `symmetricDifference`/`isSubsetOf`/`isSupersetOf`/`isDisjointFrom`.
 - The `Set === literal` / collection-of-`any` comparison confounds depend on the
   value-rep work (#2104/#2106), out of scope here.
+
+## Slice — ES2025 Set set-algebra (PR, dev-1, 2026-06-17)
+
+All 7 ES2025 Set set-algebra methods are now Wasm-native standalone/WASI (they
+leaked `Set_*` host imports before). New `src/codegen/set-algebra.ts`:
+`union`/`intersection`/`difference`/`symmetricDifference` return a new Set;
+`isSubsetOf`/`isSupersetOf`/`isDisjointFrom` return a boolean. Each builds on the
+shared `$Map` backing store — walk one operand's entries vector (the same
+insertion-ordered, tombstone-skipping walk `forEach`/`__map_iter_next` use) and
+consult the other via `__map_has`, accumulating into a fresh Set (`__map_new` +
+`__set_add`) or an i32 flag. Dispatched from `extern.ts` when BOTH the receiver
+and the single argument type as `Set` (a genuine Set `b`; a Set-LIKE arg / the
+GetSetRecord path is a follow-up). No host import, no iterator object.
+
+Verified standalone (empty-`{}`/wasi, zero `Set_*`/`Map_*` imports): all 7 ops,
+true+false predicate cases, content checks, dedup. Test:
+`tests/issue-2162-set-algebra.test.ts` (10/10, operands built via `.add()` so the
+slice is independent of the `new Set([...])` constructor slice). tsc + prettier
+clean; Set Slice-1 unaffected.
