@@ -376,3 +376,70 @@ this PR (verified by stashing). PR #1653.
   blast radius, overlaps #1917; deferred.
 - **PR-B:** dynamic-space indentation. **PR-C:** `__json_parse_text`. **PR-D:**
   instance fields + toJSON + reviver/replacer.
+
+## Progress (2026-06-17, sdev-json2) — PR-C: dynamic JSON.parse codec
+
+PR-C of the Implementation Plan. Adds `emitJsonParseText` to
+`src/codegen/json-codec-native.ts`: a pure-Wasm recursive-descent JSON parser
+(ECMA-404 / §25.5.1) — `__json_parse_text(s: externref) -> anyref` plus mutually
+recursive `__json_parse_value` / `__json_parse_str` helpers sharing a cursor
+through a `$JsonP { $data, $pos(mut), $end }` state struct. Output uses the SAME
+standalone value rep stringify (PR-A) consumes and the property-read path
+unboxes:
+
+- objects → `$Object` via `__new_plain_object` + `__extern_set` (insertion order).
+- numbers → `$__box_number_struct`; booleans → `$__box_number_struct` 1.0/0.0
+  (matching how `o.x = true` stores a boolean in a standalone object — a distinct
+  boolean identity is the broader #1917 boolean-boxing gap); `null` → null eqref.
+- strings → native `$AnyString` with full §25.5.1 unescaping (`\" \\ \/ \b\f\n\r\t`
+  and `\uXXXX`), via a two-pass (size-scan then fill) over the flattened i16 backing.
+- arrays → `$ObjVec` via `__objvec_new` + `__objvec_push`.
+- malformed input / trailing junk → runtime `throw new SyntaxError(...)` through the
+  standalone `__new_SyntaxError` ctor + the shared exn tag (§25.5.1 step 3), not a trap.
+
+Routing (`src/codegen/expressions/calls.ts`): a runtime-string / `any`-typed
+`JSON.parse(text)` (1-arg) now routes to the codec, replacing the primitive-only
+`__json_parse_primitive` slice (a strict superset — it parsed only a lone
+number/true/false/null and trapped on `{`/`[`/`"`). A `reviver` (2nd arg) is
+deferred to PR-D (refused, not silently ignored).
+
+Tests: `tests/issue-2166.test.ts` (+14 PR-C cases — object number/string/nested
+reads, §25.5.1 escapes incl. `\uXXXX`, boolean truthy round-trip, null, top-level
+primitive, negative/fraction/exponent numbers, whitespace tolerance, object +
+nested round-trip `JSON.parse(JSON.stringify(o))`, `--target wasi`, and a
+malformed-input SyntaxError throw). Updated `tests/issue-1599-json-standalone-
+refuse.test.ts`: dynamic `JSON.parse(s).x` now COMPILES (was refused), both
+standalone and wasi; a dynamic `number[]` stringify still refuses (PR-A2).
+
+Two pre-existing host-mode failures (`tests/json.test.ts` number→host-import,
+array-of-structs) are upstream, not from this PR (the host `JSON_stringify`
+import path is untouched — every PR-C change is gated on `ctx.standalone ||
+ctx.wasi`).
+
+### Codegen note (WHY) — fresh GC struct in a lazy codegen pass
+A fresh struct type registered during a *lazy* call-expression codegen (here
+`$JsonP`) is fragile if its `typeIdx` is baked into many shared helper-`Instr`
+objects: the finalize dead-type-elimination remap (`remapTypeIdxInBody`)
+mutates `typeIdx` IN PLACE and re-visits a shared object once per occurrence,
+re-mapping an already-mapped index repeatedly (the #1302 shared-array
+double-shift hazard). It desynced the most-spread `$pos` `struct.get`/`set`
+operands (78→72→…→54 `$ProxyTraps`) from the cursor local's declared type. Fix:
+deep-clone each function body with a **JSON round-trip** (NOT `structuredClone`,
+which *preserves* internal aliasing) so every operand occurrence is an
+independent object and is remapped exactly once. The struct index is also kept
+off every function **signature** (helpers take `anyref` + `ref.cast` on entry)
+and its fields are `$`-prefixed (so the same-shape collision resolver skips it).
+
+### PR-C2 follow-up (array element indexing)
+Parsed arrays build a `$ObjVec`; `.length` and use as object-property values
+work, but **direct numeric element indexing on a parsed array** (`a[i]`) reads
+0 — the standalone element-access path does not route an `$ObjVec` numeric read
+through `__extern_get_idx` (it resolves `a[i]` as a string-keyed `__extern_get`,
+which an `$ObjVec` has no key for). PR-C2: route `$ObjVec` numeric element-access
+through `__extern_get_idx` (the helper already ref.tests `$ObjVec` and returns
+`data[i]`). Object graphs — the dominant `JSON.parse` shape — are fully working.
+
+### Still open
+- **PR-C2:** parsed-array element indexing (`a[i]`) via `__extern_get_idx`.
+- **PR-D:** instance fields + `toJSON` + reviver/replacer.
+- **PR-A2:** closed typed-array (`number[]`) stringify; proper boolean boxing.
