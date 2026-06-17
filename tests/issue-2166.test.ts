@@ -306,12 +306,12 @@ describe("#2166 PR-C — standalone dynamic JSON.parse (object graphs + primitiv
   });
 
   it("parses a string value", async () => {
-    expect(await parseInternal(`const o: any = JSON.parse('{"s":"hi"}'); return (o.s as string) === "hi" ? 1 : 0;`)).toBe(
-      1,
-    );
+    expect(
+      await parseInternal(`const o: any = JSON.parse('{"s":"hi"}'); return (o.s as string) === "hi" ? 1 : 0;`),
+    ).toBe(1);
   });
 
-  it("parses §25.5.1 string escapes (\\n, \\\", \\\\, \\uXXXX)", async () => {
+  it('parses §25.5.1 string escapes (\\n, \\", \\\\, \\uXXXX)', async () => {
     // {"s":"a\nb\"c\\dA"}  →  a<LF>b"c\dA
     expect(
       await parseInternal(
@@ -321,13 +321,15 @@ describe("#2166 PR-C — standalone dynamic JSON.parse (object graphs + primitiv
   });
 
   it("parses a boolean property (truthy round-trip)", async () => {
-    expect(await parseInternal(`const o: any = JSON.parse('{"t":true,"f":false}'); return (o.t as boolean) ? 1 : 0;`)).toBe(
-      1,
-    );
+    expect(
+      await parseInternal(`const o: any = JSON.parse('{"t":true,"f":false}'); return (o.t as boolean) ? 1 : 0;`),
+    ).toBe(1);
   });
 
   it("parses a null property", async () => {
-    expect(await parseInternal(`const o: any = JSON.parse('{"n":null}'); return (o.n as any) === null ? 1 : 0;`)).toBe(1);
+    expect(await parseInternal(`const o: any = JSON.parse('{"n":null}'); return (o.n as any) === null ? 1 : 0;`)).toBe(
+      1,
+    );
   });
 
   it("parses a top-level primitive (number)", async () => {
@@ -343,7 +345,9 @@ describe("#2166 PR-C — standalone dynamic JSON.parse (object graphs + primitiv
   });
 
   it("tolerates leading/trailing whitespace", async () => {
-    expect(await parseInternal(`const o: any = JSON.parse('  {"x":1}  '); return (o.x as number) === 1 ? 1 : 0;`)).toBe(1);
+    expect(await parseInternal(`const o: any = JSON.parse('  {"x":1}  '); return (o.x as number) === 1 ? 1 : 0;`)).toBe(
+      1,
+    );
   });
 
   it("round-trips JSON.parse(JSON.stringify(o)) for an object graph", async () => {

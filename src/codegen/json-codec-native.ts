@@ -1520,11 +1520,7 @@ export function emitJsonParseText(ctx: CodegenContext): number {
     {
       op: "if",
       blockType: { kind: "val", type: i32 },
-      then: [
-        { op: "local.get", index: S_C },
-        { op: "i32.const", value: 48 },
-        { op: "i32.sub" },
-      ],
+      then: [{ op: "local.get", index: S_C }, { op: "i32.const", value: 48 }, { op: "i32.sub" }],
       else: [
         { op: "local.get", index: S_C },
         { op: "i32.const", value: 97 },
@@ -1532,16 +1528,8 @@ export function emitJsonParseText(ctx: CodegenContext): number {
         {
           op: "if",
           blockType: { kind: "val", type: i32 },
-          then: [
-            { op: "local.get", index: S_C },
-            { op: "i32.const", value: 87 },
-            { op: "i32.sub" },
-          ],
-          else: [
-            { op: "local.get", index: S_C },
-            { op: "i32.const", value: 55 },
-            { op: "i32.sub" },
-          ],
+          then: [{ op: "local.get", index: S_C }, { op: "i32.const", value: 87 }, { op: "i32.sub" }],
+          else: [{ op: "local.get", index: S_C }, { op: "i32.const", value: 55 }, { op: "i32.sub" }],
         },
       ],
     },
