@@ -38,6 +38,7 @@ import type {
 import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
+import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
@@ -1207,6 +1208,11 @@ export function generateModule(
       ctx.arrayIteratorMaybeOverridden = true;
     }
 
+    // (#2023) Detect any `new.target` use up front so class collection assigns
+    // class-ids and `new`/comparison sites emit the threading global. Off by
+    // default — programs without `new.target` are byte-identical.
+    scanForNewTarget(ctx, ast.sourceFile);
+
     collectDeclarations(ctx, ast.sourceFile);
 
     // Shape inference: detect array-like variables and override their types
@@ -1371,6 +1377,16 @@ export function generateModule(
         funcs: new Set<string>([...selection.funcs].filter((n) => overrideMap.has(n))),
         classMembers: selection.classMembers,
       };
+      // (#2023) The IR `new C(...)` lowering does not thread the new.target
+      // class-id (that machinery lives only on the legacy path). When the
+      // program uses `new.target`, route every function through legacy so the
+      // outermost-`new` global is set/restored at each construction site. This
+      // is a coarse but safe gate — `new.target` is rare, so the perf cost is
+      // negligible and it avoids a parallel IR implementation of the threading.
+      if (ctx.usesNewTarget) {
+        safeSelection.funcs.clear();
+        safeSelection.classMembers = new Set();
+      }
       const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes);
       // Slice 12 (#1169o) — most IR-path failures are NOT compile errors. The
       // legacy path has already produced a working `body` for every function
@@ -5143,6 +5159,11 @@ export function generateMultiModule(
     }
 
     // Phase 2: Collect all declarations — only entry file gets Wasm exports
+    // (#2023) Whole-realm new.target detection — OR across all source files.
+    for (const sf of multiAst.sourceFiles) {
+      scanForNewTarget(ctx, sf);
+    }
+
     for (const sf of multiAst.sourceFiles) {
       const isEntry = sf === multiAst.entryFile;
       collectDeclarations(ctx, sf, isEntry);

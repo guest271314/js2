@@ -25,6 +25,7 @@ import {
   resolveWasmType,
 } from "../index.js";
 import { ensureMapHelpers } from "../map-runtime.js";
+import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
 import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
 import { ensureSetHelpers } from "../set-runtime.js";
 import { ensureWeakCollectionHelpers } from "../weak-collections-runtime.js";
@@ -3132,6 +3133,17 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const ctorRestInfo = ctx.funcRestParams.get(ctorName);
     let ctorActualArgCount = args.length;
 
+    // (#2023) Save the current new.target class-id before evaluating args, so a
+    // nested `new` inside an argument expression — and after this construction
+    // returns — sees the correct (outer) target. Restored after the call.
+    let ntPrevLocal: number | undefined;
+    if (ctx.usesNewTarget && !ctx.classExternrefBackedSet.has(className)) {
+      const ntGlobalIdx = ensureNewTargetGlobal(ctx);
+      ntPrevLocal = allocTempLocal(fctx, { kind: "i32" });
+      fctx.body.push({ op: "global.get", index: ntGlobalIdx } as Instr);
+      fctx.body.push({ op: "local.set", index: ntPrevLocal });
+    }
+
     // Check for spread arguments
     const hasSpreadCtorArg = args.some((a) => ts.isSpreadElement(a));
     if (hasSpreadCtorArg && paramTypes) {
@@ -3190,6 +3202,12 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       }
     }
 
+    // (#2023) With args on the stack, set new.target to THIS class's id right
+    // before the call. The ctor body (and the super() chain it drives, which
+    // calls `_init` and never touches the global) reads this id.
+    if (ntPrevLocal !== undefined) {
+      emitSetNewTargetBeforeCall(ctx, fctx.body, className);
+    }
     // Re-lookup funcIdx: argument compilation may trigger addUnionImports
     // which shifts defined-function indices, making the earlier lookup stale.
     const finalCtorIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)) ?? funcIdx; // (#1983)
@@ -3201,6 +3219,18 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       return { kind: "externref" };
     }
     const structTypeIdx = ctx.structMap.get(className)!;
+    // (#2023) Restore the saved new.target id, preserving the instance on the
+    // stack across the global write.
+    if (ntPrevLocal !== undefined) {
+      const ntGlobalIdx = ensureNewTargetGlobal(ctx);
+      const resultLocal = allocTempLocal(fctx, { kind: "ref", typeIdx: structTypeIdx });
+      fctx.body.push({ op: "local.set", index: resultLocal });
+      fctx.body.push({ op: "local.get", index: ntPrevLocal });
+      fctx.body.push({ op: "global.set", index: ntGlobalIdx } as Instr);
+      fctx.body.push({ op: "local.get", index: resultLocal });
+      releaseTempLocal(fctx, resultLocal);
+      releaseTempLocal(fctx, ntPrevLocal);
+    }
     return { kind: "ref", typeIdx: structTypeIdx };
   }
 

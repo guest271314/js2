@@ -159,6 +159,12 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
   // in a saved body via a manual swap pattern). Without per-call dedup, each
   // additional reachability path applies an extra +delta, over-shifting the
   // index past the declared global range (#1302 — lodash flow.js).
+  // (#2023) Keep the cached new.target global index in step with the shift, so
+  // call sites compiled after a later string-constant import still target it.
+  if (ctx.newTargetGlobalIdx !== undefined && ctx.newTargetGlobalIdx >= threshold) {
+    ctx.newTargetGlobalIdx += delta;
+  }
+
   const visitedInstrs = new WeakSet<object>();
   const visitedArrays = new WeakSet<Instr[]>();
   function shiftGlobalIndices(instrs: Instr[]): void {
