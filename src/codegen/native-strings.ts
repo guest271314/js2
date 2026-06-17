@@ -2159,6 +2159,111 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
     });
   }
 
+  // --- $__str_substr(s: ref $NativeString, start: i32, length: i32) -> ref $NativeString ---
+  // Annex B §B.2.2.1 String.prototype.substr(start, length):
+  //   len = s.length
+  //   if start < 0: start = max(len + start, 0)   (negative counts from end)
+  //   length = max(min(length, len - start), 0)   (clamp; absent → len sentinel)
+  //   return substring(start, start + length)
+  // Unlike `substring`/`slice`, the SECOND argument is a *count*, not an end
+  // index, and is never negative-relative. The caller passes 0x7fffffff for an
+  // absent length so the min() clamps it to `len - start` (to the end).
+  {
+    const typeIdx = addFuncType(ctx, [strRef, { kind: "i32" }, { kind: "i32" }], [strRef]);
+    const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+    ctx.nativeStrHelpers.set("__str_substr", funcIdx);
+
+    const substringIdx = ctx.nativeStrHelpers.get("__str_substring")!;
+
+    // locals: len (index 3)
+    const body: Instr[] = [
+      // len = s.len
+      { op: "local.get", index: 0 },
+      { op: "struct.get", typeIdx: strTypeIdx, fieldIdx: 0 },
+      { op: "local.set", index: 3 }, // len
+
+      // Resolve negative start: if start < 0, start = max(len + start, 0)
+      { op: "local.get", index: 1 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.lt_s" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 3 }, // len
+          { op: "local.get", index: 1 }, // start (negative)
+          { op: "i32.add" }, // len + start
+          { op: "local.set", index: 1 }, // start = len + start
+          // max(start, 0): (start < 0) ? 0 : start
+          { op: "i32.const", value: 0 }, // a = 0
+          { op: "local.get", index: 1 }, // b = start
+          { op: "local.get", index: 1 }, // start
+          { op: "i32.const", value: 0 },
+          { op: "i32.lt_s" }, // c = (start < 0)
+          { op: "select" }, // c ? 0 : start
+          { op: "local.set", index: 1 },
+        ],
+      },
+      // Clamp start to <= len (a start past the end yields the empty string).
+      { op: "local.get", index: 1 },
+      { op: "local.get", index: 3 },
+      { op: "i32.gt_s" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 3 },
+          { op: "local.set", index: 1 },
+        ],
+      },
+
+      // tail = len - start (chars available from `start` to the end)
+      { op: "local.get", index: 3 }, // len
+      { op: "local.get", index: 1 }, // start
+      { op: "i32.sub" }, // len - start
+      { op: "local.set", index: 4 }, // tail = len - start
+      // length = min(length, tail): (length < tail) ? length : tail
+      { op: "local.get", index: 2 }, // a = length
+      { op: "local.get", index: 4 }, // b = tail
+      { op: "local.get", index: 2 }, // length
+      { op: "local.get", index: 4 }, // tail
+      { op: "i32.lt_s" }, // c = (length < tail)
+      { op: "select" }, // c ? length : tail
+      { op: "local.set", index: 2 }, // length = min(length, tail)
+      // Clamp length to >= 0
+      { op: "local.get", index: 2 },
+      { op: "i32.const", value: 0 },
+      { op: "i32.lt_s" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "i32.const", value: 0 },
+          { op: "local.set", index: 2 },
+        ],
+      },
+
+      // return __str_substring(s, start, start + length)
+      { op: "local.get", index: 0 },
+      { op: "local.get", index: 1 }, // start
+      { op: "local.get", index: 1 }, // start
+      { op: "local.get", index: 2 }, // length
+      { op: "i32.add" }, // end = start + length
+      { op: "call", funcIdx: substringIdx },
+    ];
+
+    ctx.mod.functions.push({
+      name: "__str_substr",
+      typeIdx,
+      locals: [
+        { name: "len", type: { kind: "i32" } },
+        { name: "tail", type: { kind: "i32" } },
+      ],
+      body: wrapBodyWithFlatten(body, [0]),
+      exported: false,
+    });
+  }
+
   // --- $__str_indexOf(haystack: ref $NativeString, needle: ref $NativeString, fromIndex: i32) -> i32 ---
   {
     const typeIdx = addFuncType(ctx, [strRef, strRef, { kind: "i32" }], [{ kind: "i32" }]);
