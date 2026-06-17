@@ -64,8 +64,8 @@ value-rep P0/P1 work that just landed.
 `Number.parseFloat` (the §21.1.2.12-13 namespaced aliases — same functions as
 the globals) failed to compile in standalone with a `__get_builtin` codegen
 error, while the bare `parseInt`/`parseFloat` worked. Root cause: the parse
-import-collector (`src/codegen/declarations.ts`) only recognized the *bare
-identifier* call form, so the `Number.`-prefixed property-access form never
+import-collector (`src/codegen/declarations.ts`) only recognized the _bare
+identifier_ call form, so the `Number.`-prefixed property-access form never
 registered the native WasmGC scanner; the call-site routing
 (`calls.ts`, which reads `funcMap.get("parseInt"/"parseFloat")`) then fell
 through to the dynamic-shape `__get_builtin` refusal. Fix: detect the
@@ -79,3 +79,38 @@ same helper to `parseNeeded`. Regression test:
 acceptance criteria's `__new_String`/`__new_Number` leak) plus the harder
 String/Number coercion edges that overlap the coercion engine (#1917). Those
 remain the value-rep / #1917 territory called out in the original notes.
+
+---
+
+## Sub-slice (dev-strnum) — `substr` lowering for standalone (PR #1627)
+
+`String.prototype.substr` (Annex B §B.2.2.1) was not lowered for native-strings
+(standalone / WASI). `compileNativeStringMethodCall` (`src/codegen/string-ops.ts`)
+handled `substring`/`slice` but had no `substr` branch, so the call fell through
+and trapped with a null-pointer dereference. Fix: new `__str_substr(s, start,
+length)` WasmGC helper (`src/codegen/native-strings.ts`) — `substr`'s 2nd arg is
+a CHAR COUNT, negative `start` counts from end — delegating to `__str_substring`,
+plus a `substr` dispatch branch. Verified standalone/WASI/gc.
+Test: `tests/issue-2160-substr-standalone.test.ts`.
+
+## Sub-slice (dev-strnum) — `String()` array→primitive coercion (PR #1640, String-only)
+
+`String([1,2,3])` null-dereffed in standalone. **Root cause:** the `String()`
+builtin handler (`src/codegen/expressions/calls.ts`, the `funcName === "String"`
+block) routes a ref/array argument through the generic `coerceType` ref→string
+path, which has no array case — arrays aren't classes with `valueOf`/`@@toPrimitive`
+funcMap entries, so it null-derefs. `[1,2,3].toString()` already lowers natively
+via `compileArrayJoinNative`. **Fix (additive, no shared-coercion-engine change):**
+a `tryEmitArrayToStringNative` helper synthesizes `arg.toString()` and dispatches
+through `compileArrayMethodCall` BEFORE the coerceType fall-through. Covers
+numeric/string arrays + empty typed arrays; **boolean-element arrays are
+intentionally skipped** (the join path packs them i8 and synthetic-dispatch
+element-type resolution diverges — they fall through with no regression).
+Verified standalone/WASI; gc/host mode untouched (guard is `nativeStrings`-only).
+Test: `tests/issue-2160-array-coercion-standalone.test.ts`.
+
+**`Number(array)` deferred to senior-dev/engine:** the `Number(arr)` half
+(ToNumber(ToString(arr)) per §7.1.4 → §7.1.1.1) must route string→number through
+the **#1917 single coercion engine**, not a hand-rolled `__str_to_number` call
+site — the Coercion-site drift gate (#2108) rejects a new ad-hoc site (18→19).
+Tracked separately as a senior-dev task.

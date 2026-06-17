@@ -240,3 +240,34 @@ Follow §10.1.6.3 step order exactly — `verifyProperty` makes ordering observa
 - TypeError is catchable (no trap) on invalid redefinition.
 - Host/gc mode byte-identical (all changes `ctx.standalone`-gated or inside
   `ensureObjectRuntime`).
+
+### S1 — `__to_property_key` key hardening (2026-06-17, dev-1) — DONE
+
+Central runtime key coercion, per the architect S1 plan. PR-A only ToPropertyKey'd
+the `Object.defineProperty` *call site*; every OTHER caller (computed numeric
+member access `o[0]`, `Reflect.get(o, 1)`, `Object.getOwnPropertyDescriptor(o, 0)`,
+`delete o[0]`, `0 in o`) still fed a boxed number straight into the
+`ref.cast $AnyString` and trapped `illegal cast [in __obj_find()]` (~170-230 rows).
+
+- New `__to_property_key(externref) -> externref` native in
+  `src/codegen/object-runtime.ts` (standalone-gated): `$AnyString` → unchanged
+  (fast path); boxed number → `number_toString(__unbox_number(key))` (canonical
+  decimal, `-0`→`"0"`, `1.5`→`"1.5"`); Symbol/opaque → unchanged (no NEW trap;
+  Symbol keys stay a compile-time #1472 refusal).
+- Wired via a guarded `withKeyCoercion` prologue at the top of **`__obj_find`,
+  `__obj_hash`, AND `__obj_insert`** (the write path `__obj_insert` has its own
+  key `ref.cast` + stores the key into `$PropEntry.key`, so it needed the same
+  coercion — the architect's "find/hash only" claim missed the insert path; the
+  write side `o[0]=v` trapped until insert was covered too). Inner re-coercion
+  (e.g. `__obj_find`→`__obj_hash`) is idempotent (already-`$AnyString` fast-return).
+- Verified standalone: numeric get/set round-trip, literal numeric key read,
+  `getOwnPropertyDescriptor(o,0)`, `Reflect.get(o,1)`, decimal/`-0` keys, `in`,
+  `delete` — all were `illegal cast`, now pass. tsc + prettier clean; host/gc
+  mode untouched (`ctx.standalone`-gated). Tests: `tests/issue-2042.test.ts`
+  ("S1 numeric-key ToPropertyKey hardening" block, 9 cases; 14/14 file total).
+- **Out of S1 scope (separate pre-existing bug):** `o[0] + o[1]` still traps in
+  `__any_add`→`__any_to_string` on the retrieved *values* (a value-coercion path,
+  not a key cast) — confirmed identical on clean main. Likely folds into S2
+  (#1910/#1472 boxed-primitive ToPrimitive). S1 is KEY hardening only.
+- Provides the shared `__to_property_key` helper that #2046 PR-D / S3 should
+  consume rather than adding their own coercion.
