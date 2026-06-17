@@ -348,7 +348,12 @@ jobs:
     # --no-verify pushes and contributors without the hook.
     name: test262 ${{ matrix.target.name }} shard ${{ matrix.chunk }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # A shard normally finishes in ~5-8 min; the prior 90-min cap let a single
+    # hung shard (intermittent test262/runner stall, or the setup-node@v6 Node-25
+    # tool-cache miss → flaky direct download) wedge the whole merge queue for up
+    # to 90 min before failing. 25 min fails a hung shard fast so the merge_group
+    # ejects + re-runs instead of stalling every other PR behind it.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
