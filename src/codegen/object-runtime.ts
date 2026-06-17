@@ -288,18 +288,21 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     ],
   });
 
-  // (#1100) `$ProxyTraps` — 4 trap fields for the standalone Proxy Phase 1
-  // (get/set/has/apply). A null field means "no trap" → forward to the ordinary
-  // operation on the proxy target. The fields hold the user trap handler as an
-  // **externref closure** (the boxed closure-wrapper struct produced by every
-  // compiled function expression), NOT a bare funcref: a user trap `(t,k,r) =>
-  // …` lowers to a GC closure struct whose own funcref takes the closure-self as
-  // arg0, so it cannot be `call_ref`-ed with `(target,key,receiver)` directly.
-  // Phase 1 invokes traps through the existing closure-call bridge
-  // (`__call_fn_method_N`, the same path accessors/`__apply_closure` use) which
-  // threads `this` and the closure-self correctly — see `ensureProxyRuntime` /
-  // `fillProxyDispatch`. This is the architect's "reuse the closure→funcref
-  // bridge, don't invent a calling convention" requirement.
+  // (#1100/#1355) `$ProxyTraps` — trap fields for the standalone Proxy. A null
+  // field means "no trap" → forward to the ordinary operation on the proxy
+  // target. The fields hold the user trap handler as an **externref closure**
+  // (the boxed closure-wrapper struct produced by every compiled function
+  // expression), NOT a bare funcref: a user trap `(t,k,r) => …` lowers to a GC
+  // closure struct whose own funcref takes the closure-self as arg0, so it cannot
+  // be `call_ref`-ed with `(target,key,receiver)` directly. Traps are invoked
+  // through the existing closure-call bridge (`__apply_closure`, the same path
+  // accessors use) which threads `this` and the closure-self correctly — see
+  // `ensureProxyRuntime` / `fillProxyDispatch`. This is the architect's "reuse
+  // the closure→funcref bridge, don't invent a calling convention" requirement.
+  //
+  // (#1355) APPEND new trap fields after the #1100 base four (get/set/has/apply);
+  // never renumber the base — the dispatch helpers and `__proxy_create` bake the
+  // field indices. `deleteProperty` is field index 4.
   const proxyTrapsTypeIdx = ctx.mod.types.length;
   ctx.mod.types.push({
     kind: "struct",
@@ -309,6 +312,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { name: "set", type: { kind: "externref" }, mutable: false },
       { name: "has", type: { kind: "externref" }, mutable: false },
       { name: "apply", type: { kind: "externref" }, mutable: false },
+      // (#1355 Slice A) deleteProperty — field index 4.
+      { name: "deleteProperty", type: { kind: "externref" }, mutable: false },
     ],
   });
 
@@ -4937,10 +4942,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   return types;
 }
 
-/** (#1100) Reserved trap-invoke driver names — filled by `fillProxyDispatch`. */
+/** (#1100/#1355) Reserved trap-invoke driver names — filled by `fillProxyDispatch`. */
 const PROXY_CALL_GET = "__proxy_call_get";
 const PROXY_CALL_SET = "__proxy_call_set";
 const PROXY_CALL_HAS = "__proxy_call_has";
+const PROXY_CALL_DELETE = "__proxy_call_delete"; // (#1355 Slice A)
 
 /**
  * (#1100) Standalone Proxy meta-object dispatch runtime — Phase 1.
@@ -5027,10 +5033,11 @@ function ensureProxyRuntime(
   const F_PHANDLER = 2;
   const F_PTRAPS = 3;
   const F_REVOKED = 4;
-  // Field indices on $ProxyTraps: get(0) set(1) has(2) apply(3).
+  // Field indices on $ProxyTraps: get(0) set(1) has(2) apply(3) deleteProperty(4).
   const TRAP_GET = 0;
   const TRAP_SET = 1;
   const TRAP_HAS = 2;
+  const TRAP_DELETE = 4; // (#1355 Slice A)
 
   // ── Reserve the trap-invoke driver placeholders (filled by fillProxyDispatch) ──
   //
@@ -5062,6 +5069,9 @@ function ensureProxyRuntime(
   const callGetIdx = reserveDriver(PROXY_CALL_GET, [externref, externref, externref, externref, externref]);
   const callSetIdx = reserveDriver(PROXY_CALL_SET, [externref, externref, externref, externref, externref, externref]);
   const callHasIdx = reserveDriver(PROXY_CALL_HAS, [externref, externref, externref, externref]);
+  // (#1355 Slice A) deleteProperty driver — same arity as has: (handler, trap,
+  // target, key) → __call_fn_method_2 (§10.5.10 step 8 `Call(trap, handler, «O, P»)`).
+  const callDeleteIdx = reserveDriver(PROXY_CALL_DELETE, [externref, externref, externref, externref]);
   ctx.proxyDispatchReserved = true;
 
   // Builds a dispatch helper body. `trapFieldIdx` selects the trap closure;
@@ -5096,6 +5106,10 @@ function ensureProxyRuntime(
       trapArm.push({ op: "call", funcIdx: callSetIdx });
     } else if (trapFieldIdx === TRAP_HAS) {
       trapArm.push({ op: "call", funcIdx: callHasIdx });
+    } else if (trapFieldIdx === TRAP_DELETE) {
+      // (#1355) deleteProperty: driver(handler, trap, target, key) — same 2-arg
+      // shape as has (§10.5.10 step 8 `Call(trap, handler, «O, P»)`).
+      trapArm.push({ op: "call", funcIdx: callDeleteIdx });
     } else {
       // get: receiver = param 2
       trapArm.push({ op: "local.get", index: 2 });
@@ -5145,10 +5159,12 @@ function ensureProxyRuntime(
               { op: "call", funcIdx: forwardIdx },
               { op: "ref.null.extern" },
             ]
-          : trapFieldIdx === TRAP_HAS
+          : trapFieldIdx === TRAP_HAS || trapFieldIdx === TRAP_DELETE
             ? [
-                // __extern_has(target, key) -> i32 ; box back to a boolean any so
-                // the dispatch result stays uniform externref.
+                // has:    __extern_has(target, key)     -> i32
+                // delete: __delete_property(target, key) -> i32
+                // Both are 2-arg `(target,key) -> i32`; box back to a boolean any
+                // so the dispatch result stays uniform externref.
                 { op: "local.get", index: 3 },
                 { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
                 { op: "extern.convert_any" } as Instr,
@@ -5204,6 +5220,24 @@ function ensureProxyRuntime(
     dispatchLocals(),
     buildDispatch(TRAP_HAS, "__extern_has", false),
   );
+  // (#1355 Slice A) __proxy_delete_dispatch(proxyExtern, key, _recv) -> externref
+  // (booleanish). §10.5.10 [[Delete]]: revoked→throw; read deleteProperty trap;
+  // null→forward __delete_property on target (boxed boolean); else invoke trap
+  // with `(target, key)` and the handler as `this`. The `__delete_property`
+  // front-guard coerces the result back to i32 via `__is_truthy`. Phase-A scope:
+  // NO §10.5.10 result-invariant check (a trap may not report a delete of a
+  // non-configurable own property as successful) — that is a later invariant
+  // slice. Takes 3 params to match `buildDispatch`'s hardcoded local layout
+  // (p=local 3, trap=local 4 after the 3 params); the [[Delete]] trap signature
+  // has no receiver, so param 2 is an unused placeholder (the front-guard passes
+  // the proxy itself, never read on the delete path).
+  registerNative(
+    "__proxy_delete_dispatch",
+    [externref, externref, externref],
+    [externref],
+    dispatchLocals(),
+    buildDispatch(TRAP_DELETE, "__delete_property", false),
+  );
 
   // ── __proxy_create(target, handler) -> externref ──────────────────────────
   //
@@ -5249,7 +5283,7 @@ function ensureProxyRuntime(
       { op: "any.convert_extern" },
       { op: "ref.is_null" },
       { op: "if", blockType: { kind: "empty" }, then: throwNotObject() } as Instr,
-      // read the four traps off the (open) handler.
+      // read the traps off the (open) handler. (#1355) deleteProperty appended.
       ...readTrap("get"),
       { op: "local.set", index: 2 },
       ...readTrap("set"),
@@ -5258,17 +5292,20 @@ function ensureProxyRuntime(
       { op: "local.set", index: 4 },
       ...readTrap("apply"),
       { op: "local.set", index: 5 },
+      ...readTrap("deleteProperty"),
+      { op: "local.set", index: 6 },
       // proxy fields (standalone $Proxy struct):
       { op: "i32.const", value: 1 }, // ptag = PROXY_TAG (1; bare ref.test $Proxy is the real discriminator)
       { op: "local.get", index: 0 }, // ptarget (externref → anyref)
       { op: "any.convert_extern" } as Instr,
       { op: "local.get", index: 1 }, // phandler (externref → anyref; trap `this`)
       { op: "any.convert_extern" } as Instr,
-      // ptraps = struct.new $ProxyTraps (getT, setT, hasT, applyT)
+      // ptraps = struct.new $ProxyTraps (getT, setT, hasT, applyT, delT)
       { op: "local.get", index: 2 },
       { op: "local.get", index: 3 },
       { op: "local.get", index: 4 },
       { op: "local.get", index: 5 },
+      { op: "local.get", index: 6 },
       { op: "struct.new", typeIdx: proxyTrapsTypeIdx } as Instr,
       { op: "i32.const", value: 0 }, // revoked = 0
       { op: "struct.new", typeIdx: proxyTypeIdx } as Instr,
@@ -5283,6 +5320,7 @@ function ensureProxyRuntime(
         { name: "setT", type: externref },
         { name: "hasT", type: externref },
         { name: "applyT", type: externref },
+        { name: "delT", type: externref }, // (#1355 Slice A)
       ],
       proxyCreateBody,
     );
@@ -5333,6 +5371,7 @@ function ensureProxyRuntime(
   const getDispatchIdx = ctx.funcMap.get("__proxy_get_dispatch")!;
   const setDispatchIdx = ctx.funcMap.get("__proxy_set_dispatch")!;
   const hasDispatchIdx = ctx.funcMap.get("__proxy_has_dispatch")!;
+  const deleteDispatchIdx = ctx.funcMap.get("__proxy_delete_dispatch")!; // (#1355 Slice A)
 
   const findBody = (name: string): Instr[] | undefined => ctx.mod.functions.find((f) => f.name === name)?.body;
 
@@ -5406,6 +5445,34 @@ function ensureProxyRuntime(
       } as Instr,
     ];
     hasBody.unshift(...guard);
+  }
+
+  // (#1355 Slice A) __delete_property(obj, key) -> i32 : if proxy →
+  // ToBoolean(delete_dispatch(obj,key)). `delete p.x` / `Reflect.deleteProperty`
+  // both route through __delete_property, so this single front-guard covers both.
+  // The dispatch returns the deleteProperty trap's booleanish externref result;
+  // coerce to i32 via `__is_truthy` (same as the has guard).
+  const deleteBody = findBody("__delete_property");
+  if (deleteBody) {
+    const isTruthyIdx = ctx.funcMap.get("__is_truthy")!;
+    const guard: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: proxyTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 0 }, // unused receiver placeholder (3-param dispatch)
+          { op: "call", funcIdx: deleteDispatchIdx },
+          { op: "call", funcIdx: isTruthyIdx },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    deleteBody.unshift(...guard);
   }
 
   void objectTypeIdx;
@@ -5483,6 +5550,7 @@ export function fillProxyDispatch(ctx: CodegenContext): void {
   fill(PROXY_CALL_GET, 3); // (target, key, receiver)
   fill(PROXY_CALL_SET, 4); // (target, key, value, receiver)
   fill(PROXY_CALL_HAS, 2); // (target, key)
+  fill(PROXY_CALL_DELETE, 2); // (#1355 Slice A) deleteProperty (target, key)
 }
 
 /**
