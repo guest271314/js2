@@ -854,9 +854,16 @@ export function emitJsonParseText(ctx: CodegenContext): number {
   // `null` becomes a null eqref (reads back as `null`, distinct from a missing
   // property which reads `undefined`).
   const boxNullAny: Instr[] = [{ op: "ref.null", typeIdx: EQ_HEAP_TYPE }];
+  // JSON booleans box as a `$__box_number_struct` holding 1.0/0.0 — the SAME
+  // representation `o.t = true` produces in a standalone object (TS `true` is an
+  // i32 and the i32→externref store path boxes it as a number, #2166 PR-A note).
+  // Matching it keeps member reads/round-trips consistent (`o.t ? …` works); a
+  // distinct boolean identity (`o.t === true`) is the broader standalone
+  // boolean-boxing gap (overlaps #1917), out of PR-C scope.
+  void boxBoolTypeIdx;
   const boxBoolAny = (v: number): Instr[] => [
-    { op: "i32.const", value: v },
-    { op: "struct.new", typeIdx: boxBoolTypeIdx },
+    { op: "f64.const", value: v },
+    { op: "struct.new", typeIdx: boxNumTypeIdx },
   ];
   const boxF64AnyFromLocal = (local: number): Instr[] => [
     { op: "local.get", index: local },

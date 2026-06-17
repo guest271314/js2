@@ -62,20 +62,23 @@ describe("#1599 --target standalone refuses dynamic unsupported JSON shapes", ()
     await expectAccepted(`export function f(n: number): string { return JSON.stringify(n); }`);
   });
 
-  it("rejects dynamic JSON.parse text", async () => {
-    await expectRefused(`export function f(s: string): number { return JSON.parse(s).x; }`);
+  it("compiles dynamic JSON.parse text (PR-C codec, no longer refused)", async () => {
+    // #2166 PR-C: a runtime-string `JSON.parse` now routes to the pure-Wasm
+    // recursive-descent `__json_parse_text` codec (host-import-free), so a
+    // dynamic-text parse + property read compiles instead of refusing.
+    await expectAccepted(`export function f(s: string): number { return JSON.parse(s).x; }`);
   });
 
   it("compiles JSON.parse of a static string literal property read", async () => {
     await expectAccepted(`export function f(): number { return JSON.parse('{"x":42}').x; }`);
   });
 
-  it("also refuses an unsupported shape under --target wasi", async () => {
-    // A dynamic array (closed typed-vec) and a dynamic JSON.parse text still
-    // refuse under wasi. (An object DOES route to the PR-A codec under wasi too,
-    // host-import-free — covered by the #2166 PR-A wasi test.)
+  it("still refuses a dynamic array (closed typed-vec) stringify under --target wasi", async () => {
+    // A dynamic array (closed typed-vec) still refuses (PR-A2 follow-up). A
+    // dynamic JSON.parse text now compiles under wasi too (PR-C, host-import-
+    // free — covered by the #2166 PR-C wasi test).
     await expectRefused(`export function f(a: number[]): string { return JSON.stringify(a); }`, "wasi");
-    await expectRefused(`export function f(s: string): number { return JSON.parse(s).x; }`, "wasi");
+    await expectAccepted(`export function f(s: string): number { return JSON.parse(s).x; }`, "wasi");
   });
 
   it("emits no env::JSON_* import when refused", async () => {
