@@ -63,9 +63,7 @@ describe("#2151 Slice 3 — spread-of-array-literal any-receiver method call", (
 
   it("empty literal spread: o.next(...[])", async () => {
     expect(
-      await runStandalone(
-        `export function test(): number { const o:any={next(){return 7}}; return o.next(...[]); }`,
-      ),
+      await runStandalone(`export function test(): number { const o:any={next(){return 7}}; return o.next(...[]); }`),
     ).toBe(7);
   });
 });
