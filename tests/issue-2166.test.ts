@@ -167,3 +167,99 @@ describe("#2166 — replacer / dynamic space still refuse (no silent wrong outpu
     await expectRefused(`export function test(s: number): number { return JSON.stringify({ a: 1 }, null, s).length; }`);
   });
 });
+
+/**
+ * #2166 PR-A — dynamic object-graph `JSON.stringify` via the pure-Wasm recursive
+ * codec (`__json_stringify_value`, src/codegen/json-codec-native.ts). The static
+ * fold only handled compile-time-constant graphs; a runtime object value
+ * (`let o: any = {...}`, a parameter-passed object) previously either refused or,
+ * worse, silently folded the *declaration* literal and dropped runtime
+ * mutations — e.g. `const o = {}; o.x = f(); JSON.stringify(o)` returned `"{}"`.
+ *
+ * Standalone native strings don't marshal across the JS export boundary, so the
+ * harness materialises the JSON text into a module-level string and reads it
+ * back code-unit by code-unit via exported `len`/`ch` accessors (the same
+ * approach test262 internal-comparison needs).
+ *
+ * Scope (PR-A): `$Object` graphs (nested objects, string/number/null values),
+ * §25.5 number rules (NaN/±Infinity → null, -0 → 0), and full
+ * QuoteJSONString escaping (reuses `__json_quote_string`). Booleans stored in an
+ * object property and closed typed-array (`number[]`) serialisation are a
+ * follow-up sub-slice (PR-A2) — see the issue file.
+ */
+async function stringifyDynamic(
+  build: string,
+  target: "standalone" | "wasi" = "standalone",
+): Promise<string> {
+  const src =
+    `function s(o: any): string { return JSON.stringify(o); }\n` +
+    `let G: string = "";\n` +
+    `export function len(): number { return G.length; }\n` +
+    `export function ch(i: number): number { return G.charCodeAt(i); }\n` +
+    `export function run(): void { ${build} }`;
+  const r = await compile(src, { target });
+  expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+  // No JSON_* host import may leak into the standalone/wasi module.
+  const labels = r.imports.map((i) => `${i.module}::${i.name}`);
+  expect(labels.some((l) => /JSON_stringify|JSON_parse/.test(l))).toBe(false);
+  const { instance } = await WebAssembly.instantiate(r.binary, {});
+  const ex = instance.exports as { run: () => void; len: () => number; ch: (i: number) => number };
+  ex.run();
+  let out = "";
+  const n = ex.len();
+  for (let i = 0; i < n; i++) out += String.fromCharCode(ex.ch(i));
+  return out;
+}
+
+describe("#2166 PR-A — standalone dynamic object-graph JSON.stringify", () => {
+  it("serialises a runtime object via a `let` binding", async () => {
+    expect(await stringifyDynamic(`let o: any = { x: 7, y: 8 }; G = s(o);`)).toBe('{"x":7,"y":8}');
+  });
+
+  it("serialises a parameter-passed object", async () => {
+    expect(await stringifyDynamic(`const o: any = { a: 1, b: 2 }; G = s(o);`)).toBe('{"a":1,"b":2}');
+  });
+
+  it("serialises a nested object graph", async () => {
+    expect(await stringifyDynamic(`const n: any = { k: 7 }; const o: any = { child: n, z: 9 }; G = s(o);`)).toBe(
+      '{"child":{"k":7},"z":9}',
+    );
+  });
+
+  it("applies QuoteJSONString escaping to string values", async () => {
+    // a"b\nc  →  "a\"b\\nc"  (quote, backslash, newline short-form)
+    expect(await stringifyDynamic(`const o: any = { msg: "a\\"b\\\\nc" }; G = s(o);`)).toBe('{"msg":"a\\"b\\\\nc"}');
+  });
+
+  it("formats numbers per §25.5.2 (NaN/Infinity → null, -0 → 0)", async () => {
+    expect(await stringifyDynamic(`const o: any = { i: 3, neg: -2.5, zero: 0 }; G = s(o);`)).toBe(
+      '{"i":3,"neg":-2.5,"zero":0}',
+    );
+    expect(await stringifyDynamic(`const o: any = { a: NaN, b: Infinity }; G = s(o);`)).toBe('{"a":null,"b":null}');
+  });
+
+  it("serialises a null property value", async () => {
+    expect(await stringifyDynamic(`const o: any = { n: null }; G = s(o);`)).toBe('{"n":null}');
+  });
+
+  it("serialises an empty object", async () => {
+    expect(await stringifyDynamic(`const o: any = {}; G = s(o);`)).toBe("{}");
+  });
+
+  it("emits no JSON host import under --target wasi (pure-Wasm codec)", async () => {
+    // The standalone object runtime that backs an enumerable `$Object` graph is
+    // not built the same way under wasi (a separate wasi object-rep gap), so we
+    // don't assert object output here — only that the dynamic codec path stays
+    // host-import-free under wasi (no `JSON_stringify` leak). The assertion is
+    // inside `stringifyDynamic`.
+    await stringifyDynamic(`let o: any = { x: 1, y: 2 }; G = s(o);`, "wasi");
+  });
+
+  it("reassigned `let` object serialises its current value, not the declaration", async () => {
+    // Guards against the static-fold-of-a-mutable-binding bug: a `let` rebound
+    // to a richer object must serialise the live value. (`const o = {}; o.x =
+    // …` builds no enumerable keys yet — a separate empty-literal-rep gap — so
+    // we exercise a rebind, which produces a real $Object graph.)
+    expect(await stringifyDynamic(`let o: any = { a: 1 }; o = { a: 1, b: 2 }; G = s(o);`)).toBe('{"a":1,"b":2}');
+  });
+});

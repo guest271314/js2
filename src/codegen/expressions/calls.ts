@@ -67,6 +67,7 @@ import {
 } from "../literals.js";
 import { tryEmitJsonParseLiteral, tryEmitJsonStringifyStatic } from "../json-standalone.js";
 import { emitJsonParsePrimitive, emitJsonQuoteString } from "../json-runtime.js";
+import { emitJsonStringifyValue } from "../json-codec-native.js";
 import {
   compileObjectDefineProperties,
   compileObjectDefineProperty,
@@ -5991,6 +5992,53 @@ function compileCallExpression(
             );
             if (staticStringType !== undefined) {
               return staticStringType;
+            }
+            // (#2166 PR-A) Dynamic object-graph stringify. The static fold
+            // declined (runtime-built graph), so serialise with the pure-Wasm
+            // recursive codec over the standalone value rep ($Object/$ObjVec/
+            // boxed primitives) instead of refusing or silently wrong-folding.
+            // Compact output only; a function/array replacer or a `space`
+            // argument is not yet threaded here (the static fold owns the
+            // static-space form, PR-B threads the dynamic-space form), so route
+            // only the 1-arg / null-replacer-no-space shape and let other
+            // shapes keep the refusal below.
+            const replacerArg = expr.arguments[1];
+            const spaceArg = expr.arguments[2];
+            const replacerNullish =
+              replacerArg === undefined ||
+              replacerArg.kind === ts.SyntaxKind.NullKeyword ||
+              (ts.isIdentifier(replacerArg) && replacerArg.text === "undefined");
+            // PR-A serialises `$Object` graphs only. Arrays (closed typed-vec
+            // structs `number[]` etc.) and tuples are a separate sub-slice
+            // (PR-A2) — they are NOT `$ObjVec`, so routing them to the codec
+            // would emit wrong output. Detect an array/tuple static type via the
+            // checker and keep it on the refusal path below.
+            const arg0Type = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
+            const checkerArr = ctx.checker as unknown as {
+              isArrayType?: (t: unknown) => boolean;
+              isTupleType?: (t: unknown) => boolean;
+            };
+            const isArrayLike =
+              (checkerArr.isArrayType?.(arg0Type) ?? false) ||
+              (checkerArr.isTupleType?.(arg0Type) ?? false) ||
+              // Fallback when the internal predicates are unavailable: a numeric
+              // index type with only integer / `length` own keys looks array-like.
+              (arg0Type.getNumberIndexType() !== undefined &&
+                arg0Type.getProperties().every((p) => /^\d+$/.test(p.name) || p.name === "length"));
+            if (replacerNullish && spaceArg === undefined && !isArrayLike) {
+              const argResult = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "anyref" });
+              if (argResult === null) return null;
+              // Bring the value to anyref so the codec can ref.test-discriminate
+              // it. Externref-typed object/array values widen via any.convert_extern.
+              if (argResult.kind === "externref" || argResult.kind === "ref_extern") {
+                fctx.body.push({ op: "any.convert_extern" } as Instr);
+              } else if (argResult.kind !== "anyref") {
+                coerceType(ctx, fctx, argResult, { kind: "anyref" });
+              }
+              emitJsonStringifyValue(ctx);
+              flushLateImportShifts(ctx, fctx);
+              fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_stringify_root")! } as Instr);
+              return nativeStringType(ctx);
             }
           }
         }

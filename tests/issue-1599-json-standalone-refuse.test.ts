@@ -42,11 +42,15 @@ async function expectAccepted(src: string, target: "standalone" | "wasi" = "stan
 }
 
 describe("#1599 --target standalone refuses dynamic unsupported JSON shapes", () => {
-  it("rejects JSON.stringify of a dynamic object", async () => {
-    await expectRefused(`export function f(o: { a: number }): string { return JSON.stringify(o); }`);
+  it("compiles JSON.stringify of a dynamic object (#2166 PR-A — pure-Wasm __json_stringify_value)", async () => {
+    // PR-A serialises a runtime `$Object` graph with the recursive native
+    // codec instead of refusing (or silently folding the declaration literal).
+    await expectAccepted(`export function f(o: { a: number }): string { return JSON.stringify(o); }`);
   });
 
-  it("rejects JSON.stringify of a dynamic array", async () => {
+  it("still rejects JSON.stringify of a dynamic array (closed typed-vec — PR-A2 sub-slice)", async () => {
+    // Arrays use the closed `__vec_*` structs, not `$ObjVec`, so they stay on
+    // the refusal path until the array sub-slice (PR-A2) lands.
     await expectRefused(`export function f(a: number[]): string { return JSON.stringify(a); }`);
   });
 
@@ -66,13 +70,16 @@ describe("#1599 --target standalone refuses dynamic unsupported JSON shapes", ()
     await expectAccepted(`export function f(): number { return JSON.parse('{"x":42}').x; }`);
   });
 
-  it("also refuses under --target wasi", async () => {
-    await expectRefused(`export function f(o: { a: number }): string { return JSON.stringify(o); }`, "wasi");
+  it("also refuses an unsupported shape under --target wasi", async () => {
+    // A dynamic array (closed typed-vec) and a dynamic JSON.parse text still
+    // refuse under wasi. (An object DOES route to the PR-A codec under wasi too,
+    // host-import-free — covered by the #2166 PR-A wasi test.)
+    await expectRefused(`export function f(a: number[]): string { return JSON.stringify(a); }`, "wasi");
     await expectRefused(`export function f(s: string): number { return JSON.parse(s).x; }`, "wasi");
   });
 
   it("emits no env::JSON_* import when refused", async () => {
-    const r = await compile(`export function f(o: { a: number }): string { return JSON.stringify(o); }`, {
+    const r = await compile(`export function f(a: number[]): string { return JSON.stringify(a); }`, {
       target: "standalone",
     });
     expect(r.success).toBe(false);
