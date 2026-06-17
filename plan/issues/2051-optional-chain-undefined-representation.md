@@ -4,7 +4,7 @@ title: "short-circuited ?. produces the type's default value (0 / \"null\") inst
 status: in-progress
 sprint: 63
 created: 2026-06-10
-updated: 2026-06-15
+updated: 2026-06-17
 priority: high
 feasibility: hard
 reasoning_effort: max

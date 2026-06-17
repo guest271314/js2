@@ -4,7 +4,7 @@ title: "Standalone Map/Set/WeakMap/WeakSet conformance residual (~532 tests)"
 status: in-progress
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-16
+updated: 2026-06-17
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -111,6 +111,34 @@ only wired for Map) is enabled here too.
 `Map_*`/`Set_*` imports): Map/Set `keys()`/`values()` for-of, bare Set for-of,
 tombstone-skip, Set.forEach.
 
+## Slice 3 — native Set.forEach (PR, dev-1, 2026-06-17)
+
+`Set.prototype.forEach` produced **invalid Wasm** standalone (the call fell
+through `tryCompileNativeSetMethodCall`'s `add/has/delete/clear` gate to the
+generic host path). Fixed by routing `forEach` to the shared
+`tryCompileNativeCollectionForEach(..., isSet=true)` — the SAME entries-vector
+drive Map.forEach (#1527) already uses, which already had the `isSet` branch
+(passes the value as both `value` and `key` per spec 24.2.3.6). One import + a
+3-line dispatch route in `set-runtime.ts`; no new runtime helper. Verified
+standalone (empty-`{}` instantiate, zero `Set_*`/`Map_*` imports): count, sum,
+value===key, tombstone-skip after delete, insertion order, empty-set no-op.
+Test: `tests/issue-2162-set-foreach.test.ts` (6/6).
+
+## Slice 4 — `new Set([...])` / `new Map([[k,v],...])` from array literal (PR, dev-1, 2026-06-17)
+
+The constructor-from-iterable forms fell through to the host path:
+`new Set([1,2,3])` leaked `env.*` imports, `new Map([[1,10]])` was a hard
+"Unsupported new expression". Fixed in `new-super.ts` for the **array-literal**
+argument (the dominant iterable form): build the empty `$Map` (`__map_new`),
+then seed element-by-element — each Set element via `__set_add` (dedups through
+the shared insert), each Map `[k,v]` pair via `__map_set`. Keys/values boxed via
+`coerceMapKeyToAnyref`; the no-arg forms are unchanged. A non-array-literal
+iterable (spread, a variable, a non-pair Map element) still falls back to the
+empty collection (the general iterator drive is the remaining slice below).
+Verified standalone (empty-`{}` instantiate, zero `Set_*`/`Map_*` imports): seed
++ size, dedup, has(), empty literal, seeded-forEach, Map pair overwrite, no-arg
+control. Test: `tests/issue-2162-collection-from-array.test.ts` (10/10).
+
 ### Remaining slices (issue stays in-progress)
 
 - **`entries()` `[k, v]`-pair iteration + value spread** (`[...map.values()]`) —
@@ -118,8 +146,28 @@ tombstone-skip, Set.forEach.
   array fast path. The `entries` projection builder is in place
   (`emitCollectionIteratorVec`, `kind: "entries"`) but not yet wired to a
   consumer. Tracked as a #2162 follow-up.
-- `new Map(iterable)` / `new Set(iterable)` — needs `__map_new_from_arr`.
+- `new Map(iterable)` / `new Set(iterable)` over a NON-literal iterable — needs
+  the general iterator drive (Slice 4 from-array covers only array literals).
 - ES2025 set-algebra: `union`/`intersection`/`difference`/
   `symmetricDifference`/`isSubsetOf`/`isSupersetOf`/`isDisjointFrom`.
 - The `Set === literal` / collection-of-`any` comparison confounds depend on the
   value-rep work (#2104/#2106), out of scope here.
+
+## Slice — ES2025 Set set-algebra (PR, dev-1, 2026-06-17)
+
+All 7 ES2025 Set set-algebra methods are now Wasm-native standalone/WASI (they
+leaked `Set_*` host imports before). New `src/codegen/set-algebra.ts`:
+`union`/`intersection`/`difference`/`symmetricDifference` return a new Set;
+`isSubsetOf`/`isSupersetOf`/`isDisjointFrom` return a boolean. Each builds on the
+shared `$Map` backing store — walk one operand's entries vector (the same
+insertion-ordered, tombstone-skipping walk `forEach`/`__map_iter_next` use) and
+consult the other via `__map_has`, accumulating into a fresh Set (`__map_new` +
+`__set_add`) or an i32 flag. Dispatched from `extern.ts` when BOTH the receiver
+and the single argument type as `Set` (a genuine Set `b`; a Set-LIKE arg / the
+GetSetRecord path is a follow-up). No host import, no iterator object.
+
+Verified standalone (empty-`{}`/wasi, zero `Set_*`/`Map_*` imports): all 7 ops,
+true+false predicate cases, content checks, dedup. Test:
+`tests/issue-2162-set-algebra.test.ts` (10/10, operands built via `.add()` so the
+slice is independent of the `new Set([...])` constructor slice). tsc + prettier
+clean; Set Slice-1 unaffected.
