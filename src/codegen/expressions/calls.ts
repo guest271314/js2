@@ -140,6 +140,7 @@ import {
   ensureTextEncodingHelpers,
   stringConstantExternrefInstrs,
 } from "../native-strings.js";
+import { emitVariadicStringConcat, hostStringRepr, nativeStringRepr } from "../builtin-scaffold.js";
 import { emitArrayBufferSlice, emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
 import {
   getLinearU8Buffer,
@@ -2156,6 +2157,66 @@ function getExplicitThisParam(ctx: CodegenContext, callee: ts.Expression): ts.Pa
   return undefined;
 }
 
+/**
+ * #2088 — `String.fromCharCode` / `String.fromCodePoint`, all four lanes
+ * (native helper × host import) served by one definition.
+ *
+ * Each argument becomes a one-char(-or-code-point) string via `helperIdx`;
+ * the variadic concatenation that joins them is the shared
+ * {@link emitVariadicStringConcat} primitive, so the single-argument-drop bug
+ * that #2122 / #1955 fixed independently in every arm can no longer reappear
+ * in just one lane.
+ *
+ * `native` selects the representation: native helpers concat with
+ * `__str_concat` over `(ref $NativeString)` parts (zero host imports); the
+ * host import path concats with the `wasm:js-string` `concat` builtin over
+ * externref parts. `argToCode` is the per-argument numeric coercion the helper
+ * expects (`i32.trunc_sat_f64_s` for the i32-typed native helpers,
+ * `f64.convert_i32_s` for the f64-typed host imports).
+ */
+function compileFromCharCodeFamily(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  opts: { native: boolean; helperIdx: number },
+): ValType | null {
+  const { native, helperIdx } = opts;
+  const repr = native ? nativeStringRepr(ctx) : hostStringRepr(ctx);
+  if (repr === undefined) return null;
+
+  // Build one string `part` per argument by compiling its code into a buffer
+  // and applying the per-rep numeric coercion + the 1-char-string helper. The
+  // buffers are registered with `ctx.liveBodies` so a late import added while
+  // compiling a *later* argument still shifts indices baked into earlier ones.
+  const parts: Instr[][] = [];
+  for (let i = 0; i < expr.arguments.length; i++) {
+    const buf: Instr[] = [];
+    ctx.liveBodies.add(buf);
+    const savedBody = fctx.body;
+    fctx.body = buf;
+    try {
+      const argType = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
+      if (native) {
+        if (argType && argType.kind !== "i32") buf.push({ op: "i32.trunc_sat_f64_s" });
+      } else {
+        if (argType && argType.kind === "i32") buf.push({ op: "f64.convert_i32_s" });
+      }
+      buf.push({ op: "call", funcIdx: helperIdx });
+    } finally {
+      fctx.body = savedBody;
+    }
+    parts.push(buf);
+  }
+
+  fctx.body.push(...emitVariadicStringConcat(repr, parts));
+  // The part instructions now live (spliced) inside `fctx.body`, which every
+  // future `flushLateImportShifts` already walks. Drop the standalone buffer
+  // registrations so the same instruction objects are not shifted twice (the
+  // shift dedup keys on array identity, not instruction identity).
+  for (const buf of parts) ctx.liveBodies.delete(buf);
+  return repr.resultType;
+}
+
 function compileCallExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3853,58 +3914,24 @@ function compileCallExpression(
     ) {
       // #1598: nativeStrings mode (forced on for --target wasi / standalone) uses
       // a pure-Wasm __str_fromCharCode helper — no env.String_fromCharCode import.
+      // #2088: the variadic concat fold is shared via compileFromCharCodeFamily.
       if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
         const helperIdx = ctx.nativeStrHelpers.get("__str_fromCharCode");
-        const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
         if (helperIdx !== undefined) {
-          // First arg → string
-          const a0 = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
-          if (a0 && a0.kind !== "i32") {
-            fctx.body.push({ op: "i32.trunc_sat_f64_s" });
-          }
-          fctx.body.push({ op: "call", funcIdx: helperIdx });
-          // Multi-arg: concat each subsequent code unit's string (spec: join).
-          if (expr.arguments.length > 1 && concatIdx !== undefined) {
-            for (let i = 1; i < expr.arguments.length; i++) {
-              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
-              if (ai && ai.kind !== "i32") {
-                fctx.body.push({ op: "i32.trunc_sat_f64_s" });
-              }
-              fctx.body.push({ op: "call", funcIdx: helperIdx });
-              fctx.body.push({ op: "call", funcIdx: concatIdx });
-            }
-          }
-          return nativeStringType(ctx);
+          const r = compileFromCharCodeFamily(ctx, fctx, expr, { native: true, helperIdx });
+          if (r !== null) return r;
         }
       }
       const funcIdx = ctx.funcMap.get("String_fromCharCode");
       if (funcIdx !== undefined) {
-        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, {
-          kind: "f64",
-        });
-        if (argType && argType.kind === "i32") {
-          fctx.body.push({ op: "f64.convert_i32_s" });
-        }
-        fctx.body.push({ op: "call", funcIdx });
-        // #2122: fromCharCode is variadic — each subsequent code unit produces a
-        // 1-char string that must be concatenated (ES §22.1.2.1). The host import
-        // is 1-arg, so call it per-argument and join via the js-string `concat`
-        // import. (Args are still evaluated left-to-right exactly once.)
-        if (expr.arguments.length > 1) {
-          addStringImports(ctx);
-          const concatIdx = ctx.jsStringImports.get("concat");
-          if (concatIdx !== undefined) {
-            for (let i = 1; i < expr.arguments.length; i++) {
-              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
-              if (ai && ai.kind === "i32") {
-                fctx.body.push({ op: "f64.convert_i32_s" });
-              }
-              fctx.body.push({ op: "call", funcIdx });
-              fctx.body.push({ op: "call", funcIdx: concatIdx });
-            }
-          }
-        }
-        // In fast mode, marshal externref string to native string
+        // #2122: fromCharCode is variadic (ES §22.1.2.1). The host import is
+        // 1-arg, so each code unit produces a 1-char string joined via the
+        // js-string `concat` import — register it before the shared fold so the
+        // host repr can resolve it.
+        if (expr.arguments.length > 1) addStringImports(ctx);
+        const r = compileFromCharCodeFamily(ctx, fctx, expr, { native: false, helperIdx: funcIdx });
+        if (r === null) return r;
+        // In fast mode, marshal externref string to native string.
         if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
           ensureNativeStringExternBridge(ctx);
           flushLateImportShifts(ctx, fctx);
@@ -3925,54 +3952,23 @@ function compileCallExpression(
       propAccess.name.text === "fromCodePoint" &&
       expr.arguments.length >= 1
     ) {
-      // Native strings mode: use pure-Wasm __str_fromCodePoint (no host import)
+      // Native strings mode: use pure-Wasm __str_fromCodePoint (no host import).
+      // #2088: shares the variadic concat fold via compileFromCharCodeFamily.
       if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
         const helperIdx = ctx.nativeStrHelpers.get("__str_fromCodePoint");
-        const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
         if (helperIdx !== undefined) {
-          const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
-          if (argType && argType.kind !== "i32") {
-            fctx.body.push({ op: "i32.trunc_sat_f64_s" });
-          }
-          fctx.body.push({ op: "call", funcIdx: helperIdx });
-          // #2122: variadic — concat each subsequent code point's string.
-          if (expr.arguments.length > 1 && concatIdx !== undefined) {
-            for (let i = 1; i < expr.arguments.length; i++) {
-              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
-              if (ai && ai.kind !== "i32") {
-                fctx.body.push({ op: "i32.trunc_sat_f64_s" });
-              }
-              fctx.body.push({ op: "call", funcIdx: helperIdx });
-              fctx.body.push({ op: "call", funcIdx: concatIdx });
-            }
-          }
-          return nativeStringType(ctx);
+          const r = compileFromCharCodeFamily(ctx, fctx, expr, { native: true, helperIdx });
+          if (r !== null) return r;
         }
       }
       // Host import path (non-nativeStrings mode)
       const funcIdx = ctx.funcMap.get("String_fromCodePoint");
       if (funcIdx !== undefined) {
-        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
-        if (argType && argType.kind === "i32") {
-          fctx.body.push({ op: "f64.convert_i32_s" });
-        }
-        fctx.body.push({ op: "call", funcIdx });
-        // #2122: variadic — concat each subsequent code point's string via the
-        // 1-arg host import joined with the js-string `concat` import.
-        if (expr.arguments.length > 1) {
-          addStringImports(ctx);
-          const concatIdx = ctx.jsStringImports.get("concat");
-          if (concatIdx !== undefined) {
-            for (let i = 1; i < expr.arguments.length; i++) {
-              const ai = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
-              if (ai && ai.kind === "i32") {
-                fctx.body.push({ op: "f64.convert_i32_s" });
-              }
-              fctx.body.push({ op: "call", funcIdx });
-              fctx.body.push({ op: "call", funcIdx: concatIdx });
-            }
-          }
-        }
+        // #2122: variadic — each code point produces a string joined via the
+        // js-string `concat` import; register it before the shared fold.
+        if (expr.arguments.length > 1) addStringImports(ctx);
+        const r = compileFromCharCodeFamily(ctx, fctx, expr, { native: false, helperIdx: funcIdx });
+        if (r === null) return r;
         return { kind: "externref" };
       }
     }
