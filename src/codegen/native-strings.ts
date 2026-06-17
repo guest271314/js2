@@ -5636,6 +5636,8 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
   // `box` (the $AnyValue ref) lives in local 1; the original anyref param in 0.
   const L_V = 0;
   const L_BOX = 1;
+  // #1910/#1472 S2 — scratch anyref for the tag-5 string-vs-wrapper recovery.
+  const L_RECOVER = 2;
 
   const numberArm = (loadNumeric: Instr[]): Instr[] =>
     numToStrIdx !== undefined
@@ -5646,6 +5648,97 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
           { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
         ]
       : litStr("[object Object]");
+
+  // #1910/#1472 S2 — recover the string for an externref that is tagged as a
+  // string (tag 5) but is NOT actually a `$AnyString`. The generic
+  // externref→AnyValue boxing tags EVERY externref as tag-5 (see
+  // value-tags.ts:185), so a boxed-primitive WRAPPER (`new String`/`new Number`/
+  // `new Boolean` → a `$Object` carrying the internal [[PrimitiveValue]] slot)
+  // reaches the tag-5 arm; the raw `ref.cast $AnyString` would trap ("illegal
+  // cast"). When the value is a `$Object`, reduce it with `__to_primitive`
+  // (registered by ensureObjectRuntime BEFORE this helper bakes, so its funcIdx
+  // is known here — same no-intervening-shift invariant the rest of this helper
+  // relies on), which reads the wrapper's internal slot and returns its boxed
+  // primitive. That primitive is then a `$AnyString` (string wrapper) or a
+  // `$__box_number_struct`/`$__box_boolean_struct` (number/boolean wrapper), all
+  // of which the existing $AnyString test + residual box-recovery format
+  // correctly — so we route the reduced value back through that recovery
+  // (`stringifyExtern`). Non-`$Object` tag-5 externrefs (boxed primitive carriers
+  // crossing the open-any boundary) skip straight to that recovery unchanged.
+  const toPrimitiveIdx = ctx.funcMap.get("__to_primitive");
+  const objectRtTypes = ctx.objectRuntimeTypes;
+  const boxNumIdxEarly = ctx.nativeBoxNumberTypeIdx;
+  const boxBoolIdxEarly = ctx.nativeBoxBooleanTypeIdx;
+  // Format an externref already known NOT to be a $AnyString: recover a
+  // $__box_number_struct / $__box_boolean_struct, else "[object Object]".
+  const stringifyBoxedExtern = (loadExtern: Instr[]): Instr[] =>
+    boxNumIdxEarly >= 0 && boxBoolIdxEarly >= 0
+      ? [
+          ...loadExtern,
+          { op: "any.convert_extern" } as Instr,
+          { op: "local.tee", index: L_RECOVER } as Instr,
+          { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: strRef },
+            then: [{ op: "local.get", index: L_RECOVER }, { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr],
+            else: [
+              { op: "local.get", index: L_RECOVER },
+              { op: "ref.test", typeIdx: boxNumIdxEarly } as Instr,
+              {
+                op: "if",
+                blockType: { kind: "val", type: strRef },
+                then: numberArm([
+                  { op: "local.get", index: L_RECOVER },
+                  { op: "ref.cast", typeIdx: boxNumIdxEarly } as Instr,
+                  { op: "struct.get", typeIdx: boxNumIdxEarly, fieldIdx: 0 },
+                ]),
+                else: [
+                  { op: "local.get", index: L_RECOVER },
+                  { op: "ref.test", typeIdx: boxBoolIdxEarly } as Instr,
+                  {
+                    op: "if",
+                    blockType: { kind: "val", type: strRef },
+                    then: [
+                      { op: "local.get", index: L_RECOVER },
+                      { op: "ref.cast", typeIdx: boxBoolIdxEarly } as Instr,
+                      { op: "struct.get", typeIdx: boxBoolIdxEarly, fieldIdx: 0 },
+                      {
+                        op: "if",
+                        blockType: { kind: "val", type: strRef },
+                        then: litStr("true"),
+                        else: litStr("false"),
+                      } as Instr,
+                    ],
+                    else: litStr("[object Object]"),
+                  } as Instr,
+                ],
+              } as Instr,
+            ],
+          } as Instr,
+        ]
+      : litStr("[object Object]");
+  const recoverNonStringExtern = (loadExtern: Instr[]): Instr[] =>
+    toPrimitiveIdx !== undefined && objectRtTypes !== undefined
+      ? [
+          // if (value is a $Object wrapper) value = __to_primitive(value, default)
+          ...loadExtern,
+          { op: "any.convert_extern" } as Instr,
+          { op: "local.tee", index: L_RECOVER } as Instr,
+          { op: "ref.test", typeIdx: objectRtTypes.objectTypeIdx } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "val", type: strRef },
+            then: stringifyBoxedExtern([
+              { op: "local.get", index: L_RECOVER },
+              { op: "extern.convert_any" } as Instr,
+              { op: "ref.null.extern" } as Instr, // default hint
+              { op: "call", funcIdx: toPrimitiveIdx } as Instr,
+            ]),
+            else: stringifyBoxedExtern([{ op: "local.get", index: L_RECOVER }, { op: "extern.convert_any" } as Instr]),
+          } as Instr,
+        ]
+      : stringifyBoxedExtern(loadExtern);
 
   const tagEq = (tag: number): Instr[] => [
     { op: "local.get", index: L_BOX },
@@ -5710,6 +5803,15 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
                         {
                           op: "if",
                           blockType: { kind: "val", type: strRef },
+                          // tag 5 (string): the externval is USUALLY a real
+                          // `$AnyString`, but the generic externref boxing also
+                          // tags boxed-primitive WRAPPER objects (new String /
+                          // Number / Boolean → $Object) and other open externrefs
+                          // as tag-5 (#1910/#1472 S2). Test $AnyString first; only
+                          // cast when it really is a string, otherwise recover via
+                          // __extern_toString (reads the wrapper's internal slot
+                          // through ToPrimitive). Without this guard the raw cast
+                          // traps with "illegal cast" for `new String("1") + x`.
                           then: [
                             { op: "local.get", index: L_BOX },
                             {
@@ -5718,7 +5820,20 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
                               fieldIdx: 4,
                             },
                             { op: "any.convert_extern" } as Instr,
-                            { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+                            { op: "local.tee", index: L_RECOVER } as Instr,
+                            { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+                            {
+                              op: "if",
+                              blockType: { kind: "val", type: strRef },
+                              then: [
+                                { op: "local.get", index: L_RECOVER },
+                                { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+                              ],
+                              else: recoverNonStringExtern([
+                                { op: "local.get", index: L_RECOVER },
+                                { op: "extern.convert_any" } as Instr,
+                              ]),
+                            } as Instr,
                           ],
                           // tag 6 / unknown → "[object Object]"
                           else: litStr("[object Object]"),
@@ -5832,7 +5947,10 @@ export function ensureAnyToStringHelper(ctx: CodegenContext): number {
   ctx.mod.functions.push({
     name: "__any_to_string",
     typeIdx,
-    locals: [{ name: "box", type: { kind: "ref_null", typeIdx: anyValueTypeIdx } }],
+    locals: [
+      { name: "box", type: { kind: "ref_null", typeIdx: anyValueTypeIdx } },
+      { name: "recover", type: { kind: "anyref" } },
+    ],
     body,
     exported: false,
   });
