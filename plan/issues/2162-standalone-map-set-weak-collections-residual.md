@@ -4,7 +4,7 @@ title: "Standalone Map/Set/WeakMap/WeakSet conformance residual (~532 tests)"
 status: in-progress
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-16
+updated: 2026-06-17
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -85,13 +85,26 @@ FinalizationRegistry liveness, skip-filtered, could tell). Host/gc unchanged.
 zero `WeakMap_*`/`WeakSet_*`/`Map_*` imports): WeakMap set+get / has / distinct
 keys / overwrite / delete; WeakSet add+has / delete / chained add.
 
+## Slice 3 — native Set.forEach (PR, dev-1, 2026-06-17)
+
+`Set.prototype.forEach` produced **invalid Wasm** standalone (the call fell
+through `tryCompileNativeSetMethodCall`'s `add/has/delete/clear` gate to the
+generic host path). Fixed by routing `forEach` to the shared
+`tryCompileNativeCollectionForEach(..., isSet=true)` — the SAME entries-vector
+drive Map.forEach (#1527) already uses, which already had the `isSet` branch
+(passes the value as both `value` and `key` per spec 24.2.3.6). One import + a
+3-line dispatch route in `set-runtime.ts`; no new runtime helper. Verified
+standalone (empty-`{}` instantiate, zero `Set_*`/`Map_*` imports): count, sum,
+value===key, tombstone-skip after delete, insertion order, empty-set no-op.
+Test: `tests/issue-2162-set-foreach.test.ts` (6/6).
+
 ### Remaining slices (issue stays in-progress)
 
-- **Map.forEach** (PR #1527) and **Set.forEach** (follow-up) — entries-vector
-  drive over the callback closure.
 - `keys()`/`values()`/`entries()` + `for-of` over Map/Set — needs a JS-iterable
   iterator object; `new Map(iterable)` / `new Set(iterable)` — needs
-  `__map_new_from_arr`.
+  `__map_new_from_arr`. (Confirmed still broken standalone 2026-06-17:
+  `for (const v of set)` yields 0; `new Set([1,2,3])` / `new Map([[1,10]])`
+  fail.)
 - ES2025 set-algebra: `union`/`intersection`/`difference`/
   `symmetricDifference`/`isSubsetOf`/`isSupersetOf`/`isDisjointFrom`.
 - The `Set === literal` / collection-of-`any` comparison confounds depend on the
