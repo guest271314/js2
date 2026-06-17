@@ -4597,13 +4597,17 @@ export function compileElementAccessBody(
     // `Object.values`/`Object.entries`, by `JSON.parse` of an array, and by the
     // array-method machinery) whose elements are positional, not string-keyed —
     // `__extern_get(v, "1")` finds nothing and returns null, so `v[1]` read 0.
-    // `__extern_get_idx` already ref.tests `$ObjVec` and returns `data[i]`, and
-    // for an array-like `$Object` it delegates to `__extern_get(v, ToString(i))`
-    // (its #2036 arm), so it is a correct superset of the string-key path for a
-    // numeric index. Scoped to standalone/WASI — host mode keeps the JS
-    // `__extern_get` fast path, which already indexes real JS arrays. A
-    // non-numeric (string/symbol/computed) key stays on `__extern_get`.
-    if ((ctx.standalone || ctx.wasi) && isNumericIndexExpression(ctx, expr.argumentExpression)) {
+    // `__extern_get_idx` ref.tests `$ObjVec` and returns `data[i]`; for an
+    // array-like `$Object` it delegates to `__extern_get(v, ToString(i))` (its
+    // #2036 arm), so it is a correct superset of the string-key path for a
+    // numeric index — but ONLY in `--target standalone`: that `$Object`
+    // delegation arm is gated on `objArrayLikeArms = ctx.standalone` in
+    // object-runtime.ts, so under `--target wasi` `__extern_get_idx` returns the
+    // null sentinel for a genuine `$Object`, which would break a plain-object
+    // numeric read. Hence this is scoped to `ctx.standalone` only (NOT wasi);
+    // wasi and host mode keep the existing `__extern_get` path. A non-numeric
+    // (string/symbol/computed) key always stays on `__extern_get`.
+    if (ctx.standalone && isNumericIndexExpression(ctx, expr.argumentExpression)) {
       compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
       const getIdxFn = ensureLateImport(
         ctx,
