@@ -1,10 +1,13 @@
 ---
 id: 2166
 title: "Standalone JSON conformance residual (~76 tests)"
-status: ready
+status: in-progress
+assignee: sdev-json3
 sprint: 63
 created: 2026-06-15
 updated: 2026-06-17
+dev_complete: true
+remaining: "PR-D (reviver/replacer/toJSON) — tracked as architect follow-up; see ## Status (2026-06-17)"
 priority: low
 feasibility: medium
 reasoning_effort: medium
@@ -324,3 +327,220 @@ In `compileCallExpression`'s JSON arm (`src/codegen/expressions/calls.ts`
   near-parity as PR-A/PR-C land (verify via CI test262 bucket).
 - No regression to the existing #1599/#1636 static-fold suites or the boolean/
   space slices already merged.
+
+---
+
+## Progress (2026-06-17, sdev-json) — PR-A: dynamic object-graph stringify codec
+
+PR-A of the Implementation Plan above. New module
+`src/codegen/json-codec-native.ts` emits a recursive pure-Wasm
+`__json_stringify_value(v: anyref, depth) -> ref null $AnyString` (+ a
+`__json_stringify_root` entry that coalesces a top-level undefined-serialisation
+to `"null"`) over the **existing** standalone value rep — no new representation
+work:
+
+- `$Object` graphs: own enumerable string keys in insertion order via the
+  existing `__obj_ordered`; recurses on `$PropEntry.value` (anyref); omits a
+  property whose value serialises to undefined (§25.5.2).
+- nested `$Object`, native-string values (`__json_quote_string` reused verbatim
+  for keys + string values), `$box_number_struct` numbers (NaN/±Inf → `null`,
+  `-0` → `0` via `number_toString`), `null`, and `$AnyValue`-carried primitives.
+- `$ObjVec` array arm (enumeration-vector arrays).
+
+Routing (`src/codegen/expressions/calls.ts`, the standalone/wasi JSON arm): when
+the static fold (`tryEmitJsonStringifyStatic`) declines and the call is the
+1-arg / null-replacer-no-space shape, compile arg0 to `anyref` and call the
+codec. **Arrays/tuples (closed `__vec_*` structs) are NOT routed** — they are not
+`$ObjVec` and stay on the #1599 refusal path until the array sub-slice (PR-A2).
+
+**Correctness bug also fixed (`src/codegen/json-standalone.ts`):** `staticJsonValue`
+followed a `const` identifier into an object/array literal initializer and folded
+it, but such bindings are **mutable in place** (`const o = {}; o.x = f()`), so it
+silently dropped runtime mutations and emitted `"{}"`. Now a `const` is only
+followed to a **primitive** initializer; object/array bindings route to the codec
+(or the refusal) instead of a wrong static fold.
+
+Regression tests: `tests/issue-2166.test.ts` (+10 PR-A cases — runtime `let`/param
+object, nested graph, QuoteJSONString escaping, NaN/Inf→null, -0→0, null value,
+empty object, wasi host-import-free, reassigned-`let` no-stale-fold). Updated
+`tests/issue-1599-json-standalone-refuse.test.ts`: dynamic **object** now compiles
+(was refused); dynamic **array** still refuses (PR-A2). All 40 cases green; the
+two pre-existing host-mode failures (`json.test.ts` number→host-import,
+`issue-json-stringify-structs.test.ts` array-of-structs) are upstream, not from
+this PR (verified by stashing). PR #1653.
+
+**PR-A known limitations → follow-up slices:**
+- **PR-A2:** closed typed-array (`number[]`) serialisation — a separate vec-struct
+  discrimination, not `$ObjVec`.
+- **boolean object-property values** serialise as `1`/`0`: the i32→externref
+  coercion boxes a boolean as `$box_number` (indistinguishable from a number).
+  A proper fix needs `__box_boolean` + an `__unbox_number` boolean arm — broad
+  blast radius, overlaps #1917; deferred.
+- **PR-B:** dynamic-space indentation. **PR-C:** `__json_parse_text`. **PR-D:**
+  instance fields + toJSON + reviver/replacer.
+
+---
+
+## Progress (2026-06-17, sdev-json3) — PR-B: dynamic-graph `space` indentation
+
+PR-B of the Implementation Plan. Threads §25.5.2 pretty-printing through the
+pure-Wasm dynamic stringify codec (`src/codegen/json-codec-native.ts`). PR-A
+emitted dynamic object graphs *compactly* only; any `space` argument forced the
+#1599 refusal (the static-fold path owns only the static-value form, which a
+runtime-built graph never reaches).
+
+**Codec (`json-codec-native.ts`):**
+- `__json_stringify_value` gains a third param `gap: ref null $AnyString` (the
+  per-level indent unit, e.g. `"  "`). A **null** gap selects the compact form
+  (PR-A behaviour, zero added work — the separators collapse to `""`); a
+  non-null gap drives indentation.
+- Each call computes three separator locals once (prologue): `L_NL_IN` =
+  `"\n" + __str_repeat(gap, depth+1)` (before every element/property),
+  `L_NL_OUT` = `"\n" + __str_repeat(gap, depth)` (before the closing brace),
+  `L_COLON` = `": "` (key/value). With a null gap all three are `""`/`":"`, so
+  the object/array arms emit **byte-identical** compact output (verified by the
+  1-arg regression guard). `__str_repeat` returns `""` for count 0, so the
+  top-level (depth 0) close indent is bare `"\n"`.
+- Empty object/array stays `{}` / `[]` (the close-indent is gated on
+  "≥1 member emitted", §25.5.2).
+- New entry `__json_stringify_root_indent(v, gap)` mirrors `__json_stringify_root`
+  with the gap forwarded.
+
+**Routing (`src/codegen/expressions/calls.ts`):** the dynamic-graph branch now
+resolves a *static* `space` arg (`staticSpaceValue` → `jsonGapFromStaticSpace`,
+both newly exported from `json-standalone.ts`) to the gap string per §25.5.2
+(`min(10, floor(n))` spaces / first 10 chars of a string; ≤0/"" → compact). An
+empty gap routes through the cheap compact root; a non-empty gap pushes the gap
+literal and calls `__json_stringify_root_indent`. A function/array replacer or a
+**dynamic** space still keeps the #1599 refusal (no silent wrong output).
+
+Tests: `tests/issue-2166.test.ts` (+12 PR-B cases — flat/nested/deeply-nested
+object with numeric space 2, string (tab) + multi-char space, numeric-space>10
+clamp, space 0 = compact, null property value, empty nested object stays
+compact, `--target wasi` host-import-free, and a 1-arg compact PR-A regression
+guard). Each result is read back char-by-char and compared to Node's own
+`JSON.stringify(value, null, space)` for exact parity. `#1599`/`#1636` refuse
+suites stay green; the two pre-existing host-mode `json.test.ts` failures are
+upstream (verified by stashing).
+
+**Still open after PR-B:** PR-C (`__json_parse_text`, separate branch #1657),
+PR-C2 (parsed-array `a[i]` indexing, #1658), PR-D (reviver/replacer/toJSON),
+PR-A2 (closed `number[]` array stringify — a literal `number[]` isn't an
+`$ObjVec`, so it still routes to refusal; the array *indent* arm is implemented
+and activates for `$ObjVec` arrays once those route through the codec).
+
+---
+
+## Progress (2026-06-17, sdev-json2) — PR-C: dynamic JSON.parse codec
+
+PR-C of the Implementation Plan. Adds `emitJsonParseText` to
+`src/codegen/json-codec-native.ts`: a pure-Wasm recursive-descent JSON parser
+(ECMA-404 / §25.5.1) — `__json_parse_text(s: externref) -> anyref` plus mutually
+recursive `__json_parse_value` / `__json_parse_str` helpers sharing a cursor
+through a `$JsonP { $data, $pos(mut), $end }` state struct. Output uses the SAME
+standalone value rep stringify (PR-A) consumes and the property-read path
+unboxes:
+
+- objects → `$Object` via `__new_plain_object` + `__extern_set` (insertion order).
+- numbers → `$__box_number_struct`; booleans → `$__box_number_struct` 1.0/0.0
+  (matching how `o.x = true` stores a boolean in a standalone object — a distinct
+  boolean identity is the broader #1917 boolean-boxing gap); `null` → null eqref.
+- strings → native `$AnyString` with full §25.5.1 unescaping (`\" \\ \/ \b\f\n\r\t`
+  and `\uXXXX`), via a two-pass (size-scan then fill) over the flattened i16 backing.
+- arrays → `$ObjVec` via `__objvec_new` + `__objvec_push`.
+- malformed input / trailing junk → runtime `throw new SyntaxError(...)` through the
+  standalone `__new_SyntaxError` ctor + the shared exn tag (§25.5.1 step 3), not a trap.
+
+Routing (`src/codegen/expressions/calls.ts`): a runtime-string / `any`-typed
+`JSON.parse(text)` (1-arg) now routes to the codec, replacing the primitive-only
+`__json_parse_primitive` slice (a strict superset — it parsed only a lone
+number/true/false/null and trapped on `{`/`[`/`"`). A `reviver` (2nd arg) is
+deferred to PR-D (refused, not silently ignored).
+
+Tests: `tests/issue-2166.test.ts` (+14 PR-C cases — object number/string/nested
+reads, §25.5.1 escapes incl. `\uXXXX`, boolean truthy round-trip, null, top-level
+primitive, negative/fraction/exponent numbers, whitespace tolerance, object +
+nested round-trip `JSON.parse(JSON.stringify(o))`, `--target wasi`, and a
+malformed-input SyntaxError throw). Updated `tests/issue-1599-json-standalone-
+refuse.test.ts`: dynamic `JSON.parse(s).x` now COMPILES (was refused), both
+standalone and wasi; a dynamic `number[]` stringify still refuses (PR-A2).
+
+Two pre-existing host-mode failures (`tests/json.test.ts` number→host-import,
+array-of-structs) are upstream, not from this PR (the host `JSON_stringify`
+import path is untouched — every PR-C change is gated on `ctx.standalone ||
+ctx.wasi`).
+
+### Codegen note (WHY) — fresh GC struct in a lazy codegen pass
+A fresh struct type registered during a *lazy* call-expression codegen (here
+`$JsonP`) is fragile if its `typeIdx` is baked into many shared helper-`Instr`
+objects: the finalize dead-type-elimination remap (`remapTypeIdxInBody`)
+mutates `typeIdx` IN PLACE and re-visits a shared object once per occurrence,
+re-mapping an already-mapped index repeatedly (the #1302 shared-array
+double-shift hazard). It desynced the most-spread `$pos` `struct.get`/`set`
+operands (78→72→…→54 `$ProxyTraps`) from the cursor local's declared type. Fix:
+deep-clone each function body with a **JSON round-trip** (NOT `structuredClone`,
+which *preserves* internal aliasing) so every operand occurrence is an
+independent object and is remapped exactly once. The struct index is also kept
+off every function **signature** (helpers take `anyref` + `ref.cast` on entry)
+and its fields are `$`-prefixed (so the same-shape collision resolver skips it).
+
+### PR-C2 follow-up (array element indexing)
+Parsed arrays build a `$ObjVec`; `.length` and use as object-property values
+work, but **direct numeric element indexing on a parsed array** (`a[i]`) reads
+0 — the standalone element-access path does not route an `$ObjVec` numeric read
+through `__extern_get_idx` (it resolves `a[i]` as a string-keyed `__extern_get`,
+which an `$ObjVec` has no key for). PR-C2: route `$ObjVec` numeric element-access
+through `__extern_get_idx` (the helper already ref.tests `$ObjVec` and returns
+`data[i]`). Object graphs — the dominant `JSON.parse` shape — are fully working.
+
+### Still open
+- **PR-C2:** parsed-array element indexing (`a[i]`) via `__extern_get_idx`.
+- **PR-D:** instance fields + `toJSON` + reviver/replacer.
+- **PR-A2:** closed typed-array (`number[]`) stringify; proper boolean boxing.
+
+---
+
+## Status (2026-06-17, sdev-json3) — dev residual CLOSED; PR-D = architect follow-up
+
+All four pure-Wasm codec slices of the #1599 Phase-2 dynamic JSON codec have
+**landed on main**:
+
+- **PR-A** (#1653) — dynamic object-graph `JSON.stringify` (compact).
+- **PR-C** (#1657) — dynamic `JSON.parse` recursive-descent codec
+  (`__json_parse_text`); round-trip `JSON.parse(JSON.stringify(o))` works.
+- **PR-C2** (#1658) — parsed-array element indexing `a[i]` via `__extern_get_idx`.
+- **PR-B** (#1660) — `JSON.stringify(value, null, space)` §25.5.2 indentation.
+
+Standalone JSON now does **dynamic object-graph stringify (compact + indented) +
+parse + round-trip + parsed-array indexing**, pure-Wasm, host-import-free under
+`--target standalone`/`wasi`. The dev-completable residual is closed.
+
+### Remaining: PR-D (reviver / replacer / `toJSON`) → architect follow-up
+
+`JSON.parse(text, reviver)`, a function/array `replacer`, and `toJSON` are NOT
+yet supported standalone (they currently **refuse**, not silently mis-behave).
+
+**Feasibility (timeboxed assessment, sdev-json3):** PR-D is **dev-tractable in
+standalone — NOT host-only.** The closure-invocation machinery it needs already
+exists and runs under `--target standalone`: `__call_fn_method_N` (N=0..5,
+`emitClosureMethodCallExportN` in `index.ts`) threads `this`/holder via the
+`__current_this` global and is already consumed by the open-`$Object` accessor
+drivers (`__call_accessor_get`/`_set`, `accessor-driver.ts`) and the Proxy/
+`__apply_closure` bridges via the **reserve/fill driver** pattern (funcIdx-ordering
+safe across late-import shifts).
+
+So PR-D is a real, sizeable but doable feature, broken into:
+- **PR-D1 (reviver):** thread the reviver closure-ref from the `JSON.parse`
+  call site into `__json_parse_text`; after building the value, run the
+  §25.5.1 InternalizeJSONProperty post-walk, calling `reviver(key, value)` via a
+  reserved `__call_reviver` driver → `__call_fn_method_2`.
+- **PR-D2 (`toJSON`):** in `__json_stringify_value`, before serialising a
+  `$Object`/instance, `HasProperty`-check `toJSON` and call it with the holder
+  `this`; reuse `__call_fn_method_1` via a reserved driver.
+- **PR-D3 (function/array replacer):** mirror PR-D2's call path for the
+  replacer during the stringify walk.
+
+This is multi-PR and overlaps #1636 (`__call_fn_method`) + #2042 (instance-field
+reflection), so it's tracked as the **architect-scoped follow-up (TaskList #32)**
+rather than appended to this issue's dev queue. The compiler primitives are
+in place; the work is the codec-side plumbing + the InternalizeJSONProperty walk.

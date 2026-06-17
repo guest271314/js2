@@ -18,6 +18,7 @@
   "codegen/host-import-allowlist.ts": 2,
   "codegen/index.ts": 31,
   "codegen/iterator-native.ts": 2,
+  "codegen/json-codec-native.ts": 3,
   "codegen/map-runtime.ts": 2,
   "codegen/number-format-native.ts": 8,
   "codegen/object-ops.ts": 4,

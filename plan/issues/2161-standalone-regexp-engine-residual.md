@@ -214,3 +214,45 @@ TypedArray and other builtins will also need). The cleanly-isolated wins inside
 (a) are gated on the same `RegExp.prototype`-object representation, so there is
 no tail-end slice to peel off. sdev5 flagged this at the implementation boundary
 rather than half-building the prototype-object representation at session tail.
+
+## Sub-bucket (b), first slice — LANDED (2026-06-17, sdev-regex3)
+
+Re-validated against upstream/main (`fe0e21ba1`). Probed every RegExp form in
+standalone: only the explicit well-known-symbol protocol forms still refused
+(`re[Symbol.match/matchAll/search/replace/split](str)` at
+`calls.ts:~10414`). `RegExp.prototype.test.call(...)` and `String.prototype.*`
+native paths already work, so the prior (a)/(b) split holds: this PR is the
+first slice of (b).
+
+**Shipped — the READ protocol forms** `re[Symbol.match](s)`,
+`re[Symbol.matchAll](s)`, `re[Symbol.search](s)` for static / backend-created
+RegExp receivers route to the native engine, **zero host imports**:
+
+- `src/codegen/regexp-standalone.ts`: extracted operand-explicit cores
+  `emitStandaloneRegExpSearchCore` / `…MatchCore` / `…MatchAllCore` out of the
+  `tryCompileStandaloneStringSearch/Match/MatchAll` functions (which now
+  delegate), then added `tryCompileStandaloneRegExpSymbolCall` that calls those
+  same cores with **swapped operands** (regex = receiver, subject = argument).
+  The native lower-level emitters were already operand-order agnostic, so there
+  is no second engine path. Also taught `isStandaloneMatchResultCall` to
+  recognise the `re[Symbol.match](s)` shape so a `let m = …` local gets the
+  precise `$__regexp_match_vec` ref type (else `m[1]` routes through
+  `__extern_get_idx` and leaks `env::__extern_get` — the bug the runtime probe
+  caught).
+- `src/codegen/index.ts`: mirrored that recognition in
+  `inferStandaloneRegExpMatchArrayType` + `isStaticRegExpMatchArrayCallForImportScan`
+  (the let/const local-type + import-scan inferers).
+- `src/codegen/expressions/calls.ts`: at the standalone `@@`-refusal site, try
+  `tryCompileStandaloneRegExpSymbolCall` first; fall through to the existing
+  refusal (and JS-host `__regex_symbol_call` in host mode) when it returns
+  `undefined`.
+- Tests: `tests/issue-2161-regex-symbol-protocol.test.ts` (8 cases, all
+  standalone + empty importObject). 257 existing regex tests still green
+  (refactor is behaviour-preserving).
+
+**Deferred (still narrowed-refuse, NOT silently wrong):** `@@replace` / `@@split`
+(carry extra replacement / limit operands — their cores still need the
+operand-explicit extraction; next slice), dynamic-flag / `any`-typed receivers
+(fall through to host `__regex_symbol_call`), string-coercion arguments. The
+`RegExp.prototype` reflection bucket (a) remains gated on #2158's prototype-object
+representation. #2161 stays open for those.
