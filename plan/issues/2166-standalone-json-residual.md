@@ -1,13 +1,14 @@
 ---
 id: 2166
 title: "Standalone JSON conformance residual (~76 tests)"
-status: in-progress
+status: done
 assignee: sdev-json3
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-17
+updated: 2026-06-18
+completed: 2026-06-18
 dev_complete: true
-remaining: "PR-D (reviver/replacer/toJSON) — tracked as architect follow-up; see ## Status (2026-06-17)"
+remaining: "CLOSED — all PR-A/B/C/C2/D1/D2/D3 slices landed. Residual method-lookup items (shorthand/class toJSON, instance-field stringify, closure-this, PR-A2 number[]) are separate architect-scale follow-ups."
 priority: low
 feasibility: medium
 reasoning_effort: medium
@@ -786,3 +787,70 @@ object returns work.
 
 **Remaining PR-D:** D3 (function/array replacer) — same driver infra, last slice;
 after it, #2166 is fully closed.
+
+---
+
+## Progress (2026-06-18, sdev-json3) — PR-D3: standalone JSON.stringify replacer (CLOSES #2166)
+
+PR-D3, the LAST slice of the #1599 Phase-2 dynamic JSON codec. `JSON.stringify`
+now honours a **function replacer** and an **array-allowlist replacer** entirely
+in Wasm under `--target standalone`/`wasi` (previously refused), reusing the
+PR-D1/-D2 `__call_*` driver infra.
+
+§25.5.2 SerializeJSONProperty: a function replacer transforms every property and
+array element via `replacer.call(holder, key, value)` (holder bound as `this`);
+an array replacer is a key allowlist. Both route to a new
+`__json_stringify_root_replacer` entry that wraps the value in the §25.5.2 root
+holder `{"": v}`, applies a function replacer to the root value, then threads
+holder/replacer/allowList through the recursive walk.
+
+**Files:**
+- `src/codegen/json-codec-native.ts` — `__json_stringify_value` gains 3 params
+  (`holder`, `replacer`, `allowList`), threaded at both recursion sites + both
+  prior roots (passed null, unchanged behaviour). Object arm: allowlist filter
+  (skip a key when `__extern_has(allowList, key)` is false); function-replacer
+  transform per property; a replacer returning `undefined` (null carrier) omits
+  the property (does NOT recurse → avoids emitting the `"null"` literal). Array
+  arm: replacer applied per element. New `__json_stringify_root_replacer`.
+- `src/codegen/accessor-driver.ts` — `reserveReplacerDriver` + a fill arm
+  wrapping `__call_fn_method_2` (holder bound as `this`) — a clone of the PR-D1
+  reviver driver. `context/types.ts`: `replacerDriverReserved` flag.
+- `src/codegen/expressions/calls.ts` — routing: a *callable* replacer compiles
+  via `compileArrowAsClosure` (GC closure, NOT `__make_callback` — same env::
+  leak rationale as PR-D1); an *array literal* replacer builds the allowlist
+  `$Object` via `emitJsonReplacerAllowList` (String/Number elements → keys,
+  deduped). A non-callable/non-array 2nd arg keeps prior behaviour; a *dynamic*
+  space still refuses.
+
+Tests: `tests/issue-2166.test.ts` (+9 PR-D3 cases — number doubling, undefined
+omit, key passing, nested graph, array allowlist (flat + nested), indented form,
+no-replacer regression, `--target wasi` host-import-free). 79/79 in the suite
+green; the #1599 refuse + PR-A/B/C/D1/D2 suites are unaffected. Coercion gate
+ratcheted 8→7 (the array arm now computes the index key once). The one host-mode
+`json.test.ts` failure (`JSON.stringify(42)`→host-import) is pre-existing on the
+base — every PR-D3 change is gated on `ctx.standalone || ctx.wasi`.
+
+**Known limitations (out of D3 scope):**
+- Replacer **`this`-member access** (`function(){ return this.x }`) is the
+  pre-existing standalone-closure-`this` gap — the PR-D1 reviver path has the
+  identical gap (verified by probe). The driver binds `this` correctly via
+  `__current_this`; reading `this.<prop>` inside a standalone closure body is the
+  broader closure-`this` issue. A replacer that ignores `this` (the dominant
+  case) works.
+- A `number[]` array **value** nested in an object still doesn't serialise at all
+  (PR-A2 closed-vec limitation — `JSON.stringify({arr:[1,2]})` already yields
+  `{}` with no replacer), so the array-element replacer path is dormant until
+  PR-A2 routes `number[]` through the codec.
+- A replacer returning the **literal JS `null`** is omitted like `undefined`
+  (shared null carrier); the dominant `return undefined` drop-a-key case is
+  correct.
+
+### #2166 status: CLOSED
+All four slices of the #1599 Phase-2 dynamic JSON codec have landed: PR-A (#1653),
+PR-C (#1657), PR-C2 (#1658), PR-B (#1660), PR-D1 (#1665), PR-D2 (#1666), and
+PR-D3 (this PR). Standalone JSON now does dynamic object-graph stringify (compact
++ indented) + parse + round-trip + parsed-array indexing + reviver + toJSON
+(data-property forms) + function/array replacer, pure-Wasm and host-import-free
+under `--target standalone`/`wasi`. Residual method-lookup items (shorthand/class
+`toJSON`, instance-field stringify, closure-`this`, PR-A2 `number[]`) are tracked
+as separate architect-scale follow-ups.
