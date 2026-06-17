@@ -141,39 +141,40 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
   // ── number arm: format f64 (in L_NUM) per JSON rules → push ref $AnyString ─
   // NaN / +-Inf → "null"; everything else via number_toString (which already
   // renders -0 as "0" and integers without a trailing ".0").
-  const formatNumber: Instr[] = numToStrIdx === undefined
-    ? [...litStr("null")] // no formatter available → degrade to null
-    : [
-        // if (n != n) → "null"   (NaN)
-        { op: "local.get", index: L_NUM },
-        { op: "local.get", index: L_NUM },
-        { op: "f64.ne" },
-        {
-          op: "if",
-          blockType: { kind: "val", type: strRef },
-          then: [...litStr("null")],
-          else: [
-            // if (abs(n) == +Inf) → "null"
-            { op: "local.get", index: L_NUM },
-            { op: "f64.abs" },
-            { op: "f64.const", value: Infinity },
-            { op: "f64.eq" },
-            {
-              op: "if",
-              blockType: { kind: "val", type: strRef },
-              then: [...litStr("null")],
-              else: [
-                { op: "local.get", index: L_NUM },
-                { op: "call", funcIdx: numToStrIdx },
-                // number_toString returns externref ($NativeString widened) →
-                // bring back to a ref $AnyString for concat.
-                { op: "any.convert_extern" },
-                { op: "ref.cast", typeIdx: anyStrTypeIdx },
-              ],
-            },
-          ],
-        },
-      ];
+  const formatNumber: Instr[] =
+    numToStrIdx === undefined
+      ? [...litStr("null")] // no formatter available → degrade to null
+      : [
+          // if (n != n) → "null"   (NaN)
+          { op: "local.get", index: L_NUM },
+          { op: "local.get", index: L_NUM },
+          { op: "f64.ne" },
+          {
+            op: "if",
+            blockType: { kind: "val", type: strRef },
+            then: [...litStr("null")],
+            else: [
+              // if (abs(n) == +Inf) → "null"
+              { op: "local.get", index: L_NUM },
+              { op: "f64.abs" },
+              { op: "f64.const", value: Infinity },
+              { op: "f64.eq" },
+              {
+                op: "if",
+                blockType: { kind: "val", type: strRef },
+                then: [...litStr("null")],
+                else: [
+                  { op: "local.get", index: L_NUM },
+                  { op: "call", funcIdx: numToStrIdx },
+                  // number_toString returns externref ($NativeString widened) →
+                  // bring back to a ref $AnyString for concat.
+                  { op: "any.convert_extern" },
+                  { op: "ref.cast", typeIdx: anyStrTypeIdx },
+                ],
+              },
+            ],
+          },
+        ];
 
   // ── $AnyValue arm: discriminate by tag, leave a ref $AnyString on stack ────
   // tag 0/1 → "null" (undefined-as-value at this depth already became null);

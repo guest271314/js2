@@ -187,10 +187,7 @@ describe("#2166 — replacer / dynamic space still refuse (no silent wrong outpu
  * object property and closed typed-array (`number[]`) serialisation are a
  * follow-up sub-slice (PR-A2) — see the issue file.
  */
-async function stringifyDynamic(
-  build: string,
-  target: "standalone" | "wasi" = "standalone",
-): Promise<string> {
+async function stringifyDynamic(build: string, target: "standalone" | "wasi" = "standalone"): Promise<string> {
   const src =
     `function s(o: any): string { return JSON.stringify(o); }\n` +
     `let G: string = "";\n` +
