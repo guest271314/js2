@@ -1408,7 +1408,16 @@ export function tryCompileStandaloneStringReplace(
   const globalReplace = method === "replaceAll" || reHasGlobal;
 
   // String-method operand order: subject = receiver, regex = arg[0].
-  return emitStandaloneRegExpReplaceCore(ctx, fctx, expr, propAccess.expression, reExpr, replExpr, globalReplace, method);
+  return emitStandaloneRegExpReplaceCore(
+    ctx,
+    fctx,
+    expr,
+    propAccess.expression,
+    reExpr,
+    replExpr,
+    globalReplace,
+    method,
+  );
 }
 
 /**
@@ -1532,7 +1541,15 @@ export function tryCompileStandaloneStringSplit(
   const limitExpr = expr.arguments[1];
 
   // String-method operand order: subject = receiver, regex = arg[0].
-  return emitStandaloneRegExpSplitCore(ctx, fctx, expr, propAccess.expression, reExpr, limitExpr, "String.prototype.split");
+  return emitStandaloneRegExpSplitCore(
+    ctx,
+    fctx,
+    expr,
+    propAccess.expression,
+    reExpr,
+    limitExpr,
+    "String.prototype.split",
+  );
 }
 
 /**
