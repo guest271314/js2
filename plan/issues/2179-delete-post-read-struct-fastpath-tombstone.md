@@ -1,10 +1,12 @@
 ---
 id: 2179
 title: "post-delete struct READ returns stale value — inline struct.get fast-path bypasses the runtime tombstone"
-status: ready
+status: done
+completed: 2026-06-17
+assignee: sendev-closures
 sprint: 63
 created: 2026-06-16
-updated: 2026-06-16
+updated: 2026-06-17
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -105,3 +107,53 @@ Split from #2130 (Stage A `in`/hasOwnProperty fix is `done`). This is the
 codegen + representation-steering remainder. Coordinate the `moduleUsesDelete`
 pre-scan with any other delete-aware lowering. See #2130's `## Resolution`
 note and the architect addenda A6/A7 in #2130's Implementation Plan.
+
+## Resolution (2026-06-17 — A6 JS-host landed; A7 standalone split out)
+
+**A6 (JS-host) — implemented.** All JS-host read-path acceptance criteria pass.
+
+- **`moduleUsesDelete` pre-scan** (`src/codegen/index.ts` `sourceContainsDelete`,
+  set on `ctx.moduleUsesDelete`): true only when the module contains
+  `delete <PropertyAccess|ElementAccess>`. Delete-free modules keep the
+  byte-identical inline `ref.test`+`struct.get` fast-path (verified: a
+  delete-free `any` read still emits `struct.get`/`ref.test`); zero overhead.
+- **Read routing** (`src/codegen/property-access.ts` `tryEmitDeleteAwareDynamicGet`,
+  called at the top of `compilePropertyAccess`): when `moduleUsesDelete &&
+  !standalone` and the receiver is `any`/`unknown`, the read is lowered to
+  `__extern_get(obj, "prop") -> externref` instead of the inline struct.get
+  fast-path. Returning `externref` is load-bearing: a tombstoned key reads real
+  `undefined` (so `o.a === undefined` is no longer constant-folded — the prior
+  fold fired because the f64-typed field can never be undefined). Tightly
+  scoped: skips reserved accessors (`length`/`constructor`/`__proto__`/
+  `prototype`/`name`) and method/function-typed accesses, and never fires for
+  concrete (non-`any`) struct/class receivers.
+- **Runtime tombstone gates** (`src/runtime.ts`): the two `__extern_get`
+  bindings (the by-name `if (name === "__extern_get")` and the `case
+  "extern_get"` switch arm) each consulted the `__sget_<key>` struct-field
+  getter fallback **without** checking the tombstone, resurrecting the deleted
+  field even though `_safeGet` had already returned `undefined`. Added a
+  `_wasmStructDeletedKeys` check before the `__sget_<key>` fallback in both.
+  Also added the tombstone filter to `__object_keys`/`__object_values`/
+  `__object_entries` (the #2130 A4 enumeration gap) so `Object.keys(o)` /
+  `for..in` omit the deleted key.
+
+Acceptance criteria met (JS-host): `delete o.a; o.a` → `undefined`;
+`o.a === undefined` → `true`; `delete o.a; o.a = 5; o.a` → `5` and `"a" in o` →
+`true`; `Object.keys` / `for..in` omit the deleted key; delete-free modules emit
+byte-identical wasm (fast-path retained). Sibling reads, typed (non-`any`)
+receivers, and method dispatch on an `any` receiver in a delete-using module are
+unregressed. Tests: `tests/issue-2179.test.ts` (10 cases). Existing delete/keys
+suites green (42 tests across 6 files: `issue-2130-delete-in-presence`,
+`issue-1821-delete-struct-fastpath`, `issue-1364b-class-method-delete`,
+`issue-2131`, `issue-786-object-keys-dynamic`, `object-keys-values-entries`).
+Typecheck clean.
+
+**A7 (standalone) — split to follow-up #2186.** `__extern_get` is a JS host
+import, unavailable under `--target standalone`. The architect's answer
+(addendum A7) is **representation steering**: lower delete-touched object
+literals to the dynamic `$Object` representation (which already has spec-correct
+`FLAG_TOMBSTONE` tombstones + proto-walk `in` + insertion-order enumeration),
+NOT a wasm-side `(obj,key)` tombstone registry (WasmGC has no weak refs → would
+strongly retain every deleted-from object). This change gates on `!ctx.standalone`
+so standalone is unaffected (still compiles; keeps prior behavior). Tracked as
+#2186.
