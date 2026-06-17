@@ -12467,6 +12467,16 @@ function nativeStringVecTypeForStandaloneRegExp(ctx: CodegenContext): ValType | 
   return { kind: "ref_null", typeIdx: vecTypeIdx };
 }
 
+/** True for the computed key `Symbol.match` (the @@match well-known symbol). */
+function isSymbolMatchKeyForInference(arg: ts.Expression): boolean {
+  return (
+    ts.isPropertyAccessExpression(arg) &&
+    ts.isIdentifier(arg.expression) &&
+    arg.expression.text === "Symbol" &&
+    arg.name.text === "match"
+  );
+}
+
 function inferStandaloneRegExpMatchArrayType(
   ctx: CodegenContext,
   initializer: ts.Expression | undefined,
@@ -12474,28 +12484,47 @@ function inferStandaloneRegExpMatchArrayType(
   if (!ctx.standalone || !initializer) return null;
   const unwrapped = stripRegExpInferenceWrapper(initializer);
   if (!ts.isCallExpression(unwrapped)) return null;
-  if (!ts.isPropertyAccessExpression(unwrapped.expression)) return null;
-  const method = unwrapped.expression.name.text;
-  if (method === "exec") {
-    return isStaticRegExpExpressionForInference(ctx, unwrapped.expression.expression)
-      ? nativeStringVecTypeForStandaloneRegExp(ctx)
-      : null;
+  if (ts.isPropertyAccessExpression(unwrapped.expression)) {
+    const method = unwrapped.expression.name.text;
+    if (method === "exec") {
+      return isStaticRegExpExpressionForInference(ctx, unwrapped.expression.expression)
+        ? nativeStringVecTypeForStandaloneRegExp(ctx)
+        : null;
+    }
+    if (method === "match" && unwrapped.arguments.length === 1) {
+      return isStaticRegExpExpressionForInference(ctx, unwrapped.arguments[0]!)
+        ? nativeStringVecTypeForStandaloneRegExp(ctx)
+        : null;
+    }
+    return null;
   }
-  if (method === "match" && unwrapped.arguments.length === 1) {
-    return isStaticRegExpExpressionForInference(ctx, unwrapped.arguments[0]!)
-      ? nativeStringVecTypeForStandaloneRegExp(ctx)
-      : null;
+  // `re[Symbol.match](s)` (#2161) — symbol-protocol dual of `s.match(re)`.
+  if (ts.isElementAccessExpression(unwrapped.expression)) {
+    const elem = unwrapped.expression;
+    if (isSymbolMatchKeyForInference(elem.argumentExpression) && unwrapped.arguments.length === 1) {
+      return isStaticRegExpExpressionForInference(ctx, elem.expression)
+        ? nativeStringVecTypeForStandaloneRegExp(ctx)
+        : null;
+    }
   }
   return null;
 }
 
 function isStaticRegExpMatchArrayCallForImportScan(ctx: CodegenContext, call: ts.CallExpression): boolean {
   const callee = stripRegExpInferenceWrapper(call.expression);
-  if (!ts.isPropertyAccessExpression(callee)) return false;
-  const method = callee.name.text;
-  if (method === "exec") return isStaticRegExpExpressionForInference(ctx, callee.expression);
-  if (method === "match" && call.arguments.length === 1) {
-    return isStaticRegExpExpressionForInference(ctx, call.arguments[0]!);
+  if (ts.isPropertyAccessExpression(callee)) {
+    const method = callee.name.text;
+    if (method === "exec") return isStaticRegExpExpressionForInference(ctx, callee.expression);
+    if (method === "match" && call.arguments.length === 1) {
+      return isStaticRegExpExpressionForInference(ctx, call.arguments[0]!);
+    }
+    return false;
+  }
+  // `re[Symbol.match](s)` (#2161) — symbol-protocol dual of `s.match(re)`.
+  if (ts.isElementAccessExpression(callee)) {
+    if (isSymbolMatchKeyForInference(callee.argumentExpression) && call.arguments.length === 1) {
+      return isStaticRegExpExpressionForInference(ctx, callee.expression);
+    }
   }
   return false;
 }

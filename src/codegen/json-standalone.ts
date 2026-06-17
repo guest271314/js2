@@ -107,7 +107,20 @@ function staticJsonValue(ctx: CodegenContext, expr: ts.Expression, seen = new Se
     if (cur.text === "Infinity") return Infinity;
     if (cur.text === "undefined") return UNSUPPORTED;
     const init = constInitializerForIdentifier(ctx, cur);
-    if (init) return staticJsonValue(ctx, init, seen);
+    if (init) {
+      // #2166 soundness: a `const`-bound object/array is still MUTABLE in place
+      // (`const o = {}; o.x = f()`), so folding its *declaration* literal would
+      // silently drop later property/element assignments and emit wrong JSON
+      // (it produced `"{}"` for any runtime-built graph). Only follow an
+      // identifier to a PRIMITIVE const initializer; object/array bindings fall
+      // through to UNSUPPORTED, which routes them to the dynamic native codec
+      // (or, before PR-A, the Phase-1 refusal) instead of a wrong static fold.
+      const initUnwrapped = unwrapTransparentExpression(init);
+      if (ts.isObjectLiteralExpression(initUnwrapped) || ts.isArrayLiteralExpression(initUnwrapped)) {
+        return UNSUPPORTED;
+      }
+      return staticJsonValue(ctx, init, seen);
+    }
   }
 
   if (ts.isArrayLiteralExpression(cur)) {
