@@ -661,7 +661,15 @@ export function emitJsonParseText(ctx: CodegenContext): number {
   const strTypeIdx = ctx.nativeStrTypeIdx; // $NativeString { len, off, data }
   const strDataTypeIdx = ctx.nativeStrDataTypeIdx; // (array (mut i16))
   const anyStrTypeIdx = ctx.anyStrTypeIdx;
-  const anyValueTypeIdx = ctx.anyValueTypeIdx;
+  // Box parsed primitives into the SAME standalone boxed structs the object
+  // runtime + `__unbox_number` understand (`$__box_number_struct {value:f64}`,
+  // `$__box_boolean_struct {value:i32}`), NOT `$AnyValue`. A value stored into a
+  // `$Object` via `__extern_set` is read back via the property path, whose
+  // externref→number/boolean coercion only unboxes the `$__box_*` structs — an
+  // `$AnyValue` would read back as NaN/undefined. (Top-level primitive parse
+  // results unbox fine either way, but object/array members must use these.)
+  const boxNumTypeIdx = ctx.nativeBoxNumberTypeIdx;
+  const boxBoolTypeIdx = ctx.nativeBoxBooleanTypeIdx;
   const strDataRef: ValType = { kind: "ref", typeIdx: strDataTypeIdx };
   const strRefNative: ValType = { kind: "ref", typeIdx: strTypeIdx };
 
@@ -841,30 +849,18 @@ export function emitJsonParseText(ctx: CodegenContext): number {
     return out;
   };
 
-  // AnyValue box helpers
-  const boxNullAny: Instr[] = [
-    { op: "i32.const", value: 0 },
-    { op: "i32.const", value: 0 },
-    { op: "f64.const", value: 0 },
-    { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
-    { op: "ref.null.extern" },
-    { op: "struct.new", typeIdx: anyValueTypeIdx },
-  ];
+  // Primitive box helpers (leave an `anyref` on the stack). Numbers/booleans use
+  // the standalone boxed structs so object/array member reads unbox them; JSON
+  // `null` becomes a null eqref (reads back as `null`, distinct from a missing
+  // property which reads `undefined`).
+  const boxNullAny: Instr[] = [{ op: "ref.null", typeIdx: EQ_HEAP_TYPE }];
   const boxBoolAny = (v: number): Instr[] => [
-    { op: "i32.const", value: 4 },
     { op: "i32.const", value: v },
-    { op: "f64.const", value: 0 },
-    { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
-    { op: "ref.null.extern" },
-    { op: "struct.new", typeIdx: anyValueTypeIdx },
+    { op: "struct.new", typeIdx: boxBoolTypeIdx },
   ];
   const boxF64AnyFromLocal = (local: number): Instr[] => [
-    { op: "i32.const", value: 3 },
-    { op: "i32.const", value: 0 },
     { op: "local.get", index: local },
-    { op: "ref.null", typeIdx: EQ_HEAP_TYPE },
-    { op: "ref.null.extern" },
-    { op: "struct.new", typeIdx: anyValueTypeIdx },
+    { op: "struct.new", typeIdx: boxNumTypeIdx },
   ];
 
   // number parser (cursor at '-'/digit) → f64 in V_NUM; advances V_POS.
