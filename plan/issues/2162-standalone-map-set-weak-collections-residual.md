@@ -46,7 +46,7 @@ impact).
 Probed each collection in standalone (`target: standalone`). Findings:
 
 - **Map is already fully functional** in standalone — `new/set/get/has/
-  delete/size/clear` all return correct values when the result is read into a
+delete/size/clear` all return correct values when the result is read into a
   typed binding. The apparent Map failures in casual probing were
   `m.get(k) === <literal>` confounds (the `any === literal` boxed-compare gap,
   owned by value-rep #2104/#2106, not Map). No Map work needed for the core
@@ -78,20 +78,47 @@ host-import-free in standalone (~101+ tests). New
 `tryCompileNativeWeakMethodCall` (extern.ts); `WeakMap`/`WeakSet` resolve to
 `ref $Map` (index.ts); externClass skipped under `nativeStrings`. Weak
 collections have **no iteration and no `.size`** (spec), so none is wired. The
-*weak* (collectable) reference is not modelled — WasmGC has no weak refs, so
+_weak_ (collectable) reference is not modelled — WasmGC has no weak refs, so
 entries are strongly retained; a memory property, not observable (only WeakRef/
 FinalizationRegistry liveness, skip-filtered, could tell). Host/gc unchanged.
 **Verified** (`tests/issue-2162-standalone-weak.test.ts`, 6/6, `--target wasi`,
 zero `WeakMap_*`/`WeakSet_*`/`Map_*` imports): WeakMap set+get / has / distinct
 keys / overwrite / delete; WeakSet add+has / delete / chained add.
 
+## Slice — Map/Set `keys()`/`values()` + for-of iteration (this PR)
+
+`keys()` / `values()` and bare `for-of` over a native Map/Set now lower without
+a `Map_*`/`Set_*` host import. The projection is materialized eagerly into a
+**canonical externref `$Vec`** (mirroring the array `.values()`/`.keys()` path,
+`array-methods.ts`): a new `emitCollectionIteratorVec` (map-runtime.ts) walks the
+entries vector once, sizing the result to `liveCount` and skipping tombstones,
+and projects each live entry to its key (`keys`) or value (`values` — for a Set,
+key === value). The for-of array fast path then drives it, so `for (const v of
+m.values())`, `for (const k of m.keys())`, `for (const v of set)` and `[…]`
+indexing all work.
+
+**Latent bug fixed:** the `$Map` struct's `entries` field is a ref-to-array, so
+`getArrTypeIdxFromVec($Map)` returns a valid array index — which made
+`arrayIteratorReceiverForForOf` misidentify a native Map/Set as a plain vec and
+iterate its raw struct as garbage. `compileForOfStatement` now intercepts native
+collections (`compileForOfNativeCollection`) **before** the array-receiver
+detection.
+
+`Set.forEach` (the shared `tryCompileNativeCollectionForEach` helper, previously
+only wired for Map) is enabled here too.
+
+**Verified** (`tests/issue-2162-iterators.test.ts`, 7/7, `--target wasi`, zero
+`Map_*`/`Set_*` imports): Map/Set `keys()`/`values()` for-of, bare Set for-of,
+tombstone-skip, Set.forEach.
+
 ### Remaining slices (issue stays in-progress)
 
-- **Map.forEach** (PR #1527) and **Set.forEach** (follow-up) — entries-vector
-  drive over the callback closure.
-- `keys()`/`values()`/`entries()` + `for-of` over Map/Set — needs a JS-iterable
-  iterator object; `new Map(iterable)` / `new Set(iterable)` — needs
-  `__map_new_from_arr`.
+- **`entries()` `[k, v]`-pair iteration + value spread** (`[...map.values()]`) —
+  the `$ObjVec` pair / spread consumer needs the `__iterator` pair route, not the
+  array fast path. The `entries` projection builder is in place
+  (`emitCollectionIteratorVec`, `kind: "entries"`) but not yet wired to a
+  consumer. Tracked as a #2162 follow-up.
+- `new Map(iterable)` / `new Set(iterable)` — needs `__map_new_from_arr`.
 - ES2025 set-algebra: `union`/`intersection`/`difference`/
   `symmetricDifference`/`isSubsetOf`/`isSupersetOf`/`isDisjointFrom`.
 - The `Set === literal` / collection-of-`any` comparison confounds depend on the
