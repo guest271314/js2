@@ -86,6 +86,30 @@ export function getOrRegisterArrayType(ctx: CodegenContext, elemKind: string, el
 }
 
 /**
+ * (#2186) Get or register the shared `$__vec_base` supertype struct — a single
+ * `(length i32)` field that every concrete `__vec_<elemKind>` subtypes. This
+ * gives standalone runtime helpers a uniform `ref.test $__vec_base` /
+ * `ref.cast $__vec_base` → `struct.get 0` path to read a boxed array's length
+ * regardless of its element kind (the array-length-through-externref boundary
+ * fix). Declared open (`superTypeIdx: -1`) so vecs can extend it. Idempotent.
+ */
+export function getOrRegisterVecBaseType(ctx: CodegenContext): number {
+  if (ctx.vecBaseTypeIdx >= 0) return ctx.vecBaseTypeIdx;
+  const idx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: "__vec_base",
+    superTypeIdx: -1, // open / non-final — concrete vecs subtype this
+    fields: [{ name: "length", type: { kind: "i32" }, mutable: true }],
+  });
+  ctx.vecBaseTypeIdx = idx;
+  ctx.structMap.set("__vec_base", idx);
+  ctx.typeIdxToStructName.set(idx, "__vec_base");
+  ctx.structFields.set("__vec_base", [{ name: "length", type: { kind: "i32" as const }, mutable: true }]);
+  return idx;
+}
+
+/**
  * Get or register a vec struct type wrapping a Wasm GC array.
  * The vec struct has {length: i32, data: (ref $__arr_<elemKind>)}.
  */
@@ -93,11 +117,20 @@ export function getOrRegisterVecType(ctx: CodegenContext, elemKind: string, elem
   const existing = ctx.vecTypeMap.get(elemKind);
   if (existing !== undefined) return existing;
 
+  // (#2186) Ensure the shared `$__vec_base` length supertype exists before
+  // registering any concrete vec. Every `__vec_<elemKind>` subtypes it so a
+  // boxed array externref can be `ref.test`/`ref.cast`-ed to read `.length`
+  // uniformly (the `__extern_length` `$__vec_base` arm). `length` (i32) is field
+  // 0 of every vec, a valid struct-subtype prefix. The base is `superTypeIdx:-1`
+  // (open / non-final) so vecs may extend it.
+  const vecBaseIdx = getOrRegisterVecBaseType(ctx);
+
   const arrTypeIdx = getOrRegisterArrayType(ctx, elemKind, elemTypeOverride);
   const vecIdx = ctx.mod.types.length;
   ctx.mod.types.push({
     kind: "struct",
     name: `__vec_${elemKind}`,
+    superTypeIdx: vecBaseIdx,
     fields: [
       { name: "length", type: { kind: "i32" }, mutable: true },
       {
