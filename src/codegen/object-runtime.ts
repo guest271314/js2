@@ -6415,46 +6415,42 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
   for (const { typeIdx, arrTypeIdx, elemType } of carriers) {
     const boxOps = boxVecElementToExternref(ctx, elemType);
     if (boxOps === null) continue; // unsupported element kind — leave to null fallback
-    vecArms.push(
-      { op: "local.get", index: 2 },
-      { op: "ref.test", typeIdx },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [
-          // i = trunc_sat(idx) ; if i < 0 → null
-          { op: "local.get", index: 1 },
-          { op: "i32.trunc_sat_f64_s" },
-          { op: "local.tee", index: 4 },
-          { op: "i32.const", value: 0 },
-          { op: "i32.lt_s" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [{ op: "ref.null.extern" }, { op: "return" }],
-          } as Instr,
-          // if i >= vec.length → null
-          { op: "local.get", index: 4 },
-          { op: "local.get", index: 2 },
-          { op: "ref.cast", typeIdx },
-          { op: "struct.get", typeIdx, fieldIdx: 0 },
-          { op: "i32.ge_s" },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [{ op: "ref.null.extern" }, { op: "return" }],
-          } as Instr,
-          // return box(vec.data[i])
-          { op: "local.get", index: 2 },
-          { op: "ref.cast", typeIdx },
-          { op: "struct.get", typeIdx, fieldIdx: 1 },
-          { op: "local.get", index: 4 },
-          { op: "array.get", typeIdx: arrTypeIdx },
-          ...boxOps,
-          { op: "return" },
-        ],
-      } as Instr,
-    );
+    vecArms.push({ op: "local.get", index: 2 }, { op: "ref.test", typeIdx }, {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        // i = trunc_sat(idx) ; if i < 0 → null
+        { op: "local.get", index: 1 },
+        { op: "i32.trunc_sat_f64_s" },
+        { op: "local.tee", index: 4 },
+        { op: "i32.const", value: 0 },
+        { op: "i32.lt_s" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "ref.null.extern" }, { op: "return" }],
+        } as Instr,
+        // if i >= vec.length → null
+        { op: "local.get", index: 4 },
+        { op: "local.get", index: 2 },
+        { op: "ref.cast", typeIdx },
+        { op: "struct.get", typeIdx, fieldIdx: 0 },
+        { op: "i32.ge_s" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "ref.null.extern" }, { op: "return" }],
+        } as Instr,
+        // return box(vec.data[i])
+        { op: "local.get", index: 2 },
+        { op: "ref.cast", typeIdx },
+        { op: "struct.get", typeIdx, fieldIdx: 1 },
+        { op: "local.get", index: 4 },
+        { op: "array.get", typeIdx: arrTypeIdx },
+        ...boxOps,
+        { op: "return" },
+      ],
+    } as Instr);
   }
 
   fn.body = buildExternGetIdxBody({
