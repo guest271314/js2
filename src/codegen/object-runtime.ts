@@ -391,6 +391,89 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
   const strEqualsIdx = ctx.nativeStrHelpers.get("__str_equals")!;
 
+  // ── __to_property_key(externref key) -> externref (#2042 S1) ──────────────
+  //
+  // Central ToPropertyKey-style coercion for the string-keyed `$Object` runtime.
+  // The downstream `ref.cast $AnyString` in `__obj_hash` / `__obj_find` traps
+  // (`illegal cast [in __obj_find()]`) for any non-string key — every computed
+  // numeric access (`o[0]`, `Reflect.get(o, 1)`, descriptor reflection) feeds a
+  // boxed number straight into that cast. Coercing once here, at the top of both
+  // hash + find, makes the cast always safe without patching each public entry
+  // (`__extern_get`/`_set`/`_has`/`__getOwnPropertyDescriptor`/`__delete_property`).
+  //
+  //   - already an `$AnyString` (cons or flat) → return unchanged (fast path).
+  //   - a boxed number → `number_toString(__unbox_number(key))` → canonical
+  //     decimal `$NativeString` ("0"/"1.5"/"-0"→"0" per §6.1.6.1.20), matching
+  //     `{0:x}` literal-key storage and host behaviour.
+  //   - else (Symbol / opaque) → return unchanged: the downstream behaviour is
+  //     unchanged for those keys (no NEW trap introduced), while the dominant
+  //     numeric + string cases are fixed. Symbol keys under the string-keyed
+  //     runtime stay a separate concern (#1472 Phase B refusal at compile time).
+  //
+  // standalone-only: in gc/host mode the host `__extern_*` JS imports own these
+  // paths and ToPropertyKey the key themselves, so registering this helper there
+  // would only shift funcMap indices — host output stays byte-identical.
+  if (ctx.standalone) {
+    const numToStringIdx = ctx.funcMap.get("number_toString")!;
+    const unboxNumberIdx = ctx.funcMap.get("__unbox_number")!;
+    const boxNumTypeIdx = ctx.nativeBoxNumberTypeIdx;
+    const tpkBody: Instr[] = [
+      // any = any.convert_extern(key)
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      // if (ref.test $AnyString any) return key unchanged
+      { op: "ref.test", typeIdx: anyStrTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      // else if (boxed number) return number_toString(__unbox_number(key))
+      ...(boxNumTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: boxNumTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 0 },
+                { op: "call", funcIdx: unboxNumberIdx },
+                { op: "call", funcIdx: numToStringIdx },
+                { op: "return" },
+              ],
+            },
+          ] as Instr[])
+        : []),
+      // else return key unchanged (Symbol / opaque — preserve existing behaviour)
+      { op: "local.get", index: 0 },
+    ];
+    registerNative(
+      "__to_property_key",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [{ name: "any", type: { kind: "anyref" } }],
+      tpkBody,
+    );
+  }
+  const toPropertyKeyIdx = ctx.funcMap.get("__to_property_key");
+
+  // Prepend, in standalone mode, a guarded ToPropertyKey coercion to a key-taking
+  // helper body so its downstream `ref.cast $AnyString` is always safe. No-op in
+  // gc/host mode (the host imports own the path → byte-identical output).
+  // The coercion is itself guarded (`__to_property_key` fast-returns an
+  // already-$AnyString key) so the common string-key path pays one `ref.test`.
+  const withKeyCoercion = (keyParamIdx: number, body: Instr[]): Instr[] =>
+    toPropertyKeyIdx === undefined
+      ? body
+      : [
+          { op: "local.get", index: keyParamIdx } as Instr,
+          { op: "call", funcIdx: toPropertyKeyIdx } as Instr,
+          { op: "local.set", index: keyParamIdx } as Instr,
+          ...body,
+        ];
+
   // ── $__obj_hash(externref key) -> i32 ────────────────────────────────────
   //
   // FNV-1a over the UTF-16 code units of the flattened string. The key is an
@@ -473,7 +556,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "i", type: { kind: "i32" } },
         { name: "h", type: { kind: "i32" } },
       ],
-      body,
+      // #2042 S1 — coerce a non-string key (boxed number) to its canonical
+      // string before the FNV walk's `ref.cast $AnyString`. key is param 0.
+      withKeyCoercion(0, body),
     );
   }
   const objHashIdx = ctx.funcMap.get("__obj_hash")!;
@@ -600,7 +685,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "e", type: entryRefNull },
         { name: "fkey", type: nativeStrRef },
       ],
-      body,
+      // #2042 S1 — coerce a non-string key (boxed number) to its canonical
+      // string before the `ref.cast $AnyString` flatten + the inner __obj_hash
+      // call. key is param 1 (param 0 is the $Object). The inner __obj_hash
+      // re-coercion is idempotent (the key is now an $AnyString → fast-return).
+      withKeyCoercion(1, body),
     );
   }
   const objFindIdx = ctx.funcMap.get("__obj_find")!;
@@ -886,7 +975,12 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "fkey", type: nativeStrRef },
         { name: "keyStr", type: anyStrRef },
       ],
-      body,
+      // #2042 S1 — coerce a non-string key (boxed number) to its canonical
+      // string before the `ref.cast $AnyString` that both flattens it for the
+      // probe AND is stored into `$PropEntry.key`. So `o[0] = v` stores key "0"
+      // (matching the literal `{0:v}` path and the find-side coercion). key is
+      // param 1; the inner __obj_hash re-coercion is idempotent.
+      withKeyCoercion(1, body),
     );
   }
   const objInsertIdx = ctx.funcMap.get("__obj_insert")!;
