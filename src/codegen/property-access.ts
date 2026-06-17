@@ -1839,8 +1839,7 @@ export function compilePropertyAccess(
         isBuiltinTypeName(lhsTsName) &&
         isWasiErrorName(lhsTsName) &&
         isBuiltinSubtype(lhsTsName, "Error")) ||
-      (lhsUserErrorParent !== undefined &&
-        (lhsUserErrorParent === "Error" || isWasiErrorName(lhsUserErrorParent)));
+      (lhsUserErrorParent !== undefined && (lhsUserErrorParent === "Error" || isWasiErrorName(lhsUserErrorParent)));
     // #2077: a `catch (e)` binding is typed `any` (or `unknown`), so the static
     // `isErrorLhs` gate above never fires even though the caught value IS the
     // `$Error` struct at runtime — the field read then fell through to the

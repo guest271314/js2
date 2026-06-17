@@ -1123,7 +1123,12 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
     if (bp && (bp === "Error" || isWasiErrorName(bp))) userErrorParent = bp;
   }
 
-  if (ts.isIdentifier(expr.right) && !isBuiltinTypeName(ctorName) && identifierHasSourceDeclaration(ctx, expr.right) && userErrorParent === undefined) {
+  if (
+    ts.isIdentifier(expr.right) &&
+    !isBuiltinTypeName(ctorName) &&
+    identifierHasSourceDeclaration(ctx, expr.right) &&
+    userErrorParent === undefined
+  ) {
     return emitDynamicInstanceOf(ctx, fctx, expr);
   }
 
