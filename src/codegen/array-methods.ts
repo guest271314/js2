@@ -476,6 +476,33 @@ const ARRAY_LIKE_METHOD_SET = new Set([
 const ARRAY_LIKE_SEARCH_METHODS = new Set(["indexOf", "lastIndexOf", "includes"]);
 
 /**
+ * #2036 S6 step 1 — Array.prototype methods that, over a borrowed array-like
+ * (`$Object`) receiver, have **no working standalone native path** yet and emit
+ * invalid Wasm / leak host imports under `--target standalone`:
+ *   - search methods (`indexOf`/`lastIndexOf`/`includes`) leak `__host_eq` /
+ *     `__same_value_zero` and mistype a loop local (the `local.set expected f64,
+ *     found call externref` binary-emitter bug — #2036 root cause), and
+ *   - result-building methods (`filter`/`map`/`reduce`/`reduceRight`) leak the
+ *     host `__js_array_new` / `__js_array_push` builders.
+ * In standalone these route to a LOUD refusal (mirroring the existing
+ * `#1888 Slice 3/4` Array-brand refusal in calls.ts) instead of producing a
+ * broken module or a silent-wrong `-1`. The callback-iteration methods
+ * (`forEach`/`some`/`every`/`find`/`findIndex`) were taught a native `$Object`
+ * arm in #2036 PR-1 and keep working — they are intentionally NOT in this set.
+ * Step 2 (the real generic arm + the binary-emitter local-type fix) is
+ * senior/infra; this set is removed entry-by-entry as those native paths land.
+ */
+const STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS = new Set([
+  "indexOf",
+  "lastIndexOf",
+  "includes",
+  "filter",
+  "map",
+  "reduce",
+  "reduceRight",
+]);
+
+/**
  * Compile Array.prototype.METHOD.call(anyReceiver, callback, ...args) for any-typed receivers.
  * Uses __extern_length + __extern_get_idx to iterate and call_ref for Wasm closure callbacks.
  * Only handles callbacks that compile to Wasm closures (arrow functions, function declarations).
@@ -536,6 +563,32 @@ export function compileArrayLikePrototypeCall(
         }
       }
     }
+  }
+
+  // #2036 S6 step 1 — stop the invalid-Wasm / host-import-leak bleed in
+  // standalone. The receiver here is a borrowed array-like `$Object` (real
+  // `__vec_`/`__arr_` arrays already returned `undefined` above and take the
+  // dedicated native path). The search (`indexOf`/`lastIndexOf`/`includes`) and
+  // result-building (`filter`/`map`/`reduce`/`reduceRight`) arms below leak host
+  // imports (`__host_eq`/`__same_value_zero`, `__js_array_new`/`__js_array_push`)
+  // and trip the binary-emitter local-type bug under `--target standalone`/`wasi`
+  // — producing a module that fails to instantiate or returns a silent-wrong
+  // value. Per the #1888 dual-mode invariant ("any uncertainty ⇒ fail loud,
+  // never invalid Wasm"), refuse loudly instead. The callback-iteration methods
+  // (`forEach`/`some`/`every`/`find`/`findIndex`) have a working native `$Object`
+  // arm (#2036 PR-1) and fall through unaffected. Host/gc mode is untouched
+  // (gated on standalone||wasi). Step 2 (real generic arm + emitter fix) removes
+  // entries from this set as native paths land.
+  if ((ctx.standalone || ctx.wasi) && STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS.has(methodName)) {
+    reportError(
+      ctx,
+      callExpr,
+      `Codegen error: Array.prototype.${methodName}.call(...) over an array-like (non-array) receiver is not yet ` +
+        `supported in --target standalone (#2036 S6) — the generic $Object arm for this method is not native yet ` +
+        `(it would leak a host import / emit invalid Wasm). Recompile without --target standalone, or call ` +
+        `${methodName} directly on a real Array.`,
+    );
+    return null;
   }
 
   // Bail out if the call site is inside `assert_throws(...)` (test262 rewrites
