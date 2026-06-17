@@ -72,7 +72,7 @@ import {
   tryEmitJsonStringifyStatic,
 } from "../json-standalone.js";
 import { emitJsonParsePrimitive, emitJsonQuoteString } from "../json-runtime.js";
-import { emitJsonParseText, emitJsonStringifyValue } from "../json-codec-native.js";
+import { emitJsonParseText, emitJsonParseTextReviver, emitJsonStringifyValue } from "../json-codec-native.js";
 import {
   compileObjectDefineProperties,
   compileObjectDefineProperty,
@@ -6068,9 +6068,14 @@ function compileCallExpression(
           }
         }
         if (method === "parse" && (ctx.standalone || ctx.wasi)) {
-          const parsedType = tryEmitJsonParseLiteral(ctx, fctx, expr);
-          if (parsedType !== undefined) {
-            return parsedType;
+          // (#2166 PR-D1) The static-literal fold ignores a reviver — skip it
+          // when a 2nd arg is present so `JSON.parse('5', reviver)` runs the
+          // reviver walk instead of folding to the bare parsed value.
+          if (expr.arguments.length < 2) {
+            const parsedType = tryEmitJsonParseLiteral(ctx, fctx, expr);
+            if (parsedType !== undefined) {
+              return parsedType;
+            }
           }
           // (#2166 PR-C) Dynamic-graph JSON.parse: a runtime JSON *text* →
           // object / array / string / primitive value, parsed entirely in Wasm
@@ -6083,9 +6088,9 @@ function compileCallExpression(
           // number / true / false / null and *traps* on `{`/`[`/`"` — so it
           // takes over the whole runtime-string case (the primitive helper
           // stays for any caller that still routes to it directly). A `reviver`
-          // (2nd arg) is deferred to PR-D: refuse it rather than silently ignore
-          // it (§25.5.1 InternalizeJSONProperty is a post-parse walk).
-          if (expr.arguments.length === 1) {
+          // (#2166 PR-D1) A `reviver` (2nd arg) routes to the reviver codec when
+          // it is a function; a non-function 2nd arg keeps the refusal below.
+          if (expr.arguments.length === 1 || expr.arguments.length === 2) {
             let parseArgType: ts.Type | undefined;
             try {
               parseArgType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
@@ -6099,11 +6104,53 @@ function compileCallExpression(
             const isStringOrAny =
               parseArgType === undefined ||
               (parseArgType.flags & (ts.TypeFlags.StringLike | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+            // A reviver is honoured only when it is callable (has call
+            // signatures). A null / undefined / any other non-callable 2nd arg
+            // is simply IGNORED per §25.5.1 (the reviver step is IsCallable-
+            // gated) — route through the plain parse path, never refuse. This
+            // matches the host JSON.parse behaviour for a non-function reviver.
+            const reviverArg = expr.arguments[1];
+            let reviverCallable = false;
+            if (reviverArg !== undefined) {
+              try {
+                reviverCallable = ctx.checker.getTypeAtLocation(reviverArg).getCallSignatures().length > 0;
+              } catch {
+                reviverCallable = false;
+              }
+            }
             if (isStringOrAny) {
               const argResult = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
               if (argResult === null) return null;
               if (argResult.kind !== "externref") {
                 coerceType(ctx, fctx, argResult, { kind: "externref" });
+              }
+              if (reviverCallable) {
+                // text already on the stack as externref; push the reviver as a
+                // GC closure widened to externref. CRITICAL: compile the closure
+                // via the GC-struct path (`compileArrowAsClosure`), NOT
+                // `compileExpression(..., externref)` — the latter routes an
+                // inline arrow at this non-user call site through the host
+                // `__make_callback` bridge (an `env::` import that breaks
+                // standalone and whose JS wrapper fails the `__call_fn_method_2`
+                // ref.cast). The driver consumes the GC closure as externref via
+                // extern.convert_any.
+                const revResult =
+                  ts.isArrowFunction(reviverArg!) || ts.isFunctionExpression(reviverArg!)
+                    ? compileArrowAsClosure(ctx, fctx, reviverArg!)
+                    : compileExpression(ctx, fctx, reviverArg!, { kind: "anyref" });
+                if (revResult === null) return null;
+                if (revResult.kind === "ref" || revResult.kind === "ref_null" || revResult.kind === "anyref") {
+                  fctx.body.push({ op: "extern.convert_any" } as Instr);
+                } else if (revResult.kind !== "externref") {
+                  coerceType(ctx, fctx, revResult, { kind: "externref" });
+                }
+                emitJsonParseTextReviver(ctx);
+                flushLateImportShifts(ctx, fctx);
+                fctx.body.push({
+                  op: "call",
+                  funcIdx: ctx.funcMap.get("__json_parse_text_reviver")!,
+                } as Instr);
+                return { kind: "anyref" };
               }
               emitJsonParseText(ctx);
               flushLateImportShifts(ctx, fctx);

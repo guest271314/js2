@@ -42,6 +42,11 @@ import { addFuncType } from "./registry/types.js";
 export const CALL_ACCESSOR_GET = "__call_accessor_get";
 /** Reserved name for the accessor-set driver (arity-1 setter wrapper). */
 export const CALL_ACCESSOR_SET = "__call_accessor_set";
+/**
+ * (#2166 PR-D1) Reserved name for the JSON reviver driver (arity-2 method
+ * wrapper: `reviver.call(holder, key, value)`).
+ */
+export const CALL_REVIVER = "__call_reviver";
 
 /**
  * Reserve the `__call_accessor_get` driver placeholder and return its funcIdx.
@@ -114,6 +119,46 @@ export function reserveAccessorSetDriver(ctx: CodegenContext): number {
 }
 
 /**
+ * (#2166 PR-D1) Reserve the `__call_reviver` driver placeholder and return its
+ * funcIdx.
+ *
+ * Signature: `(externref holder, externref key, externref value) -> externref`.
+ * Filled by `fillAccessorDrivers` to wrap `__call_fn_method_2(holder, reviver,
+ * key, value)` — but note the reviver closure itself is NOT a driver param: the
+ * §25.5.1 walk threads it separately and the driver receives `holder` as the
+ * `this` and `key`/`value` as the two reviver args, with the reviver closure
+ * passed as the dispatcher's 2nd operand by the codec via a 4th hidden param.
+ * To keep the driver arity fixed we instead make the reviver the FIRST arg and
+ * holder the receiver: see `fillAccessorDrivers`. Idempotent.
+ */
+export function reserveReviverDriver(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get(CALL_REVIVER);
+  if (existing !== undefined) return existing;
+  // (holder, reviver, key, value) -> externref. holder is bound as `this`.
+  const sigIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+    "$call_reviver_type",
+  );
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const placeholder: WasmFunction = {
+    name: CALL_REVIVER,
+    typeIdx: sigIdx,
+    // Placeholder; filled by fillAccessorDrivers once __call_fn_method_2 exists.
+    // A bare `unreachable` keeps the stub valid (externref result) if the fill
+    // is skipped (no arity-2 closure ⇒ no reviver could have been passed).
+    locals: [],
+    body: [{ op: "unreachable" } as Instr],
+    exported: false,
+  };
+  ctx.mod.functions.push(placeholder);
+  ctx.funcMap.set(CALL_REVIVER, funcIdx);
+  ctx.reviverDriverReserved = true;
+  return funcIdx;
+}
+
+/**
  * Fill the reserved accessor driver bodies in post-processing, AFTER
  * `emitClosureMethodCallExportN(0)` / `(1)` have registered
  * `__call_fn_method_0` / `__call_fn_method_1` in `funcMap`. Each driver is a
@@ -176,6 +221,33 @@ export function fillAccessorDrivers(ctx: CodegenContext): void {
             // __call_fn_method_1 returns an externref result; the setter's
             // return value is discarded per §10.1.5.3 (Set ignores it).
             { op: "drop" } as Instr,
+          ];
+        }
+      }
+    }
+  }
+
+  // (#2166 PR-D1) JSON reviver driver: holder bound as `this`, key+value the two
+  // reviver args. Wraps __call_fn_method_2(holder, reviver, key, value).
+  if (ctx.reviverDriverReserved) {
+    const driverIdx = ctx.funcMap.get(CALL_REVIVER);
+    if (driverIdx !== undefined) {
+      const driverFn = ctx.mod.functions[driverIdx - ctx.numImportFuncs];
+      if (driverFn) {
+        const callMethod2 = ctx.funcMap.get("__call_fn_method_2");
+        if (callMethod2 === undefined) {
+          // No arity-2 closure dispatcher ⇒ no reviver closure could have been
+          // passed; the driver is unreachable from any live walk. Keep a valid
+          // identity body: return the value arg unchanged (externref result).
+          driverFn.body = [{ op: "local.get", index: 3 } as Instr];
+        } else {
+          driverFn.body = [
+            { op: "local.get", index: 0 } as Instr, // holder (bound as `this`)
+            { op: "local.get", index: 1 } as Instr, // reviver closure
+            { op: "local.get", index: 2 } as Instr, // key (arg0)
+            { op: "local.get", index: 3 } as Instr, // value (arg1)
+            { op: "call", funcIdx: callMethod2 } as Instr,
+            // result (reviver's return, externref) is this driver's result
           ];
         }
       }
