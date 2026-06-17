@@ -67,7 +67,7 @@ import {
 } from "../literals.js";
 import { tryEmitJsonParseLiteral, tryEmitJsonStringifyStatic } from "../json-standalone.js";
 import { emitJsonParsePrimitive, emitJsonQuoteString } from "../json-runtime.js";
-import { emitJsonStringifyValue } from "../json-codec-native.js";
+import { emitJsonParseText, emitJsonStringifyValue } from "../json-codec-native.js";
 import {
   compileObjectDefineProperties,
   compileObjectDefineProperty,
@@ -6047,14 +6047,51 @@ function compileCallExpression(
           if (parsedType !== undefined) {
             return parsedType;
           }
-          // (#1599 Phase 2) Runtime string-value JSON.parse → primitive slice
-          // (number / true / false / null) via pure-Wasm helper, boxed as
-          // $AnyValue. Strings / objects / arrays still fall through to refusal.
-          const primitiveParsed = tryEmitJsonParsePrimitive(ctx, fctx, expr, expr.arguments[0]!);
-          if (primitiveParsed !== undefined) {
-            return primitiveParsed;
+          // (#2166 PR-C) Dynamic-graph JSON.parse: a runtime JSON *text* →
+          // object / array / string / primitive value, parsed entirely in Wasm
+          // (no `env::JSON_parse` host import). The full recursive-descent
+          // grammar in json-codec-native.ts (`__json_parse_text`) builds the
+          // SAME value rep the object runtime + stringify codec consume, so a
+          // round-trip `JSON.parse(JSON.stringify(o))` and downstream property
+          // reads work. It is a strict superset of the older primitive-only
+          // `__json_parse_primitive` slice — which could only parse a lone
+          // number / true / false / null and *traps* on `{`/`[`/`"` — so it
+          // takes over the whole runtime-string case (the primitive helper
+          // stays for any caller that still routes to it directly). A `reviver`
+          // (2nd arg) is deferred to PR-D: refuse it rather than silently ignore
+          // it (§25.5.1 InternalizeJSONProperty is a post-parse walk).
+          if (expr.arguments.length === 1) {
+            let parseArgType: ts.Type | undefined;
+            try {
+              parseArgType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
+            } catch {
+              parseArgType = undefined;
+            }
+            // Route string-typed and `any`/`unknown`-typed (the common
+            // `JSON.parse(text)` where `text: string`) arguments. A non-string
+            // statically-typed arg (e.g. a number) is a type error in user code;
+            // let it fall through to the refusal below.
+            const isStringOrAny =
+              parseArgType === undefined ||
+              (parseArgType.flags & (ts.TypeFlags.StringLike | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+            if (isStringOrAny) {
+              const argResult = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+              if (argResult === null) return null;
+              if (argResult.kind !== "externref") {
+                coerceType(ctx, fctx, argResult, { kind: "externref" });
+              }
+              emitJsonParseText(ctx);
+              flushLateImportShifts(ctx, fctx);
+              fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_parse_text")! } as Instr);
+              // The codec returns the value graph as anyref ($Object/$ObjVec/
+              // $NativeString widened, or a ref $AnyValue for primitives). The
+              // downstream coercion paths (object property read, AnyValue→
+              // primitive) dispatch on the concrete ref via ref.test.
+              return { kind: "anyref" };
+            }
           }
         }
+        void tryEmitJsonParsePrimitive;
         // (#1599 Phase 1) Refuse-and-document: in standalone (no-JS-host) /
         // WASI mode there is no `env::JSON_*` host import to fall back to.
         // The primitive `JSON.stringify` slice above (#1324) already handles
