@@ -211,3 +211,45 @@ non-configurable own property → TypeError) deferred to the invariant slice.
 Remaining traps: B=ownKeys+getOwnPropertyDescriptor · C=getPrototypeOf+
 setPrototypeOf · D=isExtensible+preventExtensions+defineProperty · E=§10.5
 invariants + construct/apply.
+
+## Implementation — Slice B: getOwnPropertyDescriptor (sdev-proxy3, 2026-06-17)
+
+Wires the **getOwnPropertyDescriptor** trap (§10.5.5 [[GetOwnProperty]]) into the
+standalone meta-object protocol, stacked on Slice A. `$ProxyTraps` +field
+`getOwnPropertyDescriptor` (index 5). `__proxy_gopd_dispatch` built by the
+shared `buildDispatch` helper as a 2-arg trap (handler, trap, target, key) like
+has/delete, but the trap-absent forward returns the descriptor externref
+directly (no boolean boxing), like get. A `ref.test $Proxy` front-guard on the
+native `__getOwnPropertyDescriptor` helper covers
+`Object.getOwnPropertyDescriptor` and `Reflect.getOwnPropertyDescriptor` on
+dynamic receivers. Absent trap forwards to the ordinary [[GetOwnProperty]].
+§10.5.5 result-invariants (trap must return Object|undefined; non-configurable /
+non-extensible consistency) deferred to the invariant slice.
+`tests/issue-1355b.test.ts` (6 tests).
+
+## Implementation — Slice C: getPrototypeOf + setPrototypeOf (sdev-proxy3, 2026-06-17)
+
+Wires the **getPrototypeOf** (§10.5.1) and **setPrototypeOf** (§10.5.2) traps,
+stacked on Slice B. `$ProxyTraps` +fields `getPrototypeOf` (6),
+`setPrototypeOf` (7). These traps take no property key, so they don't fit the
+key-centric `buildDispatch`; a parallel `buildProtoDispatch` builds their bodies
+(getPrototypeOf forwards `__getPrototypeOf(target)` / trap`(handler, target)`;
+setPrototypeOf forwards `__object_setPrototypeOf(target, proto)` dropping its
+result and pushing the proxy as a truthy success token / trap`(handler, target,
+proto)`). `ref.test $Proxy` front-guards on `__getPrototypeOf` and
+`__object_setPrototypeOf` cover `Object.getPrototypeOf`/`setPrototypeOf` and the
+`Reflect.*` equivalents; the dispatch returns the trap result externref directly
+(no coercion-vocabulary site added). Absent traps forward to the target's
+ordinary internal method (verified value-based: prototype field readable through
+the proxy identically to the plain target — note standalone prototype-object
+`===` identity is a separate pre-existing limitation, independent of Proxy).
+§10.5.1/2 non-extensible-target result-invariants deferred to the invariant
+slice. `tests/issue-1355c.test.ts` (9 tests).
+
+### Slice sequencing note (stacked branches)
+A→B→C are stacked: each branch bases on the previous so the `$ProxyTraps` field
+appends stack textually (get/set/has/apply/deleteProperty/
+getOwnPropertyDescriptor/getPrototypeOf/setPrototypeOf) without merge conflicts.
+PRs are landed in order; each subsequent PR's diff narrows once its parent
+merges. Remaining: D=isExtensible+preventExtensions+defineProperty · E=§10.5
+result-invariants + construct/apply.

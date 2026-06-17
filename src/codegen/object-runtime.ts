@@ -316,6 +316,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { name: "deleteProperty", type: { kind: "externref" }, mutable: false },
       // (#1355 Slice B) getOwnPropertyDescriptor — field index 5.
       { name: "getOwnPropertyDescriptor", type: { kind: "externref" }, mutable: false },
+      // (#1355 Slice C) getPrototypeOf — field index 6.
+      { name: "getPrototypeOf", type: { kind: "externref" }, mutable: false },
+      // (#1355 Slice C) setPrototypeOf — field index 7.
+      { name: "setPrototypeOf", type: { kind: "externref" }, mutable: false },
     ],
   });
 
@@ -4950,6 +4954,8 @@ const PROXY_CALL_SET = "__proxy_call_set";
 const PROXY_CALL_HAS = "__proxy_call_has";
 const PROXY_CALL_DELETE = "__proxy_call_delete"; // (#1355 Slice A)
 const PROXY_CALL_GOPD = "__proxy_call_gopd"; // (#1355 Slice B) getOwnPropertyDescriptor
+const PROXY_CALL_GPO = "__proxy_call_gpo"; // (#1355 Slice C) getPrototypeOf
+const PROXY_CALL_SPO = "__proxy_call_spo"; // (#1355 Slice C) setPrototypeOf
 
 /**
  * (#1100) Standalone Proxy meta-object dispatch runtime — Phase 1.
@@ -5042,6 +5048,8 @@ function ensureProxyRuntime(
   const TRAP_HAS = 2;
   const TRAP_DELETE = 4; // (#1355 Slice A)
   const TRAP_GOPD = 5; // (#1355 Slice B) getOwnPropertyDescriptor
+  const TRAP_GPO = 6; // (#1355 Slice C) getPrototypeOf
+  const TRAP_SPO = 7; // (#1355 Slice C) setPrototypeOf
 
   // ── Reserve the trap-invoke driver placeholders (filled by fillProxyDispatch) ──
   //
@@ -5080,6 +5088,12 @@ function ensureProxyRuntime(
   // (handler, trap, target, key) → __call_fn_method_2 (§10.5.5 step 8
   // `Call(trap, handler, «target, P»)`). Returns the trap's descriptor externref.
   const callGopdIdx = reserveDriver(PROXY_CALL_GOPD, [externref, externref, externref, externref]);
+  // (#1355 Slice C) getPrototypeOf driver — 1 trap arg: (handler, trap, target)
+  // → __call_fn_method_1 (§10.5.1 step 5 `Call(trap, handler, «target»)`).
+  const callGpoIdx = reserveDriver(PROXY_CALL_GPO, [externref, externref, externref]);
+  // (#1355 Slice C) setPrototypeOf driver — 2 trap args: (handler, trap, target,
+  // proto) → __call_fn_method_2 (§10.5.2 step 7 `Call(trap, handler, «target, V»)`).
+  const callSpoIdx = reserveDriver(PROXY_CALL_SPO, [externref, externref, externref, externref]);
   ctx.proxyDispatchReserved = true;
 
   // Builds a dispatch helper body. `trapFieldIdx` selects the trap closure;
@@ -5199,6 +5213,98 @@ function ensureProxyRuntime(
     return body;
   };
 
+  // (#1355 Slice C) Prototype-trap dispatch builder. getPrototypeOf /
+  // setPrototypeOf don't take a property key, so they don't fit `buildDispatch`'s
+  // key-centric shape (param 1 = key). This builds a parallel body for them:
+  //   §10.5.1 [[GetPrototypeOf]]: forward __getPrototypeOf(target); trap arm
+  //     driver(handler, trap, target).
+  //   §10.5.2 [[SetPrototypeOf]]: forward __object_setPrototypeOf(target, proto)
+  //     (drop its externref result, push the proxy as a truthy success token);
+  //     trap arm driver(handler, trap, target, proto). The front-guard coerces
+  //     the trap's booleanish result via __is_truthy.
+  // params: 0=proxyExtern, 1=(setPrototypeOf only) proto. locals: 2=p 3=trap.
+  // Phase-C scope: NO §10.5.1/2 result-invariant checks (non-extensible target →
+  // trap result must equal the target's actual prototype) — deferred to the
+  // invariant slice; the trap result is returned as-is.
+  const buildProtoDispatch = (trapFieldIdx: number, forwardName: string, isSet: boolean): Instr[] => {
+    const forwardIdx = ctx.funcMap.get(forwardName)!;
+    const driverIdx = isSet ? callSpoIdx : callGpoIdx;
+    const trapArm: Instr[] = [
+      // handler
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PHANDLER },
+      { op: "extern.convert_any" } as Instr,
+      // trap closure
+      { op: "local.get", index: 3 },
+      // target
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+      { op: "extern.convert_any" } as Instr,
+    ];
+    if (isSet) {
+      trapArm.push({ op: "local.get", index: 1 }); // proto arg
+    }
+    trapArm.push({ op: "call", funcIdx: driverIdx });
+
+    const forwardArm: Instr[] = isSet
+      ? [
+          // __object_setPrototypeOf(target, proto) -> externref ; drop, push the
+          // proxy itself as a truthy boolean-ish success token (no trap → spec
+          // OrdinarySetPrototypeOf, which succeeded since we just performed it).
+          { op: "local.get", index: 2 },
+          { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+          { op: "extern.convert_any" } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: forwardIdx },
+          { op: "drop" },
+          { op: "local.get", index: 0 }, // truthy success token (the proxy externref)
+        ]
+      : [
+          // __getPrototypeOf(target) -> externref
+          { op: "local.get", index: 2 },
+          { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+          { op: "extern.convert_any" } as Instr,
+          { op: "call", funcIdx: forwardIdx },
+        ];
+
+    return [
+      // p = ref.cast $Proxy(any.convert_extern(proxyExtern))
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: proxyTypeIdx },
+      { op: "local.set", index: 2 },
+      // if p.revoked: throw TypeError
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_REVOKED },
+      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() } as Instr,
+      // trap = p.ptraps==null ? null : p.ptraps.<field>
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: externref },
+        then: [{ op: "ref.null.extern" } as Instr],
+        else: [
+          { op: "local.get", index: 2 },
+          { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: trapFieldIdx },
+        ],
+      } as Instr,
+      { op: "local.set", index: 3 },
+      // if trap == null: forward to ordinary op on target ; else invoke trap.
+      { op: "local.get", index: 3 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: externref },
+        then: forwardArm,
+        else: trapArm,
+      } as Instr,
+    ];
+  };
+
   // FRESH locals array + ValType objects per dispatch function. `registerNative`
   // stores `locals` by reference, and the FINALIZE dead-type-elimination pass
   // (`eliminateDeadImports`) mutates `func.locals[i]` in place when renumbering
@@ -5267,6 +5373,27 @@ function ensureProxyRuntime(
     dispatchLocals(),
     buildDispatch(TRAP_GOPD, "__getOwnPropertyDescriptor", false),
   );
+  // (#1355 Slice C) __proxy_gpo_dispatch(proxy, _unused) -> externref.
+  // §10.5.1 [[GetPrototypeOf]]. 2 params (the second unused) so the local layout
+  // (p=local 2, trap=local 3) matches `buildProtoDispatch` / the setPrototypeOf
+  // dispatch; the [[GetPrototypeOf]] trap takes only the target.
+  registerNative(
+    "__proxy_gpo_dispatch",
+    [externref, externref],
+    [externref],
+    dispatchLocals(),
+    buildProtoDispatch(TRAP_GPO, "__getPrototypeOf", false),
+  );
+  // (#1355 Slice C) __proxy_spo_dispatch(proxy, proto) -> externref (booleanish).
+  // §10.5.2 [[SetPrototypeOf]]. The __object_setPrototypeOf front-guard coerces
+  // the result via __is_truthy.
+  registerNative(
+    "__proxy_spo_dispatch",
+    [externref, externref],
+    [externref],
+    dispatchLocals(),
+    buildProtoDispatch(TRAP_SPO, "__object_setPrototypeOf", true),
+  );
 
   // ── __proxy_create(target, handler) -> externref ──────────────────────────
   //
@@ -5325,19 +5452,25 @@ function ensureProxyRuntime(
       { op: "local.set", index: 6 },
       ...readTrap("getOwnPropertyDescriptor"),
       { op: "local.set", index: 7 },
+      ...readTrap("getPrototypeOf"),
+      { op: "local.set", index: 8 },
+      ...readTrap("setPrototypeOf"),
+      { op: "local.set", index: 9 },
       // proxy fields (standalone $Proxy struct):
       { op: "i32.const", value: 1 }, // ptag = PROXY_TAG (1; bare ref.test $Proxy is the real discriminator)
       { op: "local.get", index: 0 }, // ptarget (externref → anyref)
       { op: "any.convert_extern" } as Instr,
       { op: "local.get", index: 1 }, // phandler (externref → anyref; trap `this`)
       { op: "any.convert_extern" } as Instr,
-      // ptraps = struct.new $ProxyTraps (getT, setT, hasT, applyT, delT, gopdT)
+      // ptraps = struct.new $ProxyTraps (getT,setT,hasT,applyT,delT,gopdT,gpoT,spoT)
       { op: "local.get", index: 2 },
       { op: "local.get", index: 3 },
       { op: "local.get", index: 4 },
       { op: "local.get", index: 5 },
       { op: "local.get", index: 6 },
       { op: "local.get", index: 7 },
+      { op: "local.get", index: 8 },
+      { op: "local.get", index: 9 },
       { op: "struct.new", typeIdx: proxyTrapsTypeIdx } as Instr,
       { op: "i32.const", value: 0 }, // revoked = 0
       { op: "struct.new", typeIdx: proxyTypeIdx } as Instr,
@@ -5354,6 +5487,8 @@ function ensureProxyRuntime(
         { name: "applyT", type: externref },
         { name: "delT", type: externref }, // (#1355 Slice A)
         { name: "gopdT", type: externref }, // (#1355 Slice B)
+        { name: "gpoT", type: externref }, // (#1355 Slice C) getPrototypeOf
+        { name: "spoT", type: externref }, // (#1355 Slice C) setPrototypeOf
       ],
       proxyCreateBody,
     );
@@ -5406,6 +5541,8 @@ function ensureProxyRuntime(
   const hasDispatchIdx = ctx.funcMap.get("__proxy_has_dispatch")!;
   const deleteDispatchIdx = ctx.funcMap.get("__proxy_delete_dispatch")!; // (#1355 Slice A)
   const gopdDispatchIdx = ctx.funcMap.get("__proxy_gopd_dispatch")!; // (#1355 Slice B)
+  const gpoDispatchIdx = ctx.funcMap.get("__proxy_gpo_dispatch")!; // (#1355 Slice C)
+  const spoDispatchIdx = ctx.funcMap.get("__proxy_spo_dispatch")!; // (#1355 Slice C)
 
   const findBody = (name: string): Instr[] | undefined => ctx.mod.functions.find((f) => f.name === name)?.body;
 
@@ -5535,6 +5672,59 @@ function ensureProxyRuntime(
     gopdBody.unshift(...guard);
   }
 
+  // (#1355 Slice C) __getPrototypeOf(obj) -> externref : if proxy →
+  // gpo_dispatch(obj, obj). `Object.getPrototypeOf(p)` / `Reflect.getPrototypeOf`
+  // and `p.__proto__` reads fall back to this helper for dynamic receivers. The
+  // dispatch returns the trap's prototype externref (or the target's, when the
+  // trap is absent) directly — same return type, no coercion.
+  const gpoBody = findBody("__getPrototypeOf");
+  if (gpoBody) {
+    const guard: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: proxyTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 0 }, // unused 2nd param placeholder
+          { op: "call", funcIdx: gpoDispatchIdx },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    gpoBody.unshift(...guard);
+  }
+
+  // (#1355 Slice C) __object_setPrototypeOf(obj, proto) -> externref : if proxy →
+  // spo_dispatch(obj, proto). `Object.setPrototypeOf(p, v)` /
+  // `Reflect.setPrototypeOf` and `p.__proto__ = v` writes route here for dynamic
+  // receivers. The dispatch returns the trap's booleanish externref (or a truthy
+  // success token when the trap is absent and the ordinary set succeeded); we
+  // return it as-is — the native helper's contract is also "returns an externref"
+  // (it returns the object), so the booleanish externref is type-compatible and
+  // the caller (Object.setPrototypeOf returns its first arg) ignores the value.
+  const spoBody = findBody("__object_setPrototypeOf");
+  if (spoBody) {
+    const guard: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: proxyTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: spoDispatchIdx },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    spoBody.unshift(...guard);
+  }
+
   void objectTypeIdx;
 }
 
@@ -5612,6 +5802,8 @@ export function fillProxyDispatch(ctx: CodegenContext): void {
   fill(PROXY_CALL_HAS, 2); // (target, key)
   fill(PROXY_CALL_DELETE, 2); // (#1355 Slice A) deleteProperty (target, key)
   fill(PROXY_CALL_GOPD, 2); // (#1355 Slice B) getOwnPropertyDescriptor (target, key)
+  fill(PROXY_CALL_GPO, 1); // (#1355 Slice C) getPrototypeOf (target)
+  fill(PROXY_CALL_SPO, 2); // (#1355 Slice C) setPrototypeOf (target, proto)
 }
 
 /**
