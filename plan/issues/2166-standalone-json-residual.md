@@ -377,6 +377,58 @@ this PR (verified by stashing). PR #1653.
 - **PR-B:** dynamic-space indentation. **PR-C:** `__json_parse_text`. **PR-D:**
   instance fields + toJSON + reviver/replacer.
 
+---
+
+## Progress (2026-06-17, sdev-json3) — PR-B: dynamic-graph `space` indentation
+
+PR-B of the Implementation Plan. Threads §25.5.2 pretty-printing through the
+pure-Wasm dynamic stringify codec (`src/codegen/json-codec-native.ts`). PR-A
+emitted dynamic object graphs *compactly* only; any `space` argument forced the
+#1599 refusal (the static-fold path owns only the static-value form, which a
+runtime-built graph never reaches).
+
+**Codec (`json-codec-native.ts`):**
+- `__json_stringify_value` gains a third param `gap: ref null $AnyString` (the
+  per-level indent unit, e.g. `"  "`). A **null** gap selects the compact form
+  (PR-A behaviour, zero added work — the separators collapse to `""`); a
+  non-null gap drives indentation.
+- Each call computes three separator locals once (prologue): `L_NL_IN` =
+  `"\n" + __str_repeat(gap, depth+1)` (before every element/property),
+  `L_NL_OUT` = `"\n" + __str_repeat(gap, depth)` (before the closing brace),
+  `L_COLON` = `": "` (key/value). With a null gap all three are `""`/`":"`, so
+  the object/array arms emit **byte-identical** compact output (verified by the
+  1-arg regression guard). `__str_repeat` returns `""` for count 0, so the
+  top-level (depth 0) close indent is bare `"\n"`.
+- Empty object/array stays `{}` / `[]` (the close-indent is gated on
+  "≥1 member emitted", §25.5.2).
+- New entry `__json_stringify_root_indent(v, gap)` mirrors `__json_stringify_root`
+  with the gap forwarded.
+
+**Routing (`src/codegen/expressions/calls.ts`):** the dynamic-graph branch now
+resolves a *static* `space` arg (`staticSpaceValue` → `jsonGapFromStaticSpace`,
+both newly exported from `json-standalone.ts`) to the gap string per §25.5.2
+(`min(10, floor(n))` spaces / first 10 chars of a string; ≤0/"" → compact). An
+empty gap routes through the cheap compact root; a non-empty gap pushes the gap
+literal and calls `__json_stringify_root_indent`. A function/array replacer or a
+**dynamic** space still keeps the #1599 refusal (no silent wrong output).
+
+Tests: `tests/issue-2166.test.ts` (+12 PR-B cases — flat/nested/deeply-nested
+object with numeric space 2, string (tab) + multi-char space, numeric-space>10
+clamp, space 0 = compact, null property value, empty nested object stays
+compact, `--target wasi` host-import-free, and a 1-arg compact PR-A regression
+guard). Each result is read back char-by-char and compared to Node's own
+`JSON.stringify(value, null, space)` for exact parity. `#1599`/`#1636` refuse
+suites stay green; the two pre-existing host-mode `json.test.ts` failures are
+upstream (verified by stashing).
+
+**Still open after PR-B:** PR-C (`__json_parse_text`, separate branch #1657),
+PR-C2 (parsed-array `a[i]` indexing, #1658), PR-D (reviver/replacer/toJSON),
+PR-A2 (closed `number[]` array stringify — a literal `number[]` isn't an
+`$ObjVec`, so it still routes to refusal; the array *indent* arm is implemented
+and activates for `$ObjVec` arrays once those route through the codec).
+
+---
+
 ## Progress (2026-06-17, sdev-json2) — PR-C: dynamic JSON.parse codec
 
 PR-C of the Implementation Plan. Adds `emitJsonParseText` to

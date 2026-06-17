@@ -65,7 +65,12 @@ import {
   resolveComputedKeyExpression,
   resolvePropertyNameText,
 } from "../literals.js";
-import { tryEmitJsonParseLiteral, tryEmitJsonStringifyStatic } from "../json-standalone.js";
+import {
+  jsonGapFromStaticSpace,
+  staticSpaceValue,
+  tryEmitJsonParseLiteral,
+  tryEmitJsonStringifyStatic,
+} from "../json-standalone.js";
 import { emitJsonParsePrimitive, emitJsonQuoteString } from "../json-runtime.js";
 import { emitJsonParseText, emitJsonStringifyValue } from "../json-codec-native.js";
 import {
@@ -148,6 +153,7 @@ import {
   ensureNativeStringExternBridge,
   ensureStrToCharVecHelper,
   ensureTextEncodingHelpers,
+  nativeStringLiteralInstrs,
   stringConstantExternrefInstrs,
 } from "../native-strings.js";
 import { emitVariadicStringConcat, hostStringRepr, nativeStringRepr } from "../builtin-scaffold.js";
@@ -5994,15 +6000,13 @@ function compileCallExpression(
             if (staticStringType !== undefined) {
               return staticStringType;
             }
-            // (#2166 PR-A) Dynamic object-graph stringify. The static fold
+            // (#2166 PR-A/PR-B) Dynamic object-graph stringify. The static fold
             // declined (runtime-built graph), so serialise with the pure-Wasm
             // recursive codec over the standalone value rep ($Object/$ObjVec/
             // boxed primitives) instead of refusing or silently wrong-folding.
-            // Compact output only; a function/array replacer or a `space`
-            // argument is not yet threaded here (the static fold owns the
-            // static-space form, PR-B threads the dynamic-space form), so route
-            // only the 1-arg / null-replacer-no-space shape and let other
-            // shapes keep the refusal below.
+            // PR-B threads a *static* `space` argument (number/string literal)
+            // into the codec's indent path; a function/array replacer or a
+            // *dynamic* space still keeps the refusal below.
             const replacerArg = expr.arguments[1];
             const spaceArg = expr.arguments[2];
             const replacerNullish =
@@ -6026,7 +6030,17 @@ function compileCallExpression(
               // index type with only integer / `length` own keys looks array-like.
               (arg0Type.getNumberIndexType() !== undefined &&
                 arg0Type.getProperties().every((p) => /^\d+$/.test(p.name) || p.name === "length"));
-            if (replacerNullish && spaceArg === undefined && !isArrayLike) {
+            // (#2166 PR-B) Resolve a static `space` argument to the §25.5.2
+            // indent unit ("gap"). `undefined` space → compact (gap ""). A
+            // *dynamic* space arg stays unresolved → keep the refusal below
+            // (rare shape). An empty gap (space ≤0 / "") routes through the
+            // compact path.
+            let gap: string | undefined = "";
+            if (spaceArg !== undefined) {
+              const staticSpace = staticSpaceValue(ctx, spaceArg);
+              gap = staticSpace === undefined ? undefined : jsonGapFromStaticSpace(staticSpace);
+            }
+            if (replacerNullish && gap !== undefined && !isArrayLike) {
               const argResult = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "anyref" });
               if (argResult === null) return null;
               // Bring the value to anyref so the codec can ref.test-discriminate
@@ -6038,7 +6052,17 @@ function compileCallExpression(
               }
               emitJsonStringifyValue(ctx);
               flushLateImportShifts(ctx, fctx);
-              fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_stringify_root")! } as Instr);
+              if (gap === "") {
+                // No indentation — the compact root (cheapest path).
+                fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__json_stringify_root")! } as Instr);
+              } else {
+                // Pretty-print: push the gap string and call the indent root.
+                for (const instr of nativeStringLiteralInstrs(ctx, gap)) fctx.body.push(instr);
+                fctx.body.push({
+                  op: "call",
+                  funcIdx: ctx.funcMap.get("__json_stringify_root_indent")!,
+                } as Instr);
+              }
               return nativeStringType(ctx);
             }
           }

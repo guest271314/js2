@@ -102,27 +102,37 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
   const strRefNull: ValType = { kind: "ref_null", typeIdx: anyStrTypeIdx };
   const strRef = nativeStringType(ctx); // ref $AnyString
 
+  const repeatIdx = ctx.nativeStrHelpers.get("__str_repeat")!; // (#2166 PR-B) indent builder
+
   // Pre-register the self funcIdx so the recursive calls in the body resolve.
-  const typeIdx = addFuncType(ctx, [anyref, i32], [strRefNull]);
+  // (#2166 PR-B) `gap` (param 2, `ref null $AnyString`) is the per-level indent
+  // unit (e.g. "  "). A null gap selects the compact form (PR-A behaviour, zero
+  // overhead); a non-null gap drives §25.5.2 pretty-printing.
+  const typeIdx = addFuncType(ctx, [anyref, i32, strRefNull], [strRefNull]);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
   ctx.funcMap.set("__json_stringify_value", funcIdx);
 
   // ── Local plan ──────────────────────────────────────────────────────────
-  // params: 0 v:anyref  1 depth:i32
+  // params: 0 v:anyref  1 depth:i32  2 gap:ref null $AnyString
   const P_V = 0;
   const P_DEPTH = 1;
-  const L_ANY = 2; // anyref scratch (re-tested value)
-  const L_OBJ = 3; // ref null $Object
-  const L_ARR = 4; // ref null $PropMap (ordered) / loop reuse
-  const L_VEC = 5; // ref null $ObjVec
-  const L_CAP = 6; // i32 loop bound
-  const L_I = 7; // i32 loop index
-  const L_E = 8; // ref null $PropEntry
-  const L_OUT = 9; // ref $AnyString accumulator
-  const L_PIECE = 10; // ref null $AnyString per-element/prop serialisation
-  const L_FIRST = 11; // i32 — first-emitted flag (comma control)
-  const L_NUM = 12; // f64 number scratch
-  const L_DATA = 13; // ref $ObjVecArr (vec backing)
+  const P_GAP = 2;
+  const L_ANY = 3; // anyref scratch (re-tested value)
+  const L_OBJ = 4; // ref null $Object
+  const L_ARR = 5; // ref null $PropMap (ordered) / loop reuse
+  const L_VEC = 6; // ref null $ObjVec
+  const L_CAP = 7; // i32 loop bound
+  const L_I = 8; // i32 loop index
+  const L_E = 9; // ref null $PropEntry
+  const L_OUT = 10; // ref $AnyString accumulator
+  const L_PIECE = 11; // ref null $AnyString per-element/prop serialisation
+  const L_FIRST = 12; // i32 — first-emitted flag (comma control)
+  const L_NUM = 13; // f64 number scratch
+  const L_DATA = 14; // ref $ObjVecArr (vec backing)
+  // (#2166 PR-B) Precomputed separator strings (empty when gap is null):
+  const L_NL_IN = 15; // ref $AnyString — "\n" + indent at the *inner* (depth+1) level
+  const L_NL_OUT = 16; // ref $AnyString — "\n" + indent at *this* depth (before close)
+  const L_COLON = 17; // ref $AnyString — ": " when indented, ":" when compact
 
   const litStr = (s: string): Instr[] => nativeStringLiteralInstrs(ctx, s);
 
@@ -143,6 +153,66 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
     ...litStr(s),
     { op: "call", funcIdx: concatIdx },
     { op: "local.set", index: L_OUT },
+  ];
+
+  // (#2166 PR-B) out = __str_concat(out, <separator local — always non-null>)
+  // Used for the precomputed newline/indent separators (L_NL_IN/L_NL_OUT/
+  // L_COLON). They are the empty string when gap is null, so concatenating
+  // them in the compact form is a no-op (and `__str_concat` short-circuits an
+  // empty argument).
+  const appendSep = (sepLocal: number): Instr[] => [
+    { op: "local.get", index: L_OUT },
+    { op: "ref.as_non_null" },
+    { op: "local.get", index: sepLocal },
+    { op: "ref.as_non_null" },
+    { op: "call", funcIdx: concatIdx },
+    { op: "local.set", index: L_OUT },
+  ];
+
+  // (#2166 PR-B) Compute the per-call separator strings into L_NL_IN /
+  // L_NL_OUT / L_COLON. With a null gap every separator is "" (and the colon is
+  // ":"), so the loop bodies below emit byte-identical compact output. With a
+  // non-null gap: L_NL_IN = "\n" + repeat(gap, depth+1); L_NL_OUT = "\n" +
+  // repeat(gap, depth); L_COLON = ": ". `__str_repeat` returns "" for count 0,
+  // so the top-level (depth 0) close indent is just "\n" as §25.5.2 requires.
+  const setupSeparators: Instr[] = [
+    { op: "local.get", index: P_GAP },
+    { op: "ref.is_null" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        ...litStr(""),
+        { op: "local.set", index: L_NL_IN },
+        ...litStr(""),
+        { op: "local.set", index: L_NL_OUT },
+        ...litStr(":"),
+        { op: "local.set", index: L_COLON },
+      ],
+      else: [
+        // L_NL_IN = "\n" + repeat(gap, depth + 1)
+        ...litStr("\n"),
+        { op: "local.get", index: P_GAP },
+        { op: "ref.as_non_null" },
+        { op: "local.get", index: P_DEPTH },
+        { op: "i32.const", value: 1 },
+        { op: "i32.add" },
+        { op: "call", funcIdx: repeatIdx },
+        { op: "call", funcIdx: concatIdx },
+        { op: "local.set", index: L_NL_IN },
+        // L_NL_OUT = "\n" + repeat(gap, depth)
+        ...litStr("\n"),
+        { op: "local.get", index: P_GAP },
+        { op: "ref.as_non_null" },
+        { op: "local.get", index: P_DEPTH },
+        { op: "call", funcIdx: repeatIdx },
+        { op: "call", funcIdx: concatIdx },
+        { op: "local.set", index: L_NL_OUT },
+        // L_COLON = ": "
+        ...litStr(": "),
+        { op: "local.set", index: L_COLON },
+      ],
+    },
   ];
 
   // ── number arm: format f64 (in L_NUM) per JSON rules → push ref $AnyString ─
@@ -299,14 +369,16 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
             { op: "local.get", index: L_CAP },
             { op: "i32.ge_s" },
             { op: "br_if", depth: 1 },
-            // comma before every element after the first
+            // comma before every element after the first; then (#2166 PR-B) the
+            // newline+indent separator (L_NL_IN, "" when compact) before each.
             { op: "local.get", index: L_I },
             {
               op: "if",
               blockType: { kind: "empty" },
               then: [...appendLit(",")],
             },
-            // piece = __json_stringify_value(any.convert_extern(data[i]), depth+1)
+            ...appendSep(L_NL_IN),
+            // piece = __json_stringify_value(any.convert_extern(data[i]), depth+1, gap)
             { op: "local.get", index: L_DATA },
             { op: "local.get", index: L_I },
             { op: "array.get", typeIdx: objVecArrTypeIdx },
@@ -314,6 +386,7 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
             { op: "local.get", index: P_DEPTH },
             { op: "i32.const", value: 1 },
             { op: "i32.add" },
+            { op: "local.get", index: P_GAP },
             { op: "call", funcIdx },
             { op: "local.set", index: L_PIECE },
             // null piece (undefined element) → "null"
@@ -333,6 +406,15 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
           ],
         },
       ],
+    },
+    // (#2166 PR-B) closing-indent newline only for a non-empty array (§25.5.2:
+    // an empty array stays "[]"). L_NL_OUT is "" when compact, so this is a
+    // no-op there.
+    { op: "local.get", index: L_CAP },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...appendSep(L_NL_OUT)],
     },
     ...appendLit("]"),
     { op: "local.get", index: L_OUT },
@@ -377,13 +459,14 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
             { op: "local.tee", index: L_E },
             { op: "ref.is_null" },
             { op: "br_if", depth: 1 },
-            // piece = __json_stringify_value(e.value, depth+1)
+            // piece = __json_stringify_value(e.value, depth+1, gap)
             { op: "local.get", index: L_E },
             { op: "ref.as_non_null" },
             { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 }, // value:anyref
             { op: "local.get", index: P_DEPTH },
             { op: "i32.const", value: 1 },
             { op: "i32.add" },
+            { op: "local.get", index: P_GAP },
             { op: "call", funcIdx },
             { op: "local.set", index: L_PIECE },
             // omit the property entirely if its value serialised to undefined
@@ -404,7 +487,9 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
                 },
                 { op: "i32.const", value: 0 },
                 { op: "local.set", index: L_FIRST },
-                // quote(key) : piece
+                // (#2166 PR-B) newline+indent before every property ("" compact)
+                ...appendSep(L_NL_IN),
+                // quote(key) <colon> piece — colon is ": " indented, ":" compact
                 { op: "local.get", index: L_OUT },
                 { op: "ref.as_non_null" },
                 { op: "local.get", index: L_E },
@@ -414,7 +499,7 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
                 { op: "call", funcIdx: quoteIdx },
                 { op: "call", funcIdx: concatIdx },
                 { op: "local.set", index: L_OUT },
-                ...appendLit(":"),
+                ...appendSep(L_COLON),
                 ...appendPiece,
               ],
             },
@@ -426,6 +511,16 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
           ],
         },
       ],
+    },
+    // (#2166 PR-B) closing-indent newline only when at least one property was
+    // emitted (L_FIRST == 0). An empty object stays "{}" (§25.5.2). L_NL_OUT is
+    // "" when compact.
+    { op: "local.get", index: L_FIRST },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [...appendSep(L_NL_OUT)],
     },
     ...appendLit("}"),
     { op: "local.get", index: L_OUT },
@@ -451,6 +546,9 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
       blockType: { kind: "empty" },
       then: [...litStr("null"), { op: "return" }],
     },
+    // (#2166 PR-B) compute the indent separators for the object/array arms.
+    // Only those arms read them; primitive arms below return before use.
+    ...setupSeparators,
     // any = v
     { op: "local.get", index: P_V },
     { op: "local.set", index: L_ANY },
@@ -554,6 +652,9 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
       { count: 1, type: i32 }, // L_FIRST
       { count: 1, type: f64 }, // L_NUM
       { count: 1, type: { kind: "ref", typeIdx: objVecArrTypeIdx } }, // L_DATA
+      { count: 1, type: strRef }, // L_NL_IN  (#2166 PR-B — always set in prologue)
+      { count: 1, type: strRef }, // L_NL_OUT
+      { count: 1, type: strRef }, // L_COLON
     ],
     body,
     exported: false,
@@ -578,6 +679,8 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
     body: [
       { op: "local.get", index: 0 },
       { op: "i32.const", value: 0 },
+      // (#2166 PR-B) compact form: null gap.
+      { op: "ref.null", typeIdx: anyStrTypeIdx },
       { op: "call", funcIdx },
       { op: "local.tee", index: 1 },
       { op: "ref.is_null" },
@@ -586,6 +689,35 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
         blockType: { kind: "val", type: strRef },
         then: [...litStr("null")],
         else: [{ op: "local.get", index: 1 }, { op: "ref.as_non_null" }],
+      },
+    ],
+    exported: false,
+  } as unknown as (typeof ctx.mod.functions)[number]);
+
+  // ── __json_stringify_root_indent(v: anyref, gap: ref null $AnyString) ──────
+  // (#2166 PR-B) The pretty-print entry: serialise at depth 0 with the caller's
+  // indent unit (`gap`). A null/empty gap behaves like the compact root
+  // (the worker's separators collapse to ""). Same null→"null" coalescing as
+  // the compact root.
+  const rootIndentTypeIdx = addFuncType(ctx, [anyref, strRefNull], [strRef]);
+  const rootIndentFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__json_stringify_root_indent", rootIndentFuncIdx);
+  ctx.mod.functions.push({
+    name: "__json_stringify_root_indent",
+    typeIdx: rootIndentTypeIdx,
+    locals: [{ count: 1, type: strRefNull }],
+    body: [
+      { op: "local.get", index: 0 },
+      { op: "i32.const", value: 0 },
+      { op: "local.get", index: 1 }, // gap
+      { op: "call", funcIdx },
+      { op: "local.tee", index: 2 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: strRef },
+        then: [...litStr("null")],
+        else: [{ op: "local.get", index: 2 }, { op: "ref.as_non_null" }],
       },
     ],
     exported: false,
