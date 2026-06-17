@@ -117,6 +117,7 @@ import {
   compileStandaloneRegExpConstructor,
   isGlobalRegExpIdentifier,
   tryCompileStandaloneRegExpExec,
+  tryCompileStandaloneRegExpSymbolCall,
   tryCompileStandaloneRegExpTest,
 } from "../regexp-standalone.js";
 import {
@@ -10498,6 +10499,21 @@ function compileCallExpression(
           const recvIsUnresolved = (receiverType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
           if ((isRegExpRecv || recvIsUnresolved) && !recvIsUserClass) {
             if (ctx.standalone) {
+              // (#2161) Route the well-known-symbol protocol READ forms
+              // (`re[Symbol.match/matchAll/search](str)`) to the native engine
+              // for static / backend-created RegExp receivers — the
+              // operand-swapped dual of the String.prototype.* native path.
+              // Returns undefined for forms not yet wired (dynamic receivers,
+              // @@replace/@@split, string-coercion args), which fall through to
+              // the refusal below.
+              const symResult = tryCompileStandaloneRegExpSymbolCall(
+                ctx,
+                fctx,
+                expr,
+                elemAccess.expression,
+                methodName,
+              );
+              if (symResult !== undefined) return symResult;
               reportError(
                 ctx,
                 expr,
