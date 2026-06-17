@@ -1439,14 +1439,28 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     // (#1104 Phase 1) In WASI/standalone mode, the JS host is unavailable —
     // emit Wasm-native `__new_<ErrorName>` functions that build a
     // `$Error_struct` for the 8 built-in Error constructors instead of
-    // unsatisfiable `env.__new_<ErrorName>` host imports. Other unknown
-    // constructors still emit host imports (they may resolve via user-supplied
-    // imports at instantiation time, or fail loudly if missing). JS-host mode
-    // is unchanged.
+    // unsatisfiable `env.__new_<ErrorName>` host imports. JS-host mode is
+    // unchanged.
     // #1473 — standalone mode has no JS host either, so it needs the same
     // in-module Error constructors as WASI mode.
     if ((ctx.wasi || ctx.standalone) && isWasiErrorName(name)) {
       emitWasiErrorConstructor(ctx, name, argCount);
+      continue;
+    }
+    // (#2026 PR-1b) In no-JS-host mode (WASI / standalone) an `env.__new_<name>`
+    // import is *never* satisfiable — there is no host to provide it — and the
+    // strict-import allowlist gate (#1524/#2094) rejects it at registration
+    // time, so a single `new K()` on a value-bound class identifier fails the
+    // whole standalone compile (the original "Host import env.__new_K …" error).
+    // Skip the host import entirely here: the dynamic-new fallback in
+    // `compileNewExpression` (`emitDynamicNewFallback`) is the resolution path
+    // in standalone — it reads the class-object descriptor's `__tag` and
+    // dispatches to the matching `<Class>_new` with pure Wasm (no host import),
+    // and on a no-match descriptor it yields a null externref (the same result
+    // the absent-import `else` branch produced before). Genuine JS-host
+    // builtins cannot exist in standalone anyway, so there is nothing to lose.
+    // Host (JS) mode still registers the import for those builtins.
+    if (ctx.wasi || ctx.standalone) {
       continue;
     }
     const params: ValType[] = Array.from({ length: argCount }, () => ({ kind: "externref" }) as ValType);
