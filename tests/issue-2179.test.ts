@@ -44,65 +44,85 @@ async function run<T = unknown>(src: string): Promise<T> {
 
 describe("#2179 post-delete struct read consults the tombstone (JS-host)", () => {
   it("read of a deleted property returns undefined", async () => {
-    expect(await run<string>(`export function test(): string {
+    expect(
+      await run<string>(`export function test(): string {
       const o: any = { a: 1, b: 2 }; delete o.a; return String(o.a);
-    }`)).toBe("undefined");
+    }`),
+    ).toBe("undefined");
   });
 
   it("`o.a === undefined` after delete is true (not constant-folded)", async () => {
     // Boolean exports return the i32 representation (1 = true), matching the
     // #2130 read-half assertions.
-    expect(await run<number>(`export function test(): boolean {
+    expect(
+      await run<number>(`export function test(): boolean {
       const o: any = { a: 1, b: 2 }; delete o.a; return o.a === undefined;
-    }`)).toBe(1);
+    }`),
+    ).toBe(1);
   });
 
   it("delete then re-add reads the new value", async () => {
-    expect(await run<number>(`export function test(): number {
+    expect(
+      await run<number>(`export function test(): number {
       const o2: any = { a: 1 }; delete o2.a; o2.a = 5; return o2.a;
-    }`)).toBe(5);
+    }`),
+    ).toBe(5);
   });
 
   it("dynamic-key delete tombstones the read too", async () => {
-    expect(await run<string>(`export function test(): string {
+    expect(
+      await run<string>(`export function test(): string {
       const o: any = { a: 1 }; const k = "a"; delete o[k]; return String(o.a);
-    }`)).toBe("undefined");
+    }`),
+    ).toBe("undefined");
   });
 
   it("a sibling property is unaffected by the delete", async () => {
-    expect(await run<number>(`export function test(): number {
+    expect(
+      await run<number>(`export function test(): number {
       const o: any = { a: 1, b: 2 }; delete o.a; return o.b;
-    }`)).toBe(2);
+    }`),
+    ).toBe(2);
   });
 
   it("Object.keys omits the deleted key", async () => {
-    expect(await run<string>(`export function test(): string {
+    expect(
+      await run<string>(`export function test(): string {
       const o: any = { a: 1, b: 2 }; delete o.a; return Object.keys(o).join(",");
-    }`)).toBe("b");
+    }`),
+    ).toBe("b");
   });
 
   it("for-in omits the deleted key", async () => {
-    expect(await run<string>(`export function test(): string {
+    expect(
+      await run<string>(`export function test(): string {
       const o: any = { a: 1, b: 2 }; delete o.a; let s = ""; for (const k in o) s += k; return s;
-    }`)).toBe("b");
+    }`),
+    ).toBe("b");
   });
 
   it("string-valued field reads undefined after delete", async () => {
-    expect(await run<string>(`export function test(): string {
+    expect(
+      await run<string>(`export function test(): string {
       const o: any = { s: "hi", t: "bye" }; delete o.s; return o.t + String(o.s);
-    }`)).toBe("byeundefined");
+    }`),
+    ).toBe("byeundefined");
   });
 
   // Regression guards: the gate must not perturb non-delete reads.
 
   it("typed (non-any) receiver reads are unchanged", async () => {
-    expect(await run<number>(`interface P { x: number; y: number; }
-      export function test(): number { const p: P = { x: 3, y: 4 }; return p.x + p.y; }`)).toBe(7);
+    expect(
+      await run<number>(`interface P { x: number; y: number; }
+      export function test(): number { const p: P = { x: 3, y: 4 }; return p.x + p.y; }`),
+    ).toBe(7);
   });
 
   it("method dispatch on an any receiver in a delete-using module works", async () => {
-    expect(await run<number>(`export function test(): number {
+    expect(
+      await run<number>(`export function test(): number {
       const o: any = { f: (n: number) => n * 2 }; delete o.g; return o.f(21);
-    }`)).toBe(42);
+    }`),
+    ).toBe(42);
   });
 });
