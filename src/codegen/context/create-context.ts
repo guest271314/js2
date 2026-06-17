@@ -178,6 +178,8 @@ export function createCodegenContext(
     pendingInitBody: null,
     inlinableFunctions: new Map(),
     symbolCounterGlobalIdx: -1,
+    symbolDescGlobalIdx: -1,
+    symbolDescArrTypeIdx: -1,
     parentBodiesStack: [],
     liveBodies: new Set(),
     anonStructHash: new Map(),

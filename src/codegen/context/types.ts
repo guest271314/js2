@@ -1160,6 +1160,13 @@ export interface CodegenContext {
   inlinableFunctions: Map<string, InlinableFunctionInfo>;
   /** Global index of the __symbol_counter */
   symbolCounterGlobalIdx: number;
+  /** (#2163) Global index of the native symbol id→description table
+   *  (`ref_null` to an array of `$AnyString`), lazily allocated. -1 until first
+   *  use. Standalone-mode native `.description` storage. */
+  symbolDescGlobalIdx: number;
+  /** (#2163) Type index of the symbol description table's array type
+   *  (`array (mut (ref null $AnyString))`). -1 until created. */
+  symbolDescArrTypeIdx: number;
   /** Stack of in-progress parent function bodies for index shifting during closure compilation */
   parentBodiesStack: Instr[][];
   /** All live (allocated but not yet attached to ctx.mod.functions) FunctionContext bodies.

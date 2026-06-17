@@ -303,6 +303,9 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
   if (ctx.symbolCounterGlobalIdx >= threshold) {
     ctx.symbolCounterGlobalIdx += delta;
   }
+  if (ctx.symbolDescGlobalIdx >= threshold) {
+    ctx.symbolDescGlobalIdx += delta;
+  }
   if (ctx.wasiBumpPtrGlobalIdx >= threshold) {
     ctx.wasiBumpPtrGlobalIdx += delta;
   }
