@@ -87,7 +87,25 @@ const FLAG_CONFIGURABLE = 0x04;
 // by the `$get`/`$set` funcref-bearing slots (fields 4/5). 0x08 is the first
 // free bit (0x10/0x20/0x40 remain free; 0x80 = TOMBSTONE).
 const FLAG_ACCESSOR = 0x08;
+// #1910/#1472 S2 — internal-slot marker. Set on the single reserved $PropEntry a
+// boxed primitive wrapper (`new Number`/`new String`/`new Boolean`) carries: it
+// holds the wrapper's [[NumberData]]/[[StringData]]/[[BooleanData]] primitive
+// under WRAPPER_PRIMITIVE_KEY. The entry is NON-enumerable (FLAG_INTERNAL is set,
+// FLAG_ENUMERABLE is not), so it never appears in Object.keys/for-in/JSON, and
+// `__to_primitive` reads it FIRST (before the OrdinaryToPrimitive valueOf/toString
+// probe) per §7.1.1.1 — standalone ships no Number.prototype.valueOf, so the slot
+// IS the recoverable internal value. 0x20/0x40 remain free.
+export const FLAG_INTERNAL = 0x10;
 const FLAG_TOMBSTONE = 0x80;
+/**
+ * Reserved own-key under which a boxed primitive wrapper stores its internal
+ * `[[PrimitiveValue]]` slot (#1910/#1472 S2). Uses the spec internal-slot
+ * spelling so it cannot collide with an ordinary identifier-shaped key created
+ * by user code in any realistic program; the entry is additionally flagged
+ * FLAG_INTERNAL so even an explicit `o["[[PrimitiveValue]]"]` user write is
+ * distinguishable, and it is non-enumerable so enumeration never observes it.
+ */
+export const WRAPPER_PRIMITIVE_KEY = "[[PrimitiveValue]]";
 /** Default for a data property created by `o.x = v` — w/e/c all true. */
 const FLAG_DEFAULT = FLAG_WRITABLE | FLAG_ENUMERABLE | FLAG_CONFIGURABLE;
 
@@ -373,6 +391,89 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
   const strEqualsIdx = ctx.nativeStrHelpers.get("__str_equals")!;
 
+  // ── __to_property_key(externref key) -> externref (#2042 S1) ──────────────
+  //
+  // Central ToPropertyKey-style coercion for the string-keyed `$Object` runtime.
+  // The downstream `ref.cast $AnyString` in `__obj_hash` / `__obj_find` traps
+  // (`illegal cast [in __obj_find()]`) for any non-string key — every computed
+  // numeric access (`o[0]`, `Reflect.get(o, 1)`, descriptor reflection) feeds a
+  // boxed number straight into that cast. Coercing once here, at the top of both
+  // hash + find, makes the cast always safe without patching each public entry
+  // (`__extern_get`/`_set`/`_has`/`__getOwnPropertyDescriptor`/`__delete_property`).
+  //
+  //   - already an `$AnyString` (cons or flat) → return unchanged (fast path).
+  //   - a boxed number → `number_toString(__unbox_number(key))` → canonical
+  //     decimal `$NativeString` ("0"/"1.5"/"-0"→"0" per §6.1.6.1.20), matching
+  //     `{0:x}` literal-key storage and host behaviour.
+  //   - else (Symbol / opaque) → return unchanged: the downstream behaviour is
+  //     unchanged for those keys (no NEW trap introduced), while the dominant
+  //     numeric + string cases are fixed. Symbol keys under the string-keyed
+  //     runtime stay a separate concern (#1472 Phase B refusal at compile time).
+  //
+  // standalone-only: in gc/host mode the host `__extern_*` JS imports own these
+  // paths and ToPropertyKey the key themselves, so registering this helper there
+  // would only shift funcMap indices — host output stays byte-identical.
+  if (ctx.standalone) {
+    const numToStringIdx = ctx.funcMap.get("number_toString")!;
+    const unboxNumberIdx = ctx.funcMap.get("__unbox_number")!;
+    const boxNumTypeIdx = ctx.nativeBoxNumberTypeIdx;
+    const tpkBody: Instr[] = [
+      // any = any.convert_extern(key)
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 1 },
+      // if (ref.test $AnyString any) return key unchanged
+      { op: "ref.test", typeIdx: anyStrTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "local.get", index: 0 }, { op: "return" }],
+      },
+      // else if (boxed number) return number_toString(__unbox_number(key))
+      ...(boxNumTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: boxNumTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 0 },
+                { op: "call", funcIdx: unboxNumberIdx },
+                { op: "call", funcIdx: numToStringIdx },
+                { op: "return" },
+              ],
+            },
+          ] as Instr[])
+        : []),
+      // else return key unchanged (Symbol / opaque — preserve existing behaviour)
+      { op: "local.get", index: 0 },
+    ];
+    registerNative(
+      "__to_property_key",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [{ name: "any", type: { kind: "anyref" } }],
+      tpkBody,
+    );
+  }
+  const toPropertyKeyIdx = ctx.funcMap.get("__to_property_key");
+
+  // Prepend, in standalone mode, a guarded ToPropertyKey coercion to a key-taking
+  // helper body so its downstream `ref.cast $AnyString` is always safe. No-op in
+  // gc/host mode (the host imports own the path → byte-identical output).
+  // The coercion is itself guarded (`__to_property_key` fast-returns an
+  // already-$AnyString key) so the common string-key path pays one `ref.test`.
+  const withKeyCoercion = (keyParamIdx: number, body: Instr[]): Instr[] =>
+    toPropertyKeyIdx === undefined
+      ? body
+      : [
+          { op: "local.get", index: keyParamIdx } as Instr,
+          { op: "call", funcIdx: toPropertyKeyIdx } as Instr,
+          { op: "local.set", index: keyParamIdx } as Instr,
+          ...body,
+        ];
+
   // ── $__obj_hash(externref key) -> i32 ────────────────────────────────────
   //
   // FNV-1a over the UTF-16 code units of the flattened string. The key is an
@@ -455,7 +556,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "i", type: { kind: "i32" } },
         { name: "h", type: { kind: "i32" } },
       ],
-      body,
+      // #2042 S1 — coerce a non-string key (boxed number) to its canonical
+      // string before the FNV walk's `ref.cast $AnyString`. key is param 0.
+      withKeyCoercion(0, body),
     );
   }
   const objHashIdx = ctx.funcMap.get("__obj_hash")!;
@@ -582,7 +685,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "e", type: entryRefNull },
         { name: "fkey", type: nativeStrRef },
       ],
-      body,
+      // #2042 S1 — coerce a non-string key (boxed number) to its canonical
+      // string before the `ref.cast $AnyString` flatten + the inner __obj_hash
+      // call. key is param 1 (param 0 is the $Object). The inner __obj_hash
+      // re-coercion is idempotent (the key is now an $AnyString → fast-return).
+      withKeyCoercion(1, body),
     );
   }
   const objFindIdx = ctx.funcMap.get("__obj_find")!;
@@ -868,10 +975,128 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "fkey", type: nativeStrRef },
         { name: "keyStr", type: anyStrRef },
       ],
-      body,
+      // #2042 S1 — coerce a non-string key (boxed number) to its canonical
+      // string before the `ref.cast $AnyString` that both flattens it for the
+      // probe AND is stored into `$PropEntry.key`. So `o[0] = v` stores key "0"
+      // (matching the literal `{0:v}` path and the find-side coercion). key is
+      // param 1; the inner __obj_hash re-coercion is idempotent.
+      withKeyCoercion(1, body),
     );
   }
   const objInsertIdx = ctx.funcMap.get("__obj_insert")!;
+
+  // ── Boxed primitive wrappers (#1910/#1472 S2) ────────────────────────────
+  //
+  // `new Number(x)` / `new String(x)` / `new Boolean(x)` produce a wrapper
+  // OBJECT (typeof === "object"), not a primitive. In standalone mode there is
+  // no JS host to satisfy the `env::__new_Number` import that the gc path uses,
+  // so we build the wrapper as a plain `$Object` carrying the internal
+  // [[NumberData]]/[[StringData]]/[[BooleanData]] slot under the reserved,
+  // non-enumerable WRAPPER_PRIMITIVE_KEY entry. Because the wrapper IS a
+  // `$Object`, ordinary member access (`w.toString`, `w.constructor`, future
+  // indexed reads) keeps flowing through __extern_get/__obj_find unchanged, and
+  // `__to_primitive` recovers the primitive by reading this slot first
+  // (§7.1.1.1 — the wrapper's intrinsic valueOf returns the internal slot).
+  //
+  // All three take an ALREADY-boxed primitive externref in local `valueLocal` and
+  // emit the shared wrapper-build tail: create the `$Object`, insert the internal
+  // slot (key + FLAG_INTERNAL, non-enumerable) into `objLocal`, and return the
+  // wrapper as externref. The slot encoding lives in exactly one place. The
+  // wrapper's INITIAL_CAP (8) table holds one entry without any grow, so
+  // __obj_insert is called directly.
+  const emitWrapperBuildTail = (valueLocal: number, objLocal: number): Instr[] => [
+    // o = new $Object { proto: null, props: $PropMap[INITIAL_CAP], 0,0,0, nextSeq=1 }
+    { op: "ref.null", typeIdx: objectTypeIdx }, // proto
+    { op: "i32.const", value: INITIAL_CAP },
+    { op: "array.new_default", typeIdx: propMapTypeIdx },
+    { op: "i32.const", value: 0 }, // count
+    { op: "i32.const", value: 0 }, // tombstones
+    { op: "i32.const", value: 0 }, // flags
+    { op: "i32.const", value: 1 }, // nextSeq (slot consumes seq 0)
+    { op: "struct.new", typeIdx: objectTypeIdx },
+    { op: "local.set", index: objLocal },
+    // __obj_insert(o, WRAPPER_PRIMITIVE_KEY, any.convert_extern(value),
+    //              FLAG_INTERNAL (non-enumerable), seq=0)
+    { op: "local.get", index: objLocal },
+    ...((): Instr[] => {
+      addStringConstantGlobal(ctx, WRAPPER_PRIMITIVE_KEY);
+      return stringConstantExternrefInstrs(ctx, WRAPPER_PRIMITIVE_KEY);
+    })(),
+    { op: "local.get", index: valueLocal },
+    { op: "any.convert_extern" },
+    { op: "i32.const", value: FLAG_INTERNAL },
+    { op: "i32.const", value: 0 }, // seq
+    { op: "call", funcIdx: objInsertIdx },
+    // return extern.convert_any(o)
+    { op: "local.get", index: objLocal },
+    { op: "extern.convert_any" },
+  ];
+
+  // __new_Number(f64) -> externref : box the number, then wrap.
+  {
+    addUnionImportsViaRegistry(ctx);
+    const boxNumIdx = ctx.funcMap.get("__box_number")!;
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: boxNumIdx }, // boxed number externref
+      { op: "local.set", index: 1 },
+      ...emitWrapperBuildTail(1, 2),
+    ];
+    registerNative(
+      "__new_Number",
+      [{ kind: "f64" }],
+      [{ kind: "externref" }],
+      [
+        { name: "boxed", type: { kind: "externref" } },
+        { name: "o", type: objRef },
+      ],
+      body,
+    );
+  }
+
+  // __new_String(externref) -> externref : the value is already a string
+  // externref; wrap it directly (param 0 is the value local).
+  {
+    const body: Instr[] = emitWrapperBuildTail(0, 1);
+    registerNative(
+      "__new_String",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [{ name: "o", type: objRef }],
+      body,
+    );
+  }
+
+  // __new_Boolean(f64) -> externref : ToBoolean(arg) — the call sites coerce the
+  // argument to f64; truthy iff (x != 0) && (x == x) (NaN is falsy). Box the
+  // i32 boolean, then wrap.
+  {
+    addUnionImportsViaRegistry(ctx);
+    const boxBoolIdx = ctx.funcMap.get("__box_boolean")!;
+    const body: Instr[] = [
+      // truthy = (arg != 0) & (arg == arg)
+      { op: "local.get", index: 0 },
+      { op: "f64.const", value: 0 },
+      { op: "f64.ne" },
+      { op: "local.get", index: 0 },
+      { op: "local.get", index: 0 },
+      { op: "f64.eq" }, // 0 when NaN, 1 otherwise
+      { op: "i32.and" },
+      { op: "call", funcIdx: boxBoolIdx }, // boxed boolean externref
+      { op: "local.set", index: 1 },
+      ...emitWrapperBuildTail(1, 2),
+    ];
+    registerNative(
+      "__new_Boolean",
+      [{ kind: "f64" }],
+      [{ kind: "externref" }],
+      [
+        { name: "boxed", type: { kind: "externref" } },
+        { name: "o", type: objRef },
+      ],
+      body,
+    );
+  }
 
   // ── $__obj_grow(ref $Object) -> void ─────────────────────────────────────
   //
@@ -1711,6 +1936,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const L_ANY = 2;
     const L_METHOD = 3;
     const L_RESULT = 4;
+    // #1910/#1472 S2 — the boxed-primitive internal-slot $PropEntry (or null).
+    const L_SLOT = 5;
 
     const returnIfPrimitive = (localIdx: number): Instr[] => [
       { op: "local.get", index: localIdx },
@@ -1836,6 +2063,45 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "empty" },
         then: [{ op: "local.get", index: 0 }, { op: "return" }],
       },
+      // #1910/#1472 S2 — boxed primitive wrapper short-circuit. A `new Number`/
+      // `new String`/`new Boolean` wrapper carries its [[PrimitiveValue]] in the
+      // reserved, FLAG_INTERNAL own-slot. §7.1.1.1: the wrapper's intrinsic
+      // valueOf/toString return that internal primitive, so when the slot exists
+      // we return it directly (BEFORE the ordinary valueOf/toString own-prop
+      // probe) — the slot value is already a primitive, and the caller applies the
+      // final ToNumber/ToString per its hint. Plain objects lack this slot, so
+      // __obj_find returns null and we fall through to OrdinaryToPrimitive.
+      { op: "local.get", index: L_ANY },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      ...stringExtern(WRAPPER_PRIMITIVE_KEY),
+      { op: "call", funcIdx: objFindIdx },
+      { op: "local.tee", index: L_SLOT },
+      { op: "ref.is_null" },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          // entry present — confirm it is the internal slot (FLAG_INTERNAL), then
+          // return extern.convert_any(entry.value).
+          { op: "local.get", index: L_SLOT },
+          { op: "ref.as_non_null" },
+          { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 }, // flags
+          { op: "i32.const", value: FLAG_INTERNAL },
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: L_SLOT },
+              { op: "ref.as_non_null" },
+              { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 }, // value (anyref)
+              { op: "extern.convert_any" },
+              { op: "return" },
+            ],
+          } as Instr,
+        ],
+      } as Instr,
       ...isStringHint,
       {
         op: "if",
@@ -1854,6 +2120,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         { name: "any", type: { kind: "anyref" } },
         { name: "method", type: { kind: "externref" } },
         { name: "result", type: { kind: "externref" } },
+        { name: "slot", type: { kind: "ref_null", typeIdx: propEntryTypeIdx } },
       ],
       body,
     );
@@ -5346,4 +5613,11 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   // wrapper (#1226 typeof recognition + closureInfoByTypeIdx self-reg), so
   // routing native is a correct answer, not a silent undefined.
   "__extern_method_call",
+  // #1910/#1472 S2 — boxed primitive wrappers. `new Number`/`new String`/
+  // `new Boolean` build a `$Object` carrying the [[PrimitiveValue]] internal slot
+  // (non-enumerable) instead of leaking the `env::__new_*` host import;
+  // __to_primitive reads the slot first to recover the wrapper's primitive.
+  "__new_Number",
+  "__new_String",
+  "__new_Boolean",
 ]);

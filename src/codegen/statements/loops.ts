@@ -8,7 +8,6 @@ import { forEachChild, ts } from "../../ts-api.js";
 import { collectReferencedIdentifiers } from "../closures.js";
 import { popBody, pushBody } from "../context/bodies.js";
 import { reportError, reportErrorNoNode } from "../context/errors.js";
-import { reportSilentFallback } from "../fallback-telemetry.js";
 import { allocLocal, getLocalType, restoreLocals, snapshotLocals } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import { emitExternrefDestructureGuard } from "../destructuring-params.js";
@@ -19,6 +18,9 @@ import {
 } from "../expressions/assignment.js";
 import { emitCoercedLocalSet, emitThrowTypeError } from "../expressions/helpers.js";
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "../expressions/late-imports.js";
+import { arrayIteratorOverrideGlobalIdx } from "../expressions/proto-override.js";
+import { reportSilentFallback } from "../fallback-telemetry.js";
+import { nativeGeneratorInfoForForOfSubject, tryCompileNativeGeneratorForOf } from "../generators-native.js";
 import {
   addIteratorImports,
   ensureI32Condition,
@@ -26,7 +28,10 @@ import {
   nativeStringType,
   resolveWasmType,
 } from "../index.js";
+import { ensureNativeIteratorRuntime } from "../iterator-native.js";
+import { containsLinearU8Allocation, emitLinearU8ArenaMark, linearU8ArenaResetInstrs } from "../linear-uint8-arena.js";
 import { resolveComputedKeyExpression } from "../literals.js";
+import { emitCollectionIteratorVec } from "../map-runtime.js";
 import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType } from "../registry/types.js";
 import {
@@ -36,12 +41,9 @@ import {
   emitBoundsCheckedArrayGet,
   valTypesMatch,
 } from "../shared.js";
-import { containsLinearU8Allocation, emitLinearU8ArenaMark, linearU8ArenaResetInstrs } from "../linear-uint8-arena.js";
-import { nativeGeneratorInfoForForOfSubject, tryCompileNativeGeneratorForOf } from "../generators-native.js";
-import { ensureNativeIteratorRuntime } from "../iterator-native.js";
 import {
-  compileArrayDestructuring,
   arrayDstrNeedsIdentity,
+  compileArrayDestructuring,
   compileExternrefArrayDestructuringDecl,
   compileExternrefObjectDestructuringDecl,
   compileObjectDestructuring,
@@ -52,7 +54,6 @@ import {
   syncDestructuredLocalsToGlobals,
   tryEmitArrayProtoIteratorReadDrive,
 } from "./destructuring.js";
-import { arrayIteratorOverrideGlobalIdx } from "../expressions/proto-override.js";
 import { adjustRethrowDepth, collectInstrs, restoreBlockScopedShadows, saveBlockScopedShadows } from "./shared.js";
 import { collectPatternBindingNames } from "./tdz.js";
 
@@ -2379,6 +2380,17 @@ export function compileForOfStatement(ctx: CodegenContext, fctx: FunctionContext
   // index drive but project a different per-iteration value, so they go through
   // compileForOfArrayKeys / compileForOfArrayEntries. All three eliminate the
   // __array_values/__array_keys/__array_entries host imports in standalone/WASI.
+  // (#2162) Native Map/Set for-of in standalone / nativeStrings mode — MUST run
+  // before the array-iterator-receiver detection below. A native collection
+  // (bare `for (x of map)` or `for (x of map.values())` etc.) lowers to the
+  // `$Map` struct, whose `entries` field (a ref to an array) makes
+  // `getArrTypeIdxFromVec` misidentify `$Map` as a vec — so `arrayIteratorReceiver
+  // ForForOf` would wrongly treat the map as an array and iterate garbage. Handle
+  // the collection natively first: materialize the projection (Map default →
+  // `[k, v]` entries, Set default → values; explicit `.keys()/.values()/.entries()`
+  // honoured) into a canonical externref $Vec and drive the array loop over it.
+  if (ctx.nativeStrings && compileForOfNativeCollection(ctx, fctx, stmt, exprTsType)) return;
+
   const arrayIterRecv = arrayIteratorReceiverForForOf(ctx, fctx, stmt);
   if (arrayIterRecv) {
     if (arrayIterRecv.method === "values") {
@@ -2402,6 +2414,80 @@ export function compileForOfStatement(ctx: CodegenContext, fctx: FunctionContext
   if (!compileForOfArrayTentative(ctx, fctx, stmt)) {
     compileForOfIterator(ctx, fctx, stmt);
   }
+}
+
+/**
+ * (#2162) Drive `for (… of <map|set>)` natively in standalone / nativeStrings
+ * mode by materializing the default iterator projection into a canonical
+ * externref `$Vec` and reusing the array for-of loop. Map → `[key, value]`
+ * pairs (`entries`), Set → element list (`values`). Returns `true` when the
+ * subject is a native Map/Set and iteration was emitted, else `false` (caller
+ * continues with the array/iterator paths). A bare `.keys()/.values()/.entries()`
+ * call subject is already handled upstream by `compileNativeCollectionIterator`
+ * via the tentative-array vec path, so this only covers the bare collection.
+ */
+function compileForOfNativeCollection(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  exprTsType: ts.Type,
+): boolean {
+  // Resolve the *receiver* expression and the projection kind. Two subject shapes:
+  //   - bare collection:        `for (x of map)`  → receiver = map, default kind
+  //   - explicit iterator call: `for (x of map.keys())` → receiver = map, kind = keys
+  let receiver: ts.Expression = stmt.expression;
+  let explicitKind: "keys" | "values" | "entries" | undefined;
+  if (ts.isCallExpression(stmt.expression)) {
+    if (stmt.expression.arguments.length !== 0) return false;
+    const callee = stmt.expression.expression;
+    if (!ts.isPropertyAccessExpression(callee)) return false;
+    const m = callee.name.text;
+    if (m !== "keys" && m !== "values" && m !== "entries") return false;
+    receiver = callee.expression;
+    explicitKind = m;
+  }
+
+  // The receiver must be a native Map/Set (its TS type symbol is Map/Set).
+  const recvTsType = ctx.checker.getTypeAtLocation(receiver);
+  const symName = recvTsType.getSymbol()?.getName() ?? recvTsType.aliasSymbol?.name;
+  const isMap = symName === "Map";
+  const isSet = symName === "Set";
+  if (!isMap && !isSet) return false;
+
+  // Default projection: Set → values; Map → `entries` ([k, v] pairs). An explicit
+  // `.keys()/.values()/.entries()` call overrides. The `entries` pair projection
+  // needs the `__iterator` pair consumer (not the array fast path), so it is
+  // deferred to a #2162 follow-up — fall through here so the existing path tries.
+  const kind: "keys" | "values" | "entries" = explicitKind ?? (isMap ? "entries" : "values");
+  if (kind === "entries") return false;
+
+  // Confirm the receiver genuinely lowers to the native `$Map` struct (a Map/Set
+  // typed value can still be a host externref in JS-host mode) without leaving
+  // code behind.
+  const bodyLenBefore = fctx.body.length;
+  const localsSnap = snapshotLocals(fctx);
+  const recvType = compileExpression(ctx, fctx, receiver);
+  fctx.body.length = bodyLenBefore;
+  restoreLocals(fctx, localsSnap);
+  if (!recvType || (recvType.kind !== "ref" && recvType.kind !== "ref_null")) return false;
+  if (recvType.typeIdx !== ctx.mapTypeIdx) return false;
+
+  // Build the projection vec, store it in a temp, and iterate it as an array.
+  const vecResult = emitCollectionIteratorVec(ctx, fctx, receiver, kind, /* isSet */ isSet);
+  if (
+    vecResult === undefined ||
+    vecResult === null ||
+    typeof vecResult !== "object" ||
+    (vecResult.kind !== "ref" && vecResult.kind !== "ref_null")
+  ) {
+    // Could not lower (shouldn't happen after the recvType check) — undo and bail.
+    return false;
+  }
+  const vecType: ValType = vecResult;
+  const vecLocal = allocLocal(fctx, `__cof_vec_${fctx.locals.length}`, vecType);
+  fctx.body.push({ op: "local.set", index: vecLocal });
+  compileForOfArrayFromLocal(ctx, fctx, stmt, vecLocal, vecType);
+  return true;
 }
 
 /** #681: an `arr.values()/keys()/entries()` for-of subject resolved to a vec. */
@@ -2511,14 +2597,22 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
     kind: "i32",
   });
   fctx.body.push({ op: "local.get", index: flatLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 0 });
+  fctx.body.push({
+    op: "struct.get",
+    typeIdx: ctx.nativeStrTypeIdx,
+    fieldIdx: 0,
+  });
   fctx.body.push({ op: "local.set", index: lenLocal });
 
   const offLocal = allocLocal(fctx, `__forof_off_${fctx.locals.length}`, {
     kind: "i32",
   });
   fctx.body.push({ op: "local.get", index: flatLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 1 });
+  fctx.body.push({
+    op: "struct.get",
+    typeIdx: ctx.nativeStrTypeIdx,
+    fieldIdx: 1,
+  });
   fctx.body.push({ op: "local.set", index: offLocal });
 
   const dataLocal = allocLocal(fctx, `__forof_data_${fctx.locals.length}`, {
@@ -2526,7 +2620,11 @@ function compileForOfString(ctx: CodegenContext, fctx: FunctionContext, stmt: ts
     typeIdx: ctx.nativeStrDataTypeIdx,
   });
   fctx.body.push({ op: "local.get", index: flatLocal });
-  fctx.body.push({ op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 2 });
+  fctx.body.push({
+    op: "struct.get",
+    typeIdx: ctx.nativeStrTypeIdx,
+    fieldIdx: 2,
+  });
   fctx.body.push({ op: "local.set", index: dataLocal });
 
   const takeLocal = allocLocal(fctx, `__forof_take_${fctx.locals.length}`, {
@@ -2735,17 +2833,36 @@ function compileForOfArrayTentative(
   return false;
 }
 
+/**
+ * (#2162) Drive the array for-of loop over an already-materialized vec held in a
+ * local (used by the native Map/Set for-of path, which builds the projection vec
+ * itself). Mirrors `compileForOfArray` but skips the expression-compile +
+ * vecLocal store.
+ */
+function compileForOfArrayFromLocal(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  vecLocal: number,
+  vecType: ValType,
+): void {
+  compileForOfArray(ctx, fctx, stmt, undefined, { vecLocal, vecType });
+}
+
 /** Compile for...of over an array using index-based loop (existing behavior) */
 function compileForOfArray(
   ctx: CodegenContext,
   fctx: FunctionContext,
   stmt: ts.ForOfStatement,
   iterableOverride?: ts.Expression,
+  preVec?: { vecLocal: number; vecType: ValType },
 ): void {
   // Compile the iterable expression (vec struct ref). `iterableOverride` is the
-  // inner receiver of a `.values()` call (#681) when present.
+  // inner receiver of a `.values()` call (#681) when present. When `preVec` is
+  // supplied the caller already materialized the vec into a local (#2162 native
+  // Map/Set for-of), so skip the expression compile.
   const bodyLenBefore = fctx.body.length;
-  const vecType = compileExpression(ctx, fctx, iterableOverride ?? stmt.expression);
+  const vecType = preVec ? preVec.vecType : compileExpression(ctx, fctx, iterableOverride ?? stmt.expression);
   if (!vecType || (vecType.kind !== "ref" && vecType.kind !== "ref_null")) {
     fctx.body.length = bodyLenBefore;
     reportError(ctx, stmt, "for-of requires an array expression");
@@ -2770,9 +2887,11 @@ function compileForOfArray(
   }
   const elemType = arrDef.element;
 
-  // Save vec ref to temp local
-  const vecLocal = allocLocal(fctx, `__forof_vec_${fctx.locals.length}`, vecType);
-  fctx.body.push({ op: "local.set", index: vecLocal });
+  // Save vec ref to temp local. With `preVec` the vec is already in `vecLocal`.
+  const vecLocal = preVec ? preVec.vecLocal : allocLocal(fctx, `__forof_vec_${fctx.locals.length}`, vecType);
+  if (!preVec) {
+    fctx.body.push({ op: "local.set", index: vecLocal });
+  }
 
   // #2065: Array iterators re-read the live length each step (§23.1.5.1), so a
   // body that mutates the array (push/pop/splice/length=…/reassignment, or a
@@ -3201,13 +3320,17 @@ function emitArrayKeysEntriesLoop(
   fctx.body.push({ op: "local.set", index: dataLocal });
 
   // len = vec.length
-  const lenLocal = allocLocal(fctx, `__forof_len_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__forof_len_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "local.get", index: vecLocal });
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
   fctx.body.push({ op: "local.set", index: lenLocal });
 
   // i = 0
-  const iLocal = allocLocal(fctx, `__forof_i_${fctx.locals.length}`, { kind: "i32" });
+  const iLocal = allocLocal(fctx, `__forof_i_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iLocal });
 
@@ -4031,7 +4154,9 @@ function compileForOfIterator(ctx: CodegenContext, fctx: FunctionContext, stmt: 
   // Allocate locals for the iterator-step result. __iterator_next now returns a
   // multi-value (i32 done, externref value); resultLocal holds the value, and
   // nextDoneLocal the done flag (#1620 v2 — no $IteratorResult struct).
-  const resultLocal = allocLocal(fctx, `__forof_result_${fctx.locals.length}`, { kind: "externref" });
+  const resultLocal = allocLocal(fctx, `__forof_result_${fctx.locals.length}`, {
+    kind: "externref",
+  });
   const nextDoneLocal = allocLocal(fctx, `__forof_done_raw_${fctx.locals.length}`, { kind: "i32" });
 
   // Declare the loop variable (element type is externref for iterator protocol)

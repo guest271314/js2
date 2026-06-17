@@ -24,7 +24,7 @@ import {
   getOrRegisterVecType,
   resolveWasmType,
 } from "../index.js";
-import { ensureMapHelpers } from "../map-runtime.js";
+import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
 import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
 import { ensureSetHelpers } from "../set-runtime.js";
@@ -51,6 +51,7 @@ import { maybeSetArgcForKnownCall } from "../statements/nested-declarations.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { coerceType as coerceTypeImpl, pushDefaultValue } from "../type-coercion.js";
 import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
+import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm new Date(str)
 import { compileSpreadCallArgs } from "./extern.js";
 import { compileTemporalNewExpression } from "../temporal-native.js";
 import {
@@ -79,6 +80,23 @@ function valTypeMatches(a: ValType, b: ValType): boolean {
     return a.typeIdx === b.typeIdx;
   }
   return true;
+}
+
+/**
+ * (#2164) Is `arg` statically a String value? `new Date(value)` parses a String
+ * (§21.4.2.1) but ToNumbers anything else, so we only route to __date_parse when
+ * the arg is a string literal or has a string-like static type. Anything else
+ * (number, Date, any) keeps the existing ToNumber(ms) path.
+ */
+function isStringTypedArg(ctx: CodegenContext, arg: ts.Expression): boolean {
+  if (ts.isStringLiteralLike(arg) || ts.isTemplateExpression(arg)) return true;
+  try {
+    const t = ctx.checker.getTypeAtLocation(arg);
+    // StringLike covers string, string literal types, and unions thereof.
+    return (t.flags & ts.TypeFlags.StringLike) !== 0;
+  } catch {
+    return false;
+  }
 }
 
 function compileCtorArgument(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression, expected?: ValType): void {
@@ -1651,37 +1669,84 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // needs `__map_new_from_arr` (slice 2) and falls through. Returns `ref $Map`
   // so the binding/receiver is typed (see resolveWasmType Map case + the
   // method/.size dispatch in extern.ts / property-access.ts).
-  if (
-    ctx.nativeStrings &&
-    ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "Map" &&
-    (expr.arguments?.length ?? 0) === 0
-  ) {
-    addUnionImports(ctx);
-    ensureMapHelpers(ctx);
-    const mapNewIdx = ctx.mapHelpers.get("__map_new");
-    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
-      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
-      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+  if (ctx.nativeStrings && ts.isIdentifier(expr.expression) && expr.expression.text === "Map") {
+    const args = expr.arguments ?? ([] as readonly ts.Expression[]);
+    // `new Map([[k,v],...])` — an array literal of 2-element array-literal pairs
+    // (the dominant iterable form). Each pair seeds the map via `__map_set`. Any
+    // non-array-literal element (spread, a variable, a non-pair) makes us fall
+    // back to the empty map (the general iterator drive is a follow-up slice).
+    const arrArg = args.length === 1 && ts.isArrayLiteralExpression(args[0]!) ? args[0]! : undefined;
+    const seedablePairs =
+      arrArg !== undefined &&
+      arrArg.elements.every(
+        (e) => ts.isArrayLiteralExpression(e) && e.elements.length === 2 && !e.elements.some(ts.isSpreadElement),
+      );
+    if (args.length === 0 || seedablePairs) {
+      addUnionImports(ctx);
+      ensureMapHelpers(ctx);
+      const mapNewIdx = ctx.mapHelpers.get("__map_new");
+      const mapSetIdx = ctx.mapHelpers.get("__map_set");
+      if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+        fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+        if (seedablePairs && arrArg !== undefined && arrArg.elements.length > 0 && mapSetIdx !== undefined) {
+          const mTmp = allocLocal(fctx, `__mapctor_m_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: ctx.mapTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: mTmp });
+          for (const el of arrArg.elements) {
+            // every() above narrowed each element to a 2-element array literal.
+            const pair = el as ts.ArrayLiteralExpression;
+            fctx.body.push({ op: "local.get", index: mTmp });
+            const kt = compileExpression(ctx, fctx, pair.elements[0]!);
+            coerceMapKeyToAnyref(ctx, fctx, kt);
+            const vt = compileExpression(ctx, fctx, pair.elements[1]!);
+            coerceMapKeyToAnyref(ctx, fctx, vt);
+            fctx.body.push({ op: "call", funcIdx: mapSetIdx }); // returns ref $Map
+            fctx.body.push({ op: "drop" });
+          }
+          fctx.body.push({ op: "local.get", index: mTmp });
+        }
+        return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+      }
     }
   }
 
-  // (#2162) `new Set()` in standalone / nativeStrings mode → the WasmGC-native
-  // Set runtime, which reuses the Map backing store (`__map_new` yields the
-  // same empty `$Map` a Set wraps). No-arg form only; `new Set(iterable)` needs
-  // the iterator drive (follow-up slice) and falls through.
-  if (
-    ctx.nativeStrings &&
-    ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "Set" &&
-    (expr.arguments?.length ?? 0) === 0
-  ) {
-    addUnionImports(ctx);
-    ensureSetHelpers(ctx);
-    const mapNewIdx = ctx.mapHelpers.get("__map_new");
-    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
-      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
-      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+  // (#2162) `new Set()` / `new Set([...])` in standalone / nativeStrings mode →
+  // the WasmGC-native Set runtime, which reuses the Map backing store
+  // (`__map_new` yields the same empty `$Map` a Set wraps). The no-arg form
+  // builds an empty Set; an ARRAY-LITERAL argument (`new Set([1,2,3])`, the
+  // dominant iterable form) seeds it element-by-element via `__set_add` (which
+  // dedups through the shared Map insert). A non-literal iterable still needs
+  // the general iterator drive (follow-up slice) and falls through.
+  if (ctx.nativeStrings && ts.isIdentifier(expr.expression) && expr.expression.text === "Set") {
+    const args = expr.arguments ?? ([] as readonly ts.Expression[]);
+    const arrArg = args.length === 1 && ts.isArrayLiteralExpression(args[0]!) ? args[0]! : undefined;
+    if (args.length === 0 || arrArg) {
+      addUnionImports(ctx);
+      ensureSetHelpers(ctx);
+      const mapNewIdx = ctx.mapHelpers.get("__map_new");
+      const setAddIdx = ctx.mapHelpers.get("__set_add");
+      if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+        fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+        if (arrArg && setAddIdx !== undefined && !arrArg.elements.some((e) => ts.isSpreadElement(e))) {
+          const mTmp = allocLocal(fctx, `__setctor_m_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: ctx.mapTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: mTmp });
+          for (const el of arrArg.elements) {
+            if (ts.isOmittedExpression(el)) continue; // hole → undefined element
+            fctx.body.push({ op: "local.get", index: mTmp });
+            const et = compileExpression(ctx, fctx, el);
+            coerceMapKeyToAnyref(ctx, fctx, et);
+            fctx.body.push({ op: "call", funcIdx: setAddIdx }); // returns ref $Map
+            fctx.body.push({ op: "drop" }); // discard chained set
+          }
+          fctx.body.push({ op: "local.get", index: mTmp });
+        }
+        return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+      }
     }
   }
 
@@ -2302,7 +2367,22 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // (#1343) TimeClip per §21.4.1.31: if !isFinite(ms) or abs(ms) > 8.64e15,
       // return NaN. Both NaN and out-of-range get the sentinel. ±Infinity is
       // out-of-range (abs > 8.64e15), so the single magnitude check covers it.
-      compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+      //
+      // (#2164) new Date(str) — §21.4.2.1: a String value is parsed as if by
+      // Date.parse. Route a statically-string-typed arg through the pure-Wasm
+      // __date_parse helper (yields an f64 ms, NaN on failure), then fall
+      // through the same TimeClip path below. Gated to standalone / WASI for the
+      // same reason as Date.parse (host strings + lazy helper wiring trip the
+      // late-import shift class #2043); host keeps the prior ToNumber(str)→NaN.
+      if ((ctx.standalone || ctx.wasi) && isStringTypedArg(ctx, args[0]!)) {
+        emitNativeDateParse(ctx);
+        const argType = compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+        flushLateImportShifts(ctx, fctx);
+        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__date_parse")! } as Instr);
+      } else {
+        compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+      }
       const msLocal = allocTempLocal(fctx, { kind: "f64" });
       fctx.body.push({ op: "local.tee", index: msLocal } as Instr);
       // isInvalid = (ms != ms) || (abs(ms) > 8.64e15)
@@ -2469,7 +2549,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           blockType: { kind: "val", type: { kind: "i64" } },
           then: [{ op: "i64.const", value: -9223372036854775808n } as Instr],
           else: [{ op: "local.get", index: tsResultLocal } as Instr],
-        } as unknown as Instr,
+        },
       );
       releaseTempLocal(fctx, tsResultLocal);
       releaseTempLocal(fctx, nonFiniteLocal);
@@ -3533,7 +3613,20 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Always register, even for externref buffers — ArrayBuffer variables
       // in user code are lowered to externref (see checker/type-mapper.ts),
       // but the actual wasmGC struct is what the bridge dispatches on.
-      {
+      //
+      // (#2159) Standalone / WASI mode has no JS host: the accessor
+      // (`get/set{Int,Uint,Float}N`) is lowered to pure-Wasm byte reads/writes
+      // directly on the i32_byte backing struct (see dataview-native.ts), so
+      // there is no runtime bridge to register with. Emitting the host call
+      // unconditionally leaked an unsatisfiable `env::__dv_register_view`
+      // import, making EVERY `new DataView(...)` a hard instantiate failure
+      // standalone. Gate the registration on JS-host mode; standalone evaluates
+      // the offset/length args above for their side effects + RangeError checks
+      // and then operates on the struct directly. (The view-window base offset
+      // for `new DataView(buf, n>0)` is a separate representation slice, shared
+      // with TypedArray-on-buffer windowing; offset-0 views — the dominant
+      // case — are fully native here.)
+      if (!noJsHost(ctx)) {
         const regIdx = ensureLateImport(
           ctx,
           "__dv_register_view",
