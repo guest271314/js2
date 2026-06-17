@@ -735,6 +735,13 @@ export interface CodegenContext {
   accessorGetDriverReserved?: boolean;
   accessorSetDriverReserved?: boolean;
   /**
+   * (#2166 PR-D1) True once the standalone `JSON.parse(text, reviver)` codec
+   * reserved its `__call_reviver(holder, key, value) -> externref` driver
+   * funcIdx — filled in finalize to wrap `__call_fn_method_2`. Same reserve/fill
+   * funcIdx-authority pattern as the accessor drivers above.
+   */
+  reviverDriverReserved?: boolean;
+  /**
    * (#1888 Slice 1) True once the standalone open-any method-dispatch bridge
    * `__apply_closure(fn, recv, args) -> externref` has reserved its funcIdx via
    * a placeholder function pushed during `ensureObjectRuntime` (registered in
