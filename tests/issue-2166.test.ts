@@ -339,9 +339,9 @@ describe("#2166 PR-B — standalone dynamic object-graph JSON.stringify indentat
 
   it("uses a multi-char string space", async () => {
     const want = JSON.stringify({ a: 1, b: 2 }, null, "xy");
-    expect(
-      await stringifyDynamicSpace(`let o: any = { a: 1, b: 2 }; G = s(o);`, `JSON.stringify(o, null, "xy")`),
-    ).toBe(want);
+    expect(await stringifyDynamicSpace(`let o: any = { a: 1, b: 2 }; G = s(o);`, `JSON.stringify(o, null, "xy")`)).toBe(
+      want,
+    );
   });
 
   it("clamps a numeric space > 10 to 10 spaces (§25.5.2)", async () => {
@@ -359,15 +359,18 @@ describe("#2166 PR-B — standalone dynamic object-graph JSON.stringify indentat
 
   it("indents a null property value", async () => {
     const want = JSON.stringify({ n: null, x: 1 }, null, 2);
-    expect(
-      await stringifyDynamicSpace(`let o: any = { n: null, x: 1 }; G = s(o);`, `JSON.stringify(o, null, 2)`),
-    ).toBe(want);
+    expect(await stringifyDynamicSpace(`let o: any = { n: null, x: 1 }; G = s(o);`, `JSON.stringify(o, null, 2)`)).toBe(
+      want,
+    );
   });
 
   it("keeps an empty object compact even with a space (§25.5.2)", async () => {
     const want = JSON.stringify({ a: {}, b: 2 }, null, 2);
     expect(
-      await stringifyDynamicSpace(`const e: any = {}; let o: any = { a: e, b: 2 }; G = s(o);`, `JSON.stringify(o, null, 2)`),
+      await stringifyDynamicSpace(
+        `const e: any = {}; let o: any = { a: e, b: 2 }; G = s(o);`,
+        `JSON.stringify(o, null, 2)`,
+      ),
     ).toBe(want);
   });
 
