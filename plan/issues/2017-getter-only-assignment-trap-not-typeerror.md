@@ -23,7 +23,11 @@ origin: "2026-06-10 spec-conformance sweep (objects agent): verified on main"
 ## Problem
 
 ```ts
-const o: any = { get x() { return 1; } };
+const o: any = {
+  get x() {
+    return 1;
+  },
+};
 o.x = 99;
 // wasm: RuntimeError: illegal cast (uncatchable)
 // node: TypeError: Cannot set property x ... which has only a getter
@@ -59,6 +63,7 @@ Spec (ESM is strict) requires a catchable TypeError (§13.15.2 → §10.1.9).
 **Fix — the `__extern_set_strict` split (keystone).** Added a strict [[Set]]
 host import that mirrors `__extern_set` but throws a CATCHABLE TypeError on the
 three §10.1.9 failure cases instead of silently failing:
+
 - getter-only accessor (real JS descriptor with `get`/no `set`, OR sidecar
   `__get_<k>` with no `__set_<k>`, OR symbol-keyed accessor-map entry);
 - non-writable own data property;
