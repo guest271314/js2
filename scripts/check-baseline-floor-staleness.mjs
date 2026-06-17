@@ -39,6 +39,9 @@
 //   3 — internal/usage error
 
 import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
+import { argv } from "node:process";
+import { fileURLToPath } from "node:url";
 
 const RAW_BASE = (repo) => `https://raw.githubusercontent.com/${repo}/main`;
 
@@ -128,7 +131,7 @@ function gitOk(args) {
 // walk thousands of commits when the floor is far behind. `exact` is false in
 // that early-exit case (the reported counts are a lower bound ≥ the threshold,
 // which is all the breach decision needs).
-function countRelevantDrift(floorSha, ref, maxBehind) {
+export function countRelevantDrift(floorSha, ref, maxBehind) {
   // Floor SHA must be a commit we can name; if not, staleness is undetermined.
   if (!gitOk(["cat-file", "-e", `${floorSha}^{commit}`])) {
     return null;
@@ -179,7 +182,7 @@ function countRelevantDrift(floorSha, ref, maxBehind) {
 // Mirror of scripts/test262-paths-match.sh — kept in lockstep with the
 // &test262-paths allowlist in test262-sharded.yml. A changed-file blob (one
 // path per line) touches test262 conformance iff any line matches.
-function pathsTouchTest262(changedBlob) {
+export function pathsTouchTest262(changedBlob) {
   const EXACT = new Set([
     ".github/workflows/test262-sharded.yml",
     "package.json",
@@ -276,7 +279,17 @@ async function main() {
   process.exit(breach ? 2 : 0);
 }
 
-main().catch((e) => {
-  console.error(`internal error: ${e?.stack ?? e}`);
-  process.exit(3);
-});
+// Only run the CLI when invoked directly (not when imported by a test).
+const invokedDirectly = (() => {
+  try {
+    return realpathSync(argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
+if (invokedDirectly) {
+  main().catch((e) => {
+    console.error(`internal error: ${e?.stack ?? e}`);
+    process.exit(3);
+  });
+}
