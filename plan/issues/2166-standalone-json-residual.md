@@ -4,7 +4,7 @@ title: "Standalone JSON conformance residual (~76 tests)"
 status: ready
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-15
+updated: 2026-06-17
 priority: low
 feasibility: medium
 reasoning_effort: medium

@@ -4,7 +4,7 @@ title: "Standalone Date conformance residual (~234 tests)"
 status: in-progress
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-16
+updated: 2026-06-17
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -62,8 +62,45 @@ explicit dates unaffected (5/5). Host date-basic equiv unchanged (12/12).
 
 ### Remaining slices (issue stays open)
 
-- **`Date.parse(str)`** returns 0 standalone (`Date.parse("2000-01-01")` → 0)
-  — the date-string parser isn't wired standalone. Medium slice.
 - Real current-time semantics standalone are intentionally NOT provided (no
   clock source); only the instantiate-blocking leak is fixed here. Tests
   asserting a non-zero *current* time stay failing by design.
+
+---
+
+## Slice 2 (2026-06-17) — pure-Wasm `Date.parse(str)` / `new Date(str)`
+
+**Landed.** `Date.parse` was a NaN stub and `new Date("…")` coerced the string
+to f64 (→ NaN), so neither parsed a date string in ANY mode — fatal standalone
+(no host fallback).
+
+**Fix.** New module `src/codegen/date-parse-native.ts` emits a WasmGC-native
+parser `__date_parse (externref) -> f64` for the ECMAScript Date Time String
+Format (§21.4.1.32): `YYYY[-MM[-DD]]` date forms, `THH:mm[:ss[.sss]]` time,
+`Z`/`±HH:mm` timezone, and `±YYYYYY` expanded years. It flattens the string via
+`__str_flatten` and scans code units (same foundation as
+`parse-number-native.ts`), validates field ranges, and composes the time value
+through the existing `__date_days_from_civil` helper. Returns NaN on any parse
+failure or out-of-range field. A no-timezone date-time form is treated as UTC
+(standalone has no timezone database — matches slice 1's deterministic-clock
+decision); date-only forms are UTC per spec.
+
+Wired at `expressions/calls.ts` (`Date.parse`) and `expressions/new-super.ts`
+(`new Date(str)` when the arg is statically string-typed).
+
+**Gating.** Native parse is enabled for `--target standalone` / `--target wasi`
+only. Those carry the `nativeStrings` WasmGC string backend so the helper links
+cleanly. In JS-host mode, lazily wiring the helper mid-body trips the
+late-import index-shift class (#2043: "heap type index out of range"), so host
+mode keeps the prior NaN stub — **no regression** (host `Date.parse` was always
+a NaN stub). Follow-up: register `__date_parse` up-front (like `parseInt` in
+`index.ts`) to extend native parsing to host mode.
+
+**Validation.** `tests/issue-2164.test.ts` +15 cases (ISO full/date-only/
+year-only, ms component, ±TZ offsets, no-TZ-as-UTC, leap day, expanded ±years,
+invalid month/day/hour, garbage → NaN, `new Date(str)` round-trips through UTC
+getters) — 21/21 green. Verified against Node `Date.parse` across 18 formats
+(18/18 under `TZ=UTC`; the 2 no-TZ cases differ from a Berlin-TZ Node only by
+the host TZ offset, which is the intended UTC-for-local standalone behavior).
+Host-mode Date code no longer compile-errors. tsc + biome lint + prettier +
+stack-balance gates clean.
