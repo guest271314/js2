@@ -17,7 +17,7 @@ import {
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
-import { emitThrowString, emitThrowTypeError } from "./expressions/helpers.js";
+import { emitThrowTypeError } from "./expressions/helpers.js";
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, cacheStringLiterals, getOrRegisterTupleType, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
@@ -444,7 +444,7 @@ function emitNonObjectArgGuard(
     // Compile the argument for side effects (it might have side effects)
     const argType = compileExpression(ctx, fctx, argExpr);
     if (argType) fctx.body.push({ op: "drop" });
-    emitThrowString(ctx, fctx, `TypeError: ${methodName} called on non-object`);
+    emitThrowTypeError(ctx, fctx, ` called on non-object`);
     return true;
   }
 
@@ -457,7 +457,7 @@ function emitNonObjectArgGuard(
     ts.isNumericLiteral(argExpr) ||
     (ts.isIdentifier(argExpr) && argExpr.text === "undefined")
   ) {
-    emitThrowString(ctx, fctx, `TypeError: ${methodName} called on non-object`);
+    emitThrowTypeError(ctx, fctx, ` called on non-object`);
     return true;
   }
 
@@ -1447,7 +1447,7 @@ export function compileObjectDefineProperty(
         // If the property is a known struct field (fieldIdx >= 0), it already
         // exists on the object, so redefining it is not "adding a new property".
         if (ctx.nonExtensibleVars.has(varName) && currentFlags === undefined) {
-          emitThrowString(ctx, fctx, "TypeError: Cannot define property, object is not extensible");
+          emitThrowTypeError(ctx, fctx, "Cannot define property, object is not extensible");
         }
 
         // Check existing flags
@@ -1457,28 +1457,28 @@ export function compileObjectDefineProperty(
           if (!isExistingConfigurable) {
             // Non-configurable: check for violations
             if (newFlags & PROP_FLAG_CONFIGURABLE) {
-              emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+              emitThrowTypeError(ctx, fctx, "Cannot redefine property");
             }
             const existingEnumerable = existingFlags & PROP_FLAG_ENUMERABLE;
             const newEnumerable = newFlags & PROP_FLAG_ENUMERABLE;
             if (existingEnumerable !== newEnumerable) {
-              emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+              emitThrowTypeError(ctx, fctx, "Cannot redefine property");
             }
             // Data property writable checks
             if (!(existingFlags & PROP_FLAG_ACCESSOR) && !isAccessor) {
               if (!(existingFlags & PROP_FLAG_WRITABLE)) {
                 if (newFlags & PROP_FLAG_WRITABLE) {
                   // Cannot change writable from false to true on non-configurable
-                  emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+                  emitThrowTypeError(ctx, fctx, "Cannot redefine property");
                 }
               }
             }
             // Cannot change data<->accessor on non-configurable
             if (isAccessor && !(existingFlags & PROP_FLAG_ACCESSOR)) {
-              emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+              emitThrowTypeError(ctx, fctx, "Cannot redefine property");
             }
             if (!isAccessor && existingFlags & PROP_FLAG_ACCESSOR) {
-              emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+              emitThrowTypeError(ctx, fctx, "Cannot redefine property");
             }
           }
         }
@@ -2335,33 +2335,33 @@ function emitExternDefinePropertyNoValue(
         descWritable !== undefined,
       );
       if (ctx.nonExtensibleVars.has(varName) && currentFlags === undefined) {
-        emitThrowString(ctx, fctx, "TypeError: Cannot define property, object is not extensible");
+        emitThrowTypeError(ctx, fctx, "Cannot define property, object is not extensible");
       }
       const existingFlags = currentFlags;
       if (existingFlags !== undefined) {
         const isExistingConfigurable = !!(existingFlags & PROP_FLAG_CONFIGURABLE);
         if (!isExistingConfigurable) {
           if (newFlags & PROP_FLAG_CONFIGURABLE) {
-            emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+            emitThrowTypeError(ctx, fctx, "Cannot redefine property");
           }
           if ((existingFlags & PROP_FLAG_ENUMERABLE) !== (newFlags & PROP_FLAG_ENUMERABLE)) {
-            emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+            emitThrowTypeError(ctx, fctx, "Cannot redefine property");
           }
           // Data property writable checks (#856)
           if (!(existingFlags & PROP_FLAG_ACCESSOR) && !isAccessor) {
             if (!(existingFlags & PROP_FLAG_WRITABLE)) {
               if (newFlags & PROP_FLAG_WRITABLE) {
                 // Cannot change writable from false to true on non-configurable
-                emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+                emitThrowTypeError(ctx, fctx, "Cannot redefine property");
               }
             }
           }
           // Cannot change data<->accessor on non-configurable
           if (isAccessor && !(existingFlags & PROP_FLAG_ACCESSOR)) {
-            emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+            emitThrowTypeError(ctx, fctx, "Cannot redefine property");
           }
           if (!isAccessor && existingFlags & PROP_FLAG_ACCESSOR) {
-            emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+            emitThrowTypeError(ctx, fctx, "Cannot redefine property");
           }
         }
       }
@@ -2606,27 +2606,27 @@ export function compileObjectDefineProperties(
               if (!isExistingConfigurable) {
                 // Non-configurable: check for violations
                 if (newFlags & PROP_FLAG_CONFIGURABLE) {
-                  emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+                  emitThrowTypeError(ctx, fctx, "Cannot redefine property");
                 }
                 const existingEnumerable = existingFlags & PROP_FLAG_ENUMERABLE;
                 const newEnumerable = newFlags & PROP_FLAG_ENUMERABLE;
                 if (existingEnumerable !== newEnumerable) {
-                  emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+                  emitThrowTypeError(ctx, fctx, "Cannot redefine property");
                 }
                 // Data property writable checks
                 if (!(existingFlags & PROP_FLAG_ACCESSOR) && !isAccessor) {
                   if (!(existingFlags & PROP_FLAG_WRITABLE)) {
                     if (newFlags & PROP_FLAG_WRITABLE) {
-                      emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+                      emitThrowTypeError(ctx, fctx, "Cannot redefine property");
                     }
                   }
                 }
                 // Cannot change data<->accessor on non-configurable
                 if (isAccessor && !(existingFlags & PROP_FLAG_ACCESSOR)) {
-                  emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+                  emitThrowTypeError(ctx, fctx, "Cannot redefine property");
                 }
                 if (!isAccessor && existingFlags & PROP_FLAG_ACCESSOR) {
-                  emitThrowString(ctx, fctx, "TypeError: Cannot redefine property");
+                  emitThrowTypeError(ctx, fctx, "Cannot redefine property");
                 }
               }
             }
