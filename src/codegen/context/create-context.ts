@@ -190,6 +190,7 @@ export function createCodegenContext(
     classStaticMethodsCsvGlobal: new Map(),
     builtinObjectGlobals: new Map(),
     methodClosureGlobals: new Map(),
+    nullThisTypeErrorReady: false, // (#2025)
     funcClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
     standalone: options?.standalone ?? false,

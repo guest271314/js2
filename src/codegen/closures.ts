@@ -18,6 +18,10 @@ import { ts, forEachChild } from "../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, LocalDef, StructTypeDef, ValType } from "../ir/types.js";
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
+import { addStringConstantGlobal } from "./registry/imports.js"; // (#2025)
+import { stringConstantExternrefInstrs } from "./native-strings.js"; // (#2025)
+import { noJsHost } from "./expressions/helpers.js"; // (#2025)
+import { emitWasiErrorConstructor } from "./registry/error-types.js"; // (#2025)
 import { pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { reportSilentFallback } from "./fallback-telemetry.js";
@@ -3531,10 +3535,115 @@ export function emitFuncRefAsClosure(
  * trampoline. Emits a sequence leaving exactly one `(ref null objStructTypeIdx)`
  * on the stack.
  */
-function buildTrampolineThisSlot(ctx: CodegenContext, objStructTypeIdx: number, anyTempLocalIdx: number): Instr[] {
+/**
+ * (#2025) Message thrown when an extracted method (`const f = a.m; f()`) is
+ * called with no receiver — `this` is `undefined`. Matches the spirit of
+ * Node's "Cannot read properties of undefined".
+ */
+const NULL_THIS_TYPEERROR_MSG = "Cannot read properties of undefined (reading a class field)";
+
+/**
+ * (#2025) Eagerly register the `__new_TypeError` import + the message string
+ * the first time an extractable method-as-closure trampoline is built, so the
+ * trampoline's null-`this` arm can emit a CATCHABLE TypeError throw with
+ * stable, shift-tracked indices (no late-import registration during the
+ * fragile finalize rebuild). Idempotent. Requires a live `fctx` so the flush
+ * lands the deferred index shift onto the surrounding function being compiled.
+ */
+export function ensureNullThisTypeError(ctx: CodegenContext, fctx: FunctionContext | null): void {
+  if (ctx.nullThisTypeErrorReady) return;
+  // In no-JS-host mode, define `__new_TypeError` in-module (no env import).
+  if (noJsHost(ctx)) {
+    emitWasiErrorConstructor(ctx, "TypeError", 1);
+  }
+  addStringConstantGlobal(ctx, NULL_THIS_TYPEERROR_MSG);
+  ensureLateImportShared(ctx, "__new_TypeError", [{ kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShiftsShared(ctx, fctx);
+  ensureExnTag(ctx);
+  ctx.nullThisTypeErrorReady = true;
+}
+
+/**
+ * (#2025) The catchable-TypeError throw sequence for a genuinely-absent
+ * receiver, or `null` when the helpers were not eagerly registered (in which
+ * case the trampoline falls back to the legacy `ref.null` passthrough rather
+ * than risk an unregistered call). Pure lookups — no registration, so it is
+ * safe to call from the finalize rebuild (post-body, pre-freeze).
+ */
+function buildNullThisTypeErrorThrow(ctx: CodegenContext): Instr[] | null {
+  if (!ctx.nullThisTypeErrorReady) return null;
+  const newTypeErrorIdx = ctx.funcMap.get("__new_TypeError");
+  if (newTypeErrorIdx === undefined || ctx.exnTagIdx < 0) return null;
+  return [
+    ...stringConstantExternrefInstrs(ctx, NULL_THIS_TYPEERROR_MSG),
+    { op: "call", funcIdx: newTypeErrorIdx } as Instr,
+    { op: "throw", tagIdx: ctx.exnTagIdx } as Instr,
+  ];
+}
+
+/**
+ * (#2025) Does the method's compiled body read its receiver (`this` = param 0)?
+ * A method that never touches `this` is safely callable with a null receiver
+ * (no struct.get on null), so the trampoline must NOT throw for it. We detect a
+ * `local.get 0` anywhere in the body (including nested blocks). Conservative:
+ * if the body isn't available yet (idx out of range), assume it does use `this`
+ * so we don't silently regress the trap→TypeError fix.
+ */
+function methodBodyReadsThis(ctx: CodegenContext, methodFuncIdx: number): boolean {
+  const localIdx = methodFuncIdx - ctx.numImportFuncs;
+  const fn = localIdx >= 0 ? ctx.mod.functions[localIdx] : undefined;
+  if (!fn || !Array.isArray(fn.body)) return true;
+  const walk = (instrs: Instr[]): boolean => {
+    for (const instr of instrs) {
+      if (instr.op === "local.get" && (instr as { index?: number }).index === 0) return true;
+      for (const key of ["body", "then", "else", "catchAll"] as const) {
+        const nested = (instr as Record<string, unknown>)[key];
+        if (Array.isArray(nested) && walk(nested as Instr[])) return true;
+      }
+      const catches = (instr as { catches?: { body?: Instr[] }[] }).catches;
+      if (Array.isArray(catches)) {
+        for (const c of catches) if (Array.isArray(c.body) && walk(c.body)) return true;
+      }
+    }
+    return false;
+  };
+  return walk(fn.body);
+}
+
+function buildTrampolineThisSlot(
+  ctx: CodegenContext,
+  objStructTypeIdx: number,
+  anyTempLocalIdx: number,
+  methodUsesThis: boolean,
+): Instr[] {
   const currentThisGlobalIdx = ensureCurrentThisGlobal(ctx);
   const nullThis: Instr[] = [{ op: "ref.null", typeIdx: objStructTypeIdx } as Instr];
   if (currentThisGlobalIdx < 0) return nullThis;
+  // (#2025) When the resolved `this` isn't the method's struct, distinguish a
+  // GENUINELY-ABSENT receiver (`__current_this` null — the unbound extraction
+  // `const f = a.m; f()`) from a merely structurally-different receiver (e.g. a
+  // subclass/boxed instance, where `__current_this` is non-null but doesn't
+  // `ref.test` as THIS exact struct). The first case is a spec TypeError; throw
+  // a CATCHABLE one instead of passing `ref.null` (which traps inside the
+  // method body on the first `this`-deref). The second case is left UNCHANGED
+  // (`ref.null` passthrough) — throwing there is what regressed PR #1571 (it
+  // fired for legitimate non-exact-struct receivers). Also only when the method
+  // actually READS `this` — a method that ignores its receiver (`m(){return 7}`)
+  // is callable with a null `this` (no deref, no trap), matching JS. Finally,
+  // only when the throw helpers were eagerly registered; else legacy passthrough.
+  const throwInstrs = methodUsesThis ? buildNullThisTypeErrorThrow(ctx) : null;
+  const elseArm: Instr[] = throwInstrs
+    ? [
+        { op: "local.get", index: anyTempLocalIdx } as Instr,
+        { op: "ref.is_null" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "ref_null", typeIdx: objStructTypeIdx } },
+          then: throwInstrs, // genuinely no receiver → catchable TypeError
+          else: nullThis, // different struct → unchanged passthrough
+        } as unknown as Instr,
+      ]
+    : nullThis;
   return [
     { op: "global.get", index: currentThisGlobalIdx } as Instr,
     { op: "any.convert_extern" } as Instr,
@@ -3547,7 +3656,7 @@ function buildTrampolineThisSlot(ctx: CodegenContext, objStructTypeIdx: number, 
         { op: "local.get", index: anyTempLocalIdx } as Instr,
         { op: "ref.cast", typeIdx: objStructTypeIdx } as Instr,
       ],
-      else: nullThis,
+      else: elseArm,
     } as unknown as Instr,
   ];
 }
@@ -3604,7 +3713,24 @@ export function emitObjectMethodAsClosure(
   const trampolineName = `__obj_meth_tramp_${methodName}_${ctx.closureCounter++}`;
   // anyref temp at the first slot past the params (closure_self + userParams).
   const anyTempLocalIdx = 1 + userParams.length;
-  const trampolineBody: Instr[] = buildTrampolineThisSlot(ctx, objStructTypeIdx, anyTempLocalIdx);
+  // (#2025) Decide whether the method reads `this` BEFORE registering the
+  // TypeError helpers — `ensureNullThisTypeError` adds a late import that shifts
+  // defined-function indices, which would make `methodFuncIdx` stale for the
+  // body lookup. Then register the helpers (with a live fctx so the import-index
+  // flush lands here) so the null-`this` arm throws instead of trapping and
+  // finalize never registers an import mid-rebuild.
+  // (#2025) Capture this-usage, then register the TypeError throw helpers. The
+  // registration may add a late import that shifts every DEFINED function index
+  // up by `ntShift`; the forwarding `call methodFuncIdx` we emit just below is in
+  // a body not yet attached to `ctx.mod.functions`, so the import-shift walker
+  // can't reach it — bump the captured index by the delta ourselves (import
+  // targets, < the pre-shift import count, are never shifted).
+  const methodUsesThis = methodBodyReadsThis(ctx, methodFuncIdx);
+  const importsBeforeNT = ctx.numImportFuncs;
+  ensureNullThisTypeError(ctx, fctx);
+  const ntShift = ctx.numImportFuncs - importsBeforeNT;
+  if (ntShift > 0 && methodFuncIdx >= importsBeforeNT) methodFuncIdx += ntShift;
+  const trampolineBody: Instr[] = buildTrampolineThisSlot(ctx, objStructTypeIdx, anyTempLocalIdx, methodUsesThis);
   for (let i = 0; i < userParams.length; i++) {
     // Skip closure_self at param 0; user params start at index 1
     trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
@@ -3634,6 +3760,7 @@ export function emitObjectMethodAsClosure(
     userParamCount: userParams.length,
     wrapperUserParams: userParams,
     wrapperResult: results[0],
+    methodUsesThis, // (#2025) captured pre-shift; finalize reuses it
     // (#1809) Record whether the target is already an import at registration.
     // Import indices stay stable across late-import batches (new imports append
     // at the end, so indices < importsBefore are never shifted), so an import
@@ -3766,7 +3893,12 @@ export function finalizeMethodTrampolines(ctx: CodegenContext): void {
       newBody = [];
     } else {
       const anyTempLocalIdx = allocTempLocal(tFctx, { kind: "anyref" });
-      newBody = buildTrampolineThisSlot(ctx, t.objStructTypeIdx, anyTempLocalIdx);
+      // (#2025) Reuse the registration-time `methodUsesThis` (captured before
+      // the TypeError-helper import shifted function indices, so it is reliable
+      // here where `t.methodFuncIdx` may be stale). Fall back to a fresh body
+      // scan only when it wasn't recorded.
+      const usesThis = t.methodUsesThis ?? methodBodyReadsThis(ctx, t.methodFuncIdx);
+      newBody = buildTrampolineThisSlot(ctx, t.objStructTypeIdx, anyTempLocalIdx, usesThis);
     }
     for (let i = 0; i < methodUserParams.length; i++) {
       newBody.push({ op: "local.get", index: i + 1 } as Instr);
@@ -3908,7 +4040,20 @@ export function emitCachedMethodClosureAccess(
     // null receiver propagates the spec-mandated TypeError on `this.field`
     // access), then forward user params, then call the method.
     const anyTempLocalIdx = 1 + userParams.length;
-    const trampolineBody: Instr[] = buildTrampolineThisSlot(ctx, objStructTypeIdx, anyTempLocalIdx);
+    // (#2025) Capture this-usage, register the throw helpers, then adjust the
+    // forwarding index by any import-shift the registration caused (see the
+    // matching note in emitObjectMethodAsClosure).
+    const methodUsesThisCached = methodBodyReadsThis(ctx, methodFuncIdx);
+    const importsBeforeNT = ctx.numImportFuncs;
+    ensureNullThisTypeError(ctx, fctx);
+    const ntShift = ctx.numImportFuncs - importsBeforeNT;
+    if (ntShift > 0 && methodFuncIdx >= importsBeforeNT) methodFuncIdx += ntShift;
+    const trampolineBody: Instr[] = buildTrampolineThisSlot(
+      ctx,
+      objStructTypeIdx,
+      anyTempLocalIdx,
+      methodUsesThisCached,
+    );
     for (let i = 0; i < userParams.length; i++) {
       trampolineBody.push({ op: "local.get", index: i + 1 } as Instr);
     }
@@ -3943,6 +4088,7 @@ export function emitCachedMethodClosureAccess(
       userParamCount: userParams.length,
       wrapperUserParams: userParams,
       wrapperResult: results[0],
+      methodUsesThis: methodUsesThisCached, // (#2025) captured pre-shift
       // (#1809) See the per-call-site push for rationale.
       methodTargetsImport: methodFuncIdx < ctx.numImportFuncs,
     });
