@@ -4,7 +4,7 @@ title: "Standalone TypedArray/DataView/ArrayBuffer conformance residual (~1,308 
 status: in-progress
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-16
+updated: 2026-06-17
 priority: high
 feasibility: medium
 reasoning_effort: high

@@ -4,7 +4,7 @@ title: "standalone: Array.prototype generics over array-like receivers emit inva
 status: in-progress
 sprint: Backlog
 created: 2026-06-10
-updated: 2026-06-14
+updated: 2026-06-17
 priority: high
 feasibility: medium
 reasoning_effort: high

@@ -4,7 +4,7 @@ title: "standalone: any-receiver method dispatch — o.method() on a closed obje
 status: in-progress
 sprint: 63
 created: 2026-06-14
-updated: 2026-06-14
+updated: 2026-06-17
 priority: high
 feasibility: hard
 reasoning_effort: max

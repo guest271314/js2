@@ -4,7 +4,7 @@ title: "Standalone Symbol conformance residual (~240 tests)"
 status: in-progress
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-16
+updated: 2026-06-17
 priority: medium
 feasibility: medium
 reasoning_effort: medium
