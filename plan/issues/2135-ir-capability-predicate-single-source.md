@@ -1,8 +1,9 @@
 ---
 id: 2135
 title: "Single IR capability predicate shared by selector and builder (retire select.ts/from-ast.ts drift)"
-status: ready
-sprint: 62
+status: blocked
+blocked_by: [2167]
+sprint: 64
 created: 2026-06-12
 updated: 2026-06-12
 priority: high

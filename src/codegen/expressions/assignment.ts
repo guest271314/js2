@@ -10,6 +10,7 @@ import { tryEmitLinearU8ElementSet } from "../linear-uint8-codegen.js";
 import { emitAnyAdd, emitModulo, emitToInt32 } from "../binary-ops.js";
 import { pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
+import { reportSilentFallback } from "../fallback-telemetry.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
 import {
@@ -27,7 +28,12 @@ import {
 } from "../index.js";
 import { buildDestructureNullThrow, patternIteratorStepCount } from "../destructuring-params.js";
 import { resolveComputedKeyExpression } from "../literals.js";
-import { emitNullGuardedStructGet, isProvablyNonNull, isSafeBoundsEliminated } from "../property-access.js";
+import {
+  emitNullGuardedStructGet,
+  isProvablyNonNull,
+  isSafeBoundsEliminated,
+  typeErrorThrowInstrs,
+} from "../property-access.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, skipTransparentExpressions, valTypesMatch } from "../shared.js";
 import { compileStringLiteral, emitBoolToString } from "../string-ops.js";
@@ -871,7 +877,10 @@ function compileDestructuringAssignment(
       }
       if (!propName) continue; // truly unresolvable property name — skip
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(ctx, "lookup-miss-skip", "assignment:destructure-assign-property-field-miss", prop);
+        continue;
+      }
       const fieldType = fields[fieldIdx]!.type;
 
       // Determine the target and optional default value
@@ -1876,7 +1885,10 @@ function emitObjectDestructureFromLocal(
     if (ts.isShorthandPropertyAssignment(prop)) {
       const propName = prop.name.text;
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(ctx, "lookup-miss-skip", "assignment:object-destructure-shorthand-field-miss", prop);
+        continue;
+      }
 
       let localIdx = fctx.localMap.get(propName);
       if (localIdx === undefined) {
@@ -1905,7 +1917,15 @@ function emitObjectDestructureFromLocal(
       }
       if (!propName) continue; // truly unresolvable property name — skip
       const fieldIdx = fields.findIndex((f) => f.name === propName);
-      if (fieldIdx === -1) continue;
+      if (fieldIdx === -1) {
+        reportSilentFallback(
+          ctx,
+          "lookup-miss-skip",
+          "assignment:object-destructure-from-local-property-field-miss",
+          prop,
+        );
+        continue;
+      }
       const fieldType = fields[fieldIdx]!.type;
 
       const targetExpr = prop.initializer;
@@ -2388,6 +2408,28 @@ function compilePropertyAssignment(
   if (ctx.classAccessorSet.has(accessorKey)) {
     const setterName = `${typeName}_set_${fieldName}`;
     const funcIdx = ctx.funcMap.get(setterName);
+    // (#2024) `classAccessorSet` records a class that declares EITHER a getter
+    // or a setter for this prop (class-bodies.ts adds the key for both). A
+    // get-only accessor — `class B extends A { get v() {…} }` over a parent
+    // with `set v` — therefore lands here with NO `${type}_set_${field}`
+    // function. Per §10.1.5.3 OrdinarySetWithOwnDescriptor, the own get-only
+    // accessor SHADOWS the inherited setter: strict-mode writes throw TypeError
+    // and the parent's setter must NOT run. Without this, control fell through
+    // to the struct-field path, which found no field named `<field>` and
+    // silently dropped the write. Emit the spec TypeError instead.
+    if (funcIdx === undefined && ctx.funcMap.has(`${typeName}_get_${fieldName}`)) {
+      // Evaluate the RHS for its side effects (spec: GetValue(rhs) is performed
+      // before the [[Set]]), drop its value, then throw. `emitThrowTypeError`
+      // emits an `unreachable`, so the assignment expression's stack effect is
+      // satisfied by divergence — we report the RHS type so any wrapping
+      // expression type-checks consistently.
+      const rhsResult = compileExpression(ctx, fctx, value);
+      if (rhsResult !== null) {
+        fctx.body.push({ op: "drop" });
+      }
+      emitThrowTypeError(ctx, fctx, `Cannot assign to read only property '${fieldName}' of object`);
+      return rhsResult ?? { kind: "f64" };
+    }
     if (funcIdx !== undefined) {
       // `C.prototype.<setter> = v` and `C.<static setter> = v` both write
       // through a receiver that is an externref (the prototype singleton or the
@@ -2445,12 +2487,39 @@ function compilePropertyAssignment(
     reportError(ctx, target, "Failed to compile struct field receiver");
     return null;
   }
+  // (#2084) Null-guard the write. The read path already throws a catchable
+  // TypeError on a null receiver, but the store path emitted `struct.set`
+  // directly — a null receiver then trapped uncatchably ("dereferencing a null
+  // pointer") instead of throwing `TypeError: Cannot set properties of null`
+  // (error-model divergence, family #581/#2025). Skip the guard when the
+  // receiver is a non-nullable `ref` or is statically provably non-null (e.g.
+  // `new Foo()`, `this`) — no trap is possible there and the check is dead
+  // weight. Mirrors the array-element write guard below (`isProvablyNonNull`).
+  const guardNull = structObjResult.kind === "ref_null" && !isProvablyNonNull(target.expression, ctx.checker);
   const valType = compileExpression(ctx, fctx, value, fields[fieldIdx]!.type);
   if (!valType) return null;
-  // Save value so assignment expression returns the RHS
+  // Save value so the assignment expression returns the RHS.
   const tmpVal = allocLocal(fctx, `__prop_assign_${fctx.locals.length}`, valType);
-  fctx.body.push({ op: "local.tee", index: tmpVal });
-  fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
+  if (guardNull) {
+    // stack: [receiver, value] — stash value, then null-check the receiver.
+    fctx.body.push({ op: "local.set", index: tmpVal });
+    const tmpRecv = allocLocal(fctx, `__prop_recv_${fctx.locals.length}`, structSelfType);
+    fctx.body.push({ op: "local.tee", index: tmpRecv });
+    fctx.body.push({ op: "ref.is_null" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: typeErrorThrowInstrs(ctx, target),
+      else: [
+        { op: "local.get", index: tmpRecv } as Instr,
+        { op: "local.get", index: tmpVal } as Instr,
+        { op: "struct.set", typeIdx: structTypeIdx, fieldIdx } as Instr,
+      ],
+    } as Instr);
+  } else {
+    fctx.body.push({ op: "local.tee", index: tmpVal });
+    fctx.body.push({ op: "struct.set", typeIdx: structTypeIdx, fieldIdx });
+  }
   fctx.body.push({ op: "local.get", index: tmpVal });
 
   return valType;
@@ -2833,7 +2902,17 @@ function compileElementAssignment(
       reportError(ctx, target, "Failed to compile element value");
       return null;
     }
-    const valLocal = allocLocal(fctx, `__val_${fctx.locals.length}`, arrDef.element);
+    // #2159 — `i8`/`i16` are *packed storage* types, valid only inside array
+    // elements / struct fields. The value temp holds the unpacked Wasm value
+    // (an `i32`) that `array.set` re-packs; allocating the local with the raw
+    // packed `arrDef.element` leaked an `i8`/`i16` into a local (value position),
+    // which Wasm has no encoding for and the binary emitter rejects. This is the
+    // standalone Uint8Array/Int8Array/Int16Array/Uint16Array element-write CE.
+    // The matching read path already unpacks via array.get_u/_s → i32
+    // (property-access.ts). Mirror it here for the store value local.
+    const valLocalType: ValType =
+      arrDef.element.kind === "i8" || arrDef.element.kind === "i16" ? { kind: "i32" } : arrDef.element;
+    const valLocal = allocLocal(fctx, `__val_${fctx.locals.length}`, valLocalType);
     fctx.body.push({ op: "local.set", index: valLocal });
 
     // #1196: Bounds-check elimination on writes — when the for-loop pattern

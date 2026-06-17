@@ -1,10 +1,12 @@
 ---
 id: 2126
 title: "object-literal construction with a runtime computed key drops the property and never evaluates the key expression"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-12
-updated: 2026-06-12
+updated: 2026-06-15
+completed: 2026-06-13
+pr: 1418
 priority: high
 feasibility: medium
 reasoning_effort: medium

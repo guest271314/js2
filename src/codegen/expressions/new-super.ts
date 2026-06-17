@@ -25,7 +25,12 @@ import {
   resolveWasmType,
 } from "../index.js";
 import { ensureMapHelpers } from "../map-runtime.js";
-import { resolveComputedKeyExpression } from "../literals.js";
+import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
+import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
+import { ensureSetHelpers } from "../set-runtime.js";
+import { ensureWeakCollectionHelpers } from "../weak-collections-runtime.js";
+import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
+import { compileObjectLiteralAsExternref, resolveComputedKeyExpression } from "../literals.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
 import {
   compileStandaloneRegExpConstructor,
@@ -933,7 +938,7 @@ function compileNewFunctionDeclaration(
   const ctorResults: ValType[] = [{ kind: "ref", typeIdx: structTypeIdx }];
   const ctorTypeIdx = addFuncType(ctx, ctorParams, ctorResults, `${ctorName}_type`);
   const ctorFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.funcMap.set(ctorName, ctorFuncIdx);
+  ctx.funcMap.set(classMemberFuncKey(ctx, ctorName), ctorFuncIdx); // (#1983) collision-free key
 
   const ctorFunc = {
     name: ctorName,
@@ -1097,7 +1102,7 @@ function compileNewFunctionDeclaration(
     }
   }
   // Re-lookup funcIdx in case addUnionImports shifted indices
-  const finalCtorIdx = ctx.funcMap.get(ctorName) ?? ctorFuncIdx;
+  const finalCtorIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)) ?? ctorFuncIdx; // (#1983)
   maybeSetArgcForKnownCall(ctx, fctx, ctorName, args.length, paramTypes?.length ?? args.length);
   fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
   return { kind: "ref", typeIdx: structTypeIdx };
@@ -1565,7 +1570,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
 
   if (syntheticName) {
     const ctorName = `${syntheticName}_new`;
-    const funcIdx = ctx.funcMap.get(ctorName);
+    const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
     if (funcIdx !== undefined) {
       return emitClassCtorValue(ctx, fctx, ctorName, funcIdx);
     }
@@ -1576,7 +1581,7 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
     const className = expr.name.text;
     if (ctx.classSet.has(className)) {
       const ctorName = `${className}_new`;
-      const funcIdx = ctx.funcMap.get(ctorName);
+      const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
       if (funcIdx !== undefined) {
         return emitClassCtorValue(ctx, fctx, ctorName, funcIdx);
       }
@@ -1661,6 +1666,44 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     }
   }
 
+  // (#2162) `new Set()` in standalone / nativeStrings mode → the WasmGC-native
+  // Set runtime, which reuses the Map backing store (`__map_new` yields the
+  // same empty `$Map` a Set wraps). No-arg form only; `new Set(iterable)` needs
+  // the iterator drive (follow-up slice) and falls through.
+  if (
+    ctx.nativeStrings &&
+    ts.isIdentifier(expr.expression) &&
+    expr.expression.text === "Set" &&
+    (expr.arguments?.length ?? 0) === 0
+  ) {
+    addUnionImports(ctx);
+    ensureSetHelpers(ctx);
+    const mapNewIdx = ctx.mapHelpers.get("__map_new");
+    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+  }
+
+  // (#2162) `new WeakMap()` / `new WeakSet()` in standalone / nativeStrings mode
+  // → the native weak-collection runtime, which reuses the Map backing store
+  // (`__map_new` yields the same empty `$Map`). No-arg form only; the iterable
+  // form falls through.
+  if (
+    ctx.nativeStrings &&
+    ts.isIdentifier(expr.expression) &&
+    (expr.expression.text === "WeakMap" || expr.expression.text === "WeakSet") &&
+    (expr.arguments?.length ?? 0) === 0
+  ) {
+    addUnionImports(ctx);
+    ensureWeakCollectionHelpers(ctx);
+    const mapNewIdx = ctx.mapHelpers.get("__map_new");
+    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+  }
+
   // Arrow functions are NOT constructors — `new (() => {})` throws TypeError (#730)
   {
     const unwrappedNew = unwrapNewTarget(expr.expression);
@@ -1685,7 +1728,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       const syntheticName = ctx.anonClassExprNames.get(unwrappedExpr);
       if (syntheticName) {
         const ctorName = `${syntheticName}_new`;
-        const funcIdx = ctx.funcMap.get(ctorName);
+        const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
         if (funcIdx === undefined) {
           reportError(ctx, expr, `Missing constructor for anonymous class`);
           return null;
@@ -2066,14 +2109,67 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     return { kind: "externref" };
   }
 
-  // Handle `new Proxy(target, handler)` — delegate to __proxy_create host import.
-  // The host wraps the target in a real JS Proxy with the given handler object.
-  // Standalone has no JS Proxy machinery, so fail clearly instead of silently
-  // lowering to a half-working pass-through value (#1472 Phase C).
+  // Handle `new Proxy(target, handler)`.
+  //
+  // JS-host mode: delegate to the `__proxy_create(target, handler)` host import
+  // (the host wraps the target in a real JS Proxy with the given handler).
+  //
+  // Standalone mode (#1100 Phase 1): there is no host Proxy, so route through the
+  // Wasm-native `__proxy_create(target, handler)` emitted by `ensureObjectRuntime`
+  // (object-runtime.ts `ensureProxyRuntime`). It reads the get/set/has/apply trap
+  // closures off the handler object at runtime, allocates a `$Proxy` (subtype of
+  // `$Object`), and the property-runtime front-guards (`__extern_get/set/has`)
+  // dispatch reads/writes/has through the traps. Both modes share the same
+  // `(target, handler) -> externref` signature, so the call site is uniform.
   if (ts.isIdentifier(expr.expression) && expr.expression.text === "Proxy") {
     if (ctx.standalone) {
-      reportError(ctx, expr, "Codegen error: Proxy not supported in standalone mode (#1472 Phase C).");
-      fctx.body.push({ op: "ref.null.extern" });
+      const args = expr.arguments ?? [];
+      // Force the object runtime (which registers the native __proxy_create +
+      // the trap dispatch helpers + the front-guards) before we look up the idx.
+      ensureObjectRuntime(ctx);
+      const compileToExternref = (arg: ts.Expression | undefined): void => {
+        if (arg === undefined) {
+          fctx.body.push({ op: "ref.null.extern" });
+          return;
+        }
+        // An OBJECT-LITERAL handler/target must lower to an OPEN `$Object`
+        // (`__new_plain_object` + `__extern_set` per prop) so the runtime
+        // `__proxy_create` can read the traps off the handler via `__extern_get`.
+        // A closed typed struct (the default for an inline literal) hides its
+        // fields from the open-object prop-map walk, so every trap reads null and
+        // never fires. `compileObjectLiteralAsExternref` builds the open form —
+        // the same shape a `const h: any = {…}` handler takes.
+        if (ts.isObjectLiteralExpression(arg)) {
+          const r = compileObjectLiteralAsExternref(ctx, fctx, arg);
+          if (r === null) {
+            // Builder unavailable — push undefined so the body stays valid.
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          return;
+        }
+        const r = compileExpression(ctx, fctx, arg, { kind: "externref" });
+        if (r && r.kind !== "externref") {
+          if (r.kind === "ref" || r.kind === "ref_null") {
+            fctx.body.push({ op: "extern.convert_any" });
+          } else {
+            coerceTypeImpl(ctx, fctx, r, { kind: "externref" });
+          }
+        } else if (!r) {
+          // void result (shouldn't happen for a value arg) — push undefined.
+          fctx.body.push({ op: "ref.null.extern" });
+        }
+      };
+      compileToExternref(args[0]);
+      compileToExternref(args[1]);
+      const proxyCreateIdx = ctx.funcMap.get("__proxy_create");
+      if (proxyCreateIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: proxyCreateIdx });
+      } else {
+        // Runtime not available (should not happen) — drop args, push undefined.
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "ref.null.extern" });
+      }
       return { kind: "externref" };
     }
     const args = expr.arguments ?? [];
@@ -2117,8 +2213,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
 
       return { kind: "externref" };
     }
-    // No arguments — null proxy
-    fctx.body.push({ op: "ref.null.extern" });
+    // No arguments — `new Proxy()`. Per §28.2.1.1 the missing target/handler
+    // are `undefined`, which are not objects, so construction throws TypeError.
+    // Route through __proxy_create(null, null) so the runtime raises it (#2180).
+    {
+      fctx.body.push({ op: "ref.null.extern" });
+      fctx.body.push({ op: "ref.null.extern" });
+      const proxyIdx = ensureLateImport(
+        ctx,
+        "__proxy_create",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (proxyIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: proxyIdx });
+      }
+    }
     return { kind: "externref" };
   }
 
@@ -2155,6 +2266,16 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           funcIdx: ctx.funcMap.get("__wasi_date_now")!,
         } as Instr);
         fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+        fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
+        return { kind: "ref", typeIdx: dateTypeIdx };
+      }
+      // (#2164) Pure standalone has no wall clock — emit the Unix epoch (0)
+      // directly instead of leaking the unsatisfiable env::__date_now host
+      // import (which made `new Date()` a hard instantiate failure standalone,
+      // breaking unrelated Date tests). See the matching Date.now() fallback in
+      // expressions/calls.ts.
+      if (ctx.standalone === true) {
+        fctx.body.push({ op: "i64.const", value: 0n });
         fctx.body.push({ op: "struct.new", typeIdx: dateTypeIdx } as Instr);
         return { kind: "ref", typeIdx: dateTypeIdx };
       }
@@ -3000,7 +3121,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // Handle local class constructors
   if (ctx.classSet.has(className)) {
     const ctorName = `${className}_new`;
-    const funcIdx = ctx.funcMap.get(ctorName);
+    const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)); // (#1983)
     if (funcIdx === undefined) {
       reportError(ctx, expr, `Missing constructor for class: ${className}`);
       return null;
@@ -3011,6 +3132,17 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     const args = expr.arguments ?? [];
     const ctorRestInfo = ctx.funcRestParams.get(ctorName);
     let ctorActualArgCount = args.length;
+
+    // (#2023) Save the current new.target class-id before evaluating args, so a
+    // nested `new` inside an argument expression — and after this construction
+    // returns — sees the correct (outer) target. Restored after the call.
+    let ntPrevLocal: number | undefined;
+    if (ctx.usesNewTarget && !ctx.classExternrefBackedSet.has(className)) {
+      const ntGlobalIdx = ensureNewTargetGlobal(ctx);
+      ntPrevLocal = allocTempLocal(fctx, { kind: "i32" });
+      fctx.body.push({ op: "global.get", index: ntGlobalIdx } as Instr);
+      fctx.body.push({ op: "local.set", index: ntPrevLocal });
+    }
 
     // Check for spread arguments
     const hasSpreadCtorArg = args.some((a) => ts.isSpreadElement(a));
@@ -3070,9 +3202,15 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       }
     }
 
+    // (#2023) With args on the stack, set new.target to THIS class's id right
+    // before the call. The ctor body (and the super() chain it drives, which
+    // calls `_init` and never touches the global) reads this id.
+    if (ntPrevLocal !== undefined) {
+      emitSetNewTargetBeforeCall(ctx, fctx.body, className);
+    }
     // Re-lookup funcIdx: argument compilation may trigger addUnionImports
     // which shifts defined-function indices, making the earlier lookup stale.
-    const finalCtorIdx = ctx.funcMap.get(ctorName) ?? funcIdx;
+    const finalCtorIdx = ctx.funcMap.get(classMemberFuncKey(ctx, ctorName)) ?? funcIdx; // (#1983)
     maybeSetArgcForKnownCall(ctx, fctx, ctorName, ctorActualArgCount, paramTypes?.length ?? ctorActualArgCount);
     fctx.body.push({ op: "call", funcIdx: finalCtorIdx });
     // (#1366a) Externref-backed subclass instances (extends Error / TypeError
@@ -3081,6 +3219,18 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       return { kind: "externref" };
     }
     const structTypeIdx = ctx.structMap.get(className)!;
+    // (#2023) Restore the saved new.target id, preserving the instance on the
+    // stack across the global write.
+    if (ntPrevLocal !== undefined) {
+      const ntGlobalIdx = ensureNewTargetGlobal(ctx);
+      const resultLocal = allocTempLocal(fctx, { kind: "ref", typeIdx: structTypeIdx });
+      fctx.body.push({ op: "local.set", index: resultLocal });
+      fctx.body.push({ op: "local.get", index: ntPrevLocal });
+      fctx.body.push({ op: "global.set", index: ntGlobalIdx } as Instr);
+      fctx.body.push({ op: "local.get", index: resultLocal });
+      releaseTempLocal(fctx, resultLocal);
+      releaseTempLocal(fctx, ntPrevLocal);
+    }
     return { kind: "ref", typeIdx: structTypeIdx };
   }
 

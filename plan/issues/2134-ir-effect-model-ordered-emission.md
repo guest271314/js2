@@ -1,8 +1,9 @@
 ---
 id: 2134
 title: "IR effect model: classify instruction kinds, enforce program-order emission for effectful ops"
-status: ready
-sprint: 62
+status: blocked
+blocked_by: [2167]
+sprint: 64
 created: 2026-06-12
 updated: 2026-06-12
 priority: high

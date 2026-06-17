@@ -1,10 +1,10 @@
 ---
 id: 2051
 title: "short-circuited ?. produces the type's default value (0 / \"null\") instead of undefined"
-status: ready
-sprint: 62
+status: in-progress
+sprint: 63
 created: 2026-06-10
-updated: 2026-06-12
+updated: 2026-06-15
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -367,3 +367,44 @@ import (`__get_undefined`, `__box_number`, `__box_boolean` all already exist) an
 touches a disjoint code path (optional-chain sites only). It can land any time
 after #2050. Coordinate only the `compileElementAccess` optional-branch ownership
 with #2050 (see above).
+
+---
+
+## Resolution (2026-06-15, sdev5) — property access + typeof landed; call/element carried forward
+
+**Landed in this PR:**
+
+1. **`compileOptionalPropertyAccess`** (`property-access.ts`) — when the chain's
+   whole-expression static type is a nullable primitive
+   (`isNullablePrimitiveType(tsPropType)`, e.g. `number | undefined`), the result
+   widens to externref; the short-circuit (null) arm emits host `undefined`
+   (`emitUndefined`) and the non-null arm's existing `coerceType(elseResultType,
+   resultType)` boxes the primitive (`__box_number`/`__box_boolean`). Both the
+   non-reference-receiver short-circuit and the main `ref.is_null` arm updated.
+2. **`staticTypeofForType`** (`typeof-delete.ts`) — unions are now resolved
+   BEFORE the `resolveWasmType` collapse. `number | undefined` collapsed to f64
+   and mis-folded `typeof o?.v` to the constant "number"; per §13.5.3 it is only
+   statically known if every member agrees, so `number`+`undefined` (size 2) →
+   dynamic → reaches runtime `__typeof` → "undefined" for the nullish arm.
+
+Verified (default JS-host mode, `tests/issue-2051-optional-chain-undefined.test.ts`,
+8 cases): nullish `o?.v === undefined`, `typeof o?.v === "undefined"`,
+`"" + o?.v === "undefined"`, `o?.v ?? 5 === 5`; non-null `o?.v === 9`,
+`typeof === "number"`, the `v=0` distinguishing case, and nullish boolean
+`if (o?.flag)` falsy. No regression: `??` already routes externref through
+`__extern_is_undefined`, `issue-2049`/typeof suites green. Per the plan this
+boxes into a plain externref (not AnyValue), so the #1888 tag-5 comparator ABI is
+untouched.
+
+**Carried forward (still on #2051, status in-progress):** the optional **call**
+short-circuit (`o?.f()`, `calls-optional.ts`) and optional **element** access
+(`a?.[i]`, `compileOptionalElementAccess`). An initial calls-optional widening
+attempt regressed the non-nullish path (the call's VOID_RESULT handling +
+closure-field re-eval fallback + multiple `defaultValueInstrs` sites make the
+result-type widening interact badly — `o?.f(1)===2` started trapping). Reverted
+to keep this PR clean; those two arms need the same widen-to-externref +
+`emitUndefined` treatment but applied with care to the call's else-branch value
+coercion (the call arm must box its primitive return only when widening fires,
+and VOID_RESULT calls must never widen). The standalone caveat (host `undefined`
+falls back to `ref.null.extern`, indistinguishable from null) is unchanged and
+out of scope, per the plan.

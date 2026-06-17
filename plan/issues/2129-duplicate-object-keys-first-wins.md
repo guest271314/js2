@@ -1,10 +1,11 @@
 ---
 id: 2129
 title: "duplicate object-literal keys resolve first-wins instead of last-wins"
-status: ready
+status: done
 sprint: 61
 created: 2026-06-12
 updated: 2026-06-12
+completed: 2026-06-12
 priority: medium
 feasibility: low
 reasoning_effort: low
@@ -57,3 +58,29 @@ overwrites. Side effects of all initializers still occur.
 Verified on main `c19a2e9c1` via `.tmp/triage.mts` / `.tmp/triage2.mts`
 (branch `po-1971-triage`). Likely XS-to-S — single layout fix plus
 side-effect ordering. JS-host mode, default options.
+
+## Resolution (2026-06-12)
+
+`compileObjectLiteralForStruct` (src/codegen/literals.ts) bound each struct
+field via `expr.properties.find(...)` — the FIRST matching property. The
+field loop now collects ALL matching properties (data, shorthand, method —
+the three matcher kinds previously checked in fixed precedence), binds the
+field to the LAST one per §13.2.5.5, and evaluates-then-drops the earlier
+duplicates' PropertyAssignment initializers so their side effects still run
+(shorthands/methods have none).
+
+Known caveat (documented in code): duplicates are evaluated adjacent to the
+winning one, so cross-key side-effect ORDER can deviate from strict source
+order in mixed duplicate literals — the same field-order evaluation the
+struct path already uses for non-duplicates.
+
+## Test Results
+
+- `tests/issue-2129.test.ts` — 7/7: both issue repros (2, 39), both side
+  effects run (12200), shorthand-after-data and data-after-shorthand
+  last-wins, non-duplicate and method-shorthand literals unregressed.
+- Method/shorthand matcher suites (`issue-1557`, `issue-1602` ×2,
+  `issue-1671`, `issue-1118`, `object-methods`): 41/41 pass.
+- Object-literal suites (`computed-props`, `issue-computed-props`,
+  `empty-object-widening`, `issue-786`, `computed-property-class`): 19/20 —
+  the 1 failure identical on main.

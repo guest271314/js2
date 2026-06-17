@@ -22,11 +22,14 @@ import { irVal, type IrType } from "../ir/nodes.js";
 import { buildTypeMap, type LatticeType } from "../ir/propagate.js";
 import { planIrCompilation, type IrFallbackReason } from "../ir/select.js";
 import { createCodegenContext } from "./context/create-context.js";
+import type { FallbackCounts } from "./fallback-telemetry.js";
+import { buildLeakedHostImportError, scanForLeakedHostImports } from "./host-import-allowlist.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, getLocalType } from "./context/locals.js";
 import type {
   ClosureInfo,
   CodegenContext,
+  CodegenError,
   CodegenOptions,
   ExternClassInfo,
   FunctionContext,
@@ -35,11 +38,13 @@ import type {
 import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
-import { ensureNativeIteratorRuntime } from "./iterator-native.js";
+import { scanForNewTarget } from "./new-target.js"; // (#2023)
+import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
+import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
-import { fillApplyClosure, fillExternIsArray } from "./object-runtime.js";
+import { fillApplyClosure, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -67,7 +72,7 @@ import {
 } from "./registry/types.js";
 import { exportDrainMicrotasksIfRegistered, getDrainFuncIdxForWasiStart } from "./async-scheduler.js";
 import { flushLateImportShifts, registerAddStringImports, registerAddUnionImports } from "./shared.js";
-import { stackBalance } from "./stack-balance.js";
+import { stackBalance, getFixupEvents, summarizeFixups, strictBalanceDiagnostics } from "./stack-balance.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
 import { ensureRegexMatchVecType } from "./native-regex.js";
 import { STANDALONE_REGEXP_REFLECTION_PROPS } from "./regexp-standalone.js";
@@ -88,6 +93,7 @@ import {
   collectDeclaredFuncRefs,
   compileClassBodies,
 } from "./class-bodies.js";
+import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983)
 import {
   applyShapeInference,
   collectDeclarations,
@@ -210,6 +216,31 @@ function sourceContainsClass(sourceFile: ts.SourceFile): boolean {
   function walk(node: ts.Node): void {
     if (found) return;
     if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+      found = true;
+      return;
+    }
+    forEachChild(node, walk);
+  }
+  walk(sourceFile);
+  return found;
+}
+
+/**
+ * (#2179) True when the source contains a `delete` operating on a property or
+ * element access (`delete o.a` / `delete o[k]`). `delete x` of a bare
+ * identifier and `delete <other expr>` (no-op deletes) do NOT count — only
+ * member deletes can leave a runtime tombstone that the inline struct.get
+ * read fast-path would bypass. Used to gate the tombstone-aware read routing
+ * so delete-free modules emit byte-identical wasm.
+ */
+function sourceContainsDelete(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  function walk(node: ts.Node): void {
+    if (found) return;
+    if (
+      ts.isDeleteExpression(node) &&
+      (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))
+    ) {
       found = true;
       return;
     }
@@ -952,10 +983,29 @@ export function generateModule(
   options?: CodegenOptions,
 ): {
   module: WasmModule;
-  errors: { message: string; line: number; column: number; severity?: "error" | "warning" }[];
+  errors: CodegenError[];
+  // #2089 — silent-fallback telemetry counters (per class → per site → count).
+  fallbackCounts?: FallbackCounts;
+  // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
+  irPostClaimErrors?: { kind: string; func: string; message: string }[];
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, ast.checker, options);
+  // (#1983) Pre-scan top-level user `function` declaration names BEFORE any
+  // class member registers a funcMap key, so `classMemberFuncKey` can detect a
+  // `${className}_${member}` ↔ user-function collision (e.g. `class A { m() {} }`
+  // + `function A_m() {}`) and relocate the class member's key. Must run here —
+  // ahead of class collection/compile — because the producers query this set.
+  for (const stmt of ast.sourceFile.statements) {
+    if (ts.isFunctionDeclaration(stmt) && stmt.name && stmt.body && !hasDeclareModifier(stmt)) {
+      ctx.topLevelFunctionNames.add(stmt.name.text);
+    }
+  }
+  // (#2179) Pre-scan for `delete <member>` so `any`-receiver property reads can
+  // be routed through the tombstone-aware `__extern_get` host helper instead of
+  // the inline struct.get fast-path (which reads the live field and ignores the
+  // runtime delete tombstone). Delete-free modules keep byte-identical output.
+  ctx.moduleUsesDelete = sourceContainsDelete(ast.sourceFile);
   try {
     // WASI target: register linear memory, bump pointer global, and WASI imports
     if (ctx.wasi) {
@@ -1158,6 +1208,11 @@ export function generateModule(
       ctx.arrayIteratorMaybeOverridden = true;
     }
 
+    // (#2023) Detect any `new.target` use up front so class collection assigns
+    // class-ids and `new`/comparison sites emit the threading global. Off by
+    // default — programs without `new.target` are byte-identical.
+    scanForNewTarget(ctx, ast.sourceFile);
+
     collectDeclarations(ctx, ast.sourceFile);
 
     // Shape inference: detect array-like variables and override their types
@@ -1286,10 +1341,27 @@ export function generateModule(
         } catch (e) {
           // Selector claimed a function whose types can't be resolved —
           // skip the IR path for this one. Fall through to legacy.
-          reportErrorNoNode(
-            ctx,
-            `IR path: could not resolve types for ${name}: ${e instanceof Error ? e.message : String(e)}`,
-          );
+          //
+          // #1921 — this is a deliberate IR→legacy fallback, not a compile
+          // error: the legacy path still produces a working body for `name`.
+          // Emit severity "warning" so it stays visible to bridge tests but
+          // does NOT fail the build (consistent with the IR-fallback channel
+          // at `formatIrPathFallbackDiagnostic` below). Defaulting to "error"
+          // would fail every program with a class-typed cross-function return
+          // that the IR lowerer can't yet represent (e.g. a `Builder` chain).
+          //
+          // #2137 — also record this on the structured `irPostClaimErrors`
+          // channel (kind "resolve") so consumers (bridge tests, the
+          // check:ir-fallbacks gate) can query IR-path fallbacks without
+          // string-matching the diagnostics array. The warning line below is
+          // retained one sprint for back-compat.
+          const resolveMsg = e instanceof Error ? e.message : String(e);
+          (ctx.irPostClaimErrors ??= []).push({
+            kind: "resolve",
+            func: name,
+            message: resolveMsg,
+          });
+          reportErrorNoNode(ctx, `IR path: could not resolve types for ${name}: ${resolveMsg}`, "warning");
         }
       }
       // Only request IR compilation for functions we successfully built
@@ -1305,6 +1377,16 @@ export function generateModule(
         funcs: new Set<string>([...selection.funcs].filter((n) => overrideMap.has(n))),
         classMembers: selection.classMembers,
       };
+      // (#2023) The IR `new C(...)` lowering does not thread the new.target
+      // class-id (that machinery lives only on the legacy path). When the
+      // program uses `new.target`, route every function through legacy so the
+      // outermost-`new` global is set/restored at each construction site. This
+      // is a coarse but safe gate — `new.target` is rare, so the perf cost is
+      // negligible and it avoids a parallel IR implementation of the threading.
+      if (ctx.usesNewTarget) {
+        safeSelection.funcs.clear();
+        safeSelection.classMembers = new Set();
+      }
       const report = compileIrPathFunctions(ctx, ast.sourceFile, safeSelection, overrideMap, classShapes);
       // Slice 12 (#1169o) — most IR-path failures are NOT compile errors. The
       // legacy path has already produced a working `body` for every function
@@ -1328,6 +1410,20 @@ export function generateModule(
       // class. This is the per-kind scoping hook the long-term retire
       // plan wires through (see plan/log/ir-adoption.md).
       for (const err of report.errors) {
+        // #1923 — meter post-claim demotions for the ratchet gate. These are
+        // functions the selector CLAIMED that then failed build/verify/lower/
+        // backend-legality and fell back to legacy through this warning channel
+        // — counted by no selector-level metric (`IrFallbackReason`). Always
+        // collected (cheap: the errors are already iterated here) and surfaced
+        // on `CompileResult.irPostClaimErrors`, mirroring `fallbackCounts`,
+        // which is likewise always counted; the gate buckets by kind +
+        // normalized message class. Pure telemetry; the demotion below is
+        // unchanged.
+        (ctx.irPostClaimErrors ??= []).push({
+          kind: err.kind ?? "lower",
+          func: err.func,
+          message: err.message,
+        });
         const diag = formatIrPathFallbackDiagnostic(err);
         // #1858 C4: keep the leading "IR path failed for …" text intact — many
         // bridge tests filter on `e.message.startsWith("IR path failed")` — but
@@ -1426,6 +1522,13 @@ export function generateModule(
       mod.exportSignatures = obj;
     }
 
+    // (#2009) Resolve same-structural-shape field-name collisions BEFORE the
+    // getter/setter/name-export emitters read the struct layout. Runs after ALL
+    // function bodies are final (legacy + IR), so its struct.new patch covers
+    // every construction site uniformly and backend-agnostically. Only structs
+    // that genuinely collide are touched; everything else is byte-identical.
+    resolveSameShapeFieldNameCollisions(ctx);
+
     // Emit exported struct field getter helpers for the runtime.
     // These allow JS host imports to read WasmGC struct fields that are
     // otherwise opaque to JS (V8 returns undefined for direct property access).
@@ -1454,6 +1557,30 @@ export function generateModule(
 
     // Emit __call_@@iterator export for runtime Symbol.iterator dispatch on WasmGC structs
     emitIteratorMethodExport(ctx);
+
+    // (#2038, reserve-then-fill #1719) Rebuild the native `__iterator` /
+    // `__iterator_next` carrier bodies with the USER `{next()}`-protocol arm now
+    // that the closed-struct dispatchers exist: `__sget_value`/`__sget_done`
+    // (emitStructFieldGetters, above) and `__call_@@iterator`/`__call_next`
+    // (emitIteratorMethodExport, just above). No-op unless the standalone native
+    // iterator runtime was registered AND a custom iterable produced those
+    // dispatchers — otherwise the carrier stays vec-only and byte-identical.
+    if (
+      ctx.nativeIteratorUserArmPending &&
+      ctx.funcMap.has("__call_@@iterator") &&
+      ctx.funcMap.has("__call_next") &&
+      ctx.funcMap.has("__sget_value") &&
+      ctx.funcMap.has("__sget_done") &&
+      !ctx.funcMap.has("__is_truthy")
+    ) {
+      // The USER `done` flag needs `__is_truthy` (ToBoolean on the boxed bool).
+      // `emitStructFieldGetters` usually registers it via `addUnionImports` when a
+      // `{value,done}` bucket boxes, but force it here for the rare bucket shape
+      // that does not, so the fill never silently degrades to vec-only.
+      // Native in standalone/WASI (appends funcs, no funcIdx shift).
+      addUnionImports(ctx);
+    }
+    fillNativeIteratorUserArms(ctx);
 
     // (#1716) Emit __call_@@toPrimitive(self, hint) for runtime ToPrimitive
     // dispatch of a class's [Symbol.toPrimitive] *method* on opaque structs.
@@ -1526,6 +1653,20 @@ export function generateModule(
     // method-dispatch site reserved the bridge (`ctx.applyClosureReserved`).
     fillApplyClosure(ctx);
 
+    // (#1100) Fill the reserved standalone Proxy trap-invoke drivers
+    // (`__proxy_call_{get,set,has}`) now that `__call_fn_method_2/3/4` are
+    // registered. Each driver wraps the matching closure-method dispatcher so a
+    // user trap closure runs with the handler bound as `this`. No-op when no
+    // standalone `new Proxy` site reserved the runtime (`ctx.proxyDispatchReserved`).
+    fillProxyDispatch(ctx);
+
+    // (#2151) Fill the reserved `__call_m_<name>` closed-struct method
+    // dispatchers now that every object-literal struct + its `<Struct>_<name>`
+    // method funcs are registered. Read-only over funcMap (all deps registered
+    // at reserve time), so no funcIdx churn. No-op when no any-receiver call site
+    // reserved a dispatcher (standalone/wasi only).
+    fillClosedMethodDispatch(ctx);
+
     // (#1904) Fill the standalone native Array.isArray predicate after all
     // module-local array carriers have been registered.
     fillExternIsArray(ctx);
@@ -1579,8 +1720,18 @@ export function generateModule(
     // Peephole optimization: remove redundant ref.as_non_null after ref.cast, etc.
     peepholeOptimize(mod);
 
+    // #1984 — freeze the index spaces. Every legitimate late import mutation
+    // (addUnionImports / addStringImports / reconcileNativeStrFinalizeShift,
+    // across gc/wasi/standalone) has run by this point; the remaining passes
+    // (stackBalance, fixupExternConvertAny, emit) do NOT add imports. Any
+    // addImport/ensureLateImport after here is a producer bug and throws at
+    // its own call site (see imports.ts / late-imports.ts).
+    ctx.indexSpaceFrozen = true;
+
     // Stack-balancing fixup: ensure all branches in if/try/block have matching stack states
     stackBalance(mod);
+    // #1918 — drain fixup telemetry: per-compile debug log + optional strict mode.
+    drainStackBalanceTelemetry(ctx, ast.sourceFile.fileName);
 
     // Late fixup: repair extern.convert_any applied to non-anyref values.
     // Must run after all other passes since they can introduce invalid coercions.
@@ -1589,7 +1740,75 @@ export function generateModule(
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  return { module: mod, errors: ctx.errors };
+  // (#2094) Emit-time backstop for the addImport gate: scan the finished
+  // import section for host imports that leaked into a standalone/strict
+  // binary and report each as a structured compile error.
+  assertNoLeakedHostImports(ctx, mod);
+
+  return {
+    module: mod,
+    errors: ctx.errors,
+    fallbackCounts: ctx.fallbackCounts,
+    irPostClaimErrors: ctx.irPostClaimErrors,
+  };
+}
+
+/**
+ * (#2094) Post-link import-section scan — the emit-time backstop for the
+ * `addImport` gate.
+ *
+ * Gated on `ctx.strictNoHostImports` ONLY, deliberately matching the per-call
+ * `addImport` gate's trigger (`src/codegen/registry/imports.ts`). Under strict
+ * mode (auto-on for `--target wasi`, opt-in via `--no-host-imports`) the build
+ * contract is "no JS-host imports", so a host import that survived dead-import
+ * elimination bypassed the gate (stale funcMap index / direct `mod.imports.push`)
+ * and would fail instantiation in a hostless runtime (#2073/#2075). This scan
+ * turns that into a clean `success: false` CE instead.
+ *
+ * It does NOT fire on plain `--target standalone` (which is NOT strict by
+ * default): standalone builds today still tolerate a set of `env` imports that
+ * the test harness satisfies, and rejecting them here would regress thousands
+ * of currently-passing standalone tests. The scan is a backstop for the strict
+ * contract, not a new policy — when standalone is run strictly
+ * (`strictNoHostImports`) it is covered. No-op for host/WasmGC builds.
+ */
+function assertNoLeakedHostImports(ctx: CodegenContext, mod: WasmModule): void {
+  if (!ctx.strictNoHostImports) return;
+  const leaks = scanForLeakedHostImports(mod.imports);
+  for (const leak of leaks) {
+    reportErrorNoNode(ctx, buildLeakedHostImportError(leak));
+  }
+}
+
+/**
+ * #1918 — Drain stack-balance fixup telemetry after a `stackBalance(mod)` run.
+ *
+ * Every fixup the pass applied is a masked emitter bug. Previously the count
+ * was returned and discarded. Now we:
+ *   - Under `JS2WASM_LOG_STACK_BALANCE=1`, log a one-line per-kind histogram to
+ *     stderr (per-compile debug visibility — AC #1).
+ *   - Under `JS2WASM_STRICT_BALANCE`, push each fixup as a located
+ *     severity-"warning" (=1) or severity-"error" (=error) onto `ctx.errors`
+ *     (AC #3 — the lossy const-default arm is warning-visible). Strict errors
+ *     fail the WasmGC compile through the existing `severity === "error"` gate.
+ *
+ * MUST be called immediately after `stackBalance(mod)` — the collector is
+ * module-scoped and reset on the next `stackBalance` call.
+ */
+function drainStackBalanceTelemetry(ctx: CodegenContext, fileLabel: string): void {
+  const events = getFixupEvents();
+  if (process.env.JS2WASM_LOG_STACK_BALANCE === "1") {
+    const counts = summarizeFixups(events);
+    const hist = Object.entries(counts)
+      .filter(([, n]) => n > 0)
+      .sort((a, b) => b[1] - a[1])
+      .map(([k, n]) => `${k}=${n}`)
+      .join(",");
+    process.stderr.write(`[stack-balance] file=${fileLabel || "<source>"} fixups=${events.length} ${hist}\n`);
+  }
+  for (const diag of strictBalanceDiagnostics(events)) {
+    ctx.errors.push({ message: diag.message, line: diag.line, column: diag.column, severity: diag.severity });
+  }
 }
 
 /**
@@ -1644,36 +1863,13 @@ function applyModuleInitGuard(ctx: CodegenContext): void {
   ctx.moduleInitGuardApplied = true;
 }
 
-/** Add a _start export for WASI — wraps __module_init or a no-arg main() (#1122).
+/** Add a _start export for WASI — wraps a user `main()` (running module init
+ *  first via the #1789 guard) or, when there is no callable `main`, the bare
+ *  `__module_init` (#1122).
  *  When the async microtask queue was registered (#1326c Phase 1C-A), append a
  *  call to `__drain_microtasks` after the entry function so any scheduled
  *  microtasks fire before WASI process exit. */
 function addWasiStartExport(ctx: CodegenContext): void {
-  // Prefer __module_init — it's always () -> void and handles all top-level code
-  let targetIdx: number | undefined;
-  for (let i = 0; i < ctx.mod.functions.length; i++) {
-    if (ctx.mod.functions[i]!.name === "__module_init") {
-      targetIdx = ctx.numImportFuncs + i;
-      break;
-    }
-  }
-
-  // Fall back to main only if __module_init doesn't exist AND main is () -> void
-  if (targetIdx === undefined) {
-    const mainIdx = ctx.funcMap.get("main");
-    if (mainIdx !== undefined) {
-      // Check that the function takes no parameters and returns no values
-      const funcArrayIdx = mainIdx - ctx.numImportFuncs;
-      if (funcArrayIdx >= 0 && funcArrayIdx < ctx.mod.functions.length) {
-        const func = ctx.mod.functions[funcArrayIdx]!;
-        const funcType = ctx.mod.types[func.typeIdx];
-        if (funcType && funcType.kind === "func" && funcType.params.length === 0 && funcType.results.length === 0) {
-          targetIdx = mainIdx;
-        }
-      }
-    }
-  }
-
   // (#1789) Make module init run before ANY exported function, not just
   // `_start`. The test262 standalone harness calls exports (e.g. `test()`)
   // directly without invoking `_start`, so a module-level `const`/`let`
@@ -1685,8 +1881,70 @@ function addWasiStartExport(ctx: CodegenContext): void {
   // no-op. Observable top-level side effects (console.log/stdout) therefore
   // still fire on whichever entry runs first (for WASI hosts that's `_start`,
   // preserving existing stdout behaviour) and never run twice.
+  //
+  // This MUST run BEFORE we pick the `_start` target below: the guard prepends
+  // `call __module_init` to every exported function (including a user `main`),
+  // which is exactly what lets `_start → main` run module init before main's
+  // body without splicing the init body into `main` (see the #1411/#1978 note
+  // on target selection).
   if (ctx.wasi) {
     applyModuleInitGuard(ctx);
+  }
+
+  // Choose the WASI program entry that `_start` wraps.
+  //
+  // #1411 regression: #1978 correctly stopped splicing the module-init body
+  // INTO a user `main` (init must run once at module load, not on every
+  // `main()` call), moving init to a standalone `__module_init`. But that left
+  // this function preferring `__module_init` unconditionally, so for a program
+  // WITH a user `main` (e.g. the Native Messaging host) `_start` wrapped ONLY
+  // `__module_init` — top-level globals were initialised but the user `main()`
+  // never ran, so the program produced no stdout under wasmtime.
+  //
+  // Fix: prefer an EXPORTED, no-arg, no-result `main` as the entry. Because
+  // applyModuleInitGuard (above) has already prepended `call __module_init` to
+  // every exported function, wrapping `main` runs module init exactly once (the
+  // idempotent guard) and THEN main's body — restoring the pre-#1978 behaviour
+  // WITHOUT re-introducing the splice. Only when there is no callable exported
+  // `main` do we fall back to wrapping `__module_init` directly: that covers
+  // pure top-level / init-only programs, and the `main()`-calls-itself
+  // convention where a NON-exported `main` is already invoked from top-level
+  // code captured in `__module_init`.
+  let targetIdx: number | undefined;
+
+  const mainIdx = ctx.funcMap.get("main");
+  if (mainIdx !== undefined) {
+    const funcArrayIdx = mainIdx - ctx.numImportFuncs;
+    if (funcArrayIdx >= 0 && funcArrayIdx < ctx.mod.functions.length) {
+      const func = ctx.mod.functions[funcArrayIdx]!;
+      const funcType = ctx.mod.types[func.typeIdx];
+      // Only an EXPORTED, no-arg, no-result `main` is a valid `_start` entry.
+      // A non-exported `main` (the `main()`-calls-itself convention) is reached
+      // through the top-level call already captured in `__module_init`, so it
+      // must NOT be the target — and, being non-exported, it does NOT carry the
+      // guard's `call __module_init` prefix, so wrapping it would skip module
+      // init entirely.
+      if (
+        func.exported &&
+        funcType &&
+        funcType.kind === "func" &&
+        funcType.params.length === 0 &&
+        funcType.results.length === 0
+      ) {
+        targetIdx = mainIdx;
+      }
+    }
+  }
+
+  // No callable exported `main` → wrap `__module_init`, which carries all
+  // top-level code (including any top-level call to a non-exported `main`).
+  if (targetIdx === undefined) {
+    for (let i = 0; i < ctx.mod.functions.length; i++) {
+      if (ctx.mod.functions[i]!.name === "__module_init") {
+        targetIdx = ctx.numImportFuncs + i;
+        break;
+      }
+    }
   }
 
   if (targetIdx !== undefined) {
@@ -1871,6 +2129,12 @@ function _emitStructFieldGettersInner(ctx: CodegenContext): void {
       name: funcName,
       desc: { kind: "func", index: funcIdx },
     });
+
+    // (#2038) Register in funcMap so the native iterator carrier's USER arm can
+    // resolve `__sget_value` / `__sget_done` at finalize-fill time
+    // (`fillNativeIteratorUserArms`). No other code looks `__sget_*` up by funcMap
+    // key, so this is inert for every other path.
+    ctx.funcMap.set(funcName, funcIdx);
   }
 
   // Emit __struct_field_names(externref) -> externref
@@ -1907,10 +2171,25 @@ function emitStructFieldSetters(ctx: CodegenContext): void {
 function _emitStructFieldSettersInner(ctx: CodegenContext): void {
   const mod = ctx.mod;
 
-  // Collect (fieldName → [{typeIdx, fieldIdx, fieldType}]) mappings, but
-  // ONLY for mutable fields. Mirror the skip rules used by the getter
-  // emitter so the two stay in lockstep.
-  const fieldMap = new Map<string, { typeIdx: number; fieldIdx: number; fieldType: ValType }[]>();
+  // Collect (fieldName → [{typeIdx, fieldIdx, fieldType, shapeId?, shapeFieldIdx?}])
+  // mappings, but ONLY for mutable fields. Mirror the skip rules used by the
+  // getter emitter so the two stay in lockstep.
+  //
+  // (#2009) For COLLIDING structs (those with a `$shape` field, set by
+  // resolveSameShapeFieldNameCollisions), record the shape-id + `$shape` field
+  // index so `buildSetterStore` can gate the write on the per-instance shape:
+  // same-shape canonicalization makes `ref.test typeIdx` match a DIFFERENT
+  // struct, so `__sset_b(target {a:1})` would otherwise write slot 0 of the
+  // target (its `a`). The guard makes a mismatched write no-op (sidecar carries
+  // it). Non-colliding structs leave shapeId undefined → no guard, byte-identical.
+  type SetterEntry = {
+    typeIdx: number;
+    fieldIdx: number;
+    fieldType: ValType;
+    shapeId?: number;
+    shapeFieldIdx?: number;
+  };
+  const fieldMap = new Map<string, SetterEntry[]>();
 
   for (const [structName, fields] of ctx.structFields) {
     const typeIdx = ctx.structMap.get(structName);
@@ -1923,6 +2202,9 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
       structName.startsWith("__arr_")
     )
       continue;
+
+    const shapeId = ctx.shapeIdByStructName.get(structName);
+    const shapeFieldIdx = shapeId !== undefined ? fields.findIndex((f) => f && f.name === "$shape") : -1;
 
     for (let i = 0; i < fields.length; i++) {
       const field = fields[i];
@@ -1937,7 +2219,12 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
         entries = [];
         fieldMap.set(field.name, entries);
       }
-      entries.push({ typeIdx, fieldIdx: i, fieldType: field.type });
+      entries.push({
+        typeIdx,
+        fieldIdx: i,
+        fieldType: field.type,
+        ...(shapeId !== undefined && shapeFieldIdx >= 0 ? { shapeId, shapeFieldIdx } : {}),
+      });
     }
   }
 
@@ -2003,7 +2290,7 @@ function _emitStructFieldSettersInner(ctx: CodegenContext): void {
 
 /** Build nested if/else for struct field setter dispatch. */
 function buildSetterNestedIfElse(
-  entries: { typeIdx: number; fieldIdx: number; fieldType: ValType }[],
+  entries: { typeIdx: number; fieldIdx: number; fieldType: ValType; shapeId?: number; shapeFieldIdx?: number }[],
   anyLocal: number,
   valMode: "extern" | "f64" | "i32",
 ): Instr[] {
@@ -2019,7 +2306,23 @@ function buildSetterNestedIfElse(
 
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i]!;
-    const thenBranch = buildSetterStore(entry, anyLocal, valMode);
+    let thenBranch = buildSetterStore(entry, anyLocal, valMode);
+
+    // (#2009) Colliding struct: `ref.test typeIdx` matched, but same-shape
+    // canonicalization means the instance might be a DIFFERENT struct that
+    // lacks this field. Gate the store on `struct.get $shape === entry.shapeId`
+    // so a mismatched write no-ops (sidecar carries it) instead of corrupting
+    // a same-slot field of the wrong struct.
+    if (entry.shapeId !== undefined && entry.shapeFieldIdx !== undefined) {
+      thenBranch = [
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: entry.typeIdx } as Instr,
+        { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.shapeFieldIdx } as Instr,
+        { op: "i32.const", value: entry.shapeId } as Instr,
+        { op: "i32.eq" } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: thenBranch } as Instr,
+      ];
+    }
 
     const ifInstr: Instr = {
       op: "if",
@@ -2079,6 +2382,149 @@ function buildSetterStore(
 }
 
 /**
+ * (#2009) Same-structural-shape field-name collision resolution.
+ *
+ * `{ aa: number }` and `{ bb: number }` compile to DISTINCT anon struct
+ * typeIdxs (fieldsHashKey includes field names) — but they are STRUCTURALLY
+ * identical (`struct (field (mut f64))`), so WasmGC iso-recursive
+ * canonicalization makes them indistinguishable to `ref.test`. The host
+ * `__struct_field_names` / `__sset_*` exports therefore mislabel / mis-write
+ * every same-shape instance with the first-registered shape's names.
+ *
+ * Fix (opt-in, minimal blast radius): only structs that ACTUALLY collide — two+
+ * anon object-literal structs that share field TYPES but differ in field NAMES —
+ * get a hidden trailing `$shape` i32 field retro-stamped per-instance. The host
+ * exports then read `$shape` to recover the instance's real names BY VALUE. A
+ * struct with a unique field-name-shape is never touched (the common case stays
+ * byte-identical, including all IR-path construction).
+ *
+ * Runs as a post-pass after every function body is final, so the struct.new
+ * operand patch is uniform across the legacy AND IR backends (it walks emitted
+ * `Instr` streams, not a specific construction path).
+ */
+function resolveSameShapeFieldNameCollisions(ctx: CodegenContext): void {
+  // Host enumeration is JS-only; standalone/WASI has no host name export.
+  if (ctx.nativeStrings) return;
+
+  // Structural-shape key = field TYPES only (the thing WasmGC canonicalizes on),
+  // ignoring names and any pre-existing internal `$`/`__` fields. Group anon
+  // object-literal structs by it.
+  const typeKindKey = (t: ValType): string => {
+    if (t.kind === "ref" || t.kind === "ref_null") return `${t.kind}:${(t as { typeIdx: number }).typeIdx}`;
+    if (t.kind === "i32" && (t as { boolean?: true }).boolean) return "i32:bool";
+    return t.kind;
+  };
+  type Member = { structName: string; typeIdx: number; names: string[] };
+  const byShape = new Map<string, Member[]>();
+
+  for (const [structName, fields] of ctx.structFields) {
+    // Only anonymous object-literal structs participate. Named classes have
+    // nominal types distinct under `ref.test` already; vec/arr/wrapper/union
+    // carriers are internal.
+    if (!structName.startsWith("__anon_")) continue;
+    const typeIdx = ctx.structMap.get(structName);
+    if (typeIdx === undefined) continue;
+
+    const names: string[] = [];
+    const typeParts: string[] = [];
+    for (const f of fields) {
+      if (!f || !f.type || !f.name) continue;
+      if (f.name.startsWith("$") || f.name.startsWith("__")) continue;
+      names.push(f.name);
+      typeParts.push(typeKindKey(f.type));
+    }
+    if (names.length === 0) continue; // no host-enumerable fields
+    const shapeKey = typeParts.join("|");
+    let group = byShape.get(shapeKey);
+    if (!group) {
+      group = [];
+      byShape.set(shapeKey, group);
+    }
+    group.push({ structName, typeIdx, names });
+  }
+
+  // A group "collides" iff it contains 2+ DISTINCT field-name lists. (Two
+  // structs that share BOTH types and names are just the same shape registered
+  // twice — `ref.test` returning either's identical names is correct, no fix.)
+  const shapeIdByCsv = new Map<string, number>();
+  const collidingTypeIdxs: { typeIdx: number; structName: string; shapeId: number }[] = [];
+
+  for (const group of byShape.values()) {
+    const distinctNameCsvs = new Set(group.map((m) => m.names.join(",")));
+    if (distinctNameCsvs.size < 2) continue; // unique-name shape — leave untouched
+
+    for (const m of group) {
+      const csv = m.names.join(",");
+      let shapeId = shapeIdByCsv.get(csv);
+      if (shapeId === undefined) {
+        shapeId = ctx.shapeNameCsvById.length;
+        ctx.shapeNameCsvById.push(csv);
+        shapeIdByCsv.set(csv, shapeId);
+      }
+      ctx.shapeIdByStructName.set(m.structName, shapeId);
+      collidingTypeIdxs.push({ typeIdx: m.typeIdx, structName: m.structName, shapeId });
+    }
+  }
+
+  if (collidingTypeIdxs.length === 0) return;
+
+  // Retro-stamp: append a hidden `$shape` i32 field to each colliding struct
+  // type + structFields, then patch every `struct.new <typeIdx>` instruction in
+  // every compiled body to insert `i32.const <shapeId>` immediately before it,
+  // matching the new operand count. The `$`-prefix excludes `$shape` from name
+  // enumeration and getter/setter emission.
+  for (const { typeIdx, structName, shapeId } of collidingTypeIdxs) {
+    const typeDef = ctx.mod.types[typeIdx] as { kind: string; fields?: FieldDef[] } | undefined;
+    if (!typeDef || typeDef.kind !== "struct" || !typeDef.fields) continue;
+    // The struct registration stores ONE `fields` array shared by both
+    // `ctx.mod.types[typeIdx].fields` and `ctx.structFields.get(structName)`, so
+    // push `$shape` exactly once. Guard against a double-append if this somehow
+    // re-runs for a type.
+    const alreadyStamped = typeDef.fields.some((f) => f && f.name === "$shape");
+    if (!alreadyStamped) {
+      typeDef.fields.push({ name: "$shape", type: { kind: "i32" }, mutable: false });
+      const sf = ctx.structFields.get(structName);
+      if (sf && sf !== typeDef.fields) sf.push({ name: "$shape", type: { kind: "i32" }, mutable: false });
+    }
+    patchStructNewWithShapeId(ctx, typeIdx, shapeId);
+  }
+}
+
+/**
+ * (#2009) Insert `i32.const <shapeId>` immediately before every
+ * `struct.new <typeIdx>` in every compiled function body — the retro-stamp that
+ * keeps a struct.new's operand count in sync after `$shape` is appended to its
+ * type. Backend-agnostic: walks the emitted `Instr` stream, so it covers both
+ * the legacy and IR construction paths uniformly. Mirrors the structural walk of
+ * `patchStructNewForAddedField` but inserts a specific value, not a default.
+ */
+function patchStructNewWithShapeId(ctx: CodegenContext, typeIdx: number, shapeId: number): void {
+  const patch = (root: Instr[]): void => {
+    const work: Instr[][] = [root];
+    while (work.length > 0) {
+      const arr = work.pop()!;
+      for (let i = arr.length - 1; i >= 0; i--) {
+        const instr = arr[i]!;
+        if (instr.op === "struct.new" && (instr as { typeIdx?: number }).typeIdx === typeIdx) {
+          arr.splice(i, 0, { op: "i32.const", value: shapeId } as Instr);
+        }
+        const anyInstr = instr as Record<string, unknown>;
+        if (Array.isArray(anyInstr.body)) work.push(anyInstr.body as Instr[]);
+        if (Array.isArray(anyInstr.then)) work.push(anyInstr.then as Instr[]);
+        if (Array.isArray(anyInstr.else)) work.push(anyInstr.else as Instr[]);
+        if (Array.isArray(anyInstr.catches)) {
+          for (const c of anyInstr.catches as { body?: Instr[] }[]) {
+            if (Array.isArray(c.body)) work.push(c.body);
+          }
+        }
+        if (Array.isArray(anyInstr.catchAll)) work.push(anyInstr.catchAll as Instr[]);
+      }
+    }
+  };
+  for (const func of ctx.mod.functions) patch(func.body);
+}
+
+/**
  * Emit a __struct_field_names(externref) -> externref export.
  * For each struct type, ref.test and return a string constant with comma-separated field names.
  * Falls back to ref.null.extern for non-struct values.
@@ -2098,8 +2544,16 @@ function emitStructFieldNamesExport(
 
   const mod = ctx.mod;
 
-  // Build per-struct-type field name lists (excluding internal fields)
-  const structFieldNameMap = new Map<number, string[]>(); // typeIdx -> field names
+  // (#2009) Two arms per struct:
+  //  - COLLIDING structs (have a `$shape` field, from
+  //    resolveSameShapeFieldNameCollisions): read `struct.get $shape` and pick
+  //    the name CSV by shape-id VALUE — disambiguates same-shape types that
+  //    `ref.test` cannot tell apart.
+  //  - non-colliding structs: legacy `ref.test typeIdx → own CSV` arm.
+  type LegacyEntry = { typeIdx: number; names: string[] };
+  type ShapeEntry = { typeIdx: number; shapeFieldIdx: number };
+  const legacyEntries: LegacyEntry[] = [];
+  const shapeEntries: ShapeEntry[] = [];
   for (const [structName, fields] of ctx.structFields) {
     const typeIdx = ctx.structMap.get(structName);
     if (typeIdx === undefined) continue;
@@ -2111,65 +2565,120 @@ function emitStructFieldNamesExport(
     )
       continue;
 
+    const shapeFieldIdx = fields.findIndex((f) => f && f.name === "$shape");
+    if (shapeFieldIdx >= 0 && ctx.shapeIdByStructName.has(structName)) {
+      shapeEntries.push({ typeIdx, shapeFieldIdx });
+      continue;
+    }
+
     const names: string[] = [];
     for (const field of fields) {
       if (!field || !field.type || !field.name) continue;
       if (field.name.startsWith("$") || field.name.startsWith("__")) continue;
       names.push(field.name);
     }
-    if (names.length > 0) {
-      structFieldNameMap.set(typeIdx, names);
-    }
+    if (names.length > 0) legacyEntries.push({ typeIdx, names });
   }
 
-  if (structFieldNameMap.size === 0) return;
+  if (legacyEntries.length === 0 && shapeEntries.length === 0) return;
 
-  // Register comma-separated field name strings as string constants
-  const typeIdxToGlobalIdx = new Map<number, number>();
-  for (const [typeIdx, names] of structFieldNameMap) {
+  // Register comma-separated field name strings as string constants.
+  const legacyTypeIdxToGlobalIdx = new Map<number, number>();
+  for (const { typeIdx, names } of legacyEntries) {
     const csv = names.join(",");
     addStringConstantGlobal(ctx, csv);
     const globalIdx = ctx.stringGlobalMap.get(csv);
-    if (globalIdx !== undefined) {
-      typeIdxToGlobalIdx.set(typeIdx, globalIdx);
-    }
+    if (globalIdx !== undefined) legacyTypeIdxToGlobalIdx.set(typeIdx, globalIdx);
+  }
+  // One CSV global per shape-id (colliding structs share the table by VALUE).
+  const shapeIdToGlobalIdx = new Map<number, number>();
+  for (let id = 0; id < ctx.shapeNameCsvById.length; id++) {
+    const csv = ctx.shapeNameCsvById[id]!;
+    addStringConstantGlobal(ctx, csv);
+    const globalIdx = ctx.stringGlobalMap.get(csv);
+    if (globalIdx !== undefined) shapeIdToGlobalIdx.set(id, globalIdx);
   }
 
   // Build the function body: chain of ref.test / if-else returning the right string
   const getterExternTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$sfnames_type");
   const anyLocal = 1; // local 0 = externref param, local 1 = anyref conversion
+  const shapeLocal = 2; // i32 scratch for the read shape-id (colliding arms)
 
   const body: Instr[] = [];
-  // Convert externref to anyref
   body.push({ op: "local.get", index: 0 } as Instr);
   body.push({ op: "any.convert_extern" } as Instr);
   body.push({ op: "local.set", index: anyLocal } as Instr);
 
-  // Build nested if-else chain
+  // Helper: dispatch on a shape-id value (on stack) → CSV global.
+  const buildShapeIdDispatch = (): Instr[] => {
+    const ids = [...shapeIdToGlobalIdx.entries()];
+    let chain: Instr[] = [{ op: "ref.null.extern" } as Instr];
+    for (let i = ids.length - 1; i >= 0; i--) {
+      const [shapeId, globalIdx] = ids[i]!;
+      chain = [
+        { op: "local.get", index: shapeLocal } as Instr,
+        { op: "i32.const", value: shapeId } as Instr,
+        { op: "i32.eq" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "externref" } },
+          then: [{ op: "global.get", index: globalIdx } as Instr],
+          else: chain,
+        } as Instr,
+      ];
+    }
+    return [{ op: "local.set", index: shapeLocal } as Instr, ...chain];
+  };
+
+  // Build nested if-else chain: legacy arms first, then colliding $shape arms.
   let fallback: Instr[] = [{ op: "ref.null.extern" } as Instr];
-  const typeEntries = [...typeIdxToGlobalIdx.entries()];
 
-  for (let i = typeEntries.length - 1; i >= 0; i--) {
-    const [typeIdx, globalIdx] = typeEntries[i]!;
-    const thenBranch: Instr[] = [{ op: "global.get", index: globalIdx } as Instr];
+  for (let i = legacyEntries.length - 1; i >= 0; i--) {
+    const typeIdx = legacyEntries[i]!.typeIdx;
+    const globalIdx = legacyTypeIdxToGlobalIdx.get(typeIdx);
+    if (globalIdx === undefined) continue;
+    fallback = [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.test", typeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: [{ op: "global.get", index: globalIdx } as Instr],
+        else: fallback,
+      } as Instr,
+    ];
+  }
 
-    const ifInstr: Instr = {
-      op: "if",
-      blockType: { kind: "val", type: { kind: "externref" } },
-      then: thenBranch,
-      else: fallback,
-    };
-
-    fallback = [{ op: "local.get", index: anyLocal } as Instr, { op: "ref.test", typeIdx } as Instr, ifInstr];
+  for (let i = shapeEntries.length - 1; i >= 0; i--) {
+    const { typeIdx, shapeFieldIdx } = shapeEntries[i]!;
+    const thenBranch: Instr[] = [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.cast", typeIdx } as Instr,
+      { op: "struct.get", typeIdx, fieldIdx: shapeFieldIdx } as Instr,
+      ...buildShapeIdDispatch(),
+    ];
+    fallback = [
+      { op: "local.get", index: anyLocal } as Instr,
+      { op: "ref.test", typeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: thenBranch,
+        else: fallback,
+      } as Instr,
+    ];
   }
 
   body.push(...fallback);
+
+  const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
+  if (shapeEntries.length > 0) locals.push({ name: "__shapeId", type: { kind: "i32" } });
 
   const funcIdx = ctx.numImportFuncs + mod.functions.length;
   mod.functions.push({
     name: "__struct_field_names",
     typeIdx: getterExternTypeIdx,
-    locals: [{ name: "__any", type: { kind: "anyref" } }],
+    locals,
     body,
     exported: true,
   } as WasmFunction);
@@ -2282,6 +2791,12 @@ function emitIteratorMethodExport(ctx: CodegenContext): void {
       name: exportName,
       desc: { kind: "func", index: funcIdx },
     });
+
+    // (#2038) Register in funcMap so the native iterator carrier's USER arm can
+    // resolve `__call_@@iterator` / `__call_next` at finalize-fill time
+    // (`fillNativeIteratorUserArms`). Harmless for the host/GC path — no other
+    // code looks these up by funcMap key.
+    ctx.funcMap.set(exportName, funcIdx);
   };
 
   emitMethodDispatch("@@iterator", "__call_@@iterator");
@@ -2327,7 +2842,7 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
     )
       continue;
 
-    const funcIdx = ctx.funcMap.get(`${structName}_${methodSuffix}`);
+    const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`)); // (#1983)
     if (funcIdx === undefined) continue;
 
     const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
@@ -3292,6 +3807,21 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
           fieldIdx: number;
           closureTypeIdx: number;
           closureInfo: ClosureInfo;
+        }
+      | {
+          // (#1989) externref field holding a closure (the `any`-typed
+          // object-literal method case — the field stores
+          // `extern.convert_any(closureStruct)`). Recover the closure per
+          // instance: `struct.get` (externref) → `any.convert_extern` →
+          // `ref.cast closureTypeIdx` → field-0 funcref → `call_ref`. This makes
+          // `__call_valueOf`/`__call_toString` per-object even when same-shape
+          // literals share a struct type but store distinct method funcrefs.
+          structName: string;
+          typeIdx: number;
+          mode: "closure-extern";
+          fieldIdx: number;
+          closureTypeIdx: number;
+          closureInfo: ClosureInfo;
         };
 
     const entries: DispatchEntry[] = [];
@@ -3307,8 +3837,67 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
       )
         continue;
 
-      // 1. Check for standalone method: StructName_toString
       const methodFullName = `${structName}_${methodName}`;
+      const fieldIdx = fields.findIndex((f) => f.name === methodName);
+      const field = fieldIdx >= 0 ? fields[fieldIdx]! : undefined;
+
+      // (#1989) 1. Per-instance closure FIELD takes precedence over the
+      // name-keyed standalone method — but ONLY for structs with the genuine
+      // same-shape collision (`toPrimitiveForkedStructs`): two+ object literals
+      // share the deduped struct type, each storing its OWN method closure in
+      // the field, so reading the field + `call_ref` resolves to the right body
+      // per object. The standalone `${structName}_${methodName}` func is only the
+      // first literal's body and would collapse all instances onto it.
+      //
+      // Single-literal structs intentionally STAY on the name-keyed standalone
+      // arm below: it is the one literal's correct body, is simpler, and
+      // (critically) preserves the §7.1.1.1 step-6 object-return TypeError walk
+      // in `_hostToPrimitive`. Same-shape valueOf/toString closures are
+      // `ref.test`-indistinguishable, so routing a single-literal struct through
+      // the per-instance arm could mis-select the closure type for `toString`.
+      const preferClosure = ctx.toPrimitiveForkedStructs.has(structName);
+      let pushedClosure = false;
+      if (field && preferClosure) {
+        // Closure ref field (eagerly-typed closure ref).
+        if (field.type.kind === "ref" || field.type.kind === "ref_null") {
+          const closureTypeIdx = (field.type as { typeIdx: number }).typeIdx;
+          const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
+          if (closureInfo && closureInfo.paramTypes.length === 0) {
+            entries.push({ structName, typeIdx, mode: "closure", fieldIdx, closureTypeIdx, closureInfo });
+            pushedClosure = true;
+          }
+        }
+        // eqref field — try tracked closure types (typed object-literal methods).
+        if (!pushedClosure && field.type.kind === "eqref") {
+          const trackedTypes = ctx.valueOfClosureTypes.get(structName) ?? [];
+          for (const closureTypeIdx of trackedTypes) {
+            const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
+            if (closureInfo && closureInfo.paramTypes.length === 0) {
+              entries.push({ structName, typeIdx, mode: "closure", fieldIdx, closureTypeIdx, closureInfo });
+              pushedClosure = true;
+              break;
+            }
+          }
+        }
+        // (#1989) externref field holding a closure — the `any`-typed
+        // object-literal method case. The field stores
+        // `extern.convert_any(closureStruct)`; recover it per instance.
+        if (!pushedClosure && field.type.kind === "externref") {
+          const trackedTypes = ctx.valueOfClosureTypes.get(structName) ?? [];
+          for (const closureTypeIdx of trackedTypes) {
+            const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
+            if (closureInfo && closureInfo.paramTypes.length === 0) {
+              entries.push({ structName, typeIdx, mode: "closure-extern", fieldIdx, closureTypeIdx, closureInfo });
+              pushedClosure = true;
+              break;
+            }
+          }
+        }
+      }
+      if (pushedClosure) continue;
+
+      // 2. Fallback: name-keyed standalone method `StructName_toString`. Used by
+      // nominal class methods and structs whose method has no stored closure.
       const funcIdx = ctx.funcMap.get(methodFullName);
       if (funcIdx !== undefined) {
         const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
@@ -3318,34 +3907,6 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
             ? funcType.results[0]!
             : { kind: "externref" };
         entries.push({ structName, typeIdx, mode: "standalone", funcIdx, resultType });
-        continue;
-      }
-
-      // 2. Check for closure field
-      const fieldIdx = fields.findIndex((f) => f.name === methodName);
-      if (fieldIdx < 0) continue;
-      const field = fields[fieldIdx]!;
-
-      // Closure ref field
-      if (field.type.kind === "ref" || field.type.kind === "ref_null") {
-        const closureTypeIdx = (field.type as { typeIdx: number }).typeIdx;
-        const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
-        if (closureInfo && closureInfo.paramTypes.length === 0) {
-          entries.push({ structName, typeIdx, mode: "closure", fieldIdx, closureTypeIdx, closureInfo });
-          continue;
-        }
-      }
-
-      // eqref field — try tracked closure types
-      if (field.type.kind === "eqref") {
-        const trackedTypes = ctx.valueOfClosureTypes.get(structName) ?? [];
-        for (const closureTypeIdx of trackedTypes) {
-          const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
-          if (closureInfo && closureInfo.paramTypes.length === 0) {
-            entries.push({ structName, typeIdx, mode: "closure", fieldIdx, closureTypeIdx, closureInfo });
-            break;
-          }
-        }
       }
     }
 
@@ -3395,6 +3956,34 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
           funcIdx: entry.funcIdx,
         } as Instr);
         boxResult(entry.resultType, thenInstrs);
+      } else if (entry.mode === "closure-extern") {
+        // (#1989) externref field holding `extern.convert_any(closureStruct)`.
+        // Recover the per-instance closure: struct.get (externref) →
+        // any.convert_extern → ref.cast closureType → field-0 funcref → call_ref.
+        const ci = entry.closureInfo;
+        const closureLocal = 2; // eqref scratch local
+        thenInstrs.push(
+          { op: "local.get", index: anyLocal } as Instr,
+          { op: "ref.cast", typeIdx: entry.typeIdx },
+          { op: "struct.get", typeIdx: entry.typeIdx, fieldIdx: entry.fieldIdx } as Instr,
+          // externref field → anyref → eqref scratch
+          { op: "any.convert_extern" } as Instr,
+          { op: "local.set", index: closureLocal } as Instr,
+          // self-param: the closure struct
+          { op: "local.get", index: closureLocal } as Instr,
+          { op: "ref.cast", typeIdx: entry.closureTypeIdx },
+          // funcref from closure field 0
+          { op: "local.get", index: closureLocal } as Instr,
+          { op: "ref.cast", typeIdx: entry.closureTypeIdx },
+          { op: "struct.get", typeIdx: entry.closureTypeIdx, fieldIdx: 0 } as Instr,
+          { op: "ref.cast", typeIdx: ci.funcTypeIdx },
+          { op: "call_ref", typeIdx: ci.funcTypeIdx } as Instr,
+        );
+        if (!ci.returnType) {
+          thenInstrs.push({ op: "ref.null.extern" } as Instr);
+        } else {
+          boxResult(ci.returnType, thenInstrs);
+        }
       } else {
         // Closure field: extract closure, get funcref, call_ref
         const ci = entry.closureInfo;
@@ -3439,7 +4028,7 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
     };
 
     // Determine locals: param 0 (externref), local 1 (anyref), local 2 (eqref for closure)
-    const hasClosureEntry = entries.some((e) => e.mode === "closure");
+    const hasClosureEntry = entries.some((e) => e.mode === "closure" || e.mode === "closure-extern");
     const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
     if (hasClosureEntry) {
       locals.push({ name: "__closure", type: { kind: "eqref" } });
@@ -3677,6 +4266,319 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       name: "__vec_get",
       desc: { kind: "func", index: getFuncIdx },
     });
+  }
+
+  // (#1712) Generic host-side vec MUTATORS. Compiled acorn mutates instance
+  // array fields through dynamic `this` dispatch (`this.scopeStack.push(
+  // new Scope(flags))` in enterScope): the receiver reaches the host's
+  // __extern_method_call as an opaque vec struct, and the host cannot grow a
+  // WasmGC array itself. These exports mirror the __vec_len/__vec_get
+  // per-vec-type ref.test dispatch and perform the mutation on the Wasm side
+  // (same grow discipline as compileArrayPush: newCap = max((len+1)*2, 4),
+  // array.new_default + array.copy + struct.set). Element-kind coverage is
+  // externref always, f64/i32 when __unbox_number/__box_number are imported;
+  // unsupported kinds return the -1 / 0 sentinel so the runtime falls
+  // through to its fail-loud TypeError instead of silently no-oping.
+  const unboxNumIdx = ctx.funcMap.get("__unbox_number");
+  const boxNumIdx2 = ctx.funcMap.get("__box_number");
+  const mutEntries = vecEntries.filter(([elemKey]) => {
+    if (elemKey === "externref") return true;
+    if (elemKey === "f64" || elemKey === "i32") return unboxNumIdx !== undefined && boxNumIdx2 !== undefined;
+    return false;
+  });
+
+  // __is_vec(externref) -> i32 — POSITIVE vec discriminator over ALL
+  // registered vec types. `__vec_len` cannot serve this role (its not-a-vec
+  // default of 0 is indistinguishable from an empty vec), and `__is_closure`
+  // can FALSE-POSITIVE on a vec whose canonicalized layout collides with a
+  // closure capture struct — the runtime's callable-wrapping paths consult
+  // this export to veto bridging a vec into a JS function.
+  {
+    const isVecTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__is_vec_type");
+    const isVecFuncIdx = ctx.numImportFuncs + mod.functions.length;
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 1 } as Instr,
+    ];
+    let current: Instr[] = [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr];
+    for (let i = vecEntries.length - 1; i >= 0; i--) {
+      const [, vecTypeIdx] = vecEntries[i]!;
+      current = [
+        { op: "local.get", index: 1 } as Instr,
+        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+          else: current,
+        } as Instr,
+      ];
+    }
+    body.push(...current);
+    mod.functions.push({
+      name: "__is_vec",
+      typeIdx: isVecTypeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as any);
+    mod.exports.push({ name: "__is_vec", desc: { kind: "func", index: isVecFuncIdx } });
+  }
+
+  // __vec_mut_supported(externref) -> i32 (1 = push/pop cover this vec's elem kind)
+  {
+    const supTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_mut_supported_type");
+    const supFuncIdx = ctx.numImportFuncs + mod.functions.length;
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 1 } as Instr,
+    ];
+    let current: Instr[] = [{ op: "i32.const", value: 0 } as Instr, { op: "return" } as Instr];
+    for (let i = mutEntries.length - 1; i >= 0; i--) {
+      const [, vecTypeIdx] = mutEntries[i]!;
+      current = [
+        { op: "local.get", index: 1 } as Instr,
+        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "i32.const", value: 1 } as Instr, { op: "return" } as Instr],
+          else: current,
+        } as Instr,
+      ];
+    }
+    body.push(...current);
+    mod.functions.push({
+      name: "__vec_mut_supported",
+      typeIdx: supTypeIdx,
+      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      body,
+      exported: true,
+    } as any);
+    mod.exports.push({ name: "__vec_mut_supported", desc: { kind: "func", index: supFuncIdx } });
+  }
+
+  // __vec_push(externref vec, externref value) -> i32 (new length, or -1 unsupported)
+  {
+    const pushTypeIdx = addFuncType(
+      ctx,
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      "$__vec_push_type",
+    );
+    const pushFuncIdx = ctx.numImportFuncs + mod.functions.length;
+    // locals: 2 = anyref converted; per-arm typed locals appended below
+    const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 2 } as Instr,
+    ];
+    let current: Instr[] = [{ op: "i32.const", value: -1 } as Instr, { op: "return" } as Instr];
+    for (let i = mutEntries.length - 1; i >= 0; i--) {
+      const [elemKey, vecTypeIdx] = mutEntries[i]!;
+      const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+      if (arrTypeIdx < 0) continue;
+      const base = 2 + locals.length; // 2 params + locals so far
+      const vecL = base;
+      const dataL = base + 1;
+      const lenL = base + 2;
+      const ncapL = base + 3;
+      const ndataL = base + 4;
+      locals.push(
+        { name: `__vp_vec_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: vecTypeIdx } },
+        { name: `__vp_data_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: arrTypeIdx } },
+        { name: `__vp_len_${vecTypeIdx}`, type: { kind: "i32" } },
+        { name: `__vp_ncap_${vecTypeIdx}`, type: { kind: "i32" } },
+        { name: `__vp_ndata_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: arrTypeIdx } },
+      );
+      // value unboxing per element kind (value param is local 1)
+      const valueInstrs: Instr[] =
+        elemKey === "externref"
+          ? [{ op: "local.get", index: 1 } as Instr]
+          : elemKey === "f64"
+            ? [{ op: "local.get", index: 1 } as Instr, { op: "call", funcIdx: unboxNumIdx! } as Instr]
+            : [
+                { op: "local.get", index: 1 } as Instr,
+                { op: "call", funcIdx: unboxNumIdx! } as Instr,
+                { op: "i32.trunc_sat_f64_s" } as Instr,
+              ];
+      const thenBranch: Instr[] = [
+        { op: "local.get", index: 2 } as Instr,
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.set", index: vecL } as Instr,
+        // len
+        { op: "local.get", index: vecL } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "local.set", index: lenL } as Instr,
+        // data + capacity check: cap < len+1 ?
+        { op: "local.get", index: vecL } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "local.tee", index: dataL } as Instr,
+        { op: "array.len" } as Instr,
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "i32.lt_s" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            // ncap = max((len+1)*2, 4)
+            { op: "local.get", index: lenL } as Instr,
+            { op: "i32.const", value: 1 } as Instr,
+            { op: "i32.add" } as Instr,
+            { op: "i32.const", value: 1 } as Instr,
+            { op: "i32.shl" } as Instr,
+            { op: "i32.const", value: 4 } as Instr,
+            { op: "local.get", index: lenL } as Instr,
+            { op: "i32.const", value: 1 } as Instr,
+            { op: "i32.add" } as Instr,
+            { op: "i32.const", value: 1 } as Instr,
+            { op: "i32.shl" } as Instr,
+            { op: "i32.const", value: 4 } as Instr,
+            { op: "i32.gt_s" } as Instr,
+            { op: "select" } as Instr,
+            { op: "local.set", index: ncapL } as Instr,
+            // ndata = array.new_default(ncap); copy old; vec.data = ndata
+            { op: "local.get", index: ncapL } as Instr,
+            { op: "array.new_default", typeIdx: arrTypeIdx } as Instr,
+            { op: "local.set", index: ndataL } as Instr,
+            { op: "local.get", index: ndataL } as Instr,
+            { op: "i32.const", value: 0 } as Instr,
+            { op: "local.get", index: dataL } as Instr,
+            { op: "i32.const", value: 0 } as Instr,
+            { op: "local.get", index: lenL } as Instr,
+            { op: "array.copy", dstTypeIdx: arrTypeIdx, srcTypeIdx: arrTypeIdx } as Instr,
+            { op: "local.get", index: vecL } as Instr,
+            { op: "local.get", index: ndataL } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+            { op: "local.get", index: ndataL } as Instr,
+            { op: "local.set", index: dataL } as Instr,
+          ],
+        } as Instr,
+        // data[len] = value
+        { op: "local.get", index: dataL } as Instr,
+        { op: "local.get", index: lenL } as Instr,
+        ...valueInstrs,
+        { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+        // vec.length = len + 1
+        { op: "local.get", index: vecL } as Instr,
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+        // return len + 1
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "return" } as Instr,
+      ];
+      current = [
+        { op: "local.get", index: 2 } as Instr,
+        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: thenBranch,
+          else: current,
+        } as Instr,
+      ];
+    }
+    body.push(...current);
+    mod.functions.push({
+      name: "__vec_push",
+      typeIdx: pushTypeIdx,
+      locals,
+      body,
+      exported: true,
+    } as any);
+    mod.exports.push({ name: "__vec_push", desc: { kind: "func", index: pushFuncIdx } });
+  }
+
+  // __vec_pop(externref) -> externref (boxed last element; null.extern when
+  // empty or unsupported — callers gate on __vec_mut_supported to tell apart)
+  {
+    const popTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }], "$__vec_pop_type");
+    const popFuncIdx = ctx.numImportFuncs + mod.functions.length;
+    const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
+    const body: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 1 } as Instr,
+    ];
+    let current: Instr[] = [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr];
+    for (let i = mutEntries.length - 1; i >= 0; i--) {
+      const [elemKey, vecTypeIdx] = mutEntries[i]!;
+      const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+      if (arrTypeIdx < 0) continue;
+      const base = 1 + locals.length; // 1 param + locals so far
+      const vecL = base;
+      const lenL = base + 1;
+      locals.push(
+        { name: `__vpop_vec_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: vecTypeIdx } },
+        { name: `__vpop_len_${vecTypeIdx}`, type: { kind: "i32" } },
+      );
+      const boxInstrs: Instr[] =
+        elemKey === "externref"
+          ? []
+          : elemKey === "f64"
+            ? [{ op: "call", funcIdx: boxNumIdx2! } as Instr]
+            : [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx2! } as Instr];
+      const thenBranch: Instr[] = [
+        { op: "local.get", index: 1 } as Instr,
+        { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+        { op: "local.set", index: vecL } as Instr,
+        { op: "local.get", index: vecL } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "local.set", index: lenL } as Instr,
+        // empty → undefined
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.eqz" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "ref.null.extern" } as Instr, { op: "return" } as Instr],
+        } as Instr,
+        // value = data[len-1] (boxed)
+        { op: "local.get", index: vecL } as Instr,
+        { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.sub" } as Instr,
+        { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+        ...boxInstrs,
+        // vec.length = len - 1 (value stays beneath on the stack)
+        { op: "local.get", index: vecL } as Instr,
+        { op: "local.get", index: lenL } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.sub" } as Instr,
+        { op: "struct.set", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+        { op: "return" } as Instr,
+      ];
+      current = [
+        { op: "local.get", index: 1 } as Instr,
+        { op: "ref.test", typeIdx: vecTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: thenBranch,
+          else: current,
+        } as Instr,
+      ];
+    }
+    body.push(...current);
+    mod.functions.push({
+      name: "__vec_pop",
+      typeIdx: popTypeIdx,
+      locals,
+      body,
+      exported: true,
+    } as any);
+    mod.exports.push({ name: "__vec_pop", desc: { kind: "func", index: popFuncIdx } });
   }
 }
 
@@ -4153,7 +5055,11 @@ export function generateMultiModule(
   options?: CodegenOptions,
 ): {
   module: WasmModule;
-  errors: { message: string; line: number; column: number; severity?: "error" | "warning" }[];
+  errors: CodegenError[];
+  // #2089 — silent-fallback telemetry counters (per class → per site → count).
+  fallbackCounts?: FallbackCounts;
+  // #1923 — IR post-claim demotions (only when trackIrPostClaim is set).
+  irPostClaimErrors?: { kind: string; func: string; message: string }[];
 } {
   const mod = createEmptyModule();
   const ctx = createCodegenContext(mod, multiAst.checker, options);
@@ -4253,6 +5159,11 @@ export function generateMultiModule(
     }
 
     // Phase 2: Collect all declarations — only entry file gets Wasm exports
+    // (#2023) Whole-realm new.target detection — OR across all source files.
+    for (const sf of multiAst.sourceFiles) {
+      scanForNewTarget(ctx, sf);
+    }
+
     for (const sf of multiAst.sourceFiles) {
       const isEntry = sf === multiAst.entryFile;
       collectDeclarations(ctx, sf, isEntry);
@@ -4412,8 +5323,16 @@ export function generateMultiModule(
     // Peephole optimization: remove redundant ref.as_non_null after ref.cast, etc.
     peepholeOptimize(mod);
 
+    // #1984 — freeze the index spaces (multi-module path). Same boundary as the
+    // single-module generateModule: all legitimate late import mutations have
+    // run; stackBalance / fixupExternConvertAny / emit add no imports. Any
+    // addImport/ensureLateImport after here throws at the producer site.
+    ctx.indexSpaceFrozen = true;
+
     // Stack-balancing fixup: ensure all branches in if/try/block have matching stack states
     stackBalance(mod);
+    // #1918 — drain fixup telemetry: per-compile debug log + optional strict mode.
+    drainStackBalanceTelemetry(ctx, multiAst.entryFile.fileName);
 
     // Late fixup: repair extern.convert_any applied to non-anyref values.
     // Must run after stackBalance since fixCallArgTypesInBody can insert
@@ -4428,7 +5347,15 @@ export function generateMultiModule(
     reportErrorNoNode(ctx, `Codegen error: ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  return { module: mod, errors: ctx.errors };
+  // (#2094) Emit-time backstop for the addImport gate — see generateModule.
+  assertNoLeakedHostImports(ctx, mod);
+
+  return {
+    module: mod,
+    errors: ctx.errors,
+    fallbackCounts: ctx.fallbackCounts,
+    irPostClaimErrors: ctx.irPostClaimErrors,
+  };
 }
 
 // ── Unified single-pass import collector (#592) ─────────────────────
@@ -7375,7 +8302,9 @@ function collectJsonImports(ctx: CodegenContext, sourceFile: ts.SourceFile): voi
     addImport(ctx, "env", "JSON_stringify", { kind: "func", typeIdx });
   }
   if (needParse) {
-    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+    // #2013 — (text, reviver); reviver is `ref.null.extern` when absent so the
+    // host can apply §25.5.1 InternalizeJSONProperty.
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
     addImport(ctx, "env", "JSON_parse", { kind: "func", typeIdx });
   }
 }
@@ -7477,6 +8406,14 @@ function collectGeneratorImports(ctx: CodegenContext, sourceFile: ts.SourceFile)
     addImport(ctx, "env", "__gen_yield_star", {
       kind: "func",
       typeIdx: pushRefType, // same signature as push_ref: (buf, iterable) → void
+    });
+
+    // __gen_set_return: (externref, externref) → void  (#2035 — stashes the
+    // generator's `return` value on the buffer as a side property instead of
+    // pushing it as a yielded element; surfaced once as the terminal result)
+    addImport(ctx, "env", "__gen_set_return", {
+      kind: "func",
+      typeIdx: pushRefType, // same signature as push_ref: (buf, value) → void
     });
 
     // __create_generator: (buf: externref, pendingThrow: externref) → externref
@@ -8406,6 +9343,31 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
           { op: "return" },
         ],
       },
+      // (#2080) native string? → length !== 0 (ToBoolean §7.1.2: "" → false).
+      // In standalone/nativeStrings mode an `any`-held string is a $AnyString
+      // (the supertype of $NativeString / $ConsString, all carrying $len at
+      // field 0) wrapped as externref — NOT a $AnyValue box. Without this arm
+      // it falls through to the "any non-null ref → truthy" default, so the
+      // empty string is wrongly truthy. Guarded on anyStrTypeIdx so the GC /
+      // host-string path (no native-string type registered) is unaffected.
+      ...(ctx.anyStrTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: 1 },
+                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx },
+                { op: "struct.get", typeIdx: ctx.anyStrTypeIdx, fieldIdx: 0 },
+                { op: "i32.const", value: 0 },
+                { op: "i32.ne" },
+                { op: "return" },
+              ],
+            },
+          ] as Instr[])
+        : []),
       // any other non-null ref → truthy
       { op: "i32.const", value: 1 },
     ],
@@ -8520,6 +9482,22 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         blockType: { kind: "empty" },
         then: [{ op: "i32.const", value: 0 }, { op: "return" }],
       },
+      // (#2107) native string ($AnyString) → "string", NOT "object". Under
+      // nativeStrings/standalone a string value is a `$AnyString` GC struct
+      // carried as externref; without this guard `typeof (s: any) === "object"`
+      // wrongly held and `=== "string"` was the only true arm via the separate
+      // __typeof_string helper, so both string-tagged comparisons disagreed.
+      ...(ctx.anyStrTypeIdx >= 0
+        ? ([
+            { op: "local.get", index: 1 },
+            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+            },
+          ] as Instr[])
+        : []),
       // non-null, not a boxed primitive → object
       { op: "i32.const", value: 1 },
     ],
@@ -8691,6 +9669,13 @@ export function addGeneratorImports(ctx: CodegenContext, options?: { allowNoJsHo
   addImport(ctx, "env", "__gen_yield_star", {
     kind: "func",
     typeIdx: pushRefType, // same signature as push_ref: (buf, iterable) → void
+  });
+
+  // __gen_set_return: (externref, externref) → void  (#2035 — stashes the
+  // generator's `return` value on the buffer instead of pushing it as a yield)
+  addImport(ctx, "env", "__gen_set_return", {
+    kind: "func",
+    typeIdx: pushRefType, // same signature as push_ref: (buf, value) → void
   });
 
   // __create_generator: (buf: externref, pendingThrow: externref) -> externref
@@ -8880,6 +9865,119 @@ export function resolveNativeTypeAnnotation(tsType: ts.Type): ValType | null {
 }
 
 /**
+ * (#2176) Resolve the type of an identifier reference, preferring the user's
+ * own declaration over an ambient lib (`.d.ts`) global of the same name.
+ *
+ * Root cause: js2wasm analyzes a top-level program as a **script** (no
+ * import/export ⇒ not a module). In script mode a top-level `const name = …`
+ * does NOT shadow the writable global `var name: string` declared in
+ * `lib.dom.d.ts` (both live in the global scope, and TypeScript resolves a
+ * bare reference to the ambient symbol). So `const y = name` types `y` as
+ * `void` (the ambient `name`) instead of `string`, and the colliding-name
+ * read (`` `${name}` ``, `"x" + name`, `const y = name`) loses its real type —
+ * the codegen then registers `y` as an i32 global and the value reads back as
+ * `0`/`undefined`. Runtime values are stored correctly under `$__mod_name`;
+ * only the *type* is poisoned. Common colliders: `name` (→ undefined),
+ * `length`, `top`, `status`, `origin`, etc. from lib.dom.
+ *
+ * Fix: when `getTypeAtLocation(id)` binds to a symbol whose declarations live
+ * ONLY in lib `.d.ts` files, but a user-level binding of that exact name is in
+ * scope (a non-lib declaration), re-derive the type from the user binding so
+ * the read/declaration sees the real type. Falls back to the original type
+ * when no user binding shadows the ambient — zero behavior change for genuine
+ * host-global reads (`window.name`, bare `length` with no user binding).
+ */
+export function resolveIdentifierType(ctx: CodegenContext, id: ts.Identifier): ts.Type {
+  const sym = ctx.checker.getSymbolAtLocation(id);
+  const decls = sym?.declarations;
+  // Only intervene when the bound symbol is purely ambient (every declaration
+  // lives in a lib/declaration file). A user declaration mixed in means TS
+  // already resolved (at least partly) to the user — leave it alone.
+  const isPurelyAmbient =
+    decls !== undefined && decls.length > 0 && decls.every((d) => d.getSourceFile().isDeclarationFile);
+  if (!isPurelyAmbient) {
+    return ctx.checker.getTypeAtLocation(id);
+  }
+  // A same-name user binding shadows the ambient global, but in script mode the
+  // checker's scope contains ONLY the ambient symbol — `getSymbolsInScope`
+  // never surfaces the user binding. So walk the AST enclosing scopes for a
+  // user-source declaration (var/let/const, function, class, or param) of the
+  // same name and re-derive the type from it.
+  const userDecl = findUserBindingDecl(id);
+  if (userDecl) {
+    return ctx.checker.getTypeAtLocation(userDecl);
+  }
+  return ctx.checker.getTypeAtLocation(id);
+}
+
+/**
+ * (#2176) Walk enclosing scopes from `id` outward to find a user-source
+ * declaration that binds `id.text` (a `var`/`let`/`const` declaration,
+ * function/class declaration, or parameter). Returns the binding node whose
+ * `getTypeAtLocation` gives the real type, or undefined if no user binding
+ * shadows the ambient global.
+ */
+function findUserBindingDecl(id: ts.Identifier): ts.Node | undefined {
+  const name = id.text;
+  const bindsName = (node: ts.Node): ts.Node | undefined => {
+    if (
+      (ts.isVariableDeclaration(node) || ts.isParameter(node)) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === name &&
+      !node.getSourceFile().isDeclarationFile
+    ) {
+      return node;
+    }
+    if (
+      (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) &&
+      node.name?.text === name &&
+      !node.getSourceFile().isDeclarationFile
+    ) {
+      return node;
+    }
+    return undefined;
+  };
+  // Search a statement list (block / source file body) for a binding.
+  const searchStatements = (statements: readonly ts.Statement[]): ts.Node | undefined => {
+    for (const stmt of statements) {
+      if (ts.isVariableStatement(stmt)) {
+        for (const d of stmt.declarationList.declarations) {
+          const found = bindsName(d);
+          if (found) return found;
+        }
+      } else {
+        const found = bindsName(stmt);
+        if (found) return found;
+      }
+    }
+    return undefined;
+  };
+  let scope: ts.Node | undefined = id.parent;
+  while (scope) {
+    if (ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope)) {
+      const found = searchStatements(scope.statements);
+      if (found) return found;
+    }
+    // Function/arrow/method parameters bind names in their body scope.
+    if (
+      (ts.isFunctionDeclaration(scope) ||
+        ts.isFunctionExpression(scope) ||
+        ts.isArrowFunction(scope) ||
+        ts.isMethodDeclaration(scope) ||
+        ts.isConstructorDeclaration(scope)) &&
+      scope.parameters
+    ) {
+      for (const p of scope.parameters) {
+        const found = bindsName(p);
+        if (found) return found;
+      }
+    }
+    scope = scope.parent;
+  }
+  return undefined;
+}
+
+/**
  * Resolve a ts.Type to a ValType, using the struct registry and anonymous type map.
  * Use this instead of mapTsTypeToWasm in the codegen to get real type indices.
  */
@@ -8912,6 +10010,17 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
   // in the lib as `declare var Array: ArrayConstructor` which would match externref
   if (tsType.flags & ts.TypeFlags.Object) {
     const sym = (tsType as ts.TypeReference).symbol ?? (tsType as ts.Type).symbol;
+    // `TemplateStringsArray` (the first parameter of a tag function) is the
+    // template object built by `compileTaggedTemplateExpression` — a vec struct
+    // `{ length, data, raw }` (the template vec type). It extends
+    // `ReadonlyArray<string>`, so it MUST be matched before the Array branch
+    // below, otherwise it would lower to a plain string vec without the `raw`
+    // field and indexed/`.raw` reads would mismatch the runtime struct (#2008).
+    if (sym?.name === "TemplateStringsArray") {
+      const templateVecTypeIdx = getOrRegisterTemplateVecType(ctx);
+      return { kind: "ref_null", typeIdx: templateVecTypeIdx };
+    }
+
     // `readonly T[]` / `ReadonlyArray<T>` lower identically to `T[]` — `readonly`
     // is a TS-only modifier with no runtime representation. Without this, a
     // ReadonlyArray-typed struct field falls through to the anonymous-struct /
@@ -8982,8 +10091,55 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
       if (ctx.mapTypeIdx >= 0) return { kind: "ref", typeIdx: ctx.mapTypeIdx };
     }
 
+    // (#2162) Set → the SAME native `$Map` struct in standalone / nativeStrings
+    // mode (a Set is a Map with key === value). A `Set`-typed binding becomes
+    // `ref $Map` so `new Set()` stores directly and method/.size dispatch reads
+    // a typed receiver. JS-host mode keeps Set as an externref externClass.
+    if (sym?.name === "Set" && ctx.nativeStrings) {
+      ensureMapRuntimeTypes(ctx);
+      if (ctx.mapTypeIdx >= 0) return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+
+    // (#2162) WeakMap / WeakSet → the SAME native `$Map` struct in standalone /
+    // nativeStrings mode (they reuse the Map backing store with object-identity
+    // keys and no iteration). JS-host mode keeps them as externref externClasses.
+    if ((sym?.name === "WeakMap" || sym?.name === "WeakSet") && ctx.nativeStrings) {
+      ensureMapRuntimeTypes(ctx);
+      if (ctx.mapTypeIdx >= 0) return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+    }
+
     // Check externref AFTER Array check — Array is declared in lib but should use wasm GC arrays
     if (isExternalDeclaredClass(tsType, ctx.checker)) return { kind: "externref" };
+
+    // (#1712) Function-style-constructor instance types resolve to EXTERNREF,
+    // never to a synthesized checker-shape struct. The runtime instance struct
+    // (compileFnctorNew, `__fnctor_<name>`) is built from ctor `this.*` writes
+    // only, while the checker's shape adds prototype-assigned methods as
+    // members — the two shapes have no subtype relation, so any value typed
+    // with the checker shape guard-casts to null and downstream struct.get /
+    // ref.as_non_null traps (acorn `Parser.prototype.parse = function () {
+    // return new Parser(...); }`). Externref makes fnctor instances flow
+    // dynamically end to end: member calls take the host-bridge path (which
+    // resolves through the vivified prototype) and field reads go through
+    // __extern_get/_safeGet. NOTE: resolving to the CTOR struct here instead
+    // was tried and regressed (.tmp/dbg15.mts G4/G5) — the member-call
+    // static/dynamic split keys off this type, so only the always-dynamic
+    // externref resolution is safe. JS-host mode only.
+    if (!ctx.standalone && !ctx.wasi) {
+      const fnDecl = sym?.valueDeclaration;
+      const isFnCtorType =
+        (sym?.name !== undefined && ctx.funcConstructorMap.has(sym.name)) ||
+        (!!fnDecl &&
+          (ts.isFunctionDeclaration(fnDecl) ||
+            ts.isFunctionExpression(fnDecl) ||
+            (ts.isVariableDeclaration(fnDecl) && !!fnDecl.initializer && ts.isFunctionExpression(fnDecl.initializer))));
+      // Only when the type is an INSTANCE shape (has properties but is not
+      // itself callable) — the function VALUE type (callable) must keep its
+      // closure-wrapper resolution.
+      if (isFnCtorType && tsType.getCallSignatures().length === 0) {
+        return { kind: "externref" };
+      }
+    }
 
     let name = sym?.name;
     // Map class expression symbol names to their synthetic names
@@ -9303,7 +10459,8 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
     if (declSourceFile && declSourceFile.isDeclarationFile) continue;
 
     const fullName = `${structName}_${prop.name}`;
-    if (ctx.funcMap.has(fullName)) continue; // already registered
+    const methodKey = classMemberFuncKey(ctx, fullName); // (#1983) collision-free key + display name
+    if (ctx.funcMap.has(methodKey)) continue; // already registered
 
     const sig = callSigs[0]!;
     // Build parameter types: self (ref $structTypeIdx) + declared params.
@@ -9349,10 +10506,10 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
 
     const methodTypeIdx = addFuncType(ctx, methodParams, methodResults, `${fullName}_type`);
     const methodFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-    ctx.funcMap.set(fullName, methodFuncIdx);
+    ctx.funcMap.set(methodKey, methodFuncIdx); // (#1983) relocated key
 
     const methodFunc: WasmFunction = {
-      name: fullName,
+      name: methodKey, // (#1983) display name matches relocated funcMap key for body-fill
       typeIdx: methodTypeIdx,
       locals: [],
       body: [],
@@ -9385,8 +10542,14 @@ function externMethod(
  * (e.g., bundled/browser environments where readLibFile returns empty strings).
  */
 export function registerBuiltinExternClasses(ctx: CodegenContext): void {
-  // Set methods — all take (self: externref, ...args: externref) → externref
-  if (!ctx.externClasses.has("Set")) {
+  // Set methods — all take (self: externref, ...args: externref) → externref.
+  // (#2162) In standalone / nativeStrings mode `Set` is served by the
+  // WasmGC-native runtime (src/codegen/set-runtime.ts, reusing the Map backing
+  // store), intercepted at the new-expression / method-call / .size sites.
+  // Registering it as an externClass here would eagerly emit a `Set_new` host
+  // import the standalone module can't satisfy, so skip it in that mode (mirrors
+  // the Map gating below). JS-host mode keeps the externClass path unchanged.
+  if (!ctx.externClasses.has("Set") && !ctx.nativeStrings) {
     const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
     // ES2015 methods
     methods.set("add", externMethod(1)); // add(value) → Set
@@ -9452,8 +10615,11 @@ export function registerBuiltinExternClasses(ctx: CodegenContext): void {
     });
   }
 
-  // WeakMap methods
-  if (!ctx.externClasses.has("WeakMap")) {
+  // WeakMap methods.
+  // (#2162) Skip under nativeStrings — the native weak-collection runtime
+  // (weak-collections-runtime.ts, reusing the Map backing store) serves it, so
+  // registering the externClass would leak a `WeakMap_new` host import.
+  if (!ctx.externClasses.has("WeakMap") && !ctx.nativeStrings) {
     const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
     methods.set("get", externMethod(1));
     methods.set("set", externMethod(2));
@@ -9474,8 +10640,10 @@ export function registerBuiltinExternClasses(ctx: CodegenContext): void {
     });
   }
 
-  // WeakSet methods
-  if (!ctx.externClasses.has("WeakSet")) {
+  // WeakSet methods.
+  // (#2162) Skip under nativeStrings — served by the native weak-collection
+  // runtime; registering the externClass would leak a `WeakSet_new` host import.
+  if (!ctx.externClasses.has("WeakSet") && !ctx.nativeStrings) {
     const methods = new Map<string, { params: ValType[]; results: ValType[]; requiredParams: number }>();
     methods.set("add", externMethod(1));
     methods.set("has", externMethod(1));

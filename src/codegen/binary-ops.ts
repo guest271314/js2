@@ -15,7 +15,7 @@ import {
   isWrapperObjectType,
 } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
-import { isAnyValue } from "./any-helpers.js";
+import { ensureAnyFromExternHelper, isAnyValue } from "./any-helpers.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -33,9 +33,11 @@ import {
 import { ensureExternIsUndefinedImport, ensureLateImport } from "./expressions/late-imports.js";
 import { ensureFmod } from "./fmod.js";
 import { ensureNativeStringHelpers } from "./native-strings.js";
+import { emitNewTargetClassId, getOrAssignClassNewTargetId } from "./new-target.js"; // (#2023)
 import { compileLogicalAnd, compileLogicalOr, compileNullishCoalescing } from "./expressions/logical-ops.js";
 import { tryStaticToNumber } from "./expressions/misc.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
+import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringImports, addUnionImports, resolveNativeTypeAnnotation, resolveWasmType } from "./index.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts } from "./shared.js";
@@ -338,6 +340,20 @@ export function compileBinaryExpression(
   ) {
     const typeofResult = compileTypeofComparison(ctx, fctx, expr);
     if (typeofResult !== null) return typeofResult;
+  }
+
+  // (#2023) `new.target === SomeClass` / `new.target !== SomeClass` (either
+  // operand order). `new.target` is the class-id of the outermost `new` site;
+  // compare it against the named class's stable id. Must run before the operands
+  // are compiled (a bare class identifier `SomeClass` does not lower to a value).
+  if (
+    op === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+    op === ts.SyntaxKind.EqualsEqualsToken ||
+    op === ts.SyntaxKind.ExclamationEqualsEqualsToken ||
+    op === ts.SyntaxKind.ExclamationEqualsToken
+  ) {
+    const ntResult = compileNewTargetClassComparison(ctx, fctx, expr, op);
+    if (ntResult !== null) return ntResult;
   }
 
   // Null comparison shortcut: x === null, x !== null, null === x, null !== x
@@ -1297,6 +1313,31 @@ export function compileBinaryExpression(
     }
   }
 
+  // (#2059) Relational (`<`,`<=`,`>`,`>=`) where an operand is statically
+  // `any`/`unknown` (so it lowers to a dynamic externref that may hold a runtime
+  // string). §7.2.13 IsLessThan compares two strings lexicographically, but the
+  // numeric paths below ToNumber-coerce both sides — `Number("a")` is NaN, so
+  // `("a" as any) < ("b" as any)` wrongly yielded `false`. Route these through a
+  // runtime-dispatched compare BEFORE the f64 hint is applied.
+  //
+  // CRITICAL (#1374 lesson): gate on **statically any/unknown** operands only,
+  // NOT on "any non-numeric TS type". The closed PR #1374 gated on
+  // `!isPrimNumericish` (both sides), which routed object/class relationals to
+  // the host comparator — host `<` then threw on opaque WasmGC structs (14
+  // runtime_error regressions). A concrete object/class operand is NOT
+  // any/unknown, so it keeps its existing relational path.
+  //
+  // Fast mode (`anyValueTypeIdx >= 0`) is excluded for the same reason as the
+  // `+` gate — the AnyValue helpers own that ABI. Per-site recovery is
+  // default-mode only.
+  if (isRelational && ctx.anyValueTypeIdx < 0) {
+    const leftIsAnyish = (leftTsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+    const rightIsAnyish = (rightTsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+    if ((leftIsAnyish || rightIsAnyish) && !isBigIntType(leftTsType) && !isBigIntType(rightTsType)) {
+      return emitAnyRelational(ctx, fctx, expr, op);
+    }
+  }
+
   // In fast mode, numeric hint is i32 (unless division/power which promotes to f64).
   // Also use i32 hint when operands have native i32 type annotations (type i32 = number).
   const isDivOrPow = op === ts.SyntaxKind.SlashToken || op === ts.SyntaxKind.AsteriskAsteriskToken;
@@ -1956,23 +1997,63 @@ export function compileBinaryExpression(
       }
       fctx.body.push({ op: "local.set", index: lTmp });
 
-      const eqInstrs: Instr[] = [
-        // ── number? ──
+      // (#2081) LOOSE null/undefined arm (§7.2.15 steps 2-3): `null == undefined`
+      // (and null==null / undefined==undefined) ⇒ true; a nullish vs a
+      // non-nullish ⇒ false (never coerces — `null == 0` is false). Under this
+      // representation both null and undefined are `ref.null extern`, so a
+      // both-nullish test captures all three nullish pairings. LOOSE only — strict
+      // `null === undefined` is handled by the type-aware path and must stay
+      // false; gate on `!isStrict`. The numeric/bool/string/identity cascade
+      // below is the `else`.
+      const looseNullish =
+        !isStrict && (op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken);
+      // (#2081) ToNumber for the LOOSE numeric arm: a boxed boolean coerces to
+      // 0/1 (§7.2.15 step 8 / §7.1.4 ToNumber(Boolean)), a number unboxes. Used
+      // only when the arm has already established the operand is number-or-bool.
+      const looseToNum = (externLocal: number): Instr[] => [
+        { op: "local.get", index: externLocal },
+        { op: "call", funcIdx: typeofBool } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "f64" } },
+          then: [
+            { op: "local.get", index: externLocal },
+            { op: "call", funcIdx: unboxBool },
+            { op: "f64.convert_i32_s" },
+          ],
+          else: [
+            { op: "local.get", index: externLocal },
+            { op: "call", funcIdx: unboxNum },
+          ],
+        } as Instr,
+      ];
+      const coreEqInstrs: Instr[] = [
+        // ── number (loose: number-or-boolean — §7.2.15 step 8 Boolean→ToNumber,
+        //    so `true == 1`, `false == 0` compare numerically; strict keeps
+        //    number-only since `true === 1` is false by type)? ──
         { op: "local.get", index: lTmp },
         { op: "call", funcIdx: typeofNum } as Instr,
+        ...(looseNullish
+          ? ([{ op: "local.get", index: lTmp }, { op: "call", funcIdx: typeofBool }, { op: "i32.or" }] as Instr[])
+          : []),
         { op: "local.get", index: rTmp },
         { op: "call", funcIdx: typeofNum } as Instr,
+        ...(looseNullish
+          ? ([{ op: "local.get", index: rTmp }, { op: "call", funcIdx: typeofBool }, { op: "i32.or" }] as Instr[])
+          : []),
         { op: "i32.and" } as Instr,
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "i32" } },
-          then: [
-            { op: "local.get", index: lTmp },
-            { op: "call", funcIdx: unboxNum },
-            { op: "local.get", index: rTmp },
-            { op: "call", funcIdx: unboxNum },
-            { op: "f64.eq" } as Instr,
-          ],
+          then: looseNullish
+            ? [...looseToNum(lTmp), ...looseToNum(rTmp), { op: "f64.eq" } as Instr]
+            : [
+                { op: "local.get", index: lTmp },
+                { op: "call", funcIdx: unboxNum },
+                { op: "local.get", index: rTmp },
+                { op: "call", funcIdx: unboxNum },
+                { op: "f64.eq" } as Instr,
+              ],
           else: [
             // ── boolean? ──
             { op: "local.get", index: lTmp },
@@ -2037,48 +2118,113 @@ export function compileBinaryExpression(
                           else: [{ op: "i32.const", value: 0 }],
                         } as Instr,
                       ];
+                      // ── string? ── (#1914) Native strings are VALUE-compared
+                      // (§7.2.16 "If x is a String"). Without this, `a === b` over
+                      // `any`-typed string operands (e.g. the test262 harness's
+                      // `isSameValue`) fell to ref.eq identity and returned false
+                      // for equal strings from distinct allocations. Falls back to
+                      // the eqref identity arm when not both strings.
+                      const stringAndIdentityArm = (): Instr[] => {
+                        if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+                          ensureNativeStringHelpers(ctx);
+                          const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+                          const strEqIdx = ctx.nativeStrHelpers.get("__str_equals");
+                          if (flattenIdx !== undefined && strEqIdx !== undefined) {
+                            return [
+                              { op: "local.get", index: lAny },
+                              { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                              { op: "local.get", index: rAny },
+                              { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                              { op: "i32.and" } as Instr,
+                              {
+                                op: "if",
+                                blockType: { kind: "val", type: { kind: "i32" } },
+                                then: [
+                                  { op: "local.get", index: lAny },
+                                  { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                                  { op: "call", funcIdx: flattenIdx },
+                                  { op: "local.get", index: rAny },
+                                  { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                                  { op: "call", funcIdx: flattenIdx },
+                                  { op: "call", funcIdx: strEqIdx },
+                                ],
+                                else: identityArm,
+                              } as Instr,
+                            ];
+                          }
+                        }
+                        return identityArm;
+                      };
                       const seq: Instr[] = [
                         { op: "local.set", index: rAny },
                         { op: "local.set", index: lAny },
                       ];
-                      // ── string? ── (#1914) Native strings are VALUE-compared
-                      // (§7.2.16 step "If x is a String"). Without this arm,
-                      // every `a === b` over `any`-typed string operands — most
-                      // visibly the test262 harness's `isSameValue` — fell to
-                      // ref.eq identity and returned false for equal strings
-                      // from distinct allocations (literal vs literal included,
-                      // since each string literal materializes a fresh struct).
-                      let stringArmEmitted = false;
-                      if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
-                        ensureNativeStringHelpers(ctx);
-                        const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
-                        const strEqIdx = ctx.nativeStrHelpers.get("__str_equals");
-                        if (flattenIdx !== undefined && strEqIdx !== undefined) {
-                          stringArmEmitted = true;
+                      // ── (#2081) LOOSE String ⇄ Number arm (§7.2.15 steps 4-7) ──
+                      // For `==`/`!=` only (NOT strict — `"1" === 1` is false by
+                      // type), when EXACTLY one operand is a native string and the
+                      // other is a number, compare ToNumber(both): ToNumber(string)
+                      // via the §7.1.4.1 `__str_to_number` scanner (NaN for
+                      // unparseable, 0 for empty, hex/inf), `__unbox_number` for the
+                      // numeric side, then `f64.eq`. Without this, `"1" == 1` fell
+                      // through the string==string arm (right isn't a string) to
+                      // ref.eq identity → wrong `false`. The boolean side is already
+                      // covered by the typeof-boolean arm above (`true == 1`).
+                      // `parseFloat` is deliberately NOT used (Number("0xff")=255 vs
+                      // parseFloat("0xff")=NaN — §7.1.4.1).
+                      let looseStrNumEmitted = false;
+                      if (
+                        !isStrict &&
+                        ctx.nativeStrings &&
+                        ctx.anyStrTypeIdx >= 0 &&
+                        (op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken)
+                      ) {
+                        if (!ctx.funcMap.has("__str_to_number")) {
+                          emitNativeParseNumber(ctx, new Set(["__str_to_number"]));
+                        }
+                        const strToNumIdx = ctx.funcMap.get("__str_to_number");
+                        if (strToNumIdx !== undefined) {
+                          looseStrNumEmitted = true;
+                          // ToNumber(side): native string → __str_to_number(extern);
+                          // else (a boxed number) → __unbox_number.
+                          const toNumberOf = (anyLocal: number, externLocal: number): Instr[] => [
+                            { op: "local.get", index: anyLocal },
+                            { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                            {
+                              op: "if",
+                              blockType: { kind: "val", type: { kind: "f64" } },
+                              then: [
+                                { op: "local.get", index: externLocal },
+                                { op: "call", funcIdx: strToNumIdx },
+                              ],
+                              else: [
+                                { op: "local.get", index: externLocal },
+                                { op: "call", funcIdx: unboxNum },
+                              ],
+                            } as Instr,
+                          ];
+                          // (lIsStr && rIsNum) || (rIsStr && lIsNum)
                           seq.push(
                             { op: "local.get", index: lAny },
                             { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                            { op: "local.get", index: rTmp },
+                            { op: "call", funcIdx: typeofNum } as Instr,
+                            { op: "i32.and" } as Instr,
                             { op: "local.get", index: rAny },
                             { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+                            { op: "local.get", index: lTmp },
+                            { op: "call", funcIdx: typeofNum } as Instr,
                             { op: "i32.and" } as Instr,
+                            { op: "i32.or" } as Instr,
                             {
                               op: "if",
                               blockType: { kind: "val", type: { kind: "i32" } },
-                              then: [
-                                { op: "local.get", index: lAny },
-                                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-                                { op: "call", funcIdx: flattenIdx },
-                                { op: "local.get", index: rAny },
-                                { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-                                { op: "call", funcIdx: flattenIdx },
-                                { op: "call", funcIdx: strEqIdx },
-                              ],
-                              else: identityArm,
+                              then: [...toNumberOf(lAny, lTmp), ...toNumberOf(rAny, rTmp), { op: "f64.eq" } as Instr],
+                              else: stringAndIdentityArm(),
                             } as Instr,
                           );
                         }
                       }
-                      if (!stringArmEmitted) seq.push(...identityArm);
+                      if (!looseStrNumEmitted) seq.push(...stringAndIdentityArm());
                       releaseTempLocal(fctx, lAny);
                       releaseTempLocal(fctx, rAny);
                       return seq;
@@ -2090,6 +2236,31 @@ export function compileBinaryExpression(
           ],
         } as Instr,
       ];
+      // For loose equality, wrap the core cascade in the nullish guard
+      // (§7.2.15 steps 2-3): both nullish ⇒ true; nullish-vs-non-nullish ⇒ false.
+      const eqInstrs: Instr[] = looseNullish
+        ? [
+            { op: "local.get", index: lTmp },
+            { op: "ref.is_null" } as Instr,
+            { op: "local.get", index: rTmp },
+            { op: "ref.is_null" } as Instr,
+            // (lNull || rNull): if EITHER is nullish, the result is whether BOTH
+            // are nullish (true) or not (false) — never coerce against a nullish.
+            { op: "i32.or" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [
+                { op: "local.get", index: lTmp },
+                { op: "ref.is_null" } as Instr,
+                { op: "local.get", index: rTmp },
+                { op: "ref.is_null" } as Instr,
+                { op: "i32.and" } as Instr,
+              ],
+              else: coreEqInstrs,
+            } as Instr,
+          ]
+        : coreEqInstrs;
       for (const ins of eqInstrs) fctx.body.push(ins);
       if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
       releaseTempLocal(fctx, rTmp);
@@ -2136,6 +2307,46 @@ export function compileBinaryExpression(
         fctx.body.push({ op: "drop" });
         fctx.body.push({ op: "drop" });
         fctx.body.push({ op: "i32.const", value: isStrictNeq ? 1 : 0 });
+        return { kind: "i32" };
+      }
+    }
+
+    // (#1986/#1987) Strict equality where exactly one side is an `any`-typed
+    // externref and the other is a known primitive (number / boolean) — or both
+    // sides are externref `any`. The numeric fallback further down unboxes the
+    // externref to f64 via ToNumber (null→0, false→0, "1"→1) and emits f64.eq,
+    // which makes `===` behave LOOSER than `==` (`null === 0` → true). Per §7.2.16
+    // IsStrictlyEqual must short-circuit to false on a type mismatch with no
+    // coercion. Route through `__host_eq` (JS `===`) instead — it gets the spec
+    // exactly right, including +0 === -0 (true) and NaN !== NaN. JS-host only; the
+    // standalone/WASI path is handled above (the `noJsHost` tag-dispatch block).
+    // Strings keep their dedicated `wasm:js-string equals` path below. A
+    // boolean-typed side is also excluded: `coerceType(i32 → externref)` boxes
+    // it as a JS *number* (`__box_number`), so `__host_eq(true, 1)` would be
+    // false — boolean operands keep the existing (correct) lowering, and a
+    // boolean `any` compared to a boolean falls through to it.
+    if (isStrict && !noJsHost && !leftIsString && !rightIsString && !leftIsBool && !rightIsBool) {
+      if (rightType.kind !== "externref") {
+        coerceType(ctx, fctx, rightType, { kind: "externref" });
+      }
+      if (leftType.kind !== "externref") {
+        const tmpR = allocTempLocal(fctx, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: tmpR });
+        coerceType(ctx, fctx, leftType, { kind: "externref" });
+        fctx.body.push({ op: "local.get", index: tmpR });
+        releaseTempLocal(fctx, tmpR);
+      }
+      const hostIdx = ensureLateImport(
+        ctx,
+        "__host_eq",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "i32" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      const finalHostIdx = ctx.funcMap.get("__host_eq") ?? hostIdx;
+      if (finalHostIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: finalHostIdx });
+        if (isNeqOp) fctx.body.push({ op: "i32.eqz" });
         return { kind: "i32" };
       }
     }
@@ -2362,6 +2573,37 @@ export function compileBinaryExpression(
               } as Instr,
             ] as Instr[];
           } else {
+            // Loose equality fallback for two externref `any` operands that are
+            // not eqref-identical.
+            //
+            // (#2081) STANDALONE/WASI has no JS host, so `__host_loose_eq` is an
+            // unsatisfiable import — it leaked into the module and made
+            // `("1" as any) == (1 as any)` either fail instantiation or return a
+            // wrong `false` (ref-identity never coerces string⇄number). Route
+            // through the NATIVE IsLooselyEqual instead: box both externrefs to
+            // `$AnyValue` (`__any_from_extern` → tag5 string / tag3 number / tag4
+            // bool / tag1 null) and call `__any_eq`, whose §7.2.15 arms
+            // (incl. the String⇄Number arm added in this PR) implement the spec
+            // coercion natively. Host mode keeps `__host_loose_eq` (JS `==`),
+            // unchanged.
+            const noJsHost = ctx.standalone === true || ctx.wasi === true;
+            if (noJsHost) {
+              ensureAnyHelpers(ctx);
+              const fromExternIdx = ensureAnyFromExternHelper(ctx);
+              const anyEqIdx = ctx.funcMap.get("__any_eq");
+              if (fromExternIdx !== undefined && anyEqIdx !== undefined) {
+                return [
+                  { op: "local.get", index: tmpLeft },
+                  { op: "call", funcIdx: fromExternIdx } as Instr,
+                  { op: "local.get", index: tmpRight },
+                  { op: "call", funcIdx: fromExternIdx } as Instr,
+                  { op: "call", funcIdx: anyEqIdx } as Instr,
+                  ...(isNeqOp ? [{ op: "i32.eqz" } as Instr] : []),
+                ] as Instr[];
+              }
+              // Helpers unavailable (should not happen) — fall through to the
+              // host import below rather than emit nothing.
+            }
             // Loose equality: __host_loose_eq (JS ==) handles all coercion
             // rules including null==undefined per §7.2.15. The result is
             // definitive — no numeric fallback needed. (#1134)
@@ -2580,6 +2822,19 @@ function compileAnyBinaryDispatch(
 export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): ValType {
   const noJsHost = ctx.standalone === true || ctx.wasi === true;
 
+  // #1988: in standalone/WASI the §13.15.3 string-vs-numeric decision must be
+  // made on the ToPrimitive(default) results, not the raw operands — an object
+  // or array reduces (valueOf→toString) to a STRING, which forces string
+  // concatenation. The native `__to_primitive` helper that performs that
+  // reduction is registered by `ensureObjectRuntime`. Run it here, BEFORE the
+  // operands are compiled into `fctx.body`, so any one-time funcIdx setup it
+  // does cannot desync the current function body. It registers only defined
+  // funcs (no import shift) and is idempotent, so this is a no-op when the
+  // object runtime is already present.
+  if (noJsHost && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+    ensureObjectRuntime(ctx);
+  }
+
   // Compile both operands to externref temps. Passing the externref hint keeps a
   // runtime string boxed (no ToNumber coercion) so §13.15.3 can concatenate.
   const lType = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
@@ -2627,12 +2882,45 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
     const typeofStr = ctx.funcMap.get("__typeof_string");
     const unboxNum = ctx.funcMap.get("__unbox_number");
     const concatIdx = ctx.nativeStrHelpers.get("__str_concat");
+    // #1988: the native ToPrimitive helper registered by `ensureObjectRuntime`
+    // (called at the top of this function). Reducing the operands to primitives
+    // BEFORE the string-vs-numeric test is what §13.15.3 requires — an object /
+    // array operand becomes its toString string, forcing concatenation. When it
+    // is unavailable (older minimal standalone path) we degrade to the previous
+    // raw-operand dispatch rather than failing.
+    const toPrimIdx = ctx.funcMap.get("__to_primitive");
     if (typeofStr !== undefined && unboxNum !== undefined && concatIdx !== undefined) {
       // ToString(externref) → ref $AnyString, via the runtime walker (handles
       // boxed strings, numbers, null/undefined, and struct valueOf/toString).
       const externToStr = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       const finalToStr = ctx.funcMap.get("__extern_toString") ?? externToStr;
+
+      // §13.15.3 step 1-2: lprim = ToPrimitive(left, default); rprim =
+      // ToPrimitive(right, default). The "default" hint maps to valueOf→toString
+      // ordering; `__to_primitive` treats a null hint as default. Plain objects
+      // and arrays (no exotic valueOf) reduce to their toString string, so the
+      // string test below then forces concatenation. Reduce into fresh temps so
+      // both the typeof test and the two arms operate on the SAME primitives
+      // (no double-evaluation of valueOf/toString).
+      const lPrim = allocTempLocal(fctx, { kind: "externref" });
+      const rPrim = allocTempLocal(fctx, { kind: "externref" });
+      if (toPrimIdx !== undefined) {
+        fctx.body.push({ op: "local.get", index: lTmp });
+        fctx.body.push({ op: "ref.null.extern" } as Instr); // default hint
+        fctx.body.push({ op: "call", funcIdx: toPrimIdx } as Instr);
+        fctx.body.push({ op: "local.set", index: lPrim });
+        fctx.body.push({ op: "local.get", index: rTmp });
+        fctx.body.push({ op: "ref.null.extern" } as Instr);
+        fctx.body.push({ op: "call", funcIdx: toPrimIdx } as Instr);
+        fctx.body.push({ op: "local.set", index: rPrim });
+      } else {
+        // Degrade: no ToPrimitive available — carry the raw operands through.
+        fctx.body.push({ op: "local.get", index: lTmp });
+        fctx.body.push({ op: "local.set", index: lPrim });
+        fctx.body.push({ op: "local.get", index: rTmp });
+        fctx.body.push({ op: "local.set", index: rPrim });
+      }
 
       const emitToAnyString = (tmp: number): Instr[] => [
         { op: "local.get", index: tmp },
@@ -2641,18 +2929,19 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
         { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
       ];
 
-      // if (__typeof_string(l) | __typeof_string(r)) → concat both as strings
-      //                                      else      → f64.add(unbox, unbox)
+      // if (__typeof_string(lprim) | __typeof_string(rprim)) → concat both as
+      //                                            strings
+      //                                      else            → f64.add(unbox, unbox)
       const concatArm: Instr[] = [
-        ...emitToAnyString(lTmp),
-        ...emitToAnyString(rTmp),
+        ...emitToAnyString(lPrim),
+        ...emitToAnyString(rPrim),
         { op: "call", funcIdx: concatIdx } as Instr,
         { op: "extern.convert_any" } as Instr,
       ];
       const numericArm: Instr[] = [
-        { op: "local.get", index: lTmp },
+        { op: "local.get", index: lPrim },
         { op: "call", funcIdx: unboxNum } as Instr,
-        { op: "local.get", index: rTmp },
+        { op: "local.get", index: rPrim },
         { op: "call", funcIdx: unboxNum } as Instr,
         { op: "f64.add" } as Instr,
       ];
@@ -2662,9 +2951,9 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
       const finalBoxNum = ctx.funcMap.get("__box_number") ?? boxNum;
       numericArm.push({ op: "call", funcIdx: finalBoxNum } as Instr);
 
-      fctx.body.push({ op: "local.get", index: lTmp });
+      fctx.body.push({ op: "local.get", index: lPrim });
       fctx.body.push({ op: "call", funcIdx: typeofStr } as Instr);
-      fctx.body.push({ op: "local.get", index: rTmp });
+      fctx.body.push({ op: "local.get", index: rPrim });
       fctx.body.push({ op: "call", funcIdx: typeofStr } as Instr);
       fctx.body.push({ op: "i32.or" } as Instr);
       fctx.body.push({
@@ -2673,6 +2962,8 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
         then: concatArm,
         else: numericArm,
       } as Instr);
+      releaseTempLocal(fctx, rPrim);
+      releaseTempLocal(fctx, lPrim);
       releaseTempLocal(fctx, rTmp);
       releaseTempLocal(fctx, lTmp);
       return { kind: "externref" };
@@ -2688,6 +2979,209 @@ export function emitAnyAdd(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
   releaseTempLocal(fctx, lTmp);
   fctx.body.push({ op: "f64.add" });
   return { kind: "f64" };
+}
+
+/**
+ * (#2059) Emit a relational (`<`,`<=`,`>`,`>=`) for two operands where at least
+ * one is a dynamic externref (an `any`/`unknown` value). Operands are compiled
+ * here (not yet on the stack). Per §7.2.13 IsLessThan two string operands compare
+ * lexicographically and a string-vs-number compares numerically — the f64 paths
+ * would ToNumber both sides (`Number("a")` → NaN) and yield `false`.
+ *
+ * JS-host delegates to `__host_compare` (JS `<`/`>`), which returns a 4-way
+ * result -1/0/1/2 (2 = NaN/undefined-incomparable). Standalone builds §7.2.13 in
+ * module: both-string → native `__str_compare`, else ToNumber + f64. Returns i32
+ * (the boolean relational result).
+ */
+export function emitAnyRelational(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  op: ts.SyntaxKind,
+): ValType {
+  const noJsHost = ctx.standalone === true || ctx.wasi === true;
+
+  // Compile both operands to externref temps (keep runtime strings boxed).
+  const lType = compileExpression(ctx, fctx, expr.left, { kind: "externref" });
+  if (!lType) return { kind: "i32" };
+  if (lType.kind !== "externref") coerceType(ctx, fctx, lType, { kind: "externref" });
+  const lTmp = allocTempLocal(fctx, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: lTmp });
+  const rType = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
+  if (!rType) {
+    releaseTempLocal(fctx, lTmp);
+    return { kind: "i32" };
+  }
+  if (rType.kind !== "externref") coerceType(ctx, fctx, rType, { kind: "externref" });
+  const rTmp = allocTempLocal(fctx, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: rTmp });
+
+  // Map a -1/0/1/2 `cmp` (or an f64 comparison) to the operator's boolean result.
+  // The `2` (incomparable) sentinel must make ALL four operators yield 0, so we
+  // test the concrete values explicitly rather than `cmp <= 0` / `cmp >= 0`.
+  const mapCmpToOp = (cmpTmp: number): void => {
+    switch (op) {
+      case ts.SyntaxKind.LessThanToken: // cmp == -1
+        fctx.body.push({ op: "local.get", index: cmpTmp });
+        fctx.body.push({ op: "i32.const", value: -1 });
+        fctx.body.push({ op: "i32.eq" });
+        break;
+      case ts.SyntaxKind.GreaterThanToken: // cmp == 1
+        fctx.body.push({ op: "local.get", index: cmpTmp });
+        fctx.body.push({ op: "i32.const", value: 1 });
+        fctx.body.push({ op: "i32.eq" });
+        break;
+      case ts.SyntaxKind.LessThanEqualsToken: // cmp == -1 || cmp == 0
+        fctx.body.push({ op: "local.get", index: cmpTmp });
+        fctx.body.push({ op: "i32.const", value: -1 });
+        fctx.body.push({ op: "i32.eq" });
+        fctx.body.push({ op: "local.get", index: cmpTmp });
+        fctx.body.push({ op: "i32.eqz" }); // cmp == 0
+        fctx.body.push({ op: "i32.or" });
+        break;
+      case ts.SyntaxKind.GreaterThanEqualsToken: // cmp == 1 || cmp == 0
+        fctx.body.push({ op: "local.get", index: cmpTmp });
+        fctx.body.push({ op: "i32.const", value: 1 });
+        fctx.body.push({ op: "i32.eq" });
+        fctx.body.push({ op: "local.get", index: cmpTmp });
+        fctx.body.push({ op: "i32.eqz" });
+        fctx.body.push({ op: "i32.or" });
+        break;
+    }
+  };
+
+  // ── JS-host: __host_compare → -1/0/1/2 ──
+  if (!noJsHost) {
+    fctx.body.push({ op: "local.get", index: lTmp });
+    fctx.body.push({ op: "local.get", index: rTmp });
+    const hostIdx = ensureLateImport(
+      ctx,
+      "__host_compare",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    const finalIdx = ctx.funcMap.get("__host_compare") ?? hostIdx;
+    if (finalIdx === undefined) throw new Error("Missing import after ensureLateImport: __host_compare");
+    fctx.body.push({ op: "call", funcIdx: finalIdx });
+    const cmpTmp = allocTempLocal(fctx, { kind: "i32" });
+    fctx.body.push({ op: "local.set", index: cmpTmp });
+    mapCmpToOp(cmpTmp);
+    releaseTempLocal(fctx, cmpTmp);
+    releaseTempLocal(fctx, rTmp);
+    releaseTempLocal(fctx, lTmp);
+    return { kind: "i32" };
+  }
+
+  // ── Standalone / WASI: §7.2.13 in-module ──
+  // both strings → lexicographic __str_compare; else ToNumber both + f64 compare.
+  if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+    ensureNativeStringHelpers(ctx);
+    addUnionImports(ctx);
+    const typeofStr = ctx.funcMap.get("__typeof_string");
+    const unboxNum = ctx.funcMap.get("__unbox_number");
+    const strCompare = ctx.nativeStrHelpers.get("__str_compare");
+    const strFlatten = ctx.nativeStrHelpers.get("__str_flatten");
+    if (typeofStr !== undefined && unboxNum !== undefined && strCompare !== undefined && strFlatten !== undefined) {
+      // ToString-free lexicographic compare of two boxed native strings → -1/0/1.
+      const toFlatNativeStr = (tmp: number): Instr[] => [
+        { op: "local.get", index: tmp },
+        { op: "any.convert_extern" } as Instr,
+        { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+        { op: "call", funcIdx: strFlatten } as Instr,
+      ];
+      const strArm: Instr[] = [
+        ...toFlatNativeStr(lTmp),
+        ...toFlatNativeStr(rTmp),
+        { op: "call", funcIdx: strCompare } as Instr,
+      ];
+      // Numeric arm: ToNumber(unbox) both sides, then derive a -1/0/1/2 sign.
+      const lf = allocTempLocal(fctx, { kind: "f64" });
+      const rf = allocTempLocal(fctx, { kind: "f64" });
+      const numSign: Instr[] = [
+        { op: "local.get", index: lTmp },
+        { op: "call", funcIdx: unboxNum } as Instr,
+        { op: "local.set", index: lf },
+        { op: "local.get", index: rTmp },
+        { op: "call", funcIdx: unboxNum } as Instr,
+        { op: "local.set", index: rf },
+        // (l < r) ? -1 : (l > r ? 1 : (l == r ? 0 : 2))
+        { op: "local.get", index: lf },
+        { op: "local.get", index: rf },
+        { op: "f64.lt" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: [{ op: "i32.const", value: -1 } as Instr],
+          else: [
+            { op: "local.get", index: lf },
+            { op: "local.get", index: rf },
+            { op: "f64.gt" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [{ op: "i32.const", value: 1 } as Instr],
+              else: [
+                { op: "local.get", index: lf },
+                { op: "local.get", index: rf },
+                { op: "f64.eq" } as Instr,
+                {
+                  op: "if",
+                  blockType: { kind: "val", type: { kind: "i32" } },
+                  then: [{ op: "i32.const", value: 0 } as Instr],
+                  else: [{ op: "i32.const", value: 2 } as Instr], // NaN → incomparable
+                } as Instr,
+              ],
+            } as Instr,
+          ],
+        } as Instr,
+      ];
+      const cmpTmp = allocTempLocal(fctx, { kind: "i32" });
+      // if (__typeof_string(l) && __typeof_string(r)) strArm else numSign
+      fctx.body.push({ op: "local.get", index: lTmp });
+      fctx.body.push({ op: "call", funcIdx: typeofStr } as Instr);
+      fctx.body.push({ op: "local.get", index: rTmp });
+      fctx.body.push({ op: "call", funcIdx: typeofStr } as Instr);
+      fctx.body.push({ op: "i32.and" } as Instr);
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: strArm,
+        else: numSign,
+      } as Instr);
+      fctx.body.push({ op: "local.set", index: cmpTmp });
+      mapCmpToOp(cmpTmp);
+      releaseTempLocal(fctx, cmpTmp);
+      releaseTempLocal(fctx, rf);
+      releaseTempLocal(fctx, lf);
+      releaseTempLocal(fctx, rTmp);
+      releaseTempLocal(fctx, lTmp);
+      return { kind: "i32" };
+    }
+  }
+
+  // ── Fallback: no host, no native strings → legacy f64 compare (status quo) ──
+  fctx.body.push({ op: "local.get", index: lTmp });
+  coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" }, "number");
+  fctx.body.push({ op: "local.get", index: rTmp });
+  coerceType(ctx, fctx, { kind: "externref" }, { kind: "f64" }, "number");
+  releaseTempLocal(fctx, rTmp);
+  releaseTempLocal(fctx, lTmp);
+  switch (op) {
+    case ts.SyntaxKind.LessThanToken:
+      fctx.body.push({ op: "f64.lt" });
+      break;
+    case ts.SyntaxKind.LessThanEqualsToken:
+      fctx.body.push({ op: "f64.le" });
+      break;
+    case ts.SyntaxKind.GreaterThanToken:
+      fctx.body.push({ op: "f64.gt" });
+      break;
+    case ts.SyntaxKind.GreaterThanEqualsToken:
+      fctx.body.push({ op: "f64.ge" });
+      break;
+  }
+  return { kind: "i32" };
 }
 
 export function compileNumericBinaryOp(
@@ -3093,4 +3587,62 @@ function compileBooleanBinaryOp(ctx: CodegenContext, fctx: FunctionContext, op: 
     default:
       return { kind: "i32" };
   }
+}
+
+/**
+ * (#2023) `new.target === SomeClass` / `!==` (either operand order). Returns an
+ * i32 (0/1) when one operand is the `new.target` meta-property and the other is
+ * an identifier naming a local class; otherwise null (let the generic path run).
+ *
+ * Inside a constructor, `new.target` is the class-id of the outermost `new`
+ * site, so the comparison reduces to `globalNewTargetId (==|!=) classId`.
+ * Outside a constructor `new.target` is `undefined`, so it never equals a class:
+ * `===` folds to const 0, `!==` to const 1 (operands have no side effects — a
+ * bare identifier and a meta-property).
+ */
+function compileNewTargetClassComparison(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  op: ts.SyntaxKind,
+): InnerResult | null {
+  const unwrap = (e: ts.Expression): ts.Expression => {
+    let cur = e;
+    while (ts.isParenthesizedExpression(cur) || ts.isAsExpression(cur) || ts.isNonNullExpression(cur)) {
+      cur = cur.expression;
+    }
+    return cur;
+  };
+  const isNewTarget = (e: ts.Expression): boolean =>
+    ts.isMetaProperty(e) && e.keywordToken === ts.SyntaxKind.NewKeyword && e.name.text === "target";
+
+  const left = unwrap(expr.left);
+  const right = unwrap(expr.right);
+  let classIdent: ts.Expression | undefined;
+  if (isNewTarget(left) && !isNewTarget(right)) classIdent = right;
+  else if (isNewTarget(right) && !isNewTarget(left)) classIdent = left;
+  else return null;
+
+  if (!ts.isIdentifier(classIdent)) return null;
+  // Resolve to a concrete local class name (handle class-expression aliasing).
+  let className: string | undefined = classIdent.text;
+  if (!ctx.classSet.has(className)) {
+    const mapped = ctx.classExprNameMap.get(className);
+    className = mapped && ctx.classSet.has(mapped) ? mapped : undefined;
+  }
+  if (!className) return null;
+
+  const isNeq = op === ts.SyntaxKind.ExclamationEqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
+
+  // Outside a constructor, new.target is undefined — never a class.
+  if (!fctx.isConstructor || !ctx.usesNewTarget) {
+    fctx.body.push({ op: "i32.const", value: isNeq ? 1 : 0 });
+    return { kind: "i32" };
+  }
+
+  const classId = getOrAssignClassNewTargetId(ctx, className);
+  emitNewTargetClassId(ctx, fctx.body);
+  fctx.body.push({ op: "i32.const", value: classId });
+  fctx.body.push({ op: isNeq ? "i32.ne" : "i32.eq" });
+  return { kind: "i32" };
 }

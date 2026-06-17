@@ -9,6 +9,7 @@ import { ts } from "../../ts-api.js";
 import type { WasmModule } from "../../ir/types.js";
 import { getOrRegisterVecType, registerNativeStringTypes } from "../registry/types.js";
 import { nativeLiteralRegExpEngineConfig } from "../regexp-standalone.js";
+import { createFallbackCounts } from "../fallback-telemetry.js";
 import type { CodegenContext, CodegenOptions } from "./types.js";
 
 export function createCodegenContext(
@@ -43,6 +44,12 @@ export function createCodegenContext(
     currentFunc: null,
     funcStack: [],
     errors: [],
+    // #2089 — silent-fallback telemetry counters.
+    fallbackCounts: createFallbackCounts(),
+    trackSilentFallbacks: options?.trackSilentFallbacks,
+    // #1923 — IR post-claim demotions; always collected (cheap), mirroring
+    // fallbackCounts. Surfaced on CompileResult.irPostClaimErrors for the gate.
+    irPostClaimErrors: [],
     lastKnownNode: null,
     externClasses: new Map(),
     pseudoExternClasses: new Map(),
@@ -67,7 +74,11 @@ export function createCodegenContext(
     capturedGlobals: new Map(),
     capturedGlobalsWidened: new Set(),
     classSet: new Set(),
+    usesNewTarget: false, // (#2023) set by the pre-scan in generateModule
+    newTargetGlobalIdx: undefined, // (#2023)
+    classNewTargetIds: new Map(), // (#2023) className → stable 1-based i32 id
     classThrowsOnEval: new Set(),
+    topLevelFunctionNames: new Set(), // (#1983) for class-member funcMap key collision detection
     classMethodSet: new Set(),
     deferredClassBodies: new Set(),
     classAccessorSet: new Set(),
@@ -88,6 +99,8 @@ export function createCodegenContext(
     argcGlobalIdx: -1,
     currentThisGlobalIdx: -1,
     valueOfClosureTypes: new Map(),
+    toPrimitiveSharedClaimed: new Set(),
+    toPrimitiveForkedStructs: new Set(),
     exnTagIdx: -1,
     hasUnionImports: false,
     asyncFunctions: new Set(),
@@ -142,6 +155,7 @@ export function createCodegenContext(
     anyHelpers: new Map(),
     anyHelpersEmitted: false,
     moduleInitGuardApplied: false,
+    indexSpaceFrozen: false, // #1984 — set true at the per-mode finalize boundary
     shapeMap: new Map(),
     templateCacheCounter: 0,
     templateVecTypeIdx: -1,
@@ -164,9 +178,17 @@ export function createCodegenContext(
     pendingInitBody: null,
     inlinableFunctions: new Map(),
     symbolCounterGlobalIdx: -1,
+    symbolDescGlobalIdx: -1,
+    symbolDescArrTypeIdx: -1,
+    symbolRegKeysGlobalIdx: -1,
+    symbolRegIdsGlobalIdx: -1,
+    symbolRegCountGlobalIdx: -1,
+    symbolRegIdsArrTypeIdx: -1,
     parentBodiesStack: [],
     liveBodies: new Set(),
     anonStructHash: new Map(),
+    shapeIdByStructName: new Map(),
+    shapeNameCsvById: [],
     funcTypeCache: new Map(),
     pendingLateImportShift: null,
     protoGlobals: new Map(),
@@ -177,6 +199,7 @@ export function createCodegenContext(
     classStaticMethodsCsvGlobal: new Map(),
     builtinObjectGlobals: new Map(),
     methodClosureGlobals: new Map(),
+    nullThisTypeErrorReady: false, // (#2025)
     funcClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
     standalone: options?.standalone ?? false,

@@ -1,8 +1,9 @@
 ---
 id: 1916
 title: "Symbolic function references in WasmGC codegen — retire the late-import index-shift machinery"
-status: ready
-sprint: 62
+status: blocked
+blocked_by: [2167]
+sprint: 64
 model: fable
 created: 2026-06-10
 updated: 2026-06-12

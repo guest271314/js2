@@ -17,8 +17,10 @@ import ts from "typescript";
 import { isStringType, isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, StructTypeDef, ValType, WasmFunction } from "../ir/types.js";
 import {
+  collectMutatedCaptureNames,
   compileArrowAsCallback,
   compileArrowAsClosure,
+  type SharedRefCellMap,
   emitMethodParamDefaults,
   emitObjectMethodAsClosure,
   promoteAccessorCapturesToGlobals,
@@ -47,6 +49,8 @@ import {
   resolveWasmType,
 } from "./index.js";
 import { ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
+import { emitNativeGeneratorToVec, nativeGeneratorInfoForForOfSubject } from "./generators-native.js";
+import { emitSymbolDescStore } from "./symbol-native.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
@@ -59,6 +63,7 @@ import {
   valTypesMatch,
 } from "./shared.js";
 import { buildVecFromExternref, getVecInfo, pushDefaultValue } from "./type-coercion.js";
+import { emitDrainCustomIterableToVec, isCustomIterable } from "./custom-iterable.js";
 import {
   S5C_STRUCT_ACCESSOR_CLOSURE,
   buildAccessorClosure,
@@ -167,7 +172,7 @@ export function ensureComputedPropertyFields(
  *
  * Returns externref, or null if the host import is unavailable.
  */
-function compileObjectLiteralAsExternref(
+export function compileObjectLiteralAsExternref(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.ObjectLiteralExpression,
@@ -358,6 +363,22 @@ function compileObjectLiteralWithAccessors(
     else pair.setter = p;
   }
 
+  // (#2128) Pre-compute, across ALL accessors in this literal, which outer
+  // locals any accessor body writes. Each such local is captured through ONE
+  // shared ref cell by every accessor in the literal, so a getter observes
+  // its paired setter's writes. The map is per-literal: each evaluation of
+  // the literal re-runs the creation sequence and re-fills the cell local.
+  const accessorForceMutable = new Set<string>();
+  for (const pair of accessorPairs.values()) {
+    for (const accFn of [pair.getter, pair.setter]) {
+      if (!accFn) continue;
+      for (const n of collectMutatedCaptureNames(fctx, accFn as unknown as ts.FunctionExpression)) {
+        accessorForceMutable.add(n);
+      }
+    }
+  }
+  const accessorSharedRefCells: SharedRefCellMap = new Map();
+
   // Helper to emit __extern_set(obj, key, value) — both the value and the
   // string key sit on the wasm stack first.
   const setIdx = ensureLateImport(
@@ -451,6 +472,18 @@ function compileObjectLiteralWithAccessors(
         fctx.body.push({ op: "local.get", index: objLocal });
         fctx.body.push({ op: "i32.const", value: wellKnownSymId });
         fctx.body.push({ op: "call", funcIdx: boxSymIdx });
+      } else if (propName === undefined && ts.isComputedPropertyName(prop.name)) {
+        // (#2126) Runtime computed key: evaluate the key expression here (in
+        // source order, before the value — its side effects must run) and
+        // pass it to __extern_set as the externref key. The host coerces a
+        // non-string key (e.g. a boxed number) per ToPropertyKey.
+        fctx.body.push({ op: "local.get", index: objLocal });
+        const keyType = compileExpression(ctx, fctx, prop.name.expression);
+        if (!keyType) {
+          fctx.body.push({ op: "ref.null.extern" });
+        } else if (keyType.kind !== "externref") {
+          coerceType(ctx, fctx, keyType, { kind: "externref" });
+        }
       } else {
         if (propName === undefined) continue;
         addStringConstantGlobal(ctx, propName);
@@ -514,6 +547,28 @@ function compileObjectLiteralWithAccessors(
         fctx.body.push({ op: "call", funcIdx: setIdx });
         continue;
       }
+      if (methodName === undefined && ts.isComputedPropertyName(prop.name)) {
+        // (#2126) Runtime computed method key — same as the PropertyAssignment
+        // branch: evaluate the key expression and pass it as the externref key.
+        fctx.body.push({ op: "local.get", index: objLocal });
+        const keyType = compileExpression(ctx, fctx, prop.name.expression);
+        if (!keyType) {
+          fctx.body.push({ op: "ref.null.extern" });
+        } else if (keyType.kind !== "externref") {
+          coerceType(ctx, fctx, keyType, { kind: "externref" });
+        }
+        const okRt = compileArrowAsCallback(ctx, fctx, prop as unknown as ts.FunctionExpression, { needsThis: true });
+        if (okRt) {
+          fctx.body.push({ op: "call", funcIdx: setIdx });
+        } else {
+          // Callback compilation declined — keep the pre-#2126 "property
+          // skipped" semantics (drop key + obj) but the key expression's
+          // side effects above have already run, per spec evaluation order.
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "drop" });
+        }
+        continue;
+      }
       if (methodName === undefined) continue;
       addStringConstantGlobal(ctx, methodName);
       const keyGlobal = ctx.stringGlobalMap.get(methodName);
@@ -558,7 +613,10 @@ function compileObjectLiteralWithAccessors(
       // accessor arm dispatches via __call_accessor_get → __call_fn_method_0
       // (receiver bound as `this` through __current_this). Else JS-host callback.
       if (pair.getter) {
-        const ok = emitObjectLiteralAccessorFn(ctx, fctx, pair.getter as unknown as ts.FunctionExpression);
+        const ok = emitObjectLiteralAccessorFn(ctx, fctx, pair.getter as unknown as ts.FunctionExpression, {
+          forceMutableCaptures: accessorForceMutable,
+          sharedRefCells: accessorSharedRefCells,
+        });
         if (!ok) fctx.body.push({ op: "ref.null.extern" });
       } else {
         fctx.body.push({ op: "ref.null.extern" });
@@ -566,7 +624,10 @@ function compileObjectLiteralWithAccessors(
 
       // Setter
       if (pair.setter) {
-        const ok = emitObjectLiteralAccessorFn(ctx, fctx, pair.setter as unknown as ts.FunctionExpression);
+        const ok = emitObjectLiteralAccessorFn(ctx, fctx, pair.setter as unknown as ts.FunctionExpression, {
+          forceMutableCaptures: accessorForceMutable,
+          sharedRefCells: accessorSharedRefCells,
+        });
         if (!ok) fctx.body.push({ op: "ref.null.extern" });
       } else {
         fctx.body.push({ op: "ref.null.extern" });
@@ -601,6 +662,8 @@ function emitObjectLiteralAccessorFn(
   ctx: CodegenContext,
   fctx: FunctionContext,
   fn: ts.FunctionExpression | ts.ArrowFunction,
+  // (#2128) per-literal shared-cell capture options — see compileArrowAsCallback
+  captureOptions?: { forceMutableCaptures?: Set<string>; sharedRefCells?: SharedRefCellMap },
 ): boolean {
   if (ctx.standalone) {
     const closureType = compileArrowAsClosure(ctx, fctx, fn);
@@ -610,7 +673,35 @@ function emitObjectLiteralAccessorFn(
     }
     return true;
   }
-  return !!compileArrowAsCallback(ctx, fctx, fn, { needsThis: true });
+  return !!compileArrowAsCallback(ctx, fctx, fn, { needsThis: true, ...captureOptions });
+}
+
+/**
+ * (#2127) True when the literal contains a spread whose SOURCE type carries
+ * accessor-declared own properties (get/set). The struct spread lowering
+ * copies data fields by struct layout and never invokes getters — per spec
+ * CopyDataProperties each own enumerable key gets a [[Get]] whose result is
+ * copied as a data property. Such literals must take the host plain-object
+ * path, whose spread uses __object_assign (Object.assign semantics = the
+ * required [[Get]]-then-copy).
+ */
+function _hasAccessorSpreadSource(ctx: CodegenContext, expr: ts.ObjectLiteralExpression): boolean {
+  for (const p of expr.properties) {
+    if (!ts.isSpreadAssignment(p)) continue;
+    let srcType: ts.Type | undefined;
+    try {
+      srcType = ctx.checker.getTypeAtLocation(p.expression);
+    } catch {
+      continue;
+    }
+    if (!srcType) continue;
+    for (const sym of srcType.getProperties()) {
+      if ((sym.flags & (ts.SymbolFlags.GetAccessor | ts.SymbolFlags.SetAccessor)) !== 0) return true;
+      const decls = sym.declarations ?? [];
+      if (decls.some((d) => ts.isGetAccessorDeclaration(d) || ts.isSetAccessorDeclaration(d))) return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -639,6 +730,32 @@ function _hasDisposalMethod(expr: ts.ObjectLiteralExpression): boolean {
   return false;
 }
 
+/**
+ * (#2126) True when the literal has a data property or method whose computed
+ * key is only known at runtime — `[expr]` neither folds to a compile-time
+ * string (resolveComputedKeyExpression) nor names a well-known `Symbol.X`
+ * (those keep their existing __box_symbol routing). The struct paths lay out
+ * fields from compile-time names only, so these literals must take the host
+ * plain-object path, which evaluates the key expression at runtime.
+ */
+function _hasRuntimeComputedKey(ctx: CodegenContext, expr: ts.ObjectLiteralExpression): boolean {
+  for (const p of expr.properties) {
+    if (!ts.isPropertyAssignment(p) && !ts.isMethodDeclaration(p)) continue;
+    if (!ts.isComputedPropertyName(p.name)) continue;
+    const inner = p.name.expression;
+    if (
+      ts.isPropertyAccessExpression(inner) &&
+      ts.isIdentifier(inner.expression) &&
+      inner.expression.text === "Symbol" &&
+      getWellKnownSymbolId(inner.name.text) !== undefined
+    ) {
+      continue;
+    }
+    if (resolveComputedKeyExpression(ctx, inner) === undefined) return true;
+  }
+  return false;
+}
+
 export function compileObjectLiteral(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -652,11 +769,27 @@ export function compileObjectLiteral(
   // (#1433) Same routing for objects containing a `[Symbol.dispose]` or
   // `[Symbol.asyncDispose]` method — host DisposableStack / `using`
   // declarations rely on real Symbol-keyed properties.
+  //
+  // (#2126) Same routing for literals with a RUNTIME computed key — `[expr]`
+  // that neither folds to a compile-time string nor names a well-known
+  // Symbol. The struct paths lay out fields from compile-time-known names
+  // only, so such a property (and the key expression's side effects) would
+  // be silently dropped; the host plain-object path evaluates the key at
+  // runtime.
   if (
     expr.properties.length > 0 &&
     (expr.properties.some((p) => ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) ||
-      _hasDisposalMethod(expr))
+      _hasDisposalMethod(expr) ||
+      _hasRuntimeComputedKey(ctx, expr))
   ) {
+    return compileObjectLiteralWithAccessors(ctx, fctx, expr);
+  }
+
+  // (#2127) Same routing when a spread SOURCE has accessor-declared
+  // properties: the struct spread copies data fields by layout and never
+  // fires the getter. The host path's __object_assign spread performs the
+  // spec CopyDataProperties [[Get]]-then-copy.
+  if (expr.properties.length > 0 && _hasAccessorSpreadSource(ctx, expr)) {
     return compileObjectLiteralWithAccessors(ctx, fctx, expr);
   }
 
@@ -1078,7 +1211,19 @@ export function compileSymbolCall(ctx: CodegenContext, fctx: FunctionContext, ar
   // Standalone-mode fallback: if the host import isn't available, the symbol
   // is still constructed (with the legacy `wasm_<id>` description); only the
   // `.description` accessor in JS-host mode benefits.
-  const regIdx = ensureLateImport(ctx, "__symbol_register_desc", [{ kind: "i32" }, { kind: "externref" }], []);
+  //
+  // (#2163) In no-JS-host mode (`--target standalone` / `--target wasi`) there
+  // is no host to register the description with, so emitting the
+  // `env::__symbol_register_desc` import leaves it unsatisfiable and the module
+  // fails to instantiate — making EVERY `Symbol()` call a runtime failure
+  // standalone. The symbol value itself is just the i32 counter id (which is
+  // all `typeof s === "symbol"` and symbol identity/distinctness need), so the
+  // host registration is a pure JS-host fast path. Skip it standalone and only
+  // evaluate the description argument for side effects.
+  const noJsHost = ctx.standalone === true || ctx.wasi === true;
+  const regIdx = noJsHost
+    ? undefined
+    : ensureLateImport(ctx, "__symbol_register_desc", [{ kind: "i32" }, { kind: "externref" }], []);
   if (regIdx !== undefined) {
     fctx.body.push({ op: "global.get", index: counterIdx });
     if (args.length > 0) {
@@ -1094,10 +1239,42 @@ export function compileSymbolCall(ctx: CodegenContext, fctx: FunctionContext, ar
     flushLateImportShifts(ctx, fctx);
     fctx.body.push({ op: "call", funcIdx: regIdx });
   } else if (args.length > 0) {
-    // Standalone-mode: still evaluate the description for side effects.
-    const argType = compileExpression(ctx, fctx, args[0]!);
-    if (argType !== null) {
+    // (#2163) Standalone / no-JS-host mode: store the description in the native
+    // id→string side table so `sym.description` can read it back without a host
+    // import. §20.4.1.1: if the description argument is `undefined`, the symbol
+    // has NO description (`.description === undefined`), so a literal
+    // `Symbol(undefined)` must NOT register a description — but it still
+    // evaluates the argument for side effects.
+    const argExpr = args[0]!;
+    const isUndefinedLiteral =
+      ts.isIdentifier(argExpr) &&
+      argExpr.text === "undefined" &&
+      ctx.checker.getSymbolAtLocation(argExpr) === undefined;
+    const argType = compileExpression(ctx, fctx, argExpr, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
+    if (argType === null) {
+      // expression produced no value — nothing to store.
+    } else if (isUndefinedLiteral) {
+      // Per spec, no description; discard the evaluated value.
+      if (argType.kind !== "ref_null" || argType.typeIdx !== ctx.anyStrTypeIdx) {
+        // value left on stack in some other type — drop it directly.
+      }
       fctx.body.push({ op: "drop" });
+    } else {
+      // Coerce the description to a `ref_null $AnyString` and store it at the
+      // reserved id: `store(id, desc)` consumes both off the stack.
+      if (argType.kind !== "ref_null" || argType.typeIdx !== ctx.anyStrTypeIdx) {
+        coerceType(ctx, fctx, argType, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
+      }
+      // emitSymbolDescStore wants `[id, desc]`; the desc is on top, so push id
+      // BELOW it via a temp.
+      const descTmp = allocLocal(fctx, `__symdesc_arg_${fctx.locals.length}`, {
+        kind: "ref_null",
+        typeIdx: ctx.anyStrTypeIdx,
+      });
+      fctx.body.push({ op: "local.set", index: descTmp });
+      fctx.body.push({ op: "global.get", index: counterIdx });
+      fctx.body.push({ op: "local.get", index: descTmp });
+      emitSymbolDescStore(ctx, fctx);
     }
   }
   // Push the symbol id (the counter) as the result.
@@ -1262,12 +1439,36 @@ export function compileObjectLiteralForStruct(
     return null;
   }
 
-  // Check if there are any spread assignments — if so, compile spread sources into locals
-  const spreadSources: { local: number; srcStructTypeIdx: number; srcFields: { name: string }[] }[] = [];
-  for (const prop of expr.properties) {
+  // Check if there are any spread assignments — if so, compile spread sources into locals.
+  // (#2009 R3) `propIndex` records each spread's position in `expr.properties` so the
+  // field-assembly loop can honour SOURCE ORDER between a named prop and a spread that
+  // both write the same key (later writer wins — `{ x:1, ...{x:5} }` → `x:5`).
+  const spreadSources: {
+    local: number;
+    srcStructTypeIdx: number;
+    srcFields: { name: string }[];
+    propIndex: number;
+  }[] = [];
+  for (let propIndex = 0; propIndex < expr.properties.length; propIndex++) {
+    const prop = expr.properties[propIndex]!;
     if (ts.isSpreadAssignment(prop)) {
       const srcType = ctx.checker.getTypeAtLocation(prop.expression);
-      const srcStructName = resolveStructName(ctx, srcType);
+      // (#2009 R3) An INLINE object-literal spread source (`{ ...{ x: 1 } }`)
+      // is never independently declared, so its anonymous object type was never
+      // registered as a struct — `resolveStructName` returns undefined, the
+      // source is dropped from `spreadSources`, and every spread-sourced field
+      // falls through to the undefined-default branch below (the observed
+      // `{ ...{x:1,y:2} }` → `{x:null,y:null}` bug). Register a struct for the
+      // source type first (mirroring the outer-literal registration at the
+      // `compileObjectLiteral` entry, lines ~921/938/950) so both
+      // `resolveStructName` AND the `compileExpression` below lower it to a real
+      // struct instance whose fields can be read. NAMED sources already work
+      // (their declaration registered the struct), so this is a no-op for them.
+      let srcStructName = resolveStructName(ctx, srcType);
+      if (!srcStructName) {
+        ensureStructForType(ctx, srcType);
+        srcStructName = resolveStructName(ctx, srcType);
+      }
       if (srcStructName) {
         const srcStructTypeIdx = ctx.structMap.get(srcStructName);
         const srcFields = ctx.structFields.get(srcStructName);
@@ -1277,7 +1478,7 @@ export function compileObjectLiteralForStruct(
           const spreadResult = compileExpression(ctx, fctx, prop.expression);
           if (!spreadResult) continue;
           fctx.body.push({ op: "local.set", index: srcLocal });
-          spreadSources.push({ local: srcLocal, srcStructTypeIdx, srcFields });
+          spreadSources.push({ local: srcLocal, srcStructTypeIdx, srcFields, propIndex });
         }
       }
     }
@@ -1312,7 +1513,58 @@ export function compileObjectLiteralForStruct(
     if (methodName === undefined) continue;
     const fullName = `${typeName}_${methodName}`;
     const existingFuncIdx = ctx.funcMap.get(fullName);
-    if (existingFuncIdx === undefined) continue;
+
+    // (#1989) ToPrimitive-relevant methods (`valueOf`/`toString`/
+    // `@@toPrimitive`) MUST be per-instance when two same-shape object literals
+    // deduplicate to the same struct type. Otherwise the shared
+    // `${typeName}_valueOf` method (used both as the ToPrimitive fallback AND as
+    // the body referenced by the first literal's stored closure) collapses
+    // distinct literals onto the LAST-compiled method body — so
+    // `{valueOf(){return 7}}` and `{valueOf(){return 100}}` both coerce via
+    // `()=>100`. The generic #1557 fork below only fires on a *signature*
+    // mismatch; same-signature siblings (the exact #1989 repro) slip past it.
+    //
+    // We fix this with a per-struct "claim" of the shared method func:
+    //   - The FIRST same-shape literal claims the shared `${typeName}_valueOf`
+    //     func (binding it in `literalMethodFuncIdx` so its OWN closure points at
+    //     it and its body lands in it). The shared func keeps a real body, so the
+    //     host `__call_*`/`__sget_*` exports and name-keyed coercion fallbacks
+    //     still work.
+    //   - Every LATER same-shape literal FORKS a fresh per-literal func (below),
+    //     stores its own funcref in the struct field, and the per-instance
+    //     `call_ref` dispatch resolves to the right body per object.
+    // This claim is independent of WHEN the method func happens to be pre-
+    // registered in `funcMap` (it is for `any`-typed structs via the widening
+    // pre-pass, but not for nominal struct types) — `existingFuncIdx` is an
+    // unreliable "is this the first literal?" signal, so we track the claim
+    // explicitly in `ctx.toPrimitiveSharedClaimed`.
+    const isToPrimitiveMethod = methodName === "valueOf" || methodName === "toString" || methodName === "@@toPrimitive";
+    let forkToPrimitive = false;
+    if (isToPrimitiveMethod) {
+      if (!ctx.toPrimitiveSharedClaimed.has(fullName)) {
+        // First same-shape literal: claim the shared func but leave it ENTIRELY
+        // on the base path — do NOT add a `literalMethodFuncIdx` override. The
+        // shared `${typeName}_valueOf` func is maintained by `funcMap` and the
+        // body loop the same way it is on main; capturing the funcIdx HERE
+        // (pre-construction) would record a STALE index, because
+        // `emitObjectMethodAsClosure` for an earlier field pushes a trampoline
+        // func during construction and shifts later method funcs (a
+        // valueOf+toString literal hit exactly this: toString's body landed in
+        // the pre-pass index while `funcMap` advanced to a fresh one, leaving the
+        // dispatched func empty). The first literal's per-instance closure is
+        // stored at construction via `funcMap.get(methodFullName)` for `any`
+        // structs (pre-registered) just as on main; nominal single-literal
+        // structs keep the name-keyed standalone path. Only LATER same-shape
+        // literals need a per-literal fork.
+        ctx.toPrimitiveSharedClaimed.add(fullName);
+        continue;
+      }
+      // 2nd+ same-shape literal: always fork a fresh per-literal func so its
+      // stored closure carries its own body (the #1989 collision fix).
+      forkToPrimitive = true;
+    }
+
+    if (existingFuncIdx === undefined && !forkToPrimitive) continue;
 
     // Compute the signature this method would compile to. This MUST mirror the
     // body-compile param-type derivation below (search "methodParams") exactly,
@@ -1353,36 +1605,48 @@ export function compileObjectLiteralForStruct(
     // method-as-closure trampoline built for the first literal forwards args in
     // the wrong order, emitting an invalid `call`. Treat any per-position type
     // divergence as a mismatch too, so each literal gets its own funcIdx.
-    const localIdx = existingFuncIdx - ctx.numImportFuncs;
-    const existingFunc = ctx.mod.functions[localIdx];
-    if (!existingFunc) continue;
-    const existingType = ctx.mod.types[existingFunc.typeIdx];
-    if (!existingType || existingType.kind !== "func") continue;
-    const sameArity = existingType.params.length === newParams.length;
-    // (#1602 regression fix) Compare param types nullability-insensitively for
-    // ref/ref_null of the SAME struct typeIdx. The pre-pass builds the self
-    // param as a non-null `ref structTypeIdx`, but the actual compiled method
-    // uses `ref null structTypeIdx` for self (and `ref null T` for any
-    // default-initialised ref param). A strict `valTypesMatch` flags this as a
-    // mismatch and forks a per-literal funcIdx — but that orphans the original
-    // shared funcMap entry (left with an empty body), so a *direct* call like
-    // `obj.method()` (which dispatches via funcMap, not the per-literal map)
-    // lands on the empty func and traps. Real divergence we still want to
-    // catch (e.g. sibling literals with [f64, externref] vs [externref, f64])
-    // differs in `kind` or `typeIdx`, which `refTypesMatch` still rejects.
-    const refTypesMatch = (p: ValType, q: ValType): boolean => {
-      const pRef = p.kind === "ref" || p.kind === "ref_null";
-      const qRef = q.kind === "ref" || q.kind === "ref_null";
-      if (pRef && qRef) {
-        return (p as { typeIdx: number }).typeIdx === (q as { typeIdx: number }).typeIdx;
-      }
-      return valTypesMatch(p, q);
-    };
-    const sameParamTypes = sameArity && existingType.params.every((p, i) => refTypesMatch(p, newParams[i]!));
-    if (sameArity && sameParamTypes) continue;
+    // (#1989) A 2nd+ ToPrimitive-method literal (`forkToPrimitive`) skips the
+    // same-signature short-circuit entirely: it must ALWAYS fork a per-literal
+    // funcIdx so its stored closure carries its own body, even when its
+    // signature matches the first literal's (the exact #1989 same-shape repro).
+    // Other methods keep the #1557 behaviour: fork only on a real signature
+    // mismatch.
+    if (!forkToPrimitive) {
+      // Reaching here with `!forkToPrimitive` guarantees `existingFuncIdx` is
+      // defined (the `existingFuncIdx === undefined && !forkToPrimitive`
+      // short-circuit above already `continue`d), but TS can't narrow it.
+      if (existingFuncIdx === undefined) continue;
+      const localIdx = existingFuncIdx - ctx.numImportFuncs;
+      const existingFunc = ctx.mod.functions[localIdx];
+      if (!existingFunc) continue;
+      const existingType = ctx.mod.types[existingFunc.typeIdx];
+      if (!existingType || existingType.kind !== "func") continue;
+      const sameArity = existingType.params.length === newParams.length;
+      // (#1602 regression fix) Compare param types nullability-insensitively for
+      // ref/ref_null of the SAME struct typeIdx. The pre-pass builds the self
+      // param as a non-null `ref structTypeIdx`, but the actual compiled method
+      // uses `ref null structTypeIdx` for self (and `ref null T` for any
+      // default-initialised ref param). A strict `valTypesMatch` flags this as a
+      // mismatch and forks a per-literal funcIdx — but that orphans the original
+      // shared funcMap entry (left with an empty body), so a *direct* call like
+      // `obj.method()` (which dispatches via funcMap, not the per-literal map)
+      // lands on the empty func and traps. Real divergence we still want to
+      // catch (e.g. sibling literals with [f64, externref] vs [externref, f64])
+      // differs in `kind` or `typeIdx`, which `refTypesMatch` still rejects.
+      const refTypesMatch = (p: ValType, q: ValType): boolean => {
+        const pRef = p.kind === "ref" || p.kind === "ref_null";
+        const qRef = q.kind === "ref" || q.kind === "ref_null";
+        if (pRef && qRef) {
+          return (p as { typeIdx: number }).typeIdx === (q as { typeIdx: number }).typeIdx;
+        }
+        return valTypesMatch(p, q);
+      };
+      const sameParamTypes = sameArity && existingType.params.every((p, i) => refTypesMatch(p, newParams[i]!));
+      if (sameArity && sameParamTypes) continue;
+    }
 
-    // Mismatch — allocate a fresh funcIdx for this literal's method without
-    // touching the shared funcMap entry.
+    // Mismatch (or a forced-per-instance ToPrimitive method) — allocate a fresh
+    // funcIdx for this literal's method without touching the shared funcMap entry.
     //
     // (#1602) Seed the fresh func with a type built from THIS literal's actual
     // params (`newParams`) and result, not the colliding sibling's type. A
@@ -1411,38 +1675,94 @@ export function compileObjectLiteralForStruct(
       exported: false,
     });
     literalMethodFuncIdx.set(methodName, freshFuncIdx);
+
+    if (forkToPrimitive) {
+      // (#1989) This is a 2nd+ same-shape literal of a ToPrimitive method — the
+      // genuine same-shape collision. Mark the struct so the host `__call_*`
+      // dispatch (and the in-module coercion sites) opt into per-instance
+      // struct-field closure dispatch. The single-literal case stays on the
+      // name-keyed standalone arm, preserving the §7.1.1.1 step-6 TypeError walk.
+      ctx.toPrimitiveForkedStructs.add(typeName);
+    }
   }
 
   for (const field of fields) {
-    // First check for an explicit property assignment (identifier, string literal, or computed key).
-    // #2010: resolvePropertyNameText now also matches shorthands; exclude them here so
-    // the dedicated shorthand branch below (which compiles `prop.name` as the value)
-    // keeps handling them — the property-assignment branch can't read a shorthand.
-    const prop = expr.properties.find(
-      (p) => !ts.isShorthandPropertyAssignment(p) && resolvePropertyNameText(ctx, p) === field.name,
-    );
-    // Also check for shorthand property assignment ({ x, y } where x/y are identifiers)
-    const shorthandProp = !prop
-      ? expr.properties.find((p) => ts.isShorthandPropertyAssignment(p) && p.name.text === field.name)
-      : undefined;
-    // #1118: Method shorthand `{ m() {…} }` — `resolvePropertyNameText`
-    // returns undefined for MethodDeclaration, so the search above misses
-    // it. Look it up explicitly by name. The pre-pass in
-    // `ensureStructForType` already registered the method's funcMap entry;
-    // emit a closure-struct ref to it and convert to the field type.
-    // Without this, the field defaults to `undefined` and dynamic dispatch
-    // through `any` (the test262 wrapper pattern) returns null.
-    const methodProp =
-      !prop && !shorthandProp
-        ? expr.properties.find(
-            (p): p is ts.MethodDeclaration =>
-              ts.isMethodDeclaration(p) &&
-              !!p.name &&
-              ((ts.isIdentifier(p.name) && p.name.text === field.name) ||
-                (ts.isStringLiteral(p.name) && p.name.text === field.name) ||
-                (ts.isNumericLiteral(p.name) && p.name.text === field.name)),
-          )
+    // (#2129) Collect EVERY property that defines this field, in source
+    // order. Per §13.2.5.5 PropertyDefinitionEvaluation, each duplicate runs
+    // (its initializer's side effects are observable) and the LAST definition
+    // provides the field's value — not the first.
+    //
+    // #2010: resolvePropertyNameText also matches shorthands; classify them
+    // separately so the dedicated shorthand branch below (which compiles
+    // `prop.name` as the value) keeps handling them.
+    // #1118: method shorthand `{ m() {…} }` — resolvePropertyNameText returns
+    // undefined for MethodDeclaration, so match those by name explicitly.
+    const matchingProps = expr.properties.filter((p) => {
+      if (ts.isShorthandPropertyAssignment(p)) return p.name.text === field.name;
+      if (ts.isMethodDeclaration(p)) {
+        return (
+          !!p.name &&
+          ((ts.isIdentifier(p.name) && p.name.text === field.name) ||
+            (ts.isStringLiteral(p.name) && p.name.text === field.name) ||
+            (ts.isNumericLiteral(p.name) && p.name.text === field.name))
+        );
+      }
+      return resolvePropertyNameText(ctx, p) === field.name;
+    });
+    const lastMatch = matchingProps[matchingProps.length - 1];
+    // (#2129) Evaluate earlier duplicates' initializers for their side
+    // effects and drop the values. (Shorthands/methods have no side effects
+    // to run.) Note: duplicates are evaluated adjacent to the winning one,
+    // so cross-key side-effect ORDER may deviate from strict source order in
+    // mixed duplicate literals — the same field-order evaluation the struct
+    // path already uses.
+    for (let di = 0; di < matchingProps.length - 1; di++) {
+      const dup = matchingProps[di]!;
+      if (ts.isPropertyAssignment(dup)) {
+        const dupType = compileExpression(ctx, fctx, dup.initializer);
+        if (dupType) fctx.body.push({ op: "drop" });
+      }
+    }
+    // (#2009 R3) Source-order override: when a spread appears AFTER the last
+    // named/shorthand/method writer of this key, the spread wins
+    // (`{ x:1, ...{x:5} }` → `x:5`). Find the position of the winning named
+    // writer and the LAST spread (by source position) that also defines this
+    // field; if that spread comes later, take its value instead of the named
+    // prop. When there is no named writer this is a no-op (the existing
+    // "fall through to spread" path below handles it). The named prop's
+    // initializer is still evaluated above for its observable side effects.
+    const lastMatchIndex = lastMatch ? expr.properties.indexOf(lastMatch) : -1;
+    let overridingSpread:
+      | { local: number; srcStructTypeIdx: number; srcFields: { name: string }[]; propIndex: number }
+      | undefined;
+    for (const src of spreadSources) {
+      if (src.propIndex <= lastMatchIndex) continue;
+      if (src.srcFields.some((f) => f.name === field.name)) {
+        if (!overridingSpread || src.propIndex > overridingSpread.propIndex) {
+          overridingSpread = src;
+        }
+      }
+    }
+    if (overridingSpread) {
+      // (§13.2.5.5) The overridden named prop is still evaluated for its
+      // observable side effects, then its value is dropped — only a
+      // PropertyAssignment has an initializer to run (shorthand/method have
+      // none). The earlier duplicates were already evaluated+dropped above.
+      if (lastMatch && ts.isPropertyAssignment(lastMatch)) {
+        const overriddenType = compileExpression(ctx, fctx, lastMatch.initializer);
+        if (overriddenType) fctx.body.push({ op: "drop" });
+      }
+      const fieldIdx = overridingSpread.srcFields.findIndex((f) => f.name === field.name);
+      fctx.body.push({ op: "local.get", index: overridingSpread.local });
+      fctx.body.push({ op: "struct.get", typeIdx: overridingSpread.srcStructTypeIdx, fieldIdx });
+      continue;
+    }
+    const prop =
+      lastMatch && !ts.isShorthandPropertyAssignment(lastMatch) && !ts.isMethodDeclaration(lastMatch)
+        ? lastMatch
         : undefined;
+    const shorthandProp = lastMatch && ts.isShorthandPropertyAssignment(lastMatch) ? lastMatch : undefined;
+    const methodProp = lastMatch && ts.isMethodDeclaration(lastMatch) ? lastMatch : undefined;
     if (methodProp) {
       const methodFullName = `${typeName}_${field.name}`;
       // (#1557) Prefer the per-literal funcIdx if we detected a sig mismatch
@@ -1452,6 +1772,26 @@ export function compileObjectLiteralForStruct(
       if (methodFuncIdx !== undefined) {
         const closureType = emitObjectMethodAsClosure(ctx, fctx, methodFullName, methodFuncIdx, structTypeIdx);
         if (closureType) {
+          // (#1989) Method-shorthand `valueOf`/`toString` now store a
+          // per-instance closure in the eqref field (each literal owns a
+          // distinct funcIdx via the per-literal fork above). Register the
+          // closure type so ToPrimitive coercion takes the per-instance
+          // eqref-closure dispatch (type-coercion.ts) — `struct.get` the
+          // closure field of THIS instance and `call_ref` its own funcref —
+          // instead of the name-keyed `${typeName}_valueOf` standalone
+          // fallback that collapses same-shape literals onto one body.
+          if (
+            (field.name === "valueOf" || field.name === "toString") &&
+            field.type.kind === "eqref" &&
+            (closureType.kind === "ref" || closureType.kind === "ref_null")
+          ) {
+            const closureTypeIdx = (closureType as { typeIdx: number }).typeIdx;
+            const existing = ctx.valueOfClosureTypes.get(typeName) ?? [];
+            if (!existing.includes(closureTypeIdx)) {
+              existing.push(closureTypeIdx);
+              ctx.valueOfClosureTypes.set(typeName, existing);
+            }
+          }
           // Coerce closure-struct ref → field type. The common case is
           // externref (un-typed obj literal), which needs extern.convert_any.
           // For a concretely-typed struct field of the same closure type,
@@ -2578,6 +2918,35 @@ export function compileArrayLiteral(
   } else {
     const firstElemType = ctx.checker.getTypeAtLocation(firstElem);
     elemWasm = resolveWasmType(ctx, firstElemType);
+    // (#2021) The first element's class type can be a SUBTYPE of the array's
+    // declared element type — e.g. `const a: Shape[] = [new Circle(), new
+    // Shape()]` derives `(ref $Circle)` from element 0, but a later `new
+    // Shape()` cannot satisfy `(ref $Circle)` and ends up null → trap. When the
+    // first element resolves to a struct ref AND a contextual `Array<T>`
+    // annotation is present whose element type resolves to a (different) struct
+    // ref, prefer the annotation's element type: it is the declared common
+    // supertype that holds every element. TS has already verified each element
+    // is assignable to `T`, so widening to it is sound. (`[new Shape(), new
+    // Circle()]` — base first — already worked because element 0 IS the
+    // supertype; this fixes the subclass-first ordering.)
+    if (elemWasm.kind === "ref" || elemWasm.kind === "ref_null") {
+      const ctxType = ctx.checker.getContextualType(expr);
+      if (ctxType) {
+        const ctxSym = (ctxType as ts.TypeReference).symbol ?? ctxType.symbol;
+        if (ctxSym?.name === "Array" || ctxSym?.name === "ReadonlyArray") {
+          const ctxElemType = ctx.checker.getTypeArguments(ctxType as ts.TypeReference)[0];
+          if (ctxElemType) {
+            const ctxElemWasm = resolveWasmType(ctx, ctxElemType);
+            if (
+              (ctxElemWasm.kind === "ref" || ctxElemWasm.kind === "ref_null") &&
+              ctxElemWasm.typeIdx !== elemWasm.typeIdx
+            ) {
+              elemWasm = ctxElemWasm;
+            }
+          }
+        }
+      }
+    }
     // If the literal mixes a `null` literal with another kind (e.g. `[1, null]`),
     // fall back to externref so the null survives. Without this, null gets coerced
     // to f64 0 and destructuring defaults misbehave (#1021). We gate on `null`
@@ -2603,6 +2972,33 @@ export function compileArrayLiteral(
           return t.kind === "ref" || t.kind === "ref_null" || t.kind === "externref";
         });
         if (hasObjectElem) {
+          elemWasm = { kind: "externref" };
+        }
+      }
+    }
+  }
+  // (#2106 S0) `any[]` element tag-recovery. When the contextual element type is
+  // `any`, the first-element heuristic above can pick a bare primitive ValType
+  // (e.g. `[true]` → i32, because `boolean` lowers to i32 and the contextual-type
+  // adoption at the ref branch never fires for a non-ref first element). The vec
+  // is then built as `__vec_i32` and later coerced to the `any[]` externref vec
+  // by Wasm KIND (`f64.convert_i32_s; __box_number`), so a boolean read back as
+  // `a[0]` reports `typeof === "number"` / `"" + a[0] === "1"` — the JS tag is
+  // lost. Booleans, mixed-primitive heterogeneity, and any non-string ref all
+  // need the per-element JS-type-aware boxing that `compileExpression(el,
+  // externref)` already performs (`__box_boolean` for bool, `__box_number` for
+  // number, native-string for string — the same path the `a.push(true)` route
+  // uses, which is already correct). Widen the element type to externref so each
+  // element is boxed by its own static type at construction, not by Wasm kind
+  // after the fact. Scoped strictly to `any` contextual elements: number[] /
+  // string[] / struct[] literals are untouched (byte-identical).
+  if (!hasSpread && (elemWasm.kind === "i32" || elemWasm.kind === "f64")) {
+    const ctxArrType = ctx.checker.getContextualType(expr);
+    if (ctxArrType) {
+      const ctxArrSym = (ctxArrType as ts.TypeReference).symbol ?? ctxArrType.symbol;
+      if (ctxArrSym?.name === "Array" || ctxArrSym?.name === "ReadonlyArray") {
+        const ctxElemType = ctx.checker.getTypeArguments(ctxArrType as ts.TypeReference)[0];
+        if (ctxElemType && (ctxElemType.flags & ts.TypeFlags.Any) !== 0) {
           elemWasm = { kind: "externref" };
         }
       }
@@ -2652,6 +3048,36 @@ export function compileArrayLiteral(
     if (ts.isSpreadElement(el)) {
       const srcType = compileExpression(ctx, fctx, el.expression);
       if (!srcType) continue;
+      // (#2169) Spread of a Wasm-native generator (`[...g()]`). The subject is a
+      // ref to the generator state struct, NOT a __vec — without this it fell
+      // into the generic vec branch below (struct.get field 0 read as $length →
+      // garbage-length array of defaults / host-import leak). Drain the
+      // generator into an f64 vec via the native resume loop, then treat it as a
+      // normal materialized vec spread (same shape as the externref path).
+      const genInfo = nativeGeneratorInfoForForOfSubject(ctx, srcType);
+      if (genInfo) {
+        const genVecTypeIdx = getOrRegisterVecType(ctx, "f64");
+        const genArrTypeIdx = getArrTypeIdxFromVec(ctx, genVecTypeIdx);
+        if (vecTypeIdx !== genVecTypeIdx) {
+          // Result element type isn't f64 (mixed literal whose first-element
+          // heuristic picked another type) — copying f64s into that array would
+          // be invalid Wasm. Preserve the conservative skip for this rare shape.
+          fctx.body.push({ op: "drop" });
+          continue;
+        }
+        // Stack: [running-length(i32), genState]. emitNativeGeneratorToVec
+        // consumes genState and leaves (ref $vec_f64).
+        emitNativeGeneratorToVec(ctx, fctx, genInfo, srcType, genVecTypeIdx, genArrTypeIdx);
+        const srcLocal = allocLocal(fctx, `__spread_gen_${fctx.locals.length}`, {
+          kind: "ref_null",
+          typeIdx: genVecTypeIdx,
+        });
+        fctx.body.push({ op: "local.tee", index: srcLocal });
+        fctx.body.push({ op: "struct.get", typeIdx: genVecTypeIdx, fieldIdx: 0 });
+        fctx.body.push({ op: "i32.add" });
+        spreadLocals.push({ local: srcLocal, elemIdx: i, srcVecTypeIdx: genVecTypeIdx });
+        continue;
+      }
       if (
         (srcType.kind === "ref" || srcType.kind === "ref_null") &&
         ctx.nativeStrings &&
@@ -2712,6 +3138,39 @@ export function compileArrayLiteral(
       if (srcType.kind !== "ref" && srcType.kind !== "ref_null") {
         // The compiled expression left a value on the stack — drop it so we
         // don't corrupt the running total (i32) that sits underneath.
+        fctx.body.push({ op: "drop" });
+        continue;
+      }
+      // (#2033) Spread of a user-defined iterable — an object literal / value
+      // whose struct carries a `[Symbol.iterator]()` returning a Wasm-native
+      // iterator struct. Without this it fell into the generic vec-struct path
+      // below, which reads `struct.get field 0` (the iterator-closure externref)
+      // as an i32 length → `i32.add expected i32, found externref` (invalid
+      // wasm). Spec §12.2.5.3: spread is a GetIterator consumer, same as for-of.
+      // Drain the iterator protocol into a vec of the result element type, then
+      // treat it as a normal materialized vec spread (same shape as the
+      // externref / generator paths above).
+      if (isCustomIterable(ctx, srcType)) {
+        const matVecInfo = getVecInfo(ctx, vecTypeIdx);
+        if (matVecInfo) {
+          const iterableLocal = allocLocal(fctx, `__spread_citer_src_${fctx.locals.length}`, srcType);
+          fctx.body.push({ op: "local.set", index: iterableLocal });
+          if (emitDrainCustomIterableToVec(ctx, fctx, iterableLocal, srcType, vecTypeIdx)) {
+            const srcLocal = allocLocal(fctx, `__spread_citer_${fctx.locals.length}`, {
+              kind: "ref_null",
+              typeIdx: vecTypeIdx,
+            });
+            fctx.body.push({ op: "local.tee", index: srcLocal });
+            fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+            fctx.body.push({ op: "i32.add" });
+            spreadLocals.push({ local: srcLocal, elemIdx: i, srcVecTypeIdx: vecTypeIdx });
+            continue;
+          }
+          // Drain unavailable — the value is consumed into iterableLocal; fall
+          // through with nothing contributed (drop is implicit, no stack value).
+          continue;
+        }
+        // No fillable vec — drop the source and skip.
         fctx.body.push({ op: "drop" });
         continue;
       }
@@ -2962,10 +3421,19 @@ export function compileArrayConstructorCall(
   let elemWasm: ValType;
   const rawTypeArgs = ctx.checker.getTypeArguments(exprType as ts.TypeReference);
   const elemTsType = rawTypeArgs?.[0];
-  if (elemTsType && !(elemTsType.flags & ts.TypeFlags.Any)) {
-    elemWasm = resolveWasmType(ctx, elemTsType);
+  const untypedElem = !elemTsType || (elemTsType.flags & ts.TypeFlags.Any) !== 0;
+  if (!untypedElem) {
+    elemWasm = resolveWasmType(ctx, elemTsType!);
+  } else if (args.length === 1 && !ts.isSpreadElement(args[0]!)) {
+    // #1998: `Array(n)` with an untyped element type is a *sparse* array of `n`
+    // holes (§23.1.1.1 step 4) — every slot is `undefined`. An f64 backing
+    // (`array.new_default`) defaults those holes to `0`, so `Array(3).join(",")`
+    // wrongly rendered "0,0,0". Mirror the `new Array(n)` path (new-super.ts):
+    // back untyped sparse arrays with externref, whose default is `ref.null`,
+    // which `join`/`toString` render as "" (§23.1.3.18 step 7.c/d) → ",,".
+    elemWasm = { kind: "externref" };
   } else {
-    // Default to f64 for untyped arrays
+    // Default to f64 for untyped dense arrays (`Array()`, `Array(a, b, c)`).
     elemWasm = { kind: "f64" };
   }
 

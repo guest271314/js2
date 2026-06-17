@@ -1,10 +1,11 @@
 ---
 id: 2080
 title: "standalone: any-boxed empty string is truthy — anyref truthiness checks ref non-null, never string length"
-status: ready
+status: done
 sprint: 62
 created: 2026-06-11
-updated: 2026-06-12
+updated: 2026-06-15
+completed: 2026-06-15
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -67,3 +68,24 @@ This is the SAME type-unaware-boxing root cause as [[2072]] (native string →
 tag 6, not a string tag). Fixing the boxing so strings carry a recoverable
 string tag fixes both. **Recommend bundling with #2072 under senior-dev/
 architect** rather than a tag-6 special-case here.
+
+## Resolution (2026-06-15, sdev5) — bundled with #2072
+
+The investigation's `__any_unbox_bool` lead was for the `$AnyValue`-box path;
+the **actual** standalone ToBoolean for an `any`-held value is `__is_truthy`
+(`src/codegen/index.ts`, `addUnionImportsAsNativeFuncs`). On the standalone /
+nativeStrings path a string `any` is held as an externref wrapping a native
+`$AnyString` (the supertype of `$NativeString` / `$ConsString`), NOT a tag-6
+`$AnyValue` box. `__is_truthy` already handled the number / boolean / bigint
+boxes but had **no `$AnyString` arm**, so a string fell through to the final
+`i32.const 1` ("any non-null ref → truthy") default — the empty string was
+wrongly truthy.
+
+**Fix**: inserted a native-string arm before the truthy default —
+`ref.test $AnyString` → `struct.get` field 0 (`$len`) → `len != 0`. Guarded on
+`ctx.anyStrTypeIdx >= 0` so the GC / host-string path is untouched. No boxing
+ABI change (avoids the #1888 −794 regression).
+
+Verified standalone truthiness table now matches §7.1.2 for
+`"" / "x" / "0" / 0 / -0 / NaN / 42 / false / true`. Regression test:
+`tests/issue-2072.test.ts` (`#2080 — ToBoolean`). Host/gc mode unchanged.
