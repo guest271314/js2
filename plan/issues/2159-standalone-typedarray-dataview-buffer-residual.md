@@ -4,7 +4,7 @@ title: "Standalone TypedArray/DataView/ArrayBuffer conformance residual (~1,308 
 status: in-progress
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-16
+updated: 2026-06-17
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -101,6 +101,31 @@ element byte-size; (b) a `buffer` accessor returning the backing i32_byte vec;
 `buffer.byteLength / BYTES_PER_ELEMENT`. Medium-sized, representation-aware —
 self-contained from slice 1.
 
+#### Slice 2a (LANDED 2026-06-17) — `byteLength` / `byteOffset` interception
+
+**Done — part (a) + `byteOffset`.** Added a standalone/WASI `byteLength` /
+`byteOffset` interception in `property-access.ts` (right after the
+TextEncoder/TextDecoder block). For an ArrayBuffer/SharedArrayBuffer receiver
+`byteLength` = field-0 directly (already a byte count); for a TypedArray
+receiver `byteLength` = field-0 (element count) `* BYTES_PER_ELEMENT`, where the
+per-name byte size is statically known (Int8/Uint8/Uint8Clamped=1, Int16/Uint16=2,
+Int32/Uint32/Float32=4, Float64=8). `byteOffset` is 0 on a fresh-backing view.
+Gated on `ctx.wasi || ctx.standalone || ctx.strictNoHostImports` so host mode is
+untouched. Verified: ArrayBuffer + all 9 TypedArray kinds, typed locals, typed
+params, empty arrays — all correct. Tests: `tests/issue-2159.test.ts`
+("byteLength + byteOffset" describe block, 9 cases).
+
+**Still remaining for Slice 2:**
+- (b) `.buffer` accessor returning the backing vec (needs a buffer object;
+  trickier under the f64-vec representation — the TA backing is NOT an i32_byte
+  buffer, so `.buffer` must synthesize/track one).
+- (c) `new TA(ArrayBuffer)` element-count + multi-byte reinterpret:
+  `emitTypedArrayFromByteBuffer` (new-super.ts) currently treats each source
+  *byte* as one destination *element* (`dstArr[i] = srcArr[i] & 0xff`), so an
+  8-byte buffer makes an 8-element Int32Array instead of 2. Correct behaviour
+  needs length = `buffer.byteLength / BYTES_PER_ELEMENT` and a 4-/8-byte
+  little-endian reassembly per element. Representation-heavy; a separate slice.
+
 **Slice 3 — DataView standalone** leaks `env::` host imports
 (`new DataView(buf)` + `getInt32`/`setInt32`/`getFloat64`/… not wired to the
 native `dataview-native.ts` accessors on this path) — the 336-test DataView
@@ -109,3 +134,47 @@ bucket. Larger; likely a senior-dev slice.
 **Not a slice:** Int8Array signed-read of an out-of-range store (`a[0]=200` →
 expect `-56`) reads unsigned — a separate signed/wrap concern, orthogonal to the
 above.
+
+---
+
+## Slice 3 (2026-06-17) — standalone DataView typed accessors (no host-import leak)
+
+**Landed.** `new DataView(buffer[, offset[, len]])` emitted the host
+`__dv_register_view` import **unconditionally** (so the JS-host runtime bridge
+could window a real native `DataView` on method dispatch). Under
+`--target standalone` / `--target wasi` there is no JS host, so the module
+carried an unsatisfiable `env::__dv_register_view` import and **every**
+`new DataView(...)` was a hard instantiate failure — the dominant `(none)`-leak
+class in the 336-test `built-ins/DataView` bucket.
+
+**Root cause** (`src/codegen/expressions/new-super.ts`, `new DataView` branch):
+the `ensureLateImport("__dv_register_view", …)` + call was emitted with no
+host-mode guard. The accessors themselves (`get/set{Int,Uint,Float}{8,16,32,64}`)
+already have a complete pure-Wasm lowering in `src/codegen/dataview-native.ts`
+(`emitDataViewAccessor`, wired for `noJsHost(ctx)` in `calls.ts`), reading/writing
+bytes directly on the `i32_byte` backing struct with a runtime `littleEndian`
+branch — so the host registration was pure dead weight standalone.
+
+**Fix:**
+1. Gate the `__dv_register_view` emission on `!noJsHost(ctx)`. Standalone still
+   evaluates the `byteOffset`/`byteLength` args for side-effects + the
+   ToIndex/RangeError checks, then operates on the struct directly.
+2. `emitWriteBytes` integer setters used `i32.trunc_sat_f64_s`, which
+   **saturates** (e.g. `setUint32(_, 4e9)` → `0x7FFFFFFF`). The spec
+   (`SetValueInBuffer` → `ToInt{8,16,32}`/`ToUint{8,16,32}`) is **modular**.
+   Switched to `i64.trunc_sat_f64_s` + `i32.wrap_i64` (value mod 2^32; the low
+   `bytes` are then stored), correct for 1/2/4-byte signed+unsigned setters
+   across the ±2^53 integer range, and NaN→0.
+
+Verified standalone: Int8/Uint8 (signed↔unsigned reinterpret), Int16/Uint16/
+Int32/Uint32 (both endiannesses, values ≥ 2^31), Float32/Float64 (both
+endiannesses), byte-order distinctness, modular wrap, NaN→0. Host mode emits the
+registration unchanged (no regression). Tests: `tests/issue-2159.test.ts`
+(`#2159 standalone DataView typed accessors`).
+
+**Out of this slice (offset windowing):** `new DataView(buf, n>0)` base-offset
+windowing is not yet applied to the standalone accessors (the i32_byte vec struct
+has no offset field). Offset-0 views — the dominant accessor-test pattern, where
+the index is the *accessor* argument — are fully native. Windowed-view base
+offset is a shared representation concern with TypedArray-on-buffer windowing
+(Slice 2c) and is a separate follow-up.

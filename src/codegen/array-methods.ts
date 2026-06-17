@@ -36,6 +36,7 @@ import {
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
+import { allocJoinFoldLocals, emitStringJoinFold, hostStringRepr, nativeStringRepr } from "./builtin-scaffold.js";
 import { ensureTimsortHelper } from "./timsort.js";
 import { coerceType, coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 
@@ -476,6 +477,33 @@ const ARRAY_LIKE_METHOD_SET = new Set([
 const ARRAY_LIKE_SEARCH_METHODS = new Set(["indexOf", "lastIndexOf", "includes"]);
 
 /**
+ * #2036 S6 step 1 — Array.prototype methods that, over a borrowed array-like
+ * (`$Object`) receiver, have **no working standalone native path** yet and emit
+ * invalid Wasm / leak host imports under `--target standalone`:
+ *   - search methods (`indexOf`/`lastIndexOf`/`includes`) leak `__host_eq` /
+ *     `__same_value_zero` and mistype a loop local (the `local.set expected f64,
+ *     found call externref` binary-emitter bug — #2036 root cause), and
+ *   - result-building methods (`filter`/`map`/`reduce`/`reduceRight`) leak the
+ *     host `__js_array_new` / `__js_array_push` builders.
+ * In standalone these route to a LOUD refusal (mirroring the existing
+ * `#1888 Slice 3/4` Array-brand refusal in calls.ts) instead of producing a
+ * broken module or a silent-wrong `-1`. The callback-iteration methods
+ * (`forEach`/`some`/`every`/`find`/`findIndex`) were taught a native `$Object`
+ * arm in #2036 PR-1 and keep working — they are intentionally NOT in this set.
+ * Step 2 (the real generic arm + the binary-emitter local-type fix) is
+ * senior/infra; this set is removed entry-by-entry as those native paths land.
+ */
+const STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS = new Set([
+  "indexOf",
+  "lastIndexOf",
+  "includes",
+  "filter",
+  "map",
+  "reduce",
+  "reduceRight",
+]);
+
+/**
  * Compile Array.prototype.METHOD.call(anyReceiver, callback, ...args) for any-typed receivers.
  * Uses __extern_length + __extern_get_idx to iterate and call_ref for Wasm closure callbacks.
  * Only handles callbacks that compile to Wasm closures (arrow functions, function declarations).
@@ -536,6 +564,32 @@ export function compileArrayLikePrototypeCall(
         }
       }
     }
+  }
+
+  // #2036 S6 step 1 — stop the invalid-Wasm / host-import-leak bleed in
+  // standalone. The receiver here is a borrowed array-like `$Object` (real
+  // `__vec_`/`__arr_` arrays already returned `undefined` above and take the
+  // dedicated native path). The search (`indexOf`/`lastIndexOf`/`includes`) and
+  // result-building (`filter`/`map`/`reduce`/`reduceRight`) arms below leak host
+  // imports (`__host_eq`/`__same_value_zero`, `__js_array_new`/`__js_array_push`)
+  // and trip the binary-emitter local-type bug under `--target standalone`/`wasi`
+  // — producing a module that fails to instantiate or returns a silent-wrong
+  // value. Per the #1888 dual-mode invariant ("any uncertainty ⇒ fail loud,
+  // never invalid Wasm"), refuse loudly instead. The callback-iteration methods
+  // (`forEach`/`some`/`every`/`find`/`findIndex`) have a working native `$Object`
+  // arm (#2036 PR-1) and fall through unaffected. Host/gc mode is untouched
+  // (gated on standalone||wasi). Step 2 (real generic arm + emitter fix) removes
+  // entries from this set as native paths land.
+  if ((ctx.standalone || ctx.wasi) && STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS.has(methodName)) {
+    reportError(
+      ctx,
+      callExpr,
+      `Codegen error: Array.prototype.${methodName}.call(...) over an array-like (non-array) receiver is not yet ` +
+        `supported in --target standalone (#2036 S6) — the generic $Object arm for this method is not native yet ` +
+        `(it would leak a host import / emit invalid Wasm). Recompile without --target standalone, or call ` +
+        `${methodName} directly on a real Array.`,
+    );
+    return null;
   }
 
   // Bail out if the call site is inside `assert_throws(...)` (test262 rewrites
@@ -4796,10 +4850,12 @@ function compileArrayJoinNative(
   arrTypeIdx: number,
   elemType: ValType,
 ): ValType | null {
-  ensureNativeStringHelpers(ctx);
   const anyStrTypeIdx = ctx.anyStrTypeIdx;
-  const strConcatIdx = ctx.nativeStrHelpers.get("__str_concat");
-  if (strConcatIdx === undefined || anyStrTypeIdx < 0) {
+  // #2088 — native-string representation; the fold loop + separator + empty
+  // handling are shared with the host lane via `emitStringJoinFold`. This lane
+  // supplies only the native repr and the element-type-specific `elemToStr`.
+  const repr = nativeStringRepr(ctx);
+  if (repr === undefined || anyStrTypeIdx < 0) {
     reportError(ctx, callExpr, "join requires native string helpers (__str_concat)");
     return null;
   }
@@ -4820,13 +4876,10 @@ function compileArrayJoinNative(
     }
   }
 
-  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
   const vecTmp = allocLocal(fctx, `__njoin_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__njoin_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
-  const lenTmp = allocLocal(fctx, `__njoin_len_${fctx.locals.length}`, { kind: "i32" });
-  const iTmp = allocLocal(fctx, `__njoin_i_${fctx.locals.length}`, { kind: "i32" });
-  const resultTmp = allocLocal(fctx, `__njoin_res_${fctx.locals.length}`, strRef);
-  const sepTmp = allocLocal(fctx, `__njoin_sep_${fctx.locals.length}`, strRef);
+  const foldLocals = allocJoinFoldLocals(fctx, repr, "njoin");
+  const { lenTmp, iTmp, resultTmp, sepTmp } = foldLocals;
 
   // Receiver vec → length + data array.
   compileExpression(ctx, fctx, propAccess.expression);
@@ -4890,42 +4943,8 @@ function compileArrayJoinNative(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const loopBody: Instr[] = [
-    { op: "local.get", index: iTmp },
-    { op: "local.get", index: lenTmp },
-    { op: "i32.ge_s" },
-    { op: "br_if", depth: 1 },
-
-    // result = (i == 0) ? elem : __str_concat(__str_concat(result, sep), elem)
-    { op: "local.get", index: iTmp },
-    { op: "i32.const", value: 0 },
-    { op: "i32.eq" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [...elemToStr, { op: "local.set", index: resultTmp } as Instr],
-      else: [
-        { op: "local.get", index: resultTmp } as Instr,
-        { op: "local.get", index: sepTmp } as Instr,
-        { op: "call", funcIdx: strConcatIdx } as Instr,
-        ...elemToStr,
-        { op: "call", funcIdx: strConcatIdx } as Instr,
-        { op: "local.set", index: resultTmp } as Instr,
-      ],
-    } as Instr,
-
-    { op: "local.get", index: iTmp },
-    { op: "i32.const", value: 1 },
-    { op: "i32.add" },
-    { op: "local.set", index: iTmp },
-    { op: "br", depth: 0 },
-  ];
-
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  });
+  // #2088 — shared fold (host + native lanes route through this).
+  emitStringJoinFold(ctx, fctx, repr, foldLocals, elemToStr);
 
   // Return the joined native string as externref for the caller.
   fctx.body.push({ op: "local.get", index: resultTmp });
@@ -5024,6 +5043,16 @@ function compileArrayJoin(
     return null;
   }
 
+  // #2088 — the fold loop + separator + empty-string handling are shared with
+  // the native lane via `emitStringJoinFold`; this lane supplies only the
+  // host-string representation and the element-type-specific `elemToStr`
+  // matrix below. A bug in the shared fold regresses both lanes at once.
+  const repr = hostStringRepr(ctx);
+  if (repr === undefined) {
+    reportError(ctx, callExpr, "join requires string support (wasm:js-string concat)");
+    return null;
+  }
+
   // #1968 — the empty-join result must be "" not a null externref (which every
   // downstream string consumer stringifies as "null"). Pre-register the ""
   // string constant *before* any body instructions so the eventual fixup of
@@ -5032,10 +5061,8 @@ function compileArrayJoin(
 
   const vecTmp = allocLocal(fctx, `__arr_join_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_join_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
-  const lenTmp = allocLocal(fctx, `__arr_join_len_${fctx.locals.length}`, { kind: "i32" });
-  const iTmp = allocLocal(fctx, `__arr_join_i_${fctx.locals.length}`, { kind: "i32" });
-  const resultTmp = allocLocal(fctx, `__arr_join_res_${fctx.locals.length}`, { kind: "externref" });
-  const sepTmp = allocLocal(fctx, `__arr_join_sep_${fctx.locals.length}`, { kind: "externref" });
+  const foldLocals = allocJoinFoldLocals(fctx, repr, "arr_join");
+  const { lenTmp, iTmp, resultTmp, sepTmp } = foldLocals;
 
   // Compile receiver -> vec ref
   compileExpression(ctx, fctx, propAccess.expression);
@@ -5128,41 +5155,8 @@ function compileArrayJoin(
     elemToStr.push({ op: "call", funcIdx: joinStrIdx });
   }
 
-  const loopBody: Instr[] = [
-    { op: "local.get", index: iTmp },
-    { op: "local.get", index: lenTmp },
-    { op: "i32.ge_s" },
-    { op: "br_if", depth: 1 },
-
-    { op: "local.get", index: iTmp },
-    { op: "i32.const", value: 0 },
-    { op: "i32.eq" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [...elemToStr, { op: "local.set", index: resultTmp } as Instr],
-      else: [
-        { op: "local.get", index: resultTmp } as Instr,
-        { op: "local.get", index: sepTmp } as Instr,
-        { op: "call", funcIdx: concatIdx } as Instr,
-        ...elemToStr,
-        { op: "call", funcIdx: concatIdx } as Instr,
-        { op: "local.set", index: resultTmp } as Instr,
-      ],
-    } as Instr,
-
-    { op: "local.get", index: iTmp },
-    { op: "i32.const", value: 1 },
-    { op: "i32.add" },
-    { op: "local.set", index: iTmp },
-    { op: "br", depth: 0 },
-  ];
-
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  });
+  // #2088 — shared fold (host + native lanes route through this).
+  emitStringJoinFold(ctx, fctx, repr, foldLocals, elemToStr);
 
   // An empty array leaves `resultTmp` as the initial null. join/toString of `[]`
   // is the empty String "", not null — substitute it so the result is a real

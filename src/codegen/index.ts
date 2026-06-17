@@ -5813,7 +5813,7 @@ function emitWasiClockHelpers(ctx: CodegenContext): void {
       { op: "i32.const", value: outPtr + 4 } as Instr,
       { op: "i32.load", align: 2, offset: 0 } as Instr,
       { op: "i64.extend_i32_u" } as Instr,
-      { op: "i64.const", value: 32n } as unknown as Instr,
+      { op: "i64.const", value: 32n },
       { op: "i64.shl" } as Instr,
       // | lo32
       { op: "i32.const", value: outPtr } as Instr,
@@ -5830,7 +5830,7 @@ function emitWasiClockHelpers(ctx: CodegenContext): void {
     const body: Instr[] = [
       // clock_time_get(CLOCK_REALTIME=0, precision=1_000_000ns=1ms, out_ptr=16) -> errno
       { op: "i32.const", value: 0 } as Instr,
-      { op: "i64.const", value: 1000000n } as unknown as Instr,
+      { op: "i64.const", value: 1000000n },
       { op: "i32.const", value: 16 } as Instr,
       { op: "call", funcIdx: ctx.wasiClockTimeGetIdx! } as Instr,
       { op: "drop" } as Instr, // ignore errno
@@ -5855,7 +5855,7 @@ function emitWasiClockHelpers(ctx: CodegenContext): void {
     ctx.funcMap.set("__wasi_performance_now", funcIdx);
     const body: Instr[] = [
       { op: "i32.const", value: 1 } as Instr, // CLOCK_MONOTONIC
-      { op: "i64.const", value: 1000n } as unknown as Instr, // precision = 1us
+      { op: "i64.const", value: 1000n }, // precision = 1us
       { op: "i32.const", value: 24 } as Instr,
       { op: "call", funcIdx: ctx.wasiClockTimeGetIdx! } as Instr,
       { op: "drop" } as Instr,
@@ -6892,36 +6892,36 @@ function emitWasiSleepMsHelper(ctx: CodegenContext): void {
   const body: Instr[] = [
     // userdata @ 64 = 0 (i64)
     { op: "i32.const", value: SUB_OFFSET } as Instr,
-    { op: "i64.const", value: 0n } as unknown as Instr,
-    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
+    { op: "i64.const", value: 0n },
+    { op: "i64.store", align: 3, offset: 0 },
 
     // tag @ 72 = 0 (i8 EVENTTYPE_CLOCK) — store 0 over 8 bytes covers tag + pad
     { op: "i32.const", value: SUB_OFFSET + 8 } as Instr,
-    { op: "i64.const", value: 0n } as unknown as Instr,
-    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
+    { op: "i64.const", value: 0n },
+    { op: "i64.store", align: 3, offset: 0 },
 
     // clockid @ 80 = 1 (CLOCK_MONOTONIC), pad @ 84 = 0 — combined as i64
     { op: "i32.const", value: SUB_OFFSET + 16 } as Instr,
-    { op: "i64.const", value: 1n } as unknown as Instr,
-    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
+    { op: "i64.const", value: 1n },
+    { op: "i64.store", align: 3, offset: 0 },
 
     // timeout @ 88 = (i64) ms * 1_000_000
     { op: "i32.const", value: SUB_OFFSET + 24 } as Instr,
     { op: "local.get", index: 0 } as Instr,
-    { op: "i64.extend_i32_u" } as unknown as Instr,
-    { op: "i64.const", value: 1000000n } as unknown as Instr,
-    { op: "i64.mul" } as unknown as Instr,
-    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
+    { op: "i64.extend_i32_u" },
+    { op: "i64.const", value: 1000000n },
+    { op: "i64.mul" },
+    { op: "i64.store", align: 3, offset: 0 },
 
     // precision @ 96 = 0
     { op: "i32.const", value: SUB_OFFSET + 32 } as Instr,
-    { op: "i64.const", value: 0n } as unknown as Instr,
-    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
+    { op: "i64.const", value: 0n },
+    { op: "i64.store", align: 3, offset: 0 },
 
     // flags @ 104 = 0 (u16, relative), plus pad — clear 8 bytes
     { op: "i32.const", value: SUB_OFFSET + 40 } as Instr,
-    { op: "i64.const", value: 0n } as unknown as Instr,
-    { op: "i64.store", align: 3, offset: 0 } as unknown as Instr,
+    { op: "i64.const", value: 0n },
+    { op: "i64.store", align: 3, offset: 0 },
 
     // poll_oneoff(in=64, out=112, nsubs=1, nevents_out=144) — errno dropped
     { op: "i32.const", value: SUB_OFFSET } as Instr,
@@ -7448,6 +7448,15 @@ export function addStringImports(ctx: CodegenContext): void {
     for (const [name, idx] of ctx.nativeRegexHelpers) {
       if (idx >= importsBefore) {
         ctx.nativeRegexHelpers.set(name, idx + delta);
+      }
+    }
+    // (#2162) Map/Set/WeakMap/WeakSet helper map moves in lockstep too —
+    // map-runtime.ts / weak-collections-runtime.ts call sites bake `call`
+    // indices straight from this map (see shiftLateImportIndices for the full
+    // rationale / the WeakMap stale-index validation failure it fixes).
+    for (const [name, idx] of ctx.mapHelpers) {
+      if (idx >= importsBefore) {
+        ctx.mapHelpers.set(name, idx + delta);
       }
     }
     // (#2039 slice 2) Re-base so reconcileNativeStrFinalizeShift doesn't apply
@@ -8780,6 +8789,19 @@ export function addUnionImports(ctx: CodegenContext): void {
     for (const [name, idx] of ctx.funcMap) {
       if (!newImportNames.has(name) && idx >= importsBefore) {
         ctx.funcMap.set(name, idx + delta);
+      }
+    }
+    // (#2162) `mapHelpers` (Map/Set/WeakMap/WeakSet helper funcIdx) is NOT a
+    // copy of funcMap — its entries are read directly by map-runtime.ts /
+    // weak-collections-runtime.ts call sites to bake `call` funcIdx. It must be
+    // shifted UNCONDITIONALLY in lockstep with the defined-function shift (the
+    // nativeStr/nativeRegex shifts below are gated on the string-helper base and
+    // would miss this in plain-Map programs). Leaving it stale let a late import
+    // (e.g. `__box_number` for a numeric key/value) land between helper
+    // registration and the call, so `wm.has` called `__map_get` → invalid Wasm.
+    for (const [name, idx] of ctx.mapHelpers) {
+      if (idx >= importsBefore) {
+        ctx.mapHelpers.set(name, idx + delta);
       }
     }
     // Update export indices
