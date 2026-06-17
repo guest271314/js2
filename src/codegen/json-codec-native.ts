@@ -1873,17 +1873,22 @@ export function emitJsonParseText(ctx: CodegenContext): number {
 
   // ── push the three functions in the pre-registered order ──────────────────
   // Deep-clone each body so no `Instr` object is shared between (or within) the
-  // bodies. The helper consts above (`loadPos`, `cEqV(...)`, `castP`, …) are
-  // spread into many positions, so the same object can appear multiple times in
-  // one body and across all three. The finalize remap (`remapTypeIdxInBody` in
-  // dead-elimination.ts) mutates `typeIdx` in place and re-visits a shared
-  // object once per occurrence — re-mapping an already-remapped index a second
-  // time (the documented #1302 shared-array double-shift hazard). Cloning makes
-  // every occurrence a distinct object so each `typeIdx` is remapped exactly
-  // once. (`$JsonP` is the only fresh struct index threaded through these
-  // bodies, so an un-cloned double-remap desynced `struct.get`/`ref.cast`
-  // operands from the local's declared type.)
-  const cloneBody = (b: Instr[]): Instr[] => structuredClone(b);
+  // bodies. The helper consts above (`loadPos`, `storePos`, `cEqV(...)`, …) are
+  // shared `Instr[]` arrays spread into many positions, so the SAME object
+  // appears at multiple slots in one body. The finalize remap
+  // (`remapTypeIdxInBody` in dead-elimination.ts) mutates `typeIdx` IN PLACE and
+  // re-visits a shared object once per occurrence, re-mapping an already-mapped
+  // index a second (third, …) time — the documented #1302 shared-array
+  // double-shift hazard. It desynced the `$JsonP` `$pos` `struct.get`/`struct.set`
+  // operands (spread the most) from the cursor local's declared type
+  // (`expected (ref 54 $ProxyTraps), found (ref 72 $JsonP)`).
+  //
+  // NOTE: `structuredClone` is NOT sufficient — it *preserves* internal
+  // aliasing, so a shared object stays shared (just freshly) and is still
+  // re-visited N times. The JSON round-trip below *expands* every shared
+  // reference into an independent copy, so each `typeIdx` operand is remapped
+  // exactly once. Bodies hold only plain JSON-safe data (no funcs/cycles).
+  const cloneBody = (b: Instr[]): Instr[] => JSON.parse(JSON.stringify(b)) as Instr[];
 
   ctx.mod.functions.push({
     name: "__json_parse_value",
