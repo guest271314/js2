@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/sdev-async2
 sprint: 63
 created: 2026-06-10
-updated: 2026-06-17
+updated: 2026-06-18
 priority: medium
 feasibility: hard
 reasoning_effort: high
