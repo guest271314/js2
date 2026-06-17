@@ -9,6 +9,7 @@ import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, StructTypeDef, ValType } from "../ir/types.js";
 import { isHostConstructibleBuiltin } from "./builtin-tags.js";
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
+import { getOrAssignClassNewTargetId } from "./new-target.js"; // (#2023)
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, deduplicateLocals } from "./context/locals.js";
@@ -443,6 +444,13 @@ export function collectClassDeclaration(
   const className = syntheticName ?? decl.name!.text;
   ctx.classSet.add(className);
   ctx.classDeclarationMap.set(className, decl);
+
+  // (#2023) Assign a stable new.target class-id so `new C()` sites and
+  // `new.target === C` comparisons agree on the id. Only when the program uses
+  // new.target at all (otherwise no machinery is emitted).
+  if (ctx.usesNewTarget) {
+    getOrAssignClassNewTargetId(ctx, className);
+  }
 
   // Register the class .name value for ES-spec compliance
   // Named class expressions keep their declared name (class X {} → name = "X")
