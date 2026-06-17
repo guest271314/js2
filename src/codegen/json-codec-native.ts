@@ -55,9 +55,31 @@ import { addFuncType } from "./registry/types.js";
 import { emitJsonQuoteString } from "./json-runtime.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
-import { reserveReviverDriver } from "./accessor-driver.js";
+import { reserveReviverDriver, reserveToJsonDriver } from "./accessor-driver.js";
 
 const EQ_HEAP_TYPE = -19; // signed LEB128 → 0x6d → TYPE.eq (for ref.null any/eq)
+
+/**
+ * (#2166 PR-D2) Structure-preserving deep clone of an `Instr[]` tree. Unlike a
+ * JSON round-trip it preserves non-finite `f64.const` values (`Infinity`/`NaN`),
+ * and unlike `structuredClone` it does NOT preserve internal aliasing — every
+ * shared sub-object becomes an independent copy so `shiftLateImportIndices`
+ * remaps each `funcIdx`/operand occurrence exactly once (the #1302 hazard).
+ */
+function deepCloneInstrs<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((v) => deepCloneInstrs(v)) as unknown as T;
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(value as object)) {
+      out[k] = deepCloneInstrs((value as Record<string, unknown>)[k]);
+    }
+    return out as T;
+  }
+  // Primitives (including ±Infinity / NaN) are copied by value.
+  return value;
+}
 
 /** Maximum nesting depth before the codec bails (circular-ref guard). */
 const MAX_JSON_DEPTH = 512;
@@ -105,35 +127,46 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
 
   const repeatIdx = ctx.nativeStrHelpers.get("__str_repeat")!; // (#2166 PR-B) indent builder
 
+  // (#2166 PR-D2) toJSON support — number_toString for array-index keys + the
+  // reserve/fill __call_to_json driver wrapping __call_fn_method_1.
+  const numToStrIdxTJ = ctx.funcMap.get("number_toString");
+  const externGetIdxTJ = ctx.funcMap.get("__extern_get")!;
+  const toJsonDriverIdx = reserveToJsonDriver(ctx);
+
   // Pre-register the self funcIdx so the recursive calls in the body resolve.
   // (#2166 PR-B) `gap` (param 2, `ref null $AnyString`) is the per-level indent
   // unit (e.g. "  "). A null gap selects the compact form (PR-A behaviour, zero
   // overhead); a non-null gap drives §25.5.2 pretty-printing.
-  const typeIdx = addFuncType(ctx, [anyref, i32, strRefNull], [strRefNull]);
+  // (#2166 PR-D2) `key` (param 3, externref) is the property key passed to a
+  // `toJSON` method per §25.5.2 SerializeJSONProperty step 2.b.
+  const typeIdx = addFuncType(ctx, [anyref, i32, strRefNull, { kind: "externref" }], [strRefNull]);
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
   ctx.funcMap.set("__json_stringify_value", funcIdx);
 
   // ── Local plan ──────────────────────────────────────────────────────────
-  // params: 0 v:anyref  1 depth:i32  2 gap:ref null $AnyString
+  // params: 0 v:anyref  1 depth:i32  2 gap:ref null $AnyString  3 key:externref
   const P_V = 0;
   const P_DEPTH = 1;
   const P_GAP = 2;
-  const L_ANY = 3; // anyref scratch (re-tested value)
-  const L_OBJ = 4; // ref null $Object
-  const L_ARR = 5; // ref null $PropMap (ordered) / loop reuse
-  const L_VEC = 6; // ref null $ObjVec
-  const L_CAP = 7; // i32 loop bound
-  const L_I = 8; // i32 loop index
-  const L_E = 9; // ref null $PropEntry
-  const L_OUT = 10; // ref $AnyString accumulator
-  const L_PIECE = 11; // ref null $AnyString per-element/prop serialisation
-  const L_FIRST = 12; // i32 — first-emitted flag (comma control)
-  const L_NUM = 13; // f64 number scratch
-  const L_DATA = 14; // ref $ObjVecArr (vec backing)
+  const P_KEY = 3;
+  const L_ANY = 4; // anyref scratch (re-tested value)
+  const L_OBJ = 5; // ref null $Object
+  const L_ARR = 6; // ref null $PropMap (ordered) / loop reuse
+  const L_VEC = 7; // ref null $ObjVec
+  const L_CAP = 8; // i32 loop bound
+  const L_I = 9; // i32 loop index
+  const L_E = 10; // ref null $PropEntry
+  const L_OUT = 11; // ref $AnyString accumulator
+  const L_PIECE = 12; // ref null $AnyString per-element/prop serialisation
+  const L_FIRST = 13; // i32 — first-emitted flag (comma control)
+  const L_NUM = 14; // f64 number scratch
+  const L_DATA = 15; // ref $ObjVecArr (vec backing)
   // (#2166 PR-B) Precomputed separator strings (empty when gap is null):
-  const L_NL_IN = 15; // ref $AnyString — "\n" + indent at the *inner* (depth+1) level
-  const L_NL_OUT = 16; // ref $AnyString — "\n" + indent at *this* depth (before close)
-  const L_COLON = 17; // ref $AnyString — ": " when indented, ":" when compact
+  const L_NL_IN = 16; // ref $AnyString — "\n" + indent at the *inner* (depth+1) level
+  const L_NL_OUT = 17; // ref $AnyString — "\n" + indent at *this* depth (before close)
+  const L_COLON = 18; // ref $AnyString — ": " when indented, ":" when compact
+  const L_TJKEY = 19; // externref — child key passed down (toJSON + recursion)
+  const L_TJM = 20; // externref — the toJSON method looked up on the value
 
   const litStr = (s: string): Instr[] => nativeStringLiteralInstrs(ctx, s);
 
@@ -379,7 +412,8 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
               then: [...appendLit(",")],
             },
             ...appendSep(L_NL_IN),
-            // piece = __json_stringify_value(any.convert_extern(data[i]), depth+1, gap)
+            // piece = __json_stringify_value(any.convert_extern(data[i]), depth+1,
+            //                                gap, key=number_toString(i))
             { op: "local.get", index: L_DATA },
             { op: "local.get", index: L_I },
             { op: "array.get", typeIdx: objVecArrTypeIdx },
@@ -388,6 +422,14 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
             { op: "i32.const", value: 1 },
             { op: "i32.add" },
             { op: "local.get", index: P_GAP },
+            // (#2166 PR-D2) the element index as a string key for toJSON
+            ...(numToStrIdxTJ === undefined
+              ? ([{ op: "ref.null.extern" }] as Instr[])
+              : ([
+                  { op: "local.get", index: L_I },
+                  { op: "f64.convert_i32_s" },
+                  { op: "call", funcIdx: numToStrIdxTJ },
+                ] as Instr[])),
             { op: "call", funcIdx },
             { op: "local.set", index: L_PIECE },
             // null piece (undefined element) → "null"
@@ -460,7 +502,7 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
             { op: "local.tee", index: L_E },
             { op: "ref.is_null" },
             { op: "br_if", depth: 1 },
-            // piece = __json_stringify_value(e.value, depth+1, gap)
+            // piece = __json_stringify_value(e.value, depth+1, gap, key=e.key)
             { op: "local.get", index: L_E },
             { op: "ref.as_non_null" },
             { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 }, // value:anyref
@@ -468,6 +510,11 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
             { op: "i32.const", value: 1 },
             { op: "i32.add" },
             { op: "local.get", index: P_GAP },
+            // (#2166 PR-D2) the property key (externref) for toJSON
+            { op: "local.get", index: L_E },
+            { op: "ref.as_non_null" },
+            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 }, // key: ref $AnyString
+            { op: "extern.convert_any" },
             { op: "call", funcIdx },
             { op: "local.set", index: L_PIECE },
             // omit the property entirely if its value serialised to undefined
@@ -553,6 +600,63 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
     // any = v
     { op: "local.get", index: P_V },
     { op: "local.set", index: L_ANY },
+    // ── (#2166 PR-D2) toJSON (§25.5.2 SerializeJSONProperty step 2.b) ──────────
+    // If the value is an $Object with a callable own `toJSON`, replace it with
+    // value.toJSON(key) before serialising. Look the method up via __extern_get
+    // (a closure widened to externref) and ref-test it as a closure; the driver
+    // (__call_to_json → __call_fn_method_1) binds the value as `this`. The
+    // result re-enters the dispatch below (so toJSON may return any shape).
+    ...(numToStrIdxTJ === undefined
+      ? []
+      : ([
+          { op: "local.get", index: L_ANY },
+          { op: "ref.test", typeIdx: objectTypeIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              // m = __extern_get(extern.convert_any(any), "toJSON")
+              { op: "local.get", index: L_ANY },
+              { op: "extern.convert_any" },
+              ...litStr("toJSON"),
+              { op: "extern.convert_any" },
+              { op: "call", funcIdx: externGetIdxTJ },
+              { op: "local.set", index: L_TJM },
+              // if m is a closure (non-null ref that any.convert_extern tests as
+              // a $Closure-family struct) → call it. We approximate IsCallable by
+              // a non-null check: __extern_get returns the stored method closure
+              // (externref) or null. A non-closure own "toJSON" data value would
+              // also be non-null, but JSON only meaningfully supports a function
+              // here; the driver ref.casts to the closure wrapper and would trap
+              // on a non-closure — so gate on ref.test against the closure base.
+              { op: "local.get", index: L_TJM },
+              { op: "ref.is_null" },
+              { op: "i32.eqz" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  // any = any.convert_extern(__call_to_json(value, m, key))
+                  { op: "local.get", index: L_ANY },
+                  { op: "extern.convert_any" },
+                  { op: "local.get", index: L_TJM },
+                  { op: "local.get", index: P_KEY },
+                  { op: "call", funcIdx: toJsonDriverIdx },
+                  { op: "any.convert_extern" },
+                  { op: "local.set", index: L_ANY },
+                  // a toJSON returning null/undefined → JSON "null"
+                  { op: "local.get", index: L_ANY },
+                  { op: "ref.is_null" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [...litStr("null"), { op: "return" }],
+                  },
+                ],
+              },
+            ],
+          },
+        ] as Instr[])),
     // $Object?
     { op: "local.get", index: L_ANY },
     { op: "ref.test", typeIdx: objectTypeIdx },
@@ -656,8 +760,21 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
       { count: 1, type: strRef }, // L_NL_IN  (#2166 PR-B — always set in prologue)
       { count: 1, type: strRef }, // L_NL_OUT
       { count: 1, type: strRef }, // L_COLON
+      { count: 1, type: { kind: "externref" } }, // L_TJKEY (#2166 PR-D2)
+      { count: 1, type: { kind: "externref" } }, // L_TJM   (#2166 PR-D2)
     ],
-    body,
+    // (#2166 PR-D2) Deep-clone so every `call`/operand occurrence is an
+    // INDEPENDENT object. The body spreads shared helper `Instr[]` arrays
+    // (appendPiece/appendSep/appendLit results) at multiple sites; without the
+    // clone, `shiftLateImportIndices`'s de-dupe `shifted` Set visits a shared
+    // object once and skips its other occurrences, leaving the lazily-reserved
+    // `__call_to_json` driver call (and other late-shifted funcIdx) stale when a
+    // later union import shifts indices — which surfaced as a "need 3, got 1"
+    // validation failure on __json_stringify_value whenever a method-shorthand
+    // closure forced a shift. NOTE: a JSON round-trip clone is WRONG here — the
+    // number arm holds `f64.const Infinity`, and JSON.stringify(Infinity)→null
+    // would corrupt it to 0. Use a structure-preserving deep clone instead.
+    body: deepCloneInstrs(body),
     exported: false,
   } as unknown as (typeof ctx.mod.functions)[number]);
 
@@ -682,6 +799,9 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
       { op: "i32.const", value: 0 },
       // (#2166 PR-B) compact form: null gap.
       { op: "ref.null", typeIdx: anyStrTypeIdx },
+      // (#2166 PR-D2) root key is "" (§25.5.2 SerializeJSONProperty root call).
+      ...litStr(""),
+      { op: "extern.convert_any" },
       { op: "call", funcIdx },
       { op: "local.tee", index: 1 },
       { op: "ref.is_null" },
@@ -711,6 +831,9 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
       { op: "local.get", index: 0 },
       { op: "i32.const", value: 0 },
       { op: "local.get", index: 1 }, // gap
+      // (#2166 PR-D2) root key is "".
+      ...litStr(""),
+      { op: "extern.convert_any" },
       { op: "call", funcIdx },
       { op: "local.tee", index: 2 },
       { op: "ref.is_null" },
