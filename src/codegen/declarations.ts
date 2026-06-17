@@ -3331,6 +3331,56 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     return ctx.checker.getTypeAtLocation(decl);
   }
 
+  /**
+   * (#2011) True when a module-level variable's initializer is an object
+   * literal carrying get/set accessor declarations (or a `[Symbol.dispose]`
+   * / `[Symbol.asyncDispose]` computed method). Such literals compile through
+   * the JS-host plain-object (externref) path in `compileObjectLiteral`
+   * (#1239/#1433), so the receiving global MUST be typed `externref` — never
+   * the inferred WasmGC struct type. Otherwise the host object is stored into
+   * a struct-typed global and `obj.v` reads mis-route to `__extern_get` against
+   * a struct (returning undefined → NaN). Mirrors the function-local pre-pass
+   * in index.ts (`walkStmtForLetConst` / `hoistVarDecl`, ~12573-12586) that
+   * already forces externref + tags `externrefAccessorVars` at function scope.
+   */
+  function moduleInitForcesExternref(decl: ts.VariableDeclaration): boolean {
+    if (!decl.initializer || !ts.isObjectLiteralExpression(decl.initializer)) return false;
+    for (const p of decl.initializer.properties) {
+      if (ts.isGetAccessorDeclaration(p) || ts.isSetAccessorDeclaration(p)) return true;
+      if (ts.isMethodDeclaration(p) && ts.isComputedPropertyName(p.name)) {
+        const inner = p.name.expression;
+        if (
+          ts.isPropertyAccessExpression(inner) &&
+          ts.isIdentifier(inner.expression) &&
+          inner.expression.text === "Symbol" &&
+          (inner.name.text === "dispose" || inner.name.text === "asyncDispose")
+        ) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Resolve the module-global wasm type for a simple identifier declaration,
+   * honoring the accessor-literal externref override (#2011) and tagging the
+   * name in `externrefAccessorVars` so later property accesses route to the
+   * host get/set path. Shared by the `var`-hoist walk and the source-order
+   * let/const pass so both scopes register the same type.
+   */
+  function moduleGlobalWasmType(decl: ts.VariableDeclaration, varType: ts.Type): ValType {
+    if (moduleInitForcesExternref(decl) && ts.isIdentifier(decl.name)) {
+      ctx.externrefAccessorVars.add(decl.name.text);
+      return { kind: "externref" };
+    }
+    // #1914 — `var m = re.exec(s)` under standalone gets the precise
+    // match-vec ref type so indexed reads stay on the static vec path
+    // (externref-widened globals round-trip through __extern_get_idx,
+    // which can't see typed vecs and returns null).
+    return inferStandaloneRegExpMatchGlobalType(ctx, decl) ?? resolveWasmType(ctx, varType);
+  }
+
   /** Register var declarations from a variable declaration list as module globals. */
   function registerVarDeclListGlobals(list: ts.VariableDeclarationList): void {
     // Only hoist `var` (not let/const) — let/const are block-scoped
@@ -3338,11 +3388,7 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
     for (const decl of list.declarations) {
       if (ts.isIdentifier(decl.name)) {
         const varType = moduleVarDeclType(decl);
-        // #1914 — `var m = re.exec(s)` under standalone gets the precise
-        // match-vec ref type so indexed reads stay on the static vec path
-        // (externref-widened globals round-trip through __extern_get_idx,
-        // which can't see typed vecs and returns null).
-        const wasmType = inferStandaloneRegExpMatchGlobalType(ctx, decl) ?? resolveWasmType(ctx, varType);
+        const wasmType = moduleGlobalWasmType(decl, varType);
         registerModuleGlobal(decl.name.text, wasmType);
       } else if (ts.isObjectBindingPattern(decl.name) || ts.isArrayBindingPattern(decl.name)) {
         registerBindingNames(decl.name);
@@ -3422,11 +3468,10 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
       for (const decl of stmt.declarationList.declarations) {
         if (ts.isIdentifier(decl.name)) {
           const varType = moduleVarDeclType(decl);
-          // #1914 — `var m = re.exec(s)` under standalone gets the precise
-          // match-vec ref type so indexed reads stay on the static vec path
-          // (externref-widened globals round-trip through __extern_get_idx,
-          // which can't see typed vecs and returns null).
-          const wasmType = inferStandaloneRegExpMatchGlobalType(ctx, decl) ?? resolveWasmType(ctx, varType);
+          // (#2011) Accessor/dispose object-literal initializers force an
+          // externref global (+ externrefAccessorVars tag); otherwise fall back
+          // to the standalone-regexp / inferred type. See moduleGlobalWasmType.
+          const wasmType = moduleGlobalWasmType(decl, varType);
           registerModuleGlobal(decl.name.text, wasmType);
           if (isLetOrConst) {
             ctx.tdzLetConstNames.add(decl.name.text);

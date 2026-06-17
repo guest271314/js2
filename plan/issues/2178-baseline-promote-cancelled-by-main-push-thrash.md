@@ -1,10 +1,11 @@
 ---
 id: 2178
 title: "standalone baseline floor goes stale because push:main promote-baseline is cancelled by later main pushes (thrash) → standalone-guard blocks every PR on current main"
-status: ready
+status: done
 sprint: 63
 created: 2026-06-16
-updated: 2026-06-16
+updated: 2026-06-17
+completed: 2026-06-17
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -102,3 +103,44 @@ Then have authors `gh run rerun --failed <run>` their standalone-guard
 PRs (no code change needed) and enqueue. This is a band-aid — it must be
 repeated every time a standalone-shifting change lands and the auto
 promotion is cancelled. #2178 is to make it unnecessary.
+
+## Resolution
+
+Root cause confirmed: `cancel-in-progress: false` is necessary but **not
+sufficient**. GitHub keeps at most ONE *pending* run per concurrency group, so
+with the shared `push`-event group (`test262-sharded-push-refs/heads/main`),
+when run A is in-flight and B then C queue behind it, **B is silently cancelled
+the instant C arrives** (only the newest pending run survives). During a rapid
+main-push burst that cancels the promote-baseline run for the intermediate SHA,
+so a standalone-shifting change (#2104/#1503) lands without its floor being
+promoted — and every subsequent PR fails the #1897 guard against the stale
+floor. This matches the observed 2026-06-16 evidence (run `27588392608` for
+`8c74365b` reached all-green then reverted to `queued` and was dropped when main
+advanced to `e1a0023fc`).
+
+Fix (two parts):
+
+1. **Per-SHA push concurrency group** (`test262-sharded.yml`). The `push` event's
+   group key now includes `github.sha`
+   (`...-${{ github.event_name == 'push' && format('-{0}', github.sha) || '' }}`),
+   so each push:main commit gets its OWN group. No push:main run can cancel
+   another → every push:main run reaches `promote-baseline` → the floor always
+   catches up. The existing baselines-repo fetch+rebase loop and the main-repo
+   Option-A re-anchor loop already provide latest-wins serialization at the
+   promote layer. merge_group / workflow_dispatch / PR keys are unchanged
+   (AC #1, #2).
+
+2. **Standalone/host floor staleness alert** (`baseline-floor-staleness-alert.yml`
+   + `scripts/check-baseline-floor-staleness.mjs`). A scheduled (hourly) +
+   `workflow_run`-after-sharded-push:main + manual workflow that reads each
+   floor's recorded `baseline_sha` from `loopdive/js2wasm-baselines` and counts
+   how many **test262-relevant** commits main HEAD is ahead (the same path
+   allowlist as `scripts/test262-paths-match.sh`, so `[skip ci]` baseline/doc
+   commits don't register as drift). On a breach (> 25 relevant commits behind)
+   it fails red, alerts (job summary + ntfy), and **auto-heals** by dispatching
+   the emergency `refresh-baseline.yml` (its own non-cancellable group +
+   unconditional promote — the manual recovery lever from the runbook above,
+   now automated). The `workflow_run` trigger surfaces a thrash deadlock within
+   ~one sharded-run latency instead of an hour. Reachability is fail-safe:
+   when the floor SHA is out of the checkout's fetch range the check reports
+   "undetermined" and never raises a false breach (AC #3).
