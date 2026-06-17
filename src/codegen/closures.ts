@@ -3641,7 +3641,7 @@ function buildTrampolineThisSlot(
           blockType: { kind: "val", type: { kind: "ref_null", typeIdx: objStructTypeIdx } },
           then: throwInstrs, // genuinely no receiver → catchable TypeError
           else: nullThis, // different struct → unchanged passthrough
-        } as unknown as Instr,
+        },
       ]
     : nullThis;
   return [
@@ -3657,7 +3657,7 @@ function buildTrampolineThisSlot(
         { op: "ref.cast", typeIdx: objStructTypeIdx } as Instr,
       ],
       else: elseArm,
-    } as unknown as Instr,
+    },
   ];
 }
 
