@@ -508,3 +508,97 @@ describe("#2166 PR-C — standalone dynamic JSON.parse (object graphs + primitiv
     await expect(parseInternal(`const o: any = JSON.parse('{"x":1} bogus'); return 1;`)).rejects.toThrow();
   });
 });
+
+/*
+ * #2166 PR-D1 — standalone `JSON.parse(text, reviver)` (§25.5.1
+ * InternalizeJSONProperty). After the pure-Wasm parse builds the value graph,
+ * `__internalize_json_value` recursively walks it bottom-up calling
+ * `reviver.call(holder, key, value)` via the reserve/fill `__call_reviver`
+ * driver → `__call_fn_method_2` (so the reviver runs entirely in Wasm — the
+ * closure is a GC struct, NOT a host `__make_callback` bridge). A reviver that
+ * returns `undefined` deletes the property (object) / writes a hole (array);
+ * any other value replaces it.
+ *
+ * The reviver is compiled via the GC-closure path (`compileArrowAsClosure`),
+ * so no `env::*` host import leaks — `parseInternal` already asserts that.
+ */
+describe("#2166 PR-D1 — standalone JSON.parse reviver (InternalizeJSONProperty)", () => {
+  it("transforms number values (reviver doubles every number)", async () => {
+    expect(
+      await parseInternal(
+        `const o: any = JSON.parse('{"a":2,"b":3}', (k: string, v: any) => typeof v === "number" ? (v as number) * 2 : v);
+         return ((o.a as number) + (o.b as number)) === 10 ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("identity reviver round-trips an object graph", async () => {
+    expect(
+      await parseInternal(
+        `const o: any = JSON.parse('{"x":7,"y":{"z":8}}', (k: string, v: any) => v);
+         return ((o.x as number) === 7 && (o.y.z as number) === 8) ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("deletes a property when the reviver returns undefined", async () => {
+    expect(
+      await parseInternal(
+        `const o: any = JSON.parse('{"keep":1,"drop":2}', (k: string, v: any) => k === "drop" ? undefined : v);
+         return (o.keep as number) === 1 ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("transforms a nested object graph bottom-up", async () => {
+    expect(
+      await parseInternal(
+        `const o: any = JSON.parse('{"n":{"v":5}}', (k: string, v: any) => typeof v === "number" ? (v as number) + 1 : v);
+         return (o.n.v as number) === 6 ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("transforms array elements (each gets a string index key)", async () => {
+    expect(
+      await parseInternal(
+        `const o: any = JSON.parse('{"arr":[1,2,3]}', (k: string, v: any) => typeof v === "number" ? (v as number) * 10 : v);
+         return ((o.arr[0] as number) + (o.arr[2] as number)) === 40 ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("applies the reviver to a top-level primitive", async () => {
+    expect(
+      await parseInternal(
+        `const v: any = JSON.parse('5', (k: string, val: any) => typeof val === "number" ? (val as number) + 100 : val);
+         return (v as number) === 105 ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("leaves string values intact through a numeric reviver", async () => {
+    expect(
+      await parseInternal(
+        `const o: any = JSON.parse('{"s":"hi","n":4}', (k: string, v: any) => typeof v === "number" ? (v as number) + 1 : v);
+         return ((o.s as string) === "hi" && (o.n as number) === 5) ? 1 : 0;`,
+      ),
+    ).toBe(1);
+  });
+
+  it("a null reviver argument is ignored (plain parse)", async () => {
+    expect(
+      await parseInternal(`const o: any = JSON.parse('{"x":7}', null as any); return (o.x as number) === 7 ? 1 : 0;`),
+    ).toBe(1);
+  });
+
+  it("works under --target wasi too (host-import-free)", async () => {
+    expect(
+      await parseInternal(
+        `const o: any = JSON.parse('{"a":2}', (k: string, v: any) => typeof v === "number" ? (v as number) * 3 : v);
+         return (o.a as number) === 6 ? 1 : 0;`,
+        "wasi",
+      ),
+    ).toBe(1);
+  });
+});
