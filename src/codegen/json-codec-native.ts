@@ -55,6 +55,7 @@ import { addFuncType } from "./registry/types.js";
 import { emitJsonQuoteString } from "./json-runtime.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
+import { reserveReviverDriver } from "./accessor-driver.js";
 
 const EQ_HEAP_TYPE = -19; // signed LEB128 → 0x6d → TYPE.eq (for ref.null any/eq)
 
@@ -2074,4 +2075,326 @@ export function emitJsonParseText(ctx: CodegenContext): number {
   } as unknown as (typeof ctx.mod.functions)[number]);
 
   return textFuncIdx;
+}
+
+/**
+ * (#2166 PR-D1) Emit the standalone `JSON.parse(text, reviver)` codec —
+ * `__json_parse_text_reviver(text: externref, reviver: externref) -> anyref` —
+ * and the recursive §25.5.1 InternalizeJSONProperty walk
+ * `__internalize_json_property(holder: externref, key: externref,
+ * reviver: externref) -> externref`. Idempotent. Standalone / WASI only.
+ *
+ * The reviver itself is a USER closure (externref). It is invoked via the
+ * reserve/fill `__call_reviver` driver (accessor-driver.ts) which wraps
+ * `__call_fn_method_2(holder, reviver, key, value)` — binding `holder` as `this`
+ * and passing `key`/`value` as the two reviver args (§25.5.1 step 2.c). The fill
+ * runs in finalize after `__call_fn_method_2` is registered; when no arity-2
+ * closure exists the driver degrades to an identity (returns the value), so a
+ * module with no reviver closure still verifies.
+ *
+ * Walk (§25.5.1 InternalizeJSONProperty(holder, key, reviver)):
+ *   val = holder[key]
+ *   if val is an Object: for each own key k (snapshot taken BEFORE recursion,
+ *     §25.5.1 step 2.a.i — a reviver that adds keys doesn't see them):
+ *       elem = InternalizeJSONProperty(val, k, reviver)
+ *       if elem is undefined → delete val[k]   else → val[k] = elem
+ *   if val is an Array ($ObjVec): same over numeric indices with string keys.
+ *   return reviver.call(holder, key, val)
+ *
+ * Returns the funcIdx of `__json_parse_text_reviver`.
+ */
+export function emitJsonParseTextReviver(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get("__json_parse_text_reviver");
+  if (existing !== undefined) return existing;
+
+  // Dependencies (all idempotent). The base parser + object runtime + the
+  // number formatter (for array index → string keys) + the reviver driver.
+  const parseTextIdx = emitJsonParseText(ctx);
+  ensureNativeStringHelpers(ctx);
+  const objTypes = ensureObjectRuntime(ctx);
+  emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+  const reviverDriverIdx = reserveReviverDriver(ctx);
+
+  const newObjIdx = ctx.funcMap.get("__new_plain_object")!;
+  const externSetIdx = ctx.funcMap.get("__extern_set")!;
+  const externGetIdx = ctx.funcMap.get("__extern_get")!;
+  const deleteIdx = ctx.funcMap.get("__delete_property")!;
+  const orderedIdx = ctx.funcMap.get("__obj_ordered")!;
+  const numToStrIdx = ctx.funcMap.get("number_toString")!;
+
+  const i32: ValType = { kind: "i32" };
+  const f64: ValType = { kind: "f64" };
+  const anyref: ValType = { kind: "anyref" };
+  const externref: ValType = { kind: "externref" };
+
+  const objectTypeIdx = objTypes.objectTypeIdx;
+  const propMapTypeIdx = objTypes.propMapTypeIdx;
+  const propEntryTypeIdx = objTypes.propEntryTypeIdx;
+  const objVecTypeIdx = objTypes.objVecTypeIdx;
+  const objVecArrTypeIdx = objTypes.objVecArrTypeIdx;
+  const anyStrTypeIdx = ctx.anyStrTypeIdx;
+
+  // Pre-register the recursive internalize funcIdx so the body can call itself.
+  // (#2166 PR-D1) Signature takes the VALUE directly (already fetched by the
+  // caller) plus the holder+key for the reviver's `this`/key args. This is
+  // load-bearing: an `$ObjVec` array element CANNOT be re-read via
+  // `__extern_get(holder, "i")` (the vec has no string-keyed property), so each
+  // arm fetches its child with the right primitive (`__extern_get` for object
+  // props, `array.get` for array elements) and passes the value in.
+  //
+  // __internalize_json_value(val, holder, key, reviver) -> externref
+  const internTypeIdx = addFuncType(ctx, [externref, externref, externref, externref], [externref]);
+  const internFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__internalize_json_value", internFuncIdx);
+
+  // params: 0=val 1=holder 2=key 3=reviver
+  const P_VAL = 0;
+  const P_HOLDER = 1;
+  const P_KEY = 2;
+  const P_REVIVER = 3;
+  const L_ANY = 4; // anyref — val widened for ref.test
+  const L_ARR = 5; // ref null $PropMap — ordered key snapshot
+  const L_CAP = 6; // i32 — loop bound
+  const L_I = 7; // i32 — loop index
+  const L_E = 8; // ref null $PropEntry
+  const L_K = 9; // externref — current child key
+  const L_CHILD = 10; // externref — child value (pre-reviver)
+  const L_ELEM = 11; // externref — internalized child value
+  const L_VEC = 12; // ref null $ObjVec
+  const L_DATA = 13; // ref $ObjVecArr
+  const L_OBJREF = 14; // externref — the $Object/$ObjVec value re-as-externref
+
+  const internBody: Instr[] = [
+    // any = any.convert_extern(val)
+    { op: "local.get", index: P_VAL },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: L_ANY },
+    // ── $Object arm ───────────────────────────────────────────────────────
+    { op: "local.get", index: L_ANY },
+    { op: "ref.test", typeIdx: objectTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        // objref = val (the object, as externref holder for its children)
+        { op: "local.get", index: P_VAL },
+        { op: "local.set", index: L_OBJREF },
+        // arr = __obj_ordered(cast<$Object>(any))  — snapshot BEFORE recursion
+        { op: "local.get", index: L_ANY },
+        { op: "ref.cast", typeIdx: objectTypeIdx },
+        { op: "call", funcIdx: orderedIdx },
+        { op: "local.set", index: L_ARR },
+        { op: "local.get", index: L_ARR },
+        { op: "array.len" },
+        { op: "local.set", index: L_CAP },
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: L_I },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: L_I },
+                { op: "local.get", index: L_CAP },
+                { op: "i32.ge_s" },
+                { op: "br_if", depth: 1 },
+                // e = arr[i]; ordered array is compacted — stop at first null
+                { op: "local.get", index: L_ARR },
+                { op: "local.get", index: L_I },
+                { op: "array.get", typeIdx: propMapTypeIdx },
+                { op: "local.tee", index: L_E },
+                { op: "ref.is_null" },
+                { op: "br_if", depth: 1 },
+                // k = extern.convert_any(e.key)
+                { op: "local.get", index: L_E },
+                { op: "ref.as_non_null" },
+                { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 }, // key: ref $AnyString
+                { op: "extern.convert_any" },
+                { op: "local.set", index: L_K },
+                // child = __extern_get(objref, k)
+                { op: "local.get", index: L_OBJREF },
+                { op: "local.get", index: L_K },
+                { op: "call", funcIdx: externGetIdx },
+                { op: "local.set", index: L_CHILD },
+                // elem = __internalize_json_value(child, objref, k, reviver)
+                { op: "local.get", index: L_CHILD },
+                { op: "local.get", index: L_OBJREF },
+                { op: "local.get", index: L_K },
+                { op: "local.get", index: P_REVIVER },
+                { op: "call", funcIdx: internFuncIdx },
+                { op: "local.set", index: L_ELEM },
+                // if elem is undefined (null externref) → delete; else set
+                { op: "local.get", index: L_ELEM },
+                { op: "ref.is_null" },
+                {
+                  op: "if",
+                  blockType: { kind: "empty" },
+                  then: [
+                    { op: "local.get", index: L_OBJREF },
+                    { op: "local.get", index: L_K },
+                    { op: "call", funcIdx: deleteIdx },
+                    { op: "drop" },
+                  ],
+                  else: [
+                    { op: "local.get", index: L_OBJREF },
+                    { op: "local.get", index: L_K },
+                    { op: "local.get", index: L_ELEM },
+                    { op: "call", funcIdx: externSetIdx },
+                  ],
+                },
+                { op: "local.get", index: L_I },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_I },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    // ── $ObjVec (array) arm ───────────────────────────────────────────────
+    { op: "local.get", index: L_ANY },
+    { op: "ref.test", typeIdx: objVecTypeIdx },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: L_ANY },
+        { op: "ref.cast", typeIdx: objVecTypeIdx },
+        { op: "local.tee", index: L_VEC },
+        { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 1 }, // data
+        { op: "local.set", index: L_DATA },
+        { op: "local.get", index: L_VEC },
+        { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 0 }, // len
+        { op: "local.set", index: L_CAP },
+        { op: "i32.const", value: 0 },
+        { op: "local.set", index: L_I },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: L_I },
+                { op: "local.get", index: L_CAP },
+                { op: "i32.ge_s" },
+                { op: "br_if", depth: 1 },
+                // k = number_toString(f64(i))  — array index → string key
+                { op: "local.get", index: L_I },
+                { op: "f64.convert_i32_s" },
+                { op: "call", funcIdx: numToStrIdx },
+                { op: "local.set", index: L_K },
+                // child = data[i]  (read the element directly — NOT via __extern_get)
+                { op: "local.get", index: L_DATA },
+                { op: "local.get", index: L_I },
+                { op: "array.get", typeIdx: objVecArrTypeIdx },
+                { op: "local.set", index: L_CHILD },
+                // elem = __internalize_json_value(child, val, k, reviver)
+                { op: "local.get", index: L_CHILD },
+                { op: "local.get", index: P_VAL },
+                { op: "local.get", index: L_K },
+                { op: "local.get", index: P_REVIVER },
+                { op: "call", funcIdx: internFuncIdx },
+                { op: "local.set", index: L_ELEM },
+                // §25.5.1 step 2.b.ii: a non-undefined result replaces the
+                // element in place; undefined → CreateDataProperty(undefined)
+                // (store the null externref / a JSON `null` hole).
+                { op: "local.get", index: L_DATA },
+                { op: "local.get", index: L_I },
+                { op: "local.get", index: L_ELEM },
+                { op: "array.set", typeIdx: objVecArrTypeIdx },
+                { op: "local.get", index: L_I },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_I },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    // ── return reviver.call(holder, key, val) via the driver ──────────────
+    { op: "local.get", index: P_HOLDER }, // holder (this)
+    { op: "local.get", index: P_REVIVER }, // reviver closure
+    { op: "local.get", index: P_KEY }, // key
+    { op: "local.get", index: P_VAL }, // value
+    { op: "call", funcIdx: reviverDriverIdx },
+  ];
+
+  ctx.mod.functions.push({
+    name: "__internalize_json_value",
+    typeIdx: internTypeIdx,
+    locals: [
+      { count: 1, type: anyref }, // L_ANY
+      { count: 1, type: { kind: "ref_null", typeIdx: propMapTypeIdx } }, // L_ARR
+      { count: 1, type: i32 }, // L_CAP
+      { count: 1, type: i32 }, // L_I
+      { count: 1, type: { kind: "ref_null", typeIdx: propEntryTypeIdx } }, // L_E
+      { count: 1, type: externref }, // L_K
+      { count: 1, type: externref }, // L_CHILD
+      { count: 1, type: externref }, // L_ELEM
+      { count: 1, type: { kind: "ref_null", typeIdx: objVecTypeIdx } }, // L_VEC
+      { count: 1, type: { kind: "ref", typeIdx: objVecArrTypeIdx } }, // L_DATA
+      { count: 1, type: externref }, // L_OBJREF
+    ],
+    body: internBody,
+    exported: false,
+  } as unknown as (typeof ctx.mod.functions)[number]);
+
+  // ── __json_parse_text_reviver(text, reviver) -> anyref ────────────────────
+  // val = __json_parse_text(text); root = { "": val };
+  // return any.convert_extern(
+  //          __internalize_json_value(val, root, "", reviver)).
+  const rootTypeIdx = addFuncType(ctx, [externref, externref], [anyref]);
+  const rootFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__json_parse_text_reviver", rootFuncIdx);
+
+  void anyStrTypeIdx;
+  const emptyKey = (): Instr[] => nativeStringLiteralInstrs(ctx, "");
+  const R_ROOT = 2; // externref
+  const R_VAL = 3; // externref — the parsed root value
+
+  const rootBody: Instr[] = [
+    // val = any.convert_extern(__json_parse_text(text))
+    { op: "local.get", index: 0 }, // text
+    { op: "call", funcIdx: parseTextIdx }, // -> anyref value graph
+    { op: "extern.convert_any" },
+    { op: "local.set", index: R_VAL },
+    // root = __new_plain_object(); root[""] = val
+    { op: "call", funcIdx: newObjIdx },
+    { op: "local.set", index: R_ROOT },
+    { op: "local.get", index: R_ROOT },
+    ...emptyKey(),
+    { op: "extern.convert_any" },
+    { op: "local.get", index: R_VAL },
+    { op: "call", funcIdx: externSetIdx },
+    // return any.convert_extern(__internalize_json_value(val, root, "", reviver))
+    { op: "local.get", index: R_VAL },
+    { op: "local.get", index: R_ROOT },
+    ...emptyKey(),
+    { op: "extern.convert_any" },
+    { op: "local.get", index: 1 }, // reviver
+    { op: "call", funcIdx: internFuncIdx },
+    { op: "any.convert_extern" }, // back to anyref (the parse codec's result type)
+  ];
+
+  ctx.mod.functions.push({
+    name: "__json_parse_text_reviver",
+    typeIdx: rootTypeIdx,
+    locals: [
+      { count: 1, type: externref }, // R_ROOT (index 2)
+      { count: 1, type: externref }, // R_VAL (index 3)
+    ],
+    body: rootBody,
+    exported: false,
+  } as unknown as (typeof ctx.mod.functions)[number]);
+
+  return rootFuncIdx;
 }

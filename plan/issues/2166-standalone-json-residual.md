@@ -544,3 +544,137 @@ This is multi-PR and overlaps #1636 (`__call_fn_method`) + #2042 (instance-field
 reflection), so it's tracked as the **architect-scoped follow-up (TaskList #32)**
 rather than appended to this issue's dev queue. The compiler primitives are
 in place; the work is the codec-side plumbing + the InternalizeJSONProperty walk.
+
+---
+
+## Implementation Plan (PR-D: reviver / toJSON / replacer) — sdev-json3, 2026-06-17
+
+> Architect spec for TaskList #32, written against `upstream/main` @ the #1661
+> merge. The other 4 codec slices are landed. PR-D is **dev-tractable in
+> standalone** — it reuses the existing `__call_fn_method_N` closure-invocation
+> machinery (already used standalone by accessor drivers + Proxy bridges via the
+> reserve/fill pattern). Sliced into D1 (reviver), D2 (`toJSON`), D3 (function/
+> array replacer); D1 is the most self-contained and lands first.
+
+### Shared infrastructure (used by all three slices)
+
+**The closure-call driver (reserve/fill).** `__call_fn_method_N` is an *export*
+emitted in FINALIZE (`emitClosureMethodCallExportN`, index.ts ~3367) only when a
+closure of arity ≤ N exists. Signature:
+`(thisVal: externref, closure: externref, arg0: externref, … : externref) -> externref`
+— it stores `thisVal` into the `__current_this` global across the inner
+`call_ref` (so the reviver/replacer/`toJSON` observes the right `this`). The
+codec is emitted LAZILY during call-expression codegen, before the dispatcher
+exists, so it cannot bake the dispatcher's funcIdx. Use the **proven reserve/
+fill driver** pattern (`accessor-driver.ts` `reserveAccessorGetDriver` /
+`fillAccessorDrivers`, mirrored from #1719):
+- At codec-emit time, reserve `__call_reviver` (D1) / `__call_to_json` (D2) /
+  `__call_replacer` (D3) placeholder funcs (bare `unreachable` body), funcIdx
+  fixed by append position + registered in `funcMap`; the codec emits a plain
+  `call <reserved funcIdx>`.
+- In post-processing (after `emitClosureMethodCallExportN`), fill each body as a
+  thin wrapper around `__call_fn_method_2` (reviver: `this`=holder, args key+
+  value) / `__call_fn_method_1` (`toJSON`/replacer arity-1 forms). Route through
+  `funcMap` (NOT a raw number) so `shiftLateImportIndices` patches it across
+  late-import shifts (#329/#1899 contract).
+- Guard: if no arity-2 (resp. arity-1) closure exists in the module,
+  `__call_fn_method_2` is never emitted → the fill step must degrade the driver
+  to "return value unchanged" (reviver identity / no replacer) rather than dangle.
+
+**Value ↔ externref marshalling.** Parsed members are `$Object`/`$ObjVec`/
+`$__box_*`/`$AnyString`/null as `anyref`; the reviver sees them as `externref`
+(`extern.convert_any`), and its result comes back `externref` →
+`any.convert_extern` to re-store. Boxed primitives round-trip as-is.
+
+### PR-D1 — `JSON.parse(text, reviver)` (§25.5.1 InternalizeJSONProperty)
+
+**Routing (`calls.ts`, the `method === "parse"` standalone block ~6088):** lift
+the `expr.arguments.length === 1` gate. When a 2nd arg is present and is a
+function-typed reviver, compile arg0 → externref AND arg1 (reviver) → externref,
+then call a new `__json_parse_text_reviver(text, reviver) -> anyref`. A
+non-function 2nd arg (e.g. an accidental object) keeps the refusal.
+
+**Codec (`json-codec-native.ts`), new `emitJsonParseTextReviver`:**
+1. `val = __json_parse_text(text)` — reuse the existing parser unchanged.
+2. Build the §25.5.1 root holder: `root = {"": val}` via `__new_plain_object` +
+   `__extern_set("", val)`.
+3. `return __internalize_json_property(root, "", reviver)`.
+
+**New recursive `__internalize_json_property(holder: externref, key: $AnyString,
+reviver: externref) -> externref`** (§25.5.1 InternalizeJSONProperty):
+- `val = __extern_get(holder, key)`.
+- If `val` is a `$Object`: for each own key `k` (snapshot via `__obj_ordered` —
+  take the key list FIRST since the walk mutates), `elem =
+  __internalize_json_property(val, k, reviver)`; if `elem` is `undefined`
+  (the reviver's delete sentinel) → `__delete_property(val, k)` else
+  `__extern_set(val, k, elem)`.
+- If `val` is a `$ObjVec`: same, iterating numeric indices `0..len-1` with string
+  keys; a deleted element becomes a hole → set to the parsed `undefined`/null per
+  §25.5.1 step 2.b.ii (CreateDataProperty of undefined).
+- Finally: `return __call_reviver(holder, key, val)` — the driver calls
+  `reviver.call(holder, key, val)`. The reviver's `undefined` return propagates
+  up as the delete sentinel.
+
+**Edge cases:** key order is the snapshot taken before recursion (a reviver that
+adds keys does not see them — §25.5.1); `this` inside the reviver is the holder
+(threaded by `__call_fn_method_2` via `__current_this`); a reviver returning the
+value unchanged is the identity (round-trip safe).
+
+**Tests (`tests/issue-2166.test.ts`):** reviver doubling numbers, dropping a key
+(undefined return), `this[key]` access in the reviver, nested-graph transform,
+array-element reviver, identity reviver round-trip, `--target wasi`. Compare the
+internal result (native strings don't marshal across the boundary).
+
+### PR-D2 — `toJSON` (§25.5.2 SerializeJSONProperty step 2)
+In `__json_stringify_value`, before the `$Object`/instance arms: `HasProperty`-
+check `toJSON` (via `__extern_get` of the method, ref-test for a closure); if
+present, `val = __call_to_json(val /*this*/, key)` (`__call_fn_method_1`) and
+serialise the result instead. Reserve/fill `__call_to_json` as above.
+
+### PR-D3 — function / array replacer (§25.5.2 steps 2.b / 3)
+Thread the replacer closure-ref / key-array into the stringify root; in the
+object/array arms call `replacer.call(holder, key, val)` (function form, via
+`__call_replacer` → `__call_fn_method_2`) or filter keys to the array form.
+Larger; lands last.
+
+---
+
+## Progress (2026-06-18, sdev-json3) — PR-D1: standalone JSON.parse reviver
+
+PR-D1 of the PR-D plan above. `JSON.parse(text, reviver)` now runs the §25.5.1
+InternalizeJSONProperty walk entirely in Wasm under `--target standalone`/`wasi`
+(previously refused). Implements the shared closure-call infrastructure the rest
+of PR-D (toJSON/replacer) will reuse.
+
+**Files:**
+- `src/codegen/accessor-driver.ts` — new `reserveReviverDriver` + a fill arm in
+  `fillAccessorDrivers`: the `__call_reviver(holder, reviver, key, value)` driver
+  wraps `__call_fn_method_2` (holder bound as `this`). Reserve/fill funcIdx-
+  authority pattern (shiftLateImportIndices-safe), identical to the accessor
+  drivers. Degrades to an identity (returns value) when no arity-2 closure exists.
+- `src/codegen/context/types.ts` — `reviverDriverReserved` flag.
+- `src/codegen/json-codec-native.ts` — new `emitJsonParseTextReviver`: the entry
+  `__json_parse_text_reviver(text, reviver)` (parse → wrap in root holder `{"":v}`
+  → internalize) and the recursive `__internalize_json_value(val, holder, key,
+  reviver)`. **Key design:** the walker takes the value DIRECTLY (already fetched)
+  — an `$ObjVec` array element can't be re-read via `__extern_get(vec,"i")` (no
+  string-keyed prop), so the object arm fetches children with `__extern_get` and
+  the array arm with `array.get`. Object: undefined return → `__delete_property`;
+  else `__extern_set`. Array: result written back via `array.set` in place.
+- `src/codegen/expressions/calls.ts` — routing: lift the 1-arg gate to accept a
+  2nd arg; a *callable* reviver compiles via the GC-closure path
+  (`compileArrowAsClosure`, NOT `__make_callback` — the host bridge leaks an
+  `env::` import and its JS wrapper fails the `__call_fn_method_2` ref.cast) and
+  routes to the reviver codec; a null/non-callable 2nd arg is IGNORED (§25.5.1
+  IsCallable gate) → plain parse. Also skip the static-literal fold when a 2nd
+  arg is present (it ignored the reviver, e.g. `JSON.parse('5', r)`).
+
+Tests: `tests/issue-2166.test.ts` (+9 PR-D1 cases — number transform, identity
+round-trip, key delete (undefined return), nested bottom-up transform, array-
+element transform, top-level primitive, string passthrough, null-reviver-ignored,
+`--target wasi`). All host-import-free (asserted). 61/61 in the suite green;
+#1599/#1636 refuse + PR-C2 suites unaffected. The one #2042 numeric-key failure
+is pre-existing on the base (verified by stashing).
+
+**Remaining PR-D:** D2 (`toJSON`) + D3 (function/array replacer) — same driver
+infra, on the stringify side.
