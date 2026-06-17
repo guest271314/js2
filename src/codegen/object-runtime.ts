@@ -314,6 +314,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { name: "apply", type: { kind: "externref" }, mutable: false },
       // (#1355 Slice A) deleteProperty — field index 4.
       { name: "deleteProperty", type: { kind: "externref" }, mutable: false },
+      // (#1355 Slice B) getOwnPropertyDescriptor — field index 5.
+      { name: "getOwnPropertyDescriptor", type: { kind: "externref" }, mutable: false },
     ],
   });
 
@@ -4728,6 +4730,7 @@ const PROXY_CALL_GET = "__proxy_call_get";
 const PROXY_CALL_SET = "__proxy_call_set";
 const PROXY_CALL_HAS = "__proxy_call_has";
 const PROXY_CALL_DELETE = "__proxy_call_delete"; // (#1355 Slice A)
+const PROXY_CALL_GOPD = "__proxy_call_gopd"; // (#1355 Slice B) getOwnPropertyDescriptor
 
 /**
  * (#1100) Standalone Proxy meta-object dispatch runtime — Phase 1.
@@ -4819,6 +4822,7 @@ function ensureProxyRuntime(
   const TRAP_SET = 1;
   const TRAP_HAS = 2;
   const TRAP_DELETE = 4; // (#1355 Slice A)
+  const TRAP_GOPD = 5; // (#1355 Slice B) getOwnPropertyDescriptor
 
   // ── Reserve the trap-invoke driver placeholders (filled by fillProxyDispatch) ──
   //
@@ -4853,6 +4857,10 @@ function ensureProxyRuntime(
   // (#1355 Slice A) deleteProperty driver — same arity as has: (handler, trap,
   // target, key) → __call_fn_method_2 (§10.5.10 step 8 `Call(trap, handler, «O, P»)`).
   const callDeleteIdx = reserveDriver(PROXY_CALL_DELETE, [externref, externref, externref, externref]);
+  // (#1355 Slice B) getOwnPropertyDescriptor driver — 2-arg like has/delete:
+  // (handler, trap, target, key) → __call_fn_method_2 (§10.5.5 step 8
+  // `Call(trap, handler, «target, P»)`). Returns the trap's descriptor externref.
+  const callGopdIdx = reserveDriver(PROXY_CALL_GOPD, [externref, externref, externref, externref]);
   ctx.proxyDispatchReserved = true;
 
   // Builds a dispatch helper body. `trapFieldIdx` selects the trap closure;
@@ -4891,6 +4899,10 @@ function ensureProxyRuntime(
       // (#1355) deleteProperty: driver(handler, trap, target, key) — same 2-arg
       // shape as has (§10.5.10 step 8 `Call(trap, handler, «O, P»)`).
       trapArm.push({ op: "call", funcIdx: callDeleteIdx });
+    } else if (trapFieldIdx === TRAP_GOPD) {
+      // (#1355) getOwnPropertyDescriptor: driver(handler, trap, target, key) —
+      // 2-arg, no receiver (§10.5.5 step 8 `Call(trap, handler, «target, P»)`).
+      trapArm.push({ op: "call", funcIdx: callGopdIdx });
     } else {
       // get: receiver = param 2
       trapArm.push({ op: "local.get", index: 2 });
@@ -5019,6 +5031,23 @@ function ensureProxyRuntime(
     dispatchLocals(),
     buildDispatch(TRAP_DELETE, "__delete_property", false),
   );
+  // (#1355 Slice B) __proxy_gopd_dispatch(proxy, key, _recv) -> externref.
+  // §10.5.5 [[GetOwnProperty]]: revoked→throw; read getOwnPropertyDescriptor
+  // trap; null→forward __getOwnPropertyDescriptor on target (returns the
+  // descriptor object or undefined externref directly — like get, no boxing);
+  // else invoke trap with `(target, key)` and the handler as `this`. Takes 3
+  // params to match buildDispatch's local layout; the [[GetOwnProperty]] trap
+  // signature has no receiver, so param 2 is an unused placeholder. Phase-B
+  // scope: NO §10.5.5 result-invariant checks (trap must return an Object or
+  // undefined; non-configurable/non-extensible consistency) — deferred to the
+  // invariant slice; the trap result is returned as-is.
+  registerNative(
+    "__proxy_gopd_dispatch",
+    [externref, externref, externref],
+    [externref],
+    dispatchLocals(),
+    buildDispatch(TRAP_GOPD, "__getOwnPropertyDescriptor", false),
+  );
 
   // ── __proxy_create(target, handler) -> externref ──────────────────────────
   //
@@ -5075,18 +5104,21 @@ function ensureProxyRuntime(
       { op: "local.set", index: 5 },
       ...readTrap("deleteProperty"),
       { op: "local.set", index: 6 },
+      ...readTrap("getOwnPropertyDescriptor"),
+      { op: "local.set", index: 7 },
       // proxy fields (standalone $Proxy struct):
       { op: "i32.const", value: 1 }, // ptag = PROXY_TAG (1; bare ref.test $Proxy is the real discriminator)
       { op: "local.get", index: 0 }, // ptarget (externref → anyref)
       { op: "any.convert_extern" } as Instr,
       { op: "local.get", index: 1 }, // phandler (externref → anyref; trap `this`)
       { op: "any.convert_extern" } as Instr,
-      // ptraps = struct.new $ProxyTraps (getT, setT, hasT, applyT, delT)
+      // ptraps = struct.new $ProxyTraps (getT, setT, hasT, applyT, delT, gopdT)
       { op: "local.get", index: 2 },
       { op: "local.get", index: 3 },
       { op: "local.get", index: 4 },
       { op: "local.get", index: 5 },
       { op: "local.get", index: 6 },
+      { op: "local.get", index: 7 },
       { op: "struct.new", typeIdx: proxyTrapsTypeIdx } as Instr,
       { op: "i32.const", value: 0 }, // revoked = 0
       { op: "struct.new", typeIdx: proxyTypeIdx } as Instr,
@@ -5102,6 +5134,7 @@ function ensureProxyRuntime(
         { name: "hasT", type: externref },
         { name: "applyT", type: externref },
         { name: "delT", type: externref }, // (#1355 Slice A)
+        { name: "gopdT", type: externref }, // (#1355 Slice B)
       ],
       proxyCreateBody,
     );
@@ -5153,6 +5186,7 @@ function ensureProxyRuntime(
   const setDispatchIdx = ctx.funcMap.get("__proxy_set_dispatch")!;
   const hasDispatchIdx = ctx.funcMap.get("__proxy_has_dispatch")!;
   const deleteDispatchIdx = ctx.funcMap.get("__proxy_delete_dispatch")!; // (#1355 Slice A)
+  const gopdDispatchIdx = ctx.funcMap.get("__proxy_gopd_dispatch")!; // (#1355 Slice B)
 
   const findBody = (name: string): Instr[] | undefined => ctx.mod.functions.find((f) => f.name === name)?.body;
 
@@ -5256,6 +5290,32 @@ function ensureProxyRuntime(
     deleteBody.unshift(...guard);
   }
 
+  // (#1355 Slice B) __getOwnPropertyDescriptor(obj, key) -> externref : if proxy
+  // → gopd_dispatch(obj,key,obj). `Object.getOwnPropertyDescriptor(p, k)` and
+  // `Reflect.getOwnPropertyDescriptor(p, k)` both fall back to this helper for
+  // dynamic receivers (calls.ts). The dispatch returns the trap's descriptor
+  // externref (or undefined) directly — no coercion, like the get guard.
+  const gopdBody = findBody("__getOwnPropertyDescriptor");
+  if (gopdBody) {
+    const guard: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: proxyTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 1 },
+          { op: "local.get", index: 0 }, // unused receiver placeholder (3-param dispatch)
+          { op: "call", funcIdx: gopdDispatchIdx },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    gopdBody.unshift(...guard);
+  }
+
   void objectTypeIdx;
 }
 
@@ -5332,6 +5392,7 @@ export function fillProxyDispatch(ctx: CodegenContext): void {
   fill(PROXY_CALL_SET, 4); // (target, key, value, receiver)
   fill(PROXY_CALL_HAS, 2); // (target, key)
   fill(PROXY_CALL_DELETE, 2); // (#1355 Slice A) deleteProperty (target, key)
+  fill(PROXY_CALL_GOPD, 2); // (#1355 Slice B) getOwnPropertyDescriptor (target, key)
 }
 
 /**
