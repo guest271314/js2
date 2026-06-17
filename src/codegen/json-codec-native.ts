@@ -55,7 +55,7 @@ import { addFuncType } from "./registry/types.js";
 import { emitJsonQuoteString } from "./json-runtime.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
-import { reserveReviverDriver, reserveToJsonDriver } from "./accessor-driver.js";
+import { reserveReplacerDriver, reserveReviverDriver, reserveToJsonDriver } from "./accessor-driver.js";
 
 const EQ_HEAP_TYPE = -19; // signed LEB128 → 0x6d → TYPE.eq (for ref.null any/eq)
 
@@ -133,40 +133,71 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
   const externGetIdxTJ = ctx.funcMap.get("__extern_get")!;
   const toJsonDriverIdx = reserveToJsonDriver(ctx);
 
+  // (#2166 PR-D3) replacer support — the reserve/fill __call_replacer driver
+  // wrapping __call_fn_method_2 (holder bound as `this`). The array-form
+  // (allowlist) replacer is represented at the routing site as a plain $Object
+  // whose own keys are the allowed property names; membership is the existing
+  // __extern_has (proto-safe, battle-tested), no bespoke string-compare loop.
+  const replacerDriverIdx = reserveReplacerDriver(ctx);
+  const externHasIdx = ctx.funcMap.get("__extern_has");
+
   // Pre-register the self funcIdx so the recursive calls in the body resolve.
   // (#2166 PR-B) `gap` (param 2, `ref null $AnyString`) is the per-level indent
   // unit (e.g. "  "). A null gap selects the compact form (PR-A behaviour, zero
   // overhead); a non-null gap drives §25.5.2 pretty-printing.
   // (#2166 PR-D2) `key` (param 3, externref) is the property key passed to a
   // `toJSON` method per §25.5.2 SerializeJSONProperty step 2.b.
-  const typeIdx = addFuncType(ctx, [anyref, i32, strRefNull, { kind: "externref" }], [strRefNull]);
+  // (#2166 PR-D3) `holder` (param 4, externref) is the object/array containing
+  // this value — the `this` for a function replacer; `replacer` (param 5,
+  // externref) is the replacer closure (or null); `allowList` (param 6,
+  // externref) is an $ObjVec of allowed string keys for the array-form replacer
+  // (or null). replacer and allowList are mutually exclusive per §25.5.2.
+  const typeIdx = addFuncType(
+    ctx,
+    [
+      anyref,
+      i32,
+      strRefNull,
+      { kind: "externref" },
+      { kind: "externref" },
+      { kind: "externref" },
+      { kind: "externref" },
+    ],
+    [strRefNull],
+  );
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
   ctx.funcMap.set("__json_stringify_value", funcIdx);
 
   // ── Local plan ──────────────────────────────────────────────────────────
   // params: 0 v:anyref  1 depth:i32  2 gap:ref null $AnyString  3 key:externref
+  //         4 holder:externref  5 replacer:externref  6 allowList:externref
   const P_V = 0;
   const P_DEPTH = 1;
   const P_GAP = 2;
   const P_KEY = 3;
-  const L_ANY = 4; // anyref scratch (re-tested value)
-  const L_OBJ = 5; // ref null $Object
-  const L_ARR = 6; // ref null $PropMap (ordered) / loop reuse
-  const L_VEC = 7; // ref null $ObjVec
-  const L_CAP = 8; // i32 loop bound
-  const L_I = 9; // i32 loop index
-  const L_E = 10; // ref null $PropEntry
-  const L_OUT = 11; // ref $AnyString accumulator
-  const L_PIECE = 12; // ref null $AnyString per-element/prop serialisation
-  const L_FIRST = 13; // i32 — first-emitted flag (comma control)
-  const L_NUM = 14; // f64 number scratch
-  const L_DATA = 15; // ref $ObjVecArr (vec backing)
+  const P_HOLDER = 4;
+  const P_REPLACER = 5;
+  const P_ALLOW = 6;
+  const L_ANY = 7; // anyref scratch (re-tested value)
+  const L_OBJ = 8; // ref null $Object
+  const L_ARR = 9; // ref null $PropMap (ordered) / loop reuse
+  const L_VEC = 10; // ref null $ObjVec
+  const L_CAP = 11; // i32 loop bound
+  const L_I = 12; // i32 loop index
+  const L_E = 13; // ref null $PropEntry
+  const L_OUT = 14; // ref $AnyString accumulator
+  const L_PIECE = 15; // ref null $AnyString per-element/prop serialisation
+  const L_FIRST = 16; // i32 — first-emitted flag (comma control)
+  const L_NUM = 17; // f64 number scratch
+  const L_DATA = 18; // ref $ObjVecArr (vec backing)
   // (#2166 PR-B) Precomputed separator strings (empty when gap is null):
-  const L_NL_IN = 16; // ref $AnyString — "\n" + indent at the *inner* (depth+1) level
-  const L_NL_OUT = 17; // ref $AnyString — "\n" + indent at *this* depth (before close)
-  const L_COLON = 18; // ref $AnyString — ": " when indented, ":" when compact
-  const L_TJKEY = 19; // externref — child key passed down (toJSON + recursion)
-  const L_TJM = 20; // externref — the toJSON method looked up on the value
+  const L_NL_IN = 19; // ref $AnyString — "\n" + indent at the *inner* (depth+1) level
+  const L_NL_OUT = 20; // ref $AnyString — "\n" + indent at *this* depth (before close)
+  const L_COLON = 21; // ref $AnyString — ": " when indented, ":" when compact
+  const L_TJKEY = 22; // externref — child key passed down (toJSON + recursion)
+  const L_TJM = 23; // externref — the toJSON method looked up on the value
+  const L_CHILDV = 24; // anyref — child value after replacer transform (recursion arg)
+  const L_CKEY = 25; // externref — current child key (object/array arms)
 
   const litStr = (s: string): Instr[] => nativeStringLiteralInstrs(ctx, s);
 
@@ -412,17 +443,9 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
               then: [...appendLit(",")],
             },
             ...appendSep(L_NL_IN),
-            // piece = __json_stringify_value(any.convert_extern(data[i]), depth+1,
-            //                                gap, key=number_toString(i))
-            { op: "local.get", index: L_DATA },
-            { op: "local.get", index: L_I },
-            { op: "array.get", typeIdx: objVecArrTypeIdx },
-            { op: "any.convert_extern" },
-            { op: "local.get", index: P_DEPTH },
-            { op: "i32.const", value: 1 },
-            { op: "i32.add" },
-            { op: "local.get", index: P_GAP },
-            // (#2166 PR-D2) the element index as a string key for toJSON
+            // (#2166 PR-D3) the element index as a string key (also the toJSON key
+            // per PR-D2). Computed once into L_CKEY: reused for the replacer call
+            // and the recursion key.
             ...(numToStrIdxTJ === undefined
               ? ([{ op: "ref.null.extern" }] as Instr[])
               : ([
@@ -430,6 +453,48 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
                   { op: "f64.convert_i32_s" },
                   { op: "call", funcIdx: numToStrIdxTJ },
                 ] as Instr[])),
+            { op: "local.set", index: L_CKEY },
+            // childV = data[i] (anyref). (#2166 PR-D3) If a function replacer is
+            // present, transform it first: childV =
+            //   replacer.call(/*this*/ array, idxKey, data[i]). §25.5.2 applies
+            // the replacer to array elements too (SerializeJSONArray step 5 →
+            // SerializeJSONProperty step 3). holder = this array as externref.
+            { op: "local.get", index: L_DATA },
+            { op: "local.get", index: L_I },
+            { op: "array.get", typeIdx: objVecArrTypeIdx },
+            { op: "any.convert_extern" },
+            { op: "local.set", index: L_CHILDV },
+            { op: "local.get", index: P_REPLACER },
+            { op: "ref.is_null" },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: L_ANY },
+                { op: "extern.convert_any" }, // holder = this array
+                { op: "local.get", index: P_REPLACER },
+                { op: "local.get", index: L_CKEY },
+                { op: "local.get", index: L_CHILDV },
+                { op: "extern.convert_any" },
+                { op: "call", funcIdx: replacerDriverIdx },
+                { op: "any.convert_extern" },
+                { op: "local.set", index: L_CHILDV },
+              ],
+            },
+            // piece = __json_stringify_value(childV, depth+1, gap, key=idxKey,
+            //   holder=this array, replacer, allowList) — allowList threads
+            // through unchanged (it only filters object keys, never array idx).
+            { op: "local.get", index: L_CHILDV },
+            { op: "local.get", index: P_DEPTH },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" },
+            { op: "local.get", index: P_GAP },
+            { op: "local.get", index: L_CKEY },
+            { op: "local.get", index: L_ANY },
+            { op: "extern.convert_any" }, // holder = this array
+            { op: "local.get", index: P_REPLACER },
+            { op: "local.get", index: P_ALLOW },
             { op: "call", funcIdx },
             { op: "local.set", index: L_PIECE },
             // null piece (undefined element) → "null"
@@ -502,20 +567,105 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
             { op: "local.tee", index: L_E },
             { op: "ref.is_null" },
             { op: "br_if", depth: 1 },
-            // piece = __json_stringify_value(e.value, depth+1, gap, key=e.key)
-            { op: "local.get", index: L_E },
-            { op: "ref.as_non_null" },
-            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 }, // value:anyref
-            { op: "local.get", index: P_DEPTH },
-            { op: "i32.const", value: 1 },
-            { op: "i32.add" },
-            { op: "local.get", index: P_GAP },
-            // (#2166 PR-D2) the property key (externref) for toJSON
+            // (#2166 PR-D3) the property key as externref into L_CKEY, reused for
+            // the allowlist test, the replacer call, the toJSON key, and quoting.
             { op: "local.get", index: L_E },
             { op: "ref.as_non_null" },
             { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 0 }, // key: ref $AnyString
             { op: "extern.convert_any" },
-            { op: "call", funcIdx },
+            { op: "local.set", index: L_CKEY },
+            // (#2166 PR-D3) array-form replacer (allowlist): if P_ALLOW is non-null
+            // and this key is NOT in the allowlist, skip the property entirely
+            // (§25.5.2 SerializeJSONObject step 5/6 — PropertyList membership).
+            // The allowlist is a plain $Object of allowed keys; __extern_has is
+            // the membership test.
+            ...(externHasIdx === undefined
+              ? []
+              : ([
+                  { op: "local.get", index: P_ALLOW },
+                  { op: "ref.is_null" },
+                  { op: "i32.eqz" },
+                  {
+                    op: "if",
+                    blockType: { kind: "empty" },
+                    then: [
+                      { op: "local.get", index: P_ALLOW },
+                      { op: "local.get", index: L_CKEY },
+                      { op: "call", funcIdx: externHasIdx },
+                      { op: "i32.eqz" }, // not a member?
+                      {
+                        op: "if",
+                        blockType: { kind: "empty" },
+                        then: [
+                          // advance index and continue the loop without emitting
+                          { op: "local.get", index: L_I },
+                          { op: "i32.const", value: 1 },
+                          { op: "i32.add" },
+                          { op: "local.set", index: L_I },
+                          { op: "br", depth: 2 }, // back to loop top
+                        ],
+                      },
+                    ],
+                  },
+                ] as Instr[])),
+            // childV = e.value (anyref). (#2166 PR-D3) function replacer:
+            //   childV = replacer.call(/*this*/ this object, key, e.value).
+            { op: "local.get", index: L_E },
+            { op: "ref.as_non_null" },
+            { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 1 }, // value:anyref
+            { op: "local.set", index: L_CHILDV },
+            { op: "local.get", index: P_REPLACER },
+            { op: "ref.is_null" },
+            { op: "i32.eqz" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: L_ANY },
+                { op: "extern.convert_any" }, // holder = this object
+                { op: "local.get", index: P_REPLACER },
+                { op: "local.get", index: L_CKEY },
+                { op: "local.get", index: L_CHILDV },
+                { op: "extern.convert_any" },
+                { op: "call", funcIdx: replacerDriverIdx },
+                { op: "any.convert_extern" },
+                { op: "local.set", index: L_CHILDV },
+              ],
+            },
+            // (#2166 PR-D3) §25.5.2: a function replacer that returns `undefined`
+            // omits the property. The replacer's result arrives as a null anyref
+            // (undefined ⇒ null externref ⇒ null anyref), so when a replacer was
+            // applied AND childV is null, set piece=null (omit) WITHOUT recursing
+            // — recursing would serialise null → the "null" literal. (A replacer
+            // legitimately returning the JS value `null` is the same null carrier
+            // and is also omitted here; a documented edge — the dominant use is
+            // `return undefined` to drop a key.)
+            { op: "local.get", index: P_REPLACER },
+            { op: "ref.is_null" },
+            { op: "i32.eqz" },
+            { op: "local.get", index: L_CHILDV },
+            { op: "ref.is_null" },
+            { op: "i32.and" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: strRefNull },
+              then: [{ op: "ref.null", typeIdx: anyStrTypeIdx }],
+              else: [
+                // piece = __json_stringify_value(childV, depth+1, gap, key,
+                //   holder=this object, replacer, allowList)
+                { op: "local.get", index: L_CHILDV },
+                { op: "local.get", index: P_DEPTH },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.get", index: P_GAP },
+                { op: "local.get", index: L_CKEY },
+                { op: "local.get", index: L_ANY },
+                { op: "extern.convert_any" }, // holder = this object
+                { op: "local.get", index: P_REPLACER },
+                { op: "local.get", index: P_ALLOW },
+                { op: "call", funcIdx },
+              ],
+            },
             { op: "local.set", index: L_PIECE },
             // omit the property entirely if its value serialised to undefined
             { op: "local.get", index: L_PIECE },
@@ -762,6 +912,8 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
       { count: 1, type: strRef }, // L_COLON
       { count: 1, type: { kind: "externref" } }, // L_TJKEY (#2166 PR-D2)
       { count: 1, type: { kind: "externref" } }, // L_TJM   (#2166 PR-D2)
+      { count: 1, type: anyref }, // L_CHILDV (#2166 PR-D3)
+      { count: 1, type: { kind: "externref" } }, // L_CKEY (#2166 PR-D3)
     ],
     // (#2166 PR-D2) Deep-clone so every `call`/operand occurrence is an
     // INDEPENDENT object. The body spreads shared helper `Instr[]` arrays
@@ -802,6 +954,11 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
       // (#2166 PR-D2) root key is "" (§25.5.2 SerializeJSONProperty root call).
       ...litStr(""),
       { op: "extern.convert_any" },
+      // (#2166 PR-D3) no replacer/allowlist on the plain compact root: holder,
+      // replacer, allowList are all null.
+      { op: "ref.null.extern" },
+      { op: "ref.null.extern" },
+      { op: "ref.null.extern" },
       { op: "call", funcIdx },
       { op: "local.tee", index: 1 },
       { op: "ref.is_null" },
@@ -834,6 +991,10 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
       // (#2166 PR-D2) root key is "".
       ...litStr(""),
       { op: "extern.convert_any" },
+      // (#2166 PR-D3) no replacer/allowlist on the plain indented root.
+      { op: "ref.null.extern" },
+      { op: "ref.null.extern" },
+      { op: "ref.null.extern" },
       { op: "call", funcIdx },
       { op: "local.tee", index: 2 },
       { op: "ref.is_null" },
@@ -842,6 +1003,90 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
         blockType: { kind: "val", type: strRef },
         then: [...litStr("null")],
         else: [{ op: "local.get", index: 2 }, { op: "ref.as_non_null" }],
+      },
+    ],
+    exported: false,
+  } as unknown as (typeof ctx.mod.functions)[number]);
+
+  // ── __json_stringify_root_replacer(v: anyref, gap: ref null $AnyString,
+  //     replacer: externref, allowList: externref) -> ref $AnyString ──────────
+  // (#2166 PR-D3) The replacer/allowlist entry. Per §25.5.2: build the synthetic
+  // root holder `{"": v}`, apply a function replacer to the root value itself
+  // (`replacer.call(root, "", v)`), then serialise the (possibly transformed)
+  // value with the holder/replacer/allowList threaded into the walk. A null gap
+  // selects compact output; the worker's separators collapse to "".
+  const newObjIdx = ctx.funcMap.get("__new_plain_object")!;
+  const externSetIdx = ctx.funcMap.get("__extern_set")!;
+  const rootRepTypeIdx = addFuncType(
+    ctx,
+    [anyref, strRefNull, { kind: "externref" }, { kind: "externref" }],
+    [strRef],
+  );
+  const rootRepFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__json_stringify_root_replacer", rootRepFuncIdx);
+  // locals: 4 RR_ROOT externref  5 RR_VAL anyref  6 RR_RES strRefNull
+  const RR_ROOT = 4;
+  const RR_VAL = 5;
+  const RR_RES = 6;
+  ctx.mod.functions.push({
+    name: "__json_stringify_root_replacer",
+    typeIdx: rootRepTypeIdx,
+    locals: [
+      { count: 1, type: { kind: "externref" } }, // RR_ROOT
+      { count: 1, type: anyref }, // RR_VAL
+      { count: 1, type: strRefNull }, // RR_RES
+    ],
+    body: [
+      // val = v
+      { op: "local.get", index: 0 },
+      { op: "local.set", index: RR_VAL },
+      // root = __new_plain_object(); root[""] = v
+      { op: "call", funcIdx: newObjIdx },
+      { op: "local.set", index: RR_ROOT },
+      { op: "local.get", index: RR_ROOT },
+      ...litStr(""),
+      { op: "extern.convert_any" },
+      { op: "local.get", index: RR_VAL },
+      { op: "extern.convert_any" },
+      { op: "call", funcIdx: externSetIdx },
+      // §25.5.2 step 3 — a function replacer transforms the root value too:
+      //   val = replacer.call(root, "", val). A null replacer (array-form) skips.
+      { op: "local.get", index: 2 }, // replacer
+      { op: "ref.is_null" },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: RR_ROOT }, // holder = root
+          { op: "local.get", index: 2 }, // replacer
+          ...litStr(""),
+          { op: "extern.convert_any" }, // key = ""
+          { op: "local.get", index: RR_VAL },
+          { op: "extern.convert_any" }, // value
+          { op: "call", funcIdx: replacerDriverIdx },
+          { op: "any.convert_extern" },
+          { op: "local.set", index: RR_VAL },
+        ],
+      },
+      // res = __json_stringify_value(val, 0, gap, key="", holder=root,
+      //   replacer, allowList)
+      { op: "local.get", index: RR_VAL },
+      { op: "i32.const", value: 0 },
+      { op: "local.get", index: 1 }, // gap
+      ...litStr(""),
+      { op: "extern.convert_any" }, // root key ""
+      { op: "local.get", index: RR_ROOT }, // holder = root
+      { op: "local.get", index: 2 }, // replacer
+      { op: "local.get", index: 3 }, // allowList
+      { op: "call", funcIdx },
+      { op: "local.tee", index: RR_RES },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: strRef },
+        then: [...litStr("null")],
+        else: [{ op: "local.get", index: RR_RES }, { op: "ref.as_non_null" }],
       },
     ],
     exported: false,

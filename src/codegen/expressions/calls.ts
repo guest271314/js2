@@ -2287,6 +2287,57 @@ function compileFromCharCodeFamily(
   return repr.resultType;
 }
 
+/**
+ * (#2166 PR-D3) Build the array-form `JSON.stringify` replacer allowlist as a
+ * plain `$Object` whose own keys are the (String/Number-coerced) elements of an
+ * array-literal replacer, and leave it on the stack as an externref. The codec
+ * tests membership with `__extern_has`, so the stored value is immaterial — we
+ * store the key string itself. Per §25.5.2 SerializeJSONArray-replacer rules
+ * only String and Number elements contribute a key; duplicates collapse (a
+ * second `__extern_set` of the same key is a no-op for membership). Other
+ * element kinds (booleans, objects, dynamic expressions) are ignored, matching
+ * the spec's "only String/Number" filter for the common static-array case.
+ */
+function emitJsonReplacerAllowList(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arrayLit: ts.ArrayLiteralExpression,
+): void {
+  const newObjIdx = ctx.funcMap.get("__new_plain_object")!;
+  const externSetIdx = ctx.funcMap.get("__extern_set")!;
+  const allowLocal = allocLocal(fctx, `__json_allow_${fctx.locals.length}`, { kind: "externref" });
+  // allow = __new_plain_object()
+  fctx.body.push({ op: "call", funcIdx: newObjIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: allowLocal } as Instr);
+  const seen = new Set<string>();
+  for (const el of arrayLit.elements) {
+    let key: string | undefined;
+    if (ts.isStringLiteral(el) || ts.isNoSubstitutionTemplateLiteral(el)) {
+      key = el.text;
+    } else if (ts.isNumericLiteral(el)) {
+      // Number element → its String() form (e.g. 0 → "0").
+      key = String(Number(el.text));
+    } else if (
+      ts.isPrefixUnaryExpression(el) &&
+      el.operator === ts.SyntaxKind.MinusToken &&
+      ts.isNumericLiteral(el.operand)
+    ) {
+      key = String(-Number(el.operand.text));
+    }
+    if (key === undefined || seen.has(key)) continue;
+    seen.add(key);
+    // __extern_set(allow, key, key) — value is immaterial (membership only).
+    fctx.body.push({ op: "local.get", index: allowLocal } as Instr);
+    for (const instr of nativeStringLiteralInstrs(ctx, key)) fctx.body.push(instr);
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    for (const instr of nativeStringLiteralInstrs(ctx, key)) fctx.body.push(instr);
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "call", funcIdx: externSetIdx } as Instr);
+  }
+  // leave the allowlist object on the stack as externref
+  fctx.body.push({ op: "local.get", index: allowLocal } as Instr);
+}
+
 function compileCallExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -6064,6 +6115,59 @@ function compileCallExpression(
                 } as Instr);
               }
               return nativeStringType(ctx);
+            }
+            // (#2166 PR-D3) replacer — a function replacer transforms every
+            // property/element (`replacer.call(holder, key, value)`); an array
+            // replacer is a key allowlist. Both route to the dynamic codec via
+            // __json_stringify_root_replacer. The value must be a plain object
+            // graph (PR-A scope — not array-like); a dynamic space still refuses.
+            if (!replacerNullish && gap !== undefined && !isArrayLike && replacerArg !== undefined) {
+              const replacerCallable =
+                ts.isArrowFunction(replacerArg) ||
+                ts.isFunctionExpression(replacerArg) ||
+                ctx.checker.getTypeAtLocation(replacerArg).getCallSignatures().length > 0;
+              const isArrayLiteral = ts.isArrayLiteralExpression(replacerArg);
+              if (replacerCallable || isArrayLiteral) {
+                // value → anyref
+                const argResult = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "anyref" });
+                if (argResult === null) return null;
+                if (argResult.kind === "externref" || argResult.kind === "ref_extern") {
+                  fctx.body.push({ op: "any.convert_extern" } as Instr);
+                } else if (argResult.kind !== "anyref") {
+                  coerceType(ctx, fctx, argResult, { kind: "anyref" });
+                }
+                // gap (or null for compact)
+                if (gap === "") {
+                  fctx.body.push({ op: "ref.null", typeIdx: ctx.anyStrTypeIdx } as Instr);
+                } else {
+                  for (const instr of nativeStringLiteralInstrs(ctx, gap)) fctx.body.push(instr);
+                }
+                // replacer (externref) + allowList (externref); exactly one is set.
+                if (isArrayLiteral) {
+                  fctx.body.push({ op: "ref.null.extern" } as Instr); // no fn replacer
+                  emitJsonReplacerAllowList(ctx, fctx, replacerArg); // builds $Object → externref
+                } else {
+                  // A function replacer goes through the GC-closure path
+                  // (compileArrowAsClosure), NOT __make_callback — the host
+                  // bridge leaks an env:: import and its JS wrapper fails the
+                  // __call_fn_method_2 ref.cast (same rationale as the PR-D1
+                  // reviver path).
+                  if (ts.isArrowFunction(replacerArg) || ts.isFunctionExpression(replacerArg)) {
+                    compileArrowAsClosure(ctx, fctx, replacerArg);
+                  } else {
+                    const r = compileExpression(ctx, fctx, replacerArg, { kind: "externref" });
+                    if (r === null) return null;
+                  }
+                  fctx.body.push({ op: "ref.null.extern" } as Instr); // no allowList
+                }
+                emitJsonStringifyValue(ctx);
+                flushLateImportShifts(ctx, fctx);
+                fctx.body.push({
+                  op: "call",
+                  funcIdx: ctx.funcMap.get("__json_stringify_root_replacer")!,
+                } as Instr);
+                return nativeStringType(ctx);
+              }
             }
           }
         }
