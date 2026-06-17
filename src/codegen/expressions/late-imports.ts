@@ -253,6 +253,22 @@ export function shiftLateImportIndices(
       ctx.nativeRegexHelpers.set(name, idx + added);
     }
   }
+  // (#2162) Same lockstep for `mapHelpers` — the Map/Set/WeakMap/WeakSet
+  // lowering call sites (`__map_get`/`__map_has`/`__map_set`/`__weakset_add`/…
+  // in map-runtime.ts + weak-collections-runtime.ts) bake `call` funcIdx
+  // straight from this map. Leaving it stale-low meant a late import landing
+  // BETWEEN the helper registration and the call (e.g. `__box_number` pulled in
+  // while compiling a numeric Map/WeakMap key or value) shifted every defined
+  // function up by `added` but NOT these entries — so the call landed one
+  // function too early (`wm.has` → `__map_get`, returning anyref where i32 was
+  // expected) and the module failed validation. WeakMap exposes it because its
+  // first method call is often the first `__box_number` trigger; plain Map
+  // usually imports `__box_number` earlier and dodged the window.
+  for (const [name, idx] of ctx.mapHelpers) {
+    if (idx >= importsBefore) {
+      ctx.mapHelpers.set(name, idx + added);
+    }
+  }
   // (#2039 slice 2) Re-base the native-string finalize-shift regime. The loop
   // above plus the mod.functions body walk fully repaired the helpers for the
   // `added` imports of this batch, so the helpers are now consistent with the
