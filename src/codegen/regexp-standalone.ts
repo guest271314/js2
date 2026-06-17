@@ -1397,19 +1397,6 @@ export function tryCompileStandaloneStringReplace(
     return undefined; // not a RegExp arg → generic string path
   }
 
-  // Replacement must be a STRING (any string expression — `$`-substitution
-  // patterns are expanded at runtime by __regex_get_substitution per
-  // §22.2.6.11, #1913). Function replacers need closure dispatch with
-  // capture-arg marshalling and stay a narrowed refusal.
-  if (!isStringLikeArg(ctx, replExpr)) {
-    reportStandaloneRegExpUnsupported(
-      ctx,
-      replExpr,
-      `String.prototype.${method} with a function (or non-string) replacer (#1913 follow-up)`,
-    );
-    return null;
-  }
-
   const flags = staticRegExpFlags(ctx, reExpr);
   if (flags === null) return undefined;
   const reHasGlobal = flags.includes("g");
@@ -1420,8 +1407,46 @@ export function tryCompileStandaloneStringReplace(
   // For `replace`, global is honored (replace-all when `g`, first-only else).
   const globalReplace = method === "replaceAll" || reHasGlobal;
 
+  // String-method operand order: subject = receiver, regex = arg[0].
+  return emitStandaloneRegExpReplaceCore(ctx, fctx, expr, propAccess.expression, reExpr, replExpr, globalReplace, method);
+}
+
+/**
+ * Operand-explicit core for `@@replace` semantics (§22.2.6.11). Shared by
+ * `String.prototype.replace`/`replaceAll` (subject is the receiver, regex is
+ * arg[0]) and the `re[Symbol.replace](str, replacement)` protocol form (regex is
+ * the receiver, subject is arg[0]). `globalReplace` is resolved by the caller
+ * from the method (`replaceAll`) and/or the regex `g` flag. `diag` names the
+ * surface (`replace`/`replaceAll`/`@@replace`) for refusal messages.
+ *
+ * Returns a `$NativeString` (no array boundary, no host import). A non-string
+ * replacement (function replacer) stays a narrowed refusal.
+ */
+function emitStandaloneRegExpReplaceCore(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  subjExpr: ts.Expression,
+  reExpr: ts.Expression,
+  replExpr: ts.Expression,
+  globalReplace: boolean,
+  diag: string,
+): ValType | null {
+  // Replacement must be a STRING (any string expression — `$`-substitution
+  // patterns are expanded at runtime by __regex_get_substitution per
+  // §22.2.6.11, #1913). Function replacers need closure dispatch with
+  // capture-arg marshalling and stay a narrowed refusal.
+  if (!isStringLikeArg(ctx, replExpr)) {
+    reportStandaloneRegExpUnsupported(
+      ctx,
+      replExpr,
+      `${diag} with a function (or non-string) replacer (#1913 follow-up)`,
+    );
+    return null;
+  }
+
   if (!hasStandaloneRegExpEngine(ctx)) {
-    reportStandaloneRegExpUnsupported(ctx, expr, `String.prototype.${method} without an enabled standalone engine`);
+    reportStandaloneRegExpUnsupported(ctx, expr, `${diag} without an enabled standalone engine`);
     return null;
   }
 
@@ -1439,8 +1464,8 @@ export function tryCompileStandaloneStringReplace(
   if (loaded === null) return null;
   const { regexpLocal, structTypeIdx } = loaded;
 
-  // --- subject: flatten the receiver string ---
-  const subjType = compileExpression(ctx, fctx, propAccess.expression, nativeStringType(ctx));
+  // --- subject: flatten the subject string ---
+  const subjType = compileExpression(ctx, fctx, subjExpr, nativeStringType(ctx));
   if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
   fctx.body.push({ op: "call", funcIdx: flattenIdx });
   const subjLocal = allocLocal(fctx, `__re_subj_${fctx.locals.length}`, { kind: "ref", typeIdx: strTypeIdx });
@@ -1506,9 +1531,29 @@ export function tryCompileStandaloneStringSplit(
   }
   const limitExpr = expr.arguments[1];
 
+  // String-method operand order: subject = receiver, regex = arg[0].
+  return emitStandaloneRegExpSplitCore(ctx, fctx, expr, propAccess.expression, reExpr, limitExpr, "String.prototype.split");
+}
+
+/**
+ * Operand-explicit core for `@@split` semantics (§22.2.6.14). Shared by
+ * `String.prototype.split` (subject is the receiver, separator regex is arg[0],
+ * limit is arg[1]) and the `re[Symbol.split](str, limit)` protocol form (regex
+ * is the receiver, subject is arg[0], limit is arg[1]). `diag` names the surface
+ * for refusal messages. Returns a native-string vec.
+ */
+function emitStandaloneRegExpSplitCore(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  subjExpr: ts.Expression,
+  reExpr: ts.Expression,
+  limitExpr: ts.Expression | undefined,
+  diag: string,
+): ValType | null {
   const meta = staticRegExpPatternFlags(ctx, reExpr);
   if (meta === null) {
-    reportStandaloneRegExpUnsupported(ctx, reExpr, "String.prototype.split with dynamic RegExp separators");
+    reportStandaloneRegExpUnsupported(ctx, reExpr, `${diag} with dynamic RegExp separators`);
     return null;
   }
 
@@ -1517,7 +1562,7 @@ export function tryCompileStandaloneStringSplit(
   if (compileStaticStandaloneRegExp(ctx, meta.pattern, meta.flags, reExpr) === null) return null;
 
   if (!hasStandaloneRegExpEngine(ctx)) {
-    reportStandaloneRegExpUnsupported(ctx, expr, "String.prototype.split without an enabled standalone engine");
+    reportStandaloneRegExpUnsupported(ctx, expr, `${diag} without an enabled standalone engine`);
     return null;
   }
 
@@ -1534,7 +1579,7 @@ export function tryCompileStandaloneStringSplit(
   if (loaded === null) return null;
   const { regexpLocal, structTypeIdx } = loaded;
 
-  const subjType = compileExpression(ctx, fctx, propAccess.expression, nativeStringType(ctx));
+  const subjType = compileExpression(ctx, fctx, subjExpr, nativeStringType(ctx));
   if (subjType?.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
   fctx.body.push({ op: "call", funcIdx: flattenIdx });
   const subjLocal = allocLocal(fctx, `__re_split_subj_${fctx.locals.length}`, { kind: "ref", typeIdx: strTypeIdx });
@@ -1566,7 +1611,7 @@ export function tryCompileStandaloneStringSplit(
       // matches ToUint32 for the integer limits tests exercise.
       fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
     } else if (limType.kind !== "i32") {
-      reportStandaloneRegExpUnsupported(ctx, limitExpr, "String.prototype.split with non-numeric limits");
+      reportStandaloneRegExpUnsupported(ctx, limitExpr, `${diag} with non-numeric limits`);
       return null;
     }
   }
@@ -1597,10 +1642,14 @@ export function tryCompileStandaloneStringSplit(
  *
  * Gating mirrors the String.prototype path: the receiver must be a static /
  * backend-created RegExp value (so the pattern + flags are known at compile
- * time) and the argument must be string-like. Dynamic-flag receivers, string-
- * coercion arguments, and `@@replace`/`@@split` (a follow-up slice) return
- * `undefined`, so the caller falls through to the existing
- * `__regex_symbol_call` host import (JS-host mode) or the standalone refusal.
+ * time) and the (first) argument must be string-like. Dynamic-flag receivers
+ * and string-coercion arguments return `undefined`, so the caller falls through
+ * to the existing `__regex_symbol_call` host import (JS-host mode) or the
+ * standalone refusal.
+ *
+ * `@@replace` / `@@split` carry a second operand (replacement / limit). They
+ * reuse the same operand-explicit cores as `String.prototype.replace`/`split`
+ * with the operands swapped (regex = receiver, subject = arg[0]).
  *
  * `methodName` is the `@@<id>` sentinel the element-access dispatcher resolved
  * for the computed Symbol key (e.g. `"@@match"`).
@@ -1614,9 +1663,6 @@ export function tryCompileStandaloneRegExpSymbolCall(
 ): ValType | null | undefined {
   if (!ctx.standalone) return undefined;
 
-  // Only the read protocol forms are wired in this slice; @@replace / @@split
-  // (which carry extra replacement/limit operands) fall through to the host /
-  // refusal path until their cores are operand-generalised.
   const symbolMethod =
     methodName === "@@match"
       ? "match"
@@ -1624,7 +1670,11 @@ export function tryCompileStandaloneRegExpSymbolCall(
         ? "matchAll"
         : methodName === "@@search"
           ? "search"
-          : undefined;
+          : methodName === "@@replace"
+            ? "replace"
+            : methodName === "@@split"
+              ? "split"
+              : undefined;
   if (symbolMethod === undefined) return undefined;
 
   // Receiver must be a static / backend-created RegExp (pattern + flags known
@@ -1635,20 +1685,42 @@ export function tryCompileStandaloneRegExpSymbolCall(
     return undefined;
   }
 
-  // Exactly one string argument; string-coercion (`re[Symbol.match](42)`)
-  // falls through to the host path which performs ToString.
-  if (expr.arguments.length !== 1) return undefined;
+  // arg[0] is the subject string in every form; string-coercion
+  // (`re[Symbol.match](42)`) falls through to the host path which does ToString.
+  if (expr.arguments.length < 1) return undefined;
   const strExpr = expr.arguments[0]!;
   if (!isStringLikeArg(ctx, strExpr)) return undefined;
 
-  // Operand order: subject = the string ARGUMENT, regex = the RECEIVER.
+  // Operand order: subject = the string ARGUMENT (arg[0]), regex = the RECEIVER.
   switch (symbolMethod) {
     case "search":
+      if (expr.arguments.length !== 1) return undefined;
       return emitStandaloneRegExpSearchCore(ctx, fctx, expr, strExpr, regexExpr);
     case "match":
+      if (expr.arguments.length !== 1) return undefined;
       return emitStandaloneRegExpMatchCore(ctx, fctx, expr, strExpr, regexExpr);
     case "matchAll":
+      if (expr.arguments.length !== 1) return undefined;
       return emitStandaloneRegExpMatchAllCore(ctx, fctx, expr, strExpr, regexExpr);
+    case "replace": {
+      // `re[Symbol.replace](str, replacement)` — §22.2.6.11. Requires exactly
+      // the (subject, replacement) pair; the replacement string-likeness is
+      // checked inside the core (function replacers stay a narrowed refusal).
+      if (expr.arguments.length !== 2) return undefined;
+      const replExpr = expr.arguments[1]!;
+      // @@replace honors the regex's own `g` flag (replace-all when global,
+      // first-only otherwise); there is no replaceAll distinction here.
+      const flags = staticRegExpFlags(ctx, regexExpr);
+      if (flags === null) return undefined;
+      const globalReplace = flags.includes("g");
+      return emitStandaloneRegExpReplaceCore(ctx, fctx, expr, strExpr, regexExpr, replExpr, globalReplace, "@@replace");
+    }
+    case "split": {
+      // `re[Symbol.split](str[, limit])` — §22.2.6.14. limit is optional.
+      if (expr.arguments.length > 2) return undefined;
+      const limitExpr = expr.arguments[1];
+      return emitStandaloneRegExpSplitCore(ctx, fctx, expr, strExpr, regexExpr, limitExpr, "@@split");
+    }
   }
 }
 
