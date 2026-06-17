@@ -1,10 +1,11 @@
 ---
 id: 2026
 title: "classes are not first-class values: new K() on a parameter throws 'No dependency provided for extern class', .constructor identity broken"
-status: ready
+status: in-progress
+assignee: ttraenkler/sdev-async2
 sprint: 63
 created: 2026-06-10
-updated: 2026-06-12
+updated: 2026-06-17
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -271,6 +272,51 @@ extern.convert_any                 ;; box instance
   ensure the class-object struct exposes the `__tag` for the dynamic tag read
   (it already carries `__tag`; confirm field index).
 - `src/codegen/property-access.ts` (~line 3457) — PR-2 only.
+
+### Implementation log (sdev-async2, 2026-06-17)
+
+Re-validated repro on `upstream/main` @ `fe0e21ba1`: `THROW: No dependency
+provided for extern class "K"` — confirmed. Traced the live path precisely:
+
+- `new K()` (K an `any` param) reaches `compileNewExpression`'s **`!className`
+  unknown-ctor branch** (`new-super.ts:2954`), NOT the terminal `reportError`
+  at 3812. `ctorName = "K"`. It falls past the `resolvesToNonConstructableValue`
+  guard (2992, doesn't fire for K) and the ArrayBuffer/DataView/Array builtin
+  arms, then emits the `__new_K` unknown-ctor import (~3168) → runtime
+  `runtime.ts:6230` throws "No dependency provided for extern class K".
+- Insertion point for the dynamic fallback: **inside the `!className` branch,
+  immediately before the `__new_${ctorName}` import emission (~3168)**, gated on
+  `ts.isIdentifier(s1Callee)` + value-type is class-or-`any`. Try the ctor-table
+  dispatch first; on a null/invalid tag, **fall through to the existing
+  `__new_` import** so `Test262Error`-style genuine host builtins keep working.
+- Tag read: class root structs get `__tag` at **field 0** (`class-bodies.ts:598`),
+  child classes inherit it. Class-object descriptor reuses the **same
+  `$ClassName` struct** as instances (`extern.ts:317`), so the value in `K` is an
+  `extern.convert_any`'d `$ClassName` struct carrying `__tag`. To read it
+  generically I register one shared open base `$ClassTagBase =
+  (sub (struct (field $__tag i32) (field $__shape_brand i32)))` and set it as the
+  superTypeIdx of every class-ROOT struct (`class-bodies.ts:632`); the existing
+  `__shape_brand` sentinel (626) already dodges the #2009 `$AnyString`
+  canonical-merge. Then `any.convert_extern` + `ref.test $ClassTagBase` +
+  `struct.get 0` yields the tag with no host import (standalone-safe).
+- `$ObjVecArr` = `(array (mut externref))` (`object-runtime.ts:273`) is the argv
+  array type — reuse it, do not mint a new one.
+- `<Class>_new` is keyed `classMemberFuncKey(ctx, "${className}_new")`
+  (`class-bodies.ts:736`); the uniform trampoline re-resolves it per class.
+
+### Slice plan (PR-1 → PR-3)
+
+- **PR-1 (core):** `$ClassTagBase` supertype wiring + `$UniformCtor` type +
+  per-class `__ctor_uniform_<Name>` trampoline (lazy, `ctx.uniformCtorFuncIdx`)
+  + module `(table $ctorTable funcref)` slotted at class registration + the
+  dynamic-new fallback arm (tag read → `table.get`/`call_ref`, else fall through
+  to `__new_`). Repro returns 6. Static `new C()` path untouched (regression
+  guard test). Host + standalone.
+- **PR-2:** `.constructor === A` for the externref/`any`-typed receiver via the
+  same tag→`__class_<Name>` map (statically-typed receiver already works).
+- **PR-3:** spread/arity/derived-class args in `$argv` (reuse `flattenCallArgs`);
+  new.target threading inside the trampoline; non-constructor / null descriptor
+  TypeError edge cases.
 
 ### Test files to verify
 - New `tests/issue-2026.test.ts`:
