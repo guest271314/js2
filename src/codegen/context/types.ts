@@ -1078,6 +1078,14 @@ export interface CodegenContext {
   templateCacheCounter: number;
   /** Type index for template vec struct */
   templateVecTypeIdx: number;
+  /**
+   * (#2186) Type index for the shared `$__vec_base` supertype — a `(length i32)`
+   * struct that every `__vec_<elemKind>` subtypes. Lets standalone runtime
+   * helpers (`__extern_length`) `ref.test`/`ref.cast` a boxed array externref
+   * to read its `.length` uniformly, regardless of element kind. -1 = not yet
+   * registered (created lazily on first `getOrRegisterVecType`).
+   */
+  vecBaseTypeIdx: number;
   /** Type index for the WasmGC `$Error_struct` used in standalone/WASI mode (#1104). -1 = not yet registered. */
   errorStructTypeIdx: number;
   /** Extra properties for empty object variables */

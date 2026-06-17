@@ -159,6 +159,7 @@ export function createCodegenContext(
     shapeMap: new Map(),
     templateCacheCounter: 0,
     templateVecTypeIdx: -1,
+    vecBaseTypeIdx: -1, // (#2186) shared $__vec_base length supertype, lazy
     errorStructTypeIdx: -1,
     widenedTypeProperties: new Map(),
     widenedVarStructMap: new Map(),
