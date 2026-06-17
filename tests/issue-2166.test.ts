@@ -260,3 +260,126 @@ describe("#2166 PR-A — standalone dynamic object-graph JSON.stringify", () => 
     expect(await stringifyDynamic(`let o: any = { a: 1 }; o = { a: 1, b: 2 }; G = s(o);`)).toBe('{"a":1,"b":2}');
   });
 });
+
+/*
+ * #2166 PR-B — dynamic object-graph `JSON.stringify(value, null, space)` with
+ * §25.5.2 indentation. PR-A serialised dynamic graphs *compactly* only; a
+ * `space` argument forced the #1599 refusal (the static-fold path owns the
+ * static-value-static-space form, but a runtime-built graph never reaches it).
+ *
+ * PR-B threads a per-level indent unit ("gap") through the pure-Wasm recursive
+ * codec (`__json_stringify_root_indent`). A *static* number/string `space` is
+ * resolved at compile time to the gap (`min(10, floor(n))` spaces, or the first
+ * 10 chars of a string; ≤0/"" → compact). A function/array replacer or a
+ * *dynamic* space still keeps the refusal.
+ *
+ * Standalone native strings don't marshal across the export boundary, so the
+ * result is read back char-by-char and compared to Node's own
+ * `JSON.stringify(value, null, space)` — exact §25.5.2 parity.
+ */
+async function stringifyDynamicSpace(
+  build: string,
+  sBody: string,
+  target: "standalone" | "wasi" = "standalone",
+): Promise<string> {
+  const src =
+    `function s(o: any): string { return ${sBody}; }\n` +
+    `let G: string = "";\n` +
+    `export function len(): number { return G.length; }\n` +
+    `export function ch(i: number): number { return G.charCodeAt(i); }\n` +
+    `export function run(): void { ${build} }`;
+  const r = await compile(src, { target });
+  expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+  // No JSON_* host import may leak into the standalone/wasi module.
+  const labels = r.imports.map((i) => `${i.module}::${i.name}`);
+  expect(labels.some((l) => /JSON_stringify|JSON_parse/.test(l))).toBe(false);
+  const { instance } = await WebAssembly.instantiate(r.binary, {});
+  const ex = instance.exports as { run: () => void; len: () => number; ch: (i: number) => number };
+  ex.run();
+  let out = "";
+  const n = ex.len();
+  for (let i = 0; i < n; i++) out += String.fromCharCode(ex.ch(i));
+  return out;
+}
+
+describe("#2166 PR-B — standalone dynamic object-graph JSON.stringify indentation", () => {
+  it("indents a flat object with numeric space 2", async () => {
+    const want = JSON.stringify({ x: 7, y: 8 }, null, 2);
+    expect(await stringifyDynamicSpace(`let o: any = { x: 7, y: 8 }; G = s(o);`, `JSON.stringify(o, null, 2)`)).toBe(
+      want,
+    );
+  });
+
+  it("indents a nested object graph (per-level indent grows with depth)", async () => {
+    const want = JSON.stringify({ child: { k: 7 }, z: 9 }, null, 2);
+    expect(
+      await stringifyDynamicSpace(
+        `const n: any = { k: 7 }; const o: any = { child: n, z: 9 }; G = s(o);`,
+        `JSON.stringify(o, null, 2)`,
+      ),
+    ).toBe(want);
+  });
+
+  it("indents a deeply nested graph with space 2", async () => {
+    const want = JSON.stringify({ b: { c: { d: 4 } }, e: 5 }, null, 2);
+    expect(
+      await stringifyDynamicSpace(
+        `const a: any = { d: 4 }; const b: any = { c: a }; const o: any = { b: b, e: 5 }; G = s(o);`,
+        `JSON.stringify(o, null, 2)`,
+      ),
+    ).toBe(want);
+  });
+
+  it("uses a string space (tab) as the indent unit", async () => {
+    const want = JSON.stringify({ a: 1, b: 2 }, null, "\t");
+    expect(
+      await stringifyDynamicSpace(`let o: any = { a: 1, b: 2 }; G = s(o);`, `JSON.stringify(o, null, "\\t")`),
+    ).toBe(want);
+  });
+
+  it("uses a multi-char string space", async () => {
+    const want = JSON.stringify({ a: 1, b: 2 }, null, "xy");
+    expect(
+      await stringifyDynamicSpace(`let o: any = { a: 1, b: 2 }; G = s(o);`, `JSON.stringify(o, null, "xy")`),
+    ).toBe(want);
+  });
+
+  it("clamps a numeric space > 10 to 10 spaces (§25.5.2)", async () => {
+    const want = JSON.stringify({ x: 1 }, null, 15);
+    expect(await stringifyDynamicSpace(`let o: any = { x: 1 }; G = s(o);`, `JSON.stringify(o, null, 15)`)).toBe(want);
+  });
+
+  it("space 0 produces the compact form (no indentation)", async () => {
+    const want = JSON.stringify({ a: 1, b: 2 }, null, 0);
+    expect(await stringifyDynamicSpace(`let o: any = { a: 1, b: 2 }; G = s(o);`, `JSON.stringify(o, null, 0)`)).toBe(
+      want,
+    );
+    expect(want).toBe('{"a":1,"b":2}');
+  });
+
+  it("indents a null property value", async () => {
+    const want = JSON.stringify({ n: null, x: 1 }, null, 2);
+    expect(
+      await stringifyDynamicSpace(`let o: any = { n: null, x: 1 }; G = s(o);`, `JSON.stringify(o, null, 2)`),
+    ).toBe(want);
+  });
+
+  it("keeps an empty object compact even with a space (§25.5.2)", async () => {
+    const want = JSON.stringify({ a: {}, b: 2 }, null, 2);
+    expect(
+      await stringifyDynamicSpace(`const e: any = {}; let o: any = { a: e, b: 2 }; G = s(o);`, `JSON.stringify(o, null, 2)`),
+    ).toBe(want);
+  });
+
+  it("stays host-import-free under --target wasi with a space arg", async () => {
+    // As with PR-A, the wasi object-rep differs, so only assert no host-import
+    // leak (the assertion lives inside stringifyDynamicSpace).
+    await stringifyDynamicSpace(`let o: any = { x: 1, y: 2 }; G = s(o);`, `JSON.stringify(o, null, 2)`, "wasi");
+  });
+
+  it("a 1-arg dynamic stringify stays compact (PR-A regression guard)", async () => {
+    expect(await stringifyDynamicSpace(`let o: any = { a: 1, b: 2 }; G = s(o);`, `JSON.stringify(o)`)).toBe(
+      '{"a":1,"b":2}',
+    );
+  });
+});
