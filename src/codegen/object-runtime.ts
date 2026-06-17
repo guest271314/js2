@@ -320,6 +320,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { name: "getPrototypeOf", type: { kind: "externref" }, mutable: false },
       // (#1355 Slice C) setPrototypeOf — field index 7.
       { name: "setPrototypeOf", type: { kind: "externref" }, mutable: false },
+      // (#1355 Slice D) isExtensible — field index 8.
+      { name: "isExtensible", type: { kind: "externref" }, mutable: false },
+      // (#1355 Slice D) preventExtensions — field index 9.
+      { name: "preventExtensions", type: { kind: "externref" }, mutable: false },
     ],
   });
 
@@ -4956,6 +4960,8 @@ const PROXY_CALL_DELETE = "__proxy_call_delete"; // (#1355 Slice A)
 const PROXY_CALL_GOPD = "__proxy_call_gopd"; // (#1355 Slice B) getOwnPropertyDescriptor
 const PROXY_CALL_GPO = "__proxy_call_gpo"; // (#1355 Slice C) getPrototypeOf
 const PROXY_CALL_SPO = "__proxy_call_spo"; // (#1355 Slice C) setPrototypeOf
+const PROXY_CALL_ISEXT = "__proxy_call_isext"; // (#1355 Slice D) isExtensible
+const PROXY_CALL_PREVEXT = "__proxy_call_prevext"; // (#1355 Slice D) preventExtensions
 
 /**
  * (#1100) Standalone Proxy meta-object dispatch runtime — Phase 1.
@@ -5050,6 +5056,8 @@ function ensureProxyRuntime(
   const TRAP_GOPD = 5; // (#1355 Slice B) getOwnPropertyDescriptor
   const TRAP_GPO = 6; // (#1355 Slice C) getPrototypeOf
   const TRAP_SPO = 7; // (#1355 Slice C) setPrototypeOf
+  const TRAP_ISEXT = 8; // (#1355 Slice D) isExtensible
+  const TRAP_PREVEXT = 9; // (#1355 Slice D) preventExtensions
 
   // ── Reserve the trap-invoke driver placeholders (filled by fillProxyDispatch) ──
   //
@@ -5094,6 +5102,11 @@ function ensureProxyRuntime(
   // (#1355 Slice C) setPrototypeOf driver — 2 trap args: (handler, trap, target,
   // proto) → __call_fn_method_2 (§10.5.2 step 7 `Call(trap, handler, «target, V»)`).
   const callSpoIdx = reserveDriver(PROXY_CALL_SPO, [externref, externref, externref, externref]);
+  // (#1355 Slice D) isExtensible / preventExtensions drivers — 1 trap arg each:
+  // (handler, trap, target) → __call_fn_method_1 (§10.5.3 step 5 / §10.5.4 step 5
+  // `Call(trap, handler, «target»)`). Both return a booleanish externref.
+  const callIsextIdx = reserveDriver(PROXY_CALL_ISEXT, [externref, externref, externref]);
+  const callPrevextIdx = reserveDriver(PROXY_CALL_PREVEXT, [externref, externref, externref]);
   ctx.proxyDispatchReserved = true;
 
   // Builds a dispatch helper body. `trapFieldIdx` selects the trap closure;
@@ -5305,6 +5318,85 @@ function ensureProxyRuntime(
     ];
   };
 
+  // (#1355 Slice D) isExtensible / preventExtensions dispatch builder. Both take
+  // only the target (no key, no value) and return a booleanish result, so they
+  // share a shape but differ in the trap-absent forward:
+  //   §10.5.3 [[IsExtensible]]:      forward __object_isExtensible(target) -> i32
+  //     → box via __box_boolean to keep the dispatch externref-uniform.
+  //   §10.5.4 [[PreventExtensions]]: forward __object_preventExtensions(target)
+  //     -> externref (returns the object) ; drop it, push the proxy as a truthy
+  //     success token (OrdinaryPreventExtensions always succeeds).
+  // Both invoke driver(handler, trap, target). params: 0=proxyExtern, 1=unused.
+  // locals: 2=p 3=trap. The front-guard coerces the dispatch's booleanish
+  // externref back to the native helper's i32/externref return via __is_truthy /
+  // direct. Phase-D scope: NO §10.5.3/4 result-invariants (e.g. preventExtensions
+  // reporting success while the target stays extensible → TypeError) — deferred.
+  const buildExt1Dispatch = (trapFieldIdx: number, forwardName: string, forwardReturnsI32: boolean): Instr[] => {
+    const forwardIdx = ctx.funcMap.get(forwardName)!;
+    const driverIdx = trapFieldIdx === TRAP_ISEXT ? callIsextIdx : callPrevextIdx;
+    const trapArm: Instr[] = [
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PHANDLER },
+      { op: "extern.convert_any" } as Instr,
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+      { op: "extern.convert_any" } as Instr,
+      { op: "call", funcIdx: driverIdx },
+    ];
+    const forwardArm: Instr[] = forwardReturnsI32
+      ? [
+          // __object_isExtensible(target) -> i32 ; box to a boolean any.
+          { op: "local.get", index: 2 },
+          { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+          { op: "extern.convert_any" } as Instr,
+          { op: "call", funcIdx: forwardIdx },
+          { op: "call", funcIdx: ctx.funcMap.get("__box_boolean")! },
+        ]
+      : [
+          // __object_preventExtensions(target) -> externref ; drop, push the proxy
+          // as a truthy success token.
+          { op: "local.get", index: 2 },
+          { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+          { op: "extern.convert_any" } as Instr,
+          { op: "call", funcIdx: forwardIdx },
+          { op: "drop" },
+          { op: "local.get", index: 0 },
+        ];
+    return [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: proxyTypeIdx },
+      { op: "local.set", index: 2 },
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_REVOKED },
+      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() } as Instr,
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: externref },
+        then: [{ op: "ref.null.extern" } as Instr],
+        else: [
+          { op: "local.get", index: 2 },
+          { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: trapFieldIdx },
+        ],
+      } as Instr,
+      { op: "local.set", index: 3 },
+      { op: "local.get", index: 3 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: externref },
+        then: forwardArm,
+        else: trapArm,
+      } as Instr,
+    ];
+  };
+
   // FRESH locals array + ValType objects per dispatch function. `registerNative`
   // stores `locals` by reference, and the FINALIZE dead-type-elimination pass
   // (`eliminateDeadImports`) mutates `func.locals[i]` in place when renumbering
@@ -5394,6 +5486,25 @@ function ensureProxyRuntime(
     dispatchLocals(),
     buildProtoDispatch(TRAP_SPO, "__object_setPrototypeOf", true),
   );
+  // (#1355 Slice D) __proxy_isext_dispatch(proxy, _unused) -> externref
+  // (booleanish). §10.5.3 [[IsExtensible]]. Front-guard coerces via __is_truthy.
+  registerNative(
+    "__proxy_isext_dispatch",
+    [externref, externref],
+    [externref],
+    dispatchLocals(),
+    buildExt1Dispatch(TRAP_ISEXT, "__object_isExtensible", true),
+  );
+  // (#1355 Slice D) __proxy_prevext_dispatch(proxy, _unused) -> externref
+  // (booleanish). §10.5.4 [[PreventExtensions]]. The __object_preventExtensions
+  // front-guard returns the dispatch externref directly (helper returns externref).
+  registerNative(
+    "__proxy_prevext_dispatch",
+    [externref, externref],
+    [externref],
+    dispatchLocals(),
+    buildExt1Dispatch(TRAP_PREVEXT, "__object_preventExtensions", false),
+  );
 
   // ── __proxy_create(target, handler) -> externref ──────────────────────────
   //
@@ -5456,13 +5567,18 @@ function ensureProxyRuntime(
       { op: "local.set", index: 8 },
       ...readTrap("setPrototypeOf"),
       { op: "local.set", index: 9 },
+      ...readTrap("isExtensible"),
+      { op: "local.set", index: 10 },
+      ...readTrap("preventExtensions"),
+      { op: "local.set", index: 11 },
       // proxy fields (standalone $Proxy struct):
       { op: "i32.const", value: 1 }, // ptag = PROXY_TAG (1; bare ref.test $Proxy is the real discriminator)
       { op: "local.get", index: 0 }, // ptarget (externref → anyref)
       { op: "any.convert_extern" } as Instr,
       { op: "local.get", index: 1 }, // phandler (externref → anyref; trap `this`)
       { op: "any.convert_extern" } as Instr,
-      // ptraps = struct.new $ProxyTraps (getT,setT,hasT,applyT,delT,gopdT,gpoT,spoT)
+      // ptraps = struct.new $ProxyTraps
+      //   (getT,setT,hasT,applyT,delT,gopdT,gpoT,spoT,isextT,prevextT)
       { op: "local.get", index: 2 },
       { op: "local.get", index: 3 },
       { op: "local.get", index: 4 },
@@ -5471,6 +5587,8 @@ function ensureProxyRuntime(
       { op: "local.get", index: 7 },
       { op: "local.get", index: 8 },
       { op: "local.get", index: 9 },
+      { op: "local.get", index: 10 },
+      { op: "local.get", index: 11 },
       { op: "struct.new", typeIdx: proxyTrapsTypeIdx } as Instr,
       { op: "i32.const", value: 0 }, // revoked = 0
       { op: "struct.new", typeIdx: proxyTypeIdx } as Instr,
@@ -5489,6 +5607,8 @@ function ensureProxyRuntime(
         { name: "gopdT", type: externref }, // (#1355 Slice B)
         { name: "gpoT", type: externref }, // (#1355 Slice C) getPrototypeOf
         { name: "spoT", type: externref }, // (#1355 Slice C) setPrototypeOf
+        { name: "isextT", type: externref }, // (#1355 Slice D) isExtensible
+        { name: "prevextT", type: externref }, // (#1355 Slice D) preventExtensions
       ],
       proxyCreateBody,
     );
@@ -5543,6 +5663,8 @@ function ensureProxyRuntime(
   const gopdDispatchIdx = ctx.funcMap.get("__proxy_gopd_dispatch")!; // (#1355 Slice B)
   const gpoDispatchIdx = ctx.funcMap.get("__proxy_gpo_dispatch")!; // (#1355 Slice C)
   const spoDispatchIdx = ctx.funcMap.get("__proxy_spo_dispatch")!; // (#1355 Slice C)
+  const isextDispatchIdx = ctx.funcMap.get("__proxy_isext_dispatch")!; // (#1355 Slice D)
+  const prevextDispatchIdx = ctx.funcMap.get("__proxy_prevext_dispatch")!; // (#1355 Slice D)
 
   const findBody = (name: string): Instr[] | undefined => ctx.mod.functions.find((f) => f.name === name)?.body;
 
@@ -5725,6 +5847,58 @@ function ensureProxyRuntime(
     spoBody.unshift(...guard);
   }
 
+  // (#1355 Slice D) __object_isExtensible(obj) -> i32 : if proxy →
+  // ToBoolean(isext_dispatch(obj)). `Object.isExtensible(p)` /
+  // `Reflect.isExtensible` route here for dynamic receivers. The dispatch returns
+  // the trap's booleanish externref; coerce to i32 via `__is_truthy`.
+  const isextBody = findBody("__object_isExtensible");
+  if (isextBody) {
+    const isTruthyIdx = ctx.funcMap.get("__is_truthy")!;
+    const guard: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: proxyTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 0 }, // unused 2nd param placeholder
+          { op: "call", funcIdx: isextDispatchIdx },
+          { op: "call", funcIdx: isTruthyIdx },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    isextBody.unshift(...guard);
+  }
+
+  // (#1355 Slice D) __object_preventExtensions(obj) -> externref : if proxy →
+  // prevext_dispatch(obj). `Object.preventExtensions(p)` / `Reflect.*` /
+  // `Object.seal`/`Object.freeze` (which call preventExtensions) route here. The
+  // dispatch returns a booleanish externref (or the proxy success token); we
+  // return it directly — the helper's contract is "returns an externref" (the
+  // object), type-compatible, and the JS-level caller ignores the value.
+  const prevextBody = findBody("__object_preventExtensions");
+  if (prevextBody) {
+    const guard: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: proxyTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 0 }, // unused 2nd param placeholder
+          { op: "call", funcIdx: prevextDispatchIdx },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    prevextBody.unshift(...guard);
+  }
+
   void objectTypeIdx;
 }
 
@@ -5804,6 +5978,8 @@ export function fillProxyDispatch(ctx: CodegenContext): void {
   fill(PROXY_CALL_GOPD, 2); // (#1355 Slice B) getOwnPropertyDescriptor (target, key)
   fill(PROXY_CALL_GPO, 1); // (#1355 Slice C) getPrototypeOf (target)
   fill(PROXY_CALL_SPO, 2); // (#1355 Slice C) setPrototypeOf (target, proto)
+  fill(PROXY_CALL_ISEXT, 1); // (#1355 Slice D) isExtensible (target)
+  fill(PROXY_CALL_PREVEXT, 1); // (#1355 Slice D) preventExtensions (target)
 }
 
 /**
