@@ -1137,7 +1137,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "local.get", index: 7 },
       { op: "call", funcIdx: objInsertIdx },
     ];
-    registerNative(
+    const externSetIdx = registerNative(
       "__extern_set",
       [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
       [],
@@ -1152,6 +1152,13 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       ],
       body,
     );
+    // (#2017) Standalone alias: the strict [[Set]] host import maps to the same
+    // native data-write helper. The native runtime has no host TypeError bridge
+    // yet (see __reflect_set note), so a getter-only write degrades to the
+    // existing native behaviour rather than throwing — host (JS) mode carries
+    // the spec-correct catchable TypeError. Aliasing keeps standalone
+    // accessor-literal writes compiling unchanged (no refused import).
+    ctx.funcMap.set("__extern_set_strict", externSetIdx);
   }
 
   // ── __reflect_set(externref obj, externref key, externref value) -> i32 ──
@@ -5266,6 +5273,7 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__extern_is_array",
   "__extern_get",
   "__extern_set",
+  "__extern_set_strict", // (#2017) standalone alias → __extern_set native helper
   "__reflect_set",
   "__to_primitive",
   "__extern_toString",

@@ -2573,9 +2573,15 @@ function compilePropertyAssignmentExternSet(
   }
   fctx.body.push({ op: "local.get", index: valLocal });
 
+  // (#2017) This path is reached only when an accessor descriptor (get/set)
+  // was detected for the property at compile time, so the write is a spec
+  // [[Set]] against an accessor. ESM module code is strict, so a write to a
+  // getter-only accessor must throw a catchable TypeError (§10.1.9) rather than
+  // silently no-op. Route through the strict host setter; getter+setter pairs
+  // and writable data props behave exactly as before.
   const setIdx = ensureLateImport(
     ctx,
-    "__extern_set",
+    "__extern_set_strict",
     [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
     [],
   );

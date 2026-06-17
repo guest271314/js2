@@ -20,6 +20,7 @@ export type ImportIntent =
   | { type: "unbox"; targetType: string }
   | { type: "extern_get" }
   | { type: "extern_set" }
+  | { type: "extern_set_strict" } // (#2017) strict-mode [[Set]] — throws on getter-only / non-writable
   | { type: "truthy_check" }
   | { type: "date_new" }
   | { type: "date_method"; method: string }
