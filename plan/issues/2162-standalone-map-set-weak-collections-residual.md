@@ -98,13 +98,28 @@ standalone (empty-`{}` instantiate, zero `Set_*`/`Map_*` imports): count, sum,
 value===key, tombstone-skip after delete, insertion order, empty-set no-op.
 Test: `tests/issue-2162-set-foreach.test.ts` (6/6).
 
+## Slice 4 — `new Set([...])` / `new Map([[k,v],...])` from array literal (PR, dev-1, 2026-06-17)
+
+The constructor-from-iterable forms fell through to the host path:
+`new Set([1,2,3])` leaked `env.*` imports, `new Map([[1,10]])` was a hard
+"Unsupported new expression". Fixed in `new-super.ts` for the **array-literal**
+argument (the dominant iterable form): build the empty `$Map` (`__map_new`),
+then seed element-by-element — each Set element via `__set_add` (dedups through
+the shared insert), each Map `[k,v]` pair via `__map_set`. Keys/values boxed via
+`coerceMapKeyToAnyref`; the no-arg forms are unchanged. A non-array-literal
+iterable (spread, a variable, a non-pair Map element) still falls back to the
+empty collection (the general iterator drive is the remaining slice below).
+Verified standalone (empty-`{}` instantiate, zero `Set_*`/`Map_*` imports): seed
++ size, dedup, has(), empty literal, seeded-forEach, Map pair overwrite, no-arg
+control. Test: `tests/issue-2162-collection-from-array.test.ts` (10/10).
+
 ### Remaining slices (issue stays in-progress)
 
 - `keys()`/`values()`/`entries()` + `for-of` over Map/Set — needs a JS-iterable
-  iterator object; `new Map(iterable)` / `new Set(iterable)` — needs
-  `__map_new_from_arr`. (Confirmed still broken standalone 2026-06-17:
-  `for (const v of set)` yields 0; `new Set([1,2,3])` / `new Map([[1,10]])`
-  fail.)
+  iterator object. (Confirmed still broken standalone 2026-06-17:
+  `for (const v of set)` yields 0.) The general `new Map(iterable)` /
+  `new Set(iterable)` over a NON-literal iterable also needs this drive (Slice 4
+  covers only array literals).
 - ES2025 set-algebra: `union`/`intersection`/`difference`/
   `symmetricDifference`/`isSubsetOf`/`isSupersetOf`/`isDisjointFrom`.
 - The `Set === literal` / collection-of-`any` comparison confounds depend on the
