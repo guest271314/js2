@@ -67,7 +67,7 @@ import {
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
-import { addFuncType } from "./registry/types.js";
+import { addFuncType, getOrRegisterVecBaseType } from "./registry/types.js";
 import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
 
@@ -3115,10 +3115,37 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           ] as Instr[];
         })()
       : [{ op: "f64.const", value: 0 }];
+    // (#2186) `$__vec_base` arm: a real array literal / array result boxed to
+    // externref is a `__vec_<elemKind>` struct subtyping `$__vec_base`. Its
+    // length (field 0) is readable through the shared supertype regardless of
+    // element kind — fixing `.length` === 0 for arrays read through the externref
+    // boundary (e.g. `const a:any = [1,2,3]; a.length`). Checked BEFORE the
+    // $ObjVec arm (a vec is not an $ObjVec). `objArrayLikeArms` (standalone) gates
+    // this since host mode's `__extern_length` import owns the path.
+    const vecBaseIdx = objArrayLikeArms ? getOrRegisterVecBaseType(ctx) : -1;
+    const vecBaseArm: Instr[] = objArrayLikeArms
+      ? [
+          { op: "local.get", index: 1 },
+          { op: "ref.test", typeIdx: vecBaseIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 1 },
+              { op: "ref.cast", typeIdx: vecBaseIdx },
+              { op: "struct.get", typeIdx: vecBaseIdx, fieldIdx: 0 },
+              { op: "f64.convert_i32_s" },
+              { op: "return" },
+            ],
+          } as Instr,
+        ]
+      : [];
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
-      { op: "local.tee", index: 1 },
+      { op: "local.set", index: 1 },
+      ...vecBaseArm,
+      { op: "local.get", index: 1 },
       { op: "ref.test", typeIdx: objVecTypeIdx },
       {
         op: "if",

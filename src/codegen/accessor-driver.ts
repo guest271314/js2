@@ -47,6 +47,11 @@ export const CALL_ACCESSOR_SET = "__call_accessor_set";
  * wrapper: `reviver.call(holder, key, value)`).
  */
 export const CALL_REVIVER = "__call_reviver";
+/**
+ * (#2166 PR-D2) Reserved name for the JSON `toJSON` driver (arity-1 method
+ * wrapper: `value.toJSON(key)`).
+ */
+export const CALL_TO_JSON = "__call_to_json";
 
 /**
  * Reserve the `__call_accessor_get` driver placeholder and return its funcIdx.
@@ -159,6 +164,38 @@ export function reserveReviverDriver(ctx: CodegenContext): number {
 }
 
 /**
+ * (#2166 PR-D2) Reserve the `__call_to_json` driver placeholder and return its
+ * funcIdx.
+ *
+ * Signature: `(externref value, externref method, externref key) -> externref`.
+ * Filled by `fillAccessorDrivers` to wrap `__call_fn_method_1(value, method,
+ * key)` — `value` bound as the `toJSON` receiver (`this`), `key` the §25.5.2
+ * SerializeJSONProperty step-2.b argument. Idempotent.
+ */
+export function reserveToJsonDriver(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get(CALL_TO_JSON);
+  if (existing !== undefined) return existing;
+  const sigIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+    "$call_to_json_type",
+  );
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const placeholder: WasmFunction = {
+    name: CALL_TO_JSON,
+    typeIdx: sigIdx,
+    locals: [],
+    body: [{ op: "unreachable" } as Instr],
+    exported: false,
+  };
+  ctx.mod.functions.push(placeholder);
+  ctx.funcMap.set(CALL_TO_JSON, funcIdx);
+  ctx.toJsonDriverReserved = true;
+  return funcIdx;
+}
+
+/**
  * Fill the reserved accessor driver bodies in post-processing, AFTER
  * `emitClosureMethodCallExportN(0)` / `(1)` have registered
  * `__call_fn_method_0` / `__call_fn_method_1` in `funcMap`. Each driver is a
@@ -248,6 +285,33 @@ export function fillAccessorDrivers(ctx: CodegenContext): void {
             { op: "local.get", index: 3 } as Instr, // value (arg1)
             { op: "call", funcIdx: callMethod2 } as Instr,
             // result (reviver's return, externref) is this driver's result
+          ];
+        }
+      }
+    }
+  }
+
+  // (#2166 PR-D2) JSON toJSON driver: value bound as `this`, key the lone arg.
+  // Wraps __call_fn_method_1(value, method, key).
+  if (ctx.toJsonDriverReserved) {
+    const driverIdx = ctx.funcMap.get(CALL_TO_JSON);
+    if (driverIdx !== undefined) {
+      const driverFn = ctx.mod.functions[driverIdx - ctx.numImportFuncs];
+      if (driverFn) {
+        const callMethod1 = ctx.funcMap.get("__call_fn_method_1");
+        if (callMethod1 === undefined) {
+          // No arity-1 closure dispatcher ⇒ no toJSON method closure exists in
+          // the module ⇒ the driver is unreachable (the codec's HasProperty
+          // ref-test never finds a closure). Keep a valid identity body:
+          // return the value arg unchanged (externref result).
+          driverFn.body = [{ op: "local.get", index: 0 } as Instr];
+        } else {
+          driverFn.body = [
+            { op: "local.get", index: 0 } as Instr, // value (bound as `this`)
+            { op: "local.get", index: 1 } as Instr, // toJSON method closure
+            { op: "local.get", index: 2 } as Instr, // key (arg0)
+            { op: "call", funcIdx: callMethod1 } as Instr,
+            // result (toJSON's return, externref) is this driver's result
           ];
         }
       }
