@@ -102,4 +102,25 @@ export function test(): string {
 `;
     expect(await runTest(src)).toBe("1:hi:true");
   });
+
+  it("regression guard: value-bound builtin/externref ctor does not emit invalid Wasm (#2026)", async () => {
+    // A class whose constructor is externref-backed must NOT be a tag-dispatch
+    // candidate: tag dispatch reads the descriptor as a `$ClassName` struct and
+    // boxes the result with `extern.convert_any`. If the ctor already returns
+    // externref, the second convert is invalid Wasm (`extern.convert_any[0]
+    // expected anyref, found externref`). This pattern broke ~20 test262 tests
+    // where a value-bound TypedArray constructor reached the fallback
+    // (`testWithTypedArrayConstructors(function(TA){ new TA(); })`). The presence
+    // of an externref-returning-ctor class plus a value-bound `new K()` in the
+    // same module must still compile to valid Wasm.
+    const src = `
+class Wrapped extends Error { tag = 1; }
+class Plain { v = 7; }
+function mk(K: any): any { return new K(); }
+export function test(): number { return (mk(Plain) as any).v; }
+`;
+    // The key assertion is that this compiles to valid Wasm at all (no
+    // CompileError); the value check confirms the dispatch still works.
+    expect(await runTest(src)).toBe(7);
+  });
 });

@@ -1612,6 +1612,37 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
 }
 
 /**
+ * (#2026) Result ValType of a Wasm function by index — mirrors
+ * `getFuncParamTypes` but reads `results[0]`. The dynamic-new fallback uses it
+ * to decide whether a `<Class>_new` result needs `extern.convert_any` boxing
+ * (anyref / struct-ref result) or is ALREADY an externref — in which case a
+ * second `extern.convert_any` emits invalid Wasm (`extern.convert_any[0]
+ * expected anyref, found externref`). Returns `undefined` for void / unknown.
+ */
+function getFuncResultType(ctx: CodegenContext, funcIdx: number): ValType | undefined {
+  if (funcIdx < ctx.numImportFuncs) {
+    let importFuncCount = 0;
+    for (const imp of ctx.mod.imports) {
+      if (imp.desc.kind === "func") {
+        if (importFuncCount === funcIdx) {
+          const typeDef = ctx.mod.types[imp.desc.typeIdx];
+          if (typeDef?.kind === "func" && typeDef.results.length > 0) return typeDef.results[0];
+          return undefined;
+        }
+        importFuncCount++;
+      }
+    }
+    return undefined;
+  }
+  const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+  if (func) {
+    const typeDef = ctx.mod.types[func.typeIdx];
+    if (typeDef?.kind === "func" && typeDef.results.length > 0) return typeDef.results[0];
+  }
+  return undefined;
+}
+
+/**
  * (#2026) Dynamic-new fallback: `new K(...)` where `K` is a value-bound
  * identifier (a class flowing through a parameter / variable of type `any`)
  * that the static resolution arms could not pin to a known class. The value in
@@ -1645,7 +1676,18 @@ function emitDynamicNewFallback(
   for (const className of ctx.classObjectGlobals.keys()) {
     if (ctx.classBuiltinParentMap.has(className)) continue;
     if (ctx.structMap.get(className) === undefined) continue;
-    if (ctx.funcMap.get(classMemberFuncKey(ctx, `${className}_new`)) === undefined) continue;
+    const ctorIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${className}_new`));
+    if (ctorIdx === undefined) continue;
+    // The tag-dispatch reads the descriptor as a `$ClassName` struct (ref.test /
+    // struct.get 0) and boxes the instance to externref. That only holds when
+    // `<Class>_new` actually returns the WasmGC struct ref. A ctor whose result
+    // is already externref is externref-backed (no `$ClassName` struct to
+    // type-test against), so it can be neither tag-discriminated nor struct-read
+    // here — exclude it so it falls through to the legacy host-import path
+    // instead of emitting an invalid `ref.test`/double-`extern.convert_any` (the
+    // #2026 ~20-test regression: a value-bound TypedArray ctor `new TA()`).
+    const ctorResult = getFuncResultType(ctx, ctorIdx);
+    if (ctorResult?.kind === "externref") continue;
     candidates.push(className);
   }
   if (candidates.length === 0) return false;
@@ -1746,9 +1788,18 @@ function emitDynamicNewFallback(
       }
     }
     fctx.body.push({ op: "call", funcIdx: ctorFuncIdx });
-    // <Class>_new returns (ref $structIdx); box to externref. (externref-backed
-    // classes are excluded above, so the result is always a struct ref.)
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    // Box the instance to externref to match the dispatch `if` block type. Most
+    // `<Class>_new` return `(ref $structIdx)` (an anyref subtype) → wrap with
+    // `extern.convert_any`. But some class ctors already return externref
+    // (externref-backed / builtin-bridged construction); converting an externref
+    // again is invalid Wasm (`extern.convert_any[0] expected anyref, found
+    // externref`), which broke ~20 test262 tests where a value-bound ctor (e.g.
+    // a TypedArray constructor passed as `TA`) reached this fallback (#2026).
+    // Read the ctor's real result type and only box when it is NOT externref.
+    const ctorResult = getFuncResultType(ctx, ctorFuncIdx);
+    if (!ctorResult || ctorResult.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    }
     fctx.body = savedBody;
     return arm;
   };
