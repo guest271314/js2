@@ -6463,15 +6463,39 @@ export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
     } as Instr);
   }
 
-  fn.body = buildExternGetIdxBody({
-    objArrayLikeArms: true, // reserve is standalone-only ⇒ always the array-like path
-    objectTypeIdx: types.objectTypeIdx,
-    objVecTypeIdx: types.objVecTypeIdx,
-    objVecArrTypeIdx: types.objVecArrTypeIdx,
-    numberToStringIdx: ctx.funcMap.get("number_toString")!,
-    externGetIdx: ctx.funcMap.get("__extern_get")!,
-    vecArms,
-  });
+  if (vecArms.length === 0) return; // no number carriers → leave the eager body untouched
+
+  // (#2190 regression fix, round 3) SPLICE the vec arms into the EXISTING body
+  // instead of REBUILDING it. The eager body (from `buildExternGetIdxBody` at
+  // registration) baked the `$Object` arm's `number_toString` / `__extern_get`
+  // funcIdxs, and the late-import funcIdx-shift machinery walks + adjusts those
+  // baked `call` targets if imports are added afterwards (the `addUnionImports`
+  // invariant). Rebuilding the whole body here at FINALIZE re-baked those
+  // funcIdxs with the *then-current* values; a subsequent reconcile shift would
+  // then double-apply to them, corrupting the `call` target → invalid Wasm
+  // (this regressed ~120 generator/async + destructuring-rest + TypedArray
+  // modules that hit the `$Object`/`number_toString` arm, breaching the #2097
+  // floor regardless of which element kinds we boxed). Splicing leaves the
+  // original arms — and their shift-maintained funcIdxs — exactly as the eager
+  // registration left them.
+  //
+  // The eager body starts with the 3-instr setup preamble
+  // (`local.get 0 ; any.convert_extern ; local.set 2`); the typed-vec arms must
+  // run after `any` is set and before the `$Object`/`$ObjVec` arms (a
+  // `__vec_<k>` is neither). Insert right after the preamble.
+  const SETUP_LEN = 3;
+  if (
+    fn.body.length >= SETUP_LEN &&
+    fn.body[0]?.op === "local.get" &&
+    fn.body[1]?.op === "any.convert_extern" &&
+    fn.body[2]?.op === "local.set"
+  ) {
+    fn.body.splice(SETUP_LEN, 0, ...vecArms);
+  } else {
+    // Defensive: preamble shape changed — prepend the arms after a fresh setup
+    // is not safe, so skip rather than risk an unbalanced body.
+    return;
+  }
 }
 
 /**
