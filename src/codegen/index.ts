@@ -1055,6 +1055,15 @@ export function generateModule(
       reserveTypedArraySubviewTypes(ctx);
     }
 
+    // (#2026 #53) Reserve `$ObjVecArr` up-front when the source declares a class,
+    // so the dynamic-`new` runtime-argv path (`new K(...someVar)`) has a stable
+    // type index. Class-gated + additive (one self-contained array type, no
+    // helpers/imports) → no index shift for class-free programs. Both targets:
+    // the dynamic-new fallback fires in host AND standalone.
+    if (sourceContainsClass(ast.sourceFile)) {
+      reserveObjVecArrType(ctx);
+    }
+
     // $AnyValue struct type is now registered lazily via ensureAnyValueType()
 
     // Note: console imports handled by unified collector (skipped in WASI mode via registerWasiImports)
@@ -6049,6 +6058,31 @@ export function reserveLinearU8AllocType(ctx: CodegenContext): void {
 export function reserveTypedArraySubviewTypes(ctx: CodegenContext): void {
   getOrRegisterSubviewType(ctx, "i8_byte", { kind: "i8" });
   getOrRegisterSubviewType(ctx, "f64", { kind: "f64" });
+}
+
+/**
+ * (#2026 #53) Reserve the `$ObjVecArr` = `(array (mut externref))` type up-front,
+ * at the deterministic type-init point, so the dynamic-`new` runtime-argv path
+ * (`emitDynamicNewFallback`, for `new K(...someVar)`) can reference a STABLE type
+ * index. Minting this type lazily mid-expression — via `ensureObjectRuntime` —
+ * registered it after the deterministic type prefix had been baked, leaving an
+ * unresolved `-1` heap-type ref at binary-emit (the #2043 / subview
+ * type-idx-stability hazard). The type is self-contained (element `externref`,
+ * no type deps), so reserving it alone is zero-helper, zero-import, additive.
+ * `ensureObjectRuntime` adopts this slot (see object-runtime.ts) when present so
+ * the two never collide. Gated to class-bearing sources only (the dynamic-new
+ * fallback can't fire without a class).
+ */
+export function reserveObjVecArrType(ctx: CodegenContext): void {
+  if (ctx.reservedObjVecArrTypeIdx !== undefined) return;
+  const idx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "array",
+    name: "$ObjVecArr",
+    element: { kind: "externref" },
+    mutable: true,
+  });
+  ctx.reservedObjVecArrTypeIdx = idx;
 }
 
 export function ensureLinearU8AllocHelper(ctx: CodegenContext): number {

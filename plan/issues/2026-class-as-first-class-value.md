@@ -480,3 +480,35 @@ beside `reserveTypedArraySubviewTypes`), NOT lazily. This is exactly the
 WIP committed on `issue-2026-dynnew-argv`. Resume: implement (B) up-front in
 index.ts (or escalate the A/B choice). The runtime-argv codegen itself is done
 and tsc/lint-clean — only the type-init ordering remains.
+
+### RESOLVED — option (B) implemented (sdev-ctor, 2026-06-18)
+
+Implemented (B): `reserveObjVecArrType(ctx)` (`index.ts`) registers ONLY the
+`(array (mut externref))` `$ObjVecArr` type up-front in the type-init phase,
+gated on `sourceContainsClass(ast.sourceFile)`, storing
+`ctx.reservedObjVecArrTypeIdx`. `ensureObjectRuntime` ADOPTS the reserved slot
+when present (else registers as before). `emitDynamicNewFallback` uses
+`ctx.reservedObjVecArrTypeIdx` directly (no lazy `ensureObjectRuntime`) and bails
+loudly if it's somehow absent. Zero new helpers/imports, one self-contained array
+type, class-gated → no index shift for class-free programs.
+
+Result (HOST mode): `new K(...someVar)` → correct value (4,5→9; mixed
+1,...[2,3]→6; arity-short; shape-collision tag-dispatch; method calls all work).
+All 13 existing #2026 tests green; array-literal spread + plain-args unchanged.
+tsc + prettier + biome clean. Tests:
+`tests/issue-2026-dynamic-new-varspread.test.ts` (6).
+
+**Caveat — standalone *running* dynamic-new is a SEPARATE pre-existing gap (out
+of #53 scope).** A standalone/wasi program that RUNS (reads a field off) a
+dynamically-constructed instance hits `global index out of range — -1` — and
+this reproduces with **plain `new K(7)` (no spread at all)** on this base, so it
+is NOT introduced by #53. It is the #51/#1888-family string-global sentinel that
+fires when a class flows as a value and its instance is *consumed* in standalone.
+PR-1b's standalone tests only assert *compiles* (no-arg, `{}`-instantiate), so
+they don't exercise it. #53 fixes the variable-spread argv (host); the standalone
+*running* sentinel is a distinct follow-up (relate to #51).
+
+Edge note: missing-arg padding uses `pushDefaultValue` (f64 → 0), so a ctor that
+distinguishes a *missing* arg via `b ?? 99` sees 0, not undefined. True
+`undefined`-padding for `??`/default-param semantics is a narrow refinement —
+noted.

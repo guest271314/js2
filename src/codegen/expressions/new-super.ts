@@ -1722,15 +1722,22 @@ function emitDynamicNewFallback(
     }
   }
 
-  // (#53) When we will build a runtime argv we need the `$ObjVecArr` type +
-  // object runtime. Materialize it NOW — BEFORE any instruction of this fallback
-  // is emitted — so the type/func/import registration (and its
-  // `flushLateImportShifts`) all settle before the descriptor/args/dispatch bake
-  // their type+func indices. Calling it lazily mid-body baked a stale `-1` heap
-  // type index (#2043 / reference_subview_type_idx_stability). `ensureObjectRuntime`
-  // is idempotent (no-op if already materialized).
-  if (useRuntimeArgv) {
-    ensureObjectRuntime(ctx);
+  // (#53) The runtime-argv path needs the `$ObjVecArr` `(array (mut externref))`
+  // type. It is RESERVED up-front for class-bearing sources (`reserveObjVecArrType`
+  // in the type-init phase) precisely so a body can reference a STABLE index —
+  // minting it lazily here baked an unresolved `-1` heap-type ref at binary-emit
+  // (#2043 / reference_subview_type_idx_stability). If the reservation is somehow
+  // absent (defensive — every class-bearing source reserves it), bail loudly
+  // rather than emit a broken module.
+  if (useRuntimeArgv && ctx.reservedObjVecArrTypeIdx === undefined) {
+    reportError(
+      ctx,
+      expr,
+      "Dynamic `new K(...x)` runtime-argv needs the up-front-reserved $ObjVecArr type (#2026 #53), " +
+        "which was not reserved for this module.",
+    );
+    fctx.body.push({ op: "ref.null.extern" });
+    return true;
   }
 
   // Evaluate the callee descriptor once into an anyref local (the value to
@@ -1784,7 +1791,7 @@ function emitDynamicNewFallback(
     // `argc` cursor, then append each arg in source order: a plain positional
     // arg is boxed and written at argv[argc++]; a spread's source is compiled to
     // its vec struct {len, data} and each element copied (boxed) into argv.
-    objVecArrTypeIdx = ensureObjectRuntime(ctx).objVecArrTypeIdx;
+    objVecArrTypeIdx = ctx.reservedObjVecArrTypeIdx!;
     argvLocal = allocLocal(fctx, `__dynnew_argv_${fctx.locals.length}`, { kind: "ref", typeIdx: objVecArrTypeIdx });
     argcLocal = allocLocal(fctx, `__dynnew_argc_${fctx.locals.length}`, { kind: "i32" });
 

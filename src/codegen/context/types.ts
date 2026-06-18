@@ -1442,6 +1442,15 @@ export interface CodegenContext {
    * function is emitted later and reuses this slot. See reserveLinearU8AllocType.
    */
   linearU8AllocTypeIdx?: number;
+  /**
+   * (#2026 #53) Eagerly-reserved `$ObjVecArr` = `(array (mut externref))` type
+   * index, registered in the up-front type-init phase (`reserveObjVecArrType`)
+   * when the source declares a class. The dynamic-`new` runtime-argv path
+   * (`emitDynamicNewFallback`) and `ensureObjectRuntime` both ADOPT this slot
+   * instead of minting the type lazily mid-expression — minting it late baked an
+   * unresolved `-1` heap-type ref (the #2043 / subview type-idx-stability hazard).
+   */
+  reservedObjVecArrTypeIdx?: number;
   /** #1886 Slice B — global index of the page-4 linear-U8 arena bump pointer. */
   linearU8ArenaGlobalIdx?: number;
   /** Whether `node:fs` JS-host imports are permitted (non-WASI target only, #1491). */
