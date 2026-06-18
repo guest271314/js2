@@ -56,7 +56,9 @@ describe("#42 standalone array spread of a native Set", () => {
 
   it("Set.values() spread — length", async () => {
     expect(
-      await runStandalone(`export function test(): number { const s=new Set([1,2,3]); return [...s.values()].length; }`),
+      await runStandalone(
+        `export function test(): number { const s=new Set([1,2,3]); return [...s.values()].length; }`,
+      ),
     ).toBe(3);
   });
 
@@ -84,7 +86,9 @@ describe("#42 standalone array spread of a native Set", () => {
 
   it("mixed literal — head element then Set spread", async () => {
     expect(
-      await runStandalone(`export function test(): number { const s=new Set([1,2]); const a=[9,...s]; return a.length; }`),
+      await runStandalone(
+        `export function test(): number { const s=new Set([1,2]); const a=[9,...s]; return a.length; }`,
+      ),
     ).toBe(3);
   });
 
@@ -119,9 +123,7 @@ describe("#42 standalone array spread of a native Set", () => {
 
 describe("#42 regression guards — existing spread forms unchanged", () => {
   it("array spread", async () => {
-    expect(
-      await runStandalone(`export function test(): number { const a=[...[1,2,3]]; return a[0]+a[2]; }`),
-    ).toBe(4);
+    expect(await runStandalone(`export function test(): number { const a=[...[1,2,3]]; return a[0]+a[2]; }`)).toBe(4);
   });
 
   it("string spread length", async () => {
@@ -137,9 +139,9 @@ describe("#42 regression guards — existing spread forms unchanged", () => {
   });
 
   it("typed number[] spread", async () => {
-    expect(
-      await runStandalone(`export function test(): number { const x:number[]=[7,8,9]; return [...x][1]; }`),
-    ).toBe(8);
+    expect(await runStandalone(`export function test(): number { const x:number[]=[7,8,9]; return [...x][1]; }`)).toBe(
+      8,
+    );
   });
 
   it("Set for-of unchanged", async () => {

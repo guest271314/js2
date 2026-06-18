@@ -3081,11 +3081,7 @@ export function compileArrayLiteral(
         const subjName = (subjType.symbol ?? subjType.aliasSymbol)?.name;
         if (subjName === "Set") {
           const matType = emitCollectionIteratorVec(ctx, fctx, el.expression, "values", /* isSet */ true);
-          if (
-            matType != null &&
-            matType !== VOID_RESULT &&
-            (matType.kind === "ref" || matType.kind === "ref_null")
-          ) {
+          if (matType != null && matType !== VOID_RESULT && (matType.kind === "ref" || matType.kind === "ref_null")) {
             const matVecTypeIdx = matType.typeIdx;
             const srcLocal = allocLocal(fctx, `__spread_coll_${fctx.locals.length}`, matType);
             fctx.body.push({ op: "local.tee", index: srcLocal });
