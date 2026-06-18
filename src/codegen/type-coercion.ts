@@ -258,18 +258,28 @@ export function buildVecFromExternref(
         // Save it to a temp local so we can extract each field
         const tmpElem = allocLocal(fctx, `__tuple_src_${fctx.locals.length}`, { kind: "externref" });
         const instrs: Instr[] = [{ op: "local.set", index: tmpElem } as Instr];
-        // For each tuple field, extract from the JS array by index
+        // For each tuple field, extract from the source by index.
         for (let fi = 0; fi < tupleFields.length; fi++) {
           const fieldType = tupleFields[fi]!;
-          // Push the JS array and the index
           instrs.push({ op: "local.get", index: tmpElem } as Instr);
-          if (boxIdx !== undefined) {
+          // Standalone: the pair element is a native `$ObjVec` (e.g. the
+          // `[k, v]` entry built by `__objvec_new`/`__objvec_push`), so its
+          // fields are read positionally with `__extern_get_idx(obj, f64(fi))`.
+          // The string-keyed `__extern_get` casts its key to `$AnyString` and
+          // returns undefined → every pair field read as 0 (the spread-of-
+          // entries bug). Mirror the outer-loop reader choice above. (#2162b)
+          if (useNativeObjVec && getIdxIdx !== undefined) {
             instrs.push({ op: "f64.const", value: fi } as Instr);
-            instrs.push({ op: "call", funcIdx: boxIdx } as Instr);
+            instrs.push({ op: "call", funcIdx: getIdxIdx } as Instr);
           } else {
-            instrs.push({ op: "ref.null.extern" } as Instr);
+            if (boxIdx !== undefined) {
+              instrs.push({ op: "f64.const", value: fi } as Instr);
+              instrs.push({ op: "call", funcIdx: boxIdx } as Instr);
+            } else {
+              instrs.push({ op: "ref.null.extern" } as Instr);
+            }
+            instrs.push({ op: "call", funcIdx: getIdx } as Instr);
           }
-          instrs.push({ op: "call", funcIdx: getIdx } as Instr);
           // Coerce the externref element to the tuple field type
           if (fieldType.kind === "f64" && unboxIdx !== undefined) {
             instrs.push({ op: "call", funcIdx: unboxIdx } as Instr);
