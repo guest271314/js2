@@ -749,6 +749,13 @@ export interface CodegenContext {
    */
   toJsonDriverReserved?: boolean;
   /**
+   * (#2166 PR-D3) True once the standalone `JSON.stringify` codec reserved its
+   * `__call_replacer(holder, replacer, key, value) -> externref` driver funcIdx
+   * — filled in finalize to wrap `__call_fn_method_2` (holder bound as the
+   * replacer `this`, key+value the two replacer args).
+   */
+  replacerDriverReserved?: boolean;
+  /**
    * (#1888 Slice 1) True once the standalone open-any method-dispatch bridge
    * `__apply_closure(fn, recv, args) -> externref` has reserved its funcIdx via
    * a placeholder function pushed during `ensureObjectRuntime` (registered in
