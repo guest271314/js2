@@ -20,12 +20,7 @@
 import type { ArrayTypeDef, Instr, ValType, WasmFunction } from "../ir/types.js";
 import type { CodegenContext } from "./context/types.js";
 import { addFuncType } from "./registry/types.js";
-import {
-  LOWER_CASE_RUNS,
-  LOWER_CASE_SPECIAL,
-  UPPER_CASE_RUNS,
-  UPPER_CASE_SPECIAL,
-} from "./case-tables.js";
+import { LOWER_CASE_RUNS, LOWER_CASE_SPECIAL, UPPER_CASE_RUNS, UPPER_CASE_SPECIAL } from "./case-tables.js";
 
 const i32: ValType = { kind: "i32" };
 
@@ -366,7 +361,12 @@ export function emitNativeCaseConversion(
     const flattenPrelude: Instr[] =
       flattenIdx === undefined
         ? [get(S), { op: "ref.cast", typeIdx: strTypeIdx } as Instr, set(FS)]
-        : [get(S), { op: "call", funcIdx: flattenIdx } as Instr, { op: "ref.cast", typeIdx: strTypeIdx } as Instr, set(FS)];
+        : [
+            get(S),
+            { op: "call", funcIdx: flattenIdx } as Instr,
+            { op: "ref.cast", typeIdx: strTypeIdx } as Instr,
+            set(FS),
+          ];
 
     const body: Instr[] = [
       ...flattenPrelude,
@@ -564,21 +564,33 @@ export function emitNativeCaseConversion(
   makeStr("__str_toUpperCase_uni", "__case_simple_upper", UPPER_CASE_RUNS, UPPER_CASE_SPECIAL);
   makeStr("__str_toLowerCase_uni", "__case_simple_lower", LOWER_CASE_RUNS, LOWER_CASE_SPECIAL);
 
-  // (#40) Rewrite the ASCII-only __str_toUpperCase/__str_toLowerCase bodies in
-  // place so EVERY caller gets the Unicode mapping regardless of whether it
-  // resolved the helper funcIdx before or after the funcMap re-point in makeStr.
-  for (const [asciiName, uniName] of [
+  // (#40 / #2191) Re-point the PUBLIC `__str_toUpperCase` / `__str_toLowerCase`
+  // helper names directly at the Unicode `_uni` funcIdx in BOTH resolution maps
+  // (`nativeStrHelpers` AND `funcMap`) so EVERY caller — direct-codegen string
+  // ops, the IR string-method path, `charCodeAt`, `===`, etc. — dispatches to
+  // the Unicode body. The old ASCII body becomes unreferenced dead code
+  // (wasm-opt drops it).
+  //
+  // Why NOT the previous in-place body copy: it located the ascii fn via
+  // `ctx.mod.functions[asciiIdx - ctx.numImportFuncs]`, where `asciiIdx` was
+  // captured in `nativeStrHelpers` BEFORE this point. If ANY late import was
+  // added between the ascii registration (native-strings.ts) and this re-point,
+  // `ctx.numImportFuncs` grew, so `asciiIdx - numImportFuncs` indexed the WRONG
+  // function — it patched some other fn and left the real ascii
+  // `__str_toUpperCase` un-patched. That produced the #2191 intransitivity:
+  // `"à".toUpperCase()` via the `===` call site resolved to the un-patched ascii
+  // body (à = 0xE0 left unchanged, ∉ [a-z]) while `charCodeAt` resolved to the
+  // Unicode body (à→À, 0xC0) — two different functions for the "same" call, so
+  // `"à".toUpperCase() === "À"` was false while `.charCodeAt(0)` was 0xC0.
+  // Re-pointing the NAME (not patching a body by a shift-sensitive index) is
+  // immune to the funcIdx shift and routes ALL resolvers identically.
+  for (const [publicName, uniName] of [
     ["__str_toUpperCase", "__str_toUpperCase_uni"],
     ["__str_toLowerCase", "__str_toLowerCase_uni"],
   ] as const) {
     const uniIdx = ctx.funcMap.get(uniName);
-    const asciiIdx = ctx.nativeStrHelpers.get(asciiName);
-    if (uniIdx === undefined || asciiIdx === undefined) continue;
-    const asciiFn = ctx.mod.functions[asciiIdx - ctx.numImportFuncs];
-    const uniFn = ctx.mod.functions[uniIdx - ctx.numImportFuncs];
-    if (!asciiFn || !uniFn) continue;
-    asciiFn.locals = uniFn.locals;
-    asciiFn.body = uniFn.body;
-    ctx.nativeStrHelpers.set(asciiName, asciiIdx);
+    if (uniIdx === undefined) continue;
+    ctx.nativeStrHelpers.set(publicName, uniIdx);
+    ctx.funcMap.set(publicName, uniIdx);
   }
 }

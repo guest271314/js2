@@ -1,9 +1,11 @@
 ---
 id: 2191
-title: "Standalone string === is intransitive for ≥0x80 strings built by a fresh codec helper"
-status: ready
+title: "Standalone case-conversion === literal: #40 ascii→uni toUpperCase repoint missed the called fn (funcIdx shift)"
+status: done
+assignee: ttraenkler/sdev-proxy3
 created: 2026-06-18
 updated: 2026-06-18
+completed: 2026-06-18
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -149,3 +151,35 @@ future codec that builds `$NativeString` structs directly.
 - `"à".toUpperCase() === "À"` (runtime param) returns `true` standalone, and the
   intransitivity is gone for ≥0x80 strings from any builder.
 - #40 case-conversion tests pass via `===` (not just charCodeAt readback).
+
+## RESOLVED 2026-06-18 (sdev-proxy3) — it was a #40 helper-routing bug, NOT __str_equals
+
+All prior theories (IR `string.eq` operand bug; inside `__str_equals`/
+`__str_flatten`; array-rep ≥0x80) were **disproved**. Decisive disproof:
+`"à".toUpperCase() === "à"` (compared to the LOWERCASE input) returns **TRUE** —
+i.e. `"à".toUpperCase()` via the `===` call site is still **"à" (0xE0)**, not
+"À" (0xC0). `__str_equals` is correctly comparing 0xE0 ≠ 0xC0. Meanwhile
+`"à".toUpperCase().charCodeAt(0)` is 0xC0. Two call sites → two different
+`toUpperCase` functions.
+
+The module emits TWO functions: `$__str_toUpperCase` (ASCII-only — à=0xE0 ∉
+[a-z], left unchanged) and `$__str_toUpperCase_uni` (Unicode — à→À). The #40
+ascii→uni re-point (`case-convert-native.ts`) copied `uniFn.body` into the ascii
+fn via `ctx.mod.functions[asciiIdx - ctx.numImportFuncs]`, where `asciiIdx` was
+captured in `nativeStrHelpers` BEFORE the re-point. A late import added between
+the ascii registration (`native-strings.ts`) and the re-point grew
+`ctx.numImportFuncs`, so `asciiIdx - numImportFuncs` indexed the WRONG function —
+patching some other fn and leaving the real ascii `$__str_toUpperCase`
+un-patched. The `===` path resolved to the un-patched ascii body; `charCodeAt`
+resolved to the uni body. (Same funcIdx-shift class as the #2190 round-3 bug.)
+
+**Fix:** re-point the PUBLIC `__str_toUpperCase`/`__str_toLowerCase` NAMES (in
+BOTH `nativeStrHelpers` and `funcMap`) directly at the `_uni` funcIdx, so every
+resolver dispatches to the Unicode body. The ascii body becomes dead code
+(wasm-opt drops it). Re-pointing the name is immune to the funcIdx shift.
+
+Files:
+- `src/codegen/case-convert-native.ts` — replace the shift-sensitive body-copy
+  with a name re-point in both maps.
+- `tests/issue-2191-case-equals.test.ts` — 6 tests (toUpper/toLower ≥0x80 ===
+  literal, ASCII control, transitivity); all green, optimize on+off.
