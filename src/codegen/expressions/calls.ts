@@ -129,6 +129,7 @@ import {
   tryCompileStandaloneRegExpExec,
   tryCompileStandaloneRegExpSymbolCall,
   tryCompileStandaloneRegExpTest,
+  tryCompileStandaloneRegExpToString,
 } from "../regexp-standalone.js";
 import {
   emitThrowTypeError,
@@ -2726,6 +2727,9 @@ function compileCallExpression(
 
     const standaloneRegExpTest = tryCompileStandaloneRegExpTest(ctx, fctx, expr, propAccess);
     if (standaloneRegExpTest !== undefined) return standaloneRegExpTest;
+
+    const standaloneRegExpToString = tryCompileStandaloneRegExpToString(ctx, fctx, expr, propAccess);
+    if (standaloneRegExpToString !== undefined) return standaloneRegExpToString;
 
     // Handle Array.prototype.METHOD.call(obj, ...args) — inline as array method on shape-inferred obj
     {
