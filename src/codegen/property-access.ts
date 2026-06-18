@@ -4722,6 +4722,35 @@ export function compileElementAccessBody(
   const typeIdx = (objType as { typeIdx: number }).typeIdx;
   const typeDef = ctx.mod.types[typeIdx];
 
+  // (#2357/#47) `$__subview` receiver (TypedArray subarray) — read the SHARED
+  // parent buffer at `data[byteOffset + i]`. Must run BEFORE the tuple/struct-field
+  // check below: a `$__subview` is a 3-field struct {length, data, byteOffset}, so
+  // `isVecStructAccess` (exactly 2 fields) is false and the tuple path would
+  // mis-handle it. Compile-time discriminated by the receiver typeIdx, so plain
+  // arrays (vec struct, not subview) never reach this arm.
+  if (typeDef?.kind === "struct" && isSubviewTypeIdx(ctx, typeIdx)) {
+    const subArrTypeIdx = getSubviewArrTypeIdx(ctx, typeIdx);
+    const subArrDef = ctx.mod.types[subArrTypeIdx];
+    if (!subArrDef || subArrDef.kind !== "array") {
+      reportErrorNoNode(ctx, "Element access: subview data is not an array");
+      return null;
+    }
+    const svLocal = allocLocal(fctx, `__sv_recv_${fctx.locals.length}`, { kind: "ref_null", typeIdx });
+    fctx.body.push({ op: "local.set", index: svLocal } as Instr);
+    // data = sv.data (the SHARED parent backing array, field 1)
+    fctx.body.push({ op: "local.get", index: svLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 } as Instr);
+    // index = sv.byteOffset + i
+    fctx.body.push({ op: "local.get", index: svLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 2 } as Instr); // byteOffset
+    compileExpression(ctx, fctx, expr.argumentExpression, { kind: "i32" });
+    fctx.body.push({ op: "i32.add" } as Instr);
+    const svValueType: ValType =
+      subArrDef.element.kind === "i8" || subArrDef.element.kind === "i16" ? { kind: "i32" } : subArrDef.element;
+    emitBoundsCheckedArrayGet(fctx, subArrTypeIdx, subArrDef.element);
+    return svValueType;
+  }
+
   // Handle tuple struct — element access with literal index → struct.get
   if (typeDef?.kind === "struct") {
     const isVecStructAccess =
@@ -4835,33 +4864,6 @@ export function compileElementAccessBody(
         }
       }
       return null;
-    }
-
-    // (#2357/#47) `$__subview` receiver (TypedArray subarray): read the SHARED
-    // parent buffer at `base.data[byteOffset + i]`. The receiver struct ref is on
-    // the stack. This arm is reached at COMPILE time only when the binding's static
-    // type is a subview, so plain-array access never pays for it.
-    if (isSubviewTypeIdx(ctx, typeIdx)) {
-      const subArrTypeIdx = getSubviewArrTypeIdx(ctx, typeIdx);
-      const subArrDef = ctx.mod.types[subArrTypeIdx];
-      if (!subArrDef || subArrDef.kind !== "array") {
-        reportErrorNoNode(ctx, "Element access: subview data is not an array");
-        return null;
-      }
-      const svLocal = allocLocal(fctx, `__sv_recv_${fctx.locals.length}`, { kind: "ref_null", typeIdx });
-      fctx.body.push({ op: "local.set", index: svLocal } as Instr);
-      // data = sv.data (the SHARED parent backing array, field 1)
-      fctx.body.push({ op: "local.get", index: svLocal } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 } as Instr);
-      // index = sv.byteOffset + i
-      fctx.body.push({ op: "local.get", index: svLocal } as Instr);
-      fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 2 } as Instr); // byteOffset
-      compileExpression(ctx, fctx, expr.argumentExpression, { kind: "i32" });
-      fctx.body.push({ op: "i32.add" } as Instr);
-      const svValueType: ValType =
-        subArrDef.element.kind === "i8" || subArrDef.element.kind === "i16" ? { kind: "i32" } : subArrDef.element;
-      emitBoundsCheckedArrayGet(fctx, subArrTypeIdx, subArrDef.element);
-      return svValueType;
     }
 
     // Handle vec struct (array wrapped in {length, data})
