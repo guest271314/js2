@@ -85,3 +85,28 @@ export function test(): number { const p = make(P); return p.x + p.y; }
     expect(await runTest(src)).toBe(16);
   });
 });
+
+describe("issue #2026 (PR-3b): new.target in the dynamic-new ctor", () => {
+  // `new.target === A` is an i32 boolean inside the ctor; surfaced through the
+  // externref boundary it reads as 1 (true) / 0 (false). PR-1 left it 0 on the
+  // dynamic path because the new-target global was never set. PR-3b sets it to
+  // the dispatched class id before the ctor call (the static path already does).
+  it("sets new.target to the dispatched class inside the dynamic ctor", async () => {
+    const src = `
+class A { hit: number; constructor() { this.hit = (new.target === A) ? 1 : 0; } }
+function make(K: any): any { return new K(); }
+export function test(): number { return make(A).hit; }
+`;
+    expect(await runTest(src)).toBe(1);
+  });
+
+  it("new.target discriminates between two dynamically-constructed classes", async () => {
+    const src = `
+class A { who: number; constructor() { this.who = (new.target === A) ? 1 : 0; } }
+class B { who: number; constructor() { this.who = (new.target === B) ? 2 : 0; } }
+function make(K: any): any { return new K(); }
+export function test(): number { return make(A).who + make(B).who; } // 1 + 2 = 3
+`;
+    expect(await runTest(src)).toBe(3);
+  });
+});

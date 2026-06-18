@@ -1829,6 +1829,14 @@ function emitDynamicNewFallback(
         pushDefaultValue(fctx, pType, ctx);
       }
     }
+    // (#2026 PR-3b) Set new.target to the DISPATCHED class id before the ctor
+    // call, mirroring the static `new C()` path (`emitSetNewTargetBeforeCall`).
+    // Without this the new-target global keeps whatever the enclosing frame
+    // left, so `new.target === K` inside a dynamically-constructed ctor read 0.
+    // The id-based comparison (`compileBinaryExpression`'s new.target arm) then
+    // matches `getOrAssignClassNewTargetId(className)`. No-op unless the module
+    // uses new.target (`ctx.usesNewTarget`), so zero cost otherwise.
+    emitSetNewTargetBeforeCall(ctx, fctx.body, className);
     fctx.body.push({ op: "call", funcIdx: ctorFuncIdx });
     // Box the instance to externref to match the dispatch `if` block type. Most
     // `<Class>_new` return `(ref $structIdx)` (an anyref subtype) → wrap with

@@ -416,10 +416,22 @@ emitted INVALID Wasm and the whole module failed to instantiate. Measured:
 WAT-diffed the plain `new K(7,9)` path before/after — **byte-identical** (the
 new branch is gated on `rawArgs.some(isSpreadElement)`, fully inert for
 non-spread calls; no perf/shape change). Additive; new-super.ts only; helpers by
-name. tsc + prettier + biome-lint clean. Tests:
-`tests/issue-2026-dynamic-new-spread.test.ts` (5: array-lit, mixed, extra-arg,
-loud-refuse diagnostic, plain-arg PR-1 regression guard). All 13 existing #2026
-tests still green. Branch `issue-2026-pr3a-spread`.
+name. tsc + prettier + biome-lint clean.
 
-**Split from new.target (PR-3b) and `.constructor` any-receiver (PR-2)** — each
-ships as its own PR to isolate regression risk (per tech-lead).
+**PR-3b (new.target) folded into the same PR (#1699).** `new.target === K` read
+0 inside a dynamically-constructed ctor — the dynamic path never set the
+new-target global. Fix: call the shared `emitSetNewTargetBeforeCall(ctx,
+fctx.body, className)` in `buildCtorArm` before the `<Class>_new` call, mirroring
+the static path; the id-based comparison (`compileBinaryExpression`'s new.target
+arm) then matches `getOrAssignClassNewTargetId(className)`. No-op unless
+`ctx.usesNewTarget`. (Originally split to its own PR, then folded back per
+tech-lead to avoid a redundant CI matrix restart — both edges are small,
+additive, cohesive in new-super.ts.)
+
+Tests: `tests/issue-2026-dynamic-new-spread.test.ts` (7: array-lit/mixed/
+extra-arg spread, loud-refuse diagnostic, plain-arg PR-1 guard, new.target true,
+new.target two-class discrimination). All 13 existing #2026 tests still green.
+Branch `issue-2026-pr3a-spread` → PR #1699.
+
+**Still open — PR-2** (`.constructor === A` on an externref/`any` receiver) ships
+as its own PR. **#53** = variable-spread runtime `$argv` trampoline (deferred).
