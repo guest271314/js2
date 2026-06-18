@@ -11,16 +11,16 @@
   {
     "edition": "ES5",
     "pass": 9546,
-    "fail": 3190,
-    "ce": 350,
+    "fail": 3191,
+    "ce": 349,
     "skip": 0,
     "total": 13086,
     "pct": 73
   },
   {
     "edition": "ES2015",
-    "pass": 10883,
-    "fail": 4255,
+    "pass": 10889,
+    "fail": 4249,
     "ce": 259,
     "skip": 0,
     "total": 15397,
@@ -46,8 +46,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3464,
-    "fail": 713,
+    "pass": 3463,
+    "fail": 714,
     "ce": 74,
     "skip": 0,
     "total": 4251,
@@ -64,8 +64,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 1435,
-    "fail": 368,
+    "pass": 1433,
+    "fail": 370,
     "ce": 80,
     "skip": 18,
     "total": 1901,
