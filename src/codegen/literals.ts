@@ -50,6 +50,7 @@ import {
 } from "./index.js";
 import { ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { emitNativeGeneratorToVec, nativeGeneratorInfoForForOfSubject } from "./generators-native.js";
+import { emitCollectionIteratorVec } from "./map-runtime.js";
 import { emitSymbolDescStore } from "./symbol-native.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
@@ -61,6 +62,7 @@ import {
   flushLateImportShifts,
   registerResolveComputedKeyExpression,
   valTypesMatch,
+  VOID_RESULT,
 } from "./shared.js";
 import { buildVecFromExternref, getVecInfo, pushDefaultValue } from "./type-coercion.js";
 import { emitDrainCustomIterableToVec, isCustomIterable } from "./custom-iterable.js";
@@ -579,11 +581,15 @@ function compileObjectLiteralWithAccessors(
         continue;
       }
       if (methodName === undefined) continue;
+      // (#6408) Same dual-mode key fix as the data-property arm above: the raw
+      // `global.get <stringGlobalMap.get(method)>` baked `global.get -1` in
+      // standalone for a method key on a literal that also takes the accessor
+      // path. Route through the guarded helper.
       addStringConstantGlobal(ctx, methodName);
-      const keyGlobal = ctx.stringGlobalMap.get(methodName);
-      if (keyGlobal === undefined) continue;
       fctx.body.push({ op: "local.get", index: objLocal });
-      fctx.body.push({ op: "global.get", index: keyGlobal });
+      for (const instr of stringConstantExternrefInstrs(ctx, methodName)) {
+        fctx.body.push(instr);
+      }
       const ok = compileArrowAsCallback(ctx, fctx, prop as unknown as ts.FunctionExpression, { needsThis: true });
       if (!ok) {
         fctx.body.push({ op: "ref.null.extern" });
@@ -3061,6 +3067,33 @@ export function compileArrayLiteral(
   for (let i = 0; i < expr.elements.length; i++) {
     const el = expr.elements[i]!;
     if (ts.isSpreadElement(el)) {
+      // (#42) Spread of a standalone-native Set (`[...set]`). The subject lowers
+      // to a `ref $Map` (a Set is a Map under the hood) whose field 0 is NOT a
+      // $length, so the generic vec fallthrough below would read it as a length
+      // (`i32.add expected i32, found struct.get` — invalid Wasm). Route it
+      // through the same `emitCollectionIteratorVec` driver the for-of /
+      // `.values()` paths use: a Set spreads its values (§24.2.3.*). It produces
+      // a canonical externref `$Vec`; the fill loop (Step 3) coerces each
+      // externref element to the result element type. (Bare `[...map]` spreads
+      // `[k, v]` entry pairs — deferred to the entries-pair slice #2162/#9.)
+      if (ctx.nativeStrings) {
+        const subjType = ctx.checker.getTypeAtLocation(el.expression);
+        const subjName = (subjType.symbol ?? subjType.aliasSymbol)?.name;
+        if (subjName === "Set") {
+          const matType = emitCollectionIteratorVec(ctx, fctx, el.expression, "values", /* isSet */ true);
+          if (matType != null && matType !== VOID_RESULT && (matType.kind === "ref" || matType.kind === "ref_null")) {
+            const matVecTypeIdx = matType.typeIdx;
+            const srcLocal = allocLocal(fctx, `__spread_coll_${fctx.locals.length}`, matType);
+            fctx.body.push({ op: "local.tee", index: srcLocal });
+            fctx.body.push({ op: "struct.get", typeIdx: matVecTypeIdx, fieldIdx: 0 });
+            fctx.body.push({ op: "i32.add" });
+            spreadLocals.push({ local: srcLocal, elemIdx: i, srcVecTypeIdx: matVecTypeIdx });
+            continue;
+          }
+          // Driver declined (non-native receiver) — fall through to the generic
+          // path, which compiles the subject itself below.
+        }
+      }
       const srcType = compileExpression(ctx, fctx, el.expression);
       if (!srcType) continue;
       // (#2169) Spread of a Wasm-native generator (`[...g()]`). The subject is a
@@ -3362,6 +3395,26 @@ export function compileArrayLiteral(
       fctx.body.push({ op: "i32.const", value: 0 });
       fctx.body.push({ op: "local.set", index: readIdx });
 
+      // (#42) When the spread source's element type differs from the result
+      // element type, the raw `array.get → array.set` below would store a
+      // mismatched type (invalid Wasm). This happens when a standalone
+      // collection iterator (`[...set.values()]`, `[...map.entries()]`) — whose
+      // canonical `$Vec` holds externref entries — is spread into a numeric
+      // result vec. Capture a per-element coercion template (e.g. externref →
+      // f64 via the standalone `__unbox_number`, which has a pure-Wasm body in
+      // `nativeStrings` mode — no host import) and splice it between the read and
+      // the write. `coerceType` may register late imports, so build the template
+      // (which flushes them) BEFORE emitting the loop. When src/dst element types
+      // already match, the template is empty and the copy stays byte-identical.
+      const srcVecInfo = getVecInfo(ctx, spreadInfo.srcVecTypeIdx);
+      const dstVecInfo = getVecInfo(ctx, vecTypeIdx);
+      let elemCoerce: Instr[] = [];
+      if (srcVecInfo && dstVecInfo && !valTypesMatch(srcVecInfo.elemType, dstVecInfo.elemType)) {
+        elemCoerce = collectInstrs(fctx, () => {
+          coerceType(ctx, fctx, srcVecInfo.elemType, dstVecInfo.elemType);
+        });
+      }
+
       // loop: while readIdx < srcVec.length
       const loopBody: Instr[] = [];
       // Condition: readIdx >= srcVec.length → break
@@ -3370,13 +3423,14 @@ export function compileArrayLiteral(
       loopBody.push({ op: "struct.get", typeIdx: spreadInfo.srcVecTypeIdx, fieldIdx: 0 }); // get length from vec
       loopBody.push({ op: "i32.ge_s" });
       loopBody.push({ op: "br_if", depth: 1 }); // break out of block
-      // result[writeIdx] = src.data[readIdx]
+      // result[writeIdx] = coerce(src.data[readIdx])
       loopBody.push({ op: "local.get", index: resultLocal });
       loopBody.push({ op: "local.get", index: writeIdx });
       loopBody.push({ op: "local.get", index: spreadInfo.local });
       loopBody.push({ op: "struct.get", typeIdx: spreadInfo.srcVecTypeIdx, fieldIdx: 1 }); // get data from vec
       loopBody.push({ op: "local.get", index: readIdx });
       loopBody.push({ op: "array.get", typeIdx: srcArrTypeIdx });
+      for (const instr of elemCoerce) loopBody.push(instr);
       loopBody.push({ op: "array.set", typeIdx: arrTypeIdx });
       // writeIdx++; readIdx++
       loopBody.push({ op: "local.get", index: writeIdx });
