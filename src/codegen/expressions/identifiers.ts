@@ -66,6 +66,40 @@ function collectErrorInstanceOfTags(ctorName: string): number[] {
   return tags;
 }
 
+/**
+ * (#2188) Build the set of per-class brand ids (`classTagMap` values) that count
+ * as `instanceof <ctorName>` for a standalone-native user Error subclass, where
+ * `ctorName` is itself a user subclass of a builtin Error. The set is `ctorName`'s
+ * own id plus every user class that transitively extends `ctorName` (so an
+ * instance of `class C extends A {}` matches `instanceof A`). Sibling subclasses
+ * are excluded — that is the precision the brand restores (#2188): `(new A)` is
+ * branded with A's id, which is NOT in `B`'s id set, so `(new A) instanceof B`
+ * is false. Builtin parents (`Error`/`TypeError`) keep the field-0 tag check and
+ * never call this. Returns brand ids; empty only if `ctorName` is unregistered.
+ */
+function collectUserErrorSubclassBrandIds(ctx: CodegenContext, ctorName: string): number[] {
+  const ids: number[] = [];
+  const ownId = ctx.classTagMap.get(ctorName);
+  if (ownId !== undefined) ids.push(ownId);
+  // Every user class whose ancestor chain (via classParentMap) reaches ctorName
+  // is a descendant subclass — include its brand. Walk each registered class's
+  // parent chain rather than maintaining a children index.
+  for (const [cls, id] of ctx.classTagMap) {
+    if (cls === ctorName) continue;
+    let cursor: string | undefined = ctx.classParentMap.get(cls);
+    const seen = new Set<string>();
+    while (cursor !== undefined && !seen.has(cursor)) {
+      seen.add(cursor);
+      if (cursor === ctorName) {
+        ids.push(id);
+        break;
+      }
+      cursor = ctx.classParentMap.get(cursor);
+    }
+  }
+  return ids;
+}
+
 export function emitLocalTdzCheck(ctx: CodegenContext, fctx: FunctionContext, name: string, flagIdx: number): void {
   const msg = `${name} is not defined`;
   // #1473 — no JS host: build the TDZ flag check and emit a ReferenceError
@@ -1138,56 +1172,75 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
   // by reading its `$tag` field (fieldIdx 0) and comparing against the set of
   // tags compatible with `ctorName`. No `__instanceof` host import.
   // (#1536c) `userErrorParent` extends this to externref-backed user Error
-  // subclasses: discriminate against the *parent* error's compatible tag set.
+  // subclasses.
   if (noJsHost(ctx) && (ctorName === "Error" || isWasiErrorName(ctorName) || userErrorParent !== undefined)) {
-    const compatTags = collectErrorInstanceOfTags(userErrorParent ?? ctorName);
     const structIdx = getOrRegisterErrorStructType(ctx);
-    const leftType = compileExpression(ctx, fctx, expr.left);
-    if (leftType && leftType.kind !== "externref") {
-      // Numeric / boolean primitives are never Error instances.
-      if (leftType.kind === "i32" || leftType.kind === "f64" || leftType.kind === "i64") {
-        fctx.body.push({ op: "drop" });
-        fctx.body.push({ op: "i32.const", value: 0 });
-        return { kind: "i32" };
+    // (#2188) When the RHS is a *user* Error subclass, sibling subclasses share
+    // the same builtin parent `$tag`, so the builtin-tag check (field 0) cannot
+    // tell `(new A) instanceof B` from `instanceof A`. Instead read the
+    // per-class brand (`$userClassId`, fieldIdx 4) written at the subclass
+    // construction site and compare it against the set of class ids that count
+    // as `instanceof ctorName`: ctorName's own id plus every user subclass that
+    // (transitively) extends it. `Error`/`TypeError` (builtin RHS) keep the
+    // field-0 tag check unchanged. The brand of a plain builtin Error is the
+    // `-1` sentinel, which never appears in `brandIds` (ids are >= 0), so
+    // `e instanceof MySubclass` is correctly false for a non-branded Error.
+    const useBrand = userErrorParent !== undefined;
+    const brandIds = useBrand ? collectUserErrorSubclassBrandIds(ctx, ctorName) : [];
+    // A user subclass with no resolvable brand id (should not happen — every
+    // class is in classTagMap) would make the test vacuously false; guard so we
+    // never emit an empty compare set. Fall through to the host path if so.
+    if (!useBrand || brandIds.length > 0) {
+      const compatTags = useBrand ? brandIds : collectErrorInstanceOfTags(ctorName);
+      const brandFieldIdx = useBrand ? 4 : 0;
+      const leftType = compileExpression(ctx, fctx, expr.left);
+      if (leftType && leftType.kind !== "externref") {
+        // Numeric / boolean primitives are never Error instances.
+        if (leftType.kind === "i32" || leftType.kind === "f64" || leftType.kind === "i64") {
+          fctx.body.push({ op: "drop" });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          return { kind: "i32" };
+        }
+        coerceType(ctx, fctx, leftType, { kind: "externref" });
+      } else if (!leftType) {
+        fctx.body.push({ op: "ref.null.extern" });
       }
-      coerceType(ctx, fctx, leftType, { kind: "externref" });
-    } else if (!leftType) {
-      fctx.body.push({ op: "ref.null.extern" });
-    }
-    // externref -> anyref, store in temp, ref.test $Error_struct, then read tag.
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    const anyLocalIdx = allocLocal(fctx, `__err_instanceof_${fctx.locals.length}`, { kind: "anyref" } as ValType);
-    fctx.body.push({ op: "local.set", index: anyLocalIdx });
-    const elseBody: Instr[] = [
-      { op: "local.get", index: anyLocalIdx },
-      { op: "ref.cast", typeIdx: structIdx } as Instr,
-      { op: "struct.get", typeIdx: structIdx, fieldIdx: 0 } as Instr,
-    ];
-    if (compatTags.length === 1) {
-      elseBody.push({ op: "i32.const", value: compatTags[0]! });
-      elseBody.push({ op: "i32.eq" });
-    } else {
-      const tagLocalIdx = allocLocal(fctx, `__err_tag_${fctx.locals.length}`, { kind: "i32" });
-      elseBody.push({ op: "local.set", index: tagLocalIdx });
-      elseBody.push({ op: "local.get", index: tagLocalIdx });
-      elseBody.push({ op: "i32.const", value: compatTags[0]! });
-      elseBody.push({ op: "i32.eq" });
-      for (let i = 1; i < compatTags.length; i++) {
-        elseBody.push({ op: "local.get", index: tagLocalIdx });
-        elseBody.push({ op: "i32.const", value: compatTags[i]! });
+      // externref -> anyref, store in temp, ref.test $Error_struct, then read
+      // the discriminating field (builtin tag = field 0, user brand = field 4).
+      fctx.body.push({ op: "any.convert_extern" } as Instr);
+      const anyLocalIdx = allocLocal(fctx, `__err_instanceof_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+      fctx.body.push({ op: "local.set", index: anyLocalIdx });
+      const elseBody: Instr[] = [
+        { op: "local.get", index: anyLocalIdx },
+        { op: "ref.cast", typeIdx: structIdx } as Instr,
+        { op: "struct.get", typeIdx: structIdx, fieldIdx: brandFieldIdx } as Instr,
+      ];
+      if (compatTags.length === 1) {
+        elseBody.push({ op: "i32.const", value: compatTags[0]! });
         elseBody.push({ op: "i32.eq" });
-        elseBody.push({ op: "i32.or" });
+      } else {
+        const tagLocalIdx = allocLocal(fctx, `__err_tag_${fctx.locals.length}`, { kind: "i32" });
+        elseBody.push({ op: "local.set", index: tagLocalIdx });
+        elseBody.push({ op: "local.get", index: tagLocalIdx });
+        elseBody.push({ op: "i32.const", value: compatTags[0]! });
+        elseBody.push({ op: "i32.eq" });
+        for (let i = 1; i < compatTags.length; i++) {
+          elseBody.push({ op: "local.get", index: tagLocalIdx });
+          elseBody.push({ op: "i32.const", value: compatTags[i]! });
+          elseBody.push({ op: "i32.eq" });
+          elseBody.push({ op: "i32.or" });
+        }
       }
+      fctx.body.push({ op: "local.get", index: anyLocalIdx });
+      fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: elseBody,
+        else: [{ op: "i32.const", value: 0 }],
+      });
+      return { kind: "i32" };
     }
-    fctx.body.push({ op: "local.get", index: anyLocalIdx });
-    fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
-    fctx.body.push({
-      op: "if",
-      blockType: { kind: "val", type: { kind: "i32" } },
-      then: elseBody,
-      else: [{ op: "i32.const", value: 0 }],
-    });
-    return { kind: "i32" };
   }
 
   // Ensure the __instanceof host import exists
