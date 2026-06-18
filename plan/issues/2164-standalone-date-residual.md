@@ -1,11 +1,12 @@
 ---
 id: 2164
 title: "Standalone Date conformance residual (~234 tests)"
-status: in-progress
+status: done
+completed: 2026-06-18
 sprint: 63
 created: 2026-06-15
 updated: 2026-06-18
-assignee: ttraenkler/dev-date
+assignee: ttraenkler/cs-2164
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -230,3 +231,51 @@ returns NaN. None of our formatters emit that form; it is a lenient V8 extra.
 Covering it would require the ISO scanner to detect a month-name mid-stream —
 deferred. The dominant value (round-tripping the formatters + RFC2822 GMT
 strings) is delivered.
+
+---
+
+## Slice 6 (2026-06-18, cs-2164) — negative-year calendar fields + closes the issue
+
+**Landed — closes #2164.** The remaining slice flagged under Slices 3/4: the
+negative-year calendar getters. `__date_civil_from_days` returns
+`packed = year*10000 + month*100 + day` with month/day always positive, but for
+years < 0 the whole packed value is negative. Every decode site used Wasm
+`i64.div_s` / `i64.rem_s` (truncate toward zero), which corrupted both the year
+(off by one) *and* the month/day (returned **negative**) for any pre-year-0
+timestamp. e.g. `new Date(Date.UTC(-1,0,1))` returned `getUTCFullYear()=0`,
+`getUTCMonth()=-99`, `getUTCDate()=-99` standalone (should be -1 / 0 / 1). This
+hit the three calendar getters, the `setUTC*` component readback, and both the
+`__date_iso_string` and `__date_format_string` pure-Wasm helpers (so the string
+formatters were wrong too). The bug existed in **both** modes for the getters
+(calendar getters are computed natively regardless of host).
+
+**Fix** (`expressions/builtins.ts`): two shared emitters, `emitPackedYear` /
+`emitPackedMmdd`, decode the packed value with **floor** semantics —
+`year = floor(packed/10000)`; `mmdd = packed - year*10000` (guaranteed in
+[101, 1231]); `month = mmdd/100`, `day = mmdd%100`. Applied at all five decode
+sites (3 calendar getters, the `setUTC*` readback, the ISO helper, the
+format-string helper; the latter two overwrite `$packed` with the positive
+`mmdd` so their existing trunc-based month/day extraction works unchanged).
+
+**Also fixed** (same slice): the human-readable formatters (`toString` /
+`toUTCString` / `toDateString`) rendered out-of-[0,9999] years as the fixed ISO
+±6-digit form (`-000001`). Per V8 / ECMA-262 §21.4.4.41.1/§21.4.4.43, those use
+a sign-prefixed, **minimum-4-digit** decimal (`-0001`, `0099`, natural width for
+≥10000, no `+`); only `toISOString` (§21.4.1.18) uses the ±6-digit extended
+form. `writeYear` (format-string helper) now emits the min-4 form. This matches
+the host/runtime `_formatDate` behaviour already tested by #1343 Slice 5 — both
+paths now agree.
+
+**Validation.** New `tests/issue-2164-negative-year.test.ts` (42/42): the three
+calendar getters for years -1 / -100 / -271821 (near the §21.4.1.1 minimum),
+positive-year no-regression, `setUTCMonth` readback on a year -5 date, and exact
+string conformance (Node `TZ=UTC` output) for all five formatters across epoch,
+negative years, sub-1000 (`0099`), the 9999↔10000 boundary, and 275760 (near
+max) — covering the ISO `+010000`/`+275760` extended form vs the human-readable
+natural-width form. Existing #2164 / #2164-iso / #2164-formatters / #2164-rfc2822
+/ #1638 / #1343-negative-year suites: 69/69 unchanged. tsc + prettier + biome +
+stack-balance + coercion-sites + any-box gates clean. No host-import leak.
+
+With negative-year calendar fields correct, the standalone Date string +
+component surface reaches host parity for the full §21.4.1.1 year range; the
+issue is **done**.
