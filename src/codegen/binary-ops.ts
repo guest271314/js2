@@ -1010,14 +1010,37 @@ export function compileBinaryExpression(
   // keep their existing handling.
   const isStringOrNullableString = (t: ts.Type): boolean =>
     isStringType(t) || getNullablePrimitiveInfo(t)?.primitiveKind === "string";
+
+  // (#2192) A caught Error's `.message`/`.name`/`.stack` read in standalone/WASI
+  // lowers (via the property-access `$Error`-struct guard) to a native-string
+  // ref — but the receiver `e` is typed `any` (the `catch (e)` binding), so the
+  // operand's *TS* type is `any` and the string-equality dispatch below misses
+  // it, falling through to `ref.eq` (struct identity → always false for equal
+  // content). So `e.message === "hi"` was false even though the string is right
+  // (`const m = e.message; m === "hi"` worked because the typed local re-typed
+  // it to `string`). Recognise the property-read shape at the AST level and
+  // treat it as a string operand so the comparison routes to `__str_equals`.
+  const isStandaloneErrorStringPropRead = (node: ts.Expression): boolean => {
+    if (!(ctx.standalone || ctx.wasi)) return false;
+    if (!ts.isPropertyAccessExpression(node)) return false;
+    const p = node.name.text;
+    if (p !== "message" && p !== "name" && p !== "stack") return false;
+    const recv = node.expression;
+    if (!ts.isIdentifier(recv)) return false;
+    const sym = ctx.checker.getSymbolAtLocation(recv);
+    const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
+    return decl !== undefined && ts.isVariableDeclaration(decl) && ts.isCatchClause(decl.parent);
+  };
+  const leftIsStrLike = isStringOrNullableString(leftTsType) || isStandaloneErrorStringPropRead(expr.left);
+  const rightIsStrLike = isStringOrNullableString(rightTsType) || isStandaloneErrorStringPropRead(expr.right);
   if (
     ctx.nativeStrings &&
     ctx.nativeStrTypeIdx >= 0 &&
     isEqualityOp &&
     !wrapperEquality &&
-    isStringOrNullableString(leftTsType) &&
-    isStringOrNullableString(rightTsType) &&
-    // At least one side is the union form (else the plain-string path below handles it)
+    leftIsStrLike &&
+    rightIsStrLike &&
+    // At least one side is the union/error-read form (else the plain-string path below handles it)
     (!isStringType(leftTsType) || !isStringType(rightTsType))
   ) {
     return compileStringBinaryOp(ctx, fctx, expr, op);
