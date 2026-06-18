@@ -1,7 +1,8 @@
 ---
 id: 2372
 title: "standalone: force dynamic-object-receiver vars onto $Object representation (the dynamic-object family unblock)"
-status: ready
+status: in-progress
+assignee: ttraenkler/sendev-receiver
 sprint: Backlog
 created: 2026-06-19
 updated: 2026-06-19
@@ -104,3 +105,93 @@ regress a broad swath at once.
 - Recommend an architect spec (functions, the exact body-scan predicate, the
   struct-vs-$Object decision boundary) before dev dispatch — this is `max`
   reasoning_effort and high blast radius.
+
+## Root cause + fix (sendev-receiver, 2026-06-19) — the wall is FAR NARROWER than feared
+
+**Re-grounded against current `upstream/main` + the banked #2371 helper. The
+substrate moved (the #2162b pattern): the original "force every `{}` receiver
+onto `$Object`" pre-pass is NOT needed.** A receiver `const o: any = {}` already
+builds a `$Object` (`__new_plain_object`) in almost every case, and the
+define+read-back already composes on a `$Object`. Measured matrix (all
+`--target standalone`):
+
+| receiver / descriptor | inline `{value:42}` | dynamic `const d:any={value:42}` |
+|---|---|---|
+| `const o: any = {}` | **PASS** (struct fast path) | **FAIL → 0** (the only broken cell) |
+| `const o = {} as any` | PASS | PASS |
+| `Object.create(null)` / `new Object()` | PASS | PASS |
+| plain `o.y = 5` write+read on `const o:any={}` | PASS | — |
+
+The **single** failing combination is `const o: any = {}` (explicit `any`
+*annotation* + empty literal) targeted by a **dynamic** (non-inline-literal)
+`Object.defineProperty`. Read-back returned 0.
+
+### Exact mechanism (verified by WAT)
+
+`collectEmptyObjectWidening` (`src/codegen/declarations.ts:1954`) +
+`collectPropsFromStatements` (`:2059`) treat `Object.defineProperty(o,"x",desc)`
+as a *static struct-field widening* (lines 2087-2120): they add `x` as a struct
+field and register `o` to an anon struct via `widenedVarStructMap`. That fast
+path is only sound for an **inline-literal** descriptor — the define then lowers
+to `struct.set` and the read-back `o.x` to `struct.get` on the SAME widened
+struct field (this is why the inline case passes, byte-for-byte).
+
+But the widening fires **even when the descriptor is a variable** (a *dynamic*
+descriptor the pre-pass can't statically resolve): it still registers the struct
+(line 2116-2117) with the field typed `externref`. So `o` is built as
+`struct.new <N>` → `extern.convert_any` (confirmed in the `$test` WAT: the first
+ops are `ref.null extern / struct.new 20 / extern.convert_any`). At the define
+site, standalone routes a dynamic descriptor to the native
+`__obj_define_from_desc` (#2371), which writes the **`$Object` open-hash
+runtime** — a *different* object from the struct. The read-back `o.x` lowers to
+`struct.get` against the struct (still 0). Write-to-`$Object` / read-from-struct
+→ 0.
+
+### Fix (implemented — surgical, host/gc/wasi byte-identical)
+
+Suppress struct-widening for any **standalone** receiver targeted by at least
+one dynamic-descriptor `Object.defineProperty`. The receiver then stays on the
+`$Object` representation and BOTH the dynamic write and the read route through
+the native runtime consistently.
+
+- `src/codegen/context/types.ts` — new `dynamicDescriptorWidenVars: Set<string>`
+  (standalone-only poison set).
+- `src/codegen/context/create-context.ts` — init the set.
+- `src/codegen/declarations.ts`:
+  - `collectPropsFromStatements`: when `ctx.standalone && !isObjectLiteralExpression(descArg)`,
+    add `varName` to `dynamicDescriptorWidenVars`.
+  - `collectEmptyObjectWidening`: `continue` (skip struct registration) when the
+    var is in `dynamicDescriptorWidenVars`. (The poison set is filled by
+    `collectPropsFromStatements`, which runs *before* this decision point.)
+
+Host/gc/wasi mode is untouched (the gate is `ctx.standalone`): host keeps the
+struct fast path because the host `__defineProperty_desc` import reflects back
+through the live-mirror Proxy sidecar. A *mixed* receiver (one inline + one
+dynamic define) is poisoned as a whole and routes entirely through `$Object` —
+correct, both keys read back.
+
+### Verification
+
+- Direct probes flip the broken cell 0→42 and 0→1 (hasOwnProperty); every
+  previously-passing cell stays green.
+- **WAT byte-diff vs the #2371 base is IDENTICAL** for: inline-only
+  `defineProperty` (struct fast path), class-instance field (#1673 hot path),
+  plain `{a,b}` literal, and plain `o.y=` write/read. The change only alters
+  receivers carrying a dynamic-descriptor define — minimal blast radius.
+- New `tests/issue-2372.test.ts` (7 cases): dynamic data + accessor read-back,
+  hasOwnProperty, mixed inline+dynamic, and the three fast-path regression
+  guards. All pass.
+- The full #1629a/#1629b/#1629-S1/S2/S3/S6 + `ir-frontend-widening` equivalence
+  suites pass (61 assertions). (`empty-object-widening.test.ts` fails to *load*
+  on `import './helpers.js'` — a missing file absent on `upstream/main` too,
+  pre-existing and unrelated.)
+- tsc clean; biome introduces 0 new errors (declarations.ts has 3 pre-existing).
+
+### test262 expectation
+
+The `built-ins/Object/defineProperty/15.2.3.6-3-*` ToPropertyDescriptor cluster
+uses exactly this shape (`var desc = {...}; Object.defineProperty(o,"foo",desc);
+o.hasOwnProperty("foo")`), so it is the direct target. CI bucket-by-path will
+give the real flip count; acceptance criterion #4 (≥75% / ~235) was always an
+over-estimate (it conflated several root causes — see #1630/#2371). This fix
+clears the *receiver-representation* blocker specifically.
