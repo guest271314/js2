@@ -4,7 +4,7 @@ title: "structurally identical struct types share field names at the host bounda
 status: in-progress
 sprint: 63
 created: 2026-06-10
-updated: 2026-06-15
+updated: 2026-06-18
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -405,6 +405,45 @@ key-order-insensitive, 1 side-effect-order). Zero regressions —
 equiv suites identical to main (their incidental FAILs — `spread-rest`,
 `basic-destructuring` "no tests", a couple json cases — are all PRE-EXISTING on
 main, bisected). `tsc --noEmit` clean.
+
+### R3b investigation (cs-2158, 2026-06-18) — acceptance MET; insertion-order is the high-blast remainder
+
+Re-verified on current main: **all three stated acceptance-criteria repros now
+MATCH Node exactly** (`{aa}|{bb}` names, `Object.assign({a:1},{b:2})` →
+`{"a":1,"b":2}`, `{...{x:1,y:2},...{y:3,z:4},x:9}` → `{"x":9,"y":3,"z":4}`). The
+acceptance criteria ("All three repros match Node" + source-order override + no
+perf regression) are satisfied by PR-1/PR-1b/PR-2.
+
+R3b (`{...{x:1,y:2},...{y:3,z:4}}` → `{"y":3,"z":4,"x":1}`, want `{"x":1,"y":3,"z":4}`)
+remains. **Key new finding — a LOWER-blast-radius angle exists but the ordering
+source does not:** the host enumeration order is the **field-name CSV** order,
+NOT the struct slot order — `_structToPlainObject` (runtime.ts:2898) iterates the
+CSV and reads each value via `__sget_<name>` **by name** (slot-independent). So
+reordering only the CSV (leaving slots/getters/dedup/`$shape` untouched) would
+fix R3b with near-zero blast radius — IF a correct insertion-order name list were
+available.
+
+**But the insertion order is NOT recoverable from the `ts.Type` or from symbol
+declaration positions** (both proven wrong here):
+- `tsType.getProperties()` returns last-spread-first (`y,z,x`).
+- Sorting properties by `prop.declarations[0].pos` is ALSO incorrect: it fails
+  when a key re-occurs in a later spread (the winning declaration moves later,
+  but JS insertion order keeps the key at its FIRST occurrence). Verified
+  counterexample: `{...{a:1}, ...{b:2}, ...{a:3}}` → decl-pos sort gives `b,a`,
+  Node gives `a,b`. (`{...{a:1,b:2},...{b:3}}` and `{b:1,...{a:2}}` happen to
+  match by pos, masking the bug — do NOT trust the pos heuristic.)
+
+**Correct fix (the genuine remainder, high blast radius):** JS insertion order is
+a property of the **literal expression**, not the type — it must be computed by
+walking `expr.properties` in source order and, for spreads, each source's own
+keys in order, taking FIRST occurrence. That ordered name list must then drive
+the CSV (cheapest: a per-struct insertion-order name list recorded at
+`compileObjectLiteralForStruct` and consulted by `emitStructFieldNamesExport`
+instead of the slot order). Threading literal-derived order into the shared
+canonical struct's CSV is the scoped-out high-blast-radius change; it also has to
+pick a deterministic order when two literals of the same name-set but different
+insertion order share one canonical type (dedup) — a genuine design decision, not
+a mechanical patch. Left as `it.todo`; #2009 stays in-progress for R3b only.
 
 ### R3b STILL OPEN — spread-result key INSERTION ORDER (issue stays in-progress)
 `{ ...{x:1,y:2}, ...{y:3,z:4} }` now has correct VALUES but stringifies as

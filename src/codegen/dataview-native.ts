@@ -153,7 +153,7 @@ export function emitArrayBufferSlice(
     blockType: { kind: "empty" },
     then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: sliceLenLocal } as Instr],
     else: [],
-  } as unknown as Instr);
+  });
 
   // dstArr = new i32[sliceLen]
   const dstArrLocal = allocLocal(fctx, `__abs_dstarr_${fctx.locals.length}`, {
@@ -225,7 +225,7 @@ function emitNormalizeIndex(fctx: FunctionContext, idxLocal: number, lenLocal: n
       blockType: { kind: "empty" },
       then: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: idxLocal } as Instr],
       else: [],
-    } as unknown as Instr,
+    },
   ];
   const posBranch: Instr[] = [
     // if (idx > srcLen) idx = srcLen
@@ -237,14 +237,14 @@ function emitNormalizeIndex(fctx: FunctionContext, idxLocal: number, lenLocal: n
       blockType: { kind: "empty" },
       then: [{ op: "local.get", index: lenLocal } as Instr, { op: "local.set", index: idxLocal } as Instr],
       else: [],
-    } as unknown as Instr,
+    },
   ];
   fctx.body.push({
     op: "if",
     blockType: { kind: "empty" },
     then: negBranch,
     else: posBranch,
-  } as unknown as Instr);
+  });
 }
 
 /** Lazily ensure the i32_byte vec type exists and return its struct/array indices. */
@@ -252,6 +252,103 @@ function i32ByteVec(ctx: CodegenContext): { vecTypeIdx: number; arrTypeIdx: numb
   const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
   return { vecTypeIdx, arrTypeIdx };
+}
+
+/**
+ * (#2159 / #38) Lazily register the standalone `$__dv_window` wrapper struct:
+ * `{buf: (ref null __vec_i32_byte), byteOffset: i32, byteLength: i32}`.
+ *
+ * `new DataView(buffer, byteOffset, byteLength)` produces one of these when the
+ * view is *windowed* (byteOffset > 0 or an explicit byteLength); it shares the
+ * parent buffer's backing array so windowed writes are visible through the full
+ * view, and carries the window's byteOffset/byteLength so `dv.byteOffset` /
+ * `dv.byteLength` reflect the ctor args. Offset-0 default-length views keep the
+ * bare i32_byte vec representation (no wrapper) — the dominant, fully-native
+ * case — so the accessor must accept BOTH a wrapper and a bare vec receiver.
+ */
+export function getOrRegisterDvWindowType(ctx: CodegenContext): number {
+  if (ctx.dvWindowTypeIdx >= 0) return ctx.dvWindowTypeIdx;
+  const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+  const idx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "struct",
+    name: "__dv_window",
+    fields: [
+      { name: "buf", type: { kind: "ref_null", typeIdx: vecTypeIdx }, mutable: false },
+      { name: "byteOffset", type: { kind: "i32" }, mutable: false },
+      { name: "byteLength", type: { kind: "i32" }, mutable: false },
+    ],
+  });
+  ctx.dvWindowTypeIdx = idx;
+  ctx.structMap.set("__dv_window", idx);
+  ctx.typeIdxToStructName.set(idx, "__dv_window");
+  ctx.structFields.set("__dv_window", [
+    { name: "buf", type: { kind: "ref_null" as const, typeIdx: vecTypeIdx }, mutable: false },
+    { name: "byteOffset", type: { kind: "i32" as const }, mutable: false },
+    { name: "byteLength", type: { kind: "i32" as const }, mutable: false },
+  ]);
+  return idx;
+}
+
+/**
+ * (#2159 / #38) Recover a DataView receiver into `(backing i32_byte array,
+ * base byte offset)`, stashed in the two given locals. Accepts either:
+ *   - a `$__dv_window` wrapper (windowed view) → array = buf.data, base = buf's
+ *     byteOffset;
+ *   - a bare `$__vec_i32_byte` (offset-0 view / ArrayBuffer) → array = data,
+ *     base = 0.
+ * The receiver value (externref or struct ref) must already be on the stack.
+ * Emits a runtime `ref.test $__dv_window` branch so both shapes work.
+ */
+function recoverDvBacking(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  recvType: ValType | null,
+  arrLocal: number,
+  baseLocal: number,
+  vecTypeIdx: number,
+  arrTypeIdx: number,
+): boolean {
+  const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
+  // Normalize the receiver to an anyref-castable `(ref any)` on the stack.
+  if (recvType && recvType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+  } else if (recvType && (recvType.kind === "ref" || recvType.kind === "ref_null")) {
+    // already a gc ref
+  } else {
+    return false;
+  }
+  // Stash the anyref in a temp so we can test then cast.
+  const anyLocal = allocLocal(fctx, `__dvn_any_${fctx.locals.length}`, { kind: "anyref" });
+  fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+
+  const winBranch: Instr[] = [
+    // buf = (cast $__dv_window).buf ; base = .byteOffset
+    { op: "local.get", index: anyLocal } as Instr,
+    { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.set", index: arrLocal } as Instr,
+    { op: "local.get", index: anyLocal } as Instr,
+    { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.set", index: baseLocal } as Instr,
+  ];
+  const vecBranch: Instr[] = [
+    // bare vec: arr = .data ; base = 0
+    { op: "local.get", index: anyLocal } as Instr,
+    { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+    { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
+    { op: "local.set", index: arrLocal } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "local.set", index: baseLocal } as Instr,
+  ];
+  fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+  fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: winBranch, else: vecBranch } as Instr);
+  void arrTypeIdx;
+  return true;
 }
 
 /**
@@ -281,25 +378,19 @@ export function emitDataViewAccessor(
   const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
   if (arrTypeIdx < 0) return null;
 
-  // Recover the i32_byte vec struct from the (externref) receiver and stash
-  // its backing array in a local. `dv` may be typed as a struct ref already
-  // (when DataView codegen returns the buffer struct) or externref.
+  // Recover the i32_byte backing array AND the view's base byte offset from the
+  // receiver. `dv` may be a `$__dv_window` wrapper (windowed view → base =
+  // ctor byteOffset, sharing the parent's array) or a bare `$__vec_i32_byte`
+  // (offset-0 view / ArrayBuffer → base = 0). (#2159/#38)
   const arrLocal = allocLocal(fctx, `__dvn_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const baseLocal = allocLocal(fctx, `__dvn_base_${fctx.locals.length}`, { kind: "i32" });
   const recvType = compileExpr(receiver);
-  if (recvType && recvType.kind === "externref") {
-    fctx.body.push({ op: "any.convert_extern" } as Instr);
-    fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
-  } else if (recvType && (recvType.kind === "ref" || recvType.kind === "ref_null")) {
-    if ("typeIdx" in recvType && recvType.typeIdx !== vecTypeIdx) {
-      fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
-    }
-  } else {
+  if (!recoverDvBacking(ctx, fctx, recvType, arrLocal, baseLocal, vecTypeIdx, arrTypeIdx)) {
     return null;
   }
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: arrLocal });
 
-  // byteOffset (arg 0) → i32 index.
+  // byteOffset (arg 0) → i32 index, then add the view's base byte offset so a
+  // windowed accessor addresses the correct absolute byte in the shared buffer.
   const offLocal = allocLocal(fctx, `__dvn_off_${fctx.locals.length}`, { kind: "i32" });
   if (args.length >= 1) {
     compileExpr(args[0]!, { kind: "f64" });
@@ -307,6 +398,8 @@ export function emitDataViewAccessor(
   } else {
     fctx.body.push({ op: "i32.const", value: 0 } as Instr);
   }
+  fctx.body.push({ op: "local.get", index: baseLocal } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
   fctx.body.push({ op: "local.set", index: offLocal });
 
   if (acc.kind === "get") {
@@ -459,7 +552,7 @@ function emitReadI32(
     blockType: { kind: "val", type: { kind: "i32" } },
     then: leInstrs,
     else: beInstrs,
-  } as unknown as Instr);
+  });
 }
 
 /**
@@ -543,7 +636,7 @@ function emitReadI64(
     blockType: { kind: "val", type: { kind: "i64" } },
     then: build(true),
     else: build(false),
-  } as unknown as Instr);
+  });
 }
 
 /** Store `arr[off + k] = byte` (byte already an i32 0..255 on caller's responsibility). */
@@ -581,7 +674,9 @@ function emitWriteBytes(
   arrTypeIdx: number,
 ): void {
   if (acc.bytes === 1) {
-    // arr[off] = trunc(val) & 0xff
+    // arr[off] = (value mod 256). Spec ToInt8/ToUint8 are modular; go via i64
+    // (`i64.trunc_sat_f64_s` + `i32.wrap_i64`) so large values wrap rather than
+    // saturate (`i32.trunc_sat_f64_s` would clamp ≥2^31), then mask the low byte.
     const out: Instr[] = [];
     emitStoreByte(
       out,
@@ -590,7 +685,8 @@ function emitWriteBytes(
       0,
       [
         { op: "local.get", index: valLocal } as Instr,
-        { op: "i32.trunc_sat_f64_s" } as Instr,
+        { op: "i64.trunc_sat_f64_s" } as Instr,
+        { op: "i32.wrap_i64" } as Instr,
         { op: "i32.const", value: 0xff } as Instr,
         { op: "i32.and" } as Instr,
       ],
@@ -628,7 +724,7 @@ function emitWriteBytes(
       blockType: { kind: "empty" },
       then: storeAll(true),
       else: storeAll(false),
-    } as unknown as Instr);
+    });
     return;
   }
 
@@ -640,9 +736,16 @@ function emitWriteBytes(
     fctx.body.push({ op: "f32.demote_f64" } as Instr);
     fctx.body.push({ op: "i32.reinterpret_f32" } as Instr);
   } else {
-    // Integer: truncate toward zero. trunc_sat_f64_s gives a 32-bit pattern;
-    // for unsigned/odd widths the low N bytes are what matters.
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    // Integer: the spec (SetValueInBuffer → ToInt{8,16,32}/ToUint{8,16,32}) is
+    // MODULAR (`value mod 2^(8*bytes)`), not saturating. `i32.trunc_sat_f64_s`
+    // *clamps* (e.g. setUint32(_, 4_000_000_000) → 0x7FFFFFFF), which is wrong
+    // for any value ≥ 2^31. Truncate toward zero into an i64 first, then
+    // `i32.wrap_i64` keeps the low 32 bits — i.e. `value mod 2^32`. Only the low
+    // `acc.bytes` of those are stored below, giving the correct modular result
+    // for 2- and 4-byte signed/unsigned setters across the ±2^53 integer range
+    // that conformance exercises.
+    fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+    fctx.body.push({ op: "i32.wrap_i64" } as Instr);
   }
   fctx.body.push({ op: "local.set", index: bitsLocal } as Instr);
 
@@ -667,5 +770,5 @@ function emitWriteBytes(
     blockType: { kind: "empty" },
     then: storeAll(true),
     else: storeAll(false),
-  } as unknown as Instr);
+  });
 }

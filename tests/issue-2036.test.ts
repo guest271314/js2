@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
+// #2036 S6 step 1 — borrowed Array.prototype search/result-building methods over
+// an array-like `$Object` receiver have no working native standalone path yet;
+// they previously emitted invalid Wasm / leaked host imports. They must now
+// REFUSE LOUDLY in standalone (never invalid Wasm, never a silent-wrong value),
+// while the same calls keep compiling in host mode and real-array receivers keep
+// working in standalone.
+async function compileStandalone(body: string): Promise<{ success: boolean; errors: { message: string }[] }> {
+  const r = await compile(body, { fileName: "test.ts", target: "standalone" });
+  return { success: r.success, errors: r.success ? [] : r.errors.map((e) => ({ message: e.message })) };
+}
+
 // #2036 PR-1 — standalone Array.prototype generics over a real array-like
 // `$Object` receiver ({0:x, length:n}).
 //
@@ -17,13 +28,13 @@ import { compile } from "../src/index.js";
 // via the canonical number_toString key stringifier and the existing proto-walk
 // in __extern_get/__extern_has. Gated on standalone; gc/host uses the JS import.
 //
-// Scope note: the SEARCH methods (indexOf/lastIndexOf/includes) and `filter`
-// over an `$Object` receiver still emit invalid Wasm in standalone due to a
-// SEPARATE pre-existing codegen bug in their call-site loop (the binary emitter
-// mis-types a local — same on origin/main, independent of this helper fix). Those
-// are not asserted here; they need a follow-up. The callback methods that route
-// through the generic loop (forEach/some/every/find/findIndex) are fixed and
-// covered below.
+// Scope note: the SEARCH methods (indexOf/lastIndexOf/includes) and the
+// result-building methods (filter/map/reduce/reduceRight) over an `$Object`
+// receiver previously emitted invalid Wasm / leaked host imports in standalone.
+// #2036 S6 step 1 now makes them REFUSE LOUDLY there (asserted in the second
+// describe block below) until their real native generic arm lands (step 2,
+// senior/infra). The callback methods that route through the generic loop
+// (forEach/some/every/find/findIndex) are fixed (PR-1) and covered below.
 
 async function runStandalone(body: string): Promise<unknown> {
   const r = await compile(body, { fileName: "test.ts", target: "standalone" });
@@ -125,5 +136,73 @@ describe("#2036 standalone Array.prototype generics over array-like $Object", ()
          }`,
       ),
     ).toBe(1);
+  });
+});
+
+describe("#2036 S6 step 1 — borrowed search/result-building methods refuse loud in standalone", () => {
+  // These methods previously emitted invalid Wasm / leaked a host import over a
+  // borrowed array-like `$Object` receiver in standalone. They must now refuse
+  // with a `Codegen error:` naming the method + #2036 — never a broken module.
+  for (const method of ["indexOf", "lastIndexOf", "includes", "filter", "map", "reduce", "reduceRight"]) {
+    it(`${method} over an array-like $Object refuses loudly in standalone`, async () => {
+      const args =
+        method === "filter" || method === "map"
+          ? "(x: any) => x"
+          : method.startsWith("reduce")
+            ? "(a: any, x: any) => a, 0"
+            : "'x'";
+      const r = await compileStandalone(
+        `export function test(): number {
+           const o: any = { 0: 5, 1: 'x', length: 2 };
+           const v: any = Array.prototype.${method}.call(o, ${args});
+           return 0;
+         }`,
+      );
+      expect(r.success).toBe(false);
+      expect(
+        r.errors.some(
+          (e) => /Codegen error:/.test(e.message) && e.message.includes(method) && e.message.includes("#2036"),
+        ),
+      ).toBe(true);
+    });
+  }
+
+  it("callback methods (forEach) still compile over an array-like $Object in standalone", async () => {
+    // Control: the #2036 PR-1 native callback path must NOT be caught by the refusal.
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const o: any = { 0: 5, 1: 6, length: 2 };
+           let s = 0;
+           Array.prototype.forEach.call(o, (x: any) => { s += x; });
+           return s;
+         }`,
+      ),
+    ).toBe(11);
+  });
+
+  it("real native array receivers still work in standalone (not refused)", async () => {
+    // The refusal must be scoped to array-like $Object receivers only — a real
+    // Array still takes the dedicated native path.
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const a = [10, 20, 30];
+           return Array.prototype.indexOf.call(a, 20);
+         }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("host mode still compiles borrowed indexOf over an array-like $Object", async () => {
+    // The refusal is standalone-only; host mode keeps the __proto_method_call path.
+    const r = await compile(
+      `export function test(): number {
+         const o: any = { 0: 5, 1: 'x', length: 2 };
+         return Array.prototype.indexOf.call(o, 'x');
+       }`,
+      { fileName: "test.ts" },
+    );
+    expect(r.success).toBe(true);
   });
 });

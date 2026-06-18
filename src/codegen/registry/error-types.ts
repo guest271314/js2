@@ -94,6 +94,18 @@ export function getOrRegisterErrorStructType(ctx: CodegenContext): number {
       // back as `undefined`, not a trap). Mutable so a future `err.stack = …`
       // write can land here without a struct-type change.
       { name: "stack", type: { kind: "externref" }, mutable: true },
+      // (#2188) $userClassId — fieldIdx 4. Per-user-Error-subclass brand that
+      // distinguishes sibling `extends Error` classes which all share the SAME
+      // builtin parent `$tag` (field 0). `__new_<Parent>` writes the sentinel
+      // `-1` (a plain builtin Error / the shared parent ctor has no user-class
+      // brand); the subclass `super()` site overwrites it with the subclass's
+      // `classTagMap` id (see emitSetSubclassUserBrand in class-bodies.ts). The
+      // standalone `instanceof <UserSubclass>` path reads this field instead of
+      // the shared builtin tag, so `(new A) instanceof B` is false for distinct
+      // siblings A,B. Mutable: the brand is written AFTER struct.new at the
+      // per-subclass construction site, not baked into the shared parent ctor.
+      // Kept LAST so fields 0..3 stay stable.
+      { name: "userClassId", type: { kind: "i32" }, mutable: true },
     ],
   });
   ctx.errorStructTypeIdx = idx;
@@ -152,6 +164,10 @@ export function emitWasiErrorConstructor(ctx: CodegenContext, errorName: WasiErr
     // $stack — (#1536) non-standard; standalone has no stack-capture
     // primitive, so initialize to null (reads back as `undefined`).
     { op: "ref.null.extern" },
+    // $userClassId — (#2188) -1 sentinel: a plain builtin Error (or the shared
+    // parent ctor of a user subclass) carries no per-user-class brand. The
+    // subclass `super()` site overwrites this field after construction.
+    { op: "i32.const", value: -1 },
     { op: "struct.new", typeIdx: structIdx },
     { op: "extern.convert_any" },
   ];
