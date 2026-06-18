@@ -90,6 +90,53 @@ equal — but don't, for the helper's output specifically.
 3. closest adjacent expertise: sdev-proxy3 (did the $Array/$ObjVec externref-rep
    + string-element work, #2190/#35).
 
+## BREAKTHROUGH datum (sdev-json3, follow-up)
+
+The trigger is a **bare string-LITERAL RHS**, not the helper output per se:
+- `helperOut === "À"` (bare literal RHS) → **FALSE** (bug)
+- `helperOut === String("À")` (String()-wrapped literal RHS) → **TRUE** (correct!)
+- `helperOut === ("\u00C" + "0")` (runtime concat building À) → also routes oddly
+
+So a comparison whose RHS is a **bare string literal** takes an EARLIER/different
+codegen branch than `=== String(lit)` / `=== substring` / `=== fromCharCode`.
+The FAIL WAT is a DIRECT 2-operand `call __str_equals` (helper result pushed RAW
+— NOT flattened — then the literal built + `ref.cast null (ref null 6)`, then the
+call), whereas the WORK cases go through `emitNullableStringEquals`
+(string-ops.ts ~1554: flattens BOTH via `__str_flatten` + null-checks before the
+call). The bug is therefore in the **bare-literal-RHS string-=== fast path**:
+it passes the LHS to `__str_equals` WITHOUT flattening, and `__str_equals`'s
+internal `__str_flatten` of my helper's `(ref 7)` output produces a value that
+mismatches the literal for ≥0x80 — while the explicit pre-flatten in the nullable
+path (or the String()/substring copy) yields a value that matches.
+
+**Likely fix:** make the bare-literal-RHS string-=== path ALSO route through
+`emitNullableStringEquals` (or explicitly `__str_flatten` both operands before
+`__str_equals`), OR find why `__str_flatten` of a directly-built `$NativeString`
+(array.new_default+set) vs a copy diverges for ≥0x80 inside `__str_equals` but
+not when pre-flattened. Whoever fixes this should diff the codegen branch taken
+for `x === "lit"` vs `x === String("lit")` — the former is the buggy fast path.
+
+## IR-path datum (sdev-json3, final)
+
+The FAIL `helper === "lit"` comparison is lowered by the **IR backend**
+(`src/ir/`) — the `$f` body uses `$$irN` locals and emits a DIRECT 2-operand
+`call __str_equals` with the LHS (helper result) passed RAW (no `__str_flatten`,
+no null-checks), then the literal built + `ref.cast null (ref null 6)`, then the
+call — even with `optimize:false`. By contrast `=== String(lit)` / `=== substr`
+go through the direct-codegen `emitNullableStringEquals` which pre-flattens both.
+`__str_equals` (func 4) DOES `call __str_flatten` on each arg internally, and
+flatten fast-paths a `$NativeString` (`ref.test (ref 7)`) through unchanged — so
+in principle the raw-LHS path should still compare correctly. It does for <0x80
+and for non-helper builders; it fails only for the case-helper's ≥0x80 output.
+
+Net: the bug sits at the intersection of (a) the IR-path bare `__str_equals(left,
+right)` lowering for `str === literal`, and (b) `__str_equals`/`__str_flatten`'s
+handling of a `$NativeString` built by `array.new_default` + per-char `array.set`
+with a ≥0x80 i16 element. Needs someone with the native-string-rep + IR-lowering
+knowledge (sdev-proxy3). A candidate quick fix worth trying: have the IR `===`
+lowering for two string operands route through the same flatten-both-then-equals
+shape `emitNullableStringEquals` uses, instead of a bare `__str_equals`.
+
 ## Impact
 
 Blocks #40 (case conversion) from shipping — `assert.sameValue` / `===` against a
