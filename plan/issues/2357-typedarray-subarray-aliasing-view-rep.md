@@ -201,3 +201,59 @@ subview idx is identical in both passes. Then the existing inference + element-a
 but the binding local still needs the subview *type* to hold the struct, so the
 stable-reservation route is cleaner. Writes (`s[i] = v` → same `data[byteOffset+i]`
 store) and scoped standalone tests remain to wire once the binding type lands.
+
+### Update (WIP 4/4) — reservation done, de-sync narrowed below the renumber pass
+
+`reserveTypedArraySubviewTypes(ctx)` is now called at the deterministic up-front
+point in `generateModule` (after the linear-u8 reservation). **This fixed the
+parent-as-subview regression** — plain `new Uint8Array()` resolves to the vec
+correctly again, and 38/38 typed-array + DataView tests pass. But the
+`s = a.subarray(...)` binding STILL gets the vec type, not the subview, so reads
+return 0.
+
+Narrowed the remaining de-sync: it is **NOT** the dead-type-elimination renumber.
+`dead-elimination.ts` remaps BOTH `func.locals[i].type` (line ~362) and body
+instructions through the same `tR` map, so a local and its `struct.new` stay in
+sync across elimination. The de-sync is **earlier**: a probe confirms
+`inferLetConstInitializerWasmType` runs for `s`, sees `recvName=__vec_i8_byte`, and
+RETURNS the subview ValType — yet the hoisted `s` local is allocated as the vec
+(`local $s (ref null <vec>)`, while the body emits `struct.new <subview>`). So
+`walkStmtForLetConst`'s allocation is not receiving / not honoring the subview
+ValType that inference returns for this binding. Next step: trace why
+`walkStmtForLetConst` (index.ts ~12669–12676) allocates the vec despite the
+`inferLetConstInitializerWasmType(...) ?? resolveWasmType(...)` expression.
+
+### ROOT CAUSE FOUND — exact fix location
+
+A probe on `allocLocal` (instrumented for subarray-result bindings) produced **no
+output**: the TDZ-hoist pre-pass allocation branch I'd wired (`walkStmtForLetConst`
+→ `inferLetConstInitializerWasmType`) is **never reached for `s`**. The binding's
+local is actually allocated at the **real variable-declaration compile site**,
+`compileVariableStatement` in `src/codegen/statements/variables.ts` (~line 590–641),
+where the `wasmType` chain ends in `localTypeForDeclaration(ctx, varType)` (= the
+vec) and does **not** consult subarray-subview inference. (That chain DOES already
+special-case the analogous `standaloneRegExpMatchArrayType` at line 590/600 — the
+exact pattern to mirror.)
+
+**THE FIX (localized, low-risk, mirrors existing code):**
+1. In `compileVariableStatement` (`variables.ts` ~590), compute a
+   `subarraySubviewType` for a `subarray`-result initializer (standalone/wasi) the
+   same way `inferLetConstInitializerWasmType` does — receiver `__vec_<elem>` /
+   `__subview_<elem>` name → `getOrRegisterSubviewType(elemKind)` — and add it to the
+   `wasmType` chain right after `standaloneRegExpMatchArrayType`.
+2. Keep the matching subview inference in the TDZ hoist pre-pass
+   (`inferLetConstInitializerWasmType`, already done) so a hoisted slot and the real
+   site agree (both resolve to the up-front-reserved, idx-stable subview).
+3. Then wire the WRITE path (`compileElementAssignment`, `assignment.ts:2693`) with
+   the same `$__subview` → `data[byteOffset+i]` store arm as the read path, and add
+   scoped standalone tests (sub-write visible in parent, parent-write visible in sub,
+   `.length`, byteOffset, negative/clamped begin/end, nested subarray, disjoint
+   windows).
+
+With the up-front reservation (WIP 4/4) the subview idx is stable and the
+parent-as-subview regression is gone (38/38 typed-array+DataView tests pass), so once
+the binding type is sourced at the real decl site the read/length/aliasing should
+land. Branch `issue-2357-subarray-impl` (commits WIP 1–4 + docs) has the full state.
+**Floor-gate hard** on the standalone baseline and **WAT-diff a plain Uint8Array
+for-loop before/after** to prove zero added instructions on the non-view path
+(the #1673 discipline).
