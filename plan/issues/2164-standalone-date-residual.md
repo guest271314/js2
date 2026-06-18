@@ -187,3 +187,46 @@ prettier + coercion-sites + any-box gates clean. The pre-existing
 Slice 3 (`__date_civil_from_days` for very negative days) and `getTimezoneOffset`
 already returns 0 standalone (correct for UTC). The big formatter placeholder —
 the dominant standalone Date string gap — is now closed.
+
+---
+
+## Slice 5 (2026-06-18, sdev-proxy3) — Date.parse RFC2822 / `toString` forms
+
+**Landed.** The pure-Wasm `__date_parse` (date-parse-native.ts) handled only the
+ECMAScript Date-Time-String (ISO) grammar, so `Date.parse` of an RFC2822 /
+`toString`-shaped string returned NaN standalone — e.g. the round-trip of the
+#1682 formatters: `Date.parse(d.toUTCString())` / `Date.parse(d.toString())` /
+`Date.parse(d.toDateString())` all NaN'd.
+
+**Fix:** the scanner now dispatches on the first char. A leading **letter**
+routes to a new RFC2822 arm that parses an optional weekday (`Www[,]`), then
+either `DD Mon YYYY` (toUTCString) or `Mon DD YYYY` (toString/toDateString),
+then an optional `HH:mm:ss`, then an optional timezone (`GMT`/`UTC`/`Z` or
+`±HHMM`). It fills the **same** field locals as the ISO arm, so the shared
+range-validate + compose tail handles either. New primitives: a branch-free
+case-insensitive 3-letter month-name matcher (12-way if-chain on lowercased
+chars via `select`), a weekday/month disambiguator (a leading 3-letter token is
+a weekday only when followed by `,` or ` `+letter — so `Nov 14` is a month, not
+a weekday), and space/`GMT`-skipping loops. All forms parse as **UTC**
+(standalone has no TZ DB), matching the formatter/clock decisions of slices 1–4.
+
+**Notable bug fixed in dev:** the month-name lowercaser first used an `if`
+with `blockType val i32` whose `then` arm did `i32.add` against the pre-`if`
+operand — but a value-result `if` arm has no implicit access to the stack below
+its frame, so this was an invalid-Wasm `i32.add need 2 got 1`. Rewrote it
+branch-free with `select(c+32, c, isUpper)`.
+
+**Validation.** `tests/issue-2164-date-parse-rfc2822.test.ts` (9/9): toUTCString
+/ toString / toDateString / month-first-no-weekday forms, all 12 month names,
+±HHMM offsets, garbage→NaN (no trap), ISO no-regression, and the round-trip of
+the #1682 formatters (to the second for toUTCString/toString since they carry no
+ms — exactly like V8; to the day for toDateString). 44/44 existing #2164 /
+#2164-iso / #2164-formatters suites unchanged. tsc + prettier + coercion-sites +
+any-box gates clean. No host-import leak.
+
+**Scope boundary (documented):** a bare `DD Mon YYYY` (day-first, NO weekday,
+e.g. `"14 Nov 2023"`) starts with a digit, so it routes to the ISO scanner and
+returns NaN. None of our formatters emit that form; it is a lenient V8 extra.
+Covering it would require the ISO scanner to detect a month-name mid-stream —
+deferred. The dominant value (round-tripping the formatters + RFC2822 GMT
+strings) is delivered.
