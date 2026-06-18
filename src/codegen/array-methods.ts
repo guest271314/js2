@@ -504,7 +504,11 @@ const STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS = new Set([
   "indexOf",
   "lastIndexOf",
   "includes",
-  "filter",
+  // (#2036 S6 step 2) `filter` now has a native standalone arm — it builds its
+  // result via the native `$ObjVec` builder (`__objvec_new`/`__objvec_push`)
+  // instead of the host `__js_array_*`, so it no longer leaks a host import.
+  // Removed from the refusal set. map/reduce/reduceRight stay until their
+  // native result/accumulator arms land (map needs sparse-hole handling).
   "map",
   "reduce",
   "reduceRight",
@@ -1001,8 +1005,24 @@ export function compileArrayLikePrototypeCall(
     }
 
     case "filter": {
-      const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-      const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+      // (#2036 S6 step 2) Result builder: in standalone/WASI build a native
+      // `$ObjVec` via `__objvec_new`/`__objvec_push` (host-import-free, and
+      // `[i]`/`.length`-readable post #2190/#35); in host/gc mode keep the host
+      // `__js_array_new`/`__js_array_push` JS-array builders. Both have the
+      // identical externref-new / `(externref,externref)->void`-push shape, so
+      // the loop body below is unchanged. filter's result is naturally dense
+      // (order-preserving compaction), so the sequential `push` is exact — no
+      // sparse-hole concern (that defers `map` to a follow-up slice).
+      let arrNewIdx: number | undefined;
+      let arrPushIdx: number | undefined;
+      if (ctx.standalone || ctx.wasi) {
+        const builders = ensureObjVecBuilders(ctx);
+        arrNewIdx = builders.newIdx;
+        arrPushIdx = builders.pushIdx;
+      } else {
+        arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+        arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+      }
       if (arrNewIdx === undefined || arrPushIdx === undefined) return undefined;
       flushLateImportShifts(ctx, fctx);
       const resultTmp = allocLocal(fctx, `__ali_fl_res_${fctx.locals.length}`, { kind: "externref" });

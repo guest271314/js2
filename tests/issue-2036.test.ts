@@ -143,7 +143,10 @@ describe("#2036 S6 step 1 — borrowed search/result-building methods refuse lou
   // These methods previously emitted invalid Wasm / leaked a host import over a
   // borrowed array-like `$Object` receiver in standalone. They must now refuse
   // with a `Codegen error:` naming the method + #2036 — never a broken module.
-  for (const method of ["indexOf", "lastIndexOf", "includes", "filter", "map", "reduce", "reduceRight"]) {
+  // (#2036 S6 step 2) `filter` graduated to a native standalone arm (it builds
+  // its result via the native `$ObjVec` builder) — it is asserted to WORK below,
+  // not refuse. The remaining methods still refuse until their native arms land.
+  for (const method of ["indexOf", "lastIndexOf", "includes", "map", "reduce", "reduceRight"]) {
     it(`${method} over an array-like $Object refuses loudly in standalone`, async () => {
       const args =
         method === "filter" || method === "map"
@@ -179,6 +182,61 @@ describe("#2036 S6 step 1 — borrowed search/result-building methods refuse lou
          }`,
       ),
     ).toBe(11);
+  });
+
+  // (#2036 S6 step 2) filter over an array-like $Object now runs NATIVELY in
+  // standalone (host-import-free) — builds a `$ObjVec` result via
+  // __objvec_new/__objvec_push that is `[i]`/`.length`-readable.
+  it("filter over an array-like $Object runs natively in standalone (length)", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const o: any = { 0: 1, 1: 2, 2: 3, length: 3 };
+           const r: any = Array.prototype.filter.call(o, (x: number) => x > 1);
+           return r.length;
+         }`,
+      ),
+    ).toBe(2);
+  });
+
+  it("filter preserves element order + values standalone (r[0], r[1])", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const o: any = { 0: 10, 1: 20, 2: 30, length: 3 };
+           const r: any = Array.prototype.filter.call(o, (x: number) => x > 10);
+           return r[0] * 100 + r[1];
+         }`,
+      ),
+    ).toBe(2030);
+  });
+
+  it("filter over a sparse array-like skips holes standalone", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const o: any = { 0: 1, 2: 3, length: 3 };
+           const r: any = Array.prototype.filter.call(o, (x: number) => x > 0);
+           return r.length;
+         }`,
+      ),
+    ).toBe(2);
+  });
+
+  it("filter threads thisArg standalone", async () => {
+    expect(
+      await runStandalone(
+        `export function test(): number {
+           const o: any = { 0: 5, 1: 15, length: 2 };
+           const r: any = Array.prototype.filter.call(
+             o,
+             function (this: any, x: number) { return x > this.t; },
+             { t: 10 },
+           );
+           return r.length;
+         }`,
+      ),
+    ).toBe(1);
   });
 
   it("real native array receivers still work in standalone (not refused)", async () => {
