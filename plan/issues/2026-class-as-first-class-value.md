@@ -2,7 +2,7 @@
 id: 2026
 title: "classes are not first-class values: new K() on a parameter throws 'No dependency provided for extern class', .constructor identity broken"
 status: in-progress
-assignee: ttraenkler/sdev-async2
+assignee: ttraenkler/sdev-ctor
 sprint: 63
 created: 2026-06-10
 updated: 2026-06-18
@@ -386,3 +386,40 @@ provided for extern class "K"` — confirmed. Traced the live path precisely:
   pure-Wasm (no host import) so both modes must pass.
 - Confirm no test262 `built-ins/`/`language/` regressions in the
   classes/new buckets (CI).
+
+### Implementation log (sdev-ctor, 2026-06-18) — PR-3a: dynamic-new spread
+
+Re-validated on upstream/main @ a8650ef5b. `emitDynamicNewFallback`'s per-arg
+eval loop compiled a `SpreadElement` verbatim — the spread yields an i32 (array
+length) / ref, not a boxed externref, so the downstream `extern.convert_any`
+emitted INVALID Wasm and the whole module failed to instantiate. Measured:
+`new K(...[4,5])` → WASM-INVALID, `new K(...x)` → WASM-INVALID,
+`new K(4,...[5])` → wrong (null).
+
+**Fix.** Before emitting any code, detect spread args:
+- Array-literal spread (`new K(...[a,b])`, `new K(4,...[5])`) is flattened via
+  the shared `flattenCallArgs` (the same compile-time flatten the static
+  class-`new` path uses at the `!hasSpread`/`flattenCallArgs` site) → now
+  constructs correctly (→ 9 in both cases).
+- Non-flattenable (variable) spread (`new K(...someVar)`) can't be driven by the
+  compile-time-fixed-arity tag dispatch (`compileSpreadCallArgs` is unusable: it
+  targets ONE statically-known funcIdx, not a runtime tag-dispatch). Falling
+  through to the legacy `__new_` path is UNSAFE: host mode throws an opaque
+  "No dependency provided for extern class K"; **no-JS-host mode (wasi/standalone)
+  trips the #2043/#51 late-import `global index out of range — -1` BINARY-EMIT
+  crash** (verified on main). So PR-3a **refuses loudly** with an attributable
+  `reportError` ("non-array-literal spread is not yet supported (#2026)") +
+  a balanced null-externref placeholder, instead of deferring into a misleading
+  crash or a silent wrong value. Variable spread = follow-up (#53, runtime $argv
+  trampoline).
+
+WAT-diffed the plain `new K(7,9)` path before/after — **byte-identical** (the
+new branch is gated on `rawArgs.some(isSpreadElement)`, fully inert for
+non-spread calls; no perf/shape change). Additive; new-super.ts only; helpers by
+name. tsc + prettier + biome-lint clean. Tests:
+`tests/issue-2026-dynamic-new-spread.test.ts` (5: array-lit, mixed, extra-arg,
+loud-refuse diagnostic, plain-arg PR-1 regression guard). All 13 existing #2026
+tests still green. Branch `issue-2026-pr3a-spread`.
+
+**Split from new.target (PR-3b) and `.constructor` any-receiver (PR-2)** — each
+ships as its own PR to isolate regression risk (per tech-lead).

@@ -1693,7 +1693,48 @@ function emitDynamicNewFallback(
   }
   if (candidates.length === 0) return false;
 
-  const args = expr.arguments ?? [];
+  const rawArgs = expr.arguments ?? [];
+
+  // (#2026 PR-3a) Spread arguments. `new K(...x)` must NOT reach the per-arg
+  // eval loop verbatim: a `SpreadElement` compiles to the array/iterator value
+  // (an i32 length / ref), not a boxed externref, so the downstream
+  // `extern.convert_any` produced INVALID Wasm (whole-module instantiate
+  // failure). Flatten an array-LITERAL spread (`new K(...[a, b])`) into its
+  // element expressions via the shared `flattenCallArgs` helper — the same
+  // compile-time flatten the static class-`new` path uses.
+  //
+  // A non-flattenable spread (`new K(...someVar)`) needs a runtime arity drive
+  // the tag-dispatch path does not yet have (it pre-evaluates a COMPILE-TIME-
+  // fixed set of arg locals; `compileSpreadCallArgs` is unusable here because it
+  // targets ONE statically-known ctor, not a runtime tag-dispatch). We do NOT
+  // fall through to the legacy `__new_` path for it: that path is the
+  // unknown-ctor host import, which (a) in host mode throws an opaque
+  // "No dependency provided for extern class K" at runtime, and (b) in no-JS-
+  // host mode (`--target wasi`/standalone) trips the #2043/#51 late-import
+  // `global index out of range — -1` BINARY-EMIT crash — a whole-module
+  // failure that masquerades as an unrelated bug. So we **refuse loudly** with
+  // a clear, attributable compile error (the #2043 guidance: "make the producer
+  // refuse loudly") instead of deferring into a misleading crash. A runtime-
+  // length argv trampoline is the follow-up that makes this case actually work.
+  let args: readonly ts.Expression[] = rawArgs;
+  if (rawArgs.some((a) => ts.isSpreadElement(a))) {
+    const flat = flattenCallArgs(rawArgs);
+    if (flat === null) {
+      reportError(
+        ctx,
+        expr,
+        "Dynamic `new K(...args)` with a non-array-literal spread is not yet supported (#2026): " +
+          "the value-bound (any-typed) constructor dispatch needs a runtime-length argument vector. " +
+          "Use an array-literal spread (`new K(...[a, b])`) or a statically-typed class.",
+      );
+      // Keep the value stack balanced: the caller returns `{ kind: "externref" }`
+      // on `true`, so leave a null externref placeholder (the diagnostic above
+      // already fails the compile). Do NOT fall through to the broken legacy path.
+      fctx.body.push({ op: "ref.null.extern" });
+      return true;
+    }
+    args = flat;
+  }
 
   // Evaluate the callee descriptor once into an anyref local (the value to
   // type-test). null/undefined descriptors leave a null anyref → every
