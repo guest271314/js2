@@ -778,6 +778,9 @@ export function compileSourceSync(
         testRuntime: options.testRuntime,
         wasi: options.target === "wasi",
         standalone: options.target === "standalone",
+        // (#2119) thread module-strictness inference for the single-source
+        // path (test262 + the playground both compile via `compile()` here).
+        inferModuleStrictArguments: options.inferModuleStrictArguments,
         // Phase 2 (#1131): default experimentalIR to on so recursive
         // numeric kernels (fib, factorial, etc.) compile without the
         // boxing roundtrip the legacy path emits for untyped JS
