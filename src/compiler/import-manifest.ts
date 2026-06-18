@@ -312,6 +312,8 @@ function checkJsTypeCoverage(ast: TypedAST): CompileError[] {
 // downgrade from error to warning so they don't block compilation.
 const DOWNGRADE_DIAG_CODES = new Set([
   2304, // "Cannot find name 'X'" — unknown identifiers compiled as externref/unreachable
+  2580, // "Cannot find name 'X'. Do you need to install type definitions for node?" — e.g. `process` under --target wasi, supported natively (node-process-api.ts)
+  2591, // "Cannot find name 'X'. Do you need to install type definitions for a web worker?" — DOM/worker globals codegen handles or stubs
   2339, // "Property 'X' does not exist on type 'Y'" — dynamic property access
   2551, // "Property 'X' does not exist on type 'Y'. Did you mean 'Z'?" — variant of 2339 with suggestion (#613)
   2454, // "Variable 'X' is used before being assigned"
