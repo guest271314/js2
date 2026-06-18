@@ -97,6 +97,69 @@ export function ensureDateStruct(ctx: CodegenContext): number {
   return typeIdx;
 }
 
+// ─── Packed civil-date decode (negative-year safe) ──────────────────────────
+//
+// `__date_civil_from_days` returns `packed = year*10000 + month*100 + day`
+// with month ∈ [1,12], day ∈ [1,31] (so the low four digits `month*100+day`
+// are always in [101, 1231], i.e. strictly positive). For years < 0 the whole
+// packed value is negative, and Wasm's `i64.div_s` / `i64.rem_s` truncate
+// toward zero — which corrupts the low digits (e.g. packed=-9899 for year -1
+// gives `-9899/10000 = 0` and `-9899%100 = -99`). Spec years run from about
+// -271821 to 275760 (§21.4.1.1), so negative years are reachable.
+//
+// The fix is floor semantics: `year = floor(packed/10000)` and
+// `mmdd = packed - year*10000` (guaranteed in [101, 1231]); `month = mmdd/100`,
+// `day = mmdd%100`. These emitters produce that decode given `packed` already
+// on the stack (consumed) and write the requested field. They assume the value
+// is `__date_civil_from_days`'s output so `mmdd` is non-negative.
+
+/**
+ * Emit `floor(packed / 10000)` (the calendar year) from a packed civil value
+ * on the stack. `tmpLocal` is a scratch i64 local. Leaves the year i64 on the
+ * stack.
+ */
+function emitPackedYear(out: Instr[], tmpLocal: number): void {
+  // tmp = packed
+  out.push({ op: "local.tee", index: tmpLocal } as Instr);
+  // q = packed / 10000  (trunc toward zero)
+  out.push({ op: "i64.const", value: 10000n } as Instr, { op: "i64.div_s" } as Instr);
+  // if packed < 0 and packed % 10000 != 0, subtract 1 to floor.
+  // correction = (packed % 10000 != 0) && (packed < 0) ? 1 : 0
+  out.push(
+    // q is on the stack; compute the correction and subtract it.
+    { op: "local.get", index: tmpLocal } as Instr, // packed
+    { op: "i64.const", value: 10000n } as Instr,
+    { op: "i64.rem_s" } as Instr, // packed % 10000
+    { op: "i64.const", value: 0n } as Instr,
+    { op: "i64.ne" } as Instr, // hasRem (i32)
+    { op: "local.get", index: tmpLocal } as Instr,
+    { op: "i64.const", value: 0n } as Instr,
+    { op: "i64.lt_s" } as Instr, // isNeg (i32)
+    { op: "i32.and" } as Instr, // correction (i32: 0/1)
+    { op: "i64.extend_i32_s" } as Instr,
+    { op: "i64.sub" } as Instr, // q - correction = floor(packed/10000)
+  );
+}
+
+/**
+ * Emit `packed - floor(packed/10000)*10000` (the `month*100+day` low part,
+ * always in [101, 1231]) from a packed civil value on the stack. `tmpLocal`
+ * holds the packed value; `yearTmp` is a scratch i64 local for the floored
+ * year. Leaves the `mmdd` i64 on the stack.
+ */
+function emitPackedMmdd(out: Instr[], tmpLocal: number, yearTmp: number): void {
+  emitPackedYear(out, tmpLocal); // floor year on stack; packed in tmpLocal
+  out.push({ op: "local.set", index: yearTmp } as Instr);
+  // mmdd = packed - year*10000
+  out.push(
+    { op: "local.get", index: tmpLocal } as Instr,
+    { op: "local.get", index: yearTmp } as Instr,
+    { op: "i64.const", value: 10000n } as Instr,
+    { op: "i64.mul" } as Instr,
+    { op: "i64.sub" } as Instr,
+  );
+}
+
 /**
  * Ensure the __date_civil_from_days helper function exists.
  * Signature: (i64 days_since_epoch) -> (i64 packed)
@@ -527,15 +590,26 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
     { op: "local.set", index: L_MSDAY } as Instr,
   );
 
-  // packed = civil_from_days(days); year = packed / 10000
+  // packed = civil_from_days(days); year = floor(packed / 10000). Negative-year
+  // safe: replace $packed with the always-positive low part (month*100+day)
+  // so the month/day extraction below works with plain truncating div/rem.
   body.push(
     { op: "local.get", index: L_DAYS } as Instr,
     { op: "call", funcIdx: civilIdx } as Instr,
     { op: "local.set", index: L_PACKED } as Instr,
+  );
+  // year = floor(packed / 10000)  (uses L_TMP as scratch)
+  body.push({ op: "local.get", index: L_PACKED } as Instr);
+  emitPackedYear(body, L_TMP);
+  body.push({ op: "local.set", index: L_YEAR } as Instr);
+  // packed = packed - year*10000  (month*100+day, always positive)
+  body.push(
     { op: "local.get", index: L_PACKED } as Instr,
+    { op: "local.get", index: L_YEAR } as Instr,
     { op: "i64.const", value: 10000n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "local.set", index: L_YEAR } as Instr,
+    { op: "i64.mul" } as Instr,
+    { op: "i64.sub" } as Instr,
+    { op: "local.set", index: L_PACKED } as Instr,
   );
 
   /**
@@ -886,15 +960,26 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
     { op: "local.set", index: L_MSDAY } as Instr,
   );
 
-  // packed = civil_from_days(days); year = packed / 10000
+  // packed = civil_from_days(days); year = floor(packed / 10000). Negative-year
+  // safe: replace $packed with the always-positive low part (month*100+day) so
+  // the setMonthIdx/setDay extractions below work with truncating div/rem.
   body.push(
     { op: "local.get", index: L_DAYS } as Instr,
     { op: "call", funcIdx: civilIdx } as Instr,
     { op: "local.set", index: L_PACKED } as Instr,
+  );
+  // year = floor(packed / 10000)  (uses L_TMP as scratch)
+  body.push({ op: "local.get", index: L_PACKED } as Instr);
+  emitPackedYear(body, L_TMP);
+  body.push({ op: "local.set", index: L_YEAR } as Instr);
+  // packed = packed - year*10000  (month*100+day, always positive)
+  body.push(
     { op: "local.get", index: L_PACKED } as Instr,
+    { op: "local.get", index: L_YEAR } as Instr,
     { op: "i64.const", value: 10000n } as Instr,
-    { op: "i64.div_s" } as Instr,
-    { op: "local.set", index: L_YEAR } as Instr,
+    { op: "i64.mul" } as Instr,
+    { op: "i64.sub" } as Instr,
+    { op: "local.set", index: L_PACKED } as Instr,
   );
 
   // dow = ((days % 7) + 4 + 7) % 7   (epoch day 0 = Thursday = 4)
@@ -1005,90 +1090,89 @@ function ensureDateFormatStringHelper(ctx: CodegenContext): number {
     );
   };
   const writeYear = (): void => {
-    // 4-digit when 0..9999, else extended ±6 digits.
+    // Human-readable formatters (toString/toUTCString/toDateString) render the
+    // year as a sign-prefixed, minimum-4-digit decimal: V8 emits `-0001` for
+    // year -1, `0099` for year 99, `9999`/`10000`/`275760` at natural width
+    // for larger magnitudes — NOT the fixed ±6-digit ISO extended form (that
+    // is only for toISOString, §21.4.1.18). So: write `-` when year < 0, then
+    // abs(year) zero-padded to ≥4 digits (5 digits for |year| 10000..99999,
+    // 6 digits for ≥100000).
+    //
+    // Emit `-` if year < 0.
     body.push(
-      { op: "local.get", index: L_YEAR } as Instr,
-      { op: "i64.const", value: 0n } as Instr,
-      { op: "i64.ge_s" } as Instr,
-      { op: "local.get", index: L_YEAR } as Instr,
-      { op: "i64.const", value: 9999n } as Instr,
-      { op: "i64.le_s" } as Instr,
-      { op: "i32.and" } as Instr,
-    );
-    const buf4: Instr[] = [];
-    for (let d = 0; d < 4; d++) {
-      const div = 10n ** BigInt(3 - d);
-      buf4.push(
-        { op: "local.get", index: L_BUF } as Instr,
-        { op: "local.get", index: L_POS } as Instr,
-        { op: "local.get", index: L_YEAR } as Instr,
-      );
-      if (div !== 1n) buf4.push({ op: "i64.const", value: div } as Instr, { op: "i64.div_s" } as Instr);
-      buf4.push(
-        { op: "i64.const", value: 10n } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i32.wrap_i64" } as Instr,
-        { op: "i32.const", value: 0x30 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-        { op: "local.get", index: L_POS } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "local.set", index: L_POS } as Instr,
-      );
-    }
-    const buf6: Instr[] = [];
-    buf6.push(
-      { op: "local.get", index: L_BUF } as Instr,
-      { op: "local.get", index: L_POS } as Instr,
       { op: "local.get", index: L_YEAR } as Instr,
       { op: "i64.const", value: 0n } as Instr,
       { op: "i64.lt_s" } as Instr,
       {
         op: "if",
-        blockType: { kind: "val", type: { kind: "i32" } },
-        then: [{ op: "i32.const", value: 0x2d } as Instr],
-        else: [{ op: "i32.const", value: 0x2b } as Instr],
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: L_BUF } as Instr,
+          { op: "local.get", index: L_POS } as Instr,
+          { op: "i32.const", value: 0x2d } as Instr, // '-'
+          { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+          { op: "local.get", index: L_POS } as Instr,
+          { op: "i32.const", value: 1 } as Instr,
+          { op: "i32.add" } as Instr,
+          { op: "local.set", index: L_POS } as Instr,
+        ],
       } as unknown as Instr,
-      { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-      { op: "local.get", index: L_POS } as Instr,
-      { op: "i32.const", value: 1 } as Instr,
-      { op: "i32.add" } as Instr,
-      { op: "local.set", index: L_POS } as Instr,
     );
-    buf6.push(
+    // L_TMP = abs(year)
+    body.push(
       { op: "i64.const", value: 0n } as Instr,
       { op: "local.get", index: L_YEAR } as Instr,
-      { op: "i64.sub" } as Instr,
-      { op: "local.get", index: L_YEAR } as Instr,
+      { op: "i64.sub" } as Instr, // -year
+      { op: "local.get", index: L_YEAR } as Instr, // year
       { op: "local.get", index: L_YEAR } as Instr,
       { op: "i64.const", value: 0n } as Instr,
-      { op: "i64.lt_s" } as Instr,
-      { op: "select" } as Instr,
+      { op: "i64.lt_s" } as Instr, // year < 0 ?
+      { op: "select" } as Instr, // abs(year)
       { op: "local.set", index: L_TMP } as Instr,
     );
-    for (let d = 0; d < 6; d++) {
-      const div = 10n ** BigInt(5 - d);
-      buf6.push(
-        { op: "local.get", index: L_BUF } as Instr,
-        { op: "local.get", index: L_POS } as Instr,
-        { op: "local.get", index: L_TMP } as Instr,
-      );
-      if (div !== 1n) buf6.push({ op: "i64.const", value: div } as Instr, { op: "i64.div_s" } as Instr);
-      buf6.push(
-        { op: "i64.const", value: 10n } as Instr,
-        { op: "i64.rem_s" } as Instr,
-        { op: "i32.wrap_i64" } as Instr,
-        { op: "i32.const", value: 0x30 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
-        { op: "local.get", index: L_POS } as Instr,
-        { op: "i32.const", value: 1 } as Instr,
-        { op: "i32.add" } as Instr,
-        { op: "local.set", index: L_POS } as Instr,
-      );
-    }
-    body.push({ op: "if", blockType: { kind: "empty" }, then: buf4, else: buf6 } as unknown as Instr);
+    // Choose width: 4 (|y|<=9999), 5 (<=99999), else 6 (spec max year 275760).
+    const writeWidth = (w: number): Instr[] => {
+      const out: Instr[] = [];
+      for (let d = 0; d < w; d++) {
+        const div = 10n ** BigInt(w - 1 - d);
+        out.push(
+          { op: "local.get", index: L_BUF } as Instr,
+          { op: "local.get", index: L_POS } as Instr,
+          { op: "local.get", index: L_TMP } as Instr,
+        );
+        if (div !== 1n) out.push({ op: "i64.const", value: div } as Instr, { op: "i64.div_s" } as Instr);
+        out.push(
+          { op: "i64.const", value: 10n } as Instr,
+          { op: "i64.rem_s" } as Instr,
+          { op: "i32.wrap_i64" } as Instr,
+          { op: "i32.const", value: 0x30 } as Instr,
+          { op: "i32.add" } as Instr,
+          { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+          { op: "local.get", index: L_POS } as Instr,
+          { op: "i32.const", value: 1 } as Instr,
+          { op: "i32.add" } as Instr,
+          { op: "local.set", index: L_POS } as Instr,
+        );
+      }
+      return out;
+    };
+    // if abs <= 9999: 4 digits; else if abs <= 99999: 5 digits; else 6 digits.
+    body.push(
+      { op: "local.get", index: L_TMP } as Instr,
+      { op: "i64.const", value: 9999n } as Instr,
+      { op: "i64.le_s" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: writeWidth(4),
+        else: [
+          { op: "local.get", index: L_TMP } as Instr,
+          { op: "i64.const", value: 99999n } as Instr,
+          { op: "i64.le_s" } as Instr,
+          { op: "if", blockType: { kind: "empty" }, then: writeWidth(5), else: writeWidth(6) } as unknown as Instr,
+        ],
+      } as unknown as Instr,
+    );
   };
   // hh:mm:ss into the buffer.
   const writeTimeHMS = (): void => {
@@ -1916,26 +2000,35 @@ function compileDateMethodCall(
     fctx.body.push({ op: "call", funcIdx: civilIdx } as Instr);
     fctx.body.push({ op: "local.set", index: tempPacked } as Instr);
 
-    // Extract curY, curMo (1-based), curD from packed.
-    // curY = packed / 10000
-    // curMo = (packed / 100) % 100
-    // curD = packed % 100
+    // Extract curY, curMo (1-based), curD from packed. Negative-year safe:
+    // curY = floor(packed/10000); curMmdd = packed - curY*10000 ∈ [101, 1231];
+    // curMo = curMmdd/100; curD = curMmdd%100 (see emitPackedYear/emitPackedMmdd).
     const tempCurY = allocTempLocal(fctx, { kind: "i64" });
+    const tempMmddScratch = allocTempLocal(fctx, { kind: "i64" });
     fctx.body.push({ op: "local.get", index: tempPacked } as Instr);
-    fctx.body.push({ op: "i64.const", value: 10000n } as Instr);
-    fctx.body.push({ op: "i64.div_s" } as Instr);
+    emitPackedYear(fctx.body, tempMmddScratch); // floor year on stack
     fctx.body.push({ op: "local.set", index: tempCurY } as Instr);
 
+    // curMmdd = packed - curY*10000  (always positive)
+    const tempCurMmdd = allocTempLocal(fctx, { kind: "i64" });
+    fctx.body.push(
+      { op: "local.get", index: tempPacked } as Instr,
+      { op: "local.get", index: tempCurY } as Instr,
+      { op: "i64.const", value: 10000n } as Instr,
+      { op: "i64.mul" } as Instr,
+      { op: "i64.sub" } as Instr,
+      { op: "local.set", index: tempCurMmdd } as Instr,
+    );
+    releaseTempLocal(fctx, tempMmddScratch);
+
     const tempCurMo = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.get", index: tempPacked } as Instr);
+    fctx.body.push({ op: "local.get", index: tempCurMmdd } as Instr);
     fctx.body.push({ op: "i64.const", value: 100n } as Instr);
     fctx.body.push({ op: "i64.div_s" } as Instr);
-    fctx.body.push({ op: "i64.const", value: 100n } as Instr);
-    fctx.body.push({ op: "i64.rem_s" } as Instr);
     fctx.body.push({ op: "local.set", index: tempCurMo } as Instr);
 
     const tempCurD = allocTempLocal(fctx, { kind: "i64" });
-    fctx.body.push({ op: "local.get", index: tempPacked } as Instr);
+    fctx.body.push({ op: "local.get", index: tempCurMmdd } as Instr);
     fctx.body.push({ op: "i64.const", value: 100n } as Instr);
     fctx.body.push({ op: "i64.rem_s" } as Instr);
     fctx.body.push({ op: "local.set", index: tempCurD } as Instr);
@@ -2218,25 +2311,27 @@ function compileDateMethodCall(
 
   if (methodName === "getFullYear" || methodName === "getUTCFullYear") {
     return wrapWithInvalidDateGuard(() => {
-      emitDaysToCivil();
-      fctx.body.push(
-        { op: "i64.const", value: 10000n } as Instr,
-        { op: "i64.div_s" } as Instr,
-        { op: "f64.convert_i64_s" } as Instr,
-      );
+      emitDaysToCivil(); // packed on stack
+      const tmp = allocTempLocal(fctx, { kind: "i64" });
+      emitPackedYear(fctx.body, tmp); // floor(packed/10000)
+      releaseTempLocal(fctx, tmp);
+      fctx.body.push({ op: "f64.convert_i64_s" } as Instr);
     });
   }
 
   if (methodName === "getMonth" || methodName === "getUTCMonth") {
     return wrapWithInvalidDateGuard(() => {
-      emitDaysToCivil();
+      emitDaysToCivil(); // packed on stack
+      const tmp = allocTempLocal(fctx, { kind: "i64" });
+      const yTmp = allocTempLocal(fctx, { kind: "i64" });
+      emitPackedMmdd(fctx.body, tmp, yTmp); // month*100+day (always positive)
+      releaseTempLocal(fctx, tmp);
+      releaseTempLocal(fctx, yTmp);
       fctx.body.push(
         { op: "i64.const", value: 100n } as Instr,
-        { op: "i64.div_s" } as Instr,
-        { op: "i64.const", value: 100n } as Instr,
-        { op: "i64.rem_s" } as Instr,
+        { op: "i64.div_s" } as Instr, // month (1-12)
         { op: "i64.const", value: 1n } as Instr,
-        { op: "i64.sub" } as Instr,
+        { op: "i64.sub" } as Instr, // 0-based
         { op: "f64.convert_i64_s" } as Instr,
       );
     });
@@ -2244,10 +2339,15 @@ function compileDateMethodCall(
 
   if (methodName === "getDate" || methodName === "getUTCDate") {
     return wrapWithInvalidDateGuard(() => {
-      emitDaysToCivil();
+      emitDaysToCivil(); // packed on stack
+      const tmp = allocTempLocal(fctx, { kind: "i64" });
+      const yTmp = allocTempLocal(fctx, { kind: "i64" });
+      emitPackedMmdd(fctx.body, tmp, yTmp); // month*100+day (always positive)
+      releaseTempLocal(fctx, tmp);
+      releaseTempLocal(fctx, yTmp);
       fctx.body.push(
         { op: "i64.const", value: 100n } as Instr,
-        { op: "i64.rem_s" } as Instr,
+        { op: "i64.rem_s" } as Instr, // day (1-31)
         { op: "f64.convert_i64_s" } as Instr,
       );
     });
