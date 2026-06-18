@@ -103,4 +103,61 @@ describe("#2372 — standalone dynamic-descriptor receiver read-back", () => {
     `;
     expect(await runStandalone(src)).toBe(7);
   });
+
+  // Descriptor-reification cases — the un-annotated `var desc = {...}` shape the
+  // test262 ToPropertyDescriptor cluster uses. The descriptor compiles to a
+  // typed struct; it is reified into a $Object so __obj_define_from_desc can
+  // read it (otherwise it throws a spurious TypeError on the non-$Object desc).
+  it("un-annotated var receiver + un-annotated var descriptor (real test262 shape)", async () => {
+    const src = `
+      export function test(): number {
+        var o = {};
+        var d = { value: 42 };
+        Object.defineProperty(o, "x", d);
+        return (o as any).x;
+      }
+    `;
+    expect(await runStandalone(src)).toBe(42);
+  });
+
+  it("inferred const receiver + inferred const descriptor reads back", async () => {
+    const src = `
+      export function test(): number {
+        const o = {};
+        const d = { value: 7 };
+        Object.defineProperty(o, "x", d);
+        return (o as any).x;
+      }
+    `;
+    expect(await runStandalone(src)).toBe(7);
+  });
+
+  it("typed-struct descriptor with multiple attributes reifies", async () => {
+    const src = `
+      export function test(): number {
+        var o: any = {};
+        var d = { value: 5, writable: true, enumerable: true };
+        Object.defineProperty(o, "x", d);
+        return o.x;
+      }
+    `;
+    expect(await runStandalone(src)).toBe(5);
+  });
+
+  it("data+accessor conflict in a reified descriptor still throws TypeError (§6.2.5.6)", async () => {
+    const src = `
+      export function test(): number {
+        var o: any = {};
+        var d: any = { value: 1, get: function () { return 1; } };
+        var threw = false;
+        try {
+          Object.defineProperty(o, "foo", d);
+        } catch (e) {
+          threw = true;
+        }
+        return threw && !o.hasOwnProperty("foo") ? 1 : 0;
+      }
+    `;
+    expect(await runStandalone(src)).toBe(1);
+  });
 });

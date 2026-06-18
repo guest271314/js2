@@ -195,3 +195,57 @@ o.hasOwnProperty("foo")`), so it is the direct target. CI bucket-by-path will
 give the real flip count; acceptance criterion #4 (≥75% / ~235) was always an
 over-estimate (it conflated several root causes — see #1630/#2371). This fix
 clears the *receiver-representation* blocker specifically.
+
+## Part 2 — descriptor reification (the SECOND representation half)
+
+The receiver-suppression above was correct but **insufficient alone** (~0 flips
+on the real cluster). Measuring against the test262 shape revealed a *symmetric*
+half: the **descriptor**. test262 uses `var desc = {...}` (un-annotated), which
+the TS checker types as a **closed WasmGC struct**, not a `$Object`. The native
+`__obj_define_from_desc` applier runs ToPropertyDescriptor over the descriptor as
+a `$Object` (`__hasOwnProperty`/`__extern_get`, which `ref.test $Object`); a
+struct descriptor is "not an object" → spurious **TypeError §10.1.6**, trapping at
+the define. So both operands must be `$Object`.
+
+Proof matrix (standalone): receiver-`$Object` + descriptor-struct → THROWS;
+receiver-`$Object` + descriptor-`as any`($Object) → 42; receiver-`var{}` +
+`var desc:any` → 42. Both halves compose only when each stays `$Object`.
+
+### Fix: struct→$Object descriptor reifier (`emitDescriptorStructReify`)
+
+`src/codegen/object-ops.ts` — `emitDefinePropertyDescRuntime`, standalone branch:
+when the descriptor compiled to a typed struct (`descType` ref/ref_null with a
+resolvable struct name), reify it into a fresh open-hash `$Object` before the
+applier call: `__new_plain_object()`, then for each static struct field
+`struct.get` → `coerceType(→externref)` (f64/i32/bool/ref all handled) →
+`__extern_set(obj, "<name>", value)`. A descriptor that is already a `$Object`
+(externref — `as any`, or a `$Object`-built literal) passes through unchanged
+(no double-wrap). Accessor `get`/`set` fields are already `externref` boxed
+closures — no special-casing.
+
+Emitted **INLINE** referencing `__new_plain_object`/`__extern_set` by
+`ensureLateImport` (shift-safe by-name late imports) — NOT a finalize-built
+helper body that bakes funcIdxs, so the #2190 late-import-shift hazard does not
+apply (verified: fast-path WAT byte-identical to the #2371 base).
+
+### Measured (faithful harness: allowJs + skipSemanticDiagnostics + real buildImports)
+
+`built-ins/Object/defineProperty/15.2.3.6-3-*` (316 files):
+- BASE (#2371, pre-fix): **98 pass**
+- FIX (both halves): **136 pass** → **+38 flips, 0 regressions** (per-file diff:
+  38 gained, 0 lost). Remaining 35 CE identical on base+fix (inline-descriptor
+  `verifyProperty` machinery — separate codegen path, out of scope).
+
++38 is one cluster; the same receiver+descriptor representation gates
+`Object.create(proto,props)`, `getOwnPropertyDescriptor` (#1629b), and
+`seal`/`freeze` (#1355), so the full standalone CI run should show more.
+
+### Verification (both halves)
+
+- 11 dedicated cases in `tests/issue-2372.test.ts` (receiver + descriptor +
+  accessor + mixed + the un-annotated real-test262 shape + §6.2.5.6 conflict
+  throw + 3 fast-path regression guards) — all pass.
+- WAT byte-identical vs the #2371 base for: inline-only `defineProperty`,
+  class-instance field (#1673), plain literal, plain write/read.
+- #1629a/b/S1–S6 + ir-frontend-widening suites pass; tsc clean; biome 0 new
+  errors.
