@@ -128,3 +128,35 @@ no host-import leak.
 **Remaining (PR-B/PR-C, issue stays in-progress):** per-member native closure
 bodies for Array/Object.prototype (delegate to existing array/object-method
 lowering); `arr[Symbol.iterator]` computed read; `Promise.resolve` static read.
+
+## PR-B scoping finding (2026-06-18, sdev-json3) — needs a local-driven array-method entry first
+
+Investigated the `emitMemberBody` wiring for Array.prototype member CLOSURES. The
+crux: `emitMemberBody`'s body runs on RUNTIME values — `this` is closure-param 1
+(externref), args at 2.. — but EVERY existing array-method lowering is **AST-driven**:
+- `compileArrayMethodCall` (array-methods.ts:2557) takes `propAccess`/`callExpr`/
+  `receiverTsType` and even synthesizes `syntheticPropAccess`/`syntheticCall` AST nodes
+  internally (1910-1924) to route array-likes;
+- the per-method helpers (`compileArraySlice` 4497, `compileArrayJoin` 4959, …) each
+  call `compileExpression(ctx, fctx, propAccess.expression)` to materialise the receiver.
+
+So a closure body (which has a recovered externref `this` local, not an AST receiver)
+cannot delegate to these as-is. The RegExp precedent (`emitRegExpProtoMemberBody`)
+works because it calls **struct-local-driven** helpers (`emitRegExpTestFromLocals`,
+`emitRegExpReflectionFieldRead`) that take recovered locals — Array has NO such
+local-driven variants.
+
+**PR-B therefore needs a prerequisite refactor:** extract the body of each target
+array method (after the `compileExpression(receiver)` line) into a
+`compileArray<Method>FromVecLocal(ctx, fctx, vecLocal, argLocals…)` entry, then have
+`emitArrayProtoMemberBody` (1) recover the `$ObjVec`/vec from the externref `this`,
+(2) lower closure args 2.. into locals, (3) call the local-driven entry. This is the
+"sizable / dedicated-session" work the spec flagged — it touches the hot array-method
+lowering surface, so it must be floor-gated hard (the #1673 discipline) and is not a
+quick slice (even a 1-method first cut needs the local-driven entry-point refactor).
+
+Recommendation: PR-B as its own focused session — refactor ONE method (e.g. `slice`)
+to a `*FromVecLocal` entry + wire `emitArrayProtoMemberBody` for it end-to-end (proves
+the closure-this → local-driven bridge), floor-gate, then expand method-by-method.
+Branch `issue-2193-pr-b` is set up on current main (incl PR-A #1685); claim released
+for a clean-context pass.
