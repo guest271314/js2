@@ -3,7 +3,7 @@ id: 2161
 title: "Standalone RegExp engine conformance residual (~579 tests)"
 status: in-progress
 assignee: ttraenkler/cs-2164
-sprint: 63
+sprint: 64
 created: 2026-06-15
 updated: 2026-06-18
 priority: high
