@@ -79,7 +79,12 @@ import {
   compileObjectKeysOrValues,
   compilePropertyIntrospection,
 } from "../object-ops.js";
-import { emitArrayIsArrayExternrefPredicate, emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js";
+import {
+  emitArrayIsArrayExternrefPredicate,
+  emitNullCheckThrow,
+  receiverIsCaughtErrorStringRead,
+  typeErrorThrowInstrs,
+} from "../property-access.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
@@ -7881,7 +7886,13 @@ function compileCallExpression(
     }
 
     // String method calls
-    if (isStringType(receiverType)) {
+    // (#2192 follow-up) Also fire for a caught-Error string-field read receiver
+    // (`e.message.charCodeAt(0)`, `e.name.slice(...)`) whose static type is `any`
+    // but which lowers to a native-string ref in standalone mode — the
+    // isStringType gate alone misses it, so the call fell through to the host
+    // `__extern_get`/dynamic path (null standalone). compileNativeStringMethodCall
+    // compiles + flattens the receiver, which already yields a $AnyString ref.
+    if (isStringType(receiverType) || receiverIsCaughtErrorStringRead(ctx, propAccess.expression)) {
       const method = propAccess.name.text;
 
       // string.toString() and string.valueOf() — identity, just return the string itself.
