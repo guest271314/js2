@@ -40,10 +40,39 @@ the gap is purely consumer-side **materialization** of `$ObjVec` `[k,v]` pair
 externrefs into an array/tuple. Cluster ≈ 300 tests (entries spread/Array.from +
 the array-rest / tuple destructuring that shares the materialization path).
 
-## Implementation Plan (architect spec — sdev-iter, 2026-06-18)
+## CORRECTION (2026-06-18, sdev-iter — building PR-A disproved the split below)
 
-The breakage crosses THREE interacting sites. The load-bearing one is (3); fixing
-(1)+(2) without (3) does not close it (verified in the #2162b investigation).
+**PR-A (sites (1)+(2), literals.ts only) is a NO-OP — do not implement it as
+written.** Verified empirically: with the `isPairSpreadSource`→externref
+element-type heuristic applied, `[...arr.entries()]` / `[...map.entries()]` still
+VALIDATE-FAIL identically (`array.set expected f64, found <externref>`), and even
+`const e: any[] = [...arr.entries()]` and the bare `[...arr.entries()].length`
+form fail the same way.
+
+**Why:** the `[...x.entries()]` array literal does NOT take its element type from
+the `compileArrayLiteral` heuristic that (1) targets. `x.entries()` materializes
+an externref-pair `$Vec`; the spread→array-literal path coerces it through
+`type-coercion.ts`'s `buildVecFromExternref` / `__tup_*` **vec-of-tuple-structs**
+machinery (WAT-confirmed: `$__tup_vec_*` / `$__tup_mat_*` locals + a per-pair
+tuple `struct.new` with numeric `[number,number]` fields, pulling
+`__array_from_iter`). So the result is a vec of `[number,number]` tuple structs
+and the break is coercing an externref pair into f64 tuple fields — entirely in
+the **core type-coercion.ts path**, not reachable from the literals.ts heuristic.
+
+**Consequence:** the safe literals.ts-only PR-A does not exist. The only fix is
+the high-blast-radius `__tup_*`/`buildVecFromExternref` materialization change,
+which backs ALL tuple/`[k,v]` spread + destructure. **The real design fork is the
+externref-pair-vec REPRESENTATION**: should entries materialize a vec-of-(externref
+`$ObjVec` pairs) — read back via `__extern_get_idx`, host-import-free — vs the
+current vec-of-(tuple struct)? That representation decision is architect-scale.
+ESCALATED to tech lead for a true architect / second pair of eyes (2026-06-18).
+
+---
+
+## Original (DISPROVEN) Implementation Plan — kept for context only
+
+The breakage crosses THREE interacting sites. The load-bearing one is (3); the
+(1)+(2) PR-A above turned out NOT to close the spread cases (see CORRECTION).
 
 ### (1) `src/codegen/literals.ts` `compileArrayLiteral` — element-type heuristic
 
