@@ -545,7 +545,10 @@ export function collectClassDeclaration(
           if (parentStructTypeIdx === undefined && isHostConstructibleBuiltin(parentClassName)) {
             ctx.classBuiltinParentMap.set(className, parentClassName);
             ctx.classExternrefBackedSet.add(className);
-          } else if (ctx.classExternrefBackedSet.has(parentClassName) && ctx.classBuiltinParentMap.has(parentClassName)) {
+          } else if (
+            ctx.classExternrefBackedSet.has(parentClassName) &&
+            ctx.classBuiltinParentMap.has(parentClassName)
+          ) {
             // (#2188 follow-up) Multi-level user Error chain: the direct parent is
             // itself a user class that is externref-backed by a builtin Error
             // ancestor (e.g. `class D extends A {}` where `A extends Error`).
