@@ -1,7 +1,7 @@
 ---
 id: 2357
 title: "Standalone TypedArray subarray-aliasing — offset-windowing view representation"
-status: ready
+status: done
 sprint: Backlog
 created: 2026-06-18
 priority: medium
@@ -288,3 +288,30 @@ their objType is the vec struct, not externref). Then wire the WRITE path
 (`compileElementAssignment`, assignment.ts:2693) with the same
 `data[byteOffset+i]` store, and add the scoped standalone tests. Branch
 `issue-2357-subarray-impl` (WIP 1–5).
+
+### DONE (WIP 6-8) — full subarray aliasing implemented, zero hot-path cost
+
+Implementation complete on `issue-2357-subarray-impl`. The two remaining wrinkles
+from WIP 5 are fixed:
+- **Read arm placement:** the `$__subview` element-read arm ran AFTER the
+  tuple/struct-field check, which intercepts any non-2-field struct. Moved it to run
+  right after `typeDef` resolves (before the tuple check), gated on
+  `isSubviewTypeIdx`. `s[i]` reads now route through `data[byteOffset+i]`.
+- **Write arm:** added the mirror arm in `compileElementAssignment` (also before the
+  2-field check); stashes index+value, stores into the SHARED backing array, and
+  re-pushes the value (assignment is an expression — fixes a `drop` stack imbalance).
+- **Nested subarray:** `compileTypedArraySubarray` elemKind derivation now strips
+  `__subview_` as well as `__vec_`, so `s.subarray()` on a subview accumulates the
+  offset over the same shared array.
+
+**Verified** (`tests/issue-2357-subarray-aliasing.test.ts`, 8 cases): write-through
+aliasing (`s[0]=99 → a[1]===99`), parent-write→view-read, view-read maps to
+`parent[begin]`, write/read round-trip, `.length` (explicit + default-end), nested
+subarray aliasing, and plain typed-array access unaffected. 38/38 existing
+typed-array + DataView tests pass; coercion-sites gate OK.
+
+**Hot-path cost = ZERO** (the #1673 discipline): WAT-diff of a plain
+`for (i) sum += a[i]` over a `Uint8Array` shows `array.get_u: 1` and **no**
+`__subview` / `ref.test` / `__sv_recv` instructions — the discrimination is entirely
+compile-time (the binding's static `$__subview` vs vec type), so regular arrays pay
+nothing.
