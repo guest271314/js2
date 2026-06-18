@@ -53,7 +53,12 @@ import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
 import { getOrRegisterDvWindowType } from "./dataview-native.js"; // (#2159/#38) DataView windowing
-import { getArrTypeIdxFromVec, getOrRegisterVecType, getSubviewArrTypeIdx, isSubviewTypeIdx } from "./registry/types.js";
+import {
+  getArrTypeIdxFromVec,
+  getOrRegisterVecType,
+  getSubviewArrTypeIdx,
+  isSubviewTypeIdx,
+} from "./registry/types.js";
 import {
   coerceType,
   compileExpression,
