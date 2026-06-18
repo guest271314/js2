@@ -160,3 +160,30 @@ to a `*FromVecLocal` entry + wire `emitArrayProtoMemberBody` for it end-to-end (
 the closure-this → local-driven bridge), floor-gate, then expand method-by-method.
 Branch `issue-2193-pr-b` is set up on current main (incl PR-A #1685); claim released
 for a clean-context pass.
+
+### PR-B recovery primitive identified (2026-06-18) — the externref-this → array-vec bridge
+
+The array-instance recovery for the closure body is `emitThisReceiverGuardConvert`
+(property-access.ts:4221) + `thisReceiverGuardTargets` (4289): given an externref on
+the stack, it `any.convert_extern` + chains `ref.test`/`ref.cast` over the registered
+vec type idxs and runs a `thenEmit(concreteType)` arm on a hit (compiled array) or
+`elseEmit()` on the host path. So `emitArrayProtoMemberBody` can:
+1. `local.get` closure-param 1 (externref `this`) → `emitThisReceiverGuardConvert`
+   with the registered numeric/externref vec type idxs as targets;
+2. in the `thenEmit(vecType)` arm: `local.set` a vec local, lower closure args 2.. into
+   i32/f64 locals, then call the new `compileArray<M>FromVecLocal(ctx, fctx, vecLocal,
+   vecType.typeIdx, arrTypeIdx, argLocals…)`;
+3. `elseEmit`: emitThrowTypeError (or ref.null.extern) — graceful non-array `this`.
+
+**Full bridge design is now captured** (recovery primitive + local-driven-entry refactor
++ arg threading). The remaining work is the mechanical-but-careful build:
+- refactor `compileArraySlice` (4497) → split the post-receiver body (4519-4568) into
+  `compileArraySliceFromVecLocal(ctx, fctx, vecLocal, vecTypeIdx, arrTypeIdx, startLocal,
+  endLocal)`; keep the AST wrapper calling it after `compileExpression(receiver)`;
+- write `emitArrayProtoMemberBody` (replace the PR-A refusal) using the recovery above,
+  wired for `slice` first (proving slice), graceful-refuse the rest;
+- scoped standalone tests (`let m=Array.prototype.slice; m.call(a,1,3)` → correct slice);
+  FLOOR-GATE HARD + WAT-diff the plain `a.slice()` call path (must be unchanged — the
+  refactor is a pure extraction).
+
+Branch issue-2193-pr-b is on current main (incl PR-A #1685) with this design committed.
