@@ -63,6 +63,7 @@ import {
 import type { InnerResult } from "./shared.js";
 import { compileExpression } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
+import { nativeStringRepr } from "./builtin-scaffold.js";
 
 export const STANDALONE_REGEXP_ABI_VERSION = 1;
 
@@ -1800,6 +1801,69 @@ export function tryCompileStandaloneRegExpPropertyRead(
   const { regexpLocal, structTypeIdx } = loaded;
 
   return emitRegExpReflectionFieldRead(ctx, fctx, propName, regexpLocal, structTypeIdx);
+}
+
+/**
+ * `RegExp.prototype.toString()` in standalone mode (#2161, §22.2.6.14).
+ *
+ * The spec result is `"/" + R.[[OriginalSource]] + "/" + R.[[OriginalFlags]]` —
+ * i.e. `"/" + re.source + "/" + re.flags`, both of which the native backend
+ * already produces (the struct's `source` field is stored in the spec-escaped
+ * §22.2.6.13.1 form, and `__regex_flags_str` builds the d-g-i-m-s-u-v-y flag
+ * string). In standalone / nativeStrings mode there is no JS host, so a
+ * `re.toString()` / `String(re)` / `` `${re}` `` previously leaked the generic
+ * `env::Object_toString` import (and `String(re)` null-deref'd). This composes
+ * the two native field reads with `__str_concat`, returning a native string —
+ * zero host imports.
+ *
+ * Returns `undefined` when the call is not a static-RegExp `.toString()`
+ * (caller falls through), `null` after a narrowed refusal, or the result type.
+ */
+export function tryCompileStandaloneRegExpToString(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  propAccess: ts.PropertyAccessExpression,
+): ValType | null | undefined {
+  if (!ctx.standalone || propAccess.name.text !== "toString" || expr.arguments.length !== 0) return undefined;
+  const objType = ctx.checker.getTypeAtLocation(propAccess.expression);
+  const nonNull = objType.getNonNullableType?.() ?? objType;
+  if (!isGlobalRegExpType(nonNull)) return undefined;
+  // Only static / backend-created receivers route to the native struct; a
+  // dynamic externref RegExp falls through to the host/refusal path.
+  if (
+    !isStaticStandaloneRegExpCreation(ctx, propAccess.expression) &&
+    !isKnownBackendCreatedRegExpReceiver(ctx, propAccess.expression)
+  ) {
+    return undefined;
+  }
+
+  const repr = nativeStringRepr(ctx);
+  if (repr === undefined) return undefined;
+
+  const loaded = loadStandaloneRegExpStruct(ctx, fctx, propAccess.expression);
+  if (loaded === null) return null;
+  const { regexpLocal, structTypeIdx } = loaded;
+
+  // result = "/" ++ source ++ "/" ++ flags  (left-folded via __str_concat).
+  // source: struct field read ($AnyString). flags: __regex_flags_str(flags).
+  ensureNativeStringHelpers(ctx);
+  const flagsStrIdx = ensureRegexFlagsStr(ctx);
+  const srcInstrs: Instr[] = [
+    { op: "local.get", index: regexpLocal } as Instr,
+    { op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_SOURCE } as Instr,
+  ];
+  const flagsInstrs: Instr[] = [
+    { op: "local.get", index: regexpLocal } as Instr,
+    { op: "struct.get", typeIdx: structTypeIdx, fieldIdx: RE_FIELD_FLAGS } as Instr,
+    { op: "call", funcIdx: flagsStrIdx } as Instr,
+  ];
+  // (("/" ++ source) ++ "/") ++ flags
+  let acc = repr.concat(repr.literal("/"), srcInstrs);
+  acc = repr.concat(acc, repr.literal("/"));
+  acc = repr.concat(acc, flagsInstrs);
+  for (const instr of acc) fctx.body.push(instr);
+  return repr.resultType;
 }
 
 /**
