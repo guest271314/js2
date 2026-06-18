@@ -264,3 +264,35 @@ Diagnosed gap A (`m.call(a,1,3)` → 0) end-to-end:
 Default builds remain valid (helper gated off → `m.call` falls through to the
 legacy path = returns 0, valid Wasm, no regression). tsc + prettier clean; PR-A
 7/7 + #2175 17/17 green; plain `a.slice()` byte-correct.
+
+### PR-B gap-A SURGICAL FIX DIRECTION (for the fresh pickup) — reserve the probe-wrapper type idx up-front
+
+The blocker is NOT the shared type-renumber pass — do NOT trace/modify it. The
+fix is localized to the **root**: `ensureStandaloneNativeMethodClosure`
+(native-proto.ts ~403) mints a **dead probe wrapper struct**
+(`getOrCreateFuncRefWrapperTypes(userParams, [])`, empty results) only to learn
+the member's result type. That struct is never emitted into live code → DEAD →
+dead-type elimination removes it and shifts higher type idxs down by 1, breaking
+the reflective `.call`'s `call_ref` self-param (off-by-one vs the cast struct).
+
+Two surgical options (either lands without touching the renumber pass):
+- **(a) Don't mint the dead probe struct.** For `kind === "method"` the result
+  is ALWAYS `externref` (every `emitMemberBody` method arm returns
+  `{kind:"externref"}` or refuses with `null`), so skip the probe entirely and
+  use `externref` directly. (Tried this in-session: it dropped the type count
+  47→37 but ONE off-by-one persisted — so there is a SECOND dead wrapper or the
+  getter probe also shifts. So (a) alone is insufficient; combine with (b).)
+- **(b) RESERVE the wrapper struct type idx up-front** in the type-init phase so
+  dead-elim cannot shift it — this is the **exact lesson in team memory
+  `reference_subview_type_idx_stability`** ("a struct type whose idx must be
+  stable must be RESERVED up-front, not on-demand"), same class as #2357/#47.
+  Pre-register the native-proto wrapper struct types during type init (alongside
+  the other eager type reservations) rather than on first reflective demand, so
+  every wrapper survives compaction at a stable idx and `call_ref` self-param ==
+  cast-struct idx post-renumber.
+
+Then flip `JS2WASM_PRB_REFLECTIVE_CALL` on (the recovery + arg-threading in
+`tryEmitNativeProtoReflectiveCall`, calls.ts, is already shape-correct), prove
+`m.call(a,1,3) === a.slice(1,3)`, floor-gate HARD, WAT-diff the plain `a.slice()`
+path byte-identical. Gap B (direct `m(a,1,3)`) rides the same closure-recovery
+once the type idx is stable.
