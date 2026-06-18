@@ -1,9 +1,10 @@
 ---
 id: 2190
 title: "standalone: array element indexing (arr as any)[i] returns null/0 through the externref boundary"
-status: parked
+status: done
 assignee: ttraenkler/sdev-proxy3
 created: 2026-06-18
+completed: 2026-06-18
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -143,15 +144,15 @@ externref-returning** element kinds — plain `f64` (→`__box_number`), plain `
   `undefined` (no externref roundtrip) is a separate string-array bug, NOT part
   of this fix.
 
-## PARKED 2026-06-18 — element-indexing half shelved (#2189 length half landed)
+## RESOLVED 2026-06-18 — round-3 SPLICE fix restored the floor (CI-confirmed)
 
-The `.length` half (#2189) is **merged** and is the high-value piece (unblocks
-ownKeys/apply argsList measurement + array-return correctness). The
-element-**indexing** half (this PR, #1673, now a DRAFT) repeatedly regressed the
-**same ~120 standalone test262** (generator/async + destructuring-rest +
-TypedArray-iteration modules → `pass → compile_error`, breaching the #2097
-standalone high-water floor by ~116). Not worth more blind CI iteration; parked
-cleanly with full findings below. No value lost — the length half is the win.
+Briefly parked after rounds 1-2 regressed ~120 modules, then **round-3 (the
+SPLICE-not-rebuild fix) RESOLVED it**: CI `merge shard reports` is GREEN with
+`current pass=21508 vs mark 21507 (delta +1)` — the -116 standalone regression is
+gone and the lane is +1 ABOVE the high-water mark. Number-array boundary indexing
+ships. The only post-fix CI failure was the #2108 coercion-site drift gate (+1
+from the f64/i32 `__box_number` boundary box), resolved by a reviewed baseline
+refresh. Full multi-round root-cause analysis retained below for the record.
 
 ### Root-cause findings (three rounds, all CI-verified by shard diff)
 
