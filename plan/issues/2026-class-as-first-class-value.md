@@ -2,8 +2,8 @@
 id: 2026
 title: "classes are not first-class values: new K() on a parameter throws 'No dependency provided for extern class', .constructor identity broken"
 status: in-progress
-assignee: ttraenkler/sdev-async2
-sprint: 63
+assignee: ttraenkler/sdev-ctor
+sprint: 64
 created: 2026-06-10
 updated: 2026-06-18
 priority: medium
@@ -387,128 +387,51 @@ provided for extern class "K"` — confirmed. Traced the live path precisely:
 - Confirm no test262 `built-ins/`/`language/` regressions in the
   classes/new buckets (CI).
 
-### Implementation plan — #53: variable-spread runtime argv (sdev-ctor, 2026-06-18)
+### Implementation log (sdev-ctor, 2026-06-18) — PR-3a: dynamic-new spread
 
-PR-3a (#1699) made array-literal spread work via `flattenCallArgs` and turned a
-**non-flattenable** spread (`new K(...someVar)`) into a loud compile-time
-`reportError` (because the legacy `__new_` fallthrough trips the #2043/#51
-binary-emit crash in standalone). #53 makes that case actually WORK and removes
-the refuse.
+Re-validated on upstream/main @ a8650ef5b. `emitDynamicNewFallback`'s per-arg
+eval loop compiled a `SpreadElement` verbatim — the spread yields an i32 (array
+length) / ref, not a boxed externref, so the downstream `extern.convert_any`
+emitted INVALID Wasm and the whole module failed to instantiate. Measured:
+`new K(...[4,5])` → WASM-INVALID, `new K(...x)` → WASM-INVALID,
+`new K(4,...[5])` → wrong (null).
 
-**Root cause it solves.** `emitDynamicNewFallback` pre-evaluates a
-COMPILE-TIME-fixed set of `argLocals` (one per positional arg) and each tag-arm
-reads `argLocals[i]`. A `...someVar` spread has a RUNTIME length, so there's no
-fixed arg count — `compileSpreadCallArgs` can't help (it targets one
-statically-known funcIdx, not a multi-tag runtime dispatch).
+**Fix.** Before emitting any code, detect spread args:
+- Array-literal spread (`new K(...[a,b])`, `new K(4,...[5])`) is flattened via
+  the shared `flattenCallArgs` (the same compile-time flatten the static
+  class-`new` path uses at the `!hasSpread`/`flattenCallArgs` site) → now
+  constructs correctly (→ 9 in both cases).
+- Non-flattenable (variable) spread (`new K(...someVar)`) can't be driven by the
+  compile-time-fixed-arity tag dispatch (`compileSpreadCallArgs` is unusable: it
+  targets ONE statically-known funcIdx, not a runtime tag-dispatch). Falling
+  through to the legacy `__new_` path is UNSAFE: host mode throws an opaque
+  "No dependency provided for extern class K"; **no-JS-host mode (wasi/standalone)
+  trips the #2043/#51 late-import `global index out of range — -1` BINARY-EMIT
+  crash** (verified on main). So PR-3a **refuses loudly** with an attributable
+  `reportError` ("non-array-literal spread is not yet supported (#2026)") +
+  a balanced null-externref placeholder, instead of deferring into a misleading
+  crash or a silent wrong value. Variable spread = follow-up (#53, runtime $argv
+  trampoline).
 
-**Design — runtime `$ObjVecArr` argv (reuses PR-1's tag dispatch; no funcref
-table).** When `args` contains a non-flattenable spread, instead of fixed
-`argLocals` build a runtime argv:
-1. Compile a running **`argv` `(ref $ObjVecArr)`** + an `argc` i32. `$ObjVecArr`
-   = `(array (mut externref))` (object-runtime.ts:273) — reuse, do NOT mint
-   (the #2009 canonicalization hazard). Size argv to an upper bound (sum of
-   non-spread args + each spread source's runtime `len`), or grow incrementally.
-2. For each plain positional arg: `compileExpression → externref → array.set
-   argv[k++]`.
-3. For each spread: `compileExpression(spread.expression)` → vec struct
-   `{len, data}` (the existing array-value representation, see
-   `compileSpreadCallArgs` extern.ts:519-540 for the extract pattern); loop
-   `for j in 0..len: argv[k++] = box(data[j])`. Box each element to externref
-   via `coerceType`.
-4. Each tag-arm (`buildCtorArm`) reads `argv[i]` with a RUNTIME bounds check:
-   `i < argc ? (array.get $ObjVecArr argv i) : ref.null.extern`, then coerces to
-   the ctor param ValType (the existing externref→ValType coerce). This swaps
-   the compile-time `i < argLocals.length` for a runtime `i < argc` — the only
-   change to the arm; the tag dispatch, no-match base, and box-result logic are
-   untouched.
+WAT-diffed the plain `new K(7,9)` path before/after — **byte-identical** (the
+new branch is gated on `rawArgs.some(isSpreadElement)`, fully inert for
+non-spread calls; no perf/shape change). Additive; new-super.ts only; helpers by
+name. tsc + prettier + biome-lint clean.
 
-**Why not the funcref-table `$UniformCtor` trampoline (architect option A):**
-the runtime-argv extension above reuses PR-1's proven flat tag-chain with the
-SAME blast radius as PR-3a (one function, additive), avoiding a new module-level
-table/elem segment + funcref type (more surface, the late-import-shift hazard
-class). The trampoline-table is the right move only if we later need `call_ref`
-dispatch off a first-class ctor value (e.g. `Reflect.construct(K, argv)` /
-storing ctors) — file that as a separate follow-up if it arrives.
+**PR-3b (new.target) folded into the same PR (#1699).** `new.target === K` read
+0 inside a dynamically-constructed ctor — the dynamic path never set the
+new-target global. Fix: call the shared `emitSetNewTargetBeforeCall(ctx,
+fctx.body, className)` in `buildCtorArm` before the `<Class>_new` call, mirroring
+the static path; the id-based comparison (`compileBinaryExpression`'s new.target
+arm) then matches `getOrAssignClassNewTargetId(className)`. No-op unless
+`ctx.usesNewTarget`. (Originally split to its own PR, then folded back per
+tech-lead to avoid a redundant CI matrix restart — both edges are small,
+additive, cohesive in new-super.ts.)
 
-**Edge cases:** spread of an empty array → argc 0 → all params null-padded;
-mixed `new K(a, ...rest, b)` (trailing positional after spread) → argv built in
-source order so indices stay correct; spread source not an array (a non-iterable)
-→ keep a loud refuse for now (true iterator-protocol drive is #42 territory).
-Floor-gate HW; helpers by name; box-result reuses PR-3a's `getFuncResultType`
-externref-skip guard. Standalone + host both pure-Wasm.
+Tests: `tests/issue-2026-dynamic-new-spread.test.ts` (7: array-lit/mixed/
+extra-arg spread, loud-refuse diagnostic, plain-arg PR-1 guard, new.target true,
+new.target two-class discrimination). All 13 existing #2026 tests still green.
+Branch `issue-2026-pr3a-spread` → PR #1699.
 
-Builds on #1699 (merge it into the #53 branch first so this REPLACES the
-loud-refuse, not the raw crash). Branch `issue-2026-dynnew-argv`.
-
-### Progress + BLOCKER (sdev-ctor, 2026-06-18)
-
-Implemented the full runtime-argv codegen in `emitDynamicNewFallback`
-(`new-super.ts`, WIP committed): non-flattenable spread → build a runtime
-`$ObjVecArr` argv + `argc` (capacity = #non-spread + Σ spread-source-len;
-per-spread copy via a structured `block`/`loop`/`br_if depth 1`), and each
-`buildCtorArm` reads `argv[i]` with a runtime `i<argc ? array.get :
-pushDefaultValue` (`if` blockType `val pType`). tsc + lint clean.
-
-**BLOCKER — `$ObjVecArr` type-init ordering (#2043 /
-[[reference_subview_type_idx_stability]]).** All three repros fail at
-binary-emit: `heap type index out of range — -1 at TYPE DEFINITION #15`. Note it
-is a **type definition**, not an instruction — so `$ObjVecArr` (or a type
-`ensureObjectRuntime` co-registers) is *defined* with an unresolved heap-type
-ref of `-1`. Moving `ensureObjectRuntime(ctx)` to the very top of
-`emitDynamicNewFallback` (before any instruction is emitted) did NOT fix it —
-because the failure is in the TYPE REGISTRATION's own ordering: when
-`ensureObjectRuntime` runs from inside expression compilation, the string/`$ObjVec`
-types it depends on aren't in the deterministic up-front order, so the
-`$ObjVecArr`/`$ObjVec` definition bakes a `-1` element/field heap-type.
-
-Confirmed conclusion: `ensureObjectRuntime` (or at least the `$ObjVecArr` type)
-**must be materialized in the up-front type-init phase** (`index.ts:~1042-1055`,
-beside `reserveTypedArraySubviewTypes`), NOT lazily. This is exactly the
-`reference_subview_type_idx_stability` lesson.
-
-**Resolution (architect-ish call needed):**
-- **(A)** call `ensureObjectRuntime(ctx)` up-front gated on
-  `sourceContainsClass(ast.sourceFile)` — simplest, but it pulls helpers/imports
-  for EVERY class-bearing program → must verify no HW-floor / classes-new
-  test262 regression from the index shift.
-- **(B)** a dedicated tiny `reserveObjVecArrType` up-front (mirror
-  `reserveTypedArraySubviewTypes`) that registers ONLY the
-  `(array (mut externref))` type, and have `ensureObjectRuntime` adopt the
-  pre-reserved idx. Smallest blast radius; preferred — needs
-  `ensureObjectRuntime` to accept a pre-reserved type idx.
-
-WIP committed on `issue-2026-dynnew-argv`. Resume: implement (B) up-front in
-index.ts (or escalate the A/B choice). The runtime-argv codegen itself is done
-and tsc/lint-clean — only the type-init ordering remains.
-
-### RESOLVED — option (B) implemented (sdev-ctor, 2026-06-18)
-
-Implemented (B): `reserveObjVecArrType(ctx)` (`index.ts`) registers ONLY the
-`(array (mut externref))` `$ObjVecArr` type up-front in the type-init phase,
-gated on `sourceContainsClass(ast.sourceFile)`, storing
-`ctx.reservedObjVecArrTypeIdx`. `ensureObjectRuntime` ADOPTS the reserved slot
-when present (else registers as before). `emitDynamicNewFallback` uses
-`ctx.reservedObjVecArrTypeIdx` directly (no lazy `ensureObjectRuntime`) and bails
-loudly if it's somehow absent. Zero new helpers/imports, one self-contained array
-type, class-gated → no index shift for class-free programs.
-
-Result (HOST mode): `new K(...someVar)` → correct value (4,5→9; mixed
-1,...[2,3]→6; arity-short; shape-collision tag-dispatch; method calls all work).
-All 13 existing #2026 tests green; array-literal spread + plain-args unchanged.
-tsc + prettier + biome clean. Tests:
-`tests/issue-2026-dynamic-new-varspread.test.ts` (6).
-
-**Caveat — standalone *running* dynamic-new is a SEPARATE pre-existing gap (out
-of #53 scope).** A standalone/wasi program that RUNS (reads a field off) a
-dynamically-constructed instance hits `global index out of range — -1` — and
-this reproduces with **plain `new K(7)` (no spread at all)** on this base, so it
-is NOT introduced by #53. It is the #51/#1888-family string-global sentinel that
-fires when a class flows as a value and its instance is *consumed* in standalone.
-PR-1b's standalone tests only assert *compiles* (no-arg, `{}`-instantiate), so
-they don't exercise it. #53 fixes the variable-spread argv (host); the standalone
-*running* sentinel is a distinct follow-up (relate to #51).
-
-Edge note: missing-arg padding uses `pushDefaultValue` (f64 → 0), so a ctor that
-distinguishes a *missing* arg via `b ?? 99` sees 0, not undefined. True
-`undefined`-padding for `??`/default-param semantics is a narrow refinement —
-noted.
+**Still open — PR-2** (`.constructor === A` on an externref/`any` receiver) ships
+as its own PR. **#53** = variable-spread runtime `$argv` trampoline (deferred).

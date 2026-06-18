@@ -2,8 +2,8 @@
 id: 2161
 title: "Standalone RegExp engine conformance residual (~579 tests)"
 status: in-progress
-assignee: ttraenkler/sdev-regex3
-sprint: 63
+assignee: ttraenkler/cs-2164
+sprint: 64
 created: 2026-06-15
 updated: 2026-06-18
 priority: high
@@ -306,3 +306,38 @@ prototype-object representation; (c) dynamic / `any`-typed receivers — need th
 runtime-externref regex receiver generalisation (every @@ form falls through to
 host `__regex_symbol_call` today); and the regex-engine feature tail (v-flag
 `\q{}`, dynamic ctor patterns). #2161 stays open for those.
+
+## Slice 7 (2026-06-18, cs-2164) — standalone `RegExp.prototype.toString()`
+
+**Landed.** A standalone-shard re-probe (against `955552ecc`) found `re.toString()`
+leaked `env::Object_toString` — an unsatisfiable host import in `--target
+standalone` — even though both `re.source` and `re.flags` already resolve
+natively (#1914). It fell through the RegExp method dispatch to the generic
+object `toString` path.
+
+**Fix** (`regexp-standalone.ts` + `expressions/calls.ts`): new
+`tryCompileStandaloneRegExpToString` lowers `re.toString()` (§22.2.6.14) to
+`"/" ++ re.source ++ "/" ++ re.flags` — the struct's spec-escaped `source` field
+read (§22.2.6.13.1, already stored escaped) and the `__regex_flags_str(flags)`
+flag-string, composed with `__str_concat` via the shared `nativeStringRepr`
+concat primitive. Returns a native string, **zero host imports**. Gated on
+`ctx.standalone` + a static / backend-created RegExp receiver (a dynamic
+externref receiver falls through to the host/refusal path unchanged); host mode
+is untouched (`re.toString()` still run=6 there). Wired at the RegExp method
+dispatch in `calls.ts`, right after `tryCompileStandaloneRegExpTest`.
+
+**Validation.** New `tests/issue-2161-regex-tostring.test.ts` (7): `/source/flags`
+for flagged + flagless literals, the empty-pattern `/(?:)/` form, escaped-slash
+source, a const-bound receiver, the canonical `dgimsy` flag order, and exact
+host-JS parity across four pattern/flag pairs — all standalone with an empty
+importObject asserting no `Object_toString` / `__extern_*` leak. The 35
+#2161/#2161-matchall/#1474 + 201 #2175/#1914/#1539 regex cases stay green
+(behaviour-preserving). tsc + prettier + biome(error) + stack-balance +
+coercion-sites + any-box gates clean.
+
+**Deferred (separate code paths, NOT this method dispatch):** `String(re)` (still
+null-derefs — the `String()` builtin lowering) and `` `${re}` `` (template-literal
+coercion returns a wrong-length string) both route through value→string
+coercion, not `re.toString()`, and need RegExp-aware coercion in those lowerings
+— a distinct slice. The (a) reflection and (c) dynamic-receiver buckets remain
+as noted above. **#2161 stays open.**

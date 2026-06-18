@@ -1,11 +1,13 @@
 ---
 id: 2358
 title: "Standalone native __to_primitive can't reduce typed (nominal) object structs through the externref boundary"
-status: ready
-sprint: Backlog
+status: done
+sprint: 63
+assignee: sdev-toprimitive
 model: opus
 created: 2026-06-18
 updated: 2026-06-18
+completed: 2026-06-18
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -48,9 +50,24 @@ the moment an operand is coerced to externref. `+` (via `emitAnyAdd`,
 `binary-ops.ts:2845`) and any `any`-typed parameter path lose the typeIdx and
 must fall back to the runtime helper — which can't reduce nominal structs.
 
-## Repro (current `main`, `--target wasi`)
+## Repro (original spec table — SEE 2026-06-18 CORRECTION BELOW)
 
-A single engine fix closes all of these:
+> ⚠️ **2026-06-18 re-measure (sdev-toprimitive) — the table below is PARTLY
+> STALE on current `main`.** When an object literal is written with an `as any`
+> cast *at the literal* (`({valueOf:()=>4} as any) + 1`), it now compiles to the
+> **dynamic `$Object`** representation (`__new_plain_object`), which
+> `__to_primitive` already reduces — so those `as any`-literal rows **PASS** on
+> current `main` (verified standalone). The genuine residual is the rows where
+> the object reaches `+` as a **typed nominal struct**: a typed LOCAL
+> (`const o = {valueOf:()=>4}; (o as any) + 1`) or a **class instance**
+> (`class C { valueOf(){return 9} }; (new C() as any) + 1`) — those compile to a
+> bare anon `(struct (field $valueOf eqref))` with no proto/brand, which
+> `__to_primitive`'s `ref.test objectTypeIdx` misses → null. **PR-1 (#1697)
+> fixes exactly those two** at `emitAnyAdd` operand-prep. The
+> `function f(x:any){return x*2}` row and `Number(obj)`/`Number([1])` (#10) are
+> NOT fixed by PR-1 — they reach the boundary already erased to externref (no
+> typeIdx) and need the general Option-A brand mechanism. Don't chase the rows
+> below as live repros without re-checking against `main` first.
 
 | expr | actual | expected | path |
 |------|--------|----------|------|
@@ -63,6 +80,9 @@ A single engine fix closes all of these:
 correct on main — they are NOT. `+` with object operands is broken (returns the
 raw object), because `+` routes through the externref/`__to_primitive` path, not
 the static struct-valueOf path. `-`/`*`/unary-minus ARE correct (static path).
+*(2026-06-18 refinement: the `obj+obj`/`obj+7` BREAKAGE is real only for the
+**typed-nominal-struct** form — the `as any`-at-literal form is now correct via
+the dynamic `$Object` path. See the re-measure note above.)*
 
 ### Two latent codegen bugs in the same area (valueOf returns an object)
 Fold these into the impl — same root (the reduction must fall through
@@ -156,3 +176,54 @@ disproportionate to the bucket.
 The 2026-06-12 standalone JSONL `object-to-primitive` bucket (107) is **stale**
 and the headline is partly closed — re-measure the true tractable count on a
 **fresh standalone shard** before sizing the impl.
+
+## Implementation notes — PR-1 (sdev-toprimitive, 2026-06-18)
+
+**Spec repro table was stale.** Re-measured every row standalone on current
+upstream/main (955552ecc). The `as any`-cast-at-the-literal forms
+(`({valueOf:()=>4} as any)+1`, `1+obj`, `obj+obj`, `function f(x:any){return x*2}`)
+ALL PASS already: an `as any` literal forces the **dynamic `$Object`**
+representation (`__new_plain_object`), which `__to_primitive` already reduces.
+The genuine residual is the **typed-LOCAL / class-instance** form, which compiles
+to a NOMINAL anon struct (`(struct (field $valueOf eqref))`) with no proto/brand/
+supertype — `__to_primitive`'s `ref.test objectTypeIdx` misses it → returned
+unchanged → `__unbox_number` → null.
+
+**What PR-1 ships (tractable, NOT the spec's Option A brand/RTTI).** A focused,
+additive change in `emitAnyAdd` (`binary-ops.ts`): the operand-prep is factored
+into `emitAddOperand`, which — when an operand statically resolves (through
+`as`/paren/non-null wrappers) to a nominal struct with a *number-producing*
+static ToPrimitive (`valueOf`/`@@toPrimitive`) — compiles the **unwrapped** inner
+expression WITHOUT the externref hint (so its concrete `typeIdx` survives) and
+reduces it to a boxed primitive via the shared #1917 `coerceType(ref-struct→f64,
+"default")` engine, *before* it crosses the externref boundary. Every other
+operand keeps the exact status-quo `{externref}`-hint path.
+
+Why the externref hint had to be conditionally dropped: `(o as any)` /
+`compileExpression(expr, {externref})` coerces the struct to externref *inside*
+compileExpression, erasing the typeIdx before the operand-prep can see it. Gating
+on the unwrapped operand's struct name (`resolveStructNameForExpr` on the inner
+expr) keeps the divergence surgical.
+
+**Guardrails verified:**
+- WAT byte-IDENTICAL on a battery of non-struct `+` (str+str, str+num, num+num,
+  arr+str, toString-only-obj) AND the static `*`/`-` paths (clean upstream/main
+  vs branch — empty diff). The new path only fires for nominal-struct valueOf in
+  `+`.
+- `node scripts/check-coercion-sites.mjs` flat; `check-any-box-sites` flat
+  (reused the existing coercion engine, no new site).
+- Standalone modules still instantiate host-free (`imports.length === 0` asserted
+  in the regression test).
+- Regression test `tests/issue-2358-toprimitive-nominal.test.ts` (6 cases,
+  including the two `as any`/any-param non-regression guards) — all green.
+- `tsc --noEmit` clean.
+
+**Deferred to a follow-up (the spec's Option A territory):** the
+any-typed-PARAMETER form where the struct is erased to externref at the call
+boundary BEFORE `+` (already works for valueOf via the dynamic-object box, but a
+typed nominal struct passed positionally would still strand), and `Number(obj)` /
+`Number([1])` (#10). Those need the GENERAL externref-boundary reduction — a
+shared-supertype brand + `ref.test` + brand→funcidx dispatch table — which
+requires re-declaring every object-literal struct as `sub` of a brand supertype
+(touches the hot static path) and is genuinely architect-scale. PR-1 closes the
+`+`-with-typed-object residual host-free without it.

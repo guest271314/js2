@@ -579,11 +579,15 @@ function compileObjectLiteralWithAccessors(
         continue;
       }
       if (methodName === undefined) continue;
+      // (#6408) Same dual-mode key fix as the data-property arm above: the raw
+      // `global.get <stringGlobalMap.get(method)>` baked `global.get -1` in
+      // standalone for a method key on a literal that also takes the accessor
+      // path. Route through the guarded helper.
       addStringConstantGlobal(ctx, methodName);
-      const keyGlobal = ctx.stringGlobalMap.get(methodName);
-      if (keyGlobal === undefined) continue;
       fctx.body.push({ op: "local.get", index: objLocal });
-      fctx.body.push({ op: "global.get", index: keyGlobal });
+      for (const instr of stringConstantExternrefInstrs(ctx, methodName)) {
+        fctx.body.push(instr);
+      }
       const ok = compileArrowAsCallback(ctx, fctx, prop as unknown as ts.FunctionExpression, { needsThis: true });
       if (!ok) {
         fctx.body.push({ op: "ref.null.extern" });

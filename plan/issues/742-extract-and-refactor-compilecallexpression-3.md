@@ -8,7 +8,7 @@ updated: 2026-06-17
 priority: medium
 feasibility: medium
 goal: maintainability
-sprint: 63
+sprint: 64
 depends_on: [688]
 files:
   src/codegen/expressions.ts:
