@@ -217,3 +217,50 @@ TWO REMAINING RUNTIME GAPS (concrete):
 The structural bridge (extraction + recovery wiring + arity) is DONE and the closure
 compiles + is invoked. The two gaps are dispatch-routing + recovery-match — debuggable,
 not architectural. Floor-gate + WAT-diff the plain a.slice() path (already byte-correct).
+
+### PR-B gap-A root cause (sdev-proxy3, 2026-06-18) — closure type-erasure + dead-probe-wrapper renumber
+
+Diagnosed gap A (`m.call(a,1,3)` → 0) end-to-end:
+
+1. **Why `.call` returns 0 (not a thread-thisArg bug as framed):** a value-
+   materialized `$NativeProto` member closure (`const m = Array.prototype.slice`)
+   is **type-erased to `externref`** when stored in a variable (m's local wasm
+   type is `externref`, not `(ref $wrap)`). So `resolveClosureInfoFromLocal`
+   returns nothing, `closureInfo` is null, and the generic `.call` Case 1
+   (calls.ts ~2932) drops thisArg and calls with the wrong arg slots → 0. (The
+   verified-earlier "no call_ref" symptom is this: no closureInfo ⇒ no call_ref.)
+
+2. **Recovery built (gated `JS2WASM_PRB_REFLECTIVE_CALL`):**
+   `tryEmitNativeProtoReflectiveCall` (calls.ts) recovers the closure from the
+   receiver's **TS symbol** — a builtin-proto method's symbol declares as a
+   `MethodSignature` on the `Array`/`Object` lib interface; from `(ifaceName,
+   member)` re-resolve brand+member → `ensureStandaloneNativeMethodClosure` →
+   recover `closureInfo`, reshape args to `[thisArg, ...userArgs]`
+   (this→param1), compile the receiver + `any.convert_extern` + `ref.cast` to
+   the wrapper struct, then `call_ref`. Wired into `.call`/`.apply` before the
+   legacy cases; unwraps `as`/paren casts.
+
+3. **Remaining blocker — dead-probe-wrapper type-renumber off-by-one.** The
+   `call_ref` trips `expected (ref null N) found (ref null N-1)` AFTER finalize.
+   Registration is internally consistent (struct 53 / lifted func 54, self =
+   ref 53). Root cause: `ensureStandaloneNativeMethodClosure` (native-proto.ts
+   ~403) creates a **probe wrapper** `getOrCreateFuncRefWrapperTypes(userParams,
+   [])` (empty results) only to learn the member's result type — that probe
+   struct is **never emitted into live code** so it is DEAD. Dead-type
+   elimination at finalize removes it and shifts every higher type index down by
+   1. The value-read path survives (it returns the wrapper as externref — no
+   self-type constraint), but the `call_ref` self-param constraint exposes the
+   off-by-one shift between the wrapper struct and the lifted func type's self
+   reference.
+
+   **Recommended fix (PR-A-rooted):** eliminate the dead probe wrapper in
+   `ensureStandaloneNativeMethodClosure` — e.g. learn the result type without
+   minting a throwaway empty-results wrapper struct (probe into a scratch fctx
+   whose self is the FINAL wrapper, created once), OR exclude these wrapper
+   structs from the type-compaction shift, OR pin the type idx. Once the
+   probe-struct is not dead/shifting, flip `JS2WASM_PRB_REFLECTIVE_CALL` on; the
+   recovery + arg-threading is already shape-correct.
+
+Default builds remain valid (helper gated off → `m.call` falls through to the
+legacy path = returns 0, valid Wasm, no regression). tsc + prettier clean; PR-A
+7/7 + #2175 17/17 green; plain `a.slice()` byte-correct.
