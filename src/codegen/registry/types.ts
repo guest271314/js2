@@ -154,6 +154,56 @@ export function getOrRegisterVecType(ctx: CodegenContext, elemKind: string, elem
 }
 
 /**
+ * (#2159 / #2357 / #47) Get or register the `$__subview_<elemKind>` struct — a
+ * TypedArray `subarray` view that SHARES the parent's backing array:
+ *   `{length: i32, base: (ref null __vec_<elemKind>), byteOffset: i32}`.
+ *
+ * `length` is field 0 (subtypes `$__vec_base`) so uniform `.length` reads and the
+ * externref-length helper keep working. `base` points at the PARENT vec (whose
+ * `data` array is shared — no copy), and `byteOffset` is the element offset of the
+ * window into that array. Element access on a `$__subview` receiver reads
+ * `base.data[byteOffset + i]`; on a plain vec it reads `data[i]` unchanged. The
+ * discrimination is by the receiver's static ValType.typeIdx at COMPILE time, so
+ * the plain-array hot path is untouched. Keyed per element kind. Idempotent.
+ */
+export function getOrRegisterSubviewType(ctx: CodegenContext, elemKind: string, elemTypeOverride?: ValType): number {
+  const existing = ctx.subviewTypeMap.get(elemKind);
+  if (existing !== undefined) return existing;
+
+  const vecBaseIdx = getOrRegisterVecBaseType(ctx);
+  const vecTypeIdx = getOrRegisterVecType(ctx, elemKind, elemTypeOverride);
+
+  const idx = ctx.mod.types.length;
+  const name = `__subview_${elemKind}`;
+  ctx.mod.types.push({
+    kind: "struct",
+    name,
+    superTypeIdx: vecBaseIdx, // length-prefix compatible with $__vec_base
+    fields: [
+      { name: "length", type: { kind: "i32" }, mutable: true },
+      { name: "base", type: { kind: "ref_null", typeIdx: vecTypeIdx }, mutable: false },
+      { name: "byteOffset", type: { kind: "i32" }, mutable: false },
+    ],
+  });
+  ctx.subviewTypeMap.set(elemKind, idx);
+  ctx.subviewTypeIdx = idx;
+  ctx.structMap.set(name, idx);
+  ctx.typeIdxToStructName.set(idx, name);
+  ctx.structFields.set(name, [
+    { name: "length", type: { kind: "i32" as const }, mutable: true },
+    { name: "base", type: { kind: "ref_null" as const, typeIdx: vecTypeIdx }, mutable: false },
+    { name: "byteOffset", type: { kind: "i32" as const }, mutable: false },
+  ]);
+  return idx;
+}
+
+/** (#2357) True iff `typeIdx` is a registered `$__subview_<elem>` struct. */
+export function isSubviewTypeIdx(ctx: CodegenContext, typeIdx: number): boolean {
+  for (const v of ctx.subviewTypeMap.values()) if (v === typeIdx) return true;
+  return false;
+}
+
+/**
  * Get or register the template vec struct type for tagged template string arrays.
  */
 export function getOrRegisterTemplateVecType(ctx: CodegenContext): number {

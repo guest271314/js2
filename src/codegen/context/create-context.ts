@@ -161,6 +161,8 @@ export function createCodegenContext(
     templateVecTypeIdx: -1,
     vecBaseTypeIdx: -1, // (#2186) shared $__vec_base length supertype, lazy
     dvWindowTypeIdx: -1, // (#2159/#38) standalone DataView windowing wrapper, lazy
+    subviewTypeIdx: -1, // (#2159/#2357/#47) standalone TypedArray subarray view, lazy
+    subviewTypeMap: new Map(), // (#2357) per-elem-kind $__subview type idx
     errorStructTypeIdx: -1,
     widenedTypeProperties: new Map(),
     widenedVarStructMap: new Map(),
