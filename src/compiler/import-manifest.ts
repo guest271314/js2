@@ -119,6 +119,7 @@ function classifyImport(name: string, mod: WasmModule): ImportIntent {
   // Extern get/set
   if (name === "__extern_get") return { type: "extern_get" };
   if (name === "__extern_set") return { type: "extern_set" };
+  if (name === "__extern_set_strict") return { type: "extern_set_strict" }; // (#2017) strict [[Set]]
 
   // Host strict-equality for two externref operands that are not WasmGC eqrefs
   // (e.g. host functions like `Array === Array`). (#1065)
