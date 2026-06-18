@@ -2579,7 +2579,13 @@ export function emitSafeExternrefToF64(ctx: CodegenContext, fctx: FunctionContex
  * This is a local version to avoid circular deps with expressions.ts.
  */
 function emitUndefinedValue(ctx: CodegenContext, fctx: FunctionContext): void {
-  const funcIdx = ensureLateImport(ctx, "__get_undefined", [], [{ kind: "externref" }]);
+  // (#2029) Standalone / native-strings mode has no JS host to satisfy a
+  // `__get_undefined` import, and `ensureLateImport` does NOT refuse this name —
+  // so without this guard the import LEAKS and the module fails to instantiate
+  // with an empty import object (the `env: module is not an object` linker
+  // error). Mirror the canonical `ensureGetUndefined` guard: undefined collapses
+  // to `ref.null.extern` standalone (indistinguishable from null, by design).
+  const funcIdx = ctx.nativeStrings ? undefined : ensureLateImport(ctx, "__get_undefined", [], [{ kind: "externref" }]);
   if (funcIdx !== undefined) {
     flushLateImportShifts(ctx, fctx);
     fctx.body.push({ op: "call", funcIdx });
