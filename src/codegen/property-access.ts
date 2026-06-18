@@ -52,6 +52,7 @@ import {
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
+import { getOrRegisterDvWindowType } from "./dataview-native.js"; // (#2159/#38) DataView windowing
 import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
@@ -1732,6 +1733,46 @@ export function compilePropertyAccess(
         : undefined);
     const isBuffer = recvName === "ArrayBuffer" || recvName === "SharedArrayBuffer";
     const isTypedArr = recvName !== undefined && TYPED_ARRAY_NAMES.has(recvName);
+    const isDataView = recvName === "DataView";
+    // (#2159/#38) DataView `byteOffset` / `byteLength` honour the constructor's
+    // window. The receiver is either a `$__dv_window` wrapper (windowed view) or
+    // a bare `$__vec_i32_byte` (offset-0 default-length view). For the wrapper,
+    // read its byteOffset / byteLength fields; for the bare vec, byteOffset = 0
+    // and byteLength = vec.length (one i32 per byte ⇒ length IS the byte count).
+    if (isDataView && noJsHost(ctx)) {
+      const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+      const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
+      const fieldIdx = propName === "byteOffset" ? 1 : 2;
+      const recvType = compileExpression(ctx, fctx, expr.expression);
+      const anyLocal = allocLocal(fctx, `__dvp_any_${fctx.locals.length}`, { kind: "anyref" });
+      if (recvType?.kind === "externref") {
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+      }
+      fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+      const winBranch: Instr[] = [
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx } as Instr,
+      ];
+      const vecBranch: Instr[] =
+        propName === "byteOffset"
+          ? [{ op: "i32.const", value: 0 } as Instr]
+          : [
+              { op: "local.get", index: anyLocal } as Instr,
+              { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+              { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+            ];
+      fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+      fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: winBranch,
+        else: vecBranch,
+      } as Instr);
+      if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+    }
     if (isBuffer || isTypedArr) {
       // byteOffset on a fresh-backing view is always 0.
       if (propName === "byteOffset") {

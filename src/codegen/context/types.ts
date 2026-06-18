@@ -1102,6 +1102,18 @@ export interface CodegenContext {
    * registered (created lazily on first `getOrRegisterVecType`).
    */
   vecBaseTypeIdx: number;
+  /**
+   * (#2159 / #38) Type index for the standalone `$__dv_window` struct — a
+   * `{buf: (ref null __vec_i32_byte), byteOffset: i32, byteLength: i32}` wrapper
+   * produced by `new DataView(buffer, byteOffset, byteLength)` when the view is
+   * windowed (offset > 0 or an explicit byteLength). Lets the native DataView
+   * accessors add `byteOffset` to every byte index while sharing the parent's
+   * backing array (so windowed writes are visible through the full view), and
+   * lets `dv.byteOffset`/`dv.byteLength` reflect the ctor args. -1 = not yet
+   * registered (created lazily). Offset-0 default-length views keep the bare
+   * i32_byte vec representation (no wrapper, zero new cost).
+   */
+  dvWindowTypeIdx: number;
   /** Type index for the WasmGC `$Error_struct` used in standalone/WASI mode (#1104). -1 = not yet registered. */
   errorStructTypeIdx: number;
   /** Extra properties for empty object variables */

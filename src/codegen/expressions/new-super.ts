@@ -24,6 +24,7 @@ import {
   getOrRegisterVecType,
   resolveWasmType,
 } from "../index.js";
+import { getOrRegisterDvWindowType } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper
 import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
 import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
@@ -3873,9 +3874,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         fctx.body.push({ op: "local.get", index: offsetF64 });
         fctx.body.push({ op: "f64.sub" });
         fctx.body.push({ op: "local.set", index: lenF64 });
+      } else if (noJsHost(ctx)) {
+        // (#2159/#38) Standalone externref buffer (the common case — ArrayBuffer
+        // locals are typed externref): recover the i32_byte vec struct at runtime
+        // (any.convert_extern + ref.cast) and read its byte length, so the default
+        // windowed byteLength = bufferByteLength - offset is correct without a
+        // host handler.
+        fctx.body.push({ op: "local.get", index: bufLocal });
+        fctx.body.push({ op: "any.convert_extern" });
+        fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
+        fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+        fctx.body.push({ op: "f64.convert_i32_s" });
+        fctx.body.push({ op: "local.get", index: offsetF64 });
+        fctx.body.push({ op: "f64.sub" });
+        fctx.body.push({ op: "local.set", index: lenF64 });
       } else {
-        // externref buffer — we can't read length at compile time. Use a
-        // NaN sentinel; the runtime __dv_register_view handler treats NaN as
+        // externref buffer (JS-host) — we can't read length at compile time. Use
+        // a NaN sentinel; the runtime __dv_register_view handler treats NaN as
         // "compute from __dv_byte_len(buf) - offset" at dispatch time.
         fctx.body.push({ op: "f64.const", value: NaN });
         fctx.body.push({ op: "local.set", index: lenF64 });
@@ -3916,6 +3931,40 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           fctx.body.push({ op: "local.get", index: lenF64 });
           fctx.body.push({ op: "call", funcIdx: regIdx });
         }
+      }
+
+      // (#2159/#38) Standalone windowed DataView: when the view has a non-trivial
+      // window (an explicit byteOffset > 0, or an explicit byteLength), wrap the
+      // shared backing buffer in a `$__dv_window {buf, byteOffset, byteLength}`
+      // so the native accessors add the base offset and `dv.byteOffset` /
+      // `dv.byteLength` reflect the ctor args. Offset-0 default-length views keep
+      // the bare vec representation (the dominant, fully-native case) — the
+      // accessor's `recoverDvBacking` accepts both shapes. We only wrap struct
+      // buffers (the externref-buffer path has no compile-time struct to share).
+      const windowed = noJsHost(ctx) && args.length >= 2;
+      if (windowed) {
+        const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
+        // buf (ref null vec). The buffer local may be a struct ref already or an
+        // externref (ArrayBuffer locals are typed externref) — recover the vec
+        // struct so the wrapper's `buf` field is a concrete `(ref null vec)`.
+        fctx.body.push({ op: "local.get", index: bufLocal });
+        if (!isStructBuf) {
+          fctx.body.push({ op: "any.convert_extern" });
+          fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
+        }
+        // byteOffset (i32) — offsetF64 is already ToIndex-normalized & validated.
+        fctx.body.push({ op: "local.get", index: offsetF64 });
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+        // byteLength (i32) — lenF64 holds the windowed length (explicit arg or
+        // bufferByteLength - offset default computed above).
+        fctx.body.push({ op: "local.get", index: lenF64 });
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+        fctx.body.push({ op: "struct.new", typeIdx: dvWinTypeIdx });
+        // DataView locals are externref (EXTERNREF_GLOBAL_NAMES) — hand back an
+        // externref so the wrapper survives the variable store and is recovered
+        // (any.convert_extern + ref.test $__dv_window) on accessor dispatch.
+        fctx.body.push({ op: "extern.convert_any" });
+        return { kind: "externref" };
       }
 
       // Restore buffer on stack
