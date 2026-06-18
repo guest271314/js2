@@ -163,3 +163,41 @@ inserted (length must stay field 0). The DataView windowing slice (PR #1678)
 validated the additive-wrapper approach end-to-end; subarray differs only in that
 its accessor IS the generic `a[i]` path, which is why the discrimination strategy
 (above) is the load-bearing decision.
+
+## Implementation status (#47, 2026-06-18) — BLOCKED on type-index stability
+
+WIP on branch `issue-2357-subarray-impl` (commits "WIP 1/4", "WIP 2/4"). The
+representation + lowering are built and correct in isolation:
+
+- `$__subview_<elem> {length:i32, data:(ref null $__arr_<elem>), byteOffset:i32}`
+  registered (`getOrRegisterSubviewType`); deliberately holds the backing **array**
+  directly (uniquely deduped per elem kind) rather than a vec struct idx, to avoid
+  the dual-vec-registration hazard.
+- `compileTypedArraySubarray` builds a windowing `$__subview` sharing `parent.data`
+  (no copy), with offset accumulation for nested `subarray`; host mode keeps the copy.
+- `compileElementAccess` reads `$__subview.data[byteOffset + i]`, compile-time
+  discriminated via the receiver `typeIdx` (zero cost on the plain `a[i]` path).
+- `inferLetConstInitializerWasmType` resolves a `subarray`-result binding to the
+  subview type.
+
+**The blocker** is *not* in any of the above — it is **type-index stability across
+the compiler's two type-numbering passes**. The hoist pass sizes the binding's local
+from `inferLetConstInitializerWasmType` (which on-demand-registers the subview at,
+say, idx 45); the body pass re-numbers and the subview lands at a different idx (35),
+while the binding local was already pinned to the hoist-pass number. Result: the
+`s` local and the emitted `struct.new` disagree, so reads/`.length` return 0.
+
+A naive fix — eagerly registering the subview inside `getOrRegisterVecType` —
+**back-fires**: it shifts type indices so `resolveWasmType(Uint8Array)` resolves a
+plain `new Uint8Array()` to the *subview* idx, building the parent array itself as a
+subview (verified: `local $a (ref null <subview>)`). So index shifting is too fragile.
+
+**Recommended fix (next session):** reserve the `$__subview_<elem>` type slots in the
+**deterministic up-front type-init phase** — the same place `$__vec_base`,
+`$AnyString`/`$NativeString`/`$ConsString`, and the box-number/box-bool structs are
+registered (see `index.ts` ~9002–9016 and `registerNativeStringTypes`) — so the
+subview idx is identical in both passes. Then the existing inference + element-access
++ subarray-lowering wiring works unchanged. A symbol-keyed side-map is the fallback,
+but the binding local still needs the subview *type* to hold the struct, so the
+stable-reservation route is cleaner. Writes (`s[i] = v` → same `data[byteOffset+i]`
+store) and scoped standalone tests remain to wire once the binding type lands.
