@@ -1007,6 +1007,11 @@ export interface CodegenContext {
   anyStrTypeIdx: number;
   nativeStrTypeIdx: number;
   consStrTypeIdx: number;
+  /**
+   * (#40) Immutable `(array i32)` type index for the Unicode case-mapping tables
+   * (emitNativeCaseConversion). Registered once on first use.
+   */
+  caseTableArrTypeIdx?: number;
   /** #1588 PR-B: i8 backing array + Utf8String subtype indices. -1 when
    *  `utf8Storage` is off (types not registered). */
   utf8StrDataTypeIdx: number;
