@@ -87,6 +87,9 @@ import {
 } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
+// (#2193 PR-B) reflective `m.call(thisArg, …)` on a `$NativeProto` member-closure value.
+import { ensureArrayNativeProtoGlue, ensureObjectNativeProtoGlue } from "../array-object-proto.js";
+import { ensureStandaloneNativeMethodClosure, getNativeProtoBuiltinGlue } from "../native-proto.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import {
   emitSetExtrasArgv,
@@ -455,6 +458,130 @@ function resolveClosureInfoFromLocal(
     return ctx.closureInfoByTypeIdx.get(localType.typeIdx);
   }
   return undefined;
+}
+
+/**
+ * (#2193 PR-B) Reflective `m.call(thisArg, …args)` / `m.apply(thisArg, [args])`
+ * where `m` is a **value-materialized `$NativeProto` member closure** (e.g.
+ * `const m = Array.prototype.slice; m.call(a, 1, 3)`).
+ *
+ * The closure value is type-erased to `externref` when stored in a variable
+ * (its local wasm type is `externref`, not the concrete `(ref $wrap)`), so
+ * `resolveClosureInfoFromLocal` can't recover it and the generic `.call`/`.apply`
+ * path drops `thisArg`. We instead recover the closure from the receiver's
+ * **TypeScript symbol**: a builtin prototype method's symbol declares as a
+ * `MethodSignature` on the `Array` / `Object` lib interface. From that we
+ * re-resolve the brand + member, ensure the native method closure, and emit a
+ * direct `call_ref` with `thisArg → param 1` (the receiver) and the remaining
+ * args → params 2.. — exactly the closure's `(self, this, …args)` ABI.
+ *
+ * Returns the result `ValType` when it handled the call, or `undefined` to fall
+ * through to the legacy paths (non-proto receiver, dynamic `.apply` args, etc.).
+ */
+function tryEmitNativeProtoReflectiveCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  receiver: ts.Expression,
+  isCall: boolean,
+): ValType | undefined {
+  if (!ctx.standalone) return undefined;
+  if (expr.arguments.length === 0) return undefined; // need at least a thisArg
+
+  // Resolve the member name + declaring builtin from the receiver's symbol.
+  let sym: ts.Symbol | undefined;
+  try {
+    sym = ctx.checker.getTypeAtLocation(receiver).getSymbol();
+  } catch {
+    return undefined;
+  }
+  const member = sym?.getName();
+  const decl = sym?.declarations?.[0];
+  if (!member || !decl || !ts.isMethodSignature(decl)) return undefined;
+  const ifaceDecl = decl.parent;
+  if (!ifaceDecl || !ts.isInterfaceDeclaration(ifaceDecl)) return undefined;
+  const ifaceName = ifaceDecl.name.text;
+
+  // Map the lib interface → builtin brand. Array<T> / ReadonlyArray<T> / Object.
+  let brand: number | undefined;
+  if (ifaceName === "Array" || ifaceName === "ReadonlyArray") brand = ensureArrayNativeProtoGlue(ctx);
+  else if (ifaceName === "Object") brand = ensureObjectNativeProtoGlue(ctx);
+  if (brand === undefined) return undefined;
+
+  const glue = getNativeProtoBuiltinGlue(ctx, brand);
+  if (!glue) return undefined;
+  // Only a `method`-kind member has the `(self, this, …args)` shape we thread.
+  if (glue.memberKind(member) !== "method") return undefined;
+
+  const closure = ensureStandaloneNativeMethodClosure(ctx, brand, member, "method");
+  if (!closure) return undefined; // member body refuses / not native yet → fall through
+  const closureInfo = ctx.closureInfoByTypeIdx.get(closure.type.typeIdx);
+  if (!closureInfo) return undefined;
+
+  // TODO(#2193 PR-B): the hand-rolled `ref.func`+`struct.new`+`call_ref` below
+  // still trips a wrapper-struct type-index consistency check
+  // (`call_ref[0] expected (ref null N), found (ref null N-1)`) — the rebuilt
+  // closure struct's type idx doesn't match the lifted func type's self param
+  // at finalize. Until that is resolved, BAIL so compilation stays valid
+  // (the call falls through to the legacy drop-thisArg path = returns 0, but
+  // emits valid Wasm — no worse than pre-PR-B). The arg-threading + recovery
+  // logic below is correct in shape; only the call_ref operand typing is wrong.
+  if (!process.env.JS2WASM_PRB_REFLECTIVE_CALL) return undefined;
+
+  // Reshape args to the closure's positional ABI: [thisArg, ...userArgs].
+  let userArgs: readonly ts.Expression[] | undefined;
+  if (isCall) {
+    userArgs = expr.arguments; // [thisArg, a, b] → (this, a, b)
+  } else if (expr.arguments.length === 1) {
+    userArgs = [expr.arguments[0]!]; // .apply(thisArg) → (this)
+  } else {
+    const argsExpr = expr.arguments[1]!;
+    if (ts.isArrayLiteralExpression(argsExpr)) {
+      const flattened = flattenStaticArrayElements(argsExpr);
+      if (flattened !== undefined) userArgs = [expr.arguments[0]!, ...flattened];
+    }
+  }
+  if (userArgs === undefined) return undefined; // dynamic apply args → fall through
+
+  // Build the closure struct (ref.func + struct.new) into a local. The
+  // `call_ref` ABI is: stack = [self_struct, ...userParams, funcref]. So we
+  // push the struct as the `self` param 0, compile/coerce the lifted user
+  // params (this, ...args), then re-load the struct and `struct.get 0` the
+  // funcref before `call_ref`. Missing trailing params pad with undefined
+  // (ref.null.extern) / a default — the slice body tolerates an absent `end`.
+  const closureLocal = allocLocal(fctx, `__protocall_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: closureInfo.structTypeIdx,
+  });
+  fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
+  fctx.body.push({ op: "struct.new", typeIdx: closureInfo.structTypeIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: closureLocal } as Instr);
+
+  // self param 0
+  fctx.body.push({ op: "local.get", index: closureLocal } as Instr);
+
+  const paramTypes = closureInfo.paramTypes; // excludes the self param
+  for (let i = 0; i < paramTypes.length; i++) {
+    const pType = paramTypes[i]!;
+    if (i < userArgs.length) {
+      const aType = compileExpression(ctx, fctx, userArgs[i]!, pType);
+      if (aType !== null && !valTypesMatch(aType, pType)) {
+        coerceType(ctx, fctx, aType, pType);
+      }
+    } else if (pType.kind === "externref") {
+      fctx.body.push({ op: "ref.null.extern" } as Instr);
+    } else {
+      pushDefaultValue(fctx, pType, ctx);
+    }
+  }
+
+  // call_ref carrier: this codebase's `call_ref typeIdx` consumes the closure
+  // STRUCT on top of stack (a later fixup extracts field 0 = the funcref), NOT
+  // a bare funcref — mirror the closure-call paths (e.g. compileOptionalDirectCall
+  // pushes the struct twice). So re-load the struct as the call_ref operand.
+  fctx.body.push({ op: "local.get", index: closureLocal } as Instr);
+  fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr);
+  return closureInfo.returnType ?? { kind: "externref" };
 }
 
 /**
@@ -2805,6 +2932,20 @@ function compileCallExpression(
     if (propAccess.name.text === "call" || propAccess.name.text === "apply") {
       const isCall = propAccess.name.text === "call";
       const innerExpr = propAccess.expression;
+
+      // (#2193 PR-B) Reflective `m.call/apply(thisArg, …)` on a value-erased
+      // `$NativeProto` member closure (e.g. `const m = Array.prototype.slice`).
+      // Recover the closure from the receiver's TS symbol and call_ref it with
+      // thisArg threaded into param 1. Unwrap `as`/parenthesized casts so both
+      // `m.call(…)` and `(m as any).call(…)` resolve the underlying symbol.
+      {
+        let recv: ts.Expression = innerExpr;
+        while (ts.isParenthesizedExpression(recv) || ts.isAsExpression(recv) || ts.isNonNullExpression(recv)) {
+          recv = recv.expression;
+        }
+        const reflResult = tryEmitNativeProtoReflectiveCall(ctx, fctx, expr, recv, isCall);
+        if (reflResult !== undefined) return reflResult;
+      }
 
       // Sub-fix 3 (#1596): Function.prototype.{apply,call}.call(fn, ...) reshape.
       // Rewrite `Function.prototype.apply.call(fn, thisArg, argsArr)` to
