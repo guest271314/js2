@@ -2,10 +2,10 @@
 id: 2158
 title: "Standalone class/prototype/private-name/descriptor conformance residual (~1,388 tests)"
 status: in-progress
-assignee: ttraenkler/sd1
+assignee: ttraenkler/cs-2158
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-17
+updated: 2026-06-18
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -348,3 +348,81 @@ six; schedule after the CE families are cleared so the FAIL signal is clean.
 Add standalone equivalence regressions under
 `tests/issue-2158-*-standalone.test.ts` per slice (mirror
 `tests/issue-2158-class-identity-standalone.test.ts`).
+
+---
+
+## Implementation notes — Slice F-1 (2026-06-18, cs-2158): dstr-param default funcIdx-shift invalid-Wasm
+
+### What
+Fixes a concrete Family-F (invalid-Wasm-binary) defect that hit a large slice
+of the class `dstr/` failures (e.g.
+`class/dstr/meth-dflt-obj-ptrn-prop-ary`, `private-meth-dflt-obj-ptrn-prop-ary`,
+`gen-meth-dflt-obj-ptrn-prop-ary`, … — and the equivalent top-level functions).
+A function/method parameter whose binding pattern carries a **default value**
+(`= …`) AND binds a **nested sub-pattern** (an object property bound to an array
+sub-pattern, `{ x: [y] } = { x: [42] }`, or a nested array `[[y]] = …`) compiled
+to invalid Wasm: `if[0] expected type i32, found call of type externref`.
+
+This was diagnosed by WAT-tracing the standalone repro — the param-default
+missing-arg guard `(if (call $__extern_is_undefined …))` had its condition call
+pointing at `$__object_seal` (an externref producer) instead of
+`$__extern_is_undefined` (an i32 producer).
+
+### Root cause — a funcIdx index-shift orphan (addUnionImports/#1109 family)
+`destructureParamObject`'s externref **struct-fast-path**
+(`destructuring-params.ts`, the `ref.test structTypeIdx ? then : else` arm)
+detaches the OUTER function body to a then/else branch buffer with a **plain
+JS-local swap** (`const savedBody = fctx.body; fctx.body = then/elseInstrs; …;
+fctx.body = savedBody`). The then/else buffers are correctly tracked in
+`ctx.liveBodies` (#779d), but the **outer body itself is orphaned** — it is not
+on `fctx.savedBodies`, not in `ctx.liveBodies`, and not `fctx.body` during the
+recursive descent. When the nested array sub-pattern's recursive
+`destructureParamArray` adds a late import (`__array_from_iter_n` /
+`__extern_get_idx` / `__extern_length`, added at low import indices →
+`importsBefore=0`, shifting EVERY defined-function index up), the
+`shiftLateImportIndices` walk visited `fctx.body` + `savedBodies` + `liveBodies`
+but never the orphaned outer body. So the already-emitted
+`call __extern_is_undefined` (the param-default `if` condition, emitted into the
+outer body BEFORE the destructuring loop runs) kept its stale-low funcIdx and
+the `if` consumed an externref where an i32 was required → invalid Wasm.
+
+Confirmed via instrumentation: condition captured at idx 114; module-finalize
+moved `__extern_is_undefined` to 116 but the emitted call stayed at 114 (= now
+`__object_seal`); the two flushes that did the shift reported the call
+unreachable from the fctx body chain.
+
+### Fix
+`src/codegen/destructuring-params.ts` — in the struct-fast-path branch, track the
+orphaned outer `savedBody` in `ctx.liveBodies` for the recursion window
+(add before the then/else compile, delete after the `if` is assembled),
+mirroring the existing then/else #779d tracking. Guarded with
+`outerAlreadyLive` so a re-entrant call that already tracked the body does not
+double-delete (keeps the #2182 liveBodies-balance invariant intact). +16 lines,
+no behavior change to the non-orphan paths.
+
+### Verification
+- `tests/issue-2158-dstr-param-default-nested-pattern.test.ts` (8 cases):
+  standalone now VALIDATES (`WebAssembly.compile` succeeds — the direct
+  regression guard for the orphan) for object-prop→array, class-method,
+  2-element, nested-array-with-its-own-default+outer-default, and explicit-arg
+  shapes; plus host-mode runtime correctness (default fires → 42, explicit → 7,
+  nested+outer → 24).
+- The pre-existing `issue-1025-param-default-null.test.ts:78` assertion failure
+  reproduces identically on clean `origin/main` (verified) — NOT a regression of
+  this change.
+- The `array-rest-destructuring` / `destructuring-member-targets` /
+  `for-of-array-destructuring` suites fail to load on `origin/main` too
+  (they import a non-existent `./helpers.js`) — pre-existing, unrelated.
+
+### Remaining (still open under this umbrella)
+- **Host-import leak in standalone**: these shapes now compile to *valid* Wasm
+  but still emit `env::__array_from_iter_n` (+ `env::__get_undefined` via
+  `emitBoundsCheckedArrayGetUndef` bypassing `ensureGetUndefined`), which
+  standalone cannot satisfy at instantiation. Needs a Wasm-native array-from-iter
+  fallback (or to route the known-vec fast path so the import is never added).
+  Separate, larger slice.
+- **A deeper funcIdx orphan in larger modules**: the static-method variant
+  (`meth-static-dflt-obj-ptrn-prop-ary`, harness-sized module) surfaces a second
+  shift orphan (`call[0] expected (ref null N), found externref`) AFTER this fix
+  clears its `if[0]` error — i.e. this fix is strict progress that unmasks it.
+  Same family; another body-swap site to audit. Documented for a follow-up slice.
