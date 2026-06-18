@@ -59,6 +59,7 @@ import {
   emitArgumentsObject,
   ensureLateImport,
   flushLateImportShifts,
+  registerMaterializeStructAsObject,
   registerResolveComputedKeyExpression,
   valTypesMatch,
 } from "./shared.js";
@@ -298,6 +299,88 @@ export function compileObjectLiteralAsExternref(
   fctx.body.push({ op: "local.get", index: objLocal });
   return { kind: "externref" };
 }
+
+/**
+ * (#2358) Reify a NOMINAL object struct (its ref already on the Wasm stack) into
+ * a dynamic `$Object` externref, copying each field as an own-property — so the
+ * native `__to_primitive` helper (which recognises only `$Object` via
+ * `ref.test objectTypeIdx`) can reduce a typed object that has crossed the
+ * externref boundary as an `any` value (e.g. an any-typed parameter, where the
+ * concrete typeIdx is erased inside the callee). The struct-instance analogue of
+ * `compileObjectLiteralAsExternref` (which builds the same `$Object` from AST
+ * props): both go through `__new_plain_object` + `__extern_set`, so the resulting
+ * object is read by the exact same native helpers.
+ *
+ * Returns true on success (struct consumed, `$Object` externref left on the
+ * stack); false if it declined (nothing emitted — caller must fall back to
+ * `extern.convert_any`). Declines when the struct type is unknown or the object
+ * runtime helpers are unavailable.
+ *
+ * This is a value-semantics COPY: it does not preserve nominal reference
+ * identity across the round-trip. The caller gates it to objects that carry a
+ * user ToPrimitive method (`valueOf`/`@@toPrimitive`/`toString`), for which
+ * value semantics suffice; plain data structs keep `extern.convert_any`.
+ */
+export function materializeStructAsDynamicObject(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  structTypeIdx: number,
+): boolean {
+  const structName = ctx.typeIdxToStructName.get(structTypeIdx);
+  if (structName === undefined) return false;
+  const fields = ctx.structFields.get(structName);
+  if (!fields || fields.length === 0) return false;
+
+  const newObjIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
+  const setIdx = ensureLateImport(
+    ctx,
+    "__extern_set",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (newObjIdx === undefined || setIdx === undefined) return false;
+  const finalNew = ctx.funcMap.get("__new_plain_object") ?? newObjIdx;
+  const finalSet = ctx.funcMap.get("__extern_set") ?? setIdx;
+
+  // Stash the incoming struct ref so each field read can re-fetch it.
+  const structLocal = allocLocal(fctx, `__matstruct_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: structTypeIdx,
+  });
+  fctx.body.push({ op: "local.set", index: structLocal });
+
+  // obj = __new_plain_object()
+  const objLocal = allocLocal(fctx, `__matobj_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "call", funcIdx: finalNew });
+  fctx.body.push({ op: "local.set", index: objLocal });
+
+  for (let fieldIdx = 0; fieldIdx < fields.length; fieldIdx++) {
+    const field = fields[fieldIdx]!;
+    // Read the field value: struct.get, then coerce to externref so __extern_set
+    // can store it. A method field (eqref/ref closure) coerces via the engine's
+    // ref→externref arm (extern.convert_any) — the same closure value the
+    // as-any-literal path stores, so __to_primitive's method-dispatch finds it.
+    fctx.body.push({ op: "local.get", index: structLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
+    if (field.type.kind !== "externref") {
+      coerceType(ctx, fctx, field.type, { kind: "externref" });
+    }
+    const valLocal = allocLocal(fctx, `__matval_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: valLocal });
+    // __extern_set(obj, "<field>", value)
+    fctx.body.push({ op: "local.get", index: objLocal });
+    addStringConstantGlobal(ctx, field.name);
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, field.name));
+    fctx.body.push({ op: "local.get", index: valLocal });
+    fctx.body.push({ op: "call", funcIdx: finalSet });
+  }
+
+  fctx.body.push({ op: "local.get", index: objLocal });
+  return true;
+}
+
+registerMaterializeStructAsObject(materializeStructAsDynamicObject);
 
 /**
  * (#1239) Compile an object literal whose property list contains at least

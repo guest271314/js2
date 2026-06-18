@@ -156,3 +156,57 @@ disproportionate to the bucket.
 The 2026-06-12 standalone JSONL `object-to-primitive` bucket (107) is **stale**
 and the headline is partly closed — re-measure the true tractable count on a
 **fresh standalone shard** before sizing the impl.
+
+## PR-2 design — call-site struct→$Object materialization (chosen over brand)
+
+**Measured residual (current main, 2026-06-18, sdev-toprimitive):**
+- any-typed PARAMETER over nominal struct — `function g(x:any){ return x*2 | x-1 |
+  x+1 | +x }`, class-instance param, `x==21` loose-eq — ALL null/broken.
+- `Number([1])`/`Number([42])` (ARRAY) broken (#10). `Number(obj)` with valueOf
+  ALREADY PASSES on main, so #10 is specifically Number(**array**).
+
+**Root cause (any-param):** inside `g`, `x` is a plain `externref` param with NO
+typeIdx — the nominal struct is genuinely erased at the CALL boundary (`g`
+compiles independently of its callers). `x*2` already routes through
+`__to_primitive`→`__unbox_number`; it fails only because `__to_primitive` can't
+recognise the nominal struct. PR-1's typeIdx-recovery is impossible here. The
+typeIdx IS still known at the *coercion site* that performs the erasure
+(`coerceType` ref-struct→externref, `type-coercion.ts:1573`; equivalently the
+call-arg coercion in `stack-balance.ts`).
+
+**Chosen approach (tech-lead approved over the spec's brand Option A):**
+MATERIALIZE the nominal struct into a dynamic `$Object` at the
+ref-struct→externref coercion, reusing the already-working
+`__to_primitive($Object)` path verbatim. The materializer mirrors
+`compileObjectLiteralAsExternref` (`literals.ts:175`): `__new_plain_object` +
+`__extern_set(obj, "<field>", value)` per struct field (methods stored as their
+closure value, the same way the `as any`-literal path does). The boxed `$Object`
+then satisfies `__to_primitive`'s `ref.test objectTypeIdx`.
+
+Why this over the brand-supertype: **no struct-layout change, no `$brand` field,
+no field-index shift** — so the hot static field-access path is byte-identical
+(it never enters this coercion arm). Cost is confined to the
+user-object→externref coercion (the cold path). Matches the #1673 "additive,
+zero hot-path cost" bar. The brand-supertype is only needed for nominal
+**identity** preservation across an `any` round-trip (`===`/`Object.is`), which
+ToPrimitive/arithmetic/`Number()` do not require.
+
+**Surgical gate (avoid the #1525 regression):** only materialize when the struct
+carries a user `valueOf`/`@@toPrimitive`/`toString` (a dynamic-ToPrimitive
+object). A plain data struct (`{x:1}`, no methods) keeps the status-quo
+`extern.convert_any` — byte-identical — so `typeof obj==="object"`, plain field
+reads, and reference identity for method-less data objects are unchanged.
+
+**Identity caveat (tech-lead flagged):** materialization makes a *copy*. If a
+test262 case round-trips a method-bearing object through `any` and then checks
+`===`/`Object.is` reference identity, it would see a different `$Object` and
+regress. The standalone HW floor-gate catches this. Any identity-dependent
+residual found stays DEFERRED to the heavier brand approach (noted, not broken).
+
+**Folds in #10:** `Number([arr])` reduces via the same `$Object`/array→primitive
+path on the shared engine.
+
+**Guardrails:** floor-gate standalone HW (no breach of 20,706); WAT-diff hot
+static `*`/`-` + plain-data-struct→externref byte-identical; reuse the #1917
+engine (keep `check-coercion-sites.mjs` flat); helpers BY NAME (late-import
+funcidx-shift class).
