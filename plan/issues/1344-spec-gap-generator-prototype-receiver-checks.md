@@ -11,7 +11,7 @@ task_type: bugfix
 area: codegen
 language_feature: generators
 goal: spec-completeness
-sprint: 63
+sprint: 64
 parent: 1328
 depends_on: [1665]
 ---
