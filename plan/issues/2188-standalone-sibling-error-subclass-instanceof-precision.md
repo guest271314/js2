@@ -115,3 +115,39 @@ construction-routing fix (transitively-derived Error subclasses must thread
 through `__new_<builtinAncestor>`); filing as a follow-up. The brand machinery
 here already supports the chain on the *read* side (descendant ids are collected)
 — only the *construction* side is missing for the >1-level case.
+
+## Resolution of the multi-level follow-up (2026-06-18, sendev-prb — `issue-2188-multilevel`)
+
+The construction-routing gap above is FIXED. `class D extends A {}` /
+`A extends Error` now constructs `D` as a real `$Error_struct`.
+
+**Root cause (located):** `compileSuperCall` (class-bodies.ts) gated the native
+`__new_<builtin>` super-routing on `classBuiltinParentMap.get(child)`, which the
+collection phase (class-bodies.ts ~545) only populated when the **direct** parent
+is a host-constructible builtin (`isHostConstructibleBuiltin(directParent)`). For
+`class D extends A` the direct parent A is a user class → no entry → D's `super()`
+chained through A's user `_init`, never threading to `__new_Error`, so D was
+un-tagged (`instanceof Error` false, `.message` unset, uncatchable as Error).
+
+**Fix (class-bodies.ts, additive):** make the resolution **transitive** — when
+the direct parent is itself an externref-backed user Error subclass
+(`classExternrefBackedSet.has(parent) && classBuiltinParentMap.has(parent)`),
+propagate the **builtin ANCESTOR** name (`classBuiltinParentMap.get(parent)`,
+not the immediate parent) into the child's `classBuiltinParentMap` and add the
+child to `classExternrefBackedSet`. We deliberately do NOT gate on
+`parentStructTypeIdx === undefined` here (the parent carries a vestigial struct
+slot; the discriminator is the parent's externref-backing, not struct presence).
+Parents are collected before children in source order, so the ancestor mapping is
+already present. Everything downstream (implicit forwarder, `super()` routing,
+`instanceof` brand reads) then fires through the existing externref-backed path.
+
+**Verified:** `.message` field, catchability (try/throw/catch instanceof Error),
+and #2188 sibling-disjointness all pass standalone; `tests/issue-2188-multilevel-error-chain.test.ts`
+(7 tests). tsc clean.
+
+**Dependency — #2029/#1702:** the implicit derived-ctor forwarder pads missing
+`super()` args via `pushDefaultValue`→`emitUndefinedValue` (type-coercion.ts),
+which leaks `env.__get_undefined` in standalone until #1702's `nativeStrings`
+guard lands (a PRE-EXISTING 1-level leak too, not introduced here). The 4
+no-arg-construction tests' `imports === []` assertion passes once #1702 merges;
+this PR is rebased on #1702.
