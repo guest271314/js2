@@ -518,14 +518,16 @@ function tryEmitNativeProtoReflectiveCall(
   const closureInfo = ctx.closureInfoByTypeIdx.get(closure.type.typeIdx);
   if (!closureInfo) return undefined;
 
-  // TODO(#2193 PR-B): the hand-rolled `ref.func`+`struct.new`+`call_ref` below
-  // still trips a wrapper-struct type-index consistency check
-  // (`call_ref[0] expected (ref null N), found (ref null N-1)`) — the rebuilt
-  // closure struct's type idx doesn't match the lifted func type's self param
-  // at finalize. Until that is resolved, BAIL so compilation stays valid
-  // (the call falls through to the legacy drop-thisArg path = returns 0, but
-  // emits valid Wasm — no worse than pre-PR-B). The arg-threading + recovery
-  // logic below is correct in shape; only the call_ref operand typing is wrong.
+  // GATED (#2193 PR-B): the recovery + call_ref below is shape-correct
+  // (closure recovered from the receiver's TS symbol, thisArg→param1 threaded),
+  // but the emitted `call_ref` trips a wrapper-struct type-index mismatch AFTER
+  // the finalize type-renumber pass (`call_ref[0] expected (ref null N) found
+  // (ref null N-1)`) — the closure-wrapper struct type and the lifted func
+  // type's self param renumber to adjacent-but-different indices. Registration
+  // is internally consistent (struct 53 / func 54, self=ref 53); the divergence
+  // appears only post-renumber. Until that is resolved, BAIL so compilation
+  // stays valid (the call falls through to the legacy drop-thisArg path =
+  // returns 0, valid Wasm, no worse than pre-PR-B). Flip the env var to iterate.
   if (!process.env.JS2WASM_PRB_REFLECTIVE_CALL) return undefined;
 
   // Reshape args to the closure's positional ABI: [thisArg, ...userArgs].
@@ -543,21 +545,28 @@ function tryEmitNativeProtoReflectiveCall(
   }
   if (userArgs === undefined) return undefined; // dynamic apply args → fall through
 
-  // Build the closure struct (ref.func + struct.new) into a local. The
-  // `call_ref` ABI is: stack = [self_struct, ...userParams, funcref]. So we
-  // push the struct as the `self` param 0, compile/coerce the lifted user
-  // params (this, ...args), then re-load the struct and `struct.get 0` the
-  // funcref before `call_ref`. Missing trailing params pad with undefined
-  // (ref.null.extern) / a default — the slice body tolerates an absent `end`.
-  const closureLocal = allocLocal(fctx, `__protocall_${fctx.locals.length}`, {
-    kind: "ref",
-    typeIdx: closureInfo.structTypeIdx,
-  });
-  fctx.body.push({ op: "ref.func", funcIdx: closure.funcIdx } as Instr);
-  fctx.body.push({ op: "struct.new", typeIdx: closureInfo.structTypeIdx } as Instr);
+  // Recover the closure value the variable HOLDS — compile the receiver `m`
+  // (an externref carrying the `$wrap` struct), then `any.convert_extern` +
+  // `ref.cast` to the wrapper struct type. Using the freshly-emitted closure
+  // (`ref.func`+`struct.new`) instead tripped a wrapper-struct type-idx
+  // consistency check at finalize (the probe vs final wrapper in
+  // `ensureStandaloneNativeMethodClosure` register distinct struct types). The
+  // receiver's runtime value is exactly the value-read closure, so casting it to
+  // `closureInfo.structTypeIdx` yields a `(ref structTypeIdx)` whose type lines
+  // up with the lifted func type's self param.
+  const structRefT: ValType = { kind: "ref", typeIdx: closureInfo.structTypeIdx };
+  const closureLocal = allocLocal(fctx, `__protocall_${fctx.locals.length}`, structRefT);
+  const recvType = compileExpression(ctx, fctx, receiver);
+  // The receiver is externref (type-erased) or already a (ref $wrap). Normalize
+  // to the concrete wrapper struct via any.convert_extern + ref.cast.
+  if (recvType && recvType.kind === "externref") {
+    fctx.body.push({ op: "any.convert_extern" } as Instr);
+  }
+  fctx.body.push({ op: "ref.cast", typeIdx: closureInfo.structTypeIdx } as Instr);
   fctx.body.push({ op: "local.set", index: closureLocal } as Instr);
 
-  // self param 0
+  // call_ref ABI: stack = [self_struct, ...userParams, carrier_struct].
+  // self param 0:
   fctx.body.push({ op: "local.get", index: closureLocal } as Instr);
 
   const paramTypes = closureInfo.paramTypes; // excludes the self param
@@ -575,10 +584,7 @@ function tryEmitNativeProtoReflectiveCall(
     }
   }
 
-  // call_ref carrier: this codebase's `call_ref typeIdx` consumes the closure
-  // STRUCT on top of stack (a later fixup extracts field 0 = the funcref), NOT
-  // a bare funcref — mirror the closure-call paths (e.g. compileOptionalDirectCall
-  // pushes the struct twice). So re-load the struct as the call_ref operand.
+  // carrier struct (call_ref reads field 0 = funcref via the closure fixup):
   fctx.body.push({ op: "local.get", index: closureLocal } as Instr);
   fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr);
   return closureInfo.returnType ?? { kind: "externref" };
