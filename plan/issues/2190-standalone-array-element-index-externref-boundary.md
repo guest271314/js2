@@ -100,15 +100,40 @@ Files (expected):
 - `src/codegen/context/types.ts` — a `externGetIdxVecReserved` flag if the
   reserve/fill split is used.
 
+## Shipped scope (PR #1673) — number-array path only
+
+First-cut implementation also synthesized indexing arms for `ref`/`ref_null`
+(string `$AnyString` etc.) and `boolean`-tagged `i32` element vecs. That
+produced **invalid Wasm** for some carriers the proposal harness registers
+(`__extern_get_idx return[0] expected externref, got (ref null N)` / `got i32`),
+regressing ~90 standalone test262 (the #2097 high-water floor breach). Root
+cause: a synthesized arm could leave a non-`externref` value (an internal GC ref
+or raw i32) at the helper's `return`. Verified by diffing the failing CI
+standalone shards against the main baseline (120 `pass → compile_error`, all in
+generator/async + destructuring-rest + TypedArray-iteration modules).
+
+`boxVecElementToExternref` now only emits an arm for **provably
+externref-returning** element kinds — plain `f64` (→`__box_number`), plain `i32`
+(→`f64.convert_i32_s`+`__box_number`), and *literal* `externref` (identity, type
+-safe by Wasm). `ref`/`ref_null`/`boolean`-i32/`f32`/`i64`/`v128` carriers get
+**no arm** and fall back to the prior null behaviour (no worse than pre-#2190).
+
 ## Acceptance criteria
 
-1. `const a: any = [10,20,30]; a[1] === 20` (number array). 
-2. `const a: any = ["x","y","z"]; a[2] === "z"` (string array). 
-3. `function g():any{return [1,2,3,4];} g()[3] === 4`. 
-4. Out-of-bounds (`a[99]`) and negative (`a[-1]`) → `undefined`.
-5. `$ObjVec`/array-like `$Object` indexing (existing arms) unchanged; no
-   regression in typed-array indexing, for-of, spread, map/filter.
-6. `tests/issue-2190.test.ts` green + canonical equivalence array suites green.
+1. `const a: any = [10,20,30]; a[1] === 20` (number array). ✓
+2. `function g():any{return [1,2,3,4];} g()[3] === 4`. ✓
+3. Out-of-bounds (`a[99]`) and negative (`a[-1]`) → `undefined`. ✓
+4. `$ObjVec`/array-like `$Object` indexing (existing arms) unchanged; **no
+   standalone regression** (high-water floor restored). ✓
+5. `tests/issue-2190.test.ts` green (number path + null-fallback assertions). ✓
+
+## Deferred (follow-up)
+
+- **String / GC-ref element indexing** (`const a: any = ["x","y"]; a[1]`): needs
+  a per-carrier proof that the element ref widens to `externref` validly
+  (`extern.convert_any` was insufficient/unsafe for some proposal-harness
+  carriers). A boxed string array still reads back `undefined` through the
+  boundary for now. This was criterion #2 of the original scope.
 
 ## Notes
 

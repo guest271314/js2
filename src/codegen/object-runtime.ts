@@ -6252,20 +6252,31 @@ function boxVecElementToExternref(ctx: CodegenContext, elemType: ValType): Instr
     return [{ op: "call", funcIdx: boxIdx } as Instr];
   }
   if (elemType.kind === "i32") {
+    // i32 carriers include the `boolean`-tagged variant — but `__box_number`
+    // (number box) is wrong for a boolean and there is no native i32→externref
+    // boolean box wired here, so only box plain (non-boolean) i32 number arrays.
+    // A boolean vec falls back to the prior null behaviour (no regression vs
+    // pre-#2190 for that narrow carrier).
+    if ((elemType as { boolean?: boolean }).boolean) return null;
     const boxIdx = ctx.funcMap.get("__box_number");
     if (boxIdx === undefined) return null;
     return [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr];
   }
   if (elemType.kind === "externref") {
-    // array.get already yields an externref — identity.
+    // `array.get` already yields an externref — identity. ONLY when the element
+    // ValType is *literally* externref; a `ref`/`ref_null` GC payload is handled
+    // below (it is NOT assignable to externref without conversion).
     return [];
   }
-  if (elemType.kind === "ref" || elemType.kind === "ref_null") {
-    // A GC ref payload (e.g. a string `$AnyString`) — widen any → extern.
-    return [{ op: "extern.convert_any" } as Instr];
-  }
-  // f32 / i64 / v128 element arrays are never produced by an array-literal vec
-  // that reaches the externref boundary; skip the arm (caller leaves them out).
+  // NOTE (#2190 regression fix): a `ref`/`ref_null` element is an *internal* GC
+  // ref (e.g. a `$AnyString`). Returning it directly type-errors the helper
+  // (`return[0] expected externref, got (ref null N)`), and `extern.convert_any`
+  // is only valid when the payload is provably under `any`. To stay
+  // unconditionally valid across every carrier the proposal harness can
+  // register (closure-wrapper structs, typed-array views, iterator-helper
+  // vecs), DO NOT synthesize an indexing arm for non-(f64|i32|externref)
+  // element kinds — fall back to the prior null behaviour for those, which is
+  // no worse than before this issue. f32 / i64 / v128 are likewise skipped.
   return null;
 }
 
