@@ -1,10 +1,11 @@
 ---
 id: 2161
 title: "Standalone RegExp engine conformance residual (~579 tests)"
-status: ready
+status: in-progress
+assignee: ttraenkler/sdev-regex3
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-17
+updated: 2026-06-18
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -256,3 +257,52 @@ operand-explicit extraction; next slice), dynamic-flag / `any`-typed receivers
 (fall through to host `__regex_symbol_call`), string-coercion arguments. The
 `RegExp.prototype` reflection bucket (a) remains gated on #2158's prototype-object
 representation. #2161 stays open for those.
+
+## Sub-bucket (b), second slice — LANDED (2026-06-18, sdev-regex3)
+
+Re-validated against upstream/main (`4b0072923`). The prior slice wired the
+READ protocol forms (`@@match`/`@@matchAll`/`@@search`). This slice closes the
+deferred `@@replace`/`@@split` half of bucket (b).
+
+**Shipped — the WRITE/SPLIT protocol forms** `re[Symbol.replace](str, repl)`
+and `re[Symbol.split](str[, limit])` for static / backend-created RegExp
+receivers route to the native engine, **zero host imports**:
+
+- `src/codegen/regexp-standalone.ts`: extracted operand-explicit cores
+  `emitStandaloneRegExpReplaceCore` / `emitStandaloneRegExpSplitCore` out of
+  `tryCompileStandaloneStringReplace` / `tryCompileStandaloneStringSplit` (which
+  now delegate, unchanged behaviour). The cores take explicit `subjExpr` /
+  `reExpr` / (`replExpr` | `limitExpr`) plus a `diag` label for refusal
+  messages — mirroring how match/matchAll/search were factored last slice.
+  Then `tryCompileStandaloneRegExpSymbolCall` adds `@@replace`/`@@split` cases
+  that call those same cores with **swapped operands** (regex = receiver,
+  subject = arg[0], replacement/limit = arg[1]). No second engine path.
+  - `@@replace` honors the receiver's own `g` flag for global-vs-first-only
+    (there is no `replaceAll` distinction in the @@ form); `$n`/`$&`/`$'`
+    substitution patterns expand at runtime via the existing
+    `__regex_get_substitution` path (#1913). A function replacer stays a
+    narrowed refusal (needs closure dispatch with capture marshalling).
+  - `@@split` honors an optional numeric `limit` (arg[1]); the existing
+    `__regex_split` ToUint32 lowering is reused unchanged.
+- `src/codegen/expressions/calls.ts`: unchanged — the standalone `@@`-refusal
+  site already tries `tryCompileStandaloneRegExpSymbolCall` first (added last
+  slice) and falls through to the refusal for forms it returns `undefined` for.
+- No `index.ts` change: `@@replace` returns a `$NativeString` and `@@split`
+  returns the same native-string vec as `String.prototype.split` — neither
+  produces a match-array result that needs the let/const local-type inference
+  the `@@match` form required.
+- Tests: 6 new cases in `tests/issue-2161-regex-symbol-protocol.test.ts`
+  (replace first/global/`$&`-substitution; split count/content/limit), all
+  standalone with an empty importObject asserting no `__regex_symbol_call` /
+  `__extern_get` leak. 14 file cases green; #1539 replace/split + #1913
+  substitution regression suites (43 cases) still green (refactor is
+  behaviour-preserving); host-mode #1328/#1329/#1330/#1830 symbol-protocol
+  (15 cases) unaffected.
+
+**Bucket (b) is now fully landed** for static / backend-created receivers
+(all five @@ forms: match/matchAll/search/replace/split). **Remaining #2161
+work:** (a) `RegExp.prototype` reflection — still gated on #2158's standalone
+prototype-object representation; (c) dynamic / `any`-typed receivers — need the
+runtime-externref regex receiver generalisation (every @@ form falls through to
+host `__regex_symbol_call` today); and the regex-engine feature tail (v-flag
+`\q{}`, dynamic ctor patterns). #2161 stays open for those.

@@ -742,6 +742,20 @@ export interface CodegenContext {
    */
   reviverDriverReserved?: boolean;
   /**
+   * (#2166 PR-D2) True once the standalone `JSON.stringify` codec reserved its
+   * `__call_to_json(value, method, key) -> externref` driver funcIdx — filled in
+   * finalize to wrap `__call_fn_method_1` (value bound as the `toJSON`
+   * receiver).
+   */
+  toJsonDriverReserved?: boolean;
+  /**
+   * (#2166 PR-D3) True once the standalone `JSON.stringify` codec reserved its
+   * `__call_replacer(holder, replacer, key, value) -> externref` driver funcIdx
+   * — filled in finalize to wrap `__call_fn_method_2` (holder bound as the
+   * replacer `this`, key+value the two replacer args).
+   */
+  replacerDriverReserved?: boolean;
+  /**
    * (#1888 Slice 1) True once the standalone open-any method-dispatch bridge
    * `__apply_closure(fn, recv, args) -> externref` has reserved its funcIdx via
    * a placeholder function pushed during `ensureObjectRuntime` (registered in
@@ -1064,6 +1078,14 @@ export interface CodegenContext {
   templateCacheCounter: number;
   /** Type index for template vec struct */
   templateVecTypeIdx: number;
+  /**
+   * (#2186) Type index for the shared `$__vec_base` supertype — a `(length i32)`
+   * struct that every `__vec_<elemKind>` subtypes. Lets standalone runtime
+   * helpers (`__extern_length`) `ref.test`/`ref.cast` a boxed array externref
+   * to read its `.length` uniformly, regardless of element kind. -1 = not yet
+   * registered (created lazily on first `getOrRegisterVecType`).
+   */
+  vecBaseTypeIdx: number;
   /** Type index for the WasmGC `$Error_struct` used in standalone/WASI mode (#1104). -1 = not yet registered. */
   errorStructTypeIdx: number;
   /** Extra properties for empty object variables */
