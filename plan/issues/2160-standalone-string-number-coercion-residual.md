@@ -2,6 +2,7 @@
 id: 2160
 title: "Standalone String/Number method & coercion conformance residual (~635 tests)"
 status: ready
+assignee: ttraenkler/cs-2160
 sprint: 63
 created: 2026-06-15
 updated: 2026-06-18
@@ -149,3 +150,50 @@ prettier + coercion-sites (#2108) + any-box gates clean. No host-import leak
 (pure standalone). This closes the `Number(arr)` engine-routing residual; the
 remaining #2160 bulk (wrapper objects `new String`/`new Number`) stays gated on
 value-rep #2072/#2104.
+
+---
+
+## Slice (2026-06-18, cs-2160) — wrapper `.valueOf()` / `.toString()` primitive recovery
+
+**Status stays `ready`** — one more independent slice of the 635-bucket. Now
+that value-rep #2072/#2104 + the #1910 S2 native wrapper constructor/ToPrimitive
+have landed, the foundation exists; this wires two broken consumers.
+
+**Two root causes fixed:**
+
+1. **`resolveWasmType` resolved a `String`-WRAPPER binding to `$AnyString`.**
+   `isStringType` deliberately also matches the wrapper `String` (Object) type
+   (for primitive-string method dispatch), and the `nativeStrings` string
+   fast-path in `resolveWasmType` (`src/codegen/index.ts`) fired FIRST — so
+   `const s = new String("x")` typed `s` as `$AnyString` (ref 6), the wrapper
+   `$Object` externref was `ref.cast`-to-`$AnyString` on bind, failed, and `s`
+   became **null**. Every downstream read then null-deref'd. Fix: gate that
+   fast-path with `&& !isStringWrapperType(tsType)` so the wrapper falls through
+   to the externref wrapper branch. `nativeStrings`-only; gc-mode untouched.
+
+2. **`new String(x).valueOf()` leaked `env::__unbox_string`; `.toString()`
+   trapped.** The wrapper accessor handler (`src/codegen/expressions/calls.ts`)
+   recompiled the wrapper as a primitive ValType / called the host-only
+   `__unbox_string`. Fix: in `ctx.standalone`, route String/Number wrapper
+   `.valueOf()`/`.toString()` (0-arg) through the EXISTING native `__to_primitive`
+   engine helper (#1910 S2 reads the FLAG_INTERNAL `[[PrimitiveValue]]` slot
+   first, §7.1.1.1), then unbox the Number result to f64. No new coercion matrix
+   — reuses the single engine (coercion-sites baseline bumped 18→20 for the two
+   sanctioned `__to_primitive`/`__unbox_number` references in calls.ts).
+
+**Scope guards / still open (NOT regressed):** `Number.prototype.toString(radix)`
+falls through to the radix-aware lowering (slot is a boxed number, not a string).
+Boolean wrappers excluded (slot is `$__box_boolean_struct`, different extraction).
+`.length`/full String-method dispatch on a wrapper receiver, and WASI wrapper
+parity (native object-runtime is standalone-only), remain separate residuals.
+
+**Validation.** `tests/issue-2160-wrapper-valueof-standalone.test.ts` (3/3):
+String wrapper valueOf/toString (content via rolling hash, empty string,
+chained method), Number wrapper valueOf (value/arith/compare), each asserting
+NO `__unbox_string`/`__new_String`/`__new_Number` host-import leak under
+`target: standalone`; plus a gc-mode no-regression guard. Regression suites
+green: native-strings (128), issue-1910/1910-s2, issue-1397/1111 wrapper
+equality, and all four prior #2160 suites (47). tsc + prettier + biome lint +
+coercion-sites + any-box gates clean. (Pre-existing unrelated failures on main:
+issue-929 accessor descriptor, imported-string-constants e2e, bigint-string —
+all fail identically on pristine `origin/main`.)
