@@ -15,7 +15,14 @@ import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/typ
 import { addArrayIteratorImports, addStringImports, addUnionImports, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
 import { compileStringLiteral } from "./shared.js";
-import { getArrTypeIdxFromVec, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
+import {
+  getArrTypeIdxFromVec,
+  getOrRegisterArrayType,
+  getOrRegisterSubviewType,
+  getOrRegisterVecType,
+  getSubviewArrTypeIdx,
+} from "./registry/types.js";
+import { noJsHost } from "./expressions/helpers.js";
 import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
@@ -7747,10 +7754,17 @@ function numericElemConvert(from: ValType, to: ValType): Instr[] {
 }
 
 /**
- * TypedArray.prototype.subarray(begin?, end?) (#1664) — returns a new vec over
- * the [begin, end) slice. The vec-struct model has no shared ArrayBuffer, so
- * this copies (matching `.slice` semantics); the acceptance criteria only
- * require correct element values + zero host imports, not buffer aliasing.
+ * TypedArray.prototype.subarray(begin?, end?) (#1664 / #2357 / #47).
+ *
+ * In standalone / WASI mode this returns a `$__subview` that SHARES the parent's
+ * backing `data` array (true aliasing per ECMA §23.2.3.30 — a write through the
+ * view is visible in the parent and vice-versa). The view carries `byteOffset`
+ * (element offset of `begin`) and the windowed `length`; element access on a
+ * `$__subview`-typed binding is discriminated at compile time and indexes
+ * `base.data[byteOffset + i]` (see compileElementAccess / compileElementAssignment).
+ *
+ * In JS-host mode the vec model has no shared-buffer concept on this path, so we
+ * keep the historical copy (`.slice` semantics) — aliasing there is a non-goal.
  */
 function compileTypedArraySubarray(
   ctx: CodegenContext,
@@ -7761,8 +7775,114 @@ function compileTypedArraySubarray(
   arrTypeIdx: number,
   elemType: ValType,
 ): ValType {
-  // subarray clamps the same way slice does; reuse the slice lowering.
-  return compileArraySlice(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+  if (!noJsHost(ctx)) {
+    // Host mode: keep the copy (slice semantics) — no shared buffer here.
+    return compileArraySlice(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+  }
+
+  // Standalone: build a windowing $__subview sharing the parent's data array.
+  // The receiver may be a plain vec (`__vec_<elem>`) or — for a nested subarray —
+  // itself a `$__subview_<elem>`; recover the element kind from either name.
+  const recvStructName = ctx.typeIdxToStructName.get(vecTypeIdx);
+  const elemKind = recvStructName?.replace(/^__vec_/, "").replace(/^__subview_/, "");
+  if (elemKind === undefined || elemKind === recvStructName) {
+    // Defensive: unknown shape — fall back to the copy path.
+    return compileArraySlice(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+  }
+  const subviewTypeIdx = getOrRegisterSubviewType(ctx, elemKind, elemType);
+
+  const parentVec = allocLocal(fctx, `__sub_parent_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+  const lenTmp = allocLocal(fctx, `__sub_len_${fctx.locals.length}`, { kind: "i32" });
+  const beginTmp = allocLocal(fctx, `__sub_b_${fctx.locals.length}`, { kind: "i32" });
+  const endTmp = allocLocal(fctx, `__sub_e_${fctx.locals.length}`, { kind: "i32" });
+
+  // Compile receiver → parent vec ref. The receiver itself may be a $__subview
+  // (nested subarray); recover its base + accumulate offsets below.
+  const recvType = compileExpression(ctx, fctx, propAccess.expression);
+  // Nested-subarray support: if the receiver is itself a $__subview, unwrap to its
+  // base vec and carry its byteOffset forward as the parent offset baseline.
+  const baseOffsetTmp = allocLocal(fctx, `__sub_boff_${fctx.locals.length}`, { kind: "i32" });
+  // `dataTmp` holds the SHARED backing array (parent's `data`). For a plain-vec
+  // receiver it's `parent.data`; for a $__subview receiver (nested subarray) it's
+  // the already-shared `recv.data`, with the offset accumulated.
+  const subArrTypeIdx = getSubviewArrTypeIdx(ctx, subviewTypeIdx);
+  const dataTmp = allocLocal(fctx, `__sub_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: subArrTypeIdx });
+  if (recvType && (recvType.kind === "ref" || recvType.kind === "ref_null") && recvType.typeIdx === subviewTypeIdx) {
+    // receiver is $__subview: data = recv.data, baseOffset = recv.byteOffset, len = recv.length
+    const recvLocal = allocLocal(fctx, `__sub_recv_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: subviewTypeIdx,
+    });
+    fctx.body.push({ op: "local.set", index: recvLocal });
+    fctx.body.push({ op: "local.get", index: recvLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: subviewTypeIdx, fieldIdx: 1 }); // shared data array
+    fctx.body.push({ op: "local.set", index: dataTmp });
+    fctx.body.push({ op: "local.get", index: recvLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: subviewTypeIdx, fieldIdx: 2 }); // byteOffset
+    fctx.body.push({ op: "local.set", index: baseOffsetTmp });
+    fctx.body.push({ op: "local.get", index: recvLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: subviewTypeIdx, fieldIdx: 0 }); // length
+    fctx.body.push({ op: "local.set", index: lenTmp });
+  } else {
+    fctx.body.push({ op: "local.set", index: parentVec });
+    emitReceiverNullGuard(ctx, fctx, parentVec);
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "local.set", index: baseOffsetTmp });
+    // data = parent.data (field 1) — SHARED, no copy
+    fctx.body.push({ op: "local.get", index: parentVec });
+    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+    fctx.body.push({ op: "local.set", index: dataTmp });
+    // len = parent.length (field 0)
+    fctx.body.push({ op: "local.get", index: parentVec });
+    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+    fctx.body.push({ op: "local.set", index: lenTmp });
+  }
+
+  // begin (default 0), §23.2.3.30: ToIntegerOrInfinity then negative-clamp to len.
+  if (callExpr.arguments.length >= 1) {
+    compileExpression(ctx, fctx, callExpr.arguments[0]!, { kind: "f64" });
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  } else {
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: beginTmp });
+  emitClampIndex(fctx, beginTmp, lenTmp);
+
+  // end (default len), same clamp.
+  if (callExpr.arguments.length >= 2) {
+    compileExpression(ctx, fctx, callExpr.arguments[1]!, { kind: "f64" });
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+    fctx.body.push({ op: "local.set", index: endTmp });
+    emitClampIndex(fctx, endTmp, lenTmp);
+  } else {
+    fctx.body.push({ op: "local.get", index: lenTmp });
+    fctx.body.push({ op: "local.set", index: endTmp });
+  }
+
+  // viewLen = max(end - begin, 0); push as field 0.
+  // `select` returns the FIRST operand when the condition is non-zero (true), so
+  // with operands [(end-begin), 0] the condition must be `(end-begin) >= 0` to keep
+  // the difference and fall back to 0 when negative.
+  fctx.body.push({ op: "local.get", index: endTmp });
+  fctx.body.push({ op: "local.get", index: beginTmp });
+  fctx.body.push({ op: "i32.sub" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: endTmp });
+  fctx.body.push({ op: "local.get", index: beginTmp });
+  fctx.body.push({ op: "i32.sub" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" });
+  fctx.body.push({ op: "select" }); // max(end-begin, 0)
+
+  // data = shared backing array (field 1).
+  fctx.body.push({ op: "local.get", index: dataTmp });
+  // byteOffset = baseOffset + begin (field 2) — accumulates for nested subarrays.
+  fctx.body.push({ op: "local.get", index: baseOffsetTmp });
+  fctx.body.push({ op: "local.get", index: beginTmp });
+  fctx.body.push({ op: "i32.add" });
+
+  fctx.body.push({ op: "struct.new", typeIdx: subviewTypeIdx });
+  return { kind: "ref_null", typeIdx: subviewTypeIdx };
 }
 
 /**

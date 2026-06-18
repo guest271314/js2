@@ -31,6 +31,7 @@ import { coerceType, compileExpression } from "../shared.js";
 import { emitTdzCheck } from "../statements.js";
 import { ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
 import { emitStringBuilderRead, getBuilderInfo } from "../string-builder.js";
+import { stringConstantExternrefInstrs } from "../native-strings.js";
 import { BUILTIN_TYPE_TAGS, isBuiltinSubtype, isBuiltinTypeName } from "../builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error-types.js";
 import { allocLocal } from "../context/locals.js";
@@ -1273,14 +1274,14 @@ function compileHostInstanceOf(ctx: CodegenContext, fctx: FunctionContext, expr:
     coerceType(ctx, fctx, leftType, { kind: "externref" });
   }
 
-  // Push constructor name as a string constant
+  // Push constructor name as a string constant. (#51) Materialize via the
+  // dual-mode helper — under nativeStrings `addStringConstantGlobal` records a
+  // `-1` sentinel global (no host string-constant global), so a bare
+  // `global.get -1` reaches binary emit as "global index out of range — -1".
+  // `stringConstantExternrefInstrs` emits the inline NativeString externref
+  // standalone and the host `global.get` only when a real import global exists.
   addStringConstantGlobal(ctx, ctorName);
-  const strGlobalIdx = ctx.stringGlobalMap.get(ctorName);
-  if (strGlobalIdx !== undefined) {
-    fctx.body.push({ op: "global.get", index: strGlobalIdx });
-  } else {
-    fctx.body.push({ op: "ref.null.extern" });
-  }
+  fctx.body.push(...stringConstantExternrefInstrs(ctx, ctorName));
 
   // Call __instanceof(value, ctorName) -> i32
   fctx.body.push({ op: "call", funcIdx: instanceofIdx });

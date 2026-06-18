@@ -1640,6 +1640,24 @@ jobs:
           # (pre-#1853 summaries) — the gate treats absent as zero.
           node scripts/check-test262-hard-errors.mjs --update || \
             echo "WARN: hard-error baseline update failed (non-fatal)"
+          # #2108 — refresh the coercion-site drift baseline to the freshly
+          # merged source tree. The gate (scripts/check-coercion-sites.mjs) is a
+          # PURE source-grep over src/codegen/** — it has no dependency on the
+          # test262 run, so the merged HEAD's source IS the new ground truth.
+          # PRs cannot regenerate this committed baseline (a PR's own source is
+          # checked against the *old* committed baseline at PR time), so the
+          # gate's useful work — recording the new floor — must happen here,
+          # post-merge, exactly like the #1853 hard-error baseline above. Growth
+          # is still caught at PR time (a PR adding an un-sanctioned coercion
+          # site fails the gate); this banks sanctioned additions that landed via
+          # the merge so main never drifts internally inconsistent. Without this,
+          # an admin-bypass merge / concurrent-PR baseline conflict / lost manual
+          # bump leaves main's source ahead of its committed baseline and EVERY
+          # open PR fails the gate until someone hand-bumps it (the 2026-06-18
+          # #1670 wedge). Non-fatal — a transient grep failure must not block the
+          # baseline commit.
+          node scripts/check-coercion-sites.mjs --update || \
+            echo "WARN: coercion-site baseline update failed (non-fatal)"
           stage_files() {
             git add -f benchmarks/results/test262-current.json \
               benchmarks/results/test262-report.json \
@@ -1647,6 +1665,9 @@ jobs:
               public/benchmarks/results/test262-standalone-report.json
             # #1853 — hard-error stability baseline, refreshed just above.
             git add -f scripts/test262-hard-error-baseline.json 2>/dev/null || true
+            # #2108 — coercion-site drift baseline, refreshed just above. Staged
+            # so the new floor lands atomically with the merged source.
+            git add -f scripts/coercion-sites-baseline.json 2>/dev/null || true
             # #2097 — the standalone high-water mark (raised just above when
             # conformance improved). Staged so the new floor lands atomically
             # with the refreshed summary.

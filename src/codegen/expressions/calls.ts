@@ -149,7 +149,7 @@ import {
 } from "./calls-guards.js";
 import { analyzeTdzAccessByPos, emitLocalTdzCheck, emitStaticTdzThrow } from "./identifiers.js";
 import { emitUndefined, ensureLateImport, flushLateImportShifts, shiftLateImportIndices } from "./late-imports.js";
-import { ensureSymbolRegistry } from "../symbol-native.js";
+import { emitSymbolToString, ensureSymbolRegistry } from "../symbol-native.js";
 import { resolveStructName } from "./misc.js";
 import { compileSuperElementMethodCall, compileSuperMethodCall } from "./new-super.js";
 import {
@@ -4818,14 +4818,14 @@ function compileCallExpression(
             if (dpIdx !== undefined) {
               // obj
               fctx.body.push({ op: "local.get", index: objLocal });
-              // prop name as string constant
+              // prop name as string constant. (#51) Materialize via the dual-mode
+              // helper — under nativeStrings `addStringConstantGlobal` records a
+              // `-1` sentinel global (no host string-constant global), so a bare
+              // `global.get -1` reaches binary emit as "global index out of range
+              // — -1". `stringConstantExternrefInstrs` emits the inline
+              // NativeString externref standalone and the host `global.get` under GC.
               addStringConstantGlobal(ctx, propName);
-              const strGlobalIdx = ctx.stringGlobalMap.get(propName);
-              if (strGlobalIdx !== undefined) {
-                fctx.body.push({ op: "global.get", index: strGlobalIdx } as Instr);
-              } else {
-                fctx.body.push({ op: "ref.null.extern" });
-              }
+              fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
               // value (or null for accessor descriptors)
               if (valueExpr) {
                 const vt = compileExpression(ctx, fctx, valueExpr);
@@ -4885,13 +4885,10 @@ function compileCallExpression(
 
             if (dpDescIdx !== undefined) {
               fctx.body.push({ op: "local.get", index: objLocal });
+              // (#51) Dual-mode key materialization — nativeStrings stores a `-1`
+              // sentinel global, so a bare `global.get` crashes binary emit.
               addStringConstantGlobal(ctx, propName);
-              const strGlobalIdx = ctx.stringGlobalMap.get(propName);
-              if (strGlobalIdx !== undefined) {
-                fctx.body.push({ op: "global.get", index: strGlobalIdx } as Instr);
-              } else {
-                fctx.body.push({ op: "ref.null.extern" });
-              }
+              fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
               const descValType = compileExpression(ctx, fctx, prop.initializer);
               if (!descValType) {
                 fctx.body.push({ op: "ref.null.extern" });
@@ -7865,6 +7862,31 @@ function compileCallExpression(
         return { kind: "externref" };
       }
     }
+
+    // (#2163) Symbol.prototype.toString / valueOf on a symbol-typed receiver.
+    // The symbol value is a bare i32 counter id; without a dedicated handler the
+    // generic .toString() fallback drops the id and emits "[object Object]" via a
+    // string-constant global that, in native-strings/standalone mode, resolves to
+    // the -1 sentinel (the late-import index-shift CE, #2043). In native-strings
+    // mode build the spec descriptive string natively (§20.4.3.3.1
+    // SymbolDescriptiveString → "Symbol(" + (desc ?? "") + ")") with zero host
+    // imports; valueOf returns the symbol primitive (the i32 id) itself.
+    if (isSymbolType(receiverType)) {
+      const method = propAccess.name.text;
+      if (method === "valueOf" && expr.arguments.length === 0) {
+        // Symbol.prototype.valueOf() → the symbol primitive itself (i32 id).
+        return compileExpression(ctx, fctx, propAccess.expression, { kind: "i32" });
+      }
+      if (method === "toString" && expr.arguments.length === 0 && ctx.nativeStrings) {
+        const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "i32" });
+        if (recvType && recvType.kind !== "i32") {
+          coerceType(ctx, fctx, recvType, { kind: "i32" });
+        }
+        emitSymbolToString(ctx, fctx);
+        return nativeStringType(ctx);
+      }
+    }
+
     if (isNumberType(receiverType) && propAccess.name.text === "toFixed") {
       const exprType = compileExpression(ctx, fctx, propAccess.expression);
       if (exprType && exprType.kind === "i32") {
@@ -9212,6 +9234,20 @@ function compileCallExpression(
       if (strArg0IsUndefined) {
         // String(undefined) → "undefined"
         return compileStringLiteral(ctx, fctx, "undefined", strArg0) ?? { kind: "externref" };
+      }
+
+      // (#2163) String(symbol) is the ONE ToString form that does NOT throw on a
+      // Symbol — §22.1.1.1 step 1 short-circuits to SymbolDescriptiveString
+      // ("Symbol(" + (desc ?? "") + ")"). Implicit coercions (template literals,
+      // `+`) still throw via tryThrowOnSymbolStringCoercion. In native-strings
+      // mode build the descriptive string natively (zero host imports).
+      if (ctx.nativeStrings && isSymbolType(ctx.checker.getTypeAtLocation(strArg0))) {
+        const recvType = compileExpression(ctx, fctx, strArg0, { kind: "i32" });
+        if (recvType && recvType.kind !== "i32") {
+          coerceType(ctx, fctx, recvType, { kind: "i32" });
+        }
+        emitSymbolToString(ctx, fctx);
+        return nativeStringType(ctx);
       }
 
       // #2160 — String(arr) in standalone: route an array argument through its

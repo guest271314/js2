@@ -102,6 +102,13 @@ export interface CodegenOptions {
   strictNoHostImports?: boolean;
   /** JSX runtime import detected during preprocessing (#1540). */
   jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
+  /**
+   * (#2119) Infer ES-module strictness (→ unmapped `arguments`) from a genuine
+   * top-level `import`/`export`. Default `true`. The test262 harness sets this
+   * `false` for script tests so its synthetic `export function test()` wrapper
+   * does not unmap sloppy (`noStrict`) arguments. See `CompileOptions`.
+   */
+  inferModuleStrictArguments?: boolean;
 }
 
 /** Info about an externally declared class. */
@@ -556,6 +563,9 @@ export interface CodegenContext {
    * `JS2WASM_LOG_CODEGEN_FALLBACKS=1` turn it on.
    */
   trackSilentFallbacks?: boolean;
+  /** (#2119) Infer module-strictness (→ unmapped arguments) from a genuine
+   *  top-level import/export. Default true; test262 script tests pass false. */
+  inferModuleStrictArguments?: boolean;
   /**
    * #1923 — captured IR post-claim demotions (build/verify/lower/backend-
    * legality failures on a function the selector claimed, which fall back to
@@ -1114,6 +1124,21 @@ export interface CodegenContext {
    * i32_byte vec representation (no wrapper, zero new cost).
    */
   dvWindowTypeIdx: number;
+  /**
+   * (#2159 / #2357 / #47) Type index for the standalone `$__subview` struct — a
+   * `{base: (ref null __vec_<elem>), byteOffset: i32, length: i32}` view produced
+   * by `TypedArray.prototype.subarray(begin, end)`. It SHARES the parent's backing
+   * `data` array (true aliasing — a sub-write is visible in the parent) and carries
+   * the element offset + windowed length. Element access discriminates view-vs-plain
+   * at COMPILE time via the receiver's resolved ValType (a binding initialised by
+   * `subarray` resolves to `$__subview`), so the plain-array `a[i]` hot path takes
+   * ZERO extra instructions — no per-access runtime branch. Keyed per element kind
+   * in `subviewTypeMap`; this scalar holds the most-recently-registered idx for
+   * back-compat. -1 = not yet registered. (Spec: plan/issues/2357.)
+   */
+  subviewTypeIdx: number;
+  /** (#2357) Per-element-kind `$__subview` struct type indices, keyed by elemKind. */
+  subviewTypeMap: Map<string, number>;
   /** Type index for the WasmGC `$Error_struct` used in standalone/WASI mode (#1104). -1 = not yet registered. */
   errorStructTypeIdx: number;
   /** Extra properties for empty object variables */

@@ -486,11 +486,20 @@ function compileObjectLiteralWithAccessors(
         }
       } else {
         if (propName === undefined) continue;
+        // (#51) Materialize the data-property key via the dual-mode helper, not a
+        // bare `global.get <stringGlobalMap.get(propName)>`. Under
+        // standalone/nativeStrings `addStringConstantGlobal` records the `-1`
+        // sentinel (there is no host string-constant global), so a bare
+        // `global.get -1` reaches binary emit as "global index out of range — -1".
+        // `stringConstantExternrefInstrs` emits the NativeString inline (externref)
+        // path under standalone and the host `global.get` only when a real import
+        // global exists — exactly the fix already applied to the accessor-key path
+        // below (#1888 S5c).
         addStringConstantGlobal(ctx, propName);
-        const keyGlobal = ctx.stringGlobalMap.get(propName);
-        if (keyGlobal === undefined) continue;
         fctx.body.push({ op: "local.get", index: objLocal });
-        fctx.body.push({ op: "global.get", index: keyGlobal });
+        for (const instr of stringConstantExternrefInstrs(ctx, propName)) {
+          fctx.body.push(instr);
+        }
       }
       // Compile value and coerce to externref.
       let valType: ValType | null;
@@ -2308,7 +2317,13 @@ export function compileObjectLiteralForStruct(
       if (prop.body && bodyUsesArguments(prop.body)) {
         const methodParamTypes = methodFctxParams.slice(1).map((p) => p.type); // skip 'this'
         // Object-literal methods inherit the surrounding code's strictness (#779e).
-        emitArgumentsObject(ctx, methodFctx, methodParamTypes, 1, isStrictFunction(prop)); // paramOffset 1 to skip 'this'
+        emitArgumentsObject(
+          ctx,
+          methodFctx,
+          methodParamTypes,
+          1,
+          isStrictFunction(prop, ctx.inferModuleStrictArguments),
+        ); // paramOffset 1 to skip 'this'
       }
 
       if (isGeneratorMethod && prop.body) {
