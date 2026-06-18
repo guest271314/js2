@@ -473,45 +473,60 @@ export function emitDataViewAccessor(
   fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
   fctx.body.push({ op: "local.set", index: getIdxLocal });
 
-  // throwCond = isNaN(req) || getIndex < 0 || getIndex + elementSize > viewLen.
-  //   - NaN request → ToIndex throws (trunc_sat(NaN)=0 would otherwise slip
-  //     through): `req != req`.
-  //   - negative index (e.g. -1): `getIndex < 0`.
-  //   - OOB / +Infinity (trunc_sat(+Inf)=i32.MAX): `getIndex + bytes > viewLen`
-  //     (computed in i64 so the +Infinity-saturated MAX + bytes can't overflow).
-  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
-  fctx.body.push({ op: "f64.ne" } as Instr); // req != req  (NaN)
-  fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.lt_s" } as Instr); // getIndex < 0
-  fctx.body.push({ op: "i32.or" } as Instr);
-  // getIndex + bytes > viewLen, in i64 to avoid i32 overflow at i32.MAX.
-  fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
-  fctx.body.push({ op: "i64.extend_i32_s" } as Instr);
-  fctx.body.push({ op: "i64.const", value: BigInt(acc.bytes) } as Instr);
-  fctx.body.push({ op: "i64.add" } as Instr);
-  fctx.body.push({ op: "local.get", index: viewLenLocal } as Instr);
-  fctx.body.push({ op: "i64.extend_i32_s" } as Instr);
-  fctx.body.push({ op: "i64.gt_s" } as Instr); // (getIndex + bytes) > viewLen
-  fctx.body.push({ op: "i32.or" } as Instr);
-  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] } as Instr);
+  // (#2199b) The two §24.2.1.2 SetViewValue / §24.2.1.1 GetViewValue throws fire
+  // at DIFFERENT points relative to `ToNumber(value)` for a setter:
+  //   - INDEX throw (step 4, ToIndex): `isNaN(req) || getIndex < 0` — fires
+  //     BEFORE `ToNumber(value)` (test: index-check-before-value-conversion).
+  //   - BOUNDS throw (step 8): `getIndex + elementSize > viewByteLength` — fires
+  //     AFTER `ToNumber(value)` runs (test: range-check-after-value-conversion;
+  //     a `value` whose valueOf/Symbol throws must throw FIRST). i64 math so the
+  //     +Infinity-saturated `getIndex=i32.MAX` + bytes can't overflow.
+  const emitIndexThrow = (): void => {
+    fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: reqLocal } as Instr);
+    fctx.body.push({ op: "f64.ne" } as Instr); // req != req  (NaN)
+    fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "i32.lt_s" } as Instr); // getIndex < 0
+    fctx.body.push({ op: "i32.or" } as Instr);
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] } as Instr);
+  };
+  const emitBoundsThrow = (): void => {
+    fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
+    fctx.body.push({ op: "i64.extend_i32_s" } as Instr);
+    fctx.body.push({ op: "i64.const", value: BigInt(acc.bytes) } as Instr);
+    fctx.body.push({ op: "i64.add" } as Instr);
+    fctx.body.push({ op: "local.get", index: viewLenLocal } as Instr);
+    fctx.body.push({ op: "i64.extend_i32_s" } as Instr);
+    fctx.body.push({ op: "i64.gt_s" } as Instr); // (getIndex + bytes) > viewLen
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: rangeThrow, else: [] } as Instr);
+  };
 
-  // Validated: off = getIndex + base (absolute byte in the shared buffer).
+  // off = getIndex + base (absolute byte in the shared buffer). Computed after
+  // the bounds throw at each call site.
   const offLocal = allocLocal(fctx, `__dvn_off_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: baseLocal } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "local.set", index: offLocal });
+  const setOff = (): void => {
+    fctx.body.push({ op: "local.get", index: getIdxLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: baseLocal } as Instr);
+    fctx.body.push({ op: "i32.add" } as Instr);
+    fctx.body.push({ op: "local.set", index: offLocal });
+  };
 
   if (acc.kind === "get") {
-    // littleEndian flag is the 2nd arg for getters (getUintN(off, le)).
+    // Getter has no value to convert, so both throws are adjacent (ToIndex then
+    // bounds), before the read. littleEndian is the 2nd arg.
+    emitIndexThrow();
+    emitBoundsThrow();
+    setOff();
     const leLocal = emitLittleEndianFlag(ctx, fctx, args[1], compileExpr);
     emitReadBytes(ctx, fctx, acc, arrLocal, offLocal, leLocal, arrTypeIdx);
     return { kind: "get", result: { kind: "f64" } };
   }
 
-  // Setter: value is arg 1, littleEndian is arg 2.
+  // Setter: ToIndex throw → ToNumber(value) (+littleEndian) → bounds throw →
+  // write. Compiling the value/le runs their valueOf/Symbol coercions, which can
+  // throw and MUST do so after the index check but before the bounds check.
+  emitIndexThrow();
   const valLocal = allocLocal(fctx, `__dvn_val_${fctx.locals.length}`, { kind: "f64" });
   if (args.length >= 2) {
     compileExpr(args[1]!, { kind: "f64" });
@@ -520,6 +535,8 @@ export function emitDataViewAccessor(
   }
   fctx.body.push({ op: "local.set", index: valLocal });
   const leLocal = emitLittleEndianFlag(ctx, fctx, args[2], compileExpr);
+  emitBoundsThrow();
+  setOff();
   emitWriteBytes(ctx, fctx, acc, arrLocal, offLocal, valLocal, leLocal, arrTypeIdx);
   return { kind: "set" };
 }
