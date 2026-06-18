@@ -187,6 +187,23 @@ export interface CompileOptions {
   target?: "gc" | "linear" | "wasi" | "standalone";
   /** Enable fast mode — i32 default numbers, performance optimizations */
   fast?: boolean;
+  /**
+   * (#2119) Whether to infer ES-module strictness (module code is always strict,
+   * ECMA-262 11.2.2) from a genuine top-level `import`/`export`. Drives the
+   * unmapped `arguments` object for module functions. Defaults to `true` — the
+   * product compiles real module input, so this is the spec-correct behaviour.
+   *
+   * The test262 harness sets this to `false` for *script* tests: its `wrapTest`
+   * injects a synthetic `export function test()` entry point that makes
+   * TypeScript flag *every* wrapped source as a module
+   * (`externalModuleIndicator`). Inferring module-strictness from that synthetic
+   * export wrongly unmaps `arguments` for sloppy (`noStrict`) tests asserting
+   * mapped behaviour. The harness passes `false` for non-module-goal tests and
+   * leaves it `true` (default) for genuine module tests, so the compiler sees
+   * the source's *true* strictness rather than the wrapper artifact. An explicit
+   * `"use strict"` prologue and class context still force strict regardless.
+   */
+  inferModuleStrictArguments?: boolean;
   /** Use WasmGC-native strings (array i16) instead of wasm:js-string imports.
    *  Enabled automatically when fast: true or target: "wasi".
    *  Required for non-browser runtimes (wasmtime, wasmer, etc.) */

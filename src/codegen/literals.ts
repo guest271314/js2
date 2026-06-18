@@ -2308,7 +2308,13 @@ export function compileObjectLiteralForStruct(
       if (prop.body && bodyUsesArguments(prop.body)) {
         const methodParamTypes = methodFctxParams.slice(1).map((p) => p.type); // skip 'this'
         // Object-literal methods inherit the surrounding code's strictness (#779e).
-        emitArgumentsObject(ctx, methodFctx, methodParamTypes, 1, isStrictFunction(prop)); // paramOffset 1 to skip 'this'
+        emitArgumentsObject(
+          ctx,
+          methodFctx,
+          methodParamTypes,
+          1,
+          isStrictFunction(prop, ctx.inferModuleStrictArguments),
+        ); // paramOffset 1 to skip 'this'
       }
 
       if (isGeneratorMethod && prop.body) {
