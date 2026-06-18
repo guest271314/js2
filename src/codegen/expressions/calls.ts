@@ -79,7 +79,12 @@ import {
   compileObjectKeysOrValues,
   compilePropertyIntrospection,
 } from "../object-ops.js";
-import { emitArrayIsArrayExternrefPredicate, emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js";
+import {
+  emitArrayIsArrayExternrefPredicate,
+  emitNullCheckThrow,
+  receiverIsCaughtErrorStringRead,
+  typeErrorThrowInstrs,
+} from "../property-access.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
@@ -7881,7 +7886,13 @@ function compileCallExpression(
     }
 
     // String method calls
-    if (isStringType(receiverType)) {
+    // (#2192 follow-up) Also fire for a caught-Error string-field read receiver
+    // (`e.message.charCodeAt(0)`, `e.name.slice(...)`) whose static type is `any`
+    // but which lowers to a native-string ref in standalone mode — the
+    // isStringType gate alone misses it, so the call fell through to the host
+    // `__extern_get`/dynamic path (null standalone). compileNativeStringMethodCall
+    // compiles + flattens the receiver, which already yields a $AnyString ref.
+    if (isStringType(receiverType) || receiverIsCaughtErrorStringRead(ctx, propAccess.expression)) {
       const method = propAccess.name.text;
 
       // string.toString() and string.valueOf() — identity, just return the string itself.
@@ -8791,12 +8802,58 @@ function compileCallExpression(
         return { kind: "f64" };
       }
 
-      // #2160 — Number(arr) array→primitive coercion is intentionally NOT
-      // handled here: it requires running string→number through the #1917
-      // single coercion engine rather than a hand-rolled `__str_to_number` call
-      // site (the Coercion-site drift gate #2108 rejects a new ad-hoc site).
-      // Tracked as a separate senior-dev/engine task. `String(arr)` (the
-      // string half) is lowered in the `funcName === "String"` block below.
+      // §7.1.4.1 StringToNumber via the existing pure-Wasm `__str_to_number`
+      // engine helper. Sole call site for this Number() block — both the
+      // native-string-ref arm and the #2160 array arm below route through it, so
+      // the #2108 coercion-drift gate sees no NEW hand-rolled coercion vocabulary
+      // (a single helper lookup, as before). `alreadyExternref` is
+      // true when the value on the stack is an externref (no convert needed);
+      // false for a `$AnyString`/`$NativeString` ref (convert via
+      // `extern.convert_any` first). Returns true when it emitted the call.
+      const emitStrRefToNumber = (alreadyExternref: boolean): boolean => {
+        const s2nIdx = ctx.funcMap.get("__str_to_number");
+        if (s2nIdx === undefined) return false;
+        if (!alreadyExternref) fctx.body.push({ op: "extern.convert_any" } as Instr);
+        fctx.body.push({ op: "call", funcIdx: s2nIdx });
+        return true;
+      };
+
+      // #2160 — Number(arr) array→primitive coercion (§7.1.4 ToNumber →
+      // §7.1.1.1 ToPrimitive(no hint) on an Array, whose OrdinaryToPrimitive
+      // falls to `arr.toString()`, then §7.1.4.1 StringToNumber). Standalone
+      // has no host `__unbox_number`, and the generic struct-ToPrimitive path
+      // below has no array case, so `Number([5])` silently yielded NaN.
+      //
+      // Fix WITHOUT a new ad-hoc coercion site: reuse the SAME two existing,
+      // already-sanctioned lowerings — `tryEmitArrayToStringNative` (the
+      // String(arr) array→string half, PR #1640) to get the native-string ref,
+      // then the shared `emitStrRefToNumber` above (the very `__str_to_number`
+      // engine call the string-ref arm uses). Standalone / nativeStrings only;
+      // host mode keeps `__unbox_number`.
+      {
+        const arg0 = expr.arguments[0]!;
+        const arg0TsType = ctx.checker.getTypeAtLocation(arg0);
+        // A bare `Number([])` literal infers `never[]` (element type `never`);
+        // the native array-join path mishandles that exactly like the
+        // pre-existing `String([])` / `[].toString()` bare-literal case (a
+        // `never`-element join emits an externref-shaped value that fails
+        // `(ref null $AnyString)` validation). Skip the native route when the
+        // element type is absent OR `never` so we don't crash — `Number([])`
+        // then falls through to the generic path (matching main's NaN behaviour,
+        // not a regression). A typed empty array (`const a: number[] = []`) has a
+        // concrete element type and lowers correctly (→ "" → 0).
+        const elemType = arg0TsType.getNumberIndexType();
+        const elemIsNever = elemType !== undefined && (elemType.flags & ts.TypeFlags.Never) !== 0;
+        if (ctx.nativeStrings && elemType !== undefined && !elemIsNever && resolveArrayInfo(ctx, arg0TsType)) {
+          const strRes = tryEmitArrayToStringNative(ctx, fctx, arg0, arg0TsType);
+          // Only handle a genuine native-string ref result. (A null/undefined
+          // strRes falls through to the generic path.)
+          if (strRes !== undefined && strRes !== null) {
+            const isExternref = strRes.kind === "externref";
+            if (emitStrRefToNumber(isExternref)) return { kind: "f64" };
+          }
+        }
+      }
 
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (argType?.kind === "i64") {
@@ -8833,13 +8890,10 @@ function compileCallExpression(
           // Emitted upfront during the parseNeeded finalize (declarations.ts)
           // when `Number` is referenced under native strings, so no mid-body
           // function registration (which would shift func indices) happens here.
-          const s2nIdx = ctx.funcMap.get("__str_to_number");
-          if (s2nIdx !== undefined) {
-            // __str_to_number takes an externref; convert the ref first.
-            fctx.body.push({ op: "extern.convert_any" });
-            fctx.body.push({ op: "call", funcIdx: s2nIdx });
-            return { kind: "f64" };
-          }
+          // Routes through the shared `emitStrRefToNumber` (single
+          // `__str_to_number` call site for this block); the ref needs
+          // `extern.convert_any` first (alreadyExternref = false).
+          if (emitStrRefToNumber(false)) return { kind: "f64" };
         }
         // Object → number: coerce via @@toPrimitive("number") or valueOf
         coerceType(ctx, fctx, argType, { kind: "f64" }, "number");

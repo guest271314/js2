@@ -88,15 +88,38 @@ operand**, so `e.message === "lit"` / `!==` routes to `compileStringBinaryOp`
 (`__str_equals`, content compare) instead of `ref.eq`. This is the dominant
 test262 assertion shape (`assert.sameValue(e.message, "...")`).
 
-## Deferred (follow-up) — non-equality consumers
+## Follow-up slice 1 (2026-06-18, sdev-proxy3 — PR `issue-2192b-…`): string METHODS
 
-`e.message.length`, `e.message.<method>()`, and `e.cause` still return null/empty
-inline (the `any`-typed property read isn't recognised as a string by `.length`/
-method dispatch / cause has its own field gap). The general fix is to make the
-caught-Error property read itself carry a string result type to ALL consumers
-(not just equality). Tracked here as the next slice. The pre-existing plain
-`const o:any={message:"abc"}; o.message.length` → 0 is a SEPARATE plain-object
-bug (reproduces on base, not introduced here).
+DONE: `e.message.<method>()` / `e.name.<method>()` now dispatch through the
+native-string method path for i32/boolean-returning methods (`charCodeAt`,
+`indexOf`, `includes`, `startsWith`, `endsWith`, …) on a caught-Error string
+field of an explicitly-thrown error.
+
+**Mechanism:** `receiverIsCaughtErrorStringRead(ctx, recv)` (property-access.ts)
+recognises a `<catchBinding>.message|name|stack` receiver; the string-method
+dispatch in `calls.ts` (the `isStringType(receiverType)` gate) ORs it in, so the
+call routes through `compileNativeStringMethodCall` — which compiles + flattens
+the receiver to a `$AnyString` ref (already the read's result type in standalone
+mode). No new host import; standalone/WASI-gated; `message`/`name`/`stack` only;
+inner receiver must be a bare catch binding (plain `obj.message` unaffected).
+9/9 `tests/issue-2192b-caught-error-string-methods.test.ts`; 27/27 with the
+#2192/#2077 suites; no regression.
+
+**Still deferred (intentionally NOT in this slice — broad blast radius):**
+- `e.message.length` — the `.length` dispatch is entangled with the generic
+  `any`-receiver length / `__extern_get` chain (earlier `.length` handlers
+  intercept before the string-length site). Plain
+  `const o:any={message:"abc"}; o.message.length` → 0 on base too: this is the
+  GENERAL `any`-typed-`.length` gap, not Error-specific. Needs the `any`-receiver
+  length dispatch to consult the codegen result type, not the static type alone.
+- chained string-RETURNING methods (`e.message.slice(1).charCodeAt(0)`) — the
+  intermediate `.slice()` result's type isn't carried to the next consumer.
+- `e.cause` — not a `$Error_struct` field yet (own field gap).
+- errors from a runtime TRAP (`null.x`) vs `new X()` — the trap-throw path does
+  not populate the `$Error_struct` string fields like the explicit ctor does
+  (separate construction gap).
+These together are the "string type to ALL consumers" type-propagation work;
+keeping them out preserves a bounded, low-risk slice.
 
 ## Acceptance criteria (this PR)
 
