@@ -398,7 +398,17 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
   if (ts.isTemplateExpression(node)) {
     for (const span of node.templateSpans) {
       const spanType = ctx.checker.getTypeAtLocation(span.expression);
-      if (isNumberType(spanType) || isBooleanType(spanType) || isBigIntType(spanType)) {
+      // An `any`/`unknown`-typed span (common in .js files / untyped params,
+      // where the checker can't narrow but codegen still lowers the value as a
+      // numeric f64/i32/i64) must also pre-register number_toString. Otherwise
+      // the checker-based pre-pass and codegen's value-type resolution diverge:
+      // codegen reaches the numeric substitution branch with no helper to call
+      // and hard-errors ("Template literal numeric substitution requires
+      // number_toString"), aborting compilation. Registering the helper is
+      // harmless when the span turns out non-numeric — codegen only calls it on
+      // the numeric branch.
+      const isAnyOrUnknown = (spanType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+      if (isNumberType(spanType) || isBooleanType(spanType) || isBigIntType(spanType) || isAnyOrUnknown) {
         state.primitiveNeeded.add("number_toString");
       }
     }
