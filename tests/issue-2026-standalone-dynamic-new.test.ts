@@ -31,23 +31,14 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
-async function runStandalone(
-  src: string,
-  exportName = "test",
-): Promise<unknown> {
+async function runStandalone(src: string, exportName = "test"): Promise<unknown> {
   const r = await compile(src, { fileName: "test.ts", target: "wasi" });
-  expect(
-    r.success,
-    r.success ? "" : `compile error: ${r.errors?.[0]?.message}`,
-  ).toBe(true);
+  expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   const mod = await WebAssembly.compile(r.binary);
   const envImports = WebAssembly.Module.imports(mod)
     .filter((i) => i.module === "env")
     .map((i) => i.name);
-  expect(
-    envImports,
-    `expected no env host imports, got: ${envImports.join(", ")}`,
-  ).toEqual([]);
+  expect(envImports, `expected no env host imports, got: ${envImports.join(", ")}`).toEqual([]);
   const { instance } = await WebAssembly.instantiate(r.binary, {});
   const exp = instance.exports as Record<string, () => unknown>;
   return exp[exportName]!();
