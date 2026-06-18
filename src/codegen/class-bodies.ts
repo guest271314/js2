@@ -32,7 +32,7 @@ import {
 } from "./index.js";
 import { emitUndefined } from "./expressions/late-imports.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
-import { emitWasiErrorConstructor, isWasiErrorName } from "./registry/error-types.js";
+import { emitWasiErrorConstructor, getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   cacheParamDefaultArgc,
@@ -416,6 +416,54 @@ function emitSetSubclassProto(
       { op: "call", funcIdx: setProtoIdx },
       { op: "local.set", index: selfLocal },
     ],
+  });
+}
+
+/**
+ * (#2188) Brand a standalone-native user Error subclass instance with its own
+ * `classTagMap` id, so sibling `extends Error` subclasses (which all share the
+ * SAME builtin parent `$tag`) can be told apart by `instanceof`.
+ *
+ * `selfLocal` holds the instance externref produced by `__new_<Parent>` (a real
+ * `$Error_struct`, see emitWasiErrorConstructor). We convert it back to anyref,
+ * `ref.test` that it is genuinely an `$Error_struct` (defensive — the standalone
+ * `__new_<Parent>` fallback can leave a non-struct value here), and when it is,
+ * write the subclass's unique tag into `$Error_struct.$userClassId` (fieldIdx 4).
+ * The standalone `instanceof <UserSubclass>` path (identifiers.ts) reads this
+ * field. No host import — pure WasmGC, so it works in `--target wasi`.
+ *
+ * Only emitted in standalone / WASI mode: in JS-host mode the instance is a real
+ * JS Error object (not an `$Error_struct`), `instanceof` routes through the host,
+ * and the brand field does not exist on it. Guarded by the caller.
+ */
+function emitSetSubclassUserBrand(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  selfLocal: number,
+  subName: string,
+): void {
+  if (!(ctx.wasi || ctx.standalone)) return;
+  const brand = ctx.classTagMap.get(subName);
+  if (brand === undefined) return;
+  const structIdx = getOrRegisterErrorStructType(ctx);
+  // anyref view of the instance, stash it so the `ref.test`-guarded write can
+  // re-read it without recomputing.
+  const anyLocalIdx = allocLocal(fctx, `__err_brand_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "local.get", index: selfLocal });
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: anyLocalIdx });
+  fctx.body.push({ op: "local.get", index: anyLocalIdx });
+  fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: anyLocalIdx },
+      { op: "ref.cast", typeIdx: structIdx } as Instr,
+      { op: "i32.const", value: brand },
+      { op: "struct.set", typeIdx: structIdx, fieldIdx: 4 } as Instr,
+    ],
+    else: [],
   });
 }
 
@@ -1542,6 +1590,9 @@ function compileClassBodiesInner(
         // `instance instanceof Sub` walks through it, in addition to
         // `instance instanceof Parent` (already true via Parent.prototype).
         emitSetSubclassProto(ctx, fctx, selfLocal, className, parentName);
+        // (#2188) Brand the standalone instance with this subclass's tag so
+        // sibling `extends Error` subclasses are distinguishable by instanceof.
+        emitSetSubclassUserBrand(ctx, fctx, selfLocal, className);
       }
     }
 
@@ -2347,6 +2398,9 @@ export function compileSuperCall(
     // so `instance instanceof childClassName` returns true. Without this step
     // the chain only reaches `<builtinParent>.prototype`.
     emitSetSubclassProto(ctx, fctx, selfLocal, childClassName, builtinParent);
+    // (#2188) Brand the standalone instance with this subclass's tag so sibling
+    // `extends Error` subclasses are distinguishable by instanceof.
+    emitSetSubclassUserBrand(ctx, fctx, selfLocal, childClassName);
     return;
   }
 

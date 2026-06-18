@@ -159,6 +159,8 @@ export function createCodegenContext(
     shapeMap: new Map(),
     templateCacheCounter: 0,
     templateVecTypeIdx: -1,
+    vecBaseTypeIdx: -1, // (#2186) shared $__vec_base length supertype, lazy
+    dvWindowTypeIdx: -1, // (#2159/#38) standalone DataView windowing wrapper, lazy
     errorStructTypeIdx: -1,
     widenedTypeProperties: new Map(),
     widenedVarStructMap: new Map(),

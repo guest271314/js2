@@ -49,9 +49,11 @@ import {
   getBuiltinBrand,
   getNativeProtoBuiltinGlue,
 } from "./native-proto.js";
+import { ensureArrayNativeProtoGlue, ensureObjectNativeProtoGlue } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
+import { getOrRegisterDvWindowType } from "./dataview-native.js"; // (#2159/#38) DataView windowing
 import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
@@ -450,6 +452,17 @@ function ensureStandaloneNativeMethodClosureLocal(
 function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): number | undefined {
   if (builtinName === "RegExp") {
     return ensureRegExpNativeProtoGlue(ctx);
+  }
+  // (#2193) Array.prototype / Object.prototype value reads — register the
+  // native-proto glue on demand so the read resolves to a `$NativeProto` object
+  // host-free instead of refusing. The proto OBJECT only needs the member CSV +
+  // name (emitLazyNativeProtoGet never calls emitMemberBody); reflective member
+  // closures degrade to a catchable TypeError until their native bodies land.
+  if (builtinName === "Array") {
+    return ensureArrayNativeProtoGlue(ctx);
+  }
+  if (builtinName === "Object") {
+    return ensureObjectNativeProtoGlue(ctx);
   }
   // Other builtins: only resolve if some path already registered glue for them.
   const brand = getBuiltinBrand(ctx, builtinName);
@@ -1575,6 +1588,36 @@ function receiverIsCatchClauseBinding(ctx: CodegenContext, recv: ts.Expression):
 }
 
 /**
+ * (#2192 follow-up) Recognize a receiver expression that is itself a caught-Error
+ * string-field read — i.e. `<catchBinding>.message` / `.name` / `.stack`. In
+ * standalone mode the #2077/#2192 fast path lowers that read to a `$Error_struct`
+ * `struct.get` coerced to a native-string ref (`$AnyString`), so at the VALUE
+ * level the result IS a string. But the receiver's static TS type is `any` (the
+ * catch binding is `any`), so the `.length` / string-method dispatch sites —
+ * which gate on `isStringType(<static type>)` — never fire, and
+ * `e.message.length` / `e.message.charCodeAt(0)` fall through to the host
+ * `__extern_get` path (null standalone → 0). This predicate lets those consumer
+ * sites treat such a receiver as string-typed and route through the
+ * native-string path.
+ *
+ * Scope: standalone/WASI only (the fast path that produces a string ref is
+ * standalone-gated), `message`/`name`/`stack` only (the fields the read fast path
+ * handles), and only when the inner receiver is a catch binding (so a plain
+ * `obj.message` on a real object is unaffected — it keeps its own typed path).
+ * `.cause` is intentionally NOT covered: it is not a `$Error_struct` field yet
+ * (deferred follow-up).
+ */
+export function receiverIsCaughtErrorStringRead(ctx: CodegenContext, recv: ts.Expression): boolean {
+  if (!(ctx.wasi || ctx.standalone)) return false;
+  if (!ts.isPropertyAccessExpression(recv)) return false;
+  const p = recv.name.text;
+  if (p !== "message" && p !== "name" && p !== "stack") return false;
+  if (!receiverIsCatchClauseBinding(ctx, recv.expression)) return false;
+  const innerType = ctx.checker.getTypeAtLocation(recv.expression);
+  return (innerType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+}
+
+/**
  * (#2179) When the module uses `delete <member>` (JS-host mode only), route an
  * `any`/`unknown`-typed property READ through the tombstone-aware `__extern_get`
  * host helper instead of the inline `ref.test`+`struct.get` fast-path. Returns
@@ -1732,6 +1775,46 @@ export function compilePropertyAccess(
         : undefined);
     const isBuffer = recvName === "ArrayBuffer" || recvName === "SharedArrayBuffer";
     const isTypedArr = recvName !== undefined && TYPED_ARRAY_NAMES.has(recvName);
+    const isDataView = recvName === "DataView";
+    // (#2159/#38) DataView `byteOffset` / `byteLength` honour the constructor's
+    // window. The receiver is either a `$__dv_window` wrapper (windowed view) or
+    // a bare `$__vec_i32_byte` (offset-0 default-length view). For the wrapper,
+    // read its byteOffset / byteLength fields; for the bare vec, byteOffset = 0
+    // and byteLength = vec.length (one i32 per byte ⇒ length IS the byte count).
+    if (isDataView && noJsHost(ctx)) {
+      const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+      const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
+      const fieldIdx = propName === "byteOffset" ? 1 : 2;
+      const recvType = compileExpression(ctx, fctx, expr.expression);
+      const anyLocal = allocLocal(fctx, `__dvp_any_${fctx.locals.length}`, { kind: "anyref" });
+      if (recvType?.kind === "externref") {
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+      }
+      fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+      const winBranch: Instr[] = [
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx } as Instr,
+      ];
+      const vecBranch: Instr[] =
+        propName === "byteOffset"
+          ? [{ op: "i32.const", value: 0 } as Instr]
+          : [
+              { op: "local.get", index: anyLocal } as Instr,
+              { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+              { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+            ];
+      fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+      fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: winBranch,
+        else: vecBranch,
+      } as Instr);
+      if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+    }
     if (isBuffer || isTypedArr) {
       // byteOffset on a fresh-backing view is always 0.
       if (propName === "byteOffset") {

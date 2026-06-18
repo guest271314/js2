@@ -44,7 +44,7 @@ import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
-import { fillApplyClosure, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
+import { fillApplyClosure, fillExternGetIdxVecArms, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -1113,12 +1113,23 @@ export function generateModule(
     //
     // #1472 Phase A — these two imports exist solely so the JS-host Proxy
     // wrapper can present a spec-correct own-key set for class prototypes /
-    // class objects. There is no Proxy (and no JS host) in --target standalone,
-    // so we skip registering them. `emitLazyProtoGet` / `emitLazyClassObjectGet`
-    // gate their `call` emission on the import being present in funcMap, so
-    // skipping registration cleanly drops the host notification while the
-    // struct-backed prototype/class globals still work natively.
-    if (sourceContainsClass(ast.sourceFile) && !ctx.standalone) {
+    // class objects. There is no Proxy (and no JS host) in any no-JS-host
+    // target, so we skip registering them. `emitLazyProtoGet` /
+    // `emitLazyClassObjectGet` gate their `call` emission on the import being
+    // present in funcMap, so skipping registration cleanly drops the host
+    // notification while the struct-backed prototype/class globals still work
+    // natively.
+    //
+    // (#2026 PR-1b) The guard must cover BOTH no-JS-host targets (`wasi` AND
+    // `standalone`), not just `standalone`. Under `--target wasi` the import was
+    // still registered, so `emitLazyClassObjectGet` took its
+    // `__register_class_object` CSV-notification branch and emitted a
+    // `global.get` of the static-methods-CSV string global — which under
+    // nativeStrings is not a real module global, baking a `-1` global index and
+    // crashing binary emit ("global index out of range — -1") the moment a class
+    // flowed as a value (`use(A)`, `new K()` dynamic-new). `standalone` already
+    // skipped this and worked; `wasi` now matches.
+    if (sourceContainsClass(ast.sourceFile) && !(ctx.standalone || ctx.wasi)) {
       const regProtoTypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], []);
       addImport(ctx, "env", "__register_prototype", { kind: "func", typeIdx: regProtoTypeIdx });
       // (#1395) Same rationale for the class-object registry — must be
@@ -1670,6 +1681,12 @@ export function generateModule(
     // (#1904) Fill the standalone native Array.isArray predicate after all
     // module-local array carriers have been registered.
     fillExternIsArray(ctx);
+
+    // (#2190) Fill `__extern_get_idx`'s typed-`__vec_<elemKind>` indexing arms
+    // now that every array-literal carrier type is known — sibling of #2189's
+    // `.length` fix, so `(arr as any)[i]` through the externref boundary reads
+    // the element instead of null/0. Standalone only (no-op otherwise).
+    fillExternGetIdxVecArms(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return

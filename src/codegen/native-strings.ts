@@ -7,6 +7,7 @@
  */
 import type { Instr, ValType, WasmFunction } from "../ir/types.js";
 import { ensureAnyValueType } from "./any-helpers.js";
+import { emitNativeCaseConversion } from "./case-convert-native.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { ensureLateImport, flushLateImportShifts } from "./expressions/late-imports.js";
@@ -3563,6 +3564,14 @@ export function ensureNativeStringHelpers(ctx: CodegenContext): void {
       exported: false,
     });
   }
+
+  // (#40) Replace the ASCII-only toUpperCase/toLowerCase above with full Unicode
+  // simple + special (1:N) case mapping. emitNativeCaseConversion appends the
+  // Unicode helpers and re-points the public `__str_to{Upper,Lower}Case` names in
+  // nativeStrHelpers at them (the ASCII blocks become dead, wasm-opt drops them).
+  // Emitted here, AFTER __str_flatten is registered, so the Unicode helpers can
+  // flatten a cons-string input.
+  emitNativeCaseConversion(ctx, strTypeIdx, strDataTypeIdx, anyStrTypeIdx);
 
   // --- $__str_getSubstitution(replacement, matched, prefix, suffix) -> ref $NativeString ---
   // #1822 — expand `$` patterns in a replacement string per ECMAScript

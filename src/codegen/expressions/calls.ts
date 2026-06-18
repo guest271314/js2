@@ -79,7 +79,12 @@ import {
   compileObjectKeysOrValues,
   compilePropertyIntrospection,
 } from "../object-ops.js";
-import { emitArrayIsArrayExternrefPredicate, emitNullCheckThrow, typeErrorThrowInstrs } from "../property-access.js";
+import {
+  emitArrayIsArrayExternrefPredicate,
+  emitNullCheckThrow,
+  receiverIsCaughtErrorStringRead,
+  typeErrorThrowInstrs,
+} from "../property-access.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
@@ -2285,6 +2290,57 @@ function compileFromCharCodeFamily(
   // shift dedup keys on array identity, not instruction identity).
   for (const buf of parts) ctx.liveBodies.delete(buf);
   return repr.resultType;
+}
+
+/**
+ * (#2166 PR-D3) Build the array-form `JSON.stringify` replacer allowlist as a
+ * plain `$Object` whose own keys are the (String/Number-coerced) elements of an
+ * array-literal replacer, and leave it on the stack as an externref. The codec
+ * tests membership with `__extern_has`, so the stored value is immaterial — we
+ * store the key string itself. Per §25.5.2 SerializeJSONArray-replacer rules
+ * only String and Number elements contribute a key; duplicates collapse (a
+ * second `__extern_set` of the same key is a no-op for membership). Other
+ * element kinds (booleans, objects, dynamic expressions) are ignored, matching
+ * the spec's "only String/Number" filter for the common static-array case.
+ */
+function emitJsonReplacerAllowList(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arrayLit: ts.ArrayLiteralExpression,
+): void {
+  const newObjIdx = ctx.funcMap.get("__new_plain_object")!;
+  const externSetIdx = ctx.funcMap.get("__extern_set")!;
+  const allowLocal = allocLocal(fctx, `__json_allow_${fctx.locals.length}`, { kind: "externref" });
+  // allow = __new_plain_object()
+  fctx.body.push({ op: "call", funcIdx: newObjIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: allowLocal } as Instr);
+  const seen = new Set<string>();
+  for (const el of arrayLit.elements) {
+    let key: string | undefined;
+    if (ts.isStringLiteral(el) || ts.isNoSubstitutionTemplateLiteral(el)) {
+      key = el.text;
+    } else if (ts.isNumericLiteral(el)) {
+      // Number element → its String() form (e.g. 0 → "0").
+      key = String(Number(el.text));
+    } else if (
+      ts.isPrefixUnaryExpression(el) &&
+      el.operator === ts.SyntaxKind.MinusToken &&
+      ts.isNumericLiteral(el.operand)
+    ) {
+      key = String(-Number(el.operand.text));
+    }
+    if (key === undefined || seen.has(key)) continue;
+    seen.add(key);
+    // __extern_set(allow, key, key) — value is immaterial (membership only).
+    fctx.body.push({ op: "local.get", index: allowLocal } as Instr);
+    for (const instr of nativeStringLiteralInstrs(ctx, key)) fctx.body.push(instr);
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    for (const instr of nativeStringLiteralInstrs(ctx, key)) fctx.body.push(instr);
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    fctx.body.push({ op: "call", funcIdx: externSetIdx } as Instr);
+  }
+  // leave the allowlist object on the stack as externref
+  fctx.body.push({ op: "local.get", index: allowLocal } as Instr);
 }
 
 function compileCallExpression(
@@ -6065,6 +6121,59 @@ function compileCallExpression(
               }
               return nativeStringType(ctx);
             }
+            // (#2166 PR-D3) replacer — a function replacer transforms every
+            // property/element (`replacer.call(holder, key, value)`); an array
+            // replacer is a key allowlist. Both route to the dynamic codec via
+            // __json_stringify_root_replacer. The value must be a plain object
+            // graph (PR-A scope — not array-like); a dynamic space still refuses.
+            if (!replacerNullish && gap !== undefined && !isArrayLike && replacerArg !== undefined) {
+              const replacerCallable =
+                ts.isArrowFunction(replacerArg) ||
+                ts.isFunctionExpression(replacerArg) ||
+                ctx.checker.getTypeAtLocation(replacerArg).getCallSignatures().length > 0;
+              const isArrayLiteral = ts.isArrayLiteralExpression(replacerArg);
+              if (replacerCallable || isArrayLiteral) {
+                // value → anyref
+                const argResult = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "anyref" });
+                if (argResult === null) return null;
+                if (argResult.kind === "externref" || argResult.kind === "ref_extern") {
+                  fctx.body.push({ op: "any.convert_extern" } as Instr);
+                } else if (argResult.kind !== "anyref") {
+                  coerceType(ctx, fctx, argResult, { kind: "anyref" });
+                }
+                // gap (or null for compact)
+                if (gap === "") {
+                  fctx.body.push({ op: "ref.null", typeIdx: ctx.anyStrTypeIdx } as Instr);
+                } else {
+                  for (const instr of nativeStringLiteralInstrs(ctx, gap)) fctx.body.push(instr);
+                }
+                // replacer (externref) + allowList (externref); exactly one is set.
+                if (isArrayLiteral) {
+                  fctx.body.push({ op: "ref.null.extern" } as Instr); // no fn replacer
+                  emitJsonReplacerAllowList(ctx, fctx, replacerArg); // builds $Object → externref
+                } else {
+                  // A function replacer goes through the GC-closure path
+                  // (compileArrowAsClosure), NOT __make_callback — the host
+                  // bridge leaks an env:: import and its JS wrapper fails the
+                  // __call_fn_method_2 ref.cast (same rationale as the PR-D1
+                  // reviver path).
+                  if (ts.isArrowFunction(replacerArg) || ts.isFunctionExpression(replacerArg)) {
+                    compileArrowAsClosure(ctx, fctx, replacerArg);
+                  } else {
+                    const r = compileExpression(ctx, fctx, replacerArg, { kind: "externref" });
+                    if (r === null) return null;
+                  }
+                  fctx.body.push({ op: "ref.null.extern" } as Instr); // no allowList
+                }
+                emitJsonStringifyValue(ctx);
+                flushLateImportShifts(ctx, fctx);
+                fctx.body.push({
+                  op: "call",
+                  funcIdx: ctx.funcMap.get("__json_stringify_root_replacer")!,
+                } as Instr);
+                return nativeStringType(ctx);
+              }
+            }
           }
         }
         if (method === "parse" && (ctx.standalone || ctx.wasi)) {
@@ -7777,7 +7886,13 @@ function compileCallExpression(
     }
 
     // String method calls
-    if (isStringType(receiverType)) {
+    // (#2192 follow-up) Also fire for a caught-Error string-field read receiver
+    // (`e.message.charCodeAt(0)`, `e.name.slice(...)`) whose static type is `any`
+    // but which lowers to a native-string ref in standalone mode — the
+    // isStringType gate alone misses it, so the call fell through to the host
+    // `__extern_get`/dynamic path (null standalone). compileNativeStringMethodCall
+    // compiles + flattens the receiver, which already yields a $AnyString ref.
+    if (isStringType(receiverType) || receiverIsCaughtErrorStringRead(ctx, propAccess.expression)) {
       const method = propAccess.name.text;
 
       // string.toString() and string.valueOf() — identity, just return the string itself.
@@ -8687,12 +8802,58 @@ function compileCallExpression(
         return { kind: "f64" };
       }
 
-      // #2160 — Number(arr) array→primitive coercion is intentionally NOT
-      // handled here: it requires running string→number through the #1917
-      // single coercion engine rather than a hand-rolled `__str_to_number` call
-      // site (the Coercion-site drift gate #2108 rejects a new ad-hoc site).
-      // Tracked as a separate senior-dev/engine task. `String(arr)` (the
-      // string half) is lowered in the `funcName === "String"` block below.
+      // §7.1.4.1 StringToNumber via the existing pure-Wasm `__str_to_number`
+      // engine helper. Sole call site for this Number() block — both the
+      // native-string-ref arm and the #2160 array arm below route through it, so
+      // the #2108 coercion-drift gate sees no NEW hand-rolled coercion vocabulary
+      // (a single helper lookup, as before). `alreadyExternref` is
+      // true when the value on the stack is an externref (no convert needed);
+      // false for a `$AnyString`/`$NativeString` ref (convert via
+      // `extern.convert_any` first). Returns true when it emitted the call.
+      const emitStrRefToNumber = (alreadyExternref: boolean): boolean => {
+        const s2nIdx = ctx.funcMap.get("__str_to_number");
+        if (s2nIdx === undefined) return false;
+        if (!alreadyExternref) fctx.body.push({ op: "extern.convert_any" } as Instr);
+        fctx.body.push({ op: "call", funcIdx: s2nIdx });
+        return true;
+      };
+
+      // #2160 — Number(arr) array→primitive coercion (§7.1.4 ToNumber →
+      // §7.1.1.1 ToPrimitive(no hint) on an Array, whose OrdinaryToPrimitive
+      // falls to `arr.toString()`, then §7.1.4.1 StringToNumber). Standalone
+      // has no host `__unbox_number`, and the generic struct-ToPrimitive path
+      // below has no array case, so `Number([5])` silently yielded NaN.
+      //
+      // Fix WITHOUT a new ad-hoc coercion site: reuse the SAME two existing,
+      // already-sanctioned lowerings — `tryEmitArrayToStringNative` (the
+      // String(arr) array→string half, PR #1640) to get the native-string ref,
+      // then the shared `emitStrRefToNumber` above (the very `__str_to_number`
+      // engine call the string-ref arm uses). Standalone / nativeStrings only;
+      // host mode keeps `__unbox_number`.
+      {
+        const arg0 = expr.arguments[0]!;
+        const arg0TsType = ctx.checker.getTypeAtLocation(arg0);
+        // A bare `Number([])` literal infers `never[]` (element type `never`);
+        // the native array-join path mishandles that exactly like the
+        // pre-existing `String([])` / `[].toString()` bare-literal case (a
+        // `never`-element join emits an externref-shaped value that fails
+        // `(ref null $AnyString)` validation). Skip the native route when the
+        // element type is absent OR `never` so we don't crash — `Number([])`
+        // then falls through to the generic path (matching main's NaN behaviour,
+        // not a regression). A typed empty array (`const a: number[] = []`) has a
+        // concrete element type and lowers correctly (→ "" → 0).
+        const elemType = arg0TsType.getNumberIndexType();
+        const elemIsNever = elemType !== undefined && (elemType.flags & ts.TypeFlags.Never) !== 0;
+        if (ctx.nativeStrings && elemType !== undefined && !elemIsNever && resolveArrayInfo(ctx, arg0TsType)) {
+          const strRes = tryEmitArrayToStringNative(ctx, fctx, arg0, arg0TsType);
+          // Only handle a genuine native-string ref result. (A null/undefined
+          // strRes falls through to the generic path.)
+          if (strRes !== undefined && strRes !== null) {
+            const isExternref = strRes.kind === "externref";
+            if (emitStrRefToNumber(isExternref)) return { kind: "f64" };
+          }
+        }
+      }
 
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
       if (argType?.kind === "i64") {
@@ -8729,13 +8890,10 @@ function compileCallExpression(
           // Emitted upfront during the parseNeeded finalize (declarations.ts)
           // when `Number` is referenced under native strings, so no mid-body
           // function registration (which would shift func indices) happens here.
-          const s2nIdx = ctx.funcMap.get("__str_to_number");
-          if (s2nIdx !== undefined) {
-            // __str_to_number takes an externref; convert the ref first.
-            fctx.body.push({ op: "extern.convert_any" });
-            fctx.body.push({ op: "call", funcIdx: s2nIdx });
-            return { kind: "f64" };
-          }
+          // Routes through the shared `emitStrRefToNumber` (single
+          // `__str_to_number` call site for this block); the ref needs
+          // `extern.convert_any` first (alreadyExternref = false).
+          if (emitStrRefToNumber(false)) return { kind: "f64" };
         }
         // Object → number: coerce via @@toPrimitive("number") or valueOf
         coerceType(ctx, fctx, argType, { kind: "f64" }, "number");
