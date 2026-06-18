@@ -2,9 +2,9 @@
 id: 2159
 title: "Standalone TypedArray/DataView/ArrayBuffer conformance residual (~1,308 tests)"
 status: in-progress
-sprint: 63
+sprint: 64
 created: 2026-06-15
-updated: 2026-06-17
+updated: 2026-06-18
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -214,3 +214,54 @@ harness issue on upstream/main, not a regression).
 offset-windowing representation on the **hot `a[i]` element-access path**
 (`compileElementAccessBody` / all typed-array access) — a broad, high-blast
 change routed to an architect spec (`$__subview` design), not folded here.
+
+## Triage (2026-06-18, cs-2164) — integer typed-array element fidelity is representation-gated, NOT a point fix
+
+Probed the standalone typed-array element surface for a tractable next slice and
+found the dominant remaining *value-fidelity* gap is **representation-level**, so
+documenting precise scope rather than shipping a no-op:
+
+**Finding — only `Uint8Array` has packed storage; every other integer view is
+f64-backed with NO element-width wrapping.** `typedArrayVecStorage` (index.ts:173)
+returns `i8`/`i8_byte` storage **only** for `Uint8Array` (under WASI/standalone);
+`Int8Array`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`, `Float32Array`
+all fall through to `f64` storage. Consequences, verified standalone AND host
+(so this is a general representation gap, not standalone-specific):
+
+| repro | actual | spec |
+|---|---|---|
+| `Int8Array; a[0]=200; a[0]` | `200` | `-56` (ToInt8 + sign-extend) |
+| `Int16Array; a[0]=40000; a[0]` | `40000` | `-25536` |
+| `Uint16Array; a[0]=-1; a[0]` | `-1` | `65535` (ToUint16) |
+
+The f64 store keeps the full double with no `ToInt8`/`ToUint16`/… wrapping, so no
+read-side extend can recover the right value. `Uint8Array` is correct today
+**because** it already uses packed `i8` storage (`a[0]=300 → 44`, `-1 → 255`
+verified).
+
+**Two coupled fixes are required, and both are representation-level:**
+1. **Read signedness** (small, but inert alone): the `array.get*` op for a packed
+   `i8`/`i16` element is chosen from the *storage* kind, hard-coded `i8→get_u`,
+   `i16→get_s` — wrong for a signed `Int8Array` (needs `get_s`) and an unsigned
+   `Uint16Array` (needs `get_u`). The view's signedness must come from the
+   receiver's TS type. A prototype helper (`typedArrayPackedSignedness` →
+   `array.get_s`/`get_u` per `Int*`/`Uint*`) threads cleanly into
+   `compileElementAccessBody` + `emitBoundsCheckedArrayGet`, but it is **inert
+   until** the views actually use packed storage (only `Uint8Array` does today,
+   and it's already right) — so it has zero conformance movement on its own.
+2. **Packed storage for all integer views** (the real win, architect-scope):
+   extend `typedArrayVecStorage` to map `Int8Array`/`Uint8ClampedArray` → `i8`,
+   `Int16Array`/`Uint16Array` → `i16`, `Int32Array`/`Uint32Array` → `i32`, so the
+   store `array.set` truncates to the element width (correct ToInt/ToUint
+   wrapping) and the read sign/zero-extends. This touches the marshalling
+   boundary (`wrapExports` f64-vec assumption, #1700), `__vec_set_byte`/byte
+   dispatch, `byteLength` scaling (already name-keyed), `.buffer`, and the
+   ctor/method element-coercion sites — a broad, high-blast representation change
+   that should be an **architect spec** alongside the #46 subview windowing, not
+   a dev slice.
+
+**Recommendation:** route the packed integer-typed-array storage migration to an
+architect (pairs naturally with #46 `$__subview` since both rework the
+element-access representation). The read-signedness helper above is ready to fold
+in *as part of* that change. No code shipped from this triage — the prior
+slices (1, 2a, fill, #38 DataView windowing) stand. **#2159 stays open.**

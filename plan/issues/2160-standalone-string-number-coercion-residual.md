@@ -3,7 +3,7 @@ id: 2160
 title: "Standalone String/Number method & coercion conformance residual (~635 tests)"
 status: ready
 assignee: ttraenkler/cs-2160
-sprint: 63
+sprint: 64
 created: 2026-06-15
 updated: 2026-06-18
 priority: high

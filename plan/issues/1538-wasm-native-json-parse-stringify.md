@@ -12,7 +12,7 @@ task_type: feature
 area: runtime
 language_feature: json
 goal: standalone-wasm
-sprint: 63
+sprint: 64
 related: [1535, 1537]
 ---
 # #1538 — Wasm-native JSON.parse / JSON.stringify

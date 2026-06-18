@@ -2,7 +2,7 @@
 id: promise-async-capability-residual
 title: "Promise residual: NewPromiseCapability(C) for custom constructors + resolver-element-function object semantics (~163 fails)"
 status: ready
-sprint: 63
+sprint: 64
 created: 2026-06-17
 updated: 2026-06-18
 priority: medium

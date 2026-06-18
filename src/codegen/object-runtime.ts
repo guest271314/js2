@@ -6282,7 +6282,20 @@ function boxVecElementToExternref(ctx: CodegenContext, elemType: ValType): Instr
     if (boxIdx === undefined) return null;
     return [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr];
   }
-  // externref / ref / ref_null / f32 / i64 / v128 → no arm (see scope note).
+  // (#2162b) A carrier whose `data` array element is EXACTLY `externref` (read
+  // from `arrDef.element`, never the `"externref"` map key — see the scope note
+  // above and [[reference_vec_externref_key_not_uniform]]) needs only an
+  // identity pass-through: the loaded element is already an `externref`, so it
+  // satisfies the helper's `externref` return with no boxing. This is the
+  // canonical externref `$Vec` that `arr.entries()`/`.keys()`/`.values()` and
+  // the spread/`Array.from` materialization hand back. The dangerous variants
+  // the scope note warns about are the `ref`/`ref_null`-element carriers (the
+  // `arguments`/closure-arg vecs), which would leave a `(ref null N)` on the
+  // `externref` return — those stay skipped below.
+  if (elemType.kind === "externref") {
+    return [];
+  }
+  // ref / ref_null / f32 / i64 / v128 → no arm (see scope note).
   return null;
 }
 
