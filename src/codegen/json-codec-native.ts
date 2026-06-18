@@ -1017,11 +1017,7 @@ export function emitJsonStringifyValue(ctx: CodegenContext): number {
   // selects compact output; the worker's separators collapse to "".
   const newObjIdx = ctx.funcMap.get("__new_plain_object")!;
   const externSetIdx = ctx.funcMap.get("__extern_set")!;
-  const rootRepTypeIdx = addFuncType(
-    ctx,
-    [anyref, strRefNull, { kind: "externref" }, { kind: "externref" }],
-    [strRef],
-  );
+  const rootRepTypeIdx = addFuncType(ctx, [anyref, strRefNull, { kind: "externref" }, { kind: "externref" }], [strRef]);
   const rootRepFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
   ctx.funcMap.set("__json_stringify_root_replacer", rootRepFuncIdx);
   // locals: 4 RR_ROOT externref  5 RR_VAL anyref  6 RR_RES strRefNull
