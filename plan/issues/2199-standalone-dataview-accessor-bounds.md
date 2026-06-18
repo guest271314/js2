@@ -62,12 +62,21 @@ new host imports):
   (the last computed in i64 so the `trunc_sat(+Infinity)=i32.MAX` case can't
   overflow). Valid accesses are byte-identical to before.
 
-### Known limitation (out of scope)
+### Follow-ups
 
-For **setters**, §24.2.1.2 evaluates `ToNumber(value)` BEFORE the bounds throw;
-this fix throws before compiling the setter value, so a `value` with observable
-side effects would be skipped on an out-of-bounds set. None of the targeted
-detached-buffer cluster tests exercise that ordering; deferred.
+- **Setter `ToNumber(value)` ordering** — §24.2.1.2 evaluates `ToNumber(value)`
+  BEFORE the bounds throw; this PR threw before compiling the setter value, so a
+  side-effecting value was skipped on an out-of-bounds set. **Fixed in #2199b**
+  (split the guard into index-throw → value compile → bounds-throw).
+- **Detached-buffer TypeError (§24.2.1.1 step 7)** — NOT addressed here and a
+  separate, larger slice: standalone has **no detached-ArrayBuffer
+  representation** at all (`ArrayBuffer.prototype.transfer` does not detach the
+  source — `ab.byteLength` stays non-zero, no detached-flag exists). A
+  detached-TypeError guard would need (a) a detached-flag field on the
+  ArrayBuffer i32-byte vec struct, (b) `transfer()`/`$DETACHBUFFER` setting it,
+  (c) a TypeError guard in the accessor prologue (after ToIndex's RangeError).
+  The targeted `…-after-toindex-byteoffset` cluster does NOT exercise it (ToIndex
+  RangeError fires first), so it's intentionally left for a follow-up issue.
 
 ## Test Results
 
