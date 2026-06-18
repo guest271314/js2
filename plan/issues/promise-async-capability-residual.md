@@ -4,7 +4,7 @@ title: "Promise residual: NewPromiseCapability(C) for custom constructors + reso
 status: ready
 sprint: 63
 created: 2026-06-17
-updated: 2026-06-17
+updated: 2026-06-18
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -107,3 +107,62 @@ Run each file in its **own** subprocess — async rejections from the host
 bridge (illegal-cast, bucket 2) escape try/catch onto the microtask queue and
 kill the process otherwise. Failing-file list derived from the baseline JSONL
 filtered to `test/built-ins/Promise` + `status != pass`.
+
+---
+
+## Implementation log (sdev-async2, 2026-06-18) — PR-A: executor invocation
+
+Re-validated on upstream/main @ 916169c87 (after #2026 PR-1b landed). The
+*first* concrete bug is narrower and more fundamental than the
+NewPromiseCapability framing: **the inline `new Promise(executor)` executor was
+never invoked at all** — independent of custom constructors / combinators.
+
+### Root cause (precise)
+
+`isHostCallbackArgument` (`src/codegen/closures.ts`) has a `NewExpression` arm
+that returns `true` for any constructor argument whose callee is not a
+user-defined class. So `new Promise((resolve, reject) => …)` routed its executor
+through the `__make_callback` host-callback path. For an **inline** executor
+that path emitted no `__call_fn_*` closure dispatcher export, so the host
+`Promise_new` import (`new Promise(_maybeWrapCallable(executor, 2, …))`) could
+not turn the wasm closure into a JS-callable — `_maybeWrapCallable` returned the
+raw struct, the executor was never called, and `resolve`/`reject` were
+`undefined`. This is the "executor param stripped + invocation elided" symptom.
+
+Proof: the **pre-assigned** form (`const exec = …; new Promise(exec)`) already
+worked, because the arrow is compiled as a first-class closure at the
+*assignment* site (parent is a VariableDeclaration, not the NewExpression),
+which emits `__call_fn_2`. Bucketed via probes:
+`new Promise(inlineArrow)` → no `__call_fn`/`__is_closure` exports, executor
+not invoked; `const e=…; new Promise(e)` → exports present, executor invoked
+(captured write visible).
+
+### Fix (PR-A — shipped)
+
+In `isHostCallbackArgument`, return `false` for the `Promise` constructor so the
+executor compiles as a first-class **closure** (same working path as the
+assigned form). The host `Promise_new` then wraps it via `__call_fn_2`. Now:
+executor invoked synchronously, captures mutate, `resolve`/`reject` are real
+callable functions, `new Promise(...)` returns a genuine object. Tests:
+`tests/issue-28-promise-executor-invocation.test.ts` (6 cases). No regression in
+`promise-combinators` (its 2 pre-existing `Compile failed` cases fail identically
+with/without this change — a worktree-harness artifact, not this fix).
+
+### Out of scope / follow-ups (still open under this issue / #1042 / #1326)
+
+- **await-resumption / microtask settling.** `resolve(v)` settles the host JS
+  Promise, but a compiled `await p` does not yet resume from it (the async
+  state-machine ↔ host-microtask wiring is #1042/#1326). PR-A fixes the
+  *synchronous* executor protocol only.
+- **Named inline executor** (`new Promise(function exec(resolve){…})`) still
+  fails ("Promise resolver [object Object] is not a function") — a *named*
+  function-expression is registered as a named func, not a first-class closure,
+  so it skips the `__call_fn` path. Anonymous fn-expr and arrow both work.
+  Narrow follow-up, separate from the closure-routing fix.
+- **Standalone (`--target wasi`/`standalone`)** still emits the allowlisted
+  `env.Promise_new` host import — `new Promise` is not yet pure-Wasm (that is the
+  #1326 microtask-queue work). PR-A compiles in standalone (executor is now a
+  proper closure) but a true no-host runtime needs the Wasm-native Promise.
+- **NewPromiseCapability(C) for custom constructors + resolver-element-function
+  object semantics** (the original ~163-fail combinator residual) — unchanged by
+  PR-A; remains the senior-scale body of this issue.
