@@ -191,8 +191,8 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   toPrecision: 1,
   // Zero-arity String/Number/Boolean/Object proto methods (ES2024) — fold
   // `<method>.length` to 0 so the meta-read path (`tryCompileStandalone-
-  // BuiltinProtoMemberMeta`) reports the spec arity.
-  charAt: 1,
+  // BuiltinProtoMemberMeta`) reports the spec arity. (`charAt` arity 1 is set
+  // in the String batch above.)
   toLowerCase: 0,
   toUpperCase: 0,
   toLocaleLowerCase: 0,
