@@ -408,3 +408,33 @@ coercion (the call arm must box its primitive return only when widening fires,
 and VOID_RESULT calls must never widen). The standalone caveat (host `undefined`
 falls back to `ref.null.extern`, indistinguishable from null) is unchanged and
 out of scope, per the plan.
+
+## Investigation note (2026-06-18, cs-2163) — call-arm widening blocked by late-import shift
+
+Reproduced the remaining optional-**call** gap on `main` (`typeof o?.f(1)` →
+`"number"`, `"" + o?.f(1)` → `"NaN"`, `o?.f(1) === undefined` → false for a
+nullish receiver). Attempted the planned widen-to-externref + `emitUndefined`
+fix in `calls-optional.ts` (compute `widenToUndefinedExternref` from the chain's
+`isNullablePrimitiveType` static type; null arm `emitUndefined`; else arm
+`coerceType(f64 → externref)`).
+
+**Why it's not a quick slice — confirms the prior dev's revert.** The dominant
+repro form `o?.f(1)` resolves through the **closure-field delegate**
+(`compileCallablePropertyCall`), which emits a `call_ref` for the closure
+**inside** the non-null `else` body. Appending the `f64 → externref` coercion
+afterward pulls in `__box_number` as a **late import**, and late-import
+registration **shifts function indices** (the `addUnionImports` /
+`flushLateImportShifts` machinery) — desyncing the `call_ref`/funcIdx already
+baked into `elseInstrs`. Result: a runtime `illegal cast` trap on BOTH the
+nullish and the **non-nullish** paths (regressing the working `o?.f(1) === 2`
+case), exactly the trap the 2026-06-15 attempt hit.
+
+**The fix that will work** (deferred — needs the careful ordering): register +
+flush `__box_number` / `__box_boolean` (and `__get_undefined`) **before**
+compiling the call body, so no index shift happens after the call's funcIdx is
+emitted (the #1749 pattern the property-access fix sidesteps because its else arm
+ends in a `struct.get`, not a `call`). The widening must also be gated to NOT
+fire for the closure-field-delegate path unless the box helpers are pre-flushed,
+and must never fire for `VOID_RESULT` calls. This is genuinely `reasoning_effort:
+max` (the issue's own rating) — left for a focused architect-spec'd pass. Left
+untouched on `main`; no regression introduced.
