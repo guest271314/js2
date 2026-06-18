@@ -485,7 +485,7 @@ export function compileNestedFunctionDeclaration(
 
     // Set up `arguments` object if the function body references it
     if (stmt.body && bodyUsesArguments(stmt.body)) {
-      emitArgumentsObject(ctx, liftedFctx, paramTypes, 0, isStrictFunction(stmt));
+      emitArgumentsObject(ctx, liftedFctx, paramTypes, 0, isStrictFunction(stmt, ctx.inferModuleStrictArguments));
     }
 
     if (nativeGenInfo) {
@@ -735,7 +735,13 @@ export function compileNestedFunctionDeclaration(
 
     // Set up `arguments` object if the function body references it
     if (stmt.body && bodyUsesArguments(stmt.body)) {
-      emitArgumentsObject(ctx, liftedFctx, paramTypes, captures.length, isStrictFunction(stmt));
+      emitArgumentsObject(
+        ctx,
+        liftedFctx,
+        paramTypes,
+        captures.length,
+        isStrictFunction(stmt, ctx.inferModuleStrictArguments),
+      );
     }
 
     if (isGenerator) {

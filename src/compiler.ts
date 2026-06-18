@@ -1129,6 +1129,10 @@ export async function compileMultiSource(
         wasi: options.target === "wasi",
         strictNoHostImports: options.strictNoHostImports,
         standalone: options.target === "standalone",
+        // (#2119) default true (module input is strict → unmapped arguments);
+        // the test262 harness passes false for script tests to avoid the
+        // synthetic `export function test()` wrapper unmapping sloppy arguments.
+        inferModuleStrictArguments: options.inferModuleStrictArguments,
       });
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
@@ -1438,6 +1442,10 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
         wasi: options.target === "wasi",
         strictNoHostImports: options.strictNoHostImports,
         standalone: options.target === "standalone",
+        // (#2119) default true (module input is strict → unmapped arguments);
+        // the test262 harness passes false for script tests to avoid the
+        // synthetic `export function test()` wrapper unmapping sloppy arguments.
+        inferModuleStrictArguments: options.inferModuleStrictArguments,
       });
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
