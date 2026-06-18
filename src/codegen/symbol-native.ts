@@ -22,8 +22,9 @@ import type { Instr, ValType } from "../ir/types.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { allocLocal } from "./context/locals.js";
 import { ensureSymbolCounter } from "./literals.js";
-import { ensureNativeStringHelpers } from "./native-strings.js";
+import { ensureNativeStringHelpers, nativeStringType } from "./native-strings.js";
 import { addFuncType, getOrRegisterArrayType } from "./registry/types.js";
+import { compileNativeStringLiteral } from "./string-ops.js";
 
 /** Initial capacity of the description table (covers small symbol counts without
  *  a grow; ids start at 100 so the very first user symbol already forces one
@@ -653,4 +654,58 @@ function emitDescStoreInline(
     { op: "local.get", index: keyLocal },
     { op: "array.set", typeIdx: descArrTypeIdx } as Instr,
   ];
+}
+
+/**
+ * (#2163) Emit `Symbol.prototype.toString` (§20.4.3.3 → SymbolDescriptiveString,
+ * §20.4.3.3.1) in `noJsHost` mode, producing the native string
+ * `"Symbol(" + (desc ?? "") + ")"`.
+ *
+ * Stack in:  `[i32 id]`            (the symbol's i32 counter id)
+ * Stack out: `[ref $AnyString]`    (the descriptive string)
+ *
+ * `desc` is read from the native description side table (`emitSymbolDescLoad`);
+ * a missing description (`undefined`) contributes the empty string, matching
+ * `Symbol().toString() === "Symbol()"`. Zero host imports — the prefix/suffix
+ * are inline native-string literals concatenated via the native `__str_concat`
+ * helper (same lowering template literals use).
+ */
+export function emitSymbolToString(ctx: CodegenContext, fctx: FunctionContext): void {
+  ensureNativeStringHelpers(ctx);
+  const concatIdx = ctx.nativeStrHelpers.get("__str_concat")!;
+  const anyStr = nativeStringType(ctx); // ref $AnyString
+  const descLocal = allocLocal(fctx, `__symstr_desc_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: ctx.anyStrTypeIdx,
+  });
+
+  // desc = descTable[id]  (ref_null $AnyString; null ⇒ undefined ⇒ "")
+  emitSymbolDescLoad(ctx, fctx);
+  fctx.body.push({ op: "local.set", index: descLocal });
+
+  // left = "Symbol("
+  compileNativeStringLiteral(ctx, fctx, "Symbol(");
+
+  // right = desc ?? ""  (collapse the undefined sentinel to the empty string)
+  fctx.body.push({ op: "local.get", index: descLocal });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: anyStr },
+    then: [
+      // undefined description → ""
+      { op: "i32.const", value: 0 } as Instr, // len
+      { op: "i32.const", value: 0 } as Instr, // off
+      { op: "array.new_fixed", typeIdx: ctx.nativeStrDataTypeIdx, length: 0 } as Instr,
+      { op: "struct.new", typeIdx: ctx.nativeStrTypeIdx } as Instr,
+    ],
+    else: [{ op: "local.get", index: descLocal } as Instr, { op: "ref.as_non_null" } as Instr],
+  } as Instr);
+
+  // "Symbol(" + desc
+  fctx.body.push({ op: "call", funcIdx: concatIdx });
+
+  // + ")"
+  compileNativeStringLiteral(ctx, fctx, ")");
+  fctx.body.push({ op: "call", funcIdx: concatIdx });
 }
