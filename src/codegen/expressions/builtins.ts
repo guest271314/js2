@@ -785,6 +785,486 @@ function ensureDateIsoStringHelper(ctx: CodegenContext): number {
   return funcIdx;
 }
 
+/** Three-letter weekday abbreviations, index 0 = Sunday (ECMA-262 §21.4.4.41.4). */
+const DATE_WEEKDAY_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+/** Three-letter month abbreviations, index 0 = January. */
+const DATE_MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
+
+/**
+ * (#2164 — formatters slice) Ensure the
+ * `__date_format_string(ts: i64, mode: i32) -> ref $NativeString` helper exists.
+ *
+ * Builds the non-ISO Date string formats purely in Wasm so standalone /
+ * nativeStrings modes (no JS host, no `__date_format` import) produce
+ * spec-correct results instead of the prior hard-coded placeholder. Standalone
+ * has no timezone database, so every format is rendered in **UTC** (matching the
+ * deterministic-clock decision in slice 1 and the UTC-for-local Date.parse in
+ * slice 2). `mode` selects the format:
+ *
+ *   1 toUTCString / toGMTString : `WkDay, DD Mon YYYY HH:mm:ss GMT`  (§21.4.4.43)
+ *   2 toString                  : `WkDay Mon DD YYYY HH:mm:ss GMT+0000 (Coordinated Universal Time)`
+ *   3 toDateString              : `WkDay Mon DD YYYY`                (§21.4.4.35)
+ *   4 toTimeString              : `HH:mm:ss GMT+0000 (Coordinated Universal Time)`
+ *   6 toLocaleString            : same as mode 2 (locale-independent fallback)
+ *   7 toLocaleDateString        : same as mode 3
+ *   8 toLocaleTimeString        : `HH:mm:ss` (no GMT suffix — common Intl-free shape)
+ *
+ * The caller guards an Invalid-Date receiver before invoking (those modes return
+ * the literal `"Invalid Date"` upstream — handled at the call site). Year is
+ * rendered with the §21.4.1.18 extended ±6-digit form for years <0 / >9999, else
+ * 4 digits (with a `-` sign and no zero-pad widening for negative non-extended is
+ * not reachable: civil years are calendar years). Returns
+ * `$NativeString(len, off=0, data)`; the buffer is sized for the longest format.
+ */
+function ensureDateFormatStringHelper(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get("__date_format_string");
+  if (existing !== undefined) return existing;
+
+  const MS_PER_DAY = 86400000n;
+  const civilIdx = ensureDateCivilHelper(ctx);
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+  const dataRef: ValType = { kind: "ref", typeIdx: strDataTypeIdx };
+
+  // func (param $ts i64) (param $mode i32) (result ref $NativeString)
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "i64" }, { kind: "i32" }], [{ kind: "ref", typeIdx: strTypeIdx }]);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set("__date_format_string", funcIdx);
+
+  // Param 0 $ts (i64), param 1 $mode (i32). Locals:
+  const L_BUF = 2, // ref $strData target i16 array
+    L_POS = 3, // i32 write cursor
+    L_PACKED = 4, // i64 year*10000 + month*100 + day
+    L_YEAR = 5, // i64
+    L_MSDAY = 6, // i64 [0, 86399999]
+    L_DAYS = 7, // i64 floor(ts / MS_PER_DAY)
+    L_TMP = 8, // i64 scratch (digit extraction)
+    L_DOW = 9, // i32 day-of-week 0..6 (0 = Sunday)
+    L_I32 = 10; // i32 scratch (month index / weekday index)
+  const body: Instr[] = [];
+
+  // Buffer sized for the longest format (toString ~ 64 code units). 72 is safe.
+  body.push(
+    { op: "i32.const", value: 72 } as Instr,
+    { op: "array.new_default", typeIdx: strDataTypeIdx } as Instr,
+    { op: "local.set", index: L_BUF } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "local.set", index: L_POS } as Instr,
+  );
+
+  // days = floor(ts / MS_PER_DAY)  (floor division, ts may be negative)
+  body.push(
+    { op: "local.get", index: 0 } as Instr,
+    { op: "i64.const", value: 0n } as Instr,
+    { op: "i64.ge_s" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i64" } },
+      then: [
+        { op: "local.get", index: 0 } as Instr,
+        { op: "i64.const", value: MS_PER_DAY } as Instr,
+        { op: "i64.div_s" } as Instr,
+      ],
+      else: [
+        { op: "local.get", index: 0 } as Instr,
+        { op: "i64.const", value: MS_PER_DAY - 1n } as Instr,
+        { op: "i64.sub" } as Instr,
+        { op: "i64.const", value: MS_PER_DAY } as Instr,
+        { op: "i64.div_s" } as Instr,
+      ],
+    } as unknown as Instr,
+    { op: "local.set", index: L_DAYS } as Instr,
+  );
+
+  // msOfDay = ts - days * MS_PER_DAY
+  body.push(
+    { op: "local.get", index: 0 } as Instr,
+    { op: "local.get", index: L_DAYS } as Instr,
+    { op: "i64.const", value: MS_PER_DAY } as Instr,
+    { op: "i64.mul" } as Instr,
+    { op: "i64.sub" } as Instr,
+    { op: "local.set", index: L_MSDAY } as Instr,
+  );
+
+  // packed = civil_from_days(days); year = packed / 10000
+  body.push(
+    { op: "local.get", index: L_DAYS } as Instr,
+    { op: "call", funcIdx: civilIdx } as Instr,
+    { op: "local.set", index: L_PACKED } as Instr,
+    { op: "local.get", index: L_PACKED } as Instr,
+    { op: "i64.const", value: 10000n } as Instr,
+    { op: "i64.div_s" } as Instr,
+    { op: "local.set", index: L_YEAR } as Instr,
+  );
+
+  // dow = ((days % 7) + 4 + 7) % 7   (epoch day 0 = Thursday = 4)
+  body.push(
+    { op: "local.get", index: L_DAYS } as Instr,
+    { op: "i64.const", value: 7n } as Instr,
+    { op: "i64.rem_s" } as Instr,
+    { op: "i32.wrap_i64" } as Instr,
+    { op: "i32.const", value: 4 + 7 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.const", value: 7 } as Instr,
+    { op: "i32.rem_s" } as Instr,
+    { op: "local.set", index: L_DOW } as Instr,
+  );
+
+  const writeChar = (ch: number): void => {
+    body.push(
+      { op: "local.get", index: L_BUF } as Instr,
+      { op: "local.get", index: L_POS } as Instr,
+      { op: "i32.const", value: ch } as Instr,
+      { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+      { op: "local.get", index: L_POS } as Instr,
+      { op: "i32.const", value: 1 } as Instr,
+      { op: "i32.add" } as Instr,
+      { op: "local.set", index: L_POS } as Instr,
+    );
+  };
+  const writeLiteral = (s: string): void => {
+    for (const ch of s) writeChar(ch.charCodeAt(0));
+  };
+  // Write `width` decimal digits of the non-negative i64 in `srcLocal`.
+  const writeDigits = (srcLocal: number, width: number): void => {
+    for (let d = 0; d < width; d++) {
+      const div = 10n ** BigInt(width - 1 - d);
+      body.push({ op: "local.get", index: L_BUF } as Instr, { op: "local.get", index: L_POS } as Instr);
+      body.push({ op: "local.get", index: srcLocal } as Instr);
+      if (div !== 1n) body.push({ op: "i64.const", value: div } as Instr, { op: "i64.div_s" } as Instr);
+      body.push(
+        { op: "i64.const", value: 10n } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "i32.wrap_i64" } as Instr,
+        { op: "i32.const", value: 0x30 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+        { op: "local.get", index: L_POS } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "local.set", index: L_POS } as Instr,
+      );
+    }
+  };
+  // Emit an if/else chain selecting one of `names` by the i32 in `idxLocal`,
+  // writing the chosen 3-letter abbreviation. Implemented as nested ifs so it
+  // works without a br_table.
+  const writeAbbrByIndex = (idxLocal: number, names: readonly string[]): void => {
+    // Emit `buf[pos++] = ch` for each char of `s` into an explicit Instr[].
+    const litInstrs = (s: string): Instr[] => {
+      const out: Instr[] = [];
+      for (const ch of s) {
+        out.push(
+          { op: "local.get", index: L_BUF } as Instr,
+          { op: "local.get", index: L_POS } as Instr,
+          { op: "i32.const", value: ch.charCodeAt(0) } as Instr,
+          { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+          { op: "local.get", index: L_POS } as Instr,
+          { op: "i32.const", value: 1 } as Instr,
+          { op: "i32.add" } as Instr,
+          { op: "local.set", index: L_POS } as Instr,
+        );
+      }
+      return out;
+    };
+    // Build the if-chain from the last index backwards so the innermost else is
+    // index 0 (the default abbreviation).
+    let chain: Instr[] = litInstrs(names[0]!);
+    for (let i = 1; i < names.length; i++) {
+      chain = [
+        { op: "local.get", index: idxLocal } as Instr,
+        { op: "i32.const", value: i } as Instr,
+        { op: "i32.eq" } as Instr,
+        { op: "if", blockType: { kind: "empty" }, then: litInstrs(names[i]!), else: chain } as unknown as Instr,
+      ];
+    }
+    body.push(...chain);
+  };
+
+  // Field extraction into scratch locals shared by the format builders.
+  const setMonthIdx = (): void => {
+    // monthIdx (0..11) = packed/100 % 100 - 1
+    body.push(
+      { op: "local.get", index: L_PACKED } as Instr,
+      { op: "i64.const", value: 100n } as Instr,
+      { op: "i64.div_s" } as Instr,
+      { op: "i64.const", value: 100n } as Instr,
+      { op: "i64.rem_s" } as Instr,
+      { op: "i64.const", value: 1n } as Instr,
+      { op: "i64.sub" } as Instr,
+      { op: "i32.wrap_i64" } as Instr,
+      { op: "local.set", index: L_I32 } as Instr,
+    );
+  };
+  const setDay = (): void => {
+    body.push(
+      { op: "local.get", index: L_PACKED } as Instr,
+      { op: "i64.const", value: 100n } as Instr,
+      { op: "i64.rem_s" } as Instr,
+      { op: "local.set", index: L_TMP } as Instr,
+    );
+  };
+  const writeYear = (): void => {
+    // 4-digit when 0..9999, else extended ±6 digits.
+    body.push(
+      { op: "local.get", index: L_YEAR } as Instr,
+      { op: "i64.const", value: 0n } as Instr,
+      { op: "i64.ge_s" } as Instr,
+      { op: "local.get", index: L_YEAR } as Instr,
+      { op: "i64.const", value: 9999n } as Instr,
+      { op: "i64.le_s" } as Instr,
+      { op: "i32.and" } as Instr,
+    );
+    const buf4: Instr[] = [];
+    for (let d = 0; d < 4; d++) {
+      const div = 10n ** BigInt(3 - d);
+      buf4.push(
+        { op: "local.get", index: L_BUF } as Instr,
+        { op: "local.get", index: L_POS } as Instr,
+        { op: "local.get", index: L_YEAR } as Instr,
+      );
+      if (div !== 1n) buf4.push({ op: "i64.const", value: div } as Instr, { op: "i64.div_s" } as Instr);
+      buf4.push(
+        { op: "i64.const", value: 10n } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "i32.wrap_i64" } as Instr,
+        { op: "i32.const", value: 0x30 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+        { op: "local.get", index: L_POS } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "local.set", index: L_POS } as Instr,
+      );
+    }
+    const buf6: Instr[] = [];
+    buf6.push(
+      { op: "local.get", index: L_BUF } as Instr,
+      { op: "local.get", index: L_POS } as Instr,
+      { op: "local.get", index: L_YEAR } as Instr,
+      { op: "i64.const", value: 0n } as Instr,
+      { op: "i64.lt_s" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [{ op: "i32.const", value: 0x2d } as Instr],
+        else: [{ op: "i32.const", value: 0x2b } as Instr],
+      } as unknown as Instr,
+      { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+      { op: "local.get", index: L_POS } as Instr,
+      { op: "i32.const", value: 1 } as Instr,
+      { op: "i32.add" } as Instr,
+      { op: "local.set", index: L_POS } as Instr,
+    );
+    buf6.push(
+      { op: "i64.const", value: 0n } as Instr,
+      { op: "local.get", index: L_YEAR } as Instr,
+      { op: "i64.sub" } as Instr,
+      { op: "local.get", index: L_YEAR } as Instr,
+      { op: "local.get", index: L_YEAR } as Instr,
+      { op: "i64.const", value: 0n } as Instr,
+      { op: "i64.lt_s" } as Instr,
+      { op: "select" } as Instr,
+      { op: "local.set", index: L_TMP } as Instr,
+    );
+    for (let d = 0; d < 6; d++) {
+      const div = 10n ** BigInt(5 - d);
+      buf6.push(
+        { op: "local.get", index: L_BUF } as Instr,
+        { op: "local.get", index: L_POS } as Instr,
+        { op: "local.get", index: L_TMP } as Instr,
+      );
+      if (div !== 1n) buf6.push({ op: "i64.const", value: div } as Instr, { op: "i64.div_s" } as Instr);
+      buf6.push(
+        { op: "i64.const", value: 10n } as Instr,
+        { op: "i64.rem_s" } as Instr,
+        { op: "i32.wrap_i64" } as Instr,
+        { op: "i32.const", value: 0x30 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "array.set", typeIdx: strDataTypeIdx } as Instr,
+        { op: "local.get", index: L_POS } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "local.set", index: L_POS } as Instr,
+      );
+    }
+    body.push({ op: "if", blockType: { kind: "empty" }, then: buf4, else: buf6 } as unknown as Instr);
+  };
+  // hh:mm:ss into the buffer.
+  const writeTimeHMS = (): void => {
+    // hours = msOfDay / 3600000
+    body.push(
+      { op: "local.get", index: L_MSDAY } as Instr,
+      { op: "i64.const", value: 3600000n } as Instr,
+      { op: "i64.div_s" } as Instr,
+      { op: "local.set", index: L_TMP } as Instr,
+    );
+    writeDigits(L_TMP, 2);
+    writeChar(0x3a);
+    body.push(
+      { op: "local.get", index: L_MSDAY } as Instr,
+      { op: "i64.const", value: 60000n } as Instr,
+      { op: "i64.div_s" } as Instr,
+      { op: "i64.const", value: 60n } as Instr,
+      { op: "i64.rem_s" } as Instr,
+      { op: "local.set", index: L_TMP } as Instr,
+    );
+    writeDigits(L_TMP, 2);
+    writeChar(0x3a);
+    body.push(
+      { op: "local.get", index: L_MSDAY } as Instr,
+      { op: "i64.const", value: 1000n } as Instr,
+      { op: "i64.div_s" } as Instr,
+      { op: "i64.const", value: 60n } as Instr,
+      { op: "i64.rem_s" } as Instr,
+      { op: "local.set", index: L_TMP } as Instr,
+    );
+    writeDigits(L_TMP, 2);
+  };
+
+  // Each mode's byte sequence is built into its own arm, then dispatched by an
+  // if-chain on $mode. Building per-mode keeps each format independent.
+  const buildArm = (mode: number): Instr[] => {
+    // The writer closures append to the shared `body`. Snapshot the current
+    // length, run the builders, then splice off exactly what they appended so
+    // each mode's instructions go into their own `if`-arm (not the main body).
+    const start = body.length;
+    switch (mode) {
+      case 1: // toUTCString: "WkDay, DD Mon YYYY HH:mm:ss GMT"
+        writeAbbrByIndex(L_DOW, DATE_WEEKDAY_ABBR);
+        writeLiteral(", ");
+        setDay();
+        writeDigits(L_TMP, 2);
+        writeChar(0x20);
+        setMonthIdx();
+        writeAbbrByIndex(L_I32, DATE_MONTH_ABBR);
+        writeChar(0x20);
+        writeYear();
+        writeChar(0x20);
+        writeTimeHMS();
+        writeLiteral(" GMT");
+        break;
+      case 3: // toDateString: "WkDay Mon DD YYYY"
+      case 7: // toLocaleDateString → same
+        writeAbbrByIndex(L_DOW, DATE_WEEKDAY_ABBR);
+        writeChar(0x20);
+        setMonthIdx();
+        writeAbbrByIndex(L_I32, DATE_MONTH_ABBR);
+        writeChar(0x20);
+        setDay();
+        writeDigits(L_TMP, 2);
+        writeChar(0x20);
+        writeYear();
+        break;
+      case 4: // toTimeString: "HH:mm:ss GMT+0000 (Coordinated Universal Time)"
+        writeTimeHMS();
+        writeLiteral(" GMT+0000 (Coordinated Universal Time)");
+        break;
+      case 8: // toLocaleTimeString: "HH:mm:ss"
+        writeTimeHMS();
+        break;
+      default: // 2 toString, 6 toLocaleString: date + " " + time + tz
+        writeAbbrByIndex(L_DOW, DATE_WEEKDAY_ABBR);
+        writeChar(0x20);
+        setMonthIdx();
+        writeAbbrByIndex(L_I32, DATE_MONTH_ABBR);
+        writeChar(0x20);
+        setDay();
+        writeDigits(L_TMP, 2);
+        writeChar(0x20);
+        writeYear();
+        writeChar(0x20);
+        writeTimeHMS();
+        writeLiteral(" GMT+0000 (Coordinated Universal Time)");
+        break;
+    }
+    return body.splice(start);
+  };
+
+  // Dispatch: nested ifs on $mode. Order: 1,3,7,4,8 then default (2/6).
+  const armUTC = buildArm(1);
+  const armDate = buildArm(3);
+  const armTime = buildArm(4);
+  const armLocaleTime = buildArm(8);
+  const armDefault = buildArm(2);
+
+  const eqMode = (m: number): Instr[] => [
+    { op: "local.get", index: 1 } as Instr,
+    { op: "i32.const", value: m } as Instr,
+    { op: "i32.eq" } as Instr,
+  ];
+  // if mode==1 -> UTC
+  // elif mode==3||7 -> Date
+  // elif mode==4 -> Time
+  // elif mode==8 -> LocaleTime
+  // else -> default (2/6)
+  const dateChain: Instr[] = [
+    { op: "local.get", index: 1 } as Instr,
+    { op: "i32.const", value: 3 } as Instr,
+    { op: "i32.eq" } as Instr,
+    { op: "local.get", index: 1 } as Instr,
+    { op: "i32.const", value: 7 } as Instr,
+    { op: "i32.eq" } as Instr,
+    { op: "i32.or" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: armDate,
+      else: [
+        ...eqMode(4),
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: armTime,
+          else: [
+            ...eqMode(8),
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: armLocaleTime,
+              else: armDefault,
+            } as unknown as Instr,
+          ],
+        } as unknown as Instr,
+      ],
+    } as unknown as Instr,
+  ];
+  body.push(...eqMode(1), {
+    op: "if",
+    blockType: { kind: "empty" },
+    then: armUTC,
+    else: dateChain,
+  } as unknown as Instr);
+
+  // return struct.new $NativeString(len = pos, off = 0, data = buf)
+  body.push(
+    { op: "local.get", index: L_POS } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "local.get", index: L_BUF } as Instr,
+    { op: "struct.new", typeIdx: strTypeIdx } as Instr,
+  );
+
+  ctx.mod.functions.push({
+    name: "__date_format_string",
+    typeIdx: funcTypeIdx,
+    locals: [
+      { name: "$buf", type: dataRef },
+      { name: "$pos", type: { kind: "i32" } },
+      { name: "$packed", type: { kind: "i64" } },
+      { name: "$year", type: { kind: "i64" } },
+      { name: "$msOfDay", type: { kind: "i64" } },
+      { name: "$days", type: { kind: "i64" } },
+      { name: "$tmp", type: { kind: "i64" } },
+      { name: "$dow", type: { kind: "i32" } },
+      { name: "$i32", type: { kind: "i32" } },
+    ],
+    body,
+    exported: false,
+  });
+
+  return funcIdx;
+}
+
 /**
  * Compile a Date method call on a Date struct receiver.
  * Returns undefined if this is not a Date method (caller should continue).
@@ -1832,8 +2312,41 @@ function compileDateMethodCall(
         releaseTempLocal(fctx, tsLocalShared);
         return anyStrType;
       }
-      releaseTempLocal(fctx, tsLocalShared);
-      return compileStringLiteral(ctx, fctx, "Thu Jan 01 1970 00:00:00 GMT+0000");
+      // (#2164 formatters slice) The remaining string formatters (toString,
+      // toUTCString/toGMTString, toDateString, toTimeString, toLocale*) build
+      // their spec format in pure Wasm via `__date_format_string(ts, mode)`.
+      // Standalone has no timezone DB, so all are rendered in UTC. An Invalid
+      // Date receiver (i64-MIN sentinel) yields the literal "Invalid Date"
+      // (§21.4.4.41.4 ToDateString → "Invalid Date") for every format.
+      {
+        const fmtStrIdx = ensureDateFormatStringHelper(ctx);
+        const anyStrType: ValType = { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
+        // if ts == i64-MIN (Invalid Date) -> "Invalid Date", else build format.
+        fctx.body.push(
+          { op: "local.get", index: tsLocalShared } as Instr,
+          { op: "i64.const", value: -9223372036854775808n } as Instr,
+          { op: "i64.eq" } as Instr,
+        );
+        const invalidArm: Instr[] = [];
+        {
+          const saved = fctx.body;
+          (fctx as { body: Instr[] }).body = invalidArm;
+          compileStringLiteral(ctx, fctx, "Invalid Date");
+          (fctx as { body: Instr[] }).body = saved;
+        }
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: anyStrType },
+          then: invalidArm,
+          else: [
+            { op: "local.get", index: tsLocalShared } as Instr,
+            { op: "i32.const", value: mode } as Instr,
+            { op: "call", funcIdx: fmtStrIdx } as Instr,
+          ],
+        } as unknown as Instr);
+        releaseTempLocal(fctx, tsLocalShared);
+        return anyStrType;
+      }
     }
 
     const fmtIdx = ensureLateImport(ctx, "__date_format", [{ kind: "i64" }, { kind: "i32" }], [{ kind: "externref" }]);
