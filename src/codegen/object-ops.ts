@@ -20,6 +20,7 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, cacheStringLiterals, getOrRegisterTupleType, resolveWasmType } from "./index.js";
+import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType, getOrRegisterVecType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
@@ -261,6 +262,27 @@ function emitDefinePropertyDescRuntime(
   }
   const descLocal = allocLocal(fctx, `__defprop_desc_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: descLocal });
+
+  // (#1629b) Standalone: there is no JS host, so the `__defineProperty_desc`
+  // import is refused (#1472 Phase B). Route to the Wasm-native
+  // `__obj_define_from_desc(obj, key, desc)` helper, which performs
+  // ToPropertyDescriptor over the descriptor `$Object` and dispatches to the
+  // native `__defineProperty_value` / `__defineProperty_accessor` store. The
+  // host-side `__descriptor_undefined` presence sidecar is not used standalone
+  // (the native helper reads presence directly via `__hasOwnProperty`), so the
+  // undefined-fields sidecar emission is host-only.
+  if (ctx.standalone) {
+    ensureObjectRuntime(ctx);
+    fctx.body.push({ op: "local.get", index: descLocal });
+    const nativeIdx = ctx.funcMap.get("__obj_define_from_desc");
+    if (nativeIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: nativeIdx });
+    } else {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    return { kind: "externref" };
+  }
+
   emitDescriptorUndefinedSidecars(ctx, fctx, descLocal, undefinedFields);
   fctx.body.push({ op: "local.get", index: descLocal });
 
