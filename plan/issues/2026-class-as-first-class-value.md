@@ -386,3 +386,97 @@ provided for extern class "K"` — confirmed. Traced the live path precisely:
   pure-Wasm (no host import) so both modes must pass.
 - Confirm no test262 `built-ins/`/`language/` regressions in the
   classes/new buckets (CI).
+
+### Implementation plan — #53: variable-spread runtime argv (sdev-ctor, 2026-06-18)
+
+PR-3a (#1699) made array-literal spread work via `flattenCallArgs` and turned a
+**non-flattenable** spread (`new K(...someVar)`) into a loud compile-time
+`reportError` (because the legacy `__new_` fallthrough trips the #2043/#51
+binary-emit crash in standalone). #53 makes that case actually WORK and removes
+the refuse.
+
+**Root cause it solves.** `emitDynamicNewFallback` pre-evaluates a
+COMPILE-TIME-fixed set of `argLocals` (one per positional arg) and each tag-arm
+reads `argLocals[i]`. A `...someVar` spread has a RUNTIME length, so there's no
+fixed arg count — `compileSpreadCallArgs` can't help (it targets one
+statically-known funcIdx, not a multi-tag runtime dispatch).
+
+**Design — runtime `$ObjVecArr` argv (reuses PR-1's tag dispatch; no funcref
+table).** When `args` contains a non-flattenable spread, instead of fixed
+`argLocals` build a runtime argv:
+1. Compile a running **`argv` `(ref $ObjVecArr)`** + an `argc` i32. `$ObjVecArr`
+   = `(array (mut externref))` (object-runtime.ts:273) — reuse, do NOT mint
+   (the #2009 canonicalization hazard). Size argv to an upper bound (sum of
+   non-spread args + each spread source's runtime `len`), or grow incrementally.
+2. For each plain positional arg: `compileExpression → externref → array.set
+   argv[k++]`.
+3. For each spread: `compileExpression(spread.expression)` → vec struct
+   `{len, data}` (the existing array-value representation, see
+   `compileSpreadCallArgs` extern.ts:519-540 for the extract pattern); loop
+   `for j in 0..len: argv[k++] = box(data[j])`. Box each element to externref
+   via `coerceType`.
+4. Each tag-arm (`buildCtorArm`) reads `argv[i]` with a RUNTIME bounds check:
+   `i < argc ? (array.get $ObjVecArr argv i) : ref.null.extern`, then coerces to
+   the ctor param ValType (the existing externref→ValType coerce). This swaps
+   the compile-time `i < argLocals.length` for a runtime `i < argc` — the only
+   change to the arm; the tag dispatch, no-match base, and box-result logic are
+   untouched.
+
+**Why not the funcref-table `$UniformCtor` trampoline (architect option A):**
+the runtime-argv extension above reuses PR-1's proven flat tag-chain with the
+SAME blast radius as PR-3a (one function, additive), avoiding a new module-level
+table/elem segment + funcref type (more surface, the late-import-shift hazard
+class). The trampoline-table is the right move only if we later need `call_ref`
+dispatch off a first-class ctor value (e.g. `Reflect.construct(K, argv)` /
+storing ctors) — file that as a separate follow-up if it arrives.
+
+**Edge cases:** spread of an empty array → argc 0 → all params null-padded;
+mixed `new K(a, ...rest, b)` (trailing positional after spread) → argv built in
+source order so indices stay correct; spread source not an array (a non-iterable)
+→ keep a loud refuse for now (true iterator-protocol drive is #42 territory).
+Floor-gate HW; helpers by name; box-result reuses PR-3a's `getFuncResultType`
+externref-skip guard. Standalone + host both pure-Wasm.
+
+Builds on #1699 (merge it into the #53 branch first so this REPLACES the
+loud-refuse, not the raw crash). Branch `issue-2026-dynnew-argv`.
+
+### Progress + BLOCKER (sdev-ctor, 2026-06-18)
+
+Implemented the full runtime-argv codegen in `emitDynamicNewFallback`
+(`new-super.ts`, WIP committed): non-flattenable spread → build a runtime
+`$ObjVecArr` argv + `argc` (capacity = #non-spread + Σ spread-source-len;
+per-spread copy via a structured `block`/`loop`/`br_if depth 1`), and each
+`buildCtorArm` reads `argv[i]` with a runtime `i<argc ? array.get :
+pushDefaultValue` (`if` blockType `val pType`). tsc + lint clean.
+
+**BLOCKER — `$ObjVecArr` type-init ordering (#2043 /
+[[reference_subview_type_idx_stability]]).** All three repros fail at
+binary-emit: `heap type index out of range — -1 at TYPE DEFINITION #15`. Note it
+is a **type definition**, not an instruction — so `$ObjVecArr` (or a type
+`ensureObjectRuntime` co-registers) is *defined* with an unresolved heap-type
+ref of `-1`. Moving `ensureObjectRuntime(ctx)` to the very top of
+`emitDynamicNewFallback` (before any instruction is emitted) did NOT fix it —
+because the failure is in the TYPE REGISTRATION's own ordering: when
+`ensureObjectRuntime` runs from inside expression compilation, the string/`$ObjVec`
+types it depends on aren't in the deterministic up-front order, so the
+`$ObjVecArr`/`$ObjVec` definition bakes a `-1` element/field heap-type.
+
+Confirmed conclusion: `ensureObjectRuntime` (or at least the `$ObjVecArr` type)
+**must be materialized in the up-front type-init phase** (`index.ts:~1042-1055`,
+beside `reserveTypedArraySubviewTypes`), NOT lazily. This is exactly the
+`reference_subview_type_idx_stability` lesson.
+
+**Resolution (architect-ish call needed):**
+- **(A)** call `ensureObjectRuntime(ctx)` up-front gated on
+  `sourceContainsClass(ast.sourceFile)` — simplest, but it pulls helpers/imports
+  for EVERY class-bearing program → must verify no HW-floor / classes-new
+  test262 regression from the index shift.
+- **(B)** a dedicated tiny `reserveObjVecArrType` up-front (mirror
+  `reserveTypedArraySubviewTypes`) that registers ONLY the
+  `(array (mut externref))` type, and have `ensureObjectRuntime` adopt the
+  pre-reserved idx. Smallest blast radius; preferred — needs
+  `ensureObjectRuntime` to accept a pre-reserved type idx.
+
+WIP committed on `issue-2026-dynnew-argv`. Resume: implement (B) up-front in
+index.ts (or escalate the A/B choice). The runtime-argv codegen itself is done
+and tsc/lint-clean — only the type-init ordering remains.
