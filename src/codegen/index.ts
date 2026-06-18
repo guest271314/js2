@@ -12,6 +12,7 @@ import {
   isNullablePrimitiveType,
   isNumberType,
   isStringType,
+  isStringWrapperType,
   isVoidType,
   mapTsTypeToWasm,
 } from "../checker/type-mapper.js";
@@ -10064,8 +10065,14 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
   const nativeType = resolveNativeTypeAnnotation(tsType);
   if (nativeType) return nativeType;
 
-  // Fast mode: string → ref $AnyString (not externref)
-  if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0 && isStringType(tsType)) {
+  // Fast mode: string → ref $AnyString (not externref).
+  // The String WRAPPER object (`new String(x)`) is excluded here — `isStringType`
+  // intentionally also matches the wrapper for primitive-string method dispatch,
+  // but the wrapper is a `typeof "object"` value carrying its [[StringData]] in a
+  // native `$Object` slot (#1910 S2 / #2160). Resolving it to `$AnyString` would
+  // make the wrapper-`$Object` externref fail the ref.cast on bind → null. It must
+  // fall through to the externref wrapper branch below.
+  if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0 && isStringType(tsType) && !isStringWrapperType(tsType)) {
     return { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
   }
 

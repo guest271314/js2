@@ -6890,6 +6890,58 @@ function compileCallExpression(
     {
       const wrapperMethodName = propAccess.name.text;
       const recvSymName = receiverType.getSymbol()?.name;
+      // Covered cases (the rest stay on their existing paths to avoid regressions):
+      //   - String wrapper .valueOf()/.toString() → the internal slot IS a native
+      //     string, so __to_primitive returns it directly (no post-processing).
+      //   - Number wrapper .valueOf() → internal slot is a boxed number; unbox to f64.
+      // Excluded:
+      //   - Number wrapper .toString() — the slot is a boxed number, not a string;
+      //     it needs the radix-aware numeric ToString lowering, so it falls through.
+      //   - Boolean wrappers — the internal slot is a `$__box_boolean_struct`, whose
+      //     extraction differs from the boxed-number unbox used here.
+      const isWrapperValueAccessor =
+        expr.arguments.length === 0 &&
+        ((recvSymName === "String" && (wrapperMethodName === "valueOf" || wrapperMethodName === "toString")) ||
+          (recvSymName === "Number" && wrapperMethodName === "valueOf"));
+
+      // #2160 — standalone recovery of the wrapper's internal [[PrimitiveValue]]
+      // slot. In --target standalone there is no JS host, so `new String(x)` /
+      // `new Number(x)` build a native `$Object` carrying the primitive under the
+      // reserved FLAG_INTERNAL slot (#1910 S2). The legacy host paths below leak
+      // `__unbox_string` (no native impl) and recompile the wrapper as a primitive
+      // ValType (which traps / yields the wrong value for a `$Object` receiver).
+      // Route through the native `__to_primitive` helper, which reads that slot
+      // first (§7.1.1.1), then apply the method's result type. `Number.prototype.
+      // toString` with a radix is NOT this path (arguments.length === 0 above), so
+      // it falls through to the radix-aware toString lowering. Gated on
+      // `ctx.standalone` specifically — WASI keeps the host-import object
+      // machinery (the native object-runtime is standalone-only), so it stays on
+      // the legacy paths below.
+      if (ctx.standalone && isWrapperValueAccessor) {
+        ensureObjectRuntime(ctx);
+        const toPrimIdx = ctx.funcMap.get("__to_primitive");
+        if (toPrimIdx !== undefined) {
+          // hint: "string" for toString / String wrapper, "number" for Number
+          // valueOf — matches OrdinaryToPrimitive's hint ordering.
+          const hint = wrapperMethodName === "toString" || recvSymName === "String" ? "string" : "number";
+          compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+          addStringConstantGlobal(ctx, hint);
+          fctx.body.push(...stringConstantExternrefInstrs(ctx, hint));
+          fctx.body.push({ op: "call", funcIdx: toPrimIdx });
+          // __to_primitive returns the boxed primitive as externref. String
+          // wrappers (and any toString) yield the native string ref directly.
+          // Number valueOf yields a boxed number — unbox to the f64 primitive.
+          if (wrapperMethodName === "valueOf" && recvSymName === "Number") {
+            const unboxNumIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+            flushLateImportShifts(ctx, fctx);
+            if (unboxNumIdx !== undefined) fctx.body.push({ op: "call", funcIdx: unboxNumIdx });
+            return { kind: "f64" };
+          }
+          // String wrapper valueOf/toString, or Number wrapper toString → string ref.
+          return { kind: "externref" };
+        }
+      }
+
       if (recvSymName === "Number" && wrapperMethodName === "valueOf") {
         compileExpression(ctx, fctx, propAccess.expression, { kind: "f64" });
         return { kind: "f64" };
