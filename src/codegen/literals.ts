@@ -50,6 +50,8 @@ import {
 } from "./index.js";
 import { ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { emitNativeGeneratorToVec, nativeGeneratorInfoForForOfSubject } from "./generators-native.js";
+import { emitCollectionIteratorVec } from "./map-runtime.js";
+import { emitSymbolDescStore } from "./symbol-native.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
@@ -60,6 +62,7 @@ import {
   flushLateImportShifts,
   registerResolveComputedKeyExpression,
   valTypesMatch,
+  VOID_RESULT,
 } from "./shared.js";
 import { buildVecFromExternref, getVecInfo, pushDefaultValue } from "./type-coercion.js";
 import { emitDrainCustomIterableToVec, isCustomIterable } from "./custom-iterable.js";
@@ -485,11 +488,20 @@ function compileObjectLiteralWithAccessors(
         }
       } else {
         if (propName === undefined) continue;
+        // (#51) Materialize the data-property key via the dual-mode helper, not a
+        // bare `global.get <stringGlobalMap.get(propName)>`. Under
+        // standalone/nativeStrings `addStringConstantGlobal` records the `-1`
+        // sentinel (there is no host string-constant global), so a bare
+        // `global.get -1` reaches binary emit as "global index out of range — -1".
+        // `stringConstantExternrefInstrs` emits the NativeString inline (externref)
+        // path under standalone and the host `global.get` only when a real import
+        // global exists — exactly the fix already applied to the accessor-key path
+        // below (#1888 S5c).
         addStringConstantGlobal(ctx, propName);
-        const keyGlobal = ctx.stringGlobalMap.get(propName);
-        if (keyGlobal === undefined) continue;
         fctx.body.push({ op: "local.get", index: objLocal });
-        fctx.body.push({ op: "global.get", index: keyGlobal });
+        for (const instr of stringConstantExternrefInstrs(ctx, propName)) {
+          fctx.body.push(instr);
+        }
       }
       // Compile value and coerce to externref.
       let valType: ValType | null;
@@ -569,11 +581,15 @@ function compileObjectLiteralWithAccessors(
         continue;
       }
       if (methodName === undefined) continue;
+      // (#6408) Same dual-mode key fix as the data-property arm above: the raw
+      // `global.get <stringGlobalMap.get(method)>` baked `global.get -1` in
+      // standalone for a method key on a literal that also takes the accessor
+      // path. Route through the guarded helper.
       addStringConstantGlobal(ctx, methodName);
-      const keyGlobal = ctx.stringGlobalMap.get(methodName);
-      if (keyGlobal === undefined) continue;
       fctx.body.push({ op: "local.get", index: objLocal });
-      fctx.body.push({ op: "global.get", index: keyGlobal });
+      for (const instr of stringConstantExternrefInstrs(ctx, methodName)) {
+        fctx.body.push(instr);
+      }
       const ok = compileArrowAsCallback(ctx, fctx, prop as unknown as ts.FunctionExpression, { needsThis: true });
       if (!ok) {
         fctx.body.push({ op: "ref.null.extern" });
@@ -1238,10 +1254,42 @@ export function compileSymbolCall(ctx: CodegenContext, fctx: FunctionContext, ar
     flushLateImportShifts(ctx, fctx);
     fctx.body.push({ op: "call", funcIdx: regIdx });
   } else if (args.length > 0) {
-    // Standalone-mode: still evaluate the description for side effects.
-    const argType = compileExpression(ctx, fctx, args[0]!);
-    if (argType !== null) {
+    // (#2163) Standalone / no-JS-host mode: store the description in the native
+    // id→string side table so `sym.description` can read it back without a host
+    // import. §20.4.1.1: if the description argument is `undefined`, the symbol
+    // has NO description (`.description === undefined`), so a literal
+    // `Symbol(undefined)` must NOT register a description — but it still
+    // evaluates the argument for side effects.
+    const argExpr = args[0]!;
+    const isUndefinedLiteral =
+      ts.isIdentifier(argExpr) &&
+      argExpr.text === "undefined" &&
+      ctx.checker.getSymbolAtLocation(argExpr) === undefined;
+    const argType = compileExpression(ctx, fctx, argExpr, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
+    if (argType === null) {
+      // expression produced no value — nothing to store.
+    } else if (isUndefinedLiteral) {
+      // Per spec, no description; discard the evaluated value.
+      if (argType.kind !== "ref_null" || argType.typeIdx !== ctx.anyStrTypeIdx) {
+        // value left on stack in some other type — drop it directly.
+      }
       fctx.body.push({ op: "drop" });
+    } else {
+      // Coerce the description to a `ref_null $AnyString` and store it at the
+      // reserved id: `store(id, desc)` consumes both off the stack.
+      if (argType.kind !== "ref_null" || argType.typeIdx !== ctx.anyStrTypeIdx) {
+        coerceType(ctx, fctx, argType, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
+      }
+      // emitSymbolDescStore wants `[id, desc]`; the desc is on top, so push id
+      // BELOW it via a temp.
+      const descTmp = allocLocal(fctx, `__symdesc_arg_${fctx.locals.length}`, {
+        kind: "ref_null",
+        typeIdx: ctx.anyStrTypeIdx,
+      });
+      fctx.body.push({ op: "local.set", index: descTmp });
+      fctx.body.push({ op: "global.get", index: counterIdx });
+      fctx.body.push({ op: "local.get", index: descTmp });
+      emitSymbolDescStore(ctx, fctx);
     }
   }
   // Push the symbol id (the counter) as the result.
@@ -2275,7 +2323,13 @@ export function compileObjectLiteralForStruct(
       if (prop.body && bodyUsesArguments(prop.body)) {
         const methodParamTypes = methodFctxParams.slice(1).map((p) => p.type); // skip 'this'
         // Object-literal methods inherit the surrounding code's strictness (#779e).
-        emitArgumentsObject(ctx, methodFctx, methodParamTypes, 1, isStrictFunction(prop)); // paramOffset 1 to skip 'this'
+        emitArgumentsObject(
+          ctx,
+          methodFctx,
+          methodParamTypes,
+          1,
+          isStrictFunction(prop, ctx.inferModuleStrictArguments),
+        ); // paramOffset 1 to skip 'this'
       }
 
       if (isGeneratorMethod && prop.body) {
@@ -3013,6 +3067,33 @@ export function compileArrayLiteral(
   for (let i = 0; i < expr.elements.length; i++) {
     const el = expr.elements[i]!;
     if (ts.isSpreadElement(el)) {
+      // (#42) Spread of a standalone-native Set (`[...set]`). The subject lowers
+      // to a `ref $Map` (a Set is a Map under the hood) whose field 0 is NOT a
+      // $length, so the generic vec fallthrough below would read it as a length
+      // (`i32.add expected i32, found struct.get` — invalid Wasm). Route it
+      // through the same `emitCollectionIteratorVec` driver the for-of /
+      // `.values()` paths use: a Set spreads its values (§24.2.3.*). It produces
+      // a canonical externref `$Vec`; the fill loop (Step 3) coerces each
+      // externref element to the result element type. (Bare `[...map]` spreads
+      // `[k, v]` entry pairs — deferred to the entries-pair slice #2162/#9.)
+      if (ctx.nativeStrings) {
+        const subjType = ctx.checker.getTypeAtLocation(el.expression);
+        const subjName = (subjType.symbol ?? subjType.aliasSymbol)?.name;
+        if (subjName === "Set") {
+          const matType = emitCollectionIteratorVec(ctx, fctx, el.expression, "values", /* isSet */ true);
+          if (matType != null && matType !== VOID_RESULT && (matType.kind === "ref" || matType.kind === "ref_null")) {
+            const matVecTypeIdx = matType.typeIdx;
+            const srcLocal = allocLocal(fctx, `__spread_coll_${fctx.locals.length}`, matType);
+            fctx.body.push({ op: "local.tee", index: srcLocal });
+            fctx.body.push({ op: "struct.get", typeIdx: matVecTypeIdx, fieldIdx: 0 });
+            fctx.body.push({ op: "i32.add" });
+            spreadLocals.push({ local: srcLocal, elemIdx: i, srcVecTypeIdx: matVecTypeIdx });
+            continue;
+          }
+          // Driver declined (non-native receiver) — fall through to the generic
+          // path, which compiles the subject itself below.
+        }
+      }
       const srcType = compileExpression(ctx, fctx, el.expression);
       if (!srcType) continue;
       // (#2169) Spread of a Wasm-native generator (`[...g()]`). The subject is a
@@ -3314,6 +3395,26 @@ export function compileArrayLiteral(
       fctx.body.push({ op: "i32.const", value: 0 });
       fctx.body.push({ op: "local.set", index: readIdx });
 
+      // (#42) When the spread source's element type differs from the result
+      // element type, the raw `array.get → array.set` below would store a
+      // mismatched type (invalid Wasm). This happens when a standalone
+      // collection iterator (`[...set.values()]`, `[...map.entries()]`) — whose
+      // canonical `$Vec` holds externref entries — is spread into a numeric
+      // result vec. Capture a per-element coercion template (e.g. externref →
+      // f64 via the standalone `__unbox_number`, which has a pure-Wasm body in
+      // `nativeStrings` mode — no host import) and splice it between the read and
+      // the write. `coerceType` may register late imports, so build the template
+      // (which flushes them) BEFORE emitting the loop. When src/dst element types
+      // already match, the template is empty and the copy stays byte-identical.
+      const srcVecInfo = getVecInfo(ctx, spreadInfo.srcVecTypeIdx);
+      const dstVecInfo = getVecInfo(ctx, vecTypeIdx);
+      let elemCoerce: Instr[] = [];
+      if (srcVecInfo && dstVecInfo && !valTypesMatch(srcVecInfo.elemType, dstVecInfo.elemType)) {
+        elemCoerce = collectInstrs(fctx, () => {
+          coerceType(ctx, fctx, srcVecInfo.elemType, dstVecInfo.elemType);
+        });
+      }
+
       // loop: while readIdx < srcVec.length
       const loopBody: Instr[] = [];
       // Condition: readIdx >= srcVec.length → break
@@ -3322,13 +3423,14 @@ export function compileArrayLiteral(
       loopBody.push({ op: "struct.get", typeIdx: spreadInfo.srcVecTypeIdx, fieldIdx: 0 }); // get length from vec
       loopBody.push({ op: "i32.ge_s" });
       loopBody.push({ op: "br_if", depth: 1 }); // break out of block
-      // result[writeIdx] = src.data[readIdx]
+      // result[writeIdx] = coerce(src.data[readIdx])
       loopBody.push({ op: "local.get", index: resultLocal });
       loopBody.push({ op: "local.get", index: writeIdx });
       loopBody.push({ op: "local.get", index: spreadInfo.local });
       loopBody.push({ op: "struct.get", typeIdx: spreadInfo.srcVecTypeIdx, fieldIdx: 1 }); // get data from vec
       loopBody.push({ op: "local.get", index: readIdx });
       loopBody.push({ op: "array.get", typeIdx: srcArrTypeIdx });
+      for (const instr of elemCoerce) loopBody.push(instr);
       loopBody.push({ op: "array.set", typeIdx: arrTypeIdx });
       // writeIdx++; readIdx++
       loopBody.push({ op: "local.get", index: writeIdx });
