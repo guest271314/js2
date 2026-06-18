@@ -7822,6 +7822,9 @@ function compileTypedArraySubarray(
   }
 
   // viewLen = max(end - begin, 0); push as field 0.
+  // `select` returns the FIRST operand when the condition is non-zero (true), so
+  // with operands [(end-begin), 0] the condition must be `(end-begin) >= 0` to keep
+  // the difference and fall back to 0 when negative.
   fctx.body.push({ op: "local.get", index: endTmp });
   fctx.body.push({ op: "local.get", index: beginTmp });
   fctx.body.push({ op: "i32.sub" });
@@ -7830,7 +7833,7 @@ function compileTypedArraySubarray(
   fctx.body.push({ op: "local.get", index: beginTmp });
   fctx.body.push({ op: "i32.sub" });
   fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.lt_s" });
+  fctx.body.push({ op: "i32.ge_s" });
   fctx.body.push({ op: "select" }); // max(end-begin, 0)
 
   // data = shared backing array (field 1).
