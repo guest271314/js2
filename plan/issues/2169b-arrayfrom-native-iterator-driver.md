@@ -1,10 +1,11 @@
 ---
 id: 2169b
 title: "Standalone Array.from(<native array iterator>) — __iterator driver struct.new index desync (invalid struct index)"
-status: in-progress
+status: done
 sprint: 64
 created: 2026-06-18
 updated: 2026-06-18
+completed: 2026-06-18
 assignee: ttraenkler/sdev-iter
 priority: medium
 feasibility: hard
@@ -37,54 +38,55 @@ driver, which is where the break is. **Not entries-specific** — `.values()` /
 `.keys()` fail identically (the index differs only because entries registers
 extra `$ObjVec` types).
 
-## Root cause (fully traced, reproducible)
+## Root cause (CONFIRMED — shared-array aliasing → DCE double-remap)
 
-The `__iterator(obj)` native body (`src/codegen/iterator-native.ts`
-`buildIteratorBody`) builds `$IterRec` via `struct.new <iterRecTypeIdx>`, nested
-inside the `ref.test $Vec` `if`/`then` + `else` arms. The emitted body's
-`struct.new` operand **desyncs from the `$__IterRec` type-def's final index**:
+`buildIteratorBody` (`src/codegen/iterator-native.ts`) returns the `__iterator`
+body as `{ op:"if", then: vecArm, else: elseArm }`, and on the vec-only
+registration path (`deps === undefined`, the body that ships for `Array.from`)
+`elseArm = vecArm` — **the SAME `Instr[]` array object**, so the SAME
+`struct.new $__IterRec` instruction object is referenced by BOTH `then` and
+`else`.
 
-Single-compile trace (`Array.from(a.values())`):
+DCE (`eliminateDeadImports`) removes dead types and mutates each function body
+**in place** via `remapTypeIdxInBody` (`dead-elimination.ts`). Its walk visits the
+shared `struct.new` instruction TWICE (once via `then`, once via `else`) and
+applies the type remap each time. The remap table `tR` happens to contain a
+CHAIN — `46→40` AND `40→34` — so the two in-place applications compose:
+`46 → tR.get(46)=40 → tR.get(40)=34`. The body lands at `struct.new 34`
+(`$__box_boolean_struct`, a 1-field struct) while the `$__IterRec` type-def —
+remapped once via `surv.map(remapTD)` reading the original — correctly lands at
+`40`(/32 after later compaction). V8: `invalid struct index` (4 fields pushed at
+a 1-field struct).
 
-- **Registration** (`getOrRegisterIterRecType`): `$__IterRec` pushed at type idx
-  **46**; `buildIteratorBody` emits `struct.new 46` (×2, in the then/else arms).
-- **DCE** (`eliminateDeadImports`, the type-DCE half): builds `tR` mapping
-  46→**40**; `surv` places `$__IterRec` at pos **40**. Body remapped to
-  `struct.new 40`. **Internally consistent at this point (40 / 40).**
-- **Final emitted module**: `$__IterRec` type-def at idx **32**, but the
-  `__iterator` body emits `struct.new 34` → V8 `invalid struct index: 34` (type
-  34 is `$__box_boolean_struct`, a 1-field struct; the body pushes 4 fields).
+Object-identity probe (single compile, body tagged): DCE-entry body=`[46,46]`,
+`tR.get(46)=40`, `tR.get(40)=34`; SAME body object after DCE's loop=`[34,34]`;
+emit=same body, `[34,34]`. Confirms one shared array, double-applied.
 
-So a **SECOND type renumbering happens AFTER DCE** (between DCE-end and binary
-emit) that moves the `$__IterRec` type-def 40→32 (−8) but the body's nested
-`struct.new` 40→34 (−6). The −8/−6 split = a renumber that drops 8 dead types
-before `$__IterRec` but only re-remaps the body by −6 — i.e. the second
-renumbering does NOT consistently re-remap the `__iterator` body's nested
-`struct.new` operands. (DCE itself runs exactly once and is consistent; the
-desync is downstream of it.)
+This is the [[reference_no_rebuild_helper_body_at_finalize]] family. The
+**localized** fix (what this PR does): a `buildVecArm()` factory so `then` and the
+`deps===undefined` `else` each get a FRESH array + FRESH `struct.new` object —
+DCE then walks two distinct instructions, each remapped exactly once. Non-iterator
+paths are WAT-byte-identical (the change only differs where the chained-remap type
+shape exists). `buildIteratorNextBody`'s `vecStep` is NOT aliased (its `...vecStep`
+spread and `else: vecStep` are mutually-exclusive `!deps` branches), so no fix
+needed there.
 
-**Pass-bisect results (env-gating each finalize-tail pass):** disabling
-`peepholeOptimize` alone, `repairStructTypeMismatches` alone, and BOTH together
-ALL still VFAIL `invalid struct index: 34` — so the body's `struct.new` operand
-is **already wrong (34) before either pass runs**, i.e. the desync is produced
-**inside `eliminateDeadImports` (DCE) itself**, not downstream. (An earlier
-single-snapshot read suggested DCE left it consistent at 40/40, but the
-pass-gating disproves a post-DCE culprit — the inconsistency is in DCE's remap of
-the `__iterator` body vs the `$__IterRec` type-def. The `tR` remap is applied to
-both `mod.types` (line 353) and each body via `remapTypeIdxInBody` (359), so the
-divergence implies the `__iterator` body the remap walks is NOT the same body
-that ships — a likely body-aliasing / savedBody-swap issue where the iterator
-carrier body was rebuilt at finalize-fill into a NEW array that DCE's
-walk-and-mutate either missed or double-applied.) Next step: log `tR.get(46)`
-AND the identity (object ref) of the `__iterator` function's body array at DCE
-entry vs at emit — confirm they're the same array; if the finalize USER-arm fill
-(`fillNativeIteratorUserArms`) or the vec-only registration left a stale body
-reference, DCE remaps one copy while emit serializes the other.
+**Latent root hazard (flagged separately, NOT fixed here):**
+`remapTypeIdxInBody`'s in-place chained remap is non-idempotent — ANY aliased
+body double-remaps. The durable fix is to make the DCE body remap idempotent
+(skip an instruction already mapped this pass), but that changes the global DCE
+remap contract → architect-routed follow-on, not this PR.
 
-This is the [[reference_subview_type_idx_stability]] /
-[[reference_no_rebuild_helper_body_at_finalize]] family — a shared-helper
-type-index-stability invariant, NOT a one-arm fix. Blast radius: any helper body
-with a `struct.new`/`struct.get` whose type-def survives a post-DCE renumber.
+## Honest scope (this PR)
+
+The de-alias **fixes the `__iterator` driver miscompile** (the VALIDATE-FAIL).
+It is byte-identical elsewhere and unblocks the native-iterator path. It does
+**NOT** by itself make `Array.from(<native iterator>)` zero-host: once the driver
+validates, `Array.from(iter)` routes through the `__array_from` **host import**
+(`index.ts:1626`, "host `Array.from`"). Making standalone
+`Array.from(<native iterator>)` zero-host needs a **native `__array_from`** that
+drains the now-valid `__iterator` — a separate, larger producer slice (the
+original #2169 scope; dev-typed's stale claim). Filed as the follow-on.
 
 ## Scope
 

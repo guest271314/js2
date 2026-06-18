@@ -304,7 +304,15 @@ function buildIteratorBody(types: IterRuntimeTypes, deps: UserCarrierDeps | unde
   const { iterRecTypeIdx, vecTypeIdx } = types;
   // VEC arm: $IterRec{VEC, vec, 0, userIter:null}. Field order/arity is
   // load-bearing — struct.new pushes all 4 fields (userIter = ref.null.extern).
-  const vecArm: Instr[] = [
+  //
+  // (#2169b) Build a FRESH arm each call — never reuse one `Instr[]`/`struct.new`
+  // object across the `then` and the `deps===undefined` `else` branches. A shared
+  // instruction object aliased into both branches is walked twice by any
+  // mutate-in-place body pass (DCE's `remapTypeIdxInBody`), which double-applies a
+  // chained type-index remap (e.g. 46→40 then 40→34) to the single `struct.new`,
+  // emitting it at the wrong type index → `invalid struct index`. Distinct objects
+  // per branch keep each `struct.new` remapped exactly once.
+  const buildVecArm = (): Instr[] => [
     { op: "i32.const", value: ITER_KIND_VEC },
     { op: "local.get", index: 1 },
     { op: "ref.cast", typeIdx: vecTypeIdx },
@@ -338,8 +346,10 @@ function buildIteratorBody(types: IterRuntimeTypes, deps: UserCarrierDeps | unde
         { op: "extern.convert_any" } as Instr,
       ]
     : // USER carrier not filled — preserve the legacy hard cast so the failure
-      // mode is unchanged (loud trap) rather than silently wrong.
-      vecArm;
+      // mode is unchanged (loud trap) rather than silently wrong. A FRESH vec arm
+      // (not the `then` arm's array) so the two branches never share a
+      // `struct.new` object (#2169b).
+      buildVecArm();
 
   return [
     // objAny = any.convert_extern(obj)
@@ -350,7 +360,7 @@ function buildIteratorBody(types: IterRuntimeTypes, deps: UserCarrierDeps | unde
     {
       op: "if",
       blockType: { kind: "val", type: { kind: "externref" } },
-      then: vecArm,
+      then: buildVecArm(),
       else: elseArm,
     },
   ];
