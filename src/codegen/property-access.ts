@@ -49,6 +49,7 @@ import {
   getBuiltinBrand,
   getNativeProtoBuiltinGlue,
 } from "./native-proto.js";
+import { ensureArrayNativeProtoGlue, ensureObjectNativeProtoGlue } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
@@ -451,6 +452,17 @@ function ensureStandaloneNativeMethodClosureLocal(
 function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): number | undefined {
   if (builtinName === "RegExp") {
     return ensureRegExpNativeProtoGlue(ctx);
+  }
+  // (#2193) Array.prototype / Object.prototype value reads — register the
+  // native-proto glue on demand so the read resolves to a `$NativeProto` object
+  // host-free instead of refusing. The proto OBJECT only needs the member CSV +
+  // name (emitLazyNativeProtoGet never calls emitMemberBody); reflective member
+  // closures degrade to a catchable TypeError until their native bodies land.
+  if (builtinName === "Array") {
+    return ensureArrayNativeProtoGlue(ctx);
+  }
+  if (builtinName === "Object") {
+    return ensureObjectNativeProtoGlue(ctx);
   }
   // Other builtins: only resolve if some path already registered glue for them.
   const brand = getBuiltinBrand(ctx, builtinName);
