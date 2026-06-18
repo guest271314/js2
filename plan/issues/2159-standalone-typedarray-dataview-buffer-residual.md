@@ -4,7 +4,7 @@ title: "Standalone TypedArray/DataView/ArrayBuffer conformance residual (~1,308 
 status: in-progress
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-16
+updated: 2026-06-17
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -101,6 +101,31 @@ element byte-size; (b) a `buffer` accessor returning the backing i32_byte vec;
 `buffer.byteLength / BYTES_PER_ELEMENT`. Medium-sized, representation-aware —
 self-contained from slice 1.
 
+#### Slice 2a (LANDED 2026-06-17) — `byteLength` / `byteOffset` interception
+
+**Done — part (a) + `byteOffset`.** Added a standalone/WASI `byteLength` /
+`byteOffset` interception in `property-access.ts` (right after the
+TextEncoder/TextDecoder block). For an ArrayBuffer/SharedArrayBuffer receiver
+`byteLength` = field-0 directly (already a byte count); for a TypedArray
+receiver `byteLength` = field-0 (element count) `* BYTES_PER_ELEMENT`, where the
+per-name byte size is statically known (Int8/Uint8/Uint8Clamped=1, Int16/Uint16=2,
+Int32/Uint32/Float32=4, Float64=8). `byteOffset` is 0 on a fresh-backing view.
+Gated on `ctx.wasi || ctx.standalone || ctx.strictNoHostImports` so host mode is
+untouched. Verified: ArrayBuffer + all 9 TypedArray kinds, typed locals, typed
+params, empty arrays — all correct. Tests: `tests/issue-2159.test.ts`
+("byteLength + byteOffset" describe block, 9 cases).
+
+**Still remaining for Slice 2:**
+- (b) `.buffer` accessor returning the backing vec (needs a buffer object;
+  trickier under the f64-vec representation — the TA backing is NOT an i32_byte
+  buffer, so `.buffer` must synthesize/track one).
+- (c) `new TA(ArrayBuffer)` element-count + multi-byte reinterpret:
+  `emitTypedArrayFromByteBuffer` (new-super.ts) currently treats each source
+  *byte* as one destination *element* (`dstArr[i] = srcArr[i] & 0xff`), so an
+  8-byte buffer makes an 8-element Int32Array instead of 2. Correct behaviour
+  needs length = `buffer.byteLength / BYTES_PER_ELEMENT` and a 4-/8-byte
+  little-endian reassembly per element. Representation-heavy; a separate slice.
+
 **Slice 3 — DataView standalone** leaks `env::` host imports
 (`new DataView(buf)` + `getInt32`/`setInt32`/`getFloat64`/… not wired to the
 native `dataview-native.ts` accessors on this path) — the 336-test DataView
@@ -109,3 +134,83 @@ bucket. Larger; likely a senior-dev slice.
 **Not a slice:** Int8Array signed-read of an out-of-range store (`a[0]=200` →
 expect `-56`) reads unsigned — a separate signed/wrap concern, orthogonal to the
 above.
+
+---
+
+## Slice (2026-06-17) — standalone TypedArray.prototype.fill packed-local leak
+
+**Landed.** Re-validation of the TypedArray-method surface standalone found that
+`set` / `subarray` / `copyWithin` / `slice` already work natively on byte/short
+typed arrays, but **`.fill()` was a hard compile error** for every byte/short
+typed array (`Uint8Array` / `Int8Array` / `Uint8ClampedArray` / `Int16Array` /
+`Uint16Array`).
+
+**Root cause** (`src/codegen/array-methods.ts` `compileArrayFill`): the
+fill-value temp local was allocated with the array's RAW element type — `i8`/`i16`,
+which are *packed storage* types valid only in array elements / struct fields,
+never in a value position (param/result/local/global). The binary emitter rejected
+the leaked local with `encodeValType: packed storage type "i8" is not valid in a
+value position` — the same class as the element-WRITE leak fixed in Slice 1, but
+in the `fill` path. `Int32Array`/`Float64Array` were unaffected (value-type
+elements).
+
+**Fix:** unpack the fill-value local type `i8`/`i16` → `i32` (and pass the
+unpacked type as the value-arg compile hint); `array.set` re-packs the `i32` into
+the element on store. Verified standalone: Uint8/Int8/Int16/Uint16 fill, negative
+signed round-trip, start/end range, modulo-256 wrap, and Int32Array no-regression.
+Test: `tests/issue-2159-ta-fill.test.ts`.
+
+**Out of this slice:** `subarray` aliasing (the returned view should share the
+parent buffer; standalone currently returns a copy) requires offset-windowing —
+the shared representation gap with DataView offset / TypedArray-on-buffer
+windowing — and is a separate follow-up.
+
+---
+
+## Slice (2026-06-18, #38) — standalone DataView offset-windowing
+
+**Landed.** `new DataView(buffer, byteOffset, byteLength)` in standalone / WASI
+mode previously validated the offset/length args for RangeError but then
+**discarded the window**: the ctor returned the *full* backing buffer, so every
+`dv.get/set*(i, …)` addressed byte `i` of the whole buffer (ignoring the base
+offset), and `dv.byteOffset` / `dv.byteLength` reported `0` / full-length. The
+explicit `(none)`-leak comment in `new-super.ts` flagged this as the deferred
+"view-window base offset" representation slice.
+
+**Design — additive `$__dv_window` wrapper struct** (low blast radius; chosen
+over an offset field on every vec, which would tax the hot `a[i]` element-access
+path for all arrays):
+
+- New struct `$__dv_window { buf: (ref null __vec_i32_byte), byteOffset: i32,
+  byteLength: i32 }` (`getOrRegisterDvWindowType`, lazy, in `dataview-native.ts`;
+  cache idx `ctx.dvWindowTypeIdx`).
+- The DataView ctor (standalone path, `new-super.ts`) builds a `$__dv_window`
+  **only when windowed** (an explicit byteOffset/byteLength arg, `args.length >=
+  2`), sharing the parent's backing array (true aliasing — no copy), and returns
+  it as externref (DataView locals are externref). Offset-0 default-length views
+  keep the bare `i32_byte` vec representation — the dominant, fully-native case,
+  zero new cost. The standalone externref-buffer default-length path now reads
+  the struct's byte length at runtime (`any.convert_extern` + `ref.cast`) instead
+  of the host-only NaN sentinel.
+- The native accessors (`emitDataViewAccessor`, `dataview-native.ts`) recover the
+  receiver via `recoverDvBacking`: a runtime `ref.test $__dv_window` branch
+  yields `(backing array, base byte offset)` for both shapes (wrapper → shared
+  array + ctor offset; bare vec → its array + 0), and the base offset is added to
+  every byte index.
+- `dv.byteOffset` / `dv.byteLength` (`property-access.ts`) get a DataView arm
+  that reads the wrapper fields, or `0` / `vec.length` for the bare-vec view.
+
+**Verified** (`tests/issue-38-dataview-window.test.ts`, 8 cases, all standalone):
+windowed write visible at the correct absolute byte of the full view; windowed
+multi-byte (`setUint16`) aliasing; within-window `int32` round-trip;
+`dv.byteOffset` = ctor arg; `dv.byteLength` = explicit + default
+(`bufferByteLength - offset`); offset-0 bare-vec fast-path intact; two disjoint
+windows don't clobber. coercion-sites gate OK; `tsc --noEmit` clean; existing
+standalone DataView/ArrayBuffer/TypedArray suites green (the 6 `string_constants`
+import failures in `arraybuffer-dataview.test.ts` are a pre-existing JS-host
+harness issue on upstream/main, not a regression).
+
+**Out of this slice (→ architect #46):** TypedArray `subarray` aliasing needs an
+offset-windowing representation on the **hot `a[i]` element-access path**
+(`compileElementAccessBody` / all typed-array access) — a broad, high-blast
+change routed to an architect spec (`$__subview` design), not folded here.

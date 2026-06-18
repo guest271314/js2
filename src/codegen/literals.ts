@@ -50,6 +50,7 @@ import {
 } from "./index.js";
 import { ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { emitNativeGeneratorToVec, nativeGeneratorInfoForForOfSubject } from "./generators-native.js";
+import { emitSymbolDescStore } from "./symbol-native.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
 import {
   coerceType,
@@ -485,11 +486,20 @@ function compileObjectLiteralWithAccessors(
         }
       } else {
         if (propName === undefined) continue;
+        // (#51) Materialize the data-property key via the dual-mode helper, not a
+        // bare `global.get <stringGlobalMap.get(propName)>`. Under
+        // standalone/nativeStrings `addStringConstantGlobal` records the `-1`
+        // sentinel (there is no host string-constant global), so a bare
+        // `global.get -1` reaches binary emit as "global index out of range — -1".
+        // `stringConstantExternrefInstrs` emits the NativeString inline (externref)
+        // path under standalone and the host `global.get` only when a real import
+        // global exists — exactly the fix already applied to the accessor-key path
+        // below (#1888 S5c).
         addStringConstantGlobal(ctx, propName);
-        const keyGlobal = ctx.stringGlobalMap.get(propName);
-        if (keyGlobal === undefined) continue;
         fctx.body.push({ op: "local.get", index: objLocal });
-        fctx.body.push({ op: "global.get", index: keyGlobal });
+        for (const instr of stringConstantExternrefInstrs(ctx, propName)) {
+          fctx.body.push(instr);
+        }
       }
       // Compile value and coerce to externref.
       let valType: ValType | null;
@@ -1238,10 +1248,42 @@ export function compileSymbolCall(ctx: CodegenContext, fctx: FunctionContext, ar
     flushLateImportShifts(ctx, fctx);
     fctx.body.push({ op: "call", funcIdx: regIdx });
   } else if (args.length > 0) {
-    // Standalone-mode: still evaluate the description for side effects.
-    const argType = compileExpression(ctx, fctx, args[0]!);
-    if (argType !== null) {
+    // (#2163) Standalone / no-JS-host mode: store the description in the native
+    // id→string side table so `sym.description` can read it back without a host
+    // import. §20.4.1.1: if the description argument is `undefined`, the symbol
+    // has NO description (`.description === undefined`), so a literal
+    // `Symbol(undefined)` must NOT register a description — but it still
+    // evaluates the argument for side effects.
+    const argExpr = args[0]!;
+    const isUndefinedLiteral =
+      ts.isIdentifier(argExpr) &&
+      argExpr.text === "undefined" &&
+      ctx.checker.getSymbolAtLocation(argExpr) === undefined;
+    const argType = compileExpression(ctx, fctx, argExpr, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
+    if (argType === null) {
+      // expression produced no value — nothing to store.
+    } else if (isUndefinedLiteral) {
+      // Per spec, no description; discard the evaluated value.
+      if (argType.kind !== "ref_null" || argType.typeIdx !== ctx.anyStrTypeIdx) {
+        // value left on stack in some other type — drop it directly.
+      }
       fctx.body.push({ op: "drop" });
+    } else {
+      // Coerce the description to a `ref_null $AnyString` and store it at the
+      // reserved id: `store(id, desc)` consumes both off the stack.
+      if (argType.kind !== "ref_null" || argType.typeIdx !== ctx.anyStrTypeIdx) {
+        coerceType(ctx, fctx, argType, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
+      }
+      // emitSymbolDescStore wants `[id, desc]`; the desc is on top, so push id
+      // BELOW it via a temp.
+      const descTmp = allocLocal(fctx, `__symdesc_arg_${fctx.locals.length}`, {
+        kind: "ref_null",
+        typeIdx: ctx.anyStrTypeIdx,
+      });
+      fctx.body.push({ op: "local.set", index: descTmp });
+      fctx.body.push({ op: "global.get", index: counterIdx });
+      fctx.body.push({ op: "local.get", index: descTmp });
+      emitSymbolDescStore(ctx, fctx);
     }
   }
   // Push the symbol id (the counter) as the result.
@@ -2275,7 +2317,13 @@ export function compileObjectLiteralForStruct(
       if (prop.body && bodyUsesArguments(prop.body)) {
         const methodParamTypes = methodFctxParams.slice(1).map((p) => p.type); // skip 'this'
         // Object-literal methods inherit the surrounding code's strictness (#779e).
-        emitArgumentsObject(ctx, methodFctx, methodParamTypes, 1, isStrictFunction(prop)); // paramOffset 1 to skip 'this'
+        emitArgumentsObject(
+          ctx,
+          methodFctx,
+          methodParamTypes,
+          1,
+          isStrictFunction(prop, ctx.inferModuleStrictArguments),
+        ); // paramOffset 1 to skip 'this'
       }
 
       if (isGeneratorMethod && prop.body) {
