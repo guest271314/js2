@@ -102,6 +102,13 @@ export interface CodegenOptions {
   strictNoHostImports?: boolean;
   /** JSX runtime import detected during preprocessing (#1540). */
   jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
+  /**
+   * (#2119) Infer ES-module strictness (→ unmapped `arguments`) from a genuine
+   * top-level `import`/`export`. Default `true`. The test262 harness sets this
+   * `false` for script tests so its synthetic `export function test()` wrapper
+   * does not unmap sloppy (`noStrict`) arguments. See `CompileOptions`.
+   */
+  inferModuleStrictArguments?: boolean;
 }
 
 /** Info about an externally declared class. */
@@ -556,6 +563,9 @@ export interface CodegenContext {
    * `JS2WASM_LOG_CODEGEN_FALLBACKS=1` turn it on.
    */
   trackSilentFallbacks?: boolean;
+  /** (#2119) Infer module-strictness (→ unmapped arguments) from a genuine
+   *  top-level import/export. Default true; test262 script tests pass false. */
+  inferModuleStrictArguments?: boolean;
   /**
    * #1923 — captured IR post-claim demotions (build/verify/lower/backend-
    * legality failures on a function the selector claimed, which fall back to

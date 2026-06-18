@@ -47,6 +47,9 @@ export function createCodegenContext(
     // #2089 — silent-fallback telemetry counters.
     fallbackCounts: createFallbackCounts(),
     trackSilentFallbacks: options?.trackSilentFallbacks,
+    // (#2119) default true: real module input is strict → unmapped
+    // arguments. The test262 harness passes false for script tests.
+    inferModuleStrictArguments: options?.inferModuleStrictArguments ?? true,
     // #1923 — IR post-claim demotions; always collected (cheap), mirroring
     // fallbackCounts. Surfaced on CompileResult.irPostClaimErrors for the gate.
     irPostClaimErrors: [],
