@@ -187,3 +187,33 @@ vec type idxs and runs a `thenEmit(concreteType)` arm on a hit (compiled array) 
   refactor is a pure extraction).
 
 Branch issue-2193-pr-b is on current main (incl PR-A #1685) with this design committed.
+
+### PR-B implementation progress (2026-06-18, sdev-json3) — bridge compiles + is invoked; 2 runtime gaps
+
+Committed on branch issue-2193-pr-b (commits: extract compileArraySliceFromVecLocal,
+emitArrayProtoMemberBody, slice arity-2 fix). STATUS:
+- ✅ compileArraySliceFromVecLocal (AST-free entry) — proven: plain `a.slice()` path
+  byte-correct (length/indexing/default-end/negative/no-args all pass standalone).
+- ✅ emitArrayProtoMemberBody wired: recovers array from externref `this`
+  (emitThisReceiverGuardConvert over ctx.vecTypeMap), unboxes begin/end
+  (__unbox_number→i32), delegates to the *FromVecLocal core, boxes result to externref.
+- ✅ slice arity fix: slice.length is 2 (was defaulting to 1 → the closure lacked the
+  2nd arg param → "call[0] expected externref found i32" Wasm compile error). Added
+  slice:2 to PROTO_METHOD_LENGTH. Closure body now COMPILES + RUNS (no trap).
+
+TWO REMAINING RUNTIME GAPS (concrete):
+1. **`.call` dispatch doesn't reach the proto closure.** `m.call(a,1,3)` returns 0 and
+   `$t` has NO call_ref/call_indirect — so the value-materialized closure's
+   Function.prototype.call path doesn't invoke __proto_method_<brand>_slice; it routes
+   to an empty default. (Direct `m(a,1,3)` DOES reach the closure — proven below.) Next:
+   trace how a $NativeProto member-closure value's `.call(thisArg, …args)` is dispatched
+   standalone; it must funnel thisArg→param1, args→params2.. and call_ref the closure.
+2. **Direct `m(a,1,3)` reaches the closure but THROWS a WebAssembly.Exception.** So the
+   body is invoked but either the array-instance recovery misses (the boxed `number[]`
+   `this` doesn't ref.test against the registered f64-vec, falling to the elseEmit) or a
+   trap in the slice core. Next: probe which arm fires; verify the f64-vec idx is in
+   ctx.vecTypeMap at closure-emit time and that the boxed array's runtime type matches.
+
+The structural bridge (extraction + recovery wiring + arity) is DONE and the closure
+compiles + is invoked. The two gaps are dispatch-routing + recovery-match — debuggable,
+not architectural. Floor-gate + WAT-diff the plain a.slice() path (already byte-correct).
