@@ -15,7 +15,14 @@ import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/typ
 import { addArrayIteratorImports, addStringImports, addUnionImports, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
 import { compileStringLiteral } from "./shared.js";
-import { getArrTypeIdxFromVec, getOrRegisterArrayType, getOrRegisterVecType } from "./registry/types.js";
+import {
+  getArrTypeIdxFromVec,
+  getOrRegisterArrayType,
+  getOrRegisterSubviewType,
+  getOrRegisterVecType,
+  getSubviewArrTypeIdx,
+} from "./registry/types.js";
+import { noJsHost } from "./expressions/helpers.js";
 import { ensureNativeIteratorRuntime, getOrRegisterIterRecType } from "./iterator-native.js";
 import { ensureObjVecBuilders } from "./object-runtime.js";
 import { ensureArgcGlobal, ensureCurrentThisGlobal, ensureExtrasArgvGlobal } from "./statements/nested-declarations.js";
@@ -36,6 +43,7 @@ import {
   stringConstantExternrefInstrs,
 } from "./native-strings.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
+import { allocJoinFoldLocals, emitStringJoinFold, hostStringRepr, nativeStringRepr } from "./builtin-scaffold.js";
 import { ensureTimsortHelper } from "./timsort.js";
 import { coerceType, coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 
@@ -476,6 +484,37 @@ const ARRAY_LIKE_METHOD_SET = new Set([
 const ARRAY_LIKE_SEARCH_METHODS = new Set(["indexOf", "lastIndexOf", "includes"]);
 
 /**
+ * #2036 S6 step 1 — Array.prototype methods that, over a borrowed array-like
+ * (`$Object`) receiver, have **no working standalone native path** yet and emit
+ * invalid Wasm / leak host imports under `--target standalone`:
+ *   - search methods (`indexOf`/`lastIndexOf`/`includes`) leak `__host_eq` /
+ *     `__same_value_zero` and mistype a loop local (the `local.set expected f64,
+ *     found call externref` binary-emitter bug — #2036 root cause), and
+ *   - result-building methods (`filter`/`map`/`reduce`/`reduceRight`) leak the
+ *     host `__js_array_new` / `__js_array_push` builders.
+ * In standalone these route to a LOUD refusal (mirroring the existing
+ * `#1888 Slice 3/4` Array-brand refusal in calls.ts) instead of producing a
+ * broken module or a silent-wrong `-1`. The callback-iteration methods
+ * (`forEach`/`some`/`every`/`find`/`findIndex`) were taught a native `$Object`
+ * arm in #2036 PR-1 and keep working — they are intentionally NOT in this set.
+ * Step 2 (the real generic arm + the binary-emitter local-type fix) is
+ * senior/infra; this set is removed entry-by-entry as those native paths land.
+ */
+const STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS = new Set([
+  "indexOf",
+  "lastIndexOf",
+  "includes",
+  // (#2036 S6 step 2) `filter` now has a native standalone arm — it builds its
+  // result via the native `$ObjVec` builder (`__objvec_new`/`__objvec_push`)
+  // instead of the host `__js_array_*`, so it no longer leaks a host import.
+  // Removed from the refusal set. map/reduce/reduceRight stay until their
+  // native result/accumulator arms land (map needs sparse-hole handling).
+  "map",
+  "reduce",
+  "reduceRight",
+]);
+
+/**
  * Compile Array.prototype.METHOD.call(anyReceiver, callback, ...args) for any-typed receivers.
  * Uses __extern_length + __extern_get_idx to iterate and call_ref for Wasm closure callbacks.
  * Only handles callbacks that compile to Wasm closures (arrow functions, function declarations).
@@ -536,6 +575,32 @@ export function compileArrayLikePrototypeCall(
         }
       }
     }
+  }
+
+  // #2036 S6 step 1 — stop the invalid-Wasm / host-import-leak bleed in
+  // standalone. The receiver here is a borrowed array-like `$Object` (real
+  // `__vec_`/`__arr_` arrays already returned `undefined` above and take the
+  // dedicated native path). The search (`indexOf`/`lastIndexOf`/`includes`) and
+  // result-building (`filter`/`map`/`reduce`/`reduceRight`) arms below leak host
+  // imports (`__host_eq`/`__same_value_zero`, `__js_array_new`/`__js_array_push`)
+  // and trip the binary-emitter local-type bug under `--target standalone`/`wasi`
+  // — producing a module that fails to instantiate or returns a silent-wrong
+  // value. Per the #1888 dual-mode invariant ("any uncertainty ⇒ fail loud,
+  // never invalid Wasm"), refuse loudly instead. The callback-iteration methods
+  // (`forEach`/`some`/`every`/`find`/`findIndex`) have a working native `$Object`
+  // arm (#2036 PR-1) and fall through unaffected. Host/gc mode is untouched
+  // (gated on standalone||wasi). Step 2 (real generic arm + emitter fix) removes
+  // entries from this set as native paths land.
+  if ((ctx.standalone || ctx.wasi) && STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS.has(methodName)) {
+    reportError(
+      ctx,
+      callExpr,
+      `Codegen error: Array.prototype.${methodName}.call(...) over an array-like (non-array) receiver is not yet ` +
+        `supported in --target standalone (#2036 S6) — the generic $Object arm for this method is not native yet ` +
+        `(it would leak a host import / emit invalid Wasm). Recompile without --target standalone, or call ` +
+        `${methodName} directly on a real Array.`,
+    );
+    return null;
   }
 
   // Bail out if the call site is inside `assert_throws(...)` (test262 rewrites
@@ -940,8 +1005,24 @@ export function compileArrayLikePrototypeCall(
     }
 
     case "filter": {
-      const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-      const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+      // (#2036 S6 step 2) Result builder: in standalone/WASI build a native
+      // `$ObjVec` via `__objvec_new`/`__objvec_push` (host-import-free, and
+      // `[i]`/`.length`-readable post #2190/#35); in host/gc mode keep the host
+      // `__js_array_new`/`__js_array_push` JS-array builders. Both have the
+      // identical externref-new / `(externref,externref)->void`-push shape, so
+      // the loop body below is unchanged. filter's result is naturally dense
+      // (order-preserving compaction), so the sequential `push` is exact — no
+      // sparse-hole concern (that defers `map` to a follow-up slice).
+      let arrNewIdx: number | undefined;
+      let arrPushIdx: number | undefined;
+      if (ctx.standalone || ctx.wasi) {
+        const builders = ensureObjVecBuilders(ctx);
+        arrNewIdx = builders.newIdx;
+        arrPushIdx = builders.pushIdx;
+      } else {
+        arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+        arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+      }
       if (arrNewIdx === undefined || arrPushIdx === undefined) return undefined;
       flushLateImportShifts(ctx, fctx);
       const resultTmp = allocLocal(fctx, `__ali_fl_res_${fctx.locals.length}`, { kind: "externref" });
@@ -4796,10 +4877,12 @@ function compileArrayJoinNative(
   arrTypeIdx: number,
   elemType: ValType,
 ): ValType | null {
-  ensureNativeStringHelpers(ctx);
   const anyStrTypeIdx = ctx.anyStrTypeIdx;
-  const strConcatIdx = ctx.nativeStrHelpers.get("__str_concat");
-  if (strConcatIdx === undefined || anyStrTypeIdx < 0) {
+  // #2088 — native-string representation; the fold loop + separator + empty
+  // handling are shared with the host lane via `emitStringJoinFold`. This lane
+  // supplies only the native repr and the element-type-specific `elemToStr`.
+  const repr = nativeStringRepr(ctx);
+  if (repr === undefined || anyStrTypeIdx < 0) {
     reportError(ctx, callExpr, "join requires native string helpers (__str_concat)");
     return null;
   }
@@ -4820,13 +4903,10 @@ function compileArrayJoinNative(
     }
   }
 
-  const strRef: ValType = { kind: "ref", typeIdx: anyStrTypeIdx };
   const vecTmp = allocLocal(fctx, `__njoin_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__njoin_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
-  const lenTmp = allocLocal(fctx, `__njoin_len_${fctx.locals.length}`, { kind: "i32" });
-  const iTmp = allocLocal(fctx, `__njoin_i_${fctx.locals.length}`, { kind: "i32" });
-  const resultTmp = allocLocal(fctx, `__njoin_res_${fctx.locals.length}`, strRef);
-  const sepTmp = allocLocal(fctx, `__njoin_sep_${fctx.locals.length}`, strRef);
+  const foldLocals = allocJoinFoldLocals(fctx, repr, "njoin");
+  const { lenTmp, iTmp, resultTmp, sepTmp } = foldLocals;
 
   // Receiver vec → length + data array.
   compileExpression(ctx, fctx, propAccess.expression);
@@ -4890,42 +4970,8 @@ function compileArrayJoinNative(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const loopBody: Instr[] = [
-    { op: "local.get", index: iTmp },
-    { op: "local.get", index: lenTmp },
-    { op: "i32.ge_s" },
-    { op: "br_if", depth: 1 },
-
-    // result = (i == 0) ? elem : __str_concat(__str_concat(result, sep), elem)
-    { op: "local.get", index: iTmp },
-    { op: "i32.const", value: 0 },
-    { op: "i32.eq" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [...elemToStr, { op: "local.set", index: resultTmp } as Instr],
-      else: [
-        { op: "local.get", index: resultTmp } as Instr,
-        { op: "local.get", index: sepTmp } as Instr,
-        { op: "call", funcIdx: strConcatIdx } as Instr,
-        ...elemToStr,
-        { op: "call", funcIdx: strConcatIdx } as Instr,
-        { op: "local.set", index: resultTmp } as Instr,
-      ],
-    } as Instr,
-
-    { op: "local.get", index: iTmp },
-    { op: "i32.const", value: 1 },
-    { op: "i32.add" },
-    { op: "local.set", index: iTmp },
-    { op: "br", depth: 0 },
-  ];
-
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  });
+  // #2088 — shared fold (host + native lanes route through this).
+  emitStringJoinFold(ctx, fctx, repr, foldLocals, elemToStr);
 
   // Return the joined native string as externref for the caller.
   fctx.body.push({ op: "local.get", index: resultTmp });
@@ -5024,6 +5070,16 @@ function compileArrayJoin(
     return null;
   }
 
+  // #2088 — the fold loop + separator + empty-string handling are shared with
+  // the native lane via `emitStringJoinFold`; this lane supplies only the
+  // host-string representation and the element-type-specific `elemToStr`
+  // matrix below. A bug in the shared fold regresses both lanes at once.
+  const repr = hostStringRepr(ctx);
+  if (repr === undefined) {
+    reportError(ctx, callExpr, "join requires string support (wasm:js-string concat)");
+    return null;
+  }
+
   // #1968 — the empty-join result must be "" not a null externref (which every
   // downstream string consumer stringifies as "null"). Pre-register the ""
   // string constant *before* any body instructions so the eventual fixup of
@@ -5032,10 +5088,8 @@ function compileArrayJoin(
 
   const vecTmp = allocLocal(fctx, `__arr_join_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_join_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
-  const lenTmp = allocLocal(fctx, `__arr_join_len_${fctx.locals.length}`, { kind: "i32" });
-  const iTmp = allocLocal(fctx, `__arr_join_i_${fctx.locals.length}`, { kind: "i32" });
-  const resultTmp = allocLocal(fctx, `__arr_join_res_${fctx.locals.length}`, { kind: "externref" });
-  const sepTmp = allocLocal(fctx, `__arr_join_sep_${fctx.locals.length}`, { kind: "externref" });
+  const foldLocals = allocJoinFoldLocals(fctx, repr, "arr_join");
+  const { lenTmp, iTmp, resultTmp, sepTmp } = foldLocals;
 
   // Compile receiver -> vec ref
   compileExpression(ctx, fctx, propAccess.expression);
@@ -5128,41 +5182,8 @@ function compileArrayJoin(
     elemToStr.push({ op: "call", funcIdx: joinStrIdx });
   }
 
-  const loopBody: Instr[] = [
-    { op: "local.get", index: iTmp },
-    { op: "local.get", index: lenTmp },
-    { op: "i32.ge_s" },
-    { op: "br_if", depth: 1 },
-
-    { op: "local.get", index: iTmp },
-    { op: "i32.const", value: 0 },
-    { op: "i32.eq" },
-    {
-      op: "if",
-      blockType: { kind: "empty" },
-      then: [...elemToStr, { op: "local.set", index: resultTmp } as Instr],
-      else: [
-        { op: "local.get", index: resultTmp } as Instr,
-        { op: "local.get", index: sepTmp } as Instr,
-        { op: "call", funcIdx: concatIdx } as Instr,
-        ...elemToStr,
-        { op: "call", funcIdx: concatIdx } as Instr,
-        { op: "local.set", index: resultTmp } as Instr,
-      ],
-    } as Instr,
-
-    { op: "local.get", index: iTmp },
-    { op: "i32.const", value: 1 },
-    { op: "i32.add" },
-    { op: "local.set", index: iTmp },
-    { op: "br", depth: 0 },
-  ];
-
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  });
+  // #2088 — shared fold (host + native lanes route through this).
+  emitStringJoinFold(ctx, fctx, repr, foldLocals, elemToStr);
 
   // An empty array leaves `resultTmp` as the initial null. join/toString of `[]`
   // is the empty String "", not null — substitute it so the result is a real
@@ -7473,7 +7494,16 @@ function compileArrayFill(
   const vecTmp = allocLocal(fctx, `__arr_fill_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_fill_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const lenTmp = allocLocal(fctx, `__arr_fill_len_${fctx.locals.length}`, { kind: "i32" });
-  const valTmp = allocLocal(fctx, `__arr_fill_val_${fctx.locals.length}`, elemType);
+  // (#2159) Byte/short typed arrays (Uint8Array/Int8Array/Int16Array/…) have a
+  // PACKED `i8`/`i16` element type, valid only in array elements / struct
+  // fields — never in a value position. Allocating the fill-value local with the
+  // raw packed `elemType` leaked it into a local, which the binary emitter
+  // rejects (`packed storage type "i8" is not valid in a value position`),
+  // making `.fill()` a hard compile error for every byte/short typed array
+  // standalone. Hold the value as the unpacked `i32`; `array.set` re-packs it on
+  // store (mirrors the element-assignment fix in assignment.ts).
+  const valType: ValType = elemType.kind === "i8" || elemType.kind === "i16" ? { kind: "i32" } : elemType;
+  const valTmp = allocLocal(fctx, `__arr_fill_val_${fctx.locals.length}`, valType);
   const startTmp = allocLocal(fctx, `__arr_fill_s_${fctx.locals.length}`, { kind: "i32" });
   const endTmp = allocLocal(fctx, `__arr_fill_e_${fctx.locals.length}`, { kind: "i32" });
   const iTmp = allocLocal(fctx, `__arr_fill_i_${fctx.locals.length}`, { kind: "i32" });
@@ -7492,8 +7522,8 @@ function compileArrayFill(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
 
-  // Compile value argument
-  compileExpression(ctx, fctx, callExpr.arguments[0]!, elemType);
+  // Compile value argument (unpacked hint — never pass the packed i8/i16).
+  compileExpression(ctx, fctx, callExpr.arguments[0]!, valType);
   fctx.body.push({ op: "local.set", index: valTmp });
 
   // start (default: 0) -- clamp negative
@@ -7709,10 +7739,17 @@ function numericElemConvert(from: ValType, to: ValType): Instr[] {
 }
 
 /**
- * TypedArray.prototype.subarray(begin?, end?) (#1664) — returns a new vec over
- * the [begin, end) slice. The vec-struct model has no shared ArrayBuffer, so
- * this copies (matching `.slice` semantics); the acceptance criteria only
- * require correct element values + zero host imports, not buffer aliasing.
+ * TypedArray.prototype.subarray(begin?, end?) (#1664 / #2357 / #47).
+ *
+ * In standalone / WASI mode this returns a `$__subview` that SHARES the parent's
+ * backing `data` array (true aliasing per ECMA §23.2.3.30 — a write through the
+ * view is visible in the parent and vice-versa). The view carries `byteOffset`
+ * (element offset of `begin`) and the windowed `length`; element access on a
+ * `$__subview`-typed binding is discriminated at compile time and indexes
+ * `base.data[byteOffset + i]` (see compileElementAccess / compileElementAssignment).
+ *
+ * In JS-host mode the vec model has no shared-buffer concept on this path, so we
+ * keep the historical copy (`.slice` semantics) — aliasing there is a non-goal.
  */
 function compileTypedArraySubarray(
   ctx: CodegenContext,
@@ -7723,8 +7760,114 @@ function compileTypedArraySubarray(
   arrTypeIdx: number,
   elemType: ValType,
 ): ValType {
-  // subarray clamps the same way slice does; reuse the slice lowering.
-  return compileArraySlice(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+  if (!noJsHost(ctx)) {
+    // Host mode: keep the copy (slice semantics) — no shared buffer here.
+    return compileArraySlice(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+  }
+
+  // Standalone: build a windowing $__subview sharing the parent's data array.
+  // The receiver may be a plain vec (`__vec_<elem>`) or — for a nested subarray —
+  // itself a `$__subview_<elem>`; recover the element kind from either name.
+  const recvStructName = ctx.typeIdxToStructName.get(vecTypeIdx);
+  const elemKind = recvStructName?.replace(/^__vec_/, "").replace(/^__subview_/, "");
+  if (elemKind === undefined || elemKind === recvStructName) {
+    // Defensive: unknown shape — fall back to the copy path.
+    return compileArraySlice(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
+  }
+  const subviewTypeIdx = getOrRegisterSubviewType(ctx, elemKind, elemType);
+
+  const parentVec = allocLocal(fctx, `__sub_parent_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
+  const lenTmp = allocLocal(fctx, `__sub_len_${fctx.locals.length}`, { kind: "i32" });
+  const beginTmp = allocLocal(fctx, `__sub_b_${fctx.locals.length}`, { kind: "i32" });
+  const endTmp = allocLocal(fctx, `__sub_e_${fctx.locals.length}`, { kind: "i32" });
+
+  // Compile receiver → parent vec ref. The receiver itself may be a $__subview
+  // (nested subarray); recover its base + accumulate offsets below.
+  const recvType = compileExpression(ctx, fctx, propAccess.expression);
+  // Nested-subarray support: if the receiver is itself a $__subview, unwrap to its
+  // base vec and carry its byteOffset forward as the parent offset baseline.
+  const baseOffsetTmp = allocLocal(fctx, `__sub_boff_${fctx.locals.length}`, { kind: "i32" });
+  // `dataTmp` holds the SHARED backing array (parent's `data`). For a plain-vec
+  // receiver it's `parent.data`; for a $__subview receiver (nested subarray) it's
+  // the already-shared `recv.data`, with the offset accumulated.
+  const subArrTypeIdx = getSubviewArrTypeIdx(ctx, subviewTypeIdx);
+  const dataTmp = allocLocal(fctx, `__sub_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: subArrTypeIdx });
+  if (recvType && (recvType.kind === "ref" || recvType.kind === "ref_null") && recvType.typeIdx === subviewTypeIdx) {
+    // receiver is $__subview: data = recv.data, baseOffset = recv.byteOffset, len = recv.length
+    const recvLocal = allocLocal(fctx, `__sub_recv_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: subviewTypeIdx,
+    });
+    fctx.body.push({ op: "local.set", index: recvLocal });
+    fctx.body.push({ op: "local.get", index: recvLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: subviewTypeIdx, fieldIdx: 1 }); // shared data array
+    fctx.body.push({ op: "local.set", index: dataTmp });
+    fctx.body.push({ op: "local.get", index: recvLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: subviewTypeIdx, fieldIdx: 2 }); // byteOffset
+    fctx.body.push({ op: "local.set", index: baseOffsetTmp });
+    fctx.body.push({ op: "local.get", index: recvLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: subviewTypeIdx, fieldIdx: 0 }); // length
+    fctx.body.push({ op: "local.set", index: lenTmp });
+  } else {
+    fctx.body.push({ op: "local.set", index: parentVec });
+    emitReceiverNullGuard(ctx, fctx, parentVec);
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+    fctx.body.push({ op: "local.set", index: baseOffsetTmp });
+    // data = parent.data (field 1) — SHARED, no copy
+    fctx.body.push({ op: "local.get", index: parentVec });
+    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
+    fctx.body.push({ op: "local.set", index: dataTmp });
+    // len = parent.length (field 0)
+    fctx.body.push({ op: "local.get", index: parentVec });
+    fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+    fctx.body.push({ op: "local.set", index: lenTmp });
+  }
+
+  // begin (default 0), §23.2.3.30: ToIntegerOrInfinity then negative-clamp to len.
+  if (callExpr.arguments.length >= 1) {
+    compileExpression(ctx, fctx, callExpr.arguments[0]!, { kind: "f64" });
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  } else {
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: beginTmp });
+  emitClampIndex(fctx, beginTmp, lenTmp);
+
+  // end (default len), same clamp.
+  if (callExpr.arguments.length >= 2) {
+    compileExpression(ctx, fctx, callExpr.arguments[1]!, { kind: "f64" });
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+    fctx.body.push({ op: "local.set", index: endTmp });
+    emitClampIndex(fctx, endTmp, lenTmp);
+  } else {
+    fctx.body.push({ op: "local.get", index: lenTmp });
+    fctx.body.push({ op: "local.set", index: endTmp });
+  }
+
+  // viewLen = max(end - begin, 0); push as field 0.
+  // `select` returns the FIRST operand when the condition is non-zero (true), so
+  // with operands [(end-begin), 0] the condition must be `(end-begin) >= 0` to keep
+  // the difference and fall back to 0 when negative.
+  fctx.body.push({ op: "local.get", index: endTmp });
+  fctx.body.push({ op: "local.get", index: beginTmp });
+  fctx.body.push({ op: "i32.sub" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: endTmp });
+  fctx.body.push({ op: "local.get", index: beginTmp });
+  fctx.body.push({ op: "i32.sub" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.ge_s" });
+  fctx.body.push({ op: "select" }); // max(end-begin, 0)
+
+  // data = shared backing array (field 1).
+  fctx.body.push({ op: "local.get", index: dataTmp });
+  // byteOffset = baseOffset + begin (field 2) — accumulates for nested subarrays.
+  fctx.body.push({ op: "local.get", index: baseOffsetTmp });
+  fctx.body.push({ op: "local.get", index: beginTmp });
+  fctx.body.push({ op: "i32.add" });
+
+  fctx.body.push({ op: "struct.new", typeIdx: subviewTypeIdx });
+  return { kind: "ref_null", typeIdx: subviewTypeIdx };
 }
 
 /**

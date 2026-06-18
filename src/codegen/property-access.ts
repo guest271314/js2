@@ -31,7 +31,8 @@ import {
   resolveDeclaringClassForPrivateName,
 } from "./expressions/helpers.js";
 import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
-import { addUnionImports, resolveWasmType } from "./index.js";
+import { emitSymbolDescLoad } from "./symbol-native.js";
+import { addUnionImports, resolveWasmType, TYPED_ARRAY_NAMES } from "./index.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
 import { tryCompileNativeSetSizeGet } from "./set-runtime.js";
@@ -48,10 +49,17 @@ import {
   getBuiltinBrand,
   getNativeProtoBuiltinGlue,
 } from "./native-proto.js";
+import { ensureArrayNativeProtoGlue, ensureObjectNativeProtoGlue } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
-import { getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
+import { getOrRegisterDvWindowType } from "./dataview-native.js"; // (#2159/#38) DataView windowing
+import {
+  getArrTypeIdxFromVec,
+  getOrRegisterVecType,
+  getSubviewArrTypeIdx,
+  isSubviewTypeIdx,
+} from "./registry/types.js";
 import {
   coerceType,
   compileExpression,
@@ -449,6 +457,17 @@ function ensureStandaloneNativeMethodClosureLocal(
 function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): number | undefined {
   if (builtinName === "RegExp") {
     return ensureRegExpNativeProtoGlue(ctx);
+  }
+  // (#2193) Array.prototype / Object.prototype value reads — register the
+  // native-proto glue on demand so the read resolves to a `$NativeProto` object
+  // host-free instead of refusing. The proto OBJECT only needs the member CSV +
+  // name (emitLazyNativeProtoGet never calls emitMemberBody); reflective member
+  // closures degrade to a catchable TypeError until their native bodies land.
+  if (builtinName === "Array") {
+    return ensureArrayNativeProtoGlue(ctx);
+  }
+  if (builtinName === "Object") {
+    return ensureObjectNativeProtoGlue(ctx);
   }
   // Other builtins: only resolve if some path already registered glue for them.
   const brand = getBuiltinBrand(ctx, builtinName);
@@ -1574,6 +1593,36 @@ function receiverIsCatchClauseBinding(ctx: CodegenContext, recv: ts.Expression):
 }
 
 /**
+ * (#2192 follow-up) Recognize a receiver expression that is itself a caught-Error
+ * string-field read — i.e. `<catchBinding>.message` / `.name` / `.stack`. In
+ * standalone mode the #2077/#2192 fast path lowers that read to a `$Error_struct`
+ * `struct.get` coerced to a native-string ref (`$AnyString`), so at the VALUE
+ * level the result IS a string. But the receiver's static TS type is `any` (the
+ * catch binding is `any`), so the `.length` / string-method dispatch sites —
+ * which gate on `isStringType(<static type>)` — never fire, and
+ * `e.message.length` / `e.message.charCodeAt(0)` fall through to the host
+ * `__extern_get` path (null standalone → 0). This predicate lets those consumer
+ * sites treat such a receiver as string-typed and route through the
+ * native-string path.
+ *
+ * Scope: standalone/WASI only (the fast path that produces a string ref is
+ * standalone-gated), `message`/`name`/`stack` only (the fields the read fast path
+ * handles), and only when the inner receiver is a catch binding (so a plain
+ * `obj.message` on a real object is unaffected — it keeps its own typed path).
+ * `.cause` is intentionally NOT covered: it is not a `$Error_struct` field yet
+ * (deferred follow-up).
+ */
+export function receiverIsCaughtErrorStringRead(ctx: CodegenContext, recv: ts.Expression): boolean {
+  if (!(ctx.wasi || ctx.standalone)) return false;
+  if (!ts.isPropertyAccessExpression(recv)) return false;
+  const p = recv.name.text;
+  if (p !== "message" && p !== "name" && p !== "stack") return false;
+  if (!receiverIsCatchClauseBinding(ctx, recv.expression)) return false;
+  const innerType = ctx.checker.getTypeAtLocation(recv.expression);
+  return (innerType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+}
+
+/**
  * (#2179) When the module uses `delete <member>` (JS-host mode only), route an
  * `any`/`unknown`-typed property READ through the tombstone-aware `__extern_get`
  * host helper instead of the inline `ref.test`+`struct.get` fast-path. Returns
@@ -1708,6 +1757,118 @@ export function compilePropertyAccess(
     }
   }
 
+  // (#2159 Slice 2) Standalone/WASI `byteLength` / `byteOffset` view-semantics
+  // for ArrayBuffer / SharedArrayBuffer / TypedArrays. In JS-host mode the JS
+  // runtime supplies these; with no host they fell through to `__extern_length`
+  // / a 0 default. The backing representation (see dataview-native.ts):
+  //   ArrayBuffer / SharedArrayBuffer  → vec "i32_byte" (field 0 = *byte* length)
+  //   Uint8Array (native)              → vec "i8_byte"  (field 0 = element count)
+  //   other TypedArrays                → vec "f64"      (field 0 = element count)
+  // `byteLength` is element-size-scaled: ArrayBuffer/Uint8Array byteLength ==
+  // field0; Int32Array == field0*4, Float64Array == field0*8, etc. `byteOffset`
+  // is always 0 for our non-offset views (a fresh backing store per view), which
+  // already reads correctly today — handled here only for the externref-receiver
+  // case so it doesn't leak `__extern_get`.
+  if (
+    (ctx.wasi || ctx.standalone || ctx.strictNoHostImports) &&
+    (propName === "byteLength" || propName === "byteOffset")
+  ) {
+    const recvName =
+      objType.getSymbol()?.name ??
+      (ts.isNewExpression(expr.expression) && ts.isIdentifier(expr.expression.expression)
+        ? expr.expression.expression.text
+        : undefined);
+    const isBuffer = recvName === "ArrayBuffer" || recvName === "SharedArrayBuffer";
+    const isTypedArr = recvName !== undefined && TYPED_ARRAY_NAMES.has(recvName);
+    const isDataView = recvName === "DataView";
+    // (#2159/#38) DataView `byteOffset` / `byteLength` honour the constructor's
+    // window. The receiver is either a `$__dv_window` wrapper (windowed view) or
+    // a bare `$__vec_i32_byte` (offset-0 default-length view). For the wrapper,
+    // read its byteOffset / byteLength fields; for the bare vec, byteOffset = 0
+    // and byteLength = vec.length (one i32 per byte ⇒ length IS the byte count).
+    if (isDataView && noJsHost(ctx)) {
+      const vecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+      const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
+      const fieldIdx = propName === "byteOffset" ? 1 : 2;
+      const recvType = compileExpression(ctx, fctx, expr.expression);
+      const anyLocal = allocLocal(fctx, `__dvp_any_${fctx.locals.length}`, { kind: "anyref" });
+      if (recvType?.kind === "externref") {
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+      }
+      fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+      const winBranch: Instr[] = [
+        { op: "local.get", index: anyLocal } as Instr,
+        { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
+        { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx } as Instr,
+      ];
+      const vecBranch: Instr[] =
+        propName === "byteOffset"
+          ? [{ op: "i32.const", value: 0 } as Instr]
+          : [
+              { op: "local.get", index: anyLocal } as Instr,
+              { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+              { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+            ];
+      fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+      fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: winBranch,
+        else: vecBranch,
+      } as Instr);
+      if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+    }
+    if (isBuffer || isTypedArr) {
+      // byteOffset on a fresh-backing view is always 0.
+      if (propName === "byteOffset") {
+        const recvType = compileExpression(ctx, fctx, expr.expression);
+        if (recvType !== null) fctx.body.push({ op: "drop" } as Instr);
+        fctx.body.push({ op: ctx.fast ? "i32.const" : "f64.const", value: 0 } as Instr);
+        return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+      }
+      // byteLength = field0 * BYTES_PER_ELEMENT. ArrayBuffer's field0 is already
+      // a byte count, so its element size is 1.
+      const TYPED_ARRAY_BYTES_PER_ELEMENT: Record<string, number> = {
+        Int8Array: 1,
+        Uint8Array: 1,
+        Uint8ClampedArray: 1,
+        Int16Array: 2,
+        Uint16Array: 2,
+        Int32Array: 4,
+        Uint32Array: 4,
+        Float32Array: 4,
+        Float64Array: 8,
+      };
+      const bytesPerElem = isBuffer ? 1 : (TYPED_ARRAY_BYTES_PER_ELEMENT[recvName!] ?? 1);
+      const elemKey = isBuffer ? "i32_byte" : noJsHost(ctx) && recvName === "Uint8Array" ? "i8_byte" : "f64";
+      const elemType: ValType =
+        elemKey === "i8_byte" ? { kind: "i8" } : elemKey === "i32_byte" ? { kind: "i32" } : { kind: "f64" };
+      const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
+      // Compile the receiver and recover the vec struct ref.
+      const recvType = compileExpression(ctx, fctx, expr.expression);
+      if (recvType?.kind === "externref") {
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+      } else if (
+        (recvType?.kind === "ref" || recvType?.kind === "ref_null") &&
+        "typeIdx" in recvType &&
+        recvType.typeIdx !== vecTypeIdx
+      ) {
+        fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
+      }
+      // field 0 → i32 (element count or byte count).
+      fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+      if (bytesPerElem !== 1) {
+        fctx.body.push({ op: "i32.const", value: bytesPerElem } as Instr);
+        fctx.body.push({ op: "i32.mul" } as Instr);
+      }
+      if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+    }
+  }
+
   // #1914 — standalone RegExp reflection (`re.source`/`.flags`/`.global`/…/
   // `.lastIndex`) and match-result fields (`m.index`/`m.input`). Must run
   // BEFORE the extern-class property path, which would otherwise emit an
@@ -1826,11 +1987,20 @@ export function compilePropertyAccess(
   // (`null.message` throws), so the trap is acceptable Phase 1/2 semantics.
   if ((ctx.wasi || ctx.standalone) && (propName === "message" || propName === "name" || propName === "stack")) {
     const lhsTsName = objType.getSymbol()?.name;
+    // (#1536c) A user subclass of a built-in Error (`class MyError extends
+    // Error {}`) is externref-backed; its instance is the parent's
+    // `$Error_struct` (created natively by `__new_<Parent>`). Treat it as an
+    // Error LHS so `.message`/`.name`/`.stack` read the struct field directly
+    // instead of the generic `__extern_get` host path (unavailable standalone,
+    // returns null). The struct field layout is the parent's.
+    const lhsUserErrorParent =
+      lhsTsName !== undefined && !isBuiltinTypeName(lhsTsName) ? ctx.classBuiltinParentMap.get(lhsTsName) : undefined;
     const isErrorLhs =
-      lhsTsName !== undefined &&
-      isBuiltinTypeName(lhsTsName) &&
-      isWasiErrorName(lhsTsName) &&
-      isBuiltinSubtype(lhsTsName, "Error");
+      (lhsTsName !== undefined &&
+        isBuiltinTypeName(lhsTsName) &&
+        isWasiErrorName(lhsTsName) &&
+        isBuiltinSubtype(lhsTsName, "Error")) ||
+      (lhsUserErrorParent !== undefined && (lhsUserErrorParent === "Error" || isWasiErrorName(lhsUserErrorParent)));
     // #2077: a `catch (e)` binding is typed `any` (or `unknown`), so the static
     // `isErrorLhs` gate above never fires even though the caught value IS the
     // `$Error` struct at runtime — the field read then fell through to the
@@ -3123,6 +3293,19 @@ export function compilePropertyAccess(
   // Generic __extern_get works for plain JS hosts but bypasses the spec
   // accessor (which V8 implements specially), so we route directly.
   if (propName === "description" && (objType.flags & ts.TypeFlags.ESSymbolLike) !== 0) {
+    // (#2163) No-JS-host mode: the symbol is a bare i32 id and there is no host
+    // accessor — read the description from the native id→string side table
+    // (populated by `compileSymbolCall`). A null slot / out-of-range id reads as
+    // `undefined`, matching `Symbol().description === undefined`.
+    if (noJsHost(ctx)) {
+      const recvType = compileExpression(ctx, fctx, expr.expression, { kind: "i32" });
+      if (recvType && recvType.kind !== "i32") {
+        coerceType(ctx, fctx, recvType, { kind: "i32" });
+      }
+      emitSymbolDescLoad(ctx, fctx);
+      // Result is `ref_null $AnyString` — a native string (or null⇒undefined).
+      return { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx };
+    }
     const symDescIdx = ensureLateImport(ctx, "__symbol_description", [{ kind: "externref" }], [{ kind: "externref" }]);
     if (symDescIdx !== undefined) {
       const recvType = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
@@ -4082,7 +4265,7 @@ export function emitThisReceiverGuardConvert(
         blockType: { kind: "val", type: resultType },
         then: thenBody,
         else: buildArm(i + 1),
-      } as unknown as Instr,
+      },
     ];
   };
 
@@ -4455,6 +4638,38 @@ export function compileElementAccess(
   return compileElementAccessBody(ctx, fctx, expr, objType);
 }
 
+/**
+ * (#2166 PR-C2) True when an element-access index expression is *provably*
+ * numeric, so a standalone externref read can route through the positional
+ * `__extern_get_idx(v, f64)` instead of the string-keyed `__extern_get`.
+ *
+ * Conservative on purpose: a numeric literal (`a[1]`), or a static type that is
+ * number-like with no string/symbol component, qualifies. An `any`/`unknown`/
+ * `string`/union/symbol-keyed index does NOT (it may be a genuine string
+ * property key, which `__extern_get` must keep handling). False on any checker
+ * error.
+ */
+function isNumericIndexExpression(ctx: CodegenContext, index: ts.Expression): boolean {
+  // Strip parens / `as` wrappers so `a[(i)]` / `a[i as number]` still match.
+  let inner: ts.Expression = index;
+  while (ts.isParenthesizedExpression(inner) || ts.isAsExpression(inner) || ts.isTypeAssertionExpression(inner)) {
+    inner = inner.expression;
+  }
+  if (ts.isNumericLiteral(inner)) return true;
+  let t: ts.Type;
+  try {
+    t = ctx.checker.getTypeAtLocation(inner);
+  } catch {
+    return false;
+  }
+  // A union (e.g. `number | string`) or `any`/`unknown` is ambiguous — keep the
+  // string-key path. Only a pure number-like type routes positionally.
+  if (t.isUnion?.()) return false;
+  const ambiguous = ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.StringLike | ts.TypeFlags.ESSymbolLike;
+  if ((t.flags & ambiguous) !== 0) return false;
+  return (t.flags & ts.TypeFlags.NumberLike) !== 0;
+}
+
 /** Inner element access logic — assumes objType is on the stack and non-null */
 export function compileElementAccessBody(
   ctx: CodegenContext,
@@ -4464,6 +4679,37 @@ export function compileElementAccessBody(
 ): ValType | null {
   // Externref element access: obj[key] → host import __extern_get(obj, externref) → externref
   if (objType.kind === "externref") {
+    // (#2166 PR-C2) A NUMERIC index on a standalone externref must go through
+    // `__extern_get_idx(v, f64)`, not the string-keyed `__extern_get`. The
+    // wrapped value can be an `$ObjVec` (the externref array vector produced by
+    // `Object.values`/`Object.entries`, by `JSON.parse` of an array, and by the
+    // array-method machinery) whose elements are positional, not string-keyed —
+    // `__extern_get(v, "1")` finds nothing and returns null, so `v[1]` read 0.
+    // `__extern_get_idx` ref.tests `$ObjVec` and returns `data[i]`; for an
+    // array-like `$Object` it delegates to `__extern_get(v, ToString(i))` (its
+    // #2036 arm), so it is a correct superset of the string-key path for a
+    // numeric index — but ONLY in `--target standalone`: that `$Object`
+    // delegation arm is gated on `objArrayLikeArms = ctx.standalone` in
+    // object-runtime.ts, so under `--target wasi` `__extern_get_idx` returns the
+    // null sentinel for a genuine `$Object`, which would break a plain-object
+    // numeric read. Hence this is scoped to `ctx.standalone` only (NOT wasi);
+    // wasi and host mode keep the existing `__extern_get` path. A non-numeric
+    // (string/symbol/computed) key always stays on `__extern_get`.
+    if (ctx.standalone && isNumericIndexExpression(ctx, expr.argumentExpression)) {
+      compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
+      const getIdxFn = ensureLateImport(
+        ctx,
+        "__extern_get_idx",
+        [{ kind: "externref" }, { kind: "f64" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      if (getIdxFn !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: getIdxFn });
+        return { kind: "externref" };
+      }
+      return null;
+    }
     compileExpression(ctx, fctx, expr.argumentExpression, { kind: "externref" });
     // Lazily register __extern_get if not already registered
     const funcIdx = ensureLateImport(
@@ -4522,6 +4768,35 @@ export function compileElementAccessBody(
 
   const typeIdx = (objType as { typeIdx: number }).typeIdx;
   const typeDef = ctx.mod.types[typeIdx];
+
+  // (#2357/#47) `$__subview` receiver (TypedArray subarray) — read the SHARED
+  // parent buffer at `data[byteOffset + i]`. Must run BEFORE the tuple/struct-field
+  // check below: a `$__subview` is a 3-field struct {length, data, byteOffset}, so
+  // `isVecStructAccess` (exactly 2 fields) is false and the tuple path would
+  // mis-handle it. Compile-time discriminated by the receiver typeIdx, so plain
+  // arrays (vec struct, not subview) never reach this arm.
+  if (typeDef?.kind === "struct" && isSubviewTypeIdx(ctx, typeIdx)) {
+    const subArrTypeIdx = getSubviewArrTypeIdx(ctx, typeIdx);
+    const subArrDef = ctx.mod.types[subArrTypeIdx];
+    if (!subArrDef || subArrDef.kind !== "array") {
+      reportErrorNoNode(ctx, "Element access: subview data is not an array");
+      return null;
+    }
+    const svLocal = allocLocal(fctx, `__sv_recv_${fctx.locals.length}`, { kind: "ref_null", typeIdx });
+    fctx.body.push({ op: "local.set", index: svLocal } as Instr);
+    // data = sv.data (the SHARED parent backing array, field 1)
+    fctx.body.push({ op: "local.get", index: svLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 } as Instr);
+    // index = sv.byteOffset + i
+    fctx.body.push({ op: "local.get", index: svLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 2 } as Instr); // byteOffset
+    compileExpression(ctx, fctx, expr.argumentExpression, { kind: "i32" });
+    fctx.body.push({ op: "i32.add" } as Instr);
+    const svValueType: ValType =
+      subArrDef.element.kind === "i8" || subArrDef.element.kind === "i16" ? { kind: "i32" } : subArrDef.element;
+    emitBoundsCheckedArrayGet(fctx, subArrTypeIdx, subArrDef.element);
+    return svValueType;
+  }
 
   // Handle tuple struct — element access with literal index → struct.get
   if (typeDef?.kind === "struct") {

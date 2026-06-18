@@ -24,7 +24,8 @@ import {
   getOrRegisterVecType,
   resolveWasmType,
 } from "../index.js";
-import { ensureMapHelpers } from "../map-runtime.js";
+import { getOrRegisterDvWindowType } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper
+import { ensureMapHelpers, coerceMapKeyToAnyref } from "../map-runtime.js";
 import { emitSetNewTargetBeforeCall, ensureNewTargetGlobal } from "../new-target.js"; // (#2023)
 import { ensureObjectRuntime } from "../object-runtime.js"; // (#1100) standalone Proxy native runtime
 import { ensureSetHelpers } from "../set-runtime.js";
@@ -51,6 +52,7 @@ import { maybeSetArgcForKnownCall } from "../statements/nested-declarations.js";
 import { compileStringLiteral } from "../string-ops.js";
 import { coerceType as coerceTypeImpl, pushDefaultValue } from "../type-coercion.js";
 import { ensureDateDaysFromCivilHelper, ensureDateStruct } from "./builtins.js";
+import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm new Date(str)
 import { compileSpreadCallArgs } from "./extern.js";
 import { compileTemporalNewExpression } from "../temporal-native.js";
 import {
@@ -79,6 +81,23 @@ function valTypeMatches(a: ValType, b: ValType): boolean {
     return a.typeIdx === b.typeIdx;
   }
   return true;
+}
+
+/**
+ * (#2164) Is `arg` statically a String value? `new Date(value)` parses a String
+ * (§21.4.2.1) but ToNumbers anything else, so we only route to __date_parse when
+ * the arg is a string literal or has a string-like static type. Anything else
+ * (number, Date, any) keeps the existing ToNumber(ms) path.
+ */
+function isStringTypedArg(ctx: CodegenContext, arg: ts.Expression): boolean {
+  if (ts.isStringLiteralLike(arg) || ts.isTemplateExpression(arg)) return true;
+  try {
+    const t = ctx.checker.getTypeAtLocation(arg);
+    // StringLike covers string, string literal types, and unions thereof.
+    return (t.flags & ts.TypeFlags.StringLike) !== 0;
+  } catch {
+    return false;
+  }
 }
 
 function compileCtorArgument(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression, expected?: ValType): void {
@@ -1593,6 +1612,300 @@ function compileClassExpression(ctx: CodegenContext, fctx: FunctionContext, expr
   return { kind: "externref" };
 }
 
+/**
+ * (#2026) Result ValType of a Wasm function by index — mirrors
+ * `getFuncParamTypes` but reads `results[0]`. The dynamic-new fallback uses it
+ * to decide whether a `<Class>_new` result needs `extern.convert_any` boxing
+ * (anyref / struct-ref result) or is ALREADY an externref — in which case a
+ * second `extern.convert_any` emits invalid Wasm (`extern.convert_any[0]
+ * expected anyref, found externref`). Returns `undefined` for void / unknown.
+ */
+function getFuncResultType(ctx: CodegenContext, funcIdx: number): ValType | undefined {
+  if (funcIdx < ctx.numImportFuncs) {
+    let importFuncCount = 0;
+    for (const imp of ctx.mod.imports) {
+      if (imp.desc.kind === "func") {
+        if (importFuncCount === funcIdx) {
+          const typeDef = ctx.mod.types[imp.desc.typeIdx];
+          if (typeDef?.kind === "func" && typeDef.results.length > 0) return typeDef.results[0];
+          return undefined;
+        }
+        importFuncCount++;
+      }
+    }
+    return undefined;
+  }
+  const func = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+  if (func) {
+    const typeDef = ctx.mod.types[func.typeIdx];
+    if (typeDef?.kind === "func" && typeDef.results.length > 0) return typeDef.results[0];
+  }
+  return undefined;
+}
+
+/**
+ * (#2026) Dynamic-new fallback: `new K(...)` where `K` is a value-bound
+ * identifier (a class flowing through a parameter / variable of type `any`)
+ * that the static resolution arms could not pin to a known class. The value in
+ * `K` is the `__class_<Name>` class-object singleton — an `extern.convert_any`'d
+ * `$ClassName` struct (the SAME struct type as instances of that class). We
+ * dispatch by a `ref.test $ClassName` type-test chain over every WasmGC-struct
+ * class with a class-object descriptor (`ctx.classObjectGlobals`): on the first
+ * matching struct type, call its `<Class>_new` with the (pre-evaluated, boxed)
+ * arguments coerced to each ctor param's ValType, then box the instance to
+ * externref. Returns `true` when the fallback emitted code (caller returns
+ * `{ kind: "externref" }`), `false` when no candidate classes exist (caller
+ * keeps the legacy `__new_` host-import path so genuine host builtins such as
+ * `Test262Error` still work).
+ *
+ * Pure-Wasm (no host import): works in standalone / WASI. The static
+ * `new C()` path (the `classSet` arm) is untouched — only this value-bound
+ * fallback is new, so there is no perf or shape change for statically-resolved
+ * construction.
+ */
+function emitDynamicNewFallback(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.NewExpression,
+  calleeExpr: ts.Expression,
+  ctorName: string,
+): boolean {
+  // Candidate classes: those with a class-object descriptor singleton and a
+  // WasmGC struct (externref-backed builtin subclasses are excluded — they have
+  // no `$ClassName` struct and no `<Class>_new` returning a ref).
+  const candidates: string[] = [];
+  for (const className of ctx.classObjectGlobals.keys()) {
+    if (ctx.classBuiltinParentMap.has(className)) continue;
+    if (ctx.structMap.get(className) === undefined) continue;
+    const ctorIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${className}_new`));
+    if (ctorIdx === undefined) continue;
+    // The tag-dispatch reads the descriptor as a `$ClassName` struct (ref.test /
+    // struct.get 0) and boxes the instance to externref. That only holds when
+    // `<Class>_new` actually returns the WasmGC struct ref. A ctor whose result
+    // is already externref is externref-backed (no `$ClassName` struct to
+    // type-test against), so it can be neither tag-discriminated nor struct-read
+    // here — exclude it so it falls through to the legacy host-import path
+    // instead of emitting an invalid `ref.test`/double-`extern.convert_any` (the
+    // #2026 ~20-test regression: a value-bound TypedArray ctor `new TA()`).
+    const ctorResult = getFuncResultType(ctx, ctorIdx);
+    if (ctorResult?.kind === "externref") continue;
+    candidates.push(className);
+  }
+  if (candidates.length === 0) return false;
+
+  const rawArgs = expr.arguments ?? [];
+
+  // (#2026 PR-3a) Spread arguments. `new K(...x)` must NOT reach the per-arg
+  // eval loop verbatim: a `SpreadElement` compiles to the array/iterator value
+  // (an i32 length / ref), not a boxed externref, so the downstream
+  // `extern.convert_any` produced INVALID Wasm (whole-module instantiate
+  // failure). Flatten an array-LITERAL spread (`new K(...[a, b])`) into its
+  // element expressions via the shared `flattenCallArgs` helper — the same
+  // compile-time flatten the static class-`new` path uses.
+  //
+  // A non-flattenable spread (`new K(...someVar)`) needs a runtime arity drive
+  // the tag-dispatch path does not yet have (it pre-evaluates a COMPILE-TIME-
+  // fixed set of arg locals; `compileSpreadCallArgs` is unusable here because it
+  // targets ONE statically-known ctor, not a runtime tag-dispatch). We do NOT
+  // fall through to the legacy `__new_` path for it: that path is the
+  // unknown-ctor host import, which (a) in host mode throws an opaque
+  // "No dependency provided for extern class K" at runtime, and (b) in no-JS-
+  // host mode (`--target wasi`/standalone) trips the #2043/#51 late-import
+  // `global index out of range — -1` BINARY-EMIT crash — a whole-module
+  // failure that masquerades as an unrelated bug. So we **refuse loudly** with
+  // a clear, attributable compile error (the #2043 guidance: "make the producer
+  // refuse loudly") instead of deferring into a misleading crash. A runtime-
+  // length argv trampoline is the follow-up that makes this case actually work.
+  let args: readonly ts.Expression[] = rawArgs;
+  if (rawArgs.some((a) => ts.isSpreadElement(a))) {
+    const flat = flattenCallArgs(rawArgs);
+    if (flat === null) {
+      reportError(
+        ctx,
+        expr,
+        "Dynamic `new K(...args)` with a non-array-literal spread is not yet supported (#2026): " +
+          "the value-bound (any-typed) constructor dispatch needs a runtime-length argument vector. " +
+          "Use an array-literal spread (`new K(...[a, b])`) or a statically-typed class.",
+      );
+      // Keep the value stack balanced: the caller returns `{ kind: "externref" }`
+      // on `true`, so leave a null externref placeholder (the diagnostic above
+      // already fails the compile). Do NOT fall through to the broken legacy path.
+      fctx.body.push({ op: "ref.null.extern" });
+      return true;
+    }
+    args = flat;
+  }
+
+  // Evaluate the callee descriptor once into an anyref local (the value to
+  // type-test). null/undefined descriptors leave a null anyref → every
+  // `ref.test` is false → falls through to the trailing no-match arm.
+  const calleeTy = compileExpression(ctx, fctx, calleeExpr, { kind: "externref" });
+  if (calleeTy && calleeTy.kind !== "externref") {
+    coerceType(ctx, fctx, calleeTy, { kind: "externref" });
+  } else if (calleeTy === null) {
+    fctx.body.push({ op: "ref.null.extern" });
+  }
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  const descLocal = allocLocal(fctx, `__dynnew_desc_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "local.set", index: descLocal });
+
+  // Pre-evaluate each argument once into an externref temp (boxed). Each
+  // dispatch arm reads these and coerces to the matched ctor's param ValType,
+  // so argument expressions run exactly once regardless of which class matches.
+  const argLocals: number[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const aTy = compileExpression(ctx, fctx, args[i]!, { kind: "externref" });
+    if (aTy && aTy.kind !== "externref") {
+      coerceType(ctx, fctx, aTy, { kind: "externref" });
+    } else if (aTy === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    const aLocal = allocLocal(fctx, `__dynnew_arg${i}_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: aLocal });
+    argLocals.push(aLocal);
+  }
+
+  // Discriminate by the class TAG, never by struct type alone. WasmGC
+  // iso-recursive canonicalization merges structurally-identical class structs
+  // (two classes `{ x: number }` collapse to one runtime `(struct (__tag i32)
+  // (x f64))` type even though they keep distinct `structMap` indices), so
+  // `ref.test $A` is ALSO true for a `$B` descriptor of the same shape (#2009).
+  // The `__tag` field (index 0) carries the unique class id.
+  //
+  // Strategy: (1) read the descriptor's `__tag` ONCE — a `ref.test`/`ref.cast`
+  // against any one candidate struct type yields a layout that exposes field 0
+  // for every shape-compatible class (canonicalization guarantees the read is
+  // valid whenever the test passes); we OR together a test per distinct struct
+  // shape so descriptors of any candidate shape get their tag read. (2) Dispatch
+  // on the tag value with a single flat chain over ALL candidates, independent
+  // of struct grouping — this is what makes shape-colliding classes correct.
+  const distinctStructIdxs = [...new Set(candidates.map((c) => ctx.structMap.get(c)!))];
+  const tagLocal = allocLocal(fctx, `__dynnew_tag_${fctx.locals.length}`, { kind: "i32" });
+
+  // (1) Read the tag. Default -1 (no match) so a non-class / null descriptor
+  // selects no ctor and yields null. For each distinct struct type, if the tag
+  // is still unread (-1) AND the descriptor `ref.test`s as that struct, read
+  // field 0 into `tagLocal`. Canonicalization makes the first shape-compatible
+  // test succeed and expose a valid field-0 layout for the descriptor.
+  fctx.body.push({ op: "i32.const", value: -1 });
+  fctx.body.push({ op: "local.set", index: tagLocal });
+  for (const structIdx of distinctStructIdxs) {
+    fctx.body.push({ op: "local.get", index: tagLocal });
+    fctx.body.push({ op: "i32.const", value: -1 });
+    fctx.body.push({ op: "i32.eq" });
+    fctx.body.push({ op: "local.get", index: descLocal });
+    fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+    fctx.body.push({ op: "i32.and" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: descLocal },
+        { op: "ref.cast", typeIdx: structIdx } as Instr,
+        { op: "struct.get", typeIdx: structIdx, fieldIdx: 0 } as Instr,
+        { op: "local.set", index: tagLocal },
+      ],
+      else: [],
+    } as Instr);
+  }
+
+  // Build a then-arm (coerce args → call <Class>_new → box) for one class.
+  // `coerceType` / `pushDefaultValue` only emit into `fctx.body`, so build the
+  // arm by temporarily redirecting `fctx.body` (the savedBody/swap pattern).
+  const buildCtorArm = (className: string): Instr[] => {
+    const ctorFuncIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${className}_new`))!;
+    const paramTypes = getFuncParamTypes(ctx, ctorFuncIdx) ?? [];
+    const arm: Instr[] = [];
+    const savedBody = fctx.body;
+    fctx.body = arm;
+    for (let i = 0; i < paramTypes.length; i++) {
+      const pType = paramTypes[i]!;
+      if (i < argLocals.length) {
+        fctx.body.push({ op: "local.get", index: argLocals[i]! });
+        if (pType.kind !== "externref") {
+          coerceType(ctx, fctx, { kind: "externref" }, pType);
+        }
+      } else {
+        pushDefaultValue(fctx, pType, ctx);
+      }
+    }
+    // (#2026 PR-3b) Set new.target to the DISPATCHED class id before the ctor
+    // call, mirroring the static `new C()` path (`emitSetNewTargetBeforeCall`).
+    // Without this the new-target global keeps whatever the enclosing frame
+    // left, so `new.target === K` inside a dynamically-constructed ctor read 0.
+    // The id-based comparison (`compileBinaryExpression`'s new.target arm) then
+    // matches `getOrAssignClassNewTargetId(className)`. No-op unless the module
+    // uses new.target (`ctx.usesNewTarget`), so zero cost otherwise.
+    emitSetNewTargetBeforeCall(ctx, fctx.body, className);
+    fctx.body.push({ op: "call", funcIdx: ctorFuncIdx });
+    // Box the instance to externref to match the dispatch `if` block type. Most
+    // `<Class>_new` return `(ref $structIdx)` (an anyref subtype) → wrap with
+    // `extern.convert_any`. But some class ctors already return externref
+    // (externref-backed / builtin-bridged construction); converting an externref
+    // again is invalid Wasm (`extern.convert_any[0] expected anyref, found
+    // externref`), which broke ~20 test262 tests where a value-bound ctor (e.g.
+    // a TypedArray constructor passed as `TA`) reached this fallback (#2026).
+    // Read the ctor's real result type and only box when it is NOT externref.
+    const ctorResult = getFuncResultType(ctx, ctorFuncIdx);
+    if (!ctorResult || ctorResult.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    }
+    fctx.body = savedBody;
+    return arm;
+  };
+
+  // No-match base: the descriptor is not a known user class (tag == -1) — e.g.
+  // a genuine host builtin like `Test262Error` that also reached the unknown-ctor
+  // branch. Fall through to the legacy `__new_${ctorName}` host import using the
+  // pre-evaluated externref args, so host builtins keep working. When no such
+  // import exists, yield null (the legacy `else` branch did the same).
+  // In standalone / WASI strict mode there is no `__new_` host import to fall
+  // back to (it is not on the dual-mode allowlist), so the no-match base stays
+  // pure-Wasm (null). Host mode falls through to the existing import so genuine
+  // builtins (Test262Error, …) keep working.
+  const hostImportName = `__new_${ctorName}`;
+  const hostFuncIdx = noJsHost(ctx) ? undefined : ctx.funcMap.get(hostImportName);
+  let noMatchBase: Instr[];
+  if (hostFuncIdx !== undefined) {
+    const base: Instr[] = [];
+    const savedBody2 = fctx.body;
+    fctx.body = base;
+    const hostParamTypes = getFuncParamTypes(ctx, hostFuncIdx) ?? [];
+    for (let i = 0; i < argLocals.length; i++) {
+      fctx.body.push({ op: "local.get", index: argLocals[i]! });
+    }
+    for (let i = argLocals.length; i < hostParamTypes.length; i++) {
+      pushDefaultValue(fctx, hostParamTypes[i]!, ctx);
+    }
+    fctx.body.push({ op: "call", funcIdx: hostFuncIdx });
+    fctx.body = savedBody2;
+    noMatchBase = base;
+  } else {
+    noMatchBase = [{ op: "ref.null.extern" }];
+  }
+
+  // (2) Flat tag-equality dispatch over every candidate (innermost → host base).
+  let chain: Instr[] = noMatchBase;
+  for (const className of candidates) {
+    const classTag = ctx.classTagMap.get(className) ?? 0;
+    const thenArm = buildCtorArm(className);
+    const elseArm = chain;
+    chain = [
+      { op: "local.get", index: tagLocal },
+      { op: "i32.const", value: classTag },
+      { op: "i32.eq" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: thenArm,
+        else: elseArm,
+      } as Instr,
+    ];
+  }
+  for (const instr of chain) fctx.body.push(instr);
+  return true;
+}
+
 function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.NewExpression): ValType | null {
   // Handle `new function() { ... }(args)` — constructor with function expression
   if (ts.isFunctionExpression(expr.expression)) {
@@ -1651,37 +1964,84 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   // needs `__map_new_from_arr` (slice 2) and falls through. Returns `ref $Map`
   // so the binding/receiver is typed (see resolveWasmType Map case + the
   // method/.size dispatch in extern.ts / property-access.ts).
-  if (
-    ctx.nativeStrings &&
-    ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "Map" &&
-    (expr.arguments?.length ?? 0) === 0
-  ) {
-    addUnionImports(ctx);
-    ensureMapHelpers(ctx);
-    const mapNewIdx = ctx.mapHelpers.get("__map_new");
-    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
-      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
-      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+  if (ctx.nativeStrings && ts.isIdentifier(expr.expression) && expr.expression.text === "Map") {
+    const args = expr.arguments ?? ([] as readonly ts.Expression[]);
+    // `new Map([[k,v],...])` — an array literal of 2-element array-literal pairs
+    // (the dominant iterable form). Each pair seeds the map via `__map_set`. Any
+    // non-array-literal element (spread, a variable, a non-pair) makes us fall
+    // back to the empty map (the general iterator drive is a follow-up slice).
+    const arrArg = args.length === 1 && ts.isArrayLiteralExpression(args[0]!) ? args[0]! : undefined;
+    const seedablePairs =
+      arrArg !== undefined &&
+      arrArg.elements.every(
+        (e) => ts.isArrayLiteralExpression(e) && e.elements.length === 2 && !e.elements.some(ts.isSpreadElement),
+      );
+    if (args.length === 0 || seedablePairs) {
+      addUnionImports(ctx);
+      ensureMapHelpers(ctx);
+      const mapNewIdx = ctx.mapHelpers.get("__map_new");
+      const mapSetIdx = ctx.mapHelpers.get("__map_set");
+      if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+        fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+        if (seedablePairs && arrArg !== undefined && arrArg.elements.length > 0 && mapSetIdx !== undefined) {
+          const mTmp = allocLocal(fctx, `__mapctor_m_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: ctx.mapTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: mTmp });
+          for (const el of arrArg.elements) {
+            // every() above narrowed each element to a 2-element array literal.
+            const pair = el as ts.ArrayLiteralExpression;
+            fctx.body.push({ op: "local.get", index: mTmp });
+            const kt = compileExpression(ctx, fctx, pair.elements[0]!);
+            coerceMapKeyToAnyref(ctx, fctx, kt);
+            const vt = compileExpression(ctx, fctx, pair.elements[1]!);
+            coerceMapKeyToAnyref(ctx, fctx, vt);
+            fctx.body.push({ op: "call", funcIdx: mapSetIdx }); // returns ref $Map
+            fctx.body.push({ op: "drop" });
+          }
+          fctx.body.push({ op: "local.get", index: mTmp });
+        }
+        return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+      }
     }
   }
 
-  // (#2162) `new Set()` in standalone / nativeStrings mode → the WasmGC-native
-  // Set runtime, which reuses the Map backing store (`__map_new` yields the
-  // same empty `$Map` a Set wraps). No-arg form only; `new Set(iterable)` needs
-  // the iterator drive (follow-up slice) and falls through.
-  if (
-    ctx.nativeStrings &&
-    ts.isIdentifier(expr.expression) &&
-    expr.expression.text === "Set" &&
-    (expr.arguments?.length ?? 0) === 0
-  ) {
-    addUnionImports(ctx);
-    ensureSetHelpers(ctx);
-    const mapNewIdx = ctx.mapHelpers.get("__map_new");
-    if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
-      fctx.body.push({ op: "call", funcIdx: mapNewIdx });
-      return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+  // (#2162) `new Set()` / `new Set([...])` in standalone / nativeStrings mode →
+  // the WasmGC-native Set runtime, which reuses the Map backing store
+  // (`__map_new` yields the same empty `$Map` a Set wraps). The no-arg form
+  // builds an empty Set; an ARRAY-LITERAL argument (`new Set([1,2,3])`, the
+  // dominant iterable form) seeds it element-by-element via `__set_add` (which
+  // dedups through the shared Map insert). A non-literal iterable still needs
+  // the general iterator drive (follow-up slice) and falls through.
+  if (ctx.nativeStrings && ts.isIdentifier(expr.expression) && expr.expression.text === "Set") {
+    const args = expr.arguments ?? ([] as readonly ts.Expression[]);
+    const arrArg = args.length === 1 && ts.isArrayLiteralExpression(args[0]!) ? args[0]! : undefined;
+    if (args.length === 0 || arrArg) {
+      addUnionImports(ctx);
+      ensureSetHelpers(ctx);
+      const mapNewIdx = ctx.mapHelpers.get("__map_new");
+      const setAddIdx = ctx.mapHelpers.get("__set_add");
+      if (mapNewIdx !== undefined && ctx.mapTypeIdx >= 0) {
+        fctx.body.push({ op: "call", funcIdx: mapNewIdx });
+        if (arrArg && setAddIdx !== undefined && !arrArg.elements.some((e) => ts.isSpreadElement(e))) {
+          const mTmp = allocLocal(fctx, `__setctor_m_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: ctx.mapTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: mTmp });
+          for (const el of arrArg.elements) {
+            if (ts.isOmittedExpression(el)) continue; // hole → undefined element
+            fctx.body.push({ op: "local.get", index: mTmp });
+            const et = compileExpression(ctx, fctx, el);
+            coerceMapKeyToAnyref(ctx, fctx, et);
+            fctx.body.push({ op: "call", funcIdx: setAddIdx }); // returns ref $Map
+            fctx.body.push({ op: "drop" }); // discard chained set
+          }
+          fctx.body.push({ op: "local.get", index: mTmp });
+        }
+        return { kind: "ref", typeIdx: ctx.mapTypeIdx };
+      }
     }
   }
 
@@ -2302,7 +2662,22 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // (#1343) TimeClip per §21.4.1.31: if !isFinite(ms) or abs(ms) > 8.64e15,
       // return NaN. Both NaN and out-of-range get the sentinel. ±Infinity is
       // out-of-range (abs > 8.64e15), so the single magnitude check covers it.
-      compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+      //
+      // (#2164) new Date(str) — §21.4.2.1: a String value is parsed as if by
+      // Date.parse. Route a statically-string-typed arg through the pure-Wasm
+      // __date_parse helper (yields an f64 ms, NaN on failure), then fall
+      // through the same TimeClip path below. Gated to standalone / WASI for the
+      // same reason as Date.parse (host strings + lazy helper wiring trip the
+      // late-import shift class #2043); host keeps the prior ToNumber(str)→NaN.
+      if ((ctx.standalone || ctx.wasi) && isStringTypedArg(ctx, args[0]!)) {
+        emitNativeDateParse(ctx);
+        const argType = compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+        flushLateImportShifts(ctx, fctx);
+        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__date_parse")! } as Instr);
+      } else {
+        compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
+      }
       const msLocal = allocTempLocal(fctx, { kind: "f64" });
       fctx.body.push({ op: "local.tee", index: msLocal } as Instr);
       // isInvalid = (ms != ms) || (abs(ms) > 8.64e15)
@@ -2469,7 +2844,7 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           blockType: { kind: "val", type: { kind: "i64" } },
           then: [{ op: "i64.const", value: -9223372036854775808n } as Instr],
           else: [{ op: "local.get", index: tsResultLocal } as Instr],
-        } as unknown as Instr,
+        },
       );
       releaseTempLocal(fctx, tsResultLocal);
       releaseTempLocal(fctx, nonFiniteLocal);
@@ -3085,6 +3460,34 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       }
     }
 
+    // (#2026) Dynamic-new fallback: `new K(...)` where `K` is a value-bound
+    // class identifier (type `any`) the static arms could not resolve. Dispatch
+    // through the class-object descriptor's struct type to the right
+    // `<Class>_new`, with a threaded argument list. Only fires for a bare
+    // identifier callee (so `new (expr)()` / member-callee forms keep their
+    // existing handling) and only when there is at least one struct-backed class
+    // to dispatch to; otherwise falls through to the legacy `__new_` host import
+    // (which still serves genuine host builtins like Test262Error).
+    {
+      let dynCallee: ts.Expression = expr.expression;
+      while (
+        ts.isParenthesizedExpression(dynCallee) ||
+        ts.isAsExpression(dynCallee) ||
+        ts.isNonNullExpression(dynCallee)
+      ) {
+        dynCallee = ts.isParenthesizedExpression(dynCallee)
+          ? dynCallee.expression
+          : ts.isAsExpression(dynCallee)
+            ? dynCallee.expression
+            : (dynCallee as ts.NonNullExpression).expression;
+      }
+      if (ts.isIdentifier(dynCallee) && !ctx.classSet.has(dynCallee.text)) {
+        if (emitDynamicNewFallback(ctx, fctx, expr, dynCallee, ctorName)) {
+          return { kind: "externref" };
+        }
+      }
+    }
+
     const importName = `__new_${ctorName}`;
     const funcIdx = ctx.funcMap.get(importName);
 
@@ -3520,9 +3923,23 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         fctx.body.push({ op: "local.get", index: offsetF64 });
         fctx.body.push({ op: "f64.sub" });
         fctx.body.push({ op: "local.set", index: lenF64 });
+      } else if (noJsHost(ctx)) {
+        // (#2159/#38) Standalone externref buffer (the common case — ArrayBuffer
+        // locals are typed externref): recover the i32_byte vec struct at runtime
+        // (any.convert_extern + ref.cast) and read its byte length, so the default
+        // windowed byteLength = bufferByteLength - offset is correct without a
+        // host handler.
+        fctx.body.push({ op: "local.get", index: bufLocal });
+        fctx.body.push({ op: "any.convert_extern" });
+        fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
+        fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
+        fctx.body.push({ op: "f64.convert_i32_s" });
+        fctx.body.push({ op: "local.get", index: offsetF64 });
+        fctx.body.push({ op: "f64.sub" });
+        fctx.body.push({ op: "local.set", index: lenF64 });
       } else {
-        // externref buffer — we can't read length at compile time. Use a
-        // NaN sentinel; the runtime __dv_register_view handler treats NaN as
+        // externref buffer (JS-host) — we can't read length at compile time. Use
+        // a NaN sentinel; the runtime __dv_register_view handler treats NaN as
         // "compute from __dv_byte_len(buf) - offset" at dispatch time.
         fctx.body.push({ op: "f64.const", value: NaN });
         fctx.body.push({ op: "local.set", index: lenF64 });
@@ -3533,7 +3950,20 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // Always register, even for externref buffers — ArrayBuffer variables
       // in user code are lowered to externref (see checker/type-mapper.ts),
       // but the actual wasmGC struct is what the bridge dispatches on.
-      {
+      //
+      // (#2159) Standalone / WASI mode has no JS host: the accessor
+      // (`get/set{Int,Uint,Float}N`) is lowered to pure-Wasm byte reads/writes
+      // directly on the i32_byte backing struct (see dataview-native.ts), so
+      // there is no runtime bridge to register with. Emitting the host call
+      // unconditionally leaked an unsatisfiable `env::__dv_register_view`
+      // import, making EVERY `new DataView(...)` a hard instantiate failure
+      // standalone. Gate the registration on JS-host mode; standalone evaluates
+      // the offset/length args above for their side effects + RangeError checks
+      // and then operates on the struct directly. (The view-window base offset
+      // for `new DataView(buf, n>0)` is a separate representation slice, shared
+      // with TypedArray-on-buffer windowing; offset-0 views — the dominant
+      // case — are fully native here.)
+      if (!noJsHost(ctx)) {
         const regIdx = ensureLateImport(
           ctx,
           "__dv_register_view",
@@ -3550,6 +3980,40 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
           fctx.body.push({ op: "local.get", index: lenF64 });
           fctx.body.push({ op: "call", funcIdx: regIdx });
         }
+      }
+
+      // (#2159/#38) Standalone windowed DataView: when the view has a non-trivial
+      // window (an explicit byteOffset > 0, or an explicit byteLength), wrap the
+      // shared backing buffer in a `$__dv_window {buf, byteOffset, byteLength}`
+      // so the native accessors add the base offset and `dv.byteOffset` /
+      // `dv.byteLength` reflect the ctor args. Offset-0 default-length views keep
+      // the bare vec representation (the dominant, fully-native case) — the
+      // accessor's `recoverDvBacking` accepts both shapes. We only wrap struct
+      // buffers (the externref-buffer path has no compile-time struct to share).
+      const windowed = noJsHost(ctx) && args.length >= 2;
+      if (windowed) {
+        const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
+        // buf (ref null vec). The buffer local may be a struct ref already or an
+        // externref (ArrayBuffer locals are typed externref) — recover the vec
+        // struct so the wrapper's `buf` field is a concrete `(ref null vec)`.
+        fctx.body.push({ op: "local.get", index: bufLocal });
+        if (!isStructBuf) {
+          fctx.body.push({ op: "any.convert_extern" });
+          fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx });
+        }
+        // byteOffset (i32) — offsetF64 is already ToIndex-normalized & validated.
+        fctx.body.push({ op: "local.get", index: offsetF64 });
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+        // byteLength (i32) — lenF64 holds the windowed length (explicit arg or
+        // bufferByteLength - offset default computed above).
+        fctx.body.push({ op: "local.get", index: lenF64 });
+        fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+        fctx.body.push({ op: "struct.new", typeIdx: dvWinTypeIdx });
+        // DataView locals are externref (EXTERNREF_GLOBAL_NAMES) — hand back an
+        // externref so the wrapper survives the variable store and is recovered
+        // (any.convert_extern + ref.test $__dv_window) on accessor dispatch.
+        fctx.body.push({ op: "extern.convert_any" });
+        return { kind: "externref" };
       }
 
       // Restore buffer on stack

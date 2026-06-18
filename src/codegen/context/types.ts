@@ -102,6 +102,13 @@ export interface CodegenOptions {
   strictNoHostImports?: boolean;
   /** JSX runtime import detected during preprocessing (#1540). */
   jsxRuntime?: import("../../import-resolver.js").JsxRuntimeImport;
+  /**
+   * (#2119) Infer ES-module strictness (→ unmapped `arguments`) from a genuine
+   * top-level `import`/`export`. Default `true`. The test262 harness sets this
+   * `false` for script tests so its synthetic `export function test()` wrapper
+   * does not unmap sloppy (`noStrict`) arguments. See `CompileOptions`.
+   */
+  inferModuleStrictArguments?: boolean;
 }
 
 /** Info about an externally declared class. */
@@ -556,6 +563,9 @@ export interface CodegenContext {
    * `JS2WASM_LOG_CODEGEN_FALLBACKS=1` turn it on.
    */
   trackSilentFallbacks?: boolean;
+  /** (#2119) Infer module-strictness (→ unmapped arguments) from a genuine
+   *  top-level import/export. Default true; test262 script tests pass false. */
+  inferModuleStrictArguments?: boolean;
   /**
    * #1923 — captured IR post-claim demotions (build/verify/lower/backend-
    * legality failures on a function the selector claimed, which fall back to
@@ -735,6 +745,27 @@ export interface CodegenContext {
   accessorGetDriverReserved?: boolean;
   accessorSetDriverReserved?: boolean;
   /**
+   * (#2166 PR-D1) True once the standalone `JSON.parse(text, reviver)` codec
+   * reserved its `__call_reviver(holder, key, value) -> externref` driver
+   * funcIdx — filled in finalize to wrap `__call_fn_method_2`. Same reserve/fill
+   * funcIdx-authority pattern as the accessor drivers above.
+   */
+  reviverDriverReserved?: boolean;
+  /**
+   * (#2166 PR-D2) True once the standalone `JSON.stringify` codec reserved its
+   * `__call_to_json(value, method, key) -> externref` driver funcIdx — filled in
+   * finalize to wrap `__call_fn_method_1` (value bound as the `toJSON`
+   * receiver).
+   */
+  toJsonDriverReserved?: boolean;
+  /**
+   * (#2166 PR-D3) True once the standalone `JSON.stringify` codec reserved its
+   * `__call_replacer(holder, replacer, key, value) -> externref` driver funcIdx
+   * — filled in finalize to wrap `__call_fn_method_2` (holder bound as the
+   * replacer `this`, key+value the two replacer args).
+   */
+  replacerDriverReserved?: boolean;
+  /**
    * (#1888 Slice 1) True once the standalone open-any method-dispatch bridge
    * `__apply_closure(fn, recv, args) -> externref` has reserved its funcIdx via
    * a placeholder function pushed during `ensureObjectRuntime` (registered in
@@ -775,6 +806,17 @@ export interface CodegenContext {
    * plus `$ObjVec`) are known.
    */
   externIsArrayReserved?: boolean;
+  /**
+   * (#2190) True once `__extern_get_idx` is registered with its static
+   * `$Object`/`$ObjVec` arms (standalone only). The per-element-kind
+   * `__vec_<k>` dispatch arms are appended at FINALIZE by
+   * `fillExternGetIdxVecArms`, after every `__vec_*` carrier type is known —
+   * the same reserve/fill pattern as `externIsArrayReserved`. Without the
+   * deferred fill, an array literal of an element kind compiled after
+   * `ensureObjectRuntime` would have no indexing arm and `(arr as any)[i]`
+   * would read back null/0 (sibling of the #2189 `.length` gap).
+   */
+  externGetIdxReserved?: boolean;
   /**
    * (#2038) True once the native iterator runtime (`ensureNativeIteratorRuntime`,
    * iterator-native.ts) has emitted `__iterator` / `__iterator_next` with a
@@ -986,6 +1028,11 @@ export interface CodegenContext {
   anyStrTypeIdx: number;
   nativeStrTypeIdx: number;
   consStrTypeIdx: number;
+  /**
+   * (#40) Immutable `(array i32)` type index for the Unicode case-mapping tables
+   * (emitNativeCaseConversion). Registered once on first use.
+   */
+  caseTableArrTypeIdx?: number;
   /** #1588 PR-B: i8 backing array + Utf8String subtype indices. -1 when
    *  `utf8Storage` is off (types not registered). */
   utf8StrDataTypeIdx: number;
@@ -1057,6 +1104,41 @@ export interface CodegenContext {
   templateCacheCounter: number;
   /** Type index for template vec struct */
   templateVecTypeIdx: number;
+  /**
+   * (#2186) Type index for the shared `$__vec_base` supertype — a `(length i32)`
+   * struct that every `__vec_<elemKind>` subtypes. Lets standalone runtime
+   * helpers (`__extern_length`) `ref.test`/`ref.cast` a boxed array externref
+   * to read its `.length` uniformly, regardless of element kind. -1 = not yet
+   * registered (created lazily on first `getOrRegisterVecType`).
+   */
+  vecBaseTypeIdx: number;
+  /**
+   * (#2159 / #38) Type index for the standalone `$__dv_window` struct — a
+   * `{buf: (ref null __vec_i32_byte), byteOffset: i32, byteLength: i32}` wrapper
+   * produced by `new DataView(buffer, byteOffset, byteLength)` when the view is
+   * windowed (offset > 0 or an explicit byteLength). Lets the native DataView
+   * accessors add `byteOffset` to every byte index while sharing the parent's
+   * backing array (so windowed writes are visible through the full view), and
+   * lets `dv.byteOffset`/`dv.byteLength` reflect the ctor args. -1 = not yet
+   * registered (created lazily). Offset-0 default-length views keep the bare
+   * i32_byte vec representation (no wrapper, zero new cost).
+   */
+  dvWindowTypeIdx: number;
+  /**
+   * (#2159 / #2357 / #47) Type index for the standalone `$__subview` struct — a
+   * `{base: (ref null __vec_<elem>), byteOffset: i32, length: i32}` view produced
+   * by `TypedArray.prototype.subarray(begin, end)`. It SHARES the parent's backing
+   * `data` array (true aliasing — a sub-write is visible in the parent) and carries
+   * the element offset + windowed length. Element access discriminates view-vs-plain
+   * at COMPILE time via the receiver's resolved ValType (a binding initialised by
+   * `subarray` resolves to `$__subview`), so the plain-array `a[i]` hot path takes
+   * ZERO extra instructions — no per-access runtime branch. Keyed per element kind
+   * in `subviewTypeMap`; this scalar holds the most-recently-registered idx for
+   * back-compat. -1 = not yet registered. (Spec: plan/issues/2357.)
+   */
+  subviewTypeIdx: number;
+  /** (#2357) Per-element-kind `$__subview` struct type indices, keyed by elemKind. */
+  subviewTypeMap: Map<string, number>;
   /** Type index for the WasmGC `$Error_struct` used in standalone/WASI mode (#1104). -1 = not yet registered. */
   errorStructTypeIdx: number;
   /** Extra properties for empty object variables */
@@ -1160,6 +1242,22 @@ export interface CodegenContext {
   inlinableFunctions: Map<string, InlinableFunctionInfo>;
   /** Global index of the __symbol_counter */
   symbolCounterGlobalIdx: number;
+  /** (#2163) Global index of the native symbol id→description table
+   *  (`ref_null` to an array of `$AnyString`), lazily allocated. -1 until first
+   *  use. Standalone-mode native `.description` storage. */
+  symbolDescGlobalIdx: number;
+  /** (#2163) Type index of the symbol description table's array type
+   *  (`array (mut (ref null $AnyString))`). -1 until created. */
+  symbolDescArrTypeIdx: number;
+  /** (#2163) Native `Symbol.for`/`Symbol.keyFor` registry (standalone mode).
+   *  Two parallel growable arrays — slot→key string (reuses
+   *  `symbolDescArrTypeIdx`) and slot→symbol id (`array (mut i32)`) — plus a
+   *  count global. All -1 until the first `Symbol.for`/`keyFor`. */
+  symbolRegKeysGlobalIdx: number;
+  symbolRegIdsGlobalIdx: number;
+  symbolRegCountGlobalIdx: number;
+  /** (#2163) Type index of the registry ids array (`array (mut i32)`). */
+  symbolRegIdsArrTypeIdx: number;
   /** Stack of in-progress parent function bodies for index shifting during closure compilation */
   parentBodiesStack: Instr[][];
   /** All live (allocated but not yet attached to ctx.mod.functions) FunctionContext bodies.
