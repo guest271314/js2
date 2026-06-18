@@ -26,6 +26,7 @@ import {
   localGlobalIdx,
   resolveWasmType,
 } from "../index.js";
+import { getSubviewArrTypeIdx, isSubviewTypeIdx } from "../registry/types.js"; // (#2357/#47) subview write
 import { buildDestructureNullThrow, patternIteratorStepCount } from "../destructuring-params.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import {
@@ -2780,6 +2781,47 @@ function compileElementAssignment(
   }
   const typeIdx = (arrType as { typeIdx: number }).typeIdx;
   const typeDef = ctx.mod.types[typeIdx];
+
+  // (#2357/#47) `$__subview` target (TypedArray subarray): write through to the
+  // SHARED parent buffer at `data[byteOffset + i] = v` (true aliasing). Must run
+  // BEFORE the struct-field check below — a `$__subview` is a 3-field struct so the
+  // 2-field `isVecStructAssign` test is false and the field path would mis-handle
+  // it. Compile-time discriminated by the receiver typeIdx; plain vec arrays never
+  // reach this arm. The receiver ref is already on the stack (from line ~2765).
+  if (typeDef?.kind === "struct" && isSubviewTypeIdx(ctx, typeIdx)) {
+    const subArrTypeIdx = getSubviewArrTypeIdx(ctx, typeIdx);
+    const subArrDef = ctx.mod.types[subArrTypeIdx];
+    if (!subArrDef || subArrDef.kind !== "array") {
+      reportError(ctx, target, "Subview assignment: data is not an array");
+      return null;
+    }
+    const svLocal = allocLocal(fctx, `__sv_set_${fctx.locals.length}`, { kind: "ref_null", typeIdx });
+    fctx.body.push({ op: "local.set", index: svLocal } as Instr);
+    // absolute index = sv.byteOffset + i
+    fctx.body.push({ op: "local.get", index: svLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 2 } as Instr); // byteOffset
+    compileExpression(ctx, fctx, target.argumentExpression, { kind: "i32" });
+    fctx.body.push({ op: "i32.add" } as Instr);
+    const svIdxLocal = allocLocal(fctx, `__sv_idx_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "local.set", index: svIdxLocal } as Instr);
+    // value: unpack i8/i16 element kind into i32 for the value position (#2159
+    // Slice 1) — `array.set` re-packs into the packed element.
+    const valHint: ValType =
+      subArrDef.element.kind === "i8" || subArrDef.element.kind === "i16" ? { kind: "i32" } : subArrDef.element;
+    const valResult = compileExpression(ctx, fctx, value, valHint);
+    if (valResult && !valTypesMatch(valResult, valHint)) coerceType(ctx, fctx, valResult, valHint);
+    const svValLocal = allocLocal(fctx, `__sv_val_${fctx.locals.length}`, valHint);
+    fctx.body.push({ op: "local.set", index: svValLocal } as Instr);
+    // data[absIdx] = val  (shared backing array → aliases the parent)
+    fctx.body.push({ op: "local.get", index: svLocal } as Instr);
+    fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 } as Instr); // data array
+    fctx.body.push({ op: "local.get", index: svIdxLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: svValLocal } as Instr);
+    fctx.body.push({ op: "array.set", typeIdx: subArrTypeIdx } as Instr);
+    // Assignment is an expression — re-push the value as its result.
+    fctx.body.push({ op: "local.get", index: svValLocal } as Instr);
+    return valHint;
+  }
 
   // Bracket assignment on struct: obj["prop"] = value → struct.set
   // Resolve field name from string/numeric literal, const variable, or constant expression
