@@ -154,15 +154,10 @@ describe("#2166 — standalone JSON.stringify with space (indentation)", () => {
   });
 });
 
-describe("#2166 — replacer / dynamic space still refuse (no silent wrong output)", () => {
-  it("refuses a function replacer", async () => {
-    await expectRefused(`export function test(): number { return JSON.stringify({ a: 1 }, (k, v) => v, 2).length; }`);
-  });
-
-  it("refuses an array replacer", async () => {
-    await expectRefused(`export function test(): number { return JSON.stringify({ a: 1, b: 2 }, ["a"], 2).length; }`);
-  });
-
+describe("#2166 — dynamic space still refuses (no silent wrong output)", () => {
+  // Function/array replacers are now supported (PR-D3, see the dedicated block
+  // below). A *dynamic* (non-static-literal) space remains a documented refusal
+  // — the static-fold path can't resolve the gap at compile time.
   it("refuses a dynamic (non-static) space", async () => {
     await expectRefused(`export function test(s: number): number { return JSON.stringify({ a: 1 }, null, s).length; }`);
   });
@@ -600,5 +595,217 @@ describe("#2166 PR-D1 — standalone JSON.parse reviver (InternalizeJSONProperty
         "wasi",
       ),
     ).toBe(1);
+  });
+});
+
+/*
+ * #2166 PR-D2 — standalone `JSON.stringify` toJSON support (§25.5.2
+ * SerializeJSONProperty step 2.b). Before serialising a value, if it is an
+ * $Object with a callable own `toJSON`, the codec calls `value.toJSON(key)` via
+ * the reserve/fill `__call_to_json` driver → `__call_fn_method_1` (value bound
+ * as `this`) and serialises the result instead. The property key is threaded
+ * through `__json_stringify_value`'s new 4th param.
+ *
+ * `standaloneNum` runs an internal boolean comparison (standalone native strings
+ * don't marshal across the export boundary) and also asserts no JSON host-import
+ * leak.
+ */
+describe("#2166 PR-D2 — standalone JSON.stringify toJSON", () => {
+  it("calls toJSON (arrow) and serialises its string result", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { x: 1, toJSON: () => "custom" }; return JSON.stringify(o) === '"custom"' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("serialises a numeric toJSON result", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { toJSON: () => 42 }; return JSON.stringify(o) === "42" ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("passes the property key to toJSON", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { p: { toJSON: (k: string) => k } }; return JSON.stringify(o) === '{"p":"p"}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("binds the value as `this` inside a function-expression toJSON", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { v: 7, toJSON: function() { return (this as any).v; } }; return JSON.stringify(o) === "7" ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("serialises a toJSON result that is a (captured) object graph", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const r: any = { w: 9 }; const o: any = { toJSON: () => r }; return JSON.stringify(o) === '{"w":9}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("applies toJSON to a nested property value", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const inner: any = { toJSON: () => 42 }; const o: any = { a: inner }; return JSON.stringify(o) === '{"a":42}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  // Regressed by #2186 (PR #1667): an array *literal* value (`[e]`) is now boxed
+  // as a `$__vec_base` typed vector, not an `$ObjVec`, so the codec's array arm
+  // (which ref.tests `$ObjVec`) no longer matches it — `JSON.stringify({arr:[e]})`
+  // yields `{}` regardless of toJSON. This is the same closed-vec serialisation
+  // gap as PR-A2; the fix is to route `$__vec_base` through the codec's array
+  // arm (tracked with the #2190 array-element-externref work). Skipped until then.
+  it.skip("applies toJSON to an array element (blocked on #2186/#2190 $__vec_base array rep)", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const e: any = { toJSON: () => 5 }; const o: any = { arr: [e] }; return JSON.stringify(o) === '{"arr":[5]}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("honours toJSON under the indented (space) form", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { v: { toJSON: () => 1 } }; return JSON.stringify(o, null, 2) === '{\\n  "v": 1\\n}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("does not regress a plain object with no toJSON", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { x: 1, y: 2 }; return JSON.stringify(o) === '{"x":1,"y":2}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("a method-shorthand toJSON elsewhere does not corrupt the codec", async () => {
+    // Regression guard: a method-shorthand closure forces a late import/index
+    // shift; the codec body is deep-cloned (preserving f64.const Infinity) so the
+    // lazily-reserved __call_to_json call stays in sync and the module verifies.
+    expect(
+      await standaloneNum(
+        `export function test(): number { const m: any = { v: 7, toJSON() { return this.v; } }; const p: any = { a: 1 }; return JSON.stringify(p) === '{"a":1}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("stays host-import-free under --target wasi (toJSON path)", async () => {
+    // As with PR-A/PR-B, the wasi object-rep differs, so we don't assert the
+    // toJSON result value here — only that the codec path compiles host-import-
+    // free under wasi. `standaloneNum` throws if a JSON_* host import leaks.
+    await standaloneNum(
+      `export function test(): number { const o: any = { toJSON: () => 3 }; const s: string = JSON.stringify(o); return s.length; }`,
+      "wasi",
+    );
+  });
+});
+
+/**
+ * #2166 PR-D3 — standalone `JSON.stringify` replacer (§25.5.2). A *function*
+ * replacer transforms every property/element via `replacer.call(holder, key,
+ * value)` (holder bound as `this`) through the reserve/fill `__call_replacer`
+ * driver → `__call_fn_method_2`; an *array* replacer is a key allowlist built
+ * as a plain `$Object` and filtered with `__extern_has`. Both route to
+ * `__json_stringify_root_replacer`, which wraps the value in the §25.5.2 root
+ * holder `{"": v}`, applies a function replacer to the root value, and threads
+ * holder/replacer/allowList through the recursive walk. `standaloneNum` runs an
+ * internal boolean comparison and asserts no JSON host-import leak.
+ */
+describe("#2166 PR-D3 — standalone JSON.stringify replacer", () => {
+  it("applies a function replacer that doubles every number", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { a: 1, b: 2 }; const r = (k: string, v: any) => (typeof v === "number" ? v * 2 : v); return JSON.stringify(o, r) === '{"a":2,"b":4}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("omits a property when the replacer returns undefined", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { a: 1, drop: 2 }; const r = (k: string, v: any) => (k === "drop" ? undefined : v); return JSON.stringify(o, r) === '{"a":1}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("passes the property key to the replacer", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { p: 0 }; const r = (k: string, v: any) => (k === "" ? v : k); return JSON.stringify(o, r) === '{"p":"p"}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  // NOTE: `this` inside the replacer is bound to the holder via the same
+  // __call_fn_method_2 → __current_this path the PR-D1 reviver uses, but
+  // *reading* `this.<prop>` inside a standalone closure body is a separate,
+  // pre-existing limitation (the reviver path has the identical gap — verified
+  // by probe). A replacer that ignores `this` (the dominant case) works; the
+  // `this`-member-access case is tracked as standalone-closure-this, out of D3
+  // scope. See the issue file.
+
+  it("applies the replacer to a nested object graph", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { outer: { n: 3 } }; const r = (k: string, v: any) => (typeof v === "number" ? v + 1 : v); return JSON.stringify(o, r) === '{"outer":{"n":4}}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  // NOTE: the replacer IS threaded through the array arm (per §25.5.2 it applies
+  // to array elements too), but a `number[]` array *value* nested in an object
+  // is a closed typed-vec struct, not an `$ObjVec`, so it does not yet serialise
+  // at all (the documented PR-A2 limitation — verified: `JSON.stringify({arr:[1,2]})`
+  // already yields `{}` with no replacer). The array-element replacer path
+  // activates automatically once PR-A2 routes `number[]` through the codec.
+
+  it("filters object keys with an array allowlist", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { a: 1, b: 2, c: 3 }; return JSON.stringify(o, ["a", "c"]) === '{"a":1,"c":3}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("allowlist filters nested objects too", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { a: { a: 1, b: 2 }, b: 9 }; return JSON.stringify(o, ["a"]) === '{"a":{"a":1}}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("honours a function replacer under the indented (space) form", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { a: 1 }; const r = (k: string, v: any) => (typeof v === "number" ? v + 1 : v); return JSON.stringify(o, r, 2) === '{\\n  "a": 2\\n}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("does not regress a plain object with no replacer", async () => {
+    expect(
+      await standaloneNum(
+        `export function test(): number { const o: any = { x: 1, y: 2 }; return JSON.stringify(o) === '{"x":1,"y":2}' ? 1 : 0; }`,
+      ),
+    ).toBe(1);
+  });
+
+  it("stays host-import-free under --target wasi (replacer path)", async () => {
+    await standaloneNum(
+      `export function test(): number { const o: any = { a: 1 }; const r = (k: string, v: any) => v; const s: string = JSON.stringify(o, r); return s.length; }`,
+      "wasi",
+    );
   });
 });

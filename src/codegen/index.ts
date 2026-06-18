@@ -44,7 +44,7 @@ import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
-import { fillApplyClosure, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
+import { fillApplyClosure, fillExternGetIdxVecArms, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -67,6 +67,7 @@ import {
   addFuncType,
   getArrTypeIdxFromVec,
   getOrRegisterArrayType,
+  getOrRegisterSubviewType,
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";
@@ -1036,6 +1037,23 @@ export function generateModule(
       }
     }
 
+    // (#2357/#47) Reserve the standalone TypedArray `$__subview_<elem>` struct
+    // types up-front, here — at the SAME deterministic point in every codegen
+    // pass — so the subview type index is identical across the hoist pass (which
+    // sizes a `subarray`-result binding's local via
+    // `inferLetConstInitializerWasmType`) and the body/emit pass (which emits the
+    // matching `struct.new`). On-demand subview registration lands at
+    // pass-dependent indices, de-syncing the two; eager registration *inside*
+    // `getOrRegisterVecType` instead shifts the vec resolution itself (a plain
+    // `new Uint8Array()` then resolves to the subview). Reserving the subviews
+    // here — after the vec-independent linear-u8 reservation, before any function
+    // is compiled — gives a stable, isolated slot. `getOrRegisterSubviewType`
+    // pulls in only the backing array type (deduped per elem kind), so vec
+    // registration order is untouched. Standalone/WASI only; additive.
+    if (ctx.standalone || ctx.wasi) {
+      reserveTypedArraySubviewTypes(ctx);
+    }
+
     // $AnyValue struct type is now registered lazily via ensureAnyValueType()
 
     // Note: console imports handled by unified collector (skipped in WASI mode via registerWasiImports)
@@ -1113,12 +1131,23 @@ export function generateModule(
     //
     // #1472 Phase A — these two imports exist solely so the JS-host Proxy
     // wrapper can present a spec-correct own-key set for class prototypes /
-    // class objects. There is no Proxy (and no JS host) in --target standalone,
-    // so we skip registering them. `emitLazyProtoGet` / `emitLazyClassObjectGet`
-    // gate their `call` emission on the import being present in funcMap, so
-    // skipping registration cleanly drops the host notification while the
-    // struct-backed prototype/class globals still work natively.
-    if (sourceContainsClass(ast.sourceFile) && !ctx.standalone) {
+    // class objects. There is no Proxy (and no JS host) in any no-JS-host
+    // target, so we skip registering them. `emitLazyProtoGet` /
+    // `emitLazyClassObjectGet` gate their `call` emission on the import being
+    // present in funcMap, so skipping registration cleanly drops the host
+    // notification while the struct-backed prototype/class globals still work
+    // natively.
+    //
+    // (#2026 PR-1b) The guard must cover BOTH no-JS-host targets (`wasi` AND
+    // `standalone`), not just `standalone`. Under `--target wasi` the import was
+    // still registered, so `emitLazyClassObjectGet` took its
+    // `__register_class_object` CSV-notification branch and emitted a
+    // `global.get` of the static-methods-CSV string global — which under
+    // nativeStrings is not a real module global, baking a `-1` global index and
+    // crashing binary emit ("global index out of range — -1") the moment a class
+    // flowed as a value (`use(A)`, `new K()` dynamic-new). `standalone` already
+    // skipped this and worked; `wasi` now matches.
+    if (sourceContainsClass(ast.sourceFile) && !(ctx.standalone || ctx.wasi)) {
       const regProtoTypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], []);
       addImport(ctx, "env", "__register_prototype", { kind: "func", typeIdx: regProtoTypeIdx });
       // (#1395) Same rationale for the class-object registry — must be
@@ -1670,6 +1699,12 @@ export function generateModule(
     // (#1904) Fill the standalone native Array.isArray predicate after all
     // module-local array carriers have been registered.
     fillExternIsArray(ctx);
+
+    // (#2190) Fill `__extern_get_idx`'s typed-`__vec_<elemKind>` indexing arms
+    // now that every array-literal carrier type is known — sibling of #2189's
+    // `.length` fix, so `(arr as any)[i]` through the externref boundary reads
+    // the element instead of null/0. Standalone only (no-op otherwise).
+    fillExternGetIdxVecArms(ctx);
 
     // #1504: emit __is_closure(externref) -> i32 so the JS-side wrapExports
     // can discriminate a closure struct return from a vec/struct return
@@ -5999,6 +6034,20 @@ export function reserveLinearU8AllocType(ctx: CodegenContext): void {
   if (ctx.linearU8AllocTypeIdx !== undefined) return;
   if (!ctx.wasi) return;
   ctx.linearU8AllocTypeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }]);
+}
+
+/**
+ * (#2357/#47) Reserve the standalone `$__subview_<elem>` struct types up-front so
+ * their indices are deterministic across codegen passes (see the call site in
+ * `generateModule`). Covers the element kinds standalone TypedArrays use for their
+ * backing arrays: `i8_byte` (Uint8Array) and `f64` (the other typed arrays).
+ * `getOrRegisterSubviewType` only forces the backing ARRAY type (uniquely deduped
+ * per element kind) — it does NOT register or reorder the vec struct, so plain
+ * typed-array resolution is unaffected. Idempotent.
+ */
+export function reserveTypedArraySubviewTypes(ctx: CodegenContext): void {
+  getOrRegisterSubviewType(ctx, "i8_byte", { kind: "i8" });
+  getOrRegisterSubviewType(ctx, "f64", { kind: "f64" });
 }
 
 export function ensureLinearU8AllocHelper(ctx: CodegenContext): number {
@@ -12569,7 +12618,25 @@ function inferLetConstInitializerWasmType(
     }
   }
   receiverType ??= resolveWasmType(ctx, ctx.checker.getTypeAtLocation(receiver));
-  return isVecStructType(ctx, receiverType) ? { kind: "ref_null", typeIdx: receiverType.typeIdx } : null;
+  if (!isVecStructType(ctx, receiverType)) return null;
+  // (#2357/#47) Standalone `subarray` produces a `$__subview` that shares the
+  // parent's backing array (true aliasing). Resolving the binding to the subview
+  // type here is what makes element access pick the windowed lowering at COMPILE
+  // time (so plain-array `a[i]` stays zero-cost). `slice` still returns an
+  // independent copy (a plain vec). The receiver may itself be a subview (nested
+  // subarray) — its element kind is recovered from the base vec.
+  if (methodName === "subarray" && (ctx.standalone || ctx.wasi)) {
+    const recvIdx = (receiverType as { typeIdx: number }).typeIdx;
+    // elemKind from the receiver's struct name: `__vec_<elem>` (plain typed array)
+    // or `__subview_<elem>` (nested subarray over a subview).
+    const recvName = ctx.typeIdxToStructName.get(recvIdx);
+    const elemKind = recvName?.replace(/^__vec_/, "").replace(/^__subview_/, "");
+    if (elemKind !== undefined && elemKind !== recvName) {
+      const svIdx = getOrRegisterSubviewType(ctx, elemKind);
+      return { kind: "ref_null", typeIdx: svIdx };
+    }
+  }
+  return { kind: "ref_null", typeIdx: receiverType.typeIdx };
 }
 
 function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.Statement): void {

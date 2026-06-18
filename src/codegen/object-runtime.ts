@@ -67,7 +67,7 @@ import {
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag } from "./registry/imports.js";
-import { addFuncType } from "./registry/types.js";
+import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecBaseType } from "./registry/types.js";
 import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
 
@@ -3122,10 +3122,37 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           ] as Instr[];
         })()
       : [{ op: "f64.const", value: 0 }];
+    // (#2186) `$__vec_base` arm: a real array literal / array result boxed to
+    // externref is a `__vec_<elemKind>` struct subtyping `$__vec_base`. Its
+    // length (field 0) is readable through the shared supertype regardless of
+    // element kind — fixing `.length` === 0 for arrays read through the externref
+    // boundary (e.g. `const a:any = [1,2,3]; a.length`). Checked BEFORE the
+    // $ObjVec arm (a vec is not an $ObjVec). `objArrayLikeArms` (standalone) gates
+    // this since host mode's `__extern_length` import owns the path.
+    const vecBaseIdx = objArrayLikeArms ? getOrRegisterVecBaseType(ctx) : -1;
+    const vecBaseArm: Instr[] = objArrayLikeArms
+      ? [
+          { op: "local.get", index: 1 },
+          { op: "ref.test", typeIdx: vecBaseIdx },
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [
+              { op: "local.get", index: 1 },
+              { op: "ref.cast", typeIdx: vecBaseIdx },
+              { op: "struct.get", typeIdx: vecBaseIdx, fieldIdx: 0 },
+              { op: "f64.convert_i32_s" },
+              { op: "return" },
+            ],
+          } as Instr,
+        ]
+      : [];
     const body: Instr[] = [
       { op: "local.get", index: 0 },
       { op: "any.convert_extern" },
-      { op: "local.tee", index: 1 },
+      { op: "local.set", index: 1 },
+      ...vecBaseArm,
+      { op: "local.get", index: 1 },
       { op: "ref.test", typeIdx: objVecTypeIdx },
       {
         op: "if",
@@ -3183,51 +3210,21 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
           },
         ]
       : [];
-    const body: Instr[] = [
-      { op: "local.get", index: 0 },
-      { op: "any.convert_extern" },
-      { op: "local.set", index: 2 },
-      ...objIdxArm,
-      { op: "local.get", index: 2 },
-      { op: "ref.test", typeIdx: objVecTypeIdx },
-      { op: "i32.eqz" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [{ op: "ref.null.extern" }, { op: "return" }],
-      },
-      // vec = cast<$ObjVec>(any) ; i = i32(idx)
-      { op: "local.get", index: 2 },
-      { op: "ref.cast", typeIdx: objVecTypeIdx },
-      { op: "local.set", index: 3 },
-      { op: "local.get", index: 1 },
-      { op: "i32.trunc_sat_f64_s" },
-      { op: "local.tee", index: 4 },
-      // if i < 0 || i >= vec.len → null
-      { op: "i32.const", value: 0 },
-      { op: "i32.lt_s" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [{ op: "ref.null.extern" }, { op: "return" }],
-      },
-      { op: "local.get", index: 4 },
-      { op: "local.get", index: 3 },
-      { op: "ref.as_non_null" },
-      { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 0 },
-      { op: "i32.ge_s" },
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: [{ op: "ref.null.extern" }, { op: "return" }],
-      },
-      // return vec.data[i]
-      { op: "local.get", index: 3 },
-      { op: "ref.as_non_null" },
-      { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 1 },
-      { op: "local.get", index: 4 },
-      { op: "array.get", typeIdx: objVecArrTypeIdx },
-    ];
+    // (#2190) The per-element-kind `__vec_<k>` indexing arms are NOT known yet
+    // (array literals of a given element kind may be compiled AFTER this
+    // runtime is emitted). They are appended at FINALIZE by
+    // `fillExternGetIdxVecArms` — which rebuilds this whole body via the shared
+    // `buildExternGetIdxBody` builder with the now-complete carrier set. Here we
+    // bake the body WITHOUT vec arms (empty list) and flag the reserve.
+    const body = buildExternGetIdxBody({
+      objArrayLikeArms,
+      objectTypeIdx,
+      objVecTypeIdx,
+      objVecArrTypeIdx,
+      numberToStringIdx: objArrayLikeArms ? ctx.funcMap.get("number_toString")! : -1,
+      externGetIdx: objArrayLikeArms ? ctx.funcMap.get("__extern_get")! : -1,
+      vecArms: [],
+    });
     registerNative(
       "__extern_get_idx",
       [{ kind: "externref" }, { kind: "f64" }],
@@ -3239,6 +3236,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       ],
       body,
     );
+    // Reserve the typed-vec fill only in standalone (host mode's `__extern_get_idx`
+    // JS import owns the path; registering arms there would shift funcMap indices).
+    if (objArrayLikeArms) ctx.externGetIdxReserved = true;
   }
   const externSetIdx = ctx.funcMap.get("__extern_set")!;
 
@@ -6240,6 +6240,269 @@ export function fillExternIsArray(ctx: CodegenContext): void {
 
   fn.locals = [{ name: "any", type: { kind: "anyref" } }];
   fn.body = body;
+}
+
+/**
+ * (#2190) Box one loaded `__vec_<elemKind>` element (already on the stack) up to
+ * `externref`. Returns the box-op sequence, or `null` to tell the caller to skip
+ * the arm for this carrier.
+ *
+ * SCOPE (regression-hardened, round 2): a non-null sequence is returned ONLY for
+ * the two element kinds whose box op PROVABLY yields a fresh `externref` —
+ * plain `f64` (`__box_number`) and plain `i32` (`f64.convert_i32_s` +
+ * `__box_number`). EVERY other element kind, **including a literally-`externref`
+ * element**, is skipped.
+ *
+ * Why skip `externref` too: the carriers keyed `"externref"` in `ctx.vecTypeMap`
+ * are NOT uniformly `(array externref)`. Some are registered with a `ref`/
+ * `ref_null` element override (e.g. the `arguments` object + closure-arg vecs via
+ * `getOrRegisterVecType(ctx, "externref", refElem)` in function-body.ts /
+ * closures.ts), and `getOrRegisterArrayType` rewrites a `ref` element to
+ * `ref_null`. An identity arm for such a carrier left a `(ref null N)` on the
+ * helper's `return` (`__extern_get_idx return[0] expected externref, got
+ * (ref null N)`), emitting invalid Wasm for ~120 generator/async +
+ * destructuring-rest + TypedArray modules and breaching the #2097 standalone
+ * floor (-116). A number-only arm set has NO ref-returning path, so it stays
+ * unconditionally valid across every carrier the proposal harness can register.
+ * Non-number element indexing through the boundary (externref / string / GC-ref)
+ * falls back to the prior null behaviour — no worse than pre-#2190 — and is
+ * deferred to a follow-up.
+ */
+function boxVecElementToExternref(ctx: CodegenContext, elemType: ValType): Instr[] | null {
+  if (elemType.kind === "f64") {
+    const boxIdx = ctx.funcMap.get("__box_number");
+    if (boxIdx === undefined) return null;
+    return [{ op: "call", funcIdx: boxIdx } as Instr];
+  }
+  if (elemType.kind === "i32") {
+    // The `boolean`-tagged i32 variant must NOT box through `__box_number`
+    // (number box ≠ boolean box) — skip it (falls back to prior null behaviour).
+    if ((elemType as { boolean?: boolean }).boolean) return null;
+    const boxIdx = ctx.funcMap.get("__box_number");
+    if (boxIdx === undefined) return null;
+    return [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr];
+  }
+  // externref / ref / ref_null / f32 / i64 / v128 → no arm (see scope note).
+  return null;
+}
+
+/**
+ * (#2190) Parameters needed to build the `__extern_get_idx` body, shared by the
+ * eager registration (empty `vecArms`) and the FINALIZE fill (full `vecArms`).
+ */
+interface ExternGetIdxBodyParams {
+  /** Standalone gate — emit the `$Object` array-like + typed-vec arms. */
+  objArrayLikeArms: boolean;
+  objectTypeIdx: number;
+  objVecTypeIdx: number;
+  objVecArrTypeIdx: number;
+  /** funcIdx of `number_toString` (only used when objArrayLikeArms). */
+  numberToStringIdx: number;
+  /** funcIdx of `__extern_get` (only used when objArrayLikeArms). */
+  externGetIdx: number;
+  /** Pre-built per-`__vec_<k>` dispatch arms (empty at registration time). */
+  vecArms: Instr[];
+}
+
+/**
+ * (#2190) Build the `__extern_get_idx(externref v, f64 idx) -> externref` body.
+ *
+ * Layout: locals 2=any(anyref) 3=vec(ref null $ObjVec) 4=i(i32).
+ * Order of arms (first match wins, each `return`s):
+ *   1. `$Object` array-like (`{0:x, length:n}`) — `__extern_get(v, ToString(i))`.
+ *   2. typed `__vec_<k>` carriers (`vecArms`) — the #2190 element read.
+ *   3. `$ObjVec` enumeration vector — `data[i]` when in bounds.
+ *   else → null.
+ * The typed-vec arms sit BEFORE the `$ObjVec` test because a `__vec_<k>` is not
+ * a `$ObjVec`; placing them first keeps the `$ObjVec` fast path unchanged.
+ */
+function buildExternGetIdxBody(p: ExternGetIdxBodyParams): Instr[] {
+  const { objArrayLikeArms, objectTypeIdx, objVecTypeIdx, objVecArrTypeIdx } = p;
+  const objIdxArm: Instr[] = objArrayLikeArms
+    ? [
+        { op: "local.get", index: 2 },
+        { op: "ref.test", typeIdx: objectTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 0 },
+            { op: "local.get", index: 1 },
+            { op: "f64.trunc" },
+            { op: "call", funcIdx: p.numberToStringIdx },
+            { op: "call", funcIdx: p.externGetIdx },
+            { op: "return" },
+          ],
+        } as Instr,
+      ]
+    : [];
+  return [
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "local.set", index: 2 },
+    ...objIdxArm,
+    ...p.vecArms,
+    { op: "local.get", index: 2 },
+    { op: "ref.test", typeIdx: objVecTypeIdx },
+    { op: "i32.eqz" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "ref.null.extern" }, { op: "return" }],
+    },
+    // vec = cast<$ObjVec>(any) ; i = i32(idx)
+    { op: "local.get", index: 2 },
+    { op: "ref.cast", typeIdx: objVecTypeIdx },
+    { op: "local.set", index: 3 },
+    { op: "local.get", index: 1 },
+    { op: "i32.trunc_sat_f64_s" },
+    { op: "local.tee", index: 4 },
+    // if i < 0 || i >= vec.len → null
+    { op: "i32.const", value: 0 },
+    { op: "i32.lt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "ref.null.extern" }, { op: "return" }],
+    },
+    { op: "local.get", index: 4 },
+    { op: "local.get", index: 3 },
+    { op: "ref.as_non_null" },
+    { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 0 },
+    { op: "i32.ge_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [{ op: "ref.null.extern" }, { op: "return" }],
+    },
+    // return vec.data[i]
+    { op: "local.get", index: 3 },
+    { op: "ref.as_non_null" },
+    { op: "struct.get", typeIdx: objVecTypeIdx, fieldIdx: 1 },
+    { op: "local.get", index: 4 },
+    { op: "array.get", typeIdx: objVecArrTypeIdx },
+  ];
+}
+
+/**
+ * (#2190) Fill `__extern_get_idx`'s typed-`__vec_<elemKind>` indexing arms after
+ * every module-local array carrier is registered. Sibling of the #2189
+ * `.length`-through-the-boundary fix: a real array literal lowers to a
+ * `__vec_<elemKind>` struct, and a NUMERIC index on it through the externref
+ * boundary (`(arr as any)[i]`) routes here. Without these arms, only `$ObjVec`
+ * (enumeration results) and array-like `$Object` are recognised, so a boxed
+ * `__vec_f64`/`__vec_<str>` falls through to null (number→0, ref→null).
+ *
+ * Unlike `.length` (one i32 at field 0, readable uniformly via the `$__vec_base`
+ * supertype), element reads are element-type-polymorphic: each carrier has a
+ * different `data` array element type and the loaded element must be boxed to
+ * externref per kind. So we emit one `ref.test`/`ref.cast` arm per carrier with
+ * its own bounds check + per-kind boxing (`boxVecElementToExternref`).
+ *
+ * Standalone only (gated by `ctx.externGetIdxReserved`, set in standalone). Edits
+ * the body in place — no funcIdx churn, so cached call targets stay valid.
+ */
+export function fillExternGetIdxVecArms(ctx: CodegenContext): void {
+  if (!ctx.externGetIdxReserved) return;
+  const funcIdx = ctx.funcMap.get("__extern_get_idx");
+  if (funcIdx === undefined) return;
+  const fn = ctx.mod.functions[funcIdx - ctx.numImportFuncs];
+  if (!fn) return;
+  const types = ctx.objectRuntimeTypes;
+  if (!types) return;
+
+  // Enumerate concrete `__vec_<elemKind>` carriers (NOT $ObjVec — it keeps its
+  // own dedicated arm — and NOT the non-array `_byte` carriers). Dedup by
+  // typeIdx; sort for deterministic emission.
+  const seen = new Set<number>();
+  const carriers: { typeIdx: number; arrTypeIdx: number; elemType: ValType }[] = [];
+  for (const [elemKind, vecTypeIdx] of ctx.vecTypeMap.entries()) {
+    if (NON_ARRAY_BYTE_VEC_ELEM_KINDS.has(elemKind)) continue;
+    if (seen.has(vecTypeIdx)) continue;
+    const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+    if (arrTypeIdx < 0) continue;
+    const arrDef = ctx.mod.types[arrTypeIdx];
+    if (!arrDef || arrDef.kind !== "array") continue;
+    seen.add(vecTypeIdx);
+    carriers.push({ typeIdx: vecTypeIdx, arrTypeIdx, elemType: arrDef.element });
+  }
+  carriers.sort((a, b) => a.typeIdx - b.typeIdx);
+
+  const vecArms: Instr[] = [];
+  for (const { typeIdx, arrTypeIdx, elemType } of carriers) {
+    const boxOps = boxVecElementToExternref(ctx, elemType);
+    if (boxOps === null) continue; // unsupported element kind — leave to null fallback
+    vecArms.push({ op: "local.get", index: 2 }, { op: "ref.test", typeIdx }, {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        // i = trunc_sat(idx) ; if i < 0 → null
+        { op: "local.get", index: 1 },
+        { op: "i32.trunc_sat_f64_s" },
+        { op: "local.tee", index: 4 },
+        { op: "i32.const", value: 0 },
+        { op: "i32.lt_s" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "ref.null.extern" }, { op: "return" }],
+        } as Instr,
+        // if i >= vec.length → null
+        { op: "local.get", index: 4 },
+        { op: "local.get", index: 2 },
+        { op: "ref.cast", typeIdx },
+        { op: "struct.get", typeIdx, fieldIdx: 0 },
+        { op: "i32.ge_s" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "ref.null.extern" }, { op: "return" }],
+        } as Instr,
+        // return box(vec.data[i])
+        { op: "local.get", index: 2 },
+        { op: "ref.cast", typeIdx },
+        { op: "struct.get", typeIdx, fieldIdx: 1 },
+        { op: "local.get", index: 4 },
+        { op: "array.get", typeIdx: arrTypeIdx },
+        ...boxOps,
+        { op: "return" },
+      ],
+    } as Instr);
+  }
+
+  if (vecArms.length === 0) return; // no number carriers → leave the eager body untouched
+
+  // (#2190 regression fix, round 3) SPLICE the vec arms into the EXISTING body
+  // instead of REBUILDING it. The eager body (from `buildExternGetIdxBody` at
+  // registration) baked the `$Object` arm's `number_toString` / `__extern_get`
+  // funcIdxs, and the late-import funcIdx-shift machinery walks + adjusts those
+  // baked `call` targets if imports are added afterwards (the `addUnionImports`
+  // invariant). Rebuilding the whole body here at FINALIZE re-baked those
+  // funcIdxs with the *then-current* values; a subsequent reconcile shift would
+  // then double-apply to them, corrupting the `call` target → invalid Wasm
+  // (this regressed ~120 generator/async + destructuring-rest + TypedArray
+  // modules that hit the `$Object`/`number_toString` arm, breaching the #2097
+  // floor regardless of which element kinds we boxed). Splicing leaves the
+  // original arms — and their shift-maintained funcIdxs — exactly as the eager
+  // registration left them.
+  //
+  // The eager body starts with the 3-instr setup preamble
+  // (`local.get 0 ; any.convert_extern ; local.set 2`); the typed-vec arms must
+  // run after `any` is set and before the `$Object`/`$ObjVec` arms (a
+  // `__vec_<k>` is neither). Insert right after the preamble.
+  const SETUP_LEN = 3;
+  if (
+    fn.body.length >= SETUP_LEN &&
+    fn.body[0]?.op === "local.get" &&
+    fn.body[1]?.op === "any.convert_extern" &&
+    fn.body[2]?.op === "local.set"
+  ) {
+    fn.body.splice(SETUP_LEN, 0, ...vecArms);
+  } else {
+    // Defensive: preamble shape changed — prepend the arms after a fresh setup
+    // is not safe, so skip rather than risk an unbalanced body.
+    return;
+  }
 }
 
 /**

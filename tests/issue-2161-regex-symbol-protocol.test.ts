@@ -13,10 +13,14 @@ import { compile } from "../src/index.js";
  * forms to the exact same native cores that back the String.prototype methods —
  * NO JS host import (`__regex_symbol_call` must not leak).
  *
+ * `@@replace` / `@@split` (which carry a second replacement / limit operand)
+ * reuse the same operand-explicit native cores as `String.prototype.replace`/
+ * `split` with the operands swapped — also NO host import.
+ *
  * Deferred (still narrowed — refused, not silently wrong):
- *   - `@@replace` / `@@split` (carry extra replacement / limit operands);
  *   - dynamic-flag / `any`-typed receivers (fall through to the host path);
- *   - string-coercion arguments (`re[Symbol.match](42)`).
+ *   - string-coercion arguments (`re[Symbol.match](42)`);
+ *   - `@@replace` with a non-string (function) replacer stays a refusal.
  */
 async function standaloneExports(source: string) {
   const r = await compile(source, { target: "standalone" });
@@ -117,5 +121,66 @@ describe("#2161 — standalone re[Symbol.matchAll](str)", () => {
       }
     `);
     expect(ex.count()).toBe(2);
+  });
+});
+
+describe("#2161 — standalone re[Symbol.replace](str, repl)", () => {
+  it("non-global: replaces the first match (length + content)", async () => {
+    const ex = await standaloneExports(`
+      const r: string = /a/[Symbol.replace]("banana", "Z");
+      export function len(): number { return r.length; }
+      export function at(i: number): number { return r.charCodeAt(i); }
+    `);
+    // "bZnana"
+    expect(ex.len()).toBe(6);
+    expect(String.fromCharCode(...[0, 1, 2, 3, 4, 5].map((i) => ex.at(i)))).toBe("bZnana");
+  });
+
+  it("global: replaces every match", async () => {
+    const ex = await standaloneExports(`
+      const r: string = /a/g[Symbol.replace]("banana", "Z");
+      export function len(): number { return r.length; }
+      export function at(i: number): number { return r.charCodeAt(i); }
+    `);
+    // "bZnZnZ"
+    expect(String.fromCharCode(...Array.from({ length: ex.len() }, (_, i) => ex.at(i)))).toBe("bZnZnZ");
+  });
+
+  it("$-substitution expands at runtime (whole match $&)", async () => {
+    const ex = await standaloneExports(`
+      const r: string = /\\d+/[Symbol.replace]("a12b", "[$&]");
+      export function len(): number { return r.length; }
+      export function at(i: number): number { return r.charCodeAt(i); }
+    `);
+    // "a[12]b"
+    expect(String.fromCharCode(...Array.from({ length: ex.len() }, (_, i) => ex.at(i)))).toBe("a[12]b");
+  });
+});
+
+describe("#2161 — standalone re[Symbol.split](str)", () => {
+  it("splits on the separator (piece count)", async () => {
+    const ex = await standaloneExports(`
+      export function n(): number { return /,/[Symbol.split]("a,b,c").length; }
+    `);
+    expect(ex.n()).toBe(3);
+  });
+
+  it("piece content is correct", async () => {
+    const ex = await standaloneExports(`
+      const parts = /,/[Symbol.split]("a,bb,ccc");
+      export function len0(): number { return (parts[0] as string).length; }
+      export function len1(): number { return (parts[1] as string).length; }
+      export function len2(): number { return (parts[2] as string).length; }
+    `);
+    expect(ex.len0()).toBe(1);
+    expect(ex.len1()).toBe(2);
+    expect(ex.len2()).toBe(3);
+  });
+
+  it("honors a numeric limit", async () => {
+    const ex = await standaloneExports(`
+      export function n(): number { return /,/[Symbol.split]("a,b,c,d", 2).length; }
+    `);
+    expect(ex.n()).toBe(2);
   });
 });

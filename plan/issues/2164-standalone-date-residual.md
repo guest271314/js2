@@ -4,7 +4,7 @@ title: "Standalone Date conformance residual (~234 tests)"
 status: in-progress
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-17
+updated: 2026-06-18
 assignee: ttraenkler/dev-date
 priority: medium
 feasibility: medium
@@ -139,3 +139,94 @@ getters) — 21/21 green. Verified against Node `Date.parse` across 18 formats
 the host TZ offset, which is the intended UTC-for-local standalone behavior).
 Host-mode Date code no longer compile-errors. tsc + biome lint + prettier +
 stack-balance gates clean.
+
+---
+
+## Slice 4 (2026-06-18, sdev-proxy3) — pure-Wasm non-ISO string formatters
+
+**Landed.** The remaining Date string formatters — `toString`, `toUTCString` /
+`toGMTString`, `toDateString`, `toTimeString`, and `toLocaleString` /
+`toLocaleDateString` / `toLocaleTimeString` — delegated to the `__date_format`
+host import. In standalone / nativeStrings mode the `ctx.nativeStrings` branch
+(`expressions/builtins.ts`) emitted ONE hard-coded placeholder
+(`"Thu Jan 01 1970 00:00:00 GMT+0000"`) for **all** of them, ignoring both the
+timestamp and the requested format — so every call returned the same wrong
+string. (Slice 3 had fixed only `toISOString`/`toJSON`.)
+
+**Fix:** new pure-Wasm helper `__date_format_string(ts: i64, mode: i32) -> ref
+$NativeString` (`ensureDateFormatStringHelper`, builtins.ts), modelled on Slice
+3's `__date_iso_string`. It floor-divides the timestamp into days + msOfDay,
+reuses `__date_civil_from_days` for the calendar fields, computes the weekday as
+`((days % 7) + 4 + 7) % 7` (epoch day 0 = Thursday), and writes each ECMA-262
+§21.4.4 format into an i16 buffer via a write cursor, dispatching on `mode`:
+
+| mode | method | format |
+|------|--------|--------|
+| 1 | toUTCString/toGMTString | `WkDay, DD Mon YYYY HH:mm:ss GMT` (§21.4.4.43) |
+| 2/6 | toString/toLocaleString | `WkDay Mon DD YYYY HH:mm:ss GMT+0000 (Coordinated Universal Time)` |
+| 3/7 | toDateString/toLocaleDateString | `WkDay Mon DD YYYY` (§21.4.4.35) |
+| 4 | toTimeString | `HH:mm:ss GMT+0000 (Coordinated Universal Time)` |
+| 8 | toLocaleTimeString | `HH:mm:ss` |
+
+Standalone has no timezone DB, so every format renders in **UTC** (consistent
+with Slice 1's deterministic-clock and Slice 2's UTC-for-local decisions). Year
+uses the §21.4.1.18 extended ±6-digit form for years <0/>9999, else 4 digits.
+An Invalid Date receiver (i64-MIN sentinel) yields the literal `"Invalid Date"`
+for every format. Host mode (`__date_format`) is untouched.
+
+**Validation.** `tests/issue-2164-formatters.test.ts` (10/10) asserts exact
+strings vs Node's `TZ=UTC` output for epoch / 2023 / pre-epoch (negative day &
+year) / end-of-day, across all formatters, the toGMTString alias, the weekday
+computation (incl. a Sunday and negative timestamps), and the Invalid-Date
+literal. Existing #2164 / #2164-iso / #1638 Date suites: 44/44 unchanged. tsc +
+prettier + coercion-sites + any-box gates clean. The pre-existing
+`date-native.test.ts > Date.now() returns a number` failure (a test-harness
+`__date_now` import-provision issue) is unrelated and fails identically on main.
+
+**Still open after Slice 4:** the negative-year calendar-getter gap noted under
+Slice 3 (`__date_civil_from_days` for very negative days) and `getTimezoneOffset`
+already returns 0 standalone (correct for UTC). The big formatter placeholder —
+the dominant standalone Date string gap — is now closed.
+
+---
+
+## Slice 5 (2026-06-18, sdev-proxy3) — Date.parse RFC2822 / `toString` forms
+
+**Landed.** The pure-Wasm `__date_parse` (date-parse-native.ts) handled only the
+ECMAScript Date-Time-String (ISO) grammar, so `Date.parse` of an RFC2822 /
+`toString`-shaped string returned NaN standalone — e.g. the round-trip of the
+#1682 formatters: `Date.parse(d.toUTCString())` / `Date.parse(d.toString())` /
+`Date.parse(d.toDateString())` all NaN'd.
+
+**Fix:** the scanner now dispatches on the first char. A leading **letter**
+routes to a new RFC2822 arm that parses an optional weekday (`Www[,]`), then
+either `DD Mon YYYY` (toUTCString) or `Mon DD YYYY` (toString/toDateString),
+then an optional `HH:mm:ss`, then an optional timezone (`GMT`/`UTC`/`Z` or
+`±HHMM`). It fills the **same** field locals as the ISO arm, so the shared
+range-validate + compose tail handles either. New primitives: a branch-free
+case-insensitive 3-letter month-name matcher (12-way if-chain on lowercased
+chars via `select`), a weekday/month disambiguator (a leading 3-letter token is
+a weekday only when followed by `,` or ` `+letter — so `Nov 14` is a month, not
+a weekday), and space/`GMT`-skipping loops. All forms parse as **UTC**
+(standalone has no TZ DB), matching the formatter/clock decisions of slices 1–4.
+
+**Notable bug fixed in dev:** the month-name lowercaser first used an `if`
+with `blockType val i32` whose `then` arm did `i32.add` against the pre-`if`
+operand — but a value-result `if` arm has no implicit access to the stack below
+its frame, so this was an invalid-Wasm `i32.add need 2 got 1`. Rewrote it
+branch-free with `select(c+32, c, isUpper)`.
+
+**Validation.** `tests/issue-2164-date-parse-rfc2822.test.ts` (9/9): toUTCString
+/ toString / toDateString / month-first-no-weekday forms, all 12 month names,
+±HHMM offsets, garbage→NaN (no trap), ISO no-regression, and the round-trip of
+the #1682 formatters (to the second for toUTCString/toString since they carry no
+ms — exactly like V8; to the day for toDateString). 44/44 existing #2164 /
+#2164-iso / #2164-formatters suites unchanged. tsc + prettier + coercion-sites +
+any-box gates clean. No host-import leak.
+
+**Scope boundary (documented):** a bare `DD Mon YYYY` (day-first, NO weekday,
+e.g. `"14 Nov 2023"`) starts with a digit, so it routes to the ISO scanner and
+returns NaN. None of our formatters emit that form; it is a lenient V8 extra.
+Covering it would require the ISO scanner to detect a month-name mid-stream —
+deferred. The dominant value (round-tripping the formatters + RFC2822 GMT
+strings) is delivered.
