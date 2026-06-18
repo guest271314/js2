@@ -386,3 +386,13 @@ gate becomes a **UX layer**, not the merge authority:
 
 See #1391 (staleness escalation) for the prior state where the skill was
 the sole hard-block path.
+
+---
+
+## 10. Releasing (npm + JSR)
+
+Version tags (`v*`) drive `publish-npm.yml`, which publishes whatever
+`package.json` `version` the tagged commit carries. Bump both packages in
+lockstep with `node scripts/release.mjs <x.y.z>`, land a `release:` PR, then
+tag the merge commit — the workflow's `verify-version` job fails the publish
+if the tag and `package.json` versions disagree. Full flow: [releasing.md](releasing.md).
