@@ -1,8 +1,9 @@
 ---
 id: 2371
 title: "standalone-native single dynamic-descriptor Object.defineProperty (__obj_define_from_desc)"
-status: in-progress
+status: done
 assignee: ttraenkler/sendev-date
+completed: 2026-06-19
 sprint: 64
 created: 2026-06-19
 updated: 2026-06-19

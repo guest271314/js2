@@ -1,8 +1,9 @@
 ---
 id: 2372
 title: "standalone: force dynamic-object-receiver vars onto $Object representation (the dynamic-object family unblock)"
-status: in-progress
+status: done
 assignee: ttraenkler/sendev-receiver
+completed: 2026-06-19
 sprint: Backlog
 created: 2026-06-19
 updated: 2026-06-19
