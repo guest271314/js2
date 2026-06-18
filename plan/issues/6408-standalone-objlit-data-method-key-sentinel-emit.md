@@ -3,7 +3,7 @@ id: 6408
 title: "standalone object-literal data/method property keys emit `global.get -1` sentinel → binary emit error (~17 tests; subcluster of a 155-test #51-family residual)"
 status: in-progress
 assignee: ttraenkler/sdev-harvest
-sprint: 63
+sprint: 64
 created: 2026-06-18
 updated: 2026-06-18
 priority: high
