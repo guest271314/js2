@@ -518,17 +518,15 @@ function tryEmitNativeProtoReflectiveCall(
   const closureInfo = ctx.closureInfoByTypeIdx.get(closure.type.typeIdx);
   if (!closureInfo) return undefined;
 
-  // GATED (#2193 PR-B): the recovery + call_ref below is shape-correct
-  // (closure recovered from the receiver's TS symbol, thisArg→param1 threaded),
-  // but the emitted `call_ref` trips a wrapper-struct type-index mismatch AFTER
-  // the finalize type-renumber pass (`call_ref[0] expected (ref null N) found
-  // (ref null N-1)`) — the closure-wrapper struct type and the lifted func
-  // type's self param renumber to adjacent-but-different indices. Registration
-  // is internally consistent (struct 53 / func 54, self=ref 53); the divergence
-  // appears only post-renumber. Until that is resolved, BAIL so compilation
-  // stays valid (the call falls through to the legacy drop-thisArg path =
-  // returns 0, valid Wasm, no worse than pre-PR-B). Flip the env var to iterate.
-  if (!process.env.JS2WASM_PRB_REFLECTIVE_CALL) return undefined;
+  // (#2193 PR-B) Active by default. The earlier `expected (ref null N) found
+  // (ref null N-1)` blocker was NOT a type-renumber bug (the prior diagnosis) —
+  // it was the `call_ref` operand: the trailing operand must be the FUNCREF
+  // from the wrapper's field 0, not the wrapper struct (see the call-emit tail
+  // below, which now mirrors the canonical closure-call sequence). With that
+  // corrected the recovery validates and `m.call(a,1,3) === a.slice(1,3)`.
+  // `JS2WASM_DISABLE_PRB_REFLECTIVE_CALL` is an escape hatch (falls back to the
+  // legacy drop-thisArg path → returns 0, valid Wasm, no worse than pre-PR-B).
+  if (process.env.JS2WASM_DISABLE_PRB_REFLECTIVE_CALL) return undefined;
 
   // Reshape args to the closure's positional ABI: [thisArg, ...userArgs].
   let userArgs: readonly ts.Expression[] | undefined;
@@ -565,8 +563,17 @@ function tryEmitNativeProtoReflectiveCall(
   fctx.body.push({ op: "ref.cast", typeIdx: closureInfo.structTypeIdx } as Instr);
   fctx.body.push({ op: "local.set", index: closureLocal } as Instr);
 
-  // call_ref ABI: stack = [self_struct, ...userParams, carrier_struct].
-  // self param 0:
+  // call_ref ABI mirrors the canonical closure-call sequence
+  // (calls-closures.ts compileClosureCall): the lifted func type is
+  //   (ref $wrapStruct, ...userParams) -> result
+  // so the wasm stack must be [self_struct, ...userParams, funcref], where the
+  // trailing operand is the FUNCREF extracted from the wrapper's field 0 — NOT
+  // the wrapper struct itself. The earlier draft pushed the struct as the
+  // call_ref operand, which validates as `expected (ref $funcType) found
+  // (ref $wrapStruct)` (the off-by-one #2193 gap A actually surfaced here, not
+  // in the type-renumber pass).
+
+  // self param 0: the wrapper struct.
   fctx.body.push({ op: "local.get", index: closureLocal } as Instr);
 
   const paramTypes = closureInfo.paramTypes; // excludes the self param
@@ -584,8 +591,13 @@ function tryEmitNativeProtoReflectiveCall(
     }
   }
 
-  // carrier struct (call_ref reads field 0 = funcref via the closure fixup):
+  // Trailing operand: funcref from the wrapper struct's field 0, guard-cast to
+  // the lifted func type, null-checked (→ TypeError, never a trap) — exactly
+  // the canonical closure-call tail (calls-closures.ts ~lines 138-150).
   fctx.body.push({ op: "local.get", index: closureLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: closureInfo.structTypeIdx, fieldIdx: 0 } as Instr);
+  emitGuardedFuncRefCast(fctx, closureInfo.funcTypeIdx);
+  emitNullCheckThrow(ctx, fctx, { kind: "ref_null", typeIdx: closureInfo.funcTypeIdx });
   fctx.body.push({ op: "call_ref", typeIdx: closureInfo.funcTypeIdx } as Instr);
   return closureInfo.returnType ?? { kind: "externref" };
 }

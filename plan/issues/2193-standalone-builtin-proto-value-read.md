@@ -1,8 +1,9 @@
 ---
 id: 2193
 title: "standalone: builtin .prototype / static-property value reads refuse (~83 tests) — register $NativeProto glue for Array/Object/Promise"
-status: in-progress
-assignee: ttraenkler/sdev-proxy3
+status: done
+assignee: ttraenkler/sendev-prb
+completed: 2026-06-18
 sprint: Backlog
 created: 2026-06-18
 updated: 2026-06-18
@@ -296,3 +297,48 @@ Then flip `JS2WASM_PRB_REFLECTIVE_CALL` on (the recovery + arg-threading in
 `m.call(a,1,3) === a.slice(1,3)`, floor-gate HARD, WAT-diff the plain `a.slice()`
 path byte-identical. Gap B (direct `m(a,1,3)`) rides the same closure-recovery
 once the type idx is stable.
+
+### PR-B gap-A — ACTUAL ROOT CAUSE + FIX (2026-06-18, sendev-prb) — DONE
+
+The prior "dead probe-wrapper type-renumber" diagnosis was **wrong**. Two
+disproofs, established empirically this session:
+1. Removing the probe entirely (fix (a)) and reducing to a SINGLE canonical
+   wrapper struct STILL produced the identical `expected (ref null N) found
+   (ref null N-1)` — so the 2-level probe hierarchy was never the cause.
+2. Dumping the final module before emit showed it is **internally consistent**
+   (wrapper struct 47, lifted func type 48 with self-param `(ref 47)`, the
+   `ref.cast`/local/`call_ref` all at the matching post-renumber indices) and
+   the raw type-section bytes for the func type correctly encode self-param 47.
+   The renumber pass is innocent.
+
+**Real cause:** the reflective emitter's `call_ref` **trailing operand was the
+wrapper struct, not the funcref.** `call_ref $funcType` pops `[self, ...args,
+(ref $funcType)]` — the last operand must be the FUNCREF from the wrapper's
+field 0, exactly like the canonical closure-call tail
+(`calls-closures.ts` ~138-150: `local.get` wrapper → `struct.get` field 0 →
+guarded funcref cast → null-check → `call_ref`). The draft pushed the wrapper
+struct, so V8/binaryen reported `expected (ref $funcType=48) found
+(ref $wrapStruct=47)` — the "off-by-one" was struct-vs-functype adjacency, not a
+renumber drift.
+
+**Fix (surgical, calls.ts only):** before `call_ref`, extract the funcref —
+`struct.get structTypeIdx fieldIdx 0` + `emitGuardedFuncRefCast(funcTypeIdx)` +
+`emitNullCheckThrow` — then `call_ref`. Default-on (escape hatch
+`JS2WASM_DISABLE_PRB_REFLECTIVE_CALL`). `native-proto.ts` is UNCHANGED (the probe
+stays — it is load-bearing: member result types VARY, e.g. RegExp.test→i32, so a
+fixed `externref` assumption broke 5 #2175 RegExp closures; reverted).
+
+**Verified:** `m.call(a,1,3) === a.slice(1,3)`, `.apply([1,3])`, thisArg
+threading — `tests/issue-2193-builtin-proto-value-read.test.ts` 11/11 (7 PR-A +
+4 PR-B). #2175 native-proto suites 17/17 (RegExp readers 12/12 + brands 5/5).
+Plain `a.slice(1,3)` WAT **byte-identical** to the pristine tip (additive change,
+no AST-path impact). tsc + prettier clean. No host-import leak.
+
+**Gap B (direct `m(a,1,3)`) — out of scope / not a real gap.** In real JS
+`Array.prototype.slice(a,1,3)` THROWS a TypeError (`this` is `undefined`), so the
+"should return a slice" framing was incorrect. Our standalone does throw (an
+uncatchable null-deref trap rather than a catchable TypeError) on the generic
+value-closure dispatch path — and that null-deref is **pre-existing** (identical
+with the reflective helper disabled), unrelated to this fix. Making direct-call a
+catchable TypeError touches the generic dispatch path and is a separate low-value
+follow-up; not bundled here to keep the floor-gate tight.
