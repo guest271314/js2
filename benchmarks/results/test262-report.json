@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-18T06:28:33.839Z",
-  "baseline_generated_at": "2026-06-18T06:28:33.839Z",
-  "baseline_sha": "06491d8685b9b6cc9b07c0b97c5b5673cd8dd3e4",
+  "timestamp": "2026-06-18T06:41:20.995Z",
+  "baseline_generated_at": "2026-06-18T06:41:20.995Z",
+  "baseline_sha": "e95797203e1c6452295a2dd08980fb0ae440ee4b",
   "oracle_version": 1,
   "mode": {
     "target": "gc",
@@ -10,22 +10,22 @@
   },
   "summary": {
     "total": 43135,
-    "pass": 31364,
-    "fail": 10788,
+    "pass": 31365,
+    "fail": 10786,
     "compile_error": 884,
-    "compile_timeout": 81,
+    "compile_timeout": 82,
     "skip": 18,
-    "compilable": 42152,
+    "compilable": 42151,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42049,
-        "pass": 30762,
-        "fail": 10327,
+        "pass": 30763,
+        "fail": 10325,
         "compile_error": 861,
-        "compile_timeout": 81,
+        "compile_timeout": 82,
         "skip": 18,
-        "compilable": 41089,
+        "compilable": 41088,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -53,23 +53,23 @@
       },
       "official": {
         "total": 43135,
-        "pass": 31364,
-        "fail": 10788,
+        "pass": 31365,
+        "fail": 10786,
         "compile_error": 884,
-        "compile_timeout": 81,
+        "compile_timeout": 82,
         "skip": 18,
-        "compilable": 42152,
+        "compilable": 42151,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48117,
-        "pass": 32817,
-        "fail": 13981,
+        "pass": 32818,
+        "fail": 13979,
         "compile_error": 1114,
-        "compile_timeout": 82,
+        "compile_timeout": 83,
         "skip": 123,
-        "compilable": 46798,
+        "compilable": 46797,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -77,32 +77,32 @@
   },
   "official_summary": {
     "total": 43135,
-    "pass": 31364,
-    "fail": 10788,
+    "pass": 31365,
+    "fail": 10786,
     "compile_error": 884,
-    "compile_timeout": 81,
+    "compile_timeout": 82,
     "skip": 18,
-    "compilable": 42152,
+    "compilable": 42151,
     "stale": 0
   },
   "full_summary": {
     "total": 48117,
-    "pass": 32817,
-    "fail": 13981,
+    "pass": 32818,
+    "fail": 13979,
     "compile_error": 1114,
-    "compile_timeout": 82,
+    "compile_timeout": 83,
     "skip": 123,
-    "compilable": 46798,
+    "compilable": 46797,
     "stale": 0
   },
   "strict_summary": {
     "total": 40626,
-    "pass": 30081,
-    "fail": 9885,
+    "pass": 30082,
+    "fail": 9883,
     "compile_error": 561,
-    "compile_timeout": 81,
+    "compile_timeout": 82,
     "skip": 18,
-    "compilable": 39966,
+    "compilable": 39965,
     "stale": 0
   },
   "scope_summaries": {
@@ -128,12 +128,12 @@
     },
     "standard": {
       "total": 42049,
-      "pass": 30762,
-      "fail": 10327,
+      "pass": 30763,
+      "fail": 10325,
       "compile_error": 861,
-      "compile_timeout": 81,
+      "compile_timeout": 82,
       "skip": 18,
-      "compilable": 41089,
+      "compilable": 41088,
       "stale": 0
     }
   },
@@ -182,9 +182,9 @@
       "name": "built-ins/Array",
       "path": "built-ins/Array",
       "pass": 1608,
-      "fail": 1410,
+      "fail": 1409,
       "compile_error": 49,
-      "compile_timeout": 14,
+      "compile_timeout": 15,
       "skip": 0,
       "total": 3081
     },
@@ -891,8 +891,8 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 8353,
-      "fail": 2220,
+      "pass": 8354,
+      "fail": 2219,
       "compile_error": 417,
       "compile_timeout": 28,
       "skip": 18,
@@ -1080,7 +1080,7 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 7746,
+    "assertion_fail": 7744,
     "illegal_cast": 221,
     "negative_test_fail": 77,
     "null_deref": 213,
