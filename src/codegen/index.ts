@@ -67,6 +67,7 @@ import {
   addFuncType,
   getArrTypeIdxFromVec,
   getOrRegisterArrayType,
+  getOrRegisterSubviewType,
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";
@@ -12586,7 +12587,25 @@ function inferLetConstInitializerWasmType(
     }
   }
   receiverType ??= resolveWasmType(ctx, ctx.checker.getTypeAtLocation(receiver));
-  return isVecStructType(ctx, receiverType) ? { kind: "ref_null", typeIdx: receiverType.typeIdx } : null;
+  if (!isVecStructType(ctx, receiverType)) return null;
+  // (#2357/#47) Standalone `subarray` produces a `$__subview` that shares the
+  // parent's backing array (true aliasing). Resolving the binding to the subview
+  // type here is what makes element access pick the windowed lowering at COMPILE
+  // time (so plain-array `a[i]` stays zero-cost). `slice` still returns an
+  // independent copy (a plain vec). The receiver may itself be a subview (nested
+  // subarray) — its element kind is recovered from the base vec.
+  if (methodName === "subarray" && (ctx.standalone || ctx.wasi)) {
+    const recvIdx = (receiverType as { typeIdx: number }).typeIdx;
+    // elemKind from the receiver's struct name: `__vec_<elem>` (plain typed array)
+    // or `__subview_<elem>` (nested subarray over a subview).
+    const recvName = ctx.typeIdxToStructName.get(recvIdx);
+    const elemKind = recvName?.replace(/^__vec_/, "").replace(/^__subview_/, "");
+    if (elemKind !== undefined && elemKind !== recvName) {
+      const svIdx = getOrRegisterSubviewType(ctx, elemKind);
+      return { kind: "ref_null", typeIdx: svIdx };
+    }
+  }
+  return { kind: "ref_null", typeIdx: receiverType.typeIdx };
 }
 
 function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.Statement): void {

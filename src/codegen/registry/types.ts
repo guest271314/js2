@@ -156,13 +156,17 @@ export function getOrRegisterVecType(ctx: CodegenContext, elemKind: string, elem
 /**
  * (#2159 / #2357 / #47) Get or register the `$__subview_<elemKind>` struct — a
  * TypedArray `subarray` view that SHARES the parent's backing array:
- *   `{length: i32, base: (ref null __vec_<elemKind>), byteOffset: i32}`.
+ *   `{length: i32, data: (ref null $__arr_<elemKind>), byteOffset: i32}`.
  *
  * `length` is field 0 (subtypes `$__vec_base`) so uniform `.length` reads and the
- * externref-length helper keep working. `base` points at the PARENT vec (whose
- * `data` array is shared — no copy), and `byteOffset` is the element offset of the
- * window into that array. Element access on a `$__subview` receiver reads
- * `base.data[byteOffset + i]`; on a plain vec it reads `data[i]` unchanged. The
+ * externref-length helper keep working. `data` holds the PARENT's backing array
+ * DIRECTLY (shared — no copy); `byteOffset` is the element offset of the window
+ * into that array. We deliberately store the array type (`$__arr_<elemKind>`,
+ * uniquely deduped per element kind) rather than a concrete vec struct idx,
+ * because the same element kind can be registered behind multiple vec struct
+ * indices in a module (hoist-time vs body-time) — pinning to the array type makes
+ * the subview idx-stable. Element access on a `$__subview` receiver reads
+ * `data[byteOffset + i]`; a plain vec reads `vec.data[i]` unchanged. The
  * discrimination is by the receiver's static ValType.typeIdx at COMPILE time, so
  * the plain-array hot path is untouched. Keyed per element kind. Idempotent.
  */
@@ -171,7 +175,7 @@ export function getOrRegisterSubviewType(ctx: CodegenContext, elemKind: string, 
   if (existing !== undefined) return existing;
 
   const vecBaseIdx = getOrRegisterVecBaseType(ctx);
-  const vecTypeIdx = getOrRegisterVecType(ctx, elemKind, elemTypeOverride);
+  const arrTypeIdx = getOrRegisterArrayType(ctx, elemKind, elemTypeOverride);
 
   const idx = ctx.mod.types.length;
   const name = `__subview_${elemKind}`;
@@ -181,7 +185,7 @@ export function getOrRegisterSubviewType(ctx: CodegenContext, elemKind: string, 
     superTypeIdx: vecBaseIdx, // length-prefix compatible with $__vec_base
     fields: [
       { name: "length", type: { kind: "i32" }, mutable: true },
-      { name: "base", type: { kind: "ref_null", typeIdx: vecTypeIdx }, mutable: false },
+      { name: "data", type: { kind: "ref_null", typeIdx: arrTypeIdx }, mutable: false },
       { name: "byteOffset", type: { kind: "i32" }, mutable: false },
     ],
   });
@@ -191,10 +195,19 @@ export function getOrRegisterSubviewType(ctx: CodegenContext, elemKind: string, 
   ctx.typeIdxToStructName.set(idx, name);
   ctx.structFields.set(name, [
     { name: "length", type: { kind: "i32" as const }, mutable: true },
-    { name: "base", type: { kind: "ref_null" as const, typeIdx: vecTypeIdx }, mutable: false },
+    { name: "data", type: { kind: "ref_null" as const, typeIdx: arrTypeIdx }, mutable: false },
     { name: "byteOffset", type: { kind: "i32" as const }, mutable: false },
   ]);
   return idx;
+}
+
+/** (#2357) The backing array type idx for a `$__subview_<elem>` struct (field 1). */
+export function getSubviewArrTypeIdx(ctx: CodegenContext, subviewTypeIdx: number): number {
+  const def = ctx.mod.types[subviewTypeIdx];
+  if (!def || def.kind !== "struct") return -1;
+  const dataField = def.fields[1];
+  if (!dataField || (dataField.type.kind !== "ref" && dataField.type.kind !== "ref_null")) return -1;
+  return (dataField.type as { typeIdx: number }).typeIdx;
 }
 
 /** (#2357) True iff `typeIdx` is a registered `$__subview_<elem>` struct. */
