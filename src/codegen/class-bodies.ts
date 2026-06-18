@@ -545,6 +545,26 @@ export function collectClassDeclaration(
           if (parentStructTypeIdx === undefined && isHostConstructibleBuiltin(parentClassName)) {
             ctx.classBuiltinParentMap.set(className, parentClassName);
             ctx.classExternrefBackedSet.add(className);
+          } else if (
+            ctx.classExternrefBackedSet.has(parentClassName) &&
+            ctx.classBuiltinParentMap.has(parentClassName)
+          ) {
+            // (#2188 follow-up) Multi-level user Error chain: the direct parent is
+            // itself a user class that is externref-backed by a builtin Error
+            // ancestor (e.g. `class D extends A {}` where `A extends Error`).
+            // The parent carries a vestigial struct slot, so we do NOT gate on
+            // `parentStructTypeIdx === undefined` here — the discriminator is the
+            // parent's externref-backing, not its struct presence. `super()` must
+            // thread through the SAME builtin ancestor's `__new_<builtin>` so D is
+            // constructed as a real `$Error_struct` (carrying the builtin Error
+            // `$tag`, `.message`, catchability, and `instanceof Error`) instead of
+            // chaining through A's user `_init`, which leaves D un-tagged. Parents
+            // are collected in source order before their children, so the
+            // ancestor's mapping is already present; propagate the builtin
+            // ANCESTOR name (not the immediate parent).
+            const builtinAncestor = ctx.classBuiltinParentMap.get(parentClassName)!;
+            ctx.classBuiltinParentMap.set(className, builtinAncestor);
+            ctx.classExternrefBackedSet.add(className);
           }
           // Mark parent struct as non-final so it can be extended
           if (parentStructTypeIdx !== undefined) {
