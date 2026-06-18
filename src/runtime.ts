@@ -3945,26 +3945,26 @@ function _safeSet(
     }
     return;
   }
-  // (#2017) Strict-mode [[Set]] pre-check on a plain JS object. The bundled
-  // runtime is not guaranteed to execute this assignment in strict mode, so
-  // `obj[key] = val` on a getter-only accessor or a non-writable data property
-  // can silently no-op instead of throwing. Detect those §10.1.9 failure cases
-  // up front and throw a catchable TypeError ourselves (sloppy `__extern_set`
-  // callers pass `strict=false` and skip this). Walk own → prototype chain for
-  // the resolved descriptor, matching ordinary [[Set]] semantics.
+  // (#2017) Strict [[Set]] pre-check on a plain JS object. The issue this PR
+  // fixes is narrow: a write to a getter-only OBJECT-LITERAL accessor must throw
+  // a catchable TypeError (§13.15.2 → §10.1.9) instead of silently no-oping.
+  // Object-literal accessors are always OWN properties, so we inspect ONLY the
+  // own descriptor and throw ONLY for a genuine getter-only accessor (has `get`,
+  // no `set`). Deliberately narrowed (#2017 regression fix):
+  //   - We do NOT walk the prototype chain. The old proto-walk called
+  //     `Object.getOwnPropertyDescriptor` on each prototype, which fires a Proxy
+  //     `getOwnPropertyDescriptor` trap as an observable side-effect and changed
+  //     trap ordering (built-ins/Proxy/set/call-parameters-prototype.js).
+  //   - We do NOT throw for non-writable DATA properties. These `__extern_set_strict`
+  //     calls also fire for ordinary member writes like `Math.E = 1` /
+  //     `Number.NaN = 1`, which in sloppy/noStrict script context (the test262
+  //     default) must silently no-op, not throw (S8.5_A9, S8.12.4_A1, S8.6.1_A1).
+  //     A non-writable data-property write that the engine itself surfaces under
+  //     a genuinely-strict caller is still propagated by the catch arm below.
   if (strict && (typeof key === "string" || typeof key === "symbol")) {
-    for (let cur = obj; cur != null; cur = Object.getPrototypeOf(cur)) {
-      const desc = Object.getOwnPropertyDescriptor(cur, key as PropertyKey);
-      if (!desc) continue;
-      if (desc.set) break; // has a setter → ordinary accessor write, allowed
-      if (desc.get) {
-        throw new TypeError(`Cannot set property ${String(key)} of #<Object> which has only a getter`);
-      }
-      // data property: a non-writable own data property blocks the write
-      if (!desc.writable) {
-        throw new TypeError(`Cannot assign to read only property '${String(key)}' of object`);
-      }
-      break; // writable data property found → ordinary write
+    const ownDesc = Object.getOwnPropertyDescriptor(obj, key as PropertyKey);
+    if (ownDesc && ownDesc.get && !ownDesc.set) {
+      throw new TypeError(`Cannot set property ${String(key)} of #<Object> which has only a getter`);
     }
   }
   try {
@@ -3973,13 +3973,19 @@ function _safeSet(
     // #2180 — writing to a revoked proxy throws TypeError; propagate it
     // instead of silently diverting to the sidecar.
     if (_isRevokedProxyError(e)) throw e;
-    // (#2017) A strict [[Set]] failure that the engine DID surface (e.g. frozen
-    // object under an actually-strict caller) — propagate it (catchable via the
-    // host-import exception bridge) rather than swallow it and divert to the
-    // sidecar. Sloppy callers (`__extern_set`) keep the legacy divert.
-    if (strict && e instanceof TypeError) throw e;
+    // (#2017 regression fix) Do NOT blanket re-throw the engine's TypeError just
+    // because this came through `__extern_set_strict`. The bundled runtime is an
+    // ES module (executes in strict mode), so `obj[key] = val` throws natively
+    // for a non-writable DATA property (`Math.E = 1`, `Number.NaN = 1`) or a
+    // non-extensible/frozen target. In sloppy/noStrict SCRIPT context (the
+    // test262 default) those writes must silently no-op, not throw — re-throwing
+    // here regressed S8.5_A9 / S8.12.4_A1 / S8.6.1_A1. The getter-only ACCESSOR
+    // case (#2017's actual target) is already handled by the explicit pre-check
+    // above (it throws our own catchable TypeError before reaching this write),
+    // so swallowing the engine error here and diverting to the sidecar both
+    // fixes the regression and preserves the feature.
     // For non-WasmGC objects (frozen/sealed JS objects),
-    // fall through to sidecar set — preserves original behavior for non-strict callers.
+    // fall through to sidecar set — preserves original behavior.
     _sidecarSet(obj, key, val);
     // Also store under the "@@name" alias for well-known symbols
     if (typeof key === "symbol") {

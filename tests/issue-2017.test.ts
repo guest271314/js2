@@ -55,4 +55,35 @@ describe("#2017 getter-only assignment", () => {
     `;
     expect(await run<string>(src, "t")).toBe("TypeError");
   });
+
+  // (#2017 regression guard) The strict [[Set]] must NOT over-throw. These
+  // writes go through the same `__extern_set_strict` path, but in sloppy/noStrict
+  // SCRIPT context (the default for plain member writes) a write to a
+  // non-writable DATA property silently no-ops — it must NOT throw. Regressed
+  // test262 S8.5_A9 / S8.12.4_A1 / S8.6.1_A1 when the pre-check threw for
+  // non-writable data props and the catch arm blanket-re-threw the engine's
+  // strict TypeError.
+  it("writing a non-writable built-in data property silently no-ops (no throw)", async () => {
+    // Math.E is non-writable; `Math.E = 1` must be a silent no-op, leaving it
+    // unchanged — NOT a TypeError.
+    const src = `
+      export function t(): number {
+        const before = Math.E;
+        (Math as any).E = 1;
+        return Math.E === before ? 1 : 0;
+      }
+    `;
+    expect(await run<number>(src, "t")).toBe(1);
+  });
+
+  it("writing the non-writable Number.NaN silently no-ops (no throw)", async () => {
+    const src = `
+      export function t(): number {
+        (Number as any).NaN = 1;
+        // NaN stays NaN (self-inequality) — the write did nothing.
+        return Number.NaN !== Number.NaN ? 1 : 0;
+      }
+    `;
+    expect(await run<number>(src, "t")).toBe(1);
+  });
 });

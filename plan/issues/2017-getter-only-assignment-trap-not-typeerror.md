@@ -100,3 +100,52 @@ failures are pre-existing on main — bare host-bridge harness, unrelated).
 
 **Family:** #1092 (wrong error type, done), #2024 (class-side get-only, done),
 #1456 (private get-only, done) — this completes the object-literal side.
+
+## Regression fix (#2017, sendev, 2026-06-18) — strict [[Set]] was over-throwing
+
+The first cut of the strict [[Set]] pre-check over-reached and regressed 5
+test262 tests (CI bucket `5e25f0dd855cf9bd`, net was +11 but blocked by the 31%
+ratio gate). Root cause: the strict path threw a TypeError beyond the
+getter-only accessor case it was meant for, because (a) the plain-JS pre-check
+threw for **non-writable DATA properties** and **walked the prototype chain**,
+and (b) the `catch` arm blanket-re-threw the engine's own strict TypeError for
+any `__extern_set_strict` caller.
+
+The bundled host runtime is an ES module (executes in strict mode), so a plain
+`obj[key] = val` for a non-writable data property (`Math.E = 1`,
+`Number.NaN = 1`) throws natively — and that throw was being propagated even
+though these writes occur in sloppy/`noStrict` SCRIPT context (the test262
+default), where §10.1.9 requires a **silent no-op**.
+
+The 5 regressions and their cause:
+- `language/types/number/S8.5_A9.js` (`Number.NaN = 1` silent no-op) — over-throw
+- `language/expressions/assignment/S8.12.4_A1.js` (`Math.E = 1`) — over-throw
+- `language/types/object/S8.6.1_A1.js` (`Math.E = 1`) — over-throw
+- `built-ins/Proxy/set/call-parameters-prototype.js` — the proto-walk called
+  `Object.getOwnPropertyDescriptor` on the Proxy prototype, firing its
+  `getOwnPropertyDescriptor` trap as an observable side-effect (wrong trap order)
+- `language/expressions/dynamic-import/returns-promise.js` — collateral of the
+  same over-throw on a `globalThis.Promise = fn` write
+
+**Fix (src/runtime.ts `_safeSet`):** narrow the strict throw to the issue's
+actual target — a genuine **getter-only OBJECT-LITERAL accessor** (always an OWN
+property). The plain-JS pre-check now inspects ONLY the own descriptor and
+throws ONLY when `desc.get && !desc.set`; it no longer walks the prototype chain
+(kills the Proxy trap side-effect) and no longer throws for non-writable data
+properties. The `catch` arm no longer blanket-re-throws on `strict` — the
+getter-only case is already handled by the pre-check before the write, so any
+engine TypeError reaching the catch (non-writable data / non-extensible / frozen)
+diverts to the sidecar exactly as the sloppy path always did. Revoked-proxy
+TypeErrors (#2180) are still propagated.
+
+**Tests:** `tests/issue-2017.test.ts` gains two regression guards — a
+non-writable built-in data-property write (`Math.E = 1`, `Number.NaN = 1`)
+silently no-ops and must NOT throw. All 6 pass. The 4 original feature tests
+(getter-only throws / getter+setter routes to setter / getter survives rejected
+write / TypeError instance) still pass.
+
+**Verified:** the 4 non-fixture regressed paths pass in-process via
+`runTest262File` (incl. the Proxy test — no trap fired). The dynamic-import
+fixture test's `globalThis.Promise = fn` write now succeeds in a minimal probe
+(error class "Cannot create property 'Promise'" eliminated); CI's fixture-aware
+sharded path confirms. `tsc --noEmit` + `npm run lint` clean.
