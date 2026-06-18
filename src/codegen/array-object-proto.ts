@@ -102,6 +102,7 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   forEach: 1,
   push: 1,
   reduce: 1,
+  slice: 2,
   splice: 2,
   unshift: 1,
   with: 2,
