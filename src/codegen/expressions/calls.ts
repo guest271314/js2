@@ -21,6 +21,7 @@ import {
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
+import { ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain
 import { reserveClosedMethodDispatch } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
 import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
@@ -4077,6 +4078,45 @@ function compileCallExpression(
           return { kind: "ref", typeIdx: vecTypeIdx };
         }
       }
+      // (#2169c) Native standalone drain: `Array.from(iterable)` with no mapFn,
+      // host-free. The native `__iterator` runtime (registered here) wraps the
+      // arg into an `$IterRec`; `__iterator_rest` drains it into a canonical
+      // externref `$Vec` — exactly the value the host `__array_from` returns, but
+      // with zero host imports. mapFn is NOT handled natively yet (it needs
+      // closure dispatch) — those fall through to the host path below.
+      if (noJsHost(ctx) && expr.arguments.length < 2) {
+        ensureNativeIteratorRuntime(ctx);
+        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+        flushLateImportShifts(ctx, fctx);
+        const iterIdx = ctx.funcMap.get("__iterator");
+        const restIdx = ctx.funcMap.get("__iterator_rest");
+        if (iterIdx !== undefined && restIdx !== undefined) {
+          // rec = __iterator(arg) ; return __iterator_rest(rec)
+          fctx.body.push({ op: "call", funcIdx: iterIdx });
+          fctx.body.push({ op: "call", funcIdx: restIdx });
+          return { kind: "externref" };
+        }
+        // Native runtime unavailable — fall through to the host path with the
+        // arg already on the stack (push the null mapFn it expects).
+        fctx.body.push({ op: "ref.null.extern" });
+        const fromNativeFallbackIdx = ensureLateImport(
+          ctx,
+          "__array_from",
+          [{ kind: "externref" }, { kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+        flushLateImportShifts(ctx, fctx);
+        if (fromNativeFallbackIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: fromNativeFallbackIdx });
+          return { kind: "externref" };
+        }
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+
       // Fallback: Array.from(externref/iterable) — delegate to host (#965)
       {
         const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
@@ -4099,7 +4139,6 @@ function compileCallExpression(
           fctx.body.push({ op: "call", funcIdx: fromIdx });
           return { kind: "externref" };
         }
-        fctx.body.push({ op: "drop" });
         fctx.body.push({ op: "drop" });
         fctx.body.push({ op: "ref.null.extern" });
         return { kind: "externref" };
