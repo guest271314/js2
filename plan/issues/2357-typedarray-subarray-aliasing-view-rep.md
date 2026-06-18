@@ -257,3 +257,34 @@ land. Branch `issue-2357-subarray-impl` (commits WIP 1–4 + docs) has the full 
 **Floor-gate hard** on the standalone baseline and **WAT-diff a plain Uint8Array
 for-loop before/after** to prove zero added instructions on the non-view path
 (the #1673 discipline).
+
+### Update (WIP 5) — `.length` WORKS; read-receiver flow is the last wrinkle
+
+Two root-cause fixes landed and verified:
+- **Binding type at the real decl site:** `inferSubarraySubviewType` in
+  `variables.ts` (~590) sources `s = a.subarray(...)` → `$__subview` (the TDZ-hoist
+  path was never reached for it; the live alloc is at `compileVariableStatement`).
+  `s`'s local is now `(ref null $__subview)` in the WAT and holds the
+  `struct.new $__subview` the lowering emits.
+- **`select` condition bug:** Wasm `select` returns the FIRST operand when the
+  condition is TRUE; the viewLen `max(end-begin,0)` used `i32.lt_s` (→ 0 for every
+  valid window). Fixed to `i32.ge_s`. **`s.length` now returns the correct window
+  length**, and plain `a[i]` is unaffected (no parent-as-subview regression). 40/40
+  non-pre-existing typed-array + DataView tests pass.
+
+**Last wrinkle:** `s[i]` element READ still leaks `env.__extern_get` — my
+`$__subview` read arm in `compileElementAccessBody` (property-access.ts ~4840) is
+NOT reached (`__sv_recv` absent from WAT). At the read site
+(`compileElementAccess` ~4529) `compileExpression(s)` evidently returns
+**externref**, not the subview ValType, so it takes the externref `__extern_get`
+fallback instead of the struct path. `compileIdentifier` returns the local's
+declared type (subview) — so either a later compile pass re-types `s` as externref
+(the TS type is `Uint8Array`), or a narrowing/coercion at the read site boxes it.
+Next: probe `objType.kind` at property-access.ts:4529 for `s[i]`; if externref,
+either (a) keep the local subview-typed through reads (suppress the
+externref-narrowing for subview-typed locals), or (b) add a `ref.test $__subview`
+runtime arm in the externref branch (still compile-time-free for plain arrays since
+their objType is the vec struct, not externref). Then wire the WRITE path
+(`compileElementAssignment`, assignment.ts:2693) with the same
+`data[byteOffset+i]` store, and add the scoped standalone tests. Branch
+`issue-2357-subarray-impl` (WIP 1–5).
