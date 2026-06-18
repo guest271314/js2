@@ -33,12 +33,15 @@ index: keyGlobal }` therefore emits `global.get -1`, which serializes to a
 `#1888 S5c` fixed the **accessor** arm in
 `compileObjectLiteralWithAccessors` (`src/codegen/literals.ts`) to materialize
 the key via the dual-mode helper `stringConstantExternrefInstrs(ctx, propName)`.
-But the two sibling arms in the **same loop** were left on the raw
+The two sibling arms in the **same loop** were left on the raw
 `global.get keyGlobal`:
 
-- **PropertyAssignment** arm (`literals.ts` ~L491): `addStringConstantGlobal(ctx,
-  propName); ... fctx.body.push({ op: "global.get", index: keyGlobal });`
-- **MethodDeclaration** arm (`literals.ts` ~L575): same shape for `methodName`.
+- **PropertyAssignment** arm — **already fixed on upstream/main via #51** (an
+  identical `stringConstantExternrefInstrs` conversion landed in the commits
+  after this branch's fork base; resolved as a no-op merge here).
+- **MethodDeclaration** arm (`literals.ts`, the `{ greet(){}, get v(){} }`
+  shape) — **STILL on the raw `global.get keyGlobal` on upstream/main**; this is
+  the genuine remaining defect this PR fixes.
 
 So any object literal that takes the accessor path (i.e. contains ≥1
 getter/setter) AND also has a data property or a regular method emits
@@ -97,10 +100,16 @@ capture a funcIdx).
 ## Acceptance criteria
 
 - The minimal repros above compile clean in `--target standalone`.
-- The object-literal data/method-key subcluster of the `global index out of
-  range — -1` residual clears (measured: **17 / 155** standalone CE bucket files
-  flip CE→compiles-clean with the literals.ts fix; the remaining 138 hit the same
-  sentinel class in *other* emit sites — see Follow-up).
+- The object-literal **method-key** subcluster of the `global index out of
+  range — -1` residual clears. Measured against current upstream/main (which
+  already carries #51's PropertyAssignment-arm fix): the MethodDeclaration-arm
+  fix in this PR flips **18 / 155** standalone CE bucket files
+  CE→compiles-clean, and upstream-without-this-PR flips **0 / 155** of them —
+  i.e. this bucket is dominated by object literals with named/computed
+  **methods** (iterators `[Symbol.iterator](){…}` / `next()`, set-like classes,
+  async-from-sync) that contain a getter, so the method-arm is the load-bearing
+  fix. The remaining 137 hit the same sentinel class in *other* emit sites —
+  see Follow-up.
 - No host/GC-mode regression (`stringConstantExternrefInstrs` is byte-identical
   to the old `global.get` in GC mode; verified — the object-literal /
   getter/setter / accessor suites that pass on baseline still pass, and the only
