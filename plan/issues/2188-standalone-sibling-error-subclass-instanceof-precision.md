@@ -1,10 +1,11 @@
 ---
 id: 2188
 title: "standalone: sibling Error subclasses share the parent $tag — instanceof can't distinguish them (per-user-class brand)"
-status: ready
+status: in-progress
+assignee: ttraenkler/sdev-proxy3
 sprint: Backlog
 created: 2026-06-17
-updated: 2026-06-17
+updated: 2026-06-18
 priority: low
 feasibility: hard
 reasoning_effort: high
@@ -67,3 +68,50 @@ single-subclass case host-free. Coordinate with #2101 and the host-mode
 
 Split from #1536c (single-subclass standalone Error subclass — `done`). See
 #1536c's `## Resolution` and #2101 for the brand machinery.
+
+## Resolution (2026-06-18, sdev-proxy3 — PR on `issue-2188-sibling-error-brand`)
+
+**Scope shipped:** sibling discrimination for *direct* builtin-Error subclasses
+(`class A extends Error {}`, `class C extends TypeError {}`), the issue's primary
+repro + root cause. Implemented a minimal **additive per-class brand** instead of
+the full `$ClassMeta` migration (#2101) — that migration stays future work.
+
+**Why the brand, and why a new field (not field 0):** `$Error_struct.$tag`
+(field 0) is the *builtin* type tag — shared by every direct subclass of the same
+builtin Error, and immutable. Reusing it cannot separate siblings. So I appended a
+**mutable** `$userClassId` (fieldIdx 4, after `stack`) carrying the subclass's
+unique `classTagMap` id. Kept LAST so the existing positional field indices
+(0=tag, 1=message, 2=name, 3=stack) used across property-access.ts / identifiers.ts
+stay stable.
+
+**Three touch points (registry/error-types.ts, class-bodies.ts, identifiers.ts):**
+1. `$Error_struct` gains `$userClassId` (field 4); `__new_<Parent>` writes the
+   `-1` sentinel (a plain builtin Error / the shared parent ctor has no brand —
+   it cannot, because `__new_<Parent>` is shared by name across all siblings).
+2. `emitSetSubclassUserBrand` writes the subclass's id into field 4 **after**
+   construction at BOTH externref-backed-subclass sites (implicit derived ctor +
+   explicit `super()`), `ref.test`-guarded, standalone/WASI only. The brand can't
+   live in the shared parent ctor, so it's a post-`struct.new` `struct.set` at the
+   per-subclass site — no funcIdx-shift hazard (no body rebuild, no late import).
+3. The standalone `instanceof <UserSubclass>` path reads field 4 against the id
+   set {ctorName} ∪ {descendant subclasses} (`collectUserErrorSubclassBrandIds`,
+   walks `classParentMap`). Builtin RHS (`Error`/`TypeError`) keeps the field-0
+   tag check unchanged. A `-1`-branded plain Error never matches a subclass set
+   (ids ≥ 0), so `(new Error) instanceof MySubclass` is correctly false.
+
+**Verified:** `(new A) instanceof B` → false; self / parent / cross-family
+(`C extends TypeError instanceof TypeError|Error`, not `A`); three siblings
+mutually disjoint. 10/10 `tests/issue-2188.test.ts`; 25/25 existing exception
+suites (issue-2077/1536/1536c/2192); coercion-drift gate OK; tsc + prettier clean.
+
+**Pre-existing gap NOT addressed here (orthogonal, not a regression):** a
+*multi-level user chain* `class D extends A {}` where `A extends Error` does not
+construct `D` as a proper `$Error_struct` — D's direct parent A is a user class,
+so D's `super()` chains through A's `_init`, not `__new_Error`. On **both
+upstream/main and this branch**, `(new D) instanceof A` and `instanceof Error`
+return false (`(new D) instanceof D` works — D is branded). The acceptance
+criterion "multi-level user chains resolve correctly" therefore needs a separate
+construction-routing fix (transitively-derived Error subclasses must thread
+through `__new_<builtinAncestor>`); filing as a follow-up. The brand machinery
+here already supports the chain on the *read* side (descendant ids are collected)
+— only the *construction* side is missing for the >1-level case.
