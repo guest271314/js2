@@ -31,8 +31,9 @@ import {
 import { ensureNativeIteratorRuntime } from "../iterator-native.js";
 import { containsLinearU8Allocation, emitLinearU8ArenaMark, linearU8ArenaResetInstrs } from "../linear-uint8-arena.js";
 import { resolveComputedKeyExpression } from "../literals.js";
-import { emitCollectionIteratorVec } from "../map-runtime.js";
+import { emitCollectionIteratorVec, ensureMapHelpers, MAP_LAYOUT } from "../map-runtime.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
+import { coercionInstrs } from "../type-coercion.js";
 import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType } from "../registry/types.js";
 import {
@@ -2458,11 +2459,18 @@ function compileForOfNativeCollection(
   if (!isMap && !isSet) return false;
 
   // Default projection: Set → values; Map → `entries` ([k, v] pairs). An explicit
-  // `.keys()/.values()/.entries()` call overrides. The `entries` pair projection
-  // needs the `__iterator` pair consumer (not the array fast path), so it is
-  // deferred to a #2162 follow-up — fall through here so the existing path tries.
+  // `.keys()/.values()/.entries()` call overrides.
   const kind: "keys" | "values" | "entries" = explicitKind ?? (isMap ? "entries" : "values");
-  if (kind === "entries") return false;
+
+  // `entries` with a `[k, v]` destructuring binding is driven by a dedicated
+  // native walk that binds the stored key/value directly per live entry — no
+  // intermediate `$ObjVec` pair (whose generic destructuring would route through
+  // the host `__extern_get` and leak imports). Falls back below for non-`[k,v]`
+  // shapes (a single-identifier binding over entries, holes, rest).
+  if (kind === "entries") {
+    if (compileForOfNativeMapEntries(ctx, fctx, stmt, receiver, isSet)) return true;
+    return false;
+  }
 
   // Confirm the receiver genuinely lowers to the native `$Map` struct (a Map/Set
   // typed value can still be a host externref in JS-host mode) without leaving
@@ -2490,6 +2498,189 @@ function compileForOfNativeCollection(
   const vecLocal = allocLocal(fctx, `__cof_vec_${fctx.locals.length}`, vecType);
   fctx.body.push({ op: "local.set", index: vecLocal });
   compileForOfArrayFromLocal(ctx, fctx, stmt, vecLocal, vecType);
+  return true;
+}
+
+/**
+ * (#2162) Drive `for (const [k, v] of map.entries())` / `for (const [k, v] of map)`
+ * (and the Set `[v, v]` form) natively in standalone / `nativeStrings` mode by
+ * walking the `$Map` entries vector and binding the stored key/value DIRECTLY
+ * into the destructuring targets per live entry — no intermediate `$ObjVec` pair
+ * (whose generic `[k, v]` destructuring would route through the host
+ * `__extern_get` and leak imports). Mirrors `tryCompileNativeCollectionForEach`'s
+ * tombstone-skipping walk and `compileForOfArray`'s block/loop/body-block
+ * break/continue bookkeeping.
+ *
+ * Returns `true` when it emitted the loop; `false` (leaving no code behind) when
+ * the binding is not a 2-element `[k, v]` identifier pattern (holes, rest, a
+ * single-identifier binding over entries, or an assignment target), so the
+ * caller can fall back to the generic path.
+ */
+function compileForOfNativeMapEntries(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  stmt: ts.ForOfStatement,
+  receiver: ts.Expression,
+  isSet: boolean,
+): boolean {
+  if (!ctx.nativeStrings) return false;
+  // Only the `const/let [k, v]` binding form (the dominant Map-entries shape).
+  if (!ts.isVariableDeclarationList(stmt.initializer)) return false;
+  const decl = stmt.initializer.declarations[0]!;
+  if (!ts.isArrayBindingPattern(decl.name)) return false;
+  const elements = decl.name.elements;
+  if (elements.length !== 2) return false;
+  const keyEl = elements[0]!;
+  const valEl = elements[1]!;
+  if (
+    !ts.isBindingElement(keyEl) ||
+    keyEl.dotDotDotToken ||
+    keyEl.initializer ||
+    !ts.isIdentifier(keyEl.name) ||
+    !ts.isBindingElement(valEl) ||
+    valEl.dotDotDotToken ||
+    valEl.initializer ||
+    !ts.isIdentifier(valEl.name)
+  ) {
+    return false;
+  }
+
+  ensureMapHelpers(ctx);
+  if (ctx.mapTypeIdx < 0) return false;
+
+  // Confirm the receiver genuinely lowers to the native `$Map` struct without
+  // leaving code behind (same probe as compileForOfNativeCollection).
+  const probeBody = fctx.body.length;
+  const probeLocals = snapshotLocals(fctx);
+  const recvProbe = compileExpression(ctx, fctx, receiver);
+  fctx.body.length = probeBody;
+  restoreLocals(fctx, probeLocals);
+  if (!recvProbe || (recvProbe.kind !== "ref" && recvProbe.kind !== "ref_null")) return false;
+  if (recvProbe.typeIdx !== ctx.mapTypeIdx) return false;
+
+  const { M_ENTRIES, M_ENTRYCOUNT, F_KEY, F_VALUE, F_HASH, TOMBSTONE_BIT } = MAP_LAYOUT;
+  const isConst = !!(stmt.initializer.flags & ts.NodeFlags.Const);
+  if (isConst) {
+    collectBindingNames(decl.name).forEach((n) => {
+      if (!fctx.constBindings) fctx.constBindings = new Set();
+      fctx.constBindings.add(n);
+    });
+  }
+
+  // Receiver → ref $Map in a temp.
+  const recvType = compileExpression(ctx, fctx, receiver);
+  if (!recvType) return false;
+  const mTmp = allocLocal(fctx, `__mef_m_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: ctx.mapTypeIdx,
+  });
+  fctx.body.push({ op: "local.set", index: mTmp });
+
+  // Bound key/value locals, typed from the binding-element TS types (a numeric
+  // Map key → f64, string → native string ref, etc.).
+  const keyType = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(keyEl));
+  const valType = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(valEl));
+  const keyLocal = allocLocal(fctx, keyEl.name.text, keyType);
+  const valLocal = allocLocal(fctx, valEl.name.text, valType);
+
+  const iTmp = allocLocal(fctx, `__mef_i_${fctx.locals.length}`, { kind: "i32" });
+  const entryTmp = allocLocal(fctx, `__mef_e_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: ctx.mapEntryTypeIdx,
+  });
+
+  // entry = (cast $MapEntry) m.entries[i]
+  const loadEntry: Instr[] = [
+    { op: "local.get", index: mTmp } as Instr,
+    { op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRIES } as unknown as Instr,
+    { op: "local.get", index: iTmp } as Instr,
+    { op: "array.get", typeIdx: ctx.mapEntriesTypeIdx } as unknown as Instr,
+    { op: "ref.cast", typeIdx: ctx.mapEntryTypeIdx } as Instr,
+    { op: "local.set", index: entryTmp } as Instr,
+  ];
+
+  // Externalize a $MapEntry field then coerce to the bound local's type, mirroring
+  // the forEach driver (entry fields are stored anyref / boxed externref).
+  const bindFromEntry = (field: number, targetType: ValType, targetLocal: number): Instr[] => [
+    { op: "local.get", index: entryTmp } as Instr,
+    { op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: field } as unknown as Instr,
+    { op: "extern.convert_any" } as Instr,
+    ...coercionInstrs(ctx, { kind: "externref" }, targetType, fctx),
+    { op: "local.set", index: targetLocal } as Instr,
+  ];
+
+  // i = 0
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: iTmp });
+
+  // Build the loop body (block { loop { body-block } }) — 3 nesting levels, so
+  // adjust break/continue/return depths like compileForOfArray.
+  const savedBody = pushBody(fctx);
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! += 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! += 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth += 3;
+  adjustRethrowDepth(fctx, 3);
+  fctx.breakStack.push(2); // break = exit outer block
+  fctx.continueStack.push(0); // continue = exit body block, then increment
+
+  // if i >= entryCount → break
+  fctx.body.push({ op: "local.get", index: iTmp });
+  fctx.body.push({ op: "local.get", index: mTmp });
+  fctx.body.push({ op: "struct.get", typeIdx: ctx.mapTypeIdx, fieldIdx: M_ENTRYCOUNT } as unknown as Instr);
+  fctx.body.push({ op: "i32.ge_s" });
+  fctx.body.push({ op: "br_if", depth: 1 });
+
+  // entry = entries[i]; then i++ BEFORE the tombstone/body so a `continue`
+  // (br depth 0 → loop start) and a tombstone-skip both advance the cursor
+  // (mirrors the forEach driver — never re-reads the same slot).
+  fctx.body.push(...loadEntry);
+  fctx.body.push({ op: "local.get", index: iTmp });
+  fctx.body.push({ op: "i32.const", value: 1 });
+  fctx.body.push({ op: "i32.add" });
+  fctx.body.push({ op: "local.set", index: iTmp });
+
+  // tombstone → skip this slot (continue the loop; cursor already advanced).
+  fctx.body.push({ op: "local.get", index: entryTmp });
+  fctx.body.push({ op: "struct.get", typeIdx: ctx.mapEntryTypeIdx, fieldIdx: F_HASH } as unknown as Instr);
+  fctx.body.push({ op: "i32.const", value: TOMBSTONE_BIT });
+  fctx.body.push({ op: "i32.and" });
+  fctx.body.push({ op: "br_if", depth: 0 });
+
+  // Bind k ← entry.key (Set: value === key), v ← entry.value.
+  fctx.body.push(...bindFromEntry(isSet ? F_VALUE : F_KEY, keyType, keyLocal));
+  fctx.body.push(...bindFromEntry(F_VALUE, valType, valLocal));
+
+  // Compile the user body inside its own block so `continue` (br depth 0 from
+  // inside the body) exits the body block and falls through to the loop's `br`.
+  const savedLoopBody = pushBody(fctx);
+  if (ts.isBlock(stmt.statement)) {
+    const savedScope = saveBlockScopedShadows(fctx, stmt.statement);
+    for (const s of stmt.statement.statements) compileStatement(ctx, fctx, s);
+    restoreBlockScopedShadows(fctx, savedScope);
+  } else {
+    compileStatement(ctx, fctx, stmt.statement);
+  }
+  const bodyInstrs = fctx.body;
+  popBody(fctx, savedLoopBody);
+  fctx.body.push({ op: "block", blockType: { kind: "empty" }, body: bodyInstrs });
+
+  // continue loop (cursor was already advanced above).
+  fctx.body.push({ op: "br", depth: 0 });
+
+  const loopBody = fctx.body;
+  fctx.breakStack.pop();
+  fctx.continueStack.pop();
+  for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]! -= 3;
+  for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]! -= 3;
+  if (fctx.generatorReturnDepth !== undefined) fctx.generatorReturnDepth -= 3;
+  adjustRethrowDepth(fctx, -3);
+  popBody(fctx, savedBody);
+
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody }],
+  });
   return true;
 }
 
