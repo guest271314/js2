@@ -48,6 +48,23 @@ const INIT_CAP = 8;
 const TOMBSTONE_BIT = 0x40000000; // bit 30 — keeps hashes non-negative i32
 
 /**
+ * (#2162) `$Map` / `$MapEntry` field layout, exported so the for-of entries
+ * driver (statements/loops.ts) can walk the entries vector natively without
+ * re-deriving the constants. `entries` is the `$MapEntry[]` backing array;
+ * `entryCount` is the high-water mark (live + tombstoned); a `$MapEntry` stores
+ * `key`, `value`, and a `hash` whose top bit (`tombstoneBit`) flags deletion.
+ */
+export const MAP_LAYOUT = {
+  M_ENTRIES: 1,
+  M_ENTRYCOUNT: 2,
+  M_LIVECOUNT: 3,
+  F_KEY: 0,
+  F_VALUE: 1,
+  F_HASH: 3,
+  TOMBSTONE_BIT,
+} as const;
+
+/**
  * Register the WasmGC struct/array types backing the native Map. Idempotent.
  * Stores the type indices on `ctx`. Mirrors `ensureWrapperTypes` /
  * `ensureNativeStringHelpers` type-registration.
