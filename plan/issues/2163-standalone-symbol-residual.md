@@ -1,10 +1,11 @@
 ---
 id: 2163
 title: "Standalone Symbol conformance residual (~240 tests)"
-status: in-progress
+status: done
 sprint: 63
 created: 2026-06-15
-updated: 2026-06-17
+updated: 2026-06-18
+completed: 2026-06-18
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -182,3 +183,72 @@ host mode).
 - `tests/issue-2163.test.ts` slice-1/2 — 14/14, unchanged.
 - `npm run typecheck` + Biome lint clean (`symbol-native.ts` 0 warnings).
 - Host-mode `Symbol.for` still emits `__symbol_for` (regression guard).
+
+## Slice 4 (2026-06-18, dev cs-2163) — native `Symbol.prototype.toString` / `String(symbol)`
+
+**Landed — closes the issue.** `Symbol.prototype.toString()` and the
+non-throwing `String(symbol)` form now build the spec descriptive string
+natively in `nativeStrings` / standalone mode, with **zero host imports**.
+
+Before this slice `sym.toString()` was a hard **standalone compile error**: with
+no Symbol-specific handler it fell through to the generic `.toString()` fallback,
+which drops the i32 symbol id and emits `"[object Object]"` via a string-constant
+global. In native-strings mode that global resolves to the `-1` sentinel, so
+binary emit threw the late-import index-shift CE (the carried-forward `#2043`
+class item — `global index out of range — -1`). This was the last untracked
+Symbol-semantics gap in the standalone residual.
+
+New `emitSymbolToString(ctx, fctx)` in `src/codegen/symbol-native.ts`
+(`[i32 id] → [ref $AnyString]`): loads the description via `emitSymbolDescLoad`,
+collapses the `undefined` sentinel to `""`, and concatenates
+`"Symbol(" + (desc ?? "") + ")"` (§20.4.3.3.1 SymbolDescriptiveString) using
+inline native-string literals and the native `__str_concat` helper — the same
+lowering template literals already use. No new host import, no string-constant
+global.
+
+Wiring (`src/codegen/expressions/calls.ts`):
+- A symbol-receiver branch in `compileMethodCall` (after the bigint `toString`
+  block): `toString()` → `emitSymbolToString` (native-strings only);
+  `valueOf()` → returns the symbol primitive (the i32 id) itself (§20.4.3.3.4).
+- A symbol branch at the top of the `String(...)` handler: §22.1.1.1 step 1 is
+  the ONE ToString form that does NOT throw on a Symbol — routed through the same
+  native builder. (Implicit coercions — template literals, `+` — still throw via
+  `tryThrowOnSymbolStringCoercion`, unchanged.)
+
+Host (JS-host / `target: gc`) mode is untouched — both new branches are gated on
+`ctx.nativeStrings`, so the pre-existing host behaviour is unchanged.
+
+### Acceptance criteria (slice 4)
+
+- [x] `Symbol("66").toString() === "Symbol(66)"`,
+  `Symbol().toString() === "Symbol()"`, `Symbol("").toString() === "Symbol()"`.
+- [x] `String(Symbol("66")) === "Symbol(66)"`, `String(Symbol()) === "Symbol()"`.
+- [x] `Symbol("x").valueOf() === Symbol("x")`-instance (identity).
+- [x] Registry symbol toString reflects its key (`Symbol.for("k").toString()
+  === "Symbol(k)"`).
+- [x] No host-import leak — standalone modules instantiate with **zero** imports.
+- [x] Host mode `String(symbol)` / `sym.toString()` path unchanged.
+
+### Test Results (slice 4)
+
+- `tests/issue-2163-tostring-standalone.test.ts` — 10/10 (toString of
+  desc/undefined/empty, descriptive-string length + first char, distinct
+  descriptions, `String(symbol)` ×2, valueOf identity, registry-symbol toString).
+  All assert zero host imports.
+- `tests/issue-2163.test.ts` (14) + `tests/issue-2163-registry-standalone.test.ts`
+  (9) — unchanged, 33/33 across all three files.
+- Symbol regression suites (`symbol-iterator-protocol`, `issue-1732`,
+  `issue-1470*`, `bigint-string-coercion`) — no new failures. Pre-existing
+  unrelated failures verified identical on `origin/main`: `symbol-async-iterator`
+  (instantiates without a `string_constants` import) and
+  `bigint-string-coercion` (references a missing `tests/helpers.js` — collect
+  error, not on main either).
+- `pnpm run typecheck` + `pnpm run lint` + `pnpm run format:check` — all clean.
+
+### Out of scope (separately tracked, not a Symbol-semantics gap)
+
+- `Symbol.prototype.toString.call(s)` — the borrowed-method brand path errors
+  loudly in standalone (`#1888 Slice 3/4`, "this prototype's borrowed-method
+  brand arm is not yet native"), **identically on `origin/main`**. This is a
+  generic standalone `.call`-borrowing limitation affecting all prototype
+  methods, not Symbol-specific; it is tracked under #1888.
