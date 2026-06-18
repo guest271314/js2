@@ -32,6 +32,7 @@ import { ensureNativeIteratorRuntime } from "../iterator-native.js";
 import { containsLinearU8Allocation, emitLinearU8ArenaMark, linearU8ArenaResetInstrs } from "../linear-uint8-arena.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import { emitCollectionIteratorVec } from "../map-runtime.js";
+import { stringConstantExternrefInstrs } from "../native-strings.js";
 import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType } from "../registry/types.js";
 import {
@@ -1213,7 +1214,13 @@ function compileForOfDestructuring(
               if (excludedStrIdx !== undefined) {
                 fctx.body.push({ op: "local.get", index: elemLocal });
                 fctx.body.push({ op: "extern.convert_any" } as Instr);
-                fctx.body.push({ op: "global.get", index: excludedStrIdx });
+                // (#51) `addStringConstantGlobal` stores a `-1` sentinel under
+                // nativeStrings (no host string-constant global); a bare
+                // `global.get -1` crashes binary emit ("global index out of
+                // range — -1"). Materialize the excluded-keys string inline via
+                // the dual-mode helper (inline NativeString externref standalone,
+                // host `global.get` under GC).
+                for (const instr of stringConstantExternrefInstrs(ctx, excludedStr)) fctx.body.push(instr);
                 fctx.body.push({ op: "call", funcIdx: restObjIdx });
                 fctx.body.push({ op: "local.set", index: restIdx });
               }
@@ -2159,14 +2166,10 @@ function compileForOfAssignDestructuringExternref(
       // Push key — string literal for `.prop`, computed value for `[expr]`
       if (ts.isPropertyAccessExpression(targetEl)) {
         const propName = targetEl.name.text;
+        // (#51) Materialize via the dual-mode helper — nativeStrings stores a
+        // `-1` sentinel global so a bare `global.get` crashes binary emit.
         addStringConstantGlobal(ctx, propName);
-        const keyGlobalIdx = ctx.stringGlobalMap.get(propName);
-        if (keyGlobalIdx !== undefined) {
-          fctx.body.push({ op: "global.get", index: keyGlobalIdx } as Instr);
-        } else {
-          // Fallback: skip — string-pool registration should cover all literal names
-          continue;
-        }
+        for (const instr of stringConstantExternrefInstrs(ctx, propName)) fctx.body.push(instr);
       } else {
         // ElementAccessExpression
         const keyType = compileExpression(ctx, fctx, targetEl.argumentExpression, { kind: "externref" });
@@ -3471,16 +3474,16 @@ function compileForOfIteratorAssignDestructuring(
 
       // Register string constant for property name
       addStringConstantGlobal(ctx, propName);
-      const strGlobalIdx = ctx.stringGlobalMap.get(propName);
-      if (strGlobalIdx === undefined) continue;
 
       // Refresh getIdx in case addStringConstantGlobal shifted indices
       getIdx = ctx.funcMap.get("__extern_get");
       if (getIdx === undefined) continue;
 
-      // Emit: __extern_get(elem, "propName") -> externref
+      // Emit: __extern_get(elem, "propName") -> externref. (#51) Materialize the
+      // key via the dual-mode helper — nativeStrings stores a `-1` sentinel global
+      // so a bare `global.get` would crash binary emit.
       fctx.body.push({ op: "local.get", index: elemLocal });
-      fctx.body.push({ op: "global.get", index: strGlobalIdx });
+      for (const instr of stringConstantExternrefInstrs(ctx, propName)) fctx.body.push(instr);
       fctx.body.push({ op: "call", funcIdx: getIdx });
 
       // Coerce externref to target local's type and set
@@ -3559,10 +3562,9 @@ function compileForOfIteratorAssignDestructuring(
         }
         if (ts.isPropertyAccessExpression(targetElIter)) {
           const propName = targetElIter.name.text;
+          // (#51) Dual-mode key materialization (nativeStrings `-1` sentinel).
           addStringConstantGlobal(ctx, propName);
-          const keyGlobalIdx = ctx.stringGlobalMap.get(propName);
-          if (keyGlobalIdx === undefined) continue;
-          fctx.body.push({ op: "global.get", index: keyGlobalIdx } as Instr);
+          for (const instr of stringConstantExternrefInstrs(ctx, propName)) fctx.body.push(instr);
         } else {
           const keyType = compileExpression(ctx, fctx, targetElIter.argumentExpression, { kind: "externref" });
           if (keyType && keyType.kind !== "externref") {
@@ -4431,10 +4433,9 @@ function emitForInMemberTargetWrite(
   // Key
   if (ts.isPropertyAccessExpression(target)) {
     const propName = target.name.text;
+    // (#51) Dual-mode key materialization (nativeStrings `-1` sentinel global).
     addStringConstantGlobal(ctx, propName);
-    const keyGlobalIdx = ctx.stringGlobalMap.get(propName);
-    if (keyGlobalIdx === undefined) return;
-    fctx.body.push({ op: "global.get", index: keyGlobalIdx } as Instr);
+    for (const instr of stringConstantExternrefInstrs(ctx, propName)) fctx.body.push(instr);
   } else {
     const keyType = compileExpression(ctx, fctx, target.argumentExpression, {
       kind: "externref",
@@ -4523,9 +4524,13 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
     const props = exprType.getProperties();
     if (props.length === 0) return;
     for (const prop of props) {
-      const globalIdx = ctx.stringGlobalMap.get(prop.name);
-      if (globalIdx === undefined) continue;
-      fctx.body.push({ op: "global.get", index: globalIdx });
+      // (#51) Materialize each enumerated key via the dual-mode helper. Under
+      // nativeStrings `stringGlobalMap` holds a `-1` sentinel global, so the old
+      // `global.get <sentinel>` reached binary emit as "global index out of
+      // range — -1". `stringConstantExternrefInstrs` emits the NativeString
+      // inline (externref) standalone and a host `global.get` only under GC.
+      addStringConstantGlobal(ctx, prop.name);
+      for (const instr of stringConstantExternrefInstrs(ctx, prop.name)) fctx.body.push(instr);
       fctx.body.push({ op: "local.set", index: keyLocal });
       compileStatement(ctx, fctx, stmt.statement);
     }
