@@ -1,10 +1,9 @@
 ---
 id: 2190
 title: "standalone: array element indexing (arr as any)[i] returns null/0 through the externref boundary"
-status: done
+status: parked
 assignee: ttraenkler/sdev-proxy3
 created: 2026-06-18
-completed: 2026-06-18
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -143,3 +142,52 @@ externref-returning** element kinds — plain `f64` (→`__box_number`), plain `
 - The pre-existing typed `string[]` direct-index `["x","y"][0]` returning
   `undefined` (no externref roundtrip) is a separate string-array bug, NOT part
   of this fix.
+
+## PARKED 2026-06-18 — element-indexing half shelved (#2189 length half landed)
+
+The `.length` half (#2189) is **merged** and is the high-value piece (unblocks
+ownKeys/apply argsList measurement + array-return correctness). The
+element-**indexing** half (this PR, #1673, now a DRAFT) repeatedly regressed the
+**same ~120 standalone test262** (generator/async + destructuring-rest +
+TypedArray-iteration modules → `pass → compile_error`, breaching the #2097
+standalone high-water floor by ~116). Not worth more blind CI iteration; parked
+cleanly with full findings below. No value lost — the length half is the win.
+
+### Root-cause findings (three rounds, all CI-verified by shard diff)
+
+1. **NOT `boxVecElementToExternref`.** Rounds 1 (drop ref/boolean-i32 arms) and
+   2 (number-only arms, ZERO ref-returning paths) did **not** change the failure
+   set at all — the identical 120 modules regressed. So the bad arm was never the
+   element boxing.
+2. **The `(ref null N)` source = the body REBUILD, not the arms.** The fill
+   originally did `fn.body = buildExternGetIdxBody({...})` at FINALIZE, which
+   **re-baked** the `$Object` arm's `number_toString` / `__extern_get` `call`
+   funcIdxs with then-current values. A later late-import reconcile shift
+   (`addUnionImports` invariant) then **double-applied** to those re-baked
+   targets → corrupted call → invalid Wasm in every module hitting the
+   `$Object`/`number_toString` arm. The shift invariant only holds for a body
+   baked **once** at registration.
+3. **Round 3 fix (current branch HEAD)** changed the fill to **SPLICE** the vec
+   arms into the EXISTING body (after the 3-instr setup, before `$Object`/
+   `$ObjVec`) instead of rebuilding — preserving the original arms' shift-
+   maintained funcIdxs. Validated locally on the previously-failing module shapes
+   (generator-rest + `$Object` + number-vec all WebAssembly.validate). CI on this
+   round was not confirmed green before the park decision.
+   - Secondary gotcha found along the way: `ctx.vecTypeMap`'s `"externref"` key
+     is NOT uniformly `(array externref)` — `arguments`/closure-arg vecs register
+     it with a `ref`/`ref_null` element override, so an "identity" externref arm
+     read `array.get` → `(ref null N)`. The number-only arm set sidesteps this.
+
+### Safe future approach (option A — additive, zero-regression-risk)
+
+Do **not** touch the existing `__extern_get_idx` body at all. Instead emit a
+**separate** `__extern_get_idx_vec(externref, f64) -> externref` helper that the
+element-access call site (`compileElementAccessBody`, the `externref` +
+numeric-index arm in `src/codegen/property-access.ts`) calls **FIRST**; if it
+returns a sentinel "not a typed vec" it falls back to the **untouched** original
+`__extern_get_idx`. `__extern_get_idx_vec` is filled at finalize with the
+number-only typed-vec arms via the `fillExternIsArray` deferred-fill pattern.
+Because the original helper is never rebuilt, the late-import shift invariant is
+preserved and there is no possible regression to existing `$Object`/`$ObjVec`
+indexing. More code, but provably additive. The round-3 SPLICE on the current
+branch is the lower-code alternative if a green CI run confirms it.
