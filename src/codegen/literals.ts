@@ -485,11 +485,20 @@ function compileObjectLiteralWithAccessors(
         }
       } else {
         if (propName === undefined) continue;
+        // (#6408) Materialize the data-property key via the dual-mode helper.
+        // Under standalone/nativeStrings there is no host string-constant
+        // global — `addStringConstantGlobal` records the `-1` sentinel — so the
+        // old `global.get <stringGlobalMap.get(prop)>` baked `global.get -1`
+        // ("global index out of range — -1" at serialize time) for any object
+        // literal that ALSO takes the accessor path. `stringConstantExternrefInstrs`
+        // emits the native-string inline path under standalone and the host
+        // `global.get` under GC (byte-identical there). Mirrors the accessor
+        // arm's #1888 S5c fix below.
         addStringConstantGlobal(ctx, propName);
-        const keyGlobal = ctx.stringGlobalMap.get(propName);
-        if (keyGlobal === undefined) continue;
         fctx.body.push({ op: "local.get", index: objLocal });
-        fctx.body.push({ op: "global.get", index: keyGlobal });
+        for (const instr of stringConstantExternrefInstrs(ctx, propName)) {
+          fctx.body.push(instr);
+        }
       }
       // Compile value and coerce to externref.
       let valType: ValType | null;
@@ -569,11 +578,15 @@ function compileObjectLiteralWithAccessors(
         continue;
       }
       if (methodName === undefined) continue;
+      // (#6408) Same dual-mode key fix as the data-property arm above: the raw
+      // `global.get <stringGlobalMap.get(method)>` baked `global.get -1` in
+      // standalone for a method key on a literal that also takes the accessor
+      // path. Route through the guarded helper.
       addStringConstantGlobal(ctx, methodName);
-      const keyGlobal = ctx.stringGlobalMap.get(methodName);
-      if (keyGlobal === undefined) continue;
       fctx.body.push({ op: "local.get", index: objLocal });
-      fctx.body.push({ op: "global.get", index: keyGlobal });
+      for (const instr of stringConstantExternrefInstrs(ctx, methodName)) {
+        fctx.body.push(instr);
+      }
       const ok = compileArrowAsCallback(ctx, fctx, prop as unknown as ts.FunctionExpression, { needsThis: true });
       if (!ok) {
         fctx.body.push({ op: "ref.null.extern" });
