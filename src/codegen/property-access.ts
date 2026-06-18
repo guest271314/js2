@@ -1576,6 +1576,36 @@ function receiverIsCatchClauseBinding(ctx: CodegenContext, recv: ts.Expression):
 }
 
 /**
+ * (#2192 follow-up) Recognize a receiver expression that is itself a caught-Error
+ * string-field read — i.e. `<catchBinding>.message` / `.name` / `.stack`. In
+ * standalone mode the #2077/#2192 fast path lowers that read to a `$Error_struct`
+ * `struct.get` coerced to a native-string ref (`$AnyString`), so at the VALUE
+ * level the result IS a string. But the receiver's static TS type is `any` (the
+ * catch binding is `any`), so the `.length` / string-method dispatch sites —
+ * which gate on `isStringType(<static type>)` — never fire, and
+ * `e.message.length` / `e.message.charCodeAt(0)` fall through to the host
+ * `__extern_get` path (null standalone → 0). This predicate lets those consumer
+ * sites treat such a receiver as string-typed and route through the
+ * native-string path.
+ *
+ * Scope: standalone/WASI only (the fast path that produces a string ref is
+ * standalone-gated), `message`/`name`/`stack` only (the fields the read fast path
+ * handles), and only when the inner receiver is a catch binding (so a plain
+ * `obj.message` on a real object is unaffected — it keeps its own typed path).
+ * `.cause` is intentionally NOT covered: it is not a `$Error_struct` field yet
+ * (deferred follow-up).
+ */
+export function receiverIsCaughtErrorStringRead(ctx: CodegenContext, recv: ts.Expression): boolean {
+  if (!(ctx.wasi || ctx.standalone)) return false;
+  if (!ts.isPropertyAccessExpression(recv)) return false;
+  const p = recv.name.text;
+  if (p !== "message" && p !== "name" && p !== "stack") return false;
+  if (!receiverIsCatchClauseBinding(ctx, recv.expression)) return false;
+  const innerType = ctx.checker.getTypeAtLocation(recv.expression);
+  return (innerType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+}
+
+/**
  * (#2179) When the module uses `delete <member>` (JS-host mode only), route an
  * `any`/`unknown`-typed property READ through the tombstone-aware `__extern_get`
  * host helper instead of the inline `ref.test`+`struct.get` fast-path. Returns
