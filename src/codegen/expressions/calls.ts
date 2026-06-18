@@ -2938,6 +2938,43 @@ function compileCallExpression(
           closureInfo = resolveClosureInfoFromLocal(ctx, fctx, funcName);
         }
 
+        // (#2193 PR-B) `m.call(thisArg, …args)` where `m` is a `$NativeProto`
+        // member closure (e.g. `Array.prototype.slice`). Its FIRST user param is
+        // the receiver (`this`), NOT an ordinary arg — so unlike a plain
+        // standalone function (handled below, which DROPS thisArg), the thisArg
+        // must be threaded into param 1. Rewrite `m.call(t, a, b)` to the direct
+        // closure call `m(t, a, b)` so `compileClosureCall` lands t→this, a→arg1,
+        // b→arg2. `.apply(t, [a,b])` with a statically-flattenable array literal
+        // reshapes the same way. Anything dynamic falls through to the legacy
+        // drop-thisArg path (no worse than before).
+        if (
+          closureInfo &&
+          ctx.nativeProtoReceiverClosureStructTypes?.has(closureInfo.structTypeIdx) &&
+          expr.arguments.length > 0
+        ) {
+          let directArgs: readonly ts.Expression[] | undefined;
+          if (isCall) {
+            directArgs = expr.arguments; // [thisArg, ...args] → (this, ...args)
+          } else if (expr.arguments.length === 1) {
+            directArgs = [expr.arguments[0]!]; // .apply(thisArg) → (this)
+          } else {
+            const argsExpr = expr.arguments[1]!;
+            if (ts.isArrayLiteralExpression(argsExpr)) {
+              const flattened = flattenStaticArrayElements(argsExpr);
+              if (flattened !== undefined) directArgs = [expr.arguments[0]!, ...flattened];
+            }
+          }
+          if (directArgs !== undefined) {
+            const syntheticCall = ts.factory.createCallExpression(
+              innerExpr,
+              undefined,
+              directArgs as unknown as readonly ts.Expression[],
+            );
+            (syntheticCall as { parent?: ts.Node }).parent = expr.parent;
+            return compileClosureCall(ctx, fctx, syntheticCall as ts.CallExpression, funcName, closureInfo);
+          }
+        }
+
         if (closureInfo || funcIdx !== undefined) {
           // Evaluate and drop thisArg (first argument) if present
           if (expr.arguments.length > 0) {
