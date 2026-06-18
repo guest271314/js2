@@ -1037,6 +1037,23 @@ export function generateModule(
       }
     }
 
+    // (#2357/#47) Reserve the standalone TypedArray `$__subview_<elem>` struct
+    // types up-front, here — at the SAME deterministic point in every codegen
+    // pass — so the subview type index is identical across the hoist pass (which
+    // sizes a `subarray`-result binding's local via
+    // `inferLetConstInitializerWasmType`) and the body/emit pass (which emits the
+    // matching `struct.new`). On-demand subview registration lands at
+    // pass-dependent indices, de-syncing the two; eager registration *inside*
+    // `getOrRegisterVecType` instead shifts the vec resolution itself (a plain
+    // `new Uint8Array()` then resolves to the subview). Reserving the subviews
+    // here — after the vec-independent linear-u8 reservation, before any function
+    // is compiled — gives a stable, isolated slot. `getOrRegisterSubviewType`
+    // pulls in only the backing array type (deduped per elem kind), so vec
+    // registration order is untouched. Standalone/WASI only; additive.
+    if (ctx.standalone || ctx.wasi) {
+      reserveTypedArraySubviewTypes(ctx);
+    }
+
     // $AnyValue struct type is now registered lazily via ensureAnyValueType()
 
     // Note: console imports handled by unified collector (skipped in WASI mode via registerWasiImports)
@@ -6017,6 +6034,20 @@ export function reserveLinearU8AllocType(ctx: CodegenContext): void {
   if (ctx.linearU8AllocTypeIdx !== undefined) return;
   if (!ctx.wasi) return;
   ctx.linearU8AllocTypeIdx = addFuncType(ctx, [{ kind: "i32" }], [{ kind: "i32" }]);
+}
+
+/**
+ * (#2357/#47) Reserve the standalone `$__subview_<elem>` struct types up-front so
+ * their indices are deterministic across codegen passes (see the call site in
+ * `generateModule`). Covers the element kinds standalone TypedArrays use for their
+ * backing arrays: `i8_byte` (Uint8Array) and `f64` (the other typed arrays).
+ * `getOrRegisterSubviewType` only forces the backing ARRAY type (uniquely deduped
+ * per element kind) — it does NOT register or reorder the vec struct, so plain
+ * typed-array resolution is unaffected. Idempotent.
+ */
+export function reserveTypedArraySubviewTypes(ctx: CodegenContext): void {
+  getOrRegisterSubviewType(ctx, "i8_byte", { kind: "i8" });
+  getOrRegisterSubviewType(ctx, "f64", { kind: "f64" });
 }
 
 export function ensureLinearU8AllocHelper(ctx: CodegenContext): number {
