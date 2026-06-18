@@ -7746,9 +7746,12 @@ function compileTypedArraySubarray(
   }
 
   // Standalone: build a windowing $__subview sharing the parent's data array.
-  const elemKind = ctx.typeIdxToStructName.get(vecTypeIdx)?.replace(/^__vec_/, "");
-  if (elemKind === undefined) {
-    // Defensive: unknown vec shape — fall back to the copy path.
+  // The receiver may be a plain vec (`__vec_<elem>`) or — for a nested subarray —
+  // itself a `$__subview_<elem>`; recover the element kind from either name.
+  const recvStructName = ctx.typeIdxToStructName.get(vecTypeIdx);
+  const elemKind = recvStructName?.replace(/^__vec_/, "").replace(/^__subview_/, "");
+  if (elemKind === undefined || elemKind === recvStructName) {
+    // Defensive: unknown shape — fall back to the copy path.
     return compileArraySlice(ctx, fctx, propAccess, callExpr, vecTypeIdx, arrTypeIdx, elemType);
   }
   const subviewTypeIdx = getOrRegisterSubviewType(ctx, elemKind, elemType);
