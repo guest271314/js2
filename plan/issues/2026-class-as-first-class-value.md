@@ -5,7 +5,7 @@ status: in-progress
 assignee: ttraenkler/sdev-async2
 sprint: 63
 created: 2026-06-10
-updated: 2026-06-17
+updated: 2026-06-18
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -329,9 +329,44 @@ provided for extern class "K"` — confirmed. Traced the live path precisely:
   module-build, independent of dispatch). Fixing it needs suppressing that
   import registration in `collectUnknownConstructorImports` for value-bound
   class identifiers — split out to avoid PR-1 regression risk (PR-1b).
-- **PR-1b:** standalone parity — suppress the `__new_<name>` host-import
-  registration for value-bound class callees so the pure-Wasm tag dispatch is
-  the only path in `--target wasi` / standalone.
+- **PR-1b — DONE (standalone/WASI parity).** Two no-JS-host gaps, not one:
+  1. **`__new_<name>` host-import registration** (`collectUnknownConstructorImports`
+     finalize, `declarations.ts:1436`). For `new K()` on a value-bound class
+     identifier it registered `env.__new_K`, which the strict-import allowlist
+     gate (`addImport`, #1524) rejected *at registration time* — a single
+     `new K()` failed the whole standalone compile (`Host import "env.__new_K"
+     … not on the dual-mode allowlist`). Fix: in no-JS-host mode (`ctx.wasi ||
+     ctx.standalone`), after the WASI-error-name native path, **skip the host
+     import entirely** — it is never satisfiable with no host, and the pure-Wasm
+     `emitDynamicNewFallback` (PR-1) is the resolution path (it reads the
+     class-object `__tag` and tag-dispatches to `<Class>_new`; its no-match base
+     already yields a null externref in no-JS-host mode). Host (JS) mode
+     unchanged.
+  2. **`__register_class_object` registered under `--target wasi`** — the
+     deeper, latent blocker. The skip guard (`index.ts:1121`) excluded only
+     `ctx.standalone`, so **`wasi` still registered** the JS-host Proxy own-key
+     notification import. `emitLazyClassObjectGet` (`extern.ts:269`) then took
+     its CSV-notify branch and `global.get`'d the static-methods-CSV **string**
+     global, which under nativeStrings is **not a real module global** — baking
+     a `-1` global index that crashed binary emit (`global index out of range —
+     -1`) the *instant a class flowed as a value* (`use(A)`, `const v:any=A`,
+     hence `new K()`). Reproduced on **unmodified upstream/main** under
+     `--target wasi`, and did NOT under `--target standalone` (which already
+     skipped the import) — so it pre-dates #2026 and is a general
+     class-as-value bug, surfaced here because the dynamic-new ABI requires the
+     class descriptor to flow as an externref. Fix: extend the skip to **both**
+     no-JS-host targets — `!(ctx.standalone || ctx.wasi)`. The import is a
+     JS-host Proxy notification with zero effect on actual class / method /
+     static-field behavior (verified: instance methods, static methods, static
+     fields all correct in wasi+standalone after removal).
+
+  Result: `new K()` through an `any` param returns the correct instance in
+  `--target wasi`/`standalone` with **zero `env` host imports**; arg threading
+  and shape-collision tag dispatch correct; static `new C()` untouched. Tests:
+  `tests/issue-2026-standalone-dynamic-new.test.ts` (6 cases, all assert no
+  `env` imports + instantiate with `{}`). PR-1 host test
+  (`issue-2026-dynamic-new.test.ts`, 7) still green. Files: `declarations.ts`,
+  `index.ts`. Branch `issue-2026-standalone-ctor-abi`.
 - **PR-2:** `.constructor === A` for the externref/`any`-typed receiver via the
   same tag→`__class_<Name>` map (statically-typed receiver already works).
 - **PR-3:** spread/arity/derived-class args in the dynamic path (reuse

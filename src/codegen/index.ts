@@ -1113,12 +1113,23 @@ export function generateModule(
     //
     // #1472 Phase A — these two imports exist solely so the JS-host Proxy
     // wrapper can present a spec-correct own-key set for class prototypes /
-    // class objects. There is no Proxy (and no JS host) in --target standalone,
-    // so we skip registering them. `emitLazyProtoGet` / `emitLazyClassObjectGet`
-    // gate their `call` emission on the import being present in funcMap, so
-    // skipping registration cleanly drops the host notification while the
-    // struct-backed prototype/class globals still work natively.
-    if (sourceContainsClass(ast.sourceFile) && !ctx.standalone) {
+    // class objects. There is no Proxy (and no JS host) in any no-JS-host
+    // target, so we skip registering them. `emitLazyProtoGet` /
+    // `emitLazyClassObjectGet` gate their `call` emission on the import being
+    // present in funcMap, so skipping registration cleanly drops the host
+    // notification while the struct-backed prototype/class globals still work
+    // natively.
+    //
+    // (#2026 PR-1b) The guard must cover BOTH no-JS-host targets (`wasi` AND
+    // `standalone`), not just `standalone`. Under `--target wasi` the import was
+    // still registered, so `emitLazyClassObjectGet` took its
+    // `__register_class_object` CSV-notification branch and emitted a
+    // `global.get` of the static-methods-CSV string global — which under
+    // nativeStrings is not a real module global, baking a `-1` global index and
+    // crashing binary emit ("global index out of range — -1") the moment a class
+    // flowed as a value (`use(A)`, `new K()` dynamic-new). `standalone` already
+    // skipped this and worked; `wasi` now matches.
+    if (sourceContainsClass(ast.sourceFile) && !(ctx.standalone || ctx.wasi)) {
       const regProtoTypeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], []);
       addImport(ctx, "env", "__register_prototype", { kind: "func", typeIdx: regProtoTypeIdx });
       // (#1395) Same rationale for the class-object registry — must be

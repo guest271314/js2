@@ -52,6 +52,11 @@ export const CALL_REVIVER = "__call_reviver";
  * wrapper: `value.toJSON(key)`).
  */
 export const CALL_TO_JSON = "__call_to_json";
+/**
+ * (#2166 PR-D3) Reserved name for the JSON `stringify` replacer driver (arity-2
+ * method wrapper: `replacer.call(holder, key, value)`).
+ */
+export const CALL_REPLACER = "__call_replacer";
 
 /**
  * Reserve the `__call_accessor_get` driver placeholder and return its funcIdx.
@@ -196,6 +201,40 @@ export function reserveToJsonDriver(ctx: CodegenContext): number {
 }
 
 /**
+ * (#2166 PR-D3) Reserve the `__call_replacer` driver placeholder and return its
+ * funcIdx.
+ *
+ * Signature: `(externref holder, externref replacer, externref key,
+ * externref value) -> externref`. The replacer function is invoked as
+ * `replacer.call(holder, key, value)` (§25.5.2 SerializeJSONProperty step 3),
+ * so `holder` binds as `this` and `key`/`value` are the two arguments — exactly
+ * the reviver driver's shape. Filled by `fillAccessorDrivers` wrapping
+ * `__call_fn_method_2`. Idempotent.
+ */
+export function reserveReplacerDriver(ctx: CodegenContext): number {
+  const existing = ctx.funcMap.get(CALL_REPLACER);
+  if (existing !== undefined) return existing;
+  const sigIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+    "$call_replacer_type",
+  );
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  const placeholder: WasmFunction = {
+    name: CALL_REPLACER,
+    typeIdx: sigIdx,
+    locals: [],
+    body: [{ op: "unreachable" } as Instr],
+    exported: false,
+  };
+  ctx.mod.functions.push(placeholder);
+  ctx.funcMap.set(CALL_REPLACER, funcIdx);
+  ctx.replacerDriverReserved = true;
+  return funcIdx;
+}
+
+/**
  * Fill the reserved accessor driver bodies in post-processing, AFTER
  * `emitClosureMethodCallExportN(0)` / `(1)` have registered
  * `__call_fn_method_0` / `__call_fn_method_1` in `funcMap`. Each driver is a
@@ -312,6 +351,33 @@ export function fillAccessorDrivers(ctx: CodegenContext): void {
             { op: "local.get", index: 2 } as Instr, // key (arg0)
             { op: "call", funcIdx: callMethod1 } as Instr,
             // result (toJSON's return, externref) is this driver's result
+          ];
+        }
+      }
+    }
+  }
+
+  // (#2166 PR-D3) JSON replacer driver: holder bound as `this`, key+value the two
+  // replacer args. Wraps __call_fn_method_2(holder, replacer, key, value).
+  if (ctx.replacerDriverReserved) {
+    const driverIdx = ctx.funcMap.get(CALL_REPLACER);
+    if (driverIdx !== undefined) {
+      const driverFn = ctx.mod.functions[driverIdx - ctx.numImportFuncs];
+      if (driverFn) {
+        const callMethod2 = ctx.funcMap.get("__call_fn_method_2");
+        if (callMethod2 === undefined) {
+          // No arity-2 closure dispatcher ⇒ no function replacer could have been
+          // passed; the driver is unreachable from any live walk. Keep a valid
+          // identity body: return the value arg unchanged (externref result).
+          driverFn.body = [{ op: "local.get", index: 3 } as Instr];
+        } else {
+          driverFn.body = [
+            { op: "local.get", index: 0 } as Instr, // holder (bound as `this`)
+            { op: "local.get", index: 1 } as Instr, // replacer closure
+            { op: "local.get", index: 2 } as Instr, // key (arg0)
+            { op: "local.get", index: 3 } as Instr, // value (arg1)
+            { op: "call", funcIdx: callMethod2 } as Instr,
+            // result (replacer's return, externref) is this driver's result
           ];
         }
       }

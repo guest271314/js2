@@ -1227,6 +1227,19 @@ export function isHostCallbackArgument(node: ts.Node, ctx: CodegenContext): bool
       if (newFuncIdx !== undefined && newFuncIdx >= ctx.numImportFuncs) {
         return false;
       }
+      // (#28) `new Promise(executor)` — the executor must be invoked by the host
+      // `Promise_new` import (which does `new Promise(_maybeWrapCallable(executor,
+      // 2, …))`). The `__make_callback` host-callback path does NOT round-trip
+      // here: an INLINE executor (`new Promise((res, rej) => …)`) routed through
+      // it produced no callable wrapper, so the executor was silently never
+      // invoked (resolve/reject `undefined`). Compiling the executor as a
+      // first-class CLOSURE instead emits the `__call_fn_2` dispatcher that
+      // `_maybeWrapCallable` uses to make the wasm closure JS-callable — the same
+      // path the working `const exec = …; new Promise(exec)` form already takes.
+      // So treat the Promise executor as a closure value, not a host callback.
+      if (ctorName === "Promise") {
+        return false;
+      }
     }
     return true;
   }
