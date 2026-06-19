@@ -2023,6 +2023,16 @@ export function compileBinaryExpression(
     const noJsHost = ctx.standalone === true || ctx.wasi === true;
     if (noJsHost && (leftType.kind === "externref" || rightType.kind === "externref")) {
       const EQ_HEAP = -19; // WasmGC `eq` abstract heap type (signed LEB 0x6d)
+      // (#1910 R1) §7.2.13 IsLooselyEqual steps 11-12 — the Object↔primitive arm
+      // is LOOSE-only (strict `===` never coerces, §7.2.16). Register the native
+      // ToPrimitive engine BEFORE `addUnionImports` / the typeof funcIdx reads so
+      // any late imports it adds can't desync the in-progress body — this is the
+      // #1890 finalization-shift class, and doing it after the funcIdx reads
+      // corrupted the strict `===` path (#1776 isSameValue regressed). Gated on
+      // `isLoose` so the strict path is byte-identical to before.
+      const isLoose =
+        !isStrict && (op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken);
+      if (isLoose) ensureObjectRuntime(ctx);
       addUnionImports(ctx);
       const typeofNum = ctx.funcMap.get("__typeof_number")!;
       const typeofBool = ctx.funcMap.get("__typeof_boolean")!;
@@ -2042,6 +2052,43 @@ export function compileBinaryExpression(
         coerceType(ctx, fctx, leftType, { kind: "externref" });
       }
       fctx.body.push({ op: "local.set", index: lTmp });
+
+      // (#1910 R1) §7.2.13 steps 11-12 — reduce an Object operand to a primitive
+      // for LOOSE equality. We overwrite lTmp/rTmp in place with
+      // ToPrimitive(operand, default) when EXACTLY ONE side is an Object:
+      //   - both Objects → SameType(x,y) (step 1) → IsStrictlyEqual = reference
+      //     identity, NEVER ToPrimitive (so we must NOT reduce — the eqref arm at
+      //     the bottom of the cascade handles it). The XOR gate preserves this.
+      //   - neither Object → no reduction (the `if` is false), primitives flow on.
+      // `__to_primitive` is the identity on a primitive (its leading
+      // returnIfPrimitive guard returns null/number/boolean/string unchanged), so
+      // reducing BOTH operands inside the one-object branch only transforms the
+      // object side; the primitive side is untouched. The single ToPrimitive call
+      // matches the spec's single recursion: after it both operands are primitive
+      // and the recursion bottoms out in the number/string/bigint/boolean arms.
+      const toPrimIdx = ctx.funcMap.get("__to_primitive");
+      const typeofObject = ctx.funcMap.get("__typeof_object");
+      if (isLoose && toPrimIdx !== undefined && typeofObject !== undefined) {
+        const reduceOperand = (externLocal: number): Instr[] => [
+          { op: "local.get", index: externLocal },
+          { op: "ref.null.extern" } as Instr, // default hint
+          { op: "call", funcIdx: toPrimIdx } as Instr,
+          { op: "local.set", index: externLocal },
+        ];
+        fctx.body.push(
+          // lIsObj XOR rIsObj  ≡  lIsObj !== rIsObj
+          { op: "local.get", index: lTmp },
+          { op: "call", funcIdx: typeofObject } as Instr,
+          { op: "local.get", index: rTmp },
+          { op: "call", funcIdx: typeofObject } as Instr,
+          { op: "i32.ne" } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "empty" },
+            then: [...reduceOperand(lTmp), ...reduceOperand(rTmp)],
+          } as Instr,
+        );
+      }
 
       // (#2081) LOOSE null/undefined arm (§7.2.15 steps 2-3): `null == undefined`
       // (and null==null / undefined==undefined) ⇒ true; a nullish vs a
