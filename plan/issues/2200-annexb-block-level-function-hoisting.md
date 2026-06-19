@@ -565,3 +565,46 @@ genuinely-undeclared → `"undefined"`; normal fn-decl typeof → `"function"`; 
 numeric local → `"number"`. No regression across typeof-extended / typeof-comparison
 / typeof-narrowing / symbol-typeof / var-hoisting-scope / if-branch-block-scope +
 the full Phase 1 suite. `tsc --noEmit` clean.
+
+## Phase 2 PARKED — full-gate test262 regression (-1180), NOT locally reproducible (2026-06-19, sen-1)
+
+The typeof-resolution fix (above) is correct in isolation, but the **full CI
+test262-regression gate on PR #1769 flagged -1180 net pass (1411 regressions,
+231 improvements)** — a wide regression the local Phase-2/typeof/scope tests did
+NOT catch. Phase 1 (#1764, the ~93-test floor) is merged and stands alone, so the
+floor is banked regardless; Phase 2 is parked here for a focused follow-up.
+
+**Regression profile (gate bucket output, baseline e6cf3a7, signature
+`d57ce880bc38ea96`):**
+- categories: `wasm_compile: 625`, `null_deref: 593`, `type_error: 143`, other 41.
+- top buckets (each >50): `Array/prototype/{some 115, every 113, filter 109,
+  map 93, forEach 86, reduceRight 69, reduce 58}`, `language/statements/
+  {function/dstr 88, generators/dstr 88, async-generator/dstr 52}`.
+
+**Why it is genuinely Phase 2 (not drift):** PR #1767 ran its regression gate
+against the SAME fresh baseline seconds apart and was clean (+21, signature
+`f310311519813a1c`, 3 files). So the -1180 is specific to #1769's 4-file Phase 2
+delta (`context/types.ts`, `statements.ts`, `nested-declarations.ts`,
+`typeof-delete.ts` — array-methods.ts is byte-identical to main).
+
+**Why it could not be fixed quickly:** the regression does NOT reproduce in
+targeted local compiles (standalone OR host) of realistic shapes —
+`Array.prototype.some/map/forEach` + a block-nested helper, block-fn read only
+in-block, function-with-block-fn+locals all compile and run correctly locally.
+The failures live in test262's specific harness/strict-mode shapes (the gate's
+default runner config) that the local `compileToWasm` helper doesn't replicate.
+The `null_deref`/`wasm_compile` categories across hot-path Array methods point to
+the Phase 2 **TDZ-var allocation in `hoistFunctionDeclarations`**
+(`annexBBlockNestedEligible` → `allocLocal(funcName)` + `__tdz_` flag) perturbing
+local-index layout / leaving an uninitialised externref outer-binding local that a
+shared path reads — but the exact trigger needs the full test262 harness to
+reproduce, i.e. a local test262 slice run over the flagged buckets.
+
+**Recommendation (per tech-lead's pre-authorised fallback):** ship Phase-1-only
+(already merged), close/draft PR #1769, and rework Phase 2 as a follow-up that
+(a) reproduces against a LOCAL test262 slice over the flagged buckets before
+re-attempting, and (b) narrows `annexBBlockNestedEligible` / the outer-binding
+allocation so it cannot perturb functions that merely CONTAIN a block-nested
+helper (the dominant test262 harness shape). The typeof-resolution fix
+(`emitAnnexBTypeofFlagBranch` at the top of the undeclared-identifier branch) is
+correct and should be preserved for the rework.
