@@ -776,9 +776,24 @@ export function compileTaggedTemplateExpression(
   // Use savedBody pattern so compileStringLiteral pushes into a separate array
   const savedBody = pushBody(fctx);
 
+  // The strings array element type is `externref` (line above). In nativeStrings
+  // mode `compileStringLiteral` materializes a `(ref $NativeString)` struct, NOT
+  // an externref — pushing that struct straight into the externref-typed
+  // `array.new_fixed` emits an invalid module ("array.new_fixed[0] expected
+  // externref, found struct.new of (ref $NativeString)"). Bridge each native
+  // string element to externref with `extern.convert_any` so the element type
+  // matches. (Host-string mode already returns externref, so this is a no-op
+  // there.) Surfaced by `const r = tag\`a${1}b\`;` under --target standalone.
+  const pushStringElem = (text: string): void => {
+    compileStringLiteral(ctx, fctx, text, expr);
+    if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    }
+  };
+
   // First: build the raw strings array as a regular vec
   for (const raw of rawParts) {
-    compileStringLiteral(ctx, fctx, raw, expr);
+    pushStringElem(raw);
   }
   fctx.body.push({
     op: "array.new_fixed",
@@ -801,7 +816,7 @@ export function compileTaggedTemplateExpression(
 
   // Second: build the cooked strings array
   for (const str of stringParts) {
-    compileStringLiteral(ctx, fctx, str, expr);
+    pushStringElem(str);
   }
   fctx.body.push({
     op: "array.new_fixed",
