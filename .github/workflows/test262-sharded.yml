@@ -1118,7 +1118,11 @@ jobs:
 
       - name: Check baseline staleness (#1235)
         id: staleness
-        if: env.SHARDS_RAN == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.fetch_baseline.outputs.baseline_ts != '0'
+        # (#2379) Include `push` so the drift footer renders on push-to-main runs
+        # too — the baselines-repo JSONL is frequently several merges behind main
+        # HEAD there (serialization lag), and the footer is what tells a reader
+        # the listed "regressions" are drift, not real PR-caused failures.
+        if: env.SHARDS_RAN == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && steps.fetch_baseline.outputs.baseline_ts != '0'
         run: |
           # If the baselines-repo JSONL hasn't been refreshed since several
           # commits landed on main, the regression-gate's wasm_change count
@@ -1244,8 +1248,19 @@ jobs:
           node scripts/check-test262-hard-errors.mjs \
             --jsonl merged-reports/test262-results-merged.jsonl
 
+      # (#2379) Do NOT hard-fail on `push` to main. On a push-to-main run the
+      # merge already happened, so this fine-grained regression gate cannot
+      # block anything — and the baselines-repo JSONL it diffs against is
+      # routinely several merges behind main HEAD (serialization lag), so the
+      # listed "regressions" are drift, not real failures (e.g. a run showing
+      # pass 29587 → 32818, +3231 NET, was hard-failed on 695 drift "regressions"
+      # — 7+ consecutive main runs failed identically, freezing the HW/baseline
+      # reporting). Push-to-main is already protected against a genuine break by
+      # the #1668 Catastrophic guard (threshold 200) inside the required "merge
+      # shard reports" check; this fine gate stays active for `pull_request` /
+      # `merge_group`, where pre-merge gating is the point.
       - name: Fail on regressions
-        if: env.SHARDS_RAN == 'true' && steps.regression_diff.outputs.regressions == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.force_baseline_refresh == true && inputs.confirm_force == 'YES')
+        if: env.SHARDS_RAN == 'true' && steps.regression_diff.outputs.regressions == 'true' && github.event_name != 'push' && !(github.event_name == 'workflow_dispatch' && inputs.force_baseline_refresh == true && inputs.confirm_force == 'YES')
         run: |
           echo "test262 regressions detected relative to benchmarks/results/test262-current.jsonl"
           cat merged-reports/test262-regressions.txt
