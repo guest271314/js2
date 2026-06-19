@@ -6,7 +6,7 @@ assignee: ""
 needs_role: senior-developer
 created: 2026-06-19
 updated: 2026-06-19
-priority: high
+priority: low
 feasibility: hard
 reasoning_effort: max
 task_type: bugfix
@@ -15,6 +15,7 @@ language_feature: native-strings, standalone
 goal: standalone-mode
 related: [2074, 2075, 1618, 1677, 1903, 2039]
 origin: "2026-06-19 sdev-arrayrep: surfaced while validating #2503 standalone array.join — join feeds console.log; isolated to console.log(string) itself"
+blast_radius: "MEASURED 2026-06-19 (sdev-arrayrep): ~ZERO real test262 flips. The __str_to_extern bridge fires ONLY when a native string is passed to a host-externref SINK (console.log). 582 test262 standalone files across Error/String/JSON/throw/template-literal/addition/Number.toString/Object.toString/Array.join+toString → 0 __str_*-arity instantiate failures. Verified the classifier DOES fire on console.log repros. throw new Error(str), String(obj), template literals, Error.message read all instantiate OK standalone (strings stay native WasmGC, never marshalled to externref). PRIORITY LOWERED high→low — bank it; not a session-worthy slice."
 ---
 
 # #2504 — standalone `console.log(string)` → invalid Wasm (`__str_to_extern` stale funcIdx)
