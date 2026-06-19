@@ -88,6 +88,117 @@ const OBJECT_PROTO_METHODS = [
   "valueOf",
 ] as const;
 
+/**
+ * `Date.prototype`'s own method names (ES2024 §21.4.4). All the getter/setter
+ * methods are plain data methods on the proto (no accessor *getters* on
+ * `Date.prototype` itself), so the whole set goes in the value-read member CSV.
+ * `@@toPrimitive` is a well-known-symbol member resolved by the computed-access
+ * path, so it stays out of the string CSV (same convention as the others).
+ */
+const DATE_PROTO_METHODS = [
+  "getDate",
+  "getDay",
+  "getFullYear",
+  "getHours",
+  "getMilliseconds",
+  "getMinutes",
+  "getMonth",
+  "getSeconds",
+  "getTime",
+  "getTimezoneOffset",
+  "getUTCDate",
+  "getUTCDay",
+  "getUTCFullYear",
+  "getUTCHours",
+  "getUTCMilliseconds",
+  "getUTCMinutes",
+  "getUTCMonth",
+  "getUTCSeconds",
+  "setDate",
+  "setFullYear",
+  "setHours",
+  "setMilliseconds",
+  "setMinutes",
+  "setMonth",
+  "setSeconds",
+  "setTime",
+  "setUTCDate",
+  "setUTCFullYear",
+  "setUTCHours",
+  "setUTCMilliseconds",
+  "setUTCMinutes",
+  "setUTCMonth",
+  "setUTCSeconds",
+  "toDateString",
+  "toISOString",
+  "toJSON",
+  "toLocaleDateString",
+  "toLocaleString",
+  "toLocaleTimeString",
+  "toString",
+  "toTimeString",
+  "toUTCString",
+  "valueOf",
+] as const;
+
+/**
+ * `String.prototype`'s own method names (ES2024 §22.1.3). `@@iterator` is a
+ * well-known-symbol member resolved via the computed-access path, so only the
+ * string members go in the CSV (same convention as `ARRAY_PROTO_METHODS`).
+ * Annex-B (`substr`, `anchor`, `big`, …) is included so a bare
+ * `String.prototype.substr` value read resolves host-free.
+ */
+const STRING_PROTO_METHODS = [
+  "at",
+  "charAt",
+  "charCodeAt",
+  "codePointAt",
+  "concat",
+  "endsWith",
+  "includes",
+  "indexOf",
+  "isWellFormed",
+  "lastIndexOf",
+  "localeCompare",
+  "match",
+  "matchAll",
+  "normalize",
+  "padEnd",
+  "padStart",
+  "repeat",
+  "replace",
+  "replaceAll",
+  "search",
+  "slice",
+  "split",
+  "startsWith",
+  "substr",
+  "substring",
+  "toLocaleLowerCase",
+  "toLocaleUpperCase",
+  "toLowerCase",
+  "toString",
+  "toUpperCase",
+  "toWellFormed",
+  "trim",
+  "trimEnd",
+  "trimStart",
+  "valueOf",
+] as const;
+
+/** `Number.prototype`'s own method names (ES2024 §21.1.3). */
+const NUMBER_PROTO_METHODS = [
+  "toExponential",
+  "toFixed",
+  "toLocaleString",
+  "toPrecision",
+  "toString",
+  "valueOf",
+] as const;
+
+/** `Boolean.prototype`'s own method names (ES2024 §20.3.3). */
+const BOOLEAN_PROTO_METHODS = ["toString", "valueOf"] as const;
+
 /** Spec arity (`fn.length`) of the proto methods that differ from the default 1. */
 const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   concat: 1,
@@ -103,8 +214,87 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   hasOwnProperty: 1,
   isPrototypeOf: 1,
   propertyIsEnumerable: 1,
-  // entries/keys/values/reverse/pop/shift/toString/valueOf/… default to 0 or 1;
-  // the value-read object does not depend on exact arities, only the member set.
+  // String.prototype arities that differ from the default 1 (ES2024 §22.1.3).
+  at: 1,
+  charAt: 1,
+  charCodeAt: 1,
+  codePointAt: 1,
+  endsWith: 1,
+  includes: 1,
+  indexOf: 1,
+  lastIndexOf: 1,
+  localeCompare: 1,
+  match: 1,
+  matchAll: 1,
+  normalize: 0,
+  padEnd: 1,
+  padStart: 1,
+  repeat: 1,
+  replace: 2,
+  replaceAll: 2,
+  search: 1,
+  slice: 2,
+  split: 2,
+  startsWith: 1,
+  substr: 2,
+  substring: 2,
+  // Number.prototype (ES2024 §21.1.3).
+  toExponential: 1,
+  toFixed: 1,
+  toPrecision: 1,
+  // Zero-arity String/Number/Boolean/Object proto methods (ES2024) — fold
+  // `<method>.length` to 0 so the meta-read path (`tryCompileStandalone-
+  // BuiltinProtoMemberMeta`) reports the spec arity. (`charAt` arity 1 is set
+  // in the String batch above.)
+  toLowerCase: 0,
+  toUpperCase: 0,
+  toLocaleLowerCase: 0,
+  toLocaleUpperCase: 0,
+  trim: 0,
+  trimEnd: 0,
+  trimStart: 0,
+  isWellFormed: 0,
+  toWellFormed: 0,
+  // Date.prototype set* arities (ES2024 §21.4.4) that differ from the default 1.
+  setFullYear: 3,
+  setUTCFullYear: 3,
+  setMonth: 2,
+  setUTCMonth: 2,
+  setHours: 4,
+  setUTCHours: 4,
+  setMinutes: 3,
+  setUTCMinutes: 3,
+  setSeconds: 2,
+  setUTCSeconds: 2,
+  // Date getters / no-arg conversions are 0-arity (ES2024 §21.4.4); fold their
+  // `.length` to 0 so the meta-read path reports the spec arity.
+  getDate: 0,
+  getDay: 0,
+  getFullYear: 0,
+  getHours: 0,
+  getMilliseconds: 0,
+  getMinutes: 0,
+  getMonth: 0,
+  getSeconds: 0,
+  getTime: 0,
+  getTimezoneOffset: 0,
+  getUTCDate: 0,
+  getUTCDay: 0,
+  getUTCFullYear: 0,
+  getUTCHours: 0,
+  getUTCMilliseconds: 0,
+  getUTCMinutes: 0,
+  getUTCMonth: 0,
+  getUTCSeconds: 0,
+  setTime: 1,
+  toDateString: 0,
+  toISOString: 0,
+  toTimeString: 0,
+  toUTCString: 0,
+  // toJSON is 1 (the `key` param). entries/keys/values/reverse/pop/shift/
+  // toString/valueOf/… default to 0 or 1; the value-read OBJECT does not depend
+  // on exact arities, only the member set.
+  toJSON: 1,
 };
 
 /**
@@ -162,6 +352,62 @@ export function ensureObjectNativeProtoGlue(ctx: CodegenContext): number | undef
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
     registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Object", OBJECT_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/**
+ * Register `String.prototype` glue (idempotent) and return its brand. (#1907 /
+ * #1888 S6-b — S4 wrapper protos.) The String brand is pre-reserved in
+ * `BUILTIN_BRAND_TABLE`; this only fills in the member CSV so a bare
+ * `String.prototype` / `String.prototype.<method>` value read resolves host-free
+ * instead of refusing. Reflective member-CLOSURE bodies still degrade to a
+ * catchable TypeError (`emitProtoMemberBodyRefusal`) until per-member native
+ * bodies land — the value-read object itself needs only the member set.
+ */
+export function ensureStringNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "String");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "String", STRING_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `Number.prototype` glue (idempotent) and return its brand. */
+export function ensureNumberNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Number");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Number", NUMBER_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `Boolean.prototype` glue (idempotent) and return its brand. */
+export function ensureBooleanNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Boolean");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Boolean", BOOLEAN_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/**
+ * Register `Date.prototype` glue (idempotent) and return its brand. (#1907 /
+ * #1888 S6-b — S5.) The Date brand is pre-reserved in `BUILTIN_BRAND_TABLE`;
+ * this only fills in the member CSV so a bare `Date.prototype` /
+ * `Date.prototype.<method>` value read resolves host-free instead of refusing.
+ * Reflective member-CLOSURE bodies still degrade to a catchable TypeError until
+ * per-member native bodies land — the value-read OBJECT + `.length`/`.name`
+ * meta folds need only the member set.
+ */
+export function ensureDateNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Date");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Date", DATE_PROTO_METHODS));
   }
   return brand;
 }
