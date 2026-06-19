@@ -4507,6 +4507,22 @@ export function compileOptionalElementAccess(
     resultType = { kind: "externref" };
   }
 
+  // (#2051) Same nullable-primitive widening as `compileOptionalPropertyAccess`:
+  // when the whole-chain static type is a nullable primitive (`number |
+  // undefined` etc., collapsed by `resolveWasmType` to a bare f64/i32 that can't
+  // represent `undefined`), widen the result to externref so the short-circuit
+  // arm carries host `undefined` (`emitUndefined`) and the non-null arm boxes the
+  // element value (`__box_number`/`__box_boolean` via the existing coerceType).
+  // The else arm here ends in an `array.get`/`struct.get` (not a `call`), so —
+  // unlike the optional-CALL arm (#2051 call-arm, deferred) — there is no
+  // late-import index-shift hazard from pulling in the box helper after the read.
+  // Boxes into a plain externref, NOT AnyValue, so the #1888 tag-5 ABI is intact.
+  const widenToUndefinedExternref =
+    (resultType.kind === "f64" || resultType.kind === "i32") && isNullablePrimitiveType(tsResultType);
+  if (widenToUndefinedExternref) {
+    resultType = { kind: "externref" };
+  }
+
   // A non-reference base is the compiler's representation of `undefined`/`null`
   // (e.g. a `const a = null` stored as an i32 global). Such a base always
   // short-circuits: drop it and emit the default result, never touching the
@@ -4518,7 +4534,9 @@ export function compileOptionalElementAccess(
     } else if (resultType.kind === "i32") {
       fctx.body.push({ op: "i32.const", value: 0 });
     } else {
-      fctx.body.push({ op: "ref.null.extern" });
+      // (#2051) externref result (incl. the nullable-primitive widening above) →
+      // host `undefined` so `=== undefined` / `typeof` / `+` read it correctly.
+      emitUndefined(ctx, fctx);
     }
     return resultType;
   }
@@ -4537,7 +4555,13 @@ export function compileOptionalElementAccess(
   } else if (resultType.kind === "i32") {
     thenInstrs = [{ op: "i32.const", value: 0 }];
   } else {
-    thenInstrs = [{ op: "ref.null.extern" }];
+    // (#2051) externref result → host `undefined`. Build via a body-swap because
+    // `emitUndefined` pushes to `fctx.body` and may flush late imports.
+    const savedForThen = fctx.body;
+    fctx.body = [];
+    emitUndefined(ctx, fctx);
+    thenInstrs = fctx.body;
+    fctx.body = savedForThen;
   }
 
   // else branch (non-null path): push the now-known-non-null base, then run
