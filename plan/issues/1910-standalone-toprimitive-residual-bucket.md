@@ -370,6 +370,6 @@ issue**. Sample files are core operator/destructuring paths, not edge cases:
 `…/arrow-function/dstr/ary-ptrn-elem-ary-empty-init.js`. This is a genuine
 standalone ToPrimitive coverage gap on `==` / `+` / array-literal /
 destructuring receivers (a runtime throw the wasm produced — not classifier
-over-match). Successor child **#2371** filed (goal `standalone-mode`, parent
+over-match). Successor child **#2503** filed (goal `standalone-mode`, parent
 #1781) to own the 2,835-record residual; this issue stays `done`. Default lane
 is healthy here (only 48 records).

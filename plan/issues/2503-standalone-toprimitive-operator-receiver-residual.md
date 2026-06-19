@@ -1,5 +1,5 @@
 ---
-id: 2371
+id: 2503
 title: "standalone ToPrimitive residual (successor to #1910): 2,835 `Cannot convert object to primitive value` on ==/+/array-literal/destructuring receivers"
 status: ready
 sprint: Backlog
@@ -19,7 +19,7 @@ test262_count: 2835
 origin: "2026-06-19 /harvest-errors on run e9579720 (2026-06-18): the standalone `Cannot convert object to primitive value` bucket grew 784 (#1910) / 1,292 (2026-06-10 gap review) -> 2,835, and is now the single largest standalone runtime-failure bucket. Every historical owner (#1090, #1253, #1319, #1525, #1525b, #1716, #1806, #1910) is `done`, so the residual is currently untracked by any open issue."
 ---
 
-# #2371 — Standalone ToPrimitive residual on operator / destructuring receivers
+# #2503 — Standalone ToPrimitive residual on operator / destructuring receivers
 
 ## Problem
 
