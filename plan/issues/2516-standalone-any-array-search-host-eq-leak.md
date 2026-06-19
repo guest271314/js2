@@ -1,5 +1,5 @@
 ---
-id: 2508
+id: 2516
 title: "standalone: any[].indexOf/includes/lastIndexOf leak env.__host_eq/__same_value_zero (no native impl)"
 status: in-progress
 assignee: ttraenkler/sdev-arrayrep
@@ -15,7 +15,7 @@ related: [1776, 1917, 2505, 2506, 2507, 54]
 origin: "2026-06-19 sdev-arrayrep: array-rep scan tail — TaskList #72"
 ---
 
-# #2508 — standalone `any[]` search methods leak `__host_eq`/`__same_value_zero`
+# #2516 — standalone `any[]` search methods leak `__host_eq`/`__same_value_zero`
 
 ## Problem (file-verified, current main, `--target standalone`)
 
@@ -62,7 +62,7 @@ only in the NaN-self arm and ±0 handling.
 ## Acceptance criteria
 
 1. `any[].indexOf(x)` / `lastIndexOf(x)` / `includes(x)` instantiate standalone
-   with NO leaked `env.__host_eq`/`__same_value_zero` import.
+   with NO leaked `env.__host_eq`/`env.__same_value_zero` import.
 2. Correct results: indexOf finds by Strict Equality (NaN not found; `[false].indexOf(0)`
    → -1 cross-type); includes finds by SameValueZero (`[NaN].includes(NaN)` → true).
 3. No regression: number[]/string[] search unchanged; the `===` operator path
@@ -91,7 +91,7 @@ loose-equality + issue-2073 green; the #1776 leak assertion was tightened from a
 …)` is now legitimate). coercion-sites baseline refreshed (+2 index.ts, +1
 late-imports.ts). wasm-opt `-O3` (native-messaging-smoke) passes.
 
-**String-element search-by-VALUE — deferred follow-up (string arm of #2508).**
+**String-element search-by-VALUE — deferred follow-up (string arm of #2516).**
 A boxed-any STRING element compares by content (`__str_flatten`+`__str_equals`).
 Those helpers live in the native-string regime BELOW the union-helper base; a
 call to them baked into the `__host_eq`/`__same_value_zero` union-helper body
@@ -103,7 +103,7 @@ native-messaging-smoke CI failure on the first PR push). The string arm therefor
 falls back to `eq`-heap **ref identity** here (valid Wasm; correct for interned/
 same-ref strings). String-by-value belongs in a `__any_str_value_eq` helper
 registered in the native-string regime, not the union-helper body — tracked as
-the #2508 string-value follow-up.
+the #2516 string-value follow-up.
 
 **Out of scope (separate helper family, follow-up):** `any[].flat`/`flatMap`
 leak `__array_flat`/`__array_flatMap`/`__make_callback` — need native flat/
