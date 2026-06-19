@@ -286,7 +286,12 @@ export function ensureExternStrictEqHelper(ctx: CodegenContext): number | undefi
   const strictEqIdx = ctx.funcMap.get("__any_strict_eq");
   if (fromExternIdx === undefined || strictEqIdx === undefined) return undefined;
 
-  const typeIdx = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }], "__extern_strict_eq");
+  const typeIdx = addFuncType(
+    ctx,
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "i32" }],
+    "__extern_strict_eq",
+  );
   const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
   const body: Instr[] = [
     { op: "local.get", index: 0 },
