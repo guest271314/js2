@@ -1,11 +1,12 @@
 ---
 id: 2500
 title: "Wasm-native decodeURI / encodeURI / decodeURIComponent / encodeURIComponent (percent-encoding, ~133 test262)"
-status: in-progress
+status: done
 assignee: ttraenkler/sd5
 sprint: 64
 created: 2026-06-19
 updated: 2026-06-19
+completed: 2026-06-19
 priority: medium
 feasibility: medium
 reasoning_effort: high
