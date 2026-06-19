@@ -182,3 +182,49 @@ Array `.concat` is unaffected.
 case stays `it.fails`-pinned, tracked under #1784 / #1788 (boolean i32
 struct-field representation), which is a cross-cutting WasmGC representation
 matter rather than the #1461 generic-receiver algorithm.
+
+## STANDALONE residual (2026-06-19, sdev-ctorval re-ground for task #54)
+
+The 2026-06-03 resolution closed the **host-mode** gap. The **standalone**
+(`--target standalone`/`wasi`) lane still refuses 6 array-like `.call(...)`
+methods loudly:
+
+```
+Codegen error: Array.prototype.<m>.call(...) over an array-like (non-array)
+receiver is not yet supported in --target standalone (#2036 S6)
+```
+
+`STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS` (array-methods.ts:503) =
+`{indexOf, lastIndexOf, includes, map, reduce, reduceRight}`. `forEach`/`some`/
+`every`/`find`/`findIndex`/`filter` already have native `$Object`/`$ObjVec`
+arms and work.
+
+**Measured impact (2026-06-19):** 269 refuse-CE / 500 sampled files across the 6
+refused methods' test262 dirs (`built-ins/Array/prototype/{reduce,reduceRight,
+map,indexOf,lastIndexOf,includes}`). Real, large lever.
+
+### Per-method empirical status (refusal removed, compiled `--target standalone`)
+- **reduce.call(o, cb, init)** — VALID + correct, host-import-free (boxes via
+  native `__box_number`). ✅ Ready to un-refuse.
+- **reduceRight.call(o, cb, init)** — VALID + correct. ✅
+- **reduce.call(o, cb)** *(no initial value)* — **INVALID Wasm**:
+  `if[0] expected type i32, found call of type externref`. The §23.1.3.21
+  forward hole-scan (find first present index; array-methods.ts ~1144-1206)
+  emits an `if` whose condition gets an externref instead of i32. **This is the
+  one real binary-emitter bug** blocking reduce/reduceRight. Fix it, then
+  un-refuse both (the dominant ~520-test sub-slice in the distribution above).
+- **map.call** — still uses `__js_array_new`/`__extern_set` host imports +
+  index-addressed sparse set; needs a native indexed `$ObjVec`/`$Array` result
+  arm (filter's push-compaction doesn't fit map's sparse semantics). Defer.
+- **indexOf/lastIndexOf/includes.call** — search arm leaks `__host_eq`/
+  `__same_value_zero`; needs a native StrictEqualityComparison / SameValueZero
+  arm over the boxed elements. Separate sub-slice (#72-adjacent).
+
+### Recommended PR sequencing
+1. **PR-A (biggest lever):** fix the reduce-no-init scan invalid-Wasm, then drop
+   `reduce`+`reduceRight` from the refusal set. ~520-test sub-slice.
+2. **PR-B:** native search arm for indexOf/lastIndexOf/includes (native eq).
+3. **PR-C:** native indexed result arm for map (sparse-hole aware).
+
+Owner: sdev-ctorval. Status stays `done` for the host-mode #1461; this standalone
+residual is the #54 follow-on (tracked on the task, not re-opening #1461).
