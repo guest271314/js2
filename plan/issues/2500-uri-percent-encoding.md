@@ -114,28 +114,34 @@ in `any-helpers.ts`), registered once and called from the four call sites:
 
 ## Progress
 
-**S1 + S2 DONE (sd5, 2026-06-19, PR pending).** `encodeURIComponent` and
-`encodeURI` are implemented together — they share the single native helper
-`__uri_encode(s, preservedMask)` and differ only by the mask
-(`encodeURIComponent = 0b01`, `encodeURI = 0b11`). New module
-`src/codegen/uri-encoding-native.ts`; wired at the declarations URI finalize
-(`src/codegen/declarations.ts`) under `ctx.wasi || ctx.standalone`, and routed
-at the call site (`src/codegen/expressions/calls.ts`) with the per-function
-mask. Host mode is unchanged (still `env.*` imports). `decodeURI{,Component}`
-still fall through to the host import in standalone — that is **S3/S4** (next
-slice).
+**ALL SLICES DONE (sd5, 2026-06-19).** S1+S2 (encode) and S3+S4 (decode) ship
+together in the `issue-2500-uri-percent-encoding` branch / PR #1743:
 
-**S3/S4 REMAINING:** native `__uri_decode(s, reservedMask)` — `%XX` → UTF-8 →
-code-point reassembly with surrogate re-encode, the decodeURI reserved-set
-re-escape, and URIError on malformed input (`%` not followed by 2 hex digits /
-bad continuation / overlong / out-of-range / decoded lone surrogate).
+- **S1+S2 — `__uri_encode(s, preservedMask)`** (§19.2.6.5 Encode):
+  `encodeURIComponent` and `encodeURI` share one helper, differing only by the
+  mask (`encodeURIComponent = 0b01`, `encodeURI = 0b11`).
+- **S3+S4 — `__uri_decode(s, reservedMask)`** (§19.2.6.4 Decode): `decodeURI`
+  and `decodeURIComponent` share one helper, differing only by the reserved mask
+  (`decodeURI = 0b1` keeps the `reservedURISet` escaped; `decodeURIComponent =
+  0b0` unescapes everything). `%XX` → UTF-8 leading-byte length → continuation
+  `%XX` octets → code-point reassembly → UTF-16 re-encode (surrogate pair for
+  astral); the decodeURI reserved char re-emits its ORIGINAL source escape
+  verbatim; URIError on every malformed class.
+
+All in `src/codegen/uri-encoding-native.ts`; wired at the declarations URI
+finalize (`src/codegen/declarations.ts`) under `ctx.wasi || ctx.standalone`,
+routed at the call site (`src/codegen/expressions/calls.ts`) with the
+per-function mask. Host mode is unchanged (all four still `env.*` imports).
 
 ## Test Results
 
-`tests/issue-2500-uri-encoding.test.ts` — both tests green. Standalone module
-compiled with `target: "wasi"`, instantiated with an **empty import object**
-(proving no host); exports return numbers (`.length`/`.charCodeAt`) so results
-read back without a string-marshaling host. Verified:
+`tests/issue-2500-uri-encoding.test.ts` — both tests green (37 encode+decode
+cases). Standalone module compiled with `target: "wasi"`, instantiated with an
+**empty import object** (proving no host); exports return numbers
+(`.length`/`.charCodeAt`) so results read back without a string-marshaling host.
+Verified:
+
+**Encode:**
 
 - ASCII passthrough + percent-encoding (`encodeURIComponent("a b&c")` →
   `a%20b%26c`), all `uriUnescaped` marks + alphanumerics preserved, reserved
@@ -143,7 +149,19 @@ read back without a string-marshaling host. Verified:
 - Multi-byte UTF-8: 2-byte (`©` → `%C2%A9`), 3-byte (`€` → `%E2%82%AC`), 4-byte
   astral (`😀` D83D DE00 → `%F0%9F%98%80`).
 - URIError on unpaired surrogates (lone high, lone low, high-then-ASCII).
-- Empty string, encodeURI space-escape, host-mode env-import regression.
+
+**Decode:**
+
+- `%XX` unescaping, verbatim non-`%` passthrough, lowercase-hex digits.
+- Multi-byte reassembly: 2/3/4-byte → correct code point / surrogate pair.
+- decodeURI keeps `reservedURISet` escaped (re-emits the original chars, so
+  lowercase `%2f` stays `%2f`); decodeURIComponent unescapes the same.
+- Round-trip `decodeURIComponent(encodeURIComponent(x)) === x` (incl. astral).
+- URIError on all malformed classes: `%`/`%A`/`%GG` (truncated/non-hex), bad
+  continuation (`%E2%28`), missing continuation (`%E2%82`), overlong (`%C0%80`),
+  out-of-range leader (`%F5…`), surrogate encoding (`%ED%A0%80`).
+
+Verified char-by-char against host JS `decodeURI`/`decodeURIComponent`.
 
 ## Source
 

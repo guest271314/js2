@@ -85,9 +85,91 @@ const CASES: ReadonlyArray<Case> = [
   { name: "empty", src: `return encodeURIComponent("").length;`, want: 0 },
 ];
 
-const MODULE_SRC = CASES.map((c) => `export function ${c.name}(): number { ${c.src} }`).join("\n");
+// S3/S4 — decodeURI / decodeURIComponent (ECMAScript §19.2.6.4 Decode).
+const DECODE_CASES: ReadonlyArray<Case> = [
+  // ── decodeURIComponent: %XX unescaping ──
+  // "a%20b%26c" -> "a b&c" (length 5)
+  { name: "dcLen", src: `return decodeURIComponent("a%20b%26c").length;`, want: 5 },
+  { name: "dcC1", src: `return decodeURIComponent("a%20b%26c").charCodeAt(1);`, want: 32 /* ' ' */ },
+  { name: "dcC3", src: `return decodeURIComponent("a%20b%26c").charCodeAt(3);`, want: 38 /* '&' */ },
+  // verbatim passthrough of non-% chars
+  { name: "dcNoPct", src: `return decodeURIComponent("hello").length;`, want: 5 },
+  { name: "dcEmpty", src: `return decodeURIComponent("").length;`, want: 0 },
+  // lowercase hex digits decode too
+  { name: "dcLowerHex", src: `return decodeURIComponent("%2f").charCodeAt(0);`, want: 47 /* '/' */ },
 
-describe("#2500 Wasm-native encodeURI / encodeURIComponent (standalone)", () => {
+  // ── multi-byte UTF-8 reassembly ──
+  // %C2%A9 -> U+00A9 © (1 code unit)
+  { name: "dcTwoByte", src: `return decodeURIComponent("%C2%A9").charCodeAt(0);`, want: 0xa9 },
+  // %E2%82%AC -> U+20AC € (1 code unit)
+  { name: "dcThreeByte", src: `return decodeURIComponent("%E2%82%AC").charCodeAt(0);`, want: 0x20ac },
+  { name: "dcThreeByteLen", src: `return decodeURIComponent("%E2%82%AC").length;`, want: 1 },
+  // %F0%9F%98%80 -> U+1F600 😀 (surrogate pair, 2 code units)
+  { name: "dcFourByteLen", src: `return decodeURIComponent("%F0%9F%98%80").length;`, want: 2 },
+  { name: "dcFourByteHi", src: `return decodeURIComponent("%F0%9F%98%80").charCodeAt(0);`, want: 0xd83d },
+  { name: "dcFourByteLo", src: `return decodeURIComponent("%F0%9F%98%80").charCodeAt(1);`, want: 0xde00 },
+
+  // ── decodeURI keeps the reservedURISet escaped (re-emits original chars) ──
+  // "a%20b%2Fc" -> "a b%2Fc" (length 7; '/' stays escaped)
+  { name: "duReservedLen", src: `return decodeURI("a%20b%2Fc").length;`, want: 7 },
+  { name: "duReservedPct", src: `return decodeURI("a%20b%2Fc").charCodeAt(3);`, want: 37 /* '%' */ },
+  // decodeURI re-emits the ORIGINAL source chars — lowercase %2f stays %2f
+  { name: "duReservedLowerKept", src: `return decodeURI("a%20b%2fc").charCodeAt(5);`, want: 102 /* 'f' */ },
+  // decodeURIComponent (empty reserved set) unescapes the same '/' -> "a b/c" (5)
+  { name: "dcReservedLen", src: `return decodeURIComponent("a%20b%2Fc").length;`, want: 5 },
+  { name: "dcReservedSlash", src: `return decodeURIComponent("a%20b%2Fc").charCodeAt(3);`, want: 47 /* '/' */ },
+
+  // ── round-trip: decode(encode(x)) ──
+  { name: "rtAstralHi", src: `return decodeURIComponent(encodeURIComponent("😀")).charCodeAt(0);`, want: 0xd83d },
+
+  // ── URIError on the malformed classes ──
+  {
+    name: "dcPctEnd",
+    src: `try { decodeURIComponent("%"); return 0; } catch (e) { return (e instanceof URIError) ? 1 : 2; }`,
+    want: 1,
+  },
+  {
+    name: "dcPctOneHex",
+    src: `try { decodeURIComponent("%A"); return 0; } catch (e) { return (e instanceof URIError) ? 1 : 2; }`,
+    want: 1,
+  },
+  {
+    name: "dcNonHex",
+    src: `try { decodeURIComponent("%GG"); return 0; } catch (e) { return (e instanceof URIError) ? 1 : 2; }`,
+    want: 1,
+  },
+  {
+    name: "dcBadCont",
+    src: `try { decodeURIComponent("%E2%28"); return 0; } catch (e) { return (e instanceof URIError) ? 1 : 2; }`,
+    want: 1,
+  },
+  {
+    name: "dcMissingCont",
+    src: `try { decodeURIComponent("%E2%82"); return 0; } catch (e) { return (e instanceof URIError) ? 1 : 2; }`,
+    want: 1,
+  },
+  {
+    name: "dcOverlong",
+    src: `try { decodeURIComponent("%C0%80"); return 0; } catch (e) { return (e instanceof URIError) ? 1 : 2; }`,
+    want: 1,
+  },
+  {
+    name: "dcOutOfRange",
+    src: `try { decodeURIComponent("%F5%80%80%80"); return 0; } catch (e) { return (e instanceof URIError) ? 1 : 2; }`,
+    want: 1,
+  },
+  {
+    name: "dcSurrogate",
+    src: `try { decodeURIComponent("%ED%A0%80"); return 0; } catch (e) { return (e instanceof URIError) ? 1 : 2; }`,
+    want: 1,
+  },
+];
+
+const MODULE_SRC = [...CASES, ...DECODE_CASES]
+  .map((c) => `export function ${c.name}(): number { ${c.src} }`)
+  .join("\n");
+
+describe("#2500 Wasm-native encodeURI/encodeURIComponent + decodeURI/decodeURIComponent (standalone)", () => {
   it("compiles standalone with no host imports and matches the spec", async () => {
     const result = await compile(MODULE_SRC, { fileName: "uri.ts", target: "wasi" });
     expect(result.success).toBe(true);
@@ -100,17 +182,20 @@ describe("#2500 Wasm-native encodeURI / encodeURIComponent (standalone)", () => 
     // EMPTY import object — proves the module is fully self-contained.
     const { instance } = await WebAssembly.instantiate(result.binary, {});
     const exports = instance.exports as Record<string, () => number>;
-    for (const c of CASES) {
+    for (const c of [...CASES, ...DECODE_CASES]) {
       expect(exports[c.name](), `${c.name}: ${c.src}`).toBe(c.want);
     }
   });
 
-  it("host mode still routes encodeURIComponent through the env import", async () => {
-    const result = await compile(`export function test(): string { return encodeURIComponent("a b&c"); }`, {
-      fileName: "uri.ts",
-    });
+  it("host mode still routes the URI globals through the env imports", async () => {
+    const result = await compile(
+      `export function enc(): string { return encodeURIComponent("a b&c"); }
+       export function dec(): string { return decodeURIComponent("a%20b"); }`,
+      { fileName: "uri.ts" },
+    );
     expect(result.success).toBe(true);
     const importNames = WebAssembly.Module.imports(new WebAssembly.Module(result.binary)).map((i) => i.name);
     expect(importNames).toContain("encodeURIComponent");
+    expect(importNames).toContain("decodeURIComponent");
   });
 });

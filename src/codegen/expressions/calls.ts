@@ -165,7 +165,7 @@ import {
   stringConstantExternrefInstrs,
 } from "../native-strings.js";
 import { emitVariadicStringConcat, hostStringRepr, nativeStringRepr } from "../builtin-scaffold.js";
-import { URI_ENCODE_MASK } from "../uri-encoding-native.js";
+import { URI_DECODE_MASK, URI_ENCODE_MASK } from "../uri-encoding-native.js";
 import { emitArrayBufferSlice, emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
 import {
   getLinearU8Buffer,
@@ -8892,9 +8892,10 @@ function compileCallExpression(
 
     // decodeURI, decodeURIComponent, encodeURI, encodeURIComponent.
     // Host mode: per-name `env.*` import. Standalone/wasi (#2500): the encode
-    // names route to the pure-Wasm `__uri_encode(s, preservedMask)` helper
-    // emitted in declarations.ts, passing the per-function preserved-set mask
-    // (encodeURIComponent = uriUnescaped; encodeURI = + uriReserved ∪ #).
+    // names route to `__uri_encode(s, preservedMask)` and the decode names to
+    // `__uri_decode(s, reservedMask)` (both emitted in declarations.ts), passing
+    // the per-function mask (encode: uriUnescaped vs + uriReserved ∪ #; decode:
+    // reservedURISet kept-escaped for decodeURI, empty for decodeURIComponent).
     if (
       (funcName === "decodeURI" ||
         funcName === "decodeURIComponent" ||
@@ -8902,15 +8903,16 @@ function compileCallExpression(
         funcName === "encodeURIComponent") &&
       expr.arguments.length >= 1
     ) {
-      const nativeEncodeIdx =
-        funcName === "encodeURI" || funcName === "encodeURIComponent" ? ctx.funcMap.get("__uri_encode") : undefined;
-      if (nativeEncodeIdx !== undefined) {
+      const isEncode = funcName === "encodeURI" || funcName === "encodeURIComponent";
+      const nativeHelperIdx = isEncode ? ctx.funcMap.get("__uri_encode") : ctx.funcMap.get("__uri_decode");
+      if (nativeHelperIdx !== undefined) {
+        const mask = isEncode ? URI_ENCODE_MASK[funcName]! : URI_DECODE_MASK[funcName]!;
         const arg0Type = compileExpression(ctx, fctx, expr.arguments[0]!);
         if (arg0Type && arg0Type.kind !== "externref") {
           coerceType(ctx, fctx, arg0Type, { kind: "externref" });
         }
-        fctx.body.push({ op: "i32.const", value: URI_ENCODE_MASK[funcName]! });
-        fctx.body.push({ op: "call", funcIdx: nativeEncodeIdx });
+        fctx.body.push({ op: "i32.const", value: mask });
+        fctx.body.push({ op: "call", funcIdx: nativeHelperIdx });
         return { kind: "externref" };
       }
       const importFuncIdx = ctx.funcMap.get(funcName);
