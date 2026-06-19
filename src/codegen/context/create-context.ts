@@ -197,6 +197,7 @@ export function createCodegenContext(
     anonStructHash: new Map(),
     shapeIdByStructName: new Map(),
     shapeNameCsvById: [],
+    structInsertionOrder: new Map(),
     funcTypeCache: new Map(),
     pendingLateImportShift: null,
     protoGlobals: new Map(),
