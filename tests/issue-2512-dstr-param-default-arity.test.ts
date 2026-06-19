@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #2508 — nested destructuring-param default object emitted a `struct.new` one
+ * #2512 — nested destructuring-param default object emitted a `struct.new` one
  * operand short of the field-unified struct type → invalid Wasm
  * ("not enough arguments on the stack for struct.new (need 3, got 2)").
  *
@@ -14,7 +14,7 @@
  *
  * These cases assert the module COMPILES TO VALID WASM (the invalid-Wasm CE is
  * the 24-test bucket this fixes). The destructured VALUE correctness when the
- * outer default object fires is a separate, deeper bug tracked as #2509 — so
+ * outer default object fires is a separate, deeper bug tracked as #2513 — so
  * these tests deliberately assert validity, not values.
  */
 import { describe, expect, it } from "vitest";
@@ -26,7 +26,7 @@ async function compilesValid(src: string): Promise<boolean> {
   return WebAssembly.validate(r.binary);
 }
 
-describe("#2508 — nested dstr-param default object struct.new arity", () => {
+describe("#2512 — nested dstr-param default object struct.new arity", () => {
   it("class method: nested object-pattern default with partial outer default object", async () => {
     expect(
       await compilesValid(`

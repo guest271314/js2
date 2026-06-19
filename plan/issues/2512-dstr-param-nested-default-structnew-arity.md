@@ -1,5 +1,5 @@
 ---
-id: 2508
+id: 2512
 title: "nested destructuring-param default object emits struct.new one operand short of the field-unified type — invalid Wasm (24 test262)"
 status: done
 assignee: ttraenkler/sen-1
@@ -12,17 +12,17 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring
 goal: core-semantics
-related: [2158, 2009, 1224, 1451, 1543, 2509]
+related: [2158, 2009, 1224, 1451, 1543, 2513]
 test262_bucket: dstr-param-default-shape
 test262_count: 24
 origin: "2026-06-19 jsonl scout (sd5, originally filed as #2503 which collided with the ToPrimitive issue); re-filed under a free id by sen-1."
 ---
 
-# #2508 — destructuring-param nested-default object: short struct.new (invalid Wasm)
+# #2512 — destructuring-param nested-default object: short struct.new (invalid Wasm)
 
 > Re-filed from the colliding `#2503` (that number is already
 > `2503-standalone-toprimitive-operator-receiver-residual.md` on main). This is
-> the invalid-Wasm/arity half. The destructured-VALUE-FLOW half is #2509.
+> the invalid-Wasm/arity half. The destructured-VALUE-FLOW half is #2513.
 
 ## Problem
 
@@ -77,7 +77,7 @@ contained change in `src/codegen/expressions/late-imports.ts`.
 - No regression in existing destructuring-param-default / class-method suites.
 
 Note: these tests flip `compile_error` → **fail** (assertion), NOT → pass — the
-destructured-VALUE-FLOW is a separate pre-existing bug, tracked as **#2509**.
+destructured-VALUE-FLOW is a separate pre-existing bug, tracked as **#2513**.
 This issue closes the invalid-Wasm CE half (a real robustness + bucket-clearing
 improvement; net-0 in the pass-gate).
 
@@ -86,4 +86,4 @@ improvement; net-0 in the pass-gate).
 Implemented the `ctx.liveBodies` traversal. Verified: the repro + static/gen
 variants compile to valid Wasm; no regression in
 `basic-destructuring`/`destructuring-extended`/`destructuring-initializer` +
-`issue-2158` suites; `tsc --noEmit` clean. Value-flow carved to #2509.
+`issue-2158` suites; `tsc --noEmit` clean. Value-flow carved to #2513.
