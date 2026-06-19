@@ -373,6 +373,18 @@ export interface FunctionContext {
   /** Map from let/const local variable name → local index of its i32 TDZ flag (0 = uninitialized) */
   tdzFlagLocals?: Map<string, number>;
   /**
+   * (#2200 Annex B B.3.3 Phase 1) Block-nested `function F` declarations whose
+   * web-compat outer var-binding is *cancelled* by an intervening lexical
+   * (`let`/`const`/class) shadow or a same-named parameter. Maps the function
+   * name → the source-position range(s) of the block(s) that declare it. A read
+   * of `F` OUTSIDE every such block must NOT resolve to the block-local function
+   * (it has no outer binding) and instead throws ReferenceError; a read INSIDE
+   * the declaring block still resolves normally. Normally empty — the read-site
+   * guard in `compileIdentifier` is gated on `.has(name)`, so non-Annex-B
+   * modules stay byte-identical.
+   */
+  annexBCancelled?: Map<string, Array<{ start: number; end: number }>>;
+  /**
    * For TDZ flag locals that have been boxed in an i32 ref cell so that
    * mutations propagate to closures that captured the flag (#1177).
    *
@@ -800,6 +812,14 @@ export interface CodegenContext {
    */
   closedMethodDispatchNames?: Set<string>;
   /**
+   * (#2151 Slice 4) Method names that need a VARARG closed-struct dispatcher
+   * `__call_m_<name>_vararg(recv, args)` for a DYNAMIC-spread call `o.m(...xs)`
+   * whose arity is unknown at compile time. Filled at FINALIZE by
+   * `fillClosedMethodDispatch` (the vararg pass), sourcing each declared param
+   * from `__extern_get_idx(args, i)` instead of fixed dispatcher params.
+   */
+  closedMethodDispatchVarargNames?: Set<string>;
+  /**
    * (#1904) True once the standalone `__extern_is_array(externref) -> i32`
    * helper placeholder has been emitted by the object runtime. Its body is
    * filled in post-processing after all Wasm array carrier types (`__vec_*`
@@ -1148,6 +1168,18 @@ export interface CodegenContext {
   /** Widened empty-object fields introduced by Object.defineProperty rather than assignment. */
   widenedDefinePropertyKeys: Set<string>;
   /**
+   * (#2372) Standalone-only: receiver var names that are the target of at least
+   * one `Object.defineProperty(var, key, desc)` where `desc` is a *dynamic*
+   * (non-inline-literal) descriptor. Such defines are applied via the native
+   * `__obj_define_from_desc` `$Object` runtime, which the struct-widening read
+   * path (`struct.get`) cannot observe. Membership here suppresses
+   * struct-widening for the receiver so it stays on the `$Object` representation
+   * and both the dynamic write and the read-back route through the native
+   * runtime consistently. Empty in host/gc/wasi mode (only populated under
+   * `ctx.standalone`).
+   */
+  dynamicDescriptorWidenVars: Set<string>;
+  /**
    * (#1239) Variable names whose initializer is an object literal carrying
    * `get`/`set` accessors. Such variables are stored as plain JS host
    * objects (via `__new_plain_object` + `__defineProperty_accessor`) and
@@ -1283,6 +1315,22 @@ export interface CodegenContext {
   shapeIdByStructName: Map<string, number>;
   /** (#2009) shape-id → ordered field-name CSV, for the host name export. */
   shapeNameCsvById: string[];
+  /**
+   * (#2009 R3b) anon object-literal struct name → its field names in JS
+   * INSERTION order (the order keys were first introduced while evaluating the
+   * literal source: named props left-to-right, spreads contributing each
+   * source's own keys in order, FIRST occurrence wins). The struct's slot order
+   * comes from `ts.Type.getProperties()`, which for spread-result types is
+   * last-spread-first and does NOT match JS enumeration order. Host enumeration
+   * (`Object.keys`/`JSON.stringify`/`for-in`) is driven by the field-name CSV in
+   * `__struct_field_names`, read BY NAME (slot-independent), so reordering the
+   * CSV by this list restores spec enumeration order without touching slots,
+   * getters, dedup, or the `$shape` field. First literal of a deduped canonical
+   * type wins (deterministic by compile order). Empty when a struct's checker
+   * order already matches insertion order (plain literals), so the reorder is a
+   * no-op for the common case.
+   */
+  structInsertionOrder: Map<string, string[]>;
   /** Pending late import shift state */
   pendingLateImportShift: { importsBefore: number } | null;
   /** Map from class name → global index of the prototype externref singleton */

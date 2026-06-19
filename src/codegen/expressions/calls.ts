@@ -23,7 +23,7 @@ import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } f
 import { emitCollectionIteratorVec } from "../map-runtime.js"; // (#42) native Set/Map → vec, shared with spread / Array.from
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain
-import { reserveClosedMethodDispatch } from "../closed-method-dispatch.js";
+import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
 import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
 import {
@@ -127,6 +127,7 @@ import { tryStaticEvalInline } from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
 import {
   compileStandaloneRegExpConstructor,
+  emitStandaloneRegExpToStringFromExpr,
   isGlobalRegExpIdentifier,
   tryCompileStandaloneRegExpExec,
   tryCompileStandaloneRegExpSymbolCall,
@@ -165,6 +166,7 @@ import {
   stringConstantExternrefInstrs,
 } from "../native-strings.js";
 import { emitVariadicStringConcat, hostStringRepr, nativeStringRepr } from "../builtin-scaffold.js";
+import { URI_DECODE_MASK, URI_ENCODE_MASK } from "../uri-encoding-native.js";
 import { emitArrayBufferSlice, emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
 import {
   getLinearU8Buffer,
@@ -5206,6 +5208,82 @@ function compileCallExpression(
       propAccess.name.text === "is" &&
       expr.arguments.length >= 2
     ) {
+      const xArgEarly = expr.arguments[0]!;
+      const yArgEarly = expr.arguments[1]!;
+      // (#2375) Native SameValue (§20.1.2.13) for statically same-type scalar
+      // args — no boxing, no host `__object_is` (unsatisfiable in --target
+      // standalone, where Object.is otherwise CE'd). Purely additive: only fires
+      // when BOTH args are the same primitive type; everything else falls through
+      // to the existing boxed `__object_is` path unchanged. Host mode benefits too
+      // (avoids the boxing round-trip) but the host path is preserved for the
+      // mixed/dynamic cases.
+      {
+        const xType = ctx.checker.getTypeAtLocation(xArgEarly);
+        const yType = ctx.checker.getTypeAtLocation(yArgEarly);
+        const bothNumber = isNumberType(xType) && isNumberType(yType) && !isBooleanType(xType) && !isBooleanType(yType);
+        const bothBoolean = isBooleanType(xType) && isBooleanType(yType);
+        const bothString = isStringType(xType) && isStringType(yType);
+
+        if (bothBoolean) {
+          // Booleans lower to i32 (0/1). SameValue(bool, bool) === strict equality.
+          const xt = compileExpression(ctx, fctx, xArgEarly);
+          if (xt && xt.kind !== "i32") coerceType(ctx, fctx, xt, { kind: "i32" });
+          const yt = compileExpression(ctx, fctx, yArgEarly);
+          if (yt && yt.kind !== "i32") coerceType(ctx, fctx, yt, { kind: "i32" });
+          fctx.body.push({ op: "i32.eq" });
+          return { kind: "i32" };
+        }
+
+        if (bothNumber) {
+          // SameValue(Number x, Number y): true iff x,y are both NaN, OR their
+          // IEEE-754 bit patterns are identical (which distinguishes +0 from -0
+          // — different sign bit — and treats all NaN as equal via the both-NaN
+          // clause). Lower as:
+          //   (x !== x && y !== y) | (i64.reinterpret(x) == i64.reinterpret(y))
+          const xLocal = allocLocal(fctx, `__objis_x_${fctx.locals.length}`, { kind: "f64" });
+          const yLocal = allocLocal(fctx, `__objis_y_${fctx.locals.length}`, { kind: "f64" });
+          const xt = compileExpression(ctx, fctx, xArgEarly);
+          if (xt && xt.kind !== "f64") coerceType(ctx, fctx, xt, { kind: "f64" });
+          fctx.body.push({ op: "local.set", index: xLocal });
+          const yt = compileExpression(ctx, fctx, yArgEarly);
+          if (yt && yt.kind !== "f64") coerceType(ctx, fctx, yt, { kind: "f64" });
+          fctx.body.push({ op: "local.set", index: yLocal });
+          // bits(x) == bits(y)
+          fctx.body.push({ op: "local.get", index: xLocal });
+          fctx.body.push({ op: "i64.reinterpret_f64" } as Instr);
+          fctx.body.push({ op: "local.get", index: yLocal });
+          fctx.body.push({ op: "i64.reinterpret_f64" } as Instr);
+          fctx.body.push({ op: "i64.eq" });
+          // (x !== x) & (y !== y)  →  both NaN
+          fctx.body.push({ op: "local.get", index: xLocal });
+          fctx.body.push({ op: "local.get", index: xLocal });
+          fctx.body.push({ op: "f64.ne" });
+          fctx.body.push({ op: "local.get", index: yLocal });
+          fctx.body.push({ op: "local.get", index: yLocal });
+          fctx.body.push({ op: "f64.ne" });
+          fctx.body.push({ op: "i32.and" });
+          // bitsEqual | bothNaN
+          fctx.body.push({ op: "i32.or" });
+          return { kind: "i32" };
+        }
+
+        if (bothString && ctx.nativeStrings) {
+          // SameValue(String x, String y) === string content equality. Use the
+          // native `__str_equals` (over flattened native strings) — no host call.
+          const eqIdx = ctx.nativeStrHelpers.get("__str_equals");
+          const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+          if (eqIdx !== undefined && flattenIdx !== undefined) {
+            const xt = compileExpression(ctx, fctx, xArgEarly);
+            void xt;
+            fctx.body.push({ op: "call", funcIdx: flattenIdx });
+            const yt = compileExpression(ctx, fctx, yArgEarly);
+            void yt;
+            fctx.body.push({ op: "call", funcIdx: flattenIdx });
+            fctx.body.push({ op: "call", funcIdx: eqIdx });
+            return { kind: "i32" };
+          }
+        }
+      }
       // Helper: compile an argument and coerce to externref preserving JS type
       const compileArgAsExternref = (arg: ts.Expression) => {
         const argTsType = ctx.checker.getTypeAtLocation(arg);
@@ -5304,7 +5382,71 @@ function compileCallExpression(
       propAccess.name.text === "fromEntries" &&
       expr.arguments.length >= 1
     ) {
-      const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+      const entriesArg = expr.arguments[0]!;
+      // (#2042 S3) In standalone, the native `__object_fromEntries` helper iterates
+      // the entries arg + each pair via `__extern_get_idx`, which reliably indexes
+      // only a `$ObjVec`. A native ARRAY-LITERAL of pairs (`[["a",1],["b",2]]`) is
+      // a typed native vec, not a $ObjVec, and indexing it through the externref
+      // boundary mis-casts. So — mirroring `compileObjectAssignArg` for
+      // Object.assign — normalise an array-literal-of-pairs into a $ObjVec of pair
+      // $ObjVecs HERE (push each element's two slots), then hand the helper the
+      // indexable representation. (Map / generic-iterable args keep the old
+      // ordinary-externref path; their native iterator-protocol consumption is a
+      // larger #2190 follow-up.)
+      if (
+        ctx.standalone &&
+        ts.isArrayLiteralExpression(entriesArg) &&
+        entriesArg.elements.length > 0 &&
+        entriesArg.elements.every(
+          (el) =>
+            ts.isArrayLiteralExpression(el) &&
+            el.elements.length === 2 &&
+            // Gate to STRING-typed keys (string literal, or statically-string).
+            // A numeric/boxed key round-trips through __objvec_push/__extern_get_idx
+            // and then mis-casts in __to_property_key (illegal cast) — keep that
+            // (rare) shape on the ordinary path rather than introduce a new trap.
+            (el.elements[0]!.kind === ts.SyntaxKind.StringLiteral ||
+              isStringType(ctx.checker.getTypeAtLocation(el.elements[0]!))),
+        )
+      ) {
+        const { newIdx: objVecNewIdx, pushIdx: objVecPushIdx } = ensureObjVecBuilders(ctx);
+        const outerVecLocal = allocLocal(fctx, `__fe_entries_${fctx.locals.length}`, { kind: "externref" });
+        // outer = __objvec_new()
+        fctx.body.push({ op: "call", funcIdx: objVecNewIdx });
+        fctx.body.push({ op: "local.set", index: outerVecLocal });
+        for (const el of entriesArg.elements) {
+          const pair = el as ts.ArrayLiteralExpression;
+          const pairVecLocal = allocLocal(fctx, `__fe_pair_${fctx.locals.length}`, { kind: "externref" });
+          // pair = __objvec_new()
+          fctx.body.push({ op: "call", funcIdx: objVecNewIdx });
+          fctx.body.push({ op: "local.set", index: pairVecLocal });
+          // __objvec_push(pair, <key>); __objvec_push(pair, <value>)
+          for (const slot of pair.elements) {
+            fctx.body.push({ op: "local.get", index: pairVecLocal });
+            const slotType = compileExpression(ctx, fctx, slot, { kind: "externref" });
+            if (slotType && slotType.kind !== "externref") coerceType(ctx, fctx, slotType, { kind: "externref" });
+            if (slotType === null) fctx.body.push({ op: "ref.null.extern" });
+            fctx.body.push({ op: "call", funcIdx: objVecPushIdx });
+          }
+          // __objvec_push(outer, pair)
+          fctx.body.push({ op: "local.get", index: outerVecLocal });
+          fctx.body.push({ op: "local.get", index: pairVecLocal });
+          fctx.body.push({ op: "call", funcIdx: objVecPushIdx });
+        }
+        fctx.body.push({ op: "local.get", index: outerVecLocal });
+        // __object_fromEntries is registered by ensureObjectRuntime (via
+        // ensureObjVecBuilders above) but is NOT routed via OBJECT_RUNTIME_HELPER_NAMES
+        // (so the ordinary raw-arg path keeps refusing) — resolve it from funcMap.
+        const feIdx = ctx.funcMap.get("__object_fromEntries");
+        if (feIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: feIdx });
+          return { kind: "externref" };
+        }
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+      const argType = compileExpression(ctx, fctx, entriesArg, { kind: "externref" });
       if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
       const funcIdx = ensureLateImport(ctx, "__object_fromEntries", [{ kind: "externref" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
@@ -8635,6 +8777,49 @@ function compileCallExpression(
           return { kind: "externref" };
         }
 
+        // (#2151 Slice 4) DYNAMIC-spread any-receiver dispatch: `o.m(...xs)` where
+        // `xs` is a runtime array (arity unknown at compile time), so the
+        // fixed-arity `__call_m_<name>_<arity>` dispatcher above does not apply
+        // (flattenCallArgs returned null). Scope: a SINGLE pure spread argument —
+        // the dominant shape (`o.m(...xs)`). The vararg dispatcher
+        // `__call_m_<name>_vararg(recv, args)` reads each declared param from the
+        // spread array via `__extern_get_idx(args, i)`, so the array is passed
+        // directly (the native indexer handles wasm vecs and $ObjVec). Mixed
+        // `o.m(a, ...xs)` keeps falling through to the generic path (no
+        // regression — it returns the same value as before this slice).
+        //
+        // Gated to `ctx.standalone` ONLY (not wasi): the `__extern_get_idx`
+        // array-like / wasm-vec indexing arms the dispatcher relies on are
+        // emitted only under standalone (`objArrayLikeArms = ctx.standalone` in
+        // object-runtime.ts). Under wasi they are absent, so a vararg dispatcher
+        // would read null args — wasi keeps the existing fall-through behaviour
+        // (the same pre-existing wasi arg-vec gap noted in the issue). Widening
+        // the array-like arms to wasi is a separate, broader change.
+        const isSingleDynamicSpread =
+          ctx.standalone &&
+          !recvIsBuiltinClass &&
+          expr.arguments.length === 1 &&
+          ts.isSpreadElement(expr.arguments[0]!);
+        if (isSingleDynamicSpread) {
+          const dispatchIdx = reserveClosedMethodDispatchVararg(ctx, methodName);
+          flushLateImportShifts(ctx, fctx);
+          // Receiver as externref.
+          const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+          if (recvType && recvType.kind !== "externref") {
+            fctx.body.push({ op: "extern.convert_any" });
+          } else if (recvType === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          // The spread source array as externref — passed directly to the vararg
+          // dispatcher, which indexes it via __extern_get_idx.
+          const spreadExpr = (expr.arguments[0] as ts.SpreadElement).expression;
+          const argsType = compileExpression(ctx, fctx, spreadExpr, { kind: "externref" });
+          if (argsType && argsType.kind !== "externref") coerceType(ctx, fctx, argsType, { kind: "externref" });
+          else if (argsType === null) fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "call", funcIdx: dispatchIdx });
+          return { kind: "externref" };
+        }
+
         // (#799 WI3) Generic host-delegated method call for any/externref receivers.
         // Builds a JS array of arguments and calls __extern_method_call(obj, methodName, args).
         // (#965) For known built-in class identifiers (Object, Array, Proxy, etc.) that would
@@ -8925,7 +9110,12 @@ function compileCallExpression(
       }
     }
 
-    // decodeURI, decodeURIComponent, encodeURI, encodeURIComponent — host imports
+    // decodeURI, decodeURIComponent, encodeURI, encodeURIComponent.
+    // Host mode: per-name `env.*` import. Standalone/wasi (#2500): the encode
+    // names route to `__uri_encode(s, preservedMask)` and the decode names to
+    // `__uri_decode(s, reservedMask)` (both emitted in declarations.ts), passing
+    // the per-function mask (encode: uriUnescaped vs + uriReserved ∪ #; decode:
+    // reservedURISet kept-escaped for decodeURI, empty for decodeURIComponent).
     if (
       (funcName === "decodeURI" ||
         funcName === "decodeURIComponent" ||
@@ -8933,6 +9123,18 @@ function compileCallExpression(
         funcName === "encodeURIComponent") &&
       expr.arguments.length >= 1
     ) {
+      const isEncode = funcName === "encodeURI" || funcName === "encodeURIComponent";
+      const nativeHelperIdx = isEncode ? ctx.funcMap.get("__uri_encode") : ctx.funcMap.get("__uri_decode");
+      if (nativeHelperIdx !== undefined) {
+        const mask = isEncode ? URI_ENCODE_MASK[funcName]! : URI_DECODE_MASK[funcName]!;
+        const arg0Type = compileExpression(ctx, fctx, expr.arguments[0]!);
+        if (arg0Type && arg0Type.kind !== "externref") {
+          coerceType(ctx, fctx, arg0Type, { kind: "externref" });
+        }
+        fctx.body.push({ op: "i32.const", value: mask });
+        fctx.body.push({ op: "call", funcIdx: nativeHelperIdx });
+        return { kind: "externref" };
+      }
       const importFuncIdx = ctx.funcMap.get(funcName);
       if (importFuncIdx !== undefined) {
         const arg0Type = compileExpression(ctx, fctx, expr.arguments[0]!);
@@ -9196,6 +9398,19 @@ function compileCallExpression(
         const strArg0TsType = ctx.checker.getTypeAtLocation(strArg0);
         const arrToStr = tryEmitArrayToStringNative(ctx, fctx, strArg0, strArg0TsType);
         if (arrToStr !== undefined) return arrToStr;
+      }
+
+      // #2161 — String(re) in standalone: a static / backend-created RegExp
+      // argument routes through its native RegExp.prototype.toString
+      // (§22.2.6.14 → "/" + source + "/" + flags) instead of the generic
+      // ref→string coercion, which null-derefs on the $NativeRegExp struct in
+      // native-strings mode (re.toString() already works; the String() builtin
+      // lowering did not detect it). Must run BEFORE compileExpression so the
+      // RegExp receiver is compiled by the toString core. Additive: returns
+      // undefined (falls through) for any non-static / dynamic RegExp.
+      {
+        const reToStr = emitStandaloneRegExpToStringFromExpr(ctx, fctx, strArg0);
+        if (reToStr !== undefined && reToStr !== null) return reToStr;
       }
 
       const argType = compileExpression(ctx, fctx, strArg0);
