@@ -6530,7 +6530,26 @@ function boxVecElementToExternref(ctx: CodegenContext, elemType: ValType): Instr
   if (elemType.kind === "externref") {
     return [];
   }
-  // ref / ref_null / f32 / i64 / v128 → no arm (see scope note).
+  // (#2190 read-back, homogeneous string sub-array) A carrier whose `data`
+  // element is a GC *string* ref — `$AnyString` / `$NativeString`
+  // (`ctx.anyStrTypeIdx` / `ctx.nativeStrTypeIdx`) — is the inner vec of an
+  // `any[]` of homogeneous-string arrays (`[["a","b"]]`). Without an arm here,
+  // `__extern_get_idx(inner, i)` falls through to null, the caller's
+  // `ref.test $AnyString` then fails, and `struct.get` null-derefs on the
+  // `.length`/element read (the `e[0][0]` trap). `extern.convert_any` is the
+  // universal GC-ref → externref boxing; the consuming site re-tests/casts the
+  // returned externref back to `$AnyString`, so the round-trip is identity for a
+  // string element and null for an array hole. Scoped to the string GC types
+  // only — the `arguments`/closure-arg `(ref null N)` carriers the scope note
+  // warns about stay skipped (they are not string carriers) so this adds no
+  // behaviour to those paths.
+  if (elemType.kind === "ref" || elemType.kind === "ref_null") {
+    const ti = (elemType as { typeIdx: number }).typeIdx;
+    if (ti >= 0 && (ti === ctx.anyStrTypeIdx || ti === ctx.nativeStrTypeIdx)) {
+      return [{ op: "extern.convert_any" } as Instr];
+    }
+  }
+  // other ref / ref_null / f32 / i64 / v128 → no arm (see scope note).
   return null;
 }
 
