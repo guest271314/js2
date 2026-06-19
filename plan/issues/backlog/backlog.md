@@ -49,6 +49,7 @@ main @ 936d1ac51):
 - [#2040](../2040-standalone-generator-dstr-runtime-semantics.md) — generator/destructuring runtime semantics: rest-pattern aliasing, lazy defaults, private generator methods (~1,750 tests) — critical, hard, **ready (backlog)**.
 - [#2041](../2041-standalone-temporal-null-deref-bucket.md) — Temporal compiles then traps with opaque null deref; needs fail-loud refusal + classifier bucket (544 tests) — medium, medium, **ready (backlog)**.
 - [#2042](../2042-standalone-defineproperty-descriptor-semantics.md) — defineProperty/defineProperties: `__obj_insert` illegal cast + ValidateAndApply descriptor semantics (~340 tests) — high, medium, **ready (backlog)**.
+- [#2503](../2503-standalone-toprimitive-operator-receiver-residual.md) — ToPrimitive residual (successor to #1910): `Cannot convert object to primitive value` on `==`/`+`/array-literal/destructuring object receivers; grew 784→1,292→**2,835**, now the largest standalone runtime bucket and untracked (all #1910 owners done) — critical, hard, **ready (backlog)** _(2026-06-19 harvest, run e9579720)_.
 
 Unfiled smaller residuals (classified, for later splitting): DataView abrupt/OOB
 closures ~204, String.prototype runtime ~180, Set.prototype ~124, Number/Date
