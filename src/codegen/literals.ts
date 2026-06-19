@@ -3146,6 +3146,38 @@ export function compileArrayLiteral(
         if (hasObjectElem) {
           elemWasm = { kind: "externref" };
         }
+      } else if (
+        ctx.nativeStrings &&
+        ctx.anyStrTypeIdx >= 0 &&
+        (elemWasm.kind === "ref" || elemWasm.kind === "ref_null") &&
+        ((elemWasm as { typeIdx: number }).typeIdx === ctx.anyStrTypeIdx ||
+          (elemWasm as { typeIdx: number }).typeIdx === ctx.nativeStrTypeIdx)
+      ) {
+        // (#2190 residual) The first element is a native string, so the
+        // first-element heuristic picked `$AnyString` for the whole vec — but a
+        // heterogeneous literal like `["a", 1]` (a `[string, number]` tuple,
+        // common as an `Object.fromEntries` entry) then DROPS the non-string
+        // element (`f64.const 1; drop`) and substitutes `ref.null $AnyString;
+        // ref.as_non_null` → a guaranteed null-deref trap on a later read. Mirror
+        // the numeric-first `hasObjectElem` widening: if any element is NOT a
+        // native string, widen the vec to `externref` so each element is boxed by
+        // its own static type (`__box_number`/`__box_boolean`/native-string) at
+        // construction. Scoped to native-strings mode; number[]/struct[] etc. are
+        // untouched (their first element isn't a string).
+        const hasNonStringElem = expr.elements.some((el) => {
+          if (ts.isOmittedExpression(el) || ts.isSpreadElement(el)) return false;
+          if (el.kind === ts.SyntaxKind.StringLiteral) return false;
+          const t = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(el));
+          if (t.kind === "ref" || t.kind === "ref_null") {
+            const ti = (t as { typeIdx: number }).typeIdx;
+            return ti !== ctx.anyStrTypeIdx && ti !== ctx.nativeStrTypeIdx;
+          }
+          // f64 / i32 / externref / etc. — a non-string element.
+          return true;
+        });
+        if (hasNonStringElem) {
+          elemWasm = { kind: "externref" };
+        }
       }
     }
   }
