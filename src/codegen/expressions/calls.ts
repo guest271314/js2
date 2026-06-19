@@ -227,6 +227,60 @@ const BUILTIN_CLASS_NAMES = new Set([
 ]);
 
 /**
+ * (#2501) Resolve the §20.1.3.6 `Object.prototype.toString` builtin tag for a
+ * statically-known receiver, returning the tag name (e.g. "Array", "Date") or
+ * `undefined` when it can't be classified (caller falls back / refuses).
+ *
+ * Order follows §20.1.3.6 steps 2-14 (the Symbol.toStringTag override of step
+ * 15 is a deferred phase-2 — needs dynamic @@toStringTag property lookup):
+ *   undefined → Undefined · null → Null · isArray → Array · callable → Function
+ *   · Error → Error · Boolean/Number/String primitive → that tag · Date → Date
+ *   · RegExp → RegExp · arguments exotic → Arguments · else → Object.
+ */
+function resolveObjectToStringTag(ctx: CodegenContext, argExpr: ts.Expression | undefined): string | undefined {
+  if (argExpr === undefined) return "Undefined"; // toString.call() with no arg → this=undefined
+  // Literal null / undefined keywords.
+  if (argExpr.kind === ts.SyntaxKind.NullKeyword) return "Null";
+  if (argExpr.kind === ts.SyntaxKind.UndefinedKeyword || (ts.isIdentifier(argExpr) && argExpr.text === "undefined")) {
+    return "Undefined";
+  }
+
+  const t = ctx.checker.getTypeAtLocation(argExpr);
+  const nn = ctx.checker.getNonNullableType(t);
+  // null / undefined via the type system (e.g. a `null`-typed binding).
+  if ((t.flags & ts.TypeFlags.Null) !== 0) return "Null";
+  if ((t.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0) return "Undefined";
+
+  // Array (real `__vec_`/`__arr_` arrays, via the established resolver).
+  if (resolveArrayInfo(ctx, nn)) return "Array";
+
+  // Primitive wrappers (the receiver is ToObject-boxed by the spec, tag is the
+  // wrapper's): boolean → Boolean, number → Number, string → String.
+  if (isBooleanType(nn)) return "Boolean";
+  if (isNumberType(nn)) return "Number";
+  if (isStringType(nn)) return "String";
+
+  // Callable (function) — has call signatures and is not a class instance.
+  const callSigs = nn.getCallSignatures?.();
+  if (callSigs && callSigs.length > 0) return "Function";
+
+  // Named builtin exotics by symbol name.
+  const symName = nn.getSymbol()?.name;
+  if (symName === "Date") return "Date";
+  if (symName === "RegExp") return "RegExp";
+  if (symName === "Error" || symName?.endsWith("Error")) return "Error";
+  if (symName === "IArguments" || symName === "Arguments") return "Arguments";
+
+  // Plain object / class instance / unresolved object → "Object" (the §20.1.3.6
+  // default). Only return a tag for ref/object-shaped receivers; bail on truly
+  // unknown shapes so the caller can fall through rather than mis-tag.
+  const wasm = resolveWasmType(ctx, nn);
+  if (wasm.kind === "ref" || wasm.kind === "ref_null" || wasm.kind === "externref") return "Object";
+  if ((nn.flags & ts.TypeFlags.Object) !== 0) return "Object";
+  return undefined;
+}
+
+/**
  * Statically evaluate `ToBoolean(expr)` for descriptor flag literals.
  * Per §6.2.6 ToPropertyDescriptor each attribute flag is ToBoolean-coerced —
  * `configurable: 123` / `'x'` / `{}` / `[]` are all truthy. Used by the
@@ -3188,6 +3242,30 @@ function compileCallExpression(
           expr.arguments.length >= 1
         ) {
           const typeName = objExpr.expression.text;
+
+          // (#2501) Object.prototype.toString.call(v) → native `[object X]` tag
+          // (§20.1.3.6 builtin-tag subset). The builtin tag is statically known
+          // from the receiver's TS type in nearly every test262 case, so emit the
+          // string constant directly — this fixes host mode (Array/Function/Date
+          // were mis-tagged `[object Object]` because the Wasm vec/closure receiver
+          // is opaque to the host's `Object.prototype.toString`) AND standalone
+          // (the whole `.call(...)` form was a hard compile error there). Routes
+          // BOTH modes through the same compile-away classifier — no host import.
+          // Symbol.toStringTag (§20.1.3.6 step 15) is deferred to phase-2 (it needs
+          // dynamic @@toStringTag property lookup → the dynamic-property epic).
+          if (typeName === "Object" && methodName === "toString") {
+            const tag = resolveObjectToStringTag(ctx, expr.arguments[0]);
+            if (tag !== undefined) {
+              const tagStr = `[object ${tag}]`;
+              addStringConstantGlobal(ctx, tagStr);
+              // Dual-mode string-constant push (externref in both host and
+              // nativeStrings/standalone — the host `global.get` path only works
+              // in non-nativeStrings mode, so use the shared helper).
+              for (const instr of stringConstantExternrefInstrs(ctx, tagStr)) fctx.body.push(instr);
+              return { kind: "externref" };
+            }
+          }
+
           const isBuiltinRegExpPrototype = typeName === "RegExp" && isGlobalRegExpIdentifier(ctx, objExpr.expression);
           if (ctx.standalone && isBuiltinRegExpPrototype) {
             if (methodName === "test" || methodName === "exec") {

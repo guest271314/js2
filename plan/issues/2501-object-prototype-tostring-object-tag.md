@@ -1,11 +1,10 @@
 ---
-id: 2402
+id: 2501
 title: "Object.prototype.toString [object X] builtin tag — Array/Function/Date missing (host) + standalone CE (~151 test262)"
-status: ready
-assignee: ttraenkler/sd3
-sprint: 64
+status: done
 created: 2026-06-19
 updated: 2026-06-19
+completed: 2026-06-19
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -13,11 +12,12 @@ task_type: feature
 area: codegen
 language_feature: object-builtins
 goal: spec-completeness
+sprint: 64
+assignee: ttraenkler/sd3
 test262_bucket: object-tostring-tag
 test262_count: 151
 ---
-
-# #2402 — `Object.prototype.toString` `[object X]` builtin tag
+# #2501 — `Object.prototype.toString` `[object X]` builtin tag
 
 ## Problem (§20.1.3.6)
 
@@ -77,8 +77,36 @@ the dynamic-property epic, not this issue. Banks most of the 151 without it.
   `.call(...)` form.
 - No regression in the already-correct host tags.
 
+## Landed (sd3, 2026-06-19) — unified compile-time classifier (both modes)
+
+Parts A + B collapsed into ONE fix: a compile-time `[object X]` classifier that
+intercepts `Object.prototype.toString.call(v)` **before** the host/standalone
+split (`src/codegen/expressions/calls.ts`, the `Type.prototype.method.call`
+borrowed-method handler, right after `typeName`/`methodName` are established).
+The §20.1.3.6 builtin tag is statically known from the receiver's TS type, so it
+emits the tag string directly via the dual-mode `stringConstantExternrefInstrs`
+helper — no host import, no `__proto_method_call`. This fixes BOTH:
+- **host** (Array/Function/Date were mis-tagged `[object Object]` because the
+  Wasm vec/closure receiver is opaque to the host's `Object.prototype.toString`);
+- **standalone** (the whole `.call(...)` form was a hard compile error).
+
+New helper `resolveObjectToStringTag(ctx, argExpr)` classifies per §20.1.3.6
+steps 2-14: undefined→Undefined, null→Null, isArray→Array, primitive
+boolean/number/string→Boolean/Number/String, callable→Function,
+Date/RegExp/Error(+ subclasses)/Arguments by symbol name, else Object; returns
+`undefined` (caller falls through) when the receiver shape is unresolvable.
+
+**Verified:** `tests/issue-2501.test.ts` — host returns all 9 tags correctly
+(Array/Function/Date now right, was `[object Object]`); standalone array→
+`[object Array]` (len 14) and `{}`→`[object Object]` (len 15) with **env=[]**
+(no leak). `tsc` clean; the pre-existing `tostring-valueof`/`helpers.js` test
+failures fail identically on main (verified by stash-compare) — not a regression.
+
+**Deferred (phase-2):** `Symbol.toStringTag` override (§20.1.3.6 step 15) — needs
+dynamic `@@toStringTag` property lookup → the dynamic-property epic. Banks the
+bulk of the ~151 without it.
+
 ## Source
 
 #2376/#2379 jsonl sweep, sd3 2026-06-19. Routed by tech-lead from the
 [object X]-tag cluster (~151, the 2nd-largest bounded standalone-feature group).
-Scoped (parts A/B identified) but NOT implemented this session.
