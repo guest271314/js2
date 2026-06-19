@@ -59,6 +59,11 @@ import {
   ensureErrorNativeProtoGlue,
   ensureMapNativeProtoGlue,
   ensureSetNativeProtoGlue,
+  ensureFunctionNativeProtoGlue,
+  ensureSymbolNativeProtoGlue,
+  ensureBigIntNativeProtoGlue,
+  ensureWeakMapNativeProtoGlue,
+  ensureWeakSetNativeProtoGlue,
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
@@ -516,6 +521,23 @@ function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): nu
   }
   if (builtinName === "Set") {
     return ensureSetNativeProtoGlue(ctx);
+  }
+  // (S7 trap-probe) Function / Symbol / BigInt / WeakMap / WeakSet protos —
+  // measuring flips + the trap/regression check before committing each.
+  if (builtinName === "Function") {
+    return ensureFunctionNativeProtoGlue(ctx);
+  }
+  if (builtinName === "Symbol") {
+    return ensureSymbolNativeProtoGlue(ctx);
+  }
+  if (builtinName === "BigInt") {
+    return ensureBigIntNativeProtoGlue(ctx);
+  }
+  if (builtinName === "WeakMap") {
+    return ensureWeakMapNativeProtoGlue(ctx);
+  }
+  if (builtinName === "WeakSet") {
+    return ensureWeakSetNativeProtoGlue(ctx);
   }
   // Other builtins: only resolve if some path already registered glue for them.
   const brand = getBuiltinBrand(ctx, builtinName);
