@@ -373,6 +373,18 @@ export interface FunctionContext {
   /** Map from let/const local variable name → local index of its i32 TDZ flag (0 = uninitialized) */
   tdzFlagLocals?: Map<string, number>;
   /**
+   * (#2200 Annex B B.3.3 Phase 1) Block-nested `function F` declarations whose
+   * web-compat outer var-binding is *cancelled* by an intervening lexical
+   * (`let`/`const`/class) shadow or a same-named parameter. Maps the function
+   * name → the source-position range(s) of the block(s) that declare it. A read
+   * of `F` OUTSIDE every such block must NOT resolve to the block-local function
+   * (it has no outer binding) and instead throws ReferenceError; a read INSIDE
+   * the declaring block still resolves normally. Normally empty — the read-site
+   * guard in `compileIdentifier` is gated on `.has(name)`, so non-Annex-B
+   * modules stay byte-identical.
+   */
+  annexBCancelled?: Map<string, Array<{ start: number; end: number }>>;
+  /**
    * For TDZ flag locals that have been boxed in an i32 ref cell so that
    * mutations propagate to closures that captured the flag (#1177).
    *
