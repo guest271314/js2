@@ -1063,7 +1063,8 @@ export function compileBinaryExpression(
   // operand order: a statically string-typed RIGHT operand compared against a
   // non-numeric LEFT (`any` / object / string). Without this, `a == "ab"` where
   // `a: any` fell through to the equality/`noJsHost` dispatch, which ToNumber-
-  // coerced the string literal to `__box_number(__str_to_number("ab"))` = NaN
+  // coerced the string literal via the native StringToNumber scanner then boxed
+  // the resulting NaN (a non-numeric string scans to NaN)
   // (so equal strings compared unequal — `a == "ab"` returned false for
   // `a === "ab"`). The symmetric `"ab" == a` already routed here via the
   // left-string arm and worked; this restores order-independence. Gated exactly
