@@ -1,8 +1,9 @@
 ---
 id: 2379
 title: "standalone: typed-vec array method on an externref receiver (top-level new Array(N)) emits invalid ref.cast"
-status: in-progress
-assignee: ttraenkler/sendev-receiver
+status: blocked
+assignee: ""
+blocked_reason: "representation-scale (new Array(N) element-array type diverges from array-literal); needs architect — see VERIFY-GATE VERDICT"
 created: 2026-06-19
 updated: 2026-06-19
 priority: medium
@@ -56,21 +57,61 @@ the `case "sort":` arm** (line ~2796) nor threaded into `compileArraySort` — s
 sort takes the typed-vec path unconditionally even when the receiver is an
 externref carrier.
 
-## Fix
+## VERIFY-GATE VERDICT (2026-06-19) — (b) representation-scale, NOT a contained cast guard
+
+The contained-vs-representation decision gate was: *does the `extern→$AnyString`
+cast validate for a literal-array vec but not a `new Array(N)` vec because (a) the
+element TYPE is correct and the cast is merely unvalidatable, or (b) the element
+TYPE is genuinely WRONG for `new Array(N)`?*
+
+**Answer: (b). The element array TYPE diverges at construction.** WAT-probed
+(`.tmp/probe-elem.mts`, `.tmp/probe-vectype.mts`) standalone, current main
+(parent 3760a9beb):
+
+| source                         | element-array build       | sort/join stringify load            | validates |
+|--------------------------------|---------------------------|-------------------------------------|-----------|
+| `[3,1,2]` (literal)            | `array.new_fixed 3 3` — **type 3 = numeric f64 element array** | `array.get 3` → `number_toString` → `any.convert_extern` → `ref.cast (ref 6)` (cast operand IS the externref number_toString result) | **yes** |
+| `new Array(2)` + writes        | `array.new_default 1` — **type 1 = boxed-any / externref element array** | `array.get 1` → `ref.as_non_null` → `any.convert_extern` → `ref.cast null (ref null 6)` (cast operand is the **boxed-any element itself**) | **NO** — `Invalid types for ref.cast: ref.as_non_null of (ref extern) has to be in the same reference type hierarchy as (ref 6)` |
+
+The defect is **upstream of the cast site**: `new Array(N)` constructs a vec whose
+element array is the boxed-any/externref array (type 1) while an array literal
+constructs a vec with a typed numeric element array (type 3). So `elemType` for
+`new Array(N)` is `externref`, the stringify takes the **non-numeric else arm**
+(`ref.as_non_null` on a raw boxed-any element), and the subsequent `$AnyString`
+cast is applied to a boxed *number* extern — a genuinely mistyped element, not a
+correct-value-wrong-brand situation.
+
+**A `ref.test $AnyString`-guarded bail at the cast site would PAPER OVER a real
+representation bug** (it would silently mis-stringify the boxed-number element, or
+bail to an empty/wrong result), so per the contained-vs-representation rail this
+is **STOP-and-escalate**, not a dev guard.
+
+## Architect target (the real fix — one of)
+
+1. **Normalize `new Array(N)` element representation** to match the
+   literal-array typed numeric vec when the subsequent writes are numeric (so the
+   vec carries a typed numeric element array, not the boxed-any array). This is
+   the representation-unification fix and removes the divergence at the source.
+2. **Make the typed-vec array-method stringify dispatch on the ACTUAL element
+   array type** (boxed-any vs numeric) rather than the statically-inferred
+   `elemType`/`isNumeric`, and route a boxed-any element through the runtime
+   any→string path (`__to_string`/`number_toString` after an any-tag dispatch)
+   instead of the static `array.get + number_toString + ref.cast $AnyString`.
+
+Both touch core array representation / typed-vec construction — architect-scale,
+not a contained dev slice. The earlier "gate `case "sort":` on
+`!receiverIsExternref`" idea (below) is INSUFFICIENT: the gate doesn't even fire
+because the receiver is a typed vec `(ref null 2)`, not an externref — and even
+if it did, it would only dodge sort while leaving the mistyped `new Array(N)`
+element representation in place for every other consumer.
+
+### (superseded) earlier dispatch-level hypothesis
 
 When the receiver is an externref (`receiverIsExternref`), the typed-vec array
-methods must NOT take the static-vec `struct.get`/`ref.cast` path. Gate the
-`case "sort":` (and the other typed-vec methods that don't already check the
-flag) on `!receiverIsExternref`, returning `undefined` so the dispatch falls
-through to the generic/host-import fallback (the same path `join` uses for an
-externref receiver). This produces VALID Wasm and the runtime path handles the
-externref array correctly.
-
-Bonus (guardrail #3): the same `struct.get vecTypeIdx` on an externref receiver
-affects every typed-vec array method (filter/map/reduce/forEach/find/…). Audit
-the dispatch arms — any that route to a `compileArray*` helper without an
-`!receiverIsExternref` gate share this invalid-cast bug on a top-level
-`new Array(N).<method>`; gating them all flips more for free. Measure.
+methods must NOT take the static-vec `struct.get`/`ref.cast` path. — **Does not
+apply**: the `new Array(N)` receiver is a typed vec, `receiverIsExternref` is
+`false`, so this gate never fires. Kept for the record; the real divergence is
+the element-array type, per the verdict above.
 
 ## Acceptance criteria
 
