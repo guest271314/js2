@@ -7074,7 +7074,31 @@ function compileArraySort(
   if (elemType.kind === "f64" || elemType.kind === "i32" || isStringElem) {
     const defaultResult = compileArrayDefaultToStringSort(ctx, fctx, propAccess, vecTypeIdx, arrTypeIdx, elemType);
     if (defaultResult) return defaultResult;
-    // Fell through (e.g. helpers unavailable) — fall back to numeric Timsort.
+    // Fell through (e.g. helpers unavailable) — fall back to numeric Timsort,
+    // but ONLY for numeric element kinds (below): the numeric Timsort hard-codes
+    // `f64.gt`/`i32.gt_s`, so routing a ref/externref element array here mints
+    // `__isort_<kind>` with a comparator that does `f64.gt` on a non-numeric
+    // `array.get` → invalid Wasm (#2502). For non-numeric kinds, leave the array
+    // as-is (a no-op sort) rather than emit a poisoned binary.
+  }
+
+  // #2502 — the numeric Timsort is valid only for i32/f64 element arrays. A
+  // ref/externref-element array whose default ToString sort fell through above
+  // must NOT reach `ensureTimsortHelper` (the `elemType.kind as "i32"|"f64"`
+  // cast is a lie for externref and produces `f64.gt` on an externref element).
+  // Emit a no-op (return the receiver unchanged) — correct for the common holes
+  // case (`new Array(2)` is all `undefined`, already sorted) and never invalid.
+  if (elemType.kind !== "i32" && elemType.kind !== "f64") {
+    const vecTmp0 = allocLocal(fctx, `__arr_sort_noop_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: vecTypeIdx,
+    });
+    compileExpression(ctx, fctx, propAccess.expression);
+    fctx.body.push({ op: "local.tee", index: vecTmp0 });
+    emitReceiverNullGuard(ctx, fctx, vecTmp0);
+    fctx.body.push({ op: "local.get", index: vecTmp0 });
+    fctx.body.push({ op: "ref.as_non_null" });
+    return { kind: "ref_null", typeIdx: vecTypeIdx };
   }
 
   const elemKind = elemType.kind as "i32" | "f64";
@@ -7139,7 +7163,7 @@ function compileArrayDefaultToStringSort(
     if (isNumeric) numToStrIdx = ctx.funcMap.get("number_toString");
   }
   if (compareIdx === undefined || (isNumeric && numToStrIdx === undefined)) {
-    return null; // helpers not registered — fall back to numeric Timsort
+    return null; // helpers not registered — caller no-ops (#2502) or numeric Timsort
   }
 
   const vecTmp = allocLocal(fctx, `__dsort_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
