@@ -29,6 +29,12 @@ async function runNumber(src: string): Promise<number> {
   return (instance.exports as { test: () => number }).test();
 }
 
+async function runString(src: string): Promise<unknown> {
+  const { compileToWasm } = await import("./equivalence/helpers.js");
+  const exports = await compileToWasm(src);
+  return (exports.test as () => unknown)();
+}
+
 describe("#2200 Phase 1 — Annex B B.3.3 case-A cancellation", () => {
   it("a let-shadow cancels the outer binding → reading F outside the block throws ReferenceError", async () => {
     const out = await runNumber(`
@@ -79,5 +85,33 @@ describe("#2200 Phase 1 — Annex B B.3.3 case-A cancellation", () => {
     const out = await runNumber(`
       export function test(): number { function k() { return 11; } return k(); }`);
     expect(out).toBe(11);
+  });
+});
+
+describe("#2200 Phase 2 — Annex B B.3.3 outer-binding lifecycle + typeof", () => {
+  it("typeof F AFTER the block ran → 'function' (the outer binding is initialised)", async () => {
+    expect(await runString(`export function test(): string { { function f() { return 7; } } return typeof f; }`)).toBe(
+      "function",
+    );
+  });
+
+  it("typeof F when the declaring block did NOT run → 'undefined' (binding stays uninitialised)", async () => {
+    expect(
+      await runString(`export function test(): string { if (false) { function f() { return 7; } } return typeof f; }`),
+    ).toBe("undefined");
+  });
+
+  it("genuinely undeclared identifier still → 'undefined' (no regression)", async () => {
+    expect(await runString(`export function test(): string { return typeof totallyNotDeclared; }`)).toBe("undefined");
+  });
+
+  it("a normal function-body declaration typeof still → 'function' (no regression)", async () => {
+    expect(await runString(`function g() { return 1; } export function test(): string { return typeof g; }`)).toBe(
+      "function",
+    );
+  });
+
+  it("typeof on a plain numeric local is unaffected → 'number'", async () => {
+    expect(await runString(`export function test(): string { const n = 5; return typeof n; }`)).toBe("number");
   });
 });

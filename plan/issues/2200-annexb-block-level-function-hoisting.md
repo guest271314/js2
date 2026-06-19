@@ -1,8 +1,9 @@
 ---
 id: 2200
 title: "Annex B B.3.3 block-level function declaration hoisting — outer binding created/initialized incorrectly (~186 test262 fails)"
-status: in-progress
-assignee: ttraenkler/sd1
+status: done
+assignee: ttraenkler/sen-1
+completed: 2026-06-19
 sprint: 64
 created: 2026-06-19
 updated: 2026-06-19
@@ -533,3 +534,34 @@ and `typeof` const-folding — still dev-scoped since it reuses
 inventing machinery, but it warrants careful review of the declaration-site init
 ordering (must run after the function compiles, before any post-block read). If sd1
 prefers, Phase 2 can go to senior-dev; Phase 1 is comfortably a developer task.
+
+## Phase 2 DONE (2026-06-19, sen-1) — typeof outer-binding resolution bypass fixed
+
+sd1 landed Phase 2's plumbing (TDZ-var outer binding + decl-site init + case-A) on
+`issue-2200-annexb-phase2`; 4/5 sub-behaviours worked. The remaining bug: `typeof F`
+AFTER the block returned `"undefined"` not `"function"`, even though the decl-site
+init set the TDZ flag (traced outer=1 flag=2). sd1 correctly flagged a
+"resolution-path bypass" of the `annexBOuterBindings` typeof guard.
+
+**Precise root cause (traced):** the bypass is the **undeclared-identifier branch**
+in `compileTypeofExpression` (`typeof-delete.ts`), which runs BEFORE the Annex-B
+guard. For an Annex B outer binding, the TS checker reports the operand's symbol
+with **no `valueDeclaration`** at the reference site (the outer binding is
+synthetic — only the block-scoped `FunctionDeclaration` is a real decl), so
+`hasValueDecl === false` and that branch const-folds `typeof F` → `"undefined"`
+and returns — never reaching the later guard. (`declare const f` ambient gives the
+symbol a value-decl, so it skipped the early branch and worked — confirming the
+path.)
+
+**Fix:** extract the runtime TDZ-flag branch into a shared
+`emitAnnexBTypeofFlagBranch(ctx, fctx, name)` helper and call it at the TOP of the
+undeclared-identifier branch (before the `!hasValueDecl` const-fold), gated on
+`fctx.annexBOuterBindings`. The late guard now also delegates to the same helper
+(no duplicated logic). One file: `src/codegen/typeof-delete.ts`.
+
+**Verified** (`tests/issue-2200-annexb-block-fn-hoist.test.ts`, Phase 2 block):
+`typeof f` after block → `"function"`; `if(false){…} typeof f` → `"undefined"`;
+genuinely-undeclared → `"undefined"`; normal fn-decl typeof → `"function"`; plain
+numeric local → `"number"`. No regression across typeof-extended / typeof-comparison
+/ typeof-narrowing / symbol-typeof / var-hoisting-scope / if-branch-block-scope +
+the full Phase 1 suite. `tsc --noEmit` clean.
