@@ -877,20 +877,24 @@ export function compileTypeofExpression(
     if (ts.isIdentifier(bare) && fctx.annexBOuterBindings?.has(bare.text)) {
       const flagLocal = fctx.tdzFlagLocals?.get(bare.text);
       if (flagLocal !== undefined) {
-        const fnArm: typeof fctx.body = [];
-        const undefArm: typeof fctx.body = [];
-        const saved = fctx.body;
-        fctx.body = fnArm;
+        // Materialise BOTH string constants into the MAIN body first (so any lazy
+        // NativeString global-setup / late-import shifts that compileStringLiteral
+        // emits land in the main instruction stream, not inside an if-arm), stash
+        // each in a temp local, then select on the TDZ flag. flag set ⇒ the
+        // function value's "function"; flag 0 (uninitialised / block skipped) ⇒
+        // "undefined".
         const strType = compileStringLiteral(ctx, fctx, "function") ?? { kind: "externref" };
-        fctx.body = undefArm;
+        const fnStrLocal = allocLocal(fctx, `__typeof_fn_${fctx.locals.length}`, strType);
+        fctx.body.push({ op: "local.set", index: fnStrLocal });
         compileStringLiteral(ctx, fctx, "undefined");
-        fctx.body = saved;
+        const undefStrLocal = allocLocal(fctx, `__typeof_undef_${fctx.locals.length}`, strType);
+        fctx.body.push({ op: "local.set", index: undefStrLocal });
         fctx.body.push({ op: "local.get", index: flagLocal });
         fctx.body.push({
           op: "if",
           blockType: { kind: "val", type: strType },
-          then: fnArm,
-          else: undefArm,
+          then: [{ op: "local.get", index: fnStrLocal }],
+          else: [{ op: "local.get", index: undefStrLocal }],
         });
         return strType;
       }
