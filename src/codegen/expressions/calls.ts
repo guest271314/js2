@@ -126,6 +126,7 @@ import { tryStaticEvalInline } from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
 import {
   compileStandaloneRegExpConstructor,
+  emitStandaloneRegExpToStringFromExpr,
   isGlobalRegExpIdentifier,
   tryCompileStandaloneRegExpExec,
   tryCompileStandaloneRegExpSymbolCall,
@@ -164,6 +165,7 @@ import {
   stringConstantExternrefInstrs,
 } from "../native-strings.js";
 import { emitVariadicStringConcat, hostStringRepr, nativeStringRepr } from "../builtin-scaffold.js";
+import { URI_DECODE_MASK, URI_ENCODE_MASK } from "../uri-encoding-native.js";
 import { emitArrayBufferSlice, emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
 import {
   getLinearU8Buffer,
@@ -8964,7 +8966,12 @@ function compileCallExpression(
       }
     }
 
-    // decodeURI, decodeURIComponent, encodeURI, encodeURIComponent — host imports
+    // decodeURI, decodeURIComponent, encodeURI, encodeURIComponent.
+    // Host mode: per-name `env.*` import. Standalone/wasi (#2500): the encode
+    // names route to `__uri_encode(s, preservedMask)` and the decode names to
+    // `__uri_decode(s, reservedMask)` (both emitted in declarations.ts), passing
+    // the per-function mask (encode: uriUnescaped vs + uriReserved ∪ #; decode:
+    // reservedURISet kept-escaped for decodeURI, empty for decodeURIComponent).
     if (
       (funcName === "decodeURI" ||
         funcName === "decodeURIComponent" ||
@@ -8972,6 +8979,18 @@ function compileCallExpression(
         funcName === "encodeURIComponent") &&
       expr.arguments.length >= 1
     ) {
+      const isEncode = funcName === "encodeURI" || funcName === "encodeURIComponent";
+      const nativeHelperIdx = isEncode ? ctx.funcMap.get("__uri_encode") : ctx.funcMap.get("__uri_decode");
+      if (nativeHelperIdx !== undefined) {
+        const mask = isEncode ? URI_ENCODE_MASK[funcName]! : URI_DECODE_MASK[funcName]!;
+        const arg0Type = compileExpression(ctx, fctx, expr.arguments[0]!);
+        if (arg0Type && arg0Type.kind !== "externref") {
+          coerceType(ctx, fctx, arg0Type, { kind: "externref" });
+        }
+        fctx.body.push({ op: "i32.const", value: mask });
+        fctx.body.push({ op: "call", funcIdx: nativeHelperIdx });
+        return { kind: "externref" };
+      }
       const importFuncIdx = ctx.funcMap.get(funcName);
       if (importFuncIdx !== undefined) {
         const arg0Type = compileExpression(ctx, fctx, expr.arguments[0]!);
@@ -9235,6 +9254,19 @@ function compileCallExpression(
         const strArg0TsType = ctx.checker.getTypeAtLocation(strArg0);
         const arrToStr = tryEmitArrayToStringNative(ctx, fctx, strArg0, strArg0TsType);
         if (arrToStr !== undefined) return arrToStr;
+      }
+
+      // #2161 — String(re) in standalone: a static / backend-created RegExp
+      // argument routes through its native RegExp.prototype.toString
+      // (§22.2.6.14 → "/" + source + "/" + flags) instead of the generic
+      // ref→string coercion, which null-derefs on the $NativeRegExp struct in
+      // native-strings mode (re.toString() already works; the String() builtin
+      // lowering did not detect it). Must run BEFORE compileExpression so the
+      // RegExp receiver is compiled by the toString core. Additive: returns
+      // undefined (falls through) for any non-static / dynamic RegExp.
+      {
+        const reToStr = emitStandaloneRegExpToStringFromExpr(ctx, fctx, strArg0);
+        if (reToStr !== undefined && reToStr !== null) return reToStr;
       }
 
       const argType = compileExpression(ctx, fctx, strArg0);
