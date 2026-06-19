@@ -5,13 +5,21 @@ description: Algorithmic gate for self-merging a PR. Reads CI JSON, applies 4 ha
 
 # /dev-self-merge \<N\>
 
-## Waiting for CI — synchronous, in-context
+## Waiting for CI — background the watcher, PIPELINE the next slice (do NOT idle)
 
 CI wall time is now ~2 min (115-shard parallel, sort-by-duration scheduling,
-parallel gate+shards — see PRs #503, #505, #506). The dev agent **blocks
-in-context** waiting for CI rather than terminating and handing off. Idle
-Sonnet polling is nearly free, and on-the-spot recovery from drift or CI
-failure with full PR context beats the complexity of fire-and-forget.
+parallel gate+shards — see PRs #503, #505, #506), plus merge-queue time after.
+The dev does NOT terminate and hand off — it keeps the PR — but it also does
+**not sit idle blocking on CI.** Run the watch as a **background task**, then
+**immediately claim and start your NEXT slice in a fresh worktree** while CI
+runs. On-the-spot recovery from drift / CI-failure with full PR context is
+preserved — the watcher notifies you on settle, you recover THEN (the context
+lives in the diff, not your foreground attention), and return to the next
+slice. Idling on a green-riding PR produces zero output and burns the budget
+window; a dev whose PR is in CI should always have a new slice in flight.
+A stream of idle pings "while a PR is in CI" means the dev is NOT pipelining —
+it should be claiming the next task. (See `.claude/agents/developer.md` step 5
+and the pipeline-not-idle memory.)
 
 ```bash
 # Watch the run live (preferred — exits when the run finishes):
