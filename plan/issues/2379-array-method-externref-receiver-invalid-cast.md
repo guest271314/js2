@@ -3,12 +3,13 @@ id: 2379
 title: "standalone: typed-vec array method on an externref receiver (top-level new Array(N)) emits invalid ref.cast"
 status: blocked
 assignee: ""
-blocked_reason: "representation-scale (new Array(N) element-array type diverges from array-literal); needs architect — see VERIFY-GATE VERDICT"
+needs_role: architect
+blocked_reason: "ARCHITECT-SCALE: new Array(N) builds a boxed-any element array (type 1) while a literal builds a typed-numeric element array (type 3) — the vec/element REPRESENTATION diverges. Fix = new Array(N) element-rep normalization (make it match the literal vec), NOT a cast-site guard. See VERIFY-GATE VERDICT."
 created: 2026-06-19
 updated: 2026-06-19
 priority: medium
-feasibility: medium
-reasoning_effort: high
+feasibility: hard
+reasoning_effort: max
 task_type: bugfix
 area: codegen
 language_feature: arrays, array-methods
