@@ -33,16 +33,22 @@ describe("#1910 R4 standalone String-wrapper indexed access + length", () => {
   });
 
   it("new String('abc')[0] === 'a'", async () => {
-    expect(await runNum(`export function f(): number { const s = new String("abc"); return s[0] === "a" ? 1 : 0; }`)).toBe(1);
+    expect(
+      await runNum(`export function f(): number { const s = new String("abc"); return s[0] === "a" ? 1 : 0; }`),
+    ).toBe(1);
   });
 
   it("new String('abc')[2] === 'c'", async () => {
-    expect(await runNum(`export function f(): number { const s = new String("abc"); return s[2] === "c" ? 1 : 0; }`)).toBe(1);
+    expect(
+      await runNum(`export function f(): number { const s = new String("abc"); return s[2] === "c" ? 1 : 0; }`),
+    ).toBe(1);
   });
 
   it("indexed char feeds a typed string method (charCodeAt)", async () => {
     expect(
-      await runNum(`export function f(): number { const s = new String("abc"); const c: string = s[0]; return c.charCodeAt(0); }`),
+      await runNum(
+        `export function f(): number { const s = new String("abc"); const c: string = s[0]; return c.charCodeAt(0); }`,
+      ),
     ).toBe(97);
   });
 });
