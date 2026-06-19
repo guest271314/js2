@@ -199,6 +199,53 @@ const NUMBER_PROTO_METHODS = [
 /** `Boolean.prototype`'s own method names (ES2024 §20.3.3). */
 const BOOLEAN_PROTO_METHODS = ["toString", "valueOf"] as const;
 
+/** `Error.prototype`'s own method names (ES2024 §20.5.3). `name`/`message` are
+ * data properties (own on the proto), not methods. */
+const ERROR_PROTO_METHODS = ["toString"] as const;
+
+/** `Function.prototype`'s own method names (ES2024 §20.2.3). */
+const FUNCTION_PROTO_METHODS = ["apply", "bind", "call", "toString"] as const;
+
+/** `Symbol.prototype`'s own method names (ES2024 §20.4.3). `description` is an
+ * accessor getter, resolved by the computed-access path. */
+const SYMBOL_PROTO_METHODS = ["toString", "valueOf"] as const;
+
+/** `BigInt.prototype`'s own method names (ES2024 §21.2.3). */
+const BIGINT_PROTO_METHODS = ["toLocaleString", "toString", "valueOf"] as const;
+
+/** `WeakMap.prototype`'s own method names (ES2024 §24.3.3). */
+const WEAKMAP_PROTO_METHODS = ["delete", "get", "has", "set"] as const;
+
+/** `WeakSet.prototype`'s own method names (ES2024 §24.4.3). */
+const WEAKSET_PROTO_METHODS = ["add", "delete", "has"] as const;
+
+/**
+ * `Map.prototype`'s own method names (ES2024 §24.1.3). `size` is an accessor
+ * *getter* on the proto (resolved by the computed-access path), not a data
+ * method, so it stays out of the value-read CSV.
+ */
+const MAP_PROTO_METHODS = ["clear", "delete", "entries", "forEach", "get", "has", "keys", "set", "values"] as const;
+
+/** `Set.prototype`'s own method names (ES2024 §24.2.3 + the new set-method
+ * proposal). `size` is an accessor getter, kept out of the CSV. */
+const SET_PROTO_METHODS = [
+  "add",
+  "clear",
+  "delete",
+  "difference",
+  "entries",
+  "forEach",
+  "has",
+  "intersection",
+  "isDisjointFrom",
+  "isSubsetOf",
+  "isSupersetOf",
+  "keys",
+  "symmetricDifference",
+  "union",
+  "values",
+] as const;
+
 /** Spec arity (`fn.length`) of the proto methods that differ from the default 1. */
 const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   concat: 1,
@@ -214,6 +261,12 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   hasOwnProperty: 1,
   isPrototypeOf: 1,
   propertyIsEnumerable: 1,
+  // Map.prototype.set(key, value) is arity 2 (ES2024 §24.1.3); add/get/has/delete
+  // default to 1.
+  set: 2,
+  // Function.prototype.apply(thisArg, argArray) is arity 2 (ES2024 §20.2.3);
+  // bind/call default to 1.
+  apply: 2,
   // String.prototype arities that differ from the default 1 (ES2024 §22.1.3).
   at: 1,
   charAt: 1,
@@ -408,6 +461,86 @@ export function ensureDateNativeProtoGlue(ctx: CodegenContext): number | undefin
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
     registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Date", DATE_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `Error.prototype` glue (idempotent) and return its brand. (S6) */
+export function ensureErrorNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Error");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Error", ERROR_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `Map.prototype` glue (idempotent) and return its brand. (S6) */
+export function ensureMapNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Map");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Map", MAP_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `Set.prototype` glue (idempotent) and return its brand. (S6) */
+export function ensureSetNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Set");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Set", SET_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `Function.prototype` glue (idempotent) and return its brand. (S7) */
+export function ensureFunctionNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Function");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Function", FUNCTION_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `Symbol.prototype` glue (idempotent) and return its brand. (S7) */
+export function ensureSymbolNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Symbol");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Symbol", SYMBOL_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `BigInt.prototype` glue (idempotent) and return its brand. (S7) */
+export function ensureBigIntNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "BigInt");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "BigInt", BIGINT_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `WeakMap.prototype` glue (idempotent) and return its brand. (S7) */
+export function ensureWeakMapNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "WeakMap");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "WeakMap", WEAKMAP_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `WeakSet.prototype` glue (idempotent) and return its brand. (S7) */
+export function ensureWeakSetNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "WeakSet");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "WeakSet", WEAKSET_PROTO_METHODS));
   }
   return brand;
 }

@@ -56,6 +56,14 @@ import {
   ensureNumberNativeProtoGlue,
   ensureBooleanNativeProtoGlue,
   ensureDateNativeProtoGlue,
+  ensureErrorNativeProtoGlue,
+  ensureMapNativeProtoGlue,
+  ensureSetNativeProtoGlue,
+  ensureFunctionNativeProtoGlue,
+  ensureSymbolNativeProtoGlue,
+  ensureBigIntNativeProtoGlue,
+  ensureWeakMapNativeProtoGlue,
+  ensureWeakSetNativeProtoGlue,
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
@@ -497,6 +505,39 @@ function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): nu
   // TypedArray views, see #2375), so the proto-object materialization is clean.
   if (builtinName === "Date") {
     return ensureDateNativeProtoGlue(ctx);
+  }
+  // (#1907 / #1888 S6-b — S6) Error / Map / Set protos. These three carry no
+  // runtime-state entanglement that breaks the `$NativeProto` value-read
+  // materialization (measured: clean flips, 0 regressions). Promise is
+  // deliberately EXCLUDED here — its proto glue introduced a runtime
+  // null-pointer deref in a passing Promise test (the async-capability runtime
+  // state collides with the value-read path, the Promise analog of the
+  // TypedArray init-trap in #2375); deferred to a dedicated investigation.
+  if (builtinName === "Error") {
+    return ensureErrorNativeProtoGlue(ctx);
+  }
+  if (builtinName === "Map") {
+    return ensureMapNativeProtoGlue(ctx);
+  }
+  if (builtinName === "Set") {
+    return ensureSetNativeProtoGlue(ctx);
+  }
+  // (S7 trap-probe) Function / Symbol / BigInt / WeakMap / WeakSet protos —
+  // measuring flips + the trap/regression check before committing each.
+  if (builtinName === "Function") {
+    return ensureFunctionNativeProtoGlue(ctx);
+  }
+  if (builtinName === "Symbol") {
+    return ensureSymbolNativeProtoGlue(ctx);
+  }
+  if (builtinName === "BigInt") {
+    return ensureBigIntNativeProtoGlue(ctx);
+  }
+  if (builtinName === "WeakMap") {
+    return ensureWeakMapNativeProtoGlue(ctx);
+  }
+  if (builtinName === "WeakSet") {
+    return ensureWeakSetNativeProtoGlue(ctx);
   }
   // Other builtins: only resolve if some path already registered glue for them.
   const brand = getBuiltinBrand(ctx, builtinName);
