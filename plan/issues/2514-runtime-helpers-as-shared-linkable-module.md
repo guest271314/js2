@@ -70,15 +70,32 @@ required.
   sidesteps the GC-string identity problem entirely (memory-typed strings carry
   no GC identity), so a shared runtime could land there before the WasmGC path.
 
-## Standards context (verify before relying on)
+## Standards context (checked 2026-06-19)
 
-- The Component Model deliberately copies/serializes across component boundaries
-  (Canonical ABI) — it does **not** pass core GC objects across, so it is not the
-  vehicle for a zero-copy shared runtime.
-- An explicit **type-imports / type-import-export** direction would make
-  cross-module type sharing nominal/explicit, but as of 2026-06 its status is
-  unconfirmed here — a web check is queued (see the parent investigation). The
-  canonical-rec-group convention above does NOT depend on it.
+- **Engine-level canonicalization already solves cross-module GC type identity —
+  and it is shipped.** Per the WasmGC design and V8's implementation, the engine
+  canonicalizes *all* types from *all* modules in an isolate into a single global
+  type index; a struct type from module M1 is **equivalent** to a structurally
+  identical struct from M2 (isorecursive type canonicalization). So structurally
+  identical rec groups across separately-compiled modules unify to the same
+  runtime type today — which is exactly what makes the canonical-rec-group ABI
+  above viable without any new standard.
+  Refs: WasmGC overview <https://github.com/WebAssembly/gc/blob/main/proposals/gc/Overview.md>,
+  isorecursive canonicalization discussion <https://github.com/WebAssembly/gc/issues/292>.
+  **Engine-maturity asterisk:** this canonicalizer is security-sensitive and has
+  had real bugs (a Chrome RCE was filed against the cross-module
+  type-canonicalization machinery) — validate behavior on target engines.
+- **The Component Model is NOT the vehicle.** Its in-flight shared-module design,
+  Shared-Everything Dynamic Linking
+  <https://github.com/WebAssembly/component-model/blob/main/design/mvp/examples/SharedEverythingDynamicLinking.md>,
+  is the `.dll`/`.so`-style mechanism — but it is **purely linear-memory based and
+  does not address WasmGC types**. It shares *code*, not *GC objects*; each
+  instance gets its own memory. GC-object sharing would need separate extensions.
+- **Explicit alternative (not required):** the Type Imports & Exports proposal
+  <https://github.com/WebAssembly/proposal-type-imports> would let a module import
+  a type by reference (abstract/nominal sharing) and is slated to become part of
+  the future basis for GC. It is a separate, not-yet-shipped proposal; the
+  canonical-rec-group convention above does **not** depend on it.
 
 ## Scope / phasing
 
