@@ -89,6 +89,59 @@ const OBJECT_PROTO_METHODS = [
 ] as const;
 
 /**
+ * `Date.prototype`'s own method names (ES2024 §21.4.4). All the getter/setter
+ * methods are plain data methods on the proto (no accessor *getters* on
+ * `Date.prototype` itself), so the whole set goes in the value-read member CSV.
+ * `@@toPrimitive` is a well-known-symbol member resolved by the computed-access
+ * path, so it stays out of the string CSV (same convention as the others).
+ */
+const DATE_PROTO_METHODS = [
+  "getDate",
+  "getDay",
+  "getFullYear",
+  "getHours",
+  "getMilliseconds",
+  "getMinutes",
+  "getMonth",
+  "getSeconds",
+  "getTime",
+  "getTimezoneOffset",
+  "getUTCDate",
+  "getUTCDay",
+  "getUTCFullYear",
+  "getUTCHours",
+  "getUTCMilliseconds",
+  "getUTCMinutes",
+  "getUTCMonth",
+  "getUTCSeconds",
+  "setDate",
+  "setFullYear",
+  "setHours",
+  "setMilliseconds",
+  "setMinutes",
+  "setMonth",
+  "setSeconds",
+  "setTime",
+  "setUTCDate",
+  "setUTCFullYear",
+  "setUTCHours",
+  "setUTCMilliseconds",
+  "setUTCMinutes",
+  "setUTCMonth",
+  "setUTCSeconds",
+  "toDateString",
+  "toISOString",
+  "toJSON",
+  "toLocaleDateString",
+  "toLocaleString",
+  "toLocaleTimeString",
+  "toString",
+  "toTimeString",
+  "toUTCString",
+  "valueOf",
+] as const;
+
+/**
  * `String.prototype`'s own method names (ES2024 §22.1.3). `@@iterator` is a
  * well-known-symbol member resolved via the computed-access path, so only the
  * string members go in the CSV (same convention as `ARRAY_PROTO_METHODS`).
@@ -146,6 +199,53 @@ const NUMBER_PROTO_METHODS = [
 /** `Boolean.prototype`'s own method names (ES2024 §20.3.3). */
 const BOOLEAN_PROTO_METHODS = ["toString", "valueOf"] as const;
 
+/** `Error.prototype`'s own method names (ES2024 §20.5.3). `name`/`message` are
+ * data properties (own on the proto), not methods. */
+const ERROR_PROTO_METHODS = ["toString"] as const;
+
+/** `Function.prototype`'s own method names (ES2024 §20.2.3). */
+const FUNCTION_PROTO_METHODS = ["apply", "bind", "call", "toString"] as const;
+
+/** `Symbol.prototype`'s own method names (ES2024 §20.4.3). `description` is an
+ * accessor getter, resolved by the computed-access path. */
+const SYMBOL_PROTO_METHODS = ["toString", "valueOf"] as const;
+
+/** `BigInt.prototype`'s own method names (ES2024 §21.2.3). */
+const BIGINT_PROTO_METHODS = ["toLocaleString", "toString", "valueOf"] as const;
+
+/** `WeakMap.prototype`'s own method names (ES2024 §24.3.3). */
+const WEAKMAP_PROTO_METHODS = ["delete", "get", "has", "set"] as const;
+
+/** `WeakSet.prototype`'s own method names (ES2024 §24.4.3). */
+const WEAKSET_PROTO_METHODS = ["add", "delete", "has"] as const;
+
+/**
+ * `Map.prototype`'s own method names (ES2024 §24.1.3). `size` is an accessor
+ * *getter* on the proto (resolved by the computed-access path), not a data
+ * method, so it stays out of the value-read CSV.
+ */
+const MAP_PROTO_METHODS = ["clear", "delete", "entries", "forEach", "get", "has", "keys", "set", "values"] as const;
+
+/** `Set.prototype`'s own method names (ES2024 §24.2.3 + the new set-method
+ * proposal). `size` is an accessor getter, kept out of the CSV. */
+const SET_PROTO_METHODS = [
+  "add",
+  "clear",
+  "delete",
+  "difference",
+  "entries",
+  "forEach",
+  "has",
+  "intersection",
+  "isDisjointFrom",
+  "isSubsetOf",
+  "isSupersetOf",
+  "keys",
+  "symmetricDifference",
+  "union",
+  "values",
+] as const;
+
 /** Spec arity (`fn.length`) of the proto methods that differ from the default 1. */
 const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   concat: 1,
@@ -161,6 +261,12 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   hasOwnProperty: 1,
   isPrototypeOf: 1,
   propertyIsEnumerable: 1,
+  // Map.prototype.set(key, value) is arity 2 (ES2024 §24.1.3); add/get/has/delete
+  // default to 1.
+  set: 2,
+  // Function.prototype.apply(thisArg, argArray) is arity 2 (ES2024 §20.2.3);
+  // bind/call default to 1.
+  apply: 2,
   // String.prototype arities that differ from the default 1 (ES2024 §22.1.3).
   at: 1,
   charAt: 1,
@@ -202,8 +308,46 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   trimStart: 0,
   isWellFormed: 0,
   toWellFormed: 0,
-  // entries/keys/values/reverse/pop/shift/toString/valueOf/… default to 0 or 1;
-  // the value-read OBJECT does not depend on exact arities, only the member set.
+  // Date.prototype set* arities (ES2024 §21.4.4) that differ from the default 1.
+  setFullYear: 3,
+  setUTCFullYear: 3,
+  setMonth: 2,
+  setUTCMonth: 2,
+  setHours: 4,
+  setUTCHours: 4,
+  setMinutes: 3,
+  setUTCMinutes: 3,
+  setSeconds: 2,
+  setUTCSeconds: 2,
+  // Date getters / no-arg conversions are 0-arity (ES2024 §21.4.4); fold their
+  // `.length` to 0 so the meta-read path reports the spec arity.
+  getDate: 0,
+  getDay: 0,
+  getFullYear: 0,
+  getHours: 0,
+  getMilliseconds: 0,
+  getMinutes: 0,
+  getMonth: 0,
+  getSeconds: 0,
+  getTime: 0,
+  getTimezoneOffset: 0,
+  getUTCDate: 0,
+  getUTCDay: 0,
+  getUTCFullYear: 0,
+  getUTCHours: 0,
+  getUTCMilliseconds: 0,
+  getUTCMinutes: 0,
+  getUTCMonth: 0,
+  getUTCSeconds: 0,
+  setTime: 1,
+  toDateString: 0,
+  toISOString: 0,
+  toTimeString: 0,
+  toUTCString: 0,
+  // toJSON is 1 (the `key` param). entries/keys/values/reverse/pop/shift/
+  // toString/valueOf/… default to 0 or 1; the value-read OBJECT does not depend
+  // on exact arities, only the member set.
+  toJSON: 1,
 };
 
 /**
@@ -299,6 +443,104 @@ export function ensureBooleanNativeProtoGlue(ctx: CodegenContext): number | unde
   if (brand === undefined) return undefined;
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
     registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Boolean", BOOLEAN_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/**
+ * Register `Date.prototype` glue (idempotent) and return its brand. (#1907 /
+ * #1888 S6-b — S5.) The Date brand is pre-reserved in `BUILTIN_BRAND_TABLE`;
+ * this only fills in the member CSV so a bare `Date.prototype` /
+ * `Date.prototype.<method>` value read resolves host-free instead of refusing.
+ * Reflective member-CLOSURE bodies still degrade to a catchable TypeError until
+ * per-member native bodies land — the value-read OBJECT + `.length`/`.name`
+ * meta folds need only the member set.
+ */
+export function ensureDateNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Date");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Date", DATE_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `Error.prototype` glue (idempotent) and return its brand. (S6) */
+export function ensureErrorNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Error");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Error", ERROR_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `Map.prototype` glue (idempotent) and return its brand. (S6) */
+export function ensureMapNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Map");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Map", MAP_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `Set.prototype` glue (idempotent) and return its brand. (S6) */
+export function ensureSetNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Set");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Set", SET_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `Function.prototype` glue (idempotent) and return its brand. (S7) */
+export function ensureFunctionNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Function");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Function", FUNCTION_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `Symbol.prototype` glue (idempotent) and return its brand. (S7) */
+export function ensureSymbolNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "Symbol");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "Symbol", SYMBOL_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `BigInt.prototype` glue (idempotent) and return its brand. (S7) */
+export function ensureBigIntNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "BigInt");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "BigInt", BIGINT_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `WeakMap.prototype` glue (idempotent) and return its brand. (S7) */
+export function ensureWeakMapNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "WeakMap");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "WeakMap", WEAKMAP_PROTO_METHODS));
+  }
+  return brand;
+}
+
+/** Register `WeakSet.prototype` glue (idempotent) and return its brand. (S7) */
+export function ensureWeakSetNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "WeakSet");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "WeakSet", WEAKSET_PROTO_METHODS));
   }
   return brand;
 }
