@@ -4986,6 +4986,93 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── __object_fromEntries(externref entries) -> externref (#2042 S3 residual) ─
+  //
+  // `Object.fromEntries(entries)` where `entries` is a `$ObjVec` of `[key,value]`
+  // pair `$ObjVec`s. Builds a fresh `$Object` and, for each pair, sets
+  // `out[pair[0]] = pair[1]` via `__extern_set` (which ToPropertyKeys the key —
+  // #2042 R2/S1). Iterates via `__extern_length` / `__extern_get_idx` (which
+  // index a `$ObjVec` reliably). The CALL SITE (calls.ts) normalises a literal
+  // array-of-pairs arg into this `$ObjVec`-of-`$ObjVec` shape before calling, so
+  // the helper only ever sees the indexable representation (a raw native vec /
+  // Map is not reliably indexable through `__extern_get_idx` — that's why the
+  // call site converts first, mirroring `compileObjectAssignArg`).
+  //
+  // params: 0=entries(externref) ; locals: 1=len(f64) 2=i(i32) 3=pair 4=key 5=val 6=out
+  {
+    const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
+    const externLengthIdx = ctx.funcMap.get("__extern_length")!;
+    const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx")!;
+    const externSetIdx2 = ctx.funcMap.get("__extern_set")!;
+    const pairElem = (pairLocal: number, idx: number): Instr[] => [
+      { op: "local.get", index: pairLocal },
+      { op: "f64.const", value: idx },
+      { op: "call", funcIdx: externGetIdxIdx },
+    ];
+    const body: Instr[] = [
+      { op: "call", funcIdx: newPlainObjectIdx },
+      { op: "local.set", index: 6 },
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: externLengthIdx },
+      { op: "local.set", index: 1 },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 2 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              { op: "local.get", index: 2 },
+              { op: "f64.convert_i32_s" },
+              { op: "local.get", index: 1 },
+              { op: "f64.ge" },
+              { op: "br_if", depth: 1 },
+              // pair = __extern_get_idx(entries, i)
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: 2 },
+              { op: "f64.convert_i32_s" },
+              { op: "call", funcIdx: externGetIdxIdx },
+              { op: "local.set", index: 3 },
+              // key = pair[0]; val = pair[1]
+              ...pairElem(3, 0),
+              { op: "local.set", index: 4 },
+              ...pairElem(3, 1),
+              { op: "local.set", index: 5 },
+              // __extern_set(out, key, val)
+              { op: "local.get", index: 6 },
+              { op: "local.get", index: 4 },
+              { op: "local.get", index: 5 },
+              { op: "call", funcIdx: externSetIdx2 },
+              { op: "local.get", index: 2 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 2 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      { op: "local.get", index: 6 },
+    ];
+    registerNative(
+      "__object_fromEntries",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "len", type: { kind: "f64" } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "pair", type: { kind: "externref" } },
+        { name: "key", type: { kind: "externref" } },
+        { name: "val", type: { kind: "externref" } },
+        { name: "out", type: { kind: "externref" } },
+      ],
+      body,
+    );
+  }
+
   // NOTE (#2042 S3): `__defineProperty_desc` (generic
   // `Object.defineProperty(o, k, runtimeDescObj)`) is intentionally NOT
   // registered here yet. Its body would delegate to the working native
@@ -6821,6 +6908,14 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__getOwnPropertyNames",
   "__getOwnPropertySymbols",
   "__object_getOwnPropertyDescriptors",
+  // NOTE (#2042 S3): `__object_fromEntries` is intentionally NOT in this set. The
+  // native helper only iterates a `$ObjVec` of pair `$ObjVec`s, which the
+  // fromEntries call site BUILDS (and calls the helper via funcMap directly) only
+  // for a literal array-of-pairs with string keys. The ordinary path (raw arg /
+  // Map / non-string-key) must keep REFUSING (compile error) — routing it native
+  // here would make `ensureLateImport` register the helper for those args too and
+  // TRAP on the non-$ObjVec representation. So this name stays a refusal; the
+  // call site resolves the registered helper via funcMap only on the safe shape.
   // #1472 Phase C — `x === undefined` / default-parameter / destructuring-default
   // undefinedness check. Native impl is `ref.is_null` (standalone conflates
   // undefined and null, same as __typeof_undefined). This is the single largest
