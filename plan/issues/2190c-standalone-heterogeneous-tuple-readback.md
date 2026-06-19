@@ -12,7 +12,7 @@ task_type: bug
 area: codegen
 goal: standalone-conformance
 sprint: 63
-depends_on: [2190, 2511]
+depends_on: [2190]
 ---
 
 ## Problem
