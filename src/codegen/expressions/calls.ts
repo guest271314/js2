@@ -5169,6 +5169,82 @@ function compileCallExpression(
       propAccess.name.text === "is" &&
       expr.arguments.length >= 2
     ) {
+      const xArgEarly = expr.arguments[0]!;
+      const yArgEarly = expr.arguments[1]!;
+      // (#2375) Native SameValue (§20.1.2.13) for statically same-type scalar
+      // args — no boxing, no host `__object_is` (unsatisfiable in --target
+      // standalone, where Object.is otherwise CE'd). Purely additive: only fires
+      // when BOTH args are the same primitive type; everything else falls through
+      // to the existing boxed `__object_is` path unchanged. Host mode benefits too
+      // (avoids the boxing round-trip) but the host path is preserved for the
+      // mixed/dynamic cases.
+      {
+        const xType = ctx.checker.getTypeAtLocation(xArgEarly);
+        const yType = ctx.checker.getTypeAtLocation(yArgEarly);
+        const bothNumber = isNumberType(xType) && isNumberType(yType) && !isBooleanType(xType) && !isBooleanType(yType);
+        const bothBoolean = isBooleanType(xType) && isBooleanType(yType);
+        const bothString = isStringType(xType) && isStringType(yType);
+
+        if (bothBoolean) {
+          // Booleans lower to i32 (0/1). SameValue(bool, bool) === strict equality.
+          const xt = compileExpression(ctx, fctx, xArgEarly);
+          if (xt && xt.kind !== "i32") coerceType(ctx, fctx, xt, { kind: "i32" });
+          const yt = compileExpression(ctx, fctx, yArgEarly);
+          if (yt && yt.kind !== "i32") coerceType(ctx, fctx, yt, { kind: "i32" });
+          fctx.body.push({ op: "i32.eq" });
+          return { kind: "i32" };
+        }
+
+        if (bothNumber) {
+          // SameValue(Number x, Number y): true iff x,y are both NaN, OR their
+          // IEEE-754 bit patterns are identical (which distinguishes +0 from -0
+          // — different sign bit — and treats all NaN as equal via the both-NaN
+          // clause). Lower as:
+          //   (x !== x && y !== y) | (i64.reinterpret(x) == i64.reinterpret(y))
+          const xLocal = allocLocal(fctx, `__objis_x_${fctx.locals.length}`, { kind: "f64" });
+          const yLocal = allocLocal(fctx, `__objis_y_${fctx.locals.length}`, { kind: "f64" });
+          const xt = compileExpression(ctx, fctx, xArgEarly);
+          if (xt && xt.kind !== "f64") coerceType(ctx, fctx, xt, { kind: "f64" });
+          fctx.body.push({ op: "local.set", index: xLocal });
+          const yt = compileExpression(ctx, fctx, yArgEarly);
+          if (yt && yt.kind !== "f64") coerceType(ctx, fctx, yt, { kind: "f64" });
+          fctx.body.push({ op: "local.set", index: yLocal });
+          // bits(x) == bits(y)
+          fctx.body.push({ op: "local.get", index: xLocal });
+          fctx.body.push({ op: "i64.reinterpret_f64" } as Instr);
+          fctx.body.push({ op: "local.get", index: yLocal });
+          fctx.body.push({ op: "i64.reinterpret_f64" } as Instr);
+          fctx.body.push({ op: "i64.eq" });
+          // (x !== x) & (y !== y)  →  both NaN
+          fctx.body.push({ op: "local.get", index: xLocal });
+          fctx.body.push({ op: "local.get", index: xLocal });
+          fctx.body.push({ op: "f64.ne" });
+          fctx.body.push({ op: "local.get", index: yLocal });
+          fctx.body.push({ op: "local.get", index: yLocal });
+          fctx.body.push({ op: "f64.ne" });
+          fctx.body.push({ op: "i32.and" });
+          // bitsEqual | bothNaN
+          fctx.body.push({ op: "i32.or" });
+          return { kind: "i32" };
+        }
+
+        if (bothString && ctx.nativeStrings) {
+          // SameValue(String x, String y) === string content equality. Use the
+          // native `__str_equals` (over flattened native strings) — no host call.
+          const eqIdx = ctx.nativeStrHelpers.get("__str_equals");
+          const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+          if (eqIdx !== undefined && flattenIdx !== undefined) {
+            const xt = compileExpression(ctx, fctx, xArgEarly);
+            void xt;
+            fctx.body.push({ op: "call", funcIdx: flattenIdx });
+            const yt = compileExpression(ctx, fctx, yArgEarly);
+            void yt;
+            fctx.body.push({ op: "call", funcIdx: flattenIdx });
+            fctx.body.push({ op: "call", funcIdx: eqIdx });
+            return { kind: "i32" };
+          }
+        }
+      }
       // Helper: compile an argument and coerce to externref preserving JS type
       const compileArgAsExternref = (arg: ts.Expression) => {
         const argTsType = ctx.checker.getTypeAtLocation(arg);
