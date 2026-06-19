@@ -54,6 +54,7 @@ import {
 } from "./index.js";
 import { ensureNativeStringExternBridge, ensureNativeStringHelpers } from "./native-strings.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
+import { emitNativeUriEncode } from "./uri-encoding-native.js";
 import { emitNativeNumberFormat } from "./number-format-native.js";
 import {
   isNativeGeneratorCandidate,
@@ -1205,10 +1206,34 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   }
 
   // ── collectURIImports finalize ──
-  for (const name of state.uriNeeded) {
-    if (ctx.funcMap.has(name)) continue;
-    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
-    addImport(ctx, "env", name, { kind: "func", typeIdx });
+  // #2400 — `encodeURI` / `encodeURIComponent` are JS-host `env.*` imports in
+  // host mode. Under `--target wasi`/`--target standalone` there is no host, so
+  // the call site previously fell through to a `ref.test`/`ref.cast` of the
+  // argument and returned `null`. Emit the pure-Wasm `__uri_encode` helper
+  // instead (registered as a DEFINED func; the batched late-import shift keeps
+  // its funcMap index + sibling-call targets correct as later imports register).
+  // The four function NAMES remain mapped to the host import in host mode; in
+  // standalone mode the call site (calls.ts) routes the encode names through
+  // `__uri_encode` with the per-function preserved-set mask.
+  {
+    let needsNativeEncode = false;
+    for (const name of state.uriNeeded) {
+      if (ctx.funcMap.has(name)) continue;
+      if (ctx.wasi || ctx.standalone) {
+        if (name === "encodeURI" || name === "encodeURIComponent") {
+          needsNativeEncode = true;
+          continue;
+        }
+        // decodeURI / decodeURIComponent native path (S3/S4) not yet emitted;
+        // fall through to the host import so host mode is unaffected and the
+        // standalone decode path is a follow-up slice.
+      }
+      const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
+      addImport(ctx, "env", name, { kind: "func", typeIdx });
+    }
+    if (needsNativeEncode) {
+      emitNativeUriEncode(ctx);
+    }
   }
 
   // ── collectStringStaticImports finalize ──

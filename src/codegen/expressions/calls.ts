@@ -165,6 +165,7 @@ import {
   stringConstantExternrefInstrs,
 } from "../native-strings.js";
 import { emitVariadicStringConcat, hostStringRepr, nativeStringRepr } from "../builtin-scaffold.js";
+import { URI_ENCODE_MASK } from "../uri-encoding-native.js";
 import { emitArrayBufferSlice, emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
 import {
   getLinearU8Buffer,
@@ -8889,7 +8890,11 @@ function compileCallExpression(
       }
     }
 
-    // decodeURI, decodeURIComponent, encodeURI, encodeURIComponent — host imports
+    // decodeURI, decodeURIComponent, encodeURI, encodeURIComponent.
+    // Host mode: per-name `env.*` import. Standalone/wasi (#2400): the encode
+    // names route to the pure-Wasm `__uri_encode(s, preservedMask)` helper
+    // emitted in declarations.ts, passing the per-function preserved-set mask
+    // (encodeURIComponent = uriUnescaped; encodeURI = + uriReserved ∪ #).
     if (
       (funcName === "decodeURI" ||
         funcName === "decodeURIComponent" ||
@@ -8897,6 +8902,19 @@ function compileCallExpression(
         funcName === "encodeURIComponent") &&
       expr.arguments.length >= 1
     ) {
+      const nativeEncodeIdx =
+        funcName === "encodeURI" || funcName === "encodeURIComponent"
+          ? ctx.funcMap.get("__uri_encode")
+          : undefined;
+      if (nativeEncodeIdx !== undefined) {
+        const arg0Type = compileExpression(ctx, fctx, expr.arguments[0]!);
+        if (arg0Type && arg0Type.kind !== "externref") {
+          coerceType(ctx, fctx, arg0Type, { kind: "externref" });
+        }
+        fctx.body.push({ op: "i32.const", value: URI_ENCODE_MASK[funcName]! });
+        fctx.body.push({ op: "call", funcIdx: nativeEncodeIdx });
+        return { kind: "externref" };
+      }
       const importFuncIdx = ctx.funcMap.get(funcName);
       if (importFuncIdx !== undefined) {
         const arg0Type = compileExpression(ctx, fctx, expr.arguments[0]!);
