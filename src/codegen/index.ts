@@ -9678,38 +9678,21 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
         else: [{ op: "i32.const", value: 0 }],
       } as Instr,
     ];
-    // String VALUE equality (two `$AnyString` refs compare by content, not
-    // identity — `["x"].indexOf("x")` must match) then fall back to ref identity.
-    // Guard on native-string helper availability; otherwise pure ref identity.
-    let stringOrIdentityArm: Instr[] = refIdentityArm;
-    if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
-      ensureNativeStringHelpers(ctx);
-      const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
-      const strEqIdx = ctx.nativeStrHelpers.get("__str_equals");
-      if (flattenIdx !== undefined && strEqIdx !== undefined) {
-        stringOrIdentityArm = [
-          { op: "local.get", index: 2 },
-          { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
-          { op: "local.get", index: 3 },
-          { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
-          { op: "i32.and" },
-          {
-            op: "if",
-            blockType: { kind: "val", type: { kind: "i32" } },
-            then: [
-              { op: "local.get", index: 2 },
-              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-              { op: "call", funcIdx: flattenIdx } as Instr,
-              { op: "local.get", index: 3 },
-              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
-              { op: "call", funcIdx: flattenIdx } as Instr,
-              { op: "call", funcIdx: strEqIdx } as Instr,
-            ],
-            else: refIdentityArm,
-          } as Instr,
-        ];
-      }
-    }
+    // String VALUE equality is NOT inlined here. A boxed-any STRING element
+    // compares by content (`["x"].indexOf("x")` must match), which needs a
+    // `__str_flatten`+`__str_equals` call. But those helpers live in the
+    // native-string regime BELOW the union-helper base, and any call to them
+    // baked into THIS union-helper body drifts under the late-import finalize
+    // shift (`reconcileNativeStrFinalizeShift` re-bases every `call funcIdx >=
+    // base`), landing on the wrong function — the encoder then patches the stack
+    // with `extern.convert_any; …; drop`, which the GC validator accepts but
+    // wasm-opt rejects ("popping from empty stack", surfaced as the
+    // native-messaging-smoke CI failure). Rather than fight the cross-regime
+    // index shift, the string arm falls back to `eq`-heap ref identity here:
+    // VALID Wasm, correct for interned/same-ref strings. String-element `any[]`
+    // search-by-VALUE is a tracked #2508 follow-up that belongs in a
+    // `__any_str_value_eq` helper registered in the native-string regime.
+    const stringOrIdentityArm: Instr[] = refIdentityArm;
     // Materialise the anyref temps (locals 2/3) once, then dispatch string/ref.
     const identityArm: Instr[] = [
       { op: "local.get", index: 0 },

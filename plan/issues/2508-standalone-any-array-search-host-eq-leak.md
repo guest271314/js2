@@ -84,12 +84,26 @@ to the natives under `ctx.standalone`/`ctx.wasi`. Host (GC) mode is gated out
 imports.
 
 MEASURED (standalone, instantiate with `{}`): indexOf 2→1, 9→-1, NaN→-1 (strict),
-[false].indexOf(0)→-1 (cross-type), boolean→found, string→found by value,
-fromIndex honored; includes NaN→true (SVZ), string→found; lastIndexOf number/
-string. number[] search unchanged. #1776 (21) + loose-equality + issue-2073
-green; the #1776 leak assertion was tightened from a `__host_eq` substring check
-to an `env`-IMPORT check (a native `(func $__host_eq …)` is now legitimate).
-coercion-sites baseline refreshed (+2 index.ts, +1 late-imports.ts).
+[false].indexOf(0)→-1 (cross-type), boolean→found, fromIndex honored; includes
+NaN→true (SVZ); lastIndexOf number. number[] search unchanged. #1776 (21) +
+loose-equality + issue-2073 green; the #1776 leak assertion was tightened from a
+`__host_eq` substring check to an `env`-IMPORT check (a native `(func $__host_eq
+…)` is now legitimate). coercion-sites baseline refreshed (+2 index.ts, +1
+late-imports.ts). wasm-opt `-O3` (native-messaging-smoke) passes.
+
+**String-element search-by-VALUE — deferred follow-up (string arm of #2508).**
+A boxed-any STRING element compares by content (`__str_flatten`+`__str_equals`).
+Those helpers live in the native-string regime BELOW the union-helper base; a
+call to them baked into the `__host_eq`/`__same_value_zero` union-helper body
+drifts under the late-import finalize shift (`reconcileNativeStrFinalizeShift`
+re-bases every `call funcIdx >= base`), landing on the wrong function — the
+encoder then patches the stack with `extern.convert_any; …; drop`, which the GC
+validator accepts but **wasm-opt rejects** ("popping from empty stack" — the
+native-messaging-smoke CI failure on the first PR push). The string arm therefore
+falls back to `eq`-heap **ref identity** here (valid Wasm; correct for interned/
+same-ref strings). String-by-value belongs in a `__any_str_value_eq` helper
+registered in the native-string regime, not the union-helper body — tracked as
+the #2508 string-value follow-up.
 
 **Out of scope (separate helper family, follow-up):** `any[].flat`/`flatMap`
 leak `__array_flat`/`__array_flatMap`/`__make_callback` — need native flat/
