@@ -86,6 +86,35 @@ describe("issue #2026 PR-2: .constructor identity via any-typed receiver", () =>
     ).toBe(0);
   });
 
+  // Regression guard for the net-479 break: the `.constructor`-via-tag arm fires
+  // for ANY `any`-typed `.constructor` access once a user class exists. When the
+  // receiver is NOT a user-class instance, the arm must FALL THROUGH to the real
+  // (host) `.constructor`, not clobber it with null. Before the fix it returned
+  // null, so a host object's `.constructor` evaluated to null and any later use
+  // (`.name`, `new ...`) trapped "Cannot access property on null or undefined" —
+  // this is exactly what nulled the test262 harness `TypedArray` shim
+  // (`Object.getPrototypeOf(Int8Array.prototype).constructor`) and cascaded to
+  // ~478 TypedArray tests.
+  it("host receiver keeps its real .constructor through the arm (host) → true", async () => {
+    expect(
+      await runHost(`class A { x = 1; } ${ID}
+        export function test(): boolean { const s: any = id("hi"); const c: any = s.constructor; return c === String; }`),
+    ).toBe(1);
+  });
+
+  it("non-class .constructor stays usable (no null trap) (host) → true", async () => {
+    // Mirrors the harness pattern: read `.constructor` off an `any` host value
+    // and then USE the result. A null result would trap on the subsequent read.
+    expect(
+      await runHost(`class A { x = 1; } ${ID}
+        export function test(): boolean {
+          const obj: any = id([1, 2, 3]);
+          const ctor: any = obj.constructor;
+          return ctor === Array && ctor.name === "Array";
+        }`),
+    ).toBe(1);
+  });
+
   it("standalone: a.constructor === A via any, zero env imports → true", async () => {
     expect(
       await runStandalone(`class A { v = 1; } ${ID}

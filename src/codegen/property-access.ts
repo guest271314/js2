@@ -1779,10 +1779,42 @@ function tryEmitConstructorViaTag(
     } as Instr);
   }
 
-  // Result local: the class-object externref (null when no tag matched).
+  // Result local: seeded with the GENERIC `.constructor` read of the receiver,
+  // so a non-user-class receiver (a host object, a TypedArray, a string, etc.)
+  // keeps its real constructor — the tag dispatch below only OVERRIDES this when
+  // a user-class `__tag` matches.
+  //
+  // Why this seed is load-bearing (#2026 PR-2 regression fix): this arm fires for
+  // ANY `any`/`unknown`-typed `.constructor` access whenever the module declares
+  // at least one tag-bearing user class. The test262 runner injects
+  // `class Test262Error` into essentially every program, so that condition holds
+  // for nearly every test. Seeding `resLocal` with a bare `ref.null.extern` made
+  // `Object.getPrototypeOf(Int8Array.prototype).constructor` (the `TypedArray`
+  // intrinsic shim, `any`-typed) evaluate to NULL, so every subsequent
+  // `TA.prototype.*` / `new TA(...)` trapped "Cannot access property on null or
+  // undefined" — cascading to ~478 TypedArray tests (net -479). The fix restores
+  // the pre-PR fall-through: no class-tag match ⇒ the original generic read.
   const resLocal = allocLocal(fctx, `__ctoridn_res_${fctx.locals.length}`, { kind: "externref" });
-  fctx.body.push({ op: "ref.null.extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: resLocal });
+  const externGetIdx =
+    ctx.standalone || ctx.wasi || ctx.strictNoHostImports
+      ? undefined
+      : ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  if (externGetIdx !== undefined) {
+    flushLateImportShifts(ctx, fctx);
+    // __extern_get(extern.convert_any(instLocal), "constructor")
+    fctx.body.push({ op: "local.get", index: instLocal });
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    addStringConstantGlobal(ctx, "constructor");
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, "constructor"));
+    fctx.body.push({ op: "call", funcIdx: externGetIdx } as Instr);
+    fctx.body.push({ op: "local.set", index: resLocal });
+  } else {
+    // Standalone / WASI / no-host: no `__extern_get` import. Preserve the prior
+    // behaviour for a non-class receiver (null externref — there is no host
+    // constructor object to recover).
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "local.set", index: resLocal });
+  }
 
   // Flat tag-equality dispatch: tag == classTag → emitLazyClassObjectGet(class).
   for (const className of candidates) {
