@@ -1,5 +1,5 @@
 ---
-id: 2508
+id: 2520
 title: "Ambient global-function host-import flood: collectExternDeclarations over lib files lacks a referenced-names gate"
 status: ready
 sprint: 64

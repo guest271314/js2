@@ -12,13 +12,13 @@ task_type: bug
 area: codegen
 language_feature: host-imports
 goal: correctness
-parent: 2508
-depends_on: [2508]
+parent: 2520
+depends_on: [2520]
 ---
 
 ## Problem
 
-Follow-up to #2508. The `referencedNames` gate used to decide which ambient
+Follow-up to #2520. The `referencedNames` gate used to decide which ambient
 globals to register as host imports is collected by walking **every**
 `ts.Identifier` in user source:
 
@@ -36,7 +36,7 @@ global `close`/`open`/`toString` functions. When such a name collides with an
 ambient `declare function` global, a spurious `env.<name>` host import is still
 emitted.
 
-This is the residual imprecision noted in #2508: the #2508 gate cuts the flood
+This is the residual imprecision noted in #2520: the #2520 gate cuts the flood
 from ~60 unconditional imports down to "only names appearing anywhere as an
 identifier", but property names that happen to collide with global functions
 (`close`, `open`, `stop`, `focus`, `blur`, `print`, `toString`, `postMessage`,
@@ -70,4 +70,4 @@ The property-access skip is cheap and removes the bulk of the false matches.
 ## Notes
 
 Strictly an over-emission / noise refinement — no correctness regression in
-emitted programs, just extra unused imports. Sequenced after #2508.
+emitted programs, just extra unused imports. Sequenced after #2520.
