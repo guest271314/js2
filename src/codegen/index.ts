@@ -9629,6 +9629,206 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   //     string (today's callers compare against literal tags via the
   //     __typeof_* helpers above).
   registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" }]);
+
+  // #2508 — native `__host_eq` (Strict Equality, §7.2.16) and
+  // `__same_value_zero` (SameValueZero, §7.2.11) over two boxed externrefs, so
+  // standalone `any[].indexOf/lastIndexOf/includes` need no JS host import. Tag
+  // dispatch mirrors the inline `===` lowering (#1776, binary-ops.ts): both
+  // number → unbox f64 & compare; both boolean → unbox i32; both bigint →
+  // i64; else reference identity on the WasmGC `eq` heap type. The ONLY
+  // difference between Strict and SameValueZero is the number arm's NaN case:
+  // Strict has NaN ≠ NaN (`f64.eq`), SameValueZero has NaN = NaN. Both treat
+  // +0 = -0 as equal, which `f64.eq` already gives.
+  {
+    const externref2ToI32 = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+    const typeofNumIdx = ctx.funcMap.get("__typeof_number")!;
+    const typeofBoolIdx = ctx.funcMap.get("__typeof_boolean")!;
+    const typeofBigIdx = ctx.funcMap.get("__typeof_bigint")!;
+    const unboxNumIdx = ctx.funcMap.get("__unbox_number")!;
+    const unboxBoolIdx = ctx.funcMap.get("__unbox_boolean")!;
+    const toBigIdx = ctx.funcMap.get("__to_bigint")!;
+    const EQ_HEAP = -19; // WasmGC `eq` abstract heap type
+
+    // params: l=0, r=1 ; locals: la=2 (anyref), ra=3 (anyref)
+    const bothTag = (tagIdx: number): Instr[] => [
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: tagIdx } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: tagIdx } as Instr,
+      { op: "i32.and" },
+    ];
+    // Reference-identity arm (else): both refs convert to anyref (locals 2/3);
+    // if both are eq heap refs, ref.eq; otherwise unequal.
+    const refIdentityArm: Instr[] = [
+      { op: "local.get", index: 2 },
+      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "local.get", index: 3 },
+      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 2 },
+          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "local.get", index: 3 },
+          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "ref.eq" },
+        ],
+        else: [{ op: "i32.const", value: 0 }],
+      } as Instr,
+    ];
+    // String VALUE equality (two `$AnyString` refs compare by content, not
+    // identity — `["x"].indexOf("x")` must match) then fall back to ref identity.
+    // Guard on native-string helper availability; otherwise pure ref identity.
+    let stringOrIdentityArm: Instr[] = refIdentityArm;
+    if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+      ensureNativeStringHelpers(ctx);
+      const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+      const strEqIdx = ctx.nativeStrHelpers.get("__str_equals");
+      if (flattenIdx !== undefined && strEqIdx !== undefined) {
+        stringOrIdentityArm = [
+          { op: "local.get", index: 2 },
+          { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+          { op: "local.get", index: 3 },
+          { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
+          { op: "i32.and" },
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [
+              { op: "local.get", index: 2 },
+              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+              { op: "call", funcIdx: flattenIdx } as Instr,
+              { op: "local.get", index: 3 },
+              { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+              { op: "call", funcIdx: flattenIdx } as Instr,
+              { op: "call", funcIdx: strEqIdx } as Instr,
+            ],
+            else: refIdentityArm,
+          } as Instr,
+        ];
+      }
+    }
+    // Materialise the anyref temps (locals 2/3) once, then dispatch string/ref.
+    const identityArm: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 2 },
+      { op: "local.get", index: 1 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 3 },
+      ...stringOrIdentityArm,
+    ];
+    const bigintArm = (elseArm: Instr[]): Instr[] => [
+      ...bothTag(typeofBigIdx),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: toBigIdx } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: toBigIdx } as Instr,
+          { op: "i64.eq" },
+        ],
+        else: elseArm,
+      } as Instr,
+    ];
+    const boolArm = (elseArm: Instr[]): Instr[] => [
+      ...bothTag(typeofBoolIdx),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: unboxBoolIdx } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: unboxBoolIdx } as Instr,
+          { op: "i32.eq" },
+        ],
+        else: elseArm,
+      } as Instr,
+    ];
+    // numberArm: sameValueZero=true adds a NaN==NaN recovery (a!=a && b!=b).
+    const numberArm = (sameValueZero: boolean, elseArm: Instr[]): Instr[] => {
+      const cmp: Instr[] = [
+        { op: "local.get", index: 0 },
+        { op: "call", funcIdx: unboxNumIdx } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "call", funcIdx: unboxNumIdx } as Instr,
+      ];
+      if (!sameValueZero) {
+        cmp.push({ op: "f64.eq" });
+      } else {
+        // (la == ra) || (la != la && ra != ra)   [NaN === NaN under SVZ]
+        // Stack has la, ra. Tee both into anyref-free f64 temps via locals 4/5.
+        cmp.length = 0;
+        cmp.push(
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: unboxNumIdx } as Instr,
+          { op: "local.set", index: 4 } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: unboxNumIdx } as Instr,
+          { op: "local.set", index: 5 } as Instr,
+          // la == ra
+          { op: "local.get", index: 4 } as Instr,
+          { op: "local.get", index: 5 } as Instr,
+          { op: "f64.eq" },
+          // || (la!=la && ra!=ra)
+          { op: "local.get", index: 4 } as Instr,
+          { op: "local.get", index: 4 } as Instr,
+          { op: "f64.ne" },
+          { op: "local.get", index: 5 } as Instr,
+          { op: "local.get", index: 5 } as Instr,
+          { op: "f64.ne" },
+          { op: "i32.and" },
+          { op: "i32.or" },
+        );
+      }
+      return [
+        ...bothTag(typeofNumIdx),
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: cmp,
+          else: elseArm,
+        } as Instr,
+      ];
+    };
+
+    // __host_eq: Strict Equality. null === null (both ref.null extern) → the
+    // identity arm's ref.test EQ fails for null (ref.null isn't an eq ref), so
+    // handle the both-null case up front: ref.is_null l && ref.is_null r → 1.
+    const nullArm = (rest: Instr[]): Instr[] => [
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      { op: "local.get", index: 1 },
+      { op: "ref.is_null" },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [{ op: "i32.const", value: 1 }],
+        else: rest,
+      } as Instr,
+    ];
+
+    const eqLocals = [
+      { name: "la", type: { kind: "anyref" } as ValType },
+      { name: "ra", type: { kind: "anyref" } as ValType },
+      { name: "fa", type: { kind: "f64" } as ValType },
+      { name: "fb", type: { kind: "f64" } as ValType },
+    ];
+
+    registerNative("__host_eq", externref2ToI32, nullArm(numberArm(false, boolArm(bigintArm(identityArm)))), eqLocals);
+    registerNative(
+      "__same_value_zero",
+      externref2ToI32,
+      nullArm(numberArm(true, boolArm(bigintArm(identityArm)))),
+      eqLocals,
+    );
+  }
 }
 
 /**
