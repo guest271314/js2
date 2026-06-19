@@ -1,12 +1,13 @@
 ---
 id: 2200
 title: "Annex B B.3.3 block-level function declaration hoisting — outer binding created/initialized incorrectly (~186 test262 fails)"
-status: done
+status: in-progress
 assignee: ttraenkler/sen-1
-completed: 2026-06-19
 sprint: 64
 created: 2026-06-19
 updated: 2026-06-19
+phase1: done
+phase2_rework: 2514
 has_impl_plan: true
 priority: high
 feasibility: medium
@@ -608,3 +609,13 @@ allocation so it cannot perturb functions that merely CONTAIN a block-nested
 helper (the dominant test262 harness shape). The typeof-resolution fix
 (`emitAnnexBTypeofFlagBranch` at the top of the undeclared-identifier branch) is
 correct and should be preserved for the rework.
+
+## Status: Phase-1-only (2026-06-19) — Phase 2 deferred to #2514
+
+Per tech-lead decision after the #1769 -1180 gate fail: **Phase 1 (#1764, ~93-test
+floor) is merged and stands alone; Phase 2 is deferred** to a focused rework
+tracked as **#2514** (narrow the TDZ-var allocation so it cannot perturb
+hot-path codegen; reproduce against a local test262 slice first; preserve the
+correct typeof-resolution fix). PR #1769 is converted to **draft** (NOT closed)
+to preserve the Phase 2 WIP + the reusable typeof fix. #2200 stays `in-progress`
+(Phase-1 shipped, Phase-2 → #2514).
