@@ -30,6 +30,12 @@ test262 `built-ins/{decodeURI,encodeURI,...}` fail.
 Per the dual-mode invariant these need a **pure-Wasm** implementation (no host),
 following the #679/#682 native-backend pattern.
 
+**Supersedes #863** (`863-decodeuri-encodeuri-failures-0-0.md`, `status: done`):
+that issue tracked the multi-byte UTF-8 handling in the **host-import** decodeURI/
+encodeURI path. #2500 is the standalone-native re-implementation (no host) — the
+single tracker for the percent-encoding family going forward. (Not renumbered to
+#863 to avoid churn; cross-linked instead.)
+
 ## Spec (ECMAScript §19.2.6)
 
 - **Encode** (§19.2.6.5 Encode): for each code point of the input string, if it
