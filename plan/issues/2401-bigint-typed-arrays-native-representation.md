@@ -1,5 +1,5 @@
 ---
-id: 2377
+id: 2401
 title: "Wasm-native BigInt64Array / BigUint64Array — i64/BigInt element representation"
 status: ready
 created: 2026-06-19
@@ -14,7 +14,7 @@ goal: standalone-mode
 sprint: Backlog
 related: [2379, 2159]
 ---
-# #2377 — Wasm-native `BigInt64Array` / `BigUint64Array`
+# #2401 — Wasm-native `BigInt64Array` / `BigUint64Array`
 
 ## Problem
 
