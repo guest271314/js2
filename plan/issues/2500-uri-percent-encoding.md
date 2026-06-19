@@ -50,6 +50,21 @@ following the #679/#682 native-backend pattern.
 
 ## Implementation plan
 
+**Infra finding (sd3, verified):** the existing `__str_to_utf8` /
+`__str_utf8_to_flat` transcoders are gated on `--utf8-storage` and are NOT
+emitted in the default standalone build (the native string is the i16 / UTF-16
+`$NativeString`). So `__uri_encode` must do the UTF-16→UTF-8 transcode **inline**
+(decode surrogate pairs from the flattened i16 buffer, emit 1-4 UTF-8 bytes per
+code point) rather than calling `__str_to_utf8`; `__uri_decode` likewise
+reassembles UTF-8 bytes → code point → UTF-16 code unit(s) inline. The reusable
+primitives that ARE always present in nativeStrings mode: `__str_flatten` (get
+the contiguous i16 data array + len), `__str_concat`, and the string-builder
+(`array.new_default` over `nativeStrDataTypeIdx` → wrap in `$NativeString`).
+Closest structural template: `parse-number-native.ts` (`emitNativeParseNumber`)
+— a two-pass scan over the flattened i16 buffer. **(S1/S2 confirm this: the
+shipped `__uri_encode` does exactly the inline UTF-16→UTF-8 transcode from the
+`__str_flatten` i16 buffer + `array.new_default` builder — no `__str_to_utf8`.)**
+
 Native string-engine helpers (mirror `__str_to_number` / `emitNativeParseNumber`
 in `any-helpers.ts`), registered once and called from the four call sites:
 
