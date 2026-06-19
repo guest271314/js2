@@ -49,7 +49,22 @@ import {
   getBuiltinBrand,
   getNativeProtoBuiltinGlue,
 } from "./native-proto.js";
-import { ensureArrayNativeProtoGlue, ensureObjectNativeProtoGlue } from "./array-object-proto.js";
+import {
+  ensureArrayNativeProtoGlue,
+  ensureObjectNativeProtoGlue,
+  ensureStringNativeProtoGlue,
+  ensureNumberNativeProtoGlue,
+  ensureBooleanNativeProtoGlue,
+  ensureDateNativeProtoGlue,
+  ensureErrorNativeProtoGlue,
+  ensureMapNativeProtoGlue,
+  ensureSetNativeProtoGlue,
+  ensureFunctionNativeProtoGlue,
+  ensureSymbolNativeProtoGlue,
+  ensureBigIntNativeProtoGlue,
+  ensureWeakMapNativeProtoGlue,
+  ensureWeakSetNativeProtoGlue,
+} from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
@@ -468,6 +483,61 @@ function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): nu
   }
   if (builtinName === "Object") {
     return ensureObjectNativeProtoGlue(ctx);
+  }
+  // (#1907 / #1888 S6-b — S4) String / Number / Boolean wrapper protos: register
+  // the native-proto glue on demand so `String.prototype.<method>` (and Number/
+  // Boolean) value reads resolve to a `$NativeProto` host-free instead of
+  // refusing. Reflective member closures degrade to a catchable TypeError until
+  // their native bodies land — the value-read object needs only the member set.
+  if (builtinName === "String") {
+    return ensureStringNativeProtoGlue(ctx);
+  }
+  if (builtinName === "Number") {
+    return ensureNumberNativeProtoGlue(ctx);
+  }
+  if (builtinName === "Boolean") {
+    return ensureBooleanNativeProtoGlue(ctx);
+  }
+  // (#1907 / #1888 S6-b — S5) Date.prototype value reads: register the
+  // native-proto glue on demand so `Date.prototype.<method>` value reads (and
+  // their `.length` meta folds) resolve to a `$NativeProto` host-free instead of
+  // refusing. Date carries no vec/runtime brand entanglement (unlike the
+  // TypedArray views, see #2375), so the proto-object materialization is clean.
+  if (builtinName === "Date") {
+    return ensureDateNativeProtoGlue(ctx);
+  }
+  // (#1907 / #1888 S6-b — S6) Error / Map / Set protos. These three carry no
+  // runtime-state entanglement that breaks the `$NativeProto` value-read
+  // materialization (measured: clean flips, 0 regressions). Promise is
+  // deliberately EXCLUDED here — its proto glue introduced a runtime
+  // null-pointer deref in a passing Promise test (the async-capability runtime
+  // state collides with the value-read path, the Promise analog of the
+  // TypedArray init-trap in #2375); deferred to a dedicated investigation.
+  if (builtinName === "Error") {
+    return ensureErrorNativeProtoGlue(ctx);
+  }
+  if (builtinName === "Map") {
+    return ensureMapNativeProtoGlue(ctx);
+  }
+  if (builtinName === "Set") {
+    return ensureSetNativeProtoGlue(ctx);
+  }
+  // (S7 trap-probe) Function / Symbol / BigInt / WeakMap / WeakSet protos —
+  // measuring flips + the trap/regression check before committing each.
+  if (builtinName === "Function") {
+    return ensureFunctionNativeProtoGlue(ctx);
+  }
+  if (builtinName === "Symbol") {
+    return ensureSymbolNativeProtoGlue(ctx);
+  }
+  if (builtinName === "BigInt") {
+    return ensureBigIntNativeProtoGlue(ctx);
+  }
+  if (builtinName === "WeakMap") {
+    return ensureWeakMapNativeProtoGlue(ctx);
+  }
+  if (builtinName === "WeakSet") {
+    return ensureWeakSetNativeProtoGlue(ctx);
   }
   // Other builtins: only resolve if some path already registered glue for them.
   const brand = getBuiltinBrand(ctx, builtinName);
@@ -1686,6 +1756,161 @@ function tryEmitDeleteAwareDynamicGet(
   return { kind: "externref" };
 }
 
+/**
+ * (#2026 PR-2) `.constructor` identity on an externref / `any`-typed instance.
+ *
+ * The static arm (`compileInstanceMember`, gated on `ctx.classSet.has(typeName)`)
+ * already makes `new A().constructor === A` hold for a STATICALLY-typed receiver
+ * by routing to the `__class_<Name>` singleton (`emitLazyClassObjectGet`). But
+ * when the instance flows through an `any`/externref binding (e.g. returned from
+ * `function id(x: any): any { return x }`), `typeName` is not a known class, that
+ * arm misses, and `.constructor` fell to the generic `__extern_get` read which
+ * returns a plain value that never `===` the class object — so
+ * `a.constructor === A` was `false`.
+ *
+ * This recovers identity at runtime by the SAME tag mechanism #2026 PR-1's
+ * `emitDynamicNewFallback` uses for dynamic `new`: read the instance's class
+ * `__tag` (struct field 0 on every class-root struct), then a flat
+ * `tag == classTag` if/else chain selects the matching `__class_<Name>`
+ * singleton (`emitLazyClassObjectGet`) — making both sides of `=== A`
+ * reference-identical. No host import; standalone-safe. No match (a non-class
+ * externref, or null) yields a null externref (the prior generic-read behaviour
+ * for a missing `.constructor`), so nothing regresses.
+ *
+ * Discrimination MUST be by `__tag`, never by struct type alone: WasmGC
+ * iso-recursive canonicalization merges structurally-identical class structs, so
+ * a `ref.test $A` is also true for a same-shape `$B` instance (#2009). The tag
+ * value is the unique class id.
+ *
+ * Returns the emitted result type (`externref`) when handled, else `undefined`.
+ */
+function tryEmitConstructorViaTag(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.PropertyAccessExpression,
+  objType: ts.Type,
+): ValType | undefined {
+  // Candidate classes: WasmGC-struct-backed with a class-object singleton (same
+  // filter as emitDynamicNewFallback — externref-backed builtin subclasses have
+  // no `$ClassName` struct / `__tag` to read).
+  const candidates: string[] = [];
+  for (const className of ctx.classObjectGlobals.keys()) {
+    if (ctx.classBuiltinParentMap.has(className)) continue;
+    if (ctx.structMap.get(className) === undefined) continue;
+    if (ctx.classTagMap.get(className) === undefined) continue;
+    candidates.push(className);
+  }
+  if (candidates.length === 0) return undefined;
+
+  // Only take over when the static class arm cannot: the receiver's type is not
+  // a concrete known class (those keep the zero-overhead static path at
+  // `compileInstanceMember`). `any`/`unknown`/a non-class object type reaches
+  // here; a concretely-typed class instance does not.
+  const sym = objType.getSymbol() ?? objType.aliasSymbol;
+  const typeName = sym?.name ?? ctx.anonTypeMap.get(objType);
+  if (typeName && ctx.classSet.has(typeName)) return undefined;
+
+  // Evaluate the receiver once into an anyref local for the tag read.
+  const objResult = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
+  if (objResult && objResult.kind !== "externref") {
+    coerceType(ctx, fctx, objResult, { kind: "externref" });
+  } else if (!objResult) {
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+  }
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  const instLocal = allocLocal(fctx, `__ctoridn_inst_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+  fctx.body.push({ op: "local.set", index: instLocal });
+
+  // Read the class `__tag` (field 0) once. -1 = no class instance (yields null
+  // externref). One `ref.test`/`struct.get 0` per distinct struct shape;
+  // canonicalization makes the first shape-compatible test expose a valid field-0
+  // layout for the instance.
+  const distinctStructIdxs = [...new Set(candidates.map((c) => ctx.structMap.get(c)!))];
+  const tagLocal = allocLocal(fctx, `__ctoridn_tag_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: -1 });
+  fctx.body.push({ op: "local.set", index: tagLocal });
+  for (const structIdx of distinctStructIdxs) {
+    fctx.body.push({ op: "local.get", index: tagLocal });
+    fctx.body.push({ op: "i32.const", value: -1 });
+    fctx.body.push({ op: "i32.eq" });
+    fctx.body.push({ op: "local.get", index: instLocal });
+    fctx.body.push({ op: "ref.test", typeIdx: structIdx } as Instr);
+    fctx.body.push({ op: "i32.and" });
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "local.get", index: instLocal },
+        { op: "ref.cast", typeIdx: structIdx } as Instr,
+        { op: "struct.get", typeIdx: structIdx, fieldIdx: 0 } as Instr,
+        { op: "local.set", index: tagLocal },
+      ],
+      else: [],
+    } as Instr);
+  }
+
+  // Result local: seeded with the GENERIC `.constructor` read of the receiver,
+  // so a non-user-class receiver (a host object, a TypedArray, a string, etc.)
+  // keeps its real constructor — the tag dispatch below only OVERRIDES this when
+  // a user-class `__tag` matches.
+  //
+  // Why this seed is load-bearing (#2026 PR-2 regression fix): this arm fires for
+  // ANY `any`/`unknown`-typed `.constructor` access whenever the module declares
+  // at least one tag-bearing user class. The test262 runner injects
+  // `class Test262Error` into essentially every program, so that condition holds
+  // for nearly every test. Seeding `resLocal` with a bare `ref.null.extern` made
+  // `Object.getPrototypeOf(Int8Array.prototype).constructor` (the `TypedArray`
+  // intrinsic shim, `any`-typed) evaluate to NULL, so every subsequent
+  // `TA.prototype.*` / `new TA(...)` trapped "Cannot access property on null or
+  // undefined" — cascading to ~478 TypedArray tests (net -479). The fix restores
+  // the pre-PR fall-through: no class-tag match ⇒ the original generic read.
+  const resLocal = allocLocal(fctx, `__ctoridn_res_${fctx.locals.length}`, { kind: "externref" });
+  const externGetIdx =
+    ctx.standalone || ctx.wasi || ctx.strictNoHostImports
+      ? undefined
+      : ensureLateImport(ctx, "__extern_get", [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
+  if (externGetIdx !== undefined) {
+    flushLateImportShifts(ctx, fctx);
+    // __extern_get(extern.convert_any(instLocal), "constructor")
+    fctx.body.push({ op: "local.get", index: instLocal });
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+    addStringConstantGlobal(ctx, "constructor");
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, "constructor"));
+    fctx.body.push({ op: "call", funcIdx: externGetIdx } as Instr);
+    fctx.body.push({ op: "local.set", index: resLocal });
+  } else {
+    // Standalone / WASI / no-host: no `__extern_get` import. Preserve the prior
+    // behaviour for a non-class receiver (null externref — there is no host
+    // constructor object to recover).
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    fctx.body.push({ op: "local.set", index: resLocal });
+  }
+
+  // Flat tag-equality dispatch: tag == classTag → emitLazyClassObjectGet(class).
+  for (const className of candidates) {
+    const classTag = ctx.classTagMap.get(className)!;
+    const arm: Instr[] = [];
+    const savedBody = fctx.body;
+    fctx.body = arm;
+    if (emitLazyClassObjectGet(ctx, fctx, className)) {
+      fctx.body.push({ op: "local.set", index: resLocal } as Instr);
+    } else {
+      // No singleton emitted (shouldn't happen — classObjectGlobals has it):
+      // leave resLocal null.
+      fctx.body.length = 0;
+    }
+    fctx.body = savedBody;
+    if (arm.length === 0) continue;
+    fctx.body.push({ op: "local.get", index: tagLocal });
+    fctx.body.push({ op: "i32.const", value: classTag });
+    fctx.body.push({ op: "i32.eq" });
+    fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: arm, else: [] } as Instr);
+  }
+
+  fctx.body.push({ op: "local.get", index: resLocal });
+  return { kind: "externref" };
+}
+
 export function compilePropertyAccess(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1704,6 +1929,20 @@ export function compilePropertyAccess(
 
   const objType = ctx.checker.getTypeAtLocation(expr.expression);
   const propName = ts.isPrivateIdentifier(expr.name) ? "__priv_" + expr.name.text.slice(1) : expr.name.text;
+
+  // (#2026 PR-2) `.constructor` on an externref / `any`-typed instance: recover
+  // class identity by reading the instance `__tag` and dispatching to the
+  // matching `__class_<Name>` singleton, so `a.constructor === A` holds even when
+  // `a` flowed through an `any` binding. Only fires for an `any`/`unknown`
+  // receiver — a concretely-typed class instance keeps the zero-overhead static
+  // arm in `compileInstanceMember`.
+  if (propName === "constructor") {
+    const isAnyOrUnknown = (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+    if (isAnyOrUnknown) {
+      const ctorIdn = tryEmitConstructorViaTag(ctx, fctx, expr, objType);
+      if (ctorIdn !== undefined) return ctorIdn;
+    }
+  }
 
   // (#2179) Tombstone-aware read for `any`/`unknown` receivers in delete-using
   // JS-host modules. The default `any`-receiver read resolves to an inline
@@ -4370,6 +4609,22 @@ export function compileOptionalElementAccess(
     resultType = { kind: "externref" };
   }
 
+  // (#2051) Same nullable-primitive widening as `compileOptionalPropertyAccess`:
+  // when the whole-chain static type is a nullable primitive (`number |
+  // undefined` etc., collapsed by `resolveWasmType` to a bare f64/i32 that can't
+  // represent `undefined`), widen the result to externref so the short-circuit
+  // arm carries host `undefined` (`emitUndefined`) and the non-null arm boxes the
+  // element value (`__box_number`/`__box_boolean` via the existing coerceType).
+  // The else arm here ends in an `array.get`/`struct.get` (not a `call`), so —
+  // unlike the optional-CALL arm (#2051 call-arm, deferred) — there is no
+  // late-import index-shift hazard from pulling in the box helper after the read.
+  // Boxes into a plain externref, NOT AnyValue, so the #1888 tag-5 ABI is intact.
+  const widenToUndefinedExternref =
+    (resultType.kind === "f64" || resultType.kind === "i32") && isNullablePrimitiveType(tsResultType);
+  if (widenToUndefinedExternref) {
+    resultType = { kind: "externref" };
+  }
+
   // A non-reference base is the compiler's representation of `undefined`/`null`
   // (e.g. a `const a = null` stored as an i32 global). Such a base always
   // short-circuits: drop it and emit the default result, never touching the
@@ -4381,7 +4636,9 @@ export function compileOptionalElementAccess(
     } else if (resultType.kind === "i32") {
       fctx.body.push({ op: "i32.const", value: 0 });
     } else {
-      fctx.body.push({ op: "ref.null.extern" });
+      // (#2051) externref result (incl. the nullable-primitive widening above) →
+      // host `undefined` so `=== undefined` / `typeof` / `+` read it correctly.
+      emitUndefined(ctx, fctx);
     }
     return resultType;
   }
@@ -4400,7 +4657,13 @@ export function compileOptionalElementAccess(
   } else if (resultType.kind === "i32") {
     thenInstrs = [{ op: "i32.const", value: 0 }];
   } else {
-    thenInstrs = [{ op: "ref.null.extern" }];
+    // (#2051) externref result → host `undefined`. Build via a body-swap because
+    // `emitUndefined` pushes to `fctx.body` and may flush late imports.
+    const savedForThen = fctx.body;
+    fctx.body = [];
+    emitUndefined(ctx, fctx);
+    thenInstrs = fctx.body;
+    fctx.body = savedForThen;
   }
 
   // else branch (non-null path): push the now-known-non-null base, then run

@@ -60,6 +60,7 @@ import {
   emitArgumentsObject,
   ensureLateImport,
   flushLateImportShifts,
+  registerMaterializeStructAsObject,
   registerResolveComputedKeyExpression,
   valTypesMatch,
   VOID_RESULT,
@@ -300,6 +301,88 @@ export function compileObjectLiteralAsExternref(
   fctx.body.push({ op: "local.get", index: objLocal });
   return { kind: "externref" };
 }
+
+/**
+ * (#2358) Reify a NOMINAL object struct (its ref already on the Wasm stack) into
+ * a dynamic `$Object` externref, copying each field as an own-property — so the
+ * native `__to_primitive` helper (which recognises only `$Object` via
+ * `ref.test objectTypeIdx`) can reduce a typed object that has crossed the
+ * externref boundary as an `any` value (e.g. an any-typed parameter, where the
+ * concrete typeIdx is erased inside the callee). The struct-instance analogue of
+ * `compileObjectLiteralAsExternref` (which builds the same `$Object` from AST
+ * props): both go through `__new_plain_object` + `__extern_set`, so the resulting
+ * object is read by the exact same native helpers.
+ *
+ * Returns true on success (struct consumed, `$Object` externref left on the
+ * stack); false if it declined (nothing emitted — caller must fall back to
+ * `extern.convert_any`). Declines when the struct type is unknown or the object
+ * runtime helpers are unavailable.
+ *
+ * This is a value-semantics COPY: it does not preserve nominal reference
+ * identity across the round-trip. The caller gates it to objects that carry a
+ * user ToPrimitive method (`valueOf`/`@@toPrimitive`/`toString`), for which
+ * value semantics suffice; plain data structs keep `extern.convert_any`.
+ */
+export function materializeStructAsDynamicObject(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  structTypeIdx: number,
+): boolean {
+  const structName = ctx.typeIdxToStructName.get(structTypeIdx);
+  if (structName === undefined) return false;
+  const fields = ctx.structFields.get(structName);
+  if (!fields || fields.length === 0) return false;
+
+  const newObjIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
+  const setIdx = ensureLateImport(
+    ctx,
+    "__extern_set",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (newObjIdx === undefined || setIdx === undefined) return false;
+  const finalNew = ctx.funcMap.get("__new_plain_object") ?? newObjIdx;
+  const finalSet = ctx.funcMap.get("__extern_set") ?? setIdx;
+
+  // Stash the incoming struct ref so each field read can re-fetch it.
+  const structLocal = allocLocal(fctx, `__matstruct_${fctx.locals.length}`, {
+    kind: "ref_null",
+    typeIdx: structTypeIdx,
+  });
+  fctx.body.push({ op: "local.set", index: structLocal });
+
+  // obj = __new_plain_object()
+  const objLocal = allocLocal(fctx, `__matobj_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "call", funcIdx: finalNew });
+  fctx.body.push({ op: "local.set", index: objLocal });
+
+  for (let fieldIdx = 0; fieldIdx < fields.length; fieldIdx++) {
+    const field = fields[fieldIdx]!;
+    // Read the field value: struct.get, then coerce to externref so __extern_set
+    // can store it. A method field (eqref/ref closure) coerces via the engine's
+    // ref→externref arm (extern.convert_any) — the same closure value the
+    // as-any-literal path stores, so __to_primitive's method-dispatch finds it.
+    fctx.body.push({ op: "local.get", index: structLocal });
+    fctx.body.push({ op: "struct.get", typeIdx: structTypeIdx, fieldIdx });
+    if (field.type.kind !== "externref") {
+      coerceType(ctx, fctx, field.type, { kind: "externref" });
+    }
+    const valLocal = allocLocal(fctx, `__matval_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: valLocal });
+    // __extern_set(obj, "<field>", value)
+    fctx.body.push({ op: "local.get", index: objLocal });
+    addStringConstantGlobal(ctx, field.name);
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, field.name));
+    fctx.body.push({ op: "local.get", index: valLocal });
+    fctx.body.push({ op: "call", funcIdx: finalSet });
+  }
+
+  fctx.body.push({ op: "local.get", index: objLocal });
+  return true;
+}
+
+registerMaterializeStructAsObject(materializeStructAsDynamicObject);
 
 /**
  * (#1239) Compile an object literal whose property list contains at least
@@ -551,7 +634,7 @@ function compileObjectLiteralWithAccessors(
         fctx.body.push({ op: "local.get", index: objLocal });
         fctx.body.push({ op: "i32.const", value: wellKnownSymId });
         fctx.body.push({ op: "call", funcIdx: boxSymIdx });
-        const ok = compileArrowAsCallback(ctx, fctx, prop as unknown as ts.FunctionExpression, { needsThis: true });
+        const ok = emitObjectLiteralMethodFn(ctx, fctx, prop as unknown as ts.FunctionExpression);
         if (!ok) {
           fctx.body.push({ op: "ref.null.extern" });
         }
@@ -568,7 +651,7 @@ function compileObjectLiteralWithAccessors(
         } else if (keyType.kind !== "externref") {
           coerceType(ctx, fctx, keyType, { kind: "externref" });
         }
-        const okRt = compileArrowAsCallback(ctx, fctx, prop as unknown as ts.FunctionExpression, { needsThis: true });
+        const okRt = emitObjectLiteralMethodFn(ctx, fctx, prop as unknown as ts.FunctionExpression);
         if (okRt) {
           fctx.body.push({ op: "call", funcIdx: setIdx });
         } else {
@@ -590,7 +673,7 @@ function compileObjectLiteralWithAccessors(
       for (const instr of stringConstantExternrefInstrs(ctx, methodName)) {
         fctx.body.push(instr);
       }
-      const ok = compileArrowAsCallback(ctx, fctx, prop as unknown as ts.FunctionExpression, { needsThis: true });
+      const ok = emitObjectLiteralMethodFn(ctx, fctx, prop as unknown as ts.FunctionExpression);
       if (!ok) {
         fctx.body.push({ op: "ref.null.extern" });
       }
@@ -689,6 +772,36 @@ function emitObjectLiteralAccessorFn(
     return true;
   }
   return !!compileArrowAsCallback(ctx, fctx, fn, { needsThis: true, ...captureOptions });
+}
+
+/**
+ * (#6408 follow-up) Compile an object-literal METHOD body and leave a callable
+ * externref on the stack for `__extern_set`. Mirrors the getter/setter routing
+ * in `emitObjectLiteralAccessorFn`: standalone → host-free closure
+ * (`compileArrowAsClosure`, converted to externref) so the method does NOT leak
+ * the `__make_getter_callback` JS bridge; JS-host / GC → `compileArrowAsCallback`
+ * with `needsThis: true` (unchanged host bridge). Returns `false` when the caller
+ * should push `ref.null.extern`.
+ *
+ * Why: the three MethodDeclaration arms below previously called
+ * `compileArrowAsCallback(... { needsThis: true })` unconditionally, which routes
+ * through `__make_getter_callback` (an `env::` host import, closures.ts) even in
+ * `--target standalone`. The sibling get/set arm was already standalone-aware
+ * (#1888 S5b); a literal mixing a regular method with a getter therefore left the
+ * getter host-free but leaked the bridge for the method. The standalone method
+ * closure is invoked through the same `__current_this`-bound closure-call path the
+ * getter closures use, so `this` is bound correctly.
+ */
+function emitObjectLiteralMethodFn(ctx: CodegenContext, fctx: FunctionContext, fn: ts.FunctionExpression): boolean {
+  if (ctx.standalone) {
+    const closureType = compileArrowAsClosure(ctx, fctx, fn);
+    if (!closureType) return false;
+    if (closureType.kind !== "externref") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    }
+    return true;
+  }
+  return !!compileArrowAsCallback(ctx, fctx, fn, { needsThis: true });
 }
 
 /**
@@ -1497,6 +1610,44 @@ export function compileObjectLiteralForStruct(
         }
       }
     }
+  }
+
+  // (#2009 R3b) Record this literal's field names in JS INSERTION order so the
+  // host name export (`__struct_field_names`) can enumerate keys in spec order.
+  // The struct's slot order comes from `ts.Type.getProperties()`, which is
+  // last-spread-first for spread-result types and therefore does NOT match the
+  // §13.2.5 PropertyDefinitionEvaluation order. Walk `expr.properties` in source
+  // order: a named/shorthand/method/accessor prop contributes its key; a spread
+  // contributes its source's own field names in order. First occurrence fixes a
+  // key's position (a later duplicate or override keeps the earlier slot, e.g.
+  // `{...{a:1},...{b:2},...{a:3}}` → `a,b`). The first literal of a deduped
+  // canonical type wins, so the result is deterministic by compile order and a
+  // no-op for plain literals whose checker order already matches insertion order.
+  if (!ctx.structInsertionOrder.has(typeName)) {
+    const spreadByPropIndex = new Map<number, { name: string }[]>();
+    for (const src of spreadSources) spreadByPropIndex.set(src.propIndex, src.srcFields);
+    const insertionOrder: string[] = [];
+    const seen = new Set<string>();
+    const pushName = (n: string | undefined): void => {
+      if (n === undefined || n.startsWith("$") || n.startsWith("__")) return;
+      if (seen.has(n)) return;
+      seen.add(n);
+      insertionOrder.push(n);
+    };
+    for (let pi = 0; pi < expr.properties.length; pi++) {
+      const prop = expr.properties[pi]!;
+      if (ts.isSpreadAssignment(prop)) {
+        const srcFields = spreadByPropIndex.get(pi);
+        if (srcFields) for (const f of srcFields) pushName(f.name);
+        continue;
+      }
+      if (ts.isMethodDeclaration(prop) || ts.isGetAccessorDeclaration(prop) || ts.isSetAccessorDeclaration(prop)) {
+        if (prop.name) pushName(resolveAccessorPropName(ctx, prop.name));
+        continue;
+      }
+      pushName(resolvePropertyNameText(ctx, prop));
+    }
+    if (insertionOrder.length > 0) ctx.structInsertionOrder.set(typeName, insertionOrder);
   }
 
   // (#1557) Per-literal method funcIdx overrides. When struct dedup collapses
