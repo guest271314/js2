@@ -7161,7 +7161,12 @@ function compileCallExpression(
       const isWrapperValueAccessor =
         expr.arguments.length === 0 &&
         ((recvSymName === "String" && (wrapperMethodName === "valueOf" || wrapperMethodName === "toString")) ||
-          (recvSymName === "Number" && wrapperMethodName === "valueOf"));
+          (recvSymName === "Number" && wrapperMethodName === "valueOf") ||
+          // #1910 R3 — Boolean wrapper .valueOf() in standalone: the internal
+          // slot holds a boxed boolean (`__box_boolean_struct`), recovered by
+          // `__to_primitive`; unbox it to the i32 primitive below (§20.3.3.3
+          // Boolean.prototype.valueOf returns the [[BooleanData]] slot).
+          (recvSymName === "Boolean" && wrapperMethodName === "valueOf"));
 
       // #2160 — standalone recovery of the wrapper's internal [[PrimitiveValue]]
       // slot. In --target standalone there is no JS host, so `new String(x)` /
@@ -7195,6 +7200,14 @@ function compileCallExpression(
             flushLateImportShifts(ctx, fctx);
             if (unboxNumIdx !== undefined) fctx.body.push({ op: "call", funcIdx: unboxNumIdx });
             return { kind: "f64" };
+          }
+          // #1910 R3 — Boolean wrapper valueOf → boxed boolean in the slot; unbox
+          // to the i32 primitive (true→1, false→0).
+          if (wrapperMethodName === "valueOf" && recvSymName === "Boolean") {
+            const unboxBoolIdx = ensureLateImport(ctx, "__unbox_boolean", [{ kind: "externref" }], [{ kind: "i32" }]);
+            flushLateImportShifts(ctx, fctx);
+            if (unboxBoolIdx !== undefined) fctx.body.push({ op: "call", funcIdx: unboxBoolIdx });
+            return { kind: "i32" };
           }
           // String wrapper valueOf/toString, or Number wrapper toString → string ref.
           return { kind: "externref" };
