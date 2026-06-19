@@ -7143,6 +7143,23 @@ function compileArrayDefaultToStringSort(
   const isNumeric = elemType.kind === "f64" || elemType.kind === "i32";
   const native = ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0;
 
+  // #2379 — in NATIVE-string mode this ToString sort's non-numeric branch
+  // `ref.cast`s each `array.get` element to `$AnyString` (see `stringifyTail`),
+  // which is sound only for a NativeString-typed element ref. A raw `externref`
+  // element is a *boxed-any* value (e.g. `new Array(N)` holes, an `any[]`), NOT a
+  // NativeString — `ref.cast` of an `(ref extern)` against `(ref $AnyString)` is
+  // invalid Wasm (different reference-type hierarchies → "ref.as_non_null of
+  // (ref extern) has to be in the same reference type hierarchy as (ref N)" in
+  // `__module_init`). Bail so the caller no-ops the sort (#2502) instead of
+  // emitting a poisoned binary. Boxed-any ToString-order sorting is a separate
+  // follow-up needing a runtime any→string step, not this static cast.
+  // HOST mode is unaffected: there `cmpStrType` is `externref` and the string
+  // branch emits only `ref.as_non_null` (no cast), so a host externref element
+  // sorts correctly — do NOT bail there or valid host string sorts break.
+  if (!isNumeric && native && elemType.kind === "externref") {
+    return null;
+  }
+
   // Comparison-string type + the compare/stringify helpers per backend.
   let cmpStrType: ValType;
   let compareIdx: number | undefined;
