@@ -292,7 +292,6 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   replace: 2,
   replaceAll: 2,
   search: 1,
-  slice: 2,
   split: 2,
   startsWith: 1,
   substr: 2,
