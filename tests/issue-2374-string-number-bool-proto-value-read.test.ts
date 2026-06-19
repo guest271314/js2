@@ -50,9 +50,9 @@ describe("#2374 — standalone String/Number/Boolean.prototype value reads", () 
   });
 
   it("String.prototype.toUpperCase.length folds the spec arity (0)", async () => {
-    expect(
-      await runStandalone(`export function test(): number { return String.prototype.toUpperCase.length; }`),
-    ).toBe(0);
+    expect(await runStandalone(`export function test(): number { return String.prototype.toUpperCase.length; }`)).toBe(
+      0,
+    );
   });
 
   it("String.prototype.replace.length folds the spec arity (2)", async () => {
@@ -90,14 +90,14 @@ describe("#2374 — standalone String/Number/Boolean.prototype value reads", () 
   });
 
   it("no regression: instance string methods still work", async () => {
-    expect(await runStandalone(`export function test(): number { return "ABC".toLowerCase() === "abc" ? 1 : 0; }`)).toBe(
-      1,
-    );
+    expect(
+      await runStandalone(`export function test(): number { return "ABC".toLowerCase() === "abc" ? 1 : 0; }`),
+    ).toBe(1);
   });
 
   it("no regression: Array.prototype value read (the #2193 path) still resolves", async () => {
-    expect(
-      await runStandalone(`export function test(): number { const p = Array.prototype; return p ? 1 : 0; }`),
-    ).toBe(1);
+    expect(await runStandalone(`export function test(): number { const p = Array.prototype; return p ? 1 : 0; }`)).toBe(
+      1,
+    );
   });
 });
