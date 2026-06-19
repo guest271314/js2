@@ -49,7 +49,10 @@ permissions:
 
 concurrency:
   group: auto-enqueue
-  cancel-in-progress: false
+  # Idempotent sweep: the latest run enqueues every mergeable PR, so a burst of
+  # triggers should collapse to the most-recent run rather than serial-running
+  # each one (#2519 — cut redundant workflow runs). Safe to cancel in-flight.
+  cancel-in-progress: true
 
 jobs:
   enqueue:
