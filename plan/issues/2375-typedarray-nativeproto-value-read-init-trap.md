@@ -1,22 +1,78 @@
 ---
 id: 2375
-title: "standalone: TypedArray concrete-view $NativeProto value-read materialization traps at module init (base CE → patched init-trap)"
-status: backlog
+title: "standalone: TypedArray/ArrayBuffer/DataView.prototype value-read cluster is gated on builtin-ctor reflection in the test262 harness, not the $NativeProto glue"
+status: blocked
+needs_role: architect
 sprint: Backlog
 created: 2026-06-19
 updated: 2026-06-19
 priority: medium
 feasibility: hard
-reasoning_effort: high
-task_type: bug
+reasoning_effort: max
+task_type: investigation
 area: codegen
 language_feature: builtins, reflection, typedarray
 goal: standalone-mode
-related: [2374, 2193, 2175, 1907, 1888]
-origin: "2026-06-19 — measure-first probe while extending #2374 value-read glue to the TypedArray family"
+related: [2374, 2376, 2377, 2378, 2193, 2175, 1907, 1888, 2026]
+origin: "2026-06-19 — measure-first probe while extending #2374 value-read glue to the TypedArray family; root-caused 2026-06-19 spec-first deep-dive"
 ---
 
-## Problem
+## PINNED ROOT CAUSE (2026-06-19 spec-first deep-dive — corrects the original hypothesis)
+
+The original hypothesis below ("the `$NativeProto` materialization for a
+concrete-view brand traps at instantiate") is **WRONG**. Isolation proves the
+materialization is CLEAN; the trap is elsewhere:
+
+| probe (`--target standalone`) | result |
+|---|---|
+| `const m: any = Int8Array.prototype; return m ? 1 : 0` (bare value-read, glue wired) | **INSTANTIATES OK** → 1 |
+| full `findLastIndex/this-is-not-object.js` (glue wired) | `wasm exception during module init` |
+
+The full TypedArray tests almost all carry `includes: [testTypedArray.js]`,
+whose **module-scope** code is the real trap:
+
+```js
+var floatArrayConstructors = [Float64Array, Float32Array];   // builtin ctors as values
+var TypedArray = Object.getPrototypeOf(Int8Array);            // getPrototypeOf on a builtin ctor
+```
+
+Isolation confirms `[Float64Array, Float32Array]` and
+`Object.getPrototypeOf(Int8Array)` each independently emit unsatisfiable `env`
+host imports under `--target standalone` → instantiate trap. The bare
+proto-value-read alone is clean.
+
+**Before the value-read glue this was MASKED**: the
+`Int8Array.prototype ... value read is not supported` compile_error stopped
+compilation before the harness reflection ran. The glue removes the mask.
+
+### Classification: ARCHITECT-SCALE, not a contained fix
+
+Wiring the TypedArray proto value-read glue flips **0 / 40** sampled tests — the
+cluster is gated on the harness's `Object.getPrototypeOf(<builtin ctor>)` +
+builtin-ctor-as-value reflection, NOT on the value read. The real blocker is a
+separate, broad standalone-reflection gap:
+1. `Object.getPrototypeOf(<builtin constructor>)` host-free (return the
+   `%TypedArray%` / `Function.prototype` intrinsic).
+2. builtin constructor used as a first-class value (`[Float64Array, ...]`) —
+   relates to the #2026 classes-as-values / dynamic-new ctor ABI.
+
+Both are runtime/representation-scale → the rail's "do NOT force a guard that
+papers over a runtime-state bug" case. Same for ArrayBuffer/SharedArrayBuffer/
+DataView (they include `testTypedArray.js`/`testBigIntTypedArray.js` too).
+
+### Recommendation
+
+- The TypedArray/ArrayBuffer/DataView **value-read glue is correct + clean**
+  (parity with String/Date/Error/Map/Set), but wire it only **after** the
+  harness-reflection gap closes — else it flips 0 and just unmasks the trap.
+- Route to **architect**: spec the standalone `Object.getPrototypeOf(builtin)` +
+  builtin-ctor-as-value path (likely folds into #2026). Once that lands, the
+  TypedArray value-read glue is the same additive ~36+ flip slice as the other
+  brands.
+
+---
+
+## Problem (original hypothesis — superseded by the pinned root cause above)
 
 Extending the #2374 `$NativeProto` value-read glue to the TypedArray family
 (`%TypedArray%` + the concrete views `Int8Array`…`Float64Array`,
