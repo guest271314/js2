@@ -1,8 +1,8 @@
 ---
 id: 1344
 title: "spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return/throw (52 + 12 test262 fails)"
-status: in-progress
-assignee: ttraenkler/sd3
+status: suspended
+assignee: ttraenkler/sen-1
 created: 2026-05-08
 updated: 2026-06-19
 priority: medium
@@ -188,3 +188,60 @@ regression from this change.)
 
 These remaining parts are the genuinely architectural half the 2026-05-28
 triage flagged ("NOT a localized fix") — route to senior-dev/architect.
+
+## Suspended Work (sd3 → sen-1, 2026-06-19)
+
+**Branch:** `issue-1344-generator-receiver-checks` (PR #1732, BLOCKED — net-53)
+**Worktree:** `/workspace/.claude/worktrees/issue-1344-generator-receiver-checks`
+**PR #1732:** parked — fails the standalone regression gate; NOT in the merge
+queue; do NOT enqueue.
+
+### What the branch does (and why it regressed)
+Slice 1 makes `buildNativeGeneratorDispatch`'s terminal `fallback`
+(`src/codegen/generators-native.ts`) throw a catchable TypeError via
+`emitBrandCheckTypeError` (native-proto.ts) instead of the silent
+`{value:0,done:true}` sentinel. **Semantically correct** — borrowed
+`Generator.prototype.{next,return}.call({})` now throws TypeError per §27.5.3.2;
+5 unit tests pass (`tests/issue-1344.test.ts`); tsc clean.
+
+**But CI standalone regression gate = net -53** (single bucket
+`37cbcb78aea838e8`, all "wasm-hash change"). Confirmed root cause:
+`emitBrandCheckTypeError` runs error-machinery side effects
+(`emitWasiErrorConstructor` pushes `__new_TypeError`, `addStringConstantGlobal`,
+`ensureExnTag`) **per generator dispatch site, inline in the fallback build**,
+which happens MID generator-body compilation. This perturbs **every** generator
+binary (+346 bytes for a one-generator program, verified) even when the throw is
+never reached, and for 53 standalone tests that perturbation flips pass→fail.
+Basic generator runtime behaviour (next/for-of/return/done/yield*) is
+byte-stable and value-identical to baseline; the 53 are a subtler
+harness/index-timing interaction.
+
+### Approved fix direction (tech-lead option A) — needs senior-dev
+Pre-register the TypeError-throw machinery **once** as a shared helper (mirror
+#2025's proven `ensureNullThisTypeError` + `buildNullThisTypeErrorThrow`):
+- a `ctx.generatorBrandTypeErrorReady` flag + idempotent
+  `ensureGeneratorBrandTypeError(ctx, fctx)` that registers
+  `__new_TypeError` / the message string / exn-tag ONCE with a correct
+  late-import flush (`ensureLateImport` + `flushLateImportShifts`);
+- a pure-lookup `buildGeneratorBrandTypeErrorThrow(ctx)` for the fallback arm;
+- a single SHARED message (not the per-`methodName` string the WIP uses).
+Then re-validate the standalone gate — **net ≥ 0 required before enqueue.**
+
+**Why senior-dev / the tripwire:** getting `ensure`'s late-import flush to land
+on the in-progress generator `fctx` at the right moment during the mid-body
+`buildNativeGeneratorDispatch` build is exactly the error-machinery **timing**
+protocol that #1726 / #2079 own. Done wrong it re-introduces the same index
+desync → another net-53 class. This is NOT just hoisting a throw to a stub.
+
+### Resume steps for sen-1
+1. `cd /workspace/.claude/worktrees/issue-1344-generator-receiver-checks`
+   (re-claim with `--force` if needed). PR #1732 is the existing impl PR.
+2. Replace the inline `emitBrandCheckTypeError(ctx, fallback, …)` call in
+   `buildNativeGeneratorDispatch` with `ensure…` (once, up front, before the
+   `branch(0)` build) + `build…` (pure) for the fallback instrs.
+3. Verify a single-generator program is byte-identical to baseline when the
+   throw is unreachable (the WIP is +346 b; the fix should be ~0).
+4. Re-run the standalone regression gate; only enqueue at net ≥ 0.
+5. Then (separate follow-on slices, still #1344): `.throw()` routing,
+   AsyncGenerator/AsyncIterator prototype checks, GeneratorPrototype-as-object
+   reification — see the remaining-parts list above.
