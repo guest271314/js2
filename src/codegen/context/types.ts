@@ -1295,6 +1295,22 @@ export interface CodegenContext {
   shapeIdByStructName: Map<string, number>;
   /** (#2009) shape-id → ordered field-name CSV, for the host name export. */
   shapeNameCsvById: string[];
+  /**
+   * (#2009 R3b) anon object-literal struct name → its field names in JS
+   * INSERTION order (the order keys were first introduced while evaluating the
+   * literal source: named props left-to-right, spreads contributing each
+   * source's own keys in order, FIRST occurrence wins). The struct's slot order
+   * comes from `ts.Type.getProperties()`, which for spread-result types is
+   * last-spread-first and does NOT match JS enumeration order. Host enumeration
+   * (`Object.keys`/`JSON.stringify`/`for-in`) is driven by the field-name CSV in
+   * `__struct_field_names`, read BY NAME (slot-independent), so reordering the
+   * CSV by this list restores spec enumeration order without touching slots,
+   * getters, dedup, or the `$shape` field. First literal of a deduped canonical
+   * type wins (deterministic by compile order). Empty when a struct's checker
+   * order already matches insertion order (plain literals), so the reorder is a
+   * no-op for the common case.
+   */
+  structInsertionOrder: Map<string, string[]>;
   /** Pending late import shift state */
   pendingLateImportShift: { importsBefore: number } | null;
   /** Map from class name → global index of the prototype externref singleton */

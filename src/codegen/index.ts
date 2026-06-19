@@ -2447,6 +2447,40 @@ function buildSetterStore(
  * operand patch is uniform across the legacy AND IR backends (it walks emitted
  * `Instr` streams, not a specific construction path).
  */
+
+/**
+ * (#2009 R3b) Permute a struct's slot-order field names into JS INSERTION order
+ * for the host name export, using the per-literal order recorded in
+ * `ctx.structInsertionOrder` (see its doc). MEMBERSHIP is preserved exactly:
+ * the returned list is `slotNames` reordered, never added to or filtered — every
+ * name still resolves to its `__sget_<name>` getter. Names present in the
+ * insertion-order list come first in that order; any slot name not in the list
+ * (defensive — should not happen for a literal-derived struct) keeps its
+ * original relative position at the end. No recorded order ⇒ `slotNames`
+ * unchanged (plain literals, IR-fresh structs, named classes).
+ */
+function orderNamesByInsertion(ctx: CodegenContext, structName: string, slotNames: string[]): string[] {
+  const order = ctx.structInsertionOrder.get(structName);
+  if (!order || order.length === 0) return slotNames;
+  const slotSet = new Set(slotNames);
+  const ordered: string[] = [];
+  const placed = new Set<string>();
+  for (const name of order) {
+    if (slotSet.has(name) && !placed.has(name)) {
+      ordered.push(name);
+      placed.add(name);
+    }
+  }
+  // Append any slot name the insertion list did not cover, in slot order.
+  for (const name of slotNames) {
+    if (!placed.has(name)) {
+      ordered.push(name);
+      placed.add(name);
+    }
+  }
+  return ordered;
+}
+
 function resolveSameShapeFieldNameCollisions(ctx: CodegenContext): void {
   // Host enumeration is JS-only; standalone/WASI has no host name export.
   if (ctx.nativeStrings) return;
@@ -2479,13 +2513,19 @@ function resolveSameShapeFieldNameCollisions(ctx: CodegenContext): void {
       typeParts.push(typeKindKey(f.type));
     }
     if (names.length === 0) continue; // no host-enumerable fields
+    // (#2009 R3b) The structural-shape key (`typeParts`) is built from slot order
+    // so same-shape grouping is unaffected, but the enumerated `names` are
+    // permuted to JS insertion order — so the shape-id CSV the host reads
+    // reflects spec enumeration order, and two colliding structs with the SAME
+    // insertion order share a shape-id.
+    const orderedNames = orderNamesByInsertion(ctx, structName, names);
     const shapeKey = typeParts.join("|");
     let group = byShape.get(shapeKey);
     if (!group) {
       group = [];
       byShape.set(shapeKey, group);
     }
-    group.push({ structName, typeIdx, names });
+    group.push({ structName, typeIdx, names: orderedNames });
   }
 
   // A group "collides" iff it contains 2+ DISTINCT field-name lists. (Two
@@ -2622,7 +2662,10 @@ function emitStructFieldNamesExport(
       if (field.name.startsWith("$") || field.name.startsWith("__")) continue;
       names.push(field.name);
     }
-    if (names.length > 0) legacyEntries.push({ typeIdx, names });
+    // (#2009 R3b) Permute to JS insertion order for spec-correct host
+    // enumeration; no-op when no literal-derived order was recorded.
+    const orderedNames = orderNamesByInsertion(ctx, structName, names);
+    if (orderedNames.length > 0) legacyEntries.push({ typeIdx, names: orderedNames });
   }
 
   if (legacyEntries.length === 0 && shapeEntries.length === 0) return;
