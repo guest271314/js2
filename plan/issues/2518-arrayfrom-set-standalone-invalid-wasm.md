@@ -1,5 +1,5 @@
 ---
-id: 2372
+id: 2518
 title: "standalone Array.from(Set) emits invalid Wasm (struct.new arity) — Set struct mis-read as a __vec by structural resolveArrayInfo"
 status: done
 assignee: ttraenkler/sd2
@@ -17,7 +17,7 @@ related: [42, 2162, 2169]
 origin: "2026-06-19 standalone leak/crash sweep (sd2): compiling collections/iterators with --target standalone surfaced Array.from(Set)/Array.from(Map) emitting invalid Wasm."
 ---
 
-# #2372 — standalone `Array.from(Set)` emits invalid Wasm
+# #2518 — standalone `Array.from(Set)` emits invalid Wasm
 
 ## Problem
 
