@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 //
-// #2376 — Uint8ClampedArray methods mis-dispatched to the host extern-class
+// #2379 — Uint8ClampedArray methods mis-dispatched to the host extern-class
 // path (env.Uint8ClampedArray_<method>) instead of the native typed-array
 // array-method path used by every other typed array. In GC mode the host
 // import's externref `self` param mismatched the GC vec receiver → invalid Wasm
@@ -26,7 +26,7 @@ async function compileStandalone(source: string) {
   return compile(source, { target: "standalone" } as Parameters<typeof compile>[1]);
 }
 
-describe("#2376 Uint8ClampedArray method dispatch", () => {
+describe("#2379 Uint8ClampedArray method dispatch", () => {
   it("reduce returns the correct value (was invalid Wasm in GC mode)", async () => {
     const e = await compileRun(`
       export function test(): number {

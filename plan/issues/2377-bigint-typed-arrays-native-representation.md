@@ -2,7 +2,6 @@
 id: 2377
 title: "Wasm-native BigInt64Array / BigUint64Array — i64/BigInt element representation"
 status: ready
-sprint: Backlog
 created: 2026-06-19
 updated: 2026-06-19
 priority: low
@@ -12,9 +11,9 @@ task_type: feature
 area: codegen
 language_feature: typed-arrays
 goal: standalone-mode
-related: [2376, 2159]
+sprint: Backlog
+related: [2379, 2159]
 ---
-
 # #2377 — Wasm-native `BigInt64Array` / `BigUint64Array`
 
 ## Problem
@@ -28,7 +27,7 @@ standalone/WASI leaks `BigInt64Array_new` / `BigUint64Array_new` /
 `BigUint64Array_get_length` (unsatisfiable → instantiation failure), and GC mode
 hits the externref-vs-GC-ref receiver mismatch.
 
-Found during the #2376 `BUILTIN_TYPES` sweep. **This is NOT the #2376 one-line
+Found during the #2379 `BUILTIN_TYPES` sweep. **This is NOT the #2379 one-line
 class**: the other typed arrays already had a native `(ref null $Vec[f64])`
 representation to fall through to once added to `BUILTIN_TYPES`. BigInt64 arrays
 carry **i64 / BigInt elements**, which need a distinct element representation
@@ -55,4 +54,4 @@ typed-array element representation).
 
 ## Source
 
-#2376 sweep, sd3, 2026-06-19.
+#2379 sweep, sd3, 2026-06-19.

@@ -1,12 +1,10 @@
 ---
-id: 2376
+id: 2379
 title: "Uint8ClampedArray methods mis-dispatch to host extern-class imports (invalid Wasm host / Uint8ClampedArray_* leak standalone)"
 status: done
-completed: 2026-06-19
-assignee: ttraenkler/sd3
-sprint: 64
 created: 2026-06-19
 updated: 2026-06-19
+completed: 2026-06-19
 priority: medium
 feasibility: easy
 reasoning_effort: low
@@ -14,9 +12,10 @@ task_type: bugfix
 area: codegen
 language_feature: typed-arrays
 goal: correctness
+sprint: 64
+assignee: ttraenkler/sd3
 ---
-
-# #2376 — `Uint8ClampedArray` methods mis-dispatch to host extern-class imports
+# #2379 — `Uint8ClampedArray` methods mis-dispatch to host extern-class imports
 
 ## Problem
 
