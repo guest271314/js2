@@ -4930,6 +4930,21 @@ function compileArrayJoinNative(
     }
   }
 
+  // #2505-family — a boxed-any (`externref`) element array stringifies each
+  // element through the runtime `__extern_toString` (the same ToString
+  // `String(x)`/template-literals use for an `any` value). Resolve its funcIdx
+  // up front and flush the late-import shift BEFORE the fold bakes the call, so
+  // the index is stable. Bail to the string-element path only if unavailable.
+  let externToStrIdx: number | undefined;
+  if (elemType.kind === "externref") {
+    externToStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (externToStrIdx === undefined) {
+      reportError(ctx, callExpr, "join of a boxed-any array requires __extern_toString");
+      return null;
+    }
+  }
+
   const vecTmp = allocLocal(fctx, `__njoin_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__njoin_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const foldLocals = allocJoinFoldLocals(fctx, repr, "njoin");
@@ -4987,6 +5002,23 @@ function compileArrayJoinNative(
     if (elemType.kind !== "f64") elemToStr.push({ op: "f64.convert_i32_s" } as Instr);
     elemToStr.push({ op: "call", funcIdx: numToStrIdx } as Instr);
     // number_toString returns the native string boxed as externref.
+    elemToStr.push({ op: "any.convert_extern" } as Instr);
+    elemToStr.push({ op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr);
+  } else if (elemType.kind === "externref") {
+    // #2505-family — a boxed-any element array (`any[]`, `new Array(N)` holes)
+    // stores its elements as raw `externref`, NOT as a `$NativeString` ref. The
+    // string-element branch below (`ref.as_non_null`) would non-null the externref
+    // and `local.set` it into the `(ref $AnyString)` result local → a validator
+    // type mismatch ("local.set expected (ref null N), found ref.as_non_null of
+    // (ref extern)"). Route each boxed-any element through `__extern_toString`
+    // (externref → externref native string) — the SAME runtime ToString that
+    // `String(a[i])` / `` `${a[i]}` `` use for an `any`-typed value. (NOT
+    // `__any_to_string`, the $AnyValue-tag dispatcher: an `any[]` element is a
+    // `__box_number`/`__box_boolean`-boxed externref, not a $AnyValue, so the tag
+    // dispatch mis-stringifies it to "[object Object]".) Convert the externref
+    // result up to `ref $AnyString` for the concat fold. `__extern_toString` is
+    // provided by ensureObjectRuntime; reuse the funcIdx captured before the loop.
+    elemToStr.push({ op: "call", funcIdx: externToStrIdx! } as Instr);
     elemToStr.push({ op: "any.convert_extern" } as Instr);
     elemToStr.push({ op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr);
   } else {
