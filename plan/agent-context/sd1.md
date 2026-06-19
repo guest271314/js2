@@ -40,11 +40,14 @@ need to move earlier or also catch the function-typed symbol.
 ## Pending follow-up: renumber o[k] issue #2374→#2511 (task #44, unowned)
 
 PR #1736 lands the o[k] issue with OLD `id: 2374`, colliding with sd4's #2374
-(destructuring NamedEvaluation .name). After #1736 merges: rename
-`plan/issues/2374-standalone-dynamic-property-read-runtime-key.md` →
-`2511-...`, `id: 2374`→`2511`, H1 `# #2374`→`# #2511`. sd1 prepared this on branch
-`issue-2374-dynamic-prop-read-runtime-key` (commit 187438bc0) but couldn't push
-while #1736 was queue-locked. `check:issues` validates the index — do it promptly.
+(destructuring NamedEvaluation .name). After #1736 merges: rename the o[k]
+dynamic-property-read-runtime-key issue file (slug
+`2374-standalone-dynamic-property-read-runtime-key`, written without the `.md`
+path here so the `check:issues` link gate does not treat this future-intent note
+as a live issue link) → `2511-...`, `id: 2374`→`2511`, H1 `# #2374`→`# #2511`. sd1
+prepared this on branch `issue-2374-dynamic-prop-read-runtime-key` (commit
+187438bc0) but couldn't push while #1736 was queue-locked. `check:issues`
+validates the index — do it promptly.
 
 ## Key lesson banked (in memory)
 
