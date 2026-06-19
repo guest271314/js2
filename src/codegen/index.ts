@@ -9214,6 +9214,24 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
           { op: "return" },
         ],
       },
+      // #1910 R3 — a boxed boolean (the [[BooleanData]] slot of a
+      // `new Boolean(x)` wrapper, recovered by `__to_primitive`) coerces per
+      // §7.1.4 ToNumber(true)=1, ToNumber(false)=0. Without this arm a boxed
+      // boolean fell through to the opaque-ref NaN fallback, so
+      // `Number(new Boolean(true))` returned NaN instead of 1.
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: boxBoolStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: boxBoolStructIdx },
+          { op: "struct.get", typeIdx: boxBoolStructIdx, fieldIdx: 0 },
+          { op: "f64.convert_i32_s" },
+          { op: "return" },
+        ],
+      },
       ...(strToNumberIdx !== undefined && ctx.anyStrTypeIdx >= 0
         ? ([
             // StringToNumber (§7.1.4.1): object ToPrimitive can yield a native
