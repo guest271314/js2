@@ -1,13 +1,11 @@
 ---
 id: 2358
 title: "Standalone native __to_primitive can't reduce typed (nominal) object structs through the externref boundary"
-status: done
-sprint: 63
-assignee: sdev-toprimitive
+status: ready
+sprint: Backlog
 model: opus
 created: 2026-06-18
 updated: 2026-06-18
-completed: 2026-06-18
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -50,24 +48,9 @@ the moment an operand is coerced to externref. `+` (via `emitAnyAdd`,
 `binary-ops.ts:2845`) and any `any`-typed parameter path lose the typeIdx and
 must fall back to the runtime helper — which can't reduce nominal structs.
 
-## Repro (original spec table — SEE 2026-06-18 CORRECTION BELOW)
+## Repro (current `main`, `--target wasi`)
 
-> ⚠️ **2026-06-18 re-measure (sdev-toprimitive) — the table below is PARTLY
-> STALE on current `main`.** When an object literal is written with an `as any`
-> cast *at the literal* (`({valueOf:()=>4} as any) + 1`), it now compiles to the
-> **dynamic `$Object`** representation (`__new_plain_object`), which
-> `__to_primitive` already reduces — so those `as any`-literal rows **PASS** on
-> current `main` (verified standalone). The genuine residual is the rows where
-> the object reaches `+` as a **typed nominal struct**: a typed LOCAL
-> (`const o = {valueOf:()=>4}; (o as any) + 1`) or a **class instance**
-> (`class C { valueOf(){return 9} }; (new C() as any) + 1`) — those compile to a
-> bare anon `(struct (field $valueOf eqref))` with no proto/brand, which
-> `__to_primitive`'s `ref.test objectTypeIdx` misses → null. **PR-1 (#1697)
-> fixes exactly those two** at `emitAnyAdd` operand-prep. The
-> `function f(x:any){return x*2}` row and `Number(obj)`/`Number([1])` (#10) are
-> NOT fixed by PR-1 — they reach the boundary already erased to externref (no
-> typeIdx) and need the general Option-A brand mechanism. Don't chase the rows
-> below as live repros without re-checking against `main` first.
+A single engine fix closes all of these:
 
 | expr | actual | expected | path |
 |------|--------|----------|------|
@@ -80,9 +63,6 @@ must fall back to the runtime helper — which can't reduce nominal structs.
 correct on main — they are NOT. `+` with object operands is broken (returns the
 raw object), because `+` routes through the externref/`__to_primitive` path, not
 the static struct-valueOf path. `-`/`*`/unary-minus ARE correct (static path).
-*(2026-06-18 refinement: the `obj+obj`/`obj+7` BREAKAGE is real only for the
-**typed-nominal-struct** form — the `as any`-at-literal form is now correct via
-the dynamic `$Object` path. See the re-measure note above.)*
 
 ### Two latent codegen bugs in the same area (valueOf returns an object)
 Fold these into the impl — same root (the reduction must fall through
@@ -177,53 +157,56 @@ The 2026-06-12 standalone JSONL `object-to-primitive` bucket (107) is **stale**
 and the headline is partly closed — re-measure the true tractable count on a
 **fresh standalone shard** before sizing the impl.
 
-## Implementation notes — PR-1 (sdev-toprimitive, 2026-06-18)
+## PR-2 design — call-site struct→$Object materialization (chosen over brand)
 
-**Spec repro table was stale.** Re-measured every row standalone on current
-upstream/main (955552ecc). The `as any`-cast-at-the-literal forms
-(`({valueOf:()=>4} as any)+1`, `1+obj`, `obj+obj`, `function f(x:any){return x*2}`)
-ALL PASS already: an `as any` literal forces the **dynamic `$Object`**
-representation (`__new_plain_object`), which `__to_primitive` already reduces.
-The genuine residual is the **typed-LOCAL / class-instance** form, which compiles
-to a NOMINAL anon struct (`(struct (field $valueOf eqref))`) with no proto/brand/
-supertype — `__to_primitive`'s `ref.test objectTypeIdx` misses it → returned
-unchanged → `__unbox_number` → null.
+**Measured residual (current main, 2026-06-18, sdev-toprimitive):**
+- any-typed PARAMETER over nominal struct — `function g(x:any){ return x*2 | x-1 |
+  x+1 | +x }`, class-instance param, `x==21` loose-eq — ALL null/broken.
+- `Number([1])`/`Number([42])` (ARRAY) broken (#10). `Number(obj)` with valueOf
+  ALREADY PASSES on main, so #10 is specifically Number(**array**).
 
-**What PR-1 ships (tractable, NOT the spec's Option A brand/RTTI).** A focused,
-additive change in `emitAnyAdd` (`binary-ops.ts`): the operand-prep is factored
-into `emitAddOperand`, which — when an operand statically resolves (through
-`as`/paren/non-null wrappers) to a nominal struct with a *number-producing*
-static ToPrimitive (`valueOf`/`@@toPrimitive`) — compiles the **unwrapped** inner
-expression WITHOUT the externref hint (so its concrete `typeIdx` survives) and
-reduces it to a boxed primitive via the shared #1917 `coerceType(ref-struct→f64,
-"default")` engine, *before* it crosses the externref boundary. Every other
-operand keeps the exact status-quo `{externref}`-hint path.
+**Root cause (any-param):** inside `g`, `x` is a plain `externref` param with NO
+typeIdx — the nominal struct is genuinely erased at the CALL boundary (`g`
+compiles independently of its callers). `x*2` already routes through
+`__to_primitive`→`__unbox_number`; it fails only because `__to_primitive` can't
+recognise the nominal struct. PR-1's typeIdx-recovery is impossible here. The
+typeIdx IS still known at the *coercion site* that performs the erasure
+(`coerceType` ref-struct→externref, `type-coercion.ts:1573`; equivalently the
+call-arg coercion in `stack-balance.ts`).
 
-Why the externref hint had to be conditionally dropped: `(o as any)` /
-`compileExpression(expr, {externref})` coerces the struct to externref *inside*
-compileExpression, erasing the typeIdx before the operand-prep can see it. Gating
-on the unwrapped operand's struct name (`resolveStructNameForExpr` on the inner
-expr) keeps the divergence surgical.
+**Chosen approach (tech-lead approved over the spec's brand Option A):**
+MATERIALIZE the nominal struct into a dynamic `$Object` at the
+ref-struct→externref coercion, reusing the already-working
+`__to_primitive($Object)` path verbatim. The materializer mirrors
+`compileObjectLiteralAsExternref` (`literals.ts:175`): `__new_plain_object` +
+`__extern_set(obj, "<field>", value)` per struct field (methods stored as their
+closure value, the same way the `as any`-literal path does). The boxed `$Object`
+then satisfies `__to_primitive`'s `ref.test objectTypeIdx`.
 
-**Guardrails verified:**
-- WAT byte-IDENTICAL on a battery of non-struct `+` (str+str, str+num, num+num,
-  arr+str, toString-only-obj) AND the static `*`/`-` paths (clean upstream/main
-  vs branch — empty diff). The new path only fires for nominal-struct valueOf in
-  `+`.
-- `node scripts/check-coercion-sites.mjs` flat; `check-any-box-sites` flat
-  (reused the existing coercion engine, no new site).
-- Standalone modules still instantiate host-free (`imports.length === 0` asserted
-  in the regression test).
-- Regression test `tests/issue-2358-toprimitive-nominal.test.ts` (6 cases,
-  including the two `as any`/any-param non-regression guards) — all green.
-- `tsc --noEmit` clean.
+Why this over the brand-supertype: **no struct-layout change, no `$brand` field,
+no field-index shift** — so the hot static field-access path is byte-identical
+(it never enters this coercion arm). Cost is confined to the
+user-object→externref coercion (the cold path). Matches the #1673 "additive,
+zero hot-path cost" bar. The brand-supertype is only needed for nominal
+**identity** preservation across an `any` round-trip (`===`/`Object.is`), which
+ToPrimitive/arithmetic/`Number()` do not require.
 
-**Deferred to a follow-up (the spec's Option A territory):** the
-any-typed-PARAMETER form where the struct is erased to externref at the call
-boundary BEFORE `+` (already works for valueOf via the dynamic-object box, but a
-typed nominal struct passed positionally would still strand), and `Number(obj)` /
-`Number([1])` (#10). Those need the GENERAL externref-boundary reduction — a
-shared-supertype brand + `ref.test` + brand→funcidx dispatch table — which
-requires re-declaring every object-literal struct as `sub` of a brand supertype
-(touches the hot static path) and is genuinely architect-scale. PR-1 closes the
-`+`-with-typed-object residual host-free without it.
+**Surgical gate (avoid the #1525 regression):** only materialize when the struct
+carries a user `valueOf`/`@@toPrimitive`/`toString` (a dynamic-ToPrimitive
+object). A plain data struct (`{x:1}`, no methods) keeps the status-quo
+`extern.convert_any` — byte-identical — so `typeof obj==="object"`, plain field
+reads, and reference identity for method-less data objects are unchanged.
+
+**Identity caveat (tech-lead flagged):** materialization makes a *copy*. If a
+test262 case round-trips a method-bearing object through `any` and then checks
+`===`/`Object.is` reference identity, it would see a different `$Object` and
+regress. The standalone HW floor-gate catches this. Any identity-dependent
+residual found stays DEFERRED to the heavier brand approach (noted, not broken).
+
+**Folds in #10:** `Number([arr])` reduces via the same `$Object`/array→primitive
+path on the shared engine.
+
+**Guardrails:** floor-gate standalone HW (no breach of 20,706); WAT-diff hot
+static `*`/`-` + plain-data-struct→externref byte-identical; reuse the #1917
+engine (keep `check-coercion-sites.mjs` flat); helpers BY NAME (late-import
+funcidx-shift class).
