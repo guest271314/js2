@@ -406,6 +406,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
   const strEqualsIdx = ctx.nativeStrHelpers.get("__str_equals")!;
 
+  // #2042 R2 — held reference to `__to_property_key`'s body so the object-key
+  // arm can be spliced in after `__extern_toString` is registered later in this
+  // pass (forward dependency; see the splice below the `__extern_toString` reg).
+  let tpkBodyRef: Instr[] | undefined;
+
   // ── __to_property_key(externref key) -> externref (#2042 S1) ──────────────
   //
   // Central ToPropertyKey-style coercion for the string-keyed `$Object` runtime.
@@ -461,6 +466,18 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
             },
           ] as Instr[])
         : []),
+      // #2042 R2 — object-key arm. A computed access with an OBJECT key
+      // (`obj[{valueOf:()=>2}]`) reaches here as a `$Object` externref; the
+      // downstream `ref.cast $AnyString` in `__obj_find`/`__obj_hash` then traps
+      // ("illegal cast"). Run the object through `__extern_toString` (§7.1.1
+      // ToPrimitive(string) → ToString — the same canonical ToString used by
+      // `String(x)` / template literals), yielding the canonical string key.
+      // `__extern_toString` is registered LATER in this same `ensureObjectRuntime`
+      // pass, so the call is spliced in below once its funcIdx is known (the body
+      // array is held by reference in `mod.functions`). The splice goes BEFORE
+      // the unchanged-fallthrough so non-object opaque keys (Symbols) still
+      // pass through untouched.
+      // <<R2-OBJECT-ARM-SPLICE>>
       // else return key unchanged (Symbol / opaque — preserve existing behaviour)
       { op: "local.get", index: 0 },
     ];
@@ -471,6 +488,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       [{ name: "any", type: { kind: "anyref" } }],
       tpkBody,
     );
+    // Record the splice point: index of the trailing `local.get 0` fallthrough.
+    // After `__extern_toString` registers we insert the `$Object`-key arm here.
+    tpkBodyRef = tpkBody;
   }
   const toPropertyKeyIdx = ctx.funcMap.get("__to_property_key");
 
@@ -2166,6 +2186,31 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "extern.convert_any" },
     ];
     registerNative("__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }], [], toStringBody);
+
+    // #2042 R2 — now that `__extern_toString` exists, splice the object-key arm
+    // into `__to_property_key`'s body (built earlier, before this funcIdx was
+    // known). For a `$Object` key, ToPropertyKey = ToString(ToPrimitive(key,
+    // "string")) — exactly `__extern_toString`. Insert BEFORE the trailing
+    // `local.get 0` fallthrough so Symbol/opaque keys still pass through.
+    if (tpkBodyRef !== undefined) {
+      const externToStringIdx = ctx.funcMap.get("__extern_toString")!;
+      const objArm: Instr[] = [
+        // if (ref.test $Object any) return __extern_toString(key)
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: objectTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: 0 },
+            { op: "call", funcIdx: externToStringIdx },
+            { op: "return" },
+          ],
+        } as Instr,
+      ];
+      // Splice before the last instruction (the unchanged-key fallthrough).
+      tpkBodyRef.splice(tpkBodyRef.length - 1, 0, ...objArm);
+    }
   }
 
   // ── Prototype-chain ops (#1472 Phase C) ──────────────────────────────────
