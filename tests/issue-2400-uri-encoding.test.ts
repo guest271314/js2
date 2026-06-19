@@ -49,7 +49,11 @@ const CASES: ReadonlyArray<Case> = [
   { name: "threeByteC2", src: `return encodeURIComponent("€").charCodeAt(2);`, want: 50 /* '2' */ },
   // U+1F600 😀 (D83D DE00) -> %F0%9F%98%80 (4 octets, 12 chars)
   { name: "fourByteLen", src: `return encodeURIComponent(String.fromCharCode(0xD83D, 0xDE00)).length;`, want: 12 },
-  { name: "fourByteC1", src: `return encodeURIComponent(String.fromCharCode(0xD83D, 0xDE00)).charCodeAt(1);`, want: 70 /* 'F' */ },
+  {
+    name: "fourByteC1",
+    src: `return encodeURIComponent(String.fromCharCode(0xD83D, 0xDE00)).charCodeAt(1);`,
+    want: 70 /* 'F' */,
+  },
 
   // ── encodeURI: reserved set ∪ # passes through ──
   // "a b/c" -> "a%20b/c" (length 7, '/' preserved)

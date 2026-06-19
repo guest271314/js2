@@ -211,12 +211,7 @@ export function emitNativeUriEncode(ctx: CodegenContext): void {
   ];
 
   // getC: L_C = data[L_I]
-  const getC: Instr[] = [
-    get(L_DATA),
-    get(L_I),
-    { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr,
-    set(L_C),
-  ];
+  const getC: Instr[] = [get(L_DATA), get(L_I), { op: "array.get_u", typeIdx: strDataTypeIdx } as Instr, set(L_C)];
 
   const body: Instr[] = [
     // flat = flatten(s); data = flat.data; i = flat.off; len = flat.off + flat.len

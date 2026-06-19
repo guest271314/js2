@@ -8903,9 +8903,7 @@ function compileCallExpression(
       expr.arguments.length >= 1
     ) {
       const nativeEncodeIdx =
-        funcName === "encodeURI" || funcName === "encodeURIComponent"
-          ? ctx.funcMap.get("__uri_encode")
-          : undefined;
+        funcName === "encodeURI" || funcName === "encodeURIComponent" ? ctx.funcMap.get("__uri_encode") : undefined;
       if (nativeEncodeIdx !== undefined) {
         const arg0Type = compileExpression(ctx, fctx, expr.arguments[0]!);
         if (arg0Type && arg0Type.kind !== "externref") {
