@@ -32,51 +32,63 @@ async function runStandalone(source: string): Promise<number> {
 
 describe("#2505 — standalone join/toString of a boxed-any (any[]) element array", () => {
   it('any[] [1,2,3].join(",") → "1,2,3" (valid Wasm + correct content)', async () => {
-    expect(await runStandalone(`export function run(): number { const a: any[] = [1, 2, 3]; return a.join(",").length; }`)).toBe(
-      5,
-    );
+    expect(
+      await runStandalone(`export function run(): number { const a: any[] = [1, 2, 3]; return a.join(",").length; }`),
+    ).toBe(5);
     // first char is '1' (49), second is ',' (44) — proves real ToString, not "[object Object]"
     expect(
-      await runStandalone(`export function run(): number { const a: any[] = [1, 2, 3]; return a.join(",").charCodeAt(0); }`),
+      await runStandalone(
+        `export function run(): number { const a: any[] = [1, 2, 3]; return a.join(",").charCodeAt(0); }`,
+      ),
     ).toBe(49);
     expect(
-      await runStandalone(`export function run(): number { const a: any[] = [1, 2, 3]; return a.join(",").charCodeAt(1); }`),
+      await runStandalone(
+        `export function run(): number { const a: any[] = [1, 2, 3]; return a.join(",").charCodeAt(1); }`,
+      ),
     ).toBe(44);
   });
 
   it('any[] toString() → "1,2,3"', async () => {
-    expect(await runStandalone(`export function run(): number { const a: any[] = [1, 2, 3]; return a.toString().length; }`)).toBe(
-      5,
-    );
+    expect(
+      await runStandalone(`export function run(): number { const a: any[] = [1, 2, 3]; return a.toString().length; }`),
+    ).toBe(5);
   });
 
   it('mixed any[] [1,"x",true].join("-") → "1-x-true" (len 8)', async () => {
     expect(
-      await runStandalone(`export function run(): number { const a: any[] = [1, "x", true]; return a.join("-").length; }`),
+      await runStandalone(
+        `export function run(): number { const a: any[] = [1, "x", true]; return a.join("-").length; }`,
+      ),
     ).toBe(8);
   });
 
   it('any[] boolean elements [true,false].join(",") → "true,false" (len 10)', async () => {
     expect(
-      await runStandalone(`export function run(): number { const a: any[] = [true, false]; return a.join(",").length; }`),
+      await runStandalone(
+        `export function run(): number { const a: any[] = [true, false]; return a.join(",").length; }`,
+      ),
     ).toBe(10);
   });
 
   it('any[] string elements ["ab","cd"].join(",") → "ab,cd" (len 5)', async () => {
     expect(
-      await runStandalone(`export function run(): number { const a: any[] = ["ab", "cd"]; return a.join(",").length; }`),
+      await runStandalone(
+        `export function run(): number { const a: any[] = ["ab", "cd"]; return a.join(",").length; }`,
+      ),
     ).toBe(5);
   });
 
-  it("empty any[] join → \"\" (len 0)", async () => {
-    expect(await runStandalone(`export function run(): number { const a: any[] = []; return a.join(",").length; }`)).toBe(0);
+  it('empty any[] join → "" (len 0)', async () => {
+    expect(
+      await runStandalone(`export function run(): number { const a: any[] = []; return a.join(",").length; }`),
+    ).toBe(0);
   });
 
   // ── regressions: typed-element joins must be unchanged ──
   it('number[] [10,9,1,100].join(",") still → "10,9,1,100" (len 10)', async () => {
-    expect(await runStandalone(`export function run(): number { const a = [10, 9, 1, 100]; return a.join(",").length; }`)).toBe(
-      10,
-    );
+    expect(
+      await runStandalone(`export function run(): number { const a = [10, 9, 1, 100]; return a.join(",").length; }`),
+    ).toBe(10);
   });
 
   it('string[] ["aa","bb","cc"].join(",") still → "aa,bb,cc" (len 8)', async () => {
@@ -87,7 +99,9 @@ describe("#2505 — standalone join/toString of a boxed-any (any[]) element arra
 
   it('boolean[] [true,false,true].join(",") still → "true,false,true" (len 15)', async () => {
     expect(
-      await runStandalone(`export function run(): number { const a = [true, false, true]; return a.join(",").length; }`),
+      await runStandalone(
+        `export function run(): number { const a = [true, false, true]; return a.join(",").length; }`,
+      ),
     ).toBe(15);
   });
 });
