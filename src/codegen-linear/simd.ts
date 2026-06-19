@@ -647,12 +647,7 @@ function addSimdArrayIndexOfI32(mod: WasmModule): void {
             {
               op: "if",
               blockType: { kind: "empty" },
-              then: [
-                { op: "local.get", index: i },
-                { op: "i32.const", value: 1 },
-                { op: "i32.add" },
-                { op: "return" },
-              ],
+              then: [{ op: "local.get", index: i }, { op: "i32.const", value: 1 }, { op: "i32.add" }, { op: "return" }],
             },
 
             // i += 2
