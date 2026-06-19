@@ -507,12 +507,35 @@ const STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS = new Set([
   // (#2036 S6 step 2) `filter` now has a native standalone arm — it builds its
   // result via the native `$ObjVec` builder (`__objvec_new`/`__objvec_push`)
   // instead of the host `__js_array_*`, so it no longer leaks a host import.
-  // Removed from the refusal set. map/reduce/reduceRight stay until their
-  // native result/accumulator arms land (map needs sparse-hole handling).
+  // Removed from the refusal set.
+  //
+  // (#1461/#54) `map` stays until its native indexed (sparse-hole) result arm
+  // lands. `reduce`/`reduceRight` are special-cased in the dispatch
+  // (`standaloneArrayLikeMethodRefused`): the **with-initial-value** form is
+  // host-import-free (accumulator boxed through native `__box_number`) and
+  // ALLOWED; the **no-initial-value** form's §23.1.3.21 forward hole-scan still
+  // hits a module-finalization func-index shift (`__extern_has_idx` baked call
+  // mis-resolves to `number_toString` → `if` over an externref → invalid Wasm),
+  // so it stays refused until that finalization-shift bug is fixed.
   "map",
-  "reduce",
-  "reduceRight",
 ]);
+
+/**
+ * (#1461/#54) Whether an array-like `.call(...)` over a non-array receiver is
+ * refused under `--target standalone`/`wasi`. Beyond the static
+ * `STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS` set, `reduce`/`reduceRight` are
+ * refused ONLY in their no-initial-value form (the forward hole-scan trips a
+ * module-finalization func-index shift → invalid Wasm). The with-initial-value
+ * form compiles to valid, host-free Wasm and is allowed through.
+ */
+function standaloneArrayLikeMethodRefused(methodName: string, callExpr: ts.CallExpression): boolean {
+  if (STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS.has(methodName)) return true;
+  if (methodName === "reduce" || methodName === "reduceRight") {
+    // args: [receiver, callback, initialValue?]. No initial value ⇒ refuse.
+    return callExpr.arguments.length < 3;
+  }
+  return false;
+}
 
 /**
  * Compile Array.prototype.METHOD.call(anyReceiver, callback, ...args) for any-typed receivers.
@@ -591,7 +614,7 @@ export function compileArrayLikePrototypeCall(
   // arm (#2036 PR-1) and fall through unaffected. Host/gc mode is untouched
   // (gated on standalone||wasi). Step 2 (real generic arm + emitter fix) removes
   // entries from this set as native paths land.
-  if ((ctx.standalone || ctx.wasi) && STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS.has(methodName)) {
+  if ((ctx.standalone || ctx.wasi) && standaloneArrayLikeMethodRefused(methodName, callExpr)) {
     reportError(
       ctx,
       callExpr,

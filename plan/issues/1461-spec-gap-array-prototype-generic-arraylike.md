@@ -228,3 +228,25 @@ map,indexOf,lastIndexOf,includes}`). Real, large lever.
 
 Owner: sdev-ctorval. Status stays `done` for the host-mode #1461; this standalone
 residual is the #54 follow-on (tracked on the task, not re-opening #1461).
+
+## PR-A landed (2026-06-19, sdev-ctorval) — reduce/reduceRight with-initial-value un-refused
+
+Shipped the safe slice of the standalone residual: `Array.prototype.reduce`/
+`reduceRight.call(arrayLike, cb, init)` over a non-array receiver now compiles to
+valid, host-free Wasm and is removed from the standalone refusal set **when an
+initial value is supplied**. Measured base→patched on 260 reduce/reduceRight
+test262 files (`--target standalone`): **pass 30 → 39 (+9)**, refuse-CE 140 → 40,
+0 regressions (no pass→CE/fail).
+
+The **no-initial-value** form stays gracefully refused (clean compile error, NOT
+invalid Wasm) via `standaloneArrayLikeMethodRefused()` — its §23.1.3.21 forward
+hole-scan trips a **module-finalization func-index shift**: the baked
+`__extern_has_idx` call (funcMap idx stable at emit, verified 155=155) mis-resolves
+to `number_toString` in the final binary (`if` over an externref → invalid Wasm),
+while the adjacent `__extern_get_idx` survives — an `addUnionImports`/late-import
+finalization reorder, not a localizable array-methods.ts capture bug. That fix +
+`map` (sparse indexed result arm) + indexOf/lastIndexOf/includes (native-eq search
+arm) remain as PR-B/C/D follow-ons.
+
+Tests: `tests/issue-1461-standalone-reduce-arraylike.test.ts` (4 — with-init
+reduce/reduceRight/arguments valid+correct; no-init never emits invalid Wasm).
