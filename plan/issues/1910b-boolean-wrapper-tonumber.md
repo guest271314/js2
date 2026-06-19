@@ -1,5 +1,5 @@
 ---
-id: 1910-r3
+id: 1910b
 slug: boolean-wrapper-tonumber
 title: "standalone Boolean-wrapper ToNumber/valueOf — Number(new Boolean(true)) returned NaN"
 status: done
