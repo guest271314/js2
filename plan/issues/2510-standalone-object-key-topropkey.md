@@ -1,6 +1,6 @@
 ---
 id: 2510
-title: "standalone: computed member access with an OBJECT key obj[{toString}] traps illegal_cast (ToPropertyKey) — #2042 R2"
+title: "standalone: object-key ToPropertyKey (#2042 R2) + native Object.is (#2042 S3 residual)"
 status: done
 assignee: ttraenkler/sdev-arrayrep
 created: 2026-06-19
@@ -13,7 +13,7 @@ area: codegen
 language_feature: objects, computed-member-access, coercion
 goal: standalone-mode
 related: [2042, 1472, 1917, 1900]
-origin: "arch-dynshape #1472 spec R2 (06-17 S1); TaskList #83"
+origin: "arch-dynshape #1472 spec R2 (06-17 S1) + S3 residual; TaskList #83, #80"
 ---
 
 # #2042 R2 — standalone object-key ToPropertyKey hardening
@@ -23,7 +23,7 @@ origin: "arch-dynshape #1472 spec R2 (06-17 S1); TaskList #83"
 ```ts
 const o: any = {};
 const k: any = { toString: () => "abc" };
-o[k];   // TRAP: "illegal cast"
+o[k]; // TRAP: "illegal cast"
 ```
 
 A computed member access whose key is an OBJECT (`obj[{toString:()=>"k"}]`,
@@ -67,3 +67,32 @@ returns a NUMBER stringifies to "[object Object]" (`__extern_toString` /
 match `o[2]`. This R2 fix removes the illegal-cast TRAP and makes the common
 `toString`-keyed shape correct; the valueOf-number recovery is the #1917 engine
 owner's concern.
+
+## #2042 S3 residual — native `Object.is` (#80)
+
+`Object.is` was a #1472-Phase-B refusal standalone (`__object_is` had no native
+impl). Verify-before-claim found the S3 read-natives (getOwnPropertyNames/Symbols/
+getOwnPropertyDescriptors) already shipped (PR #1639); the residual refusals were
+`Object.is` and `Object.fromEntries`.
+
+Implemented native `__object_is` (SameValue §7.2.10) in `object-runtime.ts` —
+tag-dispatched over two boxed externrefs: both number → compare f64 BIT PATTERNS
+(`i64.reinterpret_f64`+`i64.eq`, so NaN is SameValue NaN and +0 is NOT SameValue
+-0); both boolean → unbox i32; both bigint → `__to_bigint` i64; both string →
+value equality (`__str_flatten`+`__str_equals`); both null → equal; else WasmGC
+`eq`-heap ref identity. Added `__object_is` to `OBJECT_RUNTIME_HELPER_NAMES` so
+`ensureLateImport` routes it native under standalone. The string arm is safe here
+(no wasm-opt stack-imbalance like #2508) because `__object_is` lives in the
+object-runtime regime, which already calls `__str_flatten`/`__str_equals`
+(cf. `__obj_hash`/`__obj_find`) — no cross-regime finalize index shift.
+
+MEASURED: `Object.is(NaN,NaN)`→true, `(+0,-0)`→false, `(0,0)`/`(1,1)`→true,
+`(1,2)`→false, booleans, equal/unequal strings by value, object ref identity —
+all correct; no `env.__object_is` leak. `tests/issue-2042-s3-object-is.test.ts`
+(7) green. (`Object.is(false as any, 0 as any)` reports equal due to the
+pre-existing `<bool> as any`→number literal boxing quirk — not this helper.)
+
+**Deferred (S3 residual follow-up):** `Object.fromEntries` still refuses
+standalone — it needs native iteration over an entries iterable + `$Object`
+build, a larger native-iteration slice than this contained `Object.is` win.
+`__defineProperty_desc` stays deferred per the existing #2043 note.

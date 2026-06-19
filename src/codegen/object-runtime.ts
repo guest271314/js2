@@ -2201,11 +2201,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         {
           op: "if",
           blockType: { kind: "empty" },
-          then: [
-            { op: "local.get", index: 0 },
-            { op: "call", funcIdx: externToStringIdx },
-            { op: "return" },
-          ],
+          then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: externToStringIdx }, { op: "return" }],
         } as Instr,
       ];
       // Splice before the last instruction (the unchanged-key fallthrough).
@@ -5044,6 +5040,164 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // reflection natives above (__getOwnPropertyNames / __getOwnPropertySymbols /
   // __object_getOwnPropertyDescriptors) are the shipped S3 slice.
 
+  // ── __object_is(externref a, externref b) -> i32 (#2042 S3 — Object.is) ────
+  //
+  // SameValue (§7.2.10) over two boxed externrefs. Tag-dispatched like the
+  // union-helper `===` lowering, but with the SameValue numeric rule:
+  // NaN is SameValue NaN, and +0 is NOT SameValue -0. Comparing the f64 bit
+  // patterns (`i64.reinterpret_f64` + `i64.eq`) gives exactly that — equal NaN
+  // bit patterns compare equal, and +0 (0x0…) vs -0 (0x8000…) compare unequal.
+  // boolean → unbox i32; bigint → i64; both-null → equal; else ref identity.
+  // standalone-only (host mode owns `__object_is` via its JS import).
+  if (ctx.standalone) {
+    addUnionImportsViaRegistry(ctx);
+    const typeofNumIdx = ctx.funcMap.get("__typeof_number")!;
+    const typeofBoolIdx = ctx.funcMap.get("__typeof_boolean")!;
+    const typeofBigIdx = ctx.funcMap.get("__typeof_bigint")!;
+    const unboxNumIdx = ctx.funcMap.get("__unbox_number")!;
+    const unboxBoolIdx = ctx.funcMap.get("__unbox_boolean")!;
+    const toBigIdx = ctx.funcMap.get("__to_bigint")!;
+    const EQ_HEAP = -19; // WasmGC `eq` abstract heap type
+
+    // params: a=0, b=1 ; locals: aa=2 (anyref), ba=3 (anyref)
+    const bothTag = (tagIdx: number): Instr[] => [
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: tagIdx } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: tagIdx } as Instr,
+      { op: "i32.and" },
+    ];
+    // Reference identity over the WasmGC `eq` heap (the anyref temps are already
+    // materialised in locals 2/3 by `identityArm`'s preamble below).
+    const refIdentityArm: Instr[] = [
+      { op: "local.get", index: 2 },
+      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "local.get", index: 3 },
+      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 2 },
+          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "local.get", index: 3 },
+          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "ref.eq" },
+        ],
+        else: [{ op: "i32.const", value: 0 }],
+      } as Instr,
+    ];
+    // String SameValue = value equality (flatten both, __str_equals); else ref
+    // identity. `__str_flatten`/`__str_equals` are resolved at the top of this
+    // same `ensureObjectRuntime` pass (object-runtime helpers already call them,
+    // e.g. __obj_hash/__obj_find), so the call indices are regime-consistent.
+    const stringOrIdentityArm: Instr[] =
+      strFlattenIdx !== undefined && strEqualsIdx !== undefined && anyStrTypeIdx >= 0
+        ? [
+            { op: "local.get", index: 2 },
+            { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+            { op: "local.get", index: 3 },
+            { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+            { op: "i32.and" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [
+                { op: "local.get", index: 2 },
+                { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+                { op: "call", funcIdx: strFlattenIdx } as Instr,
+                { op: "local.get", index: 3 },
+                { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+                { op: "call", funcIdx: strFlattenIdx } as Instr,
+                { op: "call", funcIdx: strEqualsIdx } as Instr,
+              ],
+              else: refIdentityArm,
+            } as Instr,
+          ]
+        : refIdentityArm;
+    const identityArm: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 2 },
+      { op: "local.get", index: 1 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 3 },
+      ...stringOrIdentityArm,
+    ];
+    const bigintArm = (elseArm: Instr[]): Instr[] => [
+      ...bothTag(typeofBigIdx),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: toBigIdx } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: toBigIdx } as Instr,
+          { op: "i64.eq" },
+        ],
+        else: elseArm,
+      } as Instr,
+    ];
+    const boolArm = (elseArm: Instr[]): Instr[] => [
+      ...bothTag(typeofBoolIdx),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: unboxBoolIdx } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: unboxBoolIdx } as Instr,
+          { op: "i32.eq" },
+        ],
+        else: elseArm,
+      } as Instr,
+    ];
+    const numberArm = (elseArm: Instr[]): Instr[] => [
+      ...bothTag(typeofNumIdx),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          // SameValue numbers: compare f64 bit patterns (NaN==NaN, +0!=-0).
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: unboxNumIdx } as Instr,
+          { op: "i64.reinterpret_f64" } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: unboxNumIdx } as Instr,
+          { op: "i64.reinterpret_f64" } as Instr,
+          { op: "i64.eq" },
+        ],
+        else: elseArm,
+      } as Instr,
+    ];
+    const nullArm = (rest: Instr[]): Instr[] => [
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      { op: "local.get", index: 1 },
+      { op: "ref.is_null" },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [{ op: "i32.const", value: 1 }],
+        else: rest,
+      } as Instr,
+    ];
+    registerNative(
+      "__object_is",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [
+        { name: "aa", type: { kind: "anyref" } },
+        { name: "ba", type: { kind: "anyref" } },
+      ],
+      nullArm(numberArm(boolArm(bigintArm(identityArm)))),
+    );
+  }
+
   // ── Object integrity predicates (#1472 Phase B Blocker A Half 1, PR #1074) ─
   //
   // __object_isFrozen / __object_isSealed / __object_isExtensible read the
@@ -6866,6 +7020,10 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__getOwnPropertyNames",
   "__getOwnPropertySymbols",
   "__object_getOwnPropertyDescriptors",
+  // #2042 S3 — Object.is (SameValue §7.2.10): tag-dispatched native over two
+  // boxed externrefs (number bit-compare for NaN==NaN / +0!=-0, boolean/bigint
+  // unbox, both-null, else ref identity). Was a #1472-Phase-B refusal.
+  "__object_is",
   // #1472 Phase C — `x === undefined` / default-parameter / destructuring-default
   // undefinedness check. Native impl is `ref.is_null` (standalone conflates
   // undefined and null, same as __typeof_undefined). This is the single largest
