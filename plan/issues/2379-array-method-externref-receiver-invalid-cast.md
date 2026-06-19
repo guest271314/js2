@@ -1,12 +1,11 @@
 ---
 id: 2379
 title: "standalone: typed-vec array method on an externref receiver (top-level new Array(N)) emits invalid ref.cast"
-status: blocked
-assignee: ""
-needs_role: architect
-blocked_reason: "ARCHITECT-SCALE: new Array(N) builds a boxed-any element array (type 1) while a literal builds a typed-numeric element array (type 3) — the vec/element REPRESENTATION diverges. Fix = new Array(N) element-rep normalization (make it match the literal vec), NOT a cast-site guard. See VERIFY-GATE VERDICT."
+status: done
+assignee: ttraenkler/sdev-arrayrep
 created: 2026-06-19
 updated: 2026-06-19
+completed: 2026-06-19
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -122,3 +121,53 @@ the element-array type, per the verdict above.
 3. No regression: `new Array(1,2,3).sort()`, `[3,1,2].sort()`, comparator sort,
    and the existing typed-vec array-method fast paths stay correct (WAT-diff a
    literal-array sort; broad equivalence; HW floor).
+
+## Resolution (sdev-arrayrep, 2026-06-19) — contained dispatch gate, NOT representation rework
+
+Re-grounded against current main (218375d60, after #2502 + #2026 landed). The
+earlier VERIFY-GATE verdict ("architect-scale representation normalization") was
+**over-scoped**. #2502 had since gated the numeric Timsort fallback against
+externref elements (sort crash in **GC mode** cleared), but the standalone
+(`--target standalone`, native strings) crash for `new Array(N).sort()` and
+`any[].sort()` was still live — through a *different* code path than #2502 fixed.
+
+**Pinned root cause (standalone):** `compileArraySort` routes ref/externref
+element kinds to `compileArrayDefaultToStringSort` (#1993 default ToString sort).
+That function's non-numeric (`isStringElem`) branch loads each `array.get`
+element and — **in native-string mode only** — `ref.cast`s it to `$AnyString`
+(`stringifyTail`, array-methods.ts ~7194/7202). That cast is sound for a
+NativeString-typed element ref (`kind:"ref"|"ref_null"`), but a boxed-any
+`externref` element (`new Array(N)` holes, `any[]`) is in a *different*
+reference-type hierarchy → `Invalid types for ref.cast: ref.as_non_null of
+(ref extern) has to be in the same reference type hierarchy as (ref N)` in
+`__module_init`. The #2502 no-op gate sits *after* this branch, so it never
+fired for the externref-element case (the string branch returned non-null).
+
+**Fix (one guard, `compileArrayDefaultToStringSort`):** bail (`return null`) when
+`!isNumeric && native && elemType.kind === "externref"`, so the caller falls
+through to the #2502 no-op (return the receiver unchanged — correct for the
+all-holes `new Array(N)` case) instead of emitting the invalid cast. The guard is
+scoped to **native + externref**: host mode is untouched (its string branch
+`cmpStrType` is `externref` and emits only `ref.as_non_null`, no cast — so host
+externref string sorts stay valid; the broader guard regressed the GC string-sort
+test and was narrowed). Numeric (`f64`/`i32`) and NativeString-ref element sorts
+are unaffected.
+
+This is the contained dispatch fix the rail asks for, not a representation
+rework: `new Array(N)`'s boxed-any element array stays as-is; we simply stop the
+ToString sort from minting an invalid cast over it. Boxed-any ToString-*order*
+sorting (sorting holes/`any` by their actual stringified value) remains a
+separate, non-crashing follow-up needing a runtime any→string step.
+
+**Out of scope (separate pre-existing bug, flagged):** standalone
+`Array.prototype.join()` emits invalid Wasm (`__str_to_extern`: "not enough
+arguments on the stack for call (need 3, got 2)") for **any** element kind —
+`[3,1,2].join(",")`, `["a","b"].join(",")`, `new Array(2).join(",")` all fail. It
+reproduces on a plain numeric/string literal with no `new Array` and no sort, so
+it is NOT the element-rep issue; it belongs to the standalone-join slice (#2074).
+
+### Test
+`tests/issue-2379-standalone-sort-rep.test.ts` — 6 tests: `new Array(2).sort()`,
+`new Array(3)`+writes+sort, `any[]` sort all compile to VALID standalone Wasm;
+regressions — `number[]`, `string[]`, and comparator sorts stay valid standalone.
+Existing #2502 (8), #1816 (9), #1993 (12) sort suites all still green.
