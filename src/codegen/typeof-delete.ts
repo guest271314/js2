@@ -857,6 +857,46 @@ export function compileTypeofExpression(
     }
   }
 
+  // (#2200 Phase 2) `typeof F` where F is an Annex B block-nested function with a
+  // pre-allocated TDZ outer var-binding. The TS checker reports F's symbol as a
+  // function type (it models the hoist), so the static-fold below would wrongly
+  // yield "function" even before the block runs. Override with a runtime branch
+  // on the TDZ flag: flag set ⇒ "function", flag 0 (uninitialised / block not yet
+  // run) ⇒ "undefined". Gated on the normally-empty annexBOuterBindings set →
+  // every other typeof path is byte-identical.
+  {
+    let bare: ts.Expression = operand;
+    while (
+      ts.isParenthesizedExpression(bare) ||
+      ts.isAsExpression(bare) ||
+      ts.isTypeAssertionExpression(bare) ||
+      ts.isNonNullExpression(bare)
+    ) {
+      bare = (bare as ts.ParenthesizedExpression | ts.AsExpression).expression;
+    }
+    if (ts.isIdentifier(bare) && fctx.annexBOuterBindings?.has(bare.text)) {
+      const flagLocal = fctx.tdzFlagLocals?.get(bare.text);
+      if (flagLocal !== undefined) {
+        const fnArm: typeof fctx.body = [];
+        const undefArm: typeof fctx.body = [];
+        const saved = fctx.body;
+        fctx.body = fnArm;
+        const strType = compileStringLiteral(ctx, fctx, "function") ?? { kind: "externref" };
+        fctx.body = undefArm;
+        compileStringLiteral(ctx, fctx, "undefined");
+        fctx.body = saved;
+        fctx.body.push({ op: "local.get", index: flagLocal });
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: strType },
+          then: fnArm,
+          else: undefArm,
+        });
+        return strType;
+      }
+    }
+  }
+
   const tsType = ctx.checker.getTypeAtLocation(operand);
 
   // Try static resolution first via the shared helper
