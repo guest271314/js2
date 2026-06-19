@@ -1,5 +1,5 @@
 ---
-id: 2379
+id: 2503
 title: "standalone: typed-vec array method on an externref receiver (top-level new Array(N)) emits invalid ref.cast"
 status: done
 assignee: ttraenkler/sdev-arrayrep
@@ -13,10 +13,11 @@ task_type: bugfix
 area: codegen
 language_feature: arrays, array-methods
 goal: standalone-mode
-related: [2190, 2191]
+related: [2190, 2191, 2502]
+note: "renumbered 2379→2503 — id 2379 was reused on main for the Uint8ClampedArray method-dispatch issue (duplicate-ID quality gate). This is the array-sort externref-element-rep issue."
 ---
 
-# #2379 — array method on an externref receiver emits invalid `ref.cast`
+# #2503 — array method on an externref receiver emits invalid `ref.cast`
 
 ## Problem (file-verified, current main)
 
