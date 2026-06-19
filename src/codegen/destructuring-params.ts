@@ -192,7 +192,13 @@ function emitBoundsCheckedArrayGetUndef(
     emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elementType);
     return;
   }
-  const getUndefIdx = ensureLateImport(ctx, "__get_undefined", [], [{ kind: "externref" }]);
+  // (#2029) `ensureLateImport` does not refuse `__get_undefined`, so in
+  // standalone / native-strings mode it would register and LEAK the host import
+  // (module then fails to instantiate). Force the standalone fallback here, as
+  // the canonical `ensureGetUndefined` does.
+  const getUndefIdx = ctx.nativeStrings
+    ? undefined
+    : ensureLateImport(ctx, "__get_undefined", [], [{ kind: "externref" }]);
   if (getUndefIdx === undefined) {
     // standalone mode — can't get JS undefined, fall back to regular path
     emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elementType);

@@ -12,6 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: optional-chaining
 goal: core-semantics
+assignee: ttraenkler/cs-2164
 related: [16, 2049, 2050, 1603]
 origin: "2026-06-10 deep-audit sweep (eval-order agent): verified miscompile on main"
 ---
@@ -409,32 +410,50 @@ and VOID_RESULT calls must never widen). The standalone caveat (host `undefined`
 falls back to `ref.null.extern`, indistinguishable from null) is unchanged and
 out of scope, per the plan.
 
-## Investigation note (2026-06-18, cs-2163) — call-arm widening blocked by late-import shift
+## Element slice — LANDED (2026-06-18, cs-2164)
 
-Reproduced the remaining optional-**call** gap on `main` (`typeof o?.f(1)` →
-`"number"`, `"" + o?.f(1)` → `"NaN"`, `o?.f(1) === undefined` → false for a
-nullish receiver). Attempted the planned widen-to-externref + `emitUndefined`
-fix in `calls-optional.ts` (compute `widenToUndefinedExternref` from the chain's
-`isNullablePrimitiveType` static type; null arm `emitUndefined`; else arm
-`coerceType(f64 → externref)`).
+**Done — optional ELEMENT access `a?.[i]`.** The element arm is the
+property-access-shaped half: `compileOptionalElementAccess`
+(`property-access.ts`) lowered the whole `a?.[i]` result to the element's bare
+value type (f64/i32) and fabricated a typed zero in both the non-ref
+short-circuit and the `ref.is_null` then-arm — so a nullish base gave
+`a?.[0] === undefined` false, `typeof a?.[0]` "number", `"" + a?.[0]` "0".
 
-**Why it's not a quick slice — confirms the prior dev's revert.** The dominant
-repro form `o?.f(1)` resolves through the **closure-field delegate**
-(`compileCallablePropertyCall`), which emits a `call_ref` for the closure
-**inside** the non-null `else` body. Appending the `f64 → externref` coercion
-afterward pulls in `__box_number` as a **late import**, and late-import
-registration **shifts function indices** (the `addUnionImports` /
-`flushLateImportShifts` machinery) — desyncing the `call_ref`/funcIdx already
-baked into `elseInstrs`. Result: a runtime `illegal cast` trap on BOTH the
-nullish and the **non-nullish** paths (regressing the working `o?.f(1) === 2`
-case), exactly the trap the 2026-06-15 attempt hit.
+**Why this slice is safe where the CALL arm is not.** The else (non-null) arm of
+`compileOptionalElementAccess` ends in `compileElementAccessBody` — an
+`array.get`/`struct.get`, **not** a `call`/`call_ref`. So pulling `__box_number`
+in as a late import after the read does NOT desync a baked-in funcIdx (the exact
+hazard the call-arm attempts hit). It is the **same** pattern the landed
+property-access fix uses, applied verbatim to the element arm.
 
-**The fix that will work** (deferred — needs the careful ordering): register +
-flush `__box_number` / `__box_boolean` (and `__get_undefined`) **before**
-compiling the call body, so no index shift happens after the call's funcIdx is
-emitted (the #1749 pattern the property-access fix sidesteps because its else arm
-ends in a `struct.get`, not a `call`). The widening must also be gated to NOT
-fire for the closure-field-delegate path unless the box helpers are pre-flushed,
-and must never fire for `VOID_RESULT` calls. This is genuinely `reasoning_effort:
-max` (the issue's own rating) — left for a focused architect-spec'd pass. Left
-untouched on `main`; no regression introduced.
+**Fix** (`compileOptionalElementAccess`): compute
+`widenToUndefinedExternref = (resultType is f64/i32) && isNullablePrimitiveType(tsResultType)`;
+when set, widen `resultType` to externref. The non-ref short-circuit and the
+`ref.is_null` then-arm now emit host `undefined` (`emitUndefined`, via the
+`fctx.body` swap so late-import flushes are safe) instead of the typed zero; the
+else arm's existing `coerceType(elseResultType, resultType)` boxes the element
+value (`__box_number`/`__box_boolean`) since `resultType` is now externref.
+Boxes into a plain externref, NOT AnyValue — #1888 tag-5 ABI intact.
+
+**Validation.** New `tests/issue-2051-optional-element-undefined.test.ts` (7,
+JS-host): nullish `a?.[0] === undefined` / `typeof` / `"" +` / `?? 42`; the
+non-null distinguishing case (element value `0` must NOT read as undefined →
+`=== undefined` false, `"" +` "0"); non-null real element; string-element array
+(nullish typeof "undefined", non-null "x"). The 17 #2051 / #2050
+optional-element / #2049 optional-call regression cases stay green. tsc +
+prettier + biome(error) + coercion-sites + any-box + stack-balance gates clean.
+(The pre-existing 2-case failure in `optional-direct-closure-call.test.ts` is on
+stock `main`, unrelated to this slice — verified by stashing the change.)
+
+**Type-inference note:** the widening gate keys on `a?.[i]` having the nullable
+static type `number | undefined`. A `getArr` body written as `b ? [...] : null`
+narrows TS's inference of `a?.[0]` to a bare `number` in some contexts (gate
+doesn't fire); the `if (b) return …; return null;` shape gives the
+reliably-nullable type. This is a pre-existing static-type limit **shared by the
+property-access gate** (not new to the element slice) — the broader fix is a
+type-resolution improvement, out of scope here.
+
+**Still open (the issue's `reasoning_effort: max` core):** the optional **CALL**
+short-circuit (`o?.f()`, `calls-optional.ts`) — blocked by the late-import
+index-shift hazard documented above; needs the pre-flush-box-helpers ordering and
+is architect-spec territory. **#2051 stays in-progress** for that arm.

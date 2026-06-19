@@ -21,7 +21,8 @@ import {
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
-import { reserveClosedMethodDispatch } from "../closed-method-dispatch.js";
+import { ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain
+import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
 import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
 import {
@@ -128,10 +129,12 @@ import { tryStaticEvalInline } from "./eval-inline.js";
 import { compileExternMethodCall, compileSpreadCallArgs, emitLazyProtoGet } from "./extern.js";
 import {
   compileStandaloneRegExpConstructor,
+  emitStandaloneRegExpToStringFromExpr,
   isGlobalRegExpIdentifier,
   tryCompileStandaloneRegExpExec,
   tryCompileStandaloneRegExpSymbolCall,
   tryCompileStandaloneRegExpTest,
+  tryCompileStandaloneRegExpToString,
 } from "../regexp-standalone.js";
 import {
   emitThrowTypeError,
@@ -165,6 +168,7 @@ import {
   stringConstantExternrefInstrs,
 } from "../native-strings.js";
 import { emitVariadicStringConcat, hostStringRepr, nativeStringRepr } from "../builtin-scaffold.js";
+import { URI_DECODE_MASK, URI_ENCODE_MASK } from "../uri-encoding-native.js";
 import { emitArrayBufferSlice, emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
 import {
   getLinearU8Buffer,
@@ -2872,6 +2876,9 @@ function compileCallExpression(
     const standaloneRegExpTest = tryCompileStandaloneRegExpTest(ctx, fctx, expr, propAccess);
     if (standaloneRegExpTest !== undefined) return standaloneRegExpTest;
 
+    const standaloneRegExpToString = tryCompileStandaloneRegExpToString(ctx, fctx, expr, propAccess);
+    if (standaloneRegExpToString !== undefined) return standaloneRegExpToString;
+
     // Handle Array.prototype.METHOD.call(obj, ...args) — inline as array method on shape-inferred obj
     {
       const callResult = compileArrayPrototypeCall(ctx, fctx, expr, propAccess);
@@ -4269,6 +4276,45 @@ function compileCallExpression(
           return { kind: "ref", typeIdx: vecTypeIdx };
         }
       }
+      // (#2169c) Native standalone drain: `Array.from(iterable)` with no mapFn,
+      // host-free. The native `__iterator` runtime (registered here) wraps the
+      // arg into an `$IterRec`; `__iterator_rest` drains it into a canonical
+      // externref `$Vec` — exactly the value the host `__array_from` returns, but
+      // with zero host imports. mapFn is NOT handled natively yet (it needs
+      // closure dispatch) — those fall through to the host path below.
+      if (noJsHost(ctx) && expr.arguments.length < 2) {
+        ensureNativeIteratorRuntime(ctx);
+        const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+        flushLateImportShifts(ctx, fctx);
+        const iterIdx = ctx.funcMap.get("__iterator");
+        const restIdx = ctx.funcMap.get("__iterator_rest");
+        if (iterIdx !== undefined && restIdx !== undefined) {
+          // rec = __iterator(arg) ; return __iterator_rest(rec)
+          fctx.body.push({ op: "call", funcIdx: iterIdx });
+          fctx.body.push({ op: "call", funcIdx: restIdx });
+          return { kind: "externref" };
+        }
+        // Native runtime unavailable — fall through to the host path with the
+        // arg already on the stack (push the null mapFn it expects).
+        fctx.body.push({ op: "ref.null.extern" });
+        const fromNativeFallbackIdx = ensureLateImport(
+          ctx,
+          "__array_from",
+          [{ kind: "externref" }, { kind: "externref" }],
+          [{ kind: "externref" }],
+        );
+        flushLateImportShifts(ctx, fctx);
+        if (fromNativeFallbackIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: fromNativeFallbackIdx });
+          return { kind: "externref" };
+        }
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+
       // Fallback: Array.from(externref/iterable) — delegate to host (#965)
       {
         const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
@@ -4291,7 +4337,6 @@ function compileCallExpression(
           fctx.body.push({ op: "call", funcIdx: fromIdx });
           return { kind: "externref" };
         }
-        fctx.body.push({ op: "drop" });
         fctx.body.push({ op: "drop" });
         fctx.body.push({ op: "ref.null.extern" });
         return { kind: "externref" };
@@ -8751,6 +8796,49 @@ function compileCallExpression(
           return { kind: "externref" };
         }
 
+        // (#2151 Slice 4) DYNAMIC-spread any-receiver dispatch: `o.m(...xs)` where
+        // `xs` is a runtime array (arity unknown at compile time), so the
+        // fixed-arity `__call_m_<name>_<arity>` dispatcher above does not apply
+        // (flattenCallArgs returned null). Scope: a SINGLE pure spread argument —
+        // the dominant shape (`o.m(...xs)`). The vararg dispatcher
+        // `__call_m_<name>_vararg(recv, args)` reads each declared param from the
+        // spread array via `__extern_get_idx(args, i)`, so the array is passed
+        // directly (the native indexer handles wasm vecs and $ObjVec). Mixed
+        // `o.m(a, ...xs)` keeps falling through to the generic path (no
+        // regression — it returns the same value as before this slice).
+        //
+        // Gated to `ctx.standalone` ONLY (not wasi): the `__extern_get_idx`
+        // array-like / wasm-vec indexing arms the dispatcher relies on are
+        // emitted only under standalone (`objArrayLikeArms = ctx.standalone` in
+        // object-runtime.ts). Under wasi they are absent, so a vararg dispatcher
+        // would read null args — wasi keeps the existing fall-through behaviour
+        // (the same pre-existing wasi arg-vec gap noted in the issue). Widening
+        // the array-like arms to wasi is a separate, broader change.
+        const isSingleDynamicSpread =
+          ctx.standalone &&
+          !recvIsBuiltinClass &&
+          expr.arguments.length === 1 &&
+          ts.isSpreadElement(expr.arguments[0]!);
+        if (isSingleDynamicSpread) {
+          const dispatchIdx = reserveClosedMethodDispatchVararg(ctx, methodName);
+          flushLateImportShifts(ctx, fctx);
+          // Receiver as externref.
+          const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+          if (recvType && recvType.kind !== "externref") {
+            fctx.body.push({ op: "extern.convert_any" });
+          } else if (recvType === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          // The spread source array as externref — passed directly to the vararg
+          // dispatcher, which indexes it via __extern_get_idx.
+          const spreadExpr = (expr.arguments[0] as ts.SpreadElement).expression;
+          const argsType = compileExpression(ctx, fctx, spreadExpr, { kind: "externref" });
+          if (argsType && argsType.kind !== "externref") coerceType(ctx, fctx, argsType, { kind: "externref" });
+          else if (argsType === null) fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "call", funcIdx: dispatchIdx });
+          return { kind: "externref" };
+        }
+
         // (#799 WI3) Generic host-delegated method call for any/externref receivers.
         // Builds a JS array of arguments and calls __extern_method_call(obj, methodName, args).
         // (#965) For known built-in class identifiers (Object, Array, Proxy, etc.) that would
@@ -9041,7 +9129,12 @@ function compileCallExpression(
       }
     }
 
-    // decodeURI, decodeURIComponent, encodeURI, encodeURIComponent — host imports
+    // decodeURI, decodeURIComponent, encodeURI, encodeURIComponent.
+    // Host mode: per-name `env.*` import. Standalone/wasi (#2500): the encode
+    // names route to `__uri_encode(s, preservedMask)` and the decode names to
+    // `__uri_decode(s, reservedMask)` (both emitted in declarations.ts), passing
+    // the per-function mask (encode: uriUnescaped vs + uriReserved ∪ #; decode:
+    // reservedURISet kept-escaped for decodeURI, empty for decodeURIComponent).
     if (
       (funcName === "decodeURI" ||
         funcName === "decodeURIComponent" ||
@@ -9049,6 +9142,18 @@ function compileCallExpression(
         funcName === "encodeURIComponent") &&
       expr.arguments.length >= 1
     ) {
+      const isEncode = funcName === "encodeURI" || funcName === "encodeURIComponent";
+      const nativeHelperIdx = isEncode ? ctx.funcMap.get("__uri_encode") : ctx.funcMap.get("__uri_decode");
+      if (nativeHelperIdx !== undefined) {
+        const mask = isEncode ? URI_ENCODE_MASK[funcName]! : URI_DECODE_MASK[funcName]!;
+        const arg0Type = compileExpression(ctx, fctx, expr.arguments[0]!);
+        if (arg0Type && arg0Type.kind !== "externref") {
+          coerceType(ctx, fctx, arg0Type, { kind: "externref" });
+        }
+        fctx.body.push({ op: "i32.const", value: mask });
+        fctx.body.push({ op: "call", funcIdx: nativeHelperIdx });
+        return { kind: "externref" };
+      }
       const importFuncIdx = ctx.funcMap.get(funcName);
       if (importFuncIdx !== undefined) {
         const arg0Type = compileExpression(ctx, fctx, expr.arguments[0]!);
@@ -9312,6 +9417,19 @@ function compileCallExpression(
         const strArg0TsType = ctx.checker.getTypeAtLocation(strArg0);
         const arrToStr = tryEmitArrayToStringNative(ctx, fctx, strArg0, strArg0TsType);
         if (arrToStr !== undefined) return arrToStr;
+      }
+
+      // #2161 — String(re) in standalone: a static / backend-created RegExp
+      // argument routes through its native RegExp.prototype.toString
+      // (§22.2.6.14 → "/" + source + "/" + flags) instead of the generic
+      // ref→string coercion, which null-derefs on the $NativeRegExp struct in
+      // native-strings mode (re.toString() already works; the String() builtin
+      // lowering did not detect it). Must run BEFORE compileExpression so the
+      // RegExp receiver is compiled by the toString core. Additive: returns
+      // undefined (falls through) for any non-static / dynamic RegExp.
+      {
+        const reToStr = emitStandaloneRegExpToStringFromExpr(ctx, fctx, strArg0);
+        if (reToStr !== undefined && reToStr !== null) return reToStr;
       }
 
       const argType = compileExpression(ctx, fctx, strArg0);

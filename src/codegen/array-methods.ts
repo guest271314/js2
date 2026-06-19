@@ -504,11 +504,38 @@ const STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS = new Set([
   "indexOf",
   "lastIndexOf",
   "includes",
-  "filter",
+  // (#2036 S6 step 2) `filter` now has a native standalone arm — it builds its
+  // result via the native `$ObjVec` builder (`__objvec_new`/`__objvec_push`)
+  // instead of the host `__js_array_*`, so it no longer leaks a host import.
+  // Removed from the refusal set.
+  //
+  // (#1461/#54) `map` stays until its native indexed (sparse-hole) result arm
+  // lands. `reduce`/`reduceRight` are special-cased in the dispatch
+  // (`standaloneArrayLikeMethodRefused`): the **with-initial-value** form is
+  // host-import-free (accumulator boxed through native `__box_number`) and
+  // ALLOWED; the **no-initial-value** form's §23.1.3.21 forward hole-scan still
+  // hits a module-finalization func-index shift (`__extern_has_idx` baked call
+  // mis-resolves to `number_toString` → `if` over an externref → invalid Wasm),
+  // so it stays refused until that finalization-shift bug is fixed.
   "map",
-  "reduce",
-  "reduceRight",
 ]);
+
+/**
+ * (#1461/#54) Whether an array-like `.call(...)` over a non-array receiver is
+ * refused under `--target standalone`/`wasi`. Beyond the static
+ * `STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS` set, `reduce`/`reduceRight` are
+ * refused ONLY in their no-initial-value form (the forward hole-scan trips a
+ * module-finalization func-index shift → invalid Wasm). The with-initial-value
+ * form compiles to valid, host-free Wasm and is allowed through.
+ */
+function standaloneArrayLikeMethodRefused(methodName: string, callExpr: ts.CallExpression): boolean {
+  if (STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS.has(methodName)) return true;
+  if (methodName === "reduce" || methodName === "reduceRight") {
+    // args: [receiver, callback, initialValue?]. No initial value ⇒ refuse.
+    return callExpr.arguments.length < 3;
+  }
+  return false;
+}
 
 /**
  * Compile Array.prototype.METHOD.call(anyReceiver, callback, ...args) for any-typed receivers.
@@ -587,7 +614,7 @@ export function compileArrayLikePrototypeCall(
   // arm (#2036 PR-1) and fall through unaffected. Host/gc mode is untouched
   // (gated on standalone||wasi). Step 2 (real generic arm + emitter fix) removes
   // entries from this set as native paths land.
-  if ((ctx.standalone || ctx.wasi) && STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS.has(methodName)) {
+  if ((ctx.standalone || ctx.wasi) && standaloneArrayLikeMethodRefused(methodName, callExpr)) {
     reportError(
       ctx,
       callExpr,
@@ -1001,8 +1028,24 @@ export function compileArrayLikePrototypeCall(
     }
 
     case "filter": {
-      const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
-      const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+      // (#2036 S6 step 2) Result builder: in standalone/WASI build a native
+      // `$ObjVec` via `__objvec_new`/`__objvec_push` (host-import-free, and
+      // `[i]`/`.length`-readable post #2190/#35); in host/gc mode keep the host
+      // `__js_array_new`/`__js_array_push` JS-array builders. Both have the
+      // identical externref-new / `(externref,externref)->void`-push shape, so
+      // the loop body below is unchanged. filter's result is naturally dense
+      // (order-preserving compaction), so the sequential `push` is exact — no
+      // sparse-hole concern (that defers `map` to a follow-up slice).
+      let arrNewIdx: number | undefined;
+      let arrPushIdx: number | undefined;
+      if (ctx.standalone || ctx.wasi) {
+        const builders = ensureObjVecBuilders(ctx);
+        arrNewIdx = builders.newIdx;
+        arrPushIdx = builders.pushIdx;
+      } else {
+        arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+        arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+      }
       if (arrNewIdx === undefined || arrPushIdx === undefined) return undefined;
       flushLateImportShifts(ctx, fctx);
       const resultTmp = allocLocal(fctx, `__ali_fl_res_${fctx.locals.length}`, { kind: "externref" });
@@ -4918,6 +4961,21 @@ function compileArrayJoinNative(
     }
   }
 
+  // #2505-family — a boxed-any (`externref`) element array stringifies each
+  // element through the runtime `__extern_toString` (the same ToString
+  // `String(x)`/template-literals use for an `any` value). Resolve its funcIdx
+  // up front and flush the late-import shift BEFORE the fold bakes the call, so
+  // the index is stable. Bail to the string-element path only if unavailable.
+  let externToStrIdx: number | undefined;
+  if (elemType.kind === "externref") {
+    externToStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (externToStrIdx === undefined) {
+      reportError(ctx, callExpr, "join of a boxed-any array requires __extern_toString");
+      return null;
+    }
+  }
+
   const vecTmp = allocLocal(fctx, `__njoin_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__njoin_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const foldLocals = allocJoinFoldLocals(fctx, repr, "njoin");
@@ -4975,6 +5033,23 @@ function compileArrayJoinNative(
     if (elemType.kind !== "f64") elemToStr.push({ op: "f64.convert_i32_s" } as Instr);
     elemToStr.push({ op: "call", funcIdx: numToStrIdx } as Instr);
     // number_toString returns the native string boxed as externref.
+    elemToStr.push({ op: "any.convert_extern" } as Instr);
+    elemToStr.push({ op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr);
+  } else if (elemType.kind === "externref") {
+    // #2505-family — a boxed-any element array (`any[]`, `new Array(N)` holes)
+    // stores its elements as raw `externref`, NOT as a `$NativeString` ref. The
+    // string-element branch below (`ref.as_non_null`) would non-null the externref
+    // and `local.set` it into the `(ref $AnyString)` result local → a validator
+    // type mismatch ("local.set expected (ref null N), found ref.as_non_null of
+    // (ref extern)"). Route each boxed-any element through `__extern_toString`
+    // (externref → externref native string) — the SAME runtime ToString that
+    // `String(a[i])` / `` `${a[i]}` `` use for an `any`-typed value. (NOT
+    // `__any_to_string`, the $AnyValue-tag dispatcher: an `any[]` element is a
+    // `__box_number`/`__box_boolean`-boxed externref, not a $AnyValue, so the tag
+    // dispatch mis-stringifies it to "[object Object]".) Convert the externref
+    // result up to `ref $AnyString` for the concat fold. `__extern_toString` is
+    // provided by ensureObjectRuntime; reuse the funcIdx captured before the loop.
+    elemToStr.push({ op: "call", funcIdx: externToStrIdx! } as Instr);
     elemToStr.push({ op: "any.convert_extern" } as Instr);
     elemToStr.push({ op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr);
   } else {
@@ -6602,10 +6677,20 @@ function compileArrayFind(
     "truthy",
   );
 
-  // Result local -- NaN (not found) or element value
-  const findResType: ValType = ctx.fast ? elemType : { kind: "f64" };
+  // #2507 — a boxed-any (`externref`) element array (`any[]`, `new Array(N)`)
+  // returns the matched ELEMENT, which is an `externref`, not an f64. The
+  // non-fast default below assumes a numeric element and types the result local
+  // f64 with a NaN "not found" sentinel — which then `local.set`s the externref
+  // element into an f64 local ("expected f64, found externref"). Keep the result
+  // as `externref` for an externref element (and use `ref.null.extern` — the
+  // `undefined` sentinel — for "not found", which is the spec result anyway).
+  const elemIsExternref = elemType.kind === "externref";
+  // Result local -- NaN/undefined (not found) or element value
+  const findResType: ValType = ctx.fast || elemIsExternref ? elemType : { kind: "f64" };
   const findResTmp = allocLocal(fctx, `__arr_find_res_${fctx.locals.length}`, findResType);
-  if (ctx.fast) {
+  if (elemIsExternref) {
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (ctx.fast) {
     fctx.body.push({ op: "i32.const", value: 0 });
   } else {
     fctx.body.push({ op: "f64.const", value: 0 });
@@ -6640,7 +6725,7 @@ function compileArrayFind(
   emitArrayLoop(fctx, loopBody);
 
   fctx.body.push({ op: "local.get", index: findResTmp });
-  return ctx.fast ? elemType : { kind: "f64" };
+  return ctx.fast || elemIsExternref ? elemType : { kind: "f64" };
 }
 
 /**
@@ -6793,9 +6878,15 @@ function compileArrayFindLast(
     "truthy",
   );
 
-  const findResType: ValType = ctx.fast ? elemType : { kind: "f64" };
+  // #2507 — boxed-any (`externref`) element array returns the externref element,
+  // not an f64; keep the result type externref with a `ref.null.extern`
+  // (undefined) "not found" sentinel. See compileArrayFind.
+  const elemIsExternref = elemType.kind === "externref";
+  const findResType: ValType = ctx.fast || elemIsExternref ? elemType : { kind: "f64" };
   const findResTmp = allocLocal(fctx, `__arr_findLast_res_${fctx.locals.length}`, findResType);
-  if (ctx.fast) {
+  if (elemIsExternref) {
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (ctx.fast) {
     fctx.body.push({ op: "i32.const", value: 0 });
   } else {
     fctx.body.push({ op: "f64.const", value: 0 });
@@ -6830,7 +6921,7 @@ function compileArrayFindLast(
   emitArrayLoop(fctx, loopBody);
 
   fctx.body.push({ op: "local.get", index: findResTmp });
-  return ctx.fast ? elemType : { kind: "f64" };
+  return ctx.fast || elemIsExternref ? elemType : { kind: "f64" };
 }
 
 /**
@@ -7089,7 +7180,31 @@ function compileArraySort(
   if (elemType.kind === "f64" || elemType.kind === "i32" || isStringElem) {
     const defaultResult = compileArrayDefaultToStringSort(ctx, fctx, propAccess, vecTypeIdx, arrTypeIdx, elemType);
     if (defaultResult) return defaultResult;
-    // Fell through (e.g. helpers unavailable) — fall back to numeric Timsort.
+    // Fell through (e.g. helpers unavailable) — fall back to numeric Timsort,
+    // but ONLY for numeric element kinds (below): the numeric Timsort hard-codes
+    // `f64.gt`/`i32.gt_s`, so routing a ref/externref element array here mints
+    // `__isort_<kind>` with a comparator that does `f64.gt` on a non-numeric
+    // `array.get` → invalid Wasm (#2502). For non-numeric kinds, leave the array
+    // as-is (a no-op sort) rather than emit a poisoned binary.
+  }
+
+  // #2502 — the numeric Timsort is valid only for i32/f64 element arrays. A
+  // ref/externref-element array whose default ToString sort fell through above
+  // must NOT reach `ensureTimsortHelper` (the `elemType.kind as "i32"|"f64"`
+  // cast is a lie for externref and produces `f64.gt` on an externref element).
+  // Emit a no-op (return the receiver unchanged) — correct for the common holes
+  // case (`new Array(2)` is all `undefined`, already sorted) and never invalid.
+  if (elemType.kind !== "i32" && elemType.kind !== "f64") {
+    const vecTmp0 = allocLocal(fctx, `__arr_sort_noop_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: vecTypeIdx,
+    });
+    compileExpression(ctx, fctx, propAccess.expression);
+    fctx.body.push({ op: "local.tee", index: vecTmp0 });
+    emitReceiverNullGuard(ctx, fctx, vecTmp0);
+    fctx.body.push({ op: "local.get", index: vecTmp0 });
+    fctx.body.push({ op: "ref.as_non_null" });
+    return { kind: "ref_null", typeIdx: vecTypeIdx };
   }
 
   const elemKind = elemType.kind as "i32" | "f64";
@@ -7134,6 +7249,23 @@ function compileArrayDefaultToStringSort(
   const isNumeric = elemType.kind === "f64" || elemType.kind === "i32";
   const native = ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0;
 
+  // #2379 — in NATIVE-string mode this ToString sort's non-numeric branch
+  // `ref.cast`s each `array.get` element to `$AnyString` (see `stringifyTail`),
+  // which is sound only for a NativeString-typed element ref. A raw `externref`
+  // element is a *boxed-any* value (e.g. `new Array(N)` holes, an `any[]`), NOT a
+  // NativeString — `ref.cast` of an `(ref extern)` against `(ref $AnyString)` is
+  // invalid Wasm (different reference-type hierarchies → "ref.as_non_null of
+  // (ref extern) has to be in the same reference type hierarchy as (ref N)" in
+  // `__module_init`). Bail so the caller no-ops the sort (#2502) instead of
+  // emitting a poisoned binary. Boxed-any ToString-order sorting is a separate
+  // follow-up needing a runtime any→string step, not this static cast.
+  // HOST mode is unaffected: there `cmpStrType` is `externref` and the string
+  // branch emits only `ref.as_non_null` (no cast), so a host externref element
+  // sorts correctly — do NOT bail there or valid host string sorts break.
+  if (!isNumeric && native && elemType.kind === "externref") {
+    return null;
+  }
+
   // Comparison-string type + the compare/stringify helpers per backend.
   let cmpStrType: ValType;
   let compareIdx: number | undefined;
@@ -7154,7 +7286,7 @@ function compileArrayDefaultToStringSort(
     if (isNumeric) numToStrIdx = ctx.funcMap.get("number_toString");
   }
   if (compareIdx === undefined || (isNumeric && numToStrIdx === undefined)) {
-    return null; // helpers not registered — fall back to numeric Timsort
+    return null; // helpers not registered — caller no-ops (#2502) or numeric Timsort
   }
 
   const vecTmp = allocLocal(fctx, `__dsort_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });

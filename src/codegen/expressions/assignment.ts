@@ -6,7 +6,7 @@ import { ts, forEachChild } from "../../ts-api.js";
 import { isBooleanType, isExternalDeclaredClass, isStringType } from "../../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType } from "../../ir/types.js";
 import { emitBoundsCheckedArrayGet, resolveArrayInfo } from "../array-methods.js";
-import { tryEmitLinearU8ElementSet } from "../linear-uint8-codegen.js";
+import { tryEmitLinearU8ElementCompound, tryEmitLinearU8ElementSet } from "../linear-uint8-codegen.js";
 import { emitAnyAdd, emitModulo, emitToInt32 } from "../binary-ops.js";
 import { pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
@@ -5562,6 +5562,18 @@ function compileElementCompoundAssignment(
   rhs: ts.Expression,
   op: ts.SyntaxKind,
 ): ValType | null {
+  // #2045 C.8: compound write `b[i] op= rhs` on a linear-backed Uint8Array must
+  // read-modify-write the linear memory. Without this it fell through to the
+  // GC/externref path below (which materialises the buffer as a value and never
+  // touches linear memory), so `b[0] += 1` silently kept the old byte. Try the
+  // linear read-modify-write first; falls through to GC for any other target.
+  const linU8Compound = tryEmitLinearU8ElementCompound(ctx, fctx, target, () => {
+    // current element value is already on the stack as f64; push rhs, apply op.
+    compileExpression(ctx, fctx, rhs, { kind: "f64" });
+    emitCompoundOp(ctx, fctx, op);
+  });
+  if (linU8Compound !== null) return linU8Compound;
+
   // Compile the object expression
   const objResult = compileExpression(ctx, fctx, target.expression);
   if (!objResult) return null;

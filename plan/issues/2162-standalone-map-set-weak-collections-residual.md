@@ -2,9 +2,9 @@
 id: 2162
 title: "Standalone Map/Set/WeakMap/WeakSet conformance residual (~532 tests)"
 status: in-progress
-sprint: 63
+sprint: 64
 created: 2026-06-15
-updated: 2026-06-17
+updated: 2026-06-18
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -141,17 +141,52 @@ control. Test: `tests/issue-2162-collection-from-array.test.ts` (10/10).
 
 ### Remaining slices (issue stays in-progress)
 
-- **`entries()` `[k, v]`-pair iteration + value spread** (`[...map.values()]`) —
-  the `$ObjVec` pair / spread consumer needs the `__iterator` pair route, not the
-  array fast path. The `entries` projection builder is in place
-  (`emitCollectionIteratorVec`, `kind: "entries"`) but not yet wired to a
-  consumer. Tracked as a #2162 follow-up.
+- ~~**`entries()` `[k, v]`-pair iteration**~~ — **done** in the entries-for-of
+  slice below.
+- **value/key/entries SPREAD** (`[...set]`, `[...map.values()]`,
+  `[...map.entries()]`) — the array-spread consumer reads the canonical externref
+  vec but stores into a scalar-typed array (externref↔f64 mismatch ⇒ invalid
+  Wasm). A separate spread-consumer slice; the for-of path is unaffected.
 - `new Map(iterable)` / `new Set(iterable)` over a NON-literal iterable — needs
   the general iterator drive (Slice 4 from-array covers only array literals).
 - ES2025 set-algebra: `union`/`intersection`/`difference`/
-  `symmetricDifference`/`isSubsetOf`/`isSupersetOf`/`isDisjointFrom`.
+  `symmetricDifference`/`isSubsetOf`/`isSupersetOf`/`isDisjointFrom` — **done**
+  (see the set-algebra slice).
 - The `Set === literal` / collection-of-`any` comparison confounds depend on the
   value-rep work (#2104/#2106), out of scope here.
+
+## Slice — native Map/Set `entries()` `[k, v]` for-of (PR, dev cs-2163, 2026-06-18)
+
+`for (const [k, v] of map.entries())` and the bare `for (const [k, v] of map)`
+(Map default → entries) — plus the Set `[v, v]` form — now iterate host-import-
+free standalone. Previously the bare-Map for-of CE'd ("element is not an array
+type"); routing it through the `$ObjVec` pair projection + generic `[k, v]`
+destructuring leaked `__array_from_iter_n` / `__get_undefined` / `__extern_get`
+(the pair element was read via the host extern-index arm).
+
+**Fix** — new `compileForOfNativeMapEntries` (`src/codegen/statements/loops.ts`):
+a dedicated native walk over the `$Map` entries vector that binds the STORED
+key/value DIRECTLY into the `[k, v]` targets per live entry (skipping tombstones)
+— no intermediate pair object, no host import. It mirrors
+`tryCompileNativeCollectionForEach`'s tombstone-skipping entry walk (cursor
+advanced before the body so a `continue`/tombstone-skip never re-reads a slot)
+and `compileForOfArray`'s block/loop/body-block break/continue depth
+bookkeeping. Entry fields are externalized (`extern.convert_any`) then coerced to
+the bound local's type via the shared `coercionInstrs` (numeric key → f64, string
+→ native string ref, etc.). The `$Map`/`$MapEntry` field layout is exported from
+`map-runtime.ts` as `MAP_LAYOUT` so the driver doesn't re-derive the constants.
+`compileForOfNativeCollection` now dispatches the `entries` kind here (the
+non-`[k,v]` shapes — single-identifier binding, holes, rest, assignment targets —
+fall back to the generic path). Gated on `ctx.nativeStrings`; host/gc unchanged
+(verified host Map entries for-of still returns the same value).
+
+**Verified** (`tests/issue-2162-entries-foreach.test.ts`, 9/9, `target:
+standalone`, ZERO host imports): explicit `.entries()` and bare-Map `[k, v]`
+for-of, Set `[v, v]` entries, numeric + string keys, tombstone-skip after delete,
+insertion order, `break`, `continue`, empty collection. tsc + lint +
+format:check clean; all prior #2162 standalone suites (iterators, set-foreach,
+collection-from-array, set-algebra, standalone-set, standalone-weak,
+weak-mapHelpers-shift = 50 tests) unaffected.
 
 ## Slice — ES2025 Set set-algebra (PR, dev-1, 2026-06-17)
 
