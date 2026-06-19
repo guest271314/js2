@@ -7074,7 +7074,31 @@ function compileArraySort(
   if (elemType.kind === "f64" || elemType.kind === "i32" || isStringElem) {
     const defaultResult = compileArrayDefaultToStringSort(ctx, fctx, propAccess, vecTypeIdx, arrTypeIdx, elemType);
     if (defaultResult) return defaultResult;
-    // Fell through (e.g. helpers unavailable) — fall back to numeric Timsort.
+    // Fell through (e.g. helpers unavailable) — fall back to numeric Timsort,
+    // but ONLY for numeric element kinds (below): the numeric Timsort hard-codes
+    // `f64.gt`/`i32.gt_s`, so routing a ref/externref element array here mints
+    // `__isort_<kind>` with a comparator that does `f64.gt` on a non-numeric
+    // `array.get` → invalid Wasm (#2502). For non-numeric kinds, leave the array
+    // as-is (a no-op sort) rather than emit a poisoned binary.
+  }
+
+  // #2502 — the numeric Timsort is valid only for i32/f64 element arrays. A
+  // ref/externref-element array whose default ToString sort fell through above
+  // must NOT reach `ensureTimsortHelper` (the `elemType.kind as "i32"|"f64"`
+  // cast is a lie for externref and produces `f64.gt` on an externref element).
+  // Emit a no-op (return the receiver unchanged) — correct for the common holes
+  // case (`new Array(2)` is all `undefined`, already sorted) and never invalid.
+  if (elemType.kind !== "i32" && elemType.kind !== "f64") {
+    const vecTmp0 = allocLocal(fctx, `__arr_sort_noop_${fctx.locals.length}`, {
+      kind: "ref_null",
+      typeIdx: vecTypeIdx,
+    });
+    compileExpression(ctx, fctx, propAccess.expression);
+    fctx.body.push({ op: "local.tee", index: vecTmp0 });
+    emitReceiverNullGuard(ctx, fctx, vecTmp0);
+    fctx.body.push({ op: "local.get", index: vecTmp0 });
+    fctx.body.push({ op: "ref.as_non_null" });
+    return { kind: "ref_null", typeIdx: vecTypeIdx };
   }
 
   const elemKind = elemType.kind as "i32" | "f64";
@@ -7119,6 +7143,23 @@ function compileArrayDefaultToStringSort(
   const isNumeric = elemType.kind === "f64" || elemType.kind === "i32";
   const native = ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0;
 
+  // #2379 — in NATIVE-string mode this ToString sort's non-numeric branch
+  // `ref.cast`s each `array.get` element to `$AnyString` (see `stringifyTail`),
+  // which is sound only for a NativeString-typed element ref. A raw `externref`
+  // element is a *boxed-any* value (e.g. `new Array(N)` holes, an `any[]`), NOT a
+  // NativeString — `ref.cast` of an `(ref extern)` against `(ref $AnyString)` is
+  // invalid Wasm (different reference-type hierarchies → "ref.as_non_null of
+  // (ref extern) has to be in the same reference type hierarchy as (ref N)" in
+  // `__module_init`). Bail so the caller no-ops the sort (#2502) instead of
+  // emitting a poisoned binary. Boxed-any ToString-order sorting is a separate
+  // follow-up needing a runtime any→string step, not this static cast.
+  // HOST mode is unaffected: there `cmpStrType` is `externref` and the string
+  // branch emits only `ref.as_non_null` (no cast), so a host externref element
+  // sorts correctly — do NOT bail there or valid host string sorts break.
+  if (!isNumeric && native && elemType.kind === "externref") {
+    return null;
+  }
+
   // Comparison-string type + the compare/stringify helpers per backend.
   let cmpStrType: ValType;
   let compareIdx: number | undefined;
@@ -7139,7 +7180,7 @@ function compileArrayDefaultToStringSort(
     if (isNumeric) numToStrIdx = ctx.funcMap.get("number_toString");
   }
   if (compareIdx === undefined || (isNumeric && numToStrIdx === undefined)) {
-    return null; // helpers not registered — fall back to numeric Timsort
+    return null; // helpers not registered — caller no-ops (#2502) or numeric Timsort
   }
 
   const vecTmp = allocLocal(fctx, `__dsort_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
