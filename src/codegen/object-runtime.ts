@@ -4493,7 +4493,10 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
         blockType: { kind: "empty" },
         then: [
           ...(marksData
-            ? ([{ op: "i32.const", value: 1 }, { op: "local.set", index: L_HAS_DATA }] as Instr[])
+            ? ([
+                { op: "i32.const", value: 1 },
+                { op: "local.set", index: L_HAS_DATA },
+              ] as Instr[])
             : []),
           ...getField(key),
           { op: "call", funcIdx: isTruthyIdx },
