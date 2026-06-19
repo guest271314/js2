@@ -8891,7 +8891,7 @@ function compileCallExpression(
     }
 
     // decodeURI, decodeURIComponent, encodeURI, encodeURIComponent.
-    // Host mode: per-name `env.*` import. Standalone/wasi (#2400): the encode
+    // Host mode: per-name `env.*` import. Standalone/wasi (#2500): the encode
     // names route to the pure-Wasm `__uri_encode(s, preservedMask)` helper
     // emitted in declarations.ts, passing the per-function preserved-set mask
     // (encodeURIComponent = uriUnescaped; encodeURI = + uriReserved ∪ #).

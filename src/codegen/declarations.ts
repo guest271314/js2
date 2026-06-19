@@ -1206,7 +1206,7 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   }
 
   // ── collectURIImports finalize ──
-  // #2400 — `encodeURI` / `encodeURIComponent` are JS-host `env.*` imports in
+  // #2500 — `encodeURI` / `encodeURIComponent` are JS-host `env.*` imports in
   // host mode. Under `--target wasi`/`--target standalone` there is no host, so
   // the call site previously fell through to a `ref.test`/`ref.cast` of the
   // argument and returned `null`. Emit the pure-Wasm `__uri_encode` helper

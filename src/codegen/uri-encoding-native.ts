@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
  * Pure-Wasm `encodeURI` / `encodeURIComponent` for standalone / WASI targets
- * (#2400). In JS-host mode these are `env.*` imports; under `--target
+ * (#2500). In JS-host mode these are `env.*` imports; under `--target
  * wasi`/`--target standalone` there is no JS host, so the call sites silently
  * fell through to a `ref.test`/`ref.cast` of the argument and returned `null`
  * (~133 `built-ins/{encodeURI,encodeURIComponent,…}` test262 fail). This module

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
 /**
- * #2400 — Wasm-native `encodeURI` / `encodeURIComponent` (ECMAScript §19.2.6.5
+ * #2500 — Wasm-native `encodeURI` / `encodeURIComponent` (ECMAScript §19.2.6.5
  * Encode) for standalone / WASI.
  *
  * In JS-host mode these are `env.*` imports. Under `--target wasi`/`--target
@@ -87,7 +87,7 @@ const CASES: ReadonlyArray<Case> = [
 
 const MODULE_SRC = CASES.map((c) => `export function ${c.name}(): number { ${c.src} }`).join("\n");
 
-describe("#2400 Wasm-native encodeURI / encodeURIComponent (standalone)", () => {
+describe("#2500 Wasm-native encodeURI / encodeURIComponent (standalone)", () => {
   it("compiles standalone with no host imports and matches the spec", async () => {
     const result = await compile(MODULE_SRC, { fileName: "uri.ts", target: "wasi" });
     expect(result.success).toBe(true);

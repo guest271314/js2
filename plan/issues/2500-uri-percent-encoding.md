@@ -1,5 +1,5 @@
 ---
-id: 2400
+id: 2500
 title: "Wasm-native decodeURI / encodeURI / decodeURIComponent / encodeURIComponent (percent-encoding, ~133 test262)"
 status: in-progress
 assignee: ttraenkler/sd5
@@ -17,7 +17,7 @@ test262_bucket: uri-encoding
 test262_count: 133
 ---
 
-# #2400 — Wasm-native URI percent-encoding
+# #2500 — Wasm-native URI percent-encoding
 
 ## Problem
 
@@ -111,7 +111,7 @@ bad continuation / overlong / out-of-range / decoded lone surrogate).
 
 ## Test Results
 
-`tests/issue-2400-uri-encoding.test.ts` — both tests green. Standalone module
+`tests/issue-2500-uri-encoding.test.ts` — both tests green. Standalone module
 compiled with `target: "wasi"`, instantiated with an **empty import object**
 (proving no host); exports return numbers (`.length`/`.charCodeAt`) so results
 read back without a string-marshaling host. Verified:
