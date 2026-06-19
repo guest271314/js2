@@ -5269,7 +5269,71 @@ function compileCallExpression(
       propAccess.name.text === "fromEntries" &&
       expr.arguments.length >= 1
     ) {
-      const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+      const entriesArg = expr.arguments[0]!;
+      // (#2042 S3) In standalone, the native `__object_fromEntries` helper iterates
+      // the entries arg + each pair via `__extern_get_idx`, which reliably indexes
+      // only a `$ObjVec`. A native ARRAY-LITERAL of pairs (`[["a",1],["b",2]]`) is
+      // a typed native vec, not a $ObjVec, and indexing it through the externref
+      // boundary mis-casts. So — mirroring `compileObjectAssignArg` for
+      // Object.assign — normalise an array-literal-of-pairs into a $ObjVec of pair
+      // $ObjVecs HERE (push each element's two slots), then hand the helper the
+      // indexable representation. (Map / generic-iterable args keep the old
+      // ordinary-externref path; their native iterator-protocol consumption is a
+      // larger #2190 follow-up.)
+      if (
+        ctx.standalone &&
+        ts.isArrayLiteralExpression(entriesArg) &&
+        entriesArg.elements.length > 0 &&
+        entriesArg.elements.every(
+          (el) =>
+            ts.isArrayLiteralExpression(el) &&
+            el.elements.length === 2 &&
+            // Gate to STRING-typed keys (string literal, or statically-string).
+            // A numeric/boxed key round-trips through __objvec_push/__extern_get_idx
+            // and then mis-casts in __to_property_key (illegal cast) — keep that
+            // (rare) shape on the ordinary path rather than introduce a new trap.
+            (el.elements[0]!.kind === ts.SyntaxKind.StringLiteral ||
+              isStringType(ctx.checker.getTypeAtLocation(el.elements[0]!))),
+        )
+      ) {
+        const { newIdx: objVecNewIdx, pushIdx: objVecPushIdx } = ensureObjVecBuilders(ctx);
+        const outerVecLocal = allocLocal(fctx, `__fe_entries_${fctx.locals.length}`, { kind: "externref" });
+        // outer = __objvec_new()
+        fctx.body.push({ op: "call", funcIdx: objVecNewIdx });
+        fctx.body.push({ op: "local.set", index: outerVecLocal });
+        for (const el of entriesArg.elements) {
+          const pair = el as ts.ArrayLiteralExpression;
+          const pairVecLocal = allocLocal(fctx, `__fe_pair_${fctx.locals.length}`, { kind: "externref" });
+          // pair = __objvec_new()
+          fctx.body.push({ op: "call", funcIdx: objVecNewIdx });
+          fctx.body.push({ op: "local.set", index: pairVecLocal });
+          // __objvec_push(pair, <key>); __objvec_push(pair, <value>)
+          for (const slot of pair.elements) {
+            fctx.body.push({ op: "local.get", index: pairVecLocal });
+            const slotType = compileExpression(ctx, fctx, slot, { kind: "externref" });
+            if (slotType && slotType.kind !== "externref") coerceType(ctx, fctx, slotType, { kind: "externref" });
+            if (slotType === null) fctx.body.push({ op: "ref.null.extern" });
+            fctx.body.push({ op: "call", funcIdx: objVecPushIdx });
+          }
+          // __objvec_push(outer, pair)
+          fctx.body.push({ op: "local.get", index: outerVecLocal });
+          fctx.body.push({ op: "local.get", index: pairVecLocal });
+          fctx.body.push({ op: "call", funcIdx: objVecPushIdx });
+        }
+        fctx.body.push({ op: "local.get", index: outerVecLocal });
+        // __object_fromEntries is registered by ensureObjectRuntime (via
+        // ensureObjVecBuilders above) but is NOT routed via OBJECT_RUNTIME_HELPER_NAMES
+        // (so the ordinary raw-arg path keeps refusing) — resolve it from funcMap.
+        const feIdx = ctx.funcMap.get("__object_fromEntries");
+        if (feIdx !== undefined) {
+          fctx.body.push({ op: "call", funcIdx: feIdx });
+          return { kind: "externref" };
+        }
+        fctx.body.push({ op: "drop" });
+        fctx.body.push({ op: "ref.null.extern" });
+        return { kind: "externref" };
+      }
+      const argType = compileExpression(ctx, fctx, entriesArg, { kind: "externref" });
       if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
       const funcIdx = ensureLateImport(ctx, "__object_fromEntries", [{ kind: "externref" }], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
