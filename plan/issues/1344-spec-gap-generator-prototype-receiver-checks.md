@@ -1,9 +1,10 @@
 ---
 id: 1344
 title: "spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return/throw (52 + 12 test262 fails)"
-status: ready
+status: in-progress
+assignee: ttraenkler/sd3
 created: 2026-05-08
-updated: 2026-06-12
+updated: 2026-06-19
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -142,3 +143,48 @@ even though tests check just for its existence).
 ## Unblocked (2026-06-12)
 
 Blocker #1665 is done — flipped to `ready`, queued sprint 63. Re-validate the repro first (#2148).
+
+---
+
+## Slice 1 (2026-06-19, sd3) — `next`/`return` borrowed-receiver TypeError — LANDED
+
+Landed the dominant `this-val-not-generator` bucket: calling a borrowed
+generator method with a `this` that lacks `[[GeneratorState]]`
+(`GeneratorPrototype.next.call({})`) now throws a **catchable TypeError**
+(§27.5.3.2 GeneratorValidate step 2), instead of the prior **silent
+`{value: 0, done: true}` sentinel**.
+
+**Root cause / fix** (`src/codegen/generators-native.ts`
+`buildNativeGeneratorDispatch`): the dispatch tests the receiver against each
+known native-generator state type (`ref.test $stateType`) and, on no match, fell
+through to a hard-coded `{value:0, done:1}` result. That terminal `fallback`
+is exactly the "not a generator" case, so it now emits a real catchable
+TypeError via the shared `emitBrandCheckTypeError(ctx, body, msg)` helper (a
+`__new_TypeError` instance + `throw $exc`, never a `ref.cast` trap). `throw` is
+stack-polymorphic so it satisfies the enclosing block's result type without
+leaving a value. One disjoint change; the per-generator `next`/`return` branches
+are untouched.
+
+**Verified** (`tests/issue-1344.test.ts`, 5 cases): borrowed `.next.call({})`
+and `.return.call({}, v)` throw a `TypeError` *instance* (catchable in-module,
+not a host RuntimeError); real generator `.next()` sequence + `.return(v)`
+unchanged. `tsc --noEmit` clean; loadable generator suites
+(`generators`/`generator-methods*`-loadable/`gen-call-579`) green. (Several
+`generator-*.test.ts` files fail to even *load* on `origin/main` because they
+import a never-committed `tests/helpers.js` — pre-existing infra gap, not a
+regression from this change.)
+
+**Still open for #1344 (issue stays `in-progress`):**
+- **`.throw()`** is not routed through the native dispatch at all
+  (`tryCompileNativeGeneratorMethodCall` early-returns for `throw`, and
+  `compileDirectNativeGeneratorMethod` returns `undefined` for it) — the
+  `throw/from-state-completed` bucket is untouched.
+- **AsyncGenerator / AsyncIterator prototype** receiver checks + the
+  prototype-of-prototypes existence (the 12-fail async bucket).
+- **Reifying `GeneratorPrototype` as a first-class object** so the test262
+  `Object.getPrototypeOf(g).prototype.next` access path is exercised directly
+  (the current slice triggers via a borrowed method reference, which covers the
+  semantic but the test262 harness uses the prototype-object access).
+
+These remaining parts are the genuinely architectural half the 2026-05-28
+triage flagged ("NOT a localized fix") — route to senior-dev/architect.
