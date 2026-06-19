@@ -22,7 +22,7 @@ import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain
-import { reserveClosedMethodDispatch } from "../closed-method-dispatch.js";
+import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
 import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
 import {
@@ -8596,6 +8596,49 @@ function compileCallExpression(
             if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
             else if (at === null) fctx.body.push({ op: "ref.null.extern" });
           }
+          fctx.body.push({ op: "call", funcIdx: dispatchIdx });
+          return { kind: "externref" };
+        }
+
+        // (#2151 Slice 4) DYNAMIC-spread any-receiver dispatch: `o.m(...xs)` where
+        // `xs` is a runtime array (arity unknown at compile time), so the
+        // fixed-arity `__call_m_<name>_<arity>` dispatcher above does not apply
+        // (flattenCallArgs returned null). Scope: a SINGLE pure spread argument —
+        // the dominant shape (`o.m(...xs)`). The vararg dispatcher
+        // `__call_m_<name>_vararg(recv, args)` reads each declared param from the
+        // spread array via `__extern_get_idx(args, i)`, so the array is passed
+        // directly (the native indexer handles wasm vecs and $ObjVec). Mixed
+        // `o.m(a, ...xs)` keeps falling through to the generic path (no
+        // regression — it returns the same value as before this slice).
+        //
+        // Gated to `ctx.standalone` ONLY (not wasi): the `__extern_get_idx`
+        // array-like / wasm-vec indexing arms the dispatcher relies on are
+        // emitted only under standalone (`objArrayLikeArms = ctx.standalone` in
+        // object-runtime.ts). Under wasi they are absent, so a vararg dispatcher
+        // would read null args — wasi keeps the existing fall-through behaviour
+        // (the same pre-existing wasi arg-vec gap noted in the issue). Widening
+        // the array-like arms to wasi is a separate, broader change.
+        const isSingleDynamicSpread =
+          ctx.standalone &&
+          !recvIsBuiltinClass &&
+          expr.arguments.length === 1 &&
+          ts.isSpreadElement(expr.arguments[0]!);
+        if (isSingleDynamicSpread) {
+          const dispatchIdx = reserveClosedMethodDispatchVararg(ctx, methodName);
+          flushLateImportShifts(ctx, fctx);
+          // Receiver as externref.
+          const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+          if (recvType && recvType.kind !== "externref") {
+            fctx.body.push({ op: "extern.convert_any" });
+          } else if (recvType === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          // The spread source array as externref — passed directly to the vararg
+          // dispatcher, which indexes it via __extern_get_idx.
+          const spreadExpr = (expr.arguments[0] as ts.SpreadElement).expression;
+          const argsType = compileExpression(ctx, fctx, spreadExpr, { kind: "externref" });
+          if (argsType && argsType.kind !== "externref") coerceType(ctx, fctx, argsType, { kind: "externref" });
+          else if (argsType === null) fctx.body.push({ op: "ref.null.extern" });
           fctx.body.push({ op: "call", funcIdx: dispatchIdx });
           return { kind: "externref" };
         }

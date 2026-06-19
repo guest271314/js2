@@ -812,6 +812,14 @@ export interface CodegenContext {
    */
   closedMethodDispatchNames?: Set<string>;
   /**
+   * (#2151 Slice 4) Method names that need a VARARG closed-struct dispatcher
+   * `__call_m_<name>_vararg(recv, args)` for a DYNAMIC-spread call `o.m(...xs)`
+   * whose arity is unknown at compile time. Filled at FINALIZE by
+   * `fillClosedMethodDispatch` (the vararg pass), sourcing each declared param
+   * from `__extern_get_idx(args, i)` instead of fixed dispatcher params.
+   */
+  closedMethodDispatchVarargNames?: Set<string>;
+  /**
    * (#1904) True once the standalone `__extern_is_array(externref) -> i32`
    * helper placeholder has been emitted by the object runtime. Its body is
    * filled in post-processing after all Wasm array carrier types (`__vec_*`
