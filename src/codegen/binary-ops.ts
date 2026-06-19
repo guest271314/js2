@@ -1059,6 +1059,27 @@ export function compileBinaryExpression(
   if (!wrapperEquality && op === ts.SyntaxKind.PlusToken && isStringType(rightTsType) && !isBigIntType(leftTsType)) {
     return compileStringBinaryOp(ctx, fctx, expr, op);
   }
+  // (#2503b) Mirror of the left-string equality arm above for the reversed
+  // operand order: a statically string-typed RIGHT operand compared against a
+  // non-numeric LEFT (`any` / object / string). Without this, `a == "ab"` where
+  // `a: any` fell through to the equality/`noJsHost` dispatch, which ToNumber-
+  // coerced the string literal to `__box_number(__str_to_number("ab"))` = NaN
+  // (so equal strings compared unequal — `a == "ab"` returned false for
+  // `a === "ab"`). The symmetric `"ab" == a` already routed here via the
+  // left-string arm and worked; this restores order-independence. Gated exactly
+  // like the left arm: equality op (not relational), and the LEFT operand is not
+  // a number/boolean/bigint (those keep their numeric §7.2.15 coercion).
+  if (
+    !wrapperEquality &&
+    isEqualityOp &&
+    isStringType(rightTsType) &&
+    !isNumberType(leftTsType) &&
+    !isBooleanType(leftTsType) &&
+    !isBigIntType(leftTsType) &&
+    !isStringType(leftTsType) // left-string pairs already handled by the arm above
+  ) {
+    return compileStringBinaryOp(ctx, fctx, expr, op);
+  }
 
   // BigInt operations — handle both pure bigint and mixed bigint/number cases
   if (isBigIntType(leftTsType) || isBigIntType(rightTsType)) {
