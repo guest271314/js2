@@ -406,6 +406,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   const strFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
   const strEqualsIdx = ctx.nativeStrHelpers.get("__str_equals")!;
 
+  // #2042 R2 — held reference to `__to_property_key`'s body so the object-key
+  // arm can be spliced in after `__extern_toString` is registered later in this
+  // pass (forward dependency; see the splice below the `__extern_toString` reg).
+  let tpkBodyRef: Instr[] | undefined;
+
   // ── __to_property_key(externref key) -> externref (#2042 S1) ──────────────
   //
   // Central ToPropertyKey-style coercion for the string-keyed `$Object` runtime.
@@ -461,6 +466,18 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
             },
           ] as Instr[])
         : []),
+      // #2042 R2 — object-key arm. A computed access with an OBJECT key
+      // (`obj[{valueOf:()=>2}]`) reaches here as a `$Object` externref; the
+      // downstream `ref.cast $AnyString` in `__obj_find`/`__obj_hash` then traps
+      // ("illegal cast"). Run the object through `__extern_toString` (§7.1.1
+      // ToPrimitive(string) → ToString — the same canonical ToString used by
+      // `String(x)` / template literals), yielding the canonical string key.
+      // `__extern_toString` is registered LATER in this same `ensureObjectRuntime`
+      // pass, so the call is spliced in below once its funcIdx is known (the body
+      // array is held by reference in `mod.functions`). The splice goes BEFORE
+      // the unchanged-fallthrough so non-object opaque keys (Symbols) still
+      // pass through untouched.
+      // <<R2-OBJECT-ARM-SPLICE>>
       // else return key unchanged (Symbol / opaque — preserve existing behaviour)
       { op: "local.get", index: 0 },
     ];
@@ -471,6 +488,9 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       [{ name: "any", type: { kind: "anyref" } }],
       tpkBody,
     );
+    // Record the splice point: index of the trailing `local.get 0` fallthrough.
+    // After `__extern_toString` registers we insert the `$Object`-key arm here.
+    tpkBodyRef = tpkBody;
   }
   const toPropertyKeyIdx = ctx.funcMap.get("__to_property_key");
 
@@ -2166,6 +2186,27 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { op: "extern.convert_any" },
     ];
     registerNative("__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }], [], toStringBody);
+
+    // #2042 R2 — now that `__extern_toString` exists, splice the object-key arm
+    // into `__to_property_key`'s body (built earlier, before this funcIdx was
+    // known). For a `$Object` key, ToPropertyKey = ToString(ToPrimitive(key,
+    // "string")) — exactly `__extern_toString`. Insert BEFORE the trailing
+    // `local.get 0` fallthrough so Symbol/opaque keys still pass through.
+    if (tpkBodyRef !== undefined) {
+      const externToStringIdx = ctx.funcMap.get("__extern_toString")!;
+      const objArm: Instr[] = [
+        // if (ref.test $Object any) return __extern_toString(key)
+        { op: "local.get", index: 1 },
+        { op: "ref.test", typeIdx: objectTypeIdx },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: externToStringIdx }, { op: "return" }],
+        } as Instr,
+      ];
+      // Splice before the last instruction (the unchanged-key fallthrough).
+      tpkBodyRef.splice(tpkBodyRef.length - 1, 0, ...objArm);
+    }
   }
 
   // ── Prototype-chain ops (#1472 Phase C) ──────────────────────────────────
@@ -4986,6 +5027,93 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     );
   }
 
+  // ── __object_fromEntries(externref entries) -> externref (#2042 S3 residual) ─
+  //
+  // `Object.fromEntries(entries)` where `entries` is a `$ObjVec` of `[key,value]`
+  // pair `$ObjVec`s. Builds a fresh `$Object` and, for each pair, sets
+  // `out[pair[0]] = pair[1]` via `__extern_set` (which ToPropertyKeys the key —
+  // #2042 R2/S1). Iterates via `__extern_length` / `__extern_get_idx` (which
+  // index a `$ObjVec` reliably). The CALL SITE (calls.ts) normalises a literal
+  // array-of-pairs arg into this `$ObjVec`-of-`$ObjVec` shape before calling, so
+  // the helper only ever sees the indexable representation (a raw native vec /
+  // Map is not reliably indexable through `__extern_get_idx` — that's why the
+  // call site converts first, mirroring `compileObjectAssignArg`).
+  //
+  // params: 0=entries(externref) ; locals: 1=len(f64) 2=i(i32) 3=pair 4=key 5=val 6=out
+  {
+    const newPlainObjectIdx = ctx.funcMap.get("__new_plain_object")!;
+    const externLengthIdx = ctx.funcMap.get("__extern_length")!;
+    const externGetIdxIdx = ctx.funcMap.get("__extern_get_idx")!;
+    const externSetIdx2 = ctx.funcMap.get("__extern_set")!;
+    const pairElem = (pairLocal: number, idx: number): Instr[] => [
+      { op: "local.get", index: pairLocal },
+      { op: "f64.const", value: idx },
+      { op: "call", funcIdx: externGetIdxIdx },
+    ];
+    const body: Instr[] = [
+      { op: "call", funcIdx: newPlainObjectIdx },
+      { op: "local.set", index: 6 },
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: externLengthIdx },
+      { op: "local.set", index: 1 },
+      { op: "i32.const", value: 0 },
+      { op: "local.set", index: 2 },
+      {
+        op: "block",
+        blockType: { kind: "empty" },
+        body: [
+          {
+            op: "loop",
+            blockType: { kind: "empty" },
+            body: [
+              { op: "local.get", index: 2 },
+              { op: "f64.convert_i32_s" },
+              { op: "local.get", index: 1 },
+              { op: "f64.ge" },
+              { op: "br_if", depth: 1 },
+              // pair = __extern_get_idx(entries, i)
+              { op: "local.get", index: 0 },
+              { op: "local.get", index: 2 },
+              { op: "f64.convert_i32_s" },
+              { op: "call", funcIdx: externGetIdxIdx },
+              { op: "local.set", index: 3 },
+              // key = pair[0]; val = pair[1]
+              ...pairElem(3, 0),
+              { op: "local.set", index: 4 },
+              ...pairElem(3, 1),
+              { op: "local.set", index: 5 },
+              // __extern_set(out, key, val)
+              { op: "local.get", index: 6 },
+              { op: "local.get", index: 4 },
+              { op: "local.get", index: 5 },
+              { op: "call", funcIdx: externSetIdx2 },
+              { op: "local.get", index: 2 },
+              { op: "i32.const", value: 1 },
+              { op: "i32.add" },
+              { op: "local.set", index: 2 },
+              { op: "br", depth: 0 },
+            ],
+          },
+        ],
+      },
+      { op: "local.get", index: 6 },
+    ];
+    registerNative(
+      "__object_fromEntries",
+      [{ kind: "externref" }],
+      [{ kind: "externref" }],
+      [
+        { name: "len", type: { kind: "f64" } },
+        { name: "i", type: { kind: "i32" } },
+        { name: "pair", type: { kind: "externref" } },
+        { name: "key", type: { kind: "externref" } },
+        { name: "val", type: { kind: "externref" } },
+        { name: "out", type: { kind: "externref" } },
+      ],
+      body,
+    );
+  }
+
   // NOTE (#2042 S3): `__defineProperty_desc` (generic
   // `Object.defineProperty(o, k, runtimeDescObj)`) is intentionally NOT
   // registered here yet. Its body would delegate to the working native
@@ -4998,6 +5126,164 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // its OBJECT_RUNTIME_HELPER_NAMES entry land as a follow-up). The read-side
   // reflection natives above (__getOwnPropertyNames / __getOwnPropertySymbols /
   // __object_getOwnPropertyDescriptors) are the shipped S3 slice.
+
+  // ── __object_is(externref a, externref b) -> i32 (#2042 S3 — Object.is) ────
+  //
+  // SameValue (§7.2.10) over two boxed externrefs. Tag-dispatched like the
+  // union-helper `===` lowering, but with the SameValue numeric rule:
+  // NaN is SameValue NaN, and +0 is NOT SameValue -0. Comparing the f64 bit
+  // patterns (`i64.reinterpret_f64` + `i64.eq`) gives exactly that — equal NaN
+  // bit patterns compare equal, and +0 (0x0…) vs -0 (0x8000…) compare unequal.
+  // boolean → unbox i32; bigint → i64; both-null → equal; else ref identity.
+  // standalone-only (host mode owns `__object_is` via its JS import).
+  if (ctx.standalone) {
+    addUnionImportsViaRegistry(ctx);
+    const typeofNumIdx = ctx.funcMap.get("__typeof_number")!;
+    const typeofBoolIdx = ctx.funcMap.get("__typeof_boolean")!;
+    const typeofBigIdx = ctx.funcMap.get("__typeof_bigint")!;
+    const unboxNumIdx = ctx.funcMap.get("__unbox_number")!;
+    const unboxBoolIdx = ctx.funcMap.get("__unbox_boolean")!;
+    const toBigIdx = ctx.funcMap.get("__to_bigint")!;
+    const EQ_HEAP = -19; // WasmGC `eq` abstract heap type
+
+    // params: a=0, b=1 ; locals: aa=2 (anyref), ba=3 (anyref)
+    const bothTag = (tagIdx: number): Instr[] => [
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: tagIdx } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: tagIdx } as Instr,
+      { op: "i32.and" },
+    ];
+    // Reference identity over the WasmGC `eq` heap (the anyref temps are already
+    // materialised in locals 2/3 by `identityArm`'s preamble below).
+    const refIdentityArm: Instr[] = [
+      { op: "local.get", index: 2 },
+      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "local.get", index: 3 },
+      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 2 },
+          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "local.get", index: 3 },
+          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "ref.eq" },
+        ],
+        else: [{ op: "i32.const", value: 0 }],
+      } as Instr,
+    ];
+    // String SameValue = value equality (flatten both, __str_equals); else ref
+    // identity. `__str_flatten`/`__str_equals` are resolved at the top of this
+    // same `ensureObjectRuntime` pass (object-runtime helpers already call them,
+    // e.g. __obj_hash/__obj_find), so the call indices are regime-consistent.
+    const stringOrIdentityArm: Instr[] =
+      strFlattenIdx !== undefined && strEqualsIdx !== undefined && anyStrTypeIdx >= 0
+        ? [
+            { op: "local.get", index: 2 },
+            { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+            { op: "local.get", index: 3 },
+            { op: "ref.test", typeIdx: anyStrTypeIdx } as Instr,
+            { op: "i32.and" },
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [
+                { op: "local.get", index: 2 },
+                { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+                { op: "call", funcIdx: strFlattenIdx } as Instr,
+                { op: "local.get", index: 3 },
+                { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+                { op: "call", funcIdx: strFlattenIdx } as Instr,
+                { op: "call", funcIdx: strEqualsIdx } as Instr,
+              ],
+              else: refIdentityArm,
+            } as Instr,
+          ]
+        : refIdentityArm;
+    const identityArm: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 2 },
+      { op: "local.get", index: 1 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 3 },
+      ...stringOrIdentityArm,
+    ];
+    const bigintArm = (elseArm: Instr[]): Instr[] => [
+      ...bothTag(typeofBigIdx),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: toBigIdx } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: toBigIdx } as Instr,
+          { op: "i64.eq" },
+        ],
+        else: elseArm,
+      } as Instr,
+    ];
+    const boolArm = (elseArm: Instr[]): Instr[] => [
+      ...bothTag(typeofBoolIdx),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: unboxBoolIdx } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: unboxBoolIdx } as Instr,
+          { op: "i32.eq" },
+        ],
+        else: elseArm,
+      } as Instr,
+    ];
+    const numberArm = (elseArm: Instr[]): Instr[] => [
+      ...bothTag(typeofNumIdx),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          // SameValue numbers: compare f64 bit patterns (NaN==NaN, +0!=-0).
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: unboxNumIdx } as Instr,
+          { op: "i64.reinterpret_f64" } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: unboxNumIdx } as Instr,
+          { op: "i64.reinterpret_f64" } as Instr,
+          { op: "i64.eq" },
+        ],
+        else: elseArm,
+      } as Instr,
+    ];
+    const nullArm = (rest: Instr[]): Instr[] => [
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      { op: "local.get", index: 1 },
+      { op: "ref.is_null" },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [{ op: "i32.const", value: 1 }],
+        else: rest,
+      } as Instr,
+    ];
+    registerNative(
+      "__object_is",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [
+        { name: "aa", type: { kind: "anyref" } },
+        { name: "ba", type: { kind: "anyref" } },
+      ],
+      nullArm(numberArm(boolArm(bigintArm(identityArm)))),
+    );
+  }
 
   // ── Object integrity predicates (#1472 Phase B Blocker A Half 1, PR #1074) ─
   //
@@ -6530,7 +6816,26 @@ function boxVecElementToExternref(ctx: CodegenContext, elemType: ValType): Instr
   if (elemType.kind === "externref") {
     return [];
   }
-  // ref / ref_null / f32 / i64 / v128 → no arm (see scope note).
+  // (#2190 read-back, homogeneous string sub-array) A carrier whose `data`
+  // element is a GC *string* ref — `$AnyString` / `$NativeString`
+  // (`ctx.anyStrTypeIdx` / `ctx.nativeStrTypeIdx`) — is the inner vec of an
+  // `any[]` of homogeneous-string arrays (`[["a","b"]]`). Without an arm here,
+  // `__extern_get_idx(inner, i)` falls through to null, the caller's
+  // `ref.test $AnyString` then fails, and `struct.get` null-derefs on the
+  // `.length`/element read (the `e[0][0]` trap). `extern.convert_any` is the
+  // universal GC-ref → externref boxing; the consuming site re-tests/casts the
+  // returned externref back to `$AnyString`, so the round-trip is identity for a
+  // string element and null for an array hole. Scoped to the string GC types
+  // only — the `arguments`/closure-arg `(ref null N)` carriers the scope note
+  // warns about stay skipped (they are not string carriers) so this adds no
+  // behaviour to those paths.
+  if (elemType.kind === "ref" || elemType.kind === "ref_null") {
+    const ti = (elemType as { typeIdx: number }).typeIdx;
+    if (ti >= 0 && (ti === ctx.anyStrTypeIdx || ti === ctx.nativeStrTypeIdx)) {
+      return [{ op: "extern.convert_any" } as Instr];
+    }
+  }
+  // other ref / ref_null / f32 / i64 / v128 → no arm (see scope note).
   return null;
 }
 
@@ -6821,6 +7126,18 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   "__getOwnPropertyNames",
   "__getOwnPropertySymbols",
   "__object_getOwnPropertyDescriptors",
+  // #2042 S3 — Object.is (SameValue §7.2.10): tag-dispatched native over two
+  // boxed externrefs (number bit-compare for NaN==NaN / +0!=-0, boolean/bigint
+  // unbox, both-null, else ref identity). Was a #1472-Phase-B refusal.
+  "__object_is",
+  // NOTE (#2042 S3): `__object_fromEntries` is intentionally NOT in this set. The
+  // native helper only iterates a `$ObjVec` of pair `$ObjVec`s, which the
+  // fromEntries call site BUILDS (and calls the helper via funcMap directly) only
+  // for a literal array-of-pairs with string keys. The ordinary path (raw arg /
+  // Map / non-string-key) must keep REFUSING (compile error) — routing it native
+  // here would make `ensureLateImport` register the helper for those args too and
+  // TRAP on the non-$ObjVec representation. So this name stays a refusal; the
+  // call site resolves the registered helper via funcMap only on the safe shape.
   // #1472 Phase C — `x === undefined` / default-parameter / destructuring-default
   // undefinedness check. Native impl is `ref.is_null` (standalone conflates
   // undefined and null, same as __typeof_undefined). This is the single largest
