@@ -3143,7 +3143,78 @@ export function compileArrayLiteral(
           const t = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(el));
           return t.kind === "ref" || t.kind === "ref_null" || t.kind === "externref";
         });
-        if (hasObjectElem) {
+        // (#2190b) Mirror of the string-first widening below for the NUMERIC-FIRST
+        // ordering: `[7, "ab"]` (a `[number, string]` tuple) picks an f64/i32 vec
+        // from element 0, then DROPS the native-string element (it is
+        // `extern.convert_any`'d + `__unbox_number`'d to NaN) — so `e[0][1]` reads
+        // back NaN and `(… as string)` traps. The `hasObjectElem` scan above
+        // deliberately EXCLUDES strings (a genuine numeric literal keeps its fast
+        // path), so detect a native-string element separately and only under an
+        // `any` contextual element type — the heterogeneous-tuple-in-`any[]` case.
+        // A real `(number|string)[]` / `number[]` literal is untouched (its
+        // contextual element type is not `any`), preserving the #1021/#786
+        // first-element fast path and the historical `[0, "last"]` behaviour.
+        let hasNativeStringElem = false;
+        if (!hasObjectElem && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+          // An inner tuple `[7, "ab"]` of an `any[]` is contextually typed `any`
+          // DIRECTLY (not `Array<any>`); a top-level `const a: any[] = [7, "ab"]`
+          // is contextually `Array<any>` (element type `any`). Accept either — both
+          // mean "no declared element constraint", which is the only case where a
+          // numeric-first literal may legitimately also hold a string element.
+          const ctxArrTypeNum = ctx.checker.getContextualType(expr);
+          const ctxElemNum =
+            ctxArrTypeNum && (ctxArrTypeNum.flags & ts.TypeFlags.Any) !== 0
+              ? ctxArrTypeNum
+              : ctxArrTypeNum
+                ? ctx.checker.getTypeArguments(ctxArrTypeNum as ts.TypeReference)[0]
+                : undefined;
+          if (ctxElemNum && (ctxElemNum.flags & ts.TypeFlags.Any) !== 0) {
+            hasNativeStringElem = expr.elements.some((el) => {
+              if (ts.isOmittedExpression(el) || _isUndefinedLike(el) || ts.isSpreadElement(el)) return false;
+              if (el.kind === ts.SyntaxKind.StringLiteral) return true;
+              const t = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(el));
+              if (t.kind === "ref" || t.kind === "ref_null") {
+                const ti = (t as { typeIdx: number }).typeIdx;
+                return ti === ctx.anyStrTypeIdx || ti === ctx.nativeStrTypeIdx;
+              }
+              return false;
+            });
+          }
+        }
+        if (hasObjectElem || hasNativeStringElem) {
+          elemWasm = { kind: "externref" };
+        }
+      } else if (
+        ctx.nativeStrings &&
+        ctx.anyStrTypeIdx >= 0 &&
+        (elemWasm.kind === "ref" || elemWasm.kind === "ref_null") &&
+        ((elemWasm as { typeIdx: number }).typeIdx === ctx.anyStrTypeIdx ||
+          (elemWasm as { typeIdx: number }).typeIdx === ctx.nativeStrTypeIdx)
+      ) {
+        // (#2190 residual / #2190b) The first element is a native string, so the
+        // first-element heuristic picked `$AnyString` for the whole vec — but a
+        // heterogeneous literal like `["a", 1]` (a `[string, number]` tuple,
+        // common as an `Object.fromEntries` entry) then DROPS the non-string
+        // element (`f64.const 1; drop`) and substitutes `ref.null $AnyString;
+        // ref.as_non_null` → a guaranteed null-deref trap on a later read. Mirror
+        // the numeric-first `hasObjectElem` widening: if any element is NOT a
+        // native string, widen the vec to `externref` so each element is boxed by
+        // its own static type (`__box_number`/`__box_boolean`/native-string) at
+        // construction. Scoped to native-strings mode (true under standalone and
+        // WASI); number[]/struct[] etc. are untouched (their first element isn't a
+        // native string).
+        const hasNonStringElem = expr.elements.some((el) => {
+          if (ts.isOmittedExpression(el) || ts.isSpreadElement(el)) return false;
+          if (el.kind === ts.SyntaxKind.StringLiteral) return false;
+          const t = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(el));
+          if (t.kind === "ref" || t.kind === "ref_null") {
+            const ti = (t as { typeIdx: number }).typeIdx;
+            return ti !== ctx.anyStrTypeIdx && ti !== ctx.nativeStrTypeIdx;
+          }
+          // f64 / i32 / externref / etc. — a non-string element.
+          return true;
+        });
+        if (hasNonStringElem) {
           elemWasm = { kind: "externref" };
         }
       } else if (
