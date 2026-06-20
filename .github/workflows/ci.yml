@@ -90,6 +90,17 @@ jobs:
         # depends_on, or broken plan/issues/<id>-<slug>.md links in tracked *.md.
         run: pnpm run check:issues
 
+      - name: Issue-ID fresh-claim gate (#2531)
+        # Rejects a PR that introduces a plan/issues/<id>-*.md whose id already
+        # exists on origin/main under a different filename — the merge-queue-wedge
+        # collision (#2530/#2531). Allocation must go through
+        # `claim-issue.mjs --allocate` (atomic against main ∪ open PRs ∪ the
+        # reservation ref); this gate is the required-CI enforcement. Needs the
+        # base ref for the merge-base diff; skips cleanly if it can't be fetched.
+        # merge_group already carries base ancestry, so the fetch is best-effort.
+        run: |
+          git fetch --no-tags --depth=50 origin main 2>/dev/null || true
+          GATE_BASE=origin/main pnpm run check:issue-ids:against-main
       - name: Issue integrity vs. merged main (#2530)
         # Stale-base dup-ID gate. The check above runs on the PR's OWN tip, which
         # was cut from an older main; an id that a sibling PR has since merged is

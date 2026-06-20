@@ -80,6 +80,14 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
 2. If the issue has `status: suspended` + `## Suspended Work`, use the listed worktree and resume instructions
 3. If no claimable task survives the gate: message tech lead `"TaskList is empty (or all remaining tasks are owned/out-of-scope), need next task."`
 
+> **Creating a NEW issue file** (a follow-up, a `[CONFLICT]` spin-off, anything
+> not already in `plan/issues/`)? Get its id from
+> `NEW=$(node scripts/claim-issue.mjs --allocate)` — **never hand-pick a
+> number** (#2531). Hand-picking races a parallel PR for the same id; the dup
+> is green at PR time and only fails in the `merge_group`, wedging the queue.
+> The required CI gate `check:issue-ids:against-main` rejects any PR introducing
+> a main-colliding id, so a hand-picked collision can't merge anyway.
+
 ### Implement
 1. Read `plan/issues/sprints/{sprint}/{N}.md` + smoke-test 1-2 failing cases to confirm the bug reproduces
 2. Update issue frontmatter: `status: in-progress` **and `assignee: ttraenkler/<your-agent-name>`** (commit on your branch — this lazily reflects the lock onto `main` when your PR merges; the live lock is already held on the `issue-assignments` ref from the Start step)
