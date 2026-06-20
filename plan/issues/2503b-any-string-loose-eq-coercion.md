@@ -3,8 +3,8 @@ id: 2503b
 title: "standalone any-vs-typed-string == mis-coerces string operand to NaN (operand-order asymmetry)"
 status: done
 created: 2026-06-19
-updated: 2026-06-19
-completed: 2026-06-19
+updated: 2026-06-20
+completed: 2026-06-20
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -13,8 +13,8 @@ area: codegen, type-coercion
 language_feature: loose-equality, string-coercion, abstract-operations
 goal: standalone-mode
 sprint: 61
-related: [1910, 1910d, 1472, 2073, 2081, 1134]
-assignee: ttraenkler/sdev-looseeq
+related: [1910, 1910d, 1472, 2073, 2081, 1134, 1914]
+assignee: ttraenkler/dev2
 ---
 ## Problem
 
@@ -46,19 +46,39 @@ right-string arm was gated to `+` (`PlusToken`) only. So a string-typed RIGHT
 operand against a non-numeric LEFT (`any`/object) skipped the string dispatch
 and fell into the numeric coercion path.
 
-## Fix
+## Fix (revised — the first attempt caused a −3 test262 regression)
 
-Add the mirror of the left-string equality arm: when the op is an equality op
-(`==`/`!=`/`===`/`!==`), the **right** operand is string-typed, and the **left**
-operand is not a number/boolean/bigint/string, route through
-`compileStringBinaryOp` (the same dispatch the reversed order already used).
-This restores operand-order independence. Left-string pairs are excluded
-(already handled by the arm above); number/boolean/bigint lefts keep their
-numeric §7.2.15 coercion.
+The first attempt mirrored the left-string arm: route a string-typed RIGHT
+operand against a non-numeric LEFT through `compileStringBinaryOp`. That forces
+a **pure string-content** compare, which is wrong whenever the `any` LEFT holds
+a NON-string at runtime, so it regressed 3 test262 tests:
+- `5 == "5.0"` must be `true` (ToNumber("5.0")=5), not `false` (String(5)="5");
+- `null == "ab"` / `undefined == "ab"` are always `false` (never coerce);
+- an object LEFT must ToPrimitive then recurse.
+The static-type routing collapsed all of these to a string compare.
 
-JS-host mode is unaffected (those comparisons route through
-`__host_loose_eq`/`__host_eq` = correct JS `==`/`===`); the rerouting only
-changes the standalone path that previously mis-coerced.
+**True root cause**: in the struct-ref coercion block of
+`compileBinaryExpression` (`src/codegen/binary-ops.ts`), **loose** equality
+(`==`/`!=`) where one operand is a native-string ref and the other is externref
+(`any`) fell into the ToNumber path (`coerceType(ref → f64, "number")`),
+scanning the string to NaN. The **strict** (`===`/`!==`) counterpart was already
+fixed (#1914 mixed externref+native-string arm); loose equality had no such arm.
+
+**Revised fix**: a loose-equality guard in that block — when one operand is a
+native-string ref and the other is externref (and it is **not** a wrapper
+object, which keeps its dedicated arm, #1910d) — boxes the string ref to
+externref and lets BOTH operands fall through to the standalone
+abstract-equality cascade (~line 1990). That cascade dispatches on the
+**runtime** tag per §7.2.15: string⇄string content compare, string⇄number
+ToNumber, nullish guard, Object→ToPrimitive. This restores operand-order
+independence WITHOUT static string routing, so number/null/undefined/object
+`any` values are compared per spec. The over-broad arm from the first attempt
+was removed.
+
+JS-host (`gc`) mode is unaffected (those comparisons route through
+`__host_loose_eq`/`__host_eq` = correct JS `==`/`===`); the guard is gated on
+`ctx.nativeStrings`, so the rerouting only changes the standalone/WASI path that
+previously mis-coerced.
 
 ## Acceptance
 
