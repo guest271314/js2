@@ -57,12 +57,30 @@ The `AMBIENT_BUILTIN_CTORS` path registered `global_<Ctor>` (the host constructo
 *object*, for identity uses like `x.constructor === Uint8Array`) on *any*
 reference to the name — including `new Uint8Array(4)`, `Uint8Array.from(...)`, and
 `: Uint8Array` type annotations, all of which hit native fast paths and need no
-host object. Now gated on a **bare value/identity use** (`isBareValueUse`): not
-`new X(...)` / `X(...)` callee, not `X.member`, not a type-reference position. So
-`new Uint8Array(4)` no longer registers `global_Uint8Array`, while
-`x.constructor === Uint8Array` still does. The native-messaging example now
-compiles with **zero** host-import warnings. Test cases in
-`tests/issue-2520-host-import-gate.test.ts`.
+host object. Now gated on a **value use** (`isBareValueUse`): not the
+`new X(...)` / `X(...)` callee, not the property NAME (`obj.X`), not a
+type-reference position. So `new Uint8Array(4)` no longer registers
+`global_Uint8Array`, while `x.constructor === Uint8Array` still does. The
+native-messaging example now compiles with **zero** host-import warnings. Test
+cases in `tests/issue-2520-host-import-gate.test.ts`.
+
+**Regression follow-up (2026-06-20, PR #1787 −50 fix):** the first cut of this
+gate also excluded the property-access **receiver** (`p.expression === id`), on
+the assumption that `X.member` always hits a native fast path. That is only true
+for the *intercepted* static members (`Date.now`, `Array.isArray`,
+`Uint8Array.from`, …); for any **non-intercepted** static prop —
+`Date.hasOwnProperty("prototype")`, `Date.parse`, `Date.UTC`, `Date.length`,
+`X.constructor`, `X.prototype` — the bare receiver `X` must resolve to the host
+constructor object, which needs `global_X`. Excluding the receiver dropped that
+global, so the receiver resolved to `ref.null.extern` and
+`null.hasOwnProperty(...)` returned false. This silently regressed test262 by
+−50 (e.g. `built-ins/Date/S15.9.4_A1..A5`). The fix narrows the exclusion to
+the property NAME only (`p.name === id`); a property-access receiver again
+counts as a value use. The intercepted-member globals it now also registers are
+harmless unused imports (the fast path resolves at the property-access site,
+before identifier resolution — see the comment at the `AMBIENT_BUILTIN_CTORS`
+loop). Regression tests added to `tests/issue-2520-host-import-gate.test.ts`
+(receiver-registers + property-name-does-not).
 
 Out of scope: a web-vs-node target/environment model (`window.stop` makes no
 sense in a node host; auto-provide Node `process`/`Buffer` types) — tracked in

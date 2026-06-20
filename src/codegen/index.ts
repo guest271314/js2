@@ -12007,16 +12007,30 @@ function collectUsedExternImports(ctx: CodegenContext, sourceFile: ts.SourceFile
 function collectDeclaredGlobals(ctx: CodegenContext, libFile: ts.SourceFile, userFile: ts.SourceFile): void {
   // First collect identifiers referenced in user source
   const referencedNames = new Set<string>();
-  // #2520 — also track names used as a BARE VALUE: not `new X(...)`, `X(...)`,
-  // or `X.member`, which all hit native/intercepted fast paths. Only a bare
-  // value use (e.g. `x.constructor === Uint8Array`, or passing `Uint8Array` as
-  // an argument) actually needs the reified host constructor object
-  // (`global_<Ctor>`); `new Uint8Array(4)` does not, so it must not register it.
+  // #2520 — also track names used as a VALUE (vs. a pure call/new callee or a
+  // type-position reference). Only a value use actually needs the reified host
+  // constructor object (`global_<Ctor>`); `new Uint8Array(4)` does not, so it
+  // must not register it.
+  //
+  // A property-access RECEIVER (`Date.parse`, `Date.hasOwnProperty(...)`,
+  // `Uint8Array.from(...)`) IS a value use: the static methods/props the
+  // compiler intercepts (`Date.now`, `Array.isArray`, `Uint8Array.from`, …) are
+  // resolved BEFORE identifier resolution at the property-access site, so for
+  // those the registered global is simply an unused import the fast path
+  // bypasses — harmless. But for any NON-intercepted static prop (`Date.parse`,
+  // `Date.prototype`, `Date.hasOwnProperty`, `X.length`, `X.constructor`) the
+  // bare receiver `X` must resolve to the host constructor object, which needs
+  // `global_X`. Excluding the receiver dropped that global and broke e.g.
+  // `Date.hasOwnProperty("prototype")` (→ null receiver, assert fails). So a
+  // receiver counts as a value use; only the call/new callee, the property NAME
+  // (`obj.Date`), and type positions are excluded.
   const valueRefNames = new Set<string>();
   const isBareValueUse = (id: ts.Identifier): boolean => {
     const p = id.parent;
     if ((ts.isNewExpression(p) || ts.isCallExpression(p)) && p.expression === id) return false;
-    if (ts.isPropertyAccessExpression(p) && (p.expression === id || p.name === id)) return false;
+    // Property NAME (`obj.Date`) is a key, not a value reference; the RECEIVER
+    // (`Date.member`) is a value use and must NOT be excluded.
+    if (ts.isPropertyAccessExpression(p) && p.name === id) return false;
     // Type-annotation position (`buf: Uint8Array`, `Uint8Array | ArrayBuffer`,
     // `typeof X`) is not a value use of the constructor.
     if (ts.isTypeReferenceNode(p) && p.typeName === id) return false;

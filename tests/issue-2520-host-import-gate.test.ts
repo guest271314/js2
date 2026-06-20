@@ -45,4 +45,27 @@ describe("#2520 — lib-scan ambient-global referenced-names gate", () => {
     );
     expect(warns).toContain('"env.global_Uint8Array"');
   });
+
+  it("registers the builtin constructor object for a property-access RECEIVER (regression)", async () => {
+    // Regression: `Date.hasOwnProperty("prototype")` / `Date.parse` access a
+    // NON-intercepted static prop on the bare ctor — the receiver `Date` must
+    // resolve to the host constructor object (global_Date), so it MUST register.
+    // The first cut of #2520 wrongly excluded property-access receivers, which
+    // made `Date` resolve to ref.null.extern and broke
+    // built-ins/Date/S15.9.4_A1..A5 (−4 test262). A typed array triggers the
+    // lib scan so the gate is active.
+    const warns = await hostImportWarnings(
+      `export function f(): boolean { const a = new Uint8Array(1); return Date.hasOwnProperty("prototype") && a[0] === 0; }`,
+    );
+    expect(warns).toContain('"env.global_Date"');
+  });
+
+  it("does NOT register a global for a property NAME that merely collides (obj.Date)", async () => {
+    // `obj.Date` is a property key, not a value reference to the global ctor —
+    // it must not pull in global_Date.
+    const warns = await hostImportWarnings(
+      `export function f(obj: any): number { const a = new Uint8Array(1); return obj.Date + a[0]; }`,
+    );
+    expect(warns).not.toContain('"env.global_Date"');
+  });
 });
