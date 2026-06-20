@@ -65,6 +65,16 @@ export interface CodegenOptions {
   testRuntime?: boolean;
   /** WASI target: emit WASI imports (fd_write, proc_exit) instead of JS host imports */
   wasi?: boolean;
+  /**
+   * #2524 Phase 1 — route `process.std{in,out,err}` IO through a separately
+   * compiled, linkable `js2wasm:node-io` shim instead of inlining the
+   * `wasi_snapshot_preview1.fd_read`/`fd_write` glue. When set (WASI only), the
+   * user module imports `stdin_read`/`stdout_write`/`stderr_write` plus its
+   * linear memory from `js2wasm:node-io` and carries NO `wasi_snapshot_preview1`
+   * import for the stream IO path; `node-shim.wasm` implements the interface
+   * over WASI. Default off — the inline fd_read/fd_write path stays as fallback.
+   */
+  nodeIoShim?: boolean;
   /** Standalone target (#1470): pure WasmGC, no JS host imports and no WASI
    *  runtime. Implies `nativeStrings: true` and refuses to emit any
    *  `wasm:js-string` namespace or `env::__concat_*` / `__extern_toString` /
@@ -812,6 +822,14 @@ export interface CodegenContext {
    */
   closedMethodDispatchNames?: Set<string>;
   /**
+   * (#2151 Slice 4) Method names that need a VARARG closed-struct dispatcher
+   * `__call_m_<name>_vararg(recv, args)` for a DYNAMIC-spread call `o.m(...xs)`
+   * whose arity is unknown at compile time. Filled at FINALIZE by
+   * `fillClosedMethodDispatch` (the vararg pass), sourcing each declared param
+   * from `__extern_get_idx(args, i)` instead of fixed dispatcher params.
+   */
+  closedMethodDispatchVarargNames?: Set<string>;
+  /**
    * (#1904) True once the standalone `__extern_is_array(externref) -> i32`
    * helper placeholder has been emitted by the object runtime. Its body is
    * filled in post-processing after all Wasm array carrier types (`__vec_*`
@@ -1407,6 +1425,14 @@ export interface CodegenContext {
    *  member name (e.g. `RegExp.prototype.test.length === 1`,
    *  `.name === "test"`). Populated by `ensureStandaloneNativeMethodClosure`. */
   nativeClosureMeta?: Map<number, { name: string; length: number }>;
+  /** (#2193 PR-B) Struct-type indices of `$NativeProto` member closures whose
+   *  FIRST user param is the receiver (`this`) — e.g. `Array.prototype.slice`'s
+   *  `(self, this, start, end)` closure. Unlike a plain user function (which
+   *  ignores `this`), a reflective `m.call(thisArg, …args)` on one of these MUST
+   *  thread `thisArg` into param 1 instead of dropping it. The generic `.call`
+   *  dispatch in expressions/calls.ts consults this set to decide. Populated by
+   *  `ensureStandaloneNativeMethodClosure`. */
+  nativeProtoReceiverClosureStructTypes?: Set<number>;
   /** (#682) Native standalone RegExp engine hook. Standalone mode currently
    *  enables the reduced literal-substring backend; null means RegExp lowering
    *  must stay on the explicit #1474 refusal path. */
@@ -1425,6 +1451,19 @@ export interface CodegenContext {
    * `IrPlanOptions.supportsAsyncIr` field.
    */
   supportsAsyncIr: boolean;
+  /**
+   * #2524 Phase 1 — when true (WASI only), `process` stream IO is lowered to
+   * imported `js2wasm:node-io` calls (over a shim-owned, imported linear
+   * memory) instead of inline `fd_read`/`fd_write`. See `nodeIoShim` in
+   * `CodegenOptions`.
+   */
+  nodeIoShim: boolean;
+  /** #2524: func index of the imported `js2wasm:node-io::stdout_write` (-1 = not registered). */
+  nodeIoStdoutWriteIdx: number;
+  /** #2524: func index of the imported `js2wasm:node-io::stderr_write` (-1 = not registered). */
+  nodeIoStderrWriteIdx: number;
+  /** #2524: func index of the imported `js2wasm:node-io::stdin_read` (-1 = not registered). */
+  nodeIoStdinReadIdx: number;
   /** WASI import indices */
   wasiFdWriteIdx: number;
   wasiFdReadIdx?: number;

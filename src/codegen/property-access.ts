@@ -13,6 +13,7 @@ import {
   isIteratorResultType,
   isNullablePrimitiveType,
   isStringType,
+  isStringWrapperType,
 } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import { emitBoundsCheckedArrayGet } from "./array-methods.js";
@@ -37,7 +38,8 @@ import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js"
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
 import { tryCompileNativeSetSizeGet } from "./set-runtime.js";
 import { tryEmitLinearU8ElementGet, tryEmitLinearU8Length } from "./linear-uint8-codegen.js";
-import { stringConstantExternrefInstrs } from "./native-strings.js";
+import { ensureNativeStringHelpers, stringConstantExternrefInstrs } from "./native-strings.js";
+import { ensureObjectRuntime } from "./object-runtime.js";
 import {
   ensureRegExpNativeProtoGlue,
   tryCompileStandaloneRegExpMatchResultRead,
@@ -1255,6 +1257,61 @@ export function emitNullGuardedStructGet(
  *
  * Stack: [externref] -> [fieldType]
  */
+/**
+ * (#2101a R5) Emit an own-field READ (`inst.code`) on an externref-backed Error
+ * subclass, routing through the `$Error_struct.$props` (fieldIdx 5) open-`$Object`
+ * backing instead of the vestigial `$A` struct (which the receiver is NOT).
+ *
+ * Lowers to: `props = self.$props; props == null ? undefined :
+ * __extern_get(props, "code")`, returning the value as externref. message/name/
+ * stack never reach here — they are served by the Error fast-path upstream.
+ *
+ * Returns the result ValType on success, or `undefined` when helpers are
+ * unavailable (caller falls through to the legacy struct read).
+ */
+function emitExternrefBackedOwnFieldRead(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.PropertyAccessExpression,
+  propName: string,
+): ValType | null | undefined {
+  ensureObjectRuntime(ctx);
+  const externGetIdx = ensureLateImport(
+    ctx,
+    "__extern_get",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (externGetIdx === undefined) return undefined;
+  const errStructIdx = getOrRegisterErrorStructType(ctx);
+
+  const selfResult = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
+  if (!selfResult) return null;
+  if (selfResult.kind !== "externref") fctx.body.push({ op: "extern.convert_any" } as Instr);
+
+  // props = self.$props (fieldIdx 5): cast externref → (ref $Error_struct) once.
+  const propsLocal = allocLocal(fctx, `__ownf_rprops_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "ref.cast", typeIdx: errStructIdx } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: errStructIdx, fieldIdx: 5 } as Instr);
+  fctx.body.push({ op: "local.tee", index: propsLocal });
+  // props == null ? undefined : __extern_get(props, propName)
+  fctx.body.push({ op: "ref.is_null" } as Instr);
+  addStringConstantGlobal(ctx, propName);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "externref" } },
+    then: [{ op: "ref.null.extern" } as Instr],
+    else: [
+      { op: "local.get", index: propsLocal } as Instr,
+      ...stringConstantExternrefInstrs(ctx, propName),
+      { op: "call", funcIdx: externGetIdx } as Instr,
+    ],
+  } as Instr);
+  return { kind: "externref" };
+}
+
 export function emitExternrefToStructGet(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3557,6 +3614,29 @@ export function compilePropertyAccess(
     }
   }
 
+  // #1910 R4 — String-wrapper `.length` in standalone. `new String("ab")` builds
+  // a `$Object` wrapper carrying its [[StringData]] native string in the reserved
+  // FLAG_INTERNAL slot (#1910 S2). `.length` is a String-exotic own property whose
+  // value is the underlying string's length (§22.1.4.1). Recover the slot string
+  // via `__to_primitive(recv, "string")` (reads the slot first, §7.1.1.1), then
+  // read `$AnyString.len` (field 0). Standalone only — host mode keeps the wrapper
+  // host-object machinery and its own `.length` reader.
+  if (ctx.standalone && isStringWrapperType(objType) && propName === "length" && ctx.anyStrTypeIdx >= 0) {
+    ensureObjectRuntime(ctx);
+    const toPrimIdx = ctx.funcMap.get("__to_primitive");
+    if (toPrimIdx !== undefined) {
+      compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
+      addStringConstantGlobal(ctx, "string");
+      fctx.body.push(...stringConstantExternrefInstrs(ctx, "string"));
+      fctx.body.push({ op: "call", funcIdx: toPrimIdx });
+      // __to_primitive returns the [[StringData]] string as externref; coerce to
+      // $AnyString and read its `len` field.
+      coerceType(ctx, fctx, { kind: "externref" }, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
+      fctx.body.push({ op: "struct.get", typeIdx: ctx.anyStrTypeIdx, fieldIdx: 0 });
+      return { kind: "i32" };
+    }
+  }
+
   // Handle string.length
   if (isStringType(objType) && propName === "length") {
     const recvType = compileExpression(ctx, fctx, expr.expression);
@@ -3827,6 +3907,19 @@ export function compilePropertyAccess(
       }
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
+    }
+
+    // (#2101a R5) Own-field READ on an externref-backed Error subclass. The
+    // instance is the parent `$Error_struct` externref, NOT a `$A` struct, so
+    // the struct.get-on-`$A` path below traps. message/name/stack were already
+    // handled by the Error fast-path above (~L2227); any other property is a
+    // user-declared own field living in the `$Error_struct.$props` (fieldIdx 5)
+    // open-`$Object` backing. Read it via `__extern_get(self.props, propName)`
+    // (null/undefined when props is null). Standalone only.
+    if (ctx.standalone && ctx.classExternrefBackedSet.has(typeName)) {
+      const ownRead = emitExternrefBackedOwnFieldRead(ctx, fctx, expr, propName);
+      if (ownRead !== undefined) return ownRead;
+      // undefined → helper unavailable; fall through to the legacy path.
     }
 
     // Handle struct field access (named or anonymous)
@@ -4832,6 +4925,40 @@ export function compileElementAccess(
             }
           }
         }
+      }
+    }
+  }
+
+  // #1910 R4 — String-wrapper integer-indexed read `w[i]` in standalone.
+  // `new String("ab")[0]` is a String-exotic indexed own property (§10.4.3.x
+  // CanonicalNumericIndexString) returning the 1-char substring at that index.
+  // The wrapper is a `$Object` carrying its [[StringData]] native string in the
+  // FLAG_INTERNAL slot, which the generic `$Object` index path can't read, so it
+  // null-derefs. Recover the slot string via `__to_primitive(recv, "string")`,
+  // then reuse the existing native `__str_charAt(flat, i)` helper (§22.1.3.1
+  // semantics — out-of-range yields ""). Standalone + nativeStrings only; the
+  // host path keeps its own String-exotic indexer.
+  if (ctx.standalone && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+    const recvWrapTsType = ctx.checker.getTypeAtLocation(expr.expression);
+    if (isStringWrapperType(recvWrapTsType) && isNumericIndexExpression(ctx, expr.argumentExpression)) {
+      ensureObjectRuntime(ctx);
+      ensureNativeStringHelpers(ctx);
+      const toPrimIdx = ctx.funcMap.get("__to_primitive");
+      const charAtIdx = ctx.nativeStrHelpers.get("__str_charAt");
+      if (toPrimIdx !== undefined && charAtIdx !== undefined) {
+        // [[StringData]] native string ← __to_primitive(recv, "string").
+        compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
+        addStringConstantGlobal(ctx, "string");
+        fctx.body.push(...stringConstantExternrefInstrs(ctx, "string"));
+        fctx.body.push({ op: "call", funcIdx: toPrimIdx });
+        // __str_charAt wants a flattened `$AnyString` ref; coerce + flatten.
+        coerceType(ctx, fctx, { kind: "externref" }, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
+        const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+        if (flattenIdx !== undefined) fctx.body.push({ op: "call", funcIdx: flattenIdx });
+        // index (i32)
+        compileExpression(ctx, fctx, expr.argumentExpression, { kind: "i32" });
+        fctx.body.push({ op: "call", funcIdx: charAtIdx });
+        return { kind: "ref", typeIdx: ctx.nativeStrTypeIdx };
       }
     }
   }

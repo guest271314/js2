@@ -211,6 +211,11 @@ export function createCodegenContext(
     nullThisTypeErrorReady: false, // (#2025)
     funcClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
+    // #2524 Phase 1 — node-io shim only applies under WASI; ignored otherwise.
+    nodeIoShim: !!(options?.wasi && options?.nodeIoShim),
+    nodeIoStdoutWriteIdx: -1,
+    nodeIoStderrWriteIdx: -1,
+    nodeIoStdinReadIdx: -1,
     standalone: options?.standalone ?? false,
     // #682 — native standalone RegExp engine hook. Standalone mode enables the
     // reduced literal-substring backend; broader QuickJS libregexp ABI linking
