@@ -1,5 +1,5 @@
 ---
-id: 2551
+id: 2553
 title: "variable-spread dynamic-new: new K(...someVar) where the spread source is a runtime array value"
 status: in-review
 sprint: 64
@@ -18,7 +18,7 @@ parent: 2026
 origin: "2026-06-20 — renumbered off the reused #2026 (which is cs-2158's done 'classes are not first-class values'). PR #1711 squatted #2026; this is its proper tracking issue."
 ---
 
-# #2551 — variable-spread dynamic-new via runtime `$ObjVecArr` argv
+# #2553 — variable-spread dynamic-new via runtime `$ObjVecArr` argv
 
 ## Problem
 
