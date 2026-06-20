@@ -2,10 +2,12 @@
 id: 2200
 title: "Annex B B.3.3 block-level function declaration hoisting — outer binding created/initialized incorrectly (~186 test262 fails)"
 status: in-progress
-assignee: ttraenkler/sd1
+assignee: ttraenkler/dev-1769
 sprint: 64
 created: 2026-06-19
 updated: 2026-06-19
+phase1: done
+phase2_rework: 2552
 has_impl_plan: true
 priority: high
 feasibility: medium
@@ -533,3 +535,88 @@ and `typeof` const-folding — still dev-scoped since it reuses
 inventing machinery, but it warrants careful review of the declaration-site init
 ordering (must run after the function compiles, before any post-block read). If sd1
 prefers, Phase 2 can go to senior-dev; Phase 1 is comfortably a developer task.
+
+## Phase 2 DONE (2026-06-19, sen-1) — typeof outer-binding resolution bypass fixed
+
+sd1 landed Phase 2's plumbing (TDZ-var outer binding + decl-site init + case-A) on
+`issue-2200-annexb-phase2`; 4/5 sub-behaviours worked. The remaining bug: `typeof F`
+AFTER the block returned `"undefined"` not `"function"`, even though the decl-site
+init set the TDZ flag (traced outer=1 flag=2). sd1 correctly flagged a
+"resolution-path bypass" of the `annexBOuterBindings` typeof guard.
+
+**Precise root cause (traced):** the bypass is the **undeclared-identifier branch**
+in `compileTypeofExpression` (`typeof-delete.ts`), which runs BEFORE the Annex-B
+guard. For an Annex B outer binding, the TS checker reports the operand's symbol
+with **no `valueDeclaration`** at the reference site (the outer binding is
+synthetic — only the block-scoped `FunctionDeclaration` is a real decl), so
+`hasValueDecl === false` and that branch const-folds `typeof F` → `"undefined"`
+and returns — never reaching the later guard. (`declare const f` ambient gives the
+symbol a value-decl, so it skipped the early branch and worked — confirming the
+path.)
+
+**Fix:** extract the runtime TDZ-flag branch into a shared
+`emitAnnexBTypeofFlagBranch(ctx, fctx, name)` helper and call it at the TOP of the
+undeclared-identifier branch (before the `!hasValueDecl` const-fold), gated on
+`fctx.annexBOuterBindings`. The late guard now also delegates to the same helper
+(no duplicated logic). One file: `src/codegen/typeof-delete.ts`.
+
+**Verified** (`tests/issue-2200-annexb-block-fn-hoist.test.ts`, Phase 2 block):
+`typeof f` after block → `"function"`; `if(false){…} typeof f` → `"undefined"`;
+genuinely-undeclared → `"undefined"`; normal fn-decl typeof → `"function"`; plain
+numeric local → `"number"`. No regression across typeof-extended / typeof-comparison
+/ typeof-narrowing / symbol-typeof / var-hoisting-scope / if-branch-block-scope +
+the full Phase 1 suite. `tsc --noEmit` clean.
+
+## Phase 2 PARKED — full-gate test262 regression (-1180), NOT locally reproducible (2026-06-19, sen-1)
+
+The typeof-resolution fix (above) is correct in isolation, but the **full CI
+test262-regression gate on PR #1769 flagged -1180 net pass (1411 regressions,
+231 improvements)** — a wide regression the local Phase-2/typeof/scope tests did
+NOT catch. Phase 1 (#1764, the ~93-test floor) is merged and stands alone, so the
+floor is banked regardless; Phase 2 is parked here for a focused follow-up.
+
+**Regression profile (gate bucket output, baseline e6cf3a7, signature
+`d57ce880bc38ea96`):**
+- categories: `wasm_compile: 625`, `null_deref: 593`, `type_error: 143`, other 41.
+- top buckets (each >50): `Array/prototype/{some 115, every 113, filter 109,
+  map 93, forEach 86, reduceRight 69, reduce 58}`, `language/statements/
+  {function/dstr 88, generators/dstr 88, async-generator/dstr 52}`.
+
+**Why it is genuinely Phase 2 (not drift):** PR #1767 ran its regression gate
+against the SAME fresh baseline seconds apart and was clean (+21, signature
+`f310311519813a1c`, 3 files). So the -1180 is specific to #1769's 4-file Phase 2
+delta (`context/types.ts`, `statements.ts`, `nested-declarations.ts`,
+`typeof-delete.ts` — array-methods.ts is byte-identical to main).
+
+**Why it could not be fixed quickly:** the regression does NOT reproduce in
+targeted local compiles (standalone OR host) of realistic shapes —
+`Array.prototype.some/map/forEach` + a block-nested helper, block-fn read only
+in-block, function-with-block-fn+locals all compile and run correctly locally.
+The failures live in test262's specific harness/strict-mode shapes (the gate's
+default runner config) that the local `compileToWasm` helper doesn't replicate.
+The `null_deref`/`wasm_compile` categories across hot-path Array methods point to
+the Phase 2 **TDZ-var allocation in `hoistFunctionDeclarations`**
+(`annexBBlockNestedEligible` → `allocLocal(funcName)` + `__tdz_` flag) perturbing
+local-index layout / leaving an uninitialised externref outer-binding local that a
+shared path reads — but the exact trigger needs the full test262 harness to
+reproduce, i.e. a local test262 slice run over the flagged buckets.
+
+**Recommendation (per tech-lead's pre-authorised fallback):** ship Phase-1-only
+(already merged), close/draft PR #1769, and rework Phase 2 as a follow-up that
+(a) reproduces against a LOCAL test262 slice over the flagged buckets before
+re-attempting, and (b) narrows `annexBBlockNestedEligible` / the outer-binding
+allocation so it cannot perturb functions that merely CONTAIN a block-nested
+helper (the dominant test262 harness shape). The typeof-resolution fix
+(`emitAnnexBTypeofFlagBranch` at the top of the undeclared-identifier branch) is
+correct and should be preserved for the rework.
+
+## Status: Phase-1-only (2026-06-19) — Phase 2 deferred to #2552
+
+Per tech-lead decision after the #1769 -1180 gate fail: **Phase 1 (#1764, ~93-test
+floor) is merged and stands alone; Phase 2 is deferred** to a focused rework
+tracked as **#2552** (narrow the TDZ-var allocation so it cannot perturb
+hot-path codegen; reproduce against a local test262 slice first; preserve the
+correct typeof-resolution fix). PR #1769 lands **docs-only** (the Phase-2 source
+was reverted to origin/main so it carries ZERO source change — Phase 1 is already
+on main via #1764); it records the deferral and creates the #2552 rework issue.
+#2200 stays `in-progress` (Phase-1 shipped, Phase-2 → #2552).
