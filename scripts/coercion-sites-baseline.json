@@ -1,5 +1,6 @@
 {
   "codegen/array-methods.ts": 20,
+  "codegen/array-object-proto.ts": 1,
   "codegen/async-scheduler.ts": 3,
   "codegen/binary-ops.ts": 38,
   "codegen/closed-method-dispatch.ts": 1,
@@ -24,7 +25,7 @@
   "codegen/object-ops.ts": 4,
   "codegen/object-runtime.ts": 23,
   "codegen/parse-number-native.ts": 4,
-  "codegen/property-access.ts": 11,
+  "codegen/property-access.ts": 16,
   "codegen/stack-balance.ts": 1,
   "codegen/statements/control-flow.ts": 4,
   "codegen/statements/nested-declarations.ts": 2,
