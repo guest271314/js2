@@ -1,5 +1,6 @@
 ---
-id: 2513
+id: 2545
+renumbered_from: 2513
 title: "nested destructuring-param default: outer-default object fires → inner fields read 0/undefined instead of the default object's values"
 status: ready
 sprint: 64
@@ -11,16 +12,16 @@ task_type: bugfix
 area: codegen
 language_feature: destructuring
 goal: core-semantics
-related: [2512, 2158, 1224, 1225, 1451]
+related: [2544, 2158, 1224, 1225, 1451]
 test262_bucket: dstr-param-default-value
-origin: "2026-06-19 — separated from #2512 (the arity half) by sen-1: once the invalid-Wasm CE clears, the destructured VALUES are still wrong."
+origin: "2026-06-19 — separated from #2544 (the arity half) by sen-1: once the invalid-Wasm CE clears, the destructured VALUES are still wrong."
 ---
 
-# #2513 — nested destructuring-param default: value flow lost when the outer default fires
+# #2545 — nested destructuring-param default: value flow lost when the outer default fires
 
 ## Problem
 
-After #2512 clears the invalid-Wasm CE, the `meth-…-dflt-obj-ptrn-prop-obj`
+After #2544 clears the invalid-Wasm CE, the `meth-…-dflt-obj-ptrn-prop-obj`
 test262 family runs but FAILS its value assertions. When the OUTER parameter
 default object fires (the method is called with no argument), the destructured
 bindings read `0`/`undefined` instead of the default object's field values.
@@ -35,7 +36,7 @@ new C().method();   // expected z = 6, got 0
 ```
 
 Reproduced even for a FULL inner default object (all three fields present, in
-declared order) — so it is NOT the #2512 field-pad arity hazard and NOT a
+declared order) — so it is NOT the #2544 field-pad arity hazard and NOT a
 partial-literal/slot-order issue. The whole nested-pattern destructuring of the
 outer-default object value yields sentinels.
 
@@ -55,6 +56,6 @@ OUTER-default object's nested object property into the inner pattern.
 
 ## Notes
 
-Deeper than #2512 — touches the value-flow of how a destructuring-param outer
+Deeper than #2544 — touches the value-flow of how a destructuring-param outer
 default object is destructured by a nested object pattern. Tracked separately so
-#2512 can land the contained invalid-Wasm fix first. Senior-dev / focused fix.
+#2544 can land the contained invalid-Wasm fix first. Senior-dev / focused fix.
