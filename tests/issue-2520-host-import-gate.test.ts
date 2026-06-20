@@ -28,4 +28,21 @@ describe("#2520 — lib-scan ambient-global referenced-names gate", () => {
     );
     expect(warns).not.toContain('"env.stop"');
   });
+
+  it("does not register a builtin constructor object for plain `new`/type uses", async () => {
+    // `new Uint8Array(...)` + a `Uint8Array` type annotation hit native fast
+    // paths and need no host constructor object (global_Uint8Array).
+    const warns = await hostImportWarnings(
+      `export function f(buf: Uint8Array): number { const a = new Uint8Array(2); return a[0] + buf[0]; }`,
+    );
+    expect(warns).not.toContain('"env.global_Uint8Array"');
+  });
+
+  it("still registers the builtin constructor object for an identity/value use", async () => {
+    // `x.constructor === Uint8Array` genuinely needs the reified constructor.
+    const warns = await hostImportWarnings(
+      `export function f(x: any): boolean { const a = new Uint8Array(1); return x.constructor === Uint8Array && a[0] === 0; }`,
+    );
+    expect(warns).toContain('"env.global_Uint8Array"');
+  });
 });

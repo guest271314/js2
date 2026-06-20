@@ -14,8 +14,13 @@ import path from "node:path";
 function compileAndCapture(extraArgs: string): string {
   const dir = mkdtempSync(path.join(tmpdir(), "issue-2520-cli-"));
   const inFile = path.join(dir, "input.ts");
-  // `new Uint8Array(...)` references a LIB_GLOBALS name → triggers the lib scan.
-  writeFileSync(inFile, `export function f(): number { const a = new Uint8Array(4); return a[0]; }`);
+  // Bare-value identity uses of several builtin constructors genuinely need the
+  // host constructor object (global_<Ctor>), which is dropped under --target wasi
+  // → multiple allowlist warnings to exercise the collapse / --verbose behaviour.
+  writeFileSync(
+    inFile,
+    `export function f(x: any): boolean { return x === Uint8Array || x === Int8Array || x === Float64Array; }`,
+  );
   return execSync(
     `npx -y tsx ${JSON.stringify(path.resolve("src/cli.ts"))} ${JSON.stringify(inFile)} --no-dts --target wasi ${extraArgs} 2>&1`,
     { cwd: process.cwd(), stdio: "pipe" },

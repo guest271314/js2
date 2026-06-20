@@ -11934,8 +11934,27 @@ function collectUsedExternImports(ctx: CodegenContext, sourceFile: ts.SourceFile
 function collectDeclaredGlobals(ctx: CodegenContext, libFile: ts.SourceFile, userFile: ts.SourceFile): void {
   // First collect identifiers referenced in user source
   const referencedNames = new Set<string>();
+  // #2520 — also track names used as a BARE VALUE: not `new X(...)`, `X(...)`,
+  // or `X.member`, which all hit native/intercepted fast paths. Only a bare
+  // value use (e.g. `x.constructor === Uint8Array`, or passing `Uint8Array` as
+  // an argument) actually needs the reified host constructor object
+  // (`global_<Ctor>`); `new Uint8Array(4)` does not, so it must not register it.
+  const valueRefNames = new Set<string>();
+  const isBareValueUse = (id: ts.Identifier): boolean => {
+    const p = id.parent;
+    if ((ts.isNewExpression(p) || ts.isCallExpression(p)) && p.expression === id) return false;
+    if (ts.isPropertyAccessExpression(p) && (p.expression === id || p.name === id)) return false;
+    // Type-annotation position (`buf: Uint8Array`, `Uint8Array | ArrayBuffer`,
+    // `typeof X`) is not a value use of the constructor.
+    if (ts.isTypeReferenceNode(p) && p.typeName === id) return false;
+    if (ts.isTypeQueryNode(p) && p.exprName === id) return false;
+    return true;
+  };
   const collectRefs = (node: ts.Node): void => {
-    if (ts.isIdentifier(node)) referencedNames.add(node.text);
+    if (ts.isIdentifier(node)) {
+      referencedNames.add(node.text);
+      if (isBareValueUse(node)) valueRefNames.add(node.text);
+    }
     forEachChild(node, collectRefs);
   };
   for (const stmt of userFile.statements) {
@@ -12007,7 +12026,10 @@ function collectDeclaredGlobals(ctx: CodegenContext, libFile: ts.SourceFile, use
     "BigUint64Array",
   ];
   for (const name of AMBIENT_BUILTIN_CTORS) {
-    if (!referencedNames.has(name)) continue;
+    // #2520 — only when the constructor is used as a bare value/identity; a
+    // plain `new Uint8Array(4)` / `Uint8Array.from(...)` is intercepted by the
+    // native fast paths and needs no host constructor object.
+    if (!valueRefNames.has(name)) continue;
     if (ctx.declaredGlobals.has(name)) continue;
     const importName = `global_${name}`;
     const typeIdx = addFuncType(ctx, [], [{ kind: "externref" }]);

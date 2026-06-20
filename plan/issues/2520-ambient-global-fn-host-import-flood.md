@@ -51,12 +51,22 @@ one-line summary by default; `--verbose`/`-v` restores the full listing. The
 allowlist *budget* test governs the allowlist's size (not these warnings), so it
 is unaffected. Test: `tests/issue-2520-host-import-warning-verbosity.test.ts`.
 
-Residual (not in scope here): the `global_<Ctor>` imports from the
-AMBIENT_BUILTIN_CTORS path register on any reference to a builtin (`Uint8Array`
-etc.) even when only the Wasm-native operations are used — a separate
-usage-context concern. And a web-vs-node target/environment model
-(`window.stop` makes no sense in a node host) is its own feature. Original
-analysis kept below for reference.
+### 3. Builtin-constructor value-use gate — `src/codegen/index.ts`
+
+The `AMBIENT_BUILTIN_CTORS` path registered `global_<Ctor>` (the host constructor
+*object*, for identity uses like `x.constructor === Uint8Array`) on *any*
+reference to the name — including `new Uint8Array(4)`, `Uint8Array.from(...)`, and
+`: Uint8Array` type annotations, all of which hit native fast paths and need no
+host object. Now gated on a **bare value/identity use** (`isBareValueUse`): not
+`new X(...)` / `X(...)` callee, not `X.member`, not a type-reference position. So
+`new Uint8Array(4)` no longer registers `global_Uint8Array`, while
+`x.constructor === Uint8Array` still does. The native-messaging example now
+compiles with **zero** host-import warnings. Test cases in
+`tests/issue-2520-host-import-gate.test.ts`.
+
+Out of scope: a web-vs-node target/environment model (`window.stop` makes no
+sense in a node host; auto-provide Node `process`/`Buffer` types) — tracked in
+#2522. Original analysis kept below for reference.
 
 ## Problem
 
