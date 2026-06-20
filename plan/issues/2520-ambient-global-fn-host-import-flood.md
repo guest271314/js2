@@ -7,6 +7,10 @@ created: 2026-06-19
 updated: 2026-06-20
 completed: 2026-06-20
 # 2026-06-20: PR #1787 −6 regression fix — lib-file gate scoped to wasi/standalone
+# 2026-06-20: PR #1787 −84 standalone-floor fix — DCE shared-array double-remap
+#   (eliminateDeadImports remapped a shared rangeThrow template twice → invalid
+#   Wasm on 132/133 built-ins/DataView). Root-cause fix in dead-elimination.ts;
+#   see tests/issue-2520-dce-shared-array-double-remap.test.ts.
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -40,6 +44,47 @@ Regression tests: `tests/issue-2520-host-import-gate.test.ts` — new
 to valid binaries. The deeper late-import index-shift remains latent (only the
 wasi/standalone path can still reorder the table); a separate hardening of the
 shift math is out of scope for this regression fix.
+
+## Regression follow-up #2 (2026-06-20, PR #1787 −84 standalone-floor fix)
+
+After the −6 gc fix above, PR #1787 still breached the #2097 **standalone**
+pass-count floor by **−84** (caught by `merge shard reports`, which runs the
+floor only on merge_group, not on the PR's own checks). Proven via
+`WebAssembly.validate` bisect at 3 heads (origin/main 133/133 valid, #1787 head
+0/133 valid, #1711 head 133/133 valid): **132 of the 133 regressed files were
+`built-ins/DataView`**, all invalid with
+`throw[0] expected type externref, found call of type i64`.
+
+**Root cause — a shared-array double-remap in dead-import elimination, NOT the
+late-import shift.** `eliminateDeadImports` (`src/codegen/dead-elimination.ts`)
+removes a now-dead host import and chains every funcIdx/typeIdx down via
+`remapFuncIdxInBody` / `remapTypeIdxInBody`, which drive `walkInstructions`. That
+walker visits an instruction once **per occurrence** in the body tree. The native
+DataView setter's §24.2.1 bounds-RangeError template (`rangeThrow` in
+`emitDataViewAccessor`) is the **same `Instr[]` object** spliced into both the
+ToIndex `if.then` (step 4) and the bounds `if.then` (step 8). So when #1787's
+gating made a host import dead (newly triggering the remap), the shared template's
+`call __new_RangeError` was chain-remapped **twice** (53→52 then 52→51), landing
+on `__to_bigint` (an i64-returning helper) → V8 rejects the throw operand type.
+The bug only manifested when DCE actually drops an import — which #1787's
+host-import gating newly caused — so it was latent on main.
+
+**Fix:** dedupe shared instruction objects in both DCE remappers via a
+`WeakSet<Instr>` so an aliased operand is chain-remapped exactly once, regardless
+of how many tree positions reference it. This closes the documented #1302
+shared-array double-shift hazard at the **sink** (the remapper) rather than
+per-producer — prior instances were worked around producer-side by never sharing
+instruction objects (`iterator-native` `buildVecArm`, `json-codec` `cloneBody`).
+
+**Validation:** the 133 affected `built-ins/DataView` files now 133/133
+`WebAssembly.validate` (0 throw-i64); +18 additional DataView
+`return-values`/`set-values` files repaired (same bug class — invalid on main,
+valid here); zero new regressions (the `issue-2036`, `arraybuffer-dataview`, and
+`issue-1302` lodash test failures all reproduce identically on origin/main, so
+they are pre-existing, not introduced). Regression test:
+`tests/issue-2520-dce-shared-array-double-remap.test.ts` reproduces the exact
+shape (poisoned-value DataView setter inside a throwing closure + a
+dead-eliminated user ctor) and fails without the fix, passes with it.
 
 ## Resolution (2026-06-20)
 
