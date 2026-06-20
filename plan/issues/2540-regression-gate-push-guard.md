@@ -1,5 +1,6 @@
 ---
-id: 2379
+id: 2540
+renumbered_from: 2379
 title: "CI: test262-sharded regression-gate hard-fails every push-to-main run on baseline-drift 'regressions' (HW/baseline reporting frozen)"
 status: done
 assignee: ttraenkler/sdev-harvest2
