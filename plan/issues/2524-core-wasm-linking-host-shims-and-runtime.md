@@ -2,7 +2,7 @@
 id: 2524
 title: "Core-wasm module linking (shared store + canonical rec-group) for host-API shims and the shared runtime — CHOSEN approach"
 status: ready
-sprint: Backlog
+sprint: 64
 created: 2026-06-20
 updated: 2026-06-20
 priority: medium
