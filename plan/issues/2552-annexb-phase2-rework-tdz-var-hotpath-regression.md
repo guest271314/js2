@@ -1,5 +1,5 @@
 ---
-id: 2514
+id: 2552
 title: "Annex B B.3.3 Phase 2 rework — TDZ-var outer-binding allocation perturbs hot-path codegen (-1180 test262 regression)"
 status: ready
 sprint: 64
@@ -16,7 +16,11 @@ related: [2200, 1764]
 origin: "2026-06-19 — #2200 Phase 2 (PR #1769) failed the full test262-regression gate -1180; parked Phase-1-only. This is the rework follow-up."
 ---
 
-# #2514 — Annex B Phase 2 rework: TDZ-var allocation perturbs hot-path codegen
+# #2552 — Annex B Phase 2 rework: TDZ-var allocation perturbs hot-path codegen
+
+> **ID note (2026-06-20):** originally drafted as `#2514`, which collided with
+> the already-on-main `#2514` (runtime-helpers-as-shared-linkable-module).
+> Renumbered to `#2552` via the atomic allocator (`claim-issue.mjs --allocate`).
 
 ## Context
 
