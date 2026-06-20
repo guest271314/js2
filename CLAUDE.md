@@ -52,6 +52,23 @@ TypeScript-to-WebAssembly compiler using WasmGC.
   - `sprints/{N}.md` (the sprint doc) lives directly under `sprints/`; the
     numbered issue files are flat under `plan/issues/`. See
     `plan/issues/SCHEMA.md`.
+  - **New issues MUST get their id from `claim-issue.mjs --allocate` (#2531) —
+    never hand-pick a number.** Hand-picking "next free off main" races: two
+    devs on separate branches each pick the same id (neither file is on `main`
+    yet), the dup is green at PR time and only fails in the `merge_group`,
+    wedging the queue. `--allocate` reserves the next id **atomically** against
+    `origin/main` ∪ every open PR's added issue files ∪ ids already reserved on
+    the orphan `issue-assignments` ref (first-push-wins; loser re-scans). Flow:
+    ```bash
+    NEW=$(node scripts/claim-issue.mjs --allocate)        # prints the reserved id
+    # (or: node scripts/claim-issue.mjs --allocate ttraenkler/<agent> --branch <b>
+    #  to reserve AND claim in one step)
+    # create plan/issues/$NEW-<slug>.md with frontmatter id: $NEW
+    ```
+    `--dry-run` previews without reserving; `--no-pr-scan` skips the slower
+    open-PR scan; `--json` for tooling. The required CI gate
+    `check:issue-ids:against-main` (in `quality`) rejects any PR that introduces
+    an id already taken on `main` — so a hand-picked collision can't merge.
 - Dependency graph: `plan/log/dependency-graph.md`
 - Goals (DAG): `plan/goals/goal-graph.md` — high-level goals with dependencies; issues belong to goals
   - Goals are not sequential milestones — they form a DAG and multiple can be active in parallel
@@ -340,7 +357,7 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 31,365 / 43,135 (72.7 %)
+**test262 conformance**: 31,389 / 43,135 (72.8 %)
 <!-- AUTO:conformance-end -->
 
 ### Sprint History
