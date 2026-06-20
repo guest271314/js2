@@ -1,7 +1,7 @@
 ---
 id: 2521
-title: "Native Messaging host: re-chunked >1 MiB messages need an in-body continuation marker so the receiver can reassemble"
-status: ready
+title: "Native Messaging host: re-chunked >1 MiB messages desync a 1:1 receiver — contract gap (receiver reassembly vs in-body continuation marker) + missing runtime test"
+status: backlog
 sprint: Backlog
 created: 2026-06-20
 updated: 2026-06-20
@@ -43,60 +43,99 @@ The host wasm logic is otherwise correct (single messages of any size, and the
 full sequence via buffered/Node-pipe I/O, all round-trip cleanly). The gap is
 the **re-chunk contract**, not codegen.
 
-## Decision: in-body continuation marker (chosen over sender-waits-for-size)
+## This is a contract gap, fixable on EITHER side — two options
 
-A "sender knows the expected size, wait for the full echo" fix only covers
-request/response echo. A **continuation marker** fixes the general case
-(including an extension receiving an unsolicited large broadcast), so it's the
-chosen approach.
+It is **not** strictly a host defect. The fix can live entirely on the receiver,
+or on the host. Pick based on whether there is a non-echo consumer.
 
-**Constraint:** the marker MUST live inside the JSON body. In the browser Chrome
-owns the 4-byte framing and delivers each frame to the extension already
-JSON-parsed, so the length prefix's bits are unavailable — only the message
-*value* survives to the receiver.
+### Option A — receiver reassembles to expected size (no host change)
 
-### Recommended frame shape — envelope per frame
+For an **echo in request/response**, the sender knows exactly what it sent, so it
+can reassemble with **no marker**: read frames and concatenate `chunk` elements
+until the reassembled length equals the sent length, then send the next message.
+The expected size *is* the termination condition. The reporter's harness can do
+this unilaterally (loop in `echoNativeMessage` until `got.length === sent.length`;
+also lift its 1 MiB `buffer` cap). **If the reporter fixes his side this way, no
+host change is needed — prefer this and skip Option B.**
+
+Limitation: only works when the receiver originated the message (it knows the
+size). A receiver that didn't send it (an extension getting an unsolicited large
+broadcast) has no termination condition without a marker.
+
+### Option B — host emits an in-body continuation marker (general case)
+
+Needed only if there's a consumer that can't predict the size (broadcast), or as
+a convenience so receivers don't each track expected sizes. Each frame becomes an
+envelope:
 
 ```json
 { "chunk": [ …slice… ], "more": true  }   // non-final frame
 { "chunk": [ …slice… ], "more": false }   // final frame
 ```
 
-- Receiver reassembles by concatenating `chunk` (array elements) until
-  `more:false`. No need to know the total up front.
-- Single-frame (≤1 MiB) messages emit one envelope with `more:false`, for a
-  uniform receiver path. (Alternative: keep ≤1 MiB messages verbatim and only
-  envelope multi-frame, with the receiver branching on shape — uniform is
-  simpler and unambiguous; pick during implementation.)
-- Each envelope must stay ≤1 MiB: drop `MAX_RUN` by the envelope overhead
-  (`{"chunk":` … `,"more":true}` ≈ 25 bytes) so a full frame including the
-  wrapper never exceeds the cap.
-- Open design choice (architect): plain `{chunk,more}` vs a
-  `{seq,total,chunk}` form (explicit index/total — more robust, slightly larger).
+Receiver concatenates `chunk` until `more:false` — no size needed.
+
+**Constraint:** the marker MUST live inside the JSON body. In the browser Chrome
+owns the 4-byte framing and delivers each frame to the extension already
+JSON-parsed, so the length prefix's bits are unavailable — only the message
+*value* survives to the receiver. (Each envelope must stay ≤1 MiB → drop
+`MAX_RUN` by the ~25-byte envelope overhead.)
+
+### Decision
+
+Default to **Option A** (receiver-side). Only implement **Option B** if a
+non-request/response consumer needs it. Track but don't build Option B until then.
+
+If Option B is built: single-frame (≤1 MiB) messages emit one envelope with
+`more:false` for a uniform receiver path (alternative: keep ≤1 MiB verbatim and
+only envelope multi-frame — pick during implementation). Open design choice
+(architect): plain `{chunk,more}` vs `{seq,total,chunk}` (explicit index/total).
+
+## Test coverage gap (the reason this slipped through — fix regardless of A/B)
+
+Today **nothing runs the example host's re-chunk path**:
+- `tests/issue-1530.test.ts` first block is **compile-only** (module validity,
+  imports) — explicitly does not assert content.
+- Its `#1618/#1651` round-trip block runs a **toy inline host** (not the example's
+  `emitRun`/re-chunk loop) and feeds a **single 7-byte message** (`frame('{"a":1}')`).
+- So the >1 MiB re-chunking path and any **multi-message sequence** have zero
+  runtime coverage — exactly where the desync lives.
+
+Add a runtime test that drives the **actual example host** (via the existing
+`runWasiRaw` shim) with: (a) a >1 MiB message → assert it emits N ≤1 MiB frames,
+and (b) a **multi-message sequence** (a >1 MiB message followed by small ones) →
+assert a correct receiver reassembles each without desync. This test would have
+caught loopdive/js2#389 and guards whichever fix (A or B) lands.
 
 ## Scope
 
-- `examples/native-messaging/nm_js2wasm.ts`: `emitRun` (and the ≤1 MiB echo
-  path, if uniform) wrap output in the envelope; shrink `MAX_RUN` for headroom.
-- `examples/native-messaging/README.md`: document the marker + receiver
-  reassembly contract.
-- `examples/native-messaging/nm_js2wasm.sh` / background.js example: show the
-  reassembling receiver.
-- Tests: `tests/issue-1530.test.ts`, `tests/wasi-stdin.test.ts` — assert each
-  emitted frame is ≤1 MiB valid JSON carrying the marker, and that reassembly
-  reproduces the original.
+- **Test (do regardless):** add the runtime multi-message + >1 MiB re-chunk test
+  above to `tests/issue-1530.test.ts`.
+- **Option A (default):** update `examples/native-messaging/nm_standalone_test.js`
+  guidance / the README to reassemble-to-expected-size; lift the receiver's 1 MiB
+  buffer cap. No host change.
+- **Option B (only if a non-echo consumer needs it):**
+  `examples/native-messaging/nm_js2wasm.ts` `emitRun` wraps output in the
+  envelope + shrink `MAX_RUN`; README documents the marker; the background.js
+  example shows the reassembling receiver.
 
 ## Acceptance criteria
 
-- A >1 MiB request produces N frames, each ≤1 MiB valid JSON with a
-  continuation marker; a receiver that reassembles on the marker reproduces the
-  original message with no desync of subsequent messages.
-- The reporter's `nm_standalone_test.js` sequence (64 MiB + ≤1 MiB messages),
-  updated to reassemble on the marker, round-trips cleanly.
-- ≤1 MiB messages still round-trip (single final-marked frame).
+- **Test (required):** a runtime test drives the actual example host and (a) a
+  >1 MiB message emits N ≤1 MiB frames, and (b) a multi-message sequence (>1 MiB
+  then small messages) is reassembled by a correct receiver with no desync. Fails
+  on current main (proving it reproduces #389), passes after the chosen fix.
+- **Option A:** the reporter's `nm_standalone_test.js` sequence (64 MiB + ≤1 MiB
+  messages), updated to reassemble-to-expected-size, round-trips cleanly — no host
+  change.
+- **Option B (only if built):** each frame is ≤1 MiB valid JSON carrying the
+  marker; a size-agnostic receiver reassembles correctly; ≤1 MiB messages still
+  round-trip.
 
 ## Notes
 
-Surfaced + reproduced while investigating loopdive/js2#389 (with deno installed
-locally to run the reporter's harness). Pairs with the example's existing
-re-chunk design in #1530.
+Surfaced + reproduced while investigating loopdive/js2#389. The reproduction did
+NOT require running the reporter's deno harness — counting the host's emitted
+frames (Node) plus reading the harness's 1-frame-per-request reader was enough;
+deno (installed locally) only added end-to-end fidelity. Pairs with the example's
+existing re-chunk design in #1530.
