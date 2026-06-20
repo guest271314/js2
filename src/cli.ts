@@ -69,6 +69,11 @@ Options:
                     is ON by default; this restores the pre-#1950 behaviour.
                     (No-op when binaryen/wasm-opt is unavailable — that path
                     already degrades to a one-line note, never a failure.)
+  --node-io-shim    (WASI, #2524 Phase 1) Route process.std{in,out,err} IO
+                    through the linkable js2wasm:node-io shim: the module imports
+                    stdin_read/stdout_write/stderr_write + its memory from
+                    js2wasm:node-io (no wasi_snapshot_preview1 for stream IO) and
+                    links node-shim.wasm. Off by default (inline fd_* fallback).
   --no-host-imports Strict dual-mode: reject JS-host 'env' imports not on
                     the allowlist (#1524). Implied by --target wasi.
   --allow-host-imports
@@ -124,6 +129,8 @@ let utf8Storage = false;
 // default (strict-on under `--target wasi`); `true` / `false` = explicit
 // override from `--no-host-imports` / `--allow-host-imports`.
 let strictNoHostImports: boolean | undefined;
+// #2524 Phase 1 — process IO via the linkable js2wasm:node-io shim (WASI only).
+let nodeIoShim = false;
 const defines: Record<string, string> = {};
 
 for (let i = 0; i < args.length; i++) {
@@ -178,6 +185,10 @@ for (let i = 0; i < args.length; i++) {
     quiet = true;
   } else if (arg === "--utf8-storage") {
     utf8Storage = true;
+  } else if (arg === "--node-io-shim") {
+    // #2524 Phase 1 — route process.std* IO through the linkable js2wasm:node-io
+    // shim (WASI only). Off by default; the inline fd_read/fd_write path stays.
+    nodeIoShim = true;
   } else if (arg === "--no-host-imports") {
     strictNoHostImports = true;
   } else if (arg === "--allow-host-imports") {
@@ -260,6 +271,7 @@ const result = await compile(source, {
   ...(emitWit ? { wit: witPackageName ? { packageName: witPackageName } : true } : {}),
   ...(allowFs ? { allowFs: true } : {}),
   ...(utf8Storage ? { utf8Storage: true } : {}),
+  ...(nodeIoShim ? { nodeIoShim: true } : {}),
   fileName: absInput,
   ...(strictNoHostImports !== undefined ? { strictNoHostImports } : {}),
   ...(Object.keys(defines).length > 0 ? { define: defines } : {}),
