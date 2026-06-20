@@ -1,10 +1,11 @@
 ---
 id: 2520
-title: "Ambient global-function host-import flood: collectExternDeclarations over lib files lacks a referenced-names gate"
-status: ready
+title: "Ambient global-function host-import warning flood under --target wasi (collapse to a --verbose summary)"
+status: done
 sprint: 64
 created: 2026-06-19
-updated: 2026-06-19
+updated: 2026-06-20
+completed: 2026-06-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -13,6 +14,33 @@ area: codegen
 language_feature: host-imports
 goal: correctness
 ---
+
+## Resolution (2026-06-20)
+
+Fixed by **collapsing the per-import warnings into a one-line summary in the CLI,
+restorable with `--verbose`** — NOT by the referenced-names gate originally
+proposed below.
+
+Why the lighter fix is the right one: the per-import "Host import "env.X" … not on
+the dual-mode allowlist" warning (`registry/imports.ts` `addImport`,
+severity `"degrade"`) fires for *every dropped* host import, then the import is
+dropped and dead-code-eliminated — it **never reaches the `.wasm`**. The
+authoritative check is a *different*, emit-time scan (`assertNoLeakedHostImports`,
+severity `"error"`) that fires only if a host import actually *survives* into the
+binary. So the per-import warnings are redundant noise: under `--target wasi`
+essentially any program (anything referencing `Uint8Array`/`Date`/`Map`/…) trips
+~60 of them. The allowlist *budget* test (`host-import-allowlist-budget.test.ts`)
+governs the allowlist's size, not these warnings, so it is unaffected.
+
+Implemented: `src/cli.ts` collapses the allowlist warnings to
+`"N host import(s) … were dropped (no-op under WASI/strict mode; not in the
+emitted .wasm). Re-run with --verbose to list them."`; `--verbose`/`-v` restores
+the full per-import listing. Test: `tests/issue-2520-host-import-warning-verbosity.test.ts`.
+
+The collection-stage over-emission (registering all ambient globals) still exists
+but is now invisible (dropped + summarized). The optional referenced-names gate
+(#2509) would additionally avoid the wasted collection work, but is not needed to
+silence the noise. Original analysis kept below for reference.
 
 ## Problem
 

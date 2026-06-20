@@ -62,6 +62,8 @@ Options:
   --wit             Generate WIT interface file for Component Model
   --wit-package <p> Package name for --wit output (ns:name[@version]).
                     Implies --wit. Defaults to js2wasm:<input-basename>.
+  -v, --verbose     List every dropped host-import warning individually instead
+                    of collapsing them into a one-line summary (WASI/strict mode)
   -O, --optimize    Run Binaryen wasm-opt optimizer (on by default at -O3)
   -O1..-O4          Set optimization level (1-4)
   --no-optimize, -O0
@@ -104,6 +106,10 @@ const emitWasm = true;
 let emitWat = true;
 let emitDts = true;
 let watOnly = false;
+// #2520 — when false, collapse the (harmless, dead-code-eliminated) per-import
+// "host import not on the dual-mode allowlist" warnings into a one-line summary.
+// --verbose restores the full per-import listing.
+let verbose = false;
 // #1950 — default-on optimization for the CLI. Binaryen wasm-opt does
 // materially valuable, safe work the in-compiler passes don't (small-function
 // inlining, array.len-into-local, post-inline null-check cleanup, dead
@@ -182,6 +188,8 @@ for (let i = 0; i < args.length; i++) {
     strictNoHostImports = true;
   } else if (arg === "--allow-host-imports") {
     strictNoHostImports = false;
+  } else if (arg === "--verbose" || arg === "-v") {
+    verbose = true;
   } else if (arg === "-O" || arg === "--optimize") {
     optimize = true;
   } else if (arg === "--no-optimize" || arg === "-O0") {
@@ -276,11 +284,31 @@ if (!result.success) {
   process.exit(1);
 }
 
-// Print any warnings (e.g. wasm-opt not available)
+// Print any warnings (e.g. wasm-opt not available).
+//
+// #2520 — the per-import "Host import "env.X" … not on the dual-mode allowlist"
+// warnings are noise: under --target wasi essentially any program trips ~60 of
+// them (anything referencing Uint8Array/Date/Map/… pulls in the whole ambient
+// global surface), and those imports are dropped and dead-code-eliminated — they
+// never reach the .wasm. The authoritative check is the emit-time leak scan
+// (assertNoLeakedHostImports, severity "error"), which only fires if a host
+// import actually survives into the binary. So collapse these into a one-line
+// summary by default; --verbose restores the full per-import listing.
+const isAllowlistWarning = (msg: string): boolean => msg.includes("not on the dual-mode allowlist");
+let suppressedAllowlist = 0;
 for (const e of result.errors) {
-  if (e.severity === "warning") {
-    console.error(`warning: ${e.message}`);
+  if (e.severity !== "warning") continue;
+  if (!verbose && isAllowlistWarning(e.message)) {
+    suppressedAllowlist++;
+    continue;
   }
+  console.error(`warning: ${e.message}`);
+}
+if (suppressedAllowlist > 0) {
+  console.error(
+    `warning: ${suppressedAllowlist} host import(s) not on the dual-mode allowlist were dropped ` +
+      `(no-op under WASI/strict mode; not in the emitted .wasm). Re-run with --verbose to list them.`,
+  );
 }
 
 if (watOnly) {
