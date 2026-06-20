@@ -5529,9 +5529,35 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // output. We now place the stdin buffer in page 1 (WASI_STDIN_BUF_START) and
   // the write scratch in page 2 (WASI_WRITE_SCRATCH_START), well above any
   // data segment, and reserve 3 pages so both regions always exist.
-  ctx.mod.memories.push({ min: 3 });
-  // WASI requires the memory to be exported as "memory"
-  ctx.mod.exports.push({ name: "memory", desc: { kind: "memory", index: 0 } });
+  if (ctx.nodeIoShim) {
+    // #2524 Phase 1 — the node-io shim OWNS + exports the linear memory; the
+    // user module IMPORTS it (memory index 0) so the shim can read/write the
+    // user's bytes over the SAME memory with no instantiation cycle (shim
+    // imports only wasi_snapshot_preview1; user imports {memory + io fns} from
+    // the already-instantiated shim). The user module therefore declares NO
+    // memory and exports none. `min: 3` mirrors the inline path's reservation
+    // (page 0 scratch/data, page 1 stdin buffer, page 2 write scratch); the
+    // shim's exported memory must be at least this large (its source declares
+    // the same min). Imports MUST precede the func imports below so the memory
+    // sits at memory-index 0 (loads/stores/`memory.size`/`memory.grow` all
+    // target it). The import order within the import section does not perturb
+    // the func index space — only func imports increment it.
+    addImport(ctx, "js2wasm:node-io", "memory", { kind: "memory", min: 3 });
+    // The three byte-boundary IO functions (over the shared memory):
+    //   stdout_write(ptr,len)->i32 · stderr_write(ptr,len) · stdin_read(ptr,len)->i32
+    const ioWriteType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], "$node_io_write");
+    const ioWriteVoidType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [], "$node_io_write_void");
+    addImport(ctx, "js2wasm:node-io", "stdout_write", { kind: "func", typeIdx: ioWriteType });
+    ctx.nodeIoStdoutWriteIdx = ctx.funcMap.get("stdout_write")!;
+    addImport(ctx, "js2wasm:node-io", "stderr_write", { kind: "func", typeIdx: ioWriteVoidType });
+    ctx.nodeIoStderrWriteIdx = ctx.funcMap.get("stderr_write")!;
+    addImport(ctx, "js2wasm:node-io", "stdin_read", { kind: "func", typeIdx: ioWriteType });
+    ctx.nodeIoStdinReadIdx = ctx.funcMap.get("stdin_read")!;
+  } else {
+    ctx.mod.memories.push({ min: 3 });
+    // WASI requires the memory to be exported as "memory"
+    ctx.mod.exports.push({ name: "memory", desc: { kind: "memory", index: 0 } });
+  }
 
   // Add bump pointer global (mutable i32, starts at 0)
   // We reserve the first 1024 bytes for iovec scratch space
@@ -5683,8 +5709,27 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   }
   forEachChild(sourceFile, visit);
 
+  // #2524 — remember whether the source needs a stream/console *write* helper
+  // (console.log/warn/error, process.std*.write) independent of the syscall
+  // import decision below. Under the node-io shim those helpers still get
+  // emitted, but they call `js2wasm:node-io::std{out,err}_write` instead of
+  // `wasi_snapshot_preview1.fd_write`.
+  const needsStreamWriteHelper = needsFdWrite;
+
   // writeFileSync also needs fd_write for the actual file data write
   if (needsPathOpen) needsFdWrite = true;
+
+  // #2524 Phase 1 — when the node-io shim is active, the stream/console IO path
+  // (process.std*.write, process.stdin.read, console.log/warn/error) is lowered
+  // to `js2wasm:node-io` calls (registered above), so it does NOT pull
+  // wasi_snapshot_preview1.fd_read/fd_write into the user module. Only a file
+  // write (writeFileSync → path_open) still needs the real syscalls. Recompute
+  // the syscall-import needs accordingly: keep fd_write solely for the file
+  // path, and drop fd_read entirely (stdin goes through the shim).
+  if (ctx.nodeIoShim) {
+    needsFdWrite = needsPathOpen;
+    needsFdRead = false;
+  }
 
   // fd_write(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) -> i32
   if (needsFdWrite) {
@@ -5821,7 +5866,10 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // entries pointing at indices that the subsequent direct `addImport` calls
   // silently shift past, corrupting later lookups (e.g. `__wasi_write_string`
   // referenced by `ensureWasiWriteI32Helper` during user-code compilation).
-  if (needsFdWrite) {
+  // #2524 — the console/stream write helper is emitted whenever the source
+  // writes to stdout/stderr, even when the node-io shim diverts the actual
+  // syscall (so `needsFdWrite` was recomputed to the file-only need above).
+  if (needsFdWrite || needsStreamWriteHelper) {
     ctx.wasiPendingFdWriteHelper = true;
   }
   if (needsConsoleStderr) {
@@ -5962,25 +6010,34 @@ function emitWasiWriteStringHelper(ctx: CodegenContext): void {
   ctx.funcMap.set("__wasi_write_string", funcIdx);
 
   // Parameters: 0=ptr, 1=len
-  // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }
-  // nwritten at memory[8]
-  const body: Instr[] = [
-    // Store ptr at memory[0] (iovec.buf)
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.get", index: 0 } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // Store len at memory[4] (iovec.buf_len)
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: 1 } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // Call fd_write(fd=1, iovs=0, iovs_len=1, nwritten=8)
-    { op: "i32.const", value: 1 } as Instr, // fd = stdout
-    { op: "i32.const", value: 0 } as Instr, // iovs pointer
-    { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
-    { op: "i32.const", value: 8 } as Instr, // nwritten pointer
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "drop" } as Instr, // drop the return value (errno)
-  ];
+  // #2524 Phase 1 — under the node-io shim, delegate straight to the imported
+  // `js2wasm:node-io::stdout_write(ptr, len)` (the shim owns the iovec/syscall);
+  // no fd_write import exists in the user module.
+  const body: Instr[] = ctx.nodeIoShim
+    ? [
+        { op: "local.get", index: 0 } as Instr,
+        { op: "local.get", index: 1 } as Instr,
+        { op: "call", funcIdx: ctx.nodeIoStdoutWriteIdx } as Instr,
+        { op: "drop" } as Instr, // drop bytes-written
+      ]
+    : [
+        // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }; nwritten at memory[8]
+        // Store ptr at memory[0] (iovec.buf)
+        { op: "i32.const", value: 0 } as Instr,
+        { op: "local.get", index: 0 } as Instr,
+        { op: "i32.store", align: 2, offset: 0 } as Instr,
+        // Store len at memory[4] (iovec.buf_len)
+        { op: "i32.const", value: 4 } as Instr,
+        { op: "local.get", index: 1 } as Instr,
+        { op: "i32.store", align: 2, offset: 0 } as Instr,
+        // Call fd_write(fd=1, iovs=0, iovs_len=1, nwritten=8)
+        { op: "i32.const", value: 1 } as Instr, // fd = stdout
+        { op: "i32.const", value: 0 } as Instr, // iovs pointer
+        { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
+        { op: "i32.const", value: 8 } as Instr, // nwritten pointer
+        { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+        { op: "drop" } as Instr, // drop the return value (errno)
+      ];
 
   ctx.mod.functions.push({
     name: "__wasi_write_string",
@@ -6002,25 +6059,32 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
   ctx.funcMap.set("__wasi_write_string_stderr", funcIdx);
 
   // Parameters: 0=ptr, 1=len
-  // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }
-  // nwritten at memory[8]
-  const body: Instr[] = [
-    // Store ptr at memory[0] (iovec.buf)
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.get", index: 0 } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // Store len at memory[4] (iovec.buf_len)
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: 1 } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // Call fd_write(fd=2, iovs=0, iovs_len=1, nwritten=8)
-    { op: "i32.const", value: 2 } as Instr, // fd = stderr
-    { op: "i32.const", value: 0 } as Instr, // iovs pointer
-    { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
-    { op: "i32.const", value: 8 } as Instr, // nwritten pointer
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "drop" } as Instr, // drop the return value (errno)
-  ];
+  // #2524 Phase 1 — under the node-io shim, delegate to the imported
+  // `js2wasm:node-io::stderr_write(ptr, len)` (returns void).
+  const body: Instr[] = ctx.nodeIoShim
+    ? [
+        { op: "local.get", index: 0 } as Instr,
+        { op: "local.get", index: 1 } as Instr,
+        { op: "call", funcIdx: ctx.nodeIoStderrWriteIdx } as Instr,
+      ]
+    : [
+        // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }; nwritten at memory[8]
+        // Store ptr at memory[0] (iovec.buf)
+        { op: "i32.const", value: 0 } as Instr,
+        { op: "local.get", index: 0 } as Instr,
+        { op: "i32.store", align: 2, offset: 0 } as Instr,
+        // Store len at memory[4] (iovec.buf_len)
+        { op: "i32.const", value: 4 } as Instr,
+        { op: "local.get", index: 1 } as Instr,
+        { op: "i32.store", align: 2, offset: 0 } as Instr,
+        // Call fd_write(fd=2, iovs=0, iovs_len=1, nwritten=8)
+        { op: "i32.const", value: 2 } as Instr, // fd = stderr
+        { op: "i32.const", value: 0 } as Instr, // iovs pointer
+        { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
+        { op: "i32.const", value: 8 } as Instr, // nwritten pointer
+        { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+        { op: "drop" } as Instr, // drop the return value (errno)
+      ];
 
   ctx.mod.functions.push({
     name: "__wasi_write_string_stderr",
@@ -6054,6 +6118,49 @@ const WASI_WRITE_SCRATCH_START = 128 * 1024;
  * `memory.grow` in `__lin_u8_alloc`.
  */
 const LINEAR_U8_ARENA_START = 256 * 1024;
+
+/**
+ * #2524 Phase 1 — emit the "write `len` bytes starting at linear `srcConst`
+ * to fd `fd`, discarding the result" tail used by the GC-buffer / string
+ * `__wasi_write_*` helpers. `len` is read from the named local index.
+ *
+ * Inline (default) path: build the iovec at memory[0..7] pointing at
+ * `srcConst`, call `fd_write(fd, iovs=0, iovs_len=1, nwritten=8)`, drop errno.
+ *
+ * Shim path (`ctx.nodeIoShim`): call the imported `js2wasm:node-io`
+ * `stdout_write`/`stderr_write(srcConst, len)` directly — the shim owns the
+ * iovec + syscall over the shared memory. `stdout_write` returns bytes-written
+ * (dropped); `stderr_write` returns void.
+ */
+function emitWasiWriteTail(ctx: CodegenContext, fd: number, srcConst: number, lenLocalIdx: number): Instr[] {
+  if (ctx.nodeIoShim) {
+    const useStderr = fd === 2;
+    const ioIdx = useStderr ? ctx.nodeIoStderrWriteIdx : ctx.nodeIoStdoutWriteIdx;
+    return [
+      { op: "i32.const", value: srcConst } as Instr,
+      { op: "local.get", index: lenLocalIdx } as Instr,
+      { op: "call", funcIdx: ioIdx } as Instr,
+      ...(useStderr ? [] : [{ op: "drop" } as Instr]),
+    ];
+  }
+  return [
+    // iovec.buf = srcConst at memory[0]
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: srcConst } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // iovec.buf_len = len at memory[4]
+    { op: "i32.const", value: 4 } as Instr,
+    { op: "local.get", index: lenLocalIdx } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
+    { op: "i32.const", value: fd } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.const", value: 8 } as Instr,
+    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+    { op: "drop" } as Instr,
+  ];
+}
 
 /**
  * #1886 Slice B — Ensure the `__lin_u8_alloc(len: i32) -> i32` bump allocator
@@ -6195,7 +6302,8 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
   const existing = ctx.funcMap.get(helperName);
   if (existing !== undefined) return existing;
 
-  if (!ctx.wasi || ctx.wasiFdWriteIdx === undefined || ctx.nativeStrTypeIdx < 0) return -1;
+  // #2524 — node-io shim path needs no fd_write idx (see Uint8Array helper).
+  if (!ctx.wasi || (!ctx.nodeIoShim && ctx.wasiFdWriteIdx === undefined) || ctx.nativeStrTypeIdx < 0) return -1;
 
   // Make sure the native-string runtime (incl. __str_flatten) is emitted.
   ensureNativeStringHelpers(ctx);
@@ -6516,21 +6624,9 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
       ],
     },
 
-    // iovec.buf = SCRATCH_START at memory[0]
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // iovec.buf_len = actual UTF-8 byte length at memory[4]
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: O } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
-    { op: "i32.const", value: fd } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.const", value: 8 } as Instr,
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "drop" } as Instr,
+    // #2524 — write the staged UTF-8 region (`O` bytes) via fd_write or the
+    // node-io shim's stdout/stderr_write.
+    ...emitWasiWriteTail(ctx, fd, WASI_WRITE_SCRATCH_START, O),
   ];
 
   ctx.mod.functions.push({
@@ -6575,7 +6671,9 @@ export function ensureWasiWriteUint8ArrayHelper(
   vecTypeIdx: number,
   useStderr: boolean = false,
 ): number {
-  if (!ctx.wasi || ctx.wasiFdWriteIdx === undefined) return -1;
+  // #2524 — under the node-io shim the write is satisfied by the imported
+  // `js2wasm:node-io` fns (no fd_write idx); otherwise it needs the real fd_write.
+  if (!ctx.wasi || (!ctx.nodeIoShim && ctx.wasiFdWriteIdx === undefined)) return -1;
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
   if (arrTypeIdx < 0) return -1;
   const arrDef = ctx.mod.types[arrTypeIdx];
@@ -6690,21 +6788,8 @@ export function ensureWasiWriteUint8ArrayHelper(
       ],
     },
 
-    // iovec.buf = SCRATCH_START at memory[0]
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // iovec.buf_len = len at memory[4]
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: LEN } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
-    { op: "i32.const", value: fd } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.const", value: 8 } as Instr,
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "drop" } as Instr,
+    // #2524 — write the staged scratch region (fd_write inline, or node-io shim)
+    ...emitWasiWriteTail(ctx, fd, WASI_WRITE_SCRATCH_START, LEN),
   ];
 
   ctx.mod.functions.push({
@@ -6743,7 +6828,8 @@ export function ensureWasiWriteArrayBufferHelper(
   const existing = ctx.funcMap.get(helperName);
   if (existing !== undefined) return existing;
 
-  if (!ctx.wasi || ctx.wasiFdWriteIdx === undefined) return -1;
+  // #2524 — node-io shim path needs no fd_write idx (see Uint8Array helper).
+  if (!ctx.wasi || (!ctx.nodeIoShim && ctx.wasiFdWriteIdx === undefined)) return -1;
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
   if (arrTypeIdx < 0) return -1;
 
@@ -6841,21 +6927,8 @@ export function ensureWasiWriteArrayBufferHelper(
       ],
     },
 
-    // iovec.buf = SCRATCH_START at memory[0]
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // iovec.buf_len = len at memory[4]
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: LEN } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
-    { op: "i32.const", value: fd } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.const", value: 8 } as Instr,
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "drop" } as Instr,
+    // #2524 — write the staged scratch region (fd_write inline, or node-io shim)
+    ...emitWasiWriteTail(ctx, fd, WASI_WRITE_SCRATCH_START, LEN),
   ];
 
   ctx.mod.functions.push({
