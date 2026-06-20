@@ -1461,6 +1461,11 @@ export function encodeInstr(instr: Instr, enc: WasmEncoder): void {
       enc.u32(instr.align);
       enc.u32(instr.offset);
       break;
+    case "i64.store":
+      enc.byte(OP.i64_store);
+      enc.u32(instr.align);
+      enc.u32(instr.offset);
+      break;
     case "i32.store8":
       enc.byte(OP.i32_store8);
       enc.u32(instr.align);
@@ -1920,13 +1925,14 @@ export function encodeInstr(instr: Instr, enc: WasmEncoder): void {
         "encodeInstr: 'br_table' has no payload in the Instr union (needs targets[] + default) — " +
           "cannot be encoded; no codegen path should emit it yet (#1939)",
       );
-    // #1939 — fail loud on an op with no encoding case. The ~170
-    // `as unknown as Instr` casts (#1095) bypass the type union, so a
-    // mistyped/missing op string would otherwise be silently omitted from the
-    // binary — the worst failure shape, surfacing far downstream as an opaque
-    // wasm validation error (stack/type mismatch) with no link to the source
-    // op. The `never` binding is a compile-time exhaustiveness check over the
-    // real union; the throw also catches cast-injected strings at runtime.
+    // #1939 — fail loud on an op with no encoding case. The `never` binding is
+    // a compile-time exhaustiveness check over the real Instr union, so a new
+    // union variant without a matching encoding case is a type error here rather
+    // than a silent omission from the binary (the worst failure shape: it
+    // surfaces far downstream as an opaque wasm validation error with no link to
+    // the source op). The runtime throw is the belt-and-braces backstop for any
+    // remaining `as Instr` assertion that injects an off-union op string. The
+    // double-cast `as unknown as Instr` form (#1095) has been eliminated.
     default: {
       const unknown: never = instr;
       throw new Error(`encodeInstr: unknown op "${(unknown as { op?: string }).op ?? "<no op>"}"`);

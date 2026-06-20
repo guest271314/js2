@@ -779,6 +779,9 @@ export function compileSourceSync(
         wasi: options.target === "wasi",
         nodeIoShim: options.nodeIoShim,
         standalone: options.target === "standalone",
+        // (#2119) thread module-strictness inference for the single-source
+        // path (test262 + the playground both compile via `compile()` here).
+        inferModuleStrictArguments: options.inferModuleStrictArguments,
         // Phase 2 (#1131): default experimentalIR to on so recursive
         // numeric kernels (fib, factorial, etc.) compile without the
         // boxing roundtrip the legacy path emits for untyped JS
@@ -1047,6 +1050,32 @@ export async function compileMultiSource(
     };
   }
 
+  // Early error detection — catch ES-spec syntax errors that TypeScript misses,
+  // on every user source file (#1931). Previously the multi-source path skipped
+  // ES early errors entirely; now compileSource and compileMultiSource share the
+  // same detectEarlyErrors pass so e.g. a duplicate-`let` is rejected in a
+  // multi-file compile too. allowJs dependency files are skipped (their JS may
+  // use patterns we cannot control) — same scoping as the diagnostic loop above.
+  if (!options.allowJs) {
+    for (const sf of multiAst.sourceFiles) {
+      errors.push(...detectEarlyErrors(sf));
+    }
+    if (errors.some((e) => e.severity === "error")) {
+      return {
+        binary: new Uint8Array(0),
+        wat: "",
+        dts: "",
+        importsHelper: "",
+        success: false,
+        errors,
+        stringPool: [],
+        imports: [],
+        hasMain: false,
+        hasTopLevelStatements: false,
+      };
+    }
+  }
+
   // Safe mode validation for all source files
   if (options.safe) {
     for (const sf of multiAst.sourceFiles) {
@@ -1105,6 +1134,10 @@ export async function compileMultiSource(
         nodeIoShim: options.nodeIoShim,
         strictNoHostImports: options.strictNoHostImports,
         standalone: options.target === "standalone",
+        // (#2119) default true (module input is strict → unmapped arguments);
+        // the test262 harness passes false for script tests to avoid the
+        // synthetic `export function test()` wrapper unmapping sloppy arguments.
+        inferModuleStrictArguments: options.inferModuleStrictArguments,
       });
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
@@ -1334,6 +1367,29 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
     };
   }
 
+  // Early error detection — catch ES-spec syntax errors that TypeScript misses,
+  // on every user source file (#1931). compileFilesSource previously skipped ES
+  // early errors; wire the same detectEarlyErrors pass here too.
+  if (!options.allowJs) {
+    for (const sf of multiAst.sourceFiles) {
+      errors.push(...detectEarlyErrors(sf));
+    }
+    if (errors.some((e) => e.severity === "error")) {
+      return {
+        binary: new Uint8Array(0),
+        wat: "",
+        dts: "",
+        importsHelper: "",
+        success: false,
+        errors,
+        stringPool: [],
+        imports: [],
+        hasMain: false,
+        hasTopLevelStatements: false,
+      };
+    }
+  }
+
   // Safe mode validation for all source files
   if (options.safe) {
     for (const sf of multiAst.sourceFiles) {
@@ -1392,6 +1448,10 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
         nodeIoShim: options.nodeIoShim,
         strictNoHostImports: options.strictNoHostImports,
         standalone: options.target === "standalone",
+        // (#2119) default true (module input is strict → unmapped arguments);
+        // the test262 harness passes false for script tests to avoid the
+        // synthetic `export function test()` wrapper unmapping sloppy arguments.
+        inferModuleStrictArguments: options.inferModuleStrictArguments,
       });
       mod = result.module;
       capturedFallbackCounts = result.fallbackCounts;
