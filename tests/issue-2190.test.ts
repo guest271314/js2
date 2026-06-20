@@ -156,4 +156,98 @@ describe("#2190 standalone array element indexing through the externref boundary
       ).toBe(88);
     });
   });
+
+  // (#2190b) HETEROGENEOUS inner-tuple read-back. An inner tuple of an `any[]`
+  // mixing a native string with a number/boolean previously DROPPED the
+  // off-kind element at construction (the first-element heuristic picked a
+  // homogeneous vec — `$AnyString[]` for string-first, `f64[]` for number-first
+  // — then `f64.const N; drop` / `extern.convert_any; __unbox_number` the other
+  // element to a null/NaN). `compileArrayLiteral` now widens such a heterogeneous
+  // literal to an externref vec (under native strings + an `any` contextual
+  // element type), so each element is boxed by its own static type and reads back
+  // correctly. The `(number|string)[]` *union*-typed literal stays on its prior
+  // path (not an `any` context) — a distinct representation, untouched here.
+  describe("#2190b heterogeneous inner-tuple read-back", () => {
+    it('string-first [["a", 7]] — e[0][1] reads the number', async () => {
+      expect(
+        await runStandalone(`export function test(): number {
+          const e: any[] = [["a", 7]];
+          return e[0][1] as number;
+        }`),
+      ).toBe(7);
+    });
+
+    it('string-first [["a", 7]] — e[0][0] still reads the string', async () => {
+      expect(
+        await runStandalone(`export function test(): number {
+          const e: any[] = [["a", 7]];
+          return (e[0][0] as string).length;
+        }`),
+      ).toBe(1);
+    });
+
+    it('number-first [[7, "ab"]] — e[0][1] reads the string', async () => {
+      expect(
+        await runStandalone(`export function test(): number {
+          const e: any[] = [[7, "ab"]];
+          return (e[0][1] as string).length;
+        }`),
+      ).toBe(2);
+    });
+
+    it('number-first [[7, "ab"]] — e[0][0] still reads the number', async () => {
+      expect(
+        await runStandalone(`export function test(): number {
+          const e: any[] = [[7, "ab"]];
+          return e[0][0] as number;
+        }`),
+      ).toBe(7);
+    });
+
+    it("three-element mixed [string, number, string]", async () => {
+      expect(
+        await runStandalone(`export function test(): number {
+          const e: any[] = [["a", 9, "ccc"]];
+          return (e[0][2] as string).length + (e[0][1] as number);
+        }`),
+      ).toBe(12);
+    });
+
+    it("boolean+number heterogeneous tuple preserves the boolean tag", async () => {
+      expect(
+        await runStandalone(`export function test(): number {
+          const e: any[] = [[true, 7]];
+          return (e[0][0] as boolean) ? 1 : 0;
+        }`),
+      ).toBe(1);
+    });
+
+    it('flat any[] [0, "last"] reads the string element', async () => {
+      expect(
+        await runStandalone(`export function test(): number {
+          const a: any[] = [0, "last"];
+          return (a[1] as string).length;
+        }`),
+      ).toBe(4);
+    });
+
+    // Regression guards — fast paths must stay byte-identical.
+    it("pure number[][] nested indexing unchanged", async () => {
+      expect(
+        await runStandalone(`export function test(): number {
+          const a = [[1, 2], [3, 4]];
+          return a[1][0];
+        }`),
+      ).toBe(3);
+    });
+
+    it("pure string[] indexing unchanged", async () => {
+      expect(
+        await runStandalone(`export function test(): number {
+          const a = ["x", "yy"];
+          return a[1].length;
+        }`),
+      ).toBe(2);
+    });
+  });
 });
