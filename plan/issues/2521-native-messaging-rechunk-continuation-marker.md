@@ -121,10 +121,15 @@ caught loopdive/js2#389 and guards whichever fix (A or B) lands.
 
 ## Acceptance criteria
 
-- **Test (required):** a runtime test drives the actual example host and (a) a
-  >1 MiB message emits N ≤1 MiB frames, and (b) a multi-message sequence (>1 MiB
-  then small messages) is reassembled by a correct receiver with no desync. Fails
-  on current main (proving it reproduces #389), passes after the chosen fix.
+- **Test (DONE — `tests/issue-2521-native-messaging-rechunk.test.ts`):** drives
+  the actual example host via the `runWasiRaw` shim and covers the reporter's
+  cases — (a) ≤1 MiB message echoes verbatim in one frame, (b) a >1 MiB array is
+  split into N ≤1 MiB valid-JSON-array frames that reassemble to the original,
+  (c) the reporter's multi-message sequence (big then `"test"`/`""`/`1`/`{"0":97}`)
+  reassembles with every frame accounted for (no desync). Passes on current main
+  — it documents that the host's stream is correct/reassemblable and the #389
+  failure is the harness's 1:1 assumption, and gives the runtime coverage the
+  re-chunk path lacked. (If Option B lands, update it to the envelope shape.)
 - **Option A:** the reporter's `nm_standalone_test.js` sequence (64 MiB + ≤1 MiB
   messages), updated to reassemble-to-expected-size, round-trips cleanly — no host
   change.
