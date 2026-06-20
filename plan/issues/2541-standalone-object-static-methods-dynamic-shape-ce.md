@@ -1,5 +1,6 @@
 ---
-id: 2375
+id: 2541
+renumbered_from: 2375
 title: "standalone: Object.fromEntries / o.propertyIsEnumerable / Object.is refuse with a dynamic-shape CE"
 status: ready
 sprint: 64
@@ -14,7 +15,7 @@ related: [2374, 2151]
 origin: "2026-06-19 sd1 standalone host-import-leak hunt (object/class/property lane)"
 ---
 
-# #2375 — standalone Object.fromEntries / propertyIsEnumerable / Object.is dynamic-shape CE
+# #2541 — standalone Object.fromEntries / propertyIsEnumerable / Object.is dynamic-shape CE
 
 ## Problem
 
