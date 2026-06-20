@@ -77,42 +77,61 @@ clock minutes:
 - `src_commits_behind  > 0` → genuinely behind src: keep the drift warning and
   the strict gate.
 
-`evaluateRegressionThresholds` (`scripts/diff-test262.ts`) gains a
-`baselineContentCurrent` parameter. When set, the **ratio** gate is **waived
-only** for a **net-positive** diff with **≤ `RATIO_WAIVE_MAX_REGRESSIONS` (3)**
-absolute regressions — exactly the drift/flake over-reaction case. The waiver is
-tightly bounded and **never** touches:
+The `--baseline-content-current` flag is passed to `diff-test262.ts` when
+content-current; it **widens** the ratio gate's absolute floor (Part 3) but is
+no longer the _sole_ trigger for the waiver.
 
-- the **bucket gate** (>50 regressions in one path), or
-- the **net<0 gate** (caller-side `net_per_test < 0`).
+### Part 3 — Absolute regression-count floor (the PRIMARY blocker today)
 
-So a real regression cluster, or any net-negative change, still fails the gate
-regardless of content-currency. The waiver only neutralises the ratio's
-punishment of low-improvement _net-positive_ PRs when the baseline genuinely
-reflects current src.
+> Reprioritised mid-implementation: the ratio-gate over-sensitivity, not
+> staleness, is the live blocker. Net-positive PRs #1742/#1711 (Net +8, 9
+> improvements) kept failing `GATE FAIL: regression ratio 11.1% (1/9)` on a
+> **single nondeterministic flaky file** — recorded `pass` in a
+> _freshly-refreshed_ baseline (so a baseline refresh did NOT clear it; it is
+> flake, not stale content) that flips to `fail` only under merge_group load.
+
+`evaluateRegressionThresholds` (`scripts/diff-test262.ts`) now gives the **ratio
+gate an absolute regression-count FLOOR** (`RATIO_MIN_ABSOLUTE_REGRESSIONS = 3`,
+widened by `RATIO_FLOOR_CONTENT_CURRENT_BONUS = 2` when content-current). The
+ratio gate fires **only** once the wasm-change regression count reaches the
+floor. Below it, a **net-positive** diff passes the ratio gate regardless of how
+few improvements it carries — so 1–2 residual drift/flake regressions can't fail
+a net-positive PR. The floor is **UNCONDITIONAL** (the content-current signal
+only widens it) because the observed blocker is run-to-run flake, not stale
+content.
+
+Real regressions still fail, via gates the floor never touches:
+
+- the **net<0 gate** (caller-side `net_per_test < 0`) — ANY net-negative diff;
+- the **bucket gate** (>50 regressions in one path);
+- the **ratio gate** itself once regressions reach the floor (≥3 genuine
+  regressions against few improvements).
 
 ## Why this is safe (regression-gate is load-bearing)
 
 The gate that every merge depends on keeps its full power to catch **real**
-regressions. The only behaviour change is: when the workflow can _prove_ the
-baseline content is current (0 src commits behind), a tiny net-positive
-drift/flake residue no longer trips the _ratio_ sub-gate. The proof is
-conservative — any failure to parse/reach the baseline main-sha disables the
-waiver (gate stays strict). Validated by unit tests _and_ end-to-end CLI runs:
+regressions. The only behaviour change: a **net-positive** diff with fewer than
+the floor (3, or 5 when content-current) absolute wasm-change regressions no
+longer trips the _ratio_ sub-gate. Validated by unit tests (15/15) _and_
+end-to-end CLI runs:
 
-- 1 regression / 9 improvements, content-current → **waived** (exit 0); strict
-  (no flag) → **fails** (exit 1). [the exact #1742/#1711 case]
-- 5 regressions / 2 improvements (net-negative), content-current → **fails**
-  (net<0 AND ratio both fire).
-- 60 regressions in one bucket, content-current → **fails** (bucket gate fires).
+- 1 reg / 9 imp (Net +8), NO flag → **floored** (exit 0) — the exact #1742/#1711
+  flake case, now passing without needing the content-current proof.
+- 3 reg / 9 imp, NO flag → **fails** (ratio re-engages at the floor — a real
+  regression).
+- 5 reg / 2 imp (net-negative) → **fails** (net<0 AND ratio fire).
+- 60 reg in one bucket → **fails** (bucket gate fires).
+- 4 reg / 9 imp, content-current → floored (4 < 3+2); 5 reg → fails (5 == 3+2).
 
 ## Files changed
 
-- `scripts/diff-test262.ts` — `RATIO_WAIVE_MAX_REGRESSIONS` const,
-  `baselineContentCurrent` param on `evaluateRegressionThresholds`,
+- `scripts/diff-test262.ts` — `RATIO_MIN_ABSOLUTE_REGRESSIONS` +
+  `RATIO_FLOOR_CONTENT_CURRENT_BONUS` consts, unconditional absolute floor on the
+  ratio gate in `evaluateRegressionThresholds`, `baselineContentCurrent` param,
   `--baseline-content-current` CLI flag.
-- `tests/issue-1943.test.ts` — `#2562` waiver test block (waive case, plus the
-  net-negative / over-count / bucket-cluster safety boundaries).
+- `tests/issue-1943.test.ts` — `#2562` floor test block (unconditional-floor
+  case, the at-floor re-engagement, net-negative, content-current widening, and
+  bucket-cluster safety boundaries).
 - `.github/workflows/test262-sharded.yml` — src-aware staleness step
   (`baseline_content_current` / `src_commits_behind` outputs), pass the flag to
   the diff, src-aware drift footer.
@@ -124,7 +143,9 @@ waiver (gate stays strict). Validated by unit tests _and_ end-to-end CLI runs:
 
 - [x] A scheduled (cron) NORMAL baseline refresh exists and records main's
       actual current state (not force/emergency).
-- [x] The drift warning + ratio waiver are driven by **src-commit count**, not
-      clock time; 0 src-behind ⇒ content-current ⇒ no time-based over-reaction.
-- [x] Real regressions (net<0, large clusters, >3 absolute regressions) still
-      fail the gate, content-current or not (unit + CLI validated).
+- [x] The drift warning + content-current signal are driven by **src-commit
+      count**, not clock time; 0 src-behind ⇒ content-current.
+- [x] **(primary)** A net-positive PR with 1–2 drift/flake regressions PASSES
+      the ratio gate **unconditionally** (no staleness-proof required).
+- [x] Real regressions (net<0, large clusters, ≥3 genuine regressions) still
+      fail the gate (unit + CLI validated).

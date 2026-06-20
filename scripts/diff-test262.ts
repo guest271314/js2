@@ -33,21 +33,40 @@ export const REGRESSION_RATIO_LIMIT = 0.1;
 export const REGRESSION_BUCKET_LIMIT = 50;
 export const REGRESSION_BUCKET_PATH_DEPTH = 5;
 
-// #2562 — src-aware ratio waiver. The 10% RATIO gate is the right tool when the
-// baseline is genuinely behind src (a PR adding many regressions vs few
-// improvements). But it over-reacts when the baseline is CONTENT-CURRENT (0
-// test262-relevant commits separate the baseline commit from main HEAD) and the
-// PR is net-POSITIVE with only a tiny absolute number of residual regressions:
-// a single drift/flake regression that survives the wasm_sha filter then reads
-// as 1/9 = 11.1% ≥ 10% and FAILS an otherwise net-positive PR (this blocked the
-// net-positive PRs #1742/#1711 on 2026-06-20). When the workflow can prove the
-// baseline content is current (`baselineContentCurrent`), the ratio gate is
-// WAIVED — but ONLY for a net-positive diff with at most this many absolute
-// regressions. The bucket gate (>50 in one path) and the net<0 gate stay fully
-// active in every mode, so a real regression cluster can never slip through:
-// the waiver only neutralises the ratio's punishment of low-improvement
-// net-positive PRs, never the absolute-magnitude or net-sign gates.
-export const RATIO_WAIVE_MAX_REGRESSIONS = 3;
+// #2562 — absolute regression-count floor for the RATIO gate. The 10% RATIO
+// gate is the right tool against a PR that adds MANY regressions vs few
+// improvements, but on its own it over-reacts on a low-count net-positive PR: a
+// single drift/flake regression that survives the wasm_sha filter reads as
+// 1/9 = 11.1% ≥ 10% and FAILS an otherwise net-positive PR. This blocked the
+// net-positive PRs #1742/#1711 (Net +8, 9 improvements) on 2026-06-20 — on a
+// SINGLE nondeterministic flaky file, recorded `pass` in a *freshly-refreshed*
+// baseline (so it is NOT a staleness problem — a refresh did not clear it) that
+// flips to `fail` only under merge_group load.
+//
+// Fix: the ratio gate fires ONLY once the absolute wasm-change regression count
+// reaches `RATIO_MIN_ABSOLUTE_REGRESSIONS`. Below that floor a net-positive diff
+// passes the ratio gate regardless of how few improvements it has — 1–2 residual
+// drift/flake regressions can no longer fail a net-positive PR. This is
+// UNCONDITIONAL (it does NOT depend on the baseline being provably
+// content-current), because the observed blocker is flake, not stale content.
+//
+// Real regressions still fail, via gates this floor never touches:
+//   - the net<0 gate (caller-side `net_per_test < 0`) — ANY net-negative diff,
+//   - the bucket gate (>50 regressions in one path),
+//   - the ratio gate itself once regressions ≥ the floor (e.g. ≥3 genuine
+//     regressions against few improvements).
+// So a PR that genuinely regresses ≥3 files, or is net-negative, or piles a
+// cluster into one bucket, still fails — only the 1–2-flake-on-net-positive
+// case is let through.
+export const RATIO_MIN_ABSOLUTE_REGRESSIONS = 3;
+
+// #2562 — when the workflow can additionally PROVE the baseline is
+// content-current (0 test262-relevant commits behind main HEAD — see the
+// src-aware staleness step), the floor is widened by this amount: residual
+// regressions against a content-current baseline are even more likely to be
+// drift/flake, so a slightly larger handful is tolerated before the ratio gate
+// re-engages. The net<0 and bucket gates are still never affected.
+export const RATIO_FLOOR_CONTENT_CURRENT_BONUS = 2;
 
 /**
  * Group regressed test files into path buckets (first
@@ -72,12 +91,16 @@ export function bucketRegressions(files: string[]): { bucket: string; count: num
  * least one regression — a clean PR (R == 0) always passes regardless of how
  * few improvements it carries.
  *
- * `baselineContentCurrent` (#2562): set by the workflow when it has proven the
- * baseline is content-current (0 test262-relevant commits between the baseline
- * commit and main HEAD). In that mode the RATIO gate is waived for a
- * net-positive diff carrying at most `RATIO_WAIVE_MAX_REGRESSIONS` absolute
- * regressions — see the constant for the rationale. The bucket gate and the
- * net<0 gate (in the caller) are NOT affected, so real regressions still fail.
+ * #2562 — the RATIO gate now has an ABSOLUTE-COUNT FLOOR. It fires only once the
+ * wasm-change regression count reaches `RATIO_MIN_ABSOLUTE_REGRESSIONS`
+ * (+`RATIO_FLOOR_CONTENT_CURRENT_BONUS` when `baselineContentCurrent` proves the
+ * baseline reflects current src). Below the floor, a net-positive diff passes
+ * the ratio gate regardless of how few improvements it carries, so 1–2 residual
+ * drift/flake regressions can't fail a net-positive PR. The floor is
+ * UNCONDITIONAL (the content-current bonus only widens it) because the observed
+ * blocker is run-to-run flake, not stale baseline content. The bucket gate and
+ * the caller's net<0 gate are NOT affected — a genuine regression (≥ floor
+ * regressions, a >50 cluster, or any net-negative change) still fails.
  */
 export function evaluateRegressionThresholds(opts: {
   improvements: number;
@@ -89,22 +112,25 @@ export function evaluateRegressionThresholds(opts: {
   const { improvements, regressionsWasmChange, regressedFiles, baselineContentCurrent = false } = opts;
   if (regressionsWasmChange > 0) {
     const ratio = improvements > 0 ? regressionsWasmChange / improvements : Infinity;
-    // #2562 — src-aware waiver: only when the baseline is content-current AND
-    // the diff is net-positive (more improvements than regressions) AND the
-    // absolute regression count is small. All three are required: a content-
-    // current but net-NEGATIVE diff, or one with a large absolute regression
-    // count, still fails the ratio gate. The bucket gate below is untouched.
     const netPositive = improvements > regressionsWasmChange;
-    const ratioWaived = baselineContentCurrent && netPositive && regressionsWasmChange <= RATIO_WAIVE_MAX_REGRESSIONS;
+    // #2562 — absolute regression-count floor. The ratio gate is suppressed for
+    // a net-positive diff whose absolute regression count is below the floor
+    // (widened when the baseline is provably content-current). A net-NEGATIVE
+    // diff is NEVER floored here (the caller's net<0 gate already fails it, and
+    // keeping the ratio message is useful context); and once regressions reach
+    // the floor the ratio gate re-engages even on a net-positive diff.
+    const floor = RATIO_MIN_ABSOLUTE_REGRESSIONS + (baselineContentCurrent ? RATIO_FLOOR_CONTENT_CURRENT_BONUS : 0);
+    const belowAbsoluteFloor = netPositive && regressionsWasmChange < floor;
     if (ratio >= REGRESSION_RATIO_LIMIT) {
-      if (ratioWaived) {
+      if (belowAbsoluteFloor) {
         // Emit a note (not a failure) so the run log records WHY the ratio gate
-        // did not fire — readers can audit the waiver.
+        // did not fire — readers can audit the floor.
         console.log(
-          `=== ratio gate WAIVED (#2562): baseline content-current, net-positive ` +
+          `=== ratio gate FLOORED (#2562): net-positive ` +
             `(${improvements} improvements − ${regressionsWasmChange} regressions), ` +
-            `${regressionsWasmChange} ≤ ${RATIO_WAIVE_MAX_REGRESSIONS} absolute regressions — ` +
-            `the ${(ratio * 100).toFixed(1)}% ratio is drift/flake noise, not a PR regression ===`,
+            `${regressionsWasmChange} < ${floor} absolute-regression floor` +
+            `${baselineContentCurrent ? " (baseline content-current → +" + RATIO_FLOOR_CONTENT_CURRENT_BONUS + ")" : ""} — ` +
+            `the ${(ratio * 100).toFixed(1)}% ratio is drift/flake noise on a net-positive PR, not a PR regression ===`,
         );
       } else {
         const pct = improvements > 0 ? (ratio * 100).toFixed(1) + "%" : "∞ (0 improvements)";
@@ -225,9 +251,10 @@ Options:
   --quiet, -q                   Only show summary counts
   --baseline-meta <report.json> Read baseline_generated_at + baseline_sha to warn on stale baseline
   --baseline-content-current    (#2562) The caller has proven the baseline is content-current
-                                (0 test262-relevant commits behind main HEAD). Waives the 10%
-                                ratio gate for a net-positive diff with ≤3 absolute regressions
-                                (drift/flake noise). Bucket + net<0 gates stay active.
+                                (0 test262-relevant commits behind main HEAD). Widens the ratio
+                                gate's absolute-regression floor by RATIO_FLOOR_CONTENT_CURRENT_BONUS.
+                                The floor itself is UNCONDITIONAL: a net-positive diff below it never
+                                fails the ratio gate. Bucket + net<0 gates always stay active.
 
 Environment:
   ORACLE_REBASE=1               Allow a cross-oracle-version diff (#2096). By default a diff

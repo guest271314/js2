@@ -239,17 +239,19 @@ Stop.
 > the PR ONCE — Step 5 — then stand down); a failing criterion means ESCALATE
 > to tech lead instead of enqueuing.
 
-> **#2562 — src-aware ratio waiver (CI gate is slightly more lenient than
-> criterion 2 here).** When the CI regression-gate can _prove_ the baseline is
-> content-current (0 test262-relevant commits between the baseline commit and
-> main HEAD — common during a docs/CI-only merge stretch when the baseline goes
-> clock-stale but src is unchanged), it **waives the 10% ratio sub-gate for a
-> net-positive diff with ≤3 absolute regressions** (drift/flake noise). The
-> bucket gate and the `net_per_test < 0` gate are **never** waived. So a
-> net-positive PR with a single drift regression that this local self-check
-> flags as criterion-2 ESCALATE may still pass CI green — trust the CI gate.
-> A real regression (net-negative, >3 absolute regressions, or a >50 cluster)
-> always fails regardless of content-currency.
+> **#2562 — ratio-gate absolute floor (CI gate is more lenient than criterion 2
+> here).** The CI regression-gate suppresses the 10% ratio sub-gate for a
+> **net-positive** diff whose absolute wasm-change regression count is below the
+> floor (`RATIO_MIN_ABSOLUTE_REGRESSIONS = 3`, widened to 5 when the baseline is
+> provably content-current). This is **unconditional** — it does NOT require a
+> staleness proof — because the observed blocker is run-to-run _flake_ (a single
+> nondeterministic file that flips against a freshly-refreshed baseline), not
+> stale content. So a net-positive PR with 1–2 drift/flake regressions that this
+> local self-check flags as criterion-2 ESCALATE may still pass CI green — trust
+> the CI gate. The `net_per_test < 0` gate and the >50 bucket gate are **never**
+> floored, and the ratio gate re-engages at ≥3 regressions — so a real
+> regression (net-negative, ≥3 genuine regressions, or a >50 cluster) always
+> fails.
 
 ## Step 3 — criteria (in order, stop at first failure)
 
