@@ -78,4 +78,36 @@ describe("#2501 Object.prototype.toString [object X] tag", () => {
     expect(len).toBe(15);
     expect(envLeak).toEqual([]);
   });
+
+  // (#2501 regression guard, PR #1742 −27) The original classifier was too
+  // eager and MIS-tagged receivers the host `Object.prototype.toString`
+  // resolves correctly, regressing 35 test262 files. These forms must defer to
+  // the host (host mode) so the spec-correct tag is computed:
+  //   - ToObject-boxing `Object(x)` → tag of `x` (§7.1.18 + §20.1.3.6).
+  //   - primitive-wrapper *objects* `new Number/Boolean/String(...)`.
+  //   - a builtin `.prototype` is an ordinary object → [object Object], NOT the
+  //     parent's tag (TypeError.prototype was mis-tagged [object Error]).
+  //   - @@toStringTag (step 14/15) objects like JSON / Math.
+  it("host: ToObject-boxing / wrapper objects / .prototype / @@toStringTag tag correctly (PR #1742 guard)", async () => {
+    const e = await runHost(`
+      export function test(): string {
+        const parts: string[] = [];
+        parts.push(Object.prototype.toString.call(Object("")));     // [object String]
+        parts.push(Object.prototype.toString.call(Object(5)));      // [object Number]
+        parts.push(Object.prototype.toString.call(Object(true)));   // [object Boolean]
+        parts.push(Object.prototype.toString.call(Object([])));     // [object Array]
+        parts.push(Object.prototype.toString.call(new Number(5)));  // [object Number]
+        parts.push(Object.prototype.toString.call(new Boolean(true)));  // [object Boolean]
+        parts.push(Object.prototype.toString.call(TypeError.prototype)); // [object Object]
+        parts.push(Object.prototype.toString.call(Function.prototype));  // [object Function]
+        parts.push(Object.prototype.toString.call(JSON));           // [object JSON]
+        parts.push(Object.prototype.toString.call(Math));           // [object Math]
+        return parts.join("|");
+      }
+    `);
+    expect(e.test()).toBe(
+      "[object String]|[object Number]|[object Boolean]|[object Array]|[object Number]|[object Boolean]|" +
+        "[object Object]|[object Function]|[object JSON]|[object Math]",
+    );
+  });
 });

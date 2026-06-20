@@ -3,8 +3,8 @@ id: 2501
 title: "Object.prototype.toString [object X] builtin tag — Array/Function/Date missing (host) + standalone CE (~151 test262)"
 status: done
 created: 2026-06-19
-updated: 2026-06-19
-completed: 2026-06-19
+updated: 2026-06-20
+completed: 2026-06-20
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -17,6 +17,7 @@ assignee: ttraenkler/dev3
 test262_bucket: object-tostring-tag
 test262_count: 151
 ---
+
 # #2501 — `Object.prototype.toString` `[object X]` builtin tag
 
 ## Problem (§20.1.3.6)
@@ -24,18 +25,18 @@ test262_count: 151
 `Object.prototype.toString.call(v)` must return `[object X]` where X is the
 spec builtin tag. Current state (verified, sd3 2026-06-19):
 
-| receiver | spec | current host | current standalone |
-|---|---|---|---|
-| `{}` | `[object Object]` | ✅ `[object Object]` | ❌ compile error |
-| `[]` | `[object Array]` | ❌ `[object Object]` | ❌ CE |
-| `function(){}` | `[object Function]` | ❌ `[object Object]` | ❌ CE |
-| `new Date()` | `[object Date]` | ❌ `[object Object]` | ❌ CE |
-| `42` | `[object Number]` | ✅ | ❌ CE |
-| `"s"` | `[object String]` | ✅ | ❌ CE |
-| `true` | `[object Boolean]` | ✅ | ❌ CE |
-| `/x/` | `[object RegExp]` | ✅ | ❌ CE |
-| `null` | `[object Null]` | ✅ | ❌ CE |
-| `undefined` | `[object Undefined]` | ✅ | ❌ CE |
+| receiver       | spec                 | current host         | current standalone |
+| -------------- | -------------------- | -------------------- | ------------------ |
+| `{}`           | `[object Object]`    | ✅ `[object Object]` | ❌ compile error   |
+| `[]`           | `[object Array]`     | ❌ `[object Object]` | ❌ CE              |
+| `function(){}` | `[object Function]`  | ❌ `[object Object]` | ❌ CE              |
+| `new Date()`   | `[object Date]`      | ❌ `[object Object]` | ❌ CE              |
+| `42`           | `[object Number]`    | ✅                   | ❌ CE              |
+| `"s"`          | `[object String]`    | ✅                   | ❌ CE              |
+| `true`         | `[object Boolean]`   | ✅                   | ❌ CE              |
+| `/x/`          | `[object RegExp]`    | ✅                   | ❌ CE              |
+| `null`         | `[object Null]`      | ✅                   | ❌ CE              |
+| `undefined`    | `[object Undefined]` | ✅                   | ❌ CE              |
 
 So host mode is **partial** (Array/Function/Date wrong → `[object Object]`), and
 **standalone hard-errors** on the whole `Object.prototype.toString.call(...)`
@@ -44,6 +45,7 @@ form (~151 test262 fails, the jsonl `Object_toString` cluster).
 ## Two parts
 
 ### Part A — host-mode missing tags (smaller)
+
 The `Object.prototype.toString.call` tag dispatch is at
 `src/codegen/expressions/calls.ts` ~8430-8458: it has an `isArray`/`isFunc`
 branch but `isArray` (`resolveArrayInfo`) doesn't fire for the `.call(arr)`
@@ -55,6 +57,7 @@ above but returns the source-text toString, not the tag — the `.call`-as-Objec
 toString case must take the tag branch, not the function-source branch.)
 
 ### Part B — standalone native classifier (larger)
+
 The whole `Object.prototype.toString.call(...)` is a `reportError` compile-error
 under `--target standalone` (no host `Object_toString`). Emit a native §20.1.3.6
 classifier: a static type-check switch on the receiver's TS/Wasm type producing
@@ -86,6 +89,7 @@ borrowed-method handler, right after `typeName`/`methodName` are established).
 The §20.1.3.6 builtin tag is statically known from the receiver's TS type, so it
 emits the tag string directly via the dual-mode `stringConstantExternrefInstrs`
 helper — no host import, no `__proto_method_call`. This fixes BOTH:
+
 - **host** (Array/Function/Date were mis-tagged `[object Object]` because the
   Wasm vec/closure receiver is opaque to the host's `Object.prototype.toString`);
 - **standalone** (the whole `.call(...)` form was a hard compile error).
@@ -114,13 +118,13 @@ the flagged regression **does not reproduce — it was drift / already resolved.
 The PR is strictly an improvement over main in every probed case, never a
 pass→fail:
 
-| receiver | main (prior) | PR #1742 | verdict |
-|---|---|---|---|
-| `[]` host | `[object Object]` (wrong) | `[object Array]` | **fixed** |
-| `function` / `Date` host | `[object Object]` (wrong) | correct tag | **fixed** |
-| `any`-typed receiver, host | `[object Object]` | `[object Object]` | unchanged (still unfixed, not a regression) |
-| `@@toStringTag` override, host | `[object Object]` | `[object Object]` | unchanged (deferred phase-2; main never honored it here either) |
-| standalone `.call(...)`, `any` receiver | **hard compile error** | valid Wasm (clean fall-through) | **improved** (CE → no CE) |
+| receiver                                | main (prior)              | PR #1742                        | verdict                                                         |
+| --------------------------------------- | ------------------------- | ------------------------------- | --------------------------------------------------------------- |
+| `[]` host                               | `[object Object]` (wrong) | `[object Array]`                | **fixed**                                                       |
+| `function` / `Date` host                | `[object Object]` (wrong) | correct tag                     | **fixed**                                                       |
+| `any`-typed receiver, host              | `[object Object]`         | `[object Object]`               | unchanged (still unfixed, not a regression)                     |
+| `@@toStringTag` override, host          | `[object Object]`         | `[object Object]`               | unchanged (deferred phase-2; main never honored it here either) |
+| standalone `.call(...)`, `any` receiver | **hard compile error**    | valid Wasm (clean fall-through) | **improved** (CE → no CE)                                       |
 
 The `@@toStringTag` deferral does **not** regress host mode: on main the opaque
 Wasm receiver already routed to `[object Object]` (the host `Object.prototype.
@@ -135,3 +139,40 @@ regression set (`2104`/`2163`/`2161`/`1337`/`hasownproperty-call`/`2042-r2`/
 
 #2376/#2379 jsonl sweep, sd3 2026-06-19. Routed by tech-lead from the
 [object X]-tag cluster (~151, the 2nd-largest bounded standalone-feature group).
+
+## Regression fix (PR #1742, 2026-06-20) — the −27 WAS real
+
+The earlier "does not reproduce — drift" note above was **wrong**: the
+`merge_group` full-shards confirmed a real **−27** (8 improvements − 35
+regressions, `assertion_fail`, bucket `ef8cfd3a676ebd52`). Root cause:
+`resolveObjectToStringTag` (src/codegen/expressions/calls.ts) was **too eager**
+and emitted a static tag for receivers the host `Object.prototype.toString`
+already resolved correctly, so the static path _overrode_ a correct host answer
+with a wrong one. Five mis-tag classes:
+
+| receiver form                                               | emitted           | correct                   | why                                                    |
+| ----------------------------------------------------------- | ----------------- | ------------------------- | ------------------------------------------------------ |
+| `Object("")` / `Object(5)` / `Object([])` (ToObject-boxing) | `[object Object]` | wrapped tag               | `Object(x)` types as `Object`                          |
+| `new Number(5)` / `new Boolean(true)`                       | `[object Object]` | `[object Number/Boolean]` | wrapper-object type, not primitive                     |
+| `TypeError.prototype` / `Error.prototype`                   | `[object Error]`  | `[object Object]`         | a `.prototype` is not an instance (no `[[ErrorData]]`) |
+| `Function.prototype`                                        | `[object Object]` | `[object Function]`       | `.prototype` has no call sig in TS                     |
+| `JSON` / `Math` (`@@toStringTag`)                           | `[object Object]` | `[object JSON/Math]`      | step-15 deferred — host got it right                   |
+
+**Fix**: make the classifier _defer to the host_ for everything it can't prove,
+returning a static tag only for the receivers the host gets WRONG (opaque Wasm
+vec/closure/struct): genuine arrays, callable functions, `arguments`, and
+Date/RegExp/Error _instances_. `Object(x)` recurses on `x` (§7.1.18 + §20.1.3.6,
+the tag of `Object(x)` is the tag of `x`). The 8 host-mis-tag _improvements_
+(Array/Date/Function) are retained. **Standalone** has no host fall-through, so a
+`deferOrStandalone(fallback)` helper keeps the best static answer there (plain
+object → `[object Object]`, primitives/wrappers → their tag) — no worse than the
+pre-#2501 hard CE.
+
+**Validation** (host mode, isolated per-process to avoid prototype-poison cross
+-talk): all 35 toString-related regressions recovered (34/34; the 36th is a
+`Proxy`-skip feature, not run in CI). On an 84-file regressed-category sweep
+(Object/toString + Array.prototype iteration + NativeErrors + Function +
+Number/RegExp/class-subclass): **PR-broken 24 pass → fixed 50 pass, net +26,
+ZERO new regressions** (every remaining failure also fails on the broken head).
+`tests/issue-2501.test.ts` 4/4 (added a PR #1742 regression-guard case). tsc +
+prettier clean.

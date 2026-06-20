@@ -250,38 +250,99 @@ function resolveObjectToStringTag(ctx: CodegenContext, argExpr: ts.Expression | 
     return "Undefined";
   }
 
+  // (#2501) IMPORTANT — in **host mode** only return a static tag when we are
+  // *certain* it matches §20.1.3.6, and otherwise bail (return undefined) so the
+  // caller falls through to the host `__proto_method_call` path, whose real
+  // `Object.prototype.toString` already gets every remaining case right
+  // (primitives, primitive-wrapper objects, plain objects, `.prototype`
+  // objects, and @@toStringTag (step 14/15) objects like JSON / Math). The
+  // earlier broad classifier MIS-tagged all of those (`Object([])` /
+  // `Object(5)` / `new Number(5)` → [object Object]; `TypeError.prototype` →
+  // [object Error]; `JSON` → [object Object]), regressing 35 test262 files.
+  //
+  // So host mode restricts the static path to exactly the receivers the host
+  // gets WRONG — the ones whose underlying Wasm value (a GC vec/struct/closure)
+  // is opaque to the host's `Object.prototype.toString`: genuine arrays,
+  // callable functions, the `arguments` exotic, and Date/RegExp/Error
+  // *instances*. Everything else returns undefined → host fall-through.
+  //
+  // **Standalone mode** has no host to fall through to (the borrowed `.call`
+  // form is otherwise a hard compile error there), so for the would-defer
+  // cases it returns the best-available *static* tag instead of undefined:
+  // plain objects / primitive wrappers → the §20.1.3.6 step-2-14 builtin tag
+  // (the deferred @@toStringTag step-15 override is no worse than the pre-#2501
+  // CE). `deferOrStandalone(fallback)` encodes that: host → undefined,
+  // standalone → fallback.
+  const deferOrStandalone = (fallback: string | undefined): string | undefined =>
+    ctx.standalone ? fallback : undefined;
+
+  // Receiver forms that defeat static classification — the spec tag depends on
+  // an internal slot the TS type can't reveal. Handle / bail explicitly:
+  //   - `Object(x)` ToObject-boxing → §7.1.18: ToObject of a primitive yields
+  //     the matching wrapper, ToObject of an object returns it unchanged. So
+  //     the §20.1.3.6 tag of `Object(x)` is exactly the tag of `x`. Recurse on
+  //     the inner expr (Object([]) → Array, Object(5) → host-defer Number).
+  //   - `X.prototype` → a builtin prototype is an ordinary object with NO
+  //     [[ErrorData]]/[[Call]] slot, so it is [object Object], not the parent's
+  //     tag (TypeError.prototype → Object, Function.prototype → Function — but
+  //     the host resolves both precisely, so defer rather than risk a mis-tag).
+  if (ts.isCallExpression(argExpr) && ts.isIdentifier(argExpr.expression) && argExpr.expression.text === "Object") {
+    return argExpr.arguments.length >= 1 ? resolveObjectToStringTag(ctx, argExpr.arguments[0]) : "Object";
+  }
+  if (ts.isPropertyAccessExpression(argExpr) && argExpr.name.text === "prototype") {
+    return deferOrStandalone("Object");
+  }
+
   const t = ctx.checker.getTypeAtLocation(argExpr);
   const nn = ctx.checker.getNonNullableType(t);
   // null / undefined via the type system (e.g. a `null`-typed binding).
   if ((t.flags & ts.TypeFlags.Null) !== 0) return "Null";
   if ((t.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0) return "Undefined";
 
-  // Array (real `__vec_`/`__arr_` arrays, via the established resolver).
+  // Array (real `__vec_`/`__arr_` arrays, via the established resolver) — the
+  // host sees an opaque GC vec and mis-tags it [object Object].
   if (resolveArrayInfo(ctx, nn)) return "Array";
 
-  // Primitive wrappers (the receiver is ToObject-boxed by the spec, tag is the
-  // wrapper's): boolean → Boolean, number → Number, string → String.
-  if (isBooleanType(nn)) return "Boolean";
-  if (isNumberType(nn)) return "Number";
-  if (isStringType(nn)) return "String";
-
-  // Callable (function) — has call signatures and is not a class instance.
-  const callSigs = nn.getCallSignatures?.();
-  if (callSigs && callSigs.length > 0) return "Function";
-
-  // Named builtin exotics by symbol name.
   const symName = nn.getSymbol()?.name;
+
+  // Primitive-wrapper *objects* (`new Number(5)` / `new Boolean(true)` /
+  // `new String("")`) box to the corresponding tag, but the host already
+  // resolves them correctly — and the static type is unreliable here (one
+  // resolves via isStringType, the others fall through). Defer to the host
+  // (standalone → emit the matching wrapper tag, the best static answer).
+  if (symName === "Number") return deferOrStandalone("Number");
+  if (symName === "Boolean") return deferOrStandalone("Boolean");
+  if (symName === "String") return deferOrStandalone("String");
+
+  // Named builtin exotic *instances* the host mis-tags (opaque Wasm receiver):
+  // Date / RegExp / Error(+subclasses) / arguments. `.prototype` of these was
+  // already filtered above, so a match here is a real instance.
   if (symName === "Date") return "Date";
   if (symName === "RegExp") return "RegExp";
   if (symName === "Error" || symName?.endsWith("Error")) return "Error";
   if (symName === "IArguments" || symName === "Arguments") return "Arguments";
 
-  // Plain object / class instance / unresolved object → "Object" (the §20.1.3.6
-  // default). Only return a tag for ref/object-shaped receivers; bail on truly
-  // unknown shapes so the caller can fall through rather than mis-tag.
+  // Callable (function) — has call signatures. The host sees an opaque Wasm
+  // closure receiver and mis-tags it [object Object].
+  const callSigs = nn.getCallSignatures?.();
+  if (callSigs && callSigs.length > 0) return "Function";
+
+  // Bare primitives (string / number / boolean *types*, not wrapper objects) →
+  // §20.1.3.6 boxes them to the matching wrapper tag. Host resolves this
+  // precisely; standalone emits the static tag.
+  if (isStringType(nn)) return deferOrStandalone("String");
+  if (isNumberType(nn)) return deferOrStandalone("Number");
+  if (isBooleanType(nn)) return deferOrStandalone("Boolean");
+
+  // Everything else (plain objects, class instances, @@toStringTag objects,
+  // unresolved shapes). Host → defer so it computes the spec-correct tag
+  // including the step-14/15 @@toStringTag override. Standalone → emit the
+  // §20.1.3.6 step-13 default "Object" for object-shaped receivers (no host
+  // @@toStringTag resolution exists there yet; still better than a hard CE),
+  // else give up (undefined → caller's standalone refuse-loud path).
   const wasm = resolveWasmType(ctx, nn);
-  if (wasm.kind === "ref" || wasm.kind === "ref_null" || wasm.kind === "externref") return "Object";
-  if ((nn.flags & ts.TypeFlags.Object) !== 0) return "Object";
+  if (wasm.kind === "ref" || wasm.kind === "ref_null" || wasm.kind === "externref") return deferOrStandalone("Object");
+  if ((nn.flags & ts.TypeFlags.Object) !== 0) return deferOrStandalone("Object");
   return undefined;
 }
 
