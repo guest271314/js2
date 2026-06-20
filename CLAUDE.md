@@ -21,6 +21,7 @@ TypeScript-to-WebAssembly compiler using WasmGC.
   - Read/Edit/Write tools use absolute paths and are unaffected.
   - The `pre-git-commit.sh` hook injects a "VERIFY BEFORE COMMITTING: pwd=/workspace branch=main" reminder; that's the hook reading the (reset) shell cwd, NOT the actual command's working dir. The reminder is informational — verify by reading the commit's branch in git output (`[issue-1183-string-forof-ir 0527c7c5]`-style line shows the real branch).
 - **Worktree creation**: `git worktree add /workspace/.claude/worktrees/issue-NNN-slug -b issue-NNN-slug origin/main`. Always branch from `origin/main` (post-fetch), never from local `main`.
+- **Branch base — `origin/main`, never the merge-queue tip (#2522)**: for independent work, branch from `origin/main`, then `git merge origin/main` again right before enqueue — that catch-up rebases the work onto future-main but incorporates only PRs that *actually landed*. Do **not** branch from a `gh-readonly-queue/main/pr-N-<sha>` tip or otherwise base work on the queue's *speculative* end-state: queued PRs eject, and a base built on an ejected PR carries phantom commits that force a rebase (forbidden — public main is append-only). **Exception — known dependency (explicit predecessor-stacking)**: when a new task is known to depend on / heavily overlap a specific in-flight PR, branch from *that PR's real branch* (durable, not the ephemeral queue ref) and enqueue only after the predecessor lands; re-merge it if it changes. The inter-PR conflict rate is a queue-*speculation* lever (`max_entries_to_build > 1`, re-raise once runner capacity from #2519 allows), not a dev-branch-base lever.
 - **Push safety**: `.git/config` sets `push.default=current` — `git push` always pushes to the remote branch matching the local branch name, regardless of upstream tracking. This prevents the `git worktree add -b <branch> origin/main` trap where the inherited tracking ref routes pushes to origin/main.
 - **Worktree cleanup after merge**: after a dev self-merges their PR, they remove their own worktree (`git worktree remove /workspace/.claude/worktrees/<branch>`) before claiming the next task. Tech-lead only removes worktrees for suspended or abandoned branches.
 
@@ -51,6 +52,23 @@ TypeScript-to-WebAssembly compiler using WasmGC.
   - `sprints/{N}.md` (the sprint doc) lives directly under `sprints/`; the
     numbered issue files are flat under `plan/issues/`. See
     `plan/issues/SCHEMA.md`.
+  - **New issues MUST get their id from `claim-issue.mjs --allocate` (#2531) —
+    never hand-pick a number.** Hand-picking "next free off main" races: two
+    devs on separate branches each pick the same id (neither file is on `main`
+    yet), the dup is green at PR time and only fails in the `merge_group`,
+    wedging the queue. `--allocate` reserves the next id **atomically** against
+    `origin/main` ∪ every open PR's added issue files ∪ ids already reserved on
+    the orphan `issue-assignments` ref (first-push-wins; loser re-scans). Flow:
+    ```bash
+    NEW=$(node scripts/claim-issue.mjs --allocate)        # prints the reserved id
+    # (or: node scripts/claim-issue.mjs --allocate ttraenkler/<agent> --branch <b>
+    #  to reserve AND claim in one step)
+    # create plan/issues/$NEW-<slug>.md with frontmatter id: $NEW
+    ```
+    `--dry-run` previews without reserving; `--no-pr-scan` skips the slower
+    open-PR scan; `--json` for tooling. The required CI gate
+    `check:issue-ids:against-main` (in `quality`) rejects any PR that introduces
+    an id already taken on `main` — so a hand-picked collision can't merge.
 - Dependency graph: `plan/log/dependency-graph.md`
 - Goals (DAG): `plan/goals/goal-graph.md` — high-level goals with dependencies; issues belong to goals
   - Goals are not sequential milestones — they form a DAG and multiple can be active in parallel
@@ -339,7 +357,7 @@ The issue frontmatter `status:` field tracks where an issue is, set by whichever
 3. Update `plan/issues/backlog/backlog.md` if the issue was listed there
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 31,365 / 43,135 (72.7 %)
+**test262 conformance**: 31,389 / 43,135 (72.8 %)
 <!-- AUTO:conformance-end -->
 
 ### Sprint History

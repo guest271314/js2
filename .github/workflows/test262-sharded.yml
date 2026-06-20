@@ -316,27 +316,29 @@ jobs:
   # =====================================================================
 
   test262-shard:
-    # Heavy 57-shard test262 fires on all gate-relevant events:
-    #   pull_request → per-PR validation (serial queue model — each PR is
-    #     validated alone before entering the queue).
-    #   merge_group → final gate before merge (catches main-drift regressions).
+    # Heavy 57-shard test262 (#2519) fires ONLY when a PR is at the front of
+    # the merge queue, plus baseline/manual contexts — NOT on every PR:
+    #   merge_group → the authoritative pre-merge gate (the PR has reached the
+    #     front of the queue; catches main-drift regressions on the merged
+    #     state). This is the single per-PR heavy run.
     #   push to main → baseline update.
     #   workflow_dispatch → manual reruns.
-    # Cheap-gate must pass first (typecheck + lint). If shards fail, the
-    # regression-gate reports per-test transitions; bad PRs bounce back to
-    # their authors with actionable feedback rather than slipping into a
-    # batch.
+    # Deliberately NOT on pull_request: the heavy matrix used to run twice per
+    # PR (once at PR-time, once in merge_group), doubling the most expensive CI
+    # cost and adding to the event volume that can soft-throttle merge_group
+    # webhook delivery. PR-time validation is now the cheap gate (typecheck +
+    # lint) only; the merge_group is the authoritative test262 gate. Trade-off:
+    # a real regression is caught when the PR reaches the front of the queue
+    # (it fails there and is ejected) rather than at PR-open time.
     #
-    # merge_group arm now also requires `needs.changes.outputs.run_shards`
-    # to be 'true' — the `changes` job skips the heavy matrix for queued
+    # merge_group arm requires `needs.changes.outputs.run_shards` to be 'true'
+    # — the `changes` job skips the heavy matrix for queued
     # website/plan/doc-only changes (and fails safe to 'true' on any doubt,
-    # see that job). The other arms are unchanged: pull_request/push are
-    # already gated by the workflow-level `paths:` filter, and
+    # see that job). push is gated by the workflow-level `paths:` filter, and
     # workflow_dispatch always runs.
     needs: [changes]
     if: |
       (github.event_name == 'push' && github.actor != 'github-actions[bot]') ||
-      (github.event_name == 'pull_request' && github.actor != 'github-actions[bot]') ||
       (github.event_name == 'merge_group' && needs.changes.outputs.run_shards == 'true') ||
       github.event_name == 'workflow_dispatch'
     # Runs in PARALLEL with `gate` — both are independently required by the
@@ -512,22 +514,23 @@ jobs:
   merge-report:
     # Aggregate the 57 shard artifacts per target into test262 reports and gate
     # on shard results. Produces the "merge shard reports" required check
-    # for all gate-relevant contexts. Serial-queue model: this is the same
-    # job whether the trigger is pull_request (PR-level validation) or
-    # merge_group (final pre-merge validation).
+    # for all gate-relevant contexts. Slim-down model (#2519): the heavy
+    # shards run only in merge_group, so on pull_request this job ALWAYS
+    # green-skips (no shards ran); in merge_group it builds the real report.
     # CRITICAL — this job produces the required check "merge shard reports".
-    # It MUST run and report green in BOTH of these cases, or the PR is
-    # permanently BLOCKED (the cascade-skip trap documented in
-    # test262-pr-stub.yml):
-    #   (a) shards ran and succeeded                        → real merged report
-    #   (b) shards were intentionally skipped on merge_group
+    # It MUST run and report green in these cases, or the PR is permanently
+    # BLOCKED (the cascade-skip trap documented in test262-pr-stub.yml):
+    #   (a) shards ran and succeeded (merge_group)          → real merged report
+    #   (b) shards intentionally skipped on merge_group
     #       because run_shards=='false' (no test262-relevant
     #       change in the queue)                            → trivial PASS
-    # `needs.test262-shard.result` is 'skipped' in case (b), so the job runs
-    # under `always()` and decides explicitly:
+    #   (c) pull_request — heavy shards never run at PR-time
+    #       under the #2519 slim-down                       → trivial PASS
+    # `needs.test262-shard.result` is 'skipped' in (b)/(c), so the job runs
+    # under `always()` and decides explicitly via SHARD_SKIP_OK:
     #   - shards succeeded                       -> build real merged report
     #   - merge_group no-shards path             -> trivial PASS
-    #   - github-actions[bot] PR synchronize     -> trivial PASS
+    #   - any pull_request                       -> trivial PASS
     #   - any other failed/skipped shard result   -> FAIL the required check
     # Steps that touch shard artifacts are guarded by `SHARDS_RAN`.
     if: |
@@ -540,7 +543,10 @@ jobs:
       # 'true' when the heavy matrix actually executed and produced artifacts;
       # 'false' on the merge_group skip path (no test262-relevant change).
       SHARDS_RAN: ${{ needs.test262-shard.result == 'success' && 'true' || 'false' }}
-      SHARD_SKIP_OK: ${{ ((github.event_name == 'merge_group' && needs.changes.outputs.run_shards == 'false') || (github.event_name == 'pull_request' && github.actor == 'github-actions[bot]')) && 'true' || 'false' }}
+      # Green-skip when shards legitimately did not run: a merge_group with no
+      # test262-relevant change, OR any pull_request (heavy shards are
+      # merge_group-only under the #2519 slim-down).
+      SHARD_SKIP_OK: ${{ ((github.event_name == 'merge_group' && needs.changes.outputs.run_shards == 'false') || github.event_name == 'pull_request') && 'true' || 'false' }}
 
     steps:
       - name: Fail if required test262 shards did not succeed
@@ -558,9 +564,10 @@ jobs:
             echo "   (changes.run_shards=='false'); the heavy 114-job target matrix was"
             echo "   intentionally skipped. Reporting 'merge shard reports' green."
           else
-            echo "-> github-actions[bot] refreshed the PR branch; PR-level heavy shards"
-            echo "   are intentionally skipped to avoid an N-PR test262 storm."
-            echo "   The merge queue still runs the full matrix on the merge_group ref."
+            echo "-> pull_request: heavy test262 shards are merge_group-only under the"
+            echo "   #2519 slim-down, so they do not run at PR-time. The cheap gate"
+            echo "   (typecheck + lint) validated this PR; the full 114-job matrix runs"
+            echo "   in the merge_group when the PR reaches the front of the queue."
           fi
 
       - name: Checkout
@@ -1118,7 +1125,11 @@ jobs:
 
       - name: Check baseline staleness (#1235)
         id: staleness
-        if: env.SHARDS_RAN == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && steps.fetch_baseline.outputs.baseline_ts != '0'
+        # (#2379) Include `push` so the drift footer renders on push-to-main runs
+        # too — the baselines-repo JSONL is frequently several merges behind main
+        # HEAD there (serialization lag), and the footer is what tells a reader
+        # the listed "regressions" are drift, not real PR-caused failures.
+        if: env.SHARDS_RAN == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && steps.fetch_baseline.outputs.baseline_ts != '0'
         run: |
           # If the baselines-repo JSONL hasn't been refreshed since several
           # commits landed on main, the regression-gate's wasm_change count
@@ -1244,8 +1255,19 @@ jobs:
           node scripts/check-test262-hard-errors.mjs \
             --jsonl merged-reports/test262-results-merged.jsonl
 
+      # (#2379) Do NOT hard-fail on `push` to main. On a push-to-main run the
+      # merge already happened, so this fine-grained regression gate cannot
+      # block anything — and the baselines-repo JSONL it diffs against is
+      # routinely several merges behind main HEAD (serialization lag), so the
+      # listed "regressions" are drift, not real failures (e.g. a run showing
+      # pass 29587 → 32818, +3231 NET, was hard-failed on 695 drift "regressions"
+      # — 7+ consecutive main runs failed identically, freezing the HW/baseline
+      # reporting). Push-to-main is already protected against a genuine break by
+      # the #1668 Catastrophic guard (threshold 200) inside the required "merge
+      # shard reports" check; this fine gate stays active for `pull_request` /
+      # `merge_group`, where pre-merge gating is the point.
       - name: Fail on regressions
-        if: env.SHARDS_RAN == 'true' && steps.regression_diff.outputs.regressions == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.force_baseline_refresh == true && inputs.confirm_force == 'YES')
+        if: env.SHARDS_RAN == 'true' && steps.regression_diff.outputs.regressions == 'true' && github.event_name != 'push' && !(github.event_name == 'workflow_dispatch' && inputs.force_baseline_refresh == true && inputs.confirm_force == 'YES')
         run: |
           echo "test262 regressions detected relative to benchmarks/results/test262-current.jsonl"
           cat merged-reports/test262-regressions.txt
