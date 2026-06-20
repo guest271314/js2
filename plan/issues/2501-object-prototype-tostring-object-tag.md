@@ -13,7 +13,7 @@ area: codegen
 language_feature: object-builtins
 goal: spec-completeness
 sprint: 64
-assignee: ttraenkler/sd3
+assignee: ttraenkler/dev3
 test262_bucket: object-tostring-tag
 test262_count: 151
 ---
@@ -105,6 +105,31 @@ failures fail identically on main (verified by stash-compare) — not a regressi
 **Deferred (phase-2):** `Symbol.toStringTag` override (§20.1.3.6 step 15) — needs
 dynamic `@@toStringTag` property lookup → the dynamic-property epic. Banks the
 bulk of the ~151 without it.
+
+## Regression re-verification (dev3, 2026-06-20)
+
+A test262 regression was flagged on PR #1742 earlier. Re-checked against current
+`origin/main` (PR reconciled to head 616efb80f, then `git merge origin/main`):
+the flagged regression **does not reproduce — it was drift / already resolved.**
+The PR is strictly an improvement over main in every probed case, never a
+pass→fail:
+
+| receiver | main (prior) | PR #1742 | verdict |
+|---|---|---|---|
+| `[]` host | `[object Object]` (wrong) | `[object Array]` | **fixed** |
+| `function` / `Date` host | `[object Object]` (wrong) | correct tag | **fixed** |
+| `any`-typed receiver, host | `[object Object]` | `[object Object]` | unchanged (still unfixed, not a regression) |
+| `@@toStringTag` override, host | `[object Object]` | `[object Object]` | unchanged (deferred phase-2; main never honored it here either) |
+| standalone `.call(...)`, `any` receiver | **hard compile error** | valid Wasm (clean fall-through) | **improved** (CE → no CE) |
+
+The `@@toStringTag` deferral does **not** regress host mode: on main the opaque
+Wasm receiver already routed to `[object Object]` (the host `Object.prototype.
+toString` never saw the JS `@@toStringTag`), so old and new fail that case
+identically. Scoped suites green: `issue-2501` (3) + Object/toString/call
+regression set (`2104`/`2163`/`2161`/`1337`/`hasownproperty-call`/`2042-r2`/
+`2042-s3`/`2029-subclass`) = 70/70; `tsc` + prettier clean. Merged main clean
+(no conflicts, no dropped files); reconciled to the PR head, not the stale
+`9c5e876e4` worktree, so sd3's pushed progress is preserved.
 
 ## Source
 
