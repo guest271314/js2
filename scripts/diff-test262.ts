@@ -33,41 +33,6 @@ export const REGRESSION_RATIO_LIMIT = 0.1;
 export const REGRESSION_BUCKET_LIMIT = 50;
 export const REGRESSION_BUCKET_PATH_DEPTH = 5;
 
-// #2562 — absolute regression-count floor for the RATIO gate. The 10% RATIO
-// gate is the right tool against a PR that adds MANY regressions vs few
-// improvements, but on its own it over-reacts on a low-count net-positive PR: a
-// single drift/flake regression that survives the wasm_sha filter reads as
-// 1/9 = 11.1% ≥ 10% and FAILS an otherwise net-positive PR. This blocked the
-// net-positive PRs #1742/#1711 (Net +8, 9 improvements) on 2026-06-20 — on a
-// SINGLE nondeterministic flaky file, recorded `pass` in a *freshly-refreshed*
-// baseline (so it is NOT a staleness problem — a refresh did not clear it) that
-// flips to `fail` only under merge_group load.
-//
-// Fix: the ratio gate fires ONLY once the absolute wasm-change regression count
-// reaches `RATIO_MIN_ABSOLUTE_REGRESSIONS`. Below that floor a net-positive diff
-// passes the ratio gate regardless of how few improvements it has — 1–2 residual
-// drift/flake regressions can no longer fail a net-positive PR. This is
-// UNCONDITIONAL (it does NOT depend on the baseline being provably
-// content-current), because the observed blocker is flake, not stale content.
-//
-// Real regressions still fail, via gates this floor never touches:
-//   - the net<0 gate (caller-side `net_per_test < 0`) — ANY net-negative diff,
-//   - the bucket gate (>50 regressions in one path),
-//   - the ratio gate itself once regressions ≥ the floor (e.g. ≥3 genuine
-//     regressions against few improvements).
-// So a PR that genuinely regresses ≥3 files, or is net-negative, or piles a
-// cluster into one bucket, still fails — only the 1–2-flake-on-net-positive
-// case is let through.
-export const RATIO_MIN_ABSOLUTE_REGRESSIONS = 3;
-
-// #2562 — when the workflow can additionally PROVE the baseline is
-// content-current (0 test262-relevant commits behind main HEAD — see the
-// src-aware staleness step), the floor is widened by this amount: residual
-// regressions against a content-current baseline are even more likely to be
-// drift/flake, so a slightly larger handful is tolerated before the ratio gate
-// re-engages. The net<0 and bucket gates are still never affected.
-export const RATIO_FLOOR_CONTENT_CURRENT_BONUS = 2;
-
 /**
  * Group regressed test files into path buckets (first
  * `REGRESSION_BUCKET_PATH_DEPTH` segments) and return them sorted by count
@@ -90,54 +55,21 @@ export function bucketRegressions(files: string[]): { bucket: string; count: num
  * (#1943 acceptance criteria). The ratio gate only fires when there is at
  * least one regression — a clean PR (R == 0) always passes regardless of how
  * few improvements it carries.
- *
- * #2562 — the RATIO gate now has an ABSOLUTE-COUNT FLOOR. It fires only once the
- * wasm-change regression count reaches `RATIO_MIN_ABSOLUTE_REGRESSIONS`
- * (+`RATIO_FLOOR_CONTENT_CURRENT_BONUS` when `baselineContentCurrent` proves the
- * baseline reflects current src). Below the floor, a net-positive diff passes
- * the ratio gate regardless of how few improvements it carries, so 1–2 residual
- * drift/flake regressions can't fail a net-positive PR. The floor is
- * UNCONDITIONAL (the content-current bonus only widens it) because the observed
- * blocker is run-to-run flake, not stale baseline content. The bucket gate and
- * the caller's net<0 gate are NOT affected — a genuine regression (≥ floor
- * regressions, a >50 cluster, or any net-negative change) still fails.
  */
 export function evaluateRegressionThresholds(opts: {
   improvements: number;
   regressionsWasmChange: number;
   regressedFiles: string[];
-  baselineContentCurrent?: boolean;
 }): string[] {
   const failures: string[] = [];
-  const { improvements, regressionsWasmChange, regressedFiles, baselineContentCurrent = false } = opts;
+  const { improvements, regressionsWasmChange, regressedFiles } = opts;
   if (regressionsWasmChange > 0) {
     const ratio = improvements > 0 ? regressionsWasmChange / improvements : Infinity;
-    const netPositive = improvements > regressionsWasmChange;
-    // #2562 — absolute regression-count floor. The ratio gate is suppressed for
-    // a net-positive diff whose absolute regression count is below the floor
-    // (widened when the baseline is provably content-current). A net-NEGATIVE
-    // diff is NEVER floored here (the caller's net<0 gate already fails it, and
-    // keeping the ratio message is useful context); and once regressions reach
-    // the floor the ratio gate re-engages even on a net-positive diff.
-    const floor = RATIO_MIN_ABSOLUTE_REGRESSIONS + (baselineContentCurrent ? RATIO_FLOOR_CONTENT_CURRENT_BONUS : 0);
-    const belowAbsoluteFloor = netPositive && regressionsWasmChange < floor;
     if (ratio >= REGRESSION_RATIO_LIMIT) {
-      if (belowAbsoluteFloor) {
-        // Emit a note (not a failure) so the run log records WHY the ratio gate
-        // did not fire — readers can audit the floor.
-        console.log(
-          `=== ratio gate FLOORED (#2562): net-positive ` +
-            `(${improvements} improvements − ${regressionsWasmChange} regressions), ` +
-            `${regressionsWasmChange} < ${floor} absolute-regression floor` +
-            `${baselineContentCurrent ? " (baseline content-current → +" + RATIO_FLOOR_CONTENT_CURRENT_BONUS + ")" : ""} — ` +
-            `the ${(ratio * 100).toFixed(1)}% ratio is drift/flake noise on a net-positive PR, not a PR regression ===`,
-        );
-      } else {
-        const pct = improvements > 0 ? (ratio * 100).toFixed(1) + "%" : "∞ (0 improvements)";
-        failures.push(
-          `regression ratio ${pct} (${regressionsWasmChange}/${improvements}) meets/exceeds the ${(REGRESSION_RATIO_LIMIT * 100).toFixed(0)}% limit`,
-        );
-      }
+      const pct = improvements > 0 ? (ratio * 100).toFixed(1) + "%" : "∞ (0 improvements)";
+      failures.push(
+        `regression ratio ${pct} (${regressionsWasmChange}/${improvements}) meets/exceeds the ${(REGRESSION_RATIO_LIMIT * 100).toFixed(0)}% limit`,
+      );
     }
   }
   for (const { bucket, count } of bucketRegressions(regressedFiles)) {
@@ -250,11 +182,6 @@ Options:
   --all                         Show all transitions (no limit)
   --quiet, -q                   Only show summary counts
   --baseline-meta <report.json> Read baseline_generated_at + baseline_sha to warn on stale baseline
-  --baseline-content-current    (#2562) The caller has proven the baseline is content-current
-                                (0 test262-relevant commits behind main HEAD). Widens the ratio
-                                gate's absolute-regression floor by RATIO_FLOOR_CONTENT_CURRENT_BONUS.
-                                The floor itself is UNCONDITIONAL: a net-positive diff below it never
-                                fails the ratio gate. Bucket + net<0 gates always stay active.
 
 Environment:
   ORACLE_REBASE=1               Allow a cross-oracle-version diff (#2096). By default a diff
@@ -291,13 +218,10 @@ Environment:
     .split("|")
     .map((p) => p.trim())
     .filter((p) => p.length > 0);
-  // #2562 — caller asserts the baseline is content-current (0 test262-relevant
-  // commits behind main HEAD), enabling the src-aware ratio waiver.
-  const baselineContentCurrent = args.includes("--baseline-content-current");
 
   const maxShow = showAll ? Infinity : verbose ? 50 : 20;
 
-  run(baselinePath, newPath, maxShow, quiet, baselineMetaPath, pathFilter, baselineContentCurrent);
+  run(baselinePath, newPath, maxShow, quiet, baselineMetaPath, pathFilter);
 }
 
 function applyPathFilter(map: StatusMap, patterns: string[]): StatusMap {
@@ -316,7 +240,6 @@ async function run(
   quiet: boolean,
   baselineMetaPath?: string,
   pathFilter: string[] = [],
-  baselineContentCurrent = false,
 ) {
   const [baselineLoaded, newerLoaded] = await Promise.all([loadJsonl(baselinePath), loadJsonl(newPath)]);
   let baseline = baselineLoaded.map;
@@ -744,7 +667,6 @@ async function run(
     improvements: improvements.length,
     regressionsWasmChange,
     regressedFiles: noiseFiltered.map((r) => r.file),
-    baselineContentCurrent,
   });
   for (const reason of thresholdFailures) {
     console.log(`=== GATE FAIL: ${reason} ===`);

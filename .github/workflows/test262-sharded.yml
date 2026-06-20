@@ -1274,20 +1274,9 @@ jobs:
           if [ -n "$BASELINE_META" ]; then
             META_ARGS="--baseline-meta $BASELINE_META"
           fi
-          # #2562 — src-aware ratio waiver. Only pass --baseline-content-current
-          # when the staleness step PROVED the baseline is content-current (0
-          # test262-relevant commits behind main HEAD). The flag waives the 10%
-          # ratio gate for a net-positive diff with ≤3 absolute regressions; the
-          # bucket and net<0 gates stay active regardless. Default (anything
-          # other than a proven "true") keeps the gate fully strict.
-          CONTENT_CURRENT_ARG=""
-          if [ "${{ steps.staleness.outputs.baseline_content_current }}" = "true" ]; then
-            CONTENT_CURRENT_ARG="--baseline-content-current"
-            echo "Baseline content-current (#2562) → ratio gate waiver active for net-positive ≤3-regression diffs."
-          fi
           set +e
           npx tsx scripts/diff-test262.ts "$BASELINE" merged-reports/test262-results-merged.jsonl --quiet $META_ARGS \
-            ${TEST262_SCOPE:+--path-filter "$TEST262_SCOPE"} $CONTENT_CURRENT_ARG \
+            ${TEST262_SCOPE:+--path-filter "$TEST262_SCOPE"} \
             > merged-reports/test262-regressions.txt
           exit_code=$?
           set -e
@@ -1342,24 +1331,24 @@ jobs:
           cat merged-reports/test262-regressions.txt
           # #1235/#2562 — append staleness footer so devs reading the failed-job
           # log see the warning even when not scrolling up to the workflow-level
-          # ::warning::. The footer is informational; the gate still fails. Use
-          # the SRC-aware signal: a content-current baseline (0 test262-relevant
-          # commits behind) cannot be the source of drift, so we only show the
-          # drift footer when src_commits_behind > 0. When content-current, a
-          # failure here is a REAL bucket/net regression (the ratio waiver
-          # already absorbed small net-positive drift) — say so explicitly so
-          # nobody dismisses a genuine failure as drift.
+          # ::warning::. The footer is purely INFORMATIONAL; the gate's
+          # pass/fail decision is UNCHANGED by this step. Use the SRC-aware
+          # signal: a content-current baseline (0 test262-relevant commits
+          # behind) cannot be the source of drift, so the drift footer only
+          # shows when src_commits_behind > 0. When content-current, a failure
+          # here is far more likely a REAL regression than baseline drift — say
+          # so explicitly so nobody dismisses a genuine failure as drift.
           SRC_BEHIND="${{ steps.staleness.outputs.src_commits_behind || '' }}"
           CONTENT_CURRENT="${{ steps.staleness.outputs.baseline_content_current || '' }}"
           STALE_M="${{ steps.staleness.outputs.stale_minutes || '0' }}"
           if [ "$CONTENT_CURRENT" = "true" ]; then
             echo ""
             echo "==============================================================="
-            echo "  ❌  REAL REGRESSION (baseline content-current, #2562)"
+            echo "  ❌  LIKELY-REAL REGRESSION (baseline content-current, #2562)"
             echo "  0 test262-relevant commits separate the baseline from main"
-            echo "  HEAD (${STALE_M}m clock age is irrelevant), and the net-positive"
-            echo "  small-drift ratio waiver did NOT apply — this is a genuine"
-            echo "  bucket/net regression, not baseline drift. Do not dismiss it."
+            echo "  HEAD (${STALE_M}m clock age is irrelevant) — the baseline"
+            echo "  reflects current src, so these regressions are far more"
+            echo "  likely PR-caused than baseline drift. Do not dismiss them."
             echo "==============================================================="
           elif [ -n "$SRC_BEHIND" ] && [ "$SRC_BEHIND" -gt 0 ] 2>/dev/null; then
             echo ""
