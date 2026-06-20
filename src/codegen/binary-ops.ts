@@ -1059,6 +1059,22 @@ export function compileBinaryExpression(
   if (!wrapperEquality && op === ts.SyntaxKind.PlusToken && isStringType(rightTsType) && !isBigIntType(leftTsType)) {
     return compileStringBinaryOp(ctx, fctx, expr, op);
   }
+  // (#2503b) The reversed shape `any == "lit"` (a non-numeric/`any` LEFT against
+  // a statically string-typed RIGHT) is deliberately NOT routed to
+  // `compileStringBinaryOp` here. A pure string-content compare would break
+  // §7.2.15 whenever the `any` actually holds a non-string at runtime:
+  //   - a number: `5 == "5.0"` must be `true` via ToNumber, not `false` via
+  //     `String(5) === "5.0"`;
+  //   - null / undefined: `null == "ab"` is always `false` (never coerces);
+  //   - an object: ToPrimitive then recurse.
+  // Routing on the *static* type alone (as a mirror of the left-string arm)
+  // mis-coerced all three, which is the −3 test262 regression of the first
+  // attempt. Instead the native-string ref operand is boxed to externref by the
+  // loose-equality guard in the struct-ref block below, and the standalone
+  // abstract-equality cascade (~line 1990) dispatches on the *runtime* tag
+  // (string⇄string content compare, string⇄number ToNumber, nullish guard,
+  // Object→ToPrimitive). The left-string arm above already handles a statically
+  // string-typed LEFT (where a content/§7.2.15-aware compare IS correct).
 
   // BigInt operations — handle both pure bigint and mixed bigint/number cases
   if (isBigIntType(leftTsType) || isBigIntType(rightTsType)) {
@@ -1786,8 +1802,53 @@ export function compileBinaryExpression(
         return { kind: "i32" };
       }
 
-      // For numeric, comparison, and loose equality ops: coerce struct refs → f64 via valueOf
-      if (isNumericOp || isEqOp || isNeqOp) {
+      // (#2503b) Loose equality `==`/`!=` between a native-string ref and an
+      // externref (`any`/object) operand: do NOT ToNumber-coerce the string (the
+      // `isNumericOp || isEqOp || isNeqOp` block below would, turning a
+      // non-numeric string into NaN → `any == "ab"` wrongly false). The strict
+      // `===`/`!==` counterpart is already handled above by the #1914 mixed
+      // externref+native-string arm; loose equality has no such arm and fell
+      // straight into the numeric coercion. Box the string ref to externref so
+      // BOTH operands are externref, then fall through to the standalone
+      // abstract-equality cascade (~line 1990), which dispatches on the runtime
+      // tag: string⇄string content compare, string⇄number ToNumber (§7.2.15
+      // steps 4-7), nullish guard (`null == "ab"` → false), Object→ToPrimitive.
+      // This is what makes `any == "lit"` order-independent with the working
+      // `"lit" == any` (left-string arm) WITHOUT the over-broad static routing
+      // that regressed number-holding `any` (the −3, #2503b first attempt).
+      const isLooseEqNeq = op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
+      const otherEqType = leftIsRef ? rightType : leftType;
+      if (
+        isLooseEqNeq &&
+        // A wrapper object (`new Boolean(true)`, `new Number(n)`, `new String(s)`)
+        // is NOT a plain primitive — its loose equality has dedicated
+        // ToPrimitive/identity handling in the wrapper arm further down (~line
+        // 2371). Excluding it here keeps `"1" == new Boolean(true)` on that path
+        // (#1910d); the primitive-tag cascade does not reduce a wrapper struct.
+        !wrapperEquality &&
+        ctx.nativeStrings &&
+        ctx.anyStrTypeIdx >= 0 &&
+        otherEqType.kind === "externref" &&
+        ((leftIsRef && isStringType(leftTsType)) || (rightIsRef && isStringType(rightTsType)))
+      ) {
+        // Box the native-string ref operand → externref (extern.convert_any).
+        // Stack is [left, right]; right is on top.
+        if (rightIsRef) {
+          coerceType(ctx, fctx, rightType, { kind: "externref" });
+          rightType = { kind: "externref" };
+        }
+        if (leftIsRef) {
+          const tmpR = allocTempLocal(fctx, rightType);
+          fctx.body.push({ op: "local.set", index: tmpR });
+          coerceType(ctx, fctx, leftType, { kind: "externref" });
+          fctx.body.push({ op: "local.get", index: tmpR });
+          releaseTempLocal(fctx, tmpR);
+          leftType = { kind: "externref" };
+        }
+        // Both operands are now externref — fall through to the externref
+        // equality cascade below (does NOT re-enter this struct-ref block).
+      } else if (isNumericOp || isEqOp || isNeqOp) {
+        // For numeric, comparison, and loose equality ops: coerce struct refs → f64 via valueOf
         // Per JS spec, binary + uses ToPrimitive with hint "default",
         // while other numeric/comparison ops use hint "number".
         const hint: "number" | "default" = op === ts.SyntaxKind.PlusToken ? "default" : "number";
