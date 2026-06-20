@@ -339,7 +339,13 @@ if (emitWit && result.wit) {
 if (!quiet && emittedWasmPath) {
   if (target === "wasi" || target === "standalone" || target === "linear") {
     // Pure Wasm, no JS host required — runnable directly under Wasmtime.
-    console.log(`\nTo run: wasmtime -W all-proposals=y ${emittedWasmPath}`);
+    // Use the targeted proposal flags this compiler actually emits — gc,
+    // function-references, tail-call, exceptions (reference-types is on by
+    // default). Do NOT recommend `-W all-proposals=y`: it also enables the
+    // stack-switching proposal, which wasmtime 44/45 rejects at module load
+    // with "the wasm_stack_switching feature is not supported on this compiler
+    // configuration" and exits before running anything (#2511).
+    console.log(`\nTo run: wasmtime -W gc=y,function-references=y,tail-call=y,exceptions=y ${emittedWasmPath}`);
   } else {
     // Default (gc) target emits JS-host imports; needs the generated helper.
     console.log(
