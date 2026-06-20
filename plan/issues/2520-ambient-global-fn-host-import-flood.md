@@ -66,7 +66,7 @@ compiles with **zero** host-import warnings. Test cases in
 
 Out of scope: a web-vs-node target/environment model (`window.stop` makes no
 sense in a node host; auto-provide Node `process`/`Buffer` types) — tracked in
-#2522. Original analysis kept below for reference.
+#2523. Original analysis kept below for reference.
 
 ## Problem
 
