@@ -908,21 +908,6 @@ function annexBHoistCancels(fnDecl: ts.FunctionDeclaration): ts.Block | null {
   return null;
 }
 
-/**
- * (#2200 Phase 2) Is `fnDecl` a block-nested function that IS eligible for the
- * Annex B web-compat outer var-binding (block-nested AND not cancelled)? Returns
- * the declaring `Block` (for the pre-allocation / decl-site init), else `null`
- * (direct function-body decl, or cancelled — Phase 1 handles the latter).
- */
-function annexBBlockNestedEligible(fnDecl: ts.FunctionDeclaration): ts.Block | null {
-  if (!fnDecl.name?.text || !fnDecl.body) return null;
-  const block = fnDecl.parent;
-  if (!ts.isBlock(block)) return null;
-  if (isAnnexBScopeBoundary(block.parent)) return null; // direct fn body → not block-nested
-  if (annexBHoistCancels(fnDecl) !== null) return null; // cancelled → Phase 1, no outer binding
-  return block;
-}
-
 export function hoistFunctionDeclarations(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1022,25 +1007,6 @@ export function hoistFunctionDeclarations(
         const ranges = fctx.annexBCancelled.get(funcName) ?? [];
         ranges.push({ start: cancelBlock.getStart(), end: cancelBlock.getEnd() });
         fctx.annexBCancelled.set(funcName, ranges);
-      } else if (annexBBlockNestedEligible(stmt) !== null) {
-        // (#2200 Phase 2) Eligible block-nested function: pre-allocate the
-        // web-compat outer var-binding as a TDZ var — an externref local +
-        // an i32 TDZ flag (zero-init = uninitialised). The value + flag←1 are
-        // emitted at the declaration's textual position (compileStatement), so a
-        // read before the block / when the block is skipped sees the flag 0 →
-        // `typeof` "undefined" / direct-read ReferenceError; a read after the
-        // block ran sees the function value. Skip if the name already has a
-        // function-local (e.g. a var/param) — that binding wins, no Annex B var.
-        if (!fctx.localMap.has(funcName)) {
-          allocLocal(fctx, funcName, { kind: "externref" });
-          if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
-          if (!fctx.tdzFlagLocals.has(funcName)) {
-            const flagIdx = allocLocal(fctx, `__tdz_${funcName}`, { kind: "i32" });
-            fctx.tdzFlagLocals.set(funcName, flagIdx);
-          }
-          if (!fctx.annexBOuterBindings) fctx.annexBOuterBindings = new Set();
-          fctx.annexBOuterBindings.add(funcName);
-        }
       }
       const hasReservedBodylessEntry = ctx.preRegisteredBodyless?.has(funcName) ?? false;
       const reservedFuncIdx = hasReservedBodylessEntry ? ctx.funcMap.get(funcName) : undefined;
