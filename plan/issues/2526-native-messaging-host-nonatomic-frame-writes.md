@@ -1,10 +1,11 @@
 ---
 id: 2526
 title: "Native Messaging example host writes each frame's length prefix and body as SEPARATE fd_writes → streaming receivers misalign (64 MiB test fails where ComponentizeJS works)"
-status: ready
+status: done
 sprint: 64
 created: 2026-06-20
 updated: 2026-06-20
+completed: 2026-06-20
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -14,6 +15,19 @@ language_feature: native-messaging
 goal: correctness
 related: [2521, 1530]
 ---
+
+## Resolution (2026-06-20)
+
+Fixed in `examples/native-messaging/nm_js2wasm.ts`: `emitRun` and the ≤1 MiB echo
+path now build `[len4][body]` in one buffer and write it with a **single**
+`process.stdout.write` (one `fd_write`); removed `writeLength`. Verified via the
+`runWasiRaw` capture — `fd_write` calls dropped from **6 → 3** for a 2 MiB input
+(one per frame; sizes `1048575, 1048575, 15` = 4 + body), matching ComponentizeJS's
+atomic framing; frames still valid JSON; output byte-identical. Test:
+`tests/issue-2526-atomic-frame-writes.test.ts` (asserts no bare 4-byte write, one
+write per frame). The browser "Native host has exited" mode below is still
+unreproduced — the atomic write *may* resolve it (misframing could make Chrome
+reject+kill); to be confirmed with the reporter.
 
 ## Problem (reproduced via direct comparison)
 
