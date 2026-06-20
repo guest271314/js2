@@ -15,6 +15,42 @@ goal: architecture
 related: [2512, 2514, 2525, 2523]
 ---
 
+## Phase 0 spike result (2026-06-20) — GREEN ✅
+
+Validated the premise: two **separately-compiled** WasmGC modules with
+structurally-identical struct types share GC objects **zero-copy via engine
+canonicalization**, on **both** target engines.
+
+Method: module A declares `(type $cell (struct (field i32)))` and exports `make`
+returning a struct as `(ref any)`; module B independently declares the **same**
+struct, imports `make`, `ref.cast`s the result to its OWN `$cell`, reads the
+field. (Assembled with binaryen 125 — wabt 1.0.39 has no GC support.)
+
+- **V8 (Node 25):** B receives A-created struct, casts, reads → `42`. ✅
+- **wasmtime 44** (`-W gc,function-references`, `--preload a=A.wasm --invoke test`)
+  → `42`. ✅
+- **Negative control:** a B′ declaring a *different* struct (extra field) → the
+  cast **traps** ("illegal cast") — confirms real canonicalization, not a
+  permissive cast. ✅
+- **Binaryen stability:** `wasm-opt -O3 -Os` on A, then link with unoptimized B →
+  still passes; a 2-member rec group with a *dead* type survived optimization with
+  the **`(rec …)` group kept intact** (both types preserved) — so the whole-group
+  canonical match held. ✅
+
+Conclusion: the engine-canonicalization premise behind this issue **holds on V8
+and wasmtime**, and default `wasm-opt -O3 -Os` preserves rec groups here. The GC
+cross-module-identity question is settled positive — not a blocker.
+
+Remaining engineering (Phase 1+), unchanged by the spike:
+- Every js2wasm module must emit the **identical** frozen canonical rec group
+  (same members + order) — canonicalization matches whole groups, not individual
+  types.
+- Validate at scale on the real js2wasm `String`/`Vec`/boxed rec group, and
+  confirm no aggressive Binaryen pass (explicit type-pruning/merging) perturbs it
+  — pin the type section or add a post-emit canonical-hash verification.
+
+Repro scripts: `.tmp/gc-canon-binaryen.mjs`, `.tmp/recgroup-prune.mjs`.
+
 ## Decision
 
 For modularizing both the **host-API shims** (#2512: process/fs/… as separately
