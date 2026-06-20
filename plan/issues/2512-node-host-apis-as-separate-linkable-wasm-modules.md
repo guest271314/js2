@@ -15,6 +15,13 @@ goal: architecture
 related: [1044, 1046, 2514]
 ---
 
+> **Linking mechanism (decided):** **core-wasm module linking** (per-host shim
+> modules: `node-shim.wasm` over WASI, `deno-shim.wasm`, … sharing a store with
+> the user module) — see **#2524** (chosen, implement first). The Component Model
+> + WIT alternative — a `node:io/process` WIT world embedded in the component as
+> the declared dependency, composed against a shim component — is **#2525**
+> (deferred; clean fit for this byte/scalar boundary but lower priority).
+
 ## Problem / proposal
 
 Node.js host-API support (`process`, and future `fs`, `path`, `url`, `os`, …)

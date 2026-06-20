@@ -15,6 +15,12 @@ goal: architecture
 related: [2512, 1046]
 ---
 
+> **Linking mechanism (decided):** **core-wasm module linking in a shared store**
+> + a frozen canonical rec group — see **#2524** (chosen). The Component Model is
+> the wrong vehicle here: its Canonical ABI *copies* GC values across the
+> boundary, defeating zero-copy sharing (#2525, deferred). Cross-module GC type
+> identity is **already provided by runtime canonicalization** — not blocked.
+
 ## Problem / proposal
 
 js2wasm emits its runtime helpers — `number_toString`, `__str_concat`, native
