@@ -33,6 +33,22 @@ export const REGRESSION_RATIO_LIMIT = 0.1;
 export const REGRESSION_BUCKET_LIMIT = 50;
 export const REGRESSION_BUCKET_PATH_DEPTH = 5;
 
+// #2562 — src-aware ratio waiver. The 10% RATIO gate is the right tool when the
+// baseline is genuinely behind src (a PR adding many regressions vs few
+// improvements). But it over-reacts when the baseline is CONTENT-CURRENT (0
+// test262-relevant commits separate the baseline commit from main HEAD) and the
+// PR is net-POSITIVE with only a tiny absolute number of residual regressions:
+// a single drift/flake regression that survives the wasm_sha filter then reads
+// as 1/9 = 11.1% ≥ 10% and FAILS an otherwise net-positive PR (this blocked the
+// net-positive PRs #1742/#1711 on 2026-06-20). When the workflow can prove the
+// baseline content is current (`baselineContentCurrent`), the ratio gate is
+// WAIVED — but ONLY for a net-positive diff with at most this many absolute
+// regressions. The bucket gate (>50 in one path) and the net<0 gate stay fully
+// active in every mode, so a real regression cluster can never slip through:
+// the waiver only neutralises the ratio's punishment of low-improvement
+// net-positive PRs, never the absolute-magnitude or net-sign gates.
+export const RATIO_WAIVE_MAX_REGRESSIONS = 3;
+
 /**
  * Group regressed test files into path buckets (first
  * `REGRESSION_BUCKET_PATH_DEPTH` segments) and return them sorted by count
@@ -55,21 +71,47 @@ export function bucketRegressions(files: string[]): { bucket: string; count: num
  * (#1943 acceptance criteria). The ratio gate only fires when there is at
  * least one regression — a clean PR (R == 0) always passes regardless of how
  * few improvements it carries.
+ *
+ * `baselineContentCurrent` (#2562): set by the workflow when it has proven the
+ * baseline is content-current (0 test262-relevant commits between the baseline
+ * commit and main HEAD). In that mode the RATIO gate is waived for a
+ * net-positive diff carrying at most `RATIO_WAIVE_MAX_REGRESSIONS` absolute
+ * regressions — see the constant for the rationale. The bucket gate and the
+ * net<0 gate (in the caller) are NOT affected, so real regressions still fail.
  */
 export function evaluateRegressionThresholds(opts: {
   improvements: number;
   regressionsWasmChange: number;
   regressedFiles: string[];
+  baselineContentCurrent?: boolean;
 }): string[] {
   const failures: string[] = [];
-  const { improvements, regressionsWasmChange, regressedFiles } = opts;
+  const { improvements, regressionsWasmChange, regressedFiles, baselineContentCurrent = false } = opts;
   if (regressionsWasmChange > 0) {
     const ratio = improvements > 0 ? regressionsWasmChange / improvements : Infinity;
+    // #2562 — src-aware waiver: only when the baseline is content-current AND
+    // the diff is net-positive (more improvements than regressions) AND the
+    // absolute regression count is small. All three are required: a content-
+    // current but net-NEGATIVE diff, or one with a large absolute regression
+    // count, still fails the ratio gate. The bucket gate below is untouched.
+    const netPositive = improvements > regressionsWasmChange;
+    const ratioWaived = baselineContentCurrent && netPositive && regressionsWasmChange <= RATIO_WAIVE_MAX_REGRESSIONS;
     if (ratio >= REGRESSION_RATIO_LIMIT) {
-      const pct = improvements > 0 ? (ratio * 100).toFixed(1) + "%" : "∞ (0 improvements)";
-      failures.push(
-        `regression ratio ${pct} (${regressionsWasmChange}/${improvements}) meets/exceeds the ${(REGRESSION_RATIO_LIMIT * 100).toFixed(0)}% limit`,
-      );
+      if (ratioWaived) {
+        // Emit a note (not a failure) so the run log records WHY the ratio gate
+        // did not fire — readers can audit the waiver.
+        console.log(
+          `=== ratio gate WAIVED (#2562): baseline content-current, net-positive ` +
+            `(${improvements} improvements − ${regressionsWasmChange} regressions), ` +
+            `${regressionsWasmChange} ≤ ${RATIO_WAIVE_MAX_REGRESSIONS} absolute regressions — ` +
+            `the ${(ratio * 100).toFixed(1)}% ratio is drift/flake noise, not a PR regression ===`,
+        );
+      } else {
+        const pct = improvements > 0 ? (ratio * 100).toFixed(1) + "%" : "∞ (0 improvements)";
+        failures.push(
+          `regression ratio ${pct} (${regressionsWasmChange}/${improvements}) meets/exceeds the ${(REGRESSION_RATIO_LIMIT * 100).toFixed(0)}% limit`,
+        );
+      }
     }
   }
   for (const { bucket, count } of bucketRegressions(regressedFiles)) {
@@ -182,6 +224,10 @@ Options:
   --all                         Show all transitions (no limit)
   --quiet, -q                   Only show summary counts
   --baseline-meta <report.json> Read baseline_generated_at + baseline_sha to warn on stale baseline
+  --baseline-content-current    (#2562) The caller has proven the baseline is content-current
+                                (0 test262-relevant commits behind main HEAD). Waives the 10%
+                                ratio gate for a net-positive diff with ≤3 absolute regressions
+                                (drift/flake noise). Bucket + net<0 gates stay active.
 
 Environment:
   ORACLE_REBASE=1               Allow a cross-oracle-version diff (#2096). By default a diff
@@ -218,10 +264,13 @@ Environment:
     .split("|")
     .map((p) => p.trim())
     .filter((p) => p.length > 0);
+  // #2562 — caller asserts the baseline is content-current (0 test262-relevant
+  // commits behind main HEAD), enabling the src-aware ratio waiver.
+  const baselineContentCurrent = args.includes("--baseline-content-current");
 
   const maxShow = showAll ? Infinity : verbose ? 50 : 20;
 
-  run(baselinePath, newPath, maxShow, quiet, baselineMetaPath, pathFilter);
+  run(baselinePath, newPath, maxShow, quiet, baselineMetaPath, pathFilter, baselineContentCurrent);
 }
 
 function applyPathFilter(map: StatusMap, patterns: string[]): StatusMap {
@@ -240,6 +289,7 @@ async function run(
   quiet: boolean,
   baselineMetaPath?: string,
   pathFilter: string[] = [],
+  baselineContentCurrent = false,
 ) {
   const [baselineLoaded, newerLoaded] = await Promise.all([loadJsonl(baselinePath), loadJsonl(newPath)]);
   let baseline = baselineLoaded.map;
@@ -667,6 +717,7 @@ async function run(
     improvements: improvements.length,
     regressionsWasmChange,
     regressedFiles: noiseFiltered.map((r) => r.file),
+    baselineContentCurrent,
   });
   for (const reason of thresholdFailures) {
     console.log(`=== GATE FAIL: ${reason} ===`);

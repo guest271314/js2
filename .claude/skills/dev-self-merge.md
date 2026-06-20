@@ -26,15 +26,15 @@ description: Regression self-check for a green PR. Reads CI JSON, applies the ha
 > for the current head. A single one-shot enqueue does not loop, so it cannot
 > churn. The earlier "agents never enqueue" experiment (Option 1) overcorrected:
 > auto-enqueue's deliberately-sparse ~30-min cron is too slow to be the
-> *primary* enqueuer, so green PRs sat un-enqueued for long idle stretches. The
-> back-off fix #2560 (merged) makes auto-enqueue a reliable *backstop*, so
+> _primary_ enqueuer, so green PRs sat un-enqueued for long idle stretches. The
+> back-off fix #2560 (merged) makes auto-enqueue a reliable _backstop_, so
 > one-shot-enqueue-then-stand-down is the right balance.
 >
 > **Auth: use the user PAT for the enqueue, NOT `GITHUB_TOKEN`.** An enqueue
 > authenticated with `GITHUB_TOKEN` suppresses the `merge_group` event
 > ("workflows can't trigger workflows") and wedges the queue (memory
 > `project_merge_queue_wedge_github_token`). The dev's interactive `gh` auth (a
-> PAT) is correct here; the *backstop* uses the App token.
+> PAT) is correct here; the _backstop_ uses the App token.
 >
 > **SECURITY — internal/trusted dev agents only.** Dev-self-enqueue applies to
 > internal dev agents. **External contributor PRs** still go through
@@ -77,13 +77,13 @@ done
 
 After the run exits:
 
-| Outcome                                                    | Action                                                                                                                                                                                                                    |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **All required checks green**                              | Proceed to Step 0 (or directly to Step 1 if the CI feed JSON is present) for the self-check; on MERGE, enqueue ONCE (Step 5)                                                                                               |
+| Outcome                                                    | Action                                                                                                                                                                                                                                                                  |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **All required checks green**                              | Proceed to Step 0 (or directly to Step 1 if the CI feed JSON is present) for the self-check; on MERGE, enqueue ONCE (Step 5)                                                                                                                                            |
 | **Drift** (mergeable_state becomes `BEHIND` while waiting) | Do NOT re-enqueue. `update-branch`/`auto-refresh-prs` auto-rebases BEHIND PRs and the `auto-enqueue` backstop re-sweeps. A clean fast-forward (`git fetch origin && git merge origin/main && git push`) is optional; never re-enqueue after — the backstop owns re-adds |
-| **CI failure** (any required check `FAILURE`)              | Diagnose with full PR context — the agent KNOWS what it changed. Fix locally, `git push`, loop back to wait-for-CI                                                                                                        |
-| **Long wait** (>10 min)                                    | Emit a `TaskUpdate` noting the unusual wait but keep waiting                                                                                                                                                              |
-| **Very long wait** (>20 min)                               | Escalate to tech lead                                                                                                                                                                                                     |
+| **CI failure** (any required check `FAILURE`)              | Diagnose with full PR context — the agent KNOWS what it changed. Fix locally, `git push`, loop back to wait-for-CI                                                                                                                                                      |
+| **Long wait** (>10 min)                                    | Emit a `TaskUpdate` noting the unusual wait but keep waiting                                                                                                                                                                                                            |
+| **Very long wait** (>20 min)                               | Escalate to tech lead                                                                                                                                                                                                                                                   |
 
 The CI feed `pr-<N>.json` still drives the merge gate below — fetch it once
 CI completes:
@@ -239,6 +239,18 @@ Stop.
 > the PR ONCE — Step 5 — then stand down); a failing criterion means ESCALATE
 > to tech lead instead of enqueuing.
 
+> **#2562 — src-aware ratio waiver (CI gate is slightly more lenient than
+> criterion 2 here).** When the CI regression-gate can _prove_ the baseline is
+> content-current (0 test262-relevant commits between the baseline commit and
+> main HEAD — common during a docs/CI-only merge stretch when the baseline goes
+> clock-stale but src is unchanged), it **waives the 10% ratio sub-gate for a
+> net-positive diff with ≤3 absolute regressions** (drift/flake noise). The
+> bucket gate and the `net_per_test < 0` gate are **never** waived. So a
+> net-positive PR with a single drift regression that this local self-check
+> flags as criterion-2 ESCALATE may still pass CI green — trust the CI gate.
+> A real regression (net-negative, >3 absolute regressions, or a >50 cluster)
+> always fails regardless of content-currency.
+
 ## Step 3 — criteria (in order, stop at first failure)
 
 | #   | Criterion                                                                                                   | Failure output                                                                                        |
@@ -311,7 +323,7 @@ Any bucket with count > 50 → **ESCALATE** with the bucket name and count (crit
 
 All criteria passed → result is **MERGE**. **Add the PR to the merge queue via
 the GraphQL `enqueuePullRequest` mutation — exactly once** (do NOT use
-`gh pr merge --auto`: it only arms on a check-state *transition*, so on an
+`gh pr merge --auto`: it only arms on a check-state _transition_, so on an
 already-green `CLEAN` PR it silently no-ops and the PR is never queued):
 
 ```bash
@@ -327,7 +339,7 @@ gh api graphql -f query='{ repository(owner:"loopdive",name:"js2"){ mergeQueue(b
 > enqueue suppresses the `merge_group` event ("workflows can't trigger
 > workflows") and wedges the queue (memory
 > `project_merge_queue_wedge_github_token`). The dev's interactive `gh` auth is a
-> PAT and is correct here. The *backstop* uses an App token.
+> PAT and is correct here. The _backstop_ uses an App token.
 
 Once enqueued, GitHub will:
 

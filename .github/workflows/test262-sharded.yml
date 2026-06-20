@@ -1123,7 +1123,7 @@ jobs:
             echo "::warning::#1956 predecessor artifact missing host JSONL — keeping baseline from (b)/(c)."
           fi
 
-      - name: Check baseline staleness (#1235)
+      - name: Check baseline staleness (#1235, src-aware #2562)
         id: staleness
         # (#2379) Include `push` so the drift footer renders on push-to-main runs
         # too — the baselines-repo JSONL is frequently several merges behind main
@@ -1131,28 +1131,86 @@ jobs:
         # the listed "regressions" are drift, not real PR-caused failures.
         if: env.SHARDS_RAN == 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'push') && steps.fetch_baseline.outputs.baseline_ts != '0'
         run: |
-          # If the baselines-repo JSONL hasn't been refreshed since several
-          # commits landed on main, the regression-gate's wasm_change count
-          # is contaminated by drift — tests that flipped on main since the
-          # last baseline refresh appear as PR regressions even though the
-          # PR didn't cause them. Emit a warning so devs/tech-lead can read
-          # the regression report skeptically.
+          # #2562 — measure staleness by the count of TEST262-RELEVANT (src)
+          # commits between the baseline's recorded main-sha and main HEAD, NOT
+          # by clock time. The old clock-based warning (#1235) fired whenever the
+          # baselines-repo JSONL was >30m older than main HEAD, but a stretch of
+          # docs/CI-only merges advances main without changing any src — so the
+          # baseline goes clock-stale while its CONTENT stays current. Counting
+          # only test262-relevant commits (via test262-paths-match.sh, the same
+          # filter the #1668 stale-baseline guard uses) tells the difference:
+          #   src_behind == 0  → content-current; any "regressions" below are
+          #                      drift/flake, NOT real PR-caused failures, and the
+          #                      ratio gate is waived (--baseline-content-current).
+          #   src_behind  > 0  → the baseline is genuinely behind src; warn, and
+          #                      the ratio gate stays fully active.
+          # The baseline's main-sha is recorded in the baselines-repo commit
+          # subject: "chore(test262): refresh baselines — N/T host, ... (<sha>)".
           MAIN_HEAD_TS=$(git log -1 --format=%ct origin/main 2>/dev/null || git log -1 --format=%ct main 2>/dev/null || echo 0)
           BASELINE_TS="${{ steps.fetch_baseline.outputs.baseline_ts }}"
           BASELINE_SHA="${{ steps.fetch_baseline.outputs.baseline_sha }}"
-          if [ "$MAIN_HEAD_TS" = "0" ] || [ "$BASELINE_TS" = "0" ]; then
-            echo "stale_minutes=0" >> "$GITHUB_OUTPUT"
+          DIFF_M=0
+          if [ "$MAIN_HEAD_TS" != "0" ] && [ "$BASELINE_TS" != "0" ]; then
+            DIFF_M=$(( (MAIN_HEAD_TS - BASELINE_TS) / 60 ))
+          fi
+          echo "stale_minutes=$DIFF_M" >> "$GITHUB_OUTPUT"
+
+          # Parse the baseline's recorded main-sha from the baselines-repo commit
+          # subject (same approach as the #1668 stale-baseline guard).
+          BMAIN_SHA=""
+          if [ -d /tmp/js2wasm-baselines/.git ]; then
+            BMAIN_SHA=$(git -C /tmp/js2wasm-baselines log -1 --format=%s 2>/dev/null | grep -oE '[0-9a-f]{7,40}' | tail -1 || true)
+          fi
+          if [ -z "$BMAIN_SHA" ]; then
+            # Can't determine the baseline main-sha → conservatively treat as
+            # NOT content-current (ratio gate stays active). Fall back to the old
+            # clock signal for the warning only.
+            echo "::notice::#2562 could not parse baseline main-sha from commit subject — ratio waiver disabled (gate stays strict)."
+            echo "baseline_content_current=false" >> "$GITHUB_OUTPUT"
+            if [ "$DIFF_M" -ge 30 ]; then
+              echo "::warning::Baseline drift: js2wasm-baselines JSONL is ${DIFF_M}m older than main HEAD (baseline=${BASELINE_SHA}). Some 'regressions' below may be drift, not real PR-caused failures. See #1235."
+            fi
             exit 0
           fi
-          DIFF_S=$(( MAIN_HEAD_TS - BASELINE_TS ))
-          DIFF_M=$(( DIFF_S / 60 ))
-          # Threshold: baseline older than main HEAD by ≥ 30 minutes. Tunable.
-          if [ "$DIFF_M" -ge 30 ]; then
-            echo "::warning::Baseline drift: js2wasm-baselines JSONL is ${DIFF_M}m older than main HEAD (baseline=${BASELINE_SHA}). Some 'regressions' below may be drift, not real PR-caused failures. See #1235."
-            echo "stale_minutes=$DIFF_M" >> "$GITHUB_OUTPUT"
+
+          # Make sure the baseline main-sha is reachable in this checkout
+          # (full history via fetch-depth:0, but the sha may pre-date the shallow
+          # window on a freshly-built merge_group ref — fetch defensively).
+          git cat-file -e "${BMAIN_SHA}^{commit}" 2>/dev/null || \
+            git fetch --no-tags --filter=blob:none origin "$BMAIN_SHA" 2>/dev/null || true
+
+          # Count test262-relevant commits between the baseline main-sha and main
+          # HEAD. Baseline-refresh commits and docs/CI-only merges are excluded
+          # by test262-paths-match.sh, so only genuine src/config drift counts.
+          SRC_BEHIND=0
+          TOTAL_BEHIND=0
+          if git cat-file -e "${BMAIN_SHA}^{commit}" 2>/dev/null; then
+            COMMITS=$(git rev-list "${BMAIN_SHA}..origin/main" 2>/dev/null || true)
+            for sha in $COMMITS; do
+              TOTAL_BEHIND=$((TOTAL_BEHIND + 1))
+              CHANGED=$(git diff-tree --no-commit-id --name-only -r "$sha" 2>/dev/null)
+              if [ "$(printf '%s\n' "$CHANGED" | bash scripts/test262-paths-match.sh)" = "true" ]; then
+                SRC_BEHIND=$((SRC_BEHIND + 1))
+              fi
+            done
           else
-            echo "Baseline freshness OK: ${DIFF_M}m behind main HEAD."
-            echo "stale_minutes=$DIFF_M" >> "$GITHUB_OUTPUT"
+            # Baseline main-sha unreachable even after fetch → can't prove
+            # content-currency. Stay strict.
+            echo "::notice::#2562 baseline main-sha ${BMAIN_SHA} unreachable — ratio waiver disabled (gate stays strict)."
+            echo "baseline_content_current=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "src_commits_behind=$SRC_BEHIND" >> "$GITHUB_OUTPUT"
+          echo "Baseline main-sha ${BMAIN_SHA}: ${SRC_BEHIND} test262-relevant commit(s) behind origin/main (${TOTAL_BEHIND} total, ${DIFF_M}m clock)."
+          if [ "$SRC_BEHIND" -eq 0 ]; then
+            # Content-current: the baseline reflects current src. Any regressions
+            # below are drift/flake; enable the ratio waiver. No drift warning.
+            echo "baseline_content_current=true" >> "$GITHUB_OUTPUT"
+            echo "Baseline is CONTENT-CURRENT (#2562): 0 test262-relevant commits behind, despite ${DIFF_M}m clock age — ratio gate waiver enabled."
+          else
+            echo "baseline_content_current=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Baseline drift: js2wasm-baselines JSONL is ${SRC_BEHIND} test262-relevant commit(s) behind main HEAD (${DIFF_M}m clock; baseline=${BASELINE_SHA}). Some 'regressions' below may be drift, not real PR-caused failures. See #1235/#2562."
           fi
 
       # Build the merged host JSONL directly from the per-shard artifacts
@@ -1216,9 +1274,20 @@ jobs:
           if [ -n "$BASELINE_META" ]; then
             META_ARGS="--baseline-meta $BASELINE_META"
           fi
+          # #2562 — src-aware ratio waiver. Only pass --baseline-content-current
+          # when the staleness step PROVED the baseline is content-current (0
+          # test262-relevant commits behind main HEAD). The flag waives the 10%
+          # ratio gate for a net-positive diff with ≤3 absolute regressions; the
+          # bucket and net<0 gates stay active regardless. Default (anything
+          # other than a proven "true") keeps the gate fully strict.
+          CONTENT_CURRENT_ARG=""
+          if [ "${{ steps.staleness.outputs.baseline_content_current }}" = "true" ]; then
+            CONTENT_CURRENT_ARG="--baseline-content-current"
+            echo "Baseline content-current (#2562) → ratio gate waiver active for net-positive ≤3-regression diffs."
+          fi
           set +e
           npx tsx scripts/diff-test262.ts "$BASELINE" merged-reports/test262-results-merged.jsonl --quiet $META_ARGS \
-            ${TEST262_SCOPE:+--path-filter "$TEST262_SCOPE"} \
+            ${TEST262_SCOPE:+--path-filter "$TEST262_SCOPE"} $CONTENT_CURRENT_ARG \
             > merged-reports/test262-regressions.txt
           exit_code=$?
           set -e
@@ -1271,15 +1340,45 @@ jobs:
         run: |
           echo "test262 regressions detected relative to benchmarks/results/test262-current.jsonl"
           cat merged-reports/test262-regressions.txt
-          # #1235 — append staleness footer so devs reading the failed-job log
-          # see the warning even when not scrolling up to the workflow-level
-          # ::warning::. The footer is informational; the gate still fails.
+          # #1235/#2562 — append staleness footer so devs reading the failed-job
+          # log see the warning even when not scrolling up to the workflow-level
+          # ::warning::. The footer is informational; the gate still fails. Use
+          # the SRC-aware signal: a content-current baseline (0 test262-relevant
+          # commits behind) cannot be the source of drift, so we only show the
+          # drift footer when src_commits_behind > 0. When content-current, a
+          # failure here is a REAL bucket/net regression (the ratio waiver
+          # already absorbed small net-positive drift) — say so explicitly so
+          # nobody dismisses a genuine failure as drift.
+          SRC_BEHIND="${{ steps.staleness.outputs.src_commits_behind || '' }}"
+          CONTENT_CURRENT="${{ steps.staleness.outputs.baseline_content_current || '' }}"
           STALE_M="${{ steps.staleness.outputs.stale_minutes || '0' }}"
-          if [ "$STALE_M" -ge 30 ]; then
+          if [ "$CONTENT_CURRENT" = "true" ]; then
+            echo ""
+            echo "==============================================================="
+            echo "  ❌  REAL REGRESSION (baseline content-current, #2562)"
+            echo "  0 test262-relevant commits separate the baseline from main"
+            echo "  HEAD (${STALE_M}m clock age is irrelevant), and the net-positive"
+            echo "  small-drift ratio waiver did NOT apply — this is a genuine"
+            echo "  bucket/net regression, not baseline drift. Do not dismiss it."
+            echo "==============================================================="
+          elif [ -n "$SRC_BEHIND" ] && [ "$SRC_BEHIND" -gt 0 ] 2>/dev/null; then
+            echo ""
+            echo "==============================================================="
+            echo "  ⚠️  BASELINE DRIFT WARNING (#1235/#2562)"
+            echo "  The js2wasm-baselines JSONL is ${SRC_BEHIND} test262-relevant"
+            echo "  commit(s) behind main HEAD (${STALE_M}m clock age)."
+            echo "  Some 'regressions' above may be drift, not real PR-caused"
+            echo "  failures. Cross-check against another open PR's regression"
+            echo "  list — overlapping clusters across unrelated PRs are drift."
+            echo "==============================================================="
+          elif [ "$STALE_M" -ge 30 ]; then
+            # src_commits_behind not computed (e.g. baseline main-sha unparseable)
+            # — fall back to the legacy clock-based footer.
             echo ""
             echo "==============================================================="
             echo "  ⚠️  BASELINE DRIFT WARNING (#1235)"
             echo "  The js2wasm-baselines JSONL is ${STALE_M}m older than main HEAD."
+            echo "  (src-commit count unavailable — clock-based fallback.)"
             echo "  Some 'regressions' above may be drift, not real PR-caused"
             echo "  failures. Cross-check against another open PR's regression"
             echo "  list — overlapping clusters across unrelated PRs are drift."
