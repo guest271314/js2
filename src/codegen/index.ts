@@ -1070,7 +1070,17 @@ export function generateModule(
     // Scan lib files for DOM extern classes + globals (only if user code uses DOM)
     // After lib.d.ts refactoring, TS loads individual lib files (lib.es5.d.ts, etc.)
     if (sourceUsesLibGlobals(ast.sourceFile)) {
-      const libRefs = collectReferencedGlobalNames([ast.sourceFile], ctx.checker);
+      // #2520 — the lib-file referenced-names gate only applies under
+      // --target wasi/standalone, where the ambient global-function flood
+      // (~60 register-then-dropped host imports) is the actual problem and the
+      // dropped imports are DCE'd. Under the default JS-host (gc) target the
+      // gate is a no-op for warnings but reorders the import/type table, which
+      // exposed a latent index-shift in the late-import path (#1787 −6
+      // regression: Array/TypedArray .join, TypedArray HasProperty, Array
+      // reduce). Passing `undefined` here keeps the gc lane byte-identical to
+      // pre-#2520 behaviour while preserving the wasi/standalone flood fix.
+      const libRefs =
+        ctx.wasi || ctx.standalone ? collectReferencedGlobalNames([ast.sourceFile], ctx.checker) : undefined;
       for (const sf of ast.program.getSourceFiles()) {
         const baseName = sf.fileName.split("/").pop() ?? sf.fileName;
         if (baseName.startsWith("lib.") && baseName.endsWith(".d.ts")) {
@@ -5168,7 +5178,12 @@ export function generateMultiModule(
     // After lib.d.ts refactoring, TS loads individual lib files (lib.es5.d.ts, etc.)
     const anyUsesDom = multiAst.sourceFiles.some((sf) => sourceUsesLibGlobals(sf));
     if (anyUsesDom) {
-      const libRefs = collectReferencedGlobalNames(multiAst.sourceFiles, ctx.checker);
+      // #2520 — gate the lib-file referenced-names filter to wasi/standalone
+      // only; under the default gc target it reorders the import/type table and
+      // exposed a latent late-import index-shift (#1787 −6). See the matching
+      // comment in generateModule above.
+      const libRefs =
+        ctx.wasi || ctx.standalone ? collectReferencedGlobalNames(multiAst.sourceFiles, ctx.checker) : undefined;
       for (const libSf of multiAst.program.getSourceFiles()) {
         const baseName = libSf.fileName.split("/").pop() ?? libSf.fileName;
         if (baseName.startsWith("lib.") && baseName.endsWith(".d.ts")) {

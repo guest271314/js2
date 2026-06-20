@@ -69,3 +69,52 @@ describe("#2520 — lib-scan ambient-global referenced-names gate", () => {
     expect(warns).not.toContain('"env.global_Date"');
   });
 });
+
+// #2520 / PR #1787 — the lib-file referenced-names gate is scoped to
+// wasi/standalone. Under the default JS-host (gc) target it is a no-op: it must
+// NOT reorder the import/type table, which previously exposed a latent
+// late-import index-shift and produced an invalid binary ("not enough arguments
+// on the stack for call") for `Array.prototype.join` over an array containing an
+// `undefined`/`null` element (test262 −6: Array/TypedArray join, TypedArray
+// HasProperty, Array reduce/reduceRight). These exercise the exact gc-lane
+// patterns the −6 regressed; each must compile to a *valid* WebAssembly binary.
+describe("#2520 / #1787 — gate must not break gc-lane codegen", () => {
+  async function gcBinaryValid(src: string): Promise<boolean> {
+    const r = await compile(src, { fileName: "g.ts", skipSemanticDiagnostics: true });
+    return r.binary != null && WebAssembly.validate(r.binary);
+  }
+
+  it("join over an array with an undefined element compiles to a valid binary", async () => {
+    // The minimal reduction of built-ins/Array/prototype/join/S15.4.4.5_A1.3_T1:
+    // an array holding `undefined`, `.join()`, compared with `!==` to a string.
+    const ok = await gcBinaryValid(
+      `export function test(): number {
+         let x: any[] = []; x[0] = undefined;
+         return x.join() !== "" ? 0 : 1;
+       }`,
+    );
+    expect(ok).toBe(true);
+  });
+
+  it("Array(...) called as a function plus join compiles to a valid binary", async () => {
+    const ok = await gcBinaryValid(
+      `export function test(): number {
+         let x: any[] = Array(undefined, 1, null, 3);
+         return x.join() === ",1,,3" ? 1 : 0;
+       }`,
+    );
+    expect(ok).toBe(true);
+  });
+
+  it("reduce on an empty array throwing TypeError compiles to a valid binary", async () => {
+    // built-ins/Array/prototype/reduce/15.4.4.21-8-b-iii-1-3 pattern.
+    const ok = await gcBinaryValid(
+      `export function test(): number {
+         const a: any[] = [];
+         try { a.reduce(function (p: any, c: any) { return p; }); return 0; }
+         catch (e) { return 1; }
+       }`,
+    );
+    expect(ok).toBe(true);
+  });
+});

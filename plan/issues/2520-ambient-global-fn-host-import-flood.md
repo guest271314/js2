@@ -6,6 +6,7 @@ sprint: 64
 created: 2026-06-19
 updated: 2026-06-20
 completed: 2026-06-20
+# 2026-06-20: PR #1787 −6 regression fix — lib-file gate scoped to wasi/standalone
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -14,6 +15,31 @@ area: codegen
 language_feature: host-imports
 goal: correctness
 ---
+
+## Regression follow-up (2026-06-20, PR #1787 −6 fix)
+
+The lib-file referenced-names gate (change #1 below) fired for **all targets**,
+but the ambient-global flood it cures is a `--target wasi` problem only. Under
+the default JS-host (gc) target the gate is a no-op for warnings yet it
+**reordered the import/type table** (it runs `addFuncType` a different number of
+times during `collectExternDeclarations`). That reordering exposed a latent
+late-import index-shift in the array-`join` element-stringify path, producing an
+**invalid** binary ("not enough arguments on the stack for call (need 2, got 1)")
+for `Array.prototype.join` / `TypedArray.prototype.join` over an array holding an
+`undefined`/`null` element, plus `TypedArrayConstructors` HasProperty `inspect`
+and `Array.prototype.reduce`/`reduceRight` — a real **−6** test262 regression
+(host lane) caught only by the full merge_group shards.
+
+**Fix:** scope the lib-file gate to `ctx.wasi || ctx.standalone` (pass
+`libReferencedNames` only then; `undefined` otherwise). The gc lane is now
+byte-identical to pre-#2520 (verified: 350 affected+diverse test262 files hash
+identically vs main), so zero gc-lane regressions are possible; the wasi
+flood-fix is unchanged (gate tests compile `--target wasi` and still pass).
+Regression tests: `tests/issue-2520-host-import-gate.test.ts` — new
+"gate must not break gc-lane codegen" block asserts those exact patterns compile
+to valid binaries. The deeper late-import index-shift remains latent (only the
+wasi/standalone path can still reorder the table); a separate hardening of the
+shift math is out of scope for this regression fix.
 
 ## Resolution (2026-06-20)
 
