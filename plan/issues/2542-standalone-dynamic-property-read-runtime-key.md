@@ -1,5 +1,6 @@
 ---
-id: 2511
+id: 2542
+renumbered_from: 2511
 title: "standalone: dynamic property read/write by a runtime string key (o[k]) returns default — needs native key enumeration + dynamic [[Get]]/[[Set]]"
 status: ready
 sprint: 64
@@ -17,7 +18,7 @@ needs: architect-spec
 origin: "2026-06-19 sd1 standalone host-import-leak hunt — the broad gap underlying #2371-phase2 (native for-in) and #2151 (any-receiver dispatch)"
 ---
 
-# #2511 — standalone dynamic property read/write by a runtime string key
+# #2542 — standalone dynamic property read/write by a runtime string key
 
 ## Problem
 
