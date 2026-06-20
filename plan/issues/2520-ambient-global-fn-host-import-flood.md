@@ -17,30 +17,46 @@ goal: correctness
 
 ## Resolution (2026-06-20)
 
-Fixed by **collapsing the per-import warnings into a one-line summary in the CLI,
-restorable with `--verbose`** — NOT by the referenced-names gate originally
-proposed below.
+Fixed by **two complementary changes**: a root-cause gate that stops registering
+unreferenced ambient globals, plus a CLI summary for whatever genuinely remains.
 
-Why the lighter fix is the right one: the per-import "Host import "env.X" … not on
-the dual-mode allowlist" warning (`registry/imports.ts` `addImport`,
-severity `"degrade"`) fires for *every dropped* host import, then the import is
-dropped and dead-code-eliminated — it **never reaches the `.wasm`**. The
-authoritative check is a *different*, emit-time scan (`assertNoLeakedHostImports`,
-severity `"error"`) that fires only if a host import actually *survives* into the
-binary. So the per-import warnings are redundant noise: under `--target wasi`
-essentially any program (anything referencing `Uint8Array`/`Date`/`Map`/…) trips
-~60 of them. The allowlist *budget* test (`host-import-allowlist-budget.test.ts`)
-governs the allowlist's size, not these warnings, so it is unaffected.
+### 1. Referenced-names gate (root fix) — `src/codegen/index.ts`
 
-Implemented: `src/cli.ts` collapses the allowlist warnings to
-`"N host import(s) … were dropped (no-op under WASI/strict mode; not in the
-emitted .wasm). Re-run with --verbose to list them."`; `--verbose`/`-v` restores
-the full per-import listing. Test: `tests/issue-2520-host-import-warning-verbosity.test.ts`.
+The lib-file `declare function` scan (`collectExternDeclarations` over
+`lib.*.d.ts`) registered an `env.<name>` host import for **every** ambient global
+function regardless of use — built mode-agnostically for JS-host mode, then
+register-then-dropped under strict mode. Now gated by
+`collectReferencedGlobalNames`: a name only registers if the user source has a
+genuine reference that **resolves (via the checker) to an ambient declaration**
+(a lib `declare function`, or a preprocessImports-injected ambient stub) — not a
+local variable / parameter / property of the same name, and not a polyfilled
+global (a `function` *with a body*, which needs no import). This is symbol-based,
+so a local `let stop = …` no longer pulls in the DOM `window.stop` global, and
+`obj.close` no longer pulls in `close`.
 
-The collection-stage over-emission (registering all ambient globals) still exists
-but is now invisible (dropped + summarized). The optional referenced-names gate
-(#2509) would additionally avoid the wasted collection work, but is not needed to
-silence the noise. Original analysis kept below for reference.
+Effect: a `Uint8Array`-only program drops from ~60 attempted imports to ~3
+(`global_Uint8Array`/`global_ArrayBuffer`, from the separate AMBIENT_BUILTIN_CTORS
+path); the native-messaging example from ~60 to ~6. Gated only on the **lib-file**
+call sites; user-file `declare function` stubs (preprocessImports) still always
+register. Test: `tests/issue-2520-host-import-gate.test.ts`.
+
+### 2. CLI summary collapse — `src/cli.ts`
+
+For whatever still registers-and-drops, the per-import "not on the dual-mode
+allowlist" warnings are redundant: they fire for *every dropped* import, then the
+import is dead-code-eliminated and never reaches the `.wasm`; the authoritative
+check is the emit-time scan (`assertNoLeakedHostImports`, severity `error`) that
+fires only if an import actually *survives*. So the CLI collapses them to a
+one-line summary by default; `--verbose`/`-v` restores the full listing. The
+allowlist *budget* test governs the allowlist's size (not these warnings), so it
+is unaffected. Test: `tests/issue-2520-host-import-warning-verbosity.test.ts`.
+
+Residual (not in scope here): the `global_<Ctor>` imports from the
+AMBIENT_BUILTIN_CTORS path register on any reference to a builtin (`Uint8Array`
+etc.) even when only the Wasm-native operations are used — a separate
+usage-context concern. And a web-vs-node target/environment model
+(`window.stop` makes no sense in a node host) is its own feature. Original
+analysis kept below for reference.
 
 ## Problem
 

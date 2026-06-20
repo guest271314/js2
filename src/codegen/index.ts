@@ -1070,10 +1070,11 @@ export function generateModule(
     // Scan lib files for DOM extern classes + globals (only if user code uses DOM)
     // After lib.d.ts refactoring, TS loads individual lib files (lib.es5.d.ts, etc.)
     if (sourceUsesLibGlobals(ast.sourceFile)) {
+      const libRefs = collectReferencedGlobalNames([ast.sourceFile], ctx.checker);
       for (const sf of ast.program.getSourceFiles()) {
         const baseName = sf.fileName.split("/").pop() ?? sf.fileName;
         if (baseName.startsWith("lib.") && baseName.endsWith(".d.ts")) {
-          collectExternDeclarations(ctx, sf);
+          collectExternDeclarations(ctx, sf, libRefs);
           collectDeclaredGlobals(ctx, sf, ast.sourceFile);
         }
       }
@@ -5167,10 +5168,11 @@ export function generateMultiModule(
     // After lib.d.ts refactoring, TS loads individual lib files (lib.es5.d.ts, etc.)
     const anyUsesDom = multiAst.sourceFiles.some((sf) => sourceUsesLibGlobals(sf));
     if (anyUsesDom) {
+      const libRefs = collectReferencedGlobalNames(multiAst.sourceFiles, ctx.checker);
       for (const libSf of multiAst.program.getSourceFiles()) {
         const baseName = libSf.fileName.split("/").pop() ?? libSf.fileName;
         if (baseName.startsWith("lib.") && baseName.endsWith(".d.ts")) {
-          collectExternDeclarations(ctx, libSf);
+          collectExternDeclarations(ctx, libSf, libRefs);
           for (const sf of multiAst.sourceFiles) {
             if (sourceUsesLibGlobals(sf)) {
               collectDeclaredGlobals(ctx, libSf, sf);
@@ -11308,7 +11310,50 @@ export function resolveMethodDispatchTarget(t: import("../ir/nodes.js").IrType):
 
 // ── Extern class collection ──────────────────────────────────────────
 
-function collectExternDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
+// #2520 — collect names that actually RESOLVE to an ambient (lib-declared)
+// global in the given user source. Symbol resolution distinguishes a real
+// reference to a global (e.g. `setTimeout(...)`) from a local variable or a
+// property that merely shares the name — e.g. a local `let stop = …` must NOT
+// pull in the DOM `window.stop` global, and `obj.close` must NOT pull in
+// `close`. Used to gate the lib-file ambient-`declare function` scan so only
+// genuinely-referenced globals register as host imports.
+function collectReferencedGlobalNames(userFiles: readonly ts.SourceFile[], checker: ts.TypeChecker): Set<string> {
+  const isLibFile = (sf: ts.SourceFile): boolean => {
+    const bn = sf.fileName.split("/").pop() ?? sf.fileName;
+    return bn.startsWith("lib.") && bn.endsWith(".d.ts");
+  };
+  // A genuine global reference resolves to an AMBIENT declaration: a lib
+  // `declare function`, OR a `declare function` stub preprocessImports injects
+  // into the user file (so `setTimeout` resolves to a user-file stub, not the
+  // lib). A local `let stop` resolves to a plain VariableDeclaration → excluded,
+  // so it can't pull in the same-named DOM global.
+  const isAmbientGlobalDecl = (d: ts.Declaration): boolean =>
+    isLibFile(d.getSourceFile()) || (ts.isFunctionDeclaration(d) && hasDeclareModifier(d) && !d.body);
+  const names = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node)) {
+      const decls = checker.getSymbolAtLocation(node)?.getDeclarations();
+      if (decls && decls.some(isAmbientGlobalDecl)) {
+        names.add(node.text);
+      }
+    }
+    forEachChild(node, visit);
+  };
+  for (const sf of userFiles) {
+    for (const stmt of sf.statements) forEachChild(stmt, visit);
+  }
+  return names;
+}
+
+// `libReferencedNames`, when provided (lib-file scan only), gates ambient
+// `declare function` host-import registration to names the user references
+// (#2520). User-file call sites omit it so preprocessImports stubs always
+// register.
+function collectExternDeclarations(
+  ctx: CodegenContext,
+  sourceFile: ts.SourceFile,
+  libReferencedNames?: Set<string>,
+): void {
   for (const stmt of sourceFile.statements) {
     if (ts.isModuleDeclaration(stmt) && hasDeclareModifier(stmt)) {
       collectDeclareNamespace(ctx, stmt, []);
@@ -11324,6 +11369,13 @@ function collectExternDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFil
     // In WASI mode, skip node:fs functions — they're handled by WASI syscall helpers.
     if (ts.isFunctionDeclaration(stmt) && stmt.name && hasDeclareModifier(stmt) && !stmt.body) {
       const name = stmt.name.text;
+      // #2520 — when scanning the TS lib files (libReferencedNames provided),
+      // only register an ambient `declare function` as an env host import if the
+      // user source actually references it. Otherwise one lib-global reference
+      // (Uint8Array/Date/…) drags in the whole ambient global-function surface
+      // (~60: eval/alert/fetch/scroll/…), each then dropped by the allowlist
+      // gate under --target wasi. User-file calls pass no set → always register.
+      if (libReferencedNames && !libReferencedNames.has(name)) continue;
       // Skip node:fs functions — they're handled by dedicated dispatch:
       //   • WASI target → __wasi_*  syscall helpers (#1035)
       //   • non-WASI + allowFs → __node_fs_* JS-host imports (#1491)
