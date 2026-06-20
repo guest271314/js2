@@ -20,13 +20,21 @@
 // 2026-05-30/31 (it stuck AWAITING_CHECKS with no `merge_group` dispatched, and
 // only a ~10-min ruleset disable/re-enable reset cleared it). The mechanism
 // built to un-strand PRs became the thing that wedged the queue. So this sweep
-// is now SURGICAL — three guards keep it from poking a forming queue:
+// is SURGICAL — its guards keep it from poking the FORMING HEAD:
 //
-//   1. BACK-OFF WHILE A HEAD IS FORMING — before sweeping, query the merge
-//      queue. If ANY entry is AWAITING_CHECKS (a merge group is mid-formation),
-//      SKIP THE ENTIRE SWEEP this run and let GitHub finish. We only sweep when
-//      no entry is AWAITING_CHECKS (queue idle / stable / empty). This is the
-//      key anti-wedge guard.
+//   1. NEVER TOUCH A QUEUED ENTRY (trailing-add only). The wedge was caused by
+//      dequeuing / re-adding the HEAD of a forming merge group — that membership
+//      change makes GitHub rebuild the group and cancels its in-flight run
+//      (#1758, project_merge_queue_requeue_cancels_run). This sweep ONLY enqueues
+//      PRs that are NOT already in the queue (the `already-queued` skip below
+//      covers every entry — forming OR stable — since the queue snapshot lists
+//      them all). Every enqueue is therefore a TRAILING APPEND to the queue tail,
+//      which does NOT alter the forming head's group and does NOT cancel its run.
+//      So we do NOT skip the whole sweep just because a head is forming — that
+//      over-broad back-off (the old behaviour) meant the serial queue, which
+//      almost always has a forming head, was rarely fed, and green PRs stranded
+//      until a human enqueued them. We log the forming head for visibility and
+//      proceed to append the trailing green PRs.
 //   2. GRACE WINDOW — only enqueue a PR whose checks have all been
 //      green for at least GRACE_MINUTES (default 10). "green since" is the most
 //      recent completion across the PR's check runs. A PR green for
@@ -177,8 +185,11 @@ function graphql(query, vars = {}) {
 
 // Merge-queue snapshot: PR numbers already queued + whether any head is forming.
 // `state` on a mergeQueueEntry is AWAITING_CHECKS while its merge group is being
-// built — that is exactly the window in which a dequeue/enqueue poke wedges the
-// serial queue (#1758).
+// built. `queued` lists EVERY entry (forming OR stable); the enqueue loop uses it
+// to skip PRs already in the queue, so we never re-touch the forming head — only
+// append trailing green PRs (#2560). `forming` is now informational only (logged,
+// no longer triggers a whole-sweep back-off): poking the head wedges the serial
+// queue (#1758), but a trailing append does not.
 function mergeQueueSnapshot() {
   const r = graphql(
     `{ repository(owner:"${OWNER}",name:"${NAME}"){ mergeQueue(branch:"main"){ entries(first:100){ nodes { state pullRequest { number } } } } } }`,
@@ -187,6 +198,17 @@ function mergeQueueSnapshot() {
   const queued = new Set(nodes.map((n) => n.pullRequest?.number).filter(Boolean));
   const forming = nodes.filter((n) => n.state === "AWAITING_CHECKS").map((n) => n.pullRequest?.number);
   return { queued, forming };
+}
+
+// TRAILING-ADD SAFETY INVARIANT (#2560). A PR is a candidate for auto-enqueue
+// ONLY if it is not already in the merge queue. `queued` is the full set of
+// queued entries (forming HEAD included). Returning false for any queued PR is
+// what guarantees every enqueue is a TRAILING APPEND to the queue tail — never a
+// re-touch of the forming head, which is the only operation that cancels a head's
+// in-flight merge_group run and wedges the serial queue (#1758). Pure + exported
+// so the invariant can be unit-tested without any `gh` call.
+export function isTrailingAddCandidate(prNumber, queued) {
+  return !queued.has(prNumber);
 }
 
 function openPrs() {
@@ -333,16 +355,26 @@ function rerunClaCheck(prNumber, branch) {
 function runSweep() {
   const { queued: inQueue, forming } = mergeQueueSnapshot();
 
-  // GUARD 1 — back off while a head is forming. A merge group mid-formation is the
-  // exact window where poking the serial queue wedges it (#1758). Skip the whole
-  // sweep; the next cycle (or CI-completion trigger) retries once the queue is idle.
+  // GUARD 1 — TRAILING-ADD ONLY; never touch the forming head (#2560, was #1758).
+  // A merge group mid-formation must not have its membership changed: dequeuing or
+  // re-adding the HEAD rebuilds the group and cancels its in-flight run, which is
+  // what wedged the serial queue twice on 2026-05-30/31. But this sweep only
+  // enqueues PRs NOT already in the queue (every queue entry — forming OR stable —
+  // is in `inQueue` and hits the `already-queued` skip below), so every enqueue is
+  // a TRAILING APPEND to the queue tail. A trailing append leaves the forming
+  // head's merge group untouched and does NOT cancel its run. So we do NOT skip the
+  // whole sweep just because a head is forming (the old back-off did, which —
+  // because the serial queue nearly always has a forming head — meant green PRs
+  // almost never got auto-enqueued and stranded until a human intervened). We log
+  // the forming head for visibility and proceed to append the trailing green PRs.
   if (forming.length > 0) {
     console.log(
-      `enqueue-green-prs: BACK OFF — ${forming.length} queue entr${
+      `enqueue-green-prs: ${forming.length} queue entr${
         forming.length === 1 ? "y is" : "ies are"
-      } AWAITING_CHECKS (head forming): ${forming.map((n) => `#${n}`).join(", ")}. Skipping sweep this cycle.`,
+      } AWAITING_CHECKS (head forming): ${forming
+        .map((n) => `#${n}`)
+        .join(", ")}. Proceeding — only TRAILING green PRs are appended; the forming head is never touched.`,
     );
-    process.exit(0);
   }
 
   const prs = openPrs();
@@ -403,7 +435,11 @@ function runSweep() {
       skipped.push([pr.number, "hold-label"]);
       continue;
     }
-    if (inQueue.has(pr.number)) {
+    // TRAILING-ADD SAFETY (#2560): never re-touch a PR already in the queue
+    // (forming head OR stable entry). Skipping every queued PR is what keeps each
+    // enqueue a trailing append to the tail, so a forming head's merge_group run
+    // is never cancelled (#1758).
+    if (!isTrailingAddCandidate(pr.number, inQueue)) {
       skipped.push([pr.number, "already-queued"]);
       continue;
     }
