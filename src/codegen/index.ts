@@ -2438,6 +2438,40 @@ function buildSetterStore(
  * operand patch is uniform across the legacy AND IR backends (it walks emitted
  * `Instr` streams, not a specific construction path).
  */
+
+/**
+ * (#2009 R3b) Permute a struct's slot-order field names into JS INSERTION order
+ * for the host name export, using the per-literal order recorded in
+ * `ctx.structInsertionOrder` (see its doc). MEMBERSHIP is preserved exactly:
+ * the returned list is `slotNames` reordered, never added to or filtered — every
+ * name still resolves to its `__sget_<name>` getter. Names present in the
+ * insertion-order list come first in that order; any slot name not in the list
+ * (defensive — should not happen for a literal-derived struct) keeps its
+ * original relative position at the end. No recorded order ⇒ `slotNames`
+ * unchanged (plain literals, IR-fresh structs, named classes).
+ */
+function orderNamesByInsertion(ctx: CodegenContext, structName: string, slotNames: string[]): string[] {
+  const order = ctx.structInsertionOrder.get(structName);
+  if (!order || order.length === 0) return slotNames;
+  const slotSet = new Set(slotNames);
+  const ordered: string[] = [];
+  const placed = new Set<string>();
+  for (const name of order) {
+    if (slotSet.has(name) && !placed.has(name)) {
+      ordered.push(name);
+      placed.add(name);
+    }
+  }
+  // Append any slot name the insertion list did not cover, in slot order.
+  for (const name of slotNames) {
+    if (!placed.has(name)) {
+      ordered.push(name);
+      placed.add(name);
+    }
+  }
+  return ordered;
+}
+
 function resolveSameShapeFieldNameCollisions(ctx: CodegenContext): void {
   // Host enumeration is JS-only; standalone/WASI has no host name export.
   if (ctx.nativeStrings) return;
@@ -2470,13 +2504,19 @@ function resolveSameShapeFieldNameCollisions(ctx: CodegenContext): void {
       typeParts.push(typeKindKey(f.type));
     }
     if (names.length === 0) continue; // no host-enumerable fields
+    // (#2009 R3b) The structural-shape key (`typeParts`) is built from slot order
+    // so same-shape grouping is unaffected, but the enumerated `names` are
+    // permuted to JS insertion order — so the shape-id CSV the host reads
+    // reflects spec enumeration order, and two colliding structs with the SAME
+    // insertion order share a shape-id.
+    const orderedNames = orderNamesByInsertion(ctx, structName, names);
     const shapeKey = typeParts.join("|");
     let group = byShape.get(shapeKey);
     if (!group) {
       group = [];
       byShape.set(shapeKey, group);
     }
-    group.push({ structName, typeIdx, names });
+    group.push({ structName, typeIdx, names: orderedNames });
   }
 
   // A group "collides" iff it contains 2+ DISTINCT field-name lists. (Two
@@ -2613,7 +2653,10 @@ function emitStructFieldNamesExport(
       if (field.name.startsWith("$") || field.name.startsWith("__")) continue;
       names.push(field.name);
     }
-    if (names.length > 0) legacyEntries.push({ typeIdx, names });
+    // (#2009 R3b) Permute to JS insertion order for spec-correct host
+    // enumeration; no-op when no literal-derived order was recorded.
+    const orderedNames = orderNamesByInsertion(ctx, structName, names);
+    if (orderedNames.length > 0) legacyEntries.push({ typeIdx, names: orderedNames });
   }
 
   if (legacyEntries.length === 0 && shapeEntries.length === 0) return;
@@ -5484,9 +5527,35 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // output. We now place the stdin buffer in page 1 (WASI_STDIN_BUF_START) and
   // the write scratch in page 2 (WASI_WRITE_SCRATCH_START), well above any
   // data segment, and reserve 3 pages so both regions always exist.
-  ctx.mod.memories.push({ min: 3 });
-  // WASI requires the memory to be exported as "memory"
-  ctx.mod.exports.push({ name: "memory", desc: { kind: "memory", index: 0 } });
+  if (ctx.nodeIoShim) {
+    // #2524 Phase 1 — the node-io shim OWNS + exports the linear memory; the
+    // user module IMPORTS it (memory index 0) so the shim can read/write the
+    // user's bytes over the SAME memory with no instantiation cycle (shim
+    // imports only wasi_snapshot_preview1; user imports {memory + io fns} from
+    // the already-instantiated shim). The user module therefore declares NO
+    // memory and exports none. `min: 3` mirrors the inline path's reservation
+    // (page 0 scratch/data, page 1 stdin buffer, page 2 write scratch); the
+    // shim's exported memory must be at least this large (its source declares
+    // the same min). Imports MUST precede the func imports below so the memory
+    // sits at memory-index 0 (loads/stores/`memory.size`/`memory.grow` all
+    // target it). The import order within the import section does not perturb
+    // the func index space — only func imports increment it.
+    addImport(ctx, "js2wasm:node-io", "memory", { kind: "memory", min: 3 });
+    // The three byte-boundary IO functions (over the shared memory):
+    //   stdout_write(ptr,len)->i32 · stderr_write(ptr,len) · stdin_read(ptr,len)->i32
+    const ioWriteType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], "$node_io_write");
+    const ioWriteVoidType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [], "$node_io_write_void");
+    addImport(ctx, "js2wasm:node-io", "stdout_write", { kind: "func", typeIdx: ioWriteType });
+    ctx.nodeIoStdoutWriteIdx = ctx.funcMap.get("stdout_write")!;
+    addImport(ctx, "js2wasm:node-io", "stderr_write", { kind: "func", typeIdx: ioWriteVoidType });
+    ctx.nodeIoStderrWriteIdx = ctx.funcMap.get("stderr_write")!;
+    addImport(ctx, "js2wasm:node-io", "stdin_read", { kind: "func", typeIdx: ioWriteType });
+    ctx.nodeIoStdinReadIdx = ctx.funcMap.get("stdin_read")!;
+  } else {
+    ctx.mod.memories.push({ min: 3 });
+    // WASI requires the memory to be exported as "memory"
+    ctx.mod.exports.push({ name: "memory", desc: { kind: "memory", index: 0 } });
+  }
 
   // Add bump pointer global (mutable i32, starts at 0)
   // We reserve the first 1024 bytes for iovec scratch space
@@ -5638,8 +5707,27 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   }
   forEachChild(sourceFile, visit);
 
+  // #2524 — remember whether the source needs a stream/console *write* helper
+  // (console.log/warn/error, process.std*.write) independent of the syscall
+  // import decision below. Under the node-io shim those helpers still get
+  // emitted, but they call `js2wasm:node-io::std{out,err}_write` instead of
+  // `wasi_snapshot_preview1.fd_write`.
+  const needsStreamWriteHelper = needsFdWrite;
+
   // writeFileSync also needs fd_write for the actual file data write
   if (needsPathOpen) needsFdWrite = true;
+
+  // #2524 Phase 1 — when the node-io shim is active, the stream/console IO path
+  // (process.std*.write, process.stdin.read, console.log/warn/error) is lowered
+  // to `js2wasm:node-io` calls (registered above), so it does NOT pull
+  // wasi_snapshot_preview1.fd_read/fd_write into the user module. Only a file
+  // write (writeFileSync → path_open) still needs the real syscalls. Recompute
+  // the syscall-import needs accordingly: keep fd_write solely for the file
+  // path, and drop fd_read entirely (stdin goes through the shim).
+  if (ctx.nodeIoShim) {
+    needsFdWrite = needsPathOpen;
+    needsFdRead = false;
+  }
 
   // fd_write(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) -> i32
   if (needsFdWrite) {
@@ -5776,7 +5864,10 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // entries pointing at indices that the subsequent direct `addImport` calls
   // silently shift past, corrupting later lookups (e.g. `__wasi_write_string`
   // referenced by `ensureWasiWriteI32Helper` during user-code compilation).
-  if (needsFdWrite) {
+  // #2524 — the console/stream write helper is emitted whenever the source
+  // writes to stdout/stderr, even when the node-io shim diverts the actual
+  // syscall (so `needsFdWrite` was recomputed to the file-only need above).
+  if (needsFdWrite || needsStreamWriteHelper) {
     ctx.wasiPendingFdWriteHelper = true;
   }
   if (needsConsoleStderr) {
@@ -5917,25 +6008,34 @@ function emitWasiWriteStringHelper(ctx: CodegenContext): void {
   ctx.funcMap.set("__wasi_write_string", funcIdx);
 
   // Parameters: 0=ptr, 1=len
-  // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }
-  // nwritten at memory[8]
-  const body: Instr[] = [
-    // Store ptr at memory[0] (iovec.buf)
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.get", index: 0 } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // Store len at memory[4] (iovec.buf_len)
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: 1 } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // Call fd_write(fd=1, iovs=0, iovs_len=1, nwritten=8)
-    { op: "i32.const", value: 1 } as Instr, // fd = stdout
-    { op: "i32.const", value: 0 } as Instr, // iovs pointer
-    { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
-    { op: "i32.const", value: 8 } as Instr, // nwritten pointer
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "drop" } as Instr, // drop the return value (errno)
-  ];
+  // #2524 Phase 1 — under the node-io shim, delegate straight to the imported
+  // `js2wasm:node-io::stdout_write(ptr, len)` (the shim owns the iovec/syscall);
+  // no fd_write import exists in the user module.
+  const body: Instr[] = ctx.nodeIoShim
+    ? [
+        { op: "local.get", index: 0 } as Instr,
+        { op: "local.get", index: 1 } as Instr,
+        { op: "call", funcIdx: ctx.nodeIoStdoutWriteIdx } as Instr,
+        { op: "drop" } as Instr, // drop bytes-written
+      ]
+    : [
+        // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }; nwritten at memory[8]
+        // Store ptr at memory[0] (iovec.buf)
+        { op: "i32.const", value: 0 } as Instr,
+        { op: "local.get", index: 0 } as Instr,
+        { op: "i32.store", align: 2, offset: 0 } as Instr,
+        // Store len at memory[4] (iovec.buf_len)
+        { op: "i32.const", value: 4 } as Instr,
+        { op: "local.get", index: 1 } as Instr,
+        { op: "i32.store", align: 2, offset: 0 } as Instr,
+        // Call fd_write(fd=1, iovs=0, iovs_len=1, nwritten=8)
+        { op: "i32.const", value: 1 } as Instr, // fd = stdout
+        { op: "i32.const", value: 0 } as Instr, // iovs pointer
+        { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
+        { op: "i32.const", value: 8 } as Instr, // nwritten pointer
+        { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+        { op: "drop" } as Instr, // drop the return value (errno)
+      ];
 
   ctx.mod.functions.push({
     name: "__wasi_write_string",
@@ -5957,25 +6057,32 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
   ctx.funcMap.set("__wasi_write_string_stderr", funcIdx);
 
   // Parameters: 0=ptr, 1=len
-  // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }
-  // nwritten at memory[8]
-  const body: Instr[] = [
-    // Store ptr at memory[0] (iovec.buf)
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "local.get", index: 0 } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // Store len at memory[4] (iovec.buf_len)
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: 1 } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // Call fd_write(fd=2, iovs=0, iovs_len=1, nwritten=8)
-    { op: "i32.const", value: 2 } as Instr, // fd = stderr
-    { op: "i32.const", value: 0 } as Instr, // iovs pointer
-    { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
-    { op: "i32.const", value: 8 } as Instr, // nwritten pointer
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "drop" } as Instr, // drop the return value (errno)
-  ];
+  // #2524 Phase 1 — under the node-io shim, delegate to the imported
+  // `js2wasm:node-io::stderr_write(ptr, len)` (returns void).
+  const body: Instr[] = ctx.nodeIoShim
+    ? [
+        { op: "local.get", index: 0 } as Instr,
+        { op: "local.get", index: 1 } as Instr,
+        { op: "call", funcIdx: ctx.nodeIoStderrWriteIdx } as Instr,
+      ]
+    : [
+        // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }; nwritten at memory[8]
+        // Store ptr at memory[0] (iovec.buf)
+        { op: "i32.const", value: 0 } as Instr,
+        { op: "local.get", index: 0 } as Instr,
+        { op: "i32.store", align: 2, offset: 0 } as Instr,
+        // Store len at memory[4] (iovec.buf_len)
+        { op: "i32.const", value: 4 } as Instr,
+        { op: "local.get", index: 1 } as Instr,
+        { op: "i32.store", align: 2, offset: 0 } as Instr,
+        // Call fd_write(fd=2, iovs=0, iovs_len=1, nwritten=8)
+        { op: "i32.const", value: 2 } as Instr, // fd = stderr
+        { op: "i32.const", value: 0 } as Instr, // iovs pointer
+        { op: "i32.const", value: 1 } as Instr, // iovs_len = 1
+        { op: "i32.const", value: 8 } as Instr, // nwritten pointer
+        { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+        { op: "drop" } as Instr, // drop the return value (errno)
+      ];
 
   ctx.mod.functions.push({
     name: "__wasi_write_string_stderr",
@@ -6009,6 +6116,49 @@ const WASI_WRITE_SCRATCH_START = 128 * 1024;
  * `memory.grow` in `__lin_u8_alloc`.
  */
 const LINEAR_U8_ARENA_START = 256 * 1024;
+
+/**
+ * #2524 Phase 1 — emit the "write `len` bytes starting at linear `srcConst`
+ * to fd `fd`, discarding the result" tail used by the GC-buffer / string
+ * `__wasi_write_*` helpers. `len` is read from the named local index.
+ *
+ * Inline (default) path: build the iovec at memory[0..7] pointing at
+ * `srcConst`, call `fd_write(fd, iovs=0, iovs_len=1, nwritten=8)`, drop errno.
+ *
+ * Shim path (`ctx.nodeIoShim`): call the imported `js2wasm:node-io`
+ * `stdout_write`/`stderr_write(srcConst, len)` directly — the shim owns the
+ * iovec + syscall over the shared memory. `stdout_write` returns bytes-written
+ * (dropped); `stderr_write` returns void.
+ */
+function emitWasiWriteTail(ctx: CodegenContext, fd: number, srcConst: number, lenLocalIdx: number): Instr[] {
+  if (ctx.nodeIoShim) {
+    const useStderr = fd === 2;
+    const ioIdx = useStderr ? ctx.nodeIoStderrWriteIdx : ctx.nodeIoStdoutWriteIdx;
+    return [
+      { op: "i32.const", value: srcConst } as Instr,
+      { op: "local.get", index: lenLocalIdx } as Instr,
+      { op: "call", funcIdx: ioIdx } as Instr,
+      ...(useStderr ? [] : [{ op: "drop" } as Instr]),
+    ];
+  }
+  return [
+    // iovec.buf = srcConst at memory[0]
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: srcConst } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // iovec.buf_len = len at memory[4]
+    { op: "i32.const", value: 4 } as Instr,
+    { op: "local.get", index: lenLocalIdx } as Instr,
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
+    { op: "i32.const", value: fd } as Instr,
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.const", value: 8 } as Instr,
+    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+    { op: "drop" } as Instr,
+  ];
+}
 
 /**
  * #1886 Slice B — Ensure the `__lin_u8_alloc(len: i32) -> i32` bump allocator
@@ -6150,7 +6300,8 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
   const existing = ctx.funcMap.get(helperName);
   if (existing !== undefined) return existing;
 
-  if (!ctx.wasi || ctx.wasiFdWriteIdx === undefined || ctx.nativeStrTypeIdx < 0) return -1;
+  // #2524 — node-io shim path needs no fd_write idx (see Uint8Array helper).
+  if (!ctx.wasi || (!ctx.nodeIoShim && ctx.wasiFdWriteIdx === undefined) || ctx.nativeStrTypeIdx < 0) return -1;
 
   // Make sure the native-string runtime (incl. __str_flatten) is emitted.
   ensureNativeStringHelpers(ctx);
@@ -6471,21 +6622,9 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
       ],
     },
 
-    // iovec.buf = SCRATCH_START at memory[0]
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // iovec.buf_len = actual UTF-8 byte length at memory[4]
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: O } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
-    { op: "i32.const", value: fd } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.const", value: 8 } as Instr,
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "drop" } as Instr,
+    // #2524 — write the staged UTF-8 region (`O` bytes) via fd_write or the
+    // node-io shim's stdout/stderr_write.
+    ...emitWasiWriteTail(ctx, fd, WASI_WRITE_SCRATCH_START, O),
   ];
 
   ctx.mod.functions.push({
@@ -6530,7 +6669,9 @@ export function ensureWasiWriteUint8ArrayHelper(
   vecTypeIdx: number,
   useStderr: boolean = false,
 ): number {
-  if (!ctx.wasi || ctx.wasiFdWriteIdx === undefined) return -1;
+  // #2524 — under the node-io shim the write is satisfied by the imported
+  // `js2wasm:node-io` fns (no fd_write idx); otherwise it needs the real fd_write.
+  if (!ctx.wasi || (!ctx.nodeIoShim && ctx.wasiFdWriteIdx === undefined)) return -1;
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
   if (arrTypeIdx < 0) return -1;
   const arrDef = ctx.mod.types[arrTypeIdx];
@@ -6645,21 +6786,8 @@ export function ensureWasiWriteUint8ArrayHelper(
       ],
     },
 
-    // iovec.buf = SCRATCH_START at memory[0]
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // iovec.buf_len = len at memory[4]
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: LEN } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
-    { op: "i32.const", value: fd } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.const", value: 8 } as Instr,
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "drop" } as Instr,
+    // #2524 — write the staged scratch region (fd_write inline, or node-io shim)
+    ...emitWasiWriteTail(ctx, fd, WASI_WRITE_SCRATCH_START, LEN),
   ];
 
   ctx.mod.functions.push({
@@ -6698,7 +6826,8 @@ export function ensureWasiWriteArrayBufferHelper(
   const existing = ctx.funcMap.get(helperName);
   if (existing !== undefined) return existing;
 
-  if (!ctx.wasi || ctx.wasiFdWriteIdx === undefined) return -1;
+  // #2524 — node-io shim path needs no fd_write idx (see Uint8Array helper).
+  if (!ctx.wasi || (!ctx.nodeIoShim && ctx.wasiFdWriteIdx === undefined)) return -1;
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
   if (arrTypeIdx < 0) return -1;
 
@@ -6796,21 +6925,8 @@ export function ensureWasiWriteArrayBufferHelper(
       ],
     },
 
-    // iovec.buf = SCRATCH_START at memory[0]
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // iovec.buf_len = len at memory[4]
-    { op: "i32.const", value: 4 } as Instr,
-    { op: "local.get", index: LEN } as Instr,
-    { op: "i32.store", align: 2, offset: 0 } as Instr,
-    // fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
-    { op: "i32.const", value: fd } as Instr,
-    { op: "i32.const", value: 0 } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.const", value: 8 } as Instr,
-    { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
-    { op: "drop" } as Instr,
+    // #2524 — write the staged scratch region (fd_write inline, or node-io shim)
+    ...emitWasiWriteTail(ctx, fd, WASI_WRITE_SCRATCH_START, LEN),
   ];
 
   ctx.mod.functions.push({
@@ -9137,6 +9253,24 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
           { op: "return" },
         ],
       },
+      // #1910 R3 — a boxed boolean (the [[BooleanData]] slot of a
+      // `new Boolean(x)` wrapper, recovered by `__to_primitive`) coerces per
+      // §7.1.4 ToNumber(true)=1, ToNumber(false)=0. Without this arm a boxed
+      // boolean fell through to the opaque-ref NaN fallback, so
+      // `Number(new Boolean(true))` returned NaN instead of 1.
+      { op: "local.get", index: 1 },
+      { op: "ref.test", typeIdx: boxBoolStructIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 1 },
+          { op: "ref.cast", typeIdx: boxBoolStructIdx },
+          { op: "struct.get", typeIdx: boxBoolStructIdx, fieldIdx: 0 },
+          { op: "f64.convert_i32_s" },
+          { op: "return" },
+        ],
+      },
       ...(strToNumberIdx !== undefined && ctx.anyStrTypeIdx >= 0
         ? ([
             // StringToNumber (§7.1.4.1): object ToPrimitive can yield a native
@@ -9586,6 +9720,189 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
   //     string (today's callers compare against literal tags via the
   //     __typeof_* helpers above).
   registerNative("__typeof", externrefToExternref, [{ op: "ref.null.extern" }]);
+
+  // #2508 — native `__host_eq` (Strict Equality, §7.2.16) and
+  // `__same_value_zero` (SameValueZero, §7.2.11) over two boxed externrefs, so
+  // standalone `any[].indexOf/lastIndexOf/includes` need no JS host import. Tag
+  // dispatch mirrors the inline `===` lowering (#1776, binary-ops.ts): both
+  // number → unbox f64 & compare; both boolean → unbox i32; both bigint →
+  // i64; else reference identity on the WasmGC `eq` heap type. The ONLY
+  // difference between Strict and SameValueZero is the number arm's NaN case:
+  // Strict has NaN ≠ NaN (`f64.eq`), SameValueZero has NaN = NaN. Both treat
+  // +0 = -0 as equal, which `f64.eq` already gives.
+  {
+    const externref2ToI32 = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
+    const typeofNumIdx = ctx.funcMap.get("__typeof_number")!;
+    const typeofBoolIdx = ctx.funcMap.get("__typeof_boolean")!;
+    const typeofBigIdx = ctx.funcMap.get("__typeof_bigint")!;
+    const unboxNumIdx = ctx.funcMap.get("__unbox_number")!;
+    const unboxBoolIdx = ctx.funcMap.get("__unbox_boolean")!;
+    const toBigIdx = ctx.funcMap.get("__to_bigint")!;
+    const EQ_HEAP = -19; // WasmGC `eq` abstract heap type
+
+    // params: l=0, r=1 ; locals: la=2 (anyref), ra=3 (anyref)
+    const bothTag = (tagIdx: number): Instr[] => [
+      { op: "local.get", index: 0 },
+      { op: "call", funcIdx: tagIdx } as Instr,
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: tagIdx } as Instr,
+      { op: "i32.and" },
+    ];
+    // Reference-identity arm (else): both refs convert to anyref (locals 2/3);
+    // if both are eq heap refs, ref.eq; otherwise unequal.
+    const refIdentityArm: Instr[] = [
+      { op: "local.get", index: 2 },
+      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "local.get", index: 3 },
+      { op: "ref.test", typeIdx: EQ_HEAP } as Instr,
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 2 },
+          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "local.get", index: 3 },
+          { op: "ref.cast", typeIdx: EQ_HEAP } as Instr,
+          { op: "ref.eq" },
+        ],
+        else: [{ op: "i32.const", value: 0 }],
+      } as Instr,
+    ];
+    // String VALUE equality is NOT inlined here. A boxed-any STRING element
+    // compares by content (`["x"].indexOf("x")` must match), which needs a
+    // `__str_flatten`+`__str_equals` call. But those helpers live in the
+    // native-string regime BELOW the union-helper base, and any call to them
+    // baked into THIS union-helper body drifts under the late-import finalize
+    // shift (`reconcileNativeStrFinalizeShift` re-bases every `call funcIdx >=
+    // base`), landing on the wrong function — the encoder then patches the stack
+    // with `extern.convert_any; …; drop`, which the GC validator accepts but
+    // wasm-opt rejects ("popping from empty stack", surfaced as the
+    // native-messaging-smoke CI failure). Rather than fight the cross-regime
+    // index shift, the string arm falls back to `eq`-heap ref identity here:
+    // VALID Wasm, correct for interned/same-ref strings. String-element `any[]`
+    // search-by-VALUE is a tracked #2508 follow-up that belongs in a
+    // `__any_str_value_eq` helper registered in the native-string regime.
+    const stringOrIdentityArm: Instr[] = refIdentityArm;
+    // Materialise the anyref temps (locals 2/3) once, then dispatch string/ref.
+    const identityArm: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 2 },
+      { op: "local.get", index: 1 },
+      { op: "any.convert_extern" } as Instr,
+      { op: "local.set", index: 3 },
+      ...stringOrIdentityArm,
+    ];
+    const bigintArm = (elseArm: Instr[]): Instr[] => [
+      ...bothTag(typeofBigIdx),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: toBigIdx } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: toBigIdx } as Instr,
+          { op: "i64.eq" },
+        ],
+        else: elseArm,
+      } as Instr,
+    ];
+    const boolArm = (elseArm: Instr[]): Instr[] => [
+      ...bothTag(typeofBoolIdx),
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: unboxBoolIdx } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: unboxBoolIdx } as Instr,
+          { op: "i32.eq" },
+        ],
+        else: elseArm,
+      } as Instr,
+    ];
+    // numberArm: sameValueZero=true adds a NaN==NaN recovery (a!=a && b!=b).
+    const numberArm = (sameValueZero: boolean, elseArm: Instr[]): Instr[] => {
+      const cmp: Instr[] = [
+        { op: "local.get", index: 0 },
+        { op: "call", funcIdx: unboxNumIdx } as Instr,
+        { op: "local.get", index: 1 },
+        { op: "call", funcIdx: unboxNumIdx } as Instr,
+      ];
+      if (!sameValueZero) {
+        cmp.push({ op: "f64.eq" });
+      } else {
+        // (la == ra) || (la != la && ra != ra)   [NaN === NaN under SVZ]
+        // Stack has la, ra. Tee both into anyref-free f64 temps via locals 4/5.
+        cmp.length = 0;
+        cmp.push(
+          { op: "local.get", index: 0 },
+          { op: "call", funcIdx: unboxNumIdx } as Instr,
+          { op: "local.set", index: 4 } as Instr,
+          { op: "local.get", index: 1 },
+          { op: "call", funcIdx: unboxNumIdx } as Instr,
+          { op: "local.set", index: 5 } as Instr,
+          // la == ra
+          { op: "local.get", index: 4 } as Instr,
+          { op: "local.get", index: 5 } as Instr,
+          { op: "f64.eq" },
+          // || (la!=la && ra!=ra)
+          { op: "local.get", index: 4 } as Instr,
+          { op: "local.get", index: 4 } as Instr,
+          { op: "f64.ne" },
+          { op: "local.get", index: 5 } as Instr,
+          { op: "local.get", index: 5 } as Instr,
+          { op: "f64.ne" },
+          { op: "i32.and" },
+          { op: "i32.or" },
+        );
+      }
+      return [
+        ...bothTag(typeofNumIdx),
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: cmp,
+          else: elseArm,
+        } as Instr,
+      ];
+    };
+
+    // __host_eq: Strict Equality. null === null (both ref.null extern) → the
+    // identity arm's ref.test EQ fails for null (ref.null isn't an eq ref), so
+    // handle the both-null case up front: ref.is_null l && ref.is_null r → 1.
+    const nullArm = (rest: Instr[]): Instr[] => [
+      { op: "local.get", index: 0 },
+      { op: "ref.is_null" },
+      { op: "local.get", index: 1 },
+      { op: "ref.is_null" },
+      { op: "i32.and" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [{ op: "i32.const", value: 1 }],
+        else: rest,
+      } as Instr,
+    ];
+
+    const eqLocals = [
+      { name: "la", type: { kind: "anyref" } as ValType },
+      { name: "ra", type: { kind: "anyref" } as ValType },
+      { name: "fa", type: { kind: "f64" } as ValType },
+      { name: "fb", type: { kind: "f64" } as ValType },
+    ];
+
+    registerNative("__host_eq", externref2ToI32, nullArm(numberArm(false, boolArm(bigintArm(identityArm)))), eqLocals);
+    registerNative(
+      "__same_value_zero",
+      externref2ToI32,
+      nullArm(numberArm(true, boolArm(bigintArm(identityArm)))),
+      eqLocals,
+    );
+  }
 }
 
 /**
