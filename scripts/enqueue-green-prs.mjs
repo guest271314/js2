@@ -43,6 +43,23 @@
 // Combined with the lowered cron (~30 min) + single-flight concurrency guard in
 // the workflow, this removes the high-frequency serial-queue poking entirely.
 //
+// AUTHOR-TRUST GATE (#2549). Auto-enqueue is the PRIMARY enqueuer of green PRs
+// now that dev agents no longer self-enqueue, so its trust boundary is
+// load-bearing. A stranger's fork normally can't even reach "all-green" because
+// arbitrary-fork CI does not run without a maintainer approving the workflow run
+// (approve-fork-runs.yml only auto-approves the trusted `ttraenkler/js2` fork).
+// But "approve CI to review an external PR" is a NORMAL maintainer action, and
+// if that run goes green this sweep would otherwise enqueue it → auto-merge.
+// "Approve CI" must NOT imply "approve merge." So this script ONLY enqueues PRs
+// whose `authorAssociation` is in TRUSTED_AUTHOR_ASSOCIATIONS (OWNER / MEMBER /
+// COLLABORATOR); every external PR (FIRST_TIME_CONTRIBUTOR / NONE / CONTRIBUTOR
+// without org membership) is SKIPPED with `untrusted-author:<assoc>` and ALWAYS
+// requires a deliberate human enqueue, no matter how green. `cla-check`
+// (a real merge gate now) is the separate, deeper line of defense for external
+// contributions; this author gate is the first line. NOTE: `gh pr list --json`
+// does NOT expose authorAssociation (gh 2.23), so it is fetched via GraphQL —
+// see authorAssociations() below.
+//
 // SAFETY: the merge queue re-runs the REQUIRED checks (cheap gate, merge shard
 // reports, quality, equivalence-gate, test262 regression gate) on the merged
 // state before landing, and GitHub branch protection is the hard block. The
@@ -68,6 +85,16 @@ const HOLD_LABELS = new Set(["hold", "do-not-merge", "do not merge", "wip", "blo
 // the state that allowed red PRs to enter the merge queue.
 const ENQUEUEABLE = new Set(["CLEAN", "HAS_HOOKS"]);
 const PASSING_CHECK_STATES = new Set(["pass", "skipping"]);
+// AUTHOR-TRUST GATE (#2549). Only PRs whose authorAssociation is one of these
+// are auto-enqueueable. The rationale: auto-enqueue is now the primary enqueuer
+// of green PRs, and a maintainer manually approving a STRANGER's CI run to
+// review their external PR ("approve CI") must NOT cascade into an auto-merge
+// ("approve merge"). OWNER/MEMBER/COLLABORATOR are people with write/org access
+// — work the merge queue may land unattended. Everything else
+// (FIRST_TIME_CONTRIBUTOR / NONE / CONTRIBUTOR-without-membership) is external
+// and ALWAYS requires a deliberate human enqueue. `cla-check` remains the
+// separate, deeper merge gate for external contributions; this is the first line.
+const TRUSTED_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 
 const [OWNER, NAME] = REPO.split("/");
 
@@ -123,6 +150,26 @@ function openPrs() {
       "number,mergeStateStatus,isDraft,labels,id,title,headRefName,createdAt",
     ]),
   );
+}
+
+// AUTHOR-TRUST GATE (#2549). `gh pr list --json` cannot return authorAssociation
+// (unsupported field in gh 2.23 — it errors "Unknown JSON field"), so fetch it
+// for all open PRs in one GraphQL page and return a { prNumber -> assoc } map.
+// `authorAssociation` is OWNER / MEMBER / COLLABORATOR / CONTRIBUTOR /
+// FIRST_TIME_CONTRIBUTOR / FIRST_TIMER / MANNEQUIN / NONE (the actor's relation
+// to the BASE repo, loopdive/js2). A number missing from the map (e.g. >100 open
+// PRs, or a transient GraphQL hiccup) is treated as untrusted by the caller —
+// fail closed, never enqueue a PR whose association we could not confirm.
+function authorAssociations() {
+  const r = graphql(
+    `{ repository(owner:"${OWNER}",name:"${NAME}"){ pullRequests(first:100,states:OPEN){ nodes { number authorAssociation } } } }`,
+  );
+  const nodes = r?.data?.repository?.pullRequests?.nodes || [];
+  const byNumber = new Map();
+  for (const n of nodes) {
+    if (n?.number != null) byNumber.set(n.number, n.authorAssociation || "NONE");
+  }
+  return byNumber;
 }
 
 // "green since" = the most-recent completion time across the PR's check
@@ -237,6 +284,10 @@ if (forming.length > 0) {
 }
 
 const prs = openPrs();
+// AUTHOR-TRUST GATE (#2549). Fetch authorAssociation for all open PRs once (gh
+// pr list cannot return it). The enqueue loop fails closed: a PR missing from
+// this map, or whose association is not trusted, is never auto-enqueued.
+const authorAssoc = authorAssociations();
 const enqueued = [];
 const skipped = [];
 const updated = [];
@@ -296,6 +347,15 @@ for (const pr of prs) {
   }
   if (!ENQUEUEABLE.has(pr.mergeStateStatus)) {
     skipped.push([pr.number, pr.mergeStateStatus]); // BLOCKED/BEHIND/DIRTY/DRAFT/UNKNOWN
+    continue;
+  }
+  // AUTHOR-TRUST GATE (#2549). Fail closed: only OWNER/MEMBER/COLLABORATOR PRs
+  // auto-enqueue. An external PR — even one a maintainer manually approved CI
+  // for, to review it — ALWAYS needs a deliberate human enqueue. "Approve CI"
+  // ≠ "approve merge." A PR missing from the map (assoc unknown) is untrusted.
+  const assoc = authorAssoc.get(pr.number) || "UNKNOWN";
+  if (!TRUSTED_AUTHOR_ASSOCIATIONS.has(assoc)) {
+    skipped.push([pr.number, `untrusted-author:${assoc}`]);
     continue;
   }
   const checks = visibleCheckState(pr.number);
