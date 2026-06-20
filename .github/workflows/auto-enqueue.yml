@@ -66,8 +66,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
+      # Mint a GitHub App installation token (#2523). Enqueuing via GITHUB_TOKEN
+      # does NOT trigger merge_group workflows ("a workflow run cannot trigger
+      # another workflow run"), so the queue head wedges (AWAITING_CHECKS, zero
+      # merge_group runs) — this cost a full night on 2026-06-19/20. A GitHub
+      # App is a distinct actor, so its enqueues DO fire merge_group runs.
+      # No `|| secrets.GITHUB_TOKEN` fallback ON PURPOSE: a missing/invalid app
+      # secret must fail this job LOUDLY, never silently re-introduce the wedge.
+      - name: Mint GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.ENQUEUE_APP_ID }}
+          private-key: ${{ secrets.ENQUEUE_APP_PRIVATE_KEY }}
       - name: Enqueue green PRs
         env:
-          GH_TOKEN: ${{ secrets.AUTO_ENQUEUE_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
         run: node scripts/enqueue-green-prs.mjs
