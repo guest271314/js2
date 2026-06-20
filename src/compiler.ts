@@ -777,6 +777,7 @@ export function compileSourceSync(
         utf8Storage: options.utf8Storage,
         testRuntime: options.testRuntime,
         wasi: options.target === "wasi",
+        nodeIoShim: options.nodeIoShim,
         standalone: options.target === "standalone",
         // Phase 2 (#1131): default experimentalIR to on so recursive
         // numeric kernels (fib, factorial, etc.) compile without the
@@ -1101,6 +1102,7 @@ export async function compileMultiSource(
         utf8Storage: options.utf8Storage,
         testRuntime: options.testRuntime,
         wasi: options.target === "wasi",
+        nodeIoShim: options.nodeIoShim,
         strictNoHostImports: options.strictNoHostImports,
         standalone: options.target === "standalone",
       });
@@ -1387,6 +1389,7 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
         utf8Storage: options.utf8Storage,
         testRuntime: options.testRuntime,
         wasi: options.target === "wasi",
+        nodeIoShim: options.nodeIoShim,
         strictNoHostImports: options.strictNoHostImports,
         standalone: options.target === "standalone",
       });
