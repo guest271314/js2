@@ -1,5 +1,5 @@
 ---
-id: 2524
+id: 2527
 title: "Core-wasm module linking (shared store + canonical rec-group) for host-API shims and the shared runtime — CHOSEN approach"
 status: ready
 sprint: 64

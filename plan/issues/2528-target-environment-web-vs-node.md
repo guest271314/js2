@@ -1,5 +1,5 @@
 ---
-id: 2523
+id: 2528
 title: "Target environment model (web vs node): scope the ambient global surface so e.g. window.stop isn't in a node host's lib"
 status: backlog
 sprint: Backlog
