@@ -1612,6 +1612,44 @@ export function compileObjectLiteralForStruct(
     }
   }
 
+  // (#2009 R3b) Record this literal's field names in JS INSERTION order so the
+  // host name export (`__struct_field_names`) can enumerate keys in spec order.
+  // The struct's slot order comes from `ts.Type.getProperties()`, which is
+  // last-spread-first for spread-result types and therefore does NOT match the
+  // §13.2.5 PropertyDefinitionEvaluation order. Walk `expr.properties` in source
+  // order: a named/shorthand/method/accessor prop contributes its key; a spread
+  // contributes its source's own field names in order. First occurrence fixes a
+  // key's position (a later duplicate or override keeps the earlier slot, e.g.
+  // `{...{a:1},...{b:2},...{a:3}}` → `a,b`). The first literal of a deduped
+  // canonical type wins, so the result is deterministic by compile order and a
+  // no-op for plain literals whose checker order already matches insertion order.
+  if (!ctx.structInsertionOrder.has(typeName)) {
+    const spreadByPropIndex = new Map<number, { name: string }[]>();
+    for (const src of spreadSources) spreadByPropIndex.set(src.propIndex, src.srcFields);
+    const insertionOrder: string[] = [];
+    const seen = new Set<string>();
+    const pushName = (n: string | undefined): void => {
+      if (n === undefined || n.startsWith("$") || n.startsWith("__")) return;
+      if (seen.has(n)) return;
+      seen.add(n);
+      insertionOrder.push(n);
+    };
+    for (let pi = 0; pi < expr.properties.length; pi++) {
+      const prop = expr.properties[pi]!;
+      if (ts.isSpreadAssignment(prop)) {
+        const srcFields = spreadByPropIndex.get(pi);
+        if (srcFields) for (const f of srcFields) pushName(f.name);
+        continue;
+      }
+      if (ts.isMethodDeclaration(prop) || ts.isGetAccessorDeclaration(prop) || ts.isSetAccessorDeclaration(prop)) {
+        if (prop.name) pushName(resolveAccessorPropName(ctx, prop.name));
+        continue;
+      }
+      pushName(resolvePropertyNameText(ctx, prop));
+    }
+    if (insertionOrder.length > 0) ctx.structInsertionOrder.set(typeName, insertionOrder);
+  }
+
   // (#1557) Per-literal method funcIdx overrides. When struct dedup collapses
   // multiple object literals that share a field shape but have methods with
   // different signatures (e.g. `{ validate(value) {} }` and `{ validate() {} }`
@@ -3106,6 +3144,38 @@ export function compileArrayLiteral(
           return t.kind === "ref" || t.kind === "ref_null" || t.kind === "externref";
         });
         if (hasObjectElem) {
+          elemWasm = { kind: "externref" };
+        }
+      } else if (
+        ctx.nativeStrings &&
+        ctx.anyStrTypeIdx >= 0 &&
+        (elemWasm.kind === "ref" || elemWasm.kind === "ref_null") &&
+        ((elemWasm as { typeIdx: number }).typeIdx === ctx.anyStrTypeIdx ||
+          (elemWasm as { typeIdx: number }).typeIdx === ctx.nativeStrTypeIdx)
+      ) {
+        // (#2190 residual) The first element is a native string, so the
+        // first-element heuristic picked `$AnyString` for the whole vec — but a
+        // heterogeneous literal like `["a", 1]` (a `[string, number]` tuple,
+        // common as an `Object.fromEntries` entry) then DROPS the non-string
+        // element (`f64.const 1; drop`) and substitutes `ref.null $AnyString;
+        // ref.as_non_null` → a guaranteed null-deref trap on a later read. Mirror
+        // the numeric-first `hasObjectElem` widening: if any element is NOT a
+        // native string, widen the vec to `externref` so each element is boxed by
+        // its own static type (`__box_number`/`__box_boolean`/native-string) at
+        // construction. Scoped to native-strings mode; number[]/struct[] etc. are
+        // untouched (their first element isn't a string).
+        const hasNonStringElem = expr.elements.some((el) => {
+          if (ts.isOmittedExpression(el) || ts.isSpreadElement(el)) return false;
+          if (el.kind === ts.SyntaxKind.StringLiteral) return false;
+          const t = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(el));
+          if (t.kind === "ref" || t.kind === "ref_null") {
+            const ti = (t as { typeIdx: number }).typeIdx;
+            return ti !== ctx.anyStrTypeIdx && ti !== ctx.nativeStrTypeIdx;
+          }
+          // f64 / i32 / externref / etc. — a non-string element.
+          return true;
+        });
+        if (hasNonStringElem) {
           elemWasm = { kind: "externref" };
         }
       }

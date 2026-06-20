@@ -85,6 +85,7 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
 2. Update issue frontmatter: `status: in-progress` **and `assignee: ttraenkler/<your-agent-name>`** (commit on your branch — this lazily reflects the lock onto `main` when your PR merges; the live lock is already held on the `issue-assignments` ref from the Start step)
 3. Check `plan/method/file-locks.md` — if another dev owns your target file/function, message them directly
 4. Create worktree: `git worktree add /workspace/.claude/worktrees/issue-{N}-{slug} -b issue-{N}-{slug} origin/main`
+   - **Branch base = `origin/main`, never the merge-queue tip (#2522).** Queued PRs are speculative and can eject; basing work on a `gh-readonly-queue` tip leaves phantom commits that force a forbidden rebase. The `git merge origin/main` you do before enqueue (steps below) already rebases your work onto future-main using only PRs that *landed*. **Exception:** if your task is known to depend on a specific in-flight PR, branch from *that PR's real branch* (explicit predecessor-stacking) and enqueue only after it lands.
    Then write your active status for the tech lead's statusline:
    ```bash
    printf '{"name":"issue-{N}-{slug}","state":"active","issue":"#{N}","since":%s}\n' "$(date +%s)" \
@@ -106,13 +107,14 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
    Then open the PR:
    `gh pr create --base main --title "fix(#N): <description>" --body "..."`
    **The implementation PR sets the issue frontmatter `status: done` directly** (with `completed: <date>`) in `plan/issues/{N}-{slug}.md` — commit it on your branch as part of the PR. You are self-merging this PR, so by the time the merge queue lands it the issue IS done, and there is no separate observer who can flip the status afterward. Do NOT set `in-review` and plan a later flip: once the queue lands the PR you can't make a follow-up commit from `/workspace`, which orphans the issue at `in-review` (see #1602/#1603/#1606). (`status: in-review` is only for the handoff/external case where the PR author is NOT the merger.)
-5. **After `gh pr create` returns — watch CI via a BACKGROUND task, then go quiet:**
+5. **After `gh pr create` returns — background the CI watcher, then PIPELINE your next slice (do NOT idle):**
    - Update your status file to show the open PR:
      ```bash
      printf '{"name":"issue-{N}-{slug}","state":"pr-open","issue":"#{N}","pr":<PR>,"since":%s}\n' "$(date +%s)" \
        > "/workspace/.claude/agent-status/issue-{N}-{slug}.json"
      ```
-   - Launch the CI watch as a **background task** (`run_in_background`): `gh run watch <run-id> --exit-status`, or a `while`-poll on `gh pr checks <N>` that exits once required checks settle. Then **stop and wait** — you are notified when it returns (~2 min wall). Do NOT loop in-context, do NOT emit status pings while it runs. If it hasn't returned after ~20 min, note it once via `TaskUpdate`; escalate to tech lead only after ~20 min of genuine stall.
+   - Launch the CI watch as a **background task** (`run_in_background`): `gh run watch <run-id> --exit-status`, or a `while`-poll on `gh pr checks <N>` that exits once required checks settle. Do NOT loop in-context or emit status pings while it runs.
+   - **Then DO NOT sit idle waiting for the PR to land — PIPELINE.** CI-wait (~2 min wall, plus merge-queue time) is the *watcher's* job, not yours. The moment the watcher is backgrounded, **go straight back to Start, claim your NEXT task, and build it in a separate worktree.** Idling on a green-riding PR burns the budget window for zero output — a dev whose PR is in CI should always have a *new* slice in flight. The background watcher notifies you when CI settles; when it fires, handle that PR's outcome (merge via step 6, or drift/failure below), then return to your in-progress next slice. A stream of `idle_notification`s while a PR is "in CI" is the signature of a dev who is NOT pipelining — claim the next task instead. (If the queue is genuinely empty/all-owned, only then go quiet and message the tech lead.) If the watcher hasn't returned after ~20 min, note it once via `TaskUpdate`; escalate to tech lead only after ~20 min of genuine stall.
    - **On CI completion:**
      - **All required checks green** → run `/dev-self-merge <N>`. If MERGE: `gh pr merge <N> --auto` (NO `--merge`/strategy flag — the queue owns the strategy and rejects `--merge --auto`), proceed to step 6.
      - **Drift detected** (`mergeable_state` becomes `BEHIND`) → `git fetch origin && git merge origin/main`, resolve conflicts with full PR context, `git push`, loop back to wait-for-CI. Do NOT escalate.
