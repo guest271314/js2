@@ -1,5 +1,6 @@
 ---
-id: 2512
+id: 2546
+renumbered_from: 2512
 title: "standalone: object-key ToPropertyKey (#2042 R2) + native Object.is (#2042 S3 residual)"
 status: done
 assignee: ttraenkler/sdev-arrayrep
