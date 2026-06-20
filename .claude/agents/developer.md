@@ -80,11 +80,20 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
 2. If the issue has `status: suspended` + `## Suspended Work`, use the listed worktree and resume instructions
 3. If no claimable task survives the gate: message tech lead `"TaskList is empty (or all remaining tasks are owned/out-of-scope), need next task."`
 
+> **Creating a NEW issue file** (a follow-up, a `[CONFLICT]` spin-off, anything
+> not already in `plan/issues/`)? Get its id from
+> `NEW=$(node scripts/claim-issue.mjs --allocate)` — **never hand-pick a
+> number** (#2531). Hand-picking races a parallel PR for the same id; the dup
+> is green at PR time and only fails in the `merge_group`, wedging the queue.
+> The required CI gate `check:issue-ids:against-main` rejects any PR introducing
+> a main-colliding id, so a hand-picked collision can't merge anyway.
+
 ### Implement
 1. Read `plan/issues/sprints/{sprint}/{N}.md` + smoke-test 1-2 failing cases to confirm the bug reproduces
 2. Update issue frontmatter: `status: in-progress` **and `assignee: ttraenkler/<your-agent-name>`** (commit on your branch — this lazily reflects the lock onto `main` when your PR merges; the live lock is already held on the `issue-assignments` ref from the Start step)
 3. Check `plan/method/file-locks.md` — if another dev owns your target file/function, message them directly
 4. Create worktree: `git worktree add /workspace/.claude/worktrees/issue-{N}-{slug} -b issue-{N}-{slug} origin/main`
+   - **Branch base = `origin/main`, never the merge-queue tip (#2522).** Queued PRs are speculative and can eject; basing work on a `gh-readonly-queue` tip leaves phantom commits that force a forbidden rebase. The `git merge origin/main` you do before enqueue (steps below) already rebases your work onto future-main using only PRs that *landed*. **Exception:** if your task is known to depend on a specific in-flight PR, branch from *that PR's real branch* (explicit predecessor-stacking) and enqueue only after it lands.
    Then write your active status for the tech lead's statusline:
    ```bash
    printf '{"name":"issue-{N}-{slug}","state":"active","issue":"#{N}","since":%s}\n' "$(date +%s)" \
@@ -114,10 +123,11 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
      ```
    - Launch the CI watch as a **background task** (`run_in_background`): `gh run watch <run-id> --exit-status`, or a `while`-poll on `gh pr checks <N>` that exits once required checks settle. Do NOT loop in-context or emit status pings while it runs.
    - **Then DO NOT sit idle waiting for the PR to land — PIPELINE.** CI-wait (~2 min wall, plus merge-queue time) is the *watcher's* job, not yours. The moment the watcher is backgrounded, **go straight back to Start, claim your NEXT task, and build it in a separate worktree.** Idling on a green-riding PR burns the budget window for zero output — a dev whose PR is in CI should always have a *new* slice in flight. The background watcher notifies you when CI settles; when it fires, handle that PR's outcome (merge via step 6, or drift/failure below), then return to your in-progress next slice. A stream of `idle_notification`s while a PR is "in CI" is the signature of a dev who is NOT pipelining — claim the next task instead. (If the queue is genuinely empty/all-owned, only then go quiet and message the tech lead.) If the watcher hasn't returned after ~20 min, note it once via `TaskUpdate`; escalate to tech lead only after ~20 min of genuine stall.
-   - **On CI completion:**
-     - **All required checks green** → run `/dev-self-merge <N>`. If MERGE: `gh pr merge <N> --auto` (NO `--merge`/strategy flag — the queue owns the strategy and rejects `--merge --auto`), proceed to step 6.
-     - **Drift detected** (`mergeable_state` becomes `BEHIND`) → `git fetch origin && git merge origin/main`, resolve conflicts with full PR context, `git push`, loop back to wait-for-CI. Do NOT escalate.
+   - **On CI completion — you do NOT enqueue (2026-06-20):** the merge path is owned by `auto-enqueue.yml` (App-token bot identity, sweeps green PRs on every CI completion + ~10-min cron), the `merge_group` required checks, and `auto-park` (#2547 — labels any PR that fails the merge_group re-run `hold` so it can't re-churn). **Never call `enqueuePullRequest`, never `gh pr merge --auto`, never re-queue.** A dev re-enqueuing its own PR changes queue membership, which rebuilds the merge group and CANCELS the in-flight `merge_group` run (the 3.5h cancellation churn of 2026-06-20; see memory `project_merge_queue_requeue_cancels_run`). Self-enqueuing also attributed merges to a human PAT instead of the bot.
+     - **All required checks green** → **STOP. Your job for this PR ends here.** `auto-enqueue` picks it up and the bot merges it. You may run `/dev-self-merge <N>` as an informational regression self-check, but its only outcomes are "leave green (auto-enqueue takes it)" or "ESCALATE to tech lead" — never "enqueue". Proceed to step 6 (claim next task).
+     - **Drift detected** (`mergeable_state` becomes `BEHIND`) → do NOT re-queue. `update-branch`/`auto-refresh-prs` auto-rebases BEHIND PRs and `auto-enqueue` re-sweeps. If you prefer, a clean fast-forward (`git fetch origin && git merge origin/main && git push`) keeps the branch current — but never enqueue after. Do NOT escalate.
      - **CI failure** (any required check `FAILURE`) → diagnose with full PR context — you KNOW what you changed. Fix locally, `git push`, loop back to wait-for-CI. Do NOT escalate ordinary failures.
+     - **`merge_group` re-run failed / PR got the `hold` label** (something flipped between your CI run and the queue's re-validation) → diagnose and fix with full PR context, push, remove the `hold` label so `auto-enqueue` re-sweeps. Escalate only if you can't resolve it.
      - **ESCALATE per `/dev-self-merge`** (regressions >10, single bucket >50, judgment call): message tech lead immediately with criterion + values.
 6. After merge lands (by you OR by the merge queue):
    - The issue frontmatter is already `status: done` (set in the PR itself, step 4) — no post-merge flip is needed. A merged PR ALWAYS implies `status: done`; under self-merge the PR carries it so nothing is left at `in-review`.
