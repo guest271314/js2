@@ -176,3 +176,20 @@ Number/RegExp/class-subclass): **PR-broken 24 pass → fixed 50 pass, net +26,
 ZERO new regressions** (every remaining failure also fails on the broken head).
 `tests/issue-2501.test.ts` 4/4 (added a PR #1742 regression-guard case). tsc +
 prettier clean.
+
+**Follow-up — Proxy receiver regression (the gate's last −1 blocker):** the
+classifier still static-tagged a **Proxy** receiver, because a proxy carries no
+TS-type brand — `new Proxy(t, h)` types identically to `t`, and
+`Proxy.revocable([], {}).proxy` types as `never[]` (an array). So
+`Object.prototype.toString.call(revokedProxy)` emitted a constant
+`[object Array]` instead of deferring to the host, which (§20.1.3.6 step 4 →
+§7.2.2 IsArray step 3a) must **throw TypeError** on a revoked proxy. The static
+constant can't throw → `test262 proxy-revoked.js` regressed (pass on main → fail
+on the PR; it was the single file failing the regression-gate's 10 % ratio for
+PR #1742 / #1711). Fix: a `receiverMayBeProxy()` syntactic detector (`new
+Proxy(...)`, `Proxy.revocable(...).proxy`, and identifiers bound transitively to
+either) → defer to host (standalone refuses, no proxy runtime there).
+**Validation:** `proxy-revoked.js` fail → pass, deterministic 5/5; a 276-file
+`Object.prototype.toString.call` sweep is **net +9 / −0 vs origin/main** (the 8
+host-mis-tag wins + proxy-revoked); two proxy regression-guard cases added to
+`tests/issue-2501.test.ts` (6/6). tsc + prettier clean.

@@ -110,4 +110,53 @@ describe("#2501 Object.prototype.toString [object X] tag", () => {
         "[object Object]|[object Function]|[object JSON]|[object Math]",
     );
   });
+
+  // (#2501 regression guard, test262 proxy-revoked.js) A **Proxy** receiver must
+  // NEVER be static-tagged. `Object.prototype.toString`'s §20.1.3.6 IsArray (step
+  // 4) unwraps the proxy to its target and throws TypeError for a *revoked* proxy
+  // (§7.2.2 step 3a). The classifier previously mis-tagged
+  // `Proxy.revocable([], {}).proxy` as a constant `[object Array]` (the `.proxy`
+  // member types as `never[]`), which can never throw — so `assert.throws` in
+  // proxy-revoked.js failed. Proxies carry no TS-type brand, so the fix detects
+  // them syntactically and defers to the host, which throws on the revoked case.
+  // The load-bearing assertion is "the revoked-proxy call throws" — that is the
+  // exact regression. (We don't assert a live proxy's *tag* here: the
+  // `runHost`/`buildImports` unit harness lacks the proxy-array unwrap shim the
+  // full test262 harness has, so a live array proxy tags [object Object] under
+  // this harness — orthogonal to the throw behaviour this guards.)
+  it("host: revoked proxy throws TypeError, not a static tag (proxy-revoked.js guard)", async () => {
+    const e = await runHost(`
+      export function test(): number {
+        const handle = Proxy.revocable([] as any[], {});
+        handle.revoke();
+        let threw = false;
+        try {
+          // Must defer to host (which throws on the revoked proxy), NOT emit a
+          // constant [object Array] (which can never throw).
+          Object.prototype.toString.call(handle.proxy);
+        } catch (err) {
+          threw = true;
+        }
+        return threw ? 1 : 2;
+      }
+    `);
+    expect(e.test()).toBe(1);
+  });
+
+  it("host: revoked proxy via direct .proxy access also throws (no variable binding)", async () => {
+    const e = await runHost(`
+      export function test(): number {
+        const revoke = Proxy.revocable([] as any[], {});
+        revoke.revoke();
+        let threw = false;
+        try {
+          Object.prototype.toString.call(revoke.proxy);
+        } catch (err) {
+          threw = true;
+        }
+        return threw ? 1 : 2;
+      }
+    `);
+    expect(e.test()).toBe(1);
+  });
 });

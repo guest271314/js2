@@ -232,6 +232,76 @@ const BUILTIN_CLASS_NAMES = new Set([
 ]);
 
 /**
+ * (#2501) Does `argExpr` denote a value that may be a **Proxy**? A proxy's
+ * §20.1.3.6 tag can't be classified statically: `IsArray` (step 4) unwraps the
+ * proxy to its target and, for a *revoked* proxy, throws TypeError (§7.2.2 step
+ * 3a) — so a static tag is both potentially wrong (the TS type is the *target's*
+ * type, e.g. `Proxy.revocable([], …).proxy` types as `never[]`) and unsound (it
+ * can't throw). The host's real `Object.prototype.toString` gets every proxy
+ * case right (unwrap-to-target, revoked → throw), so the classifier must defer
+ * to it. Proxies carry no TS-type brand (`new Proxy(t, h)` types identically to
+ * `t`), so detection is purely syntactic on the receiver's provenance:
+ *   - `new Proxy(...)` directly,
+ *   - `Proxy.revocable(...).proxy`,
+ *   - an identifier whose initializer is (transitively) either of the above
+ *     (`var p = new Proxy([], {}); …call(p)` / `var pp = new Proxy(p, {})`).
+ */
+function receiverMayBeProxy(ctx: CodegenContext, argExpr: ts.Expression): boolean {
+  const isNewProxy = (node: ts.Expression): boolean =>
+    ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Proxy";
+
+  // `Proxy.revocable(...).proxy` — the `.proxy` member of a revocable handle.
+  const isRevocableProxyAccess = (node: ts.Expression): boolean => {
+    if (!ts.isPropertyAccessExpression(node) || node.name.text !== "proxy") return false;
+    const recv = node.expression;
+    return (
+      ts.isCallExpression(recv) &&
+      ts.isPropertyAccessExpression(recv.expression) &&
+      recv.expression.name.text === "revocable" &&
+      ts.isIdentifier(recv.expression.expression) &&
+      recv.expression.expression.text === "Proxy"
+    );
+  };
+
+  // `handle.proxy` where `handle = Proxy.revocable(...)` (the revocable result is
+  // bound to a variable first — the common test262 shape).
+  const isRevocableHandleProxyAccess = (node: ts.Expression): boolean => {
+    if (!ts.isPropertyAccessExpression(node) || node.name.text !== "proxy") return false;
+    const recv = node.expression;
+    if (!ts.isIdentifier(recv)) return false;
+    const sym = ctx.checker.getSymbolAtLocation(recv);
+    const decl = sym?.valueDeclaration;
+    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return false;
+    const init = decl.initializer;
+    return (
+      ts.isCallExpression(init) &&
+      ts.isPropertyAccessExpression(init.expression) &&
+      init.expression.name.text === "revocable" &&
+      ts.isIdentifier(init.expression.expression) &&
+      init.expression.expression.text === "Proxy"
+    );
+  };
+
+  const exprIsProxy = (node: ts.Expression): boolean => {
+    const inner = ts.isParenthesizedExpression(node) ? node.expression : node;
+    return isNewProxy(inner) || isRevocableProxyAccess(inner) || isRevocableHandleProxyAccess(inner);
+  };
+
+  if (exprIsProxy(argExpr)) return true;
+
+  // Identifier bound to a proxy (transitively): `var p = new Proxy(t, h)` then
+  // `…call(p)`, including the proxy-of-proxy chain `var pp = new Proxy(p, {})`.
+  if (ts.isIdentifier(argExpr)) {
+    const sym = ctx.checker.getSymbolAtLocation(argExpr);
+    const decl = sym?.valueDeclaration;
+    if (decl && ts.isVariableDeclaration(decl) && decl.initializer && exprIsProxy(decl.initializer)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * (#2501) Resolve the §20.1.3.6 `Object.prototype.toString` builtin tag for a
  * statically-known receiver, returning the tag name (e.g. "Array", "Date") or
  * `undefined` when it can't be classified (caller falls back / refuses).
@@ -275,6 +345,16 @@ function resolveObjectToStringTag(ctx: CodegenContext, argExpr: ts.Expression | 
   // standalone → fallback.
   const deferOrStandalone = (fallback: string | undefined): string | undefined =>
     ctx.standalone ? fallback : undefined;
+
+  // Proxy receivers — never static-classify. The §20.1.3.6 tag of a proxy is
+  // resolved through `IsArray`, which unwraps to the proxy target and throws
+  // TypeError for a *revoked* proxy (§7.2.2 step 3a). The TS type reflects the
+  // *target* (a `Proxy.revocable([], …).proxy` types as `never[]`, so the broad
+  // array branch below would mis-emit a constant `[object Array]` that can never
+  // throw — regressing `proxy-revoked.js`). Defer to the host, which unwraps the
+  // proxy and throws on the revoked case correctly. (Standalone has no proxy
+  // runtime, so `undefined` → refuse-loud, no worse than the pre-#2501 CE.)
+  if (receiverMayBeProxy(ctx, argExpr)) return deferOrStandalone(undefined);
 
   // Receiver forms that defeat static classification — the spec tag depends on
   // an internal slot the TS type can't reveal. Handle / bail explicitly:
