@@ -27,10 +27,18 @@ warnings. Conversely a **web** target legitimately has those and not node's
 Proposal: a way to declare the target **environment** — e.g. `--platform web|node`
 (or `--env`) — that selects which ambient globals are in scope:
 
-- `node` → node-style globals (`process`, …); DOM/window globals are *not*
-  declared, so referencing `window.stop` is a clear error ("not defined for a
-  node target"), not a silently-dropped host import.
-- `web` → DOM globals in scope; node-only globals are not.
+- `node` → node-style globals (`process`, `Buffer`, …) are **in scope with their
+  types auto-provided**, so `process.stdin.read(...)` resolves with **no
+  "Cannot find name 'process'" (TS2580) warning** — the user no longer needs a
+  hand-written `declare const process` (which bundlers like `bun build` strip).
+  DOM/window globals are *not* declared, so `window.stop` is a clear error.
+- `web` → DOM globals + their types in scope; node-only globals are not.
+
+The "auto-provide the environment's ambient types" part is the direct fix for the
+`process` warnings on loopdive/js2#389: today `process` is *supported* under
+`--target wasi` (lowered to WASI fd syscalls) but has no ambient type unless the
+user declares one, so every use warns. A `node` environment should ship those
+types so referencing `process` Just Works.
 
 Today these are decoupled from `--target wasi`/`--standalone`, which describe the
 *backend*, not the host environment.
