@@ -3241,29 +3241,11 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   //
   // params: 0=v(externref) 1=idx(f64) ; locals: 2=any(anyref) 3=vec(ref null $ObjVec) 4=i
   {
-    // #2036 — array-like $Object arm (standalone only): return
-    // __extern_get(v, ToString(idx)). number_toString gives the canonical decimal
-    // key ("0","5") matching how {0:x} stores numeric-literal keys; __extern_get
-    // does the proto-walk + value marshaling, returning null for absent (hole)
-    // indices. Omitted in gc/host mode (the host import owns the path).
-    const objIdxArm: Instr[] = objArrayLikeArms
-      ? [
-          { op: "local.get", index: 2 },
-          { op: "ref.test", typeIdx: objectTypeIdx },
-          {
-            op: "if",
-            blockType: { kind: "empty" },
-            then: [
-              { op: "local.get", index: 0 },
-              { op: "local.get", index: 1 },
-              { op: "f64.trunc" },
-              { op: "call", funcIdx: ctx.funcMap.get("number_toString")! },
-              { op: "call", funcIdx: ctx.funcMap.get("__extern_get")! },
-              { op: "return" },
-            ],
-          },
-        ]
-      : [];
+    // The array-like `$Object` arm (#2036) + the $ObjVec/typed-vec arms are all
+    // built by the shared `buildExternGetIdxBody` builder below — the `$Object`
+    // arm returns `__extern_get(v, number_toString(idx))` (the canonical decimal
+    // key, NOT a truncated one — see #2551). number_toString is canonical
+    // Number::toString, matching how `{0:x}` stores numeric-literal keys.
     // (#2190) The per-element-kind `__vec_<k>` indexing arms are NOT known yet
     // (array literals of a given element kind may be compiled AFTER this
     // runtime is emitted). They are appended at FINALIZE by
@@ -6894,7 +6876,13 @@ function buildExternGetIdxBody(p: ExternGetIdxBodyParams): Instr[] {
           then: [
             { op: "local.get", index: 0 },
             { op: "local.get", index: 1 },
-            { op: "f64.trunc" },
+            // #2551 — do NOT truncate: ToPropertyKey of a numeric index is
+            // ToString(idx) (§7.1.19 → §6.1.6.1.20), so a non-integer index must
+            // stringify to its canonical decimal ("1.5"), matching how the STORE
+            // path (`o[1.5] = …` → __extern_set → __to_property_key) keys it. A
+            // prior `f64.trunc` here read `o[1.5]` from key "1" (truncated) while
+            // the write stored under "1.5", so the read missed. number_toString is
+            // canonical Number::toString, so an integer index still yields "3".
             { op: "call", funcIdx: p.numberToStringIdx },
             { op: "call", funcIdx: p.externGetIdx },
             { op: "return" },
