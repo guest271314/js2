@@ -1,5 +1,6 @@
 ---
-id: 2519
+id: 2543
+renumbered_from: 2519
 title: "CLI run-hint recommends `-W all-proposals=y`, which enables stack-switching and makes wasmtime exit at module load"
 status: done
 created: 2026-06-19
@@ -14,7 +15,7 @@ goal: usability
 sprint: 64
 ---
 
-# #2519 — Wasmtime run hint enables stack-switching, which exits at module load
+# #2543 — Wasmtime run hint enables stack-switching, which exits at module load
 
 References external report: loopdive/js2#389 ("the host exits in the browser").
 
