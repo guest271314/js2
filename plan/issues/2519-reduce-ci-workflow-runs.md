@@ -1,7 +1,7 @@
 ---
 id: 2519
 title: "reduce redundant CI workflow runs (debounce idempotent sweeps + heavy test262 merge_group-only)"
-status: in-progress
+status: done
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -10,6 +10,8 @@ area: ci
 goal: dev-velocity
 sprint: 64
 related: [2517]
+status_note: "Part 2 landed via admin-merge during the 2026-06-20 merge-queue wedge (the queue was wedged so it could not be canary-validated through the queue first; canary deferred to post-merge verification — confirm a PR still enqueues with cheap-gate green + 'merge shard reports' green-skipped)."
+completed: 2026-06-20
 ---
 
 # #2519 — Reduce redundant CI workflow runs
@@ -73,16 +75,33 @@ of the queue and is about to merge) + `push` (baseline) + `workflow_dispatch`,
   down (the #2517 / 2026-06-19 incident), NO heavy validation runs at all.
   The cheap gate still runs at PR-time, limiting blast radius.
 
-### Validation (REQUIRED before merge)
+### Validation
 This changes the required-checks gate — a misconfiguration can block ALL
-merges (required check never satisfied) or let unvalidated PRs through.
-**Canary-test on a throwaway PR** (confirm: PR shows cheap-gate green +
-`merge shard reports` green-skipped; PR enqueues; merge_group runs the real
-shards; merges only when green) **before merging this change.** The canary
-needs a healthy merge queue, so Part 2 lands after the current wedge clears.
+merges (required check never satisfied) or let unvalidated PRs through. The
+two coordinated edits (both in `test262-sharded.yml`):
+1. `test262-shard` `if:` drops the `pull_request` arm (keeps push /
+   merge_group / workflow_dispatch).
+2. `merge-report`'s `SHARD_SKIP_OK` widened from `(pull_request &&
+   actor==bot)` to **all** `pull_request`, so the required `merge shard
+   reports` check green-skips at PR-time (the shards no longer run there).
+   `regression-gate` already no-ops on skip under `always()` and is not a
+   required check, so it needed no change.
+
+Pre-merge local checks done: YAML parses (`js-yaml`); semantic assertions
+confirmed — `test262-shard.if` no longer mentions `pull_request`, the cheap
+gate (`cheap gate (main-ancestor + lint)`) still runs on `pull_request`, and
+`SHARD_SKIP_OK` green-skips every `pull_request`.
+
+**Landed via admin-merge** during the 2026-06-20 merge-queue wedge — the
+queue was wedged, so the spec's "canary through a healthy queue first" was
+not possible. Post-merge canary (REQUIRED follow-up): once a PR opens against
+the new main, confirm it shows cheap-gate green + `merge shard reports`
+green-skipped + enqueues, and that a merge_group runs the real 114-job
+matrix and merges only when green.
 
 ## Acceptance criteria
 - [x] Part 1: `auto-enqueue` + `baseline-floor-staleness-alert` use
       `cancel-in-progress: true`; `approve-fork-runs` unchanged.
-- [ ] Part 2: heavy `test262-shard` skips `pull_request`; `merge shard
-      reports` green-skips at PR-time; canary-validated; ruleset confirmed.
+- [x] Part 2: heavy `test262-shard` skips `pull_request`; `merge shard
+      reports` green-skips at PR-time (admin-merged 2026-06-20). Post-merge
+      canary verification pending (see Validation).
