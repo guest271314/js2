@@ -378,3 +378,83 @@ cleanly bounded. Branch `issue-2580-m1-length-canary` (WIP, NOT pushed).
   not a blocker for M0/M1.
 - **`__dyn_get` standalone arm** — M0 delegates to `__extern_get`; the
   native-string indexed/`length` arm + the `$Vec` `$Hole→undefined` arm are M2/M3.
+
+---
+
+# M1 (a2) chokepoint-refactor plan — APPROVED path (a); CONFIRM before deep work
+
+User greenlit path (a) end-to-end any-typing via the (a2) chokepoint refactor.
+Scoped here as **its own bounded slice** (guardrail 1) for lead review BEFORE the
+days go in; each step **full-gate validated** (guardrail 2).
+
+## Re-scoping finding (good news — smaller than the M1 verdict feared)
+
+A read-only map of EVERY `.length`-on-`any` consumer (`===`, arithmetic `+`,
+truthiness, `const x = obj.length` inference, `String()`/template) found
+**`compilePropertyAccess` is ALREADY the universal chokepoint**:
+`compileExpression` (expressions.ts:~1171) routes every `PropertyAccessExpression`
+through it with no exceptions, and **no consumer structurally special-cases
+`.length`** before `compileExpression`. The apparent "bypass" (M1's first read)
+is an *illusion of type coercion*: my arm returns externref, then each consumer's
+existing coercion converts it — sometimes WRONGLY (unboxing the externref back to
+numeric, losing `undefined`).
+
+**So (a2) is NOT a multi-handler rewrite.** It is: (i) make the
+`compilePropertyAccess` `.length`-on-`any` arm return externref cleanly (done in
+the WIP, gated on static `any`/`unknown`), and (ii) fix the FEW consumer-coercion
+sites that mishandle the externref. The hot-path (typed `.length`) never enters
+this arm → byte-identical (verified: number[]/string/arguments/rest return from
+the typed arms above).
+
+## Consumer-coercion sites to audit + fix (the actual work)
+
+Audit each `compileExpression(obj.length)` → my externref arm → consumer
+coercion; fix only where the externref is mishandled:
+
+1. **`x === undefined`** — binary-ops.ts:420-440 has a correct externref arm
+   (`__extern_is_undefined`). The WIP showed a `__dyn_has`-flavored fold for the
+   `propaccess === undefined` shape — INVESTIGATE whether the `===` path
+   const-folds `.length === undefined` into a presence check and, if so, route it
+   to the externref-from-`__dyn_get` (not a separate `__dyn_has`). PRIMARY canary
+   assertion: `var obj={}; obj.length === undefined` → true.
+2. **`const x = obj.length` inference** — variables.ts:~563/648/837. For
+   `obj: any`, TS types `obj.length` as `any` → externref; the binding local
+   SHOULD be externref. The WIP showed `typeof x === "number"`, so the local got
+   a numeric ValType — fix the `.length`-on-any initializer's binding local to
+   externref.
+3. **Truthiness `if (obj.length)`** — control-flow.ts:568 + externref `__is_truthy`
+   (index.ts:~13551). Likely already coerces; VERIFY (`if ({}.length)` falsy,
+   `if ([1].length)` truthy).
+4. **Arithmetic `obj.length + 1`** — binary-ops.ts:929/935. externref→f64 via
+   `__unbox_number`; absent → NaN, spec-correct. VERIFY `[1,2].length + 1 === 3`,
+   `({}).length + 1` is NaN.
+5. **`String(obj.length)` / template** — calls.ts:~10427 / string-ops.ts:~363.
+   externref→string via `__extern_toString`. VERIFY `String([1,2].length)==="2"`,
+   `String({}.length)==="undefined"`.
+
+Expect **2–4 small consumer fixes + the arm**, not a sweeping refactor.
+
+## Staging (each its own full-gated PR; stop-the-line on a typed-`.length` eject)
+
+- **M1a — the arm + `=== undefined` canary** (smallest, highest-signal). Land the
+  externref arm + whatever the `=== undefined` path needs so `var obj={};
+  obj.length === undefined` → true and the S15.4.4 `.length`-property rows flip.
+  Full-gate. **The viability proof.**
+- **M1b — binding-inference + truthiness + arithmetic + String** consumer fixes
+  (only the ones M1a's audit flags). Full-gate.
+- Each PR: typed-`.length` byte-identity guard + determinism guard.
+  STOP-THE-LINE if either ejects.
+
+## Cost / risk (revised DOWN from the M1 pessimistic estimate)
+
+The chokepoint already exists; the work is the arm (done) + 2–4 consumer-coercion
+fixes. **~2–4 days** (M1a ~1–2d incl. the `=== undefined` fold investigation,
+M1b ~1–2d), each full-gated. Risk bounded by the static-`any` gate (hot-path
+untouched) + per-PR full-gate. The M1 WIP (`d9956bfa3`, branch
+`issue-2580-m1-length-canary`) is the starting point — the arm + the
+host/standalone `__extern_get` #2043 fix already land.
+
+**CONFIRM-WITH-LEAD checkpoint (guardrail 1):** posted for review BEFORE the deep
+work. The material change from the M1 verdict: the chokepoint already exists, so
+(a2) is a ~2–4-day arm+consumer-coercion slice, not a multi-handler refactor —
+which de-risks the whole substrate's M1 cost. Awaiting go-ahead to execute M1a.
