@@ -276,3 +276,48 @@ regression):**
   scope here; the vararg path inherits it identically.
 
 #2151 stays in-progress for the mixed-spread + wasi + ref-arg residuals above.
+
+## Slice 5 RESULT (2026-06-21, sendev-funcidx) — MIXED-spread `o.m(a, ...xs)` — IMPLEMENTED & GREEN
+
+Mixed `o.m(a, ...xs)` (fixed leading args + a single trailing DYNAMIC spread)
+returned 0 standalone: the fixed-arity `__call_m_<name>_<arity>` dispatcher
+can't apply (`flattenCallArgs` returns null for a dynamic source) and the Slice 4
+pure-dynamic-spread vararg routing only fires for a single spread arg with NO
+fixed leading args.
+
+**Mechanism — build the combined arg vec at runtime, reuse the Slice 4 vararg
+dispatcher.** New routing in `src/codegen/expressions/calls.ts` (after the Slice 4
+`isSingleDynamicSpread` block): for `ctx.standalone`, a non-builtin-class
+receiver, `>= 2` args, exactly ONE spread which is the LAST arg
+(`isMixedTrailingSpread`), it
+1. reserves `__call_m_<name>_vararg` (the Slice 4 dispatcher) + pulls in
+   `__objvec_new`/`__objvec_push` + `__extern_length`/`__extern_get_idx`, then
+   `flushLateImportShifts` and **re-resolves every funcIdx by name** (the
+   `ensureLateImport`s shift defined-func indices incl. the just-reserved
+   dispatcher — #2043 late-import index-shift class);
+2. stashes the receiver in a local, builds `combined = __objvec_new()`, pushes
+   each fixed leading arg (boxed to externref), then loop-appends the spread
+   source's elements (`__extern_length` + `__extern_get_idx(src, i)` →
+   `__objvec_push`);
+3. calls `__call_m_<name>_vararg(recv, combined)` — the dispatcher reads each
+   declared param from the vec via `__extern_get_idx` (`$ObjVec` is exactly what
+   it indexes), threads the struct as `this`, coerces per declared param type,
+   and box-coerces the result.
+
+**Verified standalone, ZERO host imports** (`tests/issue-2151-mixed-spread.test.ts`,
+6 cases): `o.m(1, ...xs)`=123, two-fixed + `this`-thread `o.f(1,2,...xs)`=16,
+empty spread `o.m(5, ...[])`=50 (trailing numeric param reads 0 = missing-arg
+semantics, consistent with the typed-param model across all slices),
+function-returned-array spread `o.m(1, ...mk())`=132, zero-host-imports assertion,
+plus the Slice 1–4 regression guards (`next()`=7, static `o.m(...[2,3])`=23, pure
+dynamic `o.m(...xs)`=45). No regression: `issue-2151{,-nary,-spread-literal,
+-dynamic-spread}` + `issue-2025` (34/34), `object-methods` + `object-literals` +
+`issue-2009` (61/61). `pnpm run typecheck` + `format:check` + `lint` clean.
+
+**Still carried forward (issue stays in-progress):**
+- **`--target wasi`** (same gate as Slice 4 — array-like `__extern_get_idx` arms
+  are standalone-only; mixed-spread is gated `ctx.standalone`).
+- **ref/string-typed params** (`o.g("hi")`) — pre-existing any-receiver
+  ref-arg-coercion gap inherited identically.
+- Multiple spreads / leading-or-middle spread (`o.m(...xs, a)`, `o.m(...a, ...b)`)
+  — uncommon shapes, keep the existing fall-through (no regression).

@@ -9265,6 +9265,129 @@ function compileCallExpression(
           return { kind: "externref" };
         }
 
+        // (#2151 Slice 5) MIXED-spread any-receiver dispatch: `o.m(a, ...xs)` —
+        // fixed leading args followed by a single trailing DYNAMIC spread (arity
+        // unknown at compile time). The fixed-arity dispatcher cannot apply
+        // (flattenCallArgs returned null), and the pure-dynamic-spread vararg
+        // routing above requires exactly one spread arg with no fixed leading
+        // args. Here we build the combined arg vector at runtime — a fresh
+        // `$ObjVec`, push each fixed leading arg (boxed to externref), then
+        // loop-append the spread source's elements (`__extern_length` +
+        // `__extern_get_idx`) — and hand it to the SAME
+        // `__call_m_<name>_vararg(recv, args)` dispatcher, which reads each
+        // declared param from the vec via `__extern_get_idx`. (`$ObjVec` is
+        // exactly what `__extern_get_idx` and `__objvec_push` operate on.)
+        //
+        // Gated to `ctx.standalone` ONLY (same constraint as Slice 4 — the
+        // `__extern_get_idx` array-like / wasm-vec indexing arms the dispatcher
+        // and the loop-append rely on are emitted only under standalone). Scope:
+        // exactly ONE spread, which must be the LAST argument; any other spread
+        // shape (leading/middle spread, multiple spreads) keeps the existing
+        // fall-through (no regression).
+        const spreadCount = expr.arguments.filter((a) => ts.isSpreadElement(a)).length;
+        const lastArg = expr.arguments[expr.arguments.length - 1];
+        const isMixedTrailingSpread =
+          ctx.standalone &&
+          !recvIsBuiltinClass &&
+          expr.arguments.length >= 2 &&
+          spreadCount === 1 &&
+          lastArg !== undefined &&
+          ts.isSpreadElement(lastArg);
+        if (isMixedTrailingSpread) {
+          const dispatchIdx = reserveClosedMethodDispatchVararg(ctx, methodName);
+          ensureObjVecBuilders(ctx);
+          ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
+          ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }]);
+          flushLateImportShifts(ctx, fctx);
+          // Re-resolve every funcIdx by name AFTER the last shift (late-import
+          // index-shift class #2043): the `ensureLateImport`s above added imports,
+          // which shifted EVERY defined-function index — including the vararg
+          // dispatcher reserved above. funcMap holds the post-shift truth. These
+          // are all unconditionally registered in standalone (the object runtime
+          // provides `__objvec_*` / `__extern_*`); `!` is safe here.
+          const dispatchResolvedIdx = ctx.funcMap.get(`__call_m_${methodName}_vararg`) ?? dispatchIdx;
+          const objVecNew = ctx.funcMap.get("__objvec_new")!;
+          const objVecPush = ctx.funcMap.get("__objvec_push")!;
+          const lenFn = ctx.funcMap.get("__extern_length")!;
+          const getIdxFn = ctx.funcMap.get("__extern_get_idx")!;
+
+          // Receiver as externref → local (read once; the vec build below also
+          // pushes onto the value stack, so stash the receiver first).
+          const recvLocal = allocLocal(fctx, `__mspread_recv_${fctx.locals.length}`, { kind: "externref" });
+          const recvType = compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+          if (recvType && recvType.kind !== "externref") fctx.body.push({ op: "extern.convert_any" });
+          else if (recvType === null) fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "local.set", index: recvLocal });
+
+          // combined = __objvec_new()
+          const argsVecLocal = allocLocal(fctx, `__mspread_args_${fctx.locals.length}`, { kind: "externref" });
+          fctx.body.push({ op: "call", funcIdx: objVecNew });
+          fctx.body.push({ op: "local.set", index: argsVecLocal });
+
+          // Push each fixed leading arg (all but the trailing spread).
+          for (let i = 0; i < expr.arguments.length - 1; i++) {
+            fctx.body.push({ op: "local.get", index: argsVecLocal });
+            const at = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "externref" });
+            if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+            else if (at === null) fctx.body.push({ op: "ref.null.extern" });
+            fctx.body.push({ op: "call", funcIdx: objVecPush });
+          }
+
+          // Loop-append the spread source's elements.
+          const spreadSrcLocal = allocLocal(fctx, `__mspread_src_${fctx.locals.length}`, { kind: "externref" });
+          const spreadExpr = (lastArg as ts.SpreadElement).expression;
+          const srcType = compileExpression(ctx, fctx, spreadExpr, { kind: "externref" });
+          if (srcType && srcType.kind !== "externref") coerceType(ctx, fctx, srcType, { kind: "externref" });
+          else if (srcType === null) fctx.body.push({ op: "ref.null.extern" });
+          fctx.body.push({ op: "local.set", index: spreadSrcLocal });
+
+          const spreadLenLocal = allocLocal(fctx, `__mspread_len_${fctx.locals.length}`, { kind: "i32" });
+          fctx.body.push({ op: "local.get", index: spreadSrcLocal });
+          fctx.body.push({ op: "call", funcIdx: lenFn });
+          fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+          fctx.body.push({ op: "local.set", index: spreadLenLocal });
+
+          const spreadIdxLocal = allocLocal(fctx, `__mspread_idx_${fctx.locals.length}`, { kind: "i32" });
+          fctx.body.push({ op: "i32.const", value: 0 });
+          fctx.body.push({ op: "local.set", index: spreadIdxLocal });
+          fctx.body.push({
+            op: "block",
+            blockType: { kind: "empty" },
+            body: [
+              {
+                op: "loop",
+                blockType: { kind: "empty" },
+                body: [
+                  // if idx >= len break
+                  { op: "local.get", index: spreadIdxLocal } as Instr,
+                  { op: "local.get", index: spreadLenLocal } as Instr,
+                  { op: "i32.ge_s" } as Instr,
+                  { op: "br_if", depth: 1 } as Instr,
+                  // __objvec_push(combined, __extern_get_idx(src, idx))
+                  { op: "local.get", index: argsVecLocal } as Instr,
+                  { op: "local.get", index: spreadSrcLocal } as Instr,
+                  { op: "local.get", index: spreadIdxLocal } as Instr,
+                  { op: "f64.convert_i32_s" } as Instr,
+                  { op: "call", funcIdx: getIdxFn } as Instr,
+                  { op: "call", funcIdx: objVecPush } as Instr,
+                  // idx++
+                  { op: "local.get", index: spreadIdxLocal } as Instr,
+                  { op: "i32.const", value: 1 } as Instr,
+                  { op: "i32.add" } as Instr,
+                  { op: "local.set", index: spreadIdxLocal } as Instr,
+                  { op: "br", depth: 0 } as Instr,
+                ],
+              } as Instr,
+            ],
+          } as Instr);
+
+          // __call_m_<name>_vararg(recv, combined)
+          fctx.body.push({ op: "local.get", index: recvLocal });
+          fctx.body.push({ op: "local.get", index: argsVecLocal });
+          fctx.body.push({ op: "call", funcIdx: dispatchResolvedIdx });
+          return { kind: "externref" };
+        }
+
         // (#799 WI3) Generic host-delegated method call for any/externref receivers.
         // Builds a JS array of arguments and calls __extern_method_call(obj, methodName, args).
         // (#965) For known built-in class identifiers (Object, Array, Proxy, etc.) that would
