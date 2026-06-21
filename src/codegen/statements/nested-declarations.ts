@@ -992,6 +992,86 @@ function isAnnexBValueReference(id: ts.Identifier): boolean {
 }
 
 /**
+ * (#2552) Is the block-fn `name` REASSIGNED (an assignment write target) anywhere
+ * inside its declaring `block`? — e.g. `{ function f() { f = 123; } }`. When it
+ * is, the block-local function binding and the outer var binding hold *distinct*
+ * values (per §B.3.3: the outer binding captures the function value at block
+ * entry and is independent of a later in-block reassignment of the block-local
+ * `f`). The flag-gated single-slot outer-binding machinery cannot model that
+ * split (it shares one `localMap` slot for both), so such a shape is excluded
+ * from the outer-binding allocation and reverts to the pre-Phase-2 path — which
+ * already passes the `*-block-scoping` test262 files. Only assignment WRITES
+ * count (not reads); the scan stays within the declaring block (nested function
+ * scopes are skipped — they have their own bindings).
+ */
+function annexBNameReassignedInBlock(name: string, block: ts.Block): boolean {
+  let reassigned = false;
+  const visit = (node: ts.Node): void => {
+    if (reassigned) return;
+    // Descend through the WHOLE block subtree, INCLUDING the block-fn's own body:
+    // the canonical mutable-binding shape is `{ function f() { f = 123; } }`, where
+    // the reassignment lives inside `f`'s body and still mutates the binding (the
+    // block-local `f` and the outer var binding then diverge). A same-named decl in
+    // a *deeper* nested scope would shadow, but conflating it here only makes the
+    // gate MORE conservative (skip the outer binding → pre-Phase-2 path), never
+    // less correct, so we accept the slight over-approximation for soundness.
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(node.left) &&
+      node.left.text === name
+    ) {
+      reassigned = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(block, visit);
+  return reassigned;
+}
+
+/**
+ * (#2552) Does the enclosing Annex-B scope (the nearest function body / global
+ * holding `block`) already declare a function-scoped `var name`? Per Annex B
+ * B.3.3 step 2 ("If instantiatedVarNames does not contain F"), a block-nested
+ * `function F` creates NO fresh outer binding when a same-named `var F` already
+ * exists — the function uses the existing var. `var` declarations hoist
+ * function-wide, so a `var F` ANYWHERE in the enclosing scope (including nested
+ * blocks) counts, but NOT one inside a nested function scope. Excluding this case
+ * keeps the existing-var binding (often a non-externref slot, e.g. an f64 number)
+ * as the single home for `F`; allocating a separate externref outer binding on
+ * top of it desyncs the type (a read would wrongly go through the externref path
+ * → `expected externref, got f64`).
+ */
+function annexBSameNameVarInScope(name: string, block: ts.Block): boolean {
+  let scope: ts.Node = block.parent;
+  while (scope && !isAnnexBScopeBoundary(scope)) scope = scope.parent;
+  if (!scope) return false;
+  const scanRoot: ts.Node =
+    !ts.isSourceFile(scope) && !ts.isModuleBlock(scope) && "body" in scope
+      ? ((scope as ts.FunctionLikeDeclarationBase).body ?? scope)
+      : scope;
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    // Do not descend into a nested function scope (its `var name` is a different
+    // binding). The scanRoot boundary itself is allowed (we started inside it).
+    if (node !== scanRoot && isAnnexBScopeBoundary(node)) return;
+    if (ts.isVariableStatement(node) && (node.declarationList.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0) {
+      for (const d of node.declarationList.declarations) {
+        if (ts.isIdentifier(d.name) && d.name.text === name) {
+          found = true;
+          return;
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(scanRoot, visit);
+  return found;
+}
+
+/**
  * (#2200 Phase 2) Is `fnDecl` a block-nested function that IS eligible for the
  * Annex B web-compat outer var-binding (block-nested AND not cancelled)? Returns
  * the declaring `Block` (for the pre-allocation / decl-site init), else `null`
@@ -1002,7 +1082,9 @@ function isAnnexBValueReference(id: ts.Identifier): boolean {
  * `annexBNameObservedOutsideBlock`). A block-fn whose name is never referenced
  * at function scope outside its block needs no outer binding, so it stays
  * byte-identical to pre-Phase-2 codegen — this is what avoids the -1180 hot-path
- * regression.
+ * regression. The name must ALSO not be reassigned inside its block (see
+ * `annexBNameReassignedInBlock`) — the mutable-binding split is beyond the
+ * single-slot flag-gated machinery and reverts to the (passing) pre-Phase-2 path.
  */
 function annexBBlockNestedEligible(fnDecl: ts.FunctionDeclaration): ts.Block | null {
   const name = fnDecl.name?.text;
@@ -1012,6 +1094,8 @@ function annexBBlockNestedEligible(fnDecl: ts.FunctionDeclaration): ts.Block | n
   if (isAnnexBScopeBoundary(block.parent)) return null; // direct fn body → not block-nested
   if (annexBHoistCancels(fnDecl) !== null) return null; // cancelled → Phase 1, no outer binding
   if (!annexBNameObservedOutsideBlock(name, block)) return null; // (#2552) not observed → no binding
+  if (annexBNameReassignedInBlock(name, block)) return null; // (#2552) mutable split → pre-Phase-2 path
+  if (annexBSameNameVarInScope(name, block)) return null; // (#2552) existing var F → use it, no fresh binding
   return block;
 }
 

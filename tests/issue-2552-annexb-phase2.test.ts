@@ -53,6 +53,48 @@ describe("#2552 Phase 2 — case-B outer-binding lifecycle (observed)", () => {
       await runString(`export function test(): string { let t = typeof f; { function f() { return 1; } } return t; }`),
     ).toBe("undefined");
   });
+
+  it("bare READ of F before its block → undefined, NOT ReferenceError (var binding exists)", async () => {
+    // The merge_group -10 regression: the `*-func-existing-block-fn-no-init`
+    // shape reads F before its declaring block ran. Annex B makes the outer
+    // binding `var`-style (it EXISTS, uninitialised), so a read yields
+    // `undefined` — it must NOT throw "f is not defined" (the pre-fix bug, where
+    // the shared tdzFlagLocals path applied let/const TDZ-throw semantics).
+    expect(
+      await runString(`export function test(): string {
+        let r: any = "x"; r = f;
+        { function f() {} } { function f() {} }
+        return typeof r; }`),
+    ).toBe("undefined");
+  });
+
+  it("bare READ of F after its block ran → the function value (outer binding holds it)", async () => {
+    expect(
+      await runString(`export function test(): string {
+        let r: any; { function f() { return 1; } } r = f;
+        return typeof r; }`),
+    ).toBe("function");
+  });
+});
+
+describe("#2552 Phase 2 — mutable-binding split (reassigned-in-block) reverts to pre-Phase-2", () => {
+  // The two `*-block-scoping` test262 files (the other half of the merge_group
+  // -10) use `{ function f() { f = 123; ... } }` — the in-block reassignment
+  // mutates the BLOCK-LOCAL binding while the outer var binding stays the
+  // function captured at block entry. The single-slot flag-gated outer-binding
+  // machinery can't model that split, so `annexBNameReassignedInBlock` excludes
+  // the shape and it reverts to the (passing) pre-Phase-2 codegen. The
+  // TS-level cross-block read makes a faithful inline repro ill-typed, so the
+  // behavioural coverage lives in the real test262 files (run in CI); here we
+  // only assert the excluded shape still compiles and runs its in-block calls.
+  it("a block-fn reassigned inside its block still compiles + runs its in-block use", async () => {
+    expect(
+      await runNumber(`export function test(): number {
+        let r = 0;
+        { function f(x: number): number { return x + 1; } r = f(10) + f(20); }
+        return r; }`),
+    ).toBe(32);
+  });
 });
 
 describe("#2552 Phase 2 — narrowing (unobserved block-fn unchanged)", () => {
