@@ -25,7 +25,7 @@ import {
   isNativeGeneratorCandidate,
   registerNativeGenerator,
 } from "../generators-native.js";
-import { emitThrowReferenceError, emitThrowString, emitThrowTypeError } from "../expressions/helpers.js";
+import { emitThrowReferenceError, emitThrowString, emitThrowTypeError, noJsHost } from "../expressions/helpers.js";
 import {
   collectClassDeclaration,
   compileClassBodies,
@@ -41,6 +41,7 @@ import {
   getOrRegisterRefCellType,
   getOrRegisterVecType,
 } from "../registry/types.js";
+import { getVecInfo } from "../type-coercion.js";
 import {
   compileExpression,
   compileStatement,
@@ -1262,35 +1263,327 @@ export function emitSetExtrasArgv(
 ): void {
   const { globalIdx, vecTypeIdx } = ensureExtrasArgvGlobal(ctx);
   const ati = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+
+  // Coerce the just-compiled operand (top of stack) to externref so it can be
+  // stored in the externref-element extras array. Mirrors the boxing the
+  // static path uses below.
+  const coerceTopToExternref = (t: ValType | null): void => {
+    if (t === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+      return;
+    }
+    if (t.kind === "f64") {
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+      else fctx.body.push({ op: "drop" }, { op: "ref.null.extern" });
+    } else if (t.kind === "i32") {
+      fctx.body.push({ op: "f64.convert_i32_s" });
+      const boxIdx = ctx.funcMap.get("__box_number");
+      if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+      else fctx.body.push({ op: "drop" }, { op: "ref.null.extern" });
+    } else if (t.kind === "ref" || t.kind === "ref_null") {
+      fctx.body.push({ op: "extern.convert_any" } as Instr);
+    }
+  };
+
+  // (#2202) A spread argument (`f(...src)`) contributes its RUNTIME element
+  // count to `arguments`, not a single slot — and each spread element value must
+  // appear in `arguments`. The static `array.new_fixed` path below counts each
+  // spread node as one and stores the spread *source* as a single element, so
+  // `arguments.length`/values were wrong for any spread call. When a spread is
+  // present, build the extras array with a runtime length: evaluate every extra
+  // ONCE into temps (a non-spread → one boxed externref; a spread source →
+  // expanded to its elements), sum the lengths, allocate, then fill.
+  //
+  // The spread source is read by representation:
+  //   - a typed WasmGC vec ref (`[1,2]` literal, `number[]`/`any[]` var) →
+  //     read its struct length (field 0) and elements (field 1 + array.get)
+  //     directly, boxing each to externref. Works in BOTH host and standalone
+  //     (native vecs) and avoids the lossy `coerce-to-externref` round-trip that
+  //     dropped an inline-literal vec's elements (host `__array_from_iter` saw
+  //     length 0). This is the path the failing test262 `...[lit]` cases need.
+  //   - otherwise (opaque externref / JS iterable, JS-host only) → materialize
+  //     via `__array_from_iter` and index with `__extern_length`/`__extern_get_idx`.
+  const hasSpread = args.slice(startIdx).some((a) => ts.isSpreadElement(a));
+  if (hasSpread) {
+    const externIndexingOk = !noJsHost(ctx);
+    const lenFn = externIndexingOk
+      ? ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }])
+      : 0;
+    const getFn = externIndexingOk
+      ? ensureLateImport(ctx, "__extern_get_idx", [{ kind: "externref" }, { kind: "f64" }], [{ kind: "externref" }])
+      : 0;
+    const iterFn = externIndexingOk
+      ? ensureLateImport(ctx, "__array_from_iter", [{ kind: "externref" }], [{ kind: "externref" }])
+      : 0;
+    flushLateImportShifts(ctx, fctx);
+    if (lenFn !== undefined && getFn !== undefined && iterFn !== undefined) {
+      const boxIdx = ctx.funcMap.get("__box_number");
+      // Box a vec element of the given kind to externref (extras are externref).
+      const boxVecElem = (elemKind: ValType["kind"]): Instr[] => {
+        if (elemKind === "f64") {
+          return boxIdx !== undefined
+            ? [{ op: "call", funcIdx: boxIdx } as Instr]
+            : [{ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+        }
+        if (elemKind === "i32" || elemKind === "i8" || elemKind === "i16") {
+          return boxIdx !== undefined
+            ? [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxIdx } as Instr]
+            : [{ op: "drop" } as Instr, { op: "ref.null.extern" } as Instr];
+        }
+        if (elemKind === "ref" || elemKind === "ref_null") {
+          return [{ op: "extern.convert_any" } as Instr];
+        }
+        // externref element — already correct.
+        return [];
+      };
+      // Per-extra descriptor.
+      type Slot =
+        | { kind: "single"; valLocal: number }
+        // vec-ref spread: read length/data fields directly.
+        | { kind: "vec"; vecLocal: number; vecTi: number; arrTi: number; elemKind: ValType["kind"]; lenLocal: number }
+        // extern spread (host iterable): materialized array indexed by helpers.
+        | { kind: "spread"; srcLocal: number; lenLocal: number };
+      const slots: Slot[] = [];
+      const totalLenLocal = allocLocal(fctx, `__xa_total_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+      fctx.body.push({ op: "local.set", index: totalLenLocal } as Instr);
+
+      for (let i = startIdx; i < args.length; i++) {
+        const arg = args[i]!;
+        if (ts.isSpreadElement(arg)) {
+          // Compile the source with its natural type first (no externref hint)
+          // so a typed vec stays a vec ref we can read directly.
+          const st = compileExpression(ctx, fctx, arg.expression);
+          const stTypeIdx =
+            st && (st.kind === "ref" || st.kind === "ref_null") ? (st as { typeIdx: number }).typeIdx : -1;
+          const vecInfo = stTypeIdx >= 0 ? getVecInfo(ctx, stTypeIdx) : null;
+          // A non-vec ref may be a TUPLE struct (fields `_0`, `_1`, …) — that is
+          // how an inline array literal `[1,2]` with statically-known elements
+          // lowers in a value context (NOT a `__vec_`). Its arity is static and
+          // each element is a `struct.get fieldIdx`. Detect it so an inline-literal
+          // spread (`...[1,2]`) — the shape the failing test262 cluster uses —
+          // expands correctly instead of being treated as one opaque element.
+          const tupleDef =
+            !vecInfo && stTypeIdx >= 0 && ctx.mod.types[stTypeIdx]?.kind === "struct"
+              ? (ctx.mod.types[stTypeIdx] as { fields: { name?: string; type: ValType }[] })
+              : null;
+          const isTuple =
+            tupleDef !== null && tupleDef.fields.length > 0 && tupleDef.fields.every((f, idx) => f.name === `_${idx}`);
+          if (st && (st.kind === "ref" || st.kind === "ref_null") && isTuple && tupleDef) {
+            // Inline tuple-literal spread: static arity, read each field directly.
+            const tupLocal = allocLocal(fctx, `__xa_tup_${fctx.locals.length}`, st);
+            fctx.body.push({ op: "local.set", index: tupLocal } as Instr);
+            for (let fi = 0; fi < tupleDef.fields.length; fi++) {
+              fctx.body.push({ op: "local.get", index: tupLocal } as Instr);
+              if (st.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+              fctx.body.push({ op: "struct.get", typeIdx: stTypeIdx, fieldIdx: fi } as Instr);
+              const valLocal = allocLocal(fctx, `__xa_tv_${fctx.locals.length}`, { kind: "externref" });
+              fctx.body.push(...boxVecElem(tupleDef.fields[fi]!.type.kind));
+              fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+              fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
+              fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+              fctx.body.push({ op: "i32.add" } as Instr);
+              fctx.body.push({ op: "local.set", index: totalLenLocal } as Instr);
+              slots.push({ kind: "single", valLocal });
+            }
+            continue;
+          }
+          if (st && (st.kind === "ref" || st.kind === "ref_null") && vecInfo) {
+            const vecTi = (st as { typeIdx: number }).typeIdx;
+            const vecLocal = allocLocal(fctx, `__xa_vec_${fctx.locals.length}`, st);
+            fctx.body.push({ op: "local.set", index: vecLocal } as Instr);
+            const lenLocal = allocLocal(fctx, `__xa_vlen_${fctx.locals.length}`, { kind: "i32" });
+            // len = (vec != null) ? vec.length : 0
+            fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
+            fctx.body.push({ op: "ref.is_null" } as Instr);
+            fctx.body.push({
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [{ op: "i32.const", value: 0 } as Instr],
+              else: [
+                { op: "local.get", index: vecLocal } as Instr,
+                { op: "ref.as_non_null" } as Instr,
+                { op: "struct.get", typeIdx: vecTi, fieldIdx: 0 } as Instr,
+              ],
+            } as Instr);
+            fctx.body.push({ op: "local.tee", index: lenLocal } as Instr);
+            fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
+            fctx.body.push({ op: "i32.add" } as Instr);
+            fctx.body.push({ op: "local.set", index: totalLenLocal } as Instr);
+            slots.push({
+              kind: "vec",
+              vecLocal,
+              vecTi,
+              arrTi: vecInfo.arrTypeIdx,
+              elemKind: vecInfo.elemType.kind,
+              lenLocal,
+            });
+            continue;
+          }
+          // Opaque source (host iterable). Coerce to externref, materialize, index.
+          coerceTopToExternref(st);
+          if (!externIndexingOk || lenFn === 0 || getFn === 0 || iterFn === 0) {
+            // Standalone with a non-vec spread source — can't expand natively
+            // here. Drop the value and treat as a single slot (best effort; the
+            // static path would have done the same).
+            const valLocal = allocLocal(fctx, `__xa_val_${fctx.locals.length}`, { kind: "externref" });
+            fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+            fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
+            fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+            fctx.body.push({ op: "i32.add" } as Instr);
+            fctx.body.push({ op: "local.set", index: totalLenLocal } as Instr);
+            slots.push({ kind: "single", valLocal });
+            continue;
+          }
+          fctx.body.push({ op: "call", funcIdx: iterFn } as Instr);
+          const srcLocal = allocLocal(fctx, `__xa_src_${fctx.locals.length}`, { kind: "externref" });
+          fctx.body.push({ op: "local.set", index: srcLocal } as Instr);
+          const lenLocal = allocLocal(fctx, `__xa_len_${fctx.locals.length}`, { kind: "i32" });
+          fctx.body.push({ op: "local.get", index: srcLocal } as Instr);
+          fctx.body.push({ op: "call", funcIdx: lenFn } as Instr);
+          fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+          fctx.body.push({ op: "local.tee", index: lenLocal } as Instr);
+          fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
+          fctx.body.push({ op: "i32.add" } as Instr);
+          fctx.body.push({ op: "local.set", index: totalLenLocal } as Instr);
+          slots.push({ kind: "spread", srcLocal, lenLocal });
+        } else {
+          const t = compileExpression(ctx, fctx, arg, { kind: "externref" });
+          coerceTopToExternref(t);
+          const valLocal = allocLocal(fctx, `__xa_val_${fctx.locals.length}`, { kind: "externref" });
+          fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+          // total += 1
+          fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
+          fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+          fctx.body.push({ op: "i32.add" } as Instr);
+          fctx.body.push({ op: "local.set", index: totalLenLocal } as Instr);
+          slots.push({ kind: "single", valLocal });
+        }
+      }
+
+      // arr = array.new_default(total); fill via a running write index.
+      const arrTmp = allocLocal(fctx, `__xa_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: ati });
+      fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
+      fctx.body.push({ op: "array.new_default", typeIdx: ati } as Instr);
+      fctx.body.push({ op: "local.set", index: arrTmp } as Instr);
+      const wIdx = allocLocal(fctx, `__xa_w_${fctx.locals.length}`, { kind: "i32" });
+      fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+      fctx.body.push({ op: "local.set", index: wIdx } as Instr);
+
+      for (const slot of slots) {
+        if (slot.kind === "single") {
+          fctx.body.push({ op: "local.get", index: arrTmp } as Instr);
+          fctx.body.push({ op: "local.get", index: wIdx } as Instr);
+          fctx.body.push({ op: "local.get", index: slot.valLocal } as Instr);
+          fctx.body.push({ op: "array.set", typeIdx: ati } as Instr);
+          fctx.body.push({ op: "local.get", index: wIdx } as Instr);
+          fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+          fctx.body.push({ op: "i32.add" } as Instr);
+          fctx.body.push({ op: "local.set", index: wIdx } as Instr);
+        } else if (slot.kind === "vec") {
+          // Loop i in [0, len): arr[wIdx++] = box(vec.data[i])
+          const sIdx = allocLocal(fctx, `__xa_vi_${fctx.locals.length}`, { kind: "i32" });
+          fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+          fctx.body.push({ op: "local.set", index: sIdx } as Instr);
+          fctx.body.push({
+            op: "block",
+            blockType: { kind: "empty" },
+            body: [
+              {
+                op: "loop",
+                blockType: { kind: "empty" },
+                body: [
+                  { op: "local.get", index: sIdx } as Instr,
+                  { op: "local.get", index: slot.lenLocal } as Instr,
+                  { op: "i32.ge_s" } as Instr,
+                  { op: "br_if", depth: 1 } as Instr,
+                  // arr[wIdx] = box(vec.data[sIdx])
+                  { op: "local.get", index: arrTmp } as Instr,
+                  { op: "local.get", index: wIdx } as Instr,
+                  { op: "local.get", index: slot.vecLocal } as Instr,
+                  { op: "ref.as_non_null" } as Instr,
+                  { op: "struct.get", typeIdx: slot.vecTi, fieldIdx: 1 } as Instr,
+                  { op: "local.get", index: sIdx } as Instr,
+                  ...(slot.elemKind === "i8" || slot.elemKind === "i16"
+                    ? [{ op: "array.get_s", typeIdx: slot.arrTi } as Instr]
+                    : [{ op: "array.get", typeIdx: slot.arrTi } as Instr]),
+                  ...boxVecElem(slot.elemKind),
+                  { op: "array.set", typeIdx: ati } as Instr,
+                  // wIdx++
+                  { op: "local.get", index: wIdx } as Instr,
+                  { op: "i32.const", value: 1 } as Instr,
+                  { op: "i32.add" } as Instr,
+                  { op: "local.set", index: wIdx } as Instr,
+                  // sIdx++
+                  { op: "local.get", index: sIdx } as Instr,
+                  { op: "i32.const", value: 1 } as Instr,
+                  { op: "i32.add" } as Instr,
+                  { op: "local.set", index: sIdx } as Instr,
+                  { op: "br", depth: 0 } as Instr,
+                ],
+              } as Instr,
+            ],
+          } as Instr);
+        } else {
+          // Loop i in [0, len): arr[wIdx++] = __extern_get_idx(src, i)
+          const sIdx = allocLocal(fctx, `__xa_si_${fctx.locals.length}`, { kind: "i32" });
+          fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+          fctx.body.push({ op: "local.set", index: sIdx } as Instr);
+          fctx.body.push({
+            op: "block",
+            blockType: { kind: "empty" },
+            body: [
+              {
+                op: "loop",
+                blockType: { kind: "empty" },
+                body: [
+                  { op: "local.get", index: sIdx } as Instr,
+                  { op: "local.get", index: slot.lenLocal } as Instr,
+                  { op: "i32.ge_s" } as Instr,
+                  { op: "br_if", depth: 1 } as Instr,
+                  // arr[wIdx] = __extern_get_idx(src, f64(sIdx))
+                  { op: "local.get", index: arrTmp } as Instr,
+                  { op: "local.get", index: wIdx } as Instr,
+                  { op: "local.get", index: slot.srcLocal } as Instr,
+                  { op: "local.get", index: sIdx } as Instr,
+                  { op: "f64.convert_i32_s" } as Instr,
+                  { op: "call", funcIdx: getFn } as Instr,
+                  { op: "array.set", typeIdx: ati } as Instr,
+                  // wIdx++
+                  { op: "local.get", index: wIdx } as Instr,
+                  { op: "i32.const", value: 1 } as Instr,
+                  { op: "i32.add" } as Instr,
+                  { op: "local.set", index: wIdx } as Instr,
+                  // sIdx++
+                  { op: "local.get", index: sIdx } as Instr,
+                  { op: "i32.const", value: 1 } as Instr,
+                  { op: "i32.add" } as Instr,
+                  { op: "local.set", index: sIdx } as Instr,
+                  { op: "br", depth: 0 } as Instr,
+                ],
+              } as Instr,
+            ],
+          } as Instr);
+        }
+      }
+
+      // struct.new __vec_externref(total, arr) → __extras_argv
+      fctx.body.push({ op: "local.get", index: totalLenLocal } as Instr);
+      fctx.body.push({ op: "local.get", index: arrTmp } as Instr);
+      fctx.body.push({ op: "struct.new", typeIdx: vecTypeIdx } as Instr);
+      fctx.body.push({ op: "global.set", index: globalIdx } as Instr);
+      return;
+    }
+    // Helpers unavailable — fall through to the static path (best effort).
+  }
+
   const extrasCount = args.length - startIdx;
 
   // Build element array: compile each extra arg, coerce to externref, push.
   for (let i = startIdx; i < args.length; i++) {
     const t = compileExpression(ctx, fctx, args[i]!, { kind: "externref" });
-    if (t === null) {
-      fctx.body.push({ op: "ref.null.extern" });
-      continue;
-    }
-    if (t.kind === "f64") {
-      const boxIdx = ctx.funcMap.get("__box_number");
-      if (boxIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: boxIdx });
-      } else {
-        fctx.body.push({ op: "drop" });
-        fctx.body.push({ op: "ref.null.extern" });
-      }
-    } else if (t.kind === "i32") {
-      fctx.body.push({ op: "f64.convert_i32_s" });
-      const boxIdx = ctx.funcMap.get("__box_number");
-      if (boxIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx: boxIdx });
-      } else {
-        fctx.body.push({ op: "drop" });
-        fctx.body.push({ op: "ref.null.extern" });
-      }
-    } else if (t.kind === "ref" || t.kind === "ref_null") {
-      fctx.body.push({ op: "extern.convert_any" } as Instr);
-    }
+    coerceTopToExternref(t);
   }
   fctx.body.push({ op: "array.new_fixed", typeIdx: ati, length: extrasCount });
   const arrTmp = allocLocal(fctx, `__extras_arr_tmp_${fctx.locals.length}`, { kind: "ref", typeIdx: ati });
