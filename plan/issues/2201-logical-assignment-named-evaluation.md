@@ -2,7 +2,7 @@
 id: 2201
 title: "Logical-assignment NamedEvaluation — `x ??=/||=/&&= fn` must set fn.name to \"x\" (~9 test262 fails)"
 status: done
-assignee: ttraenkler/dev-conformance
+assignee: ttraenkler/dev-carla
 completed: 2026-06-21
 sprint: 64
 created: 2026-06-19
