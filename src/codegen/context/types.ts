@@ -724,6 +724,19 @@ export interface CodegenContext {
    */
   holeTypeIdx: number;
   holeGlobalIdx: number | undefined;
+  /**
+   * (#2580 M0) Value-rep dynamic-read substrate. Set true by a call site that
+   * needs the runtime property-presence read primitives (`__dyn_has` /
+   * `__dyn_get`) — e.g. M1's `any`-receiver `.length`. Gates
+   * `ensureDynReadHelpers`: when clear (the common case AND all of M0, which adds
+   * NO call sites), the helpers are never emitted, so a hole/dynamic-free module
+   * is byte-identical. The two helpers dispatch the #1852 boxed `$AnyValue`
+   * family by tag (0 null / 1 undefined / 2 i32 / 3 f64 / 4 bool / 5 string /
+   * 6 GC-ref → `$Object`/`$Vec`).
+   */
+  usesDynRead: boolean;
+  /** (#2580 M0) Idempotence latch for `ensureDynReadHelpers` (once per module). */
+  dynReadHelpersEmitted: boolean;
   /** Classes that must throw TypeError at evaluation time */
   classThrowsOnEval: Set<string>;
   /**

@@ -1,7 +1,9 @@
 ---
 id: 2581
 title: "standalone: object-literal method generators ({ *m(){} }) still leak env.__gen_* — native lowering via closures.ts"
-status: ready
+status: done
+assignee: sd-2
+completed: 2026-06-21
 sprint: Backlog
 created: 2026-06-21
 priority: medium
@@ -154,3 +156,71 @@ invalid wasm (the exact hazard #2571 hit + fixed).
 - **Resume**: re-claim with `--force`, start from the `this`-free first slice
   above. Validate broad-impact via the full gen-method cluster + merge_group, NOT
   a scoped sweep.
+
+## Resolution (2026-06-21, sd-2) — native, simpler than first feared
+
+Object-literal method generators now lower natively in standalone/wasi. The
+key enabler: the object-literal method **body func already leads with a `this`
+struct param** (`methodFctxParams[0] = (ref structTypeIdx)`, literals.ts) —
+structurally identical to a class method — so the #2571 synthetic-`this`
+state-struct model transferred directly and the closure trampoline carries the
+`$GenState` ref result through unchanged (the earlier `__current_this`-only
+framing was about the trampoline; the underlying body func has the struct param).
+
+### Changes
+
+- **`generators-native.ts`** — the candidate-gate bail
+  `!ts.isClassLike(decl.parent)` widened to also admit
+  `ts.isObjectLiteralExpression(decl.parent)`. Other MethodDeclaration contexts
+  still bail to host. The gate stays the single source of truth (registration +
+  `sourceNeedsGeneratorHostImports` agree).
+- **`literals.ts`** — at the object-literal method collection site: register the
+  native generator when `(standalone||wasi) && !async && candidate`, keyed by the
+  per-literal func identity (`${fullName}__lit${forkIdx}` when a
+  `literalMethodFuncIdx` fork exists, else `fullName`, so forked sibling literals
+  get distinct `$GenState`s), pass `methodParams` (already leads with `this`) +
+  `synthesizedThis = true`, and set the method result type to the `$GenState_*`
+  ref. The generator-method body emit routes through
+  `compileNativeGeneratorFunction` (host eager-buffer is the `else`). The fctx
+  returnType derives from `methodResults`, so it tracks automatically.
+
+### Bail-outs (host path, valid Wasm, no regression)
+
+Capturing / `arguments` / `super` method generators bail via the existing
+`isNativeGeneratorCandidate` guards. Two **same-name same-shape** object literals
+dedup to one method func (last body wins) — the PRE-EXISTING object-literal method
+dedup, identical for non-generators (verified on clean main: `{m(){return 100}}`
++ `{m(){return 200}}` → both 200). Distinct-named generators each get their own
+state machine (verified 100200).
+
+### Verified
+
+`tests/issue-2581-objlit-method-generators.test.ts` (12): simple/this/this+param/
+multi-yield/done/lazy native (zero `__gen_*` imports); fresh-state per call;
+for-of; distinct-named independence; gen+regular coexistence; capturing bail;
+class+free-fn regression guard. Updated the #2571 objlit test (was asserting the
+now-lifted deferral). tsc + prettier + hard-error + IR-fallback gates clean; 40
+generator/class regression tests pass. JS-host (gc) byte-identical
+(`(standalone||wasi)`-gated). Broad-impact → merge_group is the authoritative
+full-standalone-shard validator.
+
+## Merge-queue ejection + fix (2026-06-21, sd-2)
+
+PR #1873 ejected from the merge_group on "test262 standalone shard 54" — a REAL
+regression (branch was 0 commits behind origin/main; not stale-base drift).
+
+Root cause: an object-literal generator method with a **default/optional param**
+(`{ *m(d = 5){ yield d } }`) returned the WRONG value (`o.m()` → 0 instead of 5).
+Object-literal methods are invoked through the closure trampoline
+(`emitObjectMethodAsClosure`), which forwards args but does NOT set the
+`__argc_default` global the param-default check reads — so the native factory read
+the un-defaulted sentinel. The CLASS path is unaffected (class methods are called
+directly, argc set), which is why #2571 didn't hit this.
+
+Fix: `isNativeGeneratorCandidate` bails an object-literal generator method with any
+`param.initializer || param.questionToken` to the host eager-buffer path (which
+applies defaults correctly). A strictly-narrowing bail — it can only reduce what
+goes native, never add a regression. The common no-default object-literal
+generator stays native. Class/free generators with defaults stay native
+(unchanged). Regression tests added (default bails to host; explicit-arg stays
+native). Re-validated via chunk54 standalone diff + merge_group.

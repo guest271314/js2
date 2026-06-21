@@ -5533,6 +5533,89 @@ export function compileElementAccessBody(
           return typeDef.fields[fieldIdx]!.type;
         }
       }
+      // (#2582) Non-literal NUMERIC key on a struct whose fields are
+      // numeric-named (an object literal `{ 9: …, 10: … }` read via
+      // `obj[ecmaVersion]` with a runtime key) → emit a static key-switch of
+      // `struct.get` per numeric field instead of the dynamic `__extern_get`.
+      //
+      // Why this matters: the `__extern_get` path routes through the host
+      // runtime's `_safeGet`, which reads the struct field via the
+      // `__sget_<key>` EXPORT — but module-init top-level code (acorn's
+      // `for (…) buildUnicodeData(list[i])` driving
+      // `unicodeBinaryPropertiesOfStrings[ecmaVersion]`) executes inside the
+      // Wasm START function, BEFORE `__setExports` wires the exports, so
+      // `__sget_9` is unavailable and the read returns `undefined`. Worse,
+      // `_safeGet` then falls into the well-known-symbol-ID branch (key 9 ∈
+      // [1,15]) and swallows it. A `struct.get` key-switch is exports- and
+      // host-independent, so it reads correctly at module-init AND at runtime.
+      // Literal-key reads already lower to a direct `struct.get` above; this
+      // generalises that to a runtime numeric key over the same fields.
+      {
+        const numericFields = typeDef.fields
+          .map((f: { name?: string; type: ValType }, idx: number) => ({ f, idx }))
+          .filter(
+            ({ f }: { f: { name?: string; type: ValType } }) =>
+              f.name !== undefined && /^(?:0|[1-9][0-9]*)$/.test(f.name) && f.type.kind === "externref",
+          );
+        const keyType = ctx.checker.getTypeAtLocation(expr.argumentExpression);
+        // The key is switch-eligible when it is (or could be) a number: a
+        // genuine number/number-literal, OR an `any`/`unknown` key (acorn's
+        // `unicodeBinaryPropertiesOfStrings[ecmaVersion]` — `ecmaVersion` is an
+        // untyped JS param, so it resolves to `any`). A non-number `any` value
+        // coerces to NaN, matches no arm, and yields the missing-key result —
+        // exactly what `__extern_get` would return. A STATICALLY string-typed
+        // key is excluded so `obj["9"]`-style string property reads keep the
+        // dynamic path (string→f64 would mis-coerce to NaN).
+        const NUMERIC_KEY_FLAGS = ts.TypeFlags.Number | ts.TypeFlags.NumberLiteral;
+        const PERMISSIVE_KEY_FLAGS = NUMERIC_KEY_FLAGS | ts.TypeFlags.Any | ts.TypeFlags.Unknown;
+        const keyIsStringy =
+          (keyType.flags & (ts.TypeFlags.String | ts.TypeFlags.StringLiteral)) !== 0 &&
+          (keyType.flags & NUMERIC_KEY_FLAGS) === 0;
+        const keySwitchEligible = (keyType.flags & PERMISSIVE_KEY_FLAGS) !== 0 && !keyIsStringy;
+        // Only take the static key-switch when EVERY field is a numeric-named
+        // externref slot (a plain numeric-keyed object literal). A mixed shape
+        // falls through to the dynamic `__extern_get` path unchanged.
+        if (numericFields.length > 0 && numericFields.length === typeDef.fields.length && keySwitchEligible) {
+          // Receiver struct ref is already on the stack — stash it so each
+          // switch arm can re-read the same field.
+          const recvLocal = allocLocal(fctx, `__numkey_recv_${fctx.locals.length}`, {
+            kind: "ref_null",
+            typeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: recvLocal } as Instr);
+          // Key as f64 (numeric reads box through f64; matches the literal path).
+          compileExpression(ctx, fctx, expr.argumentExpression, { kind: "f64" });
+          const keyLocal = allocLocal(fctx, `__numkey_idx_${fctx.locals.length}`, { kind: "f64" });
+          fctx.body.push({ op: "local.set", index: keyLocal } as Instr);
+          // Build a nested if/else chain from the innermost (default) outward:
+          //   if key==N0 then struct.get F0 else if key==N1 then … else null
+          let chain: Instr[] = [{ op: "ref.null.extern" } as Instr];
+          for (let i = numericFields.length - 1; i >= 0; i--) {
+            const { f, idx } = numericFields[i]!;
+            const fieldNum = Number(f.name);
+            // Field is a numeric-named externref slot (guaranteed by the filter
+            // above), so a bare `struct.get` already yields externref — the
+            // unified result type of a dynamic-key read. No coercion needed.
+            const thenArm: Instr[] = [
+              { op: "local.get", index: recvLocal } as Instr,
+              { op: "struct.get", typeIdx, fieldIdx: idx } as Instr,
+            ];
+            chain = [
+              { op: "local.get", index: keyLocal } as Instr,
+              { op: "f64.const", value: fieldNum } as Instr,
+              { op: "f64.eq" } as Instr,
+              {
+                op: "if",
+                blockType: { kind: "val", type: { kind: "externref" } },
+                then: thenArm,
+                else: chain,
+              } as Instr,
+            ];
+          }
+          for (const instr of chain) fctx.body.push(instr);
+          return { kind: "externref" };
+        }
+      }
       // Non-vec, non-tuple struct: fallback to externref conversion + __extern_get
       // Convert struct ref (already on stack) to externref
       fctx.body.push({ op: "extern.convert_any" });

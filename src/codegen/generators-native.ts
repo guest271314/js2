@@ -844,21 +844,38 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
   // method threads cleanly through the funcMap key. A FunctionDeclaration name
   // is always an Identifier.
   if (ts.isMethodDeclaration(decl) && !ts.isIdentifier(decl.name)) return false;
-  // (#2571) Only CLASS method generators are routed through the native factory
-  // in this slice (class-bodies.ts). An OBJECT-LITERAL method generator
-  // (`{ *m(){} }`) is lowered via the closures.ts lifted-closure path, which is
-  // NOT yet wired to the native state machine — so it must keep forcing the host
-  // path. Bailing here (the single candidate gate consumed by both
-  // `registerNativeGenerator` AND `sourceNeedsGeneratorHostImports`) keeps the
-  // host imports registered for it, avoiding an undefined-funcidx invalid module.
-  // Object-literal method generators are the documented follow-up.
-  if (ts.isMethodDeclaration(decl) && !ts.isClassLike(decl.parent)) return false;
+  // (#2571/#2581) A method generator is native-routable only when its emit site
+  // is wired to the native factory: CLASS bodies (class-bodies.ts, #2571) and
+  // OBJECT-LITERAL methods (literals.ts, #2581). Both compile the method body as
+  // a func whose param 0 is the receiver `this` (a `ref $struct`), so the
+  // synthetic-`this` state-struct model applies uniformly. Any OTHER
+  // MethodDeclaration context (e.g. a TS interface/type member, or a shape the
+  // emit paths don't cover) keeps the host path — bailing here (the single
+  // candidate gate consumed by both `registerNativeGenerator` AND
+  // `sourceNeedsGeneratorHostImports`) keeps the host imports registered,
+  // avoiding an undefined-funcidx invalid module.
+  if (ts.isMethodDeclaration(decl) && !ts.isClassLike(decl.parent) && !ts.isObjectLiteralExpression(decl.parent)) {
+    return false;
+  }
   const modifiers = ts.canHaveModifiers(decl) ? ts.getModifiers(decl) : undefined;
   if (modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword || m.kind === ts.SyntaxKind.DeclareKeyword)) {
     return false;
   }
   for (const param of decl.parameters) {
     if (param.dotDotDotToken || !ts.isIdentifier(param.name)) return false;
+  }
+  // (#2581) An OBJECT-LITERAL generator method with a DEFAULT or OPTIONAL param
+  // must bail to the host path. Object-literal methods are invoked through the
+  // closure trampoline (`emitObjectMethodAsClosure`), which forwards args but
+  // does NOT set the `__argc_default` global the param-default check reads — so
+  // the native factory would read the un-defaulted sentinel and yield the wrong
+  // value (`{ *m(d=5){yield d} }.m()` → 0 instead of 5). Class methods are called
+  // directly (argc set), so they keep defaults native. The eager-buffer host path
+  // applies defaults correctly for the object-literal case, so route there.
+  if (ts.isMethodDeclaration(decl) && ts.isObjectLiteralExpression(decl.parent)) {
+    for (const param of decl.parameters) {
+      if (param.initializer || param.questionToken) return false;
+    }
   }
   // (#2571) A method generator that reads `arguments`, uses `super.*`, or
   // CAPTURES an enclosing-function binding (#2203) has no native state-machine

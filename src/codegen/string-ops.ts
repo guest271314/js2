@@ -2122,6 +2122,20 @@ export function compileNativeStringMethodCall(
     fctx.body.push({ op: "local.set", index: local });
     return local;
   };
+  // (#2160 wrapper-strmethod) Compile the RECEIVER into a native-string local
+  // honoring `receiverOverride`. The two-string-argument arms (indexOf /
+  // lastIndexOf / includes / startsWith / endsWith) store the receiver in a
+  // local before pushing args, so they cannot use `emitReceiver()` inline; they
+  // previously called `compileStringValueToLocal(propAccess.expression, …)`,
+  // which ignores the override and re-compiles the raw receiver expression — a
+  // trap for a `new String(x)` wrapper (the override extracts its primitive
+  // slot). Route the receiver through `emitReceiver()` so the override applies.
+  const compileReceiverToLocal = (name: string): number => {
+    const local = allocLocal(fctx, `${name}_${fctx.locals.length}`, nativeStringType(ctx));
+    emitReceiver();
+    fctx.body.push({ op: "local.set", index: local });
+    return local;
+  };
   const compileIntegerValueToLocal = (value: ts.Expression | undefined, fallback: number, name: string): number => {
     const local = allocLocal(fctx, `${name}_${fctx.locals.length}`, {
       kind: "i32",
@@ -2354,7 +2368,7 @@ export function compileNativeStringMethodCall(
 
   // indexOf: native helper
   if (method === "indexOf") {
-    const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_indexOf_recv");
+    const receiverLocal = compileReceiverToLocal("__str_indexOf_recv");
     const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_indexOf_search");
     const fromLocal = compileIntegerValueToLocal(expr.arguments[1], 0, "__str_indexOf_from");
     const funcIdx = ctx.nativeStrHelpers.get("__str_indexOf")!;
@@ -2367,7 +2381,7 @@ export function compileNativeStringMethodCall(
 
   // lastIndexOf: native helper
   if (method === "lastIndexOf") {
-    const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_lastIndexOf_recv");
+    const receiverLocal = compileReceiverToLocal("__str_lastIndexOf_recv");
     const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_lastIndexOf_search");
     // §22.1.3.9 step 5: ToIntegerOrInfinity(position) with NaN → +∞, so an
     // explicit `NaN` (or `undefined`) position searches from the end — the same
@@ -2386,7 +2400,7 @@ export function compileNativeStringMethodCall(
 
   // includes: native helper
   if (method === "includes") {
-    const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_includes_recv");
+    const receiverLocal = compileReceiverToLocal("__str_includes_recv");
     const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_includes_search");
     const fromLocal = compileIntegerValueToLocal(expr.arguments[1], 0, "__str_includes_from");
     const funcIdx = ctx.nativeStrHelpers.get("__str_includes")!;
@@ -2399,7 +2413,7 @@ export function compileNativeStringMethodCall(
 
   // startsWith: native helper
   if (method === "startsWith") {
-    const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_startsWith_recv");
+    const receiverLocal = compileReceiverToLocal("__str_startsWith_recv");
     const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_startsWith_search");
     const posLocal = compileIntegerValueToLocal(expr.arguments[1], 0, "__str_startsWith_pos");
     const funcIdx = ctx.nativeStrHelpers.get("__str_startsWith")!;
@@ -2412,7 +2426,7 @@ export function compileNativeStringMethodCall(
 
   // endsWith: native helper
   if (method === "endsWith") {
-    const receiverLocal = compileStringValueToLocal(propAccess.expression, "", "__str_endsWith_recv");
+    const receiverLocal = compileReceiverToLocal("__str_endsWith_recv");
     const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_endsWith_search");
     const endLocal = compileIntegerValueToLocal(expr.arguments[1], 0x7fffffff, "__str_endsWith_end");
     const funcIdx = ctx.nativeStrHelpers.get("__str_endsWith")!;
