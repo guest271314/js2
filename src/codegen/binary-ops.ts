@@ -41,7 +41,7 @@ import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringImports, addUnionImports, resolveNativeTypeAnnotation, resolveWasmType } from "./index.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts } from "./shared.js";
-import { resolveStructNameForExpr } from "./property-access.js";
+import { isLogicalAssignNamedEvalNameRead, resolveStructNameForExpr } from "./property-access.js";
 import { compileStringBinaryOp } from "./string-ops.js";
 import { compileInstanceOf, compileTypeofComparison } from "./typeof-delete.js";
 
@@ -1032,8 +1032,22 @@ export function compileBinaryExpression(
     const decl = sym?.valueDeclaration ?? sym?.declarations?.[0];
     return decl !== undefined && ts.isVariableDeclaration(decl) && ts.isCatchClause(decl.parent);
   };
-  const leftIsStrLike = isStringOrNullableString(leftTsType) || isStandaloneErrorStringPropRead(expr.left);
-  const rightIsStrLike = isStringOrNullableString(rightTsType) || isStandaloneErrorStringPropRead(expr.right);
+  // (#2201) ES §13.15.2 NamedEvaluation: `id.name` where `id` is the target of a
+  // logical-assignment with an anonymous fn/arrow/class RHS (`id &&=/||=/??= fn`)
+  // lowers (via the property-access `.name` static resolver) to a native-string
+  // ref, but the receiver `id` is typed `number`/`any`, so the operand's *TS*
+  // type isn't `string` and the string-equality dispatch below misses it,
+  // falling through to `ref.eq` (struct identity → always false for equal
+  // content). Recognise the read shape at the AST level so `id.name === "x"`
+  // routes to content-based string equality.
+  const leftIsStrLike =
+    isStringOrNullableString(leftTsType) ||
+    isStandaloneErrorStringPropRead(expr.left) ||
+    isLogicalAssignNamedEvalNameRead(ctx, expr.left);
+  const rightIsStrLike =
+    isStringOrNullableString(rightTsType) ||
+    isStandaloneErrorStringPropRead(expr.right) ||
+    isLogicalAssignNamedEvalNameRead(ctx, expr.right);
   if (
     ctx.nativeStrings &&
     ctx.nativeStrTypeIdx >= 0 &&
@@ -1041,7 +1055,7 @@ export function compileBinaryExpression(
     !wrapperEquality &&
     leftIsStrLike &&
     rightIsStrLike &&
-    // At least one side is the union/error-read form (else the plain-string path below handles it)
+    // At least one side is the union/error-read/named-eval form (else the plain-string path below handles it)
     (!isStringType(leftTsType) || !isStringType(rightTsType))
   ) {
     return compileStringBinaryOp(ctx, fctx, expr, op);
