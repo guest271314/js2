@@ -124,6 +124,65 @@ describe("#2202 — arguments.length for spread call args", () => {
           ),
         ).toBe(3);
       });
+
+      // (#2202 Stage 1) Free function call with spread + trailing comma where
+      // the callee reads `arguments`. The direct-call spread dispatch took
+      // `compileSpreadCallArgs` (positional-slot only) which dropped the
+      // runtime extras and left a stray operand on the stack → the callee saw
+      // `arguments.length === 0` and the call trapped with a null-deref. The
+      // 0-user-param callee now routes through the `__argc`/`__extras_argv`
+      // protocol like every method path. `function ref()` is hoisted INSIDE the
+      // wrapper `test()` here, so it is a *lifted nested* function with capture
+      // params already on the stack — the fix pads only the slots after the
+      // capture region (over-padding the captures was the original null-deref).
+      it("nested function decl: mixed fixed + multi-spread arguments.length", async () => {
+        expect(
+          await run(
+            `export function test(): number {
+               let log = 0;
+               const arr = [2, 3];
+               function ref(): void { log = arguments.length; }
+               ref(42, ...([1] as any), ...(arr as any),);
+               return log;
+             }`,
+            opts,
+          ),
+        ).toBe(4);
+      });
+
+      it("nested function decl: spread element VALUES reach arguments[i]", async () => {
+        // ref(42, ...[1], ...[2,3]) → args [42,1,2,3]
+        // length*1000 + a0*100 + a2*10 + a3 = 4000 + 4200 + 20 + 3 = 8223
+        expect(
+          await run(
+            `export function test(): number {
+               let r = 0;
+               const arr = [2, 3];
+               function ref(): void {
+                 r = (arguments.length as number) * 1000 + (arguments[0] as number) * 100 + (arguments[2] as number) * 10 + (arguments[3] as number);
+               }
+               ref(42, ...([1] as any), ...(arr as any),);
+               return r;
+             }`,
+            opts,
+          ),
+        ).toBe(8223);
+      });
+
+      it("nested generator function decl: mixed spread arguments.length", async () => {
+        expect(
+          await run(
+            `export function test(): number {
+               let log = 0;
+               const arr = [2, 3];
+               function* ref(): any { log = arguments.length; yield; }
+               ref(42, ...([1] as any), ...(arr as any),).next();
+               return log;
+             }`,
+            opts,
+          ),
+        ).toBe(4);
+      });
     });
   }
 

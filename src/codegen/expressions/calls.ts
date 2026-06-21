@@ -11143,6 +11143,27 @@ function compileCallExpression(
     const linearParamsForCall = getLinearU8ParamIndicesForCall(ctx, expr);
     const hasLinearParamsForCall = !!linearParamsForCall && linearParamsForCall.size > 0;
 
+    // (#2202) User-visible param count, computed up-front so the spread-call
+    // dispatch below can detect the "callee reads `arguments`, every arg is an
+    // extra" shape (the named generator/free-function trailing-comma+spread
+    // cluster) and route it through the `__argc`/`__extras_argv` protocol
+    // instead of `compileSpreadCallArgs` (which only fills positional param
+    // slots and never materialises the runtime-length extras vec — so a
+    // 0-param `arguments`-reading callee saw `arguments.length === 0` and a
+    // stray positional operand was left on the stack → null-deref trap). The
+    // capture-count math mirrors the normal-call path below.
+    const paramTypesEarly = getFuncParamTypes(ctx, funcIdx);
+    const captureCountEarly = nestedCaptures
+      ? nestedCaptures.length + nestedCaptures.filter((c) => c.hasTdzFlag).length
+      : 0;
+    const paramCountEarly =
+      hasLinearParamsForCall && paramTypesEarly
+        ? sourceParamCountFromExpanded(paramTypesEarly.length, linearParamsForCall, captureCountEarly)
+        : paramTypesEarly
+          ? paramTypesEarly.length - captureCountEarly
+          : expr.arguments.length;
+    const calleeReadsArgsEarly = ctx.funcUsesArguments.has(funcName);
+
     if (hasLinearParamsForCall && hasSpreadArg) {
       reportError(ctx, expr, "Cannot spread arguments into a linear Uint8Array helper call (#1886)");
       const paramTypes = getFuncParamTypes(ctx, funcIdx);
@@ -11184,6 +11205,32 @@ function compileCallExpression(
       });
       // Wrap in vec struct: { length, data }
       fctx.body.push({ op: "struct.new", typeIdx: restInfo.vecTypeIdx });
+    } else if (hasSpreadArg && calleeReadsArgsEarly && !restInfo && !hasLinearParamsForCall && paramCountEarly <= 0) {
+      // (#2202) Direct call to an `arguments`-reading function where the callee
+      // has zero user params, so EVERY argument (spread or not) is an "extra".
+      // `compileSpreadCallArgs` would only fill positional param slots (none
+      // here), dropping the runtime extras and leaving `arguments.length === 0`
+      // plus a stray operand on the stack. Route the whole list through the
+      // `__extras_argv` builder (runtime spread expansion, stack-neutral) and
+      // set `__argc` from the extras count — mirroring every method dispatch
+      // path. `paramCount` is 0, so no JS positional operands precede the call.
+      //
+      // Capture/env operands (for a lifted nested fn) are ALREADY on the stack
+      // from the `nestedCaptures` prepend loop above — `emitSetExtrasArgv` is
+      // stack-neutral (everything lands in locals), so it does not disturb
+      // them. We therefore pad only the param slots AFTER the capture region
+      // (the same accounting as the normal-call path: providedCount = 0 user
+      // args + captureCount captures already pushed). Over-padding the captures
+      // was the null-deref: a phantom default landed on top of the real env.
+      emitSetExtrasArgv(ctx, fctx, expr.arguments as unknown as ts.Expression[], 0);
+      if (paramTypesEarly) {
+        for (let i = captureCountEarly; i < paramTypesEarly.length; i++) {
+          pushDefaultValue(fctx, paramTypesEarly[i]!, ctx);
+        }
+      }
+      // __argc = 0 (no formal-region args); `arguments.length` then derives
+      // entirely from the runtime extras-vec length built above.
+      maybeSetArgcForKnownCall(ctx, fctx, funcName, 0, 0);
     } else if (hasSpreadArg) {
       // Spread in function call: fn(...arr) — unpack array elements as positional args
       compileSpreadCallArgs(ctx, fctx, expr, funcIdx, restInfo);
