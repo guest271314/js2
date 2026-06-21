@@ -5250,13 +5250,27 @@ function compileCallExpression(
           const objLocal = allocLocal(fctx, `__ocreate_obj_${fctx.locals.length}`, { kind: "externref" });
           fctx.body.push({ op: "local.set", index: objLocal });
 
-          const dpDescIdx = ensureLateImport(
-            ctx,
-            "__defineProperty_desc",
-            [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
-            [{ kind: "externref" }],
-          );
-          flushLateImportShifts(ctx, fctx);
+          // (#2515 S1) Per-property descriptor apply. In `--target standalone`
+          // there is no JS host, so the `__defineProperty_desc` host import is
+          // refused (#1472 Phase B) — route instead to the Wasm-native
+          // `__obj_define_from_desc(obj, key, descObj)` helper, the SAME native
+          // `Object.defineProperty` standalone uses (object-ops.ts). It performs
+          // ToPropertyDescriptor over the descriptor `$Object` and dispatches to
+          // the native `__defineProperty_value`/`__defineProperty_accessor`
+          // store. Host/gc/wasi keep the precise `__defineProperty_desc` import.
+          let dpDescIdx: number | undefined;
+          if (ctx.standalone) {
+            ensureObjectRuntime(ctx);
+            dpDescIdx = ctx.funcMap.get("__obj_define_from_desc");
+          } else {
+            dpDescIdx = ensureLateImport(
+              ctx,
+              "__defineProperty_desc",
+              [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+              [{ kind: "externref" }],
+            );
+            flushLateImportShifts(ctx, fctx);
+          }
 
           for (const prop of descsLiteral.properties) {
             if (!ts.isPropertyAssignment(prop)) continue;
