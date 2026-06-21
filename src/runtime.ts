@@ -7597,6 +7597,31 @@ assert._isSameValue = isSameValue;
           // protocol and propagates any throws from .next() — needed for
           // spec-compliant destructuring of throwing iterators (#1150).
           if (obj == null) return [];
+          // (#2202) An opaque WasmGC vec ref (e.g. an inline `[1]` spread source
+          // that stayed a native vec instead of being marshaled to a JS array)
+          // is not `Array.isArray` and has no `Symbol.iterator`, so it would fall
+          // through to the array-like length probe and yield an empty/wrong list,
+          // dropping the spread's elements from `arguments`. Materialize it to a
+          // real JS array first via the `__vec_len`/`__vec_get` exports (the same
+          // machinery `__array_from` / `Array.from(wasmVec)` use), then continue.
+          if (typeof obj === "object" && _isWasmStruct(obj)) {
+            const exps = callbackState?.getExports();
+            const vecLen = exps?.__vec_len;
+            const vecGet = exps?.__vec_get;
+            if (typeof vecLen === "function" && typeof vecGet === "function") {
+              try {
+                const vlen = vecLen(obj) as number;
+                if (typeof vlen === "number" && vlen >= 0) {
+                  const out: any[] = [];
+                  const n = limit < vlen ? limit : vlen;
+                  for (let i = 0; i < n; i++) out.push(vecGet(obj, i));
+                  return out;
+                }
+              } catch {
+                /* not a vec — fall through to the existing handling */
+              }
+            }
+          }
           if (Array.isArray(obj)) {
             // #1454: Real arrays normally take a fast path, but if the user has
             // overridden Array.prototype[Symbol.iterator] (or installed an own
