@@ -1,10 +1,12 @@
 ---
 id: 2572
 title: "standalone: statement-form for-in over a dynamic object leaks env.__for_in_* host imports (no native $ObjVec walk)"
-status: ready
-sprint: Backlog
+status: done
+sprint: 64
 created: 2026-06-21
 updated: 2026-06-21
+completed: 2026-06-21
+assignee: sd-5
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -88,10 +90,43 @@ the statement-form for-in is not routed through it.
 - JS-host for-in behaviour unchanged (no regression); no new host imports.
 - Closed-struct (non-dynamic) for-in keeps working.
 
+## Resolution (sd-5, 2026-06-21)
+
+Implemented exactly as the fix direction above. Two-line change set:
+
+1. `src/codegen/declarations.ts` — the `__for_in_*` host imports are now
+   registered **only** in JS-host mode (`!ctx.standalone && !ctx.wasi`), mirroring
+   the array-iterator registration. In a no-JS-host target they are no longer
+   registered, so they cannot leak — and their absence selects the native path.
+2. `src/codegen/statements/loops.ts` `compileForInStatement` — in standalone /
+   WASI, when the receiver lowers to the dynamic representation
+   (`externref`/`anyref`/`ref_extern` per `resolveWasmType`), call
+   `ensureObjectRuntime(ctx)` and bind the four native helpers — `__object_keys`
+   (live + enumerable own keys, OrdinaryOwnPropertyKeys order #1837),
+   `__extern_length`, `__extern_get_idx`, `__extern_has` — whose signatures are
+   1:1 with `__for_in_keys/_len/_get/_has`, so the existing loop scaffolding
+   (incl. the #2066 per-visit `__extern_has` liveness guard) is reused unchanged.
+   A **closed WasmGC struct** receiver is not `externref`, so it keeps the exact
+   static-unroll path (correct for a non-mutated closed shape).
+
+Verified standalone (target:"standalone", `{}` imports, zero `env.__for_in_*`):
+`{a,b}` count → 2; insertion order `a,b` → 9798; after `delete o.b` → a,c (9799);
+runtime-added `o.b` included; key deleted mid-loop skipped (9799); per-key value
+read sums to 3; closed-interface struct enumerates its fields (2). JS-host mode
+still registers + uses the host imports (unchanged). New regression test:
+`tests/issue-2572-standalone-forin.test.ts` (7 cases). Existing for-in /
+#2066 / #1837 / #1613 / #1243 / #1271 suites unchanged (77 tests pass).
+
+**Known residual (pre-existing, out of scope):** for-in over an **array** in
+standalone still routes to the static-unroll path (the array type is not a
+`$Object`), which enumerates the array's static members rather than its numeric
+indices — but it now *instantiates* instead of leaking `__for_in_*` (the
+baseline crashed). Array for-in index enumeration is a separate gap; this issue
+fixes the dynamic-object and closed-struct cases.
+
 ## Notes
 
-Carved from #2186, whose post-delete READ path is already fixed and is being
-closed `done` separately. This is the residual that blocked #2186's
-`for (const k in o)` acceptance line. Distinct from #1472 (general standalone
-object/property host-import elimination, `done`) which did not cover the
-`__for_in_*` family.
+Carved from #2186, whose post-delete READ path is already fixed. This is the
+residual that blocked #2186's `for (const k in o)` acceptance line. Distinct
+from #1472 (general standalone object/property host-import elimination, `done`)
+which did not cover the `__for_in_*` family.
