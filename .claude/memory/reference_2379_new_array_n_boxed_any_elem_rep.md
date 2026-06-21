@@ -43,5 +43,5 @@ fires.
 typed-numeric vec when subsequent writes are numeric (unify at construction);
 or (2) make typed-vec array-method stringify dispatch on the ACTUAL element
 array type (boxed-any vs numeric) and route boxed-any through the runtime
-any→string path. Banked in `plan/issues/2379-...md` (status: blocked).
+any→string path. Banked in #2379 (status: blocked).
 See [[feedback_verify_fix_in_git_not_narrative]], [[reference_vec_externref_key_not_uniform]].

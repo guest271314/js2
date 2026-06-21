@@ -9,7 +9,7 @@ metadata:
 
 #2358 (re-scoped #50/#1917): standalone native `__to_primitive` over typed (nominal) object structs.
 
-**Spec drift found (2026-06-18, sdev-toprimitive).** The spec repro table (`plan/issues/2358-...md`, on upstream/main — NOT origin/main, which was stale) is partly OUTDATED. Re-measured on upstream/main 955552ecc:
+**Spec drift found (2026-06-18, sdev-toprimitive).** The spec repro table (`plan/issues/2358-standalone-toprimitive-nominal-object-structs.md`, on upstream/main — NOT origin/main, which was stale) is partly OUTDATED. Re-measured on upstream/main 955552ecc:
 - `({valueOf:()=>4} as any) + 1` → **5 (CORRECT now)**, `1+obj` → 5, `obj+obj` → 7, `function f(x:any){return x*2}` → 84 — all PASS. The `as any` cast at the literal forces the **dynamic `$Object`** representation (`__new_plain_object`/`__obj_insert`), which `__to_primitive` already reduces.
 - Still BROKEN: `const o={valueOf:()=>4}; (o as any)+1` → **null** (o is a typed local → NOMINAL struct, NOT `$Object`); `class C{valueOf(){return 9}}; (new C() as any)+1` → null; `Number([1])` → null (#10).
 
