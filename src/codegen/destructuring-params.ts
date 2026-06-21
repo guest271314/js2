@@ -1514,10 +1514,43 @@ export function destructureParamArray(
           allocLocal(fctx, localName, fieldType);
         }
         const localIdx = fctx.localMap.get(localName)!;
+        const localType = getLocalType(fctx, localIdx);
+        // (#2574) When the tuple FIELD is f64 (it carries the sNaN "undefined"
+        // sentinel for an `undefined`/hole element) but the BINDING local is a
+        // wider type (e.g. `externref` for an `any` binding) AND there is a
+        // default, the f64→local coercion via `__box_number` turns the sentinel
+        // into a NaN-NUMBER, after which the externref default check
+        // (`__extern_is_undefined`, deliberately not `ref.is_null`) sees a number
+        // → the default never fires (`const [a=9] = [undefined]` kept NaN). Run
+        // the default check on the RAW f64 field FIRST (its sNaN-sentinel arm),
+        // applying the default as f64, THEN coerce to the local type — so the
+        // sentinel is consumed before the lossy box. Only when field=f64,
+        // local≠f64, and there's an initializer; the value-present and no-default
+        // paths keep the existing coerce.
+        const fieldIsSentinelF64 =
+          fieldType.kind === "f64" &&
+          ts.isBindingElement(element) &&
+          element.initializer !== undefined &&
+          localType !== undefined &&
+          !valTypesMatch(fieldType, localType);
+        if (fieldIsSentinelF64) {
+          const f64Tmp = allocLocal(fctx, `__dflt_f64_${fctx.locals.length}`, { kind: "f64" });
+          // Push the raw f64 field on the stack; `emitDefaultValueCheck` (f64 arm)
+          // consumes it, applies the default on the sNaN sentinel, and stores the
+          // value-or-default into `f64Tmp`.
+          fctx.body.push({ op: "local.get", index: paramIdx });
+          fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: i });
+          emitDefaultValueCheck(ctx, fctx, { kind: "f64" }, f64Tmp, element.initializer!);
+          // coerce the resolved f64 to the local's declared type.
+          fctx.body.push({ op: "local.get", index: f64Tmp });
+          coerceType(ctx, fctx, { kind: "f64" }, localType!);
+          fctx.body.push({ op: "local.set", index: localIdx });
+          if (isDecl) emitLocalTdzInit(fctx, localName);
+          continue;
+        }
         fctx.body.push({ op: "local.get", index: paramIdx });
         fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: i });
         // Coerce struct field type to local's declared type if they differ (#658)
-        const localType = getLocalType(fctx, localIdx);
         if (localType && !valTypesMatch(fieldType, localType)) {
           coerceType(ctx, fctx, fieldType, localType);
         }

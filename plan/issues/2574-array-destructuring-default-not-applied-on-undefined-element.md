@@ -1,10 +1,12 @@
 ---
 id: 2574
 title: "array destructuring default not applied when the element value is `undefined` (standalone)"
-status: ready
-sprint: Backlog
+status: done
+assignee: ttraenkler/sd-3
+sprint: 64
 created: 2026-06-21
 updated: 2026-06-21
+completed: 2026-06-21
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -135,3 +137,36 @@ correct site; documented for a focused session.
 - `const [a = 9] = [undefined]` → `a === 9` standalone; host unchanged.
 - `const [a = 9] = [5]` / `const [a = 9] = []` stay correct (no regression).
 - Object-pattern default-on-undefined verified.
+
+## FIX (sd-3, 2026-06-21) — at the destructuring READ, not the literal
+
+The earlier "fix at array-literal construction" hypothesis was WRONG. The literal
+IS correct: `[undefined]` (single element) compiles to a tuple `{_0: f64}` whose
+`_0` correctly holds the f64 sNaN "undefined" sentinel `0x7FF00000DEADC0DE` (the
+`compileTupleLiteral` f64-undefined-like arm, `literals.ts:2624`). The bug is in
+the **array-destructuring READ** (`destructureParamArray`'s tuple-struct fast
+path, `destructuring-params.ts:~1516`): for `const [a = 9] = …` the binding local
+`a` is a WIDER type than the f64 field (e.g. `externref`/`f64` mismatch via the
+`number`-binding boxing), so the read did `struct.get _0` (f64 sentinel) →
+`coerceType(f64 → localType)` (which `__box_number`s the sentinel into a NaN
+NUMBER) → THEN `emitNestedBindingDefault` checked `__extern_is_undefined` on the
+boxed number → false → default never fired → `a` kept NaN.
+
+**Fix:** when the tuple FIELD is `f64` (sentinel-carrying), the BINDING local is a
+different type, and there is a default, run `emitDefaultValueCheck` on the **RAW
+f64 field** FIRST (its sNaN-sentinel arm correctly detects undefined and applies
+the default as f64), THEN coerce the resolved f64 to the local type. The sentinel
+is consumed before the lossy box. Value-present and no-default paths keep the
+existing coerce — byte-identical.
+
+**Validation:** 7 scoped tests (`tests/issue-2574.test.ts`) pass; broad standalone
+sweep over variable/for-of/arrow-function/function `dstr` ary-ptrn categories
+**+4, 0 regressions**; hard-error gate OK; the destructuring regression suites
+(#1016/#1024 sentinel-default) green.
+
+**Out of scope (pre-existing, separate):** STRING-default array destructuring
+(`const [a="x"] = […]`) is broken for BOTH present and undefined values on
+`origin/main` (a different `$AnyString`-field path, not the f64 sentinel) — not
+caused by this change. The standalone `undefined`-vs-`null` externref conflation
+(`emitUndefined` → `ref.null.extern`) is unchanged; this fix sidesteps it by
+keeping the f64-sentinel check on the raw field.
