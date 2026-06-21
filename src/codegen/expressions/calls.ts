@@ -2329,8 +2329,25 @@ function emitVirtualMethodDispatchByTag(
     resultType = VOID_RESULT;
   }
 
-  const blockType: { kind: "val"; type: ValType } | { kind: "empty" } =
-    resultType === VOID_RESULT ? { kind: "empty" } : { kind: "val", type: resultType };
+  const resultIsRef = resultType !== VOID_RESULT && (resultType.kind === "ref" || resultType.kind === "ref_null");
+
+  // (#2564) Each nested `if` in the tag cascade below MUST get its own
+  // `blockType` object — never a single shared one. `dead-elimination`'s
+  // `remapTypeIdxInBody` remaps a `ref`/`ref_null` block-type via `remapVT`,
+  // and its double-remap guard (`seen` WeakSet, #1302) keys on the *instruction*
+  // object, not on the `blockType.type` sub-object. The cascade builds one
+  // distinct `if` instruction per candidate; if they all alias the SAME
+  // `blockType.type` ValType, the second nested `if`'s visit chain-remaps the
+  // already-remapped index a second time (observed: 20→16 on the first `if`,
+  // then 16→13 on the second — the compaction map shifts each survivor down, so
+  // 13 is the fn-wrapper type), while the callee func's result type — remapped
+  // exactly once in the type table — lands on 16. The mismatch surfaces as
+  // `type error in fallthru[0] (expected (ref null 13), got (ref null 16))`.
+  // A fresh `{ ...resultType }` per `if` keeps each block-type remapped once.
+  const freshBlockType = (): { kind: "val"; type: ValType } | { kind: "empty" } =>
+    resultType === VOID_RESULT
+      ? { kind: "empty" }
+      : { kind: "val", type: resultIsRef ? { ...(resultType as ValType) } : (resultType as ValType) };
 
   // Build the call body for one candidate. We need to ref.cast the
   // receiver to the candidate's struct type before calling, so the
@@ -2367,7 +2384,7 @@ function emitVirtualMethodDispatchByTag(
       { op: "i32.eq" } as Instr,
       {
         op: "if",
-        blockType,
+        blockType: freshBlockType(),
         then: callBody(cand),
         else: elseInstrs,
       } as Instr,

@@ -267,13 +267,26 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // (keys/values/entries) as boxed externrefs. Separate from the closed-shape
   // __vec_externref/__arr_externref the array literal path uses, so this runtime
   // owns its own type and never collides with shifted indices there.
-  const objVecArrTypeIdx = ctx.mod.types.length;
-  ctx.mod.types.push({
-    kind: "array",
-    name: "$ObjVecArr",
-    element: { kind: "externref" },
-    mutable: true,
-  });
+  //
+  // (#2026 #53) ADOPT the eagerly-reserved `$ObjVecArr` slot when present
+  // (`reserveObjVecArrType`, called up-front for class-bearing sources): the
+  // dynamic-`new` runtime-argv path references this type from a function body,
+  // so its index must be stable across the type prefix. Minting it here lazily
+  // when this runtime is first pulled in would land it at a pass-dependent index
+  // (the #2043 / subview type-idx-stability hazard). Fall back to registering it
+  // now when no reservation exists (the common Object.keys/values path).
+  let objVecArrTypeIdx: number;
+  if (ctx.reservedObjVecArrTypeIdx !== undefined) {
+    objVecArrTypeIdx = ctx.reservedObjVecArrTypeIdx;
+  } else {
+    objVecArrTypeIdx = ctx.mod.types.length;
+    ctx.mod.types.push({
+      kind: "array",
+      name: "$ObjVecArr",
+      element: { kind: "externref" },
+      mutable: true,
+    });
+  }
 
   // $ObjVec struct {len: i32, data: (ref $ObjVecArr)} — a growable externref
   // vector. Wrapped to externref via extern.convert_any so it flows through the
