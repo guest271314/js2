@@ -4622,6 +4622,70 @@ function compileCallExpression(
       propAccess.expression.text === "Array" &&
       propAccess.name.text === "of"
     ) {
+      // (#1633 standalone slice) `Array.of(a, b, c)` ≡ `[a, b, c]` (§23.1.2.3:
+      // every arg is an element; unlike `Array(n)` a single numeric arg is NOT a
+      // length). In no-JS-host mode the host `__array_of` (+ `__js_array_new`/
+      // `__js_array_push`) imports don't exist — the old path leaked them and
+      // returned a wrong/empty array standalone. Build a native vec directly,
+      // mirroring the multi-arg `Array(a,b,c)` branch of
+      // `compileArrayConstructorCall` (no spread → fixed arity). Spread args keep
+      // the host path (handled by the generic spread-call lowering in host mode);
+      // a standalone spread of Array.of falls through to the existing path.
+      const hasSpreadArg = expr.arguments.some((a) => ts.isSpreadElement(a));
+      if (noJsHost(ctx) && !hasSpreadArg) {
+        // Element type: contextual `Array<T>` type arg, else f64 for a numeric
+        // arg set, else externref (mixed / non-numeric). Mirrors the untyped
+        // dense-array default in compileArrayConstructorCall.
+        const ctxType = ctx.checker.getContextualType(expr) ?? ctx.checker.getTypeAtLocation(expr);
+        const elemTsType = ctx.checker.getTypeArguments(ctxType as ts.TypeReference)?.[0];
+        let elemWasm: ValType;
+        if (elemTsType && (elemTsType.flags & ts.TypeFlags.Any) === 0) {
+          elemWasm = resolveWasmType(ctx, elemTsType);
+        } else {
+          // No resolvable element type: pick f64 only when every arg is a static
+          // number; otherwise box to externref so mixed/object elements survive.
+          const allNumeric = expr.arguments.every((a) => {
+            const t = ctx.checker.getTypeAtLocation(a);
+            return (t.flags & (ts.TypeFlags.Number | ts.TypeFlags.NumberLiteral)) !== 0;
+          });
+          elemWasm = expr.arguments.length > 0 && allNumeric ? { kind: "f64" } : { kind: "externref" };
+        }
+        const elemKey =
+          elemWasm.kind === "ref" || elemWasm.kind === "ref_null"
+            ? `ref_${(elemWasm as { typeIdx: number }).typeIdx}`
+            : elemWasm.kind;
+        const ofVecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemWasm);
+        const ofArrTypeIdx = getArrTypeIdxFromVec(ctx, ofVecTypeIdx);
+        if (ofArrTypeIdx >= 0) {
+          if (expr.arguments.length === 0) {
+            fctx.body.push({ op: "i32.const", value: 0 });
+            fctx.body.push({ op: "i32.const", value: 0 });
+            fctx.body.push({ op: "array.new_default", typeIdx: ofArrTypeIdx });
+            fctx.body.push({ op: "struct.new", typeIdx: ofVecTypeIdx });
+            return { kind: "ref_null", typeIdx: ofVecTypeIdx };
+          }
+          for (const arg of expr.arguments) {
+            const at = compileExpression(ctx, fctx, arg, elemWasm);
+            if (at && !valTypesMatch(at, elemWasm)) coerceType(ctx, fctx, at, elemWasm);
+            else if (
+              at === null &&
+              (elemWasm.kind === "ref" || elemWasm.kind === "ref_null" || elemWasm.kind === "externref")
+            )
+              fctx.body.push({ op: "ref.null.extern" } as Instr);
+          }
+          fctx.body.push({ op: "array.new_fixed", typeIdx: ofArrTypeIdx, length: expr.arguments.length });
+          const ofDataLocal = allocLocal(fctx, `__arrof_data_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: ofArrTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: ofDataLocal });
+          fctx.body.push({ op: "i32.const", value: expr.arguments.length });
+          fctx.body.push({ op: "local.get", index: ofDataLocal });
+          fctx.body.push({ op: "struct.new", typeIdx: ofVecTypeIdx });
+          return { kind: "ref_null", typeIdx: ofVecTypeIdx };
+        }
+        // vec type unavailable — fall through to the host path below.
+      }
       // Build a JS array of the arguments and delegate to host
       const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
       const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
