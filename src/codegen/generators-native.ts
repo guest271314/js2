@@ -806,6 +806,87 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: ts.Functio
   return plan !== null && plan.states.some((s) => s.terminator.kind === "yield" || s.terminator.kind === "yield-star");
 }
 
+/**
+ * (#2203) True when `decl` is a generator nested inside another function that
+ * reads or writes a binding from an enclosing scope (a "capture"). Such a
+ * generator cannot use the Wasm-native generator factory — its state lives in a
+ * struct, with no slot for captured outer-scope bindings, so the native
+ * registration in `nested-declarations.ts` is gated on `captures.length === 0`
+ * and a capturing generator falls through to the eager-buffer host path. In a
+ * no-JS-host target the eager path needs the `__gen_*` host imports; if they
+ * were never registered (because `isNativeGeneratorCandidate` — which does not
+ * model captures — wrongly classified this as native), the emit bakes a
+ * `funcIdx: undefined` and produces invalid Wasm. Flagging the capture here lets
+ * `sourceNeedsGeneratorHostImports` register the host imports so the funcidx is
+ * valid (the test262 standalone runner supplies the `__gen_*` shim). A
+ * non-capturing nested generator stays native and is NOT flagged, so it does not
+ * gain unused host-import dependencies.
+ */
+function generatorCapturesOuterScope(ctx: CodegenContext, decl: ts.FunctionDeclaration): boolean {
+  if (!decl.body) return false;
+  // Only generators nested inside another function-like scope can capture; a
+  // top-level generator's free variables are module globals, which the native
+  // lowering already reads/writes directly (no host buffer needed).
+  let ancestor: ts.Node | undefined = decl.parent;
+  let nested = false;
+  while (ancestor) {
+    if (ts.isSourceFile(ancestor)) break;
+    if (
+      ts.isFunctionDeclaration(ancestor) ||
+      ts.isFunctionExpression(ancestor) ||
+      ts.isArrowFunction(ancestor) ||
+      ts.isMethodDeclaration(ancestor) ||
+      ts.isConstructorDeclaration(ancestor) ||
+      ts.isGetAccessorDeclaration(ancestor) ||
+      ts.isSetAccessorDeclaration(ancestor)
+    ) {
+      nested = true;
+      break;
+    }
+    ancestor = ancestor.parent;
+  }
+  if (!nested) return false;
+
+  let captures = false;
+  const checker = ctx.checker;
+  function scan(node: ts.Node): void {
+    if (captures) return;
+    if (ts.isIdentifier(node) && !(ts.isPropertyAccessExpression(node.parent) && node.parent.name === node)) {
+      const sym = checker.getSymbolAtLocation(node);
+      const declNode = sym?.declarations?.[0];
+      if (declNode) {
+        // A binding declared OUTSIDE the generator body, yet inside some
+        // enclosing function (i.e. not a module global / global builtin), is a
+        // capture. Walk the declaration's ancestors: if we reach the generator
+        // decl it is local (not a capture); if we reach an enclosing function
+        // first it is captured; if we reach the SourceFile it is a module/global
+        // binding the native path handles directly.
+        let p: ts.Node | undefined = declNode;
+        while (p) {
+          if (p === decl) return; // declared within the generator → local
+          if (p === decl.body) return;
+          if (
+            ts.isFunctionDeclaration(p) ||
+            ts.isFunctionExpression(p) ||
+            ts.isArrowFunction(p) ||
+            ts.isMethodDeclaration(p) ||
+            ts.isConstructorDeclaration(p)
+          ) {
+            // Reached an enclosing function before the SourceFile → captured.
+            captures = true;
+            return;
+          }
+          if (ts.isSourceFile(p)) return; // module-level binding → not a capture
+          p = p.parent;
+        }
+      }
+    }
+    ts.forEachChild(node, scan);
+  }
+  scan(decl.body);
+  return captures;
+}
+
 export function sourceNeedsGeneratorHostImports(ctx: CodegenContext, sourceFile: ts.SourceFile): boolean {
   let found = false;
   let needsHost = false;
@@ -814,7 +895,12 @@ export function sourceNeedsGeneratorHostImports(ctx: CodegenContext, sourceFile:
     if (needsHost) return;
     if (ts.isFunctionDeclaration(node) && node.asteriskToken && node.body) {
       found = true;
-      if (!isNativeGeneratorCandidate(ctx, node)) needsHost = true;
+      // A non-native-candidate generator needs the host imports; so does a
+      // nested generator that captures an outer-scope binding (#2203) — it
+      // cannot use the native factory (no capture slot in the state struct) and
+      // falls to the eager-buffer host path, which would otherwise bake an
+      // undefined funcidx in a no-JS-host target.
+      if (!isNativeGeneratorCandidate(ctx, node) || generatorCapturesOuterScope(ctx, node)) needsHost = true;
       return;
     }
     if (ts.isFunctionExpression(node) && node.asteriskToken) {
