@@ -290,3 +290,43 @@ edit `object-runtime.ts` (the `OBJECT_RUNTIME_HELPER_NAMES` set +
 `__obj_ordered_all`) and appends to the helper-names set. The two regions are
 disjoint except the append-only set; whichever PR merges second does the small
 `object-runtime.ts` merge resolution (same author, so no cross-agent handoff).
+
+## S4 — CALL-SITE layer (2026-06-21, sdev-validate) — `object-ops.ts`
+
+Complement to sdev-reflect's runtime-helper S4 (`object-runtime.ts`). The
+**typed-struct / literal-receiver** redefine path is a DIFFERENT code path from
+the native `$Object` runtime: `const o: any = {}` lowers to an open typed struct,
+so `Object.defineProperty(o, "x", …)` takes the `struct.set` path in
+`compileObjectDefineProperty` (object-ops.ts), NOT the native
+`__defineProperty_value`. That path had its own §10.1.6.3 redefine-throw bug:
+
+- **Root cause.** The `needsValueCompare` guard (fires when the prior descriptor
+  is non-writable/non-configurable) built its "Cannot redefine property" throw as
+  `global.get <ctx.stringGlobalMap.get(msg)>`. Under nativeStrings (auto-on for
+  `--target standalone`/`wasi`) that map returns the **`-1` sentinel**, so a
+  SECOND value-define on the same key (`defineProperty(o,"x",{value:5});
+  defineProperty(o,"x",{value:6})` in one function) reached binary emit as
+  `global index out of range — -1` (the **#2043** late-import-shift class). It
+  ALSO threw a **bare string**, so `assert.throws(TypeError, …)` (test262
+  `verifyProperty`) never matched — a latent §10.1.6.3 conformance bug in BOTH
+  modes (host threw the string too).
+- **Fix.** Both compare branches (f64 / i32) now route the throw through
+  `emitThrowTypeError` via the body-swap pattern (mirrors
+  `buildTemporalThrowInstrs`). Standalone gets an inline `$NativeString` message +
+  the in-module `__new_TypeError`; the thrown value is a real catchable TypeError
+  instance in both modes. SameValue (5≡5 allowed) and the
+  writable-non-configurable value-change-allowed rules are preserved (they sit
+  before the throw).
+- **Scope note (NOT this slice).** `getOwnPropertyDescriptor` readback returning
+  `undefined` for a runtime-stored key on an empty `const o:any={}` literal (the
+  dot-vs-bracket dual-storage / value-rep substrate) is the #2187 substrate gap
+  (sdev-strdispatch) — deliberately untouched here. CompletePropertyDescriptor
+  attribute-default false-encoding was already correct in `computeRuntimeFlags`.
+
+Tests: `tests/issue-2042-s4-callsite.test.ts` (8 cases — two-value-define compile,
+non-config redefine throws + `instanceof TypeError`, uncaught throws, SameValue
+no-throw, writable value-change no-throw, single-define unregressed). All pass;
+tsc clean. The 3 pre-existing `object-mutability` equivalence failures
+(`isFrozen`/`isSealed`/`isExtensible` stubs) are identical on pristine main —
+unrelated. Distinct files from sdev-reflect's runtime PR (object-ops.ts +
+this test only).

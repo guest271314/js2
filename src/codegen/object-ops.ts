@@ -1676,10 +1676,33 @@ export function compileObjectDefineProperty(
 
       // Compare old and new values. If different, throw TypeError.
       // Use SameValue semantics (for f64: need to handle NaN === NaN, +0 !== -0)
-      const tagIdx = ensureExnTag(ctx);
-      const errMsg = "TypeError: Cannot redefine property";
-      addStringConstantGlobal(ctx, errMsg);
-      const errMsgGlobal = ctx.stringGlobalMap.get(errMsg)!;
+      //
+      // (#2042 S4 call-site) Build the throw as a real catchable TypeError
+      // INSTANCE via the body-swap pattern (mirrors buildTemporalThrowInstrs in
+      // temporal-native.ts). The previous code emitted `global.get
+      // <stringGlobalMap.get(msg)>` directly: under nativeStrings (auto-on for
+      // --target standalone/wasi) that map returns the `-1` sentinel, so a SECOND
+      // `Object.defineProperty(o, k, { value })` on a non-writable /
+      // non-configurable data property — two value-defines on the same key in one
+      // function — reached binary emit as `global index out of range — -1` (the
+      // #2043 late-import-shift class). It also threw a bare string, so
+      // `assert.throws(TypeError, …)` (test262 verifyProperty) never matched.
+      // Routing through emitThrowTypeError fixes both: standalone gets an inline
+      // `$NativeString` message + the in-module `__new_TypeError`, and the thrown
+      // value is a real TypeError instance in BOTH modes (host previously threw a
+      // bare string here too — a latent §10.1.6.3 conformance bug, not a host
+      // regression).
+      const throwRedefineInstrs = ((): Instr[] => {
+        const saved = fctx.body;
+        const out: Instr[] = [];
+        fctx.body = out;
+        try {
+          emitThrowTypeError(ctx, fctx, "Cannot redefine property");
+        } finally {
+          fctx.body = saved;
+        }
+        return out;
+      })();
 
       if (fieldType.kind === "f64") {
         // f64 comparison using SameValue semantics (ECMA-262 §7.2.10):
@@ -1693,10 +1716,7 @@ export function compileObjectDefineProperty(
         // pushes reversed, computing copysign(value, 1) = abs(value), which
         // collapsed `+0` and `-0` to the same sign and silently allowed
         // `Object.defineProperty(obj, "x", { value: -0 })` on a frozen +0.
-        const compareBody: Instr[] = [
-          { op: "global.get", index: errMsgGlobal } as Instr,
-          { op: "throw", tagIdx } as Instr,
-        ];
+        const compareBody: Instr[] = throwRedefineInstrs;
         // Part 1: (old == new) && (copysign(1,old) == copysign(1,new))
         fctx.body.push({ op: "local.get", index: oldValLocal });
         fctx.body.push({ op: "local.get", index: newValLocal });
@@ -1727,10 +1747,7 @@ export function compileObjectDefineProperty(
           then: compareBody,
         });
       } else if (fieldType.kind === "i32") {
-        const compareBody: Instr[] = [
-          { op: "global.get", index: errMsgGlobal } as Instr,
-          { op: "throw", tagIdx } as Instr,
-        ];
+        const compareBody: Instr[] = throwRedefineInstrs;
         fctx.body.push({ op: "local.get", index: oldValLocal });
         fctx.body.push({ op: "local.get", index: newValLocal });
         fctx.body.push({ op: "i32.ne" });
