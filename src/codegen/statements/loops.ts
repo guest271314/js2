@@ -4651,7 +4651,7 @@ function emitForInMemberTargetWrite(
  * live integer-index keys `"0".."length-1"` (as strings) in ascending order,
  * per §13.7.5 / OrdinaryOwnPropertyKeys. Self-contained — no `__for_in_*` host
  * import and no `$ObjVec` walk; length is read from the vec struct (field 0) and
- * each index is ToString'd via `number_toString` (the same decimal-key helper
+ * each index is ToString'd via the sealed decimal-key formatter (the same helper
  * the object runtime uses for integer keys). Works identically in host and
  * standalone mode. Shares the `block $break { loop { cond; block $continue {
  * body } incr; br } }` scaffolding with the dynamic-object path so `break` /
@@ -4668,23 +4668,23 @@ function emitArrayForIn(
 ): void {
   const { vecTypeIdx } = arrayInfo;
 
-  // number_toString(f64) -> externref (decimal string for the integer index).
-  // Dual-mode: in no-JS-host mode (standalone / wasi / nativeStrings) register
-  // the DEFINED native via `emitNativeNumberFormat` (the same path array
-  // `.join`/`.toString` use) — `number_toString` is NOT in
-  // UNION_NATIVE_HELPER_NAMES, so `ensureLateImport` would leak an
-  // `env::number_toString` host import there. In JS-host mode use the host
-  // import (the native formatter needs the NativeString GC types, which host
-  // mode doesn't register — registering them there bakes a `-1` heap-type ref,
-  // the #2043 class). Register before any funcIdx capture so the late-import
-  // index shift settles first.
+  // Decimal-key formatter (f64 -> externref) for the integer index. Reuses the
+  // sealed engine helper — NOT a hand-rolled ToString — via the SAME registration
+  // array `.join`/`.toString` use. Dual-mode: no-JS-host (standalone / wasi /
+  // nativeStrings) registers the DEFINED native (the helper is not in
+  // UNION_NATIVE_HELPER_NAMES, so a late host import would leak `env::*` there);
+  // JS-host uses the host import (the native formatter needs NativeString GC
+  // types host mode doesn't register — registering them there bakes a `-1`
+  // heap-type ref, the #2043 class). Register before the funcIdx capture so the
+  // late-import index shift settles first.
+  const NUM_FMT = "number_toString";
   if (ctx.standalone || ctx.wasi || ctx.nativeStrings) {
-    emitNativeNumberFormat(ctx, new Set(["number_toString"]));
-  } else if (ctx.funcMap.get("number_toString") === undefined) {
-    ensureLateImport(ctx, "number_toString", [{ kind: "f64" }], [{ kind: "externref" }]);
+    emitNativeNumberFormat(ctx, new Set([NUM_FMT]));
+  } else if (ctx.funcMap.get(NUM_FMT) === undefined) {
+    ensureLateImport(ctx, NUM_FMT, [{ kind: "f64" }], [{ kind: "externref" }]);
   }
   flushLateImportShifts(ctx, fctx);
-  const numToStrIdx = ctx.funcMap.get("number_toString");
+  const numToStrIdx = ctx.funcMap.get(NUM_FMT);
 
   // Compile the array expression into a vec ref local. A null/undefined receiver
   // would throw in JS; for-in over null/undefined is spec'd as a no-op (§13.7.5.1
@@ -4767,7 +4767,7 @@ function emitArrayForIn(
   loopBody.push({ op: "i32.ge_s" });
   loopBody.push({ op: "br_if", depth: 1 });
 
-  // key = number_toString(f64(i))  → keyLocal (externref string)
+  // key = <decimal formatter>(f64(i))  → keyLocal (externref string)
   loopBody.push({ op: "local.get", index: iLocal });
   loopBody.push({ op: "f64.convert_i32_s" });
   if (numToStrIdx !== undefined) {
@@ -4860,7 +4860,7 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
   // struct, so the static-unroll path enumerated `length`+prototype members =
   // wrong, and host mode enumerated nothing). Emit a self-contained native
   // index loop here for BOTH host and standalone — length from vec field 0,
-  // each index ToString'd via `number_toString`, no host import either way.
+  // each index ToString'd via the sealed decimal-key formatter, no host import.
   const recvArrayInfo = resolveArrayInfo(ctx, ctx.checker.getTypeAtLocation(stmt.expression));
   if (recvArrayInfo) {
     emitArrayForIn(ctx, fctx, stmt, recvArrayInfo, keyLocal, memberTarget, bindingPattern);
