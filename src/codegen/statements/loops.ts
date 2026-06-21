@@ -33,6 +33,7 @@ import { containsLinearU8Allocation, emitLinearU8ArenaMark, linearU8ArenaResetIn
 import { resolveComputedKeyExpression } from "../literals.js";
 import { emitCollectionIteratorVec, ensureMapHelpers, MAP_LAYOUT } from "../map-runtime.js";
 import { stringConstantExternrefInstrs } from "../native-strings.js";
+import { ensureObjectRuntime } from "../object-runtime.js";
 import { coercionInstrs } from "../type-coercion.js";
 import { addImport, addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "../registry/imports.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterRefCellType } from "../registry/types.js";
@@ -4703,14 +4704,50 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
     return;
   }
 
-  // Look up for-in host imports
-  const keysIdx = ctx.funcMap.get("__for_in_keys");
-  const lenIdx = ctx.funcMap.get("__for_in_len");
-  const getIdx = ctx.funcMap.get("__for_in_get");
-  const hasIdx = ctx.funcMap.get("__for_in_has");
+  // Resolve the four enumeration primitives. In JS-host mode these are the
+  // `__for_in_*` host imports. In a no-JS-host target (standalone / WASI) the
+  // host imports are unavailable, so route through the native object-runtime
+  // (#2572): `__object_keys` returns a `$ObjVec` of the live + enumerable own
+  // keys in OrdinaryOwnPropertyKeys order (#1837), and `__extern_length` /
+  // `__extern_get_idx` / `__extern_has` are `$ObjVec`-aware native helpers. The
+  // four have signatures 1:1 compatible with `__for_in_keys/_len/_get/_has`, so
+  // the loop scaffolding below is identical for both modes. This replaces the
+  // old static-unroll fallback, which enumerated the receiver's *static* shape
+  // and was therefore wrong for a runtime-mutated dynamic object (a key added
+  // or deleted at runtime was invisible / stale).
+  let keysIdx = ctx.funcMap.get("__for_in_keys");
+  let lenIdx = ctx.funcMap.get("__for_in_len");
+  let getIdx = ctx.funcMap.get("__for_in_get");
+  let hasIdx = ctx.funcMap.get("__for_in_has");
+
+  if ((keysIdx === undefined || lenIdx === undefined || getIdx === undefined) && (ctx.standalone || ctx.wasi)) {
+    // No-JS-host target: the `__for_in_*` host imports are intentionally not
+    // registered (#2572, declarations.ts). For a receiver that lowers to the
+    // dynamic `$Object` representation (an `any`/index-signature object whose
+    // keys are determined at runtime), route through the native object runtime:
+    // `__object_keys` returns a `$ObjVec` of the live + enumerable own keys in
+    // OrdinaryOwnPropertyKeys order (#1837); `__extern_length`/`__extern_get_idx`
+    // /`__extern_has` are `$ObjVec`-aware native helpers with signatures 1:1
+    // compatible with `__for_in_keys/_len/_get/_has`, so the loop scaffolding
+    // below is shared. A closed WasmGC struct or an array does NOT lower to
+    // `$Object` (so `__object_keys` would return empty) — those keep the
+    // static-unroll path below, which is exact for a non-mutated closed shape.
+    const recvWasmType = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(stmt.expression));
+    const isDynamicReceiver =
+      recvWasmType.kind === "externref" || recvWasmType.kind === "anyref" || recvWasmType.kind === "ref_extern";
+    if (isDynamicReceiver) {
+      ensureObjectRuntime(ctx);
+      keysIdx = ctx.funcMap.get("__object_keys");
+      lenIdx = ctx.funcMap.get("__extern_length");
+      getIdx = ctx.funcMap.get("__extern_get_idx");
+      hasIdx = ctx.funcMap.get("__extern_has");
+    }
+  }
 
   if (keysIdx === undefined || lenIdx === undefined || getIdx === undefined) {
-    // Fallback: static unrolling when host imports are not available (standalone mode)
+    // Fallback: static unrolling. Used in standalone for a closed-shape receiver
+    // (WasmGC struct) — the static key set is exact — and as the historical
+    // fallback when no enumeration primitive is available.
     const exprType = ctx.checker.getTypeAtLocation(stmt.expression);
     const props = exprType.getProperties();
     if (props.length === 0) return;
