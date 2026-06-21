@@ -1791,7 +1791,7 @@ export function generateModule(
     markLeafStructsFinal(mod, ctx.wasi);
 
     // Dead import and type elimination pass
-    eliminateDeadImports(mod);
+    eliminateDeadImports(mod, ctx); // #1899 ctx → remap helper side-tables on import removal
 
     // Repair struct.get/struct.set type mismatches (externref → struct ref conversion)
     repairStructTypeMismatches(mod);
@@ -5519,7 +5519,7 @@ export function generateMultiModule(
     markLeafStructsFinal(mod, ctx.wasi);
 
     // Dead import and type elimination pass
-    eliminateDeadImports(mod);
+    eliminateDeadImports(mod, ctx); // #1899 ctx → remap helper side-tables on import removal
 
     // Repair struct.get/struct.set type mismatches (externref → struct ref conversion)
     repairStructTypeMismatches(mod);
