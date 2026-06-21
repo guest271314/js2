@@ -1871,6 +1871,61 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   emitHasOwn("__hasOwnProperty");
   emitHasOwn("__object_hasOwn");
 
+  // ── __propertyIsEnumerable(externref obj, externref key) -> i32 (#2541) ─────
+  //
+  // ES §20.1.3.4 Object.prototype.propertyIsEnumerable: OWN-property presence
+  // (NO prototype walk) AND the own property's [[Enumerable]] attribute. Same
+  // __obj_find own-only lookup as __hasOwnProperty, then test the found entry's
+  // FLAG_ENUMERABLE bit. Missing own property / non-$Object receiver → false.
+  // This replaces the standalone #1472-Phase-B refusal with a native lowering
+  // over the same $Object/$PropEntry runtime; host mode keeps its JS import.
+  {
+    const body: Instr[] = [
+      // any = any.convert_extern(obj); if !ref.test $Object → 0
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "local.tee", index: 2 },
+      { op: "ref.test", typeIdx: objectTypeIdx },
+      { op: "i32.eqz" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      // e = __obj_find(cast<$Object>(any), key)  (local 3)
+      { op: "local.get", index: 2 },
+      { op: "ref.cast", typeIdx: objectTypeIdx },
+      { op: "local.get", index: 1 },
+      { op: "call", funcIdx: objFindIdx },
+      { op: "local.tee", index: 3 },
+      // if e == null → 0 (no own property)
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [{ op: "i32.const", value: 0 }, { op: "return" }],
+      },
+      // return (e.flags & FLAG_ENUMERABLE) != 0
+      { op: "local.get", index: 3 },
+      { op: "ref.as_non_null" },
+      { op: "struct.get", typeIdx: propEntryTypeIdx, fieldIdx: 2 },
+      { op: "i32.const", value: FLAG_ENUMERABLE },
+      { op: "i32.and" },
+      { op: "i32.const", value: 0 },
+      { op: "i32.ne" },
+    ];
+    registerNative(
+      "__propertyIsEnumerable",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "i32" }],
+      [
+        { name: "any", type: { kind: "anyref" } },
+        { name: "e", type: entryRefNull },
+      ],
+      body,
+    );
+  }
+
   // ── __extern_has(externref obj, externref key) -> i32 (#1472 Phase C) ──────
   //
   // ES §7.3.12 HasProperty(O, P): keyed `key in obj` — own properties AND the
@@ -7181,6 +7236,10 @@ export const OBJECT_RUNTIME_HELPER_NAMES: ReadonlySet<string> = new Set([
   // __extern_get.
   "__hasOwnProperty",
   "__object_hasOwn",
+  // #2541 — Object.prototype.propertyIsEnumerable: own-property presence (no
+  // proto walk) AND the entry's FLAG_ENUMERABLE bit, over the same $Object
+  // runtime as __hasOwnProperty. Replaces the #1472 Phase B standalone refusal.
+  "__propertyIsEnumerable",
   "__extern_has",
   // #1472 Phase C — prototype-chain ops over $Object.$proto (field 0):
   // getPrototypeOf / Object.create / isPrototypeOf.
