@@ -119,7 +119,57 @@ fresh vec downstream: the untyped `$C_method` WAT has `array.copy:1`).
 
 Orthogonal smaller slice found: `const [a=9] = [undefined]` → NaN (default not
 applied when the element value is `undefined`); spec §8.5.3 applies the default on
-`undefined`, not just `done`. Independent of the rest-identity question.
+`undefined`, not just `done`. Filed as **#2574**.
+
+## ROOT CAUSE FOUND — standalone `__any_strict_eq`/`__any_eq` tag-5 number bug (sd-3, 2026-06-21, supersedes the "harness/marshaling" hypothesis above)
+
+NOT the runner, NOT marshaling, NOT destructuring. The harness `assert._isSameValue`
+(`if(a===b){return a!==0||1/a===1/b;} return a!==a && b!==b;`, `a`/`b` `any` params)
+miscompiles in **standalone ONLY** (wasi + host both correct).
+
+**Minimal repro (no if / no destructuring):**
+```ts
+function f(a:any,b:any){ const d=(1/a===1/b); const n=(a!==a); return n; }
+f(1,2)   // standalone: true (WRONG)   wasi/host: false
+```
+Also breaks with `String(a)` / `a*2` / `a-1` in place of `1/a` — i.e. **ANY
+`any`-op that ensures the AnyValue type before a self `===`/`!==`.**
+
+**Mechanism (WAT-proven):**
+1. `a!==a` ALONE → the correct abstract-eq cascade (`__typeof_number`→
+   `__unbox_number`→`f64.eq`, 15 calls) → right answer.
+2. After a preceding `any`-op, `ctx.anyValueTypeIdx >= 0`, so the gate at
+   `binary-ops.ts:967-980` routes the SAME `a!==a` through
+   `compileAnyBinaryDispatch` → `__any_strict_eq` instead.
+3. `compileAnyBinaryDispatch` boxes each operand via `boxToAny`
+   (`value-tags.ts:178-186`), which — by the **deliberate #1888 policy**
+   ("box-the-externref as tag-5"; honest recovery flipped −794 baseline) — boxes a
+   NUMBER externref as **tag 5 (string)**.
+4. The tag-5 arm of `__any_strict_eq` / `__any_eq` (`any-helpers.ts` ~1607 / ~1339)
+   compares the two field-4 externrefs with `__str_equals`. For two tag-5 boxes
+   wrapping the SAME number externref that is meaningless → "unequal" → `a!==a`
+   true. `_isSameValue` then wrongly returns true → EVERY `assert.sameValue`/
+   `notSameValue` over a numeric `any` fails (a huge fraction of test262 — likely
+   ≫ 450 rows). This is the true cluster-A driver.
+
+**Proven-viable fix direction (but #1888-pinned — needs full-baseline validation):**
+- `__any_to_f64(tag5BoxOfNumber)` DOES recover the number (its #1888 $BoxedNumber
+  arm) — confirmed: `a*2; return a+0` → 5 standalone. So the tag-5 EQUALITY arm in
+  BOTH helpers should disambiguate by the RUNTIME externref: `__str_equals` only
+  when BOTH field-4 externrefs `ref.test ctx.anyStrTypeIdx` (genuine native
+  strings); otherwise `__any_to_f64` both + `f64.eq`.
+- sd-3 attempted exactly this (both helpers, nativeStrings-gated) but the emitted
+  tag-5 arm still returned wrong in a way the local WAT couldn't fully explain (the
+  arm appeared dead/folded even with `optimize:false`), so it was **REVERTED** to
+  avoid a half-fix in the #1888-pinned representation. The boxing itself
+  (`__any_box_string` for externrefs) MUST NOT change (−794). The fix belongs in the
+  equality helpers' tag-5 arm and must be gated by the full standalone baseline
+  (merge_group), not a scoped local check.
+
+**ESCALATED to tech lead** — high value (top-tier standalone unlock), high risk
+(#1888 794-test representation). Wants an architect spec + full-baseline gate before
+landing. The `directCastInstrs` rest-copy theory was ruled out (the rest IS fresh;
+the failure is purely the equality helper).
 
 ## Acceptance criteria
 
