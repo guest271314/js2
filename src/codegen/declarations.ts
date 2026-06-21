@@ -1435,7 +1435,13 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
   }
 
   // ── collectForInStringLiterals finalize ──
-  if (state.forInFound) {
+  // (#2572) Only register the `__for_in_*` host imports in JS-host mode. A
+  // no-JS-host target (standalone / WASI) has no host to satisfy them — and they
+  // would otherwise leak into the module (validates, can't instantiate). In that
+  // mode `compileForInStatement` routes through the native object runtime
+  // (`__object_keys` + `__extern_length/_get_idx/_has`) instead, so leaving the
+  // host imports unregistered is exactly what selects the native path there.
+  if (state.forInFound && !ctx.standalone && !ctx.wasi) {
     addForInImports(ctx);
   }
   if (state.forInLiterals.size > 0) {

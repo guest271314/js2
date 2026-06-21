@@ -85,6 +85,7 @@ import {
   emitArrayIsArrayExternrefPredicate,
   emitNullCheckThrow,
   receiverIsCaughtErrorStringRead,
+  receiverIsNativeStringValType,
   typeErrorThrowInstrs,
 } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
@@ -1576,7 +1577,10 @@ function resolvePromiseSubclassThisArg(ctx: CodegenContext, fctx: FunctionContex
   // string backends.
   addStringConstantGlobal(ctx, resolved);
   const nameIdx = ctx.stringGlobalMap.get(resolved);
-  if (nameIdx !== undefined) {
+  // (#2515 S0) `>= 0`, not `!== undefined`: standalone/nativeStrings stores the
+  // `-1` sentinel, which would bake `global.get -1` and fail binary emit. Fall
+  // to the inline-materializing `compileStringLiteral` for the sentinel.
+  if (nameIdx !== undefined && nameIdx >= 0) {
     fctx.body.push({ op: "global.get", index: nameIdx } as Instr);
   } else {
     compileStringLiteral(ctx, fctx, resolved);
@@ -5246,13 +5250,27 @@ function compileCallExpression(
           const objLocal = allocLocal(fctx, `__ocreate_obj_${fctx.locals.length}`, { kind: "externref" });
           fctx.body.push({ op: "local.set", index: objLocal });
 
-          const dpDescIdx = ensureLateImport(
-            ctx,
-            "__defineProperty_desc",
-            [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
-            [{ kind: "externref" }],
-          );
-          flushLateImportShifts(ctx, fctx);
+          // (#2515 S1) Per-property descriptor apply. In `--target standalone`
+          // there is no JS host, so the `__defineProperty_desc` host import is
+          // refused (#1472 Phase B) — route instead to the Wasm-native
+          // `__obj_define_from_desc(obj, key, descObj)` helper, the SAME native
+          // `Object.defineProperty` standalone uses (object-ops.ts). It performs
+          // ToPropertyDescriptor over the descriptor `$Object` and dispatches to
+          // the native `__defineProperty_value`/`__defineProperty_accessor`
+          // store. Host/gc/wasi keep the precise `__defineProperty_desc` import.
+          let dpDescIdx: number | undefined;
+          if (ctx.standalone) {
+            ensureObjectRuntime(ctx);
+            dpDescIdx = ctx.funcMap.get("__obj_define_from_desc");
+          } else {
+            dpDescIdx = ensureLateImport(
+              ctx,
+              "__defineProperty_desc",
+              [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+              [{ kind: "externref" }],
+            );
+            flushLateImportShifts(ctx, fctx);
+          }
 
           for (const prop of descsLiteral.properties) {
             if (!ts.isPropertyAssignment(prop)) continue;
@@ -5566,7 +5584,9 @@ function compileCallExpression(
         const builtinName = (arg0 as ts.Identifier).text;
         addStringConstantGlobal(ctx, builtinName);
         const strIdx = ctx.stringGlobalMap.get(builtinName);
-        if (strIdx !== undefined) {
+        // (#2515 S0) `>= 0`, not `!== undefined`: the standalone `-1` sentinel
+        // must fall to the inline-materializing path, not bake `global.get -1`.
+        if (strIdx !== undefined && strIdx >= 0) {
           fctx.body.push({ op: "global.get", index: strIdx } as Instr);
         } else {
           compileStringLiteral(ctx, fctx, builtinName);
@@ -6341,6 +6361,75 @@ function compileCallExpression(
             return { kind: "externref" };
           }
           return fallbackReturn(1, "extern-null");
+        }
+
+        if (reflectMethod === "getOwnPropertyDescriptor" && expr.arguments.length >= 2) {
+          // (#2046 S5) Route to the native __getOwnPropertyDescriptor, the same
+          // helper backing standalone Object.getOwnPropertyDescriptor. It reads
+          // the $PropEntry back into a descriptor `$Object` (data → { value,
+          // writable, enumerable, configurable }, accessor → { get, set,
+          // enumerable, configurable }) and returns `undefined` for a missing own
+          // property — §26.1.7 step 3 (FromPropertyDescriptor over
+          // [[GetOwnProperty]]). The key is coerced with ToPropertyKey inside the
+          // native via __to_property_key (#2042 S1), so numeric keys work.
+          //
+          // §26.1.7 step 1 requires a TypeError when the target is not an Object.
+          // The native returns `undefined` for a non-$Object receiver (correct
+          // for Object.getOwnPropertyDescriptor, which forwards a coerced
+          // primitive wrapper), so — exactly as the deleteProperty PR-A guard —
+          // gate at the CALL SITE with a `ref.test $Object` and throw a catchable
+          // TypeError instead. The shared native is untouched.
+          const ort = ensureObjectRuntime(ctx);
+          const targetLocal = allocTempLocal(fctx, externRef);
+          {
+            const tArg = expr.arguments[0];
+            if (tArg !== undefined) {
+              const tTy = compileExpression(ctx, fctx, tArg, externRef);
+              if (tTy && tTy.kind !== "externref") coerceType(ctx, fctx, tTy, externRef);
+              else if (tTy === null) fctx.body.push({ op: "ref.null.extern" });
+            } else {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+          }
+          fctx.body.push({ op: "local.set", index: targetLocal });
+          // Pre-register the TypeError throw BEFORE the nested `if` so the splice
+          // that captures its instrs cannot interleave a late-import index shift
+          // into the block (same hazard handled in the deleteProperty guard).
+          const throwInstrs: Instr[] = (() => {
+            const before = fctx.body.length;
+            emitThrowTypeError(ctx, fctx, "Reflect.getOwnPropertyDescriptor called on non-object");
+            return fctx.body.splice(before);
+          })();
+          // if !ref.test $Object(target) → throw TypeError
+          fctx.body.push({ op: "local.get", index: targetLocal });
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "ref.test", typeIdx: ort.objectTypeIdx } as Instr);
+          fctx.body.push({ op: "i32.eqz" });
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "empty" },
+            then: throwInstrs,
+          } as Instr);
+          // target is an $Object — push [target, key] and read the descriptor.
+          fctx.body.push({ op: "local.get", index: targetLocal });
+          releaseTempLocal(fctx, targetLocal);
+          {
+            const kArg = expr.arguments[1];
+            if (kArg !== undefined) {
+              const kTy = compileExpression(ctx, fctx, kArg, externRef);
+              if (kTy && kTy.kind !== "externref") coerceType(ctx, fctx, kTy, externRef);
+              else if (kTy === null) fctx.body.push({ op: "ref.null.extern" });
+            } else {
+              fctx.body.push({ op: "ref.null.extern" });
+            }
+          }
+          const funcIdx = ensureLateImport(ctx, "__getOwnPropertyDescriptor", [externRef, externRef], [externRef]);
+          flushLateImportShifts(ctx, fctx);
+          if (funcIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx });
+            return { kind: "externref" };
+          }
+          return fallbackReturn(0, "extern-null");
         }
         // Boolean-returning methods need an i32 on the stack; the rest return
         // externref. Pick the fallback shape per method so the surrounding
@@ -8727,7 +8816,11 @@ function compileCallExpression(
     // isStringType gate alone misses it, so the call fell through to the host
     // `__extern_get`/dynamic path (null standalone). compileNativeStringMethodCall
     // compiles + flattens the receiver, which already yields a $AnyString ref.
-    if (isStringType(receiverType) || receiverIsCaughtErrorStringRead(ctx, propAccess.expression)) {
+    if (
+      isStringType(receiverType) ||
+      receiverIsCaughtErrorStringRead(ctx, propAccess.expression) ||
+      receiverIsNativeStringValType(ctx, fctx, propAccess.expression)
+    ) {
       const method = propAccess.name.text;
 
       // string.toString() and string.valueOf() — identity, just return the string itself.
@@ -9111,9 +9204,9 @@ function compileCallExpression(
       if (ts.isIdentifier(propAccess.expression)) {
         const captured = ctx.funcSourceText.get(propAccess.expression.text);
         if (captured) {
+          // (#2515 S0) sentinel-safe materialization (standalone bakes `-1`).
           addStringConstantGlobal(ctx, captured);
-          const idx = ctx.stringGlobalMap.get(captured)!;
-          fctx.body.push({ op: "global.get", index: idx });
+          fctx.body.push(...stringConstantExternrefInstrs(ctx, captured));
           return { kind: "externref" };
         }
       }
@@ -9164,14 +9257,14 @@ function compileCallExpression(
           const captured = ctx.funcSourceText.get(propAccess.expression.text);
           if (captured) toStrStr = captured;
         }
+        // (#2515 S0) sentinel-safe — standalone stores `-1` for the string
+        // constant, so materialize inline rather than baking `global.get -1`.
         addStringConstantGlobal(ctx, toStrStr);
-        const idx = ctx.stringGlobalMap.get(toStrStr)!;
-        fctx.body.push({ op: "global.get", index: idx });
+        fctx.body.push(...stringConstantExternrefInstrs(ctx, toStrStr));
       } else {
         const str = isArray ? "[object Array]" : "[object Object]";
         addStringConstantGlobal(ctx, str);
-        const idx = ctx.stringGlobalMap.get(str)!;
-        fctx.body.push({ op: "global.get", index: idx });
+        fctx.body.push(...stringConstantExternrefInstrs(ctx, str));
       }
       return { kind: "externref" };
     }
