@@ -85,6 +85,7 @@ import {
   emitArrayIsArrayExternrefPredicate,
   emitNullCheckThrow,
   receiverIsCaughtErrorStringRead,
+  receiverIsNativeStringValType,
   typeErrorThrowInstrs,
 } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
@@ -8727,7 +8728,11 @@ function compileCallExpression(
     // isStringType gate alone misses it, so the call fell through to the host
     // `__extern_get`/dynamic path (null standalone). compileNativeStringMethodCall
     // compiles + flattens the receiver, which already yields a $AnyString ref.
-    if (isStringType(receiverType) || receiverIsCaughtErrorStringRead(ctx, propAccess.expression)) {
+    if (
+      isStringType(receiverType) ||
+      receiverIsCaughtErrorStringRead(ctx, propAccess.expression) ||
+      receiverIsNativeStringValType(ctx, fctx, propAccess.expression)
+    ) {
       const method = propAccess.name.text;
 
       // string.toString() and string.valueOf() — identity, just return the string itself.
