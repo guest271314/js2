@@ -1,11 +1,11 @@
 ---
 id: 2358
 title: "Standalone native __to_primitive can't reduce typed (nominal) object structs through the externref boundary"
-status: in-progress
+status: done
 sprint: 64
 model: opus
 created: 2026-06-18
-updated: 2026-06-18
+updated: 2026-06-21
 priority: high
 feasibility: hard
 reasoning_effort: max
