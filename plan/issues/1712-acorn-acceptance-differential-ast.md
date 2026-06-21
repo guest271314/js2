@@ -3,7 +3,7 @@ id: 1712
 title: "acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn"
 status: in-progress
 created: 2026-05-29
-updated: 2026-06-11
+updated: 2026-06-21
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -442,3 +442,88 @@ have the same identity/equality defect). Next slice: make all dynamic
 read paths return ONE canonical representation per struct (always raw, or
 always cached proxy) before values re-enter Wasm, and check the strict-
 equality lowering for externref operands unwraps proxies on both sides.
+
+### Identity-loop slice 2026-06-21 (issue-1712-acorn-identity, sd-acorn) — TWO root causes fixed, branch PR pending
+
+The pinned "token-object identity" framing was confirmed empirically AND
+shown to be only HALF the story. Reproduced via a fast cached-binary probe
+(`.tmp/run-acorn.mjs` + a `host_eq` call-counter/watchdog in `host_eq`) and
+bisected to TWO **independent** compiler defects, each narrowed to a minimal
+isolated repro that reproduces the acorn loop. Both fixed on the branch:
+
+**BUG 1 — dynamic-method struct-field write never reaches the WasmGC field
+(`src/runtime.ts` `_safeSet`).** A `this.field = v` inside a method body
+compiled through the host bridge (`__extern_set` / `__extern_set_strict`)
+called `_safeSet(obj, key, val, /*exports*/ undefined, callbackState, …)` —
+i.e. it passed `callbackState`, NOT the `exports` param. But `_safeSet`'s
+`__sset_<key>` struct-field writeback was gated on the `exports` PARAM only,
+so the writeback was SKIPPED and the value landed in the SIDECAR ONLY. A
+later *static* `struct.get` read — the compiled member-access path takes the
+guarded-cast struct branch whenever the receiver ref-tests as the struct type
+(every fnctor-instance method body reading `this.field`) — bypasses the
+sidecar and reads the raw WasmGC field, which still held its **initializer**
+value. So a method write was invisible to a struct-typed read of the same
+field. THIS is the real "two reads disagree" identity defect (not merely
+proxy-vs-raw). Minimal repro: a function-constructor `Box` with proto methods
+`store(v){this.t=v}` / `load(){return this.t}`, then `b.store(T); b.load() ===
+T` returned `false` (`load()` read the stale ctor-init `this.t`). Acorn shape:
+`this.type = types$1.eof` (write) vs `this.type !== types$1.eof` (guard read)
+→ guard never tripped → infinite loop.
+Fix: resolve exports from `callbackState` as a fallback for the `__sset_`
+writeback, AND `_unwrapForHost(val)` before the struct-field store so a
+proxy-wrapped method ARG (host-bridge arg marshaling wraps struct args) is
+stored as the RAW struct, keeping typed `ref.eq` reads identity-correct.
+Also hardened `_hostEqComparableValue` to unwrap `_wrapForHost` proxies (the
+originally-pinned proxy-vs-raw case — real, just not sufficient alone).
+Verified: minimal `methodRoundTrip` 0→1; acorn-shape identity probe
+(module-global TokenType object + fnctor Parser + `this.type` guard loop)
+infinite-loop → terminates correct.
+
+**BUG 2 — `any`-receiver `String.prototype.replace` mis-dispatches to a DOM
+extern class and drops the replacement arg (`src/codegen/expressions/
+calls-closures.ts` `tryExternClassMethodOnAny`).** On an `any`/untyped
+receiver, `value.replace(/re/g, "rep")` was first-matched against the FIRST
+registered extern class with a `replace` method — `CSSStyleSheet.replace(text)`
+(one user arg → the replacement string was emitted then immediately `drop`ped,
+so host `replace` ran with `undefined`: `"a b".replace(/ /, "|")` →
+`"aundefinedb"`), and after the arg-count guard, `DOMTokenList.replace(a,b)`
+(returns boolean → `"^(?:false)$"`). This silently broke acorn's
+`wordsRegexp(words){ return new RegExp("^(?:"+words.replace(/ /g,"|")+")$") }`:
+keyword recognition failed (`this.keywords.test("var")` false), so `readWord`
+finished `var` as token `name` instead of `_var`, every statement
+mis-tokenized, and the tokenizer looped forever (the "every statement parses
+as ExpressionStatement / isLet truthiness" symptom noted above). Confirmed via
+`finishToken` call-counter: `readWord("var")` → `finishToken(name)`.
+Fix: refuse extern-class dispatch for `replace`/`replaceAll` on an `any`
+receiver (mirrors the existing `.slice` ambiguity refusal) + a general guard
+that refuses any candidate whose user-arity is LESS than the call's arg count
+(dropping a real arg is never correct). The call then falls through to the
+generic `__extern_method_call` host path, which forwards ALL args to the real
+`String.prototype.replace`. Verified: `anyReplace`/`wordsRegexp`-shape probes
+and the keyword-classification probes all green.
+
+**Regression check:** no new failures from either fix. Scoped suites run on
+the branch: regex/replace (`issue-1539-*`, 209 pass), `issue-1712-dynamic-
+dispatch`, `issue-1712-ifelse-global-shift`, `issue-2192b-*` all pass. The
+failures observed in `prototype-chain.test.ts` (6), `externref.test.ts` (5,
+`Host_*` missing-import), `string-methods.test.ts` (`./helpers.js` load error),
+and `issue-1712-capture-closure-dispatch.test.ts` (1, `__call_fn_1` arity-0)
+were each verified to fail IDENTICALLY on `origin/main` (revert-test-restore) —
+pre-existing container/test-infra issues, NOT regressions from this branch.
+
+**acorn status after this slice: the tokenizer identity loop is GONE.** acorn
+now executes far past the loop — into module-init `buildUnicodeData` →
+`wordsRegexp(...)`. A THIRD, independent blocker surfaces there (not yet
+fixed): `wordsRegexp(unicodeBinaryPropertiesOfStrings[ecmaVersion])` throws
+`Cannot read properties of null (reading 'replace')` — the receiver is `null`
+where real JS reads `""`. The value comes from a module-level object literal
+with numeric keys (`{ 9: "", 10: "", … }`) read by a dynamic numeric key
+inside a `data[ecmaVersion] = { …: wordsRegexp(obj[k]), … }` assignment-as-
+expression. Minimal probes of `obj[numKey]`, empty-string args, and the
+nested-object-literal shape ALL pass in isolation, so the trigger is more
+specific (likely the module-global-object + assignment-expression + nested
+`wordsRegexp` interaction, or a cross-module-global reference
+`unicodeBinaryPropertiesOfStrings[14] = ecma14BinaryPropertiesOfStrings`).
+This is a fresh investigation — a separate slice from the identity loop this
+branch closes. The #1712 acceptance test (`tests/issue-1712.test.ts`) stays
+`it.skip` until the module-init chain clears.
