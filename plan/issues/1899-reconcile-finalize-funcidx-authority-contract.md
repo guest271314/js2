@@ -1,8 +1,10 @@
 ---
 id: 1899
 title: "finalize funcIdx-authority contract: reconcile↔dead-elim native-string helper sibling-call mismatch (late-shift class recurrence-proofing)"
-status: ready
-updated: 2026-06-12
+status: done
+assignee: senior-dev
+updated: 2026-06-21
+completed: 2026-06-21
 sprint: 65
 created: 2026-06-05
 priority: medium
@@ -560,3 +562,99 @@ with this PR — never before.
 - `CLAUDE.md` (addUnionImports section) — document the contract: finalize-emitted
   helper sibling calls are repaired by name post-churn; new finalize helpers MUST
   register via `registerFinalizeHelper` so the authority pass covers them.
+
+---
+
+## Implementation (senior-dev, 2026-06-21 — against upstream/main 0e482f2fc)
+
+**Shipped a different, sound mechanism than the ratified B2 blueprint, because
+B2 (the central `staleIdx → name` reverse map + by-name re-pointer) is
+provably UNSOUND.** Implementation notes (the WHY, for the next maintainer):
+
+### Why B2 (idx-keyed re-pointer) was rejected — measured, not theorised
+I built B2 exactly as specified (central `registerFinalizeHelper` chokepoint
+routing all ~70 registration sites; additive `finalizeHelperStaleIdxToName`
+reverse map maintained by every shift pass; final post-dead-elim
+`repointFinalizeHelperSiblingCalls` that re-points by name) and ran it against
+the existing late-shift regression suite. It **corrupted correct modules**:
+`#329`/`#1839` flipped from green to `__str_concat … not enough arguments` /
+`__str_flatten call[1] expected (ref null 6) found i32.const`. Instrumentation
+showed **94 re-points that CHANGED a value on a module that was already
+correct** (e.g. every `call 1` rewritten to `call 0` because the reverse map
+held a *stale* `1 → __str_copy_tree` entry while index 1 now legitimately
+belonged to a different function).
+
+Root cause of B2's unsoundness: **a funcIdx value is ambiguous across shifts.**
+The reverse map is `staleIdx → name`, but after an index shift a freed slot is
+reused by a *different* function, so a CORRECT baked `call <idx>` can collide
+with a stale reverse-map entry for an unrelated helper. The spec's "additive,
+later overwrites" mitigation does not hold: a surviving body can still bake the
+old value meaning the old name. No idx-keyed map can both (a) repair a genuinely
+stale call AND (b) leave a correct-but-numerically-colliding call untouched —
+the two are indistinguishable by index. (A *fresh* map rebuilt right before the
+pass collapses to a no-op; an *additive* map corrupts. There is no middle
+ground.) The only sound name-anchoring is per-call **instruction-object**
+identity captured at bake time — which is the B1 approach the architect rejected
+for its ~150-site fragility (the spec under-counted it as 35). So neither B1 nor
+B2 is a good fit.
+
+### What actually recurs, and the sound fix
+The existing ADD-direction machinery (`shiftLateImportIndices` /
+`reconcileNativeStrFinalizeShift`) is already exhaustive: it walks every
+`mod.functions` body AND keeps `funcMap` / `nativeStrHelpers` /
+`nativeRegexHelpers` / `mapHelpers` / `pendingMethodTrampolines` in lockstep on
+every import ADD. The genuine, unmodelled gap is the **REMOVE** direction:
+`eliminateDeadImports` removes dead func imports and remaps every funcIdx
+*inside `mod`* through its authoritative `fR` table (so the emitted module stays
+internally consistent), but historically it touched **only `mod`** and left the
+ctx side-tables stale by the removed-import delta. A consumer that bakes a NEW
+`call` from a stale side-table AFTER dead-elim then targets the wrong function —
+the live recurrence vector. The concrete post-dead-elim consumer today is the
+`__unbox_number` repair in `fixups.ts` (`repairStructTypeMismatches` /
+`fixupExternConvertAny`, which run immediately after dead-elim).
+
+**Fix (one change):** `eliminateDeadImports(mod, ctx?)` — pass the context and
+apply the SAME authoritative `fR` remap to the ctx side-tables (`funcMap`,
+`nativeStrHelpers`, `nativeRegexHelpers`, `mapHelpers`, and the
+`pendingMethodTrampolines` side-channel), in lockstep with the module, exactly
+as the ADD-direction passes already do. This is the sound realisation of the
+contract's Q1 intent ("dead-elim becomes index-bookkeeping that the
+side-tables follow"). Properties:
+- **Sound** — uses dead-elim's own `fR` (the authority), never guesses by idx.
+- **Idempotent / no-op on the common path** — gated on `fR.size > 0` (a dead
+  func import was actually removed); a hard no-op otherwise, which is the
+  current-main case (hence no behaviour change, no test262 delta expected).
+- **Zero per-site churn** — no `registerFinalizeHelper`, no reverse map, no
+  touching the ~70 registration sites or ~150 bake sites. ~50 LOC in one file.
+- **Backward-compatible** — `ctx` is optional; non-codegen callers (tests, the
+  standalone rewriter) keep the old `mod`-only behaviour.
+
+### Detection guard — investigated, NOT shipped
+A name-identity post-freeze guard (`helper-map idx must equal the index of the
+function of that name`) was prototyped and **withdrawn**: it false-positives on
+the intentional `#40`/`#2191` public-name re-point in `case-convert-native.ts`
+(`__str_toLowerCase` in the map deliberately points at the `__str_toLowerCase_uni`
+body, while a dead, same-named ASCII body still sits at another index). Name↔index
+identity is therefore not an invariant, so the guard is unsound as a check. The
+only safe always-on check remains `validateFuncRefs` (out-of-range), already in
+`binary.ts`.
+
+### Files / tests
+- `src/codegen/dead-elimination.ts` — `eliminateDeadImports(mod, ctx?)` + ctx
+  side-table `fR` remap (the fix).
+- `src/codegen/index.ts` — pass `ctx` at both finalize arms.
+- `tests/issue-1899-funcidx-authority.test.ts` — unit (synthetic module: remap
+  lockstep, fR-empty no-op, idempotency) + integration (churning closure/string
+  + toLowerCase/toUpperCase across standalone/wasi/gc).
+
+### Relationship to #1985 / #1888 (revised)
+The "by-name authority pass subsumes #1985 targets 2 & 3" claim in the ratified
+blueprint does NOT hold (B2 is gone). #1985's `FuncIdxCell` (shared mutable cell
+observed by every shift walker) remains the right tool for **pre-emission**
+captures (`pendingMethodTrampolines[].methodFuncIdx` etc.) and, unlike B2, is
+sound for the ADD direction. This #1899 fix additionally covers the REMOVE
+direction for the side-tables, which cells do not model. **#1985 is NOT subsumed
+and stays open**; #1899 reduces, but does not eliminate, its surface. #1888 S2 /
+Slice 5 (`__apply_closure` / `__call_fn_method_N`) are covered for the REMOVE
+direction here because those funcMap entries are now remapped by dead-elim too;
+their ADD-direction coverage was already in place via `shiftLateImportIndices`.
