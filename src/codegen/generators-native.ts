@@ -844,15 +844,19 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
   // method threads cleanly through the funcMap key. A FunctionDeclaration name
   // is always an Identifier.
   if (ts.isMethodDeclaration(decl) && !ts.isIdentifier(decl.name)) return false;
-  // (#2571) Only CLASS method generators are routed through the native factory
-  // in this slice (class-bodies.ts). An OBJECT-LITERAL method generator
-  // (`{ *m(){} }`) is lowered via the closures.ts lifted-closure path, which is
-  // NOT yet wired to the native state machine — so it must keep forcing the host
-  // path. Bailing here (the single candidate gate consumed by both
-  // `registerNativeGenerator` AND `sourceNeedsGeneratorHostImports`) keeps the
-  // host imports registered for it, avoiding an undefined-funcidx invalid module.
-  // Object-literal method generators are the documented follow-up.
-  if (ts.isMethodDeclaration(decl) && !ts.isClassLike(decl.parent)) return false;
+  // (#2571/#2581) A method generator is native-routable only when its emit site
+  // is wired to the native factory: CLASS bodies (class-bodies.ts, #2571) and
+  // OBJECT-LITERAL methods (literals.ts, #2581). Both compile the method body as
+  // a func whose param 0 is the receiver `this` (a `ref $struct`), so the
+  // synthetic-`this` state-struct model applies uniformly. Any OTHER
+  // MethodDeclaration context (e.g. a TS interface/type member, or a shape the
+  // emit paths don't cover) keeps the host path — bailing here (the single
+  // candidate gate consumed by both `registerNativeGenerator` AND
+  // `sourceNeedsGeneratorHostImports`) keeps the host imports registered,
+  // avoiding an undefined-funcidx invalid module.
+  if (ts.isMethodDeclaration(decl) && !ts.isClassLike(decl.parent) && !ts.isObjectLiteralExpression(decl.parent)) {
+    return false;
+  }
   const modifiers = ts.canHaveModifiers(decl) ? ts.getModifiers(decl) : undefined;
   if (modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword || m.kind === ts.SyntaxKind.DeclareKeyword)) {
     return false;
