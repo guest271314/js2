@@ -212,3 +212,36 @@ issue-1025 nested-pattern test — fails identically on pristine `origin/main`.)
 still leaks `__new_<TypedArray>` — needs native vec-struct construction in the
 externref-backed implicit forwarder (overlaps #2159). `DisposableStack` /
 `AsyncDisposableStack` leak `DisposableStack_new`. Both are separate slices.
+
+## Slice triage (2026-06-21, dev-carla) — DisposableStack/AsyncDisposableStack is SUBSTRATE-BLOCKED, not a dev slice
+
+Probed `new DisposableStack()` standalone: confirmed it leaks `DisposableStack_new`
+(and `AsyncDisposableStack_new`) — the constructor + all methods route through the
+host `externClasses` table (`src/codegen/index.ts:11134`), no native runtime.
+
+Attempted to scope a native sync-DisposableStack runtime (struct + LIFO disposer
+list + use/adopt/defer/dispose/move, modeled on set-runtime.ts). **Blocked on
+missing ERM substrate** — measured, not assumed:
+
+1. **`Symbol.dispose` / `Symbol.asyncDispose` value-read is unsupported standalone.**
+   `const f = o[Symbol.dispose]` and `o[Symbol.dispose]()` both CE with
+   `"Symbol.dispose built-in static property value read is not supported"`. Reading
+   a disposer off a resource is the foundational op `use()`/`adopt()`/scope-exit all
+   require, so the runtime cannot store or invoke disposers without it.
+2. **There is NO native dispose-dispatch helper at all** (`grep __run_disposers /
+   __dispose / disposeStack` → 0 hits). Even plain `using r = {[Symbol.dispose](){}}`
+   leaks `__box_symbol` and defers the actual disposal to the host runtime — the
+   "call Symbol.dispose LIFO at scope exit" primitive is host-backed, not Wasm-native.
+
+The native closure-invoke primitive (`__call_fn_method_N`) DOES exist, so once the
+two substrate gaps above land, the runtime itself is a straightforward set-runtime
+-style build. But building it now would require first implementing native
+`Symbol.dispose` builtin-symbol value-read + a native dispose-dispatch substrate —
+foundational ERM/symbol-property-read work that spans the standalone object model,
+i.e. senior-dev/value-rep scope (overlaps the #2158 class/descriptor object-model
+epic and the symbol-keyed builtin-read path), **not a contained dev slice**.
+
+**Disposition:** DisposableStack/AsyncDisposableStack standalone (the ~44-test
+cluster) is **blocked on native ERM substrate** (`Symbol.dispose` builtin value-read
++ dispose-dispatch). DO NOT re-dispatch as a dev slice until that substrate exists.
+Route the substrate to senior-dev. No code pushed.
