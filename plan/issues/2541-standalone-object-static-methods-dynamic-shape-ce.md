@@ -84,3 +84,25 @@ explicitly-enumerable defined → true, inherited proto prop → false (own-only
 hasOwnProperty unregressed. Object suites 35/35; tsc + prettier clean.
 
 All three acceptance criteria met; issue closed.
+
+## Merge-queue ejection (2026-06-21, sd-2) — stale base, not a code regression
+
+PR #1860 ejected from the merge_group on "test262 standalone shard 56" +
+"merge shard reports" at 13:49. Root cause: the branch was **49 commits behind
+origin/main** (merge-base #1856) — missing #2542/#2574/#2575/#2001-S1/#2552 and
+the baseline sync that raised the standalone pass floor to 31569. The merge_group
+tests the *speculative merge* onto current main, so a stale base fails the raised
+standalone floor / drifts even when the isolated change is fine (standalone-floor
+is merge_group-only; the per-PR checks green-skip the heavy standalone shards).
+
+Verified the `__propertyIsEnumerable` native is NOT the regression: its behavior
+matches `__hasOwnProperty` exactly on every shape (own-enumerable → true, absent
+→ false, non-`$Object` → false), with zero host-import leak and valid Wasm. The
+one shape where it returns "wrong" (`const o:any={}; o.x=9; o.pie("x")` → false)
+is a *pre-existing* empty-`{}` open-object gap that `hasOwnProperty` shares
+identically — out of #2541's scope, untouched by this change.
+
+Resolution: merged current origin/main into the branch (clean, no conflicts; diff
+vs main stays the same 3 #2541 files), re-validated (tsc + #2541 suite 6/6 +
+hard-error gate 0 + targeted standalone sweep all green), and let the merge_group
+re-validate shard 56 on the now-current base.
