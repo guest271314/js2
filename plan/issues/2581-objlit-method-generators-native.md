@@ -94,3 +94,63 @@ receiver needs its own treatment (or an explicit bail when the body reads
 piece. Pairs with #2571 (class methods, landed) and #2040 (generator runtime).
 Validate via the full gen-method standalone cluster + merge_group (broad-impact,
 NOT a scoped sweep).
+
+## Investigation (2026-06-21, sd-2) — machinery mapped; harder than the class case
+
+Confirmed the object-literal method-generator path is structurally distinct from
+the class path (#2571) — it is NOT a `local.get`-the-this-struct-param emit. Map:
+
+- **Result type + per-literal func**: `literals.ts:1852-1872` — for `isGen`, the
+  method result type is set to `externref` (the eager-buffer Generator object),
+  and a fresh per-literal func (`<name>__lit<idx>`) is allocated with signature
+  `[(ref null objStruct), ...userParams] → externref`.
+- **Closure wrapping**: `literals.ts:1961-1968` calls
+  `emitObjectMethodAsClosure(ctx, fctx, methodFullName, methodFuncIdx,
+  structTypeIdx)` (closures.ts:3708) — wraps the method body func as a CLOSURE
+  value (`ref.func $trampoline` + `struct.new $closureStruct`), stored in the
+  object's eqref/closure field.
+- **`this` resolution**: the trampoline (`buildTrampolineThisSlot`,
+  closures.ts:3753) resolves the receiver from `__current_this` (#2015), NOT a
+  struct param — so the #2571 "thread `this` as synthetic leading param" trick
+  does not transfer directly.
+- **Body compile**: the generator emit for the body func lives in the
+  `closures.ts` lifted-closure generator block (`isGenerator && ts.isBlock(body)`,
+  ~closures.ts:2317) — the eager-buffer `__gen_create_buffer`/`__create_generator`
+  path.
+- **Finalize**: `finalizeMethodTrampolines` (closures.ts:3812) rebuilds every
+  trampoline body against the method's FINAL signature before late-import shifts.
+
+### Why it's a multi-layer change (the genuinely hard part)
+
+To go native, the body func must return a `$GenState_*` ref (not externref), and
+that ref must flow through: (1) the per-literal func result type
+(literals.ts:1855), (2) the closure trampoline wrapper's result type +
+`finalizeMethodTrampolines` rebuild, (3) the eqref-closure dispatch that reads the
+method back off the struct and calls it, and (4) the `.next()/.return()/.throw()`
+dispatch on the returned ref. The class path avoided all of this because the
+method is a direct struct method, not a closure value.
+
+### Suggested first slice (lower risk)
+
+Start with the `this`-FREE object-literal generator method subset (no receiver to
+thread — like a static method): register the body via `registerNativeGenerator`
+with `synthesizedThis = false`, route the body emit through
+`compileNativeGeneratorFunction`, and make the method-value/closure flow carry the
+`$GenState` ref. A `this`-reading object-literal generator method stays on the
+host bail until the receiver-through-closure model is built. Keep the candidate
+gate the SINGLE source of truth (the `!ts.isClassLike(decl.parent)` bail in
+`isNativeGeneratorCandidate`, generators-native.ts) so
+`sourceNeedsGeneratorHostImports` agrees — a mismatch bakes an undefined funcidx →
+invalid wasm (the exact hazard #2571 hit + fixed).
+
+## Suspended Work (2026-06-21, sd-2)
+
+- **Branch / worktree**: `issue-2581-objlit-method-generators` at
+  `/workspace/.claude/worktrees/issue-2581-objlit-method-generators` (off main
+  `5bfb4c3de`, post-#2571).
+- **State**: no code changes yet — investigation only (machinery mapped above).
+  Claimed `ttraenkler/sd-2`. Suspended at the end of a long session rather than
+  rushing a deep multi-layer closure/trampoline change (over-broad-change risk).
+- **Resume**: re-claim with `--force`, start from the `this`-free first slice
+  above. Validate broad-impact via the full gen-method cluster + merge_group, NOT
+  a scoped sweep.
