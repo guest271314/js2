@@ -1049,11 +1049,8 @@ export function compileObjectLiteral(
     // mixed `{ a: number; [s: string]: T }` registers a concrete struct for the
     // binding (the `__type` anon-struct branch fires on `getProperties().length > 0`),
     // so diverting its literal to `$Object` would mismatch that struct local.
-    const strIndex = ctxTypeNonEmpty
-      ? ctx.checker.getIndexInfoOfType(ctxTypeNonEmpty, ts.IndexKind.String)
-      : undefined;
-    const isPureStringIndexContext =
-      !!strIndex && !!ctxTypeNonEmpty && ctxTypeNonEmpty.getProperties().length === 0;
+    const strIndex = ctxTypeNonEmpty ? ctx.checker.getIndexInfoOfType(ctxTypeNonEmpty, ts.IndexKind.String) : undefined;
+    const isPureStringIndexContext = !!strIndex && !!ctxTypeNonEmpty && ctxTypeNonEmpty.getProperties().length === 0;
     if (isAnyContextNonEmpty || isPureStringIndexContext) {
       const objResult = compileObjectLiteralAsExternref(ctx, fctx, expr);
       if (objResult) return objResult;
