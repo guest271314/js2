@@ -1245,6 +1245,22 @@ export interface CodegenContext {
    */
   dynamicDescriptorWidenVars: Set<string>;
   /**
+   * (#2584) Standalone-only: receiver var names that are the subject of at least
+   * one `$Object`-hash-only operation — bracket read/write (`o[k]`), `key in o`,
+   * `Object.keys/values/entries/getOwnPropertyDescriptor/getOwnPropertyNames(o)`,
+   * `Object.assign(o, …)` / `Object.assign(…, o)`, or `for (… in o)`. These
+   * consumers all read the native `$Object` open-hash runtime, which a widened
+   * closed WasmGC struct is invisible to. A var written via dot-access AND read
+   * via any of these would otherwise widen to a struct on the write side but miss
+   * it on the read side (`o.a = 7; o["a"]` → 0). Membership here suppresses
+   * struct-widening for the receiver so it stays a `__new_plain_object` /
+   * `$Object`; dot-writes then route through `__extern_set` and every access form
+   * reads the same hash consistently. Mirrors `dynamicDescriptorWidenVars`; the
+   * two sets are additive. Empty in host/gc/wasi mode (only populated under
+   * `ctx.standalone`).
+   */
+  objectHashConsumerVars: Set<string>;
+  /**
    * (#1239) Variable names whose initializer is an object literal carrying
    * `get`/`set` accessors. Such variables are stored as plain JS host
    * objects (via `__new_plain_object` + `__defineProperty_accessor`) and

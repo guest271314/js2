@@ -174,6 +174,7 @@ export function createCodegenContext(
     widenedVarStructMap: new Map(),
     widenedDefinePropertyKeys: new Set(),
     dynamicDescriptorWidenVars: new Set(),
+    objectHashConsumerVars: new Set(),
     externrefAccessorVars: new Set(),
     pendingMathMethods: new Set(),
     pendingMethodTrampolines: [],
