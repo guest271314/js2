@@ -1,5 +1,5 @@
 ---
-id: 2553
+id: 2554
 title: "IR path drops tail calls on top-level recursive functions → deep-recursion stack overflow (regression vs legacy)"
 status: done
 sprint: 64
@@ -14,10 +14,10 @@ area: codegen, ir
 language_feature: tail-calls
 goal: core-semantics
 related: [602, 822, 839, 1972]
-origin: "2026-06-21 sprint-64 — flagged as the '#54 IR tail-call regression'. No matching issue file existed; reproduced on upstream/main and filed as #2553."
+origin: "2026-06-21 sprint-64 — flagged as the '#54 IR tail-call regression'. No matching issue file existed; reproduced on upstream/main and filed as #2554."
 ---
 
-# #2553 — IR path drops tail calls on top-level recursive functions
+# #2554 — IR path drops tail calls on top-level recursive functions
 
 ## Problem
 
@@ -79,5 +79,5 @@ legacy path:
       converted) — exception does not escape.
 - [x] Return-type-mismatched / param-count-mismatched tail positions are left as
       `call` (no invalid Wasm).
-- [x] `tests/issue-2553-ir-tail-call.test.ts`; typecheck + lint + format +
+- [x] `tests/issue-2554-ir-tail-call.test.ts`; typecheck + lint + format +
       stack-balance clean.

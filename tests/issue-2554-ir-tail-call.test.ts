@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #2553 — IR path drops tail calls on top-level recursive functions.
+ * #2554 — IR path drops tail calls on top-level recursive functions.
  *
  * The legacy AST return path rewrites a tail `return f(...)` into `return_call`
  * (#602). The IR `return` lowering never did, so IR-claimed (top-level)
@@ -25,7 +25,7 @@ async function run(src: string, standalone = false): Promise<number> {
 const TOP_LEVEL = `function sum(n: number, acc: number): number { if (n === 0) return acc; return sum(n - 1, acc + n); }
 export function test(): number { return sum(1000000, 0); }`;
 
-describe("#2553 IR tail-call optimization for top-level recursion", () => {
+describe("#2554 IR tail-call optimization for top-level recursion", () => {
   it("top-level 1e6 tail recursion does not overflow (host)", async () => {
     expect(await run(TOP_LEVEL)).toBe(500000500000);
   });
@@ -58,7 +58,7 @@ export function test(): number { return isEven(500000); }`),
   });
 });
 
-describe("#2553 tail-call guards (no invalid Wasm, no exception escape)", () => {
+describe("#2554 tail-call guards (no invalid Wasm, no exception escape)", () => {
   it("tail call inside try-with-catch: the throw is caught (NOT converted to return_call)", async () => {
     expect(
       await run(`function boom(): number { throw new Error("x"); }
