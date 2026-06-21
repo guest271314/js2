@@ -2,7 +2,7 @@
 id: 1887
 title: "async-generator yield* emits invalid Wasm (array.set in __closure) — 325 default-lane CE"
 status: ready
-sprint: Backlog
+sprint: 64
 created: 2026-06-05
 updated: 2026-06-05
 priority: high

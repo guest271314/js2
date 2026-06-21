@@ -2,7 +2,7 @@
 id: 2040
 title: "standalone: generator/destructuring runtime-semantics residual — rest-pattern iterator consumption, lazy defaults, private elements (~1,750 tests)"
 status: ready
-sprint: Backlog
+sprint: 64
 created: 2026-06-10
 updated: 2026-06-10
 priority: critical

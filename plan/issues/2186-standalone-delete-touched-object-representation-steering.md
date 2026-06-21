@@ -2,7 +2,7 @@
 id: 2186
 title: "standalone: post-delete struct read returns stale value — steer delete-touched object literals to $Object"
 status: ready
-sprint: Backlog
+sprint: 64
 created: 2026-06-17
 updated: 2026-06-17
 priority: medium

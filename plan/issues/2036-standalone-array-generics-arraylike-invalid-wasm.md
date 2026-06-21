@@ -2,7 +2,7 @@
 id: 2036
 title: "standalone: Array.prototype generics over array-like receivers emit invalid Wasm / null-deref / wrong results instead of refusing loud (~500+ tests)"
 status: in-progress
-sprint: Backlog
+sprint: 64
 created: 2026-06-10
 updated: 2026-06-14
 priority: high

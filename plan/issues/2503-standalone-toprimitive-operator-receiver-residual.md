@@ -2,7 +2,7 @@
 id: 2503
 title: "standalone ToPrimitive residual (successor to #1910): 2,835 `Cannot convert object to primitive value` on ==/+/array-literal/destructuring receivers"
 status: ready
-sprint: Backlog
+sprint: 64
 created: 2026-06-19
 updated: 2026-06-19
 priority: critical

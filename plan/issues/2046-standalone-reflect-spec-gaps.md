@@ -2,7 +2,7 @@
 id: 2046
 title: "standalone Reflect: receiver arg silently dropped, deleteProperty ignores freeze/configurable, no ToPropertyKey (#1905 follow-up)"
 status: in-progress
-sprint: Backlog
+sprint: 64
 created: 2026-06-10
 updated: 2026-06-17
 priority: high

@@ -2,7 +2,7 @@
 id: 2568
 title: "standalone: nested destructuring-param default OBJECT yields 0 — two-level `{ w: {x,y,z} = {…} } = { w: {…} }` reads sentinels in standalone mode"
 status: ready
-sprint: Backlog
+sprint: 64
 created: 2026-06-21
 priority: medium
 feasibility: hard
