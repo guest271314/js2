@@ -543,6 +543,53 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
   // True when the standalone concat arm can be built (all pieces present).
   const anyAddCanConcat = anyToStringIdx >= 0 && externToStringIdx >= 0 && strConcatIdx >= 0 && ctx.anyStrTypeIdx >= 0;
 
+  // (#2583) Native string-CONTENT equality for the tag-5 arms of `__any_eq` /
+  // `__any_strict_eq` in standalone/WASI, where the host `wasm:js-string equals`
+  // import (`strEqualsIdx`) is ABSENT (-1) — so the tag-5 arm otherwise collapses
+  // to a constant `0` and two equal boxed strings compare unequal. This silently
+  // broke standalone `__any_strict_eq` on boxed strings, surfaced by #2583's
+  // any-array `indexOf`/`includes` (which compares elements via
+  // `__extern_strict_eq` → `__any_strict_eq`). Each operand's tag-5 `externval`
+  // (fieldIdx 4) holds an `extern.convert_any($AnyString)`; recover it to
+  // `$AnyString`, `__str_flatten` to `$NativeString`, then native `__str_equals`.
+  // Mirrors the static `===` lowering's native path. Registered under the same
+  // gate as the concat arm (helpers idempotent).
+  let nativeStrFlattenIdx = -1;
+  let nativeStrEqualsIdx = -1;
+  if ((ctx.standalone === true || ctx.wasi === true) && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+    ensureNativeStringHelpers(ctx);
+    nativeStrFlattenIdx = ctx.nativeStrHelpers.get("__str_flatten") ?? -1;
+    nativeStrEqualsIdx = ctx.nativeStrHelpers.get("__str_equals") ?? -1;
+  }
+  // True when the native (host-import-free) tag-5 string-eq arm can be built.
+  const canNativeStrEq = nativeStrFlattenIdx >= 0 && nativeStrEqualsIdx >= 0 && ctx.anyStrTypeIdx >= 0;
+  // Build the tag-5 string-content comparison `then` body. Prefers the host
+  // `wasm:js-string equals` (gc/host mode) and falls back to the native flatten +
+  // `__str_equals` path (standalone/WASI). `0` only when neither is available.
+  const tag5StringEqThen = (): Instr[] => {
+    if (strEqualsIdx >= 0) {
+      return [
+        { op: "local.get", index: 0 } as Instr,
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
+        { op: "local.get", index: 1 } as Instr,
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
+        { op: "call", funcIdx: strEqualsIdx } as Instr,
+      ];
+    }
+    if (canNativeStrEq) {
+      // externval (externref, holds $AnyString) → $AnyString → $NativeString.
+      const recoverNative = (operandIdx: number): Instr[] => [
+        { op: "local.get", index: operandIdx } as Instr,
+        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
+        { op: "any.convert_extern" } as Instr,
+        { op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr,
+        { op: "call", funcIdx: nativeStrFlattenIdx } as Instr,
+      ];
+      return [...recoverNative(0), ...recoverNative(1), { op: "call", funcIdx: nativeStrEqualsIdx } as Instr];
+    }
+    return [{ op: "i32.const", value: 0 } as Instr];
+  };
+
   // Helper to register a helper function
   function addHelper(
     name: string,
@@ -1440,16 +1487,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                               {
                                 op: "if",
                                 blockType: { kind: "val", type: { kind: "i32" } },
-                                then:
-                                  strEqualsIdx >= 0
-                                    ? [
-                                        { op: "local.get", index: 0 },
-                                        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
-                                        { op: "local.get", index: 1 },
-                                        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
-                                        { op: "call", funcIdx: strEqualsIdx },
-                                      ]
-                                    : [{ op: "i32.const", value: 0 }],
+                                then: tag5StringEqThen(),
                                 else: [
                                   // null/undefined (tag < 2): both same tag → equal
                                   { op: "local.get", index: 2 },
@@ -1612,16 +1650,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                               {
                                 op: "if",
                                 blockType: { kind: "val", type: { kind: "i32" } },
-                                then:
-                                  strEqualsIdx >= 0
-                                    ? [
-                                        { op: "local.get", index: 0 },
-                                        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
-                                        { op: "local.get", index: 1 },
-                                        { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
-                                        { op: "call", funcIdx: strEqualsIdx },
-                                      ]
-                                    : [{ op: "i32.const", value: 0 }],
+                                then: tag5StringEqThen(),
                                 else: [
                                   // null/undefined (tag < 2): both same tag → equal
                                   { op: "local.get", index: 2 },

@@ -30,6 +30,7 @@ import {
   tryCompileStandaloneStringSearch,
   tryCompileStandaloneStringSplit,
 } from "./regexp-standalone.js";
+import { reserveClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
@@ -3034,16 +3035,69 @@ export function compileGuardedNativeStringMethodCall(
 
   if (resultType === null) return null;
 
-  // else-arm: the spec default for the result ValType (non-string receiver).
-  const elseInstrs: Instr[] = [];
-  if (resultType.kind === "f64") {
-    elseInstrs.push({ op: "f64.const", value: NaN } as Instr);
-  } else if (resultType.kind === "i32") {
-    elseInstrs.push({ op: "i32.const", value: 0 } as Instr);
-  } else if (resultType.kind === "ref" || resultType.kind === "ref_null") {
-    elseInstrs.push({ op: "ref.null", typeIdx: (resultType as { typeIdx: number }).typeIdx } as Instr);
-  } else {
-    elseInstrs.push({ op: "ref.null.extern" } as Instr);
+  // else-arm (non-string receiver at runtime). Default: the spec sentinel for
+  // the result ValType.
+  //
+  // (#2583) For the callback-free array search/predicate methods
+  // (indexOf/lastIndexOf/includes), a genuinely-`any` receiver may be an ARRAY
+  // (or an object literal with a `<Struct>_<method>`), not a string. Route the
+  // else-arm through the closed-method dispatcher `__call_m_<method>_<arity>`,
+  // whose native `$__vec_base` brand arm services the array case and whose
+  // open-`$Object` arm services object literals. For any OTHER non-string
+  // receiver (number, null, plain object), the dispatcher's terminal
+  // `ref.null.extern` is unboxed back to the same benign sentinel as before — so
+  // no regression. Gated to standalone/wasi + arity≥1, matching the dispatcher's
+  // own brand-arm gate; otherwise the plain sentinel is kept.
+  const VEC_SEARCH = method === "indexOf" || method === "lastIndexOf" || method === "includes";
+  let elseInstrs: Instr[] | undefined;
+  if (
+    VEC_SEARCH &&
+    (ctx.standalone || ctx.wasi) &&
+    (resultType.kind === "i32" || resultType.kind === "f64") &&
+    expr.arguments.length >= 1 &&
+    !expr.arguments.some((a) => ts.isSpreadElement(a))
+  ) {
+    const arity = expr.arguments.length;
+    const dispatchIdx = reserveClosedMethodDispatch(ctx, method, arity);
+    flushLateImportShifts(ctx, fctx);
+    const unboxNumIdx = ctx.funcMap.get("__unbox_number");
+    const unboxBoolIdx = ctx.funcMap.get("__unbox_boolean");
+    const haveUnbox = method === "includes" ? unboxBoolIdx !== undefined : unboxNumIdx !== undefined;
+    if (haveUnbox) {
+      const saved = pushBody(fctx);
+      // recv (the already-evaluated externref temp) + each arg boxed to externref.
+      fctx.body.push({ op: "local.get", index: recvExt } as Instr);
+      for (const arg of expr.arguments) {
+        const at = compileExpression(ctx, fctx, arg, { kind: "externref" });
+        if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+        else if (at === null) fctx.body.push({ op: "ref.null.extern" } as Instr);
+      }
+      fctx.body.push({ op: "call", funcIdx: dispatchIdx } as Instr);
+      // Dispatcher returns a boxed externref. Unbox to the string method's
+      // result kind: includes → boolean(i32); indexOf/lastIndexOf → number(f64),
+      // truncated to i32 when the string arm's result is i32.
+      if (method === "includes") {
+        fctx.body.push({ op: "call", funcIdx: unboxBoolIdx! } as Instr);
+        if (resultType.kind === "f64") fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+      } else {
+        fctx.body.push({ op: "call", funcIdx: unboxNumIdx! } as Instr); // externref → f64
+        if (resultType.kind === "i32") fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+      }
+      elseInstrs = fctx.body;
+      popBody(fctx, saved);
+    }
+  }
+  if (elseInstrs === undefined) {
+    elseInstrs = [];
+    if (resultType.kind === "f64") {
+      elseInstrs.push({ op: "f64.const", value: NaN } as Instr);
+    } else if (resultType.kind === "i32") {
+      elseInstrs.push({ op: "i32.const", value: 0 } as Instr);
+    } else if (resultType.kind === "ref" || resultType.kind === "ref_null") {
+      elseInstrs.push({ op: "ref.null", typeIdx: (resultType as { typeIdx: number }).typeIdx } as Instr);
+    } else {
+      elseInstrs.push({ op: "ref.null.extern" } as Instr);
+    }
   }
 
   fctx.body.push({ op: "local.get", index: recvExt });
