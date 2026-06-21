@@ -1,7 +1,9 @@
 ---
 id: 2582
 title: "compiled-acorn module-init: null receiver into wordsRegexp from a numeric-keyed module-object read"
-status: ready
+status: done
+assignee: sd-acorn
+completed: 2026-06-21
 created: 2026-06-21
 updated: 2026-06-21
 priority: high
@@ -125,3 +127,82 @@ heterogeneous numeric-keyed literal).
   object-literal codegen — validate broadly).
 - This unblocks the next acorn dogfood step; #1712 stays open until the full
   parse + AST-match acceptance is met.
+
+## Resolution (2026-06-21, sd-acorn) — TRUE root cause + fix
+
+The "empty-string value elided" hypothesis above was WRONG. Bisected the real
+trigger to a **6-line repro** and pinned a precise two-part root cause.
+
+### True root cause
+
+A **non-literal numeric key** read on a statically-typed numeric-keyed object
+literal (`{ 9: …, 10: … }`) returns `undefined` when executed in
+**module-init / top-level** code:
+
+```ts
+var props = { 9: "a", 10: "b" };
+var arr = [9, 10];
+var tlPlain = props[9];        // literal key  → "a"   (always worked)
+var tlArr   = props[arr[0]];   // RUNTIME key  → undefined (BUG)
+// the same `props[arr[0]]` read INSIDE a function → "a" (worked)
+```
+
+Mechanism (two compounding defects):
+
+1. **Codegen split** (`src/codegen/property-access.ts`,
+   `compileStructOrExternElementAccess`): a LITERAL/const numeric key lowers to
+   a static `struct.get $type fieldIdx` (exports-independent, works anytime). A
+   NON-literal key (`arr[0]`, a `var` loop counter, an `any` param) yields
+   `fieldName === undefined` and falls to the DYNAMIC path
+   `__extern_get(extern.convert_any(props), __box_number(key))`.
+
+2. **Module-init timing + symbol-ID swallow** (`src/runtime.ts` `_safeGet`):
+   `__extern_get` → `_safeGet(struct, 9)` reads the field via the
+   `exports["__sget_9"]` getter. But the module-init top-level
+   `for (…) buildUnicodeData(list[i])` loop runs inside the Wasm **START
+   function**, BEFORE `__setExports` wires the exports — so `__sget_9` is
+   unavailable, the fast-path is skipped, and `_safeGet` falls into the
+   well-known-symbol-ID branch (`key >= 1 && key <= 15`; key 9 ∈ [1,15]),
+   treats 9 as Symbol-ID 9, finds nothing, and `return undefined`. Confirmed
+   via instrumentation: `[INTENT eget key=9 (number)] objStruct=true
+   sget?=undefined`.
+
+acorn's `wordsRegexp(unicodeBinaryPropertiesOfStrings[ecmaVersion])` (ecmaVersion
+from `list[i]` in the module-level loop) hits exactly this → `undefined` →
+`wordsRegexp(undefined)` → `undefined.replace` → instantiation throws.
+
+### Fix
+
+`src/codegen/property-access.ts`: when the element-access receiver is a struct
+whose fields are **ALL numeric-named externref slots** (a plain numeric-keyed
+object literal) and the key is switch-eligible (number / `any` / `unknown`, but
+NOT statically string-typed), emit a static `struct.get` **key-switch**
+(`if key===N0 then struct.get F0 else if key===N1 … else ref.null.extern`)
+instead of `__extern_get`. This is exports- and host-independent, so it reads
+correctly at module-init AND at runtime — generalising the existing literal-key
+`struct.get` lowering to a runtime numeric key. A statically string-typed key,
+or a mixed-shape struct, falls through to the dynamic `__extern_get` path
+unchanged.
+
+### Validation
+
+- Regression pin `tests/issue-2582-numeric-key-struct-read.test.ts` (3 tests:
+  top-level runtime-key read, module-level loop driving the read does not throw,
+  string-key read still resolves the field). All green.
+- The full extracted acorn unicode-data section (`buildUnicodeData` +
+  numeric-keyed objects + module loop) went throws-on-instantiate → returns 6.
+- **Real compiled acorn now INSTANTIATES** (`instantiated OK; parse=function`) —
+  the `__module_init` `buildUnicodeData` throw is gone. Before this fix,
+  instantiation rejected.
+- No regression: scoped computed-property / element-access / #2542 dynamic-key
+  suites all pass (the `./helpers.js` "Failed Suites" are a pre-existing
+  worktree test-infra gap, not introduced here).
+
+### NEXT acorn blocker (4th, NOT this issue)
+
+With acorn now instantiating, `parse("var x = 1;")` **infinite-loops** again —
+a TIGHT Wasm loop (it never yields to the JS event loop, so a `setTimeout`
+watchdog can't fire; only an OS-level `timeout` kills it). This is forward
+progress (parse is now REACHABLE; before, instantiation itself threw), but a
+fresh, deeper blocker past module-init — a separate slice. Filed as a follow-up;
+#1712 stays open until the full acorn parse + AST-match acceptance is met.
