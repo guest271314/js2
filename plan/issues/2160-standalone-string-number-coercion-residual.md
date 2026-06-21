@@ -197,3 +197,64 @@ equality, and all four prior #2160 suites (47). tsc + prettier + biome lint +
 coercion-sites + any-box gates clean. (Pre-existing unrelated failures on main:
 issue-929 accessor descriptor, imported-string-constants e2e, bigint-string —
 all fail identically on pristine `origin/main`.)
+
+---
+
+## Slice (2026-06-21, sdev-tails) — String.prototype METHOD dispatch on a wrapper receiver
+
+**Status stays `ready`** — closes the "full String-method dispatch on a wrapper
+receiver" residual the cs-2160 slice above explicitly left open. Re-probed
+against current main (post-keystone #2187/#2576/#2579): nearly the entire common
+String/Number method + coercion surface now passes standalone (charAt/slice/
+toUpperCase/padStart/trim/split/at/codePointAt/normalize/localeCompare/matchAll/
+toFixed/toPrecision/toString(radix)/Number.* on PRIMITIVE strings; wrapper
+`.length`/`[i]`/`.valueOf()`/`.toString()`). The genuinely-open in-lane residual
+was **every String.prototype METHOD on a `new String(x)` WRAPPER receiver**.
+
+**Root cause** (`src/codegen/expressions/calls.ts`, the native-string method
+dispatch at the `isStringType(receiverType)` arm): `isStringType` deliberately
+also matches the String *wrapper* Object type (so primitive-string methods can
+dispatch). A wrapper reaching `compileNativeStringMethodCall` had its receiver
+emitted by `compileExpression(propAccess.expression)` → the wrapper's `$Object`
+externref → `__str_flatten`'s `ref.cast $NativeString` → **runtime trap**
+("illegal cast" / "null pointer dereference") for `charAt`/`slice`/`indexOf`/
+`toUpperCase`/`includes`/… — the whole wrapper-method surface was unusable
+standalone (it worked in host/gc via the dynamic object path).
+
+**Fix (no new hand-rolled coercion — reuses the §7.1.1.1 engine helper):**
+1. In the native-string dispatch (calls.ts), for a `ctx.standalone` String-
+   wrapper receiver (excluding `toString`/`valueOf`, which keep their existing
+   arms), pass `compileNativeStringMethodCall` a **`receiverOverride`** that
+   recovers the wrapped primitive via the EXISTING `__to_primitive(hint
+   "string")` helper (reads the wrapper's FLAG_INTERNAL `[[PrimitiveValue]]`
+   slot first — same helper the cs-2160 valueOf slice uses), then
+   `any.convert_extern` + `ref.cast $AnyString` back to a native string ref.
+2. The five two-string-arg arms (`indexOf`/`lastIndexOf`/`includes`/
+   `startsWith`/`endsWith`) stored the receiver via
+   `compileStringValueToLocal(propAccess.expression, …)`, which **bypassed**
+   `emitReceiver()`/the override. Added a `compileReceiverToLocal` helper
+   (`src/codegen/string-ops.ts`) routing the receiver through `emitReceiver()`
+   so the override applies there too.
+
+The coercion-sites baseline (#2108) for calls.ts is bumped 21→23 for the two
+sanctioned `__to_primitive` references — the SAME engine helper, no new matrix.
+
+**Still open (NOT regressed):** `Number.prototype` method dispatch on a `new
+Number(x)` wrapper receiver (slot is a boxed number; orthogonal extraction),
+WASI wrapper parity (native object-runtime is standalone-only). String
+`.replace(fn)` is the standalone RegExp engine's residual (#2161 lane). The
+inline `Array.from(new Set(...))`-expression → 0 and `[...m.entries()]` Map-
+entries-spread residuals are #2162 `$Vec`-dispatch territory (architect #24
+lane), documented below in the report — not folded here.
+
+**Validation.** `tests/issue-2160-wrapper-strmethod-standalone.test.ts` (2/2,
+22 wrapper-method cases × standalone + gc): charAt/charCodeAt/at/toUpperCase/
+toLowerCase/slice/substring/indexOf(hit+miss)/lastIndexOf/includes/startsWith/
+endsWith/repeat/padStart/trim/concat/split/chained, inline and via a wrapper
+local, each asserting NO `__unbox_string`/`__new_String`/`__extern_*`/
+`wasm:js-string` host-import leak under `target: standalone`; plus a gc-mode
+no-regression guard. Regression suites green: native-strings (110),
+issue-1910-string-wrapper-index/1910-s2/1397 (23), issue-2192b caught-error
+string methods, all prior #2160 suites (37/38 — the 1 pre-existing
+`Number(arr)` failure fails identically on pristine `origin/main`). tsc +
+prettier + biome lint + coercion-sites + any-box + stack-balance gates clean.
