@@ -602,3 +602,36 @@ gate, all 13 fixed, canary preserved, no `$Object` struct needed. **Validate
 against the REAL async-generator rest test262 file** (the reduced
 `for ([x,...y] of …)` probe is unfaithful — origin ALSO returns 0 there).
 Re-validate via merge_group (one-shot); stop-the-line on re-eject.
+
+## M1a — FINAL VERDICT (faithful runner): NOT a surgical slice; defer to M2
+
+Built a faithful local gate — call the REAL `runTest262File` (tests/test262-runner.ts)
+on all 13 regressed files directly (`.tmp/run13.mjs`). Reduced `compile()`+probe
+shapes repeatedly MISLED (a user closure ≠ a host builtin; `for([x,...y]of)` ≠ the
+async-gen harness). Results:
+
+- **Arm OFF → 12/13 pass** (the 13th `[skip]`s on Temporal). ZERO regression,
+  identical to origin — the prior path is correct for every one of the 13.
+- Arm ON v1 → 0/13. Closure-arm v2 → STILL 0/13 (the real Cluster-A receivers are
+  host-builtin functions reached via Symbol-keyed prototype walks, NOT user
+  closures the `ref.test` catches). Receiver-`ref.is_null` guard → STILL 0/13 (the
+  13's receivers are NON-null wrapped externrefs). Decline-for-struct → can't
+  separate them (the 13 `ref.test`-MISS all structs, exactly like the canary `{}`).
+
+**Root cause = TOTAL ENTANGLEMENT.** Every one of the 13 reaches
+`__extern_get(recv,"length")` → undefined → NaN, where the prior numeric path
+returned a usable value (0 via `__extern_length`'s null-guard, or the real count).
+The canary (`{}.length` → undefined) needs that SAME `__extern_get`-undefined
+result to STAY undefined. A non-null `{}` lacking `length` and a non-null wrapped
+builtin / rest-binding are the SAME externref shape — **no `ref.test` /
+`ref.is_null` / `__extern_has` predicate separates them.** The distinction lives in
+the boxed `$AnyValue` tag, which only a TAG-AWARE reader (M2's job) can inspect; a
+bare-externref runtime test cannot. So options (a)/(3) are dead — there is no
+surgical gate.
+
+**RESOLUTION = turn the arm OFF (option c).** The `.length`-on-any value-semantics
+is not a surgical M1 slice; it requires M2's tag-aware dynamic reader to
+disambiguate the receiver. Turning the arm off reverts the canary to the
+PRE-EXISTING #2580 bug (NOT a new regression), keeps M0 inert, and is zero-regression
+(validated 12/13 + skip). The `{}.length`→undefined fix folds into M2's acceptance.
+M1 over-scoped the value-semantics; M0 (the inert scaffold) is the landable M1.
