@@ -218,6 +218,353 @@ implementation, not a re-investigation).
 
 ---
 
+## Implementation Plan (arch, 2026-06-21 — against upstream/main 0e482f2fc)
+
+Implements the ratified design above: a **final, post-all-churn, by-name
+authority pass** (Q1) over **all finalize-emitted defined funcs** (Q2), driven
+by a **central reverse map B2** (Q3), **registry-membership-gated** so it never
+touches compilation-phase calls (Q4). This is a senior-dev task: high blast
+radius (every standalone/WASI string program flows through these helpers).
+**Do not dispatch as a live bugfix** — there is no reproducing case on current
+main (PR #1225 removed the cited trigger). Activate only under one of the
+re-activation triggers above. When activated, follow this plan exactly.
+
+### Root cause (confirmed in source, upstream/main 0e482f2fc)
+
+Two independent index-bookkeeping mechanisms cannot agree on a final funcIdx
+for a finalize-emitted helper's baked **sibling `call`**:
+
+1. **`reconcileNativeStrFinalizeShift`** (`src/codegen/expressions/late-imports.ts:429`)
+   is **incremental and monotonic**. Each call computes
+   `added = ctx.numImportFuncs − ctx.nativeStrHelperImportBase`, shifts every
+   `call`/`return_call`/`ref.func` with `funcIdx >= base` up by `added` across
+   ALL `ctx.mod.functions` bodies, then **re-bases** `nativeStrHelperImportBase =
+   numImportFuncs` (line 438). It is invoked at **6 interleaved sites**
+   (`index.ts:1189, 1250, 5314, 5342, 9310` + the `flushLateImportShifts`
+   re-base partner). The interleaving is **load-bearing**: helper bodies emitted
+   between two reconcile calls bake `nativeStrHelpers.get(<sibling>)!` at the
+   *current* (already-shifted) index, so a single end-of-finalize shift would
+   be wrong for them — this is exactly why Option (A) is rejected.
+
+2. **`eliminateDeadImports(mod)`** (`src/codegen/dead-elimination.ts:254`,
+   called at `index.ts:1794, 5522`) can **REMOVE** a now-dead finalize import
+   and remap every call target down (`fR` remap, lines 339–347 / 390–392). It
+   mutates **`mod` only** — it never updates `ctx.nativeStrHelpers`,
+   `ctx.funcMap`, or `ctx.nativeRegexHelpers`. After dead-elim those side-tables
+   are stale by the removed-import delta. (Confirmed: the function signature is
+   `eliminateDeadImports(mod: WasmModule)` and its body touches no ctx field.)
+
+The add-then-remove churn (reconcile adds, dead-elim removes) is what the
+incremental monotonic reconcile cannot model: cumulative `+added` deltas
+disagree with the FINAL import count, so a baked sibling `call` is off-by-N.
+`validateFuncRefs` (`src/emit/binary.ts`, always-on since #2043) only catches
+**out-of-range / -1**, never this **in-range-but-wrong-target** case (the
+`call[0] expected (ref null N), found i32.const` flavor).
+
+### The authority pass — design
+
+Add **one** final pass, `repointFinalizeHelperSiblingCalls(ctx)`, that runs
+**after the LAST reconcile AND after `eliminateDeadImports`** but **before
+`ctx.indexSpaceFrozen = true`**. It re-points every finalize-emitted helper
+body's sibling `call`/`return_call`/`ref.func` to the authoritative current
+index for that target's **name**. Because it overwrites *by name* (idempotent:
+re-pointing an already-correct call to the same index is a no-op) rather than
+applying a delta, it cannot double-shift.
+
+**The authoritative name→index map after all churn.** There is no single
+post-dead-elim name→index table today, because `eliminateDeadImports` does not
+update the ctx maps. The pass must build the authority from `mod` itself, which
+IS post-dead-elim-correct:
+
+```
+authorityByName: Map<string, number>
+  for i in 0..mod.functions.length:
+    name = mod.functions[i].name
+    if name: authorityByName.set(name, numImportFuncs_after_deadElim + i)
+```
+
+`numImportFuncs_after_deadElim = mod.imports.filter(d.kind==="func").length`
+(recompute from `mod`, do NOT trust `ctx.numImportFuncs`, which dead-elim also
+left stale). Every finalize-emitted helper is a **named defined function**
+(`__str_flatten`, `__str_copy_tree`, `__call_fn_method_N`, `__apply_closure`,
+…), so it is present in `authorityByName` by construction.
+
+### The central reverse map (B2) — `ctx.finalizeHelperCallSites`
+
+The problem with re-pointing is identifying **which** baked `{op:"call",
+funcIdx}` immediates are finalize-helper sibling calls (vs. ordinary
+compilation-phase calls that happen to alias the same numeric index). B2 solves
+this with a **central reverse map populated at helper-registration time**, the
+single chokepoint, so no per-emit-site discipline is needed (the failure mode
+that produced 5 recurrences).
+
+**New ctx field** (`src/codegen/context/types.ts`, near `nativeStrHelpers`):
+
+```ts
+/**
+ * #1899 — central reverse map for the finalize-helper by-name authority pass.
+ * Maps every funcIdx value at which a finalize-emitted helper was REGISTERED
+ * (i.e. the value a sibling `call` may have baked) → the helper's stable NAME.
+ * A helper may register/observe several stale indices over a run; the value is
+ * the name (stable), so collisions resolve to the correct name. Consumed once
+ * by `repointFinalizeHelperSiblingCalls` after all index churn settles.
+ */
+finalizeHelperStaleIdxToName: Map<number, string>;
+```
+
+Initialize to `new Map()` in `create-context.ts` alongside `nativeStrHelpers`.
+
+**Populate at every helper registration.** Wherever a finalize-emitted helper
+is registered today — `ctx.nativeStrHelpers.set(<name>, funcIdx)` (≈40 sites in
+`native-strings.ts` + the helpers in `binary-ops.ts`, `string-ops.ts`,
+`array-methods.ts`, `object-runtime.ts` `__apply_closure`/`__call_fn_method_N`,
+`json-*`, `case-convert-native.ts`, `uri-encoding-native.ts`,
+`parse-number-native.ts`, `symbol-native.ts`, `map-runtime.ts`,
+`date-parse-native.ts`, `native-regex.ts`/`regexp-standalone.ts`) — also record
+the reverse entry. **Do this via a single helper, not 40 inline edits**, to
+keep the chokepoint property:
+
+```ts
+// src/codegen/native-strings.ts (or a new small module imported widely)
+export function registerFinalizeHelper(
+  ctx: CodegenContext, name: string, funcIdx: number,
+  map: Map<string, number> = ctx.nativeStrHelpers,
+): void {
+  map.set(name, funcIdx);
+  ctx.finalizeHelperStaleIdxToName.set(funcIdx, name);
+}
+```
+
+Then mechanically replace `ctx.nativeStrHelpers.set(name, funcIdx)` →
+`registerFinalizeHelper(ctx, name, funcIdx)` and
+`ctx.funcMap.set("__apply_closure", funcIdx)` /
+`ctx.funcMap.set("__call_fn_method_N", funcIdx)` →
+`registerFinalizeHelper(ctx, name, funcIdx, ctx.funcMap)` at the registration
+sites. **Critical subtlety — the reverse map must also follow shifts.** Every
+shift pass that re-bases `nativeStrHelpers` entries
+(`reconcileNativeStrFinalizeShift` lines 510–512, the `flushLateImportShifts`
+re-base at `index.ts:7766–7773 / 9215–9226`, `shiftLateImportIndices`) must
+ALSO add the post-shift index to `finalizeHelperStaleIdxToName` (it is additive
+— keep old stale entries too, since bodies emitted before the shift baked the
+old value and bodies after baked the new one; both must map to the name). The
+cleanest implementation: in each of those passes, after updating
+`nativeStrHelpers.set(name, idx + delta)`, also
+`ctx.finalizeHelperStaleIdxToName.set(idx + delta, name)`. The original stale
+entry stays (do not delete) — see the "multiple stale indices" edge below.
+
+### The pass body — `repointFinalizeHelperSiblingCalls(ctx)`
+
+Add to `src/codegen/expressions/late-imports.ts` (sibling of the reconcile it
+supersedes for helper calls):
+
+```ts
+export function repointFinalizeHelperSiblingCalls(ctx: CodegenContext): void {
+  const reverse = ctx.finalizeHelperStaleIdxToName;
+  if (reverse.size === 0) return;                       // no helpers emitted
+  const mod = ctx.mod;
+  const numImpF = mod.imports.filter((i) => i.desc.kind === "func").length;
+
+  // 1. Build the authoritative name → current-index map from `mod` (post-deadElim).
+  const authorityByName = new Map<string, number>();
+  for (let i = 0; i < mod.functions.length; i++) {
+    const name = (mod.functions[i] as { name?: string }).name;
+    if (name) authorityByName.set(name, numImpF + i);
+  }
+
+  // 2. The set of helper FUNCTION BODIES to rewrite (registry-membership gate).
+  //    Only finalize-emitted helpers are rewritten; compilation-phase bodies are
+  //    NEVER touched even if a call inside them numerically aliases a stale idx.
+  const helperNames = new Set(reverse.values());
+
+  function repoint(instrs: Instr[]): void {
+    for (const instr of instrs) {
+      const a = instr as any;
+      if (
+        (instr.op === "call" || instr.op === "return_call" || instr.op === "ref.func") &&
+        typeof a.funcIdx === "number"
+      ) {
+        const name = reverse.get(a.funcIdx);          // is this a helper sibling call?
+        if (name !== undefined) {
+          const authoritative = authorityByName.get(name);
+          if (authoritative !== undefined) a.funcIdx = authoritative;  // idempotent
+          // else: name not in mod (dead-eliminated helper) → leave; it is
+          //       unreachable by construction (its only callers are also dead).
+        }
+      }
+      if (Array.isArray(a.body)) repoint(a.body);
+      if (Array.isArray(a.then)) repoint(a.then);
+      if (Array.isArray(a.else)) repoint(a.else);
+      if (Array.isArray(a.catches)) for (const c of a.catches) if (Array.isArray(c.body)) repoint(c.body);
+      if (Array.isArray(a.catchAll)) repoint(a.catchAll);
+    }
+  }
+
+  for (const fn of mod.functions) {
+    if (!fn.name || !helperNames.has(fn.name)) continue;  // GATE: helper bodies only
+    repoint(fn.body);
+  }
+}
+```
+
+**Why the body gate (Q4) is correct.** A compilation-phase body's `call` may
+numerically equal a stale helper index by coincidence, but that body's name is
+NOT in `helperNames`, so the outer loop skips it entirely — it is never walked,
+so a coincidental alias cannot be mis-rewritten. The inner `reverse.get` is a
+second guard (only rewrites a call whose immediate matches a recorded stale
+helper idx), making the pass doubly safe. **Assert** in the inner branch (under
+a debug/env flag) that any rewritten call inside a helper body resolves to a
+name in `authorityByName`, to convert a future regression into a loud error.
+
+### Wire-in (the ordering is the whole point)
+
+In `src/codegen/index.ts`, in BOTH finalize arms (the GC arm around line 1794
+and the standalone/wasi arm around line 5522), insert the call **immediately
+after `eliminateDeadImports(mod)` and before `ctx.indexSpaceFrozen = true`**:
+
+```ts
+    eliminateDeadImports(mod);
+    repointFinalizeHelperSiblingCalls(ctx);   // #1899 — by-name authority, post-all-churn
+    repairStructTypeMismatches(mod);
+    peepholeOptimize(mod);
+    ...
+    ctx.indexSpaceFrozen = true;
+```
+
+It MUST run after dead-elim (so `authorityByName` reflects removed imports) and
+after the last `reconcileNativeStrFinalizeShift` (all 6 sites precede line 1794
+/ 5522 — verify each is upstream of the wire-in point in both arms). It must run
+before freeze and before `stackBalance`/`emit` (which read the final indices).
+`reconcileNativeStrFinalizeShift` and `eliminateDeadImports` are LEFT IN PLACE
+unchanged — they remain index-bookkeeping for everything else; the new pass only
+OVERRIDES the finalize-helper sibling-call subset by name.
+
+### Edge cases
+
+- **A helper baked at several stale indices over the run.** The reverse map is
+  additive (every shift adds the new post-shift index, keeps the old); all such
+  entries map to the same stable name, so whichever value a given body baked,
+  `reverse.get` finds the name and re-points to the single authoritative index.
+  This is the core of why B2 (name-anchored) cannot drift where the incremental
+  delta-shift does.
+- **A dead-eliminated helper** (name absent from `authorityByName`): leave the
+  call. By dead-elim's reachability definition, if the helper was removed, every
+  caller body was also removed, so the residual call is in dead code (or the
+  module is already invalid for an unrelated reason). Do NOT throw here.
+- **Reverse-map collision: two distinct helpers share a stale idx value.**
+  Impossible within one settled index space (two live funcs cannot occupy one
+  slot), but ACROSS shifts a freed slot could be reused by a different helper.
+  Mitigation: since entries are additive and keyed by idx, a later `.set(idx,
+  nameB)` overwrites `nameA` for that idx. This is correct ONLY if no surviving
+  body still bakes `idx` meaning `nameA`. Guard: when adding a post-shift entry,
+  if `idx` already maps to a different name, the OLD name's bodies were already
+  shifted off `idx` by the same pass (they moved to `idx+delta`), so the
+  overwrite is safe. The senior-dev MUST add a unit test for two helpers whose
+  indices cross a shift boundary (below).
+- **Non-string finalize helpers in `funcMap` only** (`__apply_closure`,
+  `__call_fn_method_N`): they register via `registerFinalizeHelper(...,
+  ctx.funcMap)`, so they land in the same reverse map. The pass keys off
+  `mod.functions[].name`, which covers them identically — no string-specific
+  code path. This is the Q2 scope extension that unblocks #1888 S2 / Slice 5.
+- **Regex helpers** (`nativeRegexHelpers`): same treatment — route their
+  registration through `registerFinalizeHelper(..., ctx.nativeRegexHelpers)`.
+
+### Relationship to #1985 (subsumes its first two targets; does NOT block it)
+
+#1985 (Option 2b — `FuncIdxCell` shared mutable cells updated by every shift
+walker) and this #1899 pass are **complementary, overlapping mechanisms** for
+the same class:
+
+- **#1985 cells** prevent a stale capture at the *JS-variable* level (a holder
+  observes the shift because it shares the cell). It covers captures that are
+  NOT yet emitted into a body (e.g. `pendingMethodTrampolines[].methodFuncIdx`).
+- **#1899 by-name pass** repairs indices ALREADY baked into emitted helper
+  bodies, after ALL churn (including dead-elim REMOVAL, which cells do not model
+  — a cell tracks +delta shifts, not the funcIdx remap dead-elim applies to
+  `mod` bodies).
+
+**This pass SUBSUMES #1985 targets (2) `nativeStrHelpers` entries and the
+(3) late-import bridge captures** for the *emitted-body* case: once the by-name
+pass is authoritative for finalize-helper sibling calls, those two targets no
+longer need cells for the baked-call correctness. It does **not** subsume #1985
+target (1) `pendingMethodTrampolines[].methodFuncIdx`, which is a pre-emission
+capture in the compilation phase, nor #1985's dead-elim gap (cells don't model
+removal at all). **Recommendation:** land #1899 first; then #1985 narrows to
+target (1) only, and its `blocked_by: [2167]` can be re-evaluated — #1899 does
+not unblock #2167 but reduces #1985's remaining surface to the single
+trampoline site. Update #1985's scope note when #1899 lands.
+
+### Detection hardening (land WITH this pass, not before)
+
+Extend the always-on guard: once `finalizeHelperStaleIdxToName` exists, add a
+post-pass assertion (env-gated, e.g. `JS2WASM_VALIDATE_FUNCREFS` or a new
+`JS2WASM_VALIDATE_HELPER_CALLS`) that walks every helper body one more time and
+fails LOUDLY if any sibling `call` whose funcIdx is in the reverse map does NOT
+equal `authorityByName.get(<name>)`. This converts the silent
+in-range-wrong-target failure (the exact #1899 symptom that `validateFuncRefs`
+misses) into a named compile error. It presupposes the reverse map, so it ships
+with this PR — never before.
+
+### Test plan (keyed to the known late-shift repros)
+
+1. **Resurrect the live repro under churn.** The exact #1899 repro no longer
+   reproduces post-#1225, so the senior-dev MUST construct a churning case:
+   compile (in `--target standalone` AND `--target wasi`) a program that (a)
+   emits ≥2 sibling-calling string helpers (`+` → `__str_concat` → `__str_flatten`
+   → `__str_copy_tree`; `.padStart` → concat+repeat+substring), AND (b) forces a
+   finalize-import ADD after the helpers (a `let g: any` undefined-init path, or
+   any host import landing post-helper), AND (c) forces a dead-elim REMOVAL of a
+   finalize import (an unused builtin). Assert it **compiles, validates, and runs**
+   to the correct value. Add as `tests/issue-1899-funcidx-authority.test.ts`.
+2. **Two-helpers-cross-a-shift unit test** (the reverse-map collision edge):
+   register two finalize helpers, run two consecutive reconcile shifts plus a
+   dead-elim that removes one import, assert both helpers' sibling calls resolve
+   to their authoritative indices (no off-by-one, no cross-wire).
+3. **Idempotency / double-run unit test:** run `repointFinalizeHelperSiblingCalls`
+   twice; the second run must be a byte-for-byte no-op (proves Q4 no-double-shift).
+4. **Regression-hold the existing class tests** — all must stay green unchanged:
+   `tests/issue-329-assign-closure-lateshift.test.ts`,
+   `tests/issue-1677.test.ts` (the #618 default-GC-path guard — assert the pass
+   is a hard no-op when `finalizeHelperStaleIdxToName` is empty, i.e. JS-host GC
+   path, so the Math.*-trampoline corruption class cannot recur),
+   `tests/issue-1809.test.ts`, `tests/issue-1839.test.ts`.
+5. **#1888 consumer smoke** (Q2 scope proof): a standalone program exercising a
+   closure-accessor (`__call_fn_method_N` via `__apply_closure`) — compile +
+   validate, to confirm the pass covers the non-string finalize helpers and
+   pre-empts the keystone #1888 S2 / Slice 5 recurrence.
+6. **test262 conformance hold** — CI must show no net regression; the pass is
+   pure index repair, so the standalone/WASI string-program pass count must not
+   drop.
+
+### Files touched (summary for the senior-dev)
+
+- `src/codegen/context/types.ts` — add `finalizeHelperStaleIdxToName` field.
+- `src/codegen/context/create-context.ts` — initialize it to `new Map()`.
+- `src/codegen/native-strings.ts` — add `registerFinalizeHelper`; route the
+  ~40 `nativeStrHelpers.set` sites through it.
+- The other helper-registration modules (`object-runtime.ts` for
+  `__apply_closure`/`__call_fn_method_N`, `binary-ops.ts`, `string-ops.ts`,
+  `array-methods.ts`, `json-*`, `case-convert-native.ts`,
+  `uri-encoding-native.ts`, `parse-number-native.ts`, `symbol-native.ts`,
+  `map-runtime.ts`, `date-parse-native.ts`, `native-regex.ts`,
+  `regexp-standalone.ts`) — route their finalize-helper `funcMap` /
+  `nativeRegexHelpers` registrations through `registerFinalizeHelper`.
+- `src/codegen/expressions/late-imports.ts` — add
+  `repointFinalizeHelperSiblingCalls`; in `reconcileNativeStrFinalizeShift`,
+  `flushLateImportShifts` re-base, and `shiftLateImportIndices`, also add the
+  post-shift index to `finalizeHelperStaleIdxToName`.
+- `src/codegen/index.ts` — call `repointFinalizeHelperSiblingCalls(ctx)` after
+  `eliminateDeadImports(mod)` in BOTH finalize arms (≈line 1794 and ≈line 5522),
+  before `ctx.indexSpaceFrozen = true`. Also the two re-base sites (≈7766, ≈9215)
+  must mirror the reverse-map update.
+- `src/emit/binary.ts` (optional, ships with this PR) — the helper-call
+  detection-hardening assertion.
+- `tests/issue-1899-funcidx-authority.test.ts` — new regression + unit tests.
+- `CLAUDE.md` (addUnionImports section) — document the contract: finalize-emitted
+  helper sibling calls are repaired by name post-churn; new finalize helpers MUST
+  register via `registerFinalizeHelper` so the authority pass covers them.
+
+---
+
 ## Implementation (senior-dev, 2026-06-21 — against upstream/main 0e482f2fc)
 
 **Shipped a different, sound mechanism than the ratified B2 blueprint, because
