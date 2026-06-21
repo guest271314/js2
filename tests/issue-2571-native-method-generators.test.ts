@@ -127,13 +127,16 @@ export function test(): number { return outer(); }`;
     expect(WebAssembly.validate(binary), "capturing-bail module must still be valid Wasm").toBe(true);
   });
 
-  it("object-literal method generator keeps the host path (out of scope), still valid Wasm", async () => {
+  it("object-literal method generator now lowers natively (#2581 lifted the #2571 deferral)", async () => {
+    // #2571 originally deferred object-literal method generators to the host
+    // path; #2581 wired the literals.ts emit through the native factory (the
+    // object-literal method body func also leads with a `this` struct param), so
+    // they are native now too. Full coverage lives in
+    // tests/issue-2581-objlit-method-generators.test.ts.
     const src = `export function test(): number {
   const o = { *m() { yield 9; } };
   return (o.m().next().value as number);
 }`;
-    const { binary, genImports } = await compileNoHost(src);
-    expect(genImports.length, "object-literal method generator is the documented follow-up").toBeGreaterThan(0);
-    expect(WebAssembly.validate(binary), "object-literal-bail module must still be valid Wasm").toBe(true);
+    expect(await runNative(src)).toBe(9);
   });
 });
