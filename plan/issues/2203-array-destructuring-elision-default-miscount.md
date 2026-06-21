@@ -1,10 +1,11 @@
 ---
 id: 2203
 title: "Array destructuring with elisions + defaults binds wrong elements (host) / emits invalid funcidx (standalone) (~54 standalone CE + host fails)"
-status: ready
+status: done
+completed: 2026-06-21
 sprint: 64
 created: 2026-06-19
-updated: 2026-06-19
+updated: 2026-06-21
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -12,12 +13,49 @@ task_type: bugfix
 area: codegen, destructuring
 language_feature: destructuring
 goal: spec-completeness
-related: [2039]
+related: [2039, 2566, 680]
 test262_bucket: dstr-elision-default
 test262_count: 54
 es_edition: es2015
 origin: "2026-06-19 sprint-64 standalone failure mining: language/.../dstr/*ary-ptrn*elision* fail. Host: wrong bindings (off-by-one over holes). Standalone: same mis-codegen additionally trips `Binary emit error: function index out of range`. Distinct from #2039 (standalone-only invalid-Wasm umbrella) — this is host-agnostic, the elision sub-case of destructuring."
 ---
+
+## Resolution (2026-06-21)
+
+**Mis-scoped as an elision miscount — the actual bug was in the GENERATOR
+lowering.** Reproduction showed plain array-literal elision+default already
+lowers correctly (`[, , x] = [10,20,30]` → 30, `[, z = 99] = [1]` → 99,
+elision+rest). The `~54` standalone failures were all generator-RHS cases (the
+test262 generator scaffolding `function* g(){first+=1;yield;second+=1}`).
+
+Two distinct root causes:
+
+1. **Standalone `function index out of range` crash (the ~54 CE) — FIXED here.**
+   A nested generator that **captures** an outer-scope binding cannot use the
+   Wasm-native generator factory (its state struct has no capture slot; native
+   registration is gated on `captures.length === 0`), so it falls to the
+   eager-buffer host path. But `sourceNeedsGeneratorHostImports` mis-classified
+   it as native (`isNativeGeneratorCandidate` does not model captures), so the
+   `__gen_*` host imports were never registered in a no-JS-host target →
+   `ctx.funcMap.get("__gen_create_buffer")!` baked `funcIdx: undefined` →
+   invalid Wasm. **Fix** (`src/codegen/generators-native.ts`): a precise
+   checker-based capture detector (`generatorCapturesOuterScope`) now flags
+   capturing nested generators, so `sourceNeedsGeneratorHostImports` registers
+   the host imports → valid funcidx → the binary instantiates. Result on the
+   standalone elision cluster: the invalid-Wasm crash is eliminated, pass
+   74 → 86 (+12), **zero regressions** (broad 600-file generator+dstr sweep:
+   0 pass→non-pass); hard-error gate OK.
+
+2. **Host/standalone VALUE bug (`second === 1`, should be `0`) — split to #2566.**
+   The eager-buffer model runs the generator body to completion at call time, so
+   a trailing elision over-consumes. Fixing this needs lazy *capturing*
+   generators (a #680-class feature), tracked in **#2566**. The ~29 ex-crash
+   cases now compile to valid Wasm and `fail` only on the runtime side-effect
+   assertion.
+
+Tests: `tests/issue-2203.test.ts` (host value cases + standalone-validates
+capturing-generator elision cases). The original repro (A) `second === 0` is
+NOT met here — it is #2566's acceptance.
 
 # #2203 — Array destructuring with elisions + defaults
 
