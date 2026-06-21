@@ -43,6 +43,7 @@ import {
 import { popBody, pushBody } from "../context/bodies.js";
 import { reportError } from "../context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "../context/locals.js";
+import { snapshotSpeculative, rollbackSpeculative } from "../context/speculative.js";
 import type { ClosureInfo, CodegenContext, FunctionContext } from "../context/types.js";
 import {
   addFuncType,
@@ -4578,7 +4579,10 @@ function compileCallExpression(
       // under --target standalone. Tentatively compile and only commit when
       // the argument genuinely lowers to a native string ref (#1610 pattern).
       if (!hasMapFn && ctx.nativeStrings && ctx.anyStrTypeIdx >= 0 && isStringType(argTsType)) {
-        const bodyLenBefore = fctx.body.length;
+        // #1919 — transactional try-lower: keep the compiled arg when it lowers
+        // to a native string; otherwise roll back the body AND any locals / late
+        // imports / errors so the fallback paths below start clean.
+        const snap = snapshotSpeculative(ctx, fctx);
         const t = compileExpression(ctx, fctx, expr.arguments[0]!);
         if (
           t &&
@@ -4593,7 +4597,7 @@ function compileCallExpression(
           return { kind: "ref", typeIdx: nstrVecTypeIdx };
         }
         // Didn't lower as a native string — roll back and use the paths below.
-        fctx.body.length = bodyLenBefore;
+        rollbackSpeculative(ctx, fctx, snap);
       }
       // (#2169) Array.from(g()) over a Wasm-native generator without a mapFn.
       // The argument lowers to the generator state struct, NOT a __vec — the
@@ -4604,7 +4608,10 @@ function compileCallExpression(
       // lowers to a native-generator subject (mirrors the #1470 native-string
       // probe above).
       if (!hasMapFn) {
-        const bodyLenBefore = fctx.body.length;
+        // #1919 — transactional try-lower: keep the compiled arg when it lowers
+        // to a native-generator subject; otherwise roll back the body AND any
+        // locals / late imports / errors so the fallback paths below start clean.
+        const snap = snapshotSpeculative(ctx, fctx);
         const t = compileExpression(ctx, fctx, expr.arguments[0]!);
         const genInfo = t ? nativeGeneratorInfoForForOfSubject(ctx, t) : undefined;
         if (genInfo) {
@@ -4614,7 +4621,7 @@ function compileCallExpression(
           return { kind: "ref", typeIdx: genVecTypeIdx };
         }
         // Not a native generator — roll back and use the paths below.
-        fctx.body.length = bodyLenBefore;
+        rollbackSpeculative(ctx, fctx, snap);
       }
       // (#42 follow-up) Array.from(Set) — standalone native. A Set lowers to a
       // `ref $Map` whose field layout is NOT a `__vec` (field 0 is not a length,
