@@ -965,6 +965,157 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
   const boxI32Idx = ctx.funcMap.get("__any_box_i32")!;
   const boxF64Idx = ctx.funcMap.get("__any_box_f64")!;
 
+  // (#2040/#2585) Unified tag-5 field-4 equality CLASSIFIER, shared by the tag-5
+  // arm of BOTH `__any_eq` and `__any_strict_eq` so they can never drift.
+  //
+  // The tag-5 box's `externval` (field 4) is overloaded — under tag 5 it can hold
+  // a genuine string ($AnyString/$NativeString/cons/host), a `$BoxedNumber` (the
+  // #1888 "box-the-externref-as-tag-5" −794 contract), OR an object/proto ref. The
+  // legacy arm unconditionally ran string-eq on the two field-4 externrefs, which
+  // is correct ONLY for two real strings:
+  //   - two boxed NUMBERS → string-eq is meaningless → `a !== a` wrongly true and
+  //     (with #2583's native arm) `ref.cast $AnyString` on a $BoxedNumber TRAPS
+  //     (illegal cast). Drives the #2040 `assert.{not,}SameValue` numeric cluster.
+  //   - two OBJECT refs → content-compares non-strings → identity lost (#2585
+  //     `getPrototypeOf(Object.create(p)) === p` false) and also traps via the cast.
+  //
+  // 3-way decision (both operands already known tag==5). Operands at param locals
+  // `aIdx`/`bIdx`; `anyAIdx`/`anyBIdx` are two `anyref` scratch locals:
+  //   1. EITHER field-4 is a `$BoxedNumber` → `__any_to_f64` both + `f64.eq`.
+  //      `f64.eq` over two NaN is 0, so `NaN===NaN` stays false (−788 preserved),
+  //      while `23===23.0` becomes true (#2040). Gated ONLY on
+  //      `nativeBoxNumberTypeIdx >= 0` (ALWAYS true in standalone/wasi — union
+  //      imports register `$__box_number_struct` before the eq helpers build),
+  //      NEVER on `nativeStrings` (that mis-gate degenerated sd-3's attempt to a
+  //      constant before the numeric branch could run).
+  //   2. BOTH field-4 are genuine strings (`ref.test anyStrTypeIdx`) → content
+  //      compare via the existing `tag5StringEqThen()` (host equals or native
+  //      flatten+`__str_equals`, or `0` when neither is available — unchanged).
+  //   3. BOTH field-4 are internal GC eqref objects (`ref.test (ref eq)`, and not
+  //      a boxed number) → `ref.eq` (the #2585 proto-identity fix). A host
+  //      externref that is not an internal eqref fails the test and falls through.
+  //   else (mixed kinds under one tag, host extern, …) → conservative
+  //      `tag5StringEqThen()` — today's behaviour, no regression.
+  //
+  // Purely consumer-side: NO change to any boxing site / the `$AnyValue` layout /
+  // the −788/−794 contracts.
+  const EQ_HEAP_TYPE_REF = -19; // (ref eq) abstract heap type (0x6d signed-LEB → -19)
+  const canBoxNumEq = ctx.nativeBoxNumberTypeIdx >= 0;
+  const canStrTestEq = ctx.anyStrTypeIdx >= 0 && (strEqualsIdx >= 0 || canNativeStrEq);
+  // Recover field-4 of operand `idx` into scratch local `anyIdx` as an anyref.
+  const loadAnyField4 = (idx: number, anyIdx: number): Instr[] => [
+    { op: "local.get", index: idx } as Instr,
+    { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
+    { op: "any.convert_extern" } as Instr,
+    { op: "local.set", index: anyIdx } as Instr,
+  ];
+  // `ref.test T` over the already-recovered scratch anyref local.
+  const testAny = (anyIdx: number, typeIdx: number): Instr[] => [
+    { op: "local.get", index: anyIdx } as Instr,
+    { op: "ref.test", typeIdx } as Instr,
+  ];
+  // The 3-way decision body for the tag-5 arm. aIdx/bIdx = operand params;
+  // anyAIdx/anyBIdx = anyref scratch locals.
+  const tag5FieldEqDecision = (aIdx: number, bIdx: number, anyAIdx: number, anyBIdx: number): Instr[] => {
+    // No boxed-number type and no string-test capability → nothing new to
+    // classify; keep the legacy string-eq behaviour verbatim (host or 0).
+    if (!canBoxNumEq && !canStrTestEq) return tag5StringEqThen();
+
+    // numericEq = __any_to_f64(a) == __any_to_f64(b)
+    const numericEq: Instr[] = [
+      { op: "local.get", index: aIdx } as Instr,
+      { op: "call", funcIdx: toF64Idx } as Instr,
+      { op: "local.get", index: bIdx } as Instr,
+      { op: "call", funcIdx: toF64Idx } as Instr,
+      { op: "f64.eq" } as Instr,
+    ];
+    // objectEq = ref.eq(cast<eq>(anyA), cast<eq>(anyB))
+    const objectEq: Instr[] = [
+      { op: "local.get", index: anyAIdx } as Instr,
+      { op: "ref.cast", typeIdx: EQ_HEAP_TYPE_REF } as Instr,
+      { op: "local.get", index: anyBIdx } as Instr,
+      { op: "ref.cast", typeIdx: EQ_HEAP_TYPE_REF } as Instr,
+      { op: "ref.eq" } as Instr,
+    ];
+
+    // Innermost: both-objects vs conservative string fallback.
+    let inner: Instr[];
+    // both eqref (and, since we are past the numeric branch, neither is a boxed
+    // number) → ref.eq. Guard each with ref.test (ref eq); a host externref fails.
+    const bothObj: Instr[] = [
+      ...testAny(anyAIdx, EQ_HEAP_TYPE_REF),
+      ...testAny(anyBIdx, EQ_HEAP_TYPE_REF),
+      { op: "i32.and" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: objectEq,
+        else: tag5StringEqThen(),
+      } as Instr,
+    ];
+    if (canStrTestEq) {
+      // both genuine strings → content compare; else fall to the object/string arm.
+      inner = [
+        ...testAny(anyAIdx, ctx.anyStrTypeIdx),
+        ...testAny(anyBIdx, ctx.anyStrTypeIdx),
+        { op: "i32.and" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } },
+          then: tag5StringEqThen(),
+          else: bothObj,
+        } as Instr,
+      ];
+    } else {
+      inner = bothObj;
+    }
+
+    if (!canBoxNumEq) {
+      // No boxed-number type to test — go straight to the string/object classifier.
+      return [...loadAnyField4(aIdx, anyAIdx), ...loadAnyField4(bIdx, anyBIdx), ...inner];
+    }
+    // numeric branch dominates: if EITHER field-4 is a $BoxedNumber → numericEq.
+    return [
+      ...loadAnyField4(aIdx, anyAIdx),
+      ...loadAnyField4(bIdx, anyBIdx),
+      ...testAny(anyAIdx, ctx.nativeBoxNumberTypeIdx),
+      ...testAny(anyBIdx, ctx.nativeBoxNumberTypeIdx),
+      { op: "i32.or" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: numericEq,
+        else: inner,
+      } as Instr,
+    ];
+  };
+
+  // (#2040) ToNumber of a tag-5 operand in the `__any_eq` cross-tag String⇄Number
+  // arm. The tag-5 field-4 externval may be a `$BoxedNumber` (not a string), so
+  // route those through `__any_to_f64` (its #1888 boxed-number recovery) and only
+  // genuine strings through `__str_to_number` (§7.1.4.1 StringToNumber). Leaves a
+  // bare f64 on the stack. Only called where `strToNumIdx >= 0`.
+  const tag5ToNumber = (opIdx: number): Instr[] => {
+    const strToNum: Instr[] = [
+      { op: "local.get", index: opIdx } as Instr,
+      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
+      { op: "call", funcIdx: strToNumIdx } as Instr,
+    ];
+    if (ctx.nativeBoxNumberTypeIdx < 0) return strToNum;
+    return [
+      { op: "local.get", index: opIdx } as Instr,
+      { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 } as Instr,
+      { op: "any.convert_extern" } as Instr,
+      { op: "ref.test", typeIdx: ctx.nativeBoxNumberTypeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "val", type: { kind: "f64" } },
+        then: [{ op: "local.get", index: opIdx } as Instr, { op: "call", funcIdx: toF64Idx } as Instr],
+        else: strToNum,
+      } as Instr,
+    ];
+  };
+
   // __any_add(a: ref $AnyValue, b: ref $AnyValue) -> ref $AnyValue
   //
   // §13.15.3 ApplyStringOrNumericBinaryOperator for `+`:
@@ -1374,18 +1525,17 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                               op: "if",
                               blockType: { kind: "val", type: { kind: "i32" } },
                               then: [
-                                // ToNumber(a): tag5 → __str_to_number(externval), else __any_to_f64
+                                // ToNumber(a): tag5 → (boxed-number? __any_to_f64 : __str_to_number),
+                                // else __any_to_f64. (#2040) The tag-5 field-4 may hold a
+                                // $BoxedNumber, not a string — __str_to_number on it would
+                                // mis-coerce; route those through __any_to_f64's #1888 recovery.
                                 { op: "local.get", index: 2 },
                                 { op: "i32.const", value: 5 },
                                 { op: "i32.eq" },
                                 {
                                   op: "if",
                                   blockType: { kind: "val", type: { kind: "f64" } },
-                                  then: [
-                                    { op: "local.get", index: 0 },
-                                    { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
-                                    { op: "call", funcIdx: strToNumIdx },
-                                  ],
+                                  then: tag5ToNumber(0),
                                   else: [
                                     { op: "local.get", index: 0 },
                                     { op: "call", funcIdx: toF64Idx },
@@ -1398,11 +1548,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                                 {
                                   op: "if",
                                   blockType: { kind: "val", type: { kind: "f64" } },
-                                  then: [
-                                    { op: "local.get", index: 1 },
-                                    { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 4 },
-                                    { op: "call", funcIdx: strToNumIdx },
-                                  ],
+                                  then: tag5ToNumber(1),
                                   else: [
                                     { op: "local.get", index: 1 },
                                     { op: "call", funcIdx: toF64Idx },
@@ -1487,7 +1633,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                               {
                                 op: "if",
                                 blockType: { kind: "val", type: { kind: "i32" } },
-                                then: tag5StringEqThen(),
+                                then: tag5FieldEqDecision(0, 1, 4, 5),
                                 else: [
                                   // null/undefined (tag < 2): both same tag → equal
                                   { op: "local.get", index: 2 },
@@ -1511,6 +1657,9 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
     [
       { name: "tagA", type: { kind: "i32" } },
       { name: "tagB", type: { kind: "i32" } },
+      // (#2040/#2585) tag-5 field-4 classifier scratch (anyA/anyB at locals 4/5).
+      { name: "anyA", type: { kind: "anyref" } },
+      { name: "anyB", type: { kind: "anyref" } },
     ],
   );
 
@@ -1650,7 +1799,7 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
                               {
                                 op: "if",
                                 blockType: { kind: "val", type: { kind: "i32" } },
-                                then: tag5StringEqThen(),
+                                then: tag5FieldEqDecision(0, 1, 4, 5),
                                 else: [
                                   // null/undefined (tag < 2): both same tag → equal
                                   { op: "local.get", index: 2 },
@@ -1674,6 +1823,9 @@ export function ensureAnyHelpers(ctx: CodegenContext): void {
     [
       { name: "tagA", type: { kind: "i32" } },
       { name: "tagB", type: { kind: "i32" } },
+      // (#2040/#2585) tag-5 field-4 classifier scratch (anyA/anyB at locals 4/5).
+      { name: "anyA", type: { kind: "anyref" } },
+      { name: "anyB", type: { kind: "anyref" } },
     ],
   );
 

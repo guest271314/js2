@@ -1,10 +1,11 @@
 ---
 id: 2040
 title: "standalone: generator/destructuring runtime-semantics residual — rest-pattern iterator consumption, lazy defaults, private elements (~1,750 tests)"
-status: ready
+status: in-progress
 sprint: 64
 created: 2026-06-10
-updated: 2026-06-10
+updated: 2026-06-21
+assignee: sdev-vecdispatch
 priority: critical
 feasibility: hard
 reasoning_effort: high
@@ -215,3 +216,51 @@ residuals (cluster-B generator-object semantics, the rest-identity rows) are
 separate and unaffected by this verdict. A SEPARATE pre-existing compiler
 stack-overflow on nested-obj-pattern-default in (static) methods (the source of
 several of the 13 `wasm_compile` floor entries) is filed as **#2587**.
+
+## Implementation Notes (sdev-vecdispatch, 2026-06-21) — tag-5 3-way classifier
+
+Implements arch-tag5's "unified tag-5 field-4 equality fix" spec (PR #1886) — the
+equality half of #2040 + the #2585 proto-identity fix. Stacks on #1883/#2583
+(which added `tag5StringEqThen()` and is the content-eq base).
+
+**Why this is NOT the rejected "numeric-class-gate broadening" above.** The prior
+−788/−794 verdict ("leave equality helpers untouched; 14 regressions / 0
+improvements") was for admitting `tag==5 && ref.test field4 $box_number` into the
+`{2,3}` numeric arm of `__any_strict_eq` — which reclassifies tag-5-vs-tag-2 cross
+cases and mis-fires (14 regressions). arch-tag5's measurement REFRAMED it: the
+defect is *within* the both-tags-5 arm (overloaded field-4), and
+`nativeBoxNumberTypeIdx >= 0` is TRUE in standalone (sd-3's "−1" premise was
+false). So the fix is a 3-way classifier *inside* the tag-5 arm (only reached when
+both operands are tag 5) — it never touches the cross-tag path, so it cannot cause
+the 14-regression mis-classification.
+
+**What changed** (`src/codegen/any-helpers.ts`, consumer-side only — no boxing /
+`$AnyValue`-layout / −788/−794 change):
+- `tag5FieldEqDecision(a,b,anyA,anyB)` shared by the tag-5 arm of BOTH `__any_eq`
+  and `__any_strict_eq`: (1) EITHER field-4 is `$BoxedNumber` → `__any_to_f64` +
+  `f64.eq` (numeric branch, gated ONLY on `nativeBoxNumberTypeIdx >= 0`, never
+  `nativeStrings` — the gate that killed sd-3's attempt); (2) BOTH field-4 are
+  genuine strings → existing `tag5StringEqThen()`; (3) BOTH eqref objects →
+  `ref.eq` (#2585); else conservative `tag5StringEqThen()`.
+- `f64.eq` preserves `NaN===NaN` false (−788) while fixing `23===23.0` true.
+- Two `anyref` scratch locals (4/5) added to both helpers.
+- `__any_eq` cross-tag String⇄Number sub-read hardened: tag-5 ToNumber now routes
+  a `$BoxedNumber` field-4 through `__any_to_f64`, only genuine strings through
+  `__str_to_number` (`tag5ToNumber()`).
+
+This also FIXED a latent trap #1883 introduced: `tag5StringEqThen`'s
+`ref.cast $AnyString` traps ("illegal cast") on a tag-5 boxed-number/object — the
+classifier guards every cast with the runtime type test, so those cases never
+reach the string cast.
+
+**Verified** (`tests/issue-2040-tag5-field4-eq.test.ts`, 12/12): 23===23.0,
+a!==a-post-numeric-op, boxed===boxed, NaN===NaN false, +0===-0, proto-identity
+(#2585), object identity, loose 23==23.0. eq/array/identity regression suites
+green. Pre-existing-and-unrelated (verified by reverting any-helpers.ts —
+identical fail count on the #1883 base): `issue-1888-any-extern-roundtrip` (5,
+open-any dispatch bridge NaN), `issue-1888.test` 2-4-arg closure (1), `issue-2081`
+wasi loose-eq (#2043 late-import shift, 10), `logical-conditional-identity` void→NaN (3).
+
+**MUST be full-baseline (merge_group) gated** — the risk is in the −788/−794
+representation contracts; only the full standalone test262 lane confirms
+net-positive with zero regression bucket. Folds in #2585 (close it).
