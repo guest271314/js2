@@ -26,23 +26,43 @@ async function runStandalone(src: string): Promise<unknown> {
 
 describe("#2503 standalone ToPrimitive on == receivers", () => {
   it("string == object with user valueOf reduces to its primitive", async () => {
-    expect(await runStandalone(`export function test(): number { const o = {valueOf: () => "x"}; return ("x" == (o as any)) ? 1 : 0; }`)).toBe(1);
+    expect(
+      await runStandalone(
+        `export function test(): number { const o = {valueOf: () => "x"}; return ("x" == (o as any)) ? 1 : 0; }`,
+      ),
+    ).toBe(1);
   });
 
   it("string == object with user toString (no primitive valueOf) reduces", async () => {
-    expect(await runStandalone(`export function test(): number { const o = {toString: () => "x"}; return ("x" == (o as any)) ? 1 : 0; }`)).toBe(1);
+    expect(
+      await runStandalone(
+        `export function test(): number { const o = {toString: () => "x"}; return ("x" == (o as any)) ? 1 : 0; }`,
+      ),
+    ).toBe(1);
   });
 
   it("string == any-param holding a number ToNumber-compares (§7.2.15 4-7)", async () => {
-    expect(await runStandalone(`function f(x: any) { return ("5.0" == x) ? 1 : 0; } export function test(): number { return f(5); }`)).toBe(1);
+    expect(
+      await runStandalone(
+        `function f(x: any) { return ("5.0" == x) ? 1 : 0; } export function test(): number { return f(5); }`,
+      ),
+    ).toBe(1);
   });
 
   it("string == any holding a non-numeric string is false (no spurious coerce)", async () => {
-    expect(await runStandalone(`function f(x: any) { return ("ab" == x) ? 1 : 0; } export function test(): number { return f("cd"); }`)).toBe(0);
+    expect(
+      await runStandalone(
+        `function f(x: any) { return ("ab" == x) ? 1 : 0; } export function test(): number { return f("cd"); }`,
+      ),
+    ).toBe(0);
   });
 
   it("string == any holding null is false (§7.2.15 never coerces a nullish)", async () => {
-    expect(await runStandalone(`function f(x: any) { return ("ab" == x) ? 1 : 0; } export function test(): number { return f(null as any); }`)).toBe(0);
+    expect(
+      await runStandalone(
+        `function f(x: any) { return ("ab" == x) ? 1 : 0; } export function test(): number { return f(null as any); }`,
+      ),
+    ).toBe(0);
   });
 
   it("string == new String wrapper reduces via [[PrimitiveValue]]", async () => {
@@ -54,22 +74,34 @@ describe("#2503 standalone ToPrimitive on == receivers", () => {
   });
 
   it("string == new Boolean wrapper reduces then String⇄Boolean ToNumber (§7.2.15 step 8)", async () => {
-    expect(await runStandalone(`export function test(): number { return ("1" == new Boolean(true)) ? 1 : 0; }`)).toBe(1);
+    expect(await runStandalone(`export function test(): number { return ("1" == new Boolean(true)) ? 1 : 0; }`)).toBe(
+      1,
+    );
   });
 
   it("number == object with user valueOf reduces", async () => {
-    expect(await runStandalone(`export function test(): number { return (1 == ({valueOf: () => 1} as any)) ? 1 : 0; }`)).toBe(1);
+    expect(
+      await runStandalone(`export function test(): number { return (1 == ({valueOf: () => 1} as any)) ? 1 : 0; }`),
+    ).toBe(1);
   });
 
   it("boolean == object with user valueOf reduces (ToNumber both)", async () => {
-    expect(await runStandalone(`export function test(): number { return (true == ({valueOf: () => 1} as any)) ? 1 : 0; }`)).toBe(1);
+    expect(
+      await runStandalone(`export function test(): number { return (true == ({valueOf: () => 1} as any)) ? 1 : 0; }`),
+    ).toBe(1);
   });
 
   it("two new String wrappers compare by identity (not content) — false", async () => {
-    expect(await runStandalone(`export function test(): number { return (new String("x") == new String("x")) ? 1 : 0; }`)).toBe(0);
+    expect(
+      await runStandalone(`export function test(): number { return (new String("x") == new String("x")) ? 1 : 0; }`),
+    ).toBe(0);
   });
 
   it("strict === string vs object stays false (no coercion)", async () => {
-    expect(await runStandalone(`function f(x: any) { return ("x" === x) ? 1 : 0; } export function test(): number { return f({valueOf: () => "x"}); }`)).toBe(0);
+    expect(
+      await runStandalone(
+        `function f(x: any) { return ("x" === x) ? 1 : 0; } export function test(): number { return f({valueOf: () => "x"}); }`,
+      ),
+    ).toBe(0);
   });
 });

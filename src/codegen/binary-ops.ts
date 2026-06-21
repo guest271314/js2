@@ -1079,8 +1079,7 @@ export function compileBinaryExpression(
   // §7.2.15 handling #2503b gives the reverse shape). STRICT `===`/`!==` keeps
   // the content-compare route (a string is never `===` a non-string, which
   // `__str_equals` already yields), as do `+` and relational ops.
-  const isLooseEqNeqForward =
-    op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
+  const isLooseEqNeqForward = op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
   const rightIsAbstractNonString =
     !rightIsStrLike &&
     (rightTsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 &&
