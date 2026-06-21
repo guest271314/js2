@@ -72,6 +72,105 @@ after the first WAT-level diagnosis.
    failing `new-sc-line-gen-rs-privatename-identifier-initializer.js` form to
    find where method-position generators diverge.
 
+## Investigation (sd-3, 2026-06-21) — cluster A rest-identity diagnosis
+
+Reproduced on current origin/main via `runTest262File` (HOST vs STANDALONE):
+`class/dstr/*ary-ptrn-rest*` → **HOST 12/12 pass, STANDALONE 6/12**; the 6 fails
+are all `assert.notSameValue(x, values)` (`returned 7`, assert #6): the rest
+array `x` reads as **reference-identical** to the source `values`.
+
+**Ruled OUT — the codegen DOES build a fresh rest array in BOTH lanes:**
+- Typed `method([...x]: number[])` → fresh (`array.new_default`+`array.copy`+
+  `struct.new`, the `__rest_arr` build at destructuring-params.ts:1644-1681).
+- UNTYPED `method([...x])` (the exact test262 shape, externref param arm) →
+  the full `$C_method` WAT *also* contains `array.copy:1` + `array.new_default:5`:
+  the externref param is materialized to a fresh `resultLocal` vec, then the rest
+  copies that into `x`. So `x` is a copy-of-a-copy — structurally NOT the source.
+
+**So the alias is NOT a missing rest copy. PROVED via pure-standalone probes
+(no harness, bare `{}` instantiate):**
+- `class C { method([...x]){ x.push(99); ... } }; method(values)` → after the
+  call `values.length === 3` and `x.length === 4`: **`x` is structurally a fresh,
+  independent array** (mutating it does not touch `values`).
+- `Object.is(x, values)` for the rest case returns **`0` (NOT same)** — correct;
+  `Object.is(distinct arrays)`=0, `Object.is(same)`=1, `===` on distinct arrays=0
+  all correct standalone.
+
+**Conclusion: the destructuring rest codegen AND `Object.is`/reference-identity
+are CORRECT in pure standalone.** The `assert.notSameValue(x, values)` failure
+manifests ONLY through the test262 **harness-wrapped** path (the harness
+`assert.js` + `env`-import instantiate the runner provides; a bare `{}`
+instantiate of the harness traps on `Import #0 "env"`). So the headline ~450-row
+cluster A is most likely NOT a destructuring/generator lowering bug at all — it is
+either a `harness/assert.js` `notSameValue` lowering issue or a host-bridge
+marshaling-identity artifact specific to the runner, surfacing only when the two
+vecs cross the `env` boundary for the assert.
+
+**NEXT SESSION (re-scope before coding):** run ONE failing file under the runner
+with the rest binding replaced by an in-wasm `Object.is(x, values)` return (no
+`assert`) to confirm the codegen value is right and isolate `assert.notSameValue`;
+then inspect `assert.notSameValue`/`SameValue` lowering + the runner's `env`
+marshaling (`__make_iterable`, vec→JS) for an identity collapse. The fix is very
+likely in the marshaling/`SameValue` path, NOT destructuring-params.ts — which
+would re-scope cluster A's count substantially. The `directCastInstrs` fast-path
+(destructuring-params.ts:1122-1126, `resultLocal = param` no-copy for an already-
+`__vec_externref` param) was checked and is NOT the cause (the rest still builds a
+fresh vec downstream: the untyped `$C_method` WAT has `array.copy:1`).
+
+Orthogonal smaller slice found: `const [a=9] = [undefined]` → NaN (default not
+applied when the element value is `undefined`); spec §8.5.3 applies the default on
+`undefined`, not just `done`. Filed as **#2574**.
+
+## ROOT CAUSE FOUND — standalone `__any_strict_eq`/`__any_eq` tag-5 number bug (sd-3, 2026-06-21, supersedes the "harness/marshaling" hypothesis above)
+
+NOT the runner, NOT marshaling, NOT destructuring. The harness `assert._isSameValue`
+(`if(a===b){return a!==0||1/a===1/b;} return a!==a && b!==b;`, `a`/`b` `any` params)
+miscompiles in **standalone ONLY** (wasi + host both correct).
+
+**Minimal repro (no if / no destructuring):**
+```ts
+function f(a:any,b:any){ const d=(1/a===1/b); const n=(a!==a); return n; }
+f(1,2)   // standalone: true (WRONG)   wasi/host: false
+```
+Also breaks with `String(a)` / `a*2` / `a-1` in place of `1/a` — i.e. **ANY
+`any`-op that ensures the AnyValue type before a self `===`/`!==`.**
+
+**Mechanism (WAT-proven):**
+1. `a!==a` ALONE → the correct abstract-eq cascade (`__typeof_number`→
+   `__unbox_number`→`f64.eq`, 15 calls) → right answer.
+2. After a preceding `any`-op, `ctx.anyValueTypeIdx >= 0`, so the gate at
+   `binary-ops.ts:967-980` routes the SAME `a!==a` through
+   `compileAnyBinaryDispatch` → `__any_strict_eq` instead.
+3. `compileAnyBinaryDispatch` boxes each operand via `boxToAny`
+   (`value-tags.ts:178-186`), which — by the **deliberate #1888 policy**
+   ("box-the-externref as tag-5"; honest recovery flipped −794 baseline) — boxes a
+   NUMBER externref as **tag 5 (string)**.
+4. The tag-5 arm of `__any_strict_eq` / `__any_eq` (`any-helpers.ts` ~1607 / ~1339)
+   compares the two field-4 externrefs with `__str_equals`. For two tag-5 boxes
+   wrapping the SAME number externref that is meaningless → "unequal" → `a!==a`
+   true. `_isSameValue` then wrongly returns true → EVERY `assert.sameValue`/
+   `notSameValue` over a numeric `any` fails (a huge fraction of test262 — likely
+   ≫ 450 rows). This is the true cluster-A driver.
+
+**Proven-viable fix direction (but #1888-pinned — needs full-baseline validation):**
+- `__any_to_f64(tag5BoxOfNumber)` DOES recover the number (its #1888 $BoxedNumber
+  arm) — confirmed: `a*2; return a+0` → 5 standalone. So the tag-5 EQUALITY arm in
+  BOTH helpers should disambiguate by the RUNTIME externref: `__str_equals` only
+  when BOTH field-4 externrefs `ref.test ctx.anyStrTypeIdx` (genuine native
+  strings); otherwise `__any_to_f64` both + `f64.eq`.
+- sd-3 attempted exactly this (both helpers, nativeStrings-gated) but the emitted
+  tag-5 arm still returned wrong in a way the local WAT couldn't fully explain (the
+  arm appeared dead/folded even with `optimize:false`), so it was **REVERTED** to
+  avoid a half-fix in the #1888-pinned representation. The boxing itself
+  (`__any_box_string` for externrefs) MUST NOT change (−794). The fix belongs in the
+  equality helpers' tag-5 arm and must be gated by the full standalone baseline
+  (merge_group), not a scoped local check.
+
+**ESCALATED to tech lead** — high value (top-tier standalone unlock), high risk
+(#1888 794-test representation). Wants an architect spec + full-baseline gate before
+landing. The `directCastInstrs` rest-copy theory was ruled out (the rest IS fresh;
+the failure is purely the equality helper).
+
 ## Acceptance criteria
 
 - `assert.notSameValue(x, values)` family passes: rest pattern yields a fresh

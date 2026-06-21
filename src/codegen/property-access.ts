@@ -21,7 +21,7 @@ import { emitHoleToUndefined } from "./array-holes.js"; // (#2001 S1)
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
-import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
+import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
 import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
@@ -1842,6 +1842,46 @@ export function receiverIsCaughtErrorStringRead(ctx: CodegenContext, recv: ts.Ex
 }
 
 /**
+ * (#2187) Recognize a receiver IDENTIFIER whose TS static type is `any`/`unknown`
+ * but whose compiled local/param **ValType is a native-string ref**
+ * (`$AnyString` / `$NativeString`). This is the general "TS type vs local
+ * ValType disagreement" case behind the #2072 value-rep family: e.g. a for-of
+ * loop var bound from a string-yielding generator (`for (const v of g())`)
+ * infers `any` (no lib types in standalone) yet is compiled to a `(ref null
+ * $AnyString)` local. Without this, `v.length` / `v.charCodeAt(0)` gate on
+ * `isStringType(<static type>)` → false → the read falls to the generic
+ * externref/`__extern_get` path and returns 0.
+ *
+ * Strictly gated: standalone/WASI only (where native string refs exist), only a
+ * bare identifier (so a `.foo` property read or a real object keeps its own
+ * typed path), only when the TS type is `any`/`unknown` (a concrete non-string
+ * type is unaffected), and only when the resolved local ValType is exactly the
+ * native string ref type. Returns false for everything else — byte-identical for
+ * the common case.
+ */
+export function receiverIsNativeStringValType(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  recv: ts.Expression,
+): boolean {
+  if (!(ctx.wasi || ctx.standalone)) return false;
+  if (!ctx.nativeStrings || ctx.anyStrTypeIdx < 0) return false;
+  if (!ts.isIdentifier(recv)) return false;
+  // Only when the static type genuinely lost the string info (`any`/`unknown`).
+  // A concrete `string` already routes through the existing isStringType gate;
+  // a concrete non-string type must NOT be hijacked.
+  const tsType = ctx.checker.getTypeAtLocation(recv);
+  if ((tsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) return false;
+  const localIdx = fctx.localMap.get(recv.text);
+  if (localIdx === undefined) return false;
+  const localType = getLocalType(fctx, localIdx);
+  if (!localType) return false;
+  if (localType.kind !== "ref" && localType.kind !== "ref_null") return false;
+  const typeIdx = (localType as { typeIdx?: number }).typeIdx;
+  return typeIdx === ctx.anyStrTypeIdx || (ctx.nativeStrTypeIdx >= 0 && typeIdx === ctx.nativeStrTypeIdx);
+}
+
+/**
  * (#2179) When the module uses `delete <member>` (JS-host mode only), route an
  * `any`/`unknown`-typed property READ through the tombstone-aware `__extern_get`
  * host helper instead of the inline `ref.test`+`struct.get` fast-path. Returns
@@ -3144,6 +3184,22 @@ export function compilePropertyAccess(
     }
   }
 
+  // (#2187) `.length` on an `any`-typed identifier whose compiled local ValType
+  // is a native-string ref (e.g. a for-of var from a string-yielding generator).
+  // Must run BEFORE the Function/vec `.length` arms below: the static type is
+  // `any`, so those arms either miss or fall through to `__extern_length` (0
+  // standalone). At the VALUE level the receiver IS a string — read `len` (field
+  // 0 of `$AnyString`) natively. Tightly gated by `receiverIsNativeStringValType`
+  // (standalone + bare-identifier + any/unknown TS type + string-ref local).
+  if (propName === "length" && receiverIsNativeStringValType(ctx, fctx, expr.expression)) {
+    const recvType = compileExpression(ctx, fctx, expr.expression);
+    if (recvType && recvType.kind === "externref") {
+      coerceType(ctx, fctx, recvType, { kind: "ref_null", typeIdx: ctx.anyStrTypeIdx });
+    }
+    fctx.body.push({ op: "struct.get", typeIdx: ctx.anyStrTypeIdx, fieldIdx: 0 });
+    return { kind: "i32" };
+  }
+
   // Handle Function.length — return the number of formal parameters
   if (propName === "length") {
     // (#1632a) `.length` on the result of `.bind(...)` must NOT be statically
@@ -3752,7 +3808,10 @@ export function compilePropertyAccess(
   }
 
   // Handle string.length
-  if (isStringType(objType) && propName === "length") {
+  // (#2187) Also fire for an `any`-typed identifier whose compiled local ValType
+  // is a native-string ref (e.g. a for-of var from a string-yielding generator):
+  // the static type lost the string info, but at the VALUE level it IS a string.
+  if ((isStringType(objType) || receiverIsNativeStringValType(ctx, fctx, expr.expression)) && propName === "length") {
     const recvType = compileExpression(ctx, fctx, expr.expression);
     if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
       // The receiver must be a `$AnyString` ref before reading its `len`
