@@ -269,13 +269,53 @@ hot-path risk) → M2 (biggest row block) → M3 (hardest, prototype chain) → 
   contraindicated (#1844). Each slice is independently landable, so partial
   progress banks rows.
 
-## 7. Recommendation
+## 7. GENERALIZATION ASSESSMENT (the key sizing question)
+
+**Question (per the task spec):** does the uniform-externref + `__dyn_has`/
+`__dyn_get` rep that fixes `any`-receiver `.length` ALSO unblock the rest of the
+parked tail? This decides whether #2580 is THE big lever (~1,000 rows) or a
+small one (~12 rows). **Honest answer: it GENERALIZES to the READ clusters (the
+bulk) but NOT to the two type-INFERENCE axes (S3/S4).** Verified by reading the
+actual test bodies (e.g. `reduce/15.4.4.21-2-1`: `obj={0:12,1:11,2:9,length:2};
+Array.prototype.reduce.call(obj,cb,1)` — a runtime read of `obj.length` +
+`obj[i]` from a plain object).
+
+| Cluster | Rows | Substrate fixes it? | Why / milestone |
+|---|---|---|---|
+| `Array.prototype.X.call(arrayLike, cb)` — `{0:..,length:N}` | **~640** | **YES — substrate IS the fix** | reads `obj.length` (own/inherited) + `obj[i]` at runtime = `__dyn_get`/`__dyn_has`. M2. |
+| inherited/accessor/sparse element-retrieval (`-c-i-`/`-b-i-`) | **350** | **YES — `__dyn_has` prototype-chain arm** | HasProperty walks the proto chain (the #2001 S2 ejection family). M3 re-lands S2 *driven by `__dyn_has`*. |
+| `any`-receiver `.length` → undefined (#2580 core) | **~12** | **YES — direct** | `recv.length` = `__dyn_get(recv,"length")`. M1. |
+| `Object.prototype.{hasOwnProperty,propertyIsEnumerable}` | **17** | **YES — `__dyn_has` own-arm** | own-property presence on `$Object`. M4-adjacent. |
+| `delete arr[i]` sparseness (`in`/HOF skip) | **11** | **YES — `__dyn_has` vec-arm honours `$Hole`** | M4 re-lands #2001 S3's `join` payoff via `in`. |
+| #983d host-method dispatch | (overlap) | **PARTIAL — necessary, not sufficient** | `__dyn_get(recv,"method")` gives the *typed* dispatch surface #983d's over-broad fallback lacked; the generic-method *body* + a standalone-ToPrimitive throw are separate. M2 coordinates. |
+| **#2001 S3 — `var a=[1]; a[5]=9` target → f64** | (0) | **NO — separate axis (WRITE-target type inference)** | the array-LITERAL element heuristic picks f64 for `[1]`, so the assignment *target* `a[5]` resolves f64. The substrate is dynamic *reads* on `any` *receivers*; it never touches a typed-write-target resolution. S3's externref grow-fill (`ba634ef44`) is correct for genuine-externref vecs but its headline needs a *literal-inference* fix, not this substrate. |
+| **#2001 S4 — `const [p,q]=[1]` binding → numeric** | (0) | **NO — separate axis (binding-type inference)** | S4's fix (`779e98fa5`) re-types an OOB tuple-binding to externref — destructuring binding-local inference, orthogonal to dynamic receiver reads. |
+
+**Verdict: GENERALIZES to ~1,030 READ rows (640+350+12+17+11) — the big lever.**
+The two NON-generalizing axes (S3 headline, S4) are *type-inference* problems,
+not dynamic-read problems; they were correctly parked but are NOT what #2580
+unblocks (they'd need their own smaller literal/binding-inference fixes).
+
+**Floor vs. ceiling (honest):** M1 (12) and M3 (350) are *substrate-pure*. M2's
+640 *also* needs the #983d generic-method body (task #20) + a standalone-
+ToPrimitive fix to fully flip, so M2 is "substrate + #983d", not substrate
+alone. **Substrate-pure floor ≈ 390 rows (M1 12 + M3 350 + M4 28); ceiling
+≈ 1,030 with #983d coordination.**
+
+## 8. Recommendation
 
 The value-rep dynamic-read substrate is **the single highest-leverage open
-conformance lever** (~1,000 rows vs. the point-fixes' single digits) and the
-common blocker behind the entire sprint-64 dynamic/sparse tail. Recommend
-**proceeding M0→M1 first** (scaffold + the `.length` canary): M0 is 0-risk, M1
-sizes the hot-path regression reality with the smallest real-row slice. Hold
-M2–M4 behind M1's full-gate result. This is a senior-dev/value-rep-lane
-multi-week line, not a single PR — but it converts five conformance-flat
-parked slices (S2/S3/S4/#2573/#983d) into a staged ~1,000-row program.
+conformance lever** — a **~390-row substrate-pure floor / ~1,030-row ceiling
+(with #983d)** vs. the point-fixes' single digits — and the common blocker
+behind the dynamic/sparse READ tail (S2, #2573, #983d, the S15.4.4 generic-method
+cluster). It does NOT generalize to the S3/S4 type-inference axes (separate,
+smaller, already parked on their own merits).
+
+Recommend **M0→M1 first**: M0 is 0-risk scaffolding (dead-elim-pruned), M1 is the
+smallest-row (12) substrate-pure canary that sizes the hot-`.length` regression
+reality. Hold M2–M4 behind M1's full-gate result; M2 additionally gates on #983d
+coordination. **The investment decision — a ~2–3-week senior-dev/value-rep
+commitment — is the USER's call.** This spec sizes the payoff (390 floor / 1,030
+ceiling), the cost (~2–3 weeks), and the risk (hot-`.length` path, mitigated by
+the M1 canary + per-slice full-gate validation, never a #1844 big-bang) for that
+decision.
