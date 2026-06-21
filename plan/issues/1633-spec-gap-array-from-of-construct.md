@@ -145,3 +145,28 @@ issue. Recommend: **keep #1633 blocked on #1320 + #1620**, and split out (a)
 subclass-constructor dispatch and (b) boxed-boolean externref as separate
 issues. No code change landed — a partial mapFn-thisArg/array-like patch
 would move 0 tests until the bridge exists.
+
+---
+
+## Slice (2026-06-21, dev-agent) — `Array.of` native standalone construction (PR pending)
+
+Independent, contained slice (NOT the blocked subclassing/iterable-bridge core).
+
+**Bug:** `Array.of(a, b, c)` (§23.1.2.3) leaked the host imports `__array_of` /
+`__js_array_new` / `__js_array_push` under `--target standalone` and returned a
+wrong/empty array (length 0, elements NaN), while `Array(a,b,c)` and `[a,b,c]`
+already built a native vec. Host mode worked.
+
+**Fix:** in `noJsHost` mode, the `Array.of` handler
+(`src/codegen/expressions/calls.ts`) builds a native vec directly — mirroring the
+multi-arg `Array(a,b,c)` branch of `compileArrayConstructorCall`. Every argument
+is an element; unlike `Array(n)` a single numeric arg is NOT a length
+(`Array.of(5)` → `[5]`, length 1). Element type from the contextual `Array<T>`
+type arg, else f64 when all args are static numbers, else externref. JS-host mode
+keeps the `__array_of` path unchanged. Spread args fall through to the existing
+path (standalone spread-of-Array.of is a separate concern).
+
+**Validation.** `tests/issue-1633-array-of-standalone.test.ts` (13/13):
+multi-arg length/element, single-arg `[5]` (not sparse), empty, typed fractional,
+string elements — host & standalone — plus a standalone no-host-leak assertion.
+tsc + prettier clean; issue-1338 regression green.
