@@ -175,6 +175,85 @@ function isAnonymousFunctionDefinition(expr: ts.Expression): boolean {
   if (ts.isClassExpression(expr) && !expr.name) return true;
   return false;
 }
+
+const LOGICAL_ASSIGNMENT_TOKENS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+  ts.SyntaxKind.BarBarEqualsToken,
+  ts.SyntaxKind.QuestionQuestionEqualsToken,
+]);
+
+/**
+ * (#2201) ES §13.15.2 NamedEvaluation for the logical-assignment operators
+ * (`&&=`, `||=`, `??=`): when the LHS is a bare IdentifierReference and the RHS
+ * is an *anonymous* function/arrow/class definition, the resulting function
+ * inherits the LHS identifier as its `.name`.
+ *
+ * This compiler resolves `.name` statically from a binding's initializer, which
+ * misses the logical-assignment form (`var value = 1; value &&= function(){}`)
+ * because the variable's initializer is not the function. Here we scan the
+ * declaration's source for a logical-assignment `<id> &&=/||=/??= <fn>` targeting
+ * the same symbol and apply NamedEvaluation. A *named* function/class RHS keeps
+ * its own name (the LHS identifier is ignored, per spec).
+ *
+ * Returns the inferred `.name` string, or undefined when no qualifying
+ * logical-assignment is found.
+ */
+export function resolveLogicalAssignmentName(
+  ctx: CodegenContext,
+  id: ts.Identifier,
+  sym: ts.Symbol,
+): string | undefined {
+  const sourceFile = id.getSourceFile();
+  let resolved: string | undefined;
+  const visit = (node: ts.Node): void => {
+    if (resolved !== undefined) return;
+    if (
+      ts.isBinaryExpression(node) &&
+      LOGICAL_ASSIGNMENT_TOKENS.has(node.operatorToken.kind) &&
+      ts.isIdentifier(node.left) &&
+      ctx.checker.getSymbolAtLocation(node.left) === sym
+    ) {
+      let rhs: ts.Expression = node.right;
+      while (ts.isParenthesizedExpression(rhs)) rhs = rhs.expression;
+      if (isAnonymousFunctionDefinition(rhs)) {
+        resolved = id.text;
+        return;
+      }
+      if (ts.isFunctionExpression(rhs) && rhs.name) {
+        resolved = rhs.name.text;
+        return;
+      }
+      if (ts.isClassExpression(rhs) && rhs.name) {
+        resolved = rhs.name.text;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return resolved;
+}
+
+/**
+ * (#2201) True when `node` is a `<id>.name` read whose receiver `<id>` is the
+ * target of a logical-assignment NamedEvaluation (`id &&=/||=/??= <fn>`). Such a
+ * read lowers (via the property-access `.name` static resolver above) to a
+ * native-string ref, but the receiver's *TS* type is `number`/`any`, so an
+ * equality like `id.name === "x"` would otherwise fall through to `ref.eq`
+ * (struct identity → always false). Used by the binary-op equality dispatch to
+ * route it to content-based string equality — mirrors the catch-bound Error
+ * `.message`/`.name`/`.stack` handling (#2192).
+ */
+export function isLogicalAssignNamedEvalNameRead(ctx: CodegenContext, node: ts.Expression): boolean {
+  if (!ts.isPropertyAccessExpression(node)) return false;
+  if (node.name.text !== "name") return false;
+  const recv = node.expression;
+  if (!ts.isIdentifier(recv)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(recv);
+  if (!sym) return false;
+  return resolveLogicalAssignmentName(ctx, recv, sym) !== undefined;
+}
+
 function getWellKnownSymbolId(name: string): number | undefined {
   return WELL_KNOWN_SYMBOLS[name];
 }
@@ -2696,20 +2775,29 @@ export function compilePropertyAccess(
       if (!hasFuncSig && ts.isIdentifier(expr.expression)) {
         const sym = ctx.checker.getSymbolAtLocation(expr.expression);
         const decl = sym?.valueDeclaration;
-        if (decl && (ts.isBindingElement(decl) || ts.isVariableDeclaration(decl)) && decl.initializer) {
-          let initExpr: ts.Expression = decl.initializer;
-          while (ts.isParenthesizedExpression(initExpr)) initExpr = initExpr.expression;
+        if (decl && (ts.isBindingElement(decl) || ts.isVariableDeclaration(decl))) {
           let resolvedName: string | undefined;
-          if (isAnonymousFunctionDefinition(decl.initializer)) {
-            // SingleNameBinding NamedEvaluation: anonymous fn/class inherits
-            // the binding identifier's text as its .name.
-            resolvedName = expr.expression.text;
-          } else if (ts.isFunctionExpression(initExpr) && initExpr.name) {
-            // Named function expression keeps its own name (the binding
-            // identifier is ignored per spec).
-            resolvedName = initExpr.name.text;
-          } else if (ts.isClassExpression(initExpr) && initExpr.name) {
-            resolvedName = initExpr.name.text;
+          if (decl.initializer) {
+            let initExpr: ts.Expression = decl.initializer;
+            while (ts.isParenthesizedExpression(initExpr)) initExpr = initExpr.expression;
+            if (isAnonymousFunctionDefinition(decl.initializer)) {
+              // SingleNameBinding NamedEvaluation: anonymous fn/class inherits
+              // the binding identifier's text as its .name.
+              resolvedName = expr.expression.text;
+            } else if (ts.isFunctionExpression(initExpr) && initExpr.name) {
+              // Named function expression keeps its own name (the binding
+              // identifier is ignored per spec).
+              resolvedName = initExpr.name.text;
+            } else if (ts.isClassExpression(initExpr) && initExpr.name) {
+              resolvedName = initExpr.name.text;
+            }
+          }
+          // (#2201) The binding initializer is not itself a function (e.g.
+          // `var value = 1` or no initializer), but a later logical-assignment
+          // may install an anonymous fn/class whose .name is NamedEvaluation'd
+          // to the LHS identifier.
+          if (resolvedName === undefined && sym) {
+            resolvedName = resolveLogicalAssignmentName(ctx, expr.expression, sym);
           }
           if (resolvedName !== undefined) {
             addStringConstantGlobal(ctx, resolvedName);

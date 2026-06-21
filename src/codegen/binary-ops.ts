@@ -41,6 +41,7 @@ import { ensureObjectRuntime } from "./object-runtime.js";
 import { addStringImports, addUnionImports, resolveNativeTypeAnnotation, resolveWasmType } from "./index.js";
 import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts } from "./shared.js";
+import { isLogicalAssignNamedEvalNameRead } from "./property-access.js";
 import { compileStringBinaryOp } from "./string-ops.js";
 import { compileInstanceOf, compileTypeofComparison } from "./typeof-delete.js";
 
@@ -1010,14 +1011,25 @@ export function compileBinaryExpression(
   // keep their existing handling.
   const isStringOrNullableString = (t: ts.Type): boolean =>
     isStringType(t) || getNullablePrimitiveInfo(t)?.primitiveKind === "string";
+
+  // (#2201) ES §13.15.2 NamedEvaluation: `id.name` where `id` is the target of a
+  // logical-assignment with an anonymous fn/arrow/class RHS (`id &&=/||=/??= fn`)
+  // lowers (via the property-access `.name` static resolver) to a native-string
+  // ref, but the receiver `id` is typed `number`/`any`, so the operand's *TS*
+  // type isn't `string` and the string-equality dispatch below misses it,
+  // falling through to `ref.eq` (struct identity → always false for equal
+  // content). Recognise the read shape at the AST level so `id.name === "x"`
+  // routes to content-based string equality.
+  const leftIsStrLike = isStringOrNullableString(leftTsType) || isLogicalAssignNamedEvalNameRead(ctx, expr.left);
+  const rightIsStrLike = isStringOrNullableString(rightTsType) || isLogicalAssignNamedEvalNameRead(ctx, expr.right);
   if (
     ctx.nativeStrings &&
     ctx.nativeStrTypeIdx >= 0 &&
     isEqualityOp &&
     !wrapperEquality &&
-    isStringOrNullableString(leftTsType) &&
-    isStringOrNullableString(rightTsType) &&
-    // At least one side is the union form (else the plain-string path below handles it)
+    leftIsStrLike &&
+    rightIsStrLike &&
+    // At least one side is the union/named-eval form (else the plain-string path below handles it)
     (!isStringType(leftTsType) || !isStringType(rightTsType))
   ) {
     return compileStringBinaryOp(ctx, fctx, expr, op);
