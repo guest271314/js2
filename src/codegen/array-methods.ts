@@ -10,7 +10,8 @@ import { ts } from "../ts-api.js";
 import { isBooleanType, isStringType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { reportError } from "./context/errors.js";
-import { allocLocal, getLocalType } from "./context/locals.js";
+import { allocLocal, allocTempLocal, getLocalType } from "./context/locals.js";
+import { emitHoleToUndefined, holeTestInstrs, holeToUndefinedInstrs } from "./array-holes.js"; // (#2001 S1)
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
 import { addArrayIteratorImports, addStringImports, addUnionImports, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
@@ -402,6 +403,17 @@ export function emitBoundsCheckedArrayGet(
   // Narrow ref_null back to ref so downstream struct.get etc. validate
   if (needsNullableBlock) {
     fctx.body.push({ op: "ref.as_non_null" });
+  }
+
+  // (#2001 S1) Read-boundary `$Hole → undefined` mapping. An in-bounds slot of
+  // an `any[]` / untyped (externref-element) vec may hold the `$Hole` sentinel
+  // for a literal elision (`[1, , 3]`). Per §ToObject/Get an absent index reads
+  // as `undefined`, NOT the sentinel — so a hole must never leak into a binding,
+  // callback arg, coercion, or `===`. Gated on `usesArrayHoles` (the module
+  // actually has elisions) AND externref element (so number[]/boolean[]/struct[]
+  // reads stay byte-identical — no `ref.test` on an f64/i32/typed-ref).
+  if (ctx?.usesArrayHoles && elementType.kind === "externref") {
+    emitHoleToUndefined(ctx, fctx);
   }
 }
 
@@ -3720,11 +3732,12 @@ function compileArrayAt(
     ],
   } as Instr);
 
-  // Access element: data[idx] with bounds check
+  // Access element: data[idx] with bounds check. (#2001 S1) Pass `ctx` so an
+  // in-bounds `$Hole` slot maps to `undefined` (at() of a hole is undefined).
   fctx.body.push({ op: "local.get", index: vecTmp });
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.get", index: idxTmp });
-  emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elemType);
+  emitBoundsCheckedArrayGet(fctx, arrTypeIdx, elemType, ctx);
 
   return elemType;
 }
@@ -3848,6 +3861,18 @@ function compileArrayIndexOf(
   }
   fctx.body.push({ op: "local.set", index: resTmp });
 
+  // (#2001 S1) An `any[]` hole reads `$Hole`; map it to `undefined` before the
+  // strict-eq so `indexOf(undefined)` matches the hole index (an absent index
+  // reads as undefined via Get). Pre-ensure `__get_undefined` while we own
+  // `fctx.body` so the detached `holeToUndefinedInstrs` flush can't shift the
+  // already-captured `__host_eq` funcIdx.
+  let holeMap: Instr[] = [];
+  if (ctx.usesArrayHoles && elemType.kind === "externref") {
+    ensureGetUndefined(ctx);
+    flushLateImportShifts(ctx, fctx);
+    holeMap = holeToUndefinedInstrs(ctx, fctx);
+  }
+
   const loopBody: Instr[] = [
     { op: "local.get", index: iTmp },
     { op: "local.get", index: lenTmp },
@@ -3857,6 +3882,7 @@ function compileArrayIndexOf(
     { op: "local.get", index: dataTmp },
     { op: "local.get", index: iTmp },
     { op: getOp, typeIdx: arrTypeIdx } as Instr,
+    ...holeMap,
     { op: "local.get", index: valTmp },
     ...eqInstrs,
     {
@@ -4039,10 +4065,21 @@ function compileArrayIncludes(
       reportError(ctx, callExpr, "includes: failed to bind __same_value_zero import");
       return null;
     }
+    // (#2001 S1) §22.1.3.13 includes uses Get (holes → undefined), so
+    // `[,].includes(undefined) === true`. Map the `$Hole` slot to undefined
+    // before SameValueZero. Pre-ensure `__get_undefined` so the detached
+    // mapping's flush can't shift the captured `__same_value_zero` funcIdx.
+    let incHoleMap: Instr[] = [];
+    if (ctx.usesArrayHoles) {
+      ensureGetUndefined(ctx);
+      flushLateImportShifts(ctx, fctx);
+      incHoleMap = holeToUndefinedInstrs(ctx, fctx);
+    }
     comparisonInstrs = [
       { op: "local.get", index: dataTmp } as Instr,
       { op: "local.get", index: iTmp } as Instr,
       { op: getOp, typeIdx: arrTypeIdx } as Instr,
+      ...incHoleMap,
       { op: "local.get", index: valTmp } as Instr,
       { op: "call", funcIdx: finalSvzIdx } as Instr,
     ];
@@ -4368,6 +4405,14 @@ function compileArrayPop(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "i32.gt_s" });
 
+  // (#2001 S1) If the popped slot is a `$Hole`, return `undefined`. The result
+  // is externref here (resultType externref + `emitUndefined` already ran above,
+  // so `__get_undefined` is registered — the detached map won't shift a funcIdx).
+  const popHoleMap: Instr[] =
+    ctx.usesArrayHoles && resultType.kind === "externref" && elemType.kind === "externref"
+      ? holeToUndefinedInstrs(ctx, fctx)
+      : [];
+
   const thenInstrs: Instr[] = [
     // newLen = length - 1
     { op: "local.get", index: lenTmp } as Instr,
@@ -4379,6 +4424,7 @@ function compileArrayPop(
     { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
     { op: "local.get", index: newLenTmp } as Instr,
     { op: getOp, typeIdx: arrTypeIdx } as Instr,
+    ...popHoleMap,
     ...(resultType.kind === "externref" ? arrayElementToExternrefInstrs(ctx, fctx, elemType) : []),
     { op: "local.set", index: resultTmp } as Instr,
     // Decrement length: vec.length = newLen
@@ -4443,11 +4489,19 @@ function compileArrayShift(
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "i32.gt_s" });
 
+  // (#2001 S1) A shifted `$Hole` slot returns `undefined`. `emitUndefined` ran
+  // above for the externref result, so `__get_undefined` is already registered.
+  const shiftHoleMap: Instr[] =
+    ctx.usesArrayHoles && resultType.kind === "externref" && elemType.kind === "externref"
+      ? holeToUndefinedInstrs(ctx, fctx)
+      : [];
+
   const thenInstrs: Instr[] = [
     // result = data[0]
     { op: "local.get", index: dataTmp } as Instr,
     { op: "i32.const", value: 0 } as Instr,
     { op: getOp, typeIdx: arrTypeIdx } as Instr,
+    ...shiftHoleMap,
     ...(resultType.kind === "externref" ? arrayElementToExternrefInstrs(ctx, fctx, elemType) : []),
     { op: "local.set", index: resultTmp } as Instr,
     // newLen = len - 1
@@ -5151,9 +5205,31 @@ function compileArrayJoinNative(
     // dispatch mis-stringifies it to "[object Object]".) Convert the externref
     // result up to `ref $AnyString` for the concat fold. `__extern_toString` is
     // provided by ensureObjectRuntime; reuse the funcIdx captured before the loop.
-    elemToStr.push({ op: "call", funcIdx: externToStrIdx! } as Instr);
-    elemToStr.push({ op: "any.convert_extern" } as Instr);
-    elemToStr.push({ op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr);
+    const toStrPath: Instr[] = [
+      { op: "call", funcIdx: externToStrIdx! } as Instr,
+      { op: "any.convert_extern" } as Instr,
+      { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr,
+    ];
+    // (#2001 S1) A `$Hole` element renders as "" (§23.1.3.* join treats an
+    // absent index like undefined → ""). After S1 a literal elision stores the
+    // `$Hole` sentinel, so without this test the externref ToString lane would
+    // stringify the sentinel struct itself to garbage. Gated on `usesArrayHoles`,
+    // so hole-free `any[]` joins stay byte-identical. The empty string is cast
+    // up to ref $AnyString for the concat fold.
+    const holeTest = ctx.usesArrayHoles ? holeTestInstrs(ctx) : [];
+    if (holeTest.length > 0) {
+      const elemExternTmp = allocTempLocal(fctx, { kind: "externref" });
+      elemToStr.push({ op: "local.tee", index: elemExternTmp } as Instr);
+      elemToStr.push(...holeTest);
+      elemToStr.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "ref", typeIdx: anyStrTypeIdx } },
+        then: [...nativeStringLiteralInstrs(ctx, ""), { op: "ref.cast", typeIdx: anyStrTypeIdx } as Instr],
+        else: [{ op: "local.get", index: elemExternTmp } as Instr, ...toStrPath],
+      } as Instr);
+    } else {
+      elemToStr.push(...toStrPath);
+    }
   } else {
     // String element: a (ref null $NativeString) — non-null cast up to $AnyString.
     elemToStr.push({ op: "ref.as_non_null" } as Instr);
@@ -5371,7 +5447,25 @@ function compileArrayJoin(
       // A WasmGC struct ref must be re-expressed as externref for the import.
       elemToStr.push({ op: "extern.convert_any" });
     }
-    elemToStr.push({ op: "call", funcIdx: joinStrIdx });
+    // (#2001 S1) A `$Hole` element renders as "" (an absent index joins like
+    // undefined). After S1 a literal elision stores the `$Hole` sentinel, so
+    // without this test `__extern_join_str($Hole)` would ToString the sentinel
+    // struct (NOT undefined/null) to garbage. Only externref elements can hold
+    // the sentinel; gated on `usesArrayHoles` so hole-free joins are unchanged.
+    const holeTest = elemType.kind === "externref" && ctx.usesArrayHoles ? holeTestInstrs(ctx) : [];
+    if (holeTest.length > 0) {
+      const elemExternTmp = allocTempLocal(fctx, { kind: "externref" });
+      elemToStr.push({ op: "local.tee", index: elemExternTmp } as Instr);
+      elemToStr.push(...holeTest);
+      elemToStr.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "externref" } },
+        then: stringConstantExternrefInstrs(ctx, ""),
+        else: [{ op: "local.get", index: elemExternTmp } as Instr, { op: "call", funcIdx: joinStrIdx } as Instr],
+      } as Instr);
+    } else {
+      elemToStr.push({ op: "call", funcIdx: joinStrIdx });
+    }
   }
 
   // #2088 — shared fold (host + native lanes route through this).
@@ -5748,6 +5842,17 @@ function setupArrayLoop(
   elemType: ValType,
   tag: string,
 ): ArrayLoopLocals {
+  // (#2001 S1) When the per-iteration callback value-mapping (`$Hole →
+  // undefined`, built as detached instrs in `buildClosureCallInstrs`) may run,
+  // pre-register + flush `__get_undefined` HERE, while we still own `fctx.body`.
+  // `holeToUndefinedInstrs` calls `emitUndefined`, whose late-import flush would
+  // otherwise fire mid-detached-build and shift the already-captured closure
+  // funcIdx out from under the `call_ref` (→ null-deref). Pre-ensuring makes
+  // the later `emitUndefined` a no-op lookup. Gated like the mapping itself.
+  if (ctx.usesArrayHoles && elemType.kind === "externref") {
+    ensureGetUndefined(ctx);
+    flushLateImportShifts(ctx, fctx);
+  }
   compileExpression(ctx, fctx, propAccess.expression);
 
   const vecTmp = allocLocal(fctx, `__arr_${tag}_vec_${fctx.locals.length}`, {
@@ -5847,6 +5952,11 @@ function buildClosureCallInstrs(
                 { op: "local.get", index: loop.iTmp } as Instr,
                 { op: loop.getOp, typeIdx: arrTypeIdx } as Instr,
               ]),
+          // (#2001 S1) Map a `$Hole` slot back to `undefined` before it reaches
+          // the callback — a visited hole must present as `undefined`, never the
+          // sentinel struct (forEach/map/etc still VISIT holes in S1; S2 adds
+          // the visit-skip). Gated on externref element + `usesArrayHoles`.
+          ...(elemType.kind === "externref" && ctx.usesArrayHoles ? holeToUndefinedInstrs(ctx, fctx) : []),
           ...elemCoerce,
         ]
       : []),
@@ -6439,6 +6549,9 @@ function compileArrayReduce(
       op: elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get",
       typeIdx: arrTypeIdx,
     });
+    // (#2001 S1) If data[0] is a `$Hole` (the no-initial-value seed), map it to
+    // `undefined` before it becomes the accumulator.
+    if (ctx.usesArrayHoles && elemType.kind === "externref") emitHoleToUndefined(ctx, fctx);
     // Coerce the seed element to the accumulator type (e.g. element externref
     // string → accumulator externref, or i32 element → f64 accumulator).
     coercionInstrs(ctx, elemType, accType, fctx).forEach((i) => fctx.body.push(i));
@@ -6464,6 +6577,8 @@ function compileArrayReduce(
             { op: "local.get", index: loop.dataTmp } as Instr,
             { op: "local.get", index: loop.iTmp } as Instr,
             { op: loop.getOp, typeIdx: arrTypeIdx } as Instr,
+            // (#2001 S1) A `$Hole` element reaches the reducer as `undefined`.
+            ...(ctx.usesArrayHoles && elemType.kind === "externref" ? holeToUndefinedInstrs(ctx, fctx) : []),
             ...elemCoerce,
           ]
         : []),
@@ -6592,6 +6707,8 @@ function compileArrayReduceRight(
     fctx.body.push({ op: "i32.const", value: 1 });
     fctx.body.push({ op: "i32.sub" });
     fctx.body.push({ op: getOp, typeIdx: arrTypeIdx });
+    // (#2001 S1) data[length-1] seed may be a `$Hole` → bind `undefined`.
+    if (ctx.usesArrayHoles && elemType.kind === "externref") emitHoleToUndefined(ctx, fctx);
     // Coerce the seed element to the accumulator type (e.g. element externref
     // string → accumulator externref, or i32 element → f64 accumulator).
     coercionInstrs(ctx, elemType, accType, fctx).forEach((i) => fctx.body.push(i));
@@ -6600,6 +6717,14 @@ function compileArrayReduceRight(
     fctx.body.push({ op: "i32.const", value: 2 });
     fctx.body.push({ op: "i32.sub" });
     fctx.body.push({ op: "local.set", index: iTmp });
+  }
+
+  // (#2001 S1) Pre-ensure `__get_undefined` (reduceRight builds its loop struct
+  // manually, not via setupArrayLoop) so the detached `holeToUndefinedInstrs`
+  // for the per-iteration element load below can't shift a captured funcIdx.
+  if (ctx.usesArrayHoles && elemType.kind === "externref") {
+    ensureGetUndefined(ctx);
+    flushLateImportShifts(ctx, fctx);
   }
 
   // Build the loop locals struct for buildClosureCallInstrs compatibility
@@ -6626,6 +6751,8 @@ function compileArrayReduceRight(
             { op: "local.get", index: dataTmp } as Instr,
             { op: "local.get", index: iTmp } as Instr,
             { op: getOp, typeIdx: arrTypeIdx } as Instr,
+            // (#2001 S1) A `$Hole` element reaches the reducer as `undefined`.
+            ...(ctx.usesArrayHoles && elemType.kind === "externref" ? holeToUndefinedInstrs(ctx, fctx) : []),
             ...elemCoerce,
           ]
         : []),
@@ -6801,12 +6928,20 @@ function compileArrayFind(
   }
   fctx.body.push({ op: "local.set", index: findResTmp });
 
+  // (#2001 S1) Map a `$Hole` slot to `undefined` as the element is latched into
+  // `elemTmpLocal` — so BOTH the callback (via the local elemSource) and the
+  // returned matched element present `undefined`, never the sentinel. find still
+  // VISITS the hole in S1 (S2 adds the skip). Pre-ensure done in setupArrayLoop.
+  const findHoleMap: Instr[] =
+    ctx.usesArrayHoles && elemType.kind === "externref" ? holeToUndefinedInstrs(ctx, fctx) : [];
+
   const loopBody: Instr[] = [
     ...loopExitCheck(loop),
 
     { op: "local.get", index: loop.dataTmp } as Instr,
     { op: "local.get", index: loop.iTmp } as Instr,
     { op: loop.getOp, typeIdx: arrTypeIdx } as Instr,
+    ...findHoleMap,
     { op: "local.set", index: elemTmpLocal } as Instr,
 
     ...callAndCheck,
@@ -6997,12 +7132,18 @@ function compileArrayFindLast(
   }
   fctx.body.push({ op: "local.set", index: findResTmp });
 
+  // (#2001 S1) Map a `$Hole` slot to `undefined` as the element is latched, so
+  // both the callback and the returned element present `undefined`.
+  const findLastHoleMap: Instr[] =
+    ctx.usesArrayHoles && elemType.kind === "externref" ? holeToUndefinedInstrs(ctx, fctx) : [];
+
   const loopBody: Instr[] = [
     ...loopExitCheckReverse(loop),
 
     { op: "local.get", index: loop.dataTmp } as Instr,
     { op: "local.get", index: loop.iTmp } as Instr,
     { op: loop.getOp, typeIdx: arrTypeIdx } as Instr,
+    ...findLastHoleMap,
     { op: "local.set", index: elemTmpLocal } as Instr,
 
     ...callAndCheck,
@@ -8356,6 +8497,16 @@ function compileArrayLastIndexOf(
   }
   fctx.body.push({ op: "local.set", index: liofResTmp });
 
+  // (#2001 S1) Map a `$Hole` element to `undefined` before the strict-eq so
+  // `lastIndexOf(undefined)` matches a hole index. Pre-ensure `__get_undefined`
+  // so the detached mapping flush can't shift the captured `__host_eq` funcIdx.
+  let liofHoleMap: Instr[] = [];
+  if (ctx.usesArrayHoles && elemType.kind === "externref") {
+    ensureGetUndefined(ctx);
+    flushLateImportShifts(ctx, fctx);
+    liofHoleMap = holeToUndefinedInstrs(ctx, fctx);
+  }
+
   // Loop: while (i >= 0) { if data[i] == val, store i and break; i--; }
   const loopBody: Instr[] = [
     // if (i < 0) break
@@ -8368,6 +8519,7 @@ function compileArrayLastIndexOf(
     { op: "local.get", index: dataTmp },
     { op: "local.get", index: iTmp },
     { op: getOp, typeIdx: arrTypeIdx } as Instr,
+    ...liofHoleMap,
     { op: "local.get", index: valTmp },
     ...liofEqInstrs,
     {

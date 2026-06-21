@@ -395,6 +395,17 @@ export interface FunctionContext {
    */
   annexBCancelled?: Map<string, Array<{ start: number; end: number }>>;
   /**
+   * (#2200 Annex B B.3.3 Phase 2) Block-nested `function F` declarations that ARE
+   * eligible for the web-compat outer var-binding (no cancelling shadow/param).
+   * The outer binding is pre-allocated as a TDZ var (`localMap[F]` + a
+   * `tdzFlagLocals[F]` flag, zero-init = uninitialised); it is assigned the
+   * function value + flag←1 at the declaration's textual position (so it only
+   * initialises when control reaches the block). Membership gates the
+   * declaration-site init and the `typeof F` runtime-flag branch; normally empty,
+   * so non-Annex-B function decls are byte-identical.
+   */
+  annexBOuterBindings?: Set<string>;
+  /**
    * For TDZ flag locals that have been boxed in an i32 ref cell so that
    * mutations propagate to closures that captured the flag (#1177).
    *
@@ -680,6 +691,24 @@ export interface CodegenContext {
   usesNewTarget: boolean;
   newTargetGlobalIdx: number | undefined;
   classNewTargetIds: Map<string, number>;
+  /**
+   * (#2001 S1) Sparse-array hole support. Set by the `scanForArrayHoles`
+   * pre-scan when the program contains any array-literal elision
+   * (`OmittedExpression`). Gates the `$Hole → undefined` read-boundary guard at
+   * every externref-element vec read / join site, so a hole-bearing literal in
+   * one function and a `a[i]` read in another agree regardless of compilation
+   * order. Clear — the common case — keeps every array read byte-identical.
+   */
+  usesArrayHoles: boolean;
+  /**
+   * (#2001 S1) Type index of the `$Hole` zero-field sentinel struct, and the
+   * absolute index of the immutable `$__hole` singleton global. Registered
+   * lazily + once by `ensureHoleType` during body compilation (after class
+   * collection, per `project_type_index_shift_and_deadelim`). `-1` / `undefined`
+   * until first use; pruned by dead-elimination when no hole literal is stored.
+   */
+  holeTypeIdx: number;
+  holeGlobalIdx: number | undefined;
   /** Classes that must throw TypeError at evaluation time */
   classThrowsOnEval: Set<string>;
   /**
