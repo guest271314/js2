@@ -390,3 +390,13 @@ prettier + biome(lint) + stack-balance + coercion-sites + any-box gates clean.
 standalone prototype-object representation; (c) dynamic / `any`-typed receivers
 (both coercion forms fall through to host for those); and the regex-engine
 feature tail (v-flag `\q{}`, dynamic ctor patterns). **#2161 stays open.**
+
+## Triage re-probe (2026-06-21, dev-carla) — common patterns verified on upstream/main
+
+Probed against current upstream/main (`--target standalone`, empty/`wasm:js-string`
+imports, no env leak): `re.test`, `re.exec` with capture groups, `String.replace`
+global, `String.match` global, `String.split` with a regex, `re.flags`, and
+sticky (`/y/` + `lastIndex`) **all PASS host-import-free**. So the high-frequency
+RegExp surface is already correct standalone — **no quick dev win remains here**;
+the open residual is the documented feature/representation tail above (v-flag
+`\q{}`, dynamic ctor patterns, `any`-typed receivers). Not claimed.
