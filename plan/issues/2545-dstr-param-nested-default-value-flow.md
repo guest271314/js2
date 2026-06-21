@@ -2,7 +2,9 @@
 id: 2545
 renumbered_from: 2513
 title: "nested destructuring-param default: outer-default object fires → inner fields read 0/undefined instead of the default object's values"
-status: ready
+status: done
+assignee: sd-1
+completed: 2026-06-21
 sprint: 64
 created: 2026-06-19
 priority: medium
@@ -59,3 +61,29 @@ OUTER-default object's nested object property into the inner pattern.
 Deeper than #2544 — touches the value-flow of how a destructuring-param outer
 default object is destructured by a nested object pattern. Tracked separately so
 #2544 can land the contained invalid-Wasm fix first. Senior-dev / focused fix.
+
+## Resolution (sd-1, 2026-06-21) — already fixed by #2544; regression-guarded
+
+**Verified already fixed on current main (`62baf23aa`).** #2544's landed fix
+resolved both the arity invalid-Wasm CE *and* the nested-default value flow
+together — the destructuring of the outer-default object's nested object
+property no longer yields sentinels.
+
+Evidence (real `runTest262File`, per file):
+- The full sync `meth-dflt-obj-ptrn-prop-obj` test262 family (`meth`,
+  `meth-static`, `gen-meth`, `private-(gen-)meth(-static)`, base + `-init` +
+  `-value-null` + `-value-undef`, in BOTH `language/statements/class/dstr` and
+  `language/expressions/class/dstr`) = **48/48 pass**, 0 fail.
+- The issue's exact repro (`method({ w: { x, y, z } = {...} } = { w: {...} })`
+  with the outer default firing) returns the correct field values (`z === 6`,
+  `x === 1`).
+- Remaining fails in the broader family are **async-gen** `-value-null` /
+  `-value-undef` variants only — the async-generator state-machine path,
+  out of scope (deferred, same gap as #2202).
+
+To prevent silent regression of the value flow (the issue's acceptance
+criteria), added `tests/issue-2545-nested-dstr-param-default.test.ts`:
+outer-default-fires value read (x/y/z), the inner-pattern-default path
+(`{ w: undefined }` → inner `{x:4,y:5,z:6}`), and a `w`-out-of-scope guard —
+host + standalone. No source change needed; this is a verification +
+regression-guard close.
