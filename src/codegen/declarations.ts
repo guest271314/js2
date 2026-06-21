@@ -2048,6 +2048,20 @@ export function collectEmptyObjectWidening(
           // Scan all following statements in the same block for property assignments
           collectPropsFromStatements(checker, ctx, stmts, varName, extraProps, seenProps);
 
+          // (#2584) Standalone: if this var is ALSO the subject of any
+          // `$Object`-hash-only consumer (bracket read/write, `in`, Object.keys
+          // / values / entries / GOPD / GOPN / assign, for-in), a widened closed
+          // struct would be invisible to that consumer (`o.a=7; o["a"]` → 0).
+          // Mark it poisoned so widening is suppressed below and the receiver
+          // stays a `$Object`. Scan the whole enclosing statement list (the same
+          // tree `collectPropsFromStatements` walks). Standalone-gated — host
+          // keeps the struct fast path via the live-mirror Proxy.
+          if (ctx.standalone) {
+            for (const s of stmts) {
+              markObjectHashConsumers(s, varName, ctx.objectHashConsumerVars);
+            }
+          }
+
           // (#2372) Standalone: if any `Object.defineProperty(varName, …)` on
           // this receiver used a *dynamic* (non-inline-literal) descriptor, the
           // struct-widening fast path is unsound — the dynamic define is applied
@@ -2060,6 +2074,13 @@ export function collectEmptyObjectWidening(
           // above, before this decision point.) Host mode is unaffected — it
           // keeps the struct fast path via the live-mirror Proxy writeback.
           if (ctx.dynamicDescriptorWidenVars.has(varName)) {
+            continue;
+          }
+
+          // (#2584) Suppress widening when a $Object-hash consumer was found
+          // above — the var stays a `$Object` so bracket/`in`/keys/GOPD see the
+          // same representation the dot-writes land in.
+          if (ctx.objectHashConsumerVars.has(varName)) {
             continue;
           }
 
@@ -2143,6 +2164,69 @@ function isAccessorDescriptor(descArg: ts.Expression): boolean {
     }
   }
   return false;
+}
+
+/**
+ * (#2584) Recursively walk `node` and poison `varName` in `poisonSet` if it
+ * appears as the subject of any `$Object`-hash-only operation — i.e. an access
+ * form that, in standalone, reads or enumerates the native `$Object` open hash
+ * rather than a widened WasmGC struct field:
+ *
+ *   - `varName[<expr>]` — ElementAccessExpression with the var as receiver
+ *     (covers both `o["a"]` read and `o[k]` write).
+ *   - `<key> in varName` — `in` BinaryExpression with the var on the right.
+ *   - `Object.keys/values/entries/getOwnPropertyDescriptor/getOwnPropertyNames(varName)`
+ *     and `Object.assign(varName, …)` / `Object.assign(…, varName)` — the var as
+ *     any relevant argument.
+ *   - `for (… in varName)` — ForInStatement enumerating the var.
+ *
+ * A single match is enough; the receiver then stays a `$Object` so every access
+ * form (including the dot-writes) targets the same representation. Name-based,
+ * matching the existing widening pre-pass (aliasing is a shared, documented
+ * limitation — see the issue's `## Deferred`).
+ */
+function markObjectHashConsumers(node: ts.Node, varName: string, poisonSet: Set<string>): void {
+  const isVarRef = (n: ts.Node): boolean => ts.isIdentifier(n) && n.text === varName;
+
+  const OBJECT_HASH_METHODS = new Set([
+    "keys",
+    "values",
+    "entries",
+    "getOwnPropertyDescriptor",
+    "getOwnPropertyDescriptors",
+    "getOwnPropertyNames",
+    "assign",
+  ]);
+
+  const visit = (n: ts.Node): void => {
+    // varName[<expr>]  (bracket read or write)
+    if (ts.isElementAccessExpression(n) && isVarRef(n.expression)) {
+      poisonSet.add(varName);
+    }
+    // <key> in varName
+    else if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.InKeyword && isVarRef(n.right)) {
+      poisonSet.add(varName);
+    }
+    // Object.<hashMethod>(… varName …)
+    else if (
+      ts.isCallExpression(n) &&
+      ts.isPropertyAccessExpression(n.expression) &&
+      ts.isIdentifier(n.expression.expression) &&
+      n.expression.expression.text === "Object" &&
+      ts.isIdentifier(n.expression.name) &&
+      OBJECT_HASH_METHODS.has(n.expression.name.text) &&
+      n.arguments.some((a) => isVarRef(a))
+    ) {
+      poisonSet.add(varName);
+    }
+    // for (… in varName)
+    else if (ts.isForInStatement(n) && isVarRef(n.expression)) {
+      poisonSet.add(varName);
+    }
+    ts.forEachChild(n, visit);
+  };
+
+  visit(node);
 }
 
 export function collectPropsFromStatements(
