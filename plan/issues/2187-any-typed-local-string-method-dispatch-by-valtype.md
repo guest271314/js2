@@ -1,10 +1,12 @@
 ---
 id: 2187
 title: "standalone: string methods on an any-typed local with a native-string ValType take the generic externref path (v.length → 0)"
-status: ready
+status: done
+assignee: ttraenkler/sd-3
 sprint: 64
 created: 2026-06-17
-updated: 2026-06-17
+updated: 2026-06-21
+completed: 2026-06-21
 priority: low
 feasibility: hard
 reasoning_effort: high
@@ -73,3 +75,34 @@ dispatch sites.
 Split from #2171 (string-yield generators, SF-4 of #2157 — landed in
 `c3eb18936`). #2171's own acceptance (iterate + concat) is met; this is the
 per-element string-method residual.
+
+## Implementation (sd-3, 2026-06-21)
+
+Added `receiverIsNativeStringValType(ctx, fctx, recv)` in `property-access.ts`
+(mirrors the #2192 `receiverIsCaughtErrorStringRead` TS-type-vs-ValType pattern):
+true when the receiver is a bare identifier whose TS type is `any`/`unknown` but
+whose compiled local/param **ValType is the native string ref**
+(`anyStrTypeIdx`/`nativeStrTypeIdx`), standalone/WASI only. Wired it into the
+two dispatch gates the static `isStringType` check missed:
+1. `compilePropertyAccess` — an EARLY `.length` arm (before the Function/vec
+   `.length` arms, which else fall through to `__extern_length`→0) reads `len`
+   (field 0 of `$AnyString`) natively.
+2. `expressions/calls.ts` string-method gate (`||` next to the existing
+   `isStringType` / caught-error checks) → routes `v.charCodeAt(0)` etc. to
+   `compileNativeStringMethodCall`.
+
+Validated: the headline `for (const v of g()) n += v.length` + `v.charCodeAt(0)`
+(single-yield string generator, the #2171 origin) now pass; 9 scoped tests
+(`tests/issue-2187.test.ts`) green; no regression on typed `string`/literal
+receivers, numeric generators, or arrays (the 144-test string suite passes; the
+one `string-methods.test.ts` collection error is a pre-existing missing-`helpers.js`
+worktree artifact, identical on origin/main). Hard-error + any-box gates clean.
+
+**Out of scope (deferred, #2072 value-rep family):** an `any` local assigned
+from a string METHOD (`const v: any = s.slice(1)`) gets an **externref** ValType
+(the method returns externref), not `$AnyString`, so the ValType is opaque and
+`v.length` still routes generically — this needs the broader externref-carries-a-
+string tracking, not the bare ValType check. The multi-yield generator
+(`yield "a"; yield "b"`) value-binding residual is a separate generator-state bug
+(#2040 territory), NOT the `.length`/method DISPATCH this issue fixes (the WAT
+shows the native `len` read fires correctly; the yielded value reaches `v` wrong).
