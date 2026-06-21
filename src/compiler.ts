@@ -11,6 +11,7 @@ import { getNullablePrimitiveInfo } from "./checker/type-mapper.js";
 import { generateLinearModule, generateLinearMultiModule } from "./codegen-linear/index.js";
 import { resetCompileDepth } from "./codegen/expressions.js";
 import { generateModule, generateMultiModule } from "./codegen/index.js";
+import { assertCodegenRegistrationsComplete } from "./codegen/shared.js";
 import { isFatalCodegenDiagnostic } from "./codegen/context/errors.js";
 import type { WasmModule } from "./ir/types.js";
 import {
@@ -522,6 +523,14 @@ export function compileSourceSync(
   // Without this, the depth accumulates across compilations in the same process
   // (e.g., test262 worker pool), causing false "depth exceeded" errors.
   resetCompileDepth();
+
+  // #2146 — fail fast (with the offending module named) if any codegen delegate
+  // was never wired, instead of throwing an obscure "X not yet registered" deep
+  // inside codegen only when the relevant feature is exercised. This entry pulls
+  // in every registrar module statically (via the codegen imports above), so the
+  // assertion always passes on the production path; it only fires if a future
+  // refactor breaks the registrar-import chain.
+  assertCodegenRegistrationsComplete();
 
   const errors: CompileError[] = [];
   const emitWatOutput = options.emitWat !== false;

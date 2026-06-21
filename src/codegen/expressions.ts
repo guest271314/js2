@@ -92,7 +92,7 @@ export {
   emitNullCheckThrow,
   isProvablyNonNull,
 } from "./property-access.js";
-export { getCol, getLine, valTypesMatch, VOID_RESULT } from "./shared.js";
+export { getCol, getLine, resolveEnclosingClassName, valTypesMatch, VOID_RESULT } from "./shared.js";
 export {
   compileNativeStringLiteral,
   compileNativeStringMethodCall,
@@ -143,7 +143,6 @@ export {
   compileNewExpression,
   compileSuperElementAccess,
   compileSuperPropertyAccess,
-  resolveEnclosingClassName,
 } from "./expressions/new-super.js";
 export { compileMemberIncDec, compilePostfixUnary, compilePrefixUnary } from "./expressions/unary.js";
 
