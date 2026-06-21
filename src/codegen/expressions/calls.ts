@@ -2154,6 +2154,11 @@ function tryEmitInlineDynamicCall(
   const allCandidates: Cand[] = [];
   for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
     if (info.paramTypes.length < arity) continue;
+    // (#1837) Over-arity padding only for candidates with a NON-VOID result.
+    // Void-result closures (Promise resolve/reject element fns) marshal their
+    // padded self/args into a stack-invalid call_ref; the async-gen-meth-dflt
+    // win (the reason for padding) all have a non-void result (the generator).
+    if (info.paramTypes.length > arity && info.returnType === null) continue;
     if (!supported(info.returnType)) continue;
     let ok = true;
     for (const p of info.paramTypes) {
