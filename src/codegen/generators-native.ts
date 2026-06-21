@@ -864,6 +864,19 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorD
   for (const param of decl.parameters) {
     if (param.dotDotDotToken || !ts.isIdentifier(param.name)) return false;
   }
+  // (#2581) An OBJECT-LITERAL generator method with a DEFAULT or OPTIONAL param
+  // must bail to the host path. Object-literal methods are invoked through the
+  // closure trampoline (`emitObjectMethodAsClosure`), which forwards args but
+  // does NOT set the `__argc_default` global the param-default check reads — so
+  // the native factory would read the un-defaulted sentinel and yield the wrong
+  // value (`{ *m(d=5){yield d} }.m()` → 0 instead of 5). Class methods are called
+  // directly (argc set), so they keep defaults native. The eager-buffer host path
+  // applies defaults correctly for the object-literal case, so route there.
+  if (ts.isMethodDeclaration(decl) && ts.isObjectLiteralExpression(decl.parent)) {
+    for (const param of decl.parameters) {
+      if (param.initializer || param.questionToken) return false;
+    }
+  }
   // (#2571) A method generator that reads `arguments`, uses `super.*`, or
   // CAPTURES an enclosing-function binding (#2203) has no native state-machine
   // support: the eager-buffer path builds the arguments vec / closure, while the

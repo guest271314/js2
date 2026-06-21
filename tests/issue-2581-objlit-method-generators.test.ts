@@ -142,6 +142,30 @@ export function test(): number {
     expect(await runNative(src)).toBe(56);
   });
 
+  it("default/optional-param object-literal generator method BAILS to host (closure-trampoline argc gap)", async () => {
+    // (#2581 eject fix) Object-literal methods are invoked through the closure
+    // trampoline, which does not set the `__argc_default` global the param-default
+    // check reads — so the native factory would yield the wrong value
+    // (`{ *m(d=5){yield d} }.m()` → 0 instead of 5). These bail to the host path
+    // (valid module, host imports) where defaults apply correctly. A class method
+    // generator with a default stays native (called directly, argc set).
+    const src = `export function test(): number {
+  const o = { *m(d: number = 5) { yield d; } };
+  return (o.m().next().value as number);
+}`;
+    const { binary, genImports } = await compileNoHost(src);
+    expect(genImports.length, "default-param objlit generator must bail to host").toBeGreaterThan(0);
+    expect(WebAssembly.validate(binary), "default-param bail module must be valid Wasm").toBe(true);
+  });
+
+  it("explicit-arg (no default) object-literal generator method stays native", async () => {
+    const src = `export function test(): number {
+  const o = { *m(d: number) { yield d; } };
+  return (o.m(5).next().value as number);
+}`;
+    expect(await runNative(src)).toBe(5);
+  });
+
   it("capturing object-literal method generator BAILS to host cleanly (valid module)", async () => {
     const src = `function outer(): number {
   let cap = 3;

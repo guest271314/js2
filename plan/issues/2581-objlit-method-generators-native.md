@@ -203,3 +203,24 @@ now-lifted deferral). tsc + prettier + hard-error + IR-fallback gates clean; 40
 generator/class regression tests pass. JS-host (gc) byte-identical
 (`(standalone||wasi)`-gated). Broad-impact → merge_group is the authoritative
 full-standalone-shard validator.
+
+## Merge-queue ejection + fix (2026-06-21, sd-2)
+
+PR #1873 ejected from the merge_group on "test262 standalone shard 54" — a REAL
+regression (branch was 0 commits behind origin/main; not stale-base drift).
+
+Root cause: an object-literal generator method with a **default/optional param**
+(`{ *m(d = 5){ yield d } }`) returned the WRONG value (`o.m()` → 0 instead of 5).
+Object-literal methods are invoked through the closure trampoline
+(`emitObjectMethodAsClosure`), which forwards args but does NOT set the
+`__argc_default` global the param-default check reads — so the native factory read
+the un-defaulted sentinel. The CLASS path is unaffected (class methods are called
+directly, argc set), which is why #2571 didn't hit this.
+
+Fix: `isNativeGeneratorCandidate` bails an object-literal generator method with any
+`param.initializer || param.questionToken` to the host eager-buffer path (which
+applies defaults correctly). A strictly-narrowing bail — it can only reduce what
+goes native, never add a regression. The common no-default object-literal
+generator stays native. Class/free generators with defaults stay native
+(unchanged). Regression tests added (default bails to host; explicit-arg stays
+native). Re-validated via chunk54 standalone diff + merge_group.
