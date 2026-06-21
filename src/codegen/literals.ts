@@ -50,7 +50,13 @@ import {
   resolveWasmType,
 } from "./index.js";
 import { ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
-import { emitNativeGeneratorToVec, nativeGeneratorInfoForForOfSubject } from "./generators-native.js";
+import {
+  compileNativeGeneratorFunction,
+  emitNativeGeneratorToVec,
+  isNativeGeneratorCandidate,
+  nativeGeneratorInfoForForOfSubject,
+  registerNativeGenerator,
+} from "./generators-native.js";
 import { emitCollectionIteratorVec } from "./map-runtime.js";
 import { emitSymbolDescStore } from "./symbol-native.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
@@ -2385,8 +2391,40 @@ export function compileObjectLiteralForStruct(
       if (isAsyncMethod && retType) {
         retType = unwrapPromiseType(retType, ctx.checker);
       }
+      // (#2581) In a no-JS-host target, a native-capable object-literal
+      // generator method returns its `$GenState_*` struct (the lazy native state
+      // machine), NOT the eager-buffer externref Generator object. Register it
+      // here so the state-struct type exists and the method's wasm signature
+      // carries the right result type (mirrors class-bodies.ts #2571 + the
+      // free-function path declarations.ts:2499). `methodParams` already leads
+      // with the receiver `this` (`ref structTypeIdx`), so pass it through with
+      // `synthesizedThis = true` to mint `param_this`. The factory emit is routed
+      // in the generator-method body block below. JS-host mode keeps the
+      // externref Generator object (eager-buffer) — byte-identical.
+      let objMethNativeGen = null;
+      if (
+        isGeneratorMethod &&
+        (ctx.standalone || ctx.wasi) &&
+        !isAsyncMethod &&
+        isNativeGeneratorCandidate(ctx, prop)
+      ) {
+        // (#2581) Key the native generator by the SAME identity the method body
+        // func gets, so sibling object literals that share `fullName` but own a
+        // per-literal funcIdx (different bodies → `literalMethodFuncIdx` fork,
+        // #1557) each register a DISTINCT `$GenState` and `.m()` dispatches to
+        // its own state machine. Without the per-literal key, the idempotent
+        // `registerNativeGenerator` returns the FIRST literal's state for every
+        // sibling, so `b.m()` runs `a`'s body (`{*m(){yield 1}}`,`{*m(){yield 2}}`
+        // both yielded 1). A forked literal's body compiles into
+        // `${fullName}__lit${perLiteralIdx}` (see below); mirror that name here.
+        const perLiteralForkIdx = literalMethodFuncIdx.get(methodName);
+        const genKey = perLiteralForkIdx !== undefined ? `${fullName}__lit${perLiteralForkIdx}` : fullName;
+        objMethNativeGen = registerNativeGenerator(ctx, prop, genKey, methodParams, /* synthesizedThis */ true);
+      }
       const methodResults: ValType[] = isGeneratorMethod
-        ? [{ kind: "externref" }]
+        ? objMethNativeGen
+          ? [{ kind: "ref", typeIdx: objMethNativeGen.stateTypeIdx }]
+          : [{ kind: "externref" }]
         : retType && !isVoidType(retType)
           ? [resolveWasmType(ctx, retType)]
           : [];
@@ -2512,7 +2550,16 @@ export function compileObjectLiteralForStruct(
         ); // paramOffset 1 to skip 'this'
       }
 
-      if (isGeneratorMethod && prop.body) {
+      if (isGeneratorMethod && prop.body && objMethNativeGen) {
+        // (#2581) Native lazy object-literal generator method: emit the
+        // state-struct factory (pushes the `$GenState_*` ref) instead of the
+        // eager host buffer. The method body func's param 0 is the receiver
+        // `this` (`ref structTypeIdx`), threaded as `param_this` (#2571). The
+        // `.next()/.return()/.throw()` dispatch on the returned ref is already
+        // representation-agnostic. No host imports — instantiates standalone.
+        compileNativeGeneratorFunction(ctx, methodFctx, prop, objMethNativeGen);
+        methodFctx.body.push({ op: "return" });
+      } else if (isGeneratorMethod && prop.body) {
         // Generator method: eagerly evaluate body, collect yields into a buffer,
         // then wrap with __create_generator to return a Generator-like object.
         // Body is wrapped in try/catch to defer thrown exceptions to first next() (#928).
