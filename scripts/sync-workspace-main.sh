@@ -28,6 +28,28 @@ say() { echo "[sync-workspace-main] $*"; }
 
 [ -d "$WS/.git" ] || { say "no git repo at $WS — skipping"; exit 0; }
 
+# Keep the FORK's main synced with upstream (clean fast-forward ONLY). Agents
+# branch from origin/main and the statusline reads /workspace, so when the fork
+# (origin = ttraenkler/js2) lags upstream (loopdive/js2 — where PRs actually
+# merge) everything downstream silently rots: stale-base PRs go DIRTY, the
+# id-allocator collides, the statusline shows an old sprint. This advances
+# origin/main to upstream/main ONLY when origin is a strict ANCESTOR of upstream
+# (a real fast-forward) — never a force/rewrite (public main is append-only),
+# and a no-op when already current or when origin has its own commits.
+if git -C "$WS" remote get-url upstream >/dev/null 2>&1 \
+   && git -C "$WS" fetch upstream main --quiet 2>/dev/null; then
+  o=$(git -C "$WS" rev-parse origin/main 2>/dev/null)
+  u=$(git -C "$WS" rev-parse upstream/main 2>/dev/null)
+  if [ -n "$o" ] && [ -n "$u" ] && [ "$o" != "$u" ] \
+     && git -C "$WS" merge-base --is-ancestor "$o" "$u" 2>/dev/null; then
+    if git -C "$WS" push origin "$u:refs/heads/main" --quiet 2>/dev/null; then
+      say "synced fork origin/main -> upstream/main ($(echo "$u" | cut -c1-9))"
+    else
+      say "WARNING: upstream->origin/main fast-forward push failed (perms/protection?)"
+    fi
+  fi
+fi
+
 git -C "$WS" fetch origin main --quiet 2>/dev/null || { say "fetch failed — skipping"; exit 0; }
 
 local_sha=$(git -C "$WS" rev-parse --short HEAD 2>/dev/null)
