@@ -11,6 +11,7 @@ import {
   isHeterogeneousUnion,
   isNullablePrimitiveType,
   isNumberType,
+  isNumberWrapperType,
   isStringType,
   isStringWrapperType,
   isVoidType,
@@ -1791,7 +1792,7 @@ export function generateModule(
     markLeafStructsFinal(mod, ctx.wasi);
 
     // Dead import and type elimination pass
-    eliminateDeadImports(mod);
+    eliminateDeadImports(mod, ctx); // #1899 ctx → remap helper side-tables on import removal
 
     // Repair struct.get/struct.set type mismatches (externref → struct ref conversion)
     repairStructTypeMismatches(mod);
@@ -5519,7 +5520,7 @@ export function generateMultiModule(
     markLeafStructsFinal(mod, ctx.wasi);
 
     // Dead import and type elimination pass
-    eliminateDeadImports(mod);
+    eliminateDeadImports(mod, ctx); // #1899 ctx → remap helper side-tables on import removal
 
     // Repair struct.get/struct.set type mismatches (externref → struct ref conversion)
     repairStructTypeMismatches(mod);
@@ -7284,14 +7285,31 @@ function collectPrimitiveMethodImports(ctx: CodegenContext, sourceFile: ts.Sourc
           needed.add("__json_quote_string");
         }
       }
-      if (isNumberType(receiverType) && methodName === "toFixed") {
+      // (#2160 number-wrapper) Standalone `new Number(x).<fmt>()` routes through
+      // the SAME native `number_*` helpers as a primitive receiver (the wrapper's
+      // f64 is recovered via __to_primitive in calls.ts). The wrapper type is
+      // `TypeFlags.Object` (symbol "Number"), NOT `isNumberType`, so it must be
+      // detected here too or the helper is never pre-registered and the call site
+      // falls through to a null result. Gated on standalone (the recovery path).
+      const isNumMethodRecv = isNumberType(receiverType) || (ctx.standalone && isNumberWrapperType(receiverType));
+      if (isNumMethodRecv && methodName === "toFixed") {
         needed.add("number_toFixed");
       }
-      if (isNumberType(receiverType) && methodName === "toPrecision") {
+      if (isNumMethodRecv && methodName === "toPrecision") {
         needed.add("number_toPrecision");
       }
-      if (isNumberType(receiverType) && methodName === "toExponential") {
+      if (isNumMethodRecv && methodName === "toExponential") {
         needed.add("number_toExponential");
+      }
+      // toString(radix)/toLocaleString on a standalone Number wrapper similarly
+      // needs number_toString[_radix] pre-registered (primitive path registers it
+      // broadly, but be explicit for the wrapper receiver).
+      if (
+        ctx.standalone &&
+        isNumberWrapperType(receiverType) &&
+        (methodName === "toString" || methodName === "toLocaleString")
+      ) {
+        needed.add("number_toString");
       }
       // Detect Number.prototype.method.call/apply patterns
       if ((methodName === "call" || methodName === "apply") && ts.isPropertyAccessExpression(prop.expression)) {

@@ -624,6 +624,66 @@ function coerceNumberMethodArgToF64(ctx: CodegenContext, fctx: FunctionContext, 
 }
 
 /**
+ * (#2160 number-wrapper) Returns true when `receiverType` is a Number-prototype
+ * method receiver that the numeric arms below should handle — i.e. a primitive
+ * number, OR (standalone only) a `new Number(x)` WRAPPER object.
+ *
+ * `isNumberType` matches only the primitive (`TypeFlags.Number`), NOT the wrapper
+ * (`TypeFlags.Object` whose symbol is `Number`), so `new Number(3.14).toFixed(2)`
+ * never entered the numeric lowering and fell through to a generic/host path that
+ * trapped in standalone ("null pointer" / wrong value). Mirror of the #1878
+ * String-wrapper fix. Gated on `ctx.standalone` for the wrapper case — the native
+ * `__to_primitive` recovery (see `emitNumberMethodReceiverF64`) is standalone-only;
+ * WASI/host keep the existing object machinery.
+ */
+function isNumberMethodReceiver(ctx: CodegenContext, receiverType: ts.Type): boolean {
+  return isNumberType(receiverType) || (ctx.standalone && isNumberWrapperType(receiverType));
+}
+
+/**
+ * (#2160 number-wrapper) Emit the receiver of a Number.prototype method as an
+ * f64 on the stack.
+ *
+ * - Primitive number receiver: `compileExpression(propAccess.expression)` then
+ *   i32→f64 widen (the prior inline behaviour of every numeric arm).
+ * - Standalone Number WRAPPER receiver (`new Number(x)`): the wrapper lowers to a
+ *   `$Object` carrying the primitive in the reserved FLAG_INTERNAL
+ *   [[PrimitiveValue]] slot (#1910 S2). Recover it via the existing §7.1.1.1
+ *   `__to_primitive(hint "number")` engine helper (reads that slot first) →
+ *   `__unbox_number` → f64. Reuses the SAME helper the wrapper `.valueOf()` slice
+ *   (cs-2160) uses; no new coercion matrix.
+ */
+function emitNumberMethodReceiverF64(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  propAccess: ts.PropertyAccessExpression,
+  receiverType: ts.Type,
+): void {
+  if (ctx.standalone && isNumberWrapperType(receiverType)) {
+    ensureObjectRuntime(ctx);
+    const toPrimIdx = ctx.funcMap.get("__to_primitive");
+    if (toPrimIdx !== undefined) {
+      // wrapper externref → __to_primitive(hint "number") → boxed-number externref
+      compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+      addStringConstantGlobal(ctx, "number");
+      fctx.body.push(...stringConstantExternrefInstrs(ctx, "number"));
+      fctx.body.push({ op: "call", funcIdx: toPrimIdx });
+      const unboxNumIdx = ensureLateImport(ctx, "__unbox_number", [{ kind: "externref" }], [{ kind: "f64" }]);
+      flushLateImportShifts(ctx, fctx);
+      if (unboxNumIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: unboxNumIdx });
+      }
+      return;
+    }
+    // __to_primitive unavailable — fall through to the primitive path (best effort).
+  }
+  const exprType = compileExpression(ctx, fctx, propAccess.expression);
+  if (exprType && exprType.kind === "i32") {
+    fctx.body.push({ op: "f64.convert_i32_s" });
+  }
+}
+
+/**
  * (#1735) Normalise an f64 local holding a Number.prototype.{toExponential,
  * toPrecision} digits/precision argument so that NaN becomes 0, matching
  * ToIntegerOrInfinity (§7.1.5 / §21.1.3.{3,5} step 5: NaN → +0).
@@ -4582,6 +4642,49 @@ function compileCallExpression(
         // Driver declined (e.g. a real JS Set arriving as externref) — fall
         // through to the paths below.
       }
+      // (#2586) Array.from(Map) — host-free native. A Map's default iterator
+      // is its `entries()` (§24.1.3.12 → §24.1.5.3), so `Array.from(map)`
+      // yields one `[key, value]` pair per live entry. The generic native
+      // `__iterator` drain below is built VEC-ONLY under noJsHost and hard-casts
+      // its subject to a `$Vec` (iterator-native.ts:293) → `illegal cast` on the
+      // `ref $Map` struct. Route through the SAME `emitCollectionIteratorVec`
+      // driver as Set above, in `"entries"` mode: it materializes a canonical
+      // externref `$Vec` whose slots are 2-element `$ObjVec` `[key, value]`
+      // pairs, so the consumer's `a[i][0]`/`a[i][1]` read back through the
+      // native `__extern_get_idx`/`__extern_length` arm — exactly Array.from's
+      // result. (WeakMap is not iterable; WeakSet/Map-with-mapFn keep the
+      // existing routing.)
+      //
+      // Gated to `ctx.standalone` (the `--target standalone` pure-Wasm target),
+      // NOT plain `nativeStrings` nor WASI. The entries-mode `$ObjVec` pair
+      // materialization tickles a PRE-EXISTING substrate limitation that the
+      // stricter targets surface but this slice does not own:
+      //   - nativeStrings-WITH-JS-host → a late-registered object-runtime funcidx
+      //     (`__defineProperty_value`) desyncs (also breaks `[...m.entries()]`
+      //     there);
+      //   - `--target wasi` (strict-no-host) → the same desync PLUS a
+      //     `global_Array` declared-global request that the allowlist rejects.
+      // Both reproduce on `main` for `[...m.entries()]` independently of this
+      // change, so they are escalated as the entries-mode substrate follow-up
+      // rather than half-fixed here. Under `--target standalone` the path lowers
+      // to a zero-import, fully-native module (verified), so ship that.
+      if (!hasMapFn && ctx.standalone && ctx.nativeStrings && argSymName === "Map") {
+        const matType = emitCollectionIteratorVec(ctx, fctx, expr.arguments[0]!, "entries", /* isSet */ false);
+        if (matType != null && matType !== VOID_RESULT && (matType.kind === "ref" || matType.kind === "ref_null")) {
+          // The materialized vec carries 2-element `$ObjVec` `[key, value]` pairs
+          // as its slots, NOT type-resolved tuple structs. Hand it back as a
+          // plain externref so the consumer reads it through the dynamic
+          // `__extern_get_idx`/`__extern_length` arm (`a[i][0]`/`[k, v]`
+          // destructuring) — exactly the host `__array_from` contract. Returning
+          // the raw `ref $Vec` instead would make a `const a: [K,V][]` binding
+          // run the typed tuple-vec materialization, which can't bridge an
+          // `$ObjVec` pair into a tuple struct (→ invalid `struct.new`).
+          coerceType(ctx, fctx, matType, { kind: "externref" });
+          return { kind: "externref" };
+        }
+        // Driver declined (e.g. a real JS Map arriving as externref) — fall
+        // through to the paths below.
+      }
       // Reject the known non-array builtin collections from the structural
       // array-copy fast path so a Set the driver above declined, or a
       // Map/WeakSet/WeakMap, cannot be mis-read as a `__vec` (the struct.new
@@ -8510,7 +8613,7 @@ function compileCallExpression(
     }
 
     // Primitive method calls: number.toString(), number.toFixed()
-    if (isNumberType(receiverType) && propAccess.name.text === "toString") {
+    if (isNumberMethodReceiver(ctx, receiverType) && propAccess.name.text === "toString") {
       // RangeError: if radix argument is provided, must be integer 2-36
       // Also captures the validated, floored radix in `radixLocalIdx` so it can
       // be passed to the 2-arg `number_toString_radix` host import below (#1321).
@@ -8548,11 +8651,9 @@ function compileCallExpression(
         // radix was consumed by the validation comparisons above (via local.tee);
         // the original (floored) value is preserved in radixLocalIdx for the call.
       }
-      const exprType = compileExpression(ctx, fctx, propAccess.expression);
-      // number_toString expects f64 but source may be i32 (e.g. string.length)
-      if (exprType && exprType.kind === "i32") {
-        fctx.body.push({ op: "f64.convert_i32_s" });
-      }
+      // (#2160 number-wrapper) Recover the f64 receiver — primitive directly, or
+      // a standalone `new Number(x)` wrapper via __to_primitive/__unbox_number.
+      emitNumberMethodReceiverF64(ctx, fctx, propAccess, receiverType);
       // #1321: when a radix was provided, route to the 2-arg host import that
       // actually uses it. The legacy 1-arg `number_toString` only handled base 10
       // and silently dropped the radix — `(255).toString(16)` returned "255".
@@ -8600,14 +8701,12 @@ function compileCallExpression(
     // WITH a locale argument also falls through to that host path.
     if (
       (ctx.standalone || ctx.wasi) &&
-      isNumberType(receiverType) &&
+      isNumberMethodReceiver(ctx, receiverType) &&
       propAccess.name.text === "toLocaleString" &&
       expr.arguments.length === 0
     ) {
-      const exprType = compileExpression(ctx, fctx, propAccess.expression);
-      if (exprType && exprType.kind === "i32") {
-        fctx.body.push({ op: "f64.convert_i32_s" });
-      }
+      // (#2160 number-wrapper) f64 receiver recovery (primitive or wrapper).
+      emitNumberMethodReceiverF64(ctx, fctx, propAccess, receiverType);
       const funcIdx = ctx.funcMap.get("number_toString");
       if (funcIdx !== undefined) {
         fctx.body.push({ op: "call", funcIdx });
@@ -8697,11 +8796,9 @@ function compileCallExpression(
       }
     }
 
-    if (isNumberType(receiverType) && propAccess.name.text === "toFixed") {
-      const exprType = compileExpression(ctx, fctx, propAccess.expression);
-      if (exprType && exprType.kind === "i32") {
-        fctx.body.push({ op: "f64.convert_i32_s" });
-      }
+    if (isNumberMethodReceiver(ctx, receiverType) && propAccess.name.text === "toFixed") {
+      // (#2160 number-wrapper) f64 receiver recovery (primitive or wrapper).
+      emitNumberMethodReceiverF64(ctx, fctx, propAccess, receiverType);
       // Compile the digits argument (default 0)
       if (expr.arguments.length > 0) {
         // ToInteger(fractionDigits) begins with ToNumber (§21.1.3.3 step 4).
@@ -8742,11 +8839,9 @@ function compileCallExpression(
       }
     }
     // number.toPrecision(precision)
-    if (isNumberType(receiverType) && propAccess.name.text === "toPrecision") {
-      const exprType = compileExpression(ctx, fctx, propAccess.expression);
-      if (exprType && exprType.kind === "i32") {
-        fctx.body.push({ op: "f64.convert_i32_s" });
-      }
+    if (isNumberMethodReceiver(ctx, receiverType) && propAccess.name.text === "toPrecision") {
+      // (#2160 number-wrapper) f64 receiver recovery (primitive or wrapper).
+      emitNumberMethodReceiverF64(ctx, fctx, propAccess, receiverType);
       if (expr.arguments.length > 0) {
         // (#49) Spec §21.1.3.5 step 4 says: if x is non-finite, return
         // Number::toString(x) BEFORE the precision range check. Save the
@@ -8833,11 +8928,9 @@ function compileCallExpression(
       }
     }
     // number.toExponential(fractionDigits)
-    if (isNumberType(receiverType) && propAccess.name.text === "toExponential") {
-      const exprType = compileExpression(ctx, fctx, propAccess.expression);
-      if (exprType && exprType.kind === "i32") {
-        fctx.body.push({ op: "f64.convert_i32_s" });
-      }
+    if (isNumberMethodReceiver(ctx, receiverType) && propAccess.name.text === "toExponential") {
+      // (#2160 number-wrapper) f64 receiver recovery (primitive or wrapper).
+      emitNumberMethodReceiverF64(ctx, fctx, propAccess, receiverType);
       if (expr.arguments.length > 0) {
         // (#49) Spec §21.1.3.3 step 3: if x is non-finite, return
         // Number::toString(x) BEFORE the fractionDigits range check.
