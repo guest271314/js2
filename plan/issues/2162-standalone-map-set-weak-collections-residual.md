@@ -239,3 +239,35 @@ WeakMap/WeakSet/Map case `standalone+nativeStrings` and asserts valid Wasm; the
 assertion is `false` without the three-site fix (verified by reverting). tsc
 clean; existing Map/Set/Weak standalone suites (34) + shift-sensitive #2131 +
 foreach/algebra (29) unaffected.
+
+## Slice — `new Set(nonLiteralArray)` constructor (PR, dev-carla, 2026-06-21)
+
+The prior from-array slice seeded `new Set([1,2,3])` only from an array
+**literal**; a non-literal array-typed argument (`new Set(arr)` where `arr` is a
+variable / call result) fell through to the host path and **leaked env imports**
+(`env: module is not an object or function` on instantiate). Now seeded
+host-import-free.
+
+**Fix** — `seedNativeSetFromArrayArg` (`src/codegen/expressions/new-super.ts`):
+when the single `new Set(...)` argument is a checker-confirmed array/tuple type
+(`isArrayTypedArg`) that is NOT an array literal, compile it to its `$Vec`
+(`{length: i32, data: (ref $arr)}`), then emit a counted Wasm `block`/`loop` that
+walks `data[i]`, boxes each element to anyref via the existing
+`coerceMapKeyToAnyref` (spliced into the loop body), and calls `__set_add`. The
+element `array.get` uses the per-kind sign-extension (`array.get_u`/`_s` for
+packed i8/i16). On a non-vec / unsupported-element arg the helper gracefully
+leaves the empty Set on the stack — never a host-import leak or CE. Gated on
+`ctx.nativeStrings`; gc/host mode untouched.
+
+**Verified** (`tests/issue-2162-nonliteral-set-ctor.test.ts`, 7/7, `target:
+wasi`, ZERO `Set_*`/`Map_*` imports): numeric-array-variable seed + dedup,
+membership hit/miss, string-array seed + dedup, function-returned-array seed, and
+the no-arg + array-literal forms unaffected. tsc + prettier clean; all prior
+#2162 standalone suites (23 across set/iterators/collection-from-array) green.
+
+**Still open (this slice's siblings):** `new Map(pairsVariable)` — the inner
+`[K,V]` pair lowers to a typed tuple *struct* (`$__tuple_<n>`), not an inner vec,
+so its extraction is a distinct shape (per-field `struct.get`, varying field
+types) and falls through to an empty Map for now. `[...collection]`
+spread-of-Set/Map and `new Set(iterableNonArray)` (general iterator drive) also
+remain.
