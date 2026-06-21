@@ -56,6 +56,80 @@ guard must fire on `value === undefined`, not only on iterator-`done`. The
 the Initializer. Scope to array binding patterns with a default; object-pattern
 defaults (§8.5.4) already cover the `undefined` case — verify both.
 
+## Root cause (sd-3, 2026-06-21) — PINPOINTED to the f64-tuple `__box_number(sentinel)`
+
+The bug is NOT the destructuring default predicate (that fires on `undefined`
+correctly). It is **narrow to the single-element array literal**, and the chain is:
+
+1. `[undefined]` (single element) compiles to a **1-field TUPLE struct
+   `{_0: f64}`** whose `_0` holds the **sNaN "undefined" SENTINEL**
+   `0x7FF00000DEADC0DE` (the f64 undefined marker). `[1,2,…]`/multi-element take a
+   different (vec) path, which is why ONLY the single-element form fails. Typed
+   `(number|undefined)[]`, a function-return array, and FUNCTION PARAMS all work —
+   they don't hit this tuple-struct path.
+2. The binding `a` is `externref` (it can hold the default `9` or the value), so
+   the tuple-struct destructuring reads `struct.get {_0} → f64 sentinel` then
+   **`__box_number(sentinel)`** → a plain NaN **NUMBER** externref.
+3. The default check uses **`__extern_is_undefined`** (deliberately, NOT
+   `ref.is_null`, so JS `null` doesn't fire the default). A `__box_number(sentinel)`
+   is a NUMBER, not undefined → `__extern_is_undefined` returns 0 → the default
+   never fires → `a` keeps the NaN.
+
+**WAT-confirmed:** `(func $test … i64.const 0x7FF00000DEADC0DE; f64.reinterpret;
+struct.new 34 (the {_0:f64} tuple); … struct.get 34 0; call $__box_number;
+call $__extern_is_undefined; (if … default …))` — the box loses the sentinel's
+undefined-ness before the check.
+
+**Exact fix site:** the **tuple-struct fast path** in
+`destructuring-params.ts` (the arm that reads `_0…_n` and routes through
+`emitDefaultValueCheck` / `emitNestedBindingDefault`, ~lines 854-891). When an
+f64 tuple field that feeds an EXTERNREF binding-with-default is the sNaN
+sentinel, it must box to a real `undefined` externref (`emitUndefined`), NOT
+`__box_number`. (`boxToExternref` at ~line 237 is the per-element boxer but lacks
+`fctx`; the tuple-field box is a separate site.)
+
+**Substrate caveat — STANDALONE undefined representation:** `__get_undefined` /
+`__extern_is_undefined` are host imports; in `nativeStrings`/standalone
+`emitUndefined` degrades to `ref.null.extern` (null), which the
+`__extern_is_undefined` predicate (correctly) does NOT treat as undefined. So a
+clean standalone fix may need a **native undefined externref** (or to special-case
+the sentinel directly in the f64 tuple path BEFORE boxing — i.e. check
+`i64.reinterpret_f64 == sentinel` on the f64 _0 field and branch to the default
+arm before the `__box_number`/`__extern_is_undefined` round-trip). The
+sentinel-on-the-raw-f64 approach avoids the externref-undefined gap entirely and
+is the recommended fix. sd-3 attempted the `boxToExternref` locus but it sits on
+the VEC-conversion path, not the tuple path — the tuple-field box is the right
+site.
+
+## FINAL localization (sd-3) — the box is at ARRAY-LITERAL construction, not destructuring
+
+Tracing further: `[undefined as any]` has element type `any`, so the single-element
+literal compiles to a tuple `{_0: externref}` (NOT `{_0: f64}`), and `_0` is
+populated with **`__box_number(sentinel)`** AT LITERAL-CONSTRUCTION time. So the
+sentinel is boxed to a NaN-number externref BEFORE destructuring ever reads it —
+`emitDefaultValueCheck` then takes its EXTERNREF arm (`emitExternrefDefaultCheck`
+→ `__extern_is_undefined`), which correctly says "not undefined" for a number box.
+
+So the canonical fix is at **array-literal element compilation**: an `undefined`
+element (or the f64 sentinel) must be stored as a real `undefined` externref
+(`emitUndefined`), NOT `__box_number(sentinel)`. Equivalently, the destructuring
+externref default check could recognize the boxed sentinel — but fixing the
+literal is cleaner and benefits every consumer (`arr[0]`, spread, etc.).
+
+**Standalone substrate note (unchanged):** in `nativeStrings`/standalone there is
+no host `undefined`; `emitUndefined` → `ref.null.extern`. Since the default check
+uses `__extern_is_undefined` (not `ref.is_null`), a null won't fire the default
+either. So a fully-correct STANDALONE fix needs a native undefined externref the
+predicate recognizes, OR the array-literal `undefined` element must be tracked so
+the destructuring uses the f64-sentinel (raw) default check instead of the
+externref one. This makes #2574 partly a standalone-undefined-substrate item — the
+JS-host lane is the easy half (`emitUndefined` at the literal); standalone needs
+the native-undefined or sentinel-tracking design.
+
+3 fix loci were tried and reverted (boxToExternref vec-loop; equality dispatch;
+tuple f64 arm) — none matched the literal-construction box site. The above is the
+correct site; documented for a focused session.
+
 ## Acceptance criteria
 
 - `const [a = 9] = [undefined]` → `a === 9` standalone; host unchanged.
