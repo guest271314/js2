@@ -908,6 +908,113 @@ function annexBHoistCancels(fnDecl: ts.FunctionDeclaration): ts.Block | null {
   return null;
 }
 
+/**
+ * (#2552) Is the block-fn name `name` OBSERVED at function scope OUTSIDE its
+ * declaring `block`? — i.e. is there a value reference to `name` somewhere in the
+ * enclosing Annex-B scope (the nearest function/global boundary containing
+ * `block`) that is NOT lexically inside `block` and NOT the declaration's own
+ * name?
+ *
+ * This is the #2552 narrowing. Phase 2 (PR #1769) pre-allocated the outer
+ * var-binding (an externref TDZ local + an i32 flag) for EVERY structurally
+ * eligible block-nested function. That perturbed local-index layout for the
+ * dominant test262 harness shape — a function that merely *contains* a
+ * block-nested helper (Array-method and dstr test files wrap assertions + fns
+ * in blocks) — and the full gate flagged -1180 (`wasm_compile`/`null_deref` in
+ * `Array/prototype` + dstr buckets). The outer binding is only OBSERVABLE via a
+ * reference to `name` outside the block; when there is none, the pre-Phase-2
+ * codegen (no alloc, no flag, no `annexBOuterBindings` entry) is fully correct
+ * and must stay byte-identical. Restricting allocation to the observed case
+ * keeps the hot path untouched while still implementing the case-B lifecycle
+ * where it is actually visible.
+ */
+function annexBNameObservedOutsideBlock(name: string, block: ts.Block): boolean {
+  // Find the enclosing Annex-B scope (function body / source file) holding `block`.
+  let scope: ts.Node = block.parent;
+  while (scope && !isAnnexBScopeBoundary(scope)) scope = scope.parent;
+  if (!scope) return false;
+  // For a function-like boundary, scan its body; for SourceFile/ModuleBlock, the
+  // node itself is the statement container.
+  const scanRoot: ts.Node =
+    !ts.isSourceFile(scope) && !ts.isModuleBlock(scope) && "body" in scope
+      ? ((scope as ts.FunctionLikeDeclarationBase).body ?? scope)
+      : scope;
+
+  let observed = false;
+  const visit = (node: ts.Node): void => {
+    if (observed) return;
+    // Do not descend into the declaring block itself — references there are the
+    // function's own scope, not the outer binding.
+    if (node === block) return;
+    // Do not cross into a NESTED function scope (it has its own bindings; a
+    // same-named decl there shadows and is handled on its own pass). The
+    // `scanRoot` boundary itself is allowed (we started inside it).
+    if (node !== scanRoot && isAnnexBScopeBoundary(node)) return;
+    if (ts.isIdentifier(node) && node.text === name && isAnnexBValueReference(node)) {
+      observed = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(scanRoot, visit);
+  return observed;
+}
+
+/**
+ * (#2552) True when identifier `id` is a value *reference* that could observe the
+ * Annex B outer binding — excludes property names (`obj.F`, `{F: …}`),
+ * declaration names (the binding sites), and labels. A bare `F`, `typeof F`,
+ * `F()`, `F` as an argument, etc. count.
+ */
+function isAnnexBValueReference(id: ts.Identifier): boolean {
+  const parent = id.parent;
+  if (!parent) return false;
+  if (ts.isPropertyAccessExpression(parent) && parent.name === id) return false;
+  if (ts.isQualifiedName(parent) && parent.right === id) return false;
+  if ((ts.isPropertyAssignment(parent) || ts.isPropertySignature(parent)) && parent.name === id) return false;
+  if (ts.isBindingElement(parent) && parent.propertyName === id) return false;
+  if (
+    (ts.isVariableDeclaration(parent) ||
+      ts.isParameter(parent) ||
+      ts.isFunctionDeclaration(parent) ||
+      ts.isBindingElement(parent)) &&
+    (parent as { name?: ts.Node }).name === id
+  ) {
+    return false;
+  }
+  if (
+    (ts.isLabeledStatement(parent) || ts.isBreakStatement(parent) || ts.isContinueStatement(parent)) &&
+    parent.label === id
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * (#2200 Phase 2) Is `fnDecl` a block-nested function that IS eligible for the
+ * Annex B web-compat outer var-binding (block-nested AND not cancelled)? Returns
+ * the declaring `Block` (for the pre-allocation / decl-site init), else `null`
+ * (direct function-body decl, or cancelled — Phase 1 handles the latter).
+ *
+ * (#2552) ADDITIONALLY narrowed: the outer binding is only allocated when the
+ * name is OBSERVED outside the declaring block (see
+ * `annexBNameObservedOutsideBlock`). A block-fn whose name is never referenced
+ * at function scope outside its block needs no outer binding, so it stays
+ * byte-identical to pre-Phase-2 codegen — this is what avoids the -1180 hot-path
+ * regression.
+ */
+function annexBBlockNestedEligible(fnDecl: ts.FunctionDeclaration): ts.Block | null {
+  const name = fnDecl.name?.text;
+  if (!name || !fnDecl.body) return null;
+  const block = fnDecl.parent;
+  if (!ts.isBlock(block)) return null;
+  if (isAnnexBScopeBoundary(block.parent)) return null; // direct fn body → not block-nested
+  if (annexBHoistCancels(fnDecl) !== null) return null; // cancelled → Phase 1, no outer binding
+  if (!annexBNameObservedOutsideBlock(name, block)) return null; // (#2552) not observed → no binding
+  return block;
+}
+
 export function hoistFunctionDeclarations(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -1007,6 +1114,25 @@ export function hoistFunctionDeclarations(
         const ranges = fctx.annexBCancelled.get(funcName) ?? [];
         ranges.push({ start: cancelBlock.getStart(), end: cancelBlock.getEnd() });
         fctx.annexBCancelled.set(funcName, ranges);
+      } else if (annexBBlockNestedEligible(stmt) !== null) {
+        // (#2200 Phase 2) Eligible block-nested function: pre-allocate the
+        // web-compat outer var-binding as a TDZ var — an externref local +
+        // an i32 TDZ flag (zero-init = uninitialised). The value + flag←1 are
+        // emitted at the declaration's textual position (compileStatement), so a
+        // read before the block / when the block is skipped sees the flag 0 →
+        // `typeof` "undefined" / direct-read ReferenceError; a read after the
+        // block ran sees the function value. Skip if the name already has a
+        // function-local (e.g. a var/param) — that binding wins, no Annex B var.
+        if (!fctx.localMap.has(funcName)) {
+          allocLocal(fctx, funcName, { kind: "externref" });
+          if (!fctx.tdzFlagLocals) fctx.tdzFlagLocals = new Map();
+          if (!fctx.tdzFlagLocals.has(funcName)) {
+            const flagIdx = allocLocal(fctx, `__tdz_${funcName}`, { kind: "i32" });
+            fctx.tdzFlagLocals.set(funcName, flagIdx);
+          }
+          if (!fctx.annexBOuterBindings) fctx.annexBOuterBindings = new Set();
+          fctx.annexBOuterBindings.add(funcName);
+        }
       }
       const hasReservedBodylessEntry = ctx.preRegisteredBodyless?.has(funcName) ?? false;
       const reservedFuncIdx = hasReservedBodylessEntry ? ctx.funcMap.get(funcName) : undefined;

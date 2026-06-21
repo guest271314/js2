@@ -1,9 +1,11 @@
 ---
 id: 2552
 title: "Annex B B.3.3 Phase 2 rework — TDZ-var outer-binding allocation perturbs hot-path codegen (-1180 test262 regression)"
-status: ready
+status: done
 sprint: 64
 created: 2026-06-19
+completed: 2026-06-21
+assignee: ttraenkler/sendev-funcidx
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -97,3 +99,44 @@ typeof fix + the full regression diagnosis live there. Phase 1 floor is on main
 - The full test262-regression gate is **net ≥ 0** with no bucket >50 and ratio
   <10% (no Array/prototype/* or */dstr regression).
 - `#2200` can then close (both phases complete).
+
+## Resolution (2026-06-21, sendev-funcidx)
+
+Reintroduced the reverted Phase-2 source (the inverse of revert `925db38df`:
+`context/types.ts` `annexBOuterBindings`, `statements.ts` decl-site init,
+`nested-declarations.ts` eligibility+alloc, `typeof-delete.ts`
+`emitAnnexBTypeofFlagBranch`) onto current upstream/main, then **narrowed the
+allocation breadth** — the single root cause of the -1180.
+
+**The narrowing.** `annexBBlockNestedEligible` (nested-declarations.ts) now
+additionally requires `annexBNameObservedOutsideBlock(name, block)`: the
+block-fn's name must be referenced as a value (read / `typeof` / call / arg —
+`isAnnexBValueReference`) somewhere in the enclosing Annex-B scope OUTSIDE its
+declaring block. The scan walks the enclosing function/SourceFile body, skips the
+declaring block and any nested function scope, and excludes property/declaration/
+label names. When the name is NOT observed outside its block — the dominant
+test262 harness shape (a function that merely *contains* block-nested helpers) —
+NO outer-binding local, NO `__tdz_` flag, and NO `annexBOuterBindings` entry are
+emitted, so codegen is byte-identical to pre-Phase-2. The case-B lifecycle is
+implemented exactly where it is observable.
+
+**Byte-identity verified** (compile-and-hash, my branch vs clean upstream/main):
+single-helper, multi-helper, dstr-style, nested-block, and a realistic
+Array.prototype verifyProperty-style harness (multiple block-nested helpers used
+only within their blocks) — ALL produce identical binaries. This is the direct
+evidence the -1180 hot-path perturbation does not recur.
+
+**Case-B behaviours verified** (`tests/issue-2552-annexb-phase2.test.ts`, 10
+cases): `typeof F` after-block→"function", skip/before→"undefined", `F()` after
+block→value, unobserved-helper still callable in-block, undeclared→"undefined",
+normal fn-body decl→"function", numeric local→"number", and case-A cancellation
+(let-shadow → ReferenceError) intact. `typecheck` + `format:check` + `lint` +
+`check:stack-balance` + `check:issues` clean.
+
+Pre-existing failures `tests/finally-block.test.ts` (5) and
+`tests/issue-1712-capture-closure-dispatch.test.ts` (1) reproduce identically on
+clean upstream/main — NOT regressions.
+
+**Full-gate is the final arbiter** (the -1180 could not be pre-validated locally;
+byte-identity on the flagged shapes is the local proxy). On the gate landing
+net ≥ 0, `#2200` closes (both phases complete).
