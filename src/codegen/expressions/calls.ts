@@ -8972,6 +8972,40 @@ function compileCallExpression(
 
       // Fast mode: native string method dispatch
       if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+        // (#2160 wrapper-strmethod) A String WRAPPER receiver (`new String(x)`)
+        // reaches here because `isStringType` deliberately also matches the
+        // wrapper Object type (for primitive-string method dispatch — see the
+        // cs-2160 `resolveWasmType` note). But the wrapper lowers to a `$Object`
+        // externref, NOT a native string ref, so the default receiver emitter
+        // (`compileExpression(propAccess.expression)` → `__str_flatten`'s
+        // `ref.cast $NativeString`) traps at runtime with "illegal cast" /
+        // "null pointer" for every String.prototype method (`charAt`, `slice`,
+        // `indexOf`, `toUpperCase`, …). The wrapper `.valueOf()`/`.toString()`
+        // slice (cs-2160) already recovers the internal `[[PrimitiveValue]]` slot
+        // via the native `__to_primitive` engine helper; reuse the SAME helper
+        // here as the receiver so the method dispatches against the wrapped
+        // primitive string. Gated on `ctx.standalone` (the native object-runtime
+        // / `__to_primitive` machinery is standalone-only — WASI keeps the host
+        // object path). No new coercion site: `__to_primitive` is the existing
+        // §7.1.1.1 engine helper.
+        if (ctx.standalone && isStringWrapperType(receiverType) && method !== "toString" && method !== "valueOf") {
+          ensureObjectRuntime(ctx);
+          const toPrimIdx = ctx.funcMap.get("__to_primitive");
+          if (toPrimIdx !== undefined && ctx.anyStrTypeIdx >= 0) {
+            const wrapperReceiverOverride = (): ValType => {
+              // wrapper externref → __to_primitive(hint "string") → externref
+              // (the internal slot IS a native string) → back to `ref $AnyString`.
+              compileExpression(ctx, fctx, propAccess.expression, { kind: "externref" });
+              addStringConstantGlobal(ctx, "string");
+              fctx.body.push(...stringConstantExternrefInstrs(ctx, "string"));
+              fctx.body.push({ op: "call", funcIdx: toPrimIdx });
+              fctx.body.push({ op: "any.convert_extern" } as Instr);
+              fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+              return { kind: "ref", typeIdx: ctx.anyStrTypeIdx };
+            };
+            return compileNativeStringMethodCall(ctx, fctx, expr, propAccess, method, wrapperReceiverOverride);
+          }
+        }
         return compileNativeStringMethodCall(ctx, fctx, expr, propAccess, method);
       }
 
