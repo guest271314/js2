@@ -299,4 +299,69 @@ describe("#2001 S1 — sparse-array literal holes ($Hole sentinel, any[] only)",
       ).toBe(5);
     });
   });
+
+  // (#1838 regression) The S1 sentinel must round-trip as `undefined` across the
+  // HOST-marshaling boundary too, not just direct Wasm reads. A hole-array passed
+  // as a function ARGUMENT is wrapped by `__make_iterable` (the host vec→JS-array
+  // marshaler), which reads each element via the `__vec_get` export and rebuilds
+  // a plain JS array; the destructuring param then re-materializes from it. Two
+  // bugs broke this (PR #1838 ejected the merge_group at -39 / 42 files, all the
+  // `*-ary-ptrn-elem-id-init-hole` family):
+  //   (1) a stale cached `$__hole` global index after a string-constant import
+  //       shifted module globals — `emitHoleSentinel` stored `__current_this`
+  //       (null) instead of `$Hole`, so the hole marshaled as a real null; and
+  //   (2) the `__vec_get` host export returned the opaque `$Hole` struct as-is
+  //       (→ JS null), never mapping it to `undefined`.
+  // With a hole stored AND the host boundary mapping it, a `[x = d]` default
+  // fires on a hole argument exactly as it does on an explicit `undefined`.
+  describe("host — hole array passed as a destructuring-param argument (#1838)", () => {
+    it("element default fires for a hole arg, just like an explicit undefined", async () => {
+      const fnExpr = `var f; f = function ([x = 23]) { return x; }; export function run(): number { return f([,]) as number; }`;
+      expect(await run(fnExpr)).toBe(23);
+      // explicit undefined argument already fired the default pre-S1 — must stay 23
+      expect(await run(fnExpr.replace("f([,])", "f([undefined])"))).toBe(23);
+      // a present value is NOT overridden by the default
+      expect(await run(fnExpr.replace("f([,])", "f([5])"))).toBe(5);
+    });
+
+    it("named-fn, arrow, and generator param destructuring all honor the hole default", async () => {
+      expect(
+        await run(
+          `function f([x = 23]: any[]): number { return x as number; } export function run(): number { return f([,]); }`,
+        ),
+      ).toBe(23);
+      expect(
+        await run(
+          `const f = ([x = 23]: any[]): number => x as number; export function run(): number { return f([,]); }`,
+        ),
+      ).toBe(23);
+      expect(
+        await run(
+          `function* g([x = 23]: any[]): Generator<number> { yield x as number; } export function run(): number { return g([,]).next().value as number; }`,
+        ),
+      ).toBe(23);
+    });
+
+    it("multiple holes each fire their own default (all-holes arg)", async () => {
+      expect(
+        await run(
+          `var f; f = function ([x = 23, y = 9, z = 7]) { return (x as number) + (y as number) + (z as number); }; export function run(): number { return f([, , ]) as number; }`,
+        ),
+      ).toBe(39);
+    });
+
+    it("a hole array spread into a Set marshals holes as undefined (one Set entry)", async () => {
+      // [1,,3] → Set sees 1, undefined, 3 → size 3 (the hole is a real undefined,
+      // not the opaque sentinel struct, which would have been a distinct entry).
+      expect(await run(`export function run(): number { const a: any[] = [1, , 3]; return new Set(a).size; }`)).toBe(3);
+    });
+
+    it("for-of over a hole array yields undefined at the hole (host iterator path)", async () => {
+      expect(
+        await run(
+          `export function run(): string { const a: any[] = [1, , 3]; let s = ""; for (const x of a) { s += typeof x + ","; } return s; }`,
+        ),
+      ).toBe("number,undefined,number,");
+    });
+  });
 });

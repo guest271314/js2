@@ -40,10 +40,10 @@ import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
-import { scanForArrayHoles } from "./array-holes.js"; // (#2001 S1)
+import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
-import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
+import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
 import { fillApplyClosure, fillExternGetIdxVecArms, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
@@ -4241,6 +4241,20 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
   // Ensure __box_number is available for boxing f64/i32 elements in __vec_get (#854)
   addUnionImports(ctx);
 
+  // (#2001 S1 regress) Pre-import `__get_undefined` BEFORE baking any funcIdx into
+  // `__vec_len`/`__vec_get`, so the externref `$Hole → undefined` host-boundary map
+  // below resolves it via funcMap and emits a real JS `undefined` (not the
+  // `ref.null.extern` null fallback — null does NOT satisfy `__extern_is_undefined`,
+  // so a marshaled hole would still suppress a destructuring default). Standalone /
+  // native-strings returns undefined here (no host) and the map falls back to
+  // `ref.null.extern`, which is the standalone undefined convention — and the host
+  // marshaling path that leaks holes does not exist there anyway. Gated on
+  // `usesArrayHoles` so hole-free modules add no import.
+  if (ctx.usesArrayHoles) {
+    ensureGetUndefined(ctx);
+    flushLateImportShifts(ctx, null);
+  }
+
   // __vec_len(externref) -> i32
   const lenTypeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }], "$__vec_len_type");
   const lenFuncIdx = ctx.numImportFuncs + mod.functions.length;
@@ -4314,6 +4328,25 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     ];
     // Pre-check if __box_number is available (don't add late imports)
     const boxNumIdx = ctx.funcMap.get("__box_number");
+    // (#2001 S1 regress) `__vec_get` is the chokepoint the HOST reads a vec
+    // element through (`__make_iterable`'s convertToJS, `__array_entries`,
+    // `wrapExports`, etc.). An externref slot may hold the `$Hole` sentinel for an
+    // `any[]` literal elision; per §ToObject/Get an absent index reads as
+    // `undefined`, NOT the opaque sentinel struct. Without mapping it here a hole
+    // crosses the host boundary as an opaque WasmGC struct → JS sees a
+    // non-`undefined` value → a destructuring `[x = d]` default (or any host-side
+    // hole read) never fires (the -39 regression in PR #1838 — `f([,])` where the
+    // hole is marshaled through `__make_iterable`). Map `$Hole → undefined` for
+    // externref elements only, gated on `usesArrayHoles`. Pre-resolve the funcIdx
+    // for the host `__get_undefined` (already imported when the module uses it;
+    // `funcMap` lookup only — no late import added here) and register `$Hole`.
+    const holeMapInVecGet = ctx.usesArrayHoles;
+    let holeTypeIdxForGet = -1;
+    if (holeMapInVecGet) {
+      ensureHoleType(ctx);
+      holeTypeIdxForGet = ctx.holeTypeIdx;
+    }
+    const getUndefIdxForGet = holeMapInVecGet ? ctx.funcMap.get("__get_undefined") : undefined;
     for (let i = vecEntries.length - 1; i >= 0; i--) {
       const [elemKey, vecTypeIdx] = vecEntries[i]!;
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
@@ -4328,7 +4361,30 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
       // Inline boxing: avoid calling addUnionImports late
       let boxInstrs: Instr[];
       if (elemKey === "externref") {
-        boxInstrs = [];
+        // (#2001 S1 regress) Map a `$Hole` slot back to `undefined` before it
+        // leaves to the host. `[externref] → [externref]`: tee the slot, test it
+        // for `$Hole`; if it is the sentinel, substitute `undefined` (host
+        // `__get_undefined` when imported, else `ref.null.extern` — the standalone
+        // undefined convention), otherwise return the slot unchanged.
+        if (holeMapInVecGet && holeTypeIdxForGet >= 0) {
+          const undefInstrs: Instr[] =
+            getUndefIdxForGet !== undefined
+              ? [{ op: "call", funcIdx: getUndefIdxForGet } as Instr]
+              : [{ op: "ref.null.extern" } as Instr];
+          boxInstrs = [
+            { op: "local.tee", index: 3 } as Instr,
+            { op: "any.convert_extern" } as Instr,
+            { op: "ref.test", typeIdx: holeTypeIdxForGet } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "externref" } },
+              then: undefInstrs,
+              else: [{ op: "local.get", index: 3 } as Instr],
+            } as Instr,
+          ];
+        } else {
+          boxInstrs = [];
+        }
       } else if (elemKey === "f64" && boxNumIdx !== undefined) {
         boxInstrs = [{ op: "call", funcIdx: boxNumIdx } as Instr];
       } else if (elemKey === "i32" && boxNumIdx !== undefined) {
@@ -4373,7 +4429,16 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
     mod.functions.push({
       name: "__vec_get",
       typeIdx: getTypeIdx,
-      locals: [{ name: "__any", type: { kind: "anyref" } }],
+      // local 2 = __any (anyref). (#2001 S1 regress) When the module has holes,
+      // local 3 = __hole_scratch (externref) backs the `$Hole → undefined`
+      // read-boundary map (`local.tee 3` above). Declared ONLY then, so a
+      // hole-free module's `__vec_get` is byte-identical to pre-fix.
+      locals: holeMapInVecGet
+        ? [
+            { name: "__any", type: { kind: "anyref" } },
+            { name: "__hole_scratch", type: { kind: "externref" } },
+          ]
+        : [{ name: "__any", type: { kind: "anyref" } }],
       body,
       exported: true,
     } as any);
