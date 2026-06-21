@@ -4622,6 +4622,70 @@ function compileCallExpression(
       propAccess.expression.text === "Array" &&
       propAccess.name.text === "of"
     ) {
+      // (#1633 standalone slice) `Array.of(a, b, c)` ≡ `[a, b, c]` (§23.1.2.3:
+      // every arg is an element; unlike `Array(n)` a single numeric arg is NOT a
+      // length). In no-JS-host mode the host `__array_of` (+ `__js_array_new`/
+      // `__js_array_push`) imports don't exist — the old path leaked them and
+      // returned a wrong/empty array standalone. Build a native vec directly,
+      // mirroring the multi-arg `Array(a,b,c)` branch of
+      // `compileArrayConstructorCall` (no spread → fixed arity). Spread args keep
+      // the host path (handled by the generic spread-call lowering in host mode);
+      // a standalone spread of Array.of falls through to the existing path.
+      const hasSpreadArg = expr.arguments.some((a) => ts.isSpreadElement(a));
+      if (noJsHost(ctx) && !hasSpreadArg) {
+        // Element type: contextual `Array<T>` type arg, else f64 for a numeric
+        // arg set, else externref (mixed / non-numeric). Mirrors the untyped
+        // dense-array default in compileArrayConstructorCall.
+        const ctxType = ctx.checker.getContextualType(expr) ?? ctx.checker.getTypeAtLocation(expr);
+        const elemTsType = ctx.checker.getTypeArguments(ctxType as ts.TypeReference)?.[0];
+        let elemWasm: ValType;
+        if (elemTsType && (elemTsType.flags & ts.TypeFlags.Any) === 0) {
+          elemWasm = resolveWasmType(ctx, elemTsType);
+        } else {
+          // No resolvable element type: pick f64 only when every arg is a static
+          // number; otherwise box to externref so mixed/object elements survive.
+          const allNumeric = expr.arguments.every((a) => {
+            const t = ctx.checker.getTypeAtLocation(a);
+            return (t.flags & (ts.TypeFlags.Number | ts.TypeFlags.NumberLiteral)) !== 0;
+          });
+          elemWasm = expr.arguments.length > 0 && allNumeric ? { kind: "f64" } : { kind: "externref" };
+        }
+        const elemKey =
+          elemWasm.kind === "ref" || elemWasm.kind === "ref_null"
+            ? `ref_${(elemWasm as { typeIdx: number }).typeIdx}`
+            : elemWasm.kind;
+        const ofVecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemWasm);
+        const ofArrTypeIdx = getArrTypeIdxFromVec(ctx, ofVecTypeIdx);
+        if (ofArrTypeIdx >= 0) {
+          if (expr.arguments.length === 0) {
+            fctx.body.push({ op: "i32.const", value: 0 });
+            fctx.body.push({ op: "i32.const", value: 0 });
+            fctx.body.push({ op: "array.new_default", typeIdx: ofArrTypeIdx });
+            fctx.body.push({ op: "struct.new", typeIdx: ofVecTypeIdx });
+            return { kind: "ref_null", typeIdx: ofVecTypeIdx };
+          }
+          for (const arg of expr.arguments) {
+            const at = compileExpression(ctx, fctx, arg, elemWasm);
+            if (at && !valTypesMatch(at, elemWasm)) coerceType(ctx, fctx, at, elemWasm);
+            else if (
+              at === null &&
+              (elemWasm.kind === "ref" || elemWasm.kind === "ref_null" || elemWasm.kind === "externref")
+            )
+              fctx.body.push({ op: "ref.null.extern" } as Instr);
+          }
+          fctx.body.push({ op: "array.new_fixed", typeIdx: ofArrTypeIdx, length: expr.arguments.length });
+          const ofDataLocal = allocLocal(fctx, `__arrof_data_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: ofArrTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: ofDataLocal });
+          fctx.body.push({ op: "i32.const", value: expr.arguments.length });
+          fctx.body.push({ op: "local.get", index: ofDataLocal });
+          fctx.body.push({ op: "struct.new", typeIdx: ofVecTypeIdx });
+          return { kind: "ref_null", typeIdx: ofVecTypeIdx };
+        }
+        // vec type unavailable — fall through to the host path below.
+      }
       // Build a JS array of the arguments and delegate to host
       const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
       const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
@@ -8333,6 +8397,36 @@ function compileCallExpression(
         return { kind: "externref" };
       }
     }
+    // (#2160) Number.prototype.toLocaleString() with no arguments, STANDALONE/
+    // WASI only. Without ECMA-402 the result equals ToString(value) base 10
+    // (§21.1.3.4), so route it to the same `number_toString` lowering as the
+    // 0-arg `.toString()` arm above. This removes the standalone/WASI
+    // `__extern_toLocaleString` dynamic-shape refusal (a host-only import with
+    // no native fallback). Host (gc) mode is intentionally excluded: it keeps
+    // the `__extern_toLocaleString` path below for real Intl grouping. A call
+    // WITH a locale argument also falls through to that host path.
+    if (
+      (ctx.standalone || ctx.wasi) &&
+      isNumberType(receiverType) &&
+      propAccess.name.text === "toLocaleString" &&
+      expr.arguments.length === 0
+    ) {
+      const exprType = compileExpression(ctx, fctx, propAccess.expression);
+      if (exprType && exprType.kind === "i32") {
+        fctx.body.push({ op: "f64.convert_i32_s" });
+      }
+      const funcIdx = ctx.funcMap.get("number_toString");
+      if (funcIdx !== undefined) {
+        fctx.body.push({ op: "call", funcIdx });
+        const unwrapToNative = ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0 && (ctx.standalone || ctx.wasi);
+        if (unwrapToNative) {
+          fctx.body.push({ op: "any.convert_extern" } as Instr);
+          fctx.body.push({ op: "ref.cast", typeIdx: ctx.anyStrTypeIdx } as Instr);
+          return nativeStringType(ctx);
+        }
+        return { kind: "externref" };
+      }
+    }
     // (#1644 Slice D) BigInt.prototype.toString — bigint receivers cross the
     // boundary as i64. Mirror the number branch: validate radix range (2-36),
     // throw RangeError otherwise, then call bigint_toString_radix (or the
@@ -11049,6 +11143,27 @@ function compileCallExpression(
     const linearParamsForCall = getLinearU8ParamIndicesForCall(ctx, expr);
     const hasLinearParamsForCall = !!linearParamsForCall && linearParamsForCall.size > 0;
 
+    // (#2202) User-visible param count, computed up-front so the spread-call
+    // dispatch below can detect the "callee reads `arguments`, every arg is an
+    // extra" shape (the named generator/free-function trailing-comma+spread
+    // cluster) and route it through the `__argc`/`__extras_argv` protocol
+    // instead of `compileSpreadCallArgs` (which only fills positional param
+    // slots and never materialises the runtime-length extras vec — so a
+    // 0-param `arguments`-reading callee saw `arguments.length === 0` and a
+    // stray positional operand was left on the stack → null-deref trap). The
+    // capture-count math mirrors the normal-call path below.
+    const paramTypesEarly = getFuncParamTypes(ctx, funcIdx);
+    const captureCountEarly = nestedCaptures
+      ? nestedCaptures.length + nestedCaptures.filter((c) => c.hasTdzFlag).length
+      : 0;
+    const paramCountEarly =
+      hasLinearParamsForCall && paramTypesEarly
+        ? sourceParamCountFromExpanded(paramTypesEarly.length, linearParamsForCall, captureCountEarly)
+        : paramTypesEarly
+          ? paramTypesEarly.length - captureCountEarly
+          : expr.arguments.length;
+    const calleeReadsArgsEarly = ctx.funcUsesArguments.has(funcName);
+
     if (hasLinearParamsForCall && hasSpreadArg) {
       reportError(ctx, expr, "Cannot spread arguments into a linear Uint8Array helper call (#1886)");
       const paramTypes = getFuncParamTypes(ctx, funcIdx);
@@ -11090,6 +11205,32 @@ function compileCallExpression(
       });
       // Wrap in vec struct: { length, data }
       fctx.body.push({ op: "struct.new", typeIdx: restInfo.vecTypeIdx });
+    } else if (hasSpreadArg && calleeReadsArgsEarly && !restInfo && !hasLinearParamsForCall && paramCountEarly <= 0) {
+      // (#2202) Direct call to an `arguments`-reading function where the callee
+      // has zero user params, so EVERY argument (spread or not) is an "extra".
+      // `compileSpreadCallArgs` would only fill positional param slots (none
+      // here), dropping the runtime extras and leaving `arguments.length === 0`
+      // plus a stray operand on the stack. Route the whole list through the
+      // `__extras_argv` builder (runtime spread expansion, stack-neutral) and
+      // set `__argc` from the extras count — mirroring every method dispatch
+      // path. `paramCount` is 0, so no JS positional operands precede the call.
+      //
+      // Capture/env operands (for a lifted nested fn) are ALREADY on the stack
+      // from the `nestedCaptures` prepend loop above — `emitSetExtrasArgv` is
+      // stack-neutral (everything lands in locals), so it does not disturb
+      // them. We therefore pad only the param slots AFTER the capture region
+      // (the same accounting as the normal-call path: providedCount = 0 user
+      // args + captureCount captures already pushed). Over-padding the captures
+      // was the null-deref: a phantom default landed on top of the real env.
+      emitSetExtrasArgv(ctx, fctx, expr.arguments as unknown as ts.Expression[], 0);
+      if (paramTypesEarly) {
+        for (let i = captureCountEarly; i < paramTypesEarly.length; i++) {
+          pushDefaultValue(fctx, paramTypesEarly[i]!, ctx);
+        }
+      }
+      // __argc = 0 (no formal-region args); `arguments.length` then derives
+      // entirely from the runtime extras-vec length built above.
+      maybeSetArgcForKnownCall(ctx, fctx, funcName, 0, 0);
     } else if (hasSpreadArg) {
       // Spread in function call: fn(...arr) — unpack array elements as positional args
       compileSpreadCallArgs(ctx, fctx, expr, funcIdx, restInfo);

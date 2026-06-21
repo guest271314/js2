@@ -2,7 +2,7 @@
 id: 2187
 title: "standalone: string methods on an any-typed local with a native-string ValType take the generic externref path (v.length → 0)"
 status: ready
-sprint: Backlog
+sprint: 64
 created: 2026-06-17
 updated: 2026-06-17
 priority: low

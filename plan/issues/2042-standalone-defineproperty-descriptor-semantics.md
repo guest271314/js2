@@ -2,7 +2,7 @@
 id: 2042
 title: "standalone: Object.defineProperty/defineProperties residual — __obj_insert illegal cast + descriptor semantics over $Object (~340 tests)"
 status: in-progress
-sprint: Backlog
+sprint: 64
 created: 2026-06-10
 updated: 2026-06-17
 priority: high

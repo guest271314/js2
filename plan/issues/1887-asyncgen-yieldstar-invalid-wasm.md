@@ -1,10 +1,12 @@
 ---
 id: 1887
 title: "async-generator yield* emits invalid Wasm (array.set in __closure) — 325 default-lane CE"
-status: ready
-sprint: Backlog
+status: done
+sprint: 64
 created: 2026-06-05
-updated: 2026-06-05
+updated: 2026-06-21
+completed: 2026-06-21
+resolved_by: 2170, 2171
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -12,6 +14,21 @@ task_type: bug
 area: codegen
 language_feature: async-generators
 ---
+
+## Resolution (2026-06-21, sd-4 reproduce-first) — symptom fixed; residual → #2570
+
+The filed symptom (325 invalid-Wasm `array.set` CEs in async `yield*` closures)
+is **already fixed on main** — resolved by intervening #2170/#2171
+(native-generator + result-struct work). Re-bucketed against the fresh baseline,
+that invalid-wasm bucket is **0**; reproducing the named sample tests now yields
+an assertion failure, not an instantiate error. Acceptance #1 (no invalid wasm)
+is met → closed.
+
+The residual **~86 fails** (down from 325) are a **distinct architectural
+problem** — async `yield*` execution-order / laziness, rooted in the eager-buffer
+generator runtime (`src/runtime.ts:135`, the same root as **#2566**). Re-filed as
+**#2570** (lazy/suspending async-generator runtime). Not part of this issue's
+invalid-wasm scope.
 
 # async-generator `yield*` emits invalid Wasm (array.set in generated closure)
 

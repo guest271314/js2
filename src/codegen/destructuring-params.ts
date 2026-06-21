@@ -465,6 +465,21 @@ export function destructureParamObjectExternref(
 
         const savedBody = fctx.body;
         const thenInstrs: Instr[] = [];
+        // (#2567) Track the detached default-value buffer in `ctx.liveBodies`
+        // for the compile window. The initializer can be ANY expression —
+        // crucially a function CALL (`b = thrower()`) — whose compilation
+        // registers a late import and triggers a func/global-index shift. That
+        // shift walks `fctx.body` + `fctx.savedBodies` + `ctx.liveBodies`; while
+        // we emit into `thenInstrs` it is detached from `fctx.body` and not on
+        // `savedBodies`, so an already-emitted `call <thrower>` would keep its
+        // stale-high funcIdx and get mis-remapped at finalize (observed: the
+        // call landed on `__typeof_bigint`/`__box_number` scaffolding →
+        // `not enough arguments on the stack for call` in `C_method`). Also keep
+        // the OUTER body live for the same recursion window — mirrors the
+        // struct-fast-path then/else tracking at the `#2158` site below.
+        const outerAlreadyLive = ctx.liveBodies.has(savedBody);
+        if (!outerAlreadyLive) ctx.liveBodies.add(savedBody);
+        ctx.liveBodies.add(thenInstrs);
         fctx.body = thenInstrs;
         compileExpression(ctx, fctx, element.initializer, localType ?? elemType);
         fctx.body.push({ op: "local.set", index: localIdx! } as Instr);
@@ -474,6 +489,7 @@ export function destructureParamObjectExternref(
         if (localType && !valTypesMatch(elemType, localType)) {
           const savedBody2 = fctx.body;
           fctx.body = elseCoerce;
+          ctx.liveBodies.add(elseCoerce);
           coerceType(ctx, fctx, elemType, localType);
           fctx.body = savedBody2;
         }
@@ -488,6 +504,13 @@ export function destructureParamObjectExternref(
             { op: "local.set", index: localIdx! } as Instr,
           ],
         });
+        // The buffers are now reachable via `fctx.body` (spliced into the `if`),
+        // so drop the temporary `liveBodies` registrations to avoid the
+        // double-shift hazard (#1109) where a body reachable from both `fctx.body`
+        // and `liveBodies` is walked twice.
+        ctx.liveBodies.delete(thenInstrs);
+        ctx.liveBodies.delete(elseCoerce);
+        if (!outerAlreadyLive) ctx.liveBodies.delete(savedBody);
         if (isDecl) emitLocalTdzInit(fctx, localName);
       } else {
         if (localType && !valTypesMatch(elemType, localType)) {

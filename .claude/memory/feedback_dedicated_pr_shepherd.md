@@ -1,16 +1,40 @@
 ---
 name: feedback-dedicated-pr-shepherd
-description: "Always keep a dedicated PR-queue shepherd as a standing team role; don't let the tech-lead hand-shepherd the merge queue ad-hoc"
+description: "PR-queue shepherding is the team-LEAD's own job (lightweight: enqueue green, simple drift, reconcile); reassign only lengthy conflict-resolution/fixes to a dev — do NOT spawn a dedicated shepherd agent"
 metadata: 
   node_type: memory
   type: feedback
   originSessionId: 75ffdde9-6b72-447e-992f-f6b025616c19
 ---
 
-Always staff a **dedicated PR-queue shepherd** as a permanent part of the team (alongside devs / PO / architect), every sprint and session — not an ad-hoc tech-lead duty.
+**CORRECTED by the stakeholder (sprint 64, 2026-06-19):** shepherding the team's
+open PRs is the **team-lead's own job** — NOT a dedicated standing shepherd agent.
+The lead does the lightweight, continuous parts itself; only **lengthy conflict
+resolution or a real fix gets reassigned to a dev**. (The earlier guidance to staff
+a permanent PR-shepherd teammate was over-delegation; the user shut that down — I had
+spawned a `pr-shepherd` agent and was told to take the sweep back.)
 
-Its job: keep the GitHub merge queue draining to `main` — enqueue stranded CLEAN PRs (GraphQL `enqueuePullRequest`, never `gh pr merge --auto` which no-ops on already-green PRs), `update-branch` BEHIND PRs past the standalone guard fix, triage/park or close DIRTY PRs (draft/close to stop monitor thrash), reconcile merged PRs → TaskList + issue `status: done`, and escalate only genuine CI failures.
+**Scope: the team's OWN PRs only** — i.e. PRs this session's agents authored. Do NOT
+shepherd PRs driven by other parallel driver sessions (they shepherd their own); and
+the merge queue itself owns the strategy.
 
-**Why:** PR shepherding is continuous, easily-dropped work. When the tech-lead does it ad-hoc it both causes churn and gets neglected when the lead is busy orchestrating (a 9-PR backlog stranded with an empty queue on 2026-05-29; recurring DIRTY echoes burned loop cycles in sprint 62). A dedicated shepherd makes drainage reliable and frees the lead.
+**Lead does directly (lightweight, every loop):**
+- Enqueue stranded CLEAN/green-but-unqueued PRs — GraphQL `enqueuePullRequest`
+  (`PRID=$(gh pr view N --json id -q .id); gh api graphql -f query='mutation($id:ID!){enqueuePullRequest(input:{pullRequestId:$id}){clientMutationId}}' -f id="$PRID"`).
+  NEVER `gh pr merge --auto` (no-ops on already-green CLEAN PRs).
+- Simple drift: a trivial `git merge origin/main` with only doc/test/baseline conflicts.
+- Reconcile merged PRs → TaskList `completed` + issue `status: done`.
+- Active devs shepherd their OWN in-flight PRs (BLOCKED/UNSTABLE on their branches) — don't step on them.
 
-**How to apply:** Spawn a PR-shepherd teammate at session/sprint start as a standing role. In sessions that **cannot** spawn persistent teammates (background jobs limited to synchronous subagents), the persistent layer is the queue-shepherd **Monitor** + `.github/workflows/auto-enqueue.yml` backstop (`scripts/enqueue-green-prs.mjs`, every 10 min) — and spawn the dedicated agent at the next interactive opportunity. Record the role in `plan/method/team-setup.md`. Related: [[feedback_no_ci_wait]] (CI monitoring is not dev work), [[feedback_reduce_notification_noise]].
+**Reassign to a dev (create a task, set owner):** any PR needing
+- a **semantic src/ conflict** resolution (e.g. a hot file like property-access.ts),
+- a real CI-failure fix / regression,
+- a verify-then-rescue-or-close judgement (stale PR possibly superseded).
+Give the dev a verify-before step (does it still flip / is it superseded → close) before resolving.
+
+**Backstop (automation, still valid):** `.github/workflows/auto-enqueue.yml`
+(`scripts/enqueue-green-prs.mjs`, every 10 min + on each CI completion) auto-enqueues
+any open green mergeable non-draft PR. So green PRs self-heal within ~10 min even if the
+lead misses a sweep; the lead's manual enqueue just makes it immediate. The backstop does
+NOT touch DIRTY/BLOCKED (those need the dev/lead). Related: [[feedback_no_ci_wait]],
+[[feedback_reduce_notification_noise]].
