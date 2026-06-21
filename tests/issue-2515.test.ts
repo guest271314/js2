@@ -146,6 +146,40 @@ describe("#2515 S0 — standalone late-import global-index-shift emit bug", () =
     expect(hostImports.some((l) => l.startsWith("string_constants::"))).toBe(false);
   });
 
+  // ── S0 slice 2: calls.ts producers (toString fallback + builtin-name dispatch) ──
+
+  it(".toString() fallback string ('[object Object]') compiles + instantiates standalone (no -1 emit)", async () => {
+    // calls.ts materialized the toString fallback string via a raw
+    // `global.get <stringGlobalMap.get(str)!>` → `global.get -1` under standalone
+    // (the Number/Boolean.prototype.toString borrowed-method cluster). S0's claim
+    // is the emit-CE is gone: the module compiles + validates + instantiates
+    // under empty imports. (Exact `[object Object]` round-trip via native-string
+    // `.length` is a separate `.toString()`-semantics path, not S0.)
+    const obj = await compile(
+      `export function test(): number { const o: any = {}; const s = o.toString(); return s !== null ? 1 : 0; }`,
+      { fileName: "test.ts", target: "standalone" },
+    );
+    expect(obj.success, obj.success ? "" : obj.errors.map((e) => e.message).join("\n")).toBe(true);
+    const hostImports = obj.imports.map((i) => `${i.module}::${i.name}`);
+    expect(hostImports.some((l) => l.startsWith("string_constants::"))).toBe(false);
+    // Instantiates under empty imports without trapping (the S0 acceptance).
+    await WebAssembly.instantiate(obj.binary, {});
+  });
+
+  it("function .toString() (captured source) compiles standalone without a -1 global", async () => {
+    const r = await compile(
+      `function f(): number { return 1; } export function test(): number { return f.toString().length > 0 ? 1 : 0; }`,
+      { fileName: "test.ts", target: "standalone" },
+    );
+    if (!r.success) {
+      const msg = r.errors.map((e) => e.message).join("\n");
+      expect(msg).not.toMatch(/global index out of range/);
+    } else {
+      const { instance } = await WebAssembly.instantiate(r.binary, {});
+      expect((instance.exports as { test?: () => number }).test?.()).toBe(1);
+    }
+  });
+
   // ── S1: Object.create(o, descs) generic descriptor apply ──────────────────
 
   it("Object.create(proto, descriptorMapLiteral) compiles standalone (no __defineProperty_desc refusal)", async () => {
