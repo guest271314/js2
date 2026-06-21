@@ -2081,6 +2081,162 @@ function emitDynamicNewFallback(
   return true;
 }
 
+/**
+ * (#2162) Seed a native Set (its `$Map` backing store, already built and held in
+ * `collTmp`) from a NON-LITERAL array-typed argument — `new Set(arr)`,
+ * `new Set(spreadVar)` — the dominant non-literal iterable form. The
+ * array-literal form is handled inline by the constructor block; this covers the
+ * variable / call-result vec.
+ *
+ * `arg` is compiled to a `$Vec` struct (`{length: i32, data: (ref $arr)}`); we
+ * walk it with a counted Wasm loop, box each element, and call `__set_add`.
+ *
+ * ALWAYS leaves the collection ref on the stack (the caller returns it directly).
+ * Returns true when the seed loop was emitted; false when the arg is not a usable
+ * vec (the collection is left empty — graceful: never a host-import leak / CE).
+ *
+ * NOTE — Map(pairsVar) is intentionally out of this slice: the inner `[K,V]` pair
+ * lowers to a typed *tuple struct* (`$__tuple_<n>`), not an inner vec, so its
+ * extraction is a distinct shape (struct.get per field, varying field types). The
+ * Map array-literal-of-pairs form is already handled inline; the non-literal Map
+ * variable form falls back to an empty Map (no leak/CE) and is a follow-up.
+ */
+function seedNativeSetFromArrayArg(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  arg: ts.Expression,
+  collTmp: number,
+  addFuncIdx: number,
+): boolean {
+  // Bail helper: drop a stray compiled value (if any) and restore the collection.
+  const bail = (dropArg: boolean): boolean => {
+    if (dropArg) fctx.body.push({ op: "drop" });
+    fctx.body.push({ op: "local.get", index: collTmp });
+    return false;
+  };
+  // Compile the argument to its vec value.
+  const argType = compileExpression(ctx, fctx, arg);
+  if (argType === null) return bail(false);
+  if (argType.kind !== "ref" && argType.kind !== "ref_null") return bail(true);
+  const vecTypeIdx = (argType as { typeIdx: number }).typeIdx;
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) return bail(true);
+  const arrDef = ctx.mod.types[arrTypeIdx];
+  if (!arrDef || arrDef.kind !== "array") return bail(true);
+  const elemType = arrDef.element;
+
+  // Locals: the source vec, its data array, the loop index, the length.
+  const vecLocal = allocLocal(fctx, `__collctor_vec_${fctx.locals.length}`, argType);
+  const dataLocal = allocLocal(fctx, `__collctor_data_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: arrTypeIdx,
+  });
+  const idxLocal = allocLocal(fctx, `__collctor_i_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__collctor_len_${fctx.locals.length}`, { kind: "i32" });
+
+  // vec → local; data = vec.data (field 1); len = vec.length (field 0); i = 0.
+  fctx.body.push({ op: "local.set", index: vecLocal });
+  fctx.body.push({ op: "local.get", index: vecLocal });
+  fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: dataLocal });
+  fctx.body.push({ op: "local.get", index: vecLocal });
+  fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal });
+  fctx.body.push({ op: "i32.const", value: 0 });
+  fctx.body.push({ op: "local.set", index: idxLocal });
+
+  // Build the per-element body inside a block/loop. The body reads data[i],
+  // coerces to anyref, and calls __set_add with the collection.
+  const loopBody: Instr[] = [];
+  // break if i >= len
+  loopBody.push({ op: "local.get", index: idxLocal });
+  loopBody.push({ op: "local.get", index: lenLocal });
+  loopBody.push({ op: "i32.ge_s" });
+  loopBody.push({ op: "br_if", depth: 1 });
+  {
+    // __set_add(coll, box(data[i]))  (returns ref $Map → drop)
+    loopBody.push({ op: "local.get", index: collTmp });
+    loopBody.push({ op: "local.get", index: dataLocal });
+    loopBody.push({ op: "local.get", index: idxLocal });
+    loopBody.push(emitArrayGetForElem(arrTypeIdx, elemType));
+    emitCoerceElemToAnyrefInto(ctx, fctx, loopBody, elemType);
+    loopBody.push({ op: "call", funcIdx: addFuncIdx });
+    loopBody.push({ op: "drop" });
+  }
+
+  // i += 1; continue
+  loopBody.push({ op: "local.get", index: idxLocal });
+  loopBody.push({ op: "i32.const", value: 1 });
+  loopBody.push({ op: "i32.add" });
+  loopBody.push({ op: "local.set", index: idxLocal });
+  loopBody.push({ op: "br", depth: 0 });
+
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+
+  // Leave the collection on the stack.
+  fctx.body.push({ op: "local.get", index: collTmp });
+  return true;
+}
+
+/**
+ * (#2162) Is `arg`'s static type an array (`T[]` / `Array<T>` / readonly array /
+ * a tuple)? Used to recognise the non-literal iterable form of `new Set(arr)` /
+ * `new Map(pairs)`. Conservative: only a checker-confirmed array/tuple type
+ * qualifies, so a plain identifier of a non-array type never routes here.
+ */
+function isArrayTypedArg(ctx: CodegenContext, arg: ts.Expression): boolean {
+  // A spread inside the constructor arg list is grammatically not a single arg
+  // here (handled at the array-literal layer); guard anyway.
+  if (ts.isSpreadElement(arg)) return false;
+  const t = ctx.checker.getTypeAtLocation(arg);
+  // ts.TypeChecker exposes isArrayType/isTupleType on the internal API used
+  // elsewhere in the codebase; fall back to apparent-type number-index probing.
+  const checkerAny = ctx.checker as unknown as {
+    isArrayType?: (t: ts.Type) => boolean;
+    isTupleType?: (t: ts.Type) => boolean;
+    isArrayLikeType?: (t: ts.Type) => boolean;
+  };
+  if (checkerAny.isArrayType?.(t)) return true;
+  if (checkerAny.isTupleType?.(t)) return true;
+  // Apparent-type fallback: a numeric index signature + a `length` member is the
+  // array-like shape. Avoids matching plain objects (no number index sig).
+  const apparent = ctx.checker.getApparentType(t);
+  const numIndex = apparent.getNumberIndexType?.();
+  const hasLength = apparent.getProperty?.("length") !== undefined;
+  return numIndex !== undefined && hasLength;
+}
+
+/** array.get with the per-kind sign extension for packed element types. */
+function emitArrayGetForElem(arrTypeIdx: number, elemType: ValType): Instr {
+  const op = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
+  return { op, typeIdx: arrTypeIdx } as Instr;
+}
+
+/**
+ * Coerce a vec element (already on the stack, type `elemType`) to anyref for a
+ * collection key/value, appending into `out`. Mirrors `coerceMapKeyToAnyref` but
+ * targets an arbitrary instruction buffer (the loop body, not `fctx.body`).
+ */
+function emitCoerceElemToAnyrefInto(ctx: CodegenContext, fctx: FunctionContext, out: Instr[], elemType: ValType): void {
+  // Reuse coerceMapKeyToAnyref by temporarily swapping the body buffer: it pushes
+  // onto fctx.body. We splice those instructions into `out`.
+  const saved = fctx.body;
+  const scratch: Instr[] = [];
+  fctx.body = scratch;
+  try {
+    coerceMapKeyToAnyref(ctx, fctx, elemType);
+  } finally {
+    fctx.body = saved;
+  }
+  for (const instr of scratch) out.push(instr);
+}
+
 function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: ts.NewExpression): ValType | null {
   // Handle `new function() { ... }(args)` — constructor with function expression
   if (ts.isFunctionExpression(expr.expression)) {
@@ -2151,6 +2307,10 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       arrArg.elements.every(
         (e) => ts.isArrayLiteralExpression(e) && e.elements.length === 2 && !e.elements.some(ts.isSpreadElement),
       );
+    // (#2162) Map from a NON-literal array-of-pairs variable is a follow-up: the
+    // inner `[K,V]` pair lowers to a typed tuple *struct* (not an inner vec), so
+    // its extraction differs from the Set element walk. The array-literal-of-pairs
+    // form is handled below; a non-literal Map arg falls through to the empty map.
     if (args.length === 0 || seedablePairs) {
       addUnionImports(ctx);
       ensureMapHelpers(ctx);
@@ -2192,7 +2352,12 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
   if (ctx.nativeStrings && ts.isIdentifier(expr.expression) && expr.expression.text === "Set") {
     const args = expr.arguments ?? ([] as readonly ts.Expression[]);
     const arrArg = args.length === 1 && ts.isArrayLiteralExpression(args[0]!) ? args[0]! : undefined;
-    if (args.length === 0 || arrArg) {
+    // (#2162) A single NON-literal argument whose static type is an array (a
+    // variable, a spread that lowered to a vec, `[...set]`, a call result) is the
+    // dominant non-literal iterable form — seed it via a runtime vec walk.
+    const nonLiteralArrArg =
+      args.length === 1 && arrArg === undefined && isArrayTypedArg(ctx, args[0]!) ? args[0]! : undefined;
+    if (args.length === 0 || arrArg || nonLiteralArrArg) {
       addUnionImports(ctx);
       ensureSetHelpers(ctx);
       const mapNewIdx = ctx.mapHelpers.get("__map_new");
@@ -2214,6 +2379,15 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
             fctx.body.push({ op: "drop" }); // discard chained set
           }
           fctx.body.push({ op: "local.get", index: mTmp });
+        } else if (nonLiteralArrArg && setAddIdx !== undefined) {
+          const mTmp = allocLocal(fctx, `__setctor_m_${fctx.locals.length}`, {
+            kind: "ref",
+            typeIdx: ctx.mapTypeIdx,
+          });
+          fctx.body.push({ op: "local.set", index: mTmp });
+          // On a non-vec / unsupported-element arg the helper leaves the empty
+          // collection on the stack (graceful: empty Set, never a host-import leak).
+          seedNativeSetFromArrayArg(ctx, fctx, nonLiteralArrArg, mTmp, setAddIdx);
         }
         return { kind: "ref", typeIdx: ctx.mapTypeIdx };
       }
