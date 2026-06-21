@@ -508,6 +508,43 @@ still falls through to `throwTypeError` for some wrapper/hint combinations.
 - `src/codegen/property-access.ts` (locate the `Object.prototype.toString.call` refusal) — S3
 - `tests/issue-2515.test.ts` (new) — per-slice run-tests
 
+## Status & residual disposition (sd-6, 2026-06-21)
+
+The **keystone is DONE** — the standalone-blocking emit CE and the create
+refusal are cleared. Merged:
+- **S0** — PR #1848 (sentinel-safe string producers: descriptor TypeError-throw
+  messages, obj-rest excluded-keys, null/undefined concat/template; killed
+  `global index out of range — -1`) + PR #1850 (calls.ts toString-fallback +
+  builtin-name dispatch guards). S0 residual 91 → 20.
+- **S1** — PR #1853 (`Object.create(o, descs)` routed to the existing native
+  `__obj_define_from_desc` instead of the refused `__defineProperty_desc` host
+  import; create-descriptor refusals 26 → 0, no new runtime helper needed).
+- **S3** — already shipped by **#2501** (`Object.prototype.toString.call → [object
+  X]`, verified correct host + standalone). **No S0 binary.ts change was needed**
+  — the `validateFuncRefs` validator was already always-on and already covered
+  globals; the bug was purely producers baking the `-1` string-constant sentinel.
+
+**Residual re-routed** (reproduce-first showed it is NOT a single #2515
+substrate — the pieces belong to other, already-active lanes):
+- **Descriptor flag-storage** (enumerable/writable/configurable lost via
+  create/defineProperties) **+ `getOwnPropertyDescriptor` read-back trap** →
+  **#2042** (object-runtime descriptor define/read semantics; #1854 just reworked
+  the same `__defineProperty_value` helper — same-file lane, do not race it).
+- **Multi-property combined dynamic read** (`const a=o.x; const b=o.y; a+b`→0 but
+  explicit `:number`→7; writes + single reads are correct) → **#2578** (read-side
+  type-inference, #2542 family). Filed separately.
+- **`Reflect.defineProperty` / `Reflect.construct`** → S4 tail: `defineProperty`
+  needs the descriptor reaching the native as an open `$Object` (a closed-struct
+  `{value:5}` makes the native throw "descriptor not an object"; same reification
+  the #2042 lane owns); `construct` needs the **#2158** construct ABI.
+  `Reflect.getOwnPropertyDescriptor` already shipped (#2046 S5).
+- **S5** boxed-wrapper ToPrimitive → **#1910** (coordinate, file overlap).
+
+The 20 remaining S0-residual `global.get -1` rows are the **built-in
+prototype-graph** read cluster (`SuppressedError.prototype`,
+`DisposableStack`/`AsyncDisposableStack` constructor checks, `Set.prototype.<setop>`
+subclass-receiver dispatch) — the **#2193/#2158/#49** epic, out of scope here.
+
 ## Cross-links
 
 - #1472 (parent — open-object runtime core + landed slices)
