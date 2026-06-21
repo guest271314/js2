@@ -458,3 +458,32 @@ host/standalone `__extern_get` #2043 fix already land.
 work. The material change from the M1 verdict: the chokepoint already exists, so
 (a2) is a ~2–4-day arm+consumer-coercion slice, not a multi-handler refactor —
 which de-risks the whole substrate's M1 cost. Awaiting go-ahead to execute M1a.
+
+## Concurrency seam — vs. the parallel tag-5 equality wave (#1888/#1864/#1883)
+
+A parallel value-rep wave rewrites the **tag-5 content-equality classifier**
+(#2040 field-4 / #2579 any-str strict-eq / #2583 any-array search). My (a2)
+`.length`-externref result flows into the `===` consumer, which meets their
+classifier — so the question is collision vs. clean layering.
+
+**VERDICT: CLEAN LAYERING — zero overlapping lines** (read-only `binary-ops.ts`
+trace). My canary's `===` shapes land in arms DISJOINT from theirs:
+- `obj.length === undefined` (my PRIMARY assertion) → the **presence arm**,
+  `binary-ops.ts:429-435` (`__extern_is_undefined`). Not the classifier.
+- `obj.length === <number>` → the **numeric-fallback arm**, `binary-ops.ts:
+  2853-2876` (`__unbox_number` + `f64.eq`). Not the classifier.
+- Their tag-5 content-equality rewrite lives at `binary-ops.ts:2804-2823`
+  (`__any_from_extern` → `__any_eq` tag-dispatch), and is **strict-vs-loose
+  disjoint** from mine: that arm is the LOOSE-equality (`==`/`!=`) + standalone
+  branch; my shapes are STRICT (`===`/`!==`). They never execute the same code.
+
+**No DIRECT collision.** My `.length`-externref just lands in the
+presence/numeric arms unchanged; their classifier overhauls a different arm. So
+the two waves can proceed **in parallel** with no sequencing dependency on the
+`===` seam — my externref does NOT feed their classifier (it takes the
+`=== undefined` / numeric arms before reaching tag-5 content comparison). If a
+future (a2) shape compared two `any` VALUES for content (e.g. `obj.length ===
+otherObj.prop`, both externref), THAT would route into their classifier and want
+their base first — but the M1 `.length` canary (`=== undefined` / `=== <number>`)
+does not. Flagged for the lead's wave-sequencing: **parallel-safe at the `===`
+seam.**
