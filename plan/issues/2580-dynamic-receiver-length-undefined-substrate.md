@@ -539,3 +539,66 @@ failures are an unrelated worktree test-infra artifact (identical on origin/main
 Conformance is the merge_group full-Test262 gate's call (this is a value-rep /
 chokepoint touch → authoritative gate per `project_broad_impact_validate_full_ci`,
 NOT a scoped sweep). Stop-the-line on any typed-`.length` eject.
+
+## M1a — MERGE_GROUP EJECT (PR #1894 v1, 13 regressions) + ROOT CAUSE
+
+PR #1894 v1 (the `ctx.vecTypeMap`-dispatch arm above) passed every PR check and
+all 117 merge_group test262 shards, but the merge_group **net-regression gate**
+ejected it: **13 regressions** (pass→fail), all `assertion_fail`, all with a
+wasm-hash change, **0 improvements** (fails net AND ratio). `auto-park` applied
+the `hold` label. Confirmed NOT cross-PR drift (only #1894's merge_group shows
+bucket `964d9207`). Pulled the merged-report artifact + diffed vs baseline → the
+exact 13 split into two clusters, BOTH the `.length`-on-any arm firing on a
+receiver the prior numeric path handled correctly:
+
+- **A (5): function/closure `.length` = ARITY.** `verifyProperty(IteratorProto[
+  Symbol.iterator], 'length', {value:0})` etc. `(fn as any).length`: origin = `0`
+  (matches the arity the tests assert), my arm = **NaN** (a closure externref →
+  `__extern_get(closure,"length")` → undefined → NaN coercion).
+- **B (8): for-await-of array-rest destructuring `.length`.** `for ([x, ...y] of
+  …)` then `y.length`. The rest binding `y` is `let`-declared → `any`, and in the
+  loop-head-destructuring desugaring it ends up as a boxed/wrapped externref that
+  is NEITHER a directly-`ref.test`-able vec NOR a plain host object — so my vec
+  chain misses and `__extern_get` returns undefined → **NaN** (origin returned the
+  correct count). (A reduced `for ([x,...y] of [[1,2,3]]) {}; return y.length`
+  reproduces NaN locally; note `typeof y` is `"undefined"` / `Array.isArray(y)`
+  false in this reduced shape — there is a *separate* for-of-rest-binding
+  representation quirk here, orthogonal to M1a, that the prior numeric `.length`
+  path happened to read correctly.)
+
+**Unified root cause:** the gate `objType.flags & (Any|Unknown)` is too broad. My
+arm intercepts `.length` for ANY boxed/wrapped non-plain-object receiver (closure,
+loop-destructured rest array, …) and emits a uniform-externref `undefined` →` NaN`
+where the prior numeric path returned a usable value. The substrate CORE is sound
+(the `{}.length === undefined` canary still passes); the gate just over-reached.
+
+**FIX — option 2 (positive `$Object` gate) is NOT VIABLE in host mode; use
+option 3 (decline-for-struct).** Option 2 fails twice: (a) `objectTypeIdx` only
+exists when `ensureObjectRuntime` runs, and that registers `$PropEntry` with
+`key: ref $anyStrTypeIdx` — host mode `anyStrTypeIdx = -1` → the original −1
+type-index crash; (b) more fundamentally, in HOST mode a plain `{}` is NOT a
+WasmGC `$Object` struct — it's a host JS object (externref). There is no struct to
+`ref.test`. So a positive `$Object` gate can't work host-side.
+
+The host-mode picture (confirmed by probing): plain `{}` is a host externref that
+`ref.test`-misses ALL structs (→ `__extern_get` → undefined, the canary —
+*already* works via the current vec-MISS branch); array/closure are WasmGC
+structs; the for-of/await rest binding points at a vec (the v1 arm matched it and
+read the SOURCE array's length 3, hence "returned 3" for expected 2).
+
+**Option 3 — decline-for-struct:** the dyn-read `.length` arm DECLINES (return
+false → caller falls through to the prior numeric `.length` path) when the
+receiver `ref.test`s as a VEC **or** a CLOSURE base type
+(`collectClosureBaseWrapperTypeIdxs(ctx)`, same body-compile mechanism as the vec
+types); it fires `__extern_get(recv,"length")` ONLY for the residual genuine host
+externref. Effect: array → declines → prior path reads vec field-0 = 3 ✓ (this
+also DROPS the v1 box-number vec arm, eliminating the Cluster-B wrong-vec-match);
+`{}` → all struct-tests miss → `__extern_get` → undefined ✓ (canary); closure →
+declines → prior path → 0 ✓ (Cluster A); rest binding (vec) → declines → prior
+path → correct count ✓ (Cluster B). SIMPLER than v1 (removes the box-number arm —
+the prior path already read array `.length` correctly). Arm shrinks to
+"`ref.test` vec OR closure → decline; else `__extern_get(recv,'length')`". One
+gate, all 13 fixed, canary preserved, no `$Object` struct needed. **Validate
+against the REAL async-generator rest test262 file** (the reduced
+`for ([x,...y] of …)` probe is unfaithful — origin ALSO returns 0 there).
+Re-validate via merge_group (one-shot); stop-the-line on re-eject.
