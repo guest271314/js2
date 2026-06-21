@@ -17,6 +17,7 @@ import {
 } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import { emitBoundsCheckedArrayGet } from "./array-methods.js";
+import { emitHoleToUndefined } from "./array-holes.js"; // (#2001 S1)
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
@@ -5575,8 +5576,13 @@ export function compileElementAccessBody(
       const getOp =
         arrDef.element.kind === "i8" ? "array.get_u" : arrDef.element.kind === "i16" ? "array.get_s" : "array.get";
       fctx.body.push({ op: getOp, typeIdx: arrTypeIdx } as Instr);
+      // (#2001 S1) Even bounds-eliminated externref reads must map a `$Hole`
+      // slot back to `undefined` — the loop guard proves in-bounds, not present.
+      if (ctx.usesArrayHoles && arrDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);
     } else {
-      emitBoundsCheckedArrayGet(fctx, arrTypeIdx, arrDef.element);
+      // (#2001 S1) Pass `ctx` so the in-bounds `$Hole → undefined` read-boundary
+      // mapping fires for an externref-element (`any[]`) vec.
+      emitBoundsCheckedArrayGet(fctx, arrTypeIdx, arrDef.element, ctx);
     }
     return valueType;
   }
@@ -5598,8 +5604,12 @@ export function compileElementAccessBody(
     const getOp =
       typeDef.element.kind === "i8" ? "array.get_u" : typeDef.element.kind === "i16" ? "array.get_s" : "array.get";
     fctx.body.push({ op: getOp, typeIdx } as Instr);
+    // (#2001 S1) Map a `$Hole` slot back to `undefined` on bounds-eliminated
+    // externref reads too (in-bounds ≠ present).
+    if (ctx.usesArrayHoles && typeDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);
   } else {
-    emitBoundsCheckedArrayGet(fctx, typeIdx, typeDef.element);
+    // (#2001 S1) Pass `ctx` for the in-bounds `$Hole → undefined` mapping.
+    emitBoundsCheckedArrayGet(fctx, typeIdx, typeDef.element, ctx);
   }
   return valueType;
 }

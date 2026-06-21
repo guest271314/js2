@@ -26,6 +26,7 @@ import {
   promoteAccessorCapturesToGlobals,
 } from "./closures.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
+import { emitHoleSentinel } from "./array-holes.js"; // (#2001 S1)
 import { ensureStrToCharVecHelper, stringConstantExternrefInstrs } from "./native-strings.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
@@ -3323,6 +3324,17 @@ export function compileArrayLiteral(
       if (elemWasm.kind === "f64" && _isUndefinedLike(el)) {
         fctx.body.push({ op: "i64.const", value: 0x7ff00000deadc0den });
         fctx.body.push({ op: "f64.reinterpret_i64" });
+      } else if (elemWasm.kind === "externref" && ts.isOmittedExpression(el)) {
+        // (#2001 S1) An array-literal elision (`[1, , 3]`) in an `any[]` /
+        // untyped (externref-element) vec is a genuine *hole* — store the
+        // `$Hole` sentinel, NOT JS `undefined`. This is what makes a hole
+        // distinguishable from an explicit `undefined` element so later HOFs
+        // can honour the §23.1.3.* HasProperty hole-skip. An explicit
+        // `undefined` literal is NOT a hole (`ts.isOmittedExpression` is false
+        // for it) and keeps its `emitUndefined` lowering via the else branch.
+        // Gated strictly on `externref` — typed number[]/boolean[] literals are
+        // byte-identical (their elision keeps the element default / sNaN path).
+        emitHoleSentinel(ctx, fctx);
       } else {
         compileExpression(ctx, fctx, el, elemWasm);
       }
@@ -3734,7 +3746,14 @@ export function compileArrayLiteral(
       // Non-spread element: result[writeIdx] = el; writeIdx++
       fctx.body.push({ op: "local.get", index: resultLocal });
       fctx.body.push({ op: "local.get", index: writeIdx });
-      compileExpression(ctx, fctx, el, elemWasm);
+      if (elemWasm.kind === "externref" && ts.isOmittedExpression(el)) {
+        // (#2001 S1) Hole interleaved with spreads (`[...a, , b]`) in an
+        // externref-element vec → store the `$Hole` sentinel, matching the
+        // no-spread path. Gated on externref; typed vecs are untouched.
+        emitHoleSentinel(ctx, fctx);
+      } else {
+        compileExpression(ctx, fctx, el, elemWasm);
+      }
       fctx.body.push({ op: "array.set", typeIdx: arrTypeIdx });
       fctx.body.push({ op: "local.get", index: writeIdx });
       fctx.body.push({ op: "i32.const", value: 1 });

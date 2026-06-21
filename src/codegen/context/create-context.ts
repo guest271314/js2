@@ -80,6 +80,9 @@ export function createCodegenContext(
     usesNewTarget: false, // (#2023) set by the pre-scan in generateModule
     newTargetGlobalIdx: undefined, // (#2023)
     classNewTargetIds: new Map(), // (#2023) className → stable 1-based i32 id
+    usesArrayHoles: false, // (#2001 S1) set by the scanForArrayHoles pre-scan
+    holeTypeIdx: -1, // (#2001 S1) $Hole struct type; lazily registered
+    holeGlobalIdx: undefined, // (#2001 S1) $__hole singleton global
     classThrowsOnEval: new Set(),
     topLevelFunctionNames: new Set(), // (#1983) for class-member funcMap key collision detection
     classMethodSet: new Set(),

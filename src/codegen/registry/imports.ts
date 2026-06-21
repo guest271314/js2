@@ -164,6 +164,19 @@ function fixupModuleGlobalIndices(ctx: CodegenContext, threshold: number, delta:
   if (ctx.newTargetGlobalIdx !== undefined && ctx.newTargetGlobalIdx >= threshold) {
     ctx.newTargetGlobalIdx += delta;
   }
+  // (#2001 S1 regress) Same hazard for the `$__hole` singleton global. When a
+  // string-constant import is inserted after `$Hole` was registered,
+  // `shiftGlobalIndices` correctly bumps the already-emitted `global.get
+  // $__hole` refs, but the CACHED `ctx.holeGlobalIdx` would go stale — so a
+  // LATER `emitHoleSentinel` (a hole literal compiled after the string import)
+  // would target the wrong, un-shifted slot (it pointed one below, at
+  // `__current_this`), storing a null instead of `$Hole`. That null marshals to
+  // the host faithfully, so a hole-array call argument's destructuring default
+  // silently never fires (`f([,])` → the -39 regression in PR #1838). Keep the
+  // cached index in step exactly as `newTargetGlobalIdx` does.
+  if (ctx.holeGlobalIdx !== undefined && ctx.holeGlobalIdx >= threshold) {
+    ctx.holeGlobalIdx += delta;
+  }
 
   const visitedInstrs = new WeakSet<object>();
   const visitedArrays = new WeakSet<Instr[]>();

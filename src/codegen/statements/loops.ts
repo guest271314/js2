@@ -61,6 +61,7 @@ import {
 } from "./destructuring.js";
 import { adjustRethrowDepth, collectInstrs, restoreBlockScopedShadows, saveBlockScopedShadows } from "./shared.js";
 import { collectPatternBindingNames } from "./tdz.js";
+import { emitHoleToUndefined } from "../array-holes.js"; // (#2001 S1)
 
 export function compileWhileStatement(ctx: CodegenContext, fctx: FunctionContext, stmt: ts.WhileStatement): void {
   // block $break
@@ -3205,6 +3206,11 @@ function compileForOfArray(
   }
   fctx.body.push({ op: "local.get", index: iLocal });
   fctx.body.push({ op: "array.get", typeIdx: arrTypeIdx });
+  // (#2001 S1) A for-of over an `any[]` with a literal hole reads `$Hole` at the
+  // hole index; map it back to `undefined` (the iteration value of an absent
+  // index — for-of uses array iterator Get, which yields undefined for holes).
+  // Gated on externref element + `usesArrayHoles`.
+  if (ctx.usesArrayHoles && elemType.kind === "externref") emitHoleToUndefined(ctx, fctx);
   // Coerce from Wasm array element type to the local's declared type
   const elemLocalType = getLocalType(fctx, elemLocal);
   if (elemLocalType && !valTypesMatch(elemType, elemLocalType)) {
