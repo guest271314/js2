@@ -179,3 +179,39 @@ the failure is purely the equality helper).
 - Private/static generator-method `next().value` rows pass.
 - Standalone baseline runtime-fail count in `dstr/` halves (≤550); host
   unchanged.
+
+## Cluster-A EQUALITY angle — SHELVED (sd-3, 2026-06-21, evidence-backed)
+
+The cluster-A `assert.sameValue/notSameValue` failures were chased to the
+standalone AnyValue tag-5 equality path. Two fixes were implemented + validated;
+BOTH are net-negative on CURRENT main, and the case they targeted is ALREADY
+handled. **Verdict: SHELVE the equality fix; PR #1863 stays held/closed.**
+
+**Decisive finding:** the architect's premise (mixed-tag `assert.sameValue(z,
+<literal>)` — z=tag-5 `$box_number_struct`, literal=tag-3 — fails the `{2,3}`
+numeric-class gate) is **FALSE on current `origin/main`.** Direct test of the
+runner's shim shape `isSameValue(o.z, 7)` (tag-5 box_number vs tag-3 literal) on
+CLEAN current main → **already PASSES** (and `o.z===8`→0, any-param→1). The
+mixed-tag case is no longer broken — current main absorbed it via the
+#2503/#2358/#2187/#2574 merges that landed AFTER #1863's original +311 baseline.
+
+**Validation of both fix layers (vs CLEAN current main):**
+- Tag-5-arm 3-way cascade (PR #1863): net **−151** on the full merge_group floor.
+  Carrier is `$box_number_struct` (ref.test-able — sd-3's "4th carrier"
+  hypothesis ruled out by arch-2040), but the tag-5 arm (i) can't reach the
+  dominant mixed-tag `===` rows and (ii) bakes native-string-helper funcIdx into
+  the eq helpers → reconcileNativeStrFinalizeShift desync surface
+  (#1677/#2039/#2043).
+- Numeric-class-gate broadening (arch-2040's tractable re-scope: admit `tag==5 &&
+  ref.test field4 $box_number_struct` to the `{2,3}` numeric arm of
+  `__any_strict_eq`): **14 regressions / 0 improvements** on the class/dstr
+  sample. 0 improvements because nothing is broken to fix; 14 regressions because
+  it mis-classifies cases that pass today.
+
+`__any_to_f64` itself is fine (`Number(o.z)` recovers correctly). The +311 is NOT
+lost — it is already realized on main. Any equality-helper change now is pure
+regression risk → **leave the equality helpers untouched.** The OTHER #2040
+residuals (cluster-B generator-object semantics, the rest-identity rows) are
+separate and unaffected by this verdict. A SEPARATE pre-existing compiler
+stack-overflow on nested-obj-pattern-default in (static) methods (the source of
+several of the 13 `wasm_compile` floor entries) is filed as **#2587**.
