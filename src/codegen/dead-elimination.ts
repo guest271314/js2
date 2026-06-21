@@ -176,8 +176,17 @@ function remapTypeIdxInBody(body: Instr[], remap: Map<number, number>): void {
     if (typeof a.srcTypeIdx === "number" && remap.has(a.srcTypeIdx)) {
       a.srcTypeIdx = remap.get(a.srcTypeIdx)!;
     }
-    // Remap blockType
-    if (a.blockType) {
+    // Remap blockType. (#2564) The double-remap guard above keys on the
+    // *instruction* object, but a `blockType` (and its `.type` ValType) can be
+    // ALIASED across several distinct `if`/`block` instructions — e.g. a
+    // tag-dispatch cascade that shares one `blockType` object across its nested
+    // arms. Each aliasing instruction passes the `seen` check (different `instr`)
+    // and would chain-remap the shared block-type a second time (20→16 then
+    // 16→13 under a compaction map). Guard on the `blockType` object itself so a
+    // shared block-type is remapped exactly once regardless of how many
+    // instructions alias it.
+    if (a.blockType && !seen.has(a.blockType)) {
+      seen.add(a.blockType);
       if (a.blockType.kind === "type" && remap.has(a.blockType.typeIdx)) {
         a.blockType.typeIdx = remap.get(a.blockType.typeIdx)!;
       }
