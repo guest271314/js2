@@ -22,6 +22,7 @@ import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { emitLocalTdzInit } from "./statements/tdz.js";
 import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecType } from "./registry/types.js";
+import { holeToUndefinedInstrs } from "./array-holes.js"; // (#2001 S1)
 import {
   coerceType,
   compileExpression,
@@ -221,15 +222,22 @@ function emitBoundsCheckedArrayGetUndef(
   fctx.body.push({ op: "array.len" });
   fctx.body.push({ op: "i32.lt_u" } as Instr);
 
+  // (#2001 S1) An in-bounds `$Hole` slot (a literal elision in an `any[]` being
+  // destructured) must bind `undefined`, not the sentinel struct. Map it in the
+  // in-bounds `then` arm; the OOB `else` arm already yields `undefined`. Gated on
+  // `usesArrayHoles` (externref element is guaranteed here by the guard above).
+  const inBoundsThen: Instr[] = [
+    { op: "local.get", index: arrLocal } as Instr,
+    { op: "ref.as_non_null" } as Instr,
+    { op: "local.get", index: idxLocal } as Instr,
+    { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+  ];
+  if (ctx.usesArrayHoles) inBoundsThen.push(...holeToUndefinedInstrs(ctx, fctx));
+
   fctx.body.push({
     op: "if",
     blockType: { kind: "val", type: { kind: "externref" } },
-    then: [
-      { op: "local.get", index: arrLocal } as Instr,
-      { op: "ref.as_non_null" } as Instr,
-      { op: "local.get", index: idxLocal } as Instr,
-      { op: "array.get", typeIdx: arrTypeIdx } as Instr,
-    ],
+    then: inBoundsThen,
     else: [{ op: "call", funcIdx: getUndefIdx } as Instr],
   });
 }

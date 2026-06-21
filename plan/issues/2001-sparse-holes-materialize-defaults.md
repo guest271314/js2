@@ -251,6 +251,63 @@ without yet changing HOF visit semantics (so no behavior regresses; join stays
   === ""`; `[1,,3].length === 3`. Plus a typed-array guard:
   `([1,,3] as number[]).join(",") === "1,0,3"` UNCHANGED.
 
+### S1 landed (2026-06-21, sendev-holes-s1)
+
+**Done.** The `$Hole` anyref singleton sentinel is registered
+(`src/codegen/array-holes.ts` — lazy `ensureHoleType`: a zero-field immutable
+`(struct)` type + an immutable `(global $__hole (ref $Hole) (struct.new $Hole))`
+const-init singleton, no host import, dead-elim-pruned when unused). A literal
+elision (`OmittedExpression`) in an `externref`-element (`any[]` / untyped) vec
+now stores `$Hole` instead of `emitUndefined` (`literals.ts` — both the
+`array.new_fixed` no-spread path and the spread fill loop). A cheap AST pre-scan
+(`scanForArrayHoles` → `ctx.usesArrayHoles`, wired in `index.ts` beside
+`scanForNewTarget`) gates everything; hole-free and typed (`number[]`/`boolean[]`
+= f64/i32 element) modules are byte-identical (verified: deterministic-bytes +
+op-unchanged guards).
+
+**Scope-of-change finding — the read-boundary mapping is NOT confined to
+`a[i]` + join.** The spec scoped S1 to "literal store + element-read + join" and
+deferred all HOFs to S2. Implementing it revealed that **storing `$Hole`
+regresses every value-producing reader that was not simultaneously updated** —
+`for-of`, array destructuring, and *all* HOFs (`forEach`/`map`/`filter`/`some`/
+`every`/`find`/`findLast`/`findIndex`/`reduce`/`reduceRight`/`indexOf`/
+`lastIndexOf`/`includes`), plus `at`/`pop`/`shift` — because before S1 a hole was
+stored *as* `undefined`, so all of them already read `undefined`; after S1 they
+read the raw `$Hole` struct (`typeof === "object"`). A hole reaching an
+un-mapped reader between S1 and S2 landing is a real regression, so the
+representation change is **not independently landable as "store-only"**. S1 was
+therefore widened to land the **universal `$Hole → undefined` value-read
+mapping** at every value boundary (the reusable `emitHoleToUndefined` /
+`holeToUndefinedInstrs` helper, gated on `usesArrayHoles && externref`). This is
+the §ToObject/Get invariant ("an absent index reads as `undefined`, never the
+sentinel"), now enforced everywhere.
+
+What S1 does **NOT** do (still genuinely S2/S3/S4 — visit *semantics*, not value
+leaking): the HOF **visit-skip** (`forEach` still *visits* the hole, observing
+`undefined`; spec wants the callback NOT called) (#2001 S2); `map` producing a
+**result-hole** at the hole index rather than `undefined` (S2); `indexOf`
+**skipping** holes rather than reading them as undefined (S2 — note `includes`
+is already spec-correct since it uses Get); **index-grow** `b[5]=9` filling the
+gap with `$Hole` rather than the element default (S3); and **destructuring-past-
+length** numeric-default fix (S4). Copy methods (`slice`/`concat`/`spread`/etc.)
+preserve holes correctly by copying the externref unchanged.
+
+Key implementation note for follow-ups: `holeToUndefinedInstrs` calls
+`emitUndefined`, whose late-import flush mutates `fctx.body`; when used inside a
+**detached** instruction-list builder (the HOF callback-arg path,
+`indexOf`/`lastIndexOf`/`includes` loop bodies, `reduce`/`reduceRight`), the
+caller **must pre-register + flush `__get_undefined`** (via `ensureGetUndefined`
++ `flushLateImportShifts`, or rely on `setupArrayLoop` which now does it) BEFORE
+building the detached list — otherwise the flush shifts an already-captured
+closure/import funcIdx out from under a baked `call_ref`/`call` → runtime
+null-deref. This is done at every such site.
+
+Tests: `tests/issue-2001-s1-hole-literal.test.ts` (host + standalone, 31 cases —
+literal read/join/length, the read-boundary invariant across for-of /
+destructuring / all HOFs / at / pop / slice, typed no-regression + deterministic
+bytes). Gates green: tsc, prettier, biome lint, `check-test262-hard-errors` (0,
+no growth), `check:ir-fallbacks` (no increase).
+
 #### S2 — HOF visit-skip on the dense vec (forEach/map/filter/some/every/reduce/indexOf). **[depends on S1]**
 
 The headline fix. The `$Object`-backed array-like path already has the

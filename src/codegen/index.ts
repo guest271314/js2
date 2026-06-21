@@ -40,6 +40,7 @@ import type { NodeBuiltinImport } from "../import-resolver.js";
 import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
+import { scanForArrayHoles } from "./array-holes.js"; // (#2001 S1)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { emitUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
@@ -1262,6 +1263,11 @@ export function generateModule(
     // class-ids and `new`/comparison sites emit the threading global. Off by
     // default — programs without `new.target` are byte-identical.
     scanForNewTarget(ctx, ast.sourceFile);
+
+    // (#2001 S1) Detect any array-literal elision up front so externref-element
+    // vec reads / joins emit the `$Hole → undefined` read-boundary guard.
+    // Off by default — programs without holes are byte-identical.
+    scanForArrayHoles(ctx, ast.sourceFile);
 
     collectDeclarations(ctx, ast.sourceFile);
 
@@ -5267,6 +5273,11 @@ export function generateMultiModule(
     // (#2023) Whole-realm new.target detection — OR across all source files.
     for (const sf of multiAst.sourceFiles) {
       scanForNewTarget(ctx, sf);
+    }
+
+    // (#2001 S1) Whole-realm array-hole detection — OR across all source files.
+    for (const sf of multiAst.sourceFiles) {
+      scanForArrayHoles(ctx, sf);
     }
 
     for (const sf of multiAst.sourceFiles) {

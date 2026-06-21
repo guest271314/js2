@@ -680,6 +680,24 @@ export interface CodegenContext {
   usesNewTarget: boolean;
   newTargetGlobalIdx: number | undefined;
   classNewTargetIds: Map<string, number>;
+  /**
+   * (#2001 S1) Sparse-array hole support. Set by the `scanForArrayHoles`
+   * pre-scan when the program contains any array-literal elision
+   * (`OmittedExpression`). Gates the `$Hole → undefined` read-boundary guard at
+   * every externref-element vec read / join site, so a hole-bearing literal in
+   * one function and a `a[i]` read in another agree regardless of compilation
+   * order. Clear — the common case — keeps every array read byte-identical.
+   */
+  usesArrayHoles: boolean;
+  /**
+   * (#2001 S1) Type index of the `$Hole` zero-field sentinel struct, and the
+   * absolute index of the immutable `$__hole` singleton global. Registered
+   * lazily + once by `ensureHoleType` during body compilation (after class
+   * collection, per `project_type_index_shift_and_deadelim`). `-1` / `undefined`
+   * until first use; pruned by dead-elimination when no hole literal is stored.
+   */
+  holeTypeIdx: number;
+  holeGlobalIdx: number | undefined;
   /** Classes that must throw TypeError at evaluation time */
   classThrowsOnEval: Set<string>;
   /**
