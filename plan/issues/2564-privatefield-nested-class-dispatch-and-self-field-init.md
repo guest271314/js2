@@ -1,10 +1,12 @@
 ---
 id: 2564
 title: "Private-field nested-class follow-ups: polymorphic method-return blockType (invalid wasm) + read-before-own-slot TypeError gap"
-status: ready
-sprint: Backlog
+status: done
+sprint: 64
 created: 2026-06-20
-updated: 2026-06-20
+updated: 2026-06-21
+completed: 2026-06-21
+assignee: ttraenkler/sd3
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -92,3 +94,76 @@ read-before-declaration order statically and emit a throw.
 - `privatefieldget-typeerror-1.js`, `privatefieldset-typeerror-1.js` → pass
   (throw TypeError).
 - Broad class/private-field test262 sweep: zero new regressions.
+
+## Resolution (2026-06-21, sd3)
+
+### Part A — DONE. Real root cause: shared-`blockType` double-remap in dead-elimination
+
+The framing in the original analysis ("blockType resolved to the fn-wrapper
+struct type instead of the method's real return struct") was a *symptom*. At
+**emit time** the dispatch was already correct: `emitVirtualMethodDispatchByTag`
+(`src/codegen/expressions/calls.ts`) resolves the result type via
+`getWasmFuncReturnType(firstCand.funcIdx)`, which for `Outer.innerclass` correctly
+returned `(ref $__anonClass_0)` — the SAME type the callee func returns. Verified by
+instrumenting the dispatch: `resultType` == the func's `results[0]` == `(ref 20)`.
+
+The divergence was introduced by `eliminateDeadImports` (`dead-elimination.ts`).
+The tag cascade builds **one distinct `if` instruction per candidate** but shared
+a **single `blockType` object** across all of them. `remapTypeIdxInBody`'s
+double-remap guard (`seen` WeakSet, #1302) keys on the **instruction object**, not
+on the `blockType.type` sub-object — so each aliasing `if` passed the guard and
+chain-remapped the shared block-type a second time. Under the survivor-compaction
+remap (`20→16`, `16→13`, each survivor shifts down) the cascade did `20→16` on the
+first `if`, then `16→13` on the second, landing the block-type on `$__fn_wrap_0`
+(the fn-wrapper) — while the callee func's result type, remapped exactly once in
+the type table, landed on `16` (`$__anonClass_0`). Hence
+`type error in fallthru[0] (expected (ref null 13), got (ref null 16))`. This is the
+type-index-shift hazard family (memory `project_type_index_shift_and_deadelim`).
+
+**Fix (2 files, complementary):**
+1. `emitVirtualMethodDispatchByTag` now mints a **fresh `blockType` object per
+   `if`** (`freshBlockType()` clones the result ValType) — producers must never
+   share an instruction-operand object across distinct instructions (the
+   #1302/iterator-native/json-codec convention).
+2. `remapTypeIdxInBody` now also guards on the **`blockType` object itself**
+   (`seen.add(a.blockType)`) so an aliased block-type is remapped exactly once
+   regardless of how many instructions reference it — defense-in-depth for any
+   other producer that shares a block-type.
+
+**Impact (class-category sweep, old main bundle vs. fixed, 4367 files):**
+PASS 2395 → 2433 (**+38**), INVALID 32 → 14 (**−18**), FAIL 768 → 746, **0
+regressions** (no PASS→worse, no new INVALID/CRASH). The fix is broad: besides
+`privatefieldset-typeerror-3.js` (INVALID→PASS) it flipped 12 `dstr/*-meth-*-obj-
+ptrn-prop-obj.js`, 5 `private-methods/prod-private-*`, and 22
+`elements/*-rs-private-setter*` from INVALID/FAIL → PASS — all the same
+shared-block-type bug surfacing through different class/method shapes.
+
+### Two unrelated pre-existing INVALID-wasm files (NOT this bug, out of scope)
+
+`privatefieldget-primitive-receiver.js` / `privatefieldput-primitive-receiver.js`
+(both `features: [..., BigInt]`) emit invalid wasm via a DIFFERENT path
+(`__closure_2`: `call[0] expected (ref null 20), found f64.const of type f64`).
+They are INVALID on plain main too (pre-existing), are not touched by the dispatch
+fix, and are a separate primitive-receiver/BigInt private-field bug. Left for a
+follow-up; not a #1711 blocker (they were already on main).
+
+### Part B — DEFERRED (read-before-own-slot TypeError)
+
+`privatefieldget-typeerror-1.js` / `privatefieldset-typeerror-1.js` still return
+the default (no throw) instead of throwing TypeError per ES2022
+PrivateFieldGet/Set step 4. A spec-accurate fix needs an
+initialized-flag / definite-assignment model for private slots during the
+field-initializer phase (the slot exists structurally but is semantically "not
+yet added"). That is a non-trivial design change, not cheap; the issue scoped
+Part B as "only if Part A is cheap to finish". Deferred to keep the
+invalid-wasm fix isolated and regression-free. Behavioral-only (2 tests).
+
+### STEP 3 — top-level-await `module-import-rejection` files: NON-ISSUE
+
+The 3 `language/module-code/top-level-await/module-import-rejection*.js` files
+compile to **valid wasm** on both old main and the fixed bundle (outcome: runtime
+`THROW`/`fail`, not `malformed_wasm`). They never tripped the hard-error gate
+(which counts only `malformed_wasm` / `missing_test_export`). They were a red
+herring in the #1711 ejection diagnosis: they're ordinary `fail` outcomes gated on
+dynamic `import()` rejection handling (an unrelated feature gap), not invalid-wasm
+blockers.
