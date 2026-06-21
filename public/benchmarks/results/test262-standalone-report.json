@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-20T20:35:14.583Z",
-  "baseline_generated_at": "2026-06-20T20:35:14.583Z",
-  "baseline_sha": "a7b99fbda818675cf70dea893022a106d3569bd4",
+  "timestamp": "2026-06-21T02:37:42.413Z",
+  "baseline_generated_at": "2026-06-21T02:37:42.413Z",
+  "baseline_sha": "ba0138412cb5b0636e981e808fd5c404f47f2a23",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -10,22 +10,22 @@
   },
   "summary": {
     "total": 43135,
-    "pass": 22277,
-    "fail": 11942,
-    "compile_error": 8892,
+    "pass": 22290,
+    "fail": 11988,
+    "compile_error": 8833,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 34219,
+    "compilable": 34278,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42049,
-        "pass": 21754,
-        "fail": 11546,
-        "compile_error": 8725,
+        "pass": 21767,
+        "fail": 11592,
+        "compile_error": 8666,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 33300,
+        "compilable": 33359,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -53,23 +53,23 @@
       },
       "official": {
         "total": 43135,
-        "pass": 22277,
-        "fail": 11942,
-        "compile_error": 8892,
+        "pass": 22290,
+        "fail": 11988,
+        "compile_error": 8833,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 34219,
+        "compilable": 34278,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48117,
-        "pass": 23412,
-        "fail": 12963,
-        "compile_error": 11612,
+        "pass": 23425,
+        "fail": 13009,
+        "compile_error": 11553,
         "compile_timeout": 7,
         "skip": 123,
-        "compilable": 36375,
+        "compilable": 36434,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -77,32 +77,32 @@
   },
   "official_summary": {
     "total": 43135,
-    "pass": 22277,
-    "fail": 11942,
-    "compile_error": 8892,
+    "pass": 22290,
+    "fail": 11988,
+    "compile_error": 8833,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 34219,
+    "compilable": 34278,
     "stale": 0
   },
   "full_summary": {
     "total": 48117,
-    "pass": 23412,
-    "fail": 12963,
-    "compile_error": 11612,
+    "pass": 23425,
+    "fail": 13009,
+    "compile_error": 11553,
     "compile_timeout": 7,
     "skip": 123,
-    "compilable": 36375,
+    "compilable": 36434,
     "stale": 0
   },
   "strict_summary": {
     "total": 40626,
-    "pass": 21273,
-    "fail": 11113,
-    "compile_error": 8216,
+    "pass": 21286,
+    "fail": 11159,
+    "compile_error": 8157,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 32386,
+    "compilable": 32445,
     "stale": 0
   },
   "scope_summaries": {
@@ -128,12 +128,12 @@
     },
     "standard": {
       "total": 42049,
-      "pass": 21754,
-      "fail": 11546,
-      "compile_error": 8725,
+      "pass": 21767,
+      "fail": 11592,
+      "compile_error": 8666,
       "compile_timeout": 6,
       "skip": 18,
-      "compilable": 33300,
+      "compilable": 33359,
       "stale": 0
     }
   },
@@ -422,8 +422,8 @@
       "name": "built-ins/GeneratorPrototype",
       "path": "built-ins/GeneratorPrototype",
       "pass": 12,
-      "fail": 35,
-      "compile_error": 14,
+      "fail": 42,
+      "compile_error": 7,
       "compile_timeout": 0,
       "skip": 0,
       "total": 61
@@ -472,8 +472,8 @@
       "name": "built-ins/Iterator",
       "path": "built-ins/Iterator",
       "pass": 46,
-      "fail": 194,
-      "compile_error": 270,
+      "fail": 197,
+      "compile_error": 267,
       "compile_timeout": 0,
       "skip": 0,
       "total": 510
@@ -891,9 +891,9 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 7204,
-      "fail": 2537,
-      "compile_error": 1276,
+      "pass": 7208,
+      "fail": 2549,
+      "compile_error": 1260,
       "compile_timeout": 1,
       "skip": 18,
       "total": 11036
@@ -1051,9 +1051,9 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 5742,
-      "fail": 2409,
-      "compile_error": 1185,
+      "pass": 5751,
+      "fail": 2433,
+      "compile_error": 1152,
       "compile_timeout": 1,
       "skip": 0,
       "total": 9337
@@ -1080,18 +1080,18 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 9549,
-    "illegal_cast": 1011,
+    "assertion_fail": 9585,
+    "illegal_cast": 1015,
     "negative_test_fail": 77,
     "null_deref": 430,
     "oob": 35,
-    "other": 6119,
+    "other": 6040,
     "promise_error": 215,
     "range_error": 16,
-    "runtime_error": 6049,
+    "runtime_error": 6052,
     "type_error": 9,
-    "unreachable": 1,
-    "wasm_compile": 1064
+    "unreachable": 4,
+    "wasm_compile": 1084
   },
   "hard_errors": {},
   "skip_reasons": {
@@ -1101,39 +1101,39 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 24582,
-    "classified": 24582,
+    "total_non_pass_non_skip": 24569,
+    "classified": 24569,
     "unclassified_threshold": null,
     "buckets": [
       {
         "id": "late-import-index-shift",
         "issues": ["#2079", "#2043"],
         "label": "Late-import index-shift fail-loud CE (stale captured index across flushLateImportShifts) — standalone generators, class globals",
-        "count": 231,
+        "count": 152,
         "statuses": {
           "pass": 0,
           "fail": 0,
-          "compile_error": 231,
+          "compile_error": 152,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 231
+          "total": 152
         },
         "error_categories": {
-          "other": 231
+          "other": 152
         },
         "sample_files": [
           "test/language/expressions/dynamic-import/namespace/await-ns-has-property-sym-found.js",
-          "test/language/statements/variable/dstr/ary-ptrn-elem-ary-elision-init.js",
-          "test/language/statements/for-of/generator-close-via-return.js",
           "test/built-ins/AsyncDisposableStack/prototype/use/not-a-constructor.js",
-          "test/language/expressions/arrow-function/dstr/dflt-ary-ptrn-rest-ary-elision.js"
+          "test/built-ins/Object/defineProperties/15.2.3.7-6-a-77.js",
+          "test/built-ins/Object/defineProperties/15.2.3.7-6-a-93-3.js",
+          "test/language/expressions/assignment/destructuring/iterator-destructuring-property-reference-target-evaluation-order.js"
         ],
         "sample_signatures": [
           "other:L#:## Binary emit error: Codegen error: function index out of range — # (valid: [#, #)) at function 'fn'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImports/ad",
-          "other:L#:## Binary emit error: Codegen error: function index out of range — undefined (valid: [#, #)) at function 'g'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImp",
-          "other:L#:## Binary emit error: Codegen error: function index out of range — undefined (valid: [#, #)) at function 'values'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUni",
           "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'test'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImports/a",
-          "other:L#:## Binary emit error: Codegen error: function index out of range — # (valid: [#, #)) at function 'test'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImports/"
+          "other:L#:## Binary emit error: Codegen error: function index out of range — # (valid: [#, #)) at function 'test'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImports/",
+          "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'MySet_size'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImp",
+          "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'RE_@@replace'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionI"
         ]
       },
       {
@@ -1216,8 +1216,8 @@
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
-          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js",
-          "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js"
+          "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
+          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
         ],
         "sample_signatures": [
           "runtime_error:Cannot convert object to primitive value",
@@ -1269,15 +1269,15 @@
         "count": 122,
         "statuses": {
           "pass": 0,
-          "fail": 67,
-          "compile_error": 55,
+          "fail": 68,
+          "compile_error": 54,
           "compile_timeout": 0,
           "skip": 0,
           "total": 122
         },
         "error_categories": {
-          "assertion_fail": 40,
-          "wasm_compile": 7,
+          "assertion_fail": 41,
+          "wasm_compile": 6,
           "range_error": 3,
           "null_deref": 16,
           "illegal_cast": 3,
@@ -1559,20 +1559,20 @@
           "total": 315
         },
         "error_categories": {
-          "assertion_fail": 21,
           "other": 290,
+          "assertion_fail": 21,
           "runtime_error": 4
         },
         "sample_files": [
-          "test/built-ins/Reflect/has/return-boolean.js",
           "test/built-ins/Reflect/getOwnPropertyDescriptor/undefined-own-property.js",
+          "test/built-ins/Reflect/has/return-boolean.js",
           "test/built-ins/Reflect/construct/length.js",
           "test/built-ins/Reflect/enumerate/undefined.js",
           "test/built-ins/Object/prototype/setPrototypeOf-with-non-circular-values-__proto__.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(Reflect.has(o1, 'p'), true, 'true from own property');",
           "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor not supported in standalone mode (## Phase C).",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(Reflect.has(o1, 'p'), true, 'true from own property');",
           "other:L#:## Codegen error: Reflect.construct built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
           "other:L#:## Codegen error: Reflect.hasOwnProperty not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Reflect.setPrototypeOf not supported in standalone mode (## Phase C)."
@@ -1582,26 +1582,27 @@
         "id": "standalone-iterator-protocol",
         "issues": ["#1665", "#681", "#1718"],
         "label": "Generic iterator protocol still needs a pure-Wasm standalone path",
-        "count": 4220,
+        "count": 4287,
         "statuses": {
           "pass": 0,
-          "fail": 2541,
-          "compile_error": 1678,
+          "fail": 2586,
+          "compile_error": 1700,
           "compile_timeout": 1,
           "skip": 0,
-          "total": 4220
+          "total": 4287
         },
         "error_categories": {
           "other": 1225,
-          "wasm_compile": 305,
-          "assertion_fail": 1691,
-          "runtime_error": 374,
-          "illegal_cast": 536,
+          "wasm_compile": 327,
+          "assertion_fail": 1726,
+          "runtime_error": 377,
+          "illegal_cast": 540,
           "null_deref": 59,
           "type_error": 7,
           "range_error": 2,
           "negative_test_fail": 6,
-          "promise_error": 14
+          "promise_error": 14,
+          "unreachable": 3
         },
         "sample_files": [
           "test/language/expressions/async-generator/yield-star-getiter-sync-not-callable-symbol-throw.js",
@@ -1659,17 +1660,17 @@
         "id": "class-prototype-private-descriptor",
         "issues": ["#1591", "#1365", "#1364"],
         "label": "Class element, prototype, private-name, and descriptor reconciliation gaps",
-        "count": 6346,
+        "count": 6345,
         "statuses": {
           "pass": 0,
           "fail": 3557,
-          "compile_error": 2786,
+          "compile_error": 2785,
           "compile_timeout": 3,
           "skip": 0,
-          "total": 6346
+          "total": 6345
         },
         "error_categories": {
-          "wasm_compile": 249,
+          "wasm_compile": 248,
           "assertion_fail": 2787,
           "other": 1691,
           "illegal_cast": 214,
@@ -2523,7 +2524,7 @@
           "test/built-ins/SharedArrayBuffer/allocation-limit.js",
           "test/built-ins/SharedArrayBuffer/init-zero.js",
           "test/built-ins/SharedArrayBuffer/options-maxbytelength-undefined.js",
-          "test/built-ins/SharedArrayBuffer/options-maxbytelength-negative.js"
+          "test/built-ins/SharedArrayBuffer/toindex-length.js"
         ],
         "sample_signatures": [
           "other:L#:## Unsupported new expression for class: SharedArrayBuffer",

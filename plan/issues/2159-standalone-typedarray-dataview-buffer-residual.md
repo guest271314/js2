@@ -265,3 +265,17 @@ architect (pairs naturally with #46 `$__subview` since both rework the
 element-access representation). The read-signedness helper above is ready to fold
 in *as part of* that change. No code shipped from this triage — the prior
 slices (1, 2a, fill, #38 DataView windowing) stand. **#2159 stays open.**
+
+## Triage re-probe (2026-06-21, dev-carla) — verified residuals on upstream/main
+
+Probed against current upstream/main (`--target standalone`). **Working** (no leak):
+DataView get/set Int32/Float64 incl. little-endian, `Int16Array(buffer)` element
+read, `TypedArray.fill`, `DataView(buf, off, len).byteLength`, `subarray`,
+`Float64Array.set([...])`. **Still broken (genuine dev-tractable residuals):**
+- `Uint8Array.of(...)` / `Uint8Array.from([...])` → CE `__get_builtin` (the
+  static TypedArray factory methods aren't lowered standalone).
+- `new Uint8Array([1,2,3]).indexOf(2)` → `Binary emit error: encodeValType:
+  packed storage type "i8" is not valid` (the i8-element indexOf path emits an
+  invalid packed valType).
+Both are in #2159's lane (owner ttraenkler/sdev-json3, live claim) — flagged here
+for that owner, not claimed by triage.
