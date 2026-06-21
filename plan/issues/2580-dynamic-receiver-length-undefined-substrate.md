@@ -319,3 +319,171 @@ commitment — is the USER's call.** This spec sizes the payoff (390 floor / 1,0
 ceiling), the cost (~2–3 weeks), and the risk (hot-`.length` path, mitigated by
 the M1 canary + per-slice full-gate validation, never a #1844 big-bang) for that
 decision.
+
+---
+
+# Implementation log
+
+## M0 — `__dyn_has`/`__dyn_get` scaffold (LANDED, PR #1880, 2026-06-21)
+
+The two Wasm-native read primitives + a `ctx.usesDynRead` gate + finalize-phase
+wiring (`src/codegen/dyn-read.ts`). **Provably inert / 0-risk**: the helpers are
+gated on `usesDynRead`, which M0 sets nowhere, so they are never emitted and every
+module is byte-identical (the *gate*, not dead-elim, is the guarantee — an
+uncalled *defined* function is not import-pruned). Validated three ways: inert for
+normal programs (incl. `any[].length`, `o.length===undefined`); valid when
+force-emitted (`JS2WASM_FORCE_DYN_READ=1`, host + standalone — the bodies-are-sound
+self-test); 0 regression on the array/object suites. Merged clean through the
+merge_group (no eject), exactly as the byte-identity proof predicted.
+
+## M1 — `any`-receiver `.length` canary (CANARY VERDICT: REPRESENTATION CALL, NOT landed)
+
+The canary did its job — it surfaced the return-type-change as a **representation
+decision before M2 sank any effort**, with the typed-`.length` safety property
+cleanly bounded. Branch `issue-2580-m1-length-canary` (WIP, NOT pushed).
+
+- **SOLVED — the #2043 `-1` type-index desync.** In HOST mode `__extern_get` is a
+  JS *import*, not the native `$Object` runtime; the call-site helper called
+  `ensureObjectRuntime`, which in host mode registers `$PropEntry` with
+  `key: ref $AnyString` where `anyStrTypeIdx === -1` → a struct field referencing
+  typeidx -1 → binary-emit fail. Fix: host uses `ensureLateImport("__extern_get")`,
+  `ensureObjectRuntime` only in standalone. (Same family as
+  `project_type_index_shift_and_deadelim`.)
+- **SOLID — the typed safety property HOLDS.** `number[]`/`string`/`arguments`/
+  `rest` `.length` are byte-identical: they return from the typed arms *above* the
+  new `any`-gated arm and never reach it. The substrate's hot-path risk is bounded.
+- **THE FINDING (the re-assessment).** `.length` on an `any` receiver returning a
+  uniform externref fights every downstream *numeric* consumer. Scouting the five
+  `obj.length` consumer contexts (`const x = obj.length` inference, `===`,
+  arithmetic `+`, `String()`, `if`-truthiness) shows **none route through the
+  `compilePropertyAccess` arm** — `obj.length`-on-`any` is lowered *independently*
+  by multiple expression handlers (the `===` HasProperty fold, the arithmetic
+  numeric-coercion path, …), each with its own `.length` handling. So the
+  uniform-externref `.length` representation is **not one front-end change** but
+  either (a2) a refactor making `compilePropertyAccess` the single `.length`-on-any
+  chokepoint all consumers defer to, (a1) a per-handler patch, or (b) a narrower
+  absent-sentinel that keeps `.length` numeric (smaller, but does not generalize to
+  M2/M3's arbitrary `obj[i]` reads). **The canary proved the rep has
+  distributed-lowering integration cost the scoping doc under-estimated** — a
+  scope/investment decision (escalated to the user).
+
+### Known follow-ups (track for M2/M3)
+
+- **M0 `__dyn_has` semantic bug** — the M0 form returns "present" iff
+  `__extern_get` is non-null, which **conflates "present with value `undefined`"
+  vs "absent"** (`{}.x === undefined` own-property edge, and a real `undefined`
+  value). HasProperty-proper (own + prototype-chain presence, independent of the
+  *value*) is needed in M2/M3 where the distinction matters. M1's `.length` /
+  the array-like cluster only need non-null-Get ⇔ present, so this is deferred,
+  not a blocker for M0/M1.
+- **`__dyn_get` standalone arm** — M0 delegates to `__extern_get`; the
+  native-string indexed/`length` arm + the `$Vec` `$Hole→undefined` arm are M2/M3.
+
+---
+
+# M1 (a2) chokepoint-refactor plan — APPROVED path (a); CONFIRM before deep work
+
+User greenlit path (a) end-to-end any-typing via the (a2) chokepoint refactor.
+Scoped here as **its own bounded slice** (guardrail 1) for lead review BEFORE the
+days go in; each step **full-gate validated** (guardrail 2).
+
+## Re-scoping finding (good news — smaller than the M1 verdict feared)
+
+A read-only map of EVERY `.length`-on-`any` consumer (`===`, arithmetic `+`,
+truthiness, `const x = obj.length` inference, `String()`/template) found
+**`compilePropertyAccess` is ALREADY the universal chokepoint**:
+`compileExpression` (expressions.ts:~1171) routes every `PropertyAccessExpression`
+through it with no exceptions, and **no consumer structurally special-cases
+`.length`** before `compileExpression`. The apparent "bypass" (M1's first read)
+is an *illusion of type coercion*: my arm returns externref, then each consumer's
+existing coercion converts it — sometimes WRONGLY (unboxing the externref back to
+numeric, losing `undefined`).
+
+**So (a2) is NOT a multi-handler rewrite.** It is: (i) make the
+`compilePropertyAccess` `.length`-on-`any` arm return externref cleanly (done in
+the WIP, gated on static `any`/`unknown`), and (ii) fix the FEW consumer-coercion
+sites that mishandle the externref. The hot-path (typed `.length`) never enters
+this arm → byte-identical (verified: number[]/string/arguments/rest return from
+the typed arms above).
+
+## Consumer-coercion sites to audit + fix (the actual work)
+
+Audit each `compileExpression(obj.length)` → my externref arm → consumer
+coercion; fix only where the externref is mishandled:
+
+1. **`x === undefined`** — binary-ops.ts:420-440 has a correct externref arm
+   (`__extern_is_undefined`). The WIP showed a `__dyn_has`-flavored fold for the
+   `propaccess === undefined` shape — INVESTIGATE whether the `===` path
+   const-folds `.length === undefined` into a presence check and, if so, route it
+   to the externref-from-`__dyn_get` (not a separate `__dyn_has`). PRIMARY canary
+   assertion: `var obj={}; obj.length === undefined` → true.
+2. **`const x = obj.length` inference** — variables.ts:~563/648/837. For
+   `obj: any`, TS types `obj.length` as `any` → externref; the binding local
+   SHOULD be externref. The WIP showed `typeof x === "number"`, so the local got
+   a numeric ValType — fix the `.length`-on-any initializer's binding local to
+   externref.
+3. **Truthiness `if (obj.length)`** — control-flow.ts:568 + externref `__is_truthy`
+   (index.ts:~13551). Likely already coerces; VERIFY (`if ({}.length)` falsy,
+   `if ([1].length)` truthy).
+4. **Arithmetic `obj.length + 1`** — binary-ops.ts:929/935. externref→f64 via
+   `__unbox_number`; absent → NaN, spec-correct. VERIFY `[1,2].length + 1 === 3`,
+   `({}).length + 1` is NaN.
+5. **`String(obj.length)` / template** — calls.ts:~10427 / string-ops.ts:~363.
+   externref→string via `__extern_toString`. VERIFY `String([1,2].length)==="2"`,
+   `String({}.length)==="undefined"`.
+
+Expect **2–4 small consumer fixes + the arm**, not a sweeping refactor.
+
+## Staging (each its own full-gated PR; stop-the-line on a typed-`.length` eject)
+
+- **M1a — the arm + `=== undefined` canary** (smallest, highest-signal). Land the
+  externref arm + whatever the `=== undefined` path needs so `var obj={};
+  obj.length === undefined` → true and the S15.4.4 `.length`-property rows flip.
+  Full-gate. **The viability proof.**
+- **M1b — binding-inference + truthiness + arithmetic + String** consumer fixes
+  (only the ones M1a's audit flags). Full-gate.
+- Each PR: typed-`.length` byte-identity guard + determinism guard.
+  STOP-THE-LINE if either ejects.
+
+## Cost / risk (revised DOWN from the M1 pessimistic estimate)
+
+The chokepoint already exists; the work is the arm (done) + 2–4 consumer-coercion
+fixes. **~2–4 days** (M1a ~1–2d incl. the `=== undefined` fold investigation,
+M1b ~1–2d), each full-gated. Risk bounded by the static-`any` gate (hot-path
+untouched) + per-PR full-gate. The M1 WIP (`d9956bfa3`, branch
+`issue-2580-m1-length-canary`) is the starting point — the arm + the
+host/standalone `__extern_get` #2043 fix already land.
+
+**CONFIRM-WITH-LEAD checkpoint (guardrail 1):** posted for review BEFORE the deep
+work. The material change from the M1 verdict: the chokepoint already exists, so
+(a2) is a ~2–4-day arm+consumer-coercion slice, not a multi-handler refactor —
+which de-risks the whole substrate's M1 cost. Awaiting go-ahead to execute M1a.
+
+## Concurrency seam — vs. the parallel tag-5 equality wave (#1888/#1864/#1883)
+
+A parallel value-rep wave rewrites the **tag-5 content-equality classifier**
+(#2040 field-4 / #2579 any-str strict-eq / #2583 any-array search). My (a2)
+`.length`-externref result flows into the `===` consumer, which meets their
+classifier — so the question is collision vs. clean layering.
+
+**VERDICT: CLEAN LAYERING — zero overlapping lines** (read-only `binary-ops.ts`
+trace). My canary's `===` shapes land in arms DISJOINT from theirs:
+- `obj.length === undefined` (my PRIMARY assertion) → the **presence arm**,
+  `binary-ops.ts:429-435` (`__extern_is_undefined`). Not the classifier.
+- `obj.length === <number>` → the **numeric-fallback arm**, `binary-ops.ts:
+  2853-2876` (`__unbox_number` + `f64.eq`). Not the classifier.
+- Their tag-5 content-equality rewrite lives at `binary-ops.ts:2804-2823`
+  (`__any_from_extern` → `__any_eq` tag-dispatch), and is **strict-vs-loose
+  disjoint** from mine: that arm is the LOOSE-equality (`==`/`!=`) + standalone
+  branch; my shapes are STRICT (`===`/`!==`). They never execute the same code.
+
+**No DIRECT collision.** My `.length`-externref just lands in the
+presence/numeric arms unchanged; their classifier overhauls a different arm. So
+the two waves can proceed **in parallel** with no sequencing dependency on the
+`===` seam — my externref does NOT feed their classifier (it takes the
+`=== undefined` / numeric arms before reaching tag-5 content comparison). If a
+future (a2) shape compared two `any` VALUES for content (e.g. `obj.length ===
+otherObj.prop`, both externref), THAT would route into their classifier and want
+their base first — but the M1 `.length` canary (`=== undefined` / `=== <number>`)
+does not. Flagged for the lead's wave-sequencing: **parallel-safe at the `===`
+seam.**
