@@ -121,3 +121,61 @@
 - [feedback_regression_analysis.md](feedback_regression_analysis.md) — Regressions may be false-positive exposure, not real regressions; `pass → compile_timeout` is runner-load flake unless baseline compile >5s
 
 Most project context lives in `/workspace/CLAUDE.md`.
+
+### Recovered cross-session notes (preserved 2026-06-21, #389 session)
+
+- [feedback_background_teammate_shutdown_limitation.md](feedback_background_teammate_shutdown_limitation.md) — Background-spawned teammates can't complete the shutdown handshake; they clear on lead-session-end, not via shutdown_request
+- [feedback_batch_doc_commits_before_pr_push.md](feedback_batch_doc_commits_before_pr_push.md) — Batch plan/doc commits into the first PR push; a 2nd doc-only commit re-triggers the full CI matrix on the new HEAD
+- [feedback_branch_from_upstream_main_not_fork.md](feedback_branch_from_upstream_main_not_fork.md) — Branch ALL work from upstream/main (loopdive/js2), never the fork origin/main — the fork is ~1188 commits behind, causing CONFLICTING PRs, CI that never triggers, and silent duplicate work
+- [feedback_budget_is_own_agents_pipeline_not_idle.md](feedback_budget_is_own_agents_pipeline_not_idle.md) — In a multi-session swarm, MY token budget = MY spawned agents + my orchestration only; pipeline agents (next slice during CI-wait) so the budget produces output, not idle-poll
+- [feedback_dispatch_against_upstream_not_stale_fork.md](feedback_dispatch_against_upstream_not_stale_fork.md) — Dispatch from upstream/main probes, not stale fork frontmatter; claim handles ≠ agent names
+- [feedback_merge_queue_wedge_recovery.md](feedback_merge_queue_wedge_recovery.md) — Recover a wedged GitHub merge queue (entries stuck AWAITING_CHECKS, no merge_group CI, Actions idle) by dequeue+re-enqueue
+- [feedback_no_duplicate_issue_dispatch.md](feedback_no_duplicate_issue_dispatch.md) — Before dispatching/coding any sprint issue, verify it isn't already on upstream/main or fixed by an open PR in review
+- [feedback_no_git_stash_shared_worktree_conflict_markers.md](feedback_no_git_stash_shared_worktree_conflict_markers.md) — Never git stash/pop in a worktree to A/B-test baselines; pop injects conflict markers into concurrent agents' plan files
+- [feedback_no_shared_worktree_assignment.md](feedback_no_shared_worktree_assignment.md) — Never assign two agents to the same issue branch/worktree — uncommitted changes collide; check branch ownership before reassigning a task
+- [feedback_reground_spec_against_current_main.md](feedback_reground_spec_against_current_main.md) — Before implementing a hard-issue spec, re-probe the failure against CURRENT main — sibling PRs may have moved the path; a stale 'architect-scale' framing can collapse to a narrow fix
+- [feedback_shared_worktree_clobber_check_claim_first.md](feedback_shared_worktree_clobber_check_claim_first.md) — Before editing a continuation/PR-B branch a teammate may own, check the git claim lock by ISSUE id (not task id) — a co-owner's worktree reset silently reverts your edits
+- [feedback_verify_fix_in_git_not_narrative.md](feedback_verify_fix_in_git_not_narrative.md) — When two sessions disagree on whether/how an issue is fixed, verify against actual upstream git history (commit ancestry + dedicated test presence), not either session's narrative or a stale worktree repro
+- [project_1355_proxy_remaining_traps_blockers.md](project_1355_proxy_remaining_traps_blockers.md) — #1355 standalone Proxy: 5 traps landed; the remaining 4 are each blocked on separate standalone infrastructure
+- [project_1910_r3_r4_boxed_wrapper_slots.md](project_1910_r3_r4_boxed_wrapper_slots.md) — project 1910 r3 r4 boxed wrapper slots
+- [project_2026_dynnew_spread_newtarget.md](project_2026_dynnew_spread_newtarget.md) — project 2026 dynnew spread newtarget
+- [project_2026_pr1_and_28_already_landed.md](project_2026_pr1_and_28_already_landed.md) — project 2026 pr1 and 28 already landed
+- [project_2101a_externref_subclass_ownfield.md](project_2101a_externref_subclass_ownfield.md) — project 2101a externref subclass ownfield
+- [project_2151_any_receiver_dispatch_slices.md](project_2151_any_receiver_dispatch_slices.md) — project 2151 any receiver dispatch slices
+- [project_2186_vec_base_supertype.md](project_2186_vec_base_supertype.md) — #2186 added $__vec_base supertype so boxed arrays expose .length via __extern_length; indexing through externref still TODO
+- [project_2203_already_landed_duplicate.md](project_2203_already_landed_duplicate.md) — project 2203 already landed duplicate
+- [project_2358_pr3_to_primitive_nonobject_arm.md](project_2358_pr3_to_primitive_nonobject_arm.md) — #2358/#1917/#10 PR-3 handoff — __to_primitive non-$Object arm (class instances + $Vec arrays) — design, root cause, late-funcidx discipline
+- [project_2358_toprimitive_nominal_struct_path.md](project_2358_toprimitive_nominal_struct_path.md) — #2358 standalone __to_primitive nominal-struct gap — true root cause, repro re-measure, and the tractable emitAnyAdd-static-reduce fix
+- [project_2552_annexb_phase2_narrowed.md](project_2552_annexb_phase2_narrowed.md) — project 2552 annexb phase2 narrowed
+- [project_2554_ir_tail_call_drop.md](project_2554_ir_tail_call_drop.md) — project 2554 ir tail call drop
+- [project_fork_origin_behind_upstream_pr_base.md](project_fork_origin_behind_upstream_pr_base.md) — js2 fork origin/main lags upstream/main by ~1000+ commits; triage issues against upstream, not origin/main or local frontmatter
+- [project_s64_value_rep_substrate_next.md](project_s64_value_rep_substrate_next.md) — s64 dev pool drained; next critical-path = standalone $Object dynamic string-value read bug (senior-dev/value-rep)
+- [project_sprint64_parallel_session_dup_prs.md](project_sprint64_parallel_session_dup_prs.md) — Sprint 64 had a second agent team in a parallel session sharing the ttraenkler fork — caused duplicate PRs and shared branches; check open PRs before committing
+- [project_standalone_any_string_value_read_substrate.md](project_standalone_any_string_value_read_substrate.md) — Standalone $Object dynamic (any-typed) reader drops native-string VALUES — unified root cause behind many s64 standalone gaps; senior-dev/value-rep
+- [project_toprimitive_nominal_struct_gap.md](project_toprimitive_nominal_struct_gap.md) — Standalone ToPrimitive
+- [project_wasm_linking_core_over_component.md](project_wasm_linking_core_over_component.md) — Modularizing js2wasm host-API shims / shared runtime — use core-wasm linking (#2527), not the Component Model (#2525); GC cross-module identity is already there via runtime canonicalization
+- [reference_1461_reduce_noinit_funcidx_desync.md](reference_1461_reduce_noinit_funcidx_desync.md) — #54/#1461 standalone reduce.call(o,cb) no-init invalid-Wasm root cause: number_toString native-func registration shifts indices after the forward hole-scan baked its __extern_has_idx call; flushLateImportShifts doesn't cover native-func regs
+- [reference_1472_dynshape_verified_rootcauses_jun19.md](reference_1472_dynshape_verified_rootcauses_jun19.md) — reference 1472 dynshape verified rootcauses jun19
+- [reference_1629b_boxed_primitive_typeof_eq_layers.md](reference_1629b_boxed_primitive_typeof_eq_layers.md) — reference 1629b boxed primitive typeof eq layers
+- [reference_2190a_string_subarray_readback_extern_get_idx.md](reference_2190a_string_subarray_readback_extern_get_idx.md) — reference 2190a string subarray readback extern get idx
+- [reference_2190c_heterogeneous_tuple_write_layer_drop.md](reference_2190c_heterogeneous_tuple_write_layer_drop.md) — reference 2190c heterogeneous tuple write layer drop
+- [reference_2191_ir_string_eq_residual.md](reference_2191_ir_string_eq_residual.md) — #2191 ROOT CAUSE (confirmed): NOT the IR string.eq/flatten — it was a late-import funcIdx-shift in #40's ascii→uni case-convert REPOINT; the === call site resolved to the un-patched ascii toUpperCase body. Fixed by name-based repoint (commit 7ae5c5df4).
+- [reference_2193_call_ref_funcref_not_wrapper.md](reference_2193_call_ref_funcref_not_wrapper.md) — #2193 PR-B call_ref `expected (ref funcType) found (ref wrapStruct)` was a missing struct.get-field-0 funcref extraction, NOT a type-renumber off-by-one
+- [reference_2372_dynamic_descriptor_struct_widening.md](reference_2372_dynamic_descriptor_struct_widening.md) — reference 2372 dynamic descriptor struct widening
+- [reference_2375_typedarray_valueread_postsubstrate_verdict.md](reference_2375_typedarray_valueread_postsubstrate_verdict.md) — reference 2375 typedarray valueread postsubstrate verdict
+- [reference_2379_new_array_n_arraymethod_invalid_cast.md](reference_2379_new_array_n_arraymethod_invalid_cast.md) — reference 2379 new array n arraymethod invalid cast
+- [reference_2379_new_array_n_boxed_any_elem_rep.md](reference_2379_new_array_n_boxed_any_elem_rep.md) — #2379: standalone `new Array(N)` builds a boxed-any element array (type 1) while `[a,b,c]` builds a typed numeric element array (type 3) — sort/join stringify then ref.casts a boxed-any element to $AnyString = invalid Wasm; representation-scale, NOT a cast-site guard
+- [reference_2524_node_io_shim_memory_ownership.md](reference_2524_node_io_shim_memory_ownership.md) — reference 2524 node io shim memory ownership
+- [reference_baseline_gates_need_postmerge_autorefresh.md](reference_baseline_gates_need_postmerge_autorefresh.md) — Every prescriptive baseline gate must self-refresh post-merge in promote-baseline or it wedges all PRs via drift
+- [reference_fork_origin_behind_upstream.md](reference_fork_origin_behind_upstream.md) — The fork origin/main is ~1185+ commits behind upstream/main — branch dev work from upstream/main, not origin/main, or PRs land DIRTY
+- [reference_gh_remove_label_rest_not_pr_edit.md](reference_gh_remove_label_rest_not_pr_edit.md) — gh pr edit --remove-label/--add-label silently no-ops (projectCards deprecation aborts the mutation); use the REST API to change PR/issue labels
+- [reference_no_rebuild_helper_body_at_finalize.md](reference_no_rebuild_helper_body_at_finalize.md) — Never REBUILD a native-helper body at finalize that bakes funcIdxs — it breaks the late-import shift invariant; splice instead
+- [reference_shared_instr_object_dce_double_remap.md](reference_shared_instr_object_dce_double_remap.md) — Never alias one Instr[]/instruction OBJECT into two reachable positions (if then+else, etc.) — DCE's in-place remapTypeIdxInBody walks it twice and double-applies a chained type-idx remap (e.g. 46→40→34) → invalid struct index. Build a fresh arm per branch.
+- [reference_skipped_needs_if_pattern.md](reference_skipped_needs_if_pattern.md) — GitHub Actions — let a downstream job run when an event-gated needs: dependency is skipped
+- [reference_standalone_any_string_value_read_substrate.md](reference_standalone_any_string_value_read_substrate.md) — Standalone $Object dynamic (any-typed) property read drops native-string values — the single root cause behind a whole cluster of standalone residuals
+- [reference_standalone_harvest_rootcausemap_mislabeled.md](reference_standalone_harvest_rootcausemap_mislabeled.md) — Standalone test262 harvest — root_cause_map buckets + their issue links are unreliable; bucket from the standalone-current.jsonl signatures instead
+- [reference_string_global_sentinel_guard.md](reference_string_global_sentinel_guard.md) — Standalone -1 string-global sentinel — guard global.get sites with stringConstantExternrefInstrs, not just !== undefined
+- [reference_subissue_filename_dupid_gate.md](reference_subissue_filename_dupid_gate.md) — Sub-issue files under a parent
+- [reference_subview_type_idx_stability.md](reference_subview_type_idx_stability.md) — New WasmGC struct types whose idx must survive hoist-vs-body passes must be reserved in the up-front type-init phase, not registered on-demand
+- [reference_vec_externref_key_not_uniform.md](reference_vec_externref_key_not_uniform.md) — ctx.vecTypeMap \"externref\"-keyed carriers are not uniformly (array externref) — some have a ref/ref_null element override
+
