@@ -29,7 +29,12 @@ describe("#2575 — for-in over an array enumerates numeric indices", () => {
   for (const target of targets) {
     describe(`target: ${target}`, () => {
       it("counts one iteration per index", async () => {
-        expect(await run(`export function test(): number { const a=[10,20,30]; let n=0; for (const k in a) n++; return n; }`, target)).toBe(3);
+        expect(
+          await run(
+            `export function test(): number { const a=[10,20,30]; let n=0; for (const k in a) n++; return n; }`,
+            target,
+          ),
+        ).toBe(3);
       });
 
       it("yields the keys '0','1','2' as strings in ascending order", async () => {
@@ -48,7 +53,12 @@ describe("#2575 — for-in over an array enumerates numeric indices", () => {
       });
 
       it("enumerates empty arrays zero times", async () => {
-        expect(await run(`export function test(): number { const a: number[]=[]; let n=0; for (const k in a) n++; return n; }`, target)).toBe(0);
+        expect(
+          await run(
+            `export function test(): number { const a: number[]=[]; let n=0; for (const k in a) n++; return n; }`,
+            target,
+          ),
+        ).toBe(0);
       });
 
       it("honors break", async () => {
@@ -79,11 +89,21 @@ describe("#2575 — for-in over an array enumerates numeric indices", () => {
       });
 
       it("works with a string array (element type is independent of the key set)", async () => {
-        expect(await run(`export function test(): number { const a=["x","y","z","w"]; let n=0; for (const k in a) n++; return n; }`, target)).toBe(4);
+        expect(
+          await run(
+            `export function test(): number { const a=["x","y","z","w"]; let n=0; for (const k in a) n++; return n; }`,
+            target,
+          ),
+        ).toBe(4);
       });
 
       it("works with a var head", async () => {
-        expect(await run(`export function test(): number { const a=[1,2,3]; let n=0; for (var k in a) n++; return n; }`, target)).toBe(3);
+        expect(
+          await run(
+            `export function test(): number { const a=[1,2,3]; let n=0; for (var k in a) n++; return n; }`,
+            target,
+          ),
+        ).toBe(3);
       });
     });
   }
