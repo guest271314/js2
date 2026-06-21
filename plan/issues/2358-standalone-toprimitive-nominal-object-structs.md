@@ -276,6 +276,38 @@ registered after the array-like helpers, reusing `__extern_length` +
 `reserveAccessorGetDriver` pattern). Empty array → `""`. This keeps
 `__to_primitive`'s body funcIdx-stable.
 
+### `$__vec_base` supertype — the clean array-detection key (sd-3)
+
+`getOrRegisterVecBaseType(ctx)` (`object-runtime.ts:3186`) is a SHARED supertype
+of every `__vec_<elemKind>` carrier with `length` at field 0 — so array
+detection in `__to_primitive` is a SINGLE `ref.test vecBaseIdx` (no per-carrier
+iteration) and the length read is `struct.get vecBase 0`. Element access stays
+polymorphic via `__extern_get_idx(arr, i)` (returns the i-th element boxed as
+externref), then `$__any_to_string` per element, `__str_concat` join `,`. This
+is the same machinery `__extern_length`'s `vecBaseArm` already uses (#2186).
+
+### Cleanest landing shape (sd-3 final)
+
+Add the join as a deferred-fill arm so ordering is safe:
+1. In `__to_primitive`, at the `ref.test objectTypeIdx` MISS arm (before "return
+   unchanged", `object-runtime.ts:2107`), insert `ref.test vecBaseIdx` → on hit,
+   `call <reserved __array_to_primitive_string>` and `return`.
+2. Reserve `__array_to_primitive_string` (placeholder `unreachable`, like
+   `reserveAccessorGetDriver`) so `__to_primitive`'s `call` is funcIdx-stable.
+3. After `__extern_length`/`__extern_get_idx` register, FILL the placeholder body
+   (a `fillArrayToPrimitive(ctx)` step alongside `fillExternGetIdxVecArms`):
+   read length via `__extern_length`, loop `[0..len)` appending
+   `$__any_to_string(__extern_get_idx(arr,i))` with a `,` separator (skip
+   separator before index 0), empty → `""`. A hole/undefined element →
+   `""` per Array.prototype.join.
+4. **Number(array)** then reduces automatically: `Number([42])` →
+   `__to_primitive(arr,"number")` → string `"42"` → `__str_to_number` → 42.
+
+This is additive (only the cold ToPrimitive-on-array path changes), keeps the hot
+static paths byte-identical, and needs the HW-floor + WAT-diff guardrails above.
+Status: ANALYSIS COMPLETE, implementation-ready — sized for a focused
+max-reasoning session (deferred-fill + per-element loop + HW-floor validation).
+
 ### Repro probe
 `.tmp/probe-2358.mts` (Number([N]) / arr==str / num+arr / arr+"") reproduces all
 rows above standalone.
