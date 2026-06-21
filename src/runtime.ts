@@ -1727,6 +1727,21 @@ function _hostEqComparableValue(v: any): any {
   if (typeof v === "function") {
     return _wasmClosureWrapperTargets.get(v as Function) ?? v;
   }
+  // (#1712) Canonicalize a `_wrapForHost` proxy back to its underlying raw
+  // WasmGC struct before the reference compare. The two dynamic read paths
+  // that feed `===`/`!==` disagree on representation: an instance-field read
+  // (`this.type`) returns the raw struct, while a module-global + property
+  // read (`types$1.eof`) returns the cached host proxy for the SAME struct
+  // (the proxy is identity-stable per struct via `_hostProxyCache`). Without
+  // this unwrap `proxy === rawStruct` is `false` even though both denote one
+  // object — which is exactly why acorn's `parseTopLevel` guard
+  // `this.type !== types$1.eof` never tripped and the tokenizer looped forever.
+  // `_unwrapForHost` maps any host proxy to its unique struct (1:1 via
+  // `_hostProxyReverse`) and passes a non-proxy through unchanged, so two
+  // genuinely distinct structs still compare unequal.
+  if (v != null && typeof v === "object") {
+    return _unwrapForHost(v);
+  }
   return v;
 }
 
@@ -3915,11 +3930,33 @@ function _safeSet(
     // Falls back silently when the export is missing or doesn't match the
     // struct's runtime type — sidecar still carries the value so host-side
     // reads (Object.keys, JSON.stringify, dynamic-key reads) keep working.
-    if (typeof key === "string" && exports) {
-      const setter = exports[`__sset_${key}`];
+    //
+    // (#1712) Resolve exports from `callbackState` when the `exports` param is
+    // absent. The `__extern_set` / `__extern_set_strict` host bindings pass
+    // `callbackState` (not `exports`), so without this fallback the `__sset_`
+    // writeback was skipped and the value landed in the SIDECAR ONLY. A later
+    // *static* `struct.get` read (the compiled member-access path takes the
+    // guarded-cast struct branch whenever the receiver ref-tests as the struct
+    // type — e.g. an fnctor instance method body reading `this.field`) bypasses
+    // the sidecar and reads the raw WasmGC field, which still held its
+    // initializer value. That split made a dynamic-method write (`this.t = v`)
+    // invisible to a struct-typed read of the same field — the identity defect
+    // behind acorn's `this.type = types$1.eof` / `this.type !== types$1.eof`
+    // tokenizer loop (#1712): the write reached only the sidecar while the
+    // guard read the stale struct field, so the guard never tripped.
+    const ssetExports = exports ?? callbackState?.getExports();
+    if (typeof key === "string" && ssetExports) {
+      const setter = ssetExports[`__sset_${key}`];
       if (typeof setter === "function") {
         try {
-          setter(obj, val);
+          // (#1712) Store the RAW WasmGC struct in the field, never a
+          // `_wrapForHost` proxy. A method-call argument that is itself a
+          // struct arrives here proxy-wrapped (host-bridge arg marshaling);
+          // writing the proxy into the `externref` field would make a later
+          // *typed* `ref.eq` read compare unequal to the original struct. The
+          // proxy is a pure host-side view — `_unwrapForHost` recovers the
+          // canonical struct (1:1) and passes a non-proxy through unchanged.
+          setter(obj, _unwrapForHost(val));
         } catch {
           /* not a field of this struct's runtime type */
         }

@@ -894,6 +894,23 @@ export function tryExternClassMethodOnAny(
   // keep the historical first-match behavior.
   if (methodName === "slice") return null;
 
+  // (#1712) `replace` / `replaceAll` are core String.prototype methods, but
+  // SEVERAL DOM extern classes also declare a `replace` (CSSStyleSheet.replace
+  // takes one arg, DOMTokenList.replace takes two and returns a boolean). When
+  // a RegExp literal or other DOM type elsewhere in the module registers those
+  // extern classes, first-match iteration binds an `any`-typed receiver's
+  // `value.replace(search, replacement)` to one of them — silently dropping or
+  // mis-typing the replacement. The concrete acorn failure: `wordsRegexp(words)
+  // { return new RegExp("^(?:" + words.replace(/ /g, "|") + ")$") }` produced
+  // `^(?:varundefinedreturn…)$` (CSSStyleSheet.replace, replacement dropped) or
+  // `^(?:false)$` (DOMTokenList.replace, boolean result) instead of
+  // `^(?:var|return|…)$`, so keyword recognition failed and the tokenizer
+  // looped forever (#1712 dogfood). On an `any` receiver in untyped JS these
+  // are overwhelmingly String operations; refuse extern-class dispatch and let
+  // the generic `__extern_method_call` host path forward all args to the real
+  // `String.prototype.replace`. Mirrors the `.slice` ambiguity refusal above.
+  if (methodName === "replace" || methodName === "replaceAll") return null;
+
   // (#1283) The dispatch below emits `externref` hints for every arg and
   // assumes the call's params are all-externref. When iterating in
   // insertion order we may otherwise hit an extern class whose method has a
@@ -922,6 +939,26 @@ export function tryExternClassMethodOnAny(
     const sig = info.methods.get(methodName);
     if (!sig) continue;
     if (!isAllExternrefParams(sig)) continue;
+
+    // (#1712) Never bind a candidate that would DROP arguments the call
+    // actually provided. `sig.params` includes `self`, so the method's
+    // user-visible arity is `params.length - 1`; if the call passes MORE
+    // args than that, the loop below silently `drop`s the extras — which is
+    // never the right semantics for a name collision. The concrete failure:
+    // an `any`-typed receiver's `value.replace(/re/g, "rep")` first-matched
+    // `CSSStyleSheet.prototype.replace(text)` (one user arg), so the
+    // replacement string was emitted then immediately dropped and the host
+    // `replace` ran with `undefined` as the replacement (`"a b".replace(/ /,
+    // "|")` → `"aundefinedb"`). This silently broke acorn's
+    // `wordsRegexp(words){ return new RegExp("^(?:"+words.replace(/ /g,"|")+
+    // ")$") }` — keyword recognition failed (`varundefinedreturn…`), so every
+    // identifier mis-tokenized as `name` and the tokenizer looped forever
+    // (#1712 acorn dogfood). Refusing here lets the call fall through to the
+    // generic `__extern_method_call` host dispatch, which forwards ALL args to
+    // the correct `String.prototype.replace`. Mirrors the `.slice` refusal
+    // above (ambiguous String/Array/DOM method names on an `any` receiver).
+    const userArity = sig.params.length - 1;
+    if (expr.arguments.length > userArity) continue;
 
     const importName = `${info.importPrefix}_${methodName}`;
     let funcIdx = ctx.funcMap.get(importName);
