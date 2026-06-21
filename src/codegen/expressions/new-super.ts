@@ -47,7 +47,7 @@ import {
   compileStatement,
   registerCompileSuperElementAccess,
   registerCompileSuperPropertyAccess,
-  registerResolveEnclosingClassName,
+  resolveEnclosingClassName,
 } from "../shared.js";
 import { maybeSetArgcForKnownCall } from "../statements/nested-declarations.js";
 import { compileStringLiteral } from "../string-ops.js";
@@ -69,12 +69,7 @@ import {
 import { localGlobalIdx } from "../registry/imports.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 
-function resolveEnclosingClassName(fctx: FunctionContext): string | undefined {
-  if (fctx.enclosingClassName) return fctx.enclosingClassName;
-  const underscoreIdx = fctx.name.indexOf("_");
-  if (underscoreIdx > 0) return fctx.name.substring(0, underscoreIdx);
-  return undefined;
-}
+// #2146: resolveEnclosingClassName now lives in shared.ts (imported above).
 
 function valTypeMatches(a: ValType, b: ValType): boolean {
   if (a.kind !== b.kind) return false;
@@ -4652,16 +4647,9 @@ function emitTypedArrayFromByteBuffer(
   return true;
 }
 
-export {
-  compileClassExpression,
-  compileNewExpression,
-  compileSuperElementMethodCall,
-  compileSuperMethodCall,
-  resolveEnclosingClassName,
-};
+export { compileClassExpression, compileNewExpression, compileSuperElementMethodCall, compileSuperMethodCall };
 
-// Register the resolveEnclosingClassName delegate so closures.ts (and others)
-// can call it via shared.ts without creating an import cycle.
-registerResolveEnclosingClassName(resolveEnclosingClassName);
+// #2146: resolveEnclosingClassName is now defined in shared.ts directly (no DI
+// slot), so there is no longer a delegate to register here.
 registerCompileSuperPropertyAccess(compileSuperPropertyAccess);
 registerCompileSuperElementAccess(compileSuperElementAccess);
