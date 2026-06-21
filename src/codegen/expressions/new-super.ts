@@ -2155,16 +2155,14 @@ function seedNativeSetFromArrayArg(
   loopBody.push({ op: "local.get", index: lenLocal });
   loopBody.push({ op: "i32.ge_s" });
   loopBody.push({ op: "br_if", depth: 1 });
-  {
-    // __set_add(coll, box(data[i]))  (returns ref $Map → drop)
-    loopBody.push({ op: "local.get", index: collTmp });
-    loopBody.push({ op: "local.get", index: dataLocal });
-    loopBody.push({ op: "local.get", index: idxLocal });
-    loopBody.push(emitArrayGetForElem(arrTypeIdx, elemType));
-    emitCoerceElemToAnyrefInto(ctx, fctx, loopBody, elemType);
-    loopBody.push({ op: "call", funcIdx: addFuncIdx });
-    loopBody.push({ op: "drop" });
-  }
+  // __set_add(coll, box(data[i]))  (returns ref $Map → drop)
+  loopBody.push({ op: "local.get", index: collTmp });
+  loopBody.push({ op: "local.get", index: dataLocal });
+  loopBody.push({ op: "local.get", index: idxLocal });
+  loopBody.push(emitArrayGetForElem(arrTypeIdx, elemType));
+  emitCoerceElemToAnyrefInto(ctx, fctx, loopBody, elemType);
+  loopBody.push({ op: "call", funcIdx: addFuncIdx });
+  loopBody.push({ op: "drop" });
 
   // i += 1; continue
   loopBody.push({ op: "local.get", index: idxLocal });
