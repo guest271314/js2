@@ -3660,7 +3660,26 @@ export function compilePropertyAccess(
           return ctx.fast ? { kind: "i32" } : { kind: "f64" };
         }
       }
-      // Undo the compiled expression if it didn't match
+      // (#2580 M1 — DEFERRED TO M2, PR #1894 eject) The host `.length`-on-`any`
+      // dynamic-read arm was tried here (route through `__extern_get(recv,"length")`
+      // → uniform externref: the real value or JS `undefined` for an absent
+      // property, fixing `var obj={}; obj.length===undefined → false`). It EJECTED
+      // from the merge_group with 13 regressions and the faithful test262 runner
+      // proved the value-semantics is NOT a surgical slice: the genuinely-dynamic
+      // `any` receivers (host-builtin functions via Symbol-keyed prototype walks;
+      // `$AnyValue`-boxed for-await array-rest bindings) are RUNTIME-INDISTINGUISHABLE
+      // from a plain `{}`-absent-length at the bare-externref level — they all reach
+      // `__extern_get`→undefined→NaN where the prior numeric path returned a usable
+      // value, and the canary needs that SAME undefined to stay undefined. No
+      // `ref.test`/`ref.is_null`/`__extern_has` predicate separates them; only a
+      // TAG-AWARE reader (inspecting the boxed `$AnyValue` tag — M2's first
+      // primitive) can. So the arm is OFF: this `any`-receiver `.length` falls
+      // through to the origin path unchanged (zero regression; the #2580 fix lands
+      // in M2). `emitDynGet`/`ensureDynReadHelpers` (the M0 scaffold) stay registered
+      // for M2 to call. Standalone keeps its native `__extern_length` arm below.
+      //
+      // (#1919) Undo the compiled expression if it didn't match — transactional
+      // rollback (body + locals + late imports + errors), not a bare body truncate.
       rollbackSpeculative(ctx, fctx, snap);
     }
     // #1472 Phase B Blocker B Slice 2 — standalone `.length` on an `any`/unknown

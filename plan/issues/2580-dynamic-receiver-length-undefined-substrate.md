@@ -1,8 +1,9 @@
 ---
 id: 2580
 title: "`.length` on an any/dynamically-mutated receiver returns numeric 0, not undefined (runtime property-presence)"
-status: ready
-sprint: Backlog
+status: in-progress
+assignee: ttraenkler/sd-value-rep
+sprint: 65
 created: 2026-06-21
 priority: medium
 feasibility: hard
@@ -487,3 +488,150 @@ otherObj.prop`, both externref), THAT would route into their classifier and want
 their base first — but the M1 `.length` canary (`=== undefined` / `=== <number>`)
 does not. Flagged for the lead's wave-sequencing: **parallel-safe at the `===`
 seam.**
+
+## M1a — IMPLEMENTED (this PR)
+
+The `.length`-on-`any` HOST arm landed as a clean **2-file** change
+(`src/codegen/dyn-read.ts` + `src/codegen/property-access.ts`); the M0 scaffold,
+#1899, and the typed `.length` hot-path are all untouched.
+
+**Where the arm sits (the key root-cause fix).** It is NOT a new `propName ===
+"length"` block placed ahead of the existing ones — that was the first (wrong)
+attempt and it *clobbered the working array path*. Origin already reads
+`const o: any = [1,2,3]; o.length` correctly as `3` because `o`'s value is an
+externref wrapping a WasmGC vec; the existing handler eventually reaches a generic
+externref reader that ref.test-dispatches the vec. Intercepting `any`-`.length`
+BEFORE the vec detection forced every array through `__extern_get(vec,"length")`,
+which the host evaluates to `undefined` (V8 sees an opaque struct). So the arm is
+folded into the **`savedLen` fallback block** (`property-access.ts` ~3644): it
+runs only AFTER the length-bearing-vec-struct detection misses, i.e. the genuinely
+non-vec dynamic receiver.
+
+**`emitDynGet` host path = runtime receiver-kind dispatch (no funcidx hazard).**
+For the `length` key it emits, inline:
+```
+ref.test $vec_i  → if hit:  box_number(f64(struct.get $vec_i 0))   // the array length
+                   else:    __extern_get(recv, "length")            // value or undefined
+```
+nested as one if/else chain over every registered `{length,data}` vec type in
+`ctx.vecTypeMap`. `ref.test typeIdx` uses **type** indices (append-only /
+dead-elim-stable via the rec-group), so unlike a `call __is_vec` it carries no
+funcidx-ordering / late-import-shift hazard — which is what derailed the earlier
+`__dyn_get`-wrapper attempt (a DEFINED-func `call` whose index floated when a
+consumer added a late import). `__extern_get` + `__box_number` are host IMPORTS
+(stable), ensured up-front before any baked index is resolved. Non-`length` keys
+skip the vec arm and go straight to `__extern_get` (vec indexed reads are a later
+slice). Standalone is unchanged (M1a is host-scoped; it still routes through the
+`__dyn_get` wrapper, which is correct there because `__extern_get` is a defined
+native helper).
+
+**Representation = uniform externref, and consumers coerce for free.** The arm
+returns `{ kind: "externref" }` (a boxed number for an array length, JS
+`undefined` for an absent property). Every numeric consumer tested
+(`+`/`*`/`<`/`for`-bound) unboxes it via the existing externref→f64 coercion;
+`=== undefined` hits the presence arm; `typeof`/`String()`/truthiness all correct.
+So M1a needed **no** separate M1b consumer-coercion work for these shapes — the
+pessimistic M1 verdict over-scoped it.
+
+**Validation.** New regression suite `tests/issue-2580-any-length.test.ts` (13
+cases) green; `tsc`/`prettier` clean; the 3 pre-existing `strings.test.ts`
+failures are an unrelated worktree test-infra artifact (identical on origin/main).
+Conformance is the merge_group full-Test262 gate's call (this is a value-rep /
+chokepoint touch → authoritative gate per `project_broad_impact_validate_full_ci`,
+NOT a scoped sweep). Stop-the-line on any typed-`.length` eject.
+
+## M1a — MERGE_GROUP EJECT (PR #1894 v1, 13 regressions) + ROOT CAUSE
+
+PR #1894 v1 (the `ctx.vecTypeMap`-dispatch arm above) passed every PR check and
+all 117 merge_group test262 shards, but the merge_group **net-regression gate**
+ejected it: **13 regressions** (pass→fail), all `assertion_fail`, all with a
+wasm-hash change, **0 improvements** (fails net AND ratio). `auto-park` applied
+the `hold` label. Confirmed NOT cross-PR drift (only #1894's merge_group shows
+bucket `964d9207`). Pulled the merged-report artifact + diffed vs baseline → the
+exact 13 split into two clusters, BOTH the `.length`-on-any arm firing on a
+receiver the prior numeric path handled correctly:
+
+- **A (5): function/closure `.length` = ARITY.** `verifyProperty(IteratorProto[
+  Symbol.iterator], 'length', {value:0})` etc. `(fn as any).length`: origin = `0`
+  (matches the arity the tests assert), my arm = **NaN** (a closure externref →
+  `__extern_get(closure,"length")` → undefined → NaN coercion).
+- **B (8): for-await-of array-rest destructuring `.length`.** `for ([x, ...y] of
+  …)` then `y.length`. The rest binding `y` is `let`-declared → `any`, and in the
+  loop-head-destructuring desugaring it ends up as a boxed/wrapped externref that
+  is NEITHER a directly-`ref.test`-able vec NOR a plain host object — so my vec
+  chain misses and `__extern_get` returns undefined → **NaN** (origin returned the
+  correct count). (A reduced `for ([x,...y] of [[1,2,3]]) {}; return y.length`
+  reproduces NaN locally; note `typeof y` is `"undefined"` / `Array.isArray(y)`
+  false in this reduced shape — there is a *separate* for-of-rest-binding
+  representation quirk here, orthogonal to M1a, that the prior numeric `.length`
+  path happened to read correctly.)
+
+**Unified root cause:** the gate `objType.flags & (Any|Unknown)` is too broad. My
+arm intercepts `.length` for ANY boxed/wrapped non-plain-object receiver (closure,
+loop-destructured rest array, …) and emits a uniform-externref `undefined` →` NaN`
+where the prior numeric path returned a usable value. The substrate CORE is sound
+(the `{}.length === undefined` canary still passes); the gate just over-reached.
+
+**FIX — option 2 (positive `$Object` gate) is NOT VIABLE in host mode; use
+option 3 (decline-for-struct).** Option 2 fails twice: (a) `objectTypeIdx` only
+exists when `ensureObjectRuntime` runs, and that registers `$PropEntry` with
+`key: ref $anyStrTypeIdx` — host mode `anyStrTypeIdx = -1` → the original −1
+type-index crash; (b) more fundamentally, in HOST mode a plain `{}` is NOT a
+WasmGC `$Object` struct — it's a host JS object (externref). There is no struct to
+`ref.test`. So a positive `$Object` gate can't work host-side.
+
+The host-mode picture (confirmed by probing): plain `{}` is a host externref that
+`ref.test`-misses ALL structs (→ `__extern_get` → undefined, the canary —
+*already* works via the current vec-MISS branch); array/closure are WasmGC
+structs; the for-of/await rest binding points at a vec (the v1 arm matched it and
+read the SOURCE array's length 3, hence "returned 3" for expected 2).
+
+**Option 3 — decline-for-struct:** the dyn-read `.length` arm DECLINES (return
+false → caller falls through to the prior numeric `.length` path) when the
+receiver `ref.test`s as a VEC **or** a CLOSURE base type
+(`collectClosureBaseWrapperTypeIdxs(ctx)`, same body-compile mechanism as the vec
+types); it fires `__extern_get(recv,"length")` ONLY for the residual genuine host
+externref. Effect: array → declines → prior path reads vec field-0 = 3 ✓ (this
+also DROPS the v1 box-number vec arm, eliminating the Cluster-B wrong-vec-match);
+`{}` → all struct-tests miss → `__extern_get` → undefined ✓ (canary); closure →
+declines → prior path → 0 ✓ (Cluster A); rest binding (vec) → declines → prior
+path → correct count ✓ (Cluster B). SIMPLER than v1 (removes the box-number arm —
+the prior path already read array `.length` correctly). Arm shrinks to
+"`ref.test` vec OR closure → decline; else `__extern_get(recv,'length')`". One
+gate, all 13 fixed, canary preserved, no `$Object` struct needed. **Validate
+against the REAL async-generator rest test262 file** (the reduced
+`for ([x,...y] of …)` probe is unfaithful — origin ALSO returns 0 there).
+Re-validate via merge_group (one-shot); stop-the-line on re-eject.
+
+## M1a — FINAL VERDICT (faithful runner): NOT a surgical slice; defer to M2
+
+Built a faithful local gate — call the REAL `runTest262File` (tests/test262-runner.ts)
+on all 13 regressed files directly (`.tmp/run13.mjs`). Reduced `compile()`+probe
+shapes repeatedly MISLED (a user closure ≠ a host builtin; `for([x,...y]of)` ≠ the
+async-gen harness). Results:
+
+- **Arm OFF → 12/13 pass** (the 13th `[skip]`s on Temporal). ZERO regression,
+  identical to origin — the prior path is correct for every one of the 13.
+- Arm ON v1 → 0/13. Closure-arm v2 → STILL 0/13 (the real Cluster-A receivers are
+  host-builtin functions reached via Symbol-keyed prototype walks, NOT user
+  closures the `ref.test` catches). Receiver-`ref.is_null` guard → STILL 0/13 (the
+  13's receivers are NON-null wrapped externrefs). Decline-for-struct → can't
+  separate them (the 13 `ref.test`-MISS all structs, exactly like the canary `{}`).
+
+**Root cause = TOTAL ENTANGLEMENT.** Every one of the 13 reaches
+`__extern_get(recv,"length")` → undefined → NaN, where the prior numeric path
+returned a usable value (0 via `__extern_length`'s null-guard, or the real count).
+The canary (`{}.length` → undefined) needs that SAME `__extern_get`-undefined
+result to STAY undefined. A non-null `{}` lacking `length` and a non-null wrapped
+builtin / rest-binding are the SAME externref shape — **no `ref.test` /
+`ref.is_null` / `__extern_has` predicate separates them.** The distinction lives in
+the boxed `$AnyValue` tag, which only a TAG-AWARE reader (M2's job) can inspect; a
+bare-externref runtime test cannot. So options (a)/(3) are dead — there is no
+surgical gate.
+
+**RESOLUTION = turn the arm OFF (option c).** The `.length`-on-any value-semantics
+is not a surgical M1 slice; it requires M2's tag-aware dynamic reader to
+disambiguate the receiver. Turning the arm off reverts the canary to the
+PRE-EXISTING #2580 bug (NOT a new regression), keeps M0 inert, and is zero-regression
+(validated 12/13 + skip). The `{}.length`→undefined fix folds into M2's acceptance.
+M1 over-scoped the value-semantics; M0 (the inert scaffold) is the landable M1.
