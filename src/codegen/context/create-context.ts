@@ -83,6 +83,8 @@ export function createCodegenContext(
     usesArrayHoles: false, // (#2001 S1) set by the scanForArrayHoles pre-scan
     holeTypeIdx: -1, // (#2001 S1) $Hole struct type; lazily registered
     holeGlobalIdx: undefined, // (#2001 S1) $__hole singleton global
+    usesDynRead: false, // (#2580 M0) set by a __dyn_has/__dyn_get call site (M1+); M0 adds none
+    dynReadHelpersEmitted: false, // (#2580 M0) ensureDynReadHelpers idempotence latch
     classThrowsOnEval: new Set(),
     topLevelFunctionNames: new Set(), // (#1983) for class-member funcMap key collision detection
     classMethodSet: new Set(),
