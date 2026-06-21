@@ -36,6 +36,7 @@ import { nativeStringType } from "./native-strings.js";
 import { emitBrandCheckTypeError } from "./native-proto.js";
 import { addFuncType } from "./registry/types.js";
 import { coerceType, compileExpression, compileStatement, valTypesMatch } from "./shared.js";
+import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 
 const STATE_FIELD = 0;
 const SENT_FIELD = 1;
@@ -138,7 +139,7 @@ function isStringYieldExpression(ctx: CodegenContext, expr: ts.Expression | unde
  * (not descending into nested functions). Returns `{kind:"f64"}` when there are
  * no yields (degenerate; the plan rejects zero-yield generators separately).
  */
-function generatorElemValType(ctx: CodegenContext, decl: ts.FunctionDeclaration): ValType | null {
+function generatorElemValType(ctx: CodegenContext, decl: GeneratorDecl): ValType | null {
   let sawNumeric = false;
   let sawString = false;
   let unsupported = false;
@@ -237,7 +238,7 @@ function nodeContainsYield(root: ts.Node): boolean {
  * `null` when any shape is outside the supported subset, so callers fall back
  * to the host path (or the scoped diagnostic in standalone).
  */
-function buildNativeGeneratorPlan(ctx: CodegenContext, decl: ts.FunctionDeclaration): NativeGeneratorPlan | null {
+function buildNativeGeneratorPlan(ctx: CodegenContext, decl: GeneratorDecl): NativeGeneratorPlan | null {
   if (!decl.body) return null;
 
   // (#2171) Decide the uniform yield element type up-front. Numeric → f64 (the
@@ -792,15 +793,87 @@ function thenBody(stmt: ts.Statement): readonly ts.Statement[] {
   return [stmt];
 }
 
-export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: ts.FunctionDeclaration): boolean {
+/**
+ * (#2571) True when a method body references `super.*` (a `SuperKeyword` that is
+ * not just a nested function's own `super`). The native generator resume
+ * function has no `super`-binding setup, so a `super`-using method generator
+ * bails to the eager-buffer host path. Stops at nested non-arrow functions
+ * (their `super` is their own concern); arrow functions inherit the method's
+ * `super`, so it does NOT stop at them.
+ */
+function methodBodyUsesSuper(body: ts.Node): boolean {
+  let found = false;
+  function visit(node: ts.Node): void {
+    if (found) return;
+    if (node.kind === ts.SyntaxKind.SuperKeyword) {
+      found = true;
+      return;
+    }
+    // Nested non-arrow function-likes rebind `super` — their `super` is their
+    // own; do not descend (arrow functions keep the enclosing `super`).
+    if (
+      ts.isFunctionDeclaration(node) ||
+      ts.isFunctionExpression(node) ||
+      ts.isMethodDeclaration(node) ||
+      ts.isConstructorDeclaration(node) ||
+      ts.isGetAccessorDeclaration(node) ||
+      ts.isSetAccessorDeclaration(node)
+    ) {
+      return;
+    }
+    ts.forEachChild(node, visit);
+  }
+  ts.forEachChild(body, visit);
+  return found;
+}
+
+/**
+ * (#2571) A native-generator candidate is either a named `function*`
+ * declaration or a class / object-literal generator METHOD. Both expose
+ * `.body` / `.parameters` / `.asteriskToken` / `.name`, so the plan builder and
+ * the state model treat them uniformly; the only method-specific handling is the
+ * synthetic `this` leading param (threaded in `registerNativeGenerator`).
+ */
+export type GeneratorDecl = ts.FunctionDeclaration | ts.MethodDeclaration;
+
+export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: GeneratorDecl): boolean {
   if (!noJsHostTarget(ctx)) return false;
   if (!decl.name || !decl.body || !decl.asteriskToken) return false;
+  // (#2571) An object-literal method with a computed/string name
+  // (`{ [k]*(){} }`, `{ "m"*(){} }`) is out of scope — only an identifier-named
+  // method threads cleanly through the funcMap key. A FunctionDeclaration name
+  // is always an Identifier.
+  if (ts.isMethodDeclaration(decl) && !ts.isIdentifier(decl.name)) return false;
+  // (#2571) Only CLASS method generators are routed through the native factory
+  // in this slice (class-bodies.ts). An OBJECT-LITERAL method generator
+  // (`{ *m(){} }`) is lowered via the closures.ts lifted-closure path, which is
+  // NOT yet wired to the native state machine — so it must keep forcing the host
+  // path. Bailing here (the single candidate gate consumed by both
+  // `registerNativeGenerator` AND `sourceNeedsGeneratorHostImports`) keeps the
+  // host imports registered for it, avoiding an undefined-funcidx invalid module.
+  // Object-literal method generators are the documented follow-up.
+  if (ts.isMethodDeclaration(decl) && !ts.isClassLike(decl.parent)) return false;
   const modifiers = ts.canHaveModifiers(decl) ? ts.getModifiers(decl) : undefined;
   if (modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword || m.kind === ts.SyntaxKind.DeclareKeyword)) {
     return false;
   }
   for (const param of decl.parameters) {
     if (param.dotDotDotToken || !ts.isIdentifier(param.name)) return false;
+  }
+  // (#2571) A method generator that reads `arguments`, uses `super.*`, or
+  // CAPTURES an enclosing-function binding (#2203) has no native state-machine
+  // support: the eager-buffer path builds the arguments vec / closure, while the
+  // native state struct has slots only for `this` + own params, not captures.
+  // Bail to the host path so it stays correct (host) / refuses cleanly
+  // (standalone) rather than reading a garbage slot. This keeps the candidate
+  // gate the SINGLE source of truth — `registerNativeGenerator` (class-bodies)
+  // and `sourceNeedsGeneratorHostImports` both consult it and agree.
+  if (
+    ts.isMethodDeclaration(decl) &&
+    decl.body &&
+    (bodyUsesArguments(decl.body) || methodBodyUsesSuper(decl.body) || generatorCapturesOuterScope(ctx, decl))
+  ) {
+    return false;
   }
   const plan = buildNativeGeneratorPlan(ctx, decl);
   return plan !== null && plan.states.some((s) => s.terminator.kind === "yield" || s.terminator.kind === "yield-star");
@@ -822,7 +895,7 @@ export function isNativeGeneratorCandidate(ctx: CodegenContext, decl: ts.Functio
  * non-capturing nested generator stays native and is NOT flagged, so it does not
  * gain unused host-import dependencies.
  */
-function generatorCapturesOuterScope(ctx: CodegenContext, decl: ts.FunctionDeclaration): boolean {
+function generatorCapturesOuterScope(ctx: CodegenContext, decl: GeneratorDecl): boolean {
   if (!decl.body) return false;
   // Only generators nested inside another function-like scope can capture; a
   // top-level generator's free variables are module globals, which the native
@@ -910,7 +983,12 @@ export function sourceNeedsGeneratorHostImports(ctx: CodegenContext, sourceFile:
     }
     if (ts.isMethodDeclaration(node) && node.asteriskToken && node.body) {
       found = true;
-      needsHost = true;
+      // (#2571) A class / object-literal generator METHOD that the native path
+      // can lower (instance/static, identifier params, no capture / arguments /
+      // super) no longer forces the host imports — same logic as the
+      // FunctionDeclaration branch above, generalized to methods. A
+      // non-candidate or capturing method generator still needs the host buffer.
+      if (!isNativeGeneratorCandidate(ctx, node) || generatorCapturesOuterScope(ctx, node)) needsHost = true;
       return;
     }
     ts.forEachChild(node, visit);
@@ -957,9 +1035,16 @@ export function ensureNativeGeneratorResultType(ctx: CodegenContext, elemValType
 
 export function registerNativeGenerator(
   ctx: CodegenContext,
-  decl: ts.FunctionDeclaration,
+  decl: GeneratorDecl,
   functionName: string,
   paramTypes: ValType[],
+  // (#2571) When `decl` is a non-static instance generator METHOD, the caller
+  // passes `paramTypes = [receiverType, ...userParamTypes]` and sets this flag.
+  // We then prepend a `"this"` entry to `paramNames` so the state struct mints a
+  // `param_this` field (rehydrated as a `this` local in the resume function) and
+  // the param/name arrays stay aligned. Free functions / static methods leave
+  // this `false` — byte-identical to pre-#2571.
+  synthesizedThis = false,
 ): NativeGeneratorInfo | null {
   const existing = ctx.nativeGenerators.get(functionName);
   if (existing) return existing;
@@ -982,7 +1067,10 @@ export function registerNativeGenerator(
   if (elemIsString && bodySpillsForGuard.length > 0) return null;
 
   const resultTypeIdx = ensureNativeGeneratorResultType(ctx, elemValType);
-  const paramNames = decl.parameters.map((p) => (ts.isIdentifier(p.name) ? p.name.text : ""));
+  // (#2571) The synthetic `this` (when present) is the FIRST param name, aligned
+  // with the caller's `paramTypes[0] === receiverType`. User params follow.
+  const userParamNames = decl.parameters.map((p) => (ts.isIdentifier(p.name) ? p.name.text : ""));
+  const paramNames = synthesizedThis ? ["this", ...userParamNames] : userParamNames;
   const stateFields: FieldDef[] = [
     { name: "state", type: { kind: "i32" }, mutable: true },
     { name: "sent", type: { kind: "f64" }, mutable: true },
@@ -1037,6 +1125,7 @@ export function registerNativeGenerator(
   const info: NativeGeneratorInfo = {
     functionName,
     decl,
+    synthesizedThis,
     stateTypeIdx,
     resultTypeIdx,
     paramNames,
@@ -1634,7 +1723,7 @@ export function ensureNativeGeneratorResumeFunction(ctx: CodegenContext, info: N
 export function compileNativeGeneratorFunction(
   ctx: CodegenContext,
   fctx: FunctionContext,
-  decl: ts.FunctionDeclaration,
+  decl: GeneratorDecl,
   info: NativeGeneratorInfo,
 ): void {
   ensureNativeGeneratorResumeFunction(ctx, info);
@@ -1643,7 +1732,12 @@ export function compileNativeGeneratorFunction(
   fctx.body.push({ op: "f64.const", value: NaN });
   fctx.body.push({ op: "i32.const", value: 0 });
   fctx.body.push({ op: "f64.const", value: NaN });
-  for (let i = 0; i < decl.parameters.length; i++) {
+  // (#2571) Read every wasm param into its `param_*` state slot. For an instance
+  // method generator the synthetic `this` is wasm param 0 and user params are
+  // 1..n, so iterate `info.paramTypes.length` (which includes the synthetic
+  // `this`), NOT `decl.parameters.length`. For free functions / static methods
+  // the two are equal, so this is byte-identical there.
+  for (let i = 0; i < info.paramTypes.length; i++) {
     fctx.body.push({ op: "local.get", index: i });
   }
   for (let i = 0; i < info.spillNames.length; i++) {

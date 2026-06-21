@@ -25,6 +25,11 @@ import { emitThrowReferenceError, getFuncParamTypes } from "./expressions/helper
 import { pushDefaultValue } from "./type-coercion.js";
 import { bodyUsesArguments } from "./helpers/body-uses-arguments.js";
 import {
+  compileNativeGeneratorFunction,
+  isNativeGeneratorCandidate,
+  registerNativeGenerator,
+} from "./generators-native.js"; // (#2571) native method-generator lowering
+import {
   cacheStringLiterals,
   extractConstantDefault,
   hasAbstractModifier,
@@ -910,8 +915,28 @@ export function collectClassDeclaration(
       const sig = ctx.checker.getSignatureFromDeclaration(member);
       let methodResults: ValType[] = [];
       if (isGeneratorMethod) {
-        // Generator methods return externref (JS Generator object)
-        methodResults = [{ kind: "externref" }];
+        // (#2571) In a no-JS-host target, a native-capable generator method
+        // returns its `$GenState_*` struct (the lazy native state machine),
+        // NOT the eager-buffer `externref` Generator object. Register it here —
+        // during the collection pass — so the state-struct type exists and the
+        // method's wasm signature carries the right result type (mirrors the
+        // free-function path in declarations.ts:2499). `methodParams` already
+        // includes the leading `this` ref for instance methods; mark
+        // `synthesizedThis` so `param_this` is minted. The actual factory emit
+        // is routed below (the generator-method emit block). JS-host mode keeps
+        // the externref Generator object (eager-buffer path) — byte-identical.
+        const noJsHost = ctx.standalone || ctx.wasi;
+        let nativeGen = null;
+        if (noJsHost && !isAsyncMethod && isNativeGeneratorCandidate(ctx, member)) {
+          nativeGen = registerNativeGenerator(
+            ctx,
+            member,
+            classMemberFuncKey(ctx, fullName),
+            methodParams,
+            /* synthesizedThis */ !isStatic,
+          );
+        }
+        methodResults = nativeGen ? [{ kind: "ref", typeIdx: nativeGen.stateTypeIdx }] : [{ kind: "externref" }];
       } else if (sig) {
         let retType = ctx.checker.getReturnTypeOfSignature(sig);
         if (isAsyncMethod) {
@@ -1891,13 +1916,23 @@ function compileClassBodiesInner(
       const isGeneratorMethod = member.asteriskToken !== undefined;
       const isAsyncMethod = member.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
 
+      // (#2571) A native-lowered generator method returns its `$GenState_*`
+      // struct ref (registered in the collection pass under the same
+      // classMemberFuncKey); its fctx returnType must match that wasm result
+      // type, not the eager-buffer `externref`. JS-host (no native registration)
+      // keeps `externref`.
+      const nativeGenInfo = isGeneratorMethod ? ctx.nativeGenerators.get(classMemberFuncKey(ctx, fullName)) : undefined;
+      const genMethodReturnType: ValType = nativeGenInfo
+        ? { kind: "ref", typeIdx: nativeGenInfo.stateTypeIdx }
+        : { kind: "externref" };
+
       const fctx: FunctionContext = {
         name: fullName,
         params,
         locals: [],
         localMap: new Map(),
         returnType: isGeneratorMethod
-          ? { kind: "externref" }
+          ? genMethodReturnType
           : retType && !isVoidType(retType)
             ? resolveWasmType(ctx, retType)
             : null,
@@ -2045,7 +2080,14 @@ function compileClassBodiesInner(
         emitArgumentsObject(ctx, fctx, methodParamTypes, paramOffset, true);
       }
 
-      if (isGeneratorMethod && member.body) {
+      if (isGeneratorMethod && member.body && nativeGenInfo) {
+        // (#2571) Native lazy generator method: emit the state-struct factory
+        // (pushes the `$GenState_*` ref) instead of the eager host buffer. The
+        // resume function + `.next()/.return()/.throw()` dispatch are already
+        // representation-agnostic. No host imports, instantiates standalone.
+        compileNativeGeneratorFunction(ctx, fctx, member, nativeGenInfo);
+        fctx.body.push({ op: "return" });
+      } else if (isGeneratorMethod && member.body) {
         // Generator method: eagerly evaluate body, collect yields into a buffer,
         // then wrap with __create_generator to return a Generator-like object.
         // Body is wrapped in try/catch to defer thrown exceptions to first next() (#928).
