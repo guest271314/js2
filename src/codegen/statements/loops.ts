@@ -4734,9 +4734,7 @@ export function compileForInStatement(ctx: CodegenContext, fctx: FunctionContext
     // static-unroll path below, which is exact for a non-mutated closed shape.
     const recvWasmType = resolveWasmType(ctx, ctx.checker.getTypeAtLocation(stmt.expression));
     const isDynamicReceiver =
-      recvWasmType.kind === "externref" ||
-      recvWasmType.kind === "anyref" ||
-      recvWasmType.kind === "ref_extern";
+      recvWasmType.kind === "externref" || recvWasmType.kind === "anyref" || recvWasmType.kind === "ref_extern";
     if (isDynamicReceiver) {
       ensureObjectRuntime(ctx);
       keysIdx = ctx.funcMap.get("__object_keys");
