@@ -88,6 +88,24 @@ RUN ARCH=$(dpkg --print-architecture) && \
   rm -rf "${WT_DIR}" && \
   /usr/local/bin/wasmtime --version
 
+# deno CLI — runs the standalone Native Messaging test harnesses (e.g.
+# guest271314's nm_standalone_test.js from loopdive/js2#389) and other
+# Deno-based standalone-mode checks. Ships release .zip only (unzip is in the
+# apt block above). Arch-aware: amd64->x86_64, arm64->aarch64.
+ARG DENO_VERSION=v2.8.3
+RUN ARCH=$(dpkg --print-architecture) && \
+  case "$ARCH" in \
+    amd64) DENO_ARCH=x86_64 ;; \
+    arm64) DENO_ARCH=aarch64 ;; \
+    *) echo "unsupported arch: $ARCH" && exit 1 ;; \
+  esac && \
+  DENO_ZIP="deno-${DENO_ARCH}-unknown-linux-gnu.zip" && \
+  wget -O /tmp/deno.zip "https://github.com/denoland/deno/releases/download/${DENO_VERSION}/${DENO_ZIP}" && \
+  unzip -o /tmp/deno.zip -d /usr/local/bin && \
+  rm /tmp/deno.zip && \
+  chmod +x /usr/local/bin/deno && \
+  /usr/local/bin/deno --version
+
 COPY .tmux.conf /home/node/.tmux.conf
 RUN chown node:node /home/node/.tmux.conf
 
