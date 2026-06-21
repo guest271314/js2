@@ -59,6 +59,7 @@ import {
   hoistVarDeclarations,
   nativeStringType,
   resolveWasmType,
+  STRING_METHODS,
 } from "../index.js";
 import {
   compileArrayConstructorCall,
@@ -86,6 +87,7 @@ import {
   emitNullCheckThrow,
   receiverIsCaughtErrorStringRead,
   receiverIsNativeStringValType,
+  receiverMayBeNativeStringAtRuntime,
   typeErrorThrowInstrs,
 } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
@@ -100,7 +102,12 @@ import {
   ensureExtrasArgvGlobal,
   maybeSetArgcForKnownCall,
 } from "../statements/nested-declarations.js";
-import { compileNativeStringMethodCall, compileStringLiteral, emitBoolToString } from "../string-ops.js";
+import {
+  compileGuardedNativeStringMethodCall,
+  compileNativeStringMethodCall,
+  compileStringLiteral,
+  emitBoolToString,
+} from "../string-ops.js";
 import { tryCompileNodeProcessCall } from "../node-process-api.js";
 import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import {
@@ -8793,6 +8800,31 @@ function compileCallExpression(
         fctx.body.push({ op: "call", funcIdx });
         return { kind: "externref" };
       }
+    }
+
+    // (#2575, extends #2187) Runtime-guarded native string method on an
+    // `any`/unknown receiver whose value MAY be a native `$AnyString` at runtime
+    // but whose receiver is an opaque externref (object property value, generator
+    // yield read, indexed element read, …) — i.e. the value-rep cases that
+    // #2187's static `receiverIsNativeStringValType` (bare-identifier-with-
+    // string-ref-local) cannot recognise. A runtime `ref.test $AnyString` keeps a
+    // non-string `any` (array, number, null) on its benign default. Scoped to a
+    // known STRING_METHODS name (+`charCodeAt`, which has a dedicated arm but is
+    // not in the table), native-string mode, and an `any`/unknown receiver NOT
+    // already handled by the static string arms below.
+    if (
+      ctx.nativeStrings &&
+      ctx.nativeStrTypeIdx >= 0 &&
+      (Object.prototype.hasOwnProperty.call(STRING_METHODS, propAccess.name.text) ||
+        propAccess.name.text === "charCodeAt") &&
+      !isStringType(receiverType) &&
+      !receiverIsCaughtErrorStringRead(ctx, propAccess.expression) &&
+      !receiverIsNativeStringValType(ctx, fctx, propAccess.expression) &&
+      receiverMayBeNativeStringAtRuntime(ctx, propAccess.expression)
+    ) {
+      const guarded = compileGuardedNativeStringMethodCall(ctx, fctx, expr, propAccess, propAccess.name.text);
+      if (guarded !== null) return guarded;
+      // Fall through to the generic dispatch on a build failure.
     }
 
     // String method calls
