@@ -101,6 +101,35 @@ is the recommended fix. sd-3 attempted the `boxToExternref` locus but it sits on
 the VEC-conversion path, not the tuple path — the tuple-field box is the right
 site.
 
+## FINAL localization (sd-3) — the box is at ARRAY-LITERAL construction, not destructuring
+
+Tracing further: `[undefined as any]` has element type `any`, so the single-element
+literal compiles to a tuple `{_0: externref}` (NOT `{_0: f64}`), and `_0` is
+populated with **`__box_number(sentinel)`** AT LITERAL-CONSTRUCTION time. So the
+sentinel is boxed to a NaN-number externref BEFORE destructuring ever reads it —
+`emitDefaultValueCheck` then takes its EXTERNREF arm (`emitExternrefDefaultCheck`
+→ `__extern_is_undefined`), which correctly says "not undefined" for a number box.
+
+So the canonical fix is at **array-literal element compilation**: an `undefined`
+element (or the f64 sentinel) must be stored as a real `undefined` externref
+(`emitUndefined`), NOT `__box_number(sentinel)`. Equivalently, the destructuring
+externref default check could recognize the boxed sentinel — but fixing the
+literal is cleaner and benefits every consumer (`arr[0]`, spread, etc.).
+
+**Standalone substrate note (unchanged):** in `nativeStrings`/standalone there is
+no host `undefined`; `emitUndefined` → `ref.null.extern`. Since the default check
+uses `__extern_is_undefined` (not `ref.is_null`), a null won't fire the default
+either. So a fully-correct STANDALONE fix needs a native undefined externref the
+predicate recognizes, OR the array-literal `undefined` element must be tracked so
+the destructuring uses the f64-sentinel (raw) default check instead of the
+externref one. This makes #2574 partly a standalone-undefined-substrate item — the
+JS-host lane is the easy half (`emitUndefined` at the literal); standalone needs
+the native-undefined or sentinel-tracking design.
+
+3 fix loci were tried and reverted (boxToExternref vec-loop; equality dispatch;
+tuple f64 arm) — none matched the literal-construction box site. The above is the
+correct site; documented for a focused session.
+
 ## Acceptance criteria
 
 - `const [a = 9] = [undefined]` → `a === 9` standalone; host unchanged.
