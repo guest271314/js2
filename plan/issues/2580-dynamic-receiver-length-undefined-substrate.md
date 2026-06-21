@@ -319,3 +319,62 @@ commitment — is the USER's call.** This spec sizes the payoff (390 floor / 1,0
 ceiling), the cost (~2–3 weeks), and the risk (hot-`.length` path, mitigated by
 the M1 canary + per-slice full-gate validation, never a #1844 big-bang) for that
 decision.
+
+---
+
+# Implementation log
+
+## M0 — `__dyn_has`/`__dyn_get` scaffold (LANDED, PR #1880, 2026-06-21)
+
+The two Wasm-native read primitives + a `ctx.usesDynRead` gate + finalize-phase
+wiring (`src/codegen/dyn-read.ts`). **Provably inert / 0-risk**: the helpers are
+gated on `usesDynRead`, which M0 sets nowhere, so they are never emitted and every
+module is byte-identical (the *gate*, not dead-elim, is the guarantee — an
+uncalled *defined* function is not import-pruned). Validated three ways: inert for
+normal programs (incl. `any[].length`, `o.length===undefined`); valid when
+force-emitted (`JS2WASM_FORCE_DYN_READ=1`, host + standalone — the bodies-are-sound
+self-test); 0 regression on the array/object suites. Merged clean through the
+merge_group (no eject), exactly as the byte-identity proof predicted.
+
+## M1 — `any`-receiver `.length` canary (CANARY VERDICT: REPRESENTATION CALL, NOT landed)
+
+The canary did its job — it surfaced the return-type-change as a **representation
+decision before M2 sank any effort**, with the typed-`.length` safety property
+cleanly bounded. Branch `issue-2580-m1-length-canary` (WIP, NOT pushed).
+
+- **SOLVED — the #2043 `-1` type-index desync.** In HOST mode `__extern_get` is a
+  JS *import*, not the native `$Object` runtime; the call-site helper called
+  `ensureObjectRuntime`, which in host mode registers `$PropEntry` with
+  `key: ref $AnyString` where `anyStrTypeIdx === -1` → a struct field referencing
+  typeidx -1 → binary-emit fail. Fix: host uses `ensureLateImport("__extern_get")`,
+  `ensureObjectRuntime` only in standalone. (Same family as
+  `project_type_index_shift_and_deadelim`.)
+- **SOLID — the typed safety property HOLDS.** `number[]`/`string`/`arguments`/
+  `rest` `.length` are byte-identical: they return from the typed arms *above* the
+  new `any`-gated arm and never reach it. The substrate's hot-path risk is bounded.
+- **THE FINDING (the re-assessment).** `.length` on an `any` receiver returning a
+  uniform externref fights every downstream *numeric* consumer. Scouting the five
+  `obj.length` consumer contexts (`const x = obj.length` inference, `===`,
+  arithmetic `+`, `String()`, `if`-truthiness) shows **none route through the
+  `compilePropertyAccess` arm** — `obj.length`-on-`any` is lowered *independently*
+  by multiple expression handlers (the `===` HasProperty fold, the arithmetic
+  numeric-coercion path, …), each with its own `.length` handling. So the
+  uniform-externref `.length` representation is **not one front-end change** but
+  either (a2) a refactor making `compilePropertyAccess` the single `.length`-on-any
+  chokepoint all consumers defer to, (a1) a per-handler patch, or (b) a narrower
+  absent-sentinel that keeps `.length` numeric (smaller, but does not generalize to
+  M2/M3's arbitrary `obj[i]` reads). **The canary proved the rep has
+  distributed-lowering integration cost the scoping doc under-estimated** — a
+  scope/investment decision (escalated to the user).
+
+### Known follow-ups (track for M2/M3)
+
+- **M0 `__dyn_has` semantic bug** — the M0 form returns "present" iff
+  `__extern_get` is non-null, which **conflates "present with value `undefined`"
+  vs "absent"** (`{}.x === undefined` own-property edge, and a real `undefined`
+  value). HasProperty-proper (own + prototype-chain presence, independent of the
+  *value*) is needed in M2/M3 where the distinction matters. M1's `.length` /
+  the array-like cluster only need non-null-Get ⇔ present, so this is deferred,
+  not a blocker for M0/M1.
+- **`__dyn_get` standalone arm** — M0 delegates to `__extern_get`; the
+  native-string indexed/`length` arm + the `$Vec` `$Hole→undefined` arm are M2/M3.
