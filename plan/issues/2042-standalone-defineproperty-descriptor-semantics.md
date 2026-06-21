@@ -115,6 +115,7 @@ spec for the full map). They are stackable; land S1 → S3 → S4.
 ### S1 — `__obj_find` / `__obj_hash` key ToPropertyKey hardening (kills `illegal_cast`)
 
 **Root cause.** `src/codegen/object-runtime.ts`:
+
 - `__obj_find` (~L482): unconditional `ref.cast $AnyString` on the key param at
   **L496** (`any.convert_extern` → `ref.cast`).
 - `__obj_hash` (the hash helper, ~L289 per #2046): same unconditional cast.
@@ -127,6 +128,7 @@ member access `o[0]`, `Reflect.get(o, 1)` — #2046 PR-D, descriptor reflection)
 still feeds a boxed number straight into the cast.
 
 **Fix — central runtime coercion, not N call-site patches.**
+
 - Add `__to_property_key(externref) -> externref` native in object-runtime.ts:
   - `ref.test $AnyString` → return unchanged.
   - else if `ref.test`-able as a boxed number → `number_toString(unbox)` →
@@ -140,6 +142,7 @@ still feeds a boxed number straight into the cast.
   `__delete_property`) without touching their bodies.
 
 **Wasm IR pattern** (prepended in `__obj_find`, key in param 1):
+
 ```wasm
 local.get $key
 any.convert_extern
@@ -154,6 +157,7 @@ end
 ```
 
 **Edge cases.**
+
 - Key already a `$NativeString` cons (un-flattened) → `ref.test $AnyString` still
   true (AnyString covers cons+flat); the existing `strFlatten` handles it.
 - `o[-0]` / `o[1.5]` → `number_toString` already yields `"0"` / `"1.5"` per
@@ -162,6 +166,7 @@ end
   cannot represent it); do not silently coerce to `"Symbol(...)"`.
 
 **Acceptance signatures.**
+
 - Zero `illegal cast [in __obj_find()]` rows under standalone.
 - `Reflect.get(o, 1)` returns `o["1"]` (closes #2046 PR-D — coordinate so the two
   don't both add a coercion helper; #2046 PR-D should consume **this** helper).
@@ -183,6 +188,7 @@ exist natively, so these are mechanical extensions over `$Object`/`$PropEntry`/
 **Fix — all in `src/codegen/object-runtime.ts`; add each name to
 `OBJECT_RUNTIME_HELPER_NAMES`** (routes it through `ensureObjectRuntime` before
 the Phase A refuse gate; defined funcs ⇒ no import ⇒ no index shift):
+
 - `__getOwnPropertyNames(externref) -> externref`: clone `__object_keys` but
   **drop the enumerable filter** (include non-enumerable live entries); insertion
   order; non-`$Object` → empty `$ObjVec`.
@@ -191,7 +197,7 @@ the Phase A refuse gate; defined funcs ⇒ no import ⇒ no index shift):
   symbol-free tests pass instead of refusing).
 - `__getOwnPropertyDescriptors(externref) -> externref`: new `$Object`; for each
   own key (`__getOwnPropertyNames`) `__extern_set(out, key,
-  __getOwnPropertyDescriptor(o, key))`.
+__getOwnPropertyDescriptor(o, key))`.
 - `__defineProperty_desc(externref obj, externref key, externref desc)`: read
   `value`/`get`/`set`/`writable`/`enumerable`/`configurable` off `desc` via
   `__extern_get` (+ `__to_bool`/`__extern_has` for presence), then dispatch to
@@ -200,12 +206,14 @@ the Phase A refuse gate; defined funcs ⇒ no import ⇒ no index shift):
   path used when the descriptor shape isn't a static literal (404 refusal rows).
 
 **Edge cases.**
+
 - Mixed descriptor (both `value` and `get`) → TypeError per §10.1.6.3 — defer the
-  *validation* to S4; S3 just routes data-vs-accessor by which keys are present.
+  _validation_ to S4; S3 just routes data-vs-accessor by which keys are present.
 - `desc` is not an object → §6.2.6 ToPropertyDescriptor TypeError; S4 territory,
   S3 may approximate by treating absent keys as undefined.
 
 **Acceptance signatures.**
+
 - `built-ins/Object/getOwnPropertyNames/*`, `getOwnPropertyDescriptors/*` rows
   move from refusal → pass.
 - `Object.defineProperty(o, k, runtimeDescObj)` compiles+runs (was 404
@@ -221,6 +229,7 @@ CompletePropertyDescriptor.
 
 **Fix.** In `__defineProperty_value` / `__defineProperty_accessor` / the S3
 `__defineProperty_desc`, before the `$PropEntry` write:
+
 1. `__obj_find` the existing entry.
 2. Absent + object non-extensible (`OBJ_FLAG_NON_EXTENSIBLE`) → catchable
    TypeError.
@@ -235,6 +244,7 @@ Follow §10.1.6.3 step order exactly — `verifyProperty` makes ordering observa
 (`beforeWrite`/`afterWrite` probes). Reuse `OBJ_FLAG_*` + `$PropEntry` `FLAG_*`.
 
 **Acceptance signatures.**
+
 - `built-ins/Object/defineProperty/15.2.3.6-4-*` redefinition-throws pass.
 - `verifyProperty`-based attribute-default rows pass (≥150 of the ~300 class-B).
 - TypeError is catchable (no trap) on invalid redefinition.
@@ -291,6 +301,46 @@ edit `object-runtime.ts` (the `OBJECT_RUNTIME_HELPER_NAMES` set +
 disjoint except the append-only set; whichever PR merges second does the small
 `object-runtime.ts` merge resolution (same author, so no cross-agent handoff).
 
+## S4 — CALL-SITE layer (2026-06-21, sdev-validate) — `object-ops.ts`
+
+Complement to sdev-reflect's runtime-helper S4 (`object-runtime.ts`). The
+**typed-struct / literal-receiver** redefine path is a DIFFERENT code path from
+the native `$Object` runtime: `const o: any = {}` lowers to an open typed struct,
+so `Object.defineProperty(o, "x", …)` takes the `struct.set` path in
+`compileObjectDefineProperty` (object-ops.ts), NOT the native
+`__defineProperty_value`. That path had its own §10.1.6.3 redefine-throw bug:
+
+- **Root cause.** The `needsValueCompare` guard (fires when the prior descriptor
+  is non-writable/non-configurable) built its "Cannot redefine property" throw as
+  `global.get <ctx.stringGlobalMap.get(msg)>`. Under nativeStrings (auto-on for
+  `--target standalone`/`wasi`) that map returns the **`-1` sentinel**, so a
+  SECOND value-define on the same key (`defineProperty(o,"x",{value:5});
+defineProperty(o,"x",{value:6})` in one function) reached binary emit as
+  `global index out of range — -1` (the **#2043** late-import-shift class). It
+  ALSO threw a **bare string**, so `assert.throws(TypeError, …)` (test262
+  `verifyProperty`) never matched — a latent §10.1.6.3 conformance bug in BOTH
+  modes (host threw the string too).
+- **Fix.** Both compare branches (f64 / i32) now route the throw through
+  `emitThrowTypeError` via the body-swap pattern (mirrors
+  `buildTemporalThrowInstrs`). Standalone gets an inline `$NativeString` message +
+  the in-module `__new_TypeError`; the thrown value is a real catchable TypeError
+  instance in both modes. SameValue (5≡5 allowed) and the
+  writable-non-configurable value-change-allowed rules are preserved (they sit
+  before the throw).
+- **Scope note (NOT this slice).** `getOwnPropertyDescriptor` readback returning
+  `undefined` for a runtime-stored key on an empty `const o:any={}` literal (the
+  dot-vs-bracket dual-storage / value-rep substrate) is the #2187 substrate gap
+  (sdev-strdispatch) — deliberately untouched here. CompletePropertyDescriptor
+  attribute-default false-encoding was already correct in `computeRuntimeFlags`.
+
+Tests: `tests/issue-2042-s4-callsite.test.ts` (8 cases — two-value-define compile,
+non-config redefine throws + `instanceof TypeError`, uncaught throws, SameValue
+no-throw, writable value-change no-throw, single-define unregressed). All pass;
+tsc clean. The 3 pre-existing `object-mutability` equivalence failures
+(`isFrozen`/`isSealed`/`isExtensible` stubs) are identical on pristine main —
+unrelated. Distinct files from sdev-reflect's runtime PR (object-ops.ts +
+this test only).
+
 ## S4 — ValidateAndApplyPropertyDescriptor (2026-06-21, sdev-reflect)
 
 PROBE-VERIFIED on main HEAD 075d90ee5. Two prior blockers had cleared since the
@@ -316,6 +366,7 @@ emitted after the receiver/flags are resolved and before the table insert, that
 `__obj_find`s the existing entry and enforces §10.1.6.3 step order, throwing a
 catchable TypeError (the same `emitWasiErrorConstructor("TypeError")` +
 `ensureExnTag` + `throw` pattern `__defineProperties` already uses) on:
+
 - current undefined + object non-extensible (`OBJ_FLAG_NONEXTENSIBLE`) → step 2;
 - current non-configurable (`FLAG_CONFIGURABLE` clear) → step 4:
   - desc specifies `configurable: true`,
@@ -323,13 +374,13 @@ catchable TypeError (the same `emitWasiErrorConstructor("TypeError")` +
   - current is an accessor (data↔accessor conversion — this is the data path),
   - current non-writable (`FLAG_WRITABLE` clear): desc requests `writable: true`,
     OR desc supplies a value that is not SameValue with the current value.
-The value-change check uses the native `__object_is` (SameValue §7.2.10), so an
-identical re-define is correctly a no-op (not a throw). To reference `__object_is`
-from `__defineProperty_value`, the `__object_is` registration block was moved
-ahead of the define helpers in `ensureObjectRuntime` (it is `ctx.standalone`-gated
-and depends only on the union/string helpers resolved at the top of the pass — no
-dependency on the define helpers — so the move is behaviour-preserving;
-`Object.is` re-verified working after the move).
+    The value-change check uses the native `__object_is` (SameValue §7.2.10), so an
+    identical re-define is correctly a no-op (not a throw). To reference `__object_is`
+    from `__defineProperty_value`, the `__object_is` registration block was moved
+    ahead of the define helpers in `ensureObjectRuntime` (it is `ctx.standalone`-gated
+    and depends only on the union/string helpers resolved at the top of the pass — no
+    dependency on the define helpers — so the move is behaviour-preserving;
+    `Object.is` re-verified working after the move).
 
 The "specified vs value" distinction uses the host flags f64 bits (3/4/5 =
 writable/enumerable/configurable specified, 7 = hasValue) that the call site
@@ -354,17 +405,19 @@ A SEPARATE dot-vs-bracket **dual-storage** bug on EMPTY `const o: any = {}` LOCA
 `o.a = 7; o['a']` returns 0, and `Object.defineProperty(o, '<literalKey>', …)`
 twice on such a local hits a residual `global index out of range -1`
 ("#2043-class") binary-emit error. Reduced repro:
+
 ```ts
 const o: any = {};
 o.a = 7;
-return o['a'];           // → 0 (should be 7)
+return o["a"]; // → 0 (should be 7)
 // and:
 const o2: any = {};
-Object.defineProperty(o2, 'x', { value: 1, configurable: false });
-Object.defineProperty(o2, 'x', { value: 2 });   // → binary emit error
+Object.defineProperty(o2, "x", { value: 1, configurable: false });
+Object.defineProperty(o2, "x", { value: 2 }); // → binary emit error
 ```
+
 Root cause: dot-assignment / literal-key define on an empty object-literal local
-routes through the widened-struct / compiled-property *sidecar* fast path, which
+routes through the widened-struct / compiled-property _sidecar_ fast path, which
 is OUT OF SYNC with the `$Object` hash runtime that bracket-read, `in`,
 `Object.keys`, and `getOwnPropertyDescriptor` consult. It does NOT reproduce on a
 dynamic receiver (`function mk(): any { return {}; }`) or on an object that
@@ -373,6 +426,7 @@ path. This is orthogonal to the runtime-helper ValidateAndApply semantics in thi
 slice.
 
 Two pieces of it are carved out:
+
 - The **`global index out of range -1` emit error** on a double literal-key
   redefine + the **bare-string→TypeError** at the `compileObjectDefineProperty`
   call site is **task #21** (`object-ops.ts`, separate PR — landed in parallel by
