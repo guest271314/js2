@@ -41,6 +41,7 @@ import { eliminateDeadImports } from "./dead-elimination.js";
 import { ensureMapRuntimeTypes } from "./map-runtime.js";
 import { scanForNewTarget } from "./new-target.js"; // (#2023)
 import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 S1)
+import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
@@ -1781,6 +1782,12 @@ export function generateModule(
     // Skipped for `--target wasi` so that downstream `wasm-opt --all-features`
     // does not convert refs to those types into `(ref exact $T)`, which
     // wasmtime ≤ 44 rejects (#1173).
+    // (#2580 M0) Emit the dynamic-read primitives (__dyn_has/__dyn_get) iff a
+    // call site flagged the module needs them (M1+). Gated on ctx.usesDynRead,
+    // which M0 never sets, so this is a no-op in M0 → byte-identical. Runs before
+    // dead-elim/freeze so the helper funcIdx values are stable.
+    ensureDynReadHelpers(ctx);
+
     markLeafStructsFinal(mod, ctx.wasi);
 
     // Dead import and type elimination pass
@@ -5503,6 +5510,12 @@ export function generateMultiModule(
     // Skipped for `--target wasi` so that downstream `wasm-opt --all-features`
     // does not convert refs to those types into `(ref exact $T)`, which
     // wasmtime ≤ 44 rejects (#1173).
+    // (#2580 M0) Emit the dynamic-read primitives (__dyn_has/__dyn_get) iff a
+    // call site flagged the module needs them (M1+). Gated on ctx.usesDynRead,
+    // which M0 never sets, so this is a no-op in M0 → byte-identical. Runs before
+    // dead-elim/freeze so the helper funcIdx values are stable.
+    ensureDynReadHelpers(ctx);
+
     markLeafStructsFinal(mod, ctx.wasi);
 
     // Dead import and type elimination pass
