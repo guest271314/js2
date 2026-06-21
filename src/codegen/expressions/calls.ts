@@ -4582,6 +4582,49 @@ function compileCallExpression(
         // Driver declined (e.g. a real JS Set arriving as externref) — fall
         // through to the paths below.
       }
+      // (#2586) Array.from(Map) — host-free native. A Map's default iterator
+      // is its `entries()` (§24.1.3.12 → §24.1.5.3), so `Array.from(map)`
+      // yields one `[key, value]` pair per live entry. The generic native
+      // `__iterator` drain below is built VEC-ONLY under noJsHost and hard-casts
+      // its subject to a `$Vec` (iterator-native.ts:293) → `illegal cast` on the
+      // `ref $Map` struct. Route through the SAME `emitCollectionIteratorVec`
+      // driver as Set above, in `"entries"` mode: it materializes a canonical
+      // externref `$Vec` whose slots are 2-element `$ObjVec` `[key, value]`
+      // pairs, so the consumer's `a[i][0]`/`a[i][1]` read back through the
+      // native `__extern_get_idx`/`__extern_length` arm — exactly Array.from's
+      // result. (WeakMap is not iterable; WeakSet/Map-with-mapFn keep the
+      // existing routing.)
+      //
+      // Gated to `ctx.standalone` (the `--target standalone` pure-Wasm target),
+      // NOT plain `nativeStrings` nor WASI. The entries-mode `$ObjVec` pair
+      // materialization tickles a PRE-EXISTING substrate limitation that the
+      // stricter targets surface but this slice does not own:
+      //   - nativeStrings-WITH-JS-host → a late-registered object-runtime funcidx
+      //     (`__defineProperty_value`) desyncs (also breaks `[...m.entries()]`
+      //     there);
+      //   - `--target wasi` (strict-no-host) → the same desync PLUS a
+      //     `global_Array` declared-global request that the allowlist rejects.
+      // Both reproduce on `main` for `[...m.entries()]` independently of this
+      // change, so they are escalated as the entries-mode substrate follow-up
+      // rather than half-fixed here. Under `--target standalone` the path lowers
+      // to a zero-import, fully-native module (verified), so ship that.
+      if (!hasMapFn && ctx.standalone && ctx.nativeStrings && argSymName === "Map") {
+        const matType = emitCollectionIteratorVec(ctx, fctx, expr.arguments[0]!, "entries", /* isSet */ false);
+        if (matType != null && matType !== VOID_RESULT && (matType.kind === "ref" || matType.kind === "ref_null")) {
+          // The materialized vec carries 2-element `$ObjVec` `[key, value]` pairs
+          // as its slots, NOT type-resolved tuple structs. Hand it back as a
+          // plain externref so the consumer reads it through the dynamic
+          // `__extern_get_idx`/`__extern_length` arm (`a[i][0]`/`[k, v]`
+          // destructuring) — exactly the host `__array_from` contract. Returning
+          // the raw `ref $Vec` instead would make a `const a: [K,V][]` binding
+          // run the typed tuple-vec materialization, which can't bridge an
+          // `$ObjVec` pair into a tuple struct (→ invalid `struct.new`).
+          coerceType(ctx, fctx, matType, { kind: "externref" });
+          return { kind: "externref" };
+        }
+        // Driver declined (e.g. a real JS Map arriving as externref) — fall
+        // through to the paths below.
+      }
       // Reject the known non-array builtin collections from the structural
       // array-copy fast path so a Set the driver above declined, or a
       // Map/WeakSet/WeakMap, cannot be mis-read as a `__vec` (the struct.new
