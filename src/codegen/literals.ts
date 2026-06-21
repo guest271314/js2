@@ -951,7 +951,19 @@ export function compileObjectLiteral(
       (ctxType.flags & ts.TypeFlags.Any) !== 0 ||
       (ctxType.flags & ts.TypeFlags.Unknown) !== 0 ||
       (ctxType.flags & ts.TypeFlags.NonPrimitive) !== 0; // TypeScript `object` keyword type
-    if (isAnyContext) {
+    // (#2542) An empty `{}` typed by a PURE string-index-signature contextual type
+    // (`const o: { [s: string]: number } = {}`) is an open dictionary that will be
+    // mutated by runtime string key (`o[k] = v`). Build it as an open `$Object`
+    // (same `__new_plain_object` as the any-context arm) so the binding — which
+    // resolveWasmType lowers to externref (#2542) — is a real `$Object` the native
+    // `__extern_set`/`__extern_get` service. Standalone-only (the open-object
+    // runtime is emitted only there); gc/host/wasi keep their existing lowering.
+    const isPureStringIndexEmpty =
+      ctx.standalone &&
+      !!ctxType &&
+      ctxType.getProperties().length === 0 &&
+      !!ctx.checker.getIndexInfoOfType(ctxType, ts.IndexKind.String);
+    if (isAnyContext || isPureStringIndexEmpty) {
       const funcIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
       flushLateImportShifts(ctx, fctx);
       if (funcIdx !== undefined) {
@@ -1023,7 +1035,23 @@ export function compileObjectLiteral(
       ((ctxTypeNonEmpty.flags & ts.TypeFlags.Any) !== 0 ||
         (ctxTypeNonEmpty.flags & ts.TypeFlags.Unknown) !== 0 ||
         (ctxTypeNonEmpty.flags & ts.TypeFlags.NonPrimitive) !== 0);
-    if (isAnyContextNonEmpty) {
+    // (#2542) A STRING-INDEX-SIGNATURE contextual type — `{ [s: string]: T }` — is
+    // semantically an open dictionary: its sole purpose is runtime string-keyed
+    // access (`o[k]` with a runtime `k`). `resolveWasmType` already lowers such a
+    // type to externref for the binding (no named properties → falls through to
+    // `mapTsTypeToWasm` → externref), so the consuming local is externref and ALL
+    // reads/writes route through `__extern_get`/`__extern_set`. But the closed-
+    // struct literal path builds a nominal `struct.new` and `extern.convert_any`-
+    // wraps it; `__extern_get`'s `ref.test $Object` then can't match the struct, so
+    // `o[k]` returns 0 and `o[k] = v` is dropped. Building the literal as an open
+    // `$Object` (same as #1901's any-context route) makes every native reader find
+    // the property. Restricted to a PURE dictionary (no own named properties): a
+    // mixed `{ a: number; [s: string]: T }` registers a concrete struct for the
+    // binding (the `__type` anon-struct branch fires on `getProperties().length > 0`),
+    // so diverting its literal to `$Object` would mismatch that struct local.
+    const strIndex = ctxTypeNonEmpty ? ctx.checker.getIndexInfoOfType(ctxTypeNonEmpty, ts.IndexKind.String) : undefined;
+    const isPureStringIndexContext = !!strIndex && !!ctxTypeNonEmpty && ctxTypeNonEmpty.getProperties().length === 0;
+    if (isAnyContextNonEmpty || isPureStringIndexContext) {
       const objResult = compileObjectLiteralAsExternref(ctx, fctx, expr);
       if (objResult) return objResult;
       // fall through to the struct path if the $Object builder declined.

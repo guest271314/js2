@@ -2,10 +2,12 @@
 id: 2542
 renumbered_from: 2511
 title: "standalone: dynamic property read/write by a runtime string key (o[k]) returns default — needs native key enumeration + dynamic [[Get]]/[[Set]]"
-status: ready
+status: done
 sprint: 64
 created: 2026-06-19
-updated: 2026-06-19
+updated: 2026-06-21
+completed: 2026-06-21
+assignee: sd-2
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -14,7 +16,6 @@ area: codegen, standalone, runtime
 language_feature: property-access, dynamic-keys
 goal: standalone-mode
 related: [2371, 2151, 2001]
-needs: architect-spec
 origin: "2026-06-19 sd1 standalone host-import-leak hunt — the broad gap underlying #2371-phase2 (native for-in) and #2151 (any-receiver dispatch)"
 ---
 
@@ -80,3 +81,69 @@ representation/runtime change to the object model (dynamic [[Get]]/[[Set]] by
 string key), not a localized fix. Filed for the standalone epic pivot; do NOT
 attempt as a dev slice without a binding/representation design. Pairs naturally
 with #2371-phase2 and #2151.
+
+## Resolution (2026-06-21, sd-2) — representation routing, NOT a new runtime
+
+The dynamic [[Get]]/[[Set]]-by-string-key runtime the issue called for **already
+exists**: the native `$Object` open-object machinery (`__new_plain_object` /
+`__extern_get` / `__extern_set` / `__obj_find`, all emitted as defined Wasm
+functions under `--target standalone`, no host imports) services exactly this.
+The bug was a **representation mismatch**, not a missing runtime: index-signature
+objects were being lowered to a CLOSED nominal struct that those readers can't
+reach.
+
+### Root cause (confirmed by WAT inspection)
+
+For `const o: { [s: string]: number } = { a: 5, b: 7 }`:
+
+1. The literal `{ a: 5, b: 7 }` has an *inferred* type with named props `a,b`, so
+   `compileObjectLiteral` built it as `struct.new $Closed`, then
+   `extern.convert_any`-wrapped it to externref. `__extern_get`'s `ref.test
+   $Object` cannot match a closed struct → `o[k]` returned null → `0`; `o[k] = v`
+   targeted nothing → dropped.
+2. The index-signature TYPE `{ [s: string]: number }` (declared type of `o`,
+   params, returns) has an EMPTY `getProperties()`, so `resolveWasmType` →
+   `ensureStructForType` registered an **empty** WasmGC struct and resolved the
+   binding to `ref $empty`. A `$Object` argument then guard-cast to null at the
+   call boundary (the `idxSig-param` / `return-dict` cases returned `0`).
+
+(The issue text's "static-literal key works, runtime key returns 0" framing was
+imprecise — the real split is **plain inferred struct** `{a,b}` runtime-key reads
+*already worked* via the legacy externref-fallback path, while **index-signature
+typed** objects failed on both literal and runtime keys.)
+
+### Fix — three scoped, `ctx.standalone`-only routing changes
+
+A pure string-index-signature type (anonymous `{ [s:string]:T }`, a `type`-alias
+to one, or an `interface Dict { [s:string]:T }` — **no own named properties**) is
+semantically an open dictionary, so it must flow as a `$Object` externref end to
+end. Mirrors #1901's open-`$Object` routing.
+
+- **`src/codegen/literals.ts` `compileObjectLiteral`** — two gates extended to
+  fire when the contextual type has a string index signature + zero own props:
+  the non-empty `#1901` open-`$Object` gate (builds the literal via
+  `compileObjectLiteralAsExternref`), and the empty-`{}` `__new_plain_object`
+  arm (so `const o: Dict = {}` is a real `$Object` open to dynamic writes).
+- **`src/codegen/index.ts` `resolveWasmType`** — a pure string-index-signature
+  Object type resolves to `externref` (placed BEFORE the named-struct lookup so a
+  pure-index-signature *interface*, already registered as an empty struct by
+  `collectInterface`, still resolves to externref — the empty struct stays
+  registered but is never used as a value type, so **no type-index shift**).
+- **`src/codegen/index.ts` `ensureStructForType`** — skips registering such a
+  type as an empty anonymous struct (defense-in-depth for direct callers).
+
+A MIXED `{ a: number; [s: string]: T }` (own named props) is intentionally
+**excluded** — it has a static shape consumers read by field, so it keeps its
+struct (routing it to `$Object` would mismatch the struct-typed binding). gc /
+host / wasi are byte-identical (the open-object runtime is standalone-only).
+
+### Verified
+
+`tests/issue-2542-standalone-dynamic-key.test.ts` (15 cases): runtime-key
+read/write, write-then-read, brand-new absent key, static member, param, return,
+`type`-alias, `interface`, concatenated key, read-modify-write, empty-`{}` +
+dynamic write, spread, nested dict-of-dict — all correct value, valid Wasm, and
+**zero host-object-import leak** (the standalone contract). Plain-struct fast
+path preserved (regression guard). `string`/`boolean`-valued index sigs compile
+valid + leak-free. The pre-existing `for-in` `env.__for_in_*` leak is unchanged
+and remains #2371's job (this fix unblocks #2371-phase-2's value reads).
