@@ -1,8 +1,9 @@
 ---
 id: 2580
 title: "`.length` on an any/dynamically-mutated receiver returns numeric 0, not undefined (runtime property-presence)"
-status: ready
-sprint: Backlog
+status: in-progress
+assignee: ttraenkler/sd-value-rep
+sprint: 65
 created: 2026-06-21
 priority: medium
 feasibility: hard
@@ -487,3 +488,54 @@ otherObj.prop`, both externref), THAT would route into their classifier and want
 their base first — but the M1 `.length` canary (`=== undefined` / `=== <number>`)
 does not. Flagged for the lead's wave-sequencing: **parallel-safe at the `===`
 seam.**
+
+## M1a — IMPLEMENTED (this PR)
+
+The `.length`-on-`any` HOST arm landed as a clean **2-file** change
+(`src/codegen/dyn-read.ts` + `src/codegen/property-access.ts`); the M0 scaffold,
+#1899, and the typed `.length` hot-path are all untouched.
+
+**Where the arm sits (the key root-cause fix).** It is NOT a new `propName ===
+"length"` block placed ahead of the existing ones — that was the first (wrong)
+attempt and it *clobbered the working array path*. Origin already reads
+`const o: any = [1,2,3]; o.length` correctly as `3` because `o`'s value is an
+externref wrapping a WasmGC vec; the existing handler eventually reaches a generic
+externref reader that ref.test-dispatches the vec. Intercepting `any`-`.length`
+BEFORE the vec detection forced every array through `__extern_get(vec,"length")`,
+which the host evaluates to `undefined` (V8 sees an opaque struct). So the arm is
+folded into the **`savedLen` fallback block** (`property-access.ts` ~3644): it
+runs only AFTER the length-bearing-vec-struct detection misses, i.e. the genuinely
+non-vec dynamic receiver.
+
+**`emitDynGet` host path = runtime receiver-kind dispatch (no funcidx hazard).**
+For the `length` key it emits, inline:
+```
+ref.test $vec_i  → if hit:  box_number(f64(struct.get $vec_i 0))   // the array length
+                   else:    __extern_get(recv, "length")            // value or undefined
+```
+nested as one if/else chain over every registered `{length,data}` vec type in
+`ctx.vecTypeMap`. `ref.test typeIdx` uses **type** indices (append-only /
+dead-elim-stable via the rec-group), so unlike a `call __is_vec` it carries no
+funcidx-ordering / late-import-shift hazard — which is what derailed the earlier
+`__dyn_get`-wrapper attempt (a DEFINED-func `call` whose index floated when a
+consumer added a late import). `__extern_get` + `__box_number` are host IMPORTS
+(stable), ensured up-front before any baked index is resolved. Non-`length` keys
+skip the vec arm and go straight to `__extern_get` (vec indexed reads are a later
+slice). Standalone is unchanged (M1a is host-scoped; it still routes through the
+`__dyn_get` wrapper, which is correct there because `__extern_get` is a defined
+native helper).
+
+**Representation = uniform externref, and consumers coerce for free.** The arm
+returns `{ kind: "externref" }` (a boxed number for an array length, JS
+`undefined` for an absent property). Every numeric consumer tested
+(`+`/`*`/`<`/`for`-bound) unboxes it via the existing externref→f64 coercion;
+`=== undefined` hits the presence arm; `typeof`/`String()`/truthiness all correct.
+So M1a needed **no** separate M1b consumer-coercion work for these shapes — the
+pessimistic M1 verdict over-scoped it.
+
+**Validation.** New regression suite `tests/issue-2580-any-length.test.ts` (13
+cases) green; `tsc`/`prettier` clean; the 3 pre-existing `strings.test.ts`
+failures are an unrelated worktree test-infra artifact (identical on origin/main).
+Conformance is the merge_group full-Test262 gate's call (this is a value-rep /
+chokepoint touch → authoritative gate per `project_broad_impact_validate_full_ci`,
+NOT a scoped sweep). Stop-the-line on any typed-`.length` eject.

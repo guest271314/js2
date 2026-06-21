@@ -18,6 +18,7 @@ import {
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import { emitBoundsCheckedArrayGet } from "./array-methods.js";
 import { emitHoleToUndefined } from "./array-holes.js"; // (#2001 S1)
+import { emitDynGet } from "./dyn-read.js"; // (#2580 M1)
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
@@ -3655,8 +3656,41 @@ export function compilePropertyAccess(
           return ctx.fast ? { kind: "i32" } : { kind: "f64" };
         }
       }
-      // Undo the compiled expression if it didn't match
-      fctx.body.length = savedLen;
+      // (#2580 M1) `.length` on a statically-`any`/`unknown` receiver in HOST mode,
+      // and the compiled receiver is NOT a length-bearing vec struct above. This is
+      // the genuinely-dynamic case: the receiver may be a plain `$Object`, an
+      // array-like, a boxed primitive, etc. The legacy host fallthrough coerces the
+      // read to NUMERIC, turning a plain object's ABSENT `length` (spec `undefined`,
+      // §OrdinaryGet) into `0` / a bogus `typeof` of "boolean"
+      // (`var obj={}; obj.length===undefined` → false — the #2580 bug + the ~12-row
+      // S15.4.4 length cluster). Route through `__extern_get(recv,"length")`, which
+      // returns a UNIFORM externref: the actual property value, or JS `undefined`
+      // when absent.
+      //
+      // CRUCIALLY this runs AFTER the vec-struct detection above: an `any`-typed
+      // local that holds a real array (`const o: any = [1,2,3]`) compiles to a vec
+      // struct and is read via `struct.get` field 0 — `__extern_get` cannot see a
+      // WasmGC vec's `.length` (V8 sees an opaque struct), so intercepting it BEFORE
+      // the vec check would clobber the working array path (regression: array-as-any
+      // `.length` → undefined). Only the non-vec dynamic receiver reaches here.
+      // Gated STRICTLY on a statically-`any`/`unknown` receiver, host mode; the
+      // typed `.length` hot-path is byte-identical. Standalone keeps its native
+      // `__extern_length` arm below.
+      if (!ctx.standalone && (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 && exprType) {
+        if (exprType.kind !== "externref") {
+          coerceType(ctx, fctx, exprType, { kind: "externref" });
+        }
+        if (emitDynGet(ctx, fctx, "length")) {
+          return { kind: "externref" };
+        }
+        // emitDynGet bailed (no object runtime) — drop the coerced receiver; the
+        // legacy paths below recompile. (Rare; keeps no-regression.)
+        fctx.body.push({ op: "drop" } as Instr);
+        fctx.body.length = savedLen;
+      } else {
+        // Undo the compiled expression if it didn't match
+        fctx.body.length = savedLen;
+      }
     }
     // #1472 Phase B Blocker B Slice 2 — standalone `.length` on an `any`/unknown
     // receiver. None of the vec fast-paths matched, so the receiver is an opaque
