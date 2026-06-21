@@ -65,8 +65,8 @@
   {
     "edition": "ES2020",
     "pass": 1433,
-    "fail": 371,
-    "ce": 79,
+    "fail": 372,
+    "ce": 78,
     "skip": 18,
     "total": 1901,
     "pct": 75
@@ -82,9 +82,9 @@
   },
   {
     "edition": "ES2022",
-    "pass": 3104,
+    "pass": 3105,
     "fail": 1065,
-    "ce": 65,
+    "ce": 64,
     "skip": 0,
     "total": 4234,
     "pct": 73
@@ -128,9 +128,9 @@
   {
     "edition": "Proposals",
     "pass": 1453,
-    "fail": 3202,
+    "fail": 3193,
     "ce": 231,
-    "skip": 96,
+    "skip": 105,
     "total": 4982,
     "pct": 29
   }
