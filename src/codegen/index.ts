@@ -7380,7 +7380,7 @@ function collectStringMethodImports(ctx: CodegenContext, sourceFile: ts.SourceFi
       const prop = node.expression;
       const receiverType = ctx.checker.getTypeAtLocation(prop.expression);
       const methodName = prop.name.text;
-      // (#2575, extends #2187) An `any`/unknown receiver in native-string mode may
+      // (#2576, extends #2187) An `any`/unknown receiver in native-string mode may
       // hold a native `$AnyString` at runtime; calls.ts emits a runtime-guarded
       // native string method for it (compileGuardedNativeStringMethodCall). That
       // guard's then-arm needs the same native helpers (`__str_charAt`,

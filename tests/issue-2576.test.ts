@@ -4,7 +4,7 @@ import { compile } from "../src/index.js";
 import { compileToWasm } from "./equivalence/helpers.js";
 
 /**
- * #2575 (extends #2187) — string methods / `.length` on an `any`-typed receiver whose runtime
+ * #2576 (extends #2187) — string methods / `.length` on an `any`-typed receiver whose runtime
  * value is a native `$AnyString` take the generic externref path and return 0
  * in standalone mode.
  *
@@ -43,7 +43,7 @@ async function runStandalone(source: string): Promise<number> {
   return (instance.exports as Record<string, () => number>).test();
 }
 
-describe("#2575 (extends #2187) — string method / .length on an any-typed native-string receiver (standalone)", () => {
+describe("#2576 (extends #2187) — string method / .length on an any-typed native-string receiver (standalone)", () => {
   it("object string-value: o.v.length and o.v.charCodeAt(0)", async () => {
     expect(await runStandalone(`export function test(): number { const o:any={v:"hi"}; return o.v.length; }`)).toBe(2);
     expect(

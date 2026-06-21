@@ -1,5 +1,5 @@
 ---
-id: 2575
+id: 2576
 title: "standalone: string .length / methods on an opaque-externref any value (object prop, generator yield, indexed element) return 0 — value-rep extension of #2187"
 status: done
 sprint: 64
@@ -18,7 +18,7 @@ related: [2187, 2072, 2157, 2171, 1472]
 origin: "2026-06-21 — extends #2187 (sd-3, PR #1845) which fixed only the bare-identifier-with-$AnyString-local case"
 ---
 
-# #2575 — value-rep extension of #2187: string `.length` / methods on an opaque-externref `any` value
+# #2576 — value-rep extension of #2187: string `.length` / methods on an opaque-externref `any` value
 
 ## Problem
 
@@ -119,5 +119,5 @@ Built on top of sd-3's landed #2187 (kept `receiverIsNativeStringValType`; this
 adds the complementary opaque-externref coverage it deferred). Changed files:
 `src/codegen/property-access.ts`, `src/codegen/expressions/calls.ts`,
 `src/codegen/string-ops.ts`, `src/codegen/index.ts`. Tests:
-`tests/issue-2575.test.ts` (12 cases: all ACs + non-regression guards +
+`tests/issue-2576.test.ts` (12 cases: all ACs + non-regression guards +
 host-mode parity).

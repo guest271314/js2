@@ -8802,7 +8802,7 @@ function compileCallExpression(
       }
     }
 
-    // (#2575, extends #2187) Runtime-guarded native string method on an
+    // (#2576, extends #2187) Runtime-guarded native string method on an
     // `any`/unknown receiver whose value MAY be a native `$AnyString` at runtime
     // but whose receiver is an opaque externref (object property value, generator
     // yield read, indexed element read, …) — i.e. the value-rep cases that

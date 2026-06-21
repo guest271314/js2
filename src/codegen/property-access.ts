@@ -1881,7 +1881,7 @@ export function receiverIsNativeStringValType(
 }
 
 /**
- * (#2575, extends #2187) Generalisation of {@link receiverIsNativeStringValType}
+ * (#2576, extends #2187) Generalisation of {@link receiverIsNativeStringValType}
  * (which only catches a bare identifier whose *compiled local ValType* is a
  * native string ref) to *any* `any`/`unknown`-typed receiver whose *runtime*
  * value may be a native `$AnyString` even though no local ValType says so —
@@ -1904,7 +1904,7 @@ export function receiverMayBeNativeStringAtRuntime(ctx: CodegenContext, recv: ts
 }
 
 /**
- * (#2575, extends #2187) Emit a runtime-guarded native-string `.length` read for
+ * (#2576, extends #2187) Emit a runtime-guarded native-string `.length` read for
  * an `any`-typed receiver whose value is already on the stack as an `externref`.
  * The externref is saved to a temp; on a `ref.test $AnyString` hit the value is
  * cast to `$AnyString` and its `len` (field 0, valid for FlatString & ConsString
@@ -3676,7 +3676,7 @@ export function compilePropertyAccess(
           }
           const lenFn = ensureLateImport(ctx, "__extern_length", [{ kind: "externref" }], [{ kind: "f64" }]);
           flushLateImportShifts(ctx, fctx);
-          // (#2575, extends #2187) The `any`/unknown value may actually be a
+          // (#2576, extends #2187) The `any`/unknown value may actually be a
           // native `$AnyString` (object string-value read, generator yield read,
           // catch binding, indexed element read). `__extern_length` reads
           // $ObjVec/array length and returns 0 for a bare string, so guard with

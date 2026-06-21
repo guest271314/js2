@@ -2090,7 +2090,7 @@ export function compileNativeStringMethodCall(
   propAccess: ts.PropertyAccessExpression,
   method: string,
   /**
-   * (#2575, extends #2187) Optional receiver emitter. When provided, the method
+   * (#2576, extends #2187) Optional receiver emitter. When provided, the method
    * arms push the receiver via this callback instead of re-compiling
    * `propAccess.expression`. Used by {@link compileGuardedNativeStringMethodCall}
    * to feed a pre-evaluated, guard-cast `$AnyString` receiver (so an `any`-typed
@@ -2104,7 +2104,7 @@ export function compileNativeStringMethodCall(
   const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
   const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten")!;
 
-  // (#2575) Single indirection for emitting the receiver. Default re-compiles
+  // (#2576) Single indirection for emitting the receiver. Default re-compiles
   // `propAccess.expression`; the guarded `any`-receiver path overrides it.
   const emitReceiver = (): ValType | null =>
     receiverOverride ? receiverOverride() : compileExpression(ctx, fctx, propAccess.expression);
@@ -2983,7 +2983,7 @@ export function compileNativeStringMethodCall(
 }
 
 /**
- * (#2575, extends #2187) Runtime-guarded native string method dispatch for an
+ * (#2576, extends #2187) Runtime-guarded native string method dispatch for an
  * `any`/unknown receiver whose value MAY be a native `$AnyString` at runtime
  * (object property values, generator yield reads, catch bindings, indexed
  * element reads — see `receiverMayBeNativeStringAtRuntime`). The static
