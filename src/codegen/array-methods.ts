@@ -5135,10 +5135,10 @@ function compileArrayJoinNative(
     ];
     // (#2001 S1) A `$Hole` element renders as "" (§23.1.3.* join treats an
     // absent index like undefined → ""). After S1 a literal elision stores the
-    // `$Hole` sentinel, so without this test `__extern_toString($Hole)` would
-    // stringify the sentinel struct to garbage. Gated on `usesArrayHoles`, so
-    // hole-free `any[]` joins stay byte-identical. The empty string is cast up
-    // to ref $AnyString for the concat fold.
+    // `$Hole` sentinel, so without this test the externref ToString lane would
+    // stringify the sentinel struct itself to garbage. Gated on `usesArrayHoles`,
+    // so hole-free `any[]` joins stay byte-identical. The empty string is cast
+    // up to ref $AnyString for the concat fold.
     const holeTest = ctx.usesArrayHoles ? holeTestInstrs(ctx) : [];
     if (holeTest.length > 0) {
       const elemExternTmp = allocTempLocal(fctx, { kind: "externref" });
