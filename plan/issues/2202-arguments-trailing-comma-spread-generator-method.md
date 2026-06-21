@@ -1,10 +1,12 @@
 ---
 id: 2202
 title: "arguments.length wrong for trailing-comma + spread call args in generator / class-method bodies (~30 test262 fails)"
-status: ready
+status: done
+assignee: sd-1
 sprint: 64
 created: 2026-06-19
-updated: 2026-06-19
+updated: 2026-06-21
+completed: 2026-06-21
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -293,3 +295,85 @@ the bounded, issue-closing slice; Stage 2 is optional/separable. Recommend the
 implementing senior dev confirm the exact `(ref 15)`/`(ref 20)` operands by
 instrumenting one failing file (`gen-meth-args-trailing-comma-spread-operator.js`)
 before refactoring, and land Stage 1 alone first.
+
+## Implementation notes (sd-1, 2026-06-21) — what actually landed
+
+**The architect spec was written against a pre-`0145c98ad` main.** By the time
+I started, the *named* generator/class-method cluster (`gen-meth`,
+`cls-*-gen-meth`, `cls-*-meth`, private variants — the files the issue lists)
+was **already passing** in BOTH host and standalone: commit
+`0145c98ad fix(#2202): correct arguments.length + values for spread call args`
+had already made `emitSetExtrasArgv` spread-aware (runtime-length extras vec,
+per-arg `Slot`s — this is the "capture-once" machinery the spec describes, and
+it was already there). I re-ran the full 34-file `*trailing-comma-spread*`
+cluster through `runTest262File` (host + standalone, one file at a time) and
+the entire method cluster was green. The `(ref 15)/(ref 20)` invalid-wasm the
+spec predicted for the method paths does **not** reproduce on current main.
+
+**The real remaining SYNC defect was a different dispatch path** — the
+**direct free-function / lifted-nested-function** spread call. A call like
+`ref(42, ...[1], ...arr,)` where `ref` is a `function`/`function*` declaration
+(in the test262 wrapper these are hoisted *inside* `export function test()`, so
+they are *lifted nested* functions with capture/env params) reading
+`arguments`. That path (`compileCallExpression` in
+`src/codegen/expressions/calls.ts`) routed any spread call through
+`compileSpreadCallArgs` (extern.ts:450), which only fills **positional param
+slots**. For a 0-user-param callee that reads `arguments`, it fills *no* slots,
+**never sets `__argc`/`__extras_argv`**, and leaves a stray positional operand
+(`f64.const 42`) on the stack → the callee saw `arguments.length === 0` and the
+mismatched stack trapped as `dereferencing a null pointer`. Distinct from the
+method paths, which already route extras through `emitSetExtrasArgv` +
+`maybeSetArgcForKnownCall`.
+
+**Fix (Stage 1, surgical):** in the direct-call dispatch, *before* the generic
+`hasSpreadArg` branch, detect the named-cluster shape —
+`hasSpreadArg && calleeReadsArguments && !restInfo && !hasLinearParams &&
+userParamCount <= 0` — and route the whole arg list through
+`emitSetExtrasArgv(args, 0)` + `maybeSetArgcForKnownCall(funcName, 0, 0)`,
+mirroring every method path. Crucial subtlety: for a *lifted nested* function
+the capture/env operands are **already on the stack** from the `nestedCaptures`
+prepend loop that runs before the branch; `emitSetExtrasArgv` is stack-neutral
+(everything → locals), so it doesn't disturb them. I therefore pad only the
+param slots *after* the capture region (`for i = captureCount; i <
+paramTypes.length`). Over-padding the captures with `pushDefaultValue` was a
+*second* null-deref I hit and fixed (a phantom default landed on top of the
+real env). The common no-spread path and the existing spread→positional path
+are byte-identical (the new branch is gated narrowly), so the
+overwhelmingly-common cases are untouched — keeping the high regression surface
+contained.
+
+**Result (host + standalone, per-file `runTest262File`):**
+- `func-decl-args-trailing-comma-spread-operator.js`: fail (null-deref) → **pass**
+- `gen-func-decl-args-trailing-comma-spread-operator.js`: fail (null-deref) → **pass**
+- `cls-decl-async-gen-func-args-trailing-comma-spread-operator.js`:
+  compile_error → **pass** (bonus — its body is the same free-function shape)
+- net **+6 test262 results** (3 files × 2 modes); no sync regressions in the
+  cluster.
+
+**Deferred (out of scope per issue): async-generator METHODS.** 5 files remain
+fail — `async-gen-meth`, `cls-{decl,expr}-async-gen-meth[-static]` — all return
+`arguments.length === 2` (expected 4). This is a separate **async-generator
+state-machine** lowering bug in the *method* path (the async-gen body
+under-counts), not the sync free-function/spread defect fixed here. The issue
+explicitly defers async-gen variants (they need the async-gen state machine).
+Carry as a follow-on. (Top-level — non-nested — generator function declarations
+reading `arguments` in standalone are *also* a separate pre-existing gap; the
+nested/lifted form this PR targets works in standalone.)
+
+**Validation:** `tsc` + `biome` + `prettier` clean (only pre-existing
+`noExplicitAny` warnings remain, none at the new lines);
+`check-test262-hard-errors.mjs` → 0 hard errors, no growth; relevant unit
+suites (`generators`, `issue-2079`, `issue-2151-*`, `issue-1053`) green;
+`tests/issue-2202-spread-arguments-count.test.ts` extended with nested
+free-function + nested generator (len + element-VALUES + no-spread regression
+guard) cases — 21/21 pass host+standalone. (The `#1712` capture-closure test
+and the `tests/{arguments-object,generator-*}.test.ts` files that import a
+non-existent `./helpers.js` fail identically on pristine `origin/main` — both
+pre-existing, not caused by this change.)
+
+### Concrete change set (as landed)
+- `src/codegen/expressions/calls.ts` — `compileCallExpression`: hoist
+  `paramCount`/`calleeReadsArguments` computation above the spread-call branch
+  dispatch; add the capture-aware 0-user-param `arguments`+spread branch.
+- `tests/issue-2202-spread-arguments-count.test.ts` — nested free-function and
+  nested generator-function cases (both modes).
