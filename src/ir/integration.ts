@@ -40,6 +40,7 @@ import {
   getOrRegisterVecType,
 } from "../codegen/registry/types.js";
 import type { CodegenContext } from "../codegen/context/types.js";
+import { applyIrTailCalls } from "../codegen/ir-tail-call.js";
 import { lowerFunctionAstToIr, type IrFromAstResolver } from "./from-ast.js";
 import {
   lowerIrFunctionToWasm,
@@ -707,11 +708,18 @@ export function compileIrPathFunctions(
         });
         continue;
       }
+      // Tail-call optimization parity with the legacy AST path (#602): the IR
+      // `return` lowering never rewrites a trailing `call`/`call_ref` into
+      // `return_call`, so IR-claimed (e.g. top-level recursive) functions lost
+      // TCO and deep recursion overflowed the Wasm stack. Apply the conversion
+      // here, where the full module type info is available to enforce the same
+      // guards (param-count + return-type match, never inside a try-with-handler).
+      const tcoBody = applyIrTailCalls(ctx, wasmFunc.body, wasmFunc.typeIdx);
       ctx.mod.functions[localIdx] = {
         name: existing.name,
         typeIdx: wasmFunc.typeIdx,
         locals: wasmFunc.locals,
-        body: wasmFunc.body,
+        body: tcoBody,
         exported: existing.exported,
       };
       compiled.push(name);

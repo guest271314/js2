@@ -1,0 +1,154 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+/**
+ * Tail-call optimization for IR-lowered function bodies.
+ *
+ * The legacy AST return path applies tail-call conversion in
+ * `maybeEmitTailCall` (`src/codegen/statements/control-flow.ts`): a `return
+ * f(...)` whose trailing instruction is a `call` / `call_ref` is rewritten to
+ * `return_call` / `return_call_ref`, replacing the caller frame so deep
+ * self/mutual recursion does not grow the Wasm stack (#602).
+ *
+ * The IR lowering (`src/ir/lower.ts`) emits a `return` terminator as
+ * `<operands…>; return` and never performs this conversion — so any function the
+ * IR claims (notably top-level recursive functions) lost the optimization, and
+ * deep recursion overflowed the stack again (a regression vs. the legacy path,
+ * where the same function NESTED inside another stays on the legacy path and
+ * keeps the tail call).
+ *
+ * This pass restores parity by post-processing the assembled IR body. It runs in
+ * the integration layer (`src/ir/integration.ts`) where the full module type
+ * information is available, so it can apply the SAME guards as the legacy path:
+ *
+ *   - callee param count must equal the caller's param count (return_call needs
+ *     exactly the callee's params on the stack — #822);
+ *   - callee result type must match the caller's return type (#839);
+ *   - never inside a `try` that has a catch/catch-all handler — return_call
+ *     replaces the caller frame, so a throw from the callee would unwind past
+ *     the enclosing catch and escape (#1972). We do NOT descend into `try`
+ *     bodies/handlers at all (conservative: a tail call inside a finally-only
+ *     try is also left alone, matching the legacy `tryCatchDepth` guard which is
+ *     set for any try frame on the return path).
+ *
+ * A `call` / `call_ref` qualifies only when it is the instruction IMMEDIATELY
+ * preceding a `return` (the value flows straight into the return), at any tail
+ * position — top-level body or inside `if` / `block` / `loop` arms (a `return`
+ * there is still a tail of the function).
+ */
+import type { CodegenContext } from "./context/types.js";
+import type { Instr, ValType } from "../ir/types.js";
+
+/** Caller signature derived from its own funcType. */
+interface CallerSig {
+  paramCount: number;
+  returnType: ValType | null;
+}
+
+function funcTypeOf(ctx: CodegenContext, typeIdx: number): { params: ValType[]; results: ValType[] } | null {
+  const t = ctx.mod.types[typeIdx];
+  if (!t || t.kind !== "func") return null;
+  return { params: t.params, results: t.results };
+}
+
+/** The funcType index for a callee function index (import or defined). */
+function calleeTypeIdx(ctx: CodegenContext, calleeIdx: number): number | undefined {
+  if (calleeIdx < ctx.numImportFuncs) {
+    const imp = ctx.mod.imports[calleeIdx];
+    return imp?.desc.kind === "func" ? imp.desc.typeIdx : undefined;
+  }
+  const fn = ctx.mod.functions[calleeIdx - ctx.numImportFuncs];
+  return fn?.typeIdx;
+}
+
+/** Mirror of the legacy return-type compatibility check (control-flow.ts). */
+function resultsMatchCaller(calleeResults: ValType[], caller: CallerSig): boolean {
+  if (caller.returnType === null) return calleeResults.length === 0;
+  if (calleeResults.length !== 1) return false;
+  const calleeRet = calleeResults[0]!;
+  const callerRet = caller.returnType;
+  if (calleeRet.kind === callerRet.kind) return true;
+  // ref/ref_null are compatible for return purposes.
+  if (
+    (calleeRet.kind === "ref" || calleeRet.kind === "ref_null") &&
+    (callerRet.kind === "ref" || callerRet.kind === "ref_null")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function callIsTailEligible(ctx: CodegenContext, instr: Instr, caller: CallerSig): boolean {
+  if (instr.op === "call") {
+    const tIdx = calleeTypeIdx(ctx, instr.funcIdx);
+    if (tIdx === undefined) return false;
+    const ft = funcTypeOf(ctx, tIdx);
+    if (!ft) return false;
+    if (ft.params.length !== caller.paramCount) return false;
+    return resultsMatchCaller(ft.results, caller);
+  }
+  if (instr.op === "call_ref") {
+    if (instr.typeIdx === undefined) return false;
+    const ft = funcTypeOf(ctx, instr.typeIdx);
+    if (!ft) return false;
+    if (ft.params.length !== caller.paramCount) return false;
+    return resultsMatchCaller(ft.results, caller);
+  }
+  return false;
+}
+
+/**
+ * Rewrite `<call>; return` → `<return_call>` in-place within one instruction
+ * buffer, recursing into the tail arms of structured control flow. Returns the
+ * (possibly shortened) buffer. `try` is intentionally NOT descended into.
+ */
+function convertBuffer(ctx: CodegenContext, body: Instr[], caller: CallerSig): Instr[] {
+  // Recurse first into nested control-flow arms (their trailing return is a
+  // tail of the function too). Skip `try` — see header.
+  for (const instr of body) {
+    if (instr.op === "if") {
+      instr.then = convertBuffer(ctx, instr.then, caller);
+      if (instr.else) instr.else = convertBuffer(ctx, instr.else, caller);
+    } else if (instr.op === "block" || instr.op === "loop") {
+      instr.body = convertBuffer(ctx, instr.body, caller);
+    }
+    // `try`: left untouched (return_call inside a try-with-handler would let a
+    // callee throw escape the catch — #1972).
+  }
+
+  // Local rewrite: any `call`/`call_ref` immediately followed by `return`.
+  const out: Instr[] = [];
+  for (let i = 0; i < body.length; i++) {
+    const cur = body[i]!;
+    const next = body[i + 1];
+    if (
+      next &&
+      next.op === "return" &&
+      (cur.op === "call" || cur.op === "call_ref") &&
+      callIsTailEligible(ctx, cur, caller)
+    ) {
+      if (cur.op === "call") {
+        out.push({ op: "return_call", funcIdx: cur.funcIdx });
+      } else {
+        out.push({ op: "return_call_ref", typeIdx: cur.typeIdx! });
+      }
+      i++; // consume the following `return`
+      continue;
+    }
+    out.push(cur);
+  }
+  return out;
+}
+
+/**
+ * Apply tail-call optimization to an IR-lowered function body in place.
+ * `funcTypeIdx` is the lowered function's own type index. Returns the rewritten
+ * body (a new top-level array; nested arms are mutated in place).
+ */
+export function applyIrTailCalls(ctx: CodegenContext, body: Instr[], funcTypeIdx: number): Instr[] {
+  const ft = funcTypeOf(ctx, funcTypeIdx);
+  if (!ft) return body;
+  const caller: CallerSig = {
+    paramCount: ft.params.length,
+    returnType: ft.results.length > 0 ? ft.results[0]! : null,
+  };
+  return convertBuffer(ctx, body, caller);
+}
