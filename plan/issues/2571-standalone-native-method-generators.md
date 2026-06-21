@@ -1,10 +1,13 @@
 ---
 id: 2571
 title: "standalone: class/object-literal method generators leak env.__gen_* host imports — no native lowering (validate-but-can't-instantiate)"
-status: ready
+status: done
 sprint: Backlog
 created: 2026-06-21
 updated: 2026-06-21
+completed: 2026-06-21
+assignee: sd-2
+residual: "object-literal method generators ({ *m(){} }) keep the host path — deferred follow-up (closures.ts lifted-closure path needs native wiring); class/static/instance method generators are native."
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -323,3 +326,51 @@ new C().m();` leaves `ran === 0` until the first `it.next()`.
 - The standalone `env.__gen_*` leak count over the gen-method test262 subset
   drops to ~0; host mode unchanged (no regression).
 - No new host imports introduced for the standalone path.
+
+## Resolution (2026-06-21, sd-2) — CLASS method generators native; object-literal deferred
+
+Implemented Work Items A+B+C from the sd-5 spec for **class** (instance +
+static) generator methods. Object-literal method generators (`{ *m(){} }`) are
+deferred to a follow-up — they lower through the `closures.ts` lifted-closure
+path, which is not yet wired to the native state machine; they keep the host
+path cleanly (valid module, host imports) — NO regression.
+
+### Changes
+
+- **`src/codegen/generators-native.ts`**
+  - `isNativeGeneratorCandidate` widened to `GeneratorDecl =
+    FunctionDeclaration | MethodDeclaration` (the single source of truth). For a
+    method it bails (→ host) when: computed/string name, NOT a class method
+    (object-literal deferred), reads `arguments`, uses `super.*`, or CAPTURES an
+    enclosing binding (#2203 — the native state struct has no capture slot).
+  - `registerNativeGenerator` gains a `synthesizedThis` flag: when set (instance
+    method) it prepends `"this"` to `paramNames`, aligned with the caller's
+    `paramTypes = [receiverType, ...userParams]`, so the state struct mints a
+    `param_this` field that the resume function rehydrates as a `this` local —
+    `this.x` reads resolve via the existing `localMap.get("this")`.
+  - `compileNativeGeneratorFunction` factory reads `info.paramTypes.length`
+    wasm params (NOT `decl.parameters.length`) so the synthetic `this` (wasm
+    param 0) is read into `param_this`.
+  - `sourceNeedsGeneratorHostImports` no longer force-routes a native-capable
+    class method generator to the host path.
+- **`src/codegen/class-bodies.ts`** — the collection pass registers the native
+  generator (under `classMemberFuncKey`, `synthesizedThis = !isStatic`) when
+  `(standalone||wasi) && !async && candidate`, and sets the method's wasm result
+  type to the `$GenState_*` struct ref (mirrors `declarations.ts:2499`). The
+  fctx returnType + the emit block route through `compileNativeGeneratorFunction`
+  for the native case; the eager-buffer host block is the `else`.
+- **`src/codegen/context/types.ts`** — `NativeGeneratorInfo.decl` widened;
+  added `synthesizedThis?`.
+
+All guards are `standalone||wasi`-gated → **JS-host (gc) mode byte-identical**.
+
+### Verified
+
+`tests/issue-2571-native-method-generators.test.ts` (10): instance/static/this/
+this+param/multi-yield/done/lazy native (zero `__gen_*` imports, correct
+values); free `function*` unregressed; capturing + object-literal bail to host
+(valid Wasm). tsc + prettier + hard-error gate + IR-fallback gate clean.
+Runnable generator/class test files unregressed (the 17 `class-methods.test.ts`
+failures are the pre-existing gc-mode `string_constants` harness limitation —
+identical on pristine main). Broad-impact → merge_group is the authoritative
+full-standalone-shard validator.

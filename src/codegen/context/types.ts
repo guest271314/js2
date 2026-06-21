@@ -181,8 +181,23 @@ export interface ClosureInfo {
 export interface NativeGeneratorInfo {
   /** Source-level generator function name. */
   functionName: string;
-  /** Original declaration; used to emit the resume function lazily. */
-  decl: ts.FunctionDeclaration;
+  /**
+   * Original declaration; used to emit the resume function lazily. (#2571) A
+   * class / object-literal generator method is a `ts.MethodDeclaration`; it
+   * shares `.body` / `.parameters` / `.asteriskToken` with FunctionDeclaration,
+   * and the native lowering treats an instance method's `this` as a synthetic
+   * leading param (see `registerNativeGenerator`).
+   */
+  decl: ts.FunctionDeclaration | ts.MethodDeclaration;
+  /**
+   * (#2571) When `decl` is a non-static instance generator METHOD, the receiver
+   * is threaded as a synthetic leading param named `"this"` (state field
+   * `param_this`). `synthesizedThis` records that the param model has one extra
+   * leading entry beyond `decl.parameters` so the factory reads `local.get 0`
+   * (the `this` wasm param) into `param_this`. Free functions / static methods
+   * leave this `false` (no synthetic param) — byte-identical to pre-#2571.
+   */
+  synthesizedThis?: boolean;
   /** Per-generator state struct type index. */
   stateTypeIdx: number;
   /** Shared IteratorResult-like struct type index. */
