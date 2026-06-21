@@ -633,6 +633,38 @@ function compileStringRaw(
   substitutions: readonly ts.Expression[],
 ): ValType | null {
   addStringImports(ctx);
+
+  // (#2160) Native-strings (standalone / WASI) path. The generic host-concat
+  // loop below mixes representations here: a numeric substitution leaves an f64
+  // / a `number_toString` externref that the native accumulator (a `ref
+  // $AnyString` from `compileStringLiteral`) cannot concat — producing
+  // `any.convert_extern expected externref, found f64` (an INVALID standalone
+  // binary for `String.raw\`a${1}b\``). Mirror `compileTemplateExpression`'s
+  // native branch: coerce EVERY operand to `ref $AnyString` via the proven
+  // `compileNativeConcatOperand` helper and concat with native `__str_concat`.
+  // The no-substitution case already worked via the generic template-vec fix;
+  // this fixes the WITH-substitution case. (My prior #1812 added this branch
+  // but was closed as superseded after only the no-subst case was probed.)
+  if (noJsHost(ctx) && ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
+    const nativeConcatIdx = ctx.nativeStrHelpers.get("__str_concat");
+    if (nativeConcatIdx === undefined) {
+      reportError(ctx, expr, "String.raw: native string concat helper unavailable");
+      return null;
+    }
+    compileNativeStringLiteral(ctx, fctx, rawParts[0] ?? "");
+    for (let i = 0; i < substitutions.length; i++) {
+      // Stringify + native-coerce the substitution to `ref $AnyString`, concat.
+      if (!compileNativeConcatOperand(ctx, fctx, substitutions[i]!)) {
+        compileNativeStringLiteral(ctx, fctx, "undefined");
+      }
+      fctx.body.push({ op: "call", funcIdx: nativeConcatIdx });
+      // Append the following raw part.
+      compileNativeStringLiteral(ctx, fctx, rawParts[i + 1] ?? "");
+      fctx.body.push({ op: "call", funcIdx: nativeConcatIdx });
+    }
+    return nativeStringType(ctx);
+  }
+
   const concatIdx = ctx.jsStringImports.get("concat") ?? ctx.nativeStrHelpers.get("__str_concat");
   if (concatIdx === undefined) {
     reportError(ctx, expr, "String.raw: string concat helper unavailable");
