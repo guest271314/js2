@@ -1061,9 +1061,35 @@ export function compileBinaryExpression(
     return compileStringBinaryOp(ctx, fctx, expr, op);
   }
 
+  // (#2503) The FORWARD shape `"lit" == any` (static-string LEFT against an
+  // `any`/`unknown`/object RIGHT) is the mirror of the #2503b reverse shape and
+  // has the SAME hazard: routing it to `compileStringBinaryOp` does a pure
+  // native-string content compare, which is WRONG under §7.2.15 whenever the
+  // `any` holds a non-string at runtime — a number (`"5.0" == 5` must be `true`
+  // via ToNumber, not `false`), or an object (must ToPrimitive then recurse, so
+  // `"x" == {valueOf:()=>"x"}` is `true`). The catch-all third disjunct below
+  // (`!isRelational && !isNumber && !isBoolean && !isBigInt`) used to grab these
+  // because `any`/object satisfies it, returning a spurious `false` for the
+  // entire standalone "Cannot convert object to primitive value" / loose-eq
+  // cluster. So for LOOSE `==`/`!=` we exclude an `any`/`unknown`/object RIGHT
+  // from the string route and let it fall through to the standalone
+  // abstract-equality cascade (~line 1990), which boxes the string ref to
+  // externref and dispatches on the RUNTIME tag (string⇄string content compare,
+  // string⇄number ToNumber, nullish guard, Object→ToPrimitive — the same
+  // §7.2.15 handling #2503b gives the reverse shape). STRICT `===`/`!==` keeps
+  // the content-compare route (a string is never `===` a non-string, which
+  // `__str_equals` already yields), as do `+` and relational ops.
+  const isLooseEqNeqForward =
+    op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
+  const rightIsAbstractNonString =
+    !rightIsStrLike &&
+    (rightTsType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 &&
+    ctx.nativeStrings &&
+    ctx.anyStrTypeIdx >= 0;
   if (
     !wrapperEquality &&
     isStringType(leftTsType) &&
+    !(isLooseEqNeqForward && rightIsAbstractNonString) &&
     (isStringType(rightTsType) ||
       op === ts.SyntaxKind.PlusToken ||
       (!isRelational && !isNumberType(rightTsType) && !isBooleanType(rightTsType) && !isBigIntType(rightTsType)))
@@ -1832,17 +1858,37 @@ export function compileBinaryExpression(
       // that regressed number-holding `any` (the −3, #2503b first attempt).
       const isLooseEqNeq = op === ts.SyntaxKind.EqualsEqualsToken || op === ts.SyntaxKind.ExclamationEqualsToken;
       const otherEqType = leftIsRef ? rightType : leftType;
+      // (#2503) The OTHER operand may arrive as an `externref` (an `any`-typed
+      // parameter that lost its typeIdx) OR as a nominal STRUCT ref (the static
+      // `"x" == (obj as any)` shape, where the AsExpression keeps the concrete
+      // `(ref $T)`). Both must be boxed to externref so the abstract-equality
+      // cascade can reduce an Object operand via `__to_primitive`. For the
+      // struct-ref case the box goes through `coerceType(structRef→externref)`,
+      // which materializes a user-ToPrimitive struct as a `$Object` (#2358) so
+      // the native helper recognises it. Plain data structs are boxed by plain
+      // `extern.convert_any` and the cascade's identity arm handles them.
+      const otherIsBoxableRef =
+        otherEqType.kind === "externref" || otherEqType.kind === "ref" || otherEqType.kind === "ref_null";
+      // (#2503) A wrapper object (`new Boolean`/`new Number`/`new String`) on the
+      // OTHER side: in JS-host mode it keeps its dedicated `__host_loose_eq`
+      // routing (the wrapper arm ~line 2483). But in STANDALONE/WASI there is no
+      // JS host — the wrapper arm's `__host_loose_eq` import is unsatisfiable, so
+      // a `string == wrapper` must instead go through the native abstract-equality
+      // cascade, whose `__to_primitive` already reduces a wrapper via its
+      // WRAPPER_PRIMITIVE_KEY slot short-circuit (this is what makes `"1" == new
+      // Boolean(true)` / `"-1" == new Number(-1)` work). Without taking THIS arm
+      // for the wrapper case, `wrapperEquality` falls to the `else if (isEqOp)`
+      // f64 path below, which `__str_to_number`s the string operand → NaN →
+      // wrong `false` (the `"x" == new String("x")` residual). So permit a
+      // string-ref-vs-wrapper pairing through the externref box when noJsHost.
+      const noJsHostEq = ctx.standalone === true || ctx.wasi === true;
+      const wrapperOverStringAllowed = noJsHostEq && wrapperEquality;
       if (
         isLooseEqNeq &&
-        // A wrapper object (`new Boolean(true)`, `new Number(n)`, `new String(s)`)
-        // is NOT a plain primitive — its loose equality has dedicated
-        // ToPrimitive/identity handling in the wrapper arm further down (~line
-        // 2371). Excluding it here keeps `"1" == new Boolean(true)` on that path
-        // (#1910d); the primitive-tag cascade does not reduce a wrapper struct.
-        !wrapperEquality &&
+        (!wrapperEquality || wrapperOverStringAllowed) &&
         ctx.nativeStrings &&
         ctx.anyStrTypeIdx >= 0 &&
-        otherEqType.kind === "externref" &&
+        otherIsBoxableRef &&
         ((leftIsRef && isStringType(leftTsType)) || (rightIsRef && isStringType(rightTsType)))
       ) {
         // Box the native-string ref operand → externref (extern.convert_any).
@@ -2331,7 +2377,13 @@ export function compileBinaryExpression(
                         if (strToNumIdx !== undefined) {
                           looseStrNumEmitted = true;
                           // ToNumber(side): native string → __str_to_number(extern);
-                          // else (a boxed number) → __unbox_number.
+                          // a boxed boolean → §7.1.4 ToNumber(Boolean) = 0/1; else
+                          // (a boxed number) → __unbox_number.
+                          // (#2503) The boolean arm matters once an Object operand
+                          // reduces to a boolean via ToPrimitive (e.g. `"1" == new
+                          // Boolean(true)` → §7.2.15 step 8 String⇄Boolean: compare
+                          // ToNumber both → `1 == 1`). Before this, the reduced
+                          // boolean fell to the identity arm → spurious `false`.
                           const toNumberOf = (anyLocal: number, externLocal: number): Instr[] => [
                             { op: "local.get", index: anyLocal },
                             { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
@@ -2343,22 +2395,45 @@ export function compileBinaryExpression(
                                 { op: "call", funcIdx: strToNumIdx },
                               ],
                               else: [
+                                // boolean → 0/1, else unbox the number.
                                 { op: "local.get", index: externLocal },
-                                { op: "call", funcIdx: unboxNum },
+                                { op: "call", funcIdx: typeofBool } as Instr,
+                                {
+                                  op: "if",
+                                  blockType: { kind: "val", type: { kind: "f64" } },
+                                  then: [
+                                    { op: "local.get", index: externLocal },
+                                    { op: "call", funcIdx: unboxBool },
+                                    { op: "f64.convert_i32_s" },
+                                  ],
+                                  else: [
+                                    { op: "local.get", index: externLocal },
+                                    { op: "call", funcIdx: unboxNum },
+                                  ],
+                                } as Instr,
                               ],
                             } as Instr,
                           ];
-                          // (lIsStr && rIsNum) || (rIsStr && lIsNum)
+                          // §7.2.15: String⇄Number (steps 4-7) and String⇄Boolean
+                          // (step 8 — ToNumber the boolean) both ToNumber-compare.
+                          // Fire when exactly one side is a native string and the
+                          // OTHER is a number or a boolean.
+                          const isNumOrBool = (externLocal: number): Instr[] => [
+                            { op: "local.get", index: externLocal },
+                            { op: "call", funcIdx: typeofNum } as Instr,
+                            { op: "local.get", index: externLocal },
+                            { op: "call", funcIdx: typeofBool } as Instr,
+                            { op: "i32.or" } as Instr,
+                          ];
+                          // (lIsStr && rIsNumOrBool) || (rIsStr && lIsNumOrBool)
                           seq.push(
                             { op: "local.get", index: lAny },
                             { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
-                            { op: "local.get", index: rTmp },
-                            { op: "call", funcIdx: typeofNum } as Instr,
+                            ...isNumOrBool(rTmp),
                             { op: "i32.and" } as Instr,
                             { op: "local.get", index: rAny },
                             { op: "ref.test", typeIdx: ctx.anyStrTypeIdx } as Instr,
-                            { op: "local.get", index: lTmp },
-                            { op: "call", funcIdx: typeofNum } as Instr,
+                            ...isNumOrBool(lTmp),
                             { op: "i32.and" } as Instr,
                             { op: "i32.or" } as Instr,
                             {

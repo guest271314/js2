@@ -1,10 +1,12 @@
 ---
 id: 2503
 title: "standalone ToPrimitive residual (successor to #1910): 2,835 `Cannot convert object to primitive value` on ==/+/array-literal/destructuring receivers"
-status: ready
+status: done
+assignee: ttraenkler/sd-3
 sprint: 64
 created: 2026-06-19
-updated: 2026-06-19
+updated: 2026-06-21
+completed: 2026-06-21
 priority: critical
 feasibility: hard
 reasoning_effort: high
@@ -91,3 +93,79 @@ object receiver without routing through the standalone native
 - Scoped standalone equivalence tests cover `==`, `+`, array-literal, and
   destructuring-default object receivers.
 - Default (JS-host) lane unchanged (no regression from the 48 baseline).
+
+## Implementation (sd-3, 2026-06-21)
+
+### Reproduction — the cited "core path" clusters were mostly already fixed
+
+On current `origin/main`, the `+`, `obj+obj`, destructuring-default, and
+`any`-param-valueOf cases from the issue's "Sample failures" table **already
+pass** standalone (prior ToPrimitive work — #1910/#1525b/#2358 PR-1 —
+substantially closed them). The genuine open residual reproduced through the
+real test262 runner (`runTest262File(..., "standalone")`) is the **string side
+of abstract equality `==`/`!=`**: `equals/S11.9.1_A7.7.js` (`"1" == new
+Boolean(true)`, …) was HOST=pass / STANDALONE=fail with `Cannot convert object
+to primitive value`.
+
+### Root cause — `string == object/any` was statically mis-routed past §7.2.15
+
+The `==` lowering in `src/codegen/binary-ops.ts` routed a **static-string LEFT**
+operand against an `any`/object/wrapper RIGHT into `compileStringBinaryOp` (a
+pure native-string content compare) via the catch-all third disjunct of the
+left-string arm (~line 1064). That arm never consults `ToPrimitive`/`ToNumber`,
+so for `"x" == {valueOf:()=>"x"}` the object failed the string `ref.test` and the
+compare returned a spurious `false` (NOT a throw); for `new String/Number/Boolean`
+wrappers (`wrapperEquality`) it fell to the `else if (isEqOp)` f64 path, which ran
+`__str_to_number` on the string operand → NaN → wrong `false`. This is the exact
+**mirror** of the reverse `any == "lit"` shape that #2503b deliberately routed
+through the runtime-tag cascade; the forward shape was the un-fixed half.
+
+### Fix (3 surgical edits in `src/codegen/binary-ops.ts`, all standalone-gated)
+
+1. **Don't string-route a loose-eq forward shape with an abstract RIGHT** (~line
+   1064): for `==`/`!=` where the RIGHT is `any`/`unknown` (not statically
+   string-ish), skip `compileStringBinaryOp` and fall through to the native
+   abstract-equality cascade. STRICT `===`/`!==`, `+`, and relational ops keep
+   the content-compare route.
+2. **Box a string-ref vs. any/struct-ref/wrapper into the cascade** (the #2503b
+   externref-boxing arm, ~line 1860): broadened `otherEqType.kind === "externref"`
+   to also accept a nominal STRUCT ref (`ref`/`ref_null`) — the static `"x" ==
+   (obj as any)` shape — so `coerceType(structRef→externref)` runs, which
+   materializes a user-ToPrimitive struct as `$Object` (#2358 PR-2) for
+   `__to_primitive`. Also permitted the `wrapperEquality` case through this arm
+   **only when `noJsHost`** (standalone/WASI), since the JS-host wrapper arm's
+   `__host_loose_eq` import is unsatisfiable there and the cascade's
+   `__to_primitive` already reduces wrappers via their `[[PrimitiveValue]]` slot.
+3. **String⇄Number → String⇄(Number-or-Boolean)** in the cascade's loose arm
+   (~line 2345): §7.2.15 step 8 — once an Object operand reduces to a boolean via
+   ToPrimitive (`"1" == new Boolean(true)`), ToNumber the boolean side (0/1) and
+   compare numerically. Previously the reduced boolean fell to the identity arm →
+   spurious `false`.
+
+### Results (regression-free)
+
+Scoped standalone test262 over the operator families (this branch vs `origin/main`):
+
+| family | base SA pass | fixed SA pass | Δ |
+|---|---|---|---|
+| equals | 19 | 21 | +2 |
+| does-not-equals | 18 | 20 | +2 |
+| addition / less-than / greater-than | — | — | 0 (unchanged) |
+
+`Cannot convert object to primitive` throws: equals 8→6, does-not-equals 8→6.
+**No family regressed**; host lane unchanged. `tests/issue-2503.test.ts` (12
+cases) green; the existing #1111/#1134/#1525/#1910/#1917/#1986/#2081/#2160/#2358/
+#2503b equality+wrapper suites still pass (159/159; the one pre-existing
+`#2081 null==undefined` any/any failure and the missing-`helpers.js` collection
+errors reproduce identically on `origin/main` and are unrelated). Hard-error
+gate: 0 hard errors, no growth.
+
+### Remaining residual → tracked under #2358 (engine half) and separate gaps
+
+The full 2,835 bucket is dominated by an **engine** gap this routing fix does not
+touch: `__to_primitive` cannot reduce a `$Vec` ARRAY (`"1,2" == [1,2]`,
+`[obj] + x`) — it only recognises `$Object` (the addition family's `ctp=11` is
+this). That is the `#10` array-ToPrimitive fold already specced in **#2358**.
+Two further out-of-cluster items observed: `String(obj)` builtin null-deref, and
+`valueOf`-returns-object / Date / template coercion. None are the operator
+RECEIVER mis-routing #2503 scoped; the operator/binding routing portion is closed.
