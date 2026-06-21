@@ -272,6 +272,35 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
       ...stringConstantExternrefInstrs(ctx, keyName),
       { op: "call", funcIdx: finalExternGetIdx } as Instr,
     ];
+    // (#2580 M1a v2 — merge_group eject fix) CLOSURE arm, innermost so it is
+    // tested LAST inside the vec chain's else. A function/closure `.length` is its
+    // ARITY, not a vec length; routing a closure externref through `__extern_get`
+    // returned `undefined` → NaN (the v1 Cluster-A regression: zero-arity built-in
+    // method `.length` `verifyProperty({value:0})` tests flipped pass→fail because
+    // origin's prior numeric path returned 0). The compiler does not statically
+    // track an `any`-typed closure's arity here, and origin's prior path returned
+    // a flat `0`, so match it: `ref.test` the registered closure base wrapper
+    // types and, on a hit, return `box_number(0)`. Same `ref.test typeIdx`
+    // discipline as the vec arm (type indices are rec-group / dead-elim stable —
+    // no funcidx hazard). Closure base types are derived inline from
+    // `ctx.closureInfoByTypeIdx` (walking each to its root struct) to avoid a
+    // circular import on index.ts's private `collectClosureBaseWrapperTypeIdxs`.
+    for (const closureBaseTypeIdx of closureBaseWrapperTypeIdxs(ctx)) {
+      chain = [
+        { op: "local.get", index: anyTmp } as Instr,
+        { op: "ref.test", typeIdx: closureBaseTypeIdx } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "externref" } as ValType },
+          then: [
+            // arity fallback: box_number(0.0) — matches the prior numeric path.
+            { op: "f64.const", value: 0 } as Instr,
+            { op: "call", funcIdx: boxNumIdx } as Instr,
+          ],
+          else: chain,
+        } as Instr,
+      ];
+    }
     // Wrap from the innermost (last) vec type outward: each layer is
     // `if ref.test $vec { box_number(f64(struct.get field0)) } else { <chain> }`.
     for (let i = vecEntries.length - 1; i >= 0; i--) {
@@ -305,4 +334,35 @@ export function emitDynGet(ctx: CodegenContext, fctx: FunctionContext, keyName: 
   for (const instr of stringConstantExternrefInstrs(ctx, keyName)) fctx.body.push(instr);
   fctx.body.push({ op: "call", funcIdx: finalExternGetIdx } as Instr);
   return true;
+}
+
+/**
+ * (#2580 M1a v2) The deduped root struct types of every registered closure
+ * wrapper, for `ref.test`-discriminating a closure receiver. Mirrors index.ts's
+ * private `collectClosureBaseWrapperTypeIdxs` (walking each closure struct up its
+ * `superTypeIdx` chain to the root) but lives here to avoid a circular import
+ * (`index.ts` already imports `ensureDynReadHelpers` from this module).
+ */
+function closureBaseWrapperTypeIdxs(ctx: CodegenContext): number[] {
+  const mod = ctx.mod;
+  const out: number[] = [];
+  const seen = new Set<number>();
+  for (const [typeIdx, info] of ctx.closureInfoByTypeIdx) {
+    if (!info) continue;
+    const typeDef = mod.types[typeIdx];
+    if (!typeDef || typeDef.kind !== "struct") continue;
+    let root = typeIdx;
+    let cur: typeof typeDef = typeDef;
+    while (cur && cur.kind === "struct" && cur.superTypeIdx !== undefined && cur.superTypeIdx >= 0) {
+      const parent = mod.types[cur.superTypeIdx];
+      if (!parent || parent.kind !== "struct") break;
+      root = cur.superTypeIdx;
+      cur = parent;
+    }
+    if (!seen.has(root)) {
+      seen.add(root);
+      out.push(root);
+    }
+  }
+  return out;
 }

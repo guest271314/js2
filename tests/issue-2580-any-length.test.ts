@@ -96,4 +96,21 @@ describe("#2580 .length on an any receiver", () => {
       ),
     ).toBe(3);
   });
+
+  // (#2580 M1a v2 — merge_group eject Cluster A) A function/closure `.length` is
+  // its ARITY, not a vec/object length. A closure stored in an `any` MUST read as
+  // the arity-fallback `0` (matching the prior numeric path), NOT `undefined`/NaN.
+  // The v1 arm routed a closure externref through `__extern_get` → undefined → NaN,
+  // flipping the zero-arity built-in-method `verifyProperty({value:0})` tests.
+  it("function-as-any .length is 0 (arity fallback), not NaN", async () => {
+    expect(
+      await run(`const g: any = (x: number) => x; export function run(): number { return g.length as number; }`),
+    ).toBe(0);
+  });
+
+  it("typeof function-as-any .length is 'number', not 'undefined'", async () => {
+    expect(await run(`const g: any = () => 1; export function run(): string { return typeof g.length; }`)).toBe(
+      "number",
+    );
+  });
 });
