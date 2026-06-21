@@ -271,3 +271,33 @@ so its extraction is a distinct shape (per-field `struct.get`, varying field
 types) and falls through to an empty Map for now. `[...collection]`
 spread-of-Set/Map and `new Set(iterableNonArray)` (general iterator drive) also
 remain.
+
+## Finding (2026-06-21, during #2586): entries-mode materialization late-registration desync
+
+While wiring `Array.from(Map)` (#2586) onto `emitCollectionIteratorVec` in
+`"entries"` mode, found that the **entries** projection has a latent
+late-registration desync that the stricter targets surface — DO NOT fix in
+#2586; logged here as the entries-mode substrate follow-up:
+
+- `"entries"` mode calls `ensureObjVecBuilders` → `ensureObjectRuntime`
+  (`$ObjVec` pair builders). When that registration runs deep inside a function
+  body, a previously-baked object-runtime funcidx (`__defineProperty_value`)
+  goes stale → emit-time `function index out of range — undefined at function
+  '__defineProperty_value'` (the #2043 late-import-shift class).
+- Under `--target wasi` (strict-no-host) there is ALSO a `global_Array`
+  declared-global request that the host-import allowlist rejects.
+
+**Both reproduce on `main` independently of #2586** for
+`[...m.entries()]` consumed in an array context (`const a = [...m.entries()]`)
+under `--target wasi`. `[...m]` spread and `for (… of map)` work (they do NOT go
+through this entries-pair `emitCollectionIteratorVec` path). So the gap is
+specifically the entries-mode `$ObjVec` materialization registering object
+runtime late without a `flushLateImportShifts` re-resolve.
+
+`--target standalone` does NOT enforce the strict allowlist and lowers the
+entries path to a zero-import module, so #2586 ships standalone-only and gates
+out wasi/nativeStrings-with-host. The proper fix is to make
+`emitCollectionIteratorVec`'s entries branch register its builders/helpers
+before any shiftable funcidx is baked (or re-resolve `__defineProperty_value` by
+name after the registration), then it can be un-gated for wasi. Owner: whoever
+takes the entries-mode substrate slice (#2162 / #2542 family).
