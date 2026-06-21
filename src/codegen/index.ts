@@ -10587,6 +10587,37 @@ export function resolveWasmType(ctx: CodegenContext, tsType: ts.Type, _depth = 0
       }
     }
 
+    // (#2542) A PURE string-index-signature type — `{ [s: string]: T }`, a
+    // `type`-alias to one, or an `interface Dict { [s: string]: T }` — with no own
+    // named properties is an open dictionary. Its only access mode is runtime
+    // string-keyed [[Get]]/[[Set]] (`o[k]`), serviced by the native object runtime
+    // over a `$Object` externref (`__extern_get`/`__extern_set`). Without this
+    // guard the type lowers to an EMPTY WasmGC struct (anonymous → the auto-register
+    // below; named interface → `collectInterface`'s empty struct): a value typed
+    // that way (param, return, local) becomes `ref $empty`, so a `$Object` argument
+    // guard-casts to null at the call boundary and every `o[k]` read returns 0.
+    // Resolving to externref keeps such values flowing as `$Object`s end to end,
+    // matching the open-`$Object` literal lowering in compileObjectLiteral (#2542).
+    //
+    // Runs BEFORE the named-struct lookup so a pure-index-signature *interface*
+    // (already registered as an empty struct by `collectInterface`) still resolves
+    // to externref — the empty struct stays registered (harmless; dead-eliminated
+    // if unreferenced) but is never used as a value type, so no type-index shift.
+    //
+    // Standalone-only: the open-object runtime is emitted exclusively under
+    // `ctx.standalone` (see compileObjectLiteral's #1901/#2542 gate); gc/host/wasi
+    // keep their existing struct/externref mapping byte-identical. A MIXED
+    // `{ a: number; [s: string]: T }` (own named props) is intentionally excluded —
+    // it has a static shape consumers read by field, so it keeps its struct.
+    if (
+      ctx.standalone &&
+      tsType.getProperties().length === 0 &&
+      tsType.getCallSignatures().length === 0 &&
+      !!ctx.checker.getIndexInfoOfType(tsType, ts.IndexKind.String)
+    ) {
+      return { kind: "externref" };
+    }
+
     let name = sym?.name;
     // Map class expression symbol names to their synthetic names
     if (name && !ctx.structMap.has(name)) {
@@ -10746,6 +10777,19 @@ export function ensureStructForType(ctx: CodegenContext, tsType: ts.Type): void 
   }
   // Callable types (functions) are compiled as closures, not structs
   if (tsType.getCallSignatures().length > 0) return;
+  // (#2542) A pure string-index-signature type — `{ [s: string]: T }` with no own
+  // named properties — is an open dictionary that lowers to a `$Object` externref
+  // (see resolveWasmType's #2542 guard), NOT an empty WasmGC struct. Registering an
+  // empty struct here would make `resolveWasmType` pick `ref $empty` for the binding
+  // and break the call-boundary `$Object`→struct cast (every `o[k]` read returns 0).
+  // Standalone-only, matching the resolveWasmType guard's scope.
+  if (
+    ctx.standalone &&
+    tsType.getProperties().length === 0 &&
+    !!ctx.checker.getIndexInfoOfType(tsType, ts.IndexKind.String)
+  ) {
+    return;
+  }
   // Guard against infinite recursion on circular/self-referencing types.
   // Uses per-compilation ctx.ensureStructPending (not module-scoped) to avoid
   // leaking state between compile() calls in the same process (#923).
