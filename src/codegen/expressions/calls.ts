@@ -232,6 +232,201 @@ const BUILTIN_CLASS_NAMES = new Set([
 ]);
 
 /**
+ * (#2501) Does `argExpr` denote a value that may be a **Proxy**? A proxy's
+ * §20.1.3.6 tag can't be classified statically: `IsArray` (step 4) unwraps the
+ * proxy to its target and, for a *revoked* proxy, throws TypeError (§7.2.2 step
+ * 3a) — so a static tag is both potentially wrong (the TS type is the *target's*
+ * type, e.g. `Proxy.revocable([], …).proxy` types as `never[]`) and unsound (it
+ * can't throw). The host's real `Object.prototype.toString` gets every proxy
+ * case right (unwrap-to-target, revoked → throw), so the classifier must defer
+ * to it. Proxies carry no TS-type brand (`new Proxy(t, h)` types identically to
+ * `t`), so detection is purely syntactic on the receiver's provenance:
+ *   - `new Proxy(...)` directly,
+ *   - `Proxy.revocable(...).proxy`,
+ *   - an identifier whose initializer is (transitively) either of the above
+ *     (`var p = new Proxy([], {}); …call(p)` / `var pp = new Proxy(p, {})`).
+ */
+function receiverMayBeProxy(ctx: CodegenContext, argExpr: ts.Expression): boolean {
+  const isNewProxy = (node: ts.Expression): boolean =>
+    ts.isNewExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "Proxy";
+
+  // `Proxy.revocable(...).proxy` — the `.proxy` member of a revocable handle.
+  const isRevocableProxyAccess = (node: ts.Expression): boolean => {
+    if (!ts.isPropertyAccessExpression(node) || node.name.text !== "proxy") return false;
+    const recv = node.expression;
+    return (
+      ts.isCallExpression(recv) &&
+      ts.isPropertyAccessExpression(recv.expression) &&
+      recv.expression.name.text === "revocable" &&
+      ts.isIdentifier(recv.expression.expression) &&
+      recv.expression.expression.text === "Proxy"
+    );
+  };
+
+  // `handle.proxy` where `handle = Proxy.revocable(...)` (the revocable result is
+  // bound to a variable first — the common test262 shape).
+  const isRevocableHandleProxyAccess = (node: ts.Expression): boolean => {
+    if (!ts.isPropertyAccessExpression(node) || node.name.text !== "proxy") return false;
+    const recv = node.expression;
+    if (!ts.isIdentifier(recv)) return false;
+    const sym = ctx.checker.getSymbolAtLocation(recv);
+    const decl = sym?.valueDeclaration;
+    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return false;
+    const init = decl.initializer;
+    return (
+      ts.isCallExpression(init) &&
+      ts.isPropertyAccessExpression(init.expression) &&
+      init.expression.name.text === "revocable" &&
+      ts.isIdentifier(init.expression.expression) &&
+      init.expression.expression.text === "Proxy"
+    );
+  };
+
+  const exprIsProxy = (node: ts.Expression): boolean => {
+    const inner = ts.isParenthesizedExpression(node) ? node.expression : node;
+    return isNewProxy(inner) || isRevocableProxyAccess(inner) || isRevocableHandleProxyAccess(inner);
+  };
+
+  if (exprIsProxy(argExpr)) return true;
+
+  // Identifier bound to a proxy (transitively): `var p = new Proxy(t, h)` then
+  // `…call(p)`, including the proxy-of-proxy chain `var pp = new Proxy(p, {})`.
+  if (ts.isIdentifier(argExpr)) {
+    const sym = ctx.checker.getSymbolAtLocation(argExpr);
+    const decl = sym?.valueDeclaration;
+    if (decl && ts.isVariableDeclaration(decl) && decl.initializer && exprIsProxy(decl.initializer)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * (#2501) Resolve the §20.1.3.6 `Object.prototype.toString` builtin tag for a
+ * statically-known receiver, returning the tag name (e.g. "Array", "Date") or
+ * `undefined` when it can't be classified (caller falls back / refuses).
+ *
+ * Order follows §20.1.3.6 steps 2-14 (the Symbol.toStringTag override of step
+ * 15 is a deferred phase-2 — needs dynamic @@toStringTag property lookup):
+ *   undefined → Undefined · null → Null · isArray → Array · callable → Function
+ *   · Error → Error · Boolean/Number/String primitive → that tag · Date → Date
+ *   · RegExp → RegExp · arguments exotic → Arguments · else → Object.
+ */
+function resolveObjectToStringTag(ctx: CodegenContext, argExpr: ts.Expression | undefined): string | undefined {
+  if (argExpr === undefined) return "Undefined"; // toString.call() with no arg → this=undefined
+  // Literal null / undefined keywords.
+  if (argExpr.kind === ts.SyntaxKind.NullKeyword) return "Null";
+  if (argExpr.kind === ts.SyntaxKind.UndefinedKeyword || (ts.isIdentifier(argExpr) && argExpr.text === "undefined")) {
+    return "Undefined";
+  }
+
+  // (#2501) IMPORTANT — in **host mode** only return a static tag when we are
+  // *certain* it matches §20.1.3.6, and otherwise bail (return undefined) so the
+  // caller falls through to the host `__proto_method_call` path, whose real
+  // `Object.prototype.toString` already gets every remaining case right
+  // (primitives, primitive-wrapper objects, plain objects, `.prototype`
+  // objects, and @@toStringTag (step 14/15) objects like JSON / Math). The
+  // earlier broad classifier MIS-tagged all of those (`Object([])` /
+  // `Object(5)` / `new Number(5)` → [object Object]; `TypeError.prototype` →
+  // [object Error]; `JSON` → [object Object]), regressing 35 test262 files.
+  //
+  // So host mode restricts the static path to exactly the receivers the host
+  // gets WRONG — the ones whose underlying Wasm value (a GC vec/struct/closure)
+  // is opaque to the host's `Object.prototype.toString`: genuine arrays,
+  // callable functions, the `arguments` exotic, and Date/RegExp/Error
+  // *instances*. Everything else returns undefined → host fall-through.
+  //
+  // **Standalone mode** has no host to fall through to (the borrowed `.call`
+  // form is otherwise a hard compile error there), so for the would-defer
+  // cases it returns the best-available *static* tag instead of undefined:
+  // plain objects / primitive wrappers → the §20.1.3.6 step-2-14 builtin tag
+  // (the deferred @@toStringTag step-15 override is no worse than the pre-#2501
+  // CE). `deferOrStandalone(fallback)` encodes that: host → undefined,
+  // standalone → fallback.
+  const deferOrStandalone = (fallback: string | undefined): string | undefined =>
+    ctx.standalone ? fallback : undefined;
+
+  // Proxy receivers — never static-classify. The §20.1.3.6 tag of a proxy is
+  // resolved through `IsArray`, which unwraps to the proxy target and throws
+  // TypeError for a *revoked* proxy (§7.2.2 step 3a). The TS type reflects the
+  // *target* (a `Proxy.revocable([], …).proxy` types as `never[]`, so the broad
+  // array branch below would mis-emit a constant `[object Array]` that can never
+  // throw — regressing `proxy-revoked.js`). Defer to the host, which unwraps the
+  // proxy and throws on the revoked case correctly. (Standalone has no proxy
+  // runtime, so `undefined` → refuse-loud, no worse than the pre-#2501 CE.)
+  if (receiverMayBeProxy(ctx, argExpr)) return deferOrStandalone(undefined);
+
+  // Receiver forms that defeat static classification — the spec tag depends on
+  // an internal slot the TS type can't reveal. Handle / bail explicitly:
+  //   - `Object(x)` ToObject-boxing → §7.1.18: ToObject of a primitive yields
+  //     the matching wrapper, ToObject of an object returns it unchanged. So
+  //     the §20.1.3.6 tag of `Object(x)` is exactly the tag of `x`. Recurse on
+  //     the inner expr (Object([]) → Array, Object(5) → host-defer Number).
+  //   - `X.prototype` → a builtin prototype is an ordinary object with NO
+  //     [[ErrorData]]/[[Call]] slot, so it is [object Object], not the parent's
+  //     tag (TypeError.prototype → Object, Function.prototype → Function — but
+  //     the host resolves both precisely, so defer rather than risk a mis-tag).
+  if (ts.isCallExpression(argExpr) && ts.isIdentifier(argExpr.expression) && argExpr.expression.text === "Object") {
+    return argExpr.arguments.length >= 1 ? resolveObjectToStringTag(ctx, argExpr.arguments[0]) : "Object";
+  }
+  if (ts.isPropertyAccessExpression(argExpr) && argExpr.name.text === "prototype") {
+    return deferOrStandalone("Object");
+  }
+
+  const t = ctx.checker.getTypeAtLocation(argExpr);
+  const nn = ctx.checker.getNonNullableType(t);
+  // null / undefined via the type system (e.g. a `null`-typed binding).
+  if ((t.flags & ts.TypeFlags.Null) !== 0) return "Null";
+  if ((t.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0) return "Undefined";
+
+  // Array (real `__vec_`/`__arr_` arrays, via the established resolver) — the
+  // host sees an opaque GC vec and mis-tags it [object Object].
+  if (resolveArrayInfo(ctx, nn)) return "Array";
+
+  const symName = nn.getSymbol()?.name;
+
+  // Primitive-wrapper *objects* (`new Number(5)` / `new Boolean(true)` /
+  // `new String("")`) box to the corresponding tag, but the host already
+  // resolves them correctly — and the static type is unreliable here (one
+  // resolves via isStringType, the others fall through). Defer to the host
+  // (standalone → emit the matching wrapper tag, the best static answer).
+  if (symName === "Number") return deferOrStandalone("Number");
+  if (symName === "Boolean") return deferOrStandalone("Boolean");
+  if (symName === "String") return deferOrStandalone("String");
+
+  // Named builtin exotic *instances* the host mis-tags (opaque Wasm receiver):
+  // Date / RegExp / Error(+subclasses) / arguments. `.prototype` of these was
+  // already filtered above, so a match here is a real instance.
+  if (symName === "Date") return "Date";
+  if (symName === "RegExp") return "RegExp";
+  if (symName === "Error" || symName?.endsWith("Error")) return "Error";
+  if (symName === "IArguments" || symName === "Arguments") return "Arguments";
+
+  // Callable (function) — has call signatures. The host sees an opaque Wasm
+  // closure receiver and mis-tags it [object Object].
+  const callSigs = nn.getCallSignatures?.();
+  if (callSigs && callSigs.length > 0) return "Function";
+
+  // Bare primitives (string / number / boolean *types*, not wrapper objects) →
+  // §20.1.3.6 boxes them to the matching wrapper tag. Host resolves this
+  // precisely; standalone emits the static tag.
+  if (isStringType(nn)) return deferOrStandalone("String");
+  if (isNumberType(nn)) return deferOrStandalone("Number");
+  if (isBooleanType(nn)) return deferOrStandalone("Boolean");
+
+  // Everything else (plain objects, class instances, @@toStringTag objects,
+  // unresolved shapes). Host → defer so it computes the spec-correct tag
+  // including the step-14/15 @@toStringTag override. Standalone → emit the
+  // §20.1.3.6 step-13 default "Object" for object-shaped receivers (no host
+  // @@toStringTag resolution exists there yet; still better than a hard CE),
+  // else give up (undefined → caller's standalone refuse-loud path).
+  const wasm = resolveWasmType(ctx, nn);
+  if (wasm.kind === "ref" || wasm.kind === "ref_null" || wasm.kind === "externref") return deferOrStandalone("Object");
+  if ((nn.flags & ts.TypeFlags.Object) !== 0) return deferOrStandalone("Object");
+  return undefined;
+}
+
+/**
  * Statically evaluate `ToBoolean(expr)` for descriptor flag literals.
  * Per §6.2.6 ToPropertyDescriptor each attribute flag is ToBoolean-coerced —
  * `configurable: 123` / `'x'` / `{}` / `[]` are all truthy. Used by the
@@ -2134,8 +2329,25 @@ function emitVirtualMethodDispatchByTag(
     resultType = VOID_RESULT;
   }
 
-  const blockType: { kind: "val"; type: ValType } | { kind: "empty" } =
-    resultType === VOID_RESULT ? { kind: "empty" } : { kind: "val", type: resultType };
+  const resultIsRef = resultType !== VOID_RESULT && (resultType.kind === "ref" || resultType.kind === "ref_null");
+
+  // (#2564) Each nested `if` in the tag cascade below MUST get its own
+  // `blockType` object — never a single shared one. `dead-elimination`'s
+  // `remapTypeIdxInBody` remaps a `ref`/`ref_null` block-type via `remapVT`,
+  // and its double-remap guard (`seen` WeakSet, #1302) keys on the *instruction*
+  // object, not on the `blockType.type` sub-object. The cascade builds one
+  // distinct `if` instruction per candidate; if they all alias the SAME
+  // `blockType.type` ValType, the second nested `if`'s visit chain-remaps the
+  // already-remapped index a second time (observed: 20→16 on the first `if`,
+  // then 16→13 on the second — the compaction map shifts each survivor down, so
+  // 13 is the fn-wrapper type), while the callee func's result type — remapped
+  // exactly once in the type table — lands on 16. The mismatch surfaces as
+  // `type error in fallthru[0] (expected (ref null 13), got (ref null 16))`.
+  // A fresh `{ ...resultType }` per `if` keeps each block-type remapped once.
+  const freshBlockType = (): { kind: "val"; type: ValType } | { kind: "empty" } =>
+    resultType === VOID_RESULT
+      ? { kind: "empty" }
+      : { kind: "val", type: resultIsRef ? { ...(resultType as ValType) } : (resultType as ValType) };
 
   // Build the call body for one candidate. We need to ref.cast the
   // receiver to the candidate's struct type before calling, so the
@@ -2172,7 +2384,7 @@ function emitVirtualMethodDispatchByTag(
       { op: "i32.eq" } as Instr,
       {
         op: "if",
-        blockType,
+        blockType: freshBlockType(),
         then: callBody(cand),
         else: elseInstrs,
       } as Instr,
@@ -3386,6 +3598,30 @@ function compileCallExpression(
           expr.arguments.length >= 1
         ) {
           const typeName = objExpr.expression.text;
+
+          // (#2501) Object.prototype.toString.call(v) → native `[object X]` tag
+          // (§20.1.3.6 builtin-tag subset). The builtin tag is statically known
+          // from the receiver's TS type in nearly every test262 case, so emit the
+          // string constant directly — this fixes host mode (Array/Function/Date
+          // were mis-tagged `[object Object]` because the Wasm vec/closure receiver
+          // is opaque to the host's `Object.prototype.toString`) AND standalone
+          // (the whole `.call(...)` form was a hard compile error there). Routes
+          // BOTH modes through the same compile-away classifier — no host import.
+          // Symbol.toStringTag (§20.1.3.6 step 15) is deferred to phase-2 (it needs
+          // dynamic @@toStringTag property lookup → the dynamic-property epic).
+          if (typeName === "Object" && methodName === "toString") {
+            const tag = resolveObjectToStringTag(ctx, expr.arguments[0]);
+            if (tag !== undefined) {
+              const tagStr = `[object ${tag}]`;
+              addStringConstantGlobal(ctx, tagStr);
+              // Dual-mode string-constant push (externref in both host and
+              // nativeStrings/standalone — the host `global.get` path only works
+              // in non-nativeStrings mode, so use the shared helper).
+              for (const instr of stringConstantExternrefInstrs(ctx, tagStr)) fctx.body.push(instr);
+              return { kind: "externref" };
+            }
+          }
+
           const isBuiltinRegExpPrototype = typeName === "RegExp" && isGlobalRegExpIdentifier(ctx, objExpr.expression);
           if (ctx.standalone && isBuiltinRegExpPrototype) {
             if (methodName === "test" || methodName === "exec") {

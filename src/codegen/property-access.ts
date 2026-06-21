@@ -18,7 +18,7 @@ import {
 import type { FieldDef, Instr, ValType } from "../ir/types.js";
 import { emitBoundsCheckedArrayGet } from "./array-methods.js";
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
-import { popBody } from "./context/bodies.js";
+import { popBody, pushBody } from "./context/bodies.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -2443,12 +2443,20 @@ export function compilePropertyAccess(
           { op: "struct.get", typeIdx: declared.structTypeIdx, fieldIdx } as Instr,
         ];
         // Capture failure-path instrs by emitting into a saved body buffer.
-        const savedBody = fctx.body;
-        fctx.body = [];
+        // Use pushBody/popBody (not a raw swap): emitThrowTypeError can add a
+        // late string-constant import, which shifts every module-global index
+        // and runs fixupModuleGlobalIndices. That fixup walks fctx.savedBodies,
+        // so the swapped-out real body (which already holds the receiver's
+        // `global.get` from `compileExpression(expr.expression)` above when the
+        // receiver is a module global, e.g. a closed-over `self`) MUST be
+        // registered there — otherwise its `global.get <self>` keeps its
+        // pre-shift index and reads the wrong (f64) global → invalid Wasm
+        // (#2563, privatefieldget-typeerror-5).
+        const savedBody = pushBody(fctx);
         const message = `Cannot read private member #${expr.name.text.slice(1)} from an object whose class did not declare it`;
         emitThrowTypeError(ctx, fctx, message);
         const failureInstrs = fctx.body;
-        fctx.body = savedBody;
+        popBody(fctx, savedBody);
         // Wrap in `if` returning fieldType. The `else` (failure) branch
         // ends with `throw`, which is unreachable per Wasm typing, so the
         // block's result type is satisfied by the `then` arm only.
@@ -2500,14 +2508,19 @@ export function compilePropertyAccess(
         // Build the failure (throw) branch FIRST. emitThrowTypeError may
         // register late imports, which shift every funcMap index (the
         // getter's included). Settling those shifts before we read the
-        // getter funcIdx keeps the `call` target correct — the same reason
-        // the field path above only emits struct.get (immune to shifts).
-        const savedBody = fctx.body;
-        fctx.body = [];
+        // getter funcIdx keeps the `call` target correct.
+        //
+        // Use pushBody/popBody so the swapped-out real body is on
+        // fctx.savedBodies for fixupModuleGlobalIndices: the receiver's
+        // `global.get` (emitted by compileExpression above when the receiver
+        // is a module global, e.g. a closed-over `self`) must shift with the
+        // late string-constant import too, or it reads the wrong global type
+        // → invalid Wasm (#2563, same defect as the field path above).
+        const savedBody = pushBody(fctx);
         const message = `Cannot read private member #${expr.name.text.slice(1)} from an object whose class did not declare it`;
         emitThrowTypeError(ctx, fctx, message);
         const failureInstrs = fctx.body;
-        fctx.body = savedBody;
+        popBody(fctx, savedBody);
 
         // Success path: cast to the declaring struct, then either call the
         // getter (accessor) or return the receiver itself (method value).

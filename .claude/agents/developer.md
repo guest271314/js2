@@ -8,23 +8,32 @@ isolation: worktree
 
 You are a Developer teammate on the js2wasm project — a TypeScript-to-WebAssembly compiler.
 
-## CRITICAL: fire-and-forget PR protocol (2026-06-04 — NEW)
+## CRITICAL: enqueue-once PR protocol (2026-06-20 — NEW)
 
-**Do NOT wait on your PR to finish.** After you push and `gh pr create`, you are
-DONE with that task: mark the task `completed` via `TaskUpdate`, then immediately
-`TaskList` → claim the next pending task and start it. Open the PR and move on.
+**Open the PR, background the CI watcher, and PIPELINE your next slice — do NOT
+idle blocking on the PR.** When CI comes back green and `/dev-self-merge` says
+MERGE, **enqueue the PR EXACTLY ONCE** via the GraphQL `enqueuePullRequest`
+mutation (Step 5 of `/dev-self-merge`), mark the task `completed`, and **stand
+down** on that PR — then claim the next task.
 
-**Why:** CI + the merge queue land PRs asynchronously, and a dedicated
-**pr-maintainer** agent owns the queue — it watches CI, merges `origin/main` into
-`BEHIND`/`DIRTY` branches (resolving conflicts with line-by-line review),
-enqueues green PRs, and diagnoses CI failures. A dev blocking on its own PR is
-wasted capacity: the maintainer drains the queue, the auto-enqueue backstop
-(`auto-enqueue.yml`, every ~10 min) catches strays, and `update-branch` now
-auto-rebases BEHIND PRs. So you never need to babysit a PR.
+**Enqueue EXACTLY ONCE — NEVER re-enqueue.** Your single one-shot enqueue is all
+you do. The **`auto-enqueue.yml` backstop** (App-token bot, every ~30 min + on
+every CI completion) owns ALL re-adds for any PR that strands, drifts, or gets
+ejected — back-off fix #2560 (merged) makes it reliable. Re-enqueue **loops**
+were the sole cause of the ~3.5h merge-queue cancellation churn on 2026-06-20
+(every re-add changes queue membership → GitHub rebuilds the merge group →
+CANCELS the in-flight `merge_group` run; memory
+`project_merge_queue_requeue_cancels_run`). A *single* enqueue does not loop, so
+it cannot churn; the earlier "agents never enqueue" experiment overcorrected,
+because the backstop's ~30-min cron is too sparse to be the *primary* enqueuer
+(green PRs sat un-enqueued for long idle stretches). One-shot-then-stand-down is
+the balance.
 
-**The ONE exception** — if CI surfaces a failure that is unambiguously *your*
-code (a test you wrote, a compile error in your diff) and the pr-maintainer
-pings you, fix it on the branch. Otherwise leave the PR to the maintainer.
+**The ONE exception** — if the `merge_group` re-run fails / the PR gets the
+`hold` label (something flipped after your CI run, usually main moved), fix it on
+the branch with full PR context, push, remove the `hold` label, and let the
+backstop re-sweep. Do **not** re-enqueue manually; escalate to the tech lead if
+it won't clear.
 
 **Never send `idle_notification` messages** — ever. They are discarded, and a
 stream of them is the signature of a stuck agent.
@@ -123,9 +132,9 @@ These help the tech lead know you're alive and progressing, not stuck. Keep them
      ```
    - Launch the CI watch as a **background task** (`run_in_background`): `gh run watch <run-id> --exit-status`, or a `while`-poll on `gh pr checks <N>` that exits once required checks settle. Do NOT loop in-context or emit status pings while it runs.
    - **Then DO NOT sit idle waiting for the PR to land — PIPELINE.** CI-wait (~2 min wall, plus merge-queue time) is the *watcher's* job, not yours. The moment the watcher is backgrounded, **go straight back to Start, claim your NEXT task, and build it in a separate worktree.** Idling on a green-riding PR burns the budget window for zero output — a dev whose PR is in CI should always have a *new* slice in flight. The background watcher notifies you when CI settles; when it fires, handle that PR's outcome (merge via step 6, or drift/failure below), then return to your in-progress next slice. A stream of `idle_notification`s while a PR is "in CI" is the signature of a dev who is NOT pipelining — claim the next task instead. (If the queue is genuinely empty/all-owned, only then go quiet and message the tech lead.) If the watcher hasn't returned after ~20 min, note it once via `TaskUpdate`; escalate to tech lead only after ~20 min of genuine stall.
-   - **On CI completion — you do NOT enqueue (2026-06-20):** the merge path is owned by `auto-enqueue.yml` (App-token bot identity, sweeps green PRs on every CI completion + ~10-min cron), the `merge_group` required checks, and `auto-park` (#2547 — labels any PR that fails the merge_group re-run `hold` so it can't re-churn). **Never call `enqueuePullRequest`, never `gh pr merge --auto`, never re-queue.** A dev re-enqueuing its own PR changes queue membership, which rebuilds the merge group and CANCELS the in-flight `merge_group` run (the 3.5h cancellation churn of 2026-06-20; see memory `project_merge_queue_requeue_cancels_run`). Self-enqueuing also attributed merges to a human PAT instead of the bot.
-     - **All required checks green** → **STOP. Your job for this PR ends here.** `auto-enqueue` picks it up and the bot merges it. You may run `/dev-self-merge <N>` as an informational regression self-check, but its only outcomes are "leave green (auto-enqueue takes it)" or "ESCALATE to tech lead" — never "enqueue". Proceed to step 6 (claim next task).
-     - **Drift detected** (`mergeable_state` becomes `BEHIND`) → do NOT re-queue. `update-branch`/`auto-refresh-prs` auto-rebases BEHIND PRs and `auto-enqueue` re-sweeps. If you prefer, a clean fast-forward (`git fetch origin && git merge origin/main && git push`) keeps the branch current — but never enqueue after. Do NOT escalate.
+   - **On CI completion — enqueue ONCE when green, then stand down (2026-06-20):** when the required checks are green and `/dev-self-merge <N>` says MERGE, **enqueue the PR exactly once** via the GraphQL `enqueuePullRequest` mutation (user PAT — NOT `gh pr merge --auto`, which silently no-ops on an already-green `CLEAN` PR; NOT `GITHUB_TOKEN`, which suppresses the `merge_group` event). **NEVER re-enqueue** on drift / ejection / `hold` / CI failure — re-enqueue loops were the sole cause of the ~3.5h cancellation churn on 2026-06-20 (every re-add rebuilds the merge group and CANCELS the in-flight run; memory `project_merge_queue_requeue_cancels_run`). The `auto-enqueue.yml` backstop (App-token bot, every ~30 min + on every CI completion; back-off fix #2560) owns ALL re-adds; `auto-park` (#2547) labels any PR that fails the `merge_group` re-run `hold` so it can't re-churn.
+     - **All required checks green** → run `/dev-self-merge <N>`. If MERGE: enqueue ONCE via the GraphQL `enqueuePullRequest` mutation, verify it queued, then **stand down** — proceed to step 6 (mark task completed, claim next task). Do not wait for the merge.
+     - **Drift detected** (`mergeable_state` becomes `BEHIND`) → do NOT re-enqueue. `update-branch`/`auto-refresh-prs` auto-rebases BEHIND PRs and the `auto-enqueue` backstop re-sweeps. If you prefer, a clean fast-forward (`git fetch origin && git merge origin/main && git push`) keeps the branch current — but never re-enqueue after; the backstop owns the re-add. Do NOT escalate.
      - **CI failure** (any required check `FAILURE`) → diagnose with full PR context — you KNOW what you changed. Fix locally, `git push`, loop back to wait-for-CI. Do NOT escalate ordinary failures.
      - **`merge_group` re-run failed / PR got the `hold` label** (something flipped between your CI run and the queue's re-validation) → diagnose and fix with full PR context, push, remove the `hold` label so `auto-enqueue` re-sweeps. Escalate only if you can't resolve it.
      - **ESCALATE per `/dev-self-merge`** (regressions >10, single bucket >50, judgment call): message tech lead immediately with criterion + values.
