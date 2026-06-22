@@ -1,7 +1,9 @@
 ---
 id: 2607
 title: "Standalone Set set-algebra: GetSetRecord argument validation (TypeError on non-object / non-Set arg)"
-status: ready
+status: done
+completed: 2026-06-22
+assignee: ttraenkler/agent-af6ff9d85ab8e6fc4
 sprint: 65
 created: 2026-06-22
 priority: medium
@@ -129,3 +131,28 @@ call $__set_isSubsetOf
 - Gated on `ctx.nativeStrings`; host/gc unchanged.
 - Conservatively throwing for genuine set-like objects is acceptable (those rows
   are M2-deferred, currently failing anyway — no regression).
+
+## Resolution (2026-06-22)
+
+Landed with #2604 in one branch (`issue-2604-2607-set-brand-check`).
+
+**Change** — `src/codegen/set-algebra.ts`, `tryCompileNativeSetAlgebraCall`:
+replace the bare `castToMap(arg)` (which silently fell through to the host path
+or trap-cast) with the shared `emitSetBrandCheck` from #2604 — `ref.test $Map` →
+catchable `TypeError` on a non-Set argument (GetSetRecord 24.2.1.2 step 1 +
+has/keys-callable steps), else `ref.cast $Map`. Covers both predicate
+(`isSubsetOf`/`isSupersetOf`/`isDisjointFrom`) and set-op (`union`/`intersection`/
+`difference`/`symmetricDifference`) methods.
+
+The genuine set-LIKE-object data path (read `obj.size`/`has`/`keys` off an `any`)
+is **#2580 M2** (dynamic property read) and is conservatively (correctly) rejected
+with a TypeError here — those rows currently fail anyway, so no regression.
+
+## Test Results
+
+- `tests/issue-2607-set-algebra-arg-validation.test.ts` — 27/27 pass: predicates
+  × {1, "", true, [], {}} throw TypeError; set-ops × {1, []} throw; valid
+  `isSubsetOf`/`isDisjointFrom`/`union`/`intersection` with a real Set arg still
+  run the algebra (no over-throw).
+- Reuses the #2604 `emitSetBrandCheck` helper; no new coercion site. tsc +
+  prettier + coercion gate clean; Set/Map regression suites green.

@@ -1,7 +1,9 @@
 ---
 id: 2604
 title: "Standalone Set.prototype.METHOD.call(nonSet) — native dispatch + [[SetData]] brand-check TypeError"
-status: ready
+status: done
+completed: 2026-06-22
+assignee: ttraenkler/agent-af6ff9d85ab8e6fc4
 sprint: 65
 created: 2026-06-22
 priority: high
@@ -145,3 +147,41 @@ call $__set_add
 - Verify host/gc mode unchanged (the pre-check is gated on `ctx.nativeStrings`).
 - Independent of #2580 value-rep substrate (brand-test is a `ref.test`, not a
   dynamic property read).
+
+## Resolution (2026-06-22)
+
+Landed with #2607 in one branch (`issue-2604-2607-set-brand-check`).
+
+**Changes**
+- `src/codegen/set-runtime.ts` — new shared `emitSetBrandCheck(ctx, fctx, recvType)`:
+  normalises the compiled receiver to anyref, `ref.test $Map` (NON-trapping); on a
+  miss throws a *catchable* `TypeError` via `emitThrowTypeError` (NOT `ref.cast`,
+  which traps `illegal cast`), on a hit `ref.cast`s to the validated `(ref $Map)`.
+  Plus `tryCompileSetReflectiveCall` (dispatches `Set.prototype.METHOD.call(recv,…)`
+  / `inst.METHOD.call(recv,…)` for add/has/delete/clear after the brand-check) and
+  the cheap `isSetReflectiveCallShape` predicate.
+- `src/codegen/expressions/calls.ts` — in the `.call`/`.apply` handler, BEFORE the
+  generic #2193 member-closure recovery: when `isSetReflectiveCallShape` matches,
+  `addUnionImports(ctx)` (so the arg-boxing `__box_number` is registered up-front,
+  mirroring the direct path's extern.ts setup — avoids a mid-body index shift) then
+  `tryCompileSetReflectiveCall`. ADDS a Set pre-check; does NOT rewrite the generic
+  path (#2193 reflective tests unchanged).
+
+Gated on `ctx.nativeStrings`; host/gc mode unchanged. Both syntactic shapes
+(`Set.prototype.add.call` and `s.add.call`) are caught. `.apply` and
+forEach/keys/values/entries reflective forms fall through (deferred). The
+Set-vs-Map kind-tag discriminator (`internal-slot-{map,weakset}` sub-rows) is the
+documented stretch — those few rows stay red; the primitive/object/array/null
+bulk flips.
+
+## Test Results
+
+- `tests/issue-2604-set-brand-check.test.ts` — 31/31 pass: add/has/delete ×
+  {"", 0, true, null, undefined, {}, [], Set.prototype} all throw TypeError;
+  clear.call(non-Set) throws; instance form `s.add.call({},1)` throws; valid
+  `Set.prototype.{has,add,delete,clear}.call(realSet,…)` dispatch correctly;
+  direct `s.add`/`s.has` regression guard.
+- Set regression suites green (issue-2162-set-algebra/standalone-set/set-foreach/
+  iterators, issue-42-set-spread; Map foreach/from-array; #2193 reflective — 88
+  tests total). gc-mode Set (direct + reflective + algebra) unchanged.
+- tsc + prettier + coercion-sites gate clean.

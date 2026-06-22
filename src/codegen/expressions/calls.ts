@@ -21,6 +21,7 @@ import {
 import type { Instr, ValType } from "../../ir/types.js";
 import { compileArrayMethodCall, compileArrayPrototypeCall, resolveArrayInfo } from "../array-methods.js";
 import { emitCollectionIteratorVec } from "../map-runtime.js"; // (#42) native Set/Map → vec, shared with spread / Array.from
+import { isSetReflectiveCallShape, tryCompileSetReflectiveCall } from "../set-runtime.js"; // (#2604) Set.prototype.METHOD.call brand-check
 import { classMemberFuncKey } from "../class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { ensureNativeIteratorRuntime } from "../iterator-native.js"; // (#2169c) native Array.from drain
 import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "../closed-method-dispatch.js";
@@ -3408,6 +3409,20 @@ function compileCallExpression(
     if (propAccess.name.text === "call" || propAccess.name.text === "apply") {
       const isCall = propAccess.name.text === "call";
       const innerExpr = propAccess.expression;
+
+      // (#2604) Reflective `Set.prototype.METHOD.call(recv, …)` /
+      // `inst.METHOD.call(recv, …)` — brand-check the receiver ([[SetData]]) and
+      // dispatch to the native Set runtime. Runs BEFORE the generic #2193
+      // member-closure recovery (which has no native-Set knowledge), and only
+      // matches a Set data-method closure under nativeStrings, so it ADDS a
+      // Set-specific pre-check without rewriting the generic path. addUnionImports
+      // up-front (mirrors extern.ts's direct-path setup) so the arg-boxing
+      // `__box_number` the dispatch emits is registered without a mid-body shift.
+      if (isSetReflectiveCallShape(ctx, expr)) {
+        addUnionImports(ctx);
+        const setReflResult = tryCompileSetReflectiveCall(ctx, fctx, expr);
+        if (setReflResult !== undefined) return setReflResult;
+      }
 
       // (#2193 PR-B) Reflective `m.call/apply(thisArg, …)` on a value-erased
       // `$NativeProto` member closure (e.g. `const m = Array.prototype.slice`).
