@@ -309,3 +309,47 @@ already exist (`_wasmClosureWrapperTargets`, `_fnctorInstanceCtor`,
 `_hostProxyReverse`). No new ABI, no dispatcher rewrite, no value-rep change.
 The risk is regression breadth (hot closure-call path), addressed by
 merge_group floor validation per slice — NOT by scope.
+
+## Downstream consumers (observed gaps) — 2026-06-23, dev-promise (#1528/#40 probe)
+
+Probed two STANDARD Promise surfaces against current `origin/main` to scope the
+#42 re-spec concretely. Both are already mostly-implemented; every residual
+failure resolves to **this** substrate, with exact test paths:
+
+### `.finally` — ES2018, 22/29 test262 pass. The 7 fails are the substrate:
+| test (under `built-ins/Promise/prototype/finally/`) | what it asserts |
+|---|---|
+| `invokes-then-with-function.js` | `.finally` must call the receiver's own (monkey-patched) `target.then(onFinally, onFinally)` with `this===target`, `arguments.length===2` |
+| `invokes-then-with-non-function.js` | same, with a non-function `then` |
+| `resolved-observable-then-calls-argument.js` | the wrapped `then` callback identity must be observable |
+| `species-constructor.js` | `.finally` reads `this.constructor[@@species]` to build the result promise |
+| `this-value-thenable.js` / `this-value-then-poisoned.js` / `this-value-then-throws.js` | `.finally` must invoke the user-supplied `then` (and propagate its poison/throw) |
+
+**Root cause:** our `.finally` delegates to the HOST `p.finally()`
+(`src/runtime.ts:10250` — `Promise_finally` → `p.finally(_maybeWrapCallable(cb))`).
+The host `Promise.prototype.finally` calls V8's native `then` on the *wrapped*
+object, so a **wasm-side monkey-patched `target.then`** is never observed, and
+the `@@species` read happens on the host promise, not the wasm receiver. This is
+exactly the **observable-then / multi-hop inbound-callback** gap — i.e. the
+`2623-D` (invoke-resolve / observable-resolve) + `2623-B` (species/constructor
+identity) arms, surfacing on `.finally` rather than on the combinators.
+
+### `Promise.try` — ES2025, 9/12 test262 pass. The 3 fails are identity:
+| test (under `built-ins/Promise/try/`) | what it asserts |
+|---|---|
+| `promise.js` | `Promise.try(fn).constructor === Promise` and `instanceof Promise` |
+| `ctx-ctor.js` | `Promise.try.call(SubPromise, fn)` → result `instanceof SubPromise`, `.constructor===SubPromise`, executor invoked once |
+| `not-a-constructor.js` | `isConstructor(Promise.try)===false` + `new Promise.try()` throws (capability-ctor identity through the bridge) |
+
+**Root cause:** the capability constructor's `.constructor`/`.prototype`/species
+identity must survive the host bridge — the **`2623-B` construct_closure identity
++ species** arm. Same dependency as the `#1528` `is-a-constructor.js` /
+`executor-function-not-a-constructor.js` residual.
+
+### Implication for the #42 re-spec
+`.finally` and `Promise.try` are NOT separate work — they are additional
+**consumers** of arms B (identity/species) and D (observable-then). When B+D
+land, sweep these 10 test paths as acceptance fixtures. `allKeyed`/
+`allSettledKeyed` are the Stage-1 `await-dictionary` proposal (NOT standard ECMA)
+— exclude, no payload. See `plan/issues/1528-non-constructor-typeerror-promise-and-species.md`
+"Re-grounded against current main — 2026-06-22/23" for the full cluster table.

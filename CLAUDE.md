@@ -246,6 +246,8 @@ Tech Lead
   ↓ creates task queue, dispatches to devs, merges (ff-only), runs test262
 Developers (×3)
   ↑ signal completion → tech lead merges → broadcast rebase
+PR-queue Shepherd
+  ↔ owns the merge queue end-to-end: enqueues green PRs, handles parks/ejections
 Scrum Master
   ↔ reviews sprint → proposes process changes to PO + tech lead
 ```
@@ -256,6 +258,7 @@ Scrum Master
 | **Architect** | `.claude/agents/architect.md` | Implementation specs | Issue files, compiler source | `## Implementation Plan` in issue files |
 | **Tech Lead** | (orchestrator) | Task queue, merges, test runs | Issue files, agent messages | `main` branch, task list |
 | **Developer** | `.claude/agents/developer.md` | Code changes in worktree | Issue file + impl spec, checklists | Source code, test files, issue status |
+| **PR-queue Shepherd** | `.claude/agents/developer.md` (standing teammate) | The merge queue end-to-end | Open PRs, CI/`merge_group` results, park-hold comments | Enqueue mutations, `[CI-FIX]` tasks, escalations |
 | **Scrum Master** | `.claude/agents/scrum-master.md` | Process improvement | Done issues, git history, messages | `plan/retrospectives/`, checklist edits (proposed) |
 
 **Interaction flow:**
@@ -282,7 +285,29 @@ End of sprint:
 - Batch doc/plan commits on main AFTER all pending agent merges, not between them (doc commits force agents to re-merge main)
 - Complete post-merge issue cleanup (set `status: done` in sprint dir issue file, update dep graph) after each merge
 - **Tag sprints**: `git tag sprint-N/begin` when starting a sprint, `git tag sprint/N` when it finishes. Sprint stats (duration, commits, issues) are auto-generated from tags during `build:pages`.
-- **ALWAYS shepherd the open PRs to the merge queue every loop — the `auto-enqueue` cron is a BACKSTOP, not the primary.** Sweep `gh pr list -R loopdive/js2wasm --state open` and **one-shot enqueue every CLEAN, non-`hold`, non-draft PR not already in the queue** (GraphQL `enqueuePullRequest`, **user PAT**, NEVER re-enqueue — loop hazard, see `project_merge_queue_requeue_cancels_run`). A green PR must never sit idle waiting for the sparse ~30-min backstop cron — the lead drives it to merged. **Held (`hold` label) or CI-failing / `BEHIND` / `DIRTY` PRs → add a high-priority `[CI-FIX]` task at the TOP of the TaskList** for the next dev to rebase/fix the gate failure (with full PR context) and re-enqueue. Both the lead AND the authoring agent actively enqueue; the backstop only catches strays.
+- **Prefer the dedicated PR-queue shepherd (below) over hand-shepherding the queue from the lead loop.** Hand-shepherding ad-hoc from the lead loop strands PRs and consumes lead attention; staff a standing shepherd so the lead only steps in on escalations. When no shepherd is staffed, the lead falls back to the sweep below — **ALWAYS shepherd the open PRs to the merge queue every loop, because the `auto-enqueue` cron is a BACKSTOP, not the primary.** Sweep `gh pr list -R loopdive/js2wasm --state open` and **one-shot enqueue every CLEAN, non-`hold`, non-draft PR not already in the queue** (GraphQL `enqueuePullRequest`, **user PAT**, NEVER re-enqueue — loop hazard, see `project_merge_queue_requeue_cancels_run`). A green PR must never sit idle waiting for the sparse ~30-min backstop cron — the shepherd (or lead) drives it to merged. **Held (`hold` label) or CI-failing / `BEHIND` / `DIRTY` PRs → add a high-priority `[CI-FIX]` task at the TOP of the TaskList** for the next dev to rebase/fix the gate failure (with full PR context) and re-enqueue. Both the shepherd/lead AND the authoring agent actively enqueue; the backstop only catches strays.
+
+### PR-queue shepherd (standing role)
+
+The merge queue needs a **dedicated owner**, not ad-hoc attention from the lead loop. Staff a **standing PR-queue shepherd** — a long-running teammate (team `js2wasm`, `isolation: "worktree"`) whose entire job is to drive open PRs to merged. It is the **primary** enqueuer; the `auto-enqueue.yml` cron remains the **backstop**.
+
+The shepherd owns the queue end-to-end:
+- **Sweep** `gh pr list -R loopdive/js2wasm --state open` every loop.
+- **One-shot enqueue** every CLEAN, non-`hold`, non-draft PR not already in the queue, via the GraphQL `enqueuePullRequest` mutation with the **user PAT** (NOT `GITHUB_TOKEN`, which suppresses the `merge_group` event; NOT `gh pr merge --auto`, which silently no-ops on an already-green `CLEAN` PR). Verify the PR appears in the queue. **NEVER re-enqueue** — a single one-shot enqueue per PR; re-enqueue loops cancel in-flight `merge_group` runs (see `project_merge_queue_requeue_cancels_run`).
+- **Monitor `merge_group` results** and handle parks/ejections per the auto-park rules below.
+- **Escalate real regressions** to the lead (regressions >10, single bucket >50, or a genuine merged-baseline regression behind a bot park-hold); ordinary drift/flake is the shepherd's to resolve, not an escalation.
+
+This promotes what was an ad-hoc lead chore (and the `feedback_dedicated_pr_shepherd` memory note) into a protocol role. The lead steps in only on the shepherd's escalations.
+
+#### Auto-park handling rules (`auto-park-bot:merge-group-failure`)
+
+When **`github-actions[bot]`** adds a `hold` label together with an **`auto-park-bot:merge-group-failure`** comment, that marks a **REAL merged-baseline regression** caught only in the `merge_group` re-validation (test262 "merge shard reports" / `quality` / standalone-floor) — a class of failure that **PR-level checks DO NOT catch** (the PR was green). Treat a bot park-hold as a signal of a genuine regression, not noise:
+
+- **(a) NEVER remove a bot park-hold without first diagnosing the cited failed run.** Read the run the comment points at and identify the failing gate before touching the label.
+- **(b) A bot park-hold is NOT a dev's own manual label — don't conflate the two.** A dev's own `hold` (a deliberate WIP/do-not-merge pause it set) is different from a bot park-hold (an automated regression flag). Removing a bot park-hold thinking it was your own manual label re-admits a regressing PR (a dev did exactly this on #1960 — removed the bot's park-hold believing it was its own).
+- **(c) Before re-enqueueing a parked PR, distinguish real-regression vs flake/collateral** by pulling the regressed-test delta (the merged-report jsonl diff / failed-shard report). A real regression must be fixed on the branch first; only a confirmed flake/collateral may be re-admitted.
+- **(d) NEVER re-enqueue in a loop.** Each re-add rebuilds the merge group and CANCELS the in-flight `merge_group` run (see `project_merge_queue_requeue_cancels_run`). Re-enqueue at most once, after a confirmed fix or flake determination.
+- **(e) A held PR is SKIPPED by the `auto-enqueue` backstop** — so a wrongly-held PR, or a legitimately-parked-but-unaddressed one, **strands** until a human/shepherd resolves it. Don't assume the cron will recover a held PR; it won't.
 
 ### Sprint planning (PO + Architect + Tech Lead)
 
