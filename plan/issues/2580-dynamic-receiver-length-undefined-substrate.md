@@ -672,3 +672,15 @@ index-shift point-fix. Until that lands, the `arguments.length < 3` refusal in
 `standaloneArrayLikeMethodRefused` (array-methods.ts) stays — it is strictly
 better than the alternatives (working host path > incomplete native arm).
 Tracking task #74 set WONT-FIX on this basis.
+
+## M3/M4 follow-up: tag-5 boxed-VALUE equality (#2626)
+
+The tag-5 boxed-VALUE equality arms (numeric `f64.eq` for two `$BoxedNumber`,
+object `ref.eq` for two boxed eqref objects) are blocked on this same value-rep
+substrate. They shipped in #1888's classifier but EJECTED the merge_group floor
+(−162, class/dstr): the destructuring / generator-iterator lowering relies on the
+legacy always-false tag-5 non-string equality, so making those arms correct
+regresses the dstr cluster. The string arm (guarded #2579/#2583) landed; the
+numeric+object arms are tracked by **#2626** for the M3/M4 substrate, where the
+dstr-iterator-protocol dependency is owned. See
+`plan/issues/2626-tag5-boxed-value-equality-classifier-substrate.md`.

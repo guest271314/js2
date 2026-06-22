@@ -1,10 +1,10 @@
 ---
 id: 2585
 title: "standalone: getPrototypeOf(Object.create(p)) === p is false — object identity lost in __any_strict_eq tag-5 arm"
-status: ready
+status: blocked
 sprint: 65
 created: 2026-06-21
-updated: 2026-06-21
+updated: 2026-06-22
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -13,9 +13,19 @@ task_type: bugfix
 area: codegen, runtime
 language_feature: prototype chain, strict equality, object identity
 goal: property-model
-related: [1888, 1629, 296, 2104]
+related: [1888, 1629, 296, 2104, 2626, 2580]
+depends_on: [2626]
 origin: "2026-06-21 — surfaced during s64 value-rep keystone work; proto-identity comparison gap."
 ---
+
+> **BLOCKED — folded into #2626 (2026-06-22).** The object-identity `ref.eq` arm
+> of the tag-5 equality classifier shipped in #1888 but EJECTED the merge_group on
+> the standalone-highwater floor (−162, class/dstr cluster): making tag-5 boxed-object
+> `===` reference-correct flips a comparison the destructuring / generator-iterator
+> lowering implicitly relied on. The fix is substrate-blocked and tracked, together
+> with the #2040 numeric arm, by **#2626** behind the value-rep substrate (#2580 M3/M4,
+> #35). Do not re-attempt the standalone proto-identity arm in isolation. See
+> `plan/issues/2626-tag5-boxed-value-equality-classifier-substrate.md`.
 
 ## Problem
 
