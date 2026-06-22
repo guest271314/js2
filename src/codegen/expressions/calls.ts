@@ -62,6 +62,7 @@ import {
   resolveWasmType,
   STRING_METHODS,
   TYPED_ARRAY_NAMES,
+  typedArrayVecStorage,
 } from "../index.js";
 import {
   compileArrayConstructorCall,
@@ -4611,6 +4612,169 @@ function compileCallExpression(
       fctx.body.push({ op: "drop" });
       fctx.body.push({ op: "ref.null.extern" });
       return { kind: "externref" };
+    }
+
+    // (#2592) Standalone-native TypedArray static factories — `TA.of(...)` and
+    // `TA.from(src)`. The receiver identifier is `Int32Array` / `Uint8Array` /
+    // … ∈ TYPED_ARRAY_NAMES, so it never reaches the `Array.of` / `Array.from`
+    // arms below (keyed on `"Array"`) and otherwise falls through to the
+    // dynamic-shape `__get_builtin` path — rejected standalone (#1472 Phase B).
+    // The element vec representation is fixed by the constructor NAME via
+    // `typedArrayVecStorage` (i8_byte for standalone Uint8Array, f64 otherwise),
+    // matching today's `new TA([...])` so the result is assignment-compatible.
+    // Integer element-width wrapping (Uint8Array.of(300) → 44) is deferred to
+    // #2593 — this slice matches `new TA([...])` element fidelity (length/order).
+    if (
+      noJsHost(ctx) &&
+      ts.isIdentifier(propAccess.expression) &&
+      TYPED_ARRAY_NAMES.has(propAccess.expression.text) &&
+      (propAccess.name.text === "of" || propAccess.name.text === "from")
+    ) {
+      const taName = propAccess.expression.text;
+      const factory = propAccess.name.text;
+      const storage = typedArrayVecStorage(ctx, taName);
+      const elemWasm = storage.type; // {kind:"f64"} or {kind:"i8"}
+      const taVecTypeIdx = getOrRegisterVecType(ctx, storage.key, elemWasm);
+      const taArrTypeIdx = getArrTypeIdxFromVec(ctx, taVecTypeIdx);
+      // The store ValType for an i8 packed array is i32 on the operand stack.
+      const storeWasm: ValType = elemWasm.kind === "i8" ? { kind: "i32" } : elemWasm;
+
+      if (taArrTypeIdx >= 0) {
+        // --- TA.of(a, b, c) — every arg is an element (§23.2.2.2). ---
+        if (factory === "of") {
+          const hasSpreadArg = expr.arguments.some((a) => ts.isSpreadElement(a));
+          if (!hasSpreadArg) {
+            if (expr.arguments.length === 0) {
+              fctx.body.push({ op: "i32.const", value: 0 });
+              fctx.body.push({ op: "i32.const", value: 0 });
+              fctx.body.push({ op: "array.new_default", typeIdx: taArrTypeIdx });
+              fctx.body.push({ op: "struct.new", typeIdx: taVecTypeIdx });
+              return { kind: "ref_null", typeIdx: taVecTypeIdx };
+            }
+            for (const arg of expr.arguments) {
+              const at = compileExpression(ctx, fctx, arg, storeWasm);
+              if (at && !valTypesMatch(at, storeWasm)) coerceType(ctx, fctx, at, storeWasm);
+            }
+            fctx.body.push({ op: "array.new_fixed", typeIdx: taArrTypeIdx, length: expr.arguments.length });
+            const ofData = allocLocal(fctx, `__taof_data_${fctx.locals.length}`, {
+              kind: "ref",
+              typeIdx: taArrTypeIdx,
+            });
+            fctx.body.push({ op: "local.set", index: ofData });
+            fctx.body.push({ op: "i32.const", value: expr.arguments.length });
+            fctx.body.push({ op: "local.get", index: ofData });
+            fctx.body.push({ op: "struct.new", typeIdx: taVecTypeIdx });
+            return { kind: "ref_null", typeIdx: taVecTypeIdx };
+          }
+          // Spread arg → known standalone gap (orthogonal); fall through.
+        }
+
+        // --- TA.from(src [, mapFn]) — array-like / vec source (§23.2.2.1). ---
+        // Phase 1: array-like sources (array literal / typed/number[] vec) with
+        // NO mapFn. The source vec's element type may differ from the dest
+        // (e.g. number[] f64 → Int32Array f64, or → Uint8Array i8), so copy
+        // element-by-element with re-coercion rather than a raw array.copy.
+        // mapFn and non-array iterables fall through to the existing path.
+        if (factory === "from" && expr.arguments.length === 1) {
+          const argTsType = ctx.checker.getTypeAtLocation(expr.arguments[0]!);
+          const argWasm = resolveWasmType(ctx, argTsType);
+          if (argWasm.kind === "ref" || argWasm.kind === "ref_null") {
+            const srcInfo = resolveArrayInfo(ctx, argTsType);
+            if (srcInfo) {
+              // #1919 — transactional try-lower; roll back if the source doesn't
+              // genuinely lower to its vec (keeps the fall-through paths clean).
+              const snap = snapshotSpeculative(ctx, fctx);
+              const { vecTypeIdx: srcVecIdx, arrTypeIdx: srcArrIdx, elemType: srcElem } = srcInfo;
+              const srcT = compileExpression(ctx, fctx, expr.arguments[0]!);
+              if (srcT && (srcT.kind === "ref" || srcT.kind === "ref_null")) {
+                const srcVec = allocLocal(fctx, `__tafrom_src_${fctx.locals.length}`, {
+                  kind: "ref_null",
+                  typeIdx: srcVecIdx,
+                });
+                const srcData = allocLocal(fctx, `__tafrom_sdata_${fctx.locals.length}`, {
+                  kind: "ref_null",
+                  typeIdx: srcArrIdx,
+                });
+                const lenTmp = allocLocal(fctx, `__tafrom_len_${fctx.locals.length}`, { kind: "i32" });
+                const dstData = allocLocal(fctx, `__tafrom_ddata_${fctx.locals.length}`, {
+                  kind: "ref",
+                  typeIdx: taArrTypeIdx,
+                });
+                const iTmp = allocLocal(fctx, `__tafrom_i_${fctx.locals.length}`, { kind: "i32" });
+
+                // src vec ref → field0 (len), field1 (data)
+                if (srcT.kind === "ref_null") fctx.body.push({ op: "ref.cast", typeIdx: srcVecIdx } as Instr);
+                fctx.body.push({ op: "local.set", index: srcVec });
+                fctx.body.push({ op: "local.get", index: srcVec });
+                fctx.body.push({ op: "struct.get", typeIdx: srcVecIdx, fieldIdx: 0 });
+                fctx.body.push({ op: "local.set", index: lenTmp });
+                fctx.body.push({ op: "local.get", index: srcVec });
+                fctx.body.push({ op: "struct.get", typeIdx: srcVecIdx, fieldIdx: 1 });
+                fctx.body.push({ op: "local.set", index: srcData });
+                // dst data array of len (default-filled)
+                for (const ins of defaultValueInstrs(elemWasm)) fctx.body.push(ins);
+                fctx.body.push({ op: "local.get", index: lenTmp });
+                fctx.body.push({ op: "array.new", typeIdx: taArrTypeIdx });
+                fctx.body.push({ op: "local.set", index: dstData });
+                // for (i=0; i<len; i++) dst[i] = coerce(src[i]) — canonical
+                // block{loop{ if i>=len br 1; body; i++; br 0 }} form. Build the
+                // loop body via pushBody/popBody so the `coerceType` element
+                // conversion (which emits into `fctx.body`) lands INSIDE the loop
+                // rather than leaking before the block.
+                fctx.body.push({ op: "i32.const", value: 0 });
+                fctx.body.push({ op: "local.set", index: iTmp });
+                const srcElemIsSigned = srcElem.kind === "i8" || srcElem.kind === "i16";
+                const srcElemIsPacked = srcElem.kind === "i8" || srcElem.kind === "i16";
+                const srcStore: ValType = srcElemIsPacked ? { kind: "i32" } : srcElem;
+                const savedLoopBody = pushBody(fctx);
+                // if (i >= len) break
+                fctx.body.push({ op: "local.get", index: iTmp } as Instr);
+                fctx.body.push({ op: "local.get", index: lenTmp } as Instr);
+                fctx.body.push({ op: "i32.ge_s" } as Instr);
+                fctx.body.push({ op: "br_if", depth: 1 } as Instr);
+                // dst[i] = coerce(src[i])
+                fctx.body.push({ op: "local.get", index: dstData } as Instr);
+                fctx.body.push({ op: "local.get", index: iTmp } as Instr);
+                fctx.body.push({ op: "local.get", index: srcData } as Instr);
+                fctx.body.push({ op: "local.get", index: iTmp } as Instr);
+                if (srcElemIsPacked) {
+                  fctx.body.push({
+                    op: srcElemIsSigned ? "array.get_s" : "array.get_u",
+                    typeIdx: srcArrIdx,
+                  } as Instr);
+                } else {
+                  fctx.body.push({ op: "array.get", typeIdx: srcArrIdx } as Instr);
+                }
+                if (!valTypesMatch(srcStore, storeWasm)) coerceType(ctx, fctx, srcStore, storeWasm);
+                fctx.body.push({ op: "array.set", typeIdx: taArrTypeIdx } as Instr);
+                // i++
+                fctx.body.push({ op: "local.get", index: iTmp } as Instr);
+                fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+                fctx.body.push({ op: "i32.add" } as Instr);
+                fctx.body.push({ op: "local.set", index: iTmp } as Instr);
+                // continue
+                fctx.body.push({ op: "br", depth: 0 } as Instr);
+                const loopInner = fctx.body;
+                popBody(fctx, savedLoopBody);
+                fctx.body.push({
+                  op: "block",
+                  blockType: { kind: "empty" },
+                  body: [{ op: "loop", blockType: { kind: "empty" }, body: loopInner } as Instr],
+                } as Instr);
+                // struct.new (len, dstData)
+                fctx.body.push({ op: "local.get", index: lenTmp });
+                fctx.body.push({ op: "local.get", index: dstData });
+                fctx.body.push({ op: "struct.new", typeIdx: taVecTypeIdx });
+                return { kind: "ref", typeIdx: taVecTypeIdx };
+              }
+              rollbackSpeculative(ctx, fctx, snap);
+            }
+          }
+          // Non-array-like / mapFn / iterable source → fall through.
+        }
+      }
+      // taArrTypeIdx unavailable or unhandled shape → fall through to the
+      // existing generic path (host mode handles via host import).
     }
 
     // Handle Array.from(arr) — array copy
