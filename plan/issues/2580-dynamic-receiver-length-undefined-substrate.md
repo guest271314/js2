@@ -635,3 +635,40 @@ disambiguate the receiver. Turning the arm off reverts the canary to the
 PRE-EXISTING #2580 bug (NOT a new regression), keeps M0 inert, and is zero-regression
 (validated 12/13 + skip). The `{}.length`→undefined fix folds into M2's acceptance.
 M1 over-scoped the value-semantics; M0 (the inert scaffold) is the landable M1.
+
+## M2.2c — reduce/reduceRight-no-init un-refuse: WONT-FIX (A/B proven net-negative, 2026-06-22, sd-2611)
+
+**Do not re-attempt the un-refuse without first landing the parked native
+no-init arm.** M2.2c was framed as "un-refuse `reduce`/`reduceRight` no-init on
+array-likes by fixing the #2043 funcidx desync (re-resolve-by-name) at the
+hole-scan's baked `__extern_has_idx`/`__extern_get_idx`." Measured against
+CURRENT main, all three premises are stale:
+
+1. **The funcidx desync is ALREADY fixed.** The native no-init arm already
+   re-resolves by name (`getIdxFnNow`/`hasIdxFnNow`, array-methods.ts ~L867, the
+   #16 fix) and #2611's `flushLateImportShifts` hardening closed the remaining
+   leak. Instrumented build + A/B over the whole corpus: compile-validity is
+   IDENTICAL refusal-ON vs OFF (450/520 valid both ways), ZERO invalid-Wasm from
+   the no-init path. There is nothing left for the re-resolve-by-name pattern to
+   fix here.
+2. **The refusal is ROW-PROTECTIVE, not a graceful CE.** Its `reportError` fires
+   only in a SPECULATIVE compile pass; the final emit routes the no-init shape to
+   the WORKING host `__proto_method_call` path. So removing the refusal does not
+   "un-block a graceful CE" — it diverts working rows to the incomplete native arm.
+3. **Un-refusing REGRESSES rows.** A/B harness = compile + instantiate + run every
+   `built-ins/Array/prototype/{reduce,reduceRight}` test262 file standalone:
+   - **refusal ON (current main): PASS 363, FAIL 8, CE 68** (520 files)
+   - **refusal OFF (the un-refuse): PASS 306 (−57), FAIL 57 (+49)**
+   The native no-init arm returns WRONG results for the real corpus shapes
+   (defineProperty-getter array-likes, sparse holes, proto-chain receivers,
+   `arguments`); a bare object-literal array-like (`{0:..,1:..,length:n}`) is the
+   only best-case shape that returns correctly, and it is not representative.
+
+**A genuine un-refuse requires a CORRECT native no-init arm** (handle
+defineProperty getters / holes / proto-chain / `arguments`) — that is the M2
+value-rep / tag-aware-reader substrate (this issue's parked work; see the
+S15.4.4 cluster row in the scoping doc above, and the M2 slices). It is NOT an
+index-shift point-fix. Until that lands, the `arguments.length < 3` refusal in
+`standaloneArrayLikeMethodRefused` (array-methods.ts) stays — it is strictly
+better than the alternatives (working host path > incomplete native arm).
+Tracking task #74 set WONT-FIX on this basis.
