@@ -274,3 +274,9 @@ identity):
 
 `blocked_on` updated to `[2623]`. This issue stays `blocked` until #2623 lands
 the inbound-callback substrate.
+
+**Sibling consumers (2026-06-23, #1528 probe):** the same arms-B/D substrate also
+gates `.finally` (7 fails) and `Promise.try` (3 fails) — see the
+"Downstream consumers (observed gaps)" section in
+`plan/issues/2623-promise-capability-cluster-multihop-callback-cast.md` for the
+exact test paths to fold into the #42 re-spec acceptance set.
