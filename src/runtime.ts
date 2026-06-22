@@ -5073,9 +5073,23 @@ function _buildProxyBridgeHandler(
   const bridge: Record<string, any> = {};
   for (const name of _PROXY_TRAP_NAMES) {
     const rawTrap = _structFieldRaw(handler, name, exports);
-    if (rawTrap == null) continue;
+    if (rawTrap == null) continue; // undefined/null → genuine absence, host forwards to target (§7.3.10)
     const callable = _maybeWrapCallableUnknownArity(rawTrap, callbackState);
-    if (typeof callable !== "function") continue;
+    if (typeof callable !== "function") {
+      // (#2616) §7.3.10 GetMethod: a present-but-non-callable trap value (`{}`,
+      // `1`, `"x"`, …) is NOT absence — it must throw a TypeError when the owning
+      // internal method runs. Previously this was silently omitted, so the host
+      // engine used its default (ordinary) behavior and the spec-mandated
+      // TypeError never fired. Install a bridge trap that throws on invocation;
+      // the throw surfaces at operation time (`p.attr`, `p(...)`, `new p(...)`),
+      // which is exactly when test262 checks for it. The host TypeError
+      // propagates through the Proxy MOP and the lastCaughtException bridge so
+      // `e instanceof TypeError` holds in the compiled program.
+      bridge[name] = () => {
+        throw new TypeError(`'${name}' on proxy: trap is not a function`);
+      };
+      continue;
+    }
     // Forward to the user trap with `this` = the raw handler struct. The
     // closure bridge installs that struct as `__current_this`, so the trap
     // body's `this` is the same value the program sees as `handler` and
