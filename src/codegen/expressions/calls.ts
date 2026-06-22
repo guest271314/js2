@@ -61,6 +61,7 @@ import {
   nativeStringType,
   resolveWasmType,
   STRING_METHODS,
+  TYPED_ARRAY_NAMES,
 } from "../index.js";
 import {
   compileArrayConstructorCall,
@@ -393,11 +394,26 @@ function resolveObjectToStringTag(ctx: CodegenContext, argExpr: ts.Expression | 
   if ((t.flags & ts.TypeFlags.Null) !== 0) return "Null";
   if ((t.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0) return "Undefined";
 
+  const symName = nn.getSymbol()?.name;
+
+  // (#2597) §23.2.3.38 — `%TypedArray%.prototype[@@toStringTag]` is the typed
+  // array's constructor name (`"Int32Array"`, …). §25.x give DataView /
+  // ArrayBuffer / SharedArrayBuffer. These receivers are opaque Wasm structs, so
+  // the host's `Object.prototype.toString` ALSO mis-tags them — return the static
+  // tag unconditionally (correct in BOTH host and standalone), not via
+  // `deferOrStandalone`. MUST precede the `resolveArrayInfo` "Array" arm below:
+  // a typed array is array-like to that resolver, so without this it would mis-tag
+  // `[object Array]` instead of `[object Int32Array]`. `.prototype` of a typed
+  // array was filtered earlier (no [[TypedArrayName]] slot → `[object Object]`).
+  if (symName !== undefined && TYPED_ARRAY_NAMES.has(symName)) return symName;
+  if (symName === "BigInt64Array" || symName === "BigUint64Array") return symName;
+  if (symName === "DataView") return "DataView";
+  if (symName === "ArrayBuffer") return "ArrayBuffer";
+  if (symName === "SharedArrayBuffer") return "SharedArrayBuffer";
+
   // Array (real `__vec_`/`__arr_` arrays, via the established resolver) — the
   // host sees an opaque GC vec and mis-tags it [object Object].
   if (resolveArrayInfo(ctx, nn)) return "Array";
-
-  const symName = nn.getSymbol()?.name;
 
   // Primitive-wrapper *objects* (`new Number(5)` / `new Boolean(true)` /
   // `new String("")`) box to the corresponding tag, but the host already
