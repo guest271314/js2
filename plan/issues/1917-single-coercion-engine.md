@@ -88,7 +88,36 @@ Sequencing: Step 0 (ValType table) is dependency-safe now; Steps 1+ land
 AFTER the type-aware boxing P0 (#2072/#2080) so the engine consumes
 correct tags. Drift gate: #2108.
 
-## Implementation — Step 1 in progress (sendev-coercion, 2026-06-22; user un-parked)
+## Implementation — Step 2 in progress (sendev-coercion, 2026-06-23)
+
+Branch `issue-1917-emit-tonumber`, predecessor-stacked on the Step-1 branch
+(`emitToNumber` extends the same `coercion-engine.ts`; PR merges after Step 1).
+
+**New `emitToNumber(ctx, fctx, valType)`** in `coercion-engine.ts` — the
+consolidated ToNumber cascade (void→NaN, i64→f64, externref→`__unbox_number`
+js-host / `coerceType(f64,"number")` standalone, object-ref→`coerceType(f64,
+"number")`, i32→f64, f64 no-op). Externref arm gated on `ctx.standalone`
+EXACTLY (not `noJsHost`) to match the migrated `Number(x)` site byte-for-byte
+under `--target wasi`.
+
+**Migrated:** the `Number(x)` lowering (`calls.ts` ~:10674) — its post-pre-check
+cascade now calls `emitToNumber`. The `#2160` array pre-check, the Symbol-throw,
+and the native-string-ref→`__str_to_number` typeIdx-keyed pre-check stay in the
+caller (each is a *source* special-case that must run before / dispatches on
+facts the engine doesn't carry).
+
+**DEFERRED to a follow-up increment (NOT a missed copy — different ToNumber
+policy; folding would REGRESS):** the unary `+`/`-`/`~` arms (`unary.ts`) use
+`coerceType(f64)` with the **default** hint for externref/ref operands, whereas
+`Number(x)` uses the `"number"` hint / `__unbox_number`. Unifying them neutrally
+needs `emitToNumber` to take an explicit `hint` AND careful tracing of
+`coerceType(externref→f64)` no-hint vs `__unbox_number` equivalence — a separate
+neutrality analysis, deferred rather than risked.
+
+**#2108 ratcheted DOWN:** `calls.ts` 27→26 (the `Number(x)` `__unbox_number` use
+now lives in the sanctioned engine). No unsanctioned growth.
+
+## Implementation — Step 1 (sendev-coercion, 2026-06-22; user un-parked) — PR #1960
 
 Branch `issue-1917-emit-tostring`. Phased behavior-neutral consolidation per the
 user override (deduplicate the coercion code; equality last/isolated). All Step
