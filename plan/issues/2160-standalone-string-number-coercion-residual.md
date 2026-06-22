@@ -139,7 +139,7 @@ nativeStrings only; host mode keeps `__unbox_number`.
 `never[]`, which the native array-join mishandles exactly like the pre-existing
 `String([])` / `[].toString()` bare-literal crash. The new path is gated on a
 concrete (non-`never`) element type, so `Number([])` falls through to main's NaN
-behaviour (no crash). A *typed* empty array (`const a: number[] = []`) lowers
+behaviour (no crash). A _typed_ empty array (`const a: number[] = []`) lowers
 correctly → `""` → 0.
 
 **Validation.** `tests/issue-2160-number-array-coercion.test.ts` (14/14):
@@ -207,13 +207,13 @@ receiver" residual the cs-2160 slice above explicitly left open. Re-probed
 against current main (post-keystone #2187/#2576/#2579): nearly the entire common
 String/Number method + coercion surface now passes standalone (charAt/slice/
 toUpperCase/padStart/trim/split/at/codePointAt/normalize/localeCompare/matchAll/
-toFixed/toPrecision/toString(radix)/Number.* on PRIMITIVE strings; wrapper
+toFixed/toPrecision/toString(radix)/Number.\* on PRIMITIVE strings; wrapper
 `.length`/`[i]`/`.valueOf()`/`.toString()`). The genuinely-open in-lane residual
 was **every String.prototype METHOD on a `new String(x)` WRAPPER receiver**.
 
 **Root cause** (`src/codegen/expressions/calls.ts`, the native-string method
 dispatch at the `isStringType(receiverType)` arm): `isStringType` deliberately
-also matches the String *wrapper* Object type (so primitive-string methods can
+also matches the String _wrapper_ Object type (so primitive-string methods can
 dispatch). A wrapper reaching `compileNativeStringMethodCall` had its receiver
 emitted by `compileExpression(propAccess.expression)` → the wrapper's `$Object`
 externref → `__str_flatten`'s `ref.cast $NativeString` → **runtime trap**
@@ -222,11 +222,12 @@ externref → `__str_flatten`'s `ref.cast $NativeString` → **runtime trap**
 standalone (it worked in host/gc via the dynamic object path).
 
 **Fix (no new hand-rolled coercion — reuses the §7.1.1.1 engine helper):**
+
 1. In the native-string dispatch (calls.ts), for a `ctx.standalone` String-
    wrapper receiver (excluding `toString`/`valueOf`, which keep their existing
    arms), pass `compileNativeStringMethodCall` a **`receiverOverride`** that
    recovers the wrapped primitive via the EXISTING `__to_primitive(hint
-   "string")` helper (reads the wrapper's FLAG_INTERNAL `[[PrimitiveValue]]`
+"string")` helper (reads the wrapper's FLAG_INTERNAL `[[PrimitiveValue]]`
    slot first — same helper the cs-2160 valueOf slice uses), then
    `any.convert_extern` + `ref.cast $AnyString` back to a native string ref.
 2. The five two-string-arg arms (`indexOf`/`lastIndexOf`/`includes`/
@@ -258,3 +259,112 @@ issue-1910-string-wrapper-index/1910-s2/1397 (23), issue-2192b caught-error
 string methods, all prior #2160 suites (37/38 — the 1 pre-existing
 `Number(arr)` failure fails identically on pristine `origin/main`). tsc +
 prettier + biome lint + coercion-sites + any-box + stack-balance gates clean.
+
+## Slice (2026-06-21, sdev-vrep) — Number.prototype METHOD dispatch on a wrapper receiver (PR sibling)
+
+Direct mirror of the String-wrapper slice above, for `new Number(x)`.
+
+**Symptom (standalone).** `new Number(3.14159).toFixed(2)` returned a null
+string (and `.length`/`.charCodeAt` on the result TRAPPED "dereferencing a null
+pointer"); `new Number(255).toString(16)` returned the wrong value.
+`.toString()` (no radix), `.toLocaleString()` and `.valueOf()` already worked
+(no-radix toString went through the broadly-registered `number_toString`; valueOf
+via the cs-2160 slice).
+
+**Root cause (two parts).**
+
+1. The numeric method arms in `calls.ts` (`toFixed` / `toString` / `toPrecision`
+   / `toExponential` / `toLocaleString`) gate on `isNumberType(receiverType)`,
+   which matches only the primitive (`TypeFlags.Number`) — NOT the wrapper
+   (`TypeFlags.Object`, symbol "Number"). So a wrapper receiver never entered the
+   numeric lowering; it fell through to a generic path.
+2. The which-natives pre-pass (`declarations.ts`, drives `emitNativeNumberFormat`
+   in standalone) keyed the same way, so `number_toFixed`/`toPrecision`/
+   `toExponential` were never EMITTED for a program that only calls them on a
+   wrapper → the call-site `funcMap.get` returned undefined → null result.
+
+**Fix (no new coercion matrix).**
+
+- `calls.ts`: new `isNumberMethodReceiver` (primitive OR standalone wrapper) gates
+  the five numeric arms; new `emitNumberMethodReceiverF64` emits the receiver as
+  f64 — primitive directly, or for a standalone wrapper via the existing §7.1.1.1
+  `__to_primitive(hint "number")` engine helper → `__unbox_number` (the SAME
+  recovery the cs-2160 `.valueOf()` slice uses). Each arm now calls the helper
+  instead of inlining `compileExpression + i32→f64`.
+- `declarations.ts` + `index.ts` which-natives scans: recognize a standalone
+  Number-wrapper receiver so the native `number_*` helper is actually emitted.
+
+Standalone-gated (`ctx.standalone`) — gc/host keep the live-mirror Proxy path,
+WASI keeps the host object machinery (a bare `new Number(x)` already needs
+`__new_Number` there; that wrapper-CONSTRUCTION-under-WASI residual is separate
+and reproduces on pristine `origin/main`).
+
+**Validation.** `tests/issue-2160-wrapper-nummethod-standalone.test.ts` (3/3, 16
+wrapper-method cases × standalone + gc + a primitive-regression case):
+toFixed(round/noarg/int/neg)/toString(radix 16/2/10/default)/toPrecision/
+toExponential/toLocaleString/valueOf, inline and via a wrapper local, plus
+RangeError-still-throws — each asserting ZERO `number_*`/`__new_Number`/
+`__extern_*`/`wasm:js-string` host-import leak under `target: standalone`. #1878
+String-wrapper suite + number-format / parse / toLocaleString suites green; tsc
+clean.
+
+**Still open (NOT regressed):** `new Number(x)` wrapper CONSTRUCTION under
+`--target wasi` (requests `__new_Number`; standalone-only native object-runtime)
+— a separate substrate residual reproducing on pristine `origin/main`.
+
+---
+
+## Re-measure + residual slicing (2026-06-22, architect) — sprint 65
+
+Re-probed the **host-pass / standalone-fail** gap for `built-ins/String` +
+`built-ins/Number` against current main `0451ee920` (every file run twice:
+host-mode `runTest262File` vs `target: "standalone"`; the host-pass /
+standalone-fail set is the umbrella's definition). Result: **148 gap rows, all in
+`built-ins/String`** — `built-ins/Number` has **no** remaining host/standalone gap
+(the wrapper + native-format slices above closed it). The original "635 / 643 / 159"
+numbers were the 2026-06-15 baseline; the value-rep keystones (#2187/#2576/#2579)
++ the wrapper slices have since closed the bulk.
+
+### Verified root-cause buckets of the 148
+
+| bucket | rows | disposition |
+|---|---:|---|
+| **search-method arg ToString + IsRegExp** (`indexOf/lastIndexOf/includes/startsWith/endsWith/localeCompare`, TYPED receiver, non-string arg → `__str_flatten` null-deref) | ~20–28 | **#2598** (dev) |
+| **concat arg ToString** (variadic + non-string-primitive, TYPED receiver → `__str_concat` null-deref / `undefined`) | ~6–10 | **#2599** (dev) |
+| **index/position ToIntegerOrInfinity** (`at/charAt/charCodeAt/codePointAt/indexOf` position, fractional-string/object arg → wrong index) | ~6–12 | **#2600** (dev) |
+| **fromCodePoint RangeError** (non-integral / out-of-[0,0x10FFFF] → must throw) | ~2–3 | **#2601** (dev) |
+| `match`/`matchAll`/`search` (RegExp-routed) | 15 | → **#2161** standalone RegExp engine |
+| **RequireObjectCoercible `this`** via `.call(null/undef/symbol)` + **boxed/dynamic `this`** (`new Boolean; o.indexOf=…`, `_A1_T2`/`_A4_T*`) | ~25 | → **#2580 M2** (any-typed receiver) |
+| builtin-method-**as-value** (`String.prototype.X.length`, `new X`, `.name`, callback) — `built-in static property value read … not supported` / `__get_builtin` CE | ~8 | → builtin-closure substrate (not method correctness) |
+| object→primitive (`Cannot convert object to primitive value`) for `String()`/concat with a dynamic-object arg/receiver | ~18 | → **#1917** coercion engine (already the engine path) |
+
+### The M2-deferred note (per #2580)
+
+Everything where the **receiver is `any`/dynamic/boxed** is **#2580 M2 territory**
+(any-typed string/number method dispatch + coercion-on-any), NOT a #2160 slice.
+That is: `String.prototype.X.call(null/undefined, …)` (RequireObjectCoercible on a
+dynamic receiver), `new Boolean/Number/String; o.method = String.prototype.X; o.X(…)`
+(boxed-primitive receiver), and any `obj.method()` where `obj: any`. #2580's M1
+canary already proved a bare-externref runtime test cannot disambiguate these
+receivers — they need M2's tag-aware dynamic reader. The four #2598–#2601 slices are
+deliberately gated on a **statically-typed string receiver**, so they are
+substrate-INDEPENDENT and land independently of #2580.
+
+### Slices created (sprint 65)
+
+- **#2598** — search-method arg ToString + IsRegExp guard (largest bucket)
+- **#2599** — concat arg ToString (variadic + non-string)
+- **#2600** — index/position ToIntegerOrInfinity
+- **#2601** — fromCodePoint RangeError
+
+Each: ONE verified root cause, typed receiver (substrate-independent), reuses the
+existing `coerceType` / `__str_to_number` engine (no new #2108 coercion site),
+~1 day, full `## Implementation Plan` in its own file. #2598 + #2599 share the
+"ToString an arbitrary arg before a native string helper" shape — whichever lands
+first factors a small `emitArgAsNativeString` helper the other reuses (independently
+landable either order).
+
+**This umbrella stays `ready`** as the tracker; the actionable substrate-independent
+String work is now the four child slices. The remaining residual is #2161 (RegExp),
+#2580 M2 (dynamic receiver), #1917 (object→primitive), and the builtin-method-as-value
+closure substrate — all tracked elsewhere.

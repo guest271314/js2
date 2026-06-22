@@ -273,6 +273,16 @@ export interface AnalyzeOptions {
   allowJs?: boolean;
   /** Skip semantic diagnostics collection (faster — checker still available for type queries) */
   skipSemanticDiagnostics?: boolean;
+  /**
+   * Node API emulation (#2603), opt-in via `--emulate node`. Serves a synthetic
+   * ambient `process` declaration so the checker resolves the Node globals
+   * js2wasm lowers (process.std{in,out,err}, argv, env, exit) without the user
+   * installing @types/node — eliminating the repeated TS2580 "Cannot find name
+   * 'process'" warnings. Type-level only; does not change emitted wasm (codegen
+   * lowers `process.*` syntactically regardless). Falls back to no injection if
+   * the user already declares `process`, so it never creates a dup-identifier error.
+   */
+  emulateNode?: boolean;
 }
 
 /**
@@ -294,6 +304,45 @@ const ES_EARLY_ERROR_CODES = new Set([
   2480, // 'import()' expression is not callable with this argument
   18050, // A rest element cannot have an initializer
 ]);
+
+// #2603: ambient `process` surface emulated under `--target wasi`. Served as a
+// synthetic root .d.ts (a global script — no import/export — so `process` is an
+// ambient global) ONLY when AnalyzeOptions.wasi is set. Declares the members the
+// node-process-api.ts lowering actually supports, so the checker resolves
+// `process` (no TS2580) without the user installing @types/node. Type-level
+// only — codegen lowers `process.*` syntactically regardless of this file.
+const NODE_ENV_DTS_NAME = "__js2wasm_node_env.d.ts";
+const NODE_ENV_DTS_SOURCE = `
+interface NodeJS_WritableStream {
+  write(chunk: Uint8Array | ArrayBuffer | string): boolean;
+  once(event: string, listener: (...args: any[]) => void): void;
+}
+interface NodeJS_ReadableStream {
+  read(buffer?: Uint8Array, offset?: number): number;
+}
+interface NodeJS_Process {
+  readonly argv: string[];
+  readonly env: Record<string, string | undefined>;
+  readonly platform: string;
+  exit(code?: number): never;
+  readonly stdin: NodeJS_ReadableStream;
+  readonly stdout: NodeJS_WritableStream;
+  readonly stderr: NodeJS_WritableStream;
+}
+declare var process: NodeJS_Process;
+`;
+
+/** Diagnostic codes for a duplicate `process` declaration (user declared it themselves). */
+const DUP_IDENTIFIER_CODES = new Set([
+  2300, // Duplicate identifier 'X'
+  2403, // Subsequent variable declarations must have the same type
+  2451, // Cannot redeclare block-scoped variable 'X'
+]);
+
+function diagnosticMentionsProcess(d: ts.Diagnostic): boolean {
+  const text = typeof d.messageText === "string" ? d.messageText : d.messageText.messageText;
+  return text.includes("'process'");
+}
 
 /**
  * Parse and type-check a TS or JS source file.
@@ -319,10 +368,15 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
     ...(isJsx ? { jsx: ts.JsxEmit.ReactJSX } : {}),
   };
 
+  const injectNodeEnv = analyzeOptions?.emulateNode === true;
+
   const compilerHost: ts.CompilerHost = {
     getSourceFile(name, languageVersion) {
       if (name === fileName) {
         return ts.createSourceFile(name, source, languageVersion, true, scriptKind);
+      }
+      if (injectNodeEnv && name === NODE_ENV_DTS_NAME) {
+        return ts.createSourceFile(name, NODE_ENV_DTS_SOURCE, languageVersion, true, ts.ScriptKind.TS);
       }
       const libSf = getLibSourceFile(name, languageVersion);
       if (libSf) return libSf;
@@ -334,7 +388,7 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
     getCanonicalFileName: (f) => f,
     useCaseSensitiveFileNames: () => true,
     getNewLine: () => "\n",
-    fileExists: (name) => name === fileName || isKnownLibName(name),
+    fileExists: (name) => name === fileName || (injectNodeEnv && name === NODE_ENV_DTS_NAME) || isKnownLibName(name),
     readFile: () => undefined,
     getDirectories: () => [],
     directoryExists: () => true,
@@ -345,12 +399,30 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
     compilerOptions.checkJs = true;
   }
 
-  const program = ts.createProgram([fileName], compilerOptions, compilerHost);
+  // Build the program. Under WASI (#2603) add a synthetic ambient `process`
+  // .d.ts as an extra root so the checker resolves the emulated Node globals.
+  // If the user already declares `process`, that injection collides — detect
+  // the duplicate-identifier diagnostic and rebuild without it, so we never
+  // turn a benign warning into a hard error.
+  function buildProgram(withNodeEnv: boolean) {
+    const rootNames = withNodeEnv ? [fileName, NODE_ENV_DTS_NAME] : [fileName];
+    const prog = ts.createProgram(rootNames, compilerOptions, compilerHost);
+    const syn = prog.getSyntacticDiagnostics();
+    const sem = analyzeOptions?.skipSemanticDiagnostics
+      ? ([] as readonly ts.Diagnostic[])
+      : prog.getSemanticDiagnostics();
+    return { prog, syn, sem };
+  }
 
-  const syntacticDiagnostics = program.getSyntacticDiagnostics();
-  const semanticDiagnostics = analyzeOptions?.skipSemanticDiagnostics
-    ? ([] as ts.Diagnostic[])
-    : program.getSemanticDiagnostics();
+  let { prog: program, syn: syntacticDiagnostics, sem: semanticDiagnostics } = buildProgram(injectNodeEnv);
+
+  if (
+    injectNodeEnv &&
+    semanticDiagnostics.some((d) => DUP_IDENTIFIER_CODES.has(d.code) && diagnosticMentionsProcess(d))
+  ) {
+    ({ prog: program, syn: syntacticDiagnostics, sem: semanticDiagnostics } = buildProgram(false));
+  }
+
   const diagnostics = [...syntacticDiagnostics, ...semanticDiagnostics];
 
   return {

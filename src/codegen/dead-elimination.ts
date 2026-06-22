@@ -11,6 +11,7 @@
  * then removes the dead ones and remaps all surviving indices.
  */
 import type { ArrayTypeDef, Instr, StructTypeDef, SubTypeDef, TypeDef, ValType, WasmModule } from "../ir/types.js";
+import type { CodegenContext } from "./context/types.js";
 import { walkInstructions } from "./walk-instructions.js";
 
 // --- Reference collection ---
@@ -250,8 +251,27 @@ function remapTD(td: TypeDef, remap: Map<number, number>): TypeDef {
 /**
  * Eliminate dead (unreferenced) function imports and type definitions
  * from a compiled WasmModule. Mutates the module in place.
+ *
+ * #1899 — funcIdx-authority contract. This pass REMOVES dead function imports
+ * and remaps every funcIdx referenced from inside `mod` (bodies, exports,
+ * elements, declaredFuncRefs, start) through the authoritative `fR` remap, so
+ * the emitted module is internally consistent. Historically it touched ONLY
+ * `mod` and left the codegen-context side-tables (`funcMap`, `nativeStrHelpers`,
+ * …) stale by the removed-import delta. Any consumer that bakes a NEW `call`
+ * from those maps AFTER this pass (e.g. the `__unbox_number` repair in
+ * `fixups.ts`, which runs in `repairStructTypeMismatches` /
+ * `fixupExternConvertAny` right after dead-elim) would then target the wrong
+ * function — the recurring late-shift / index-desync class (#1677/#1809/#1839/
+ * #1886/#329/#1461/#2043). Pass `ctx` so the SAME authoritative `fR` is applied
+ * to the side-tables, keeping them in lockstep with the module exactly as the
+ * add-shift passes (`shiftLateImportIndices` / `reconcileNativeStrFinalizeShift`)
+ * already do for the import-ADD direction. The `ctx` arg is optional so non-codegen
+ * callers (tests, the standalone module rewriter) need no context; when omitted,
+ * only `mod` is remapped (the prior behaviour). The whole side-table remap is a
+ * no-op when no dead imports were removed (`fR.size === 0`), which is the common
+ * case mid-finalize.
  */
-export function eliminateDeadImports(mod: WasmModule): void {
+export function eliminateDeadImports(mod: WasmModule, ctx?: CodegenContext): void {
   const numImpF = mod.imports.filter((i) => i.desc.kind === "func").length;
   const usedF = new Set<number>();
   const usedT = new Set<number>();
@@ -458,5 +478,34 @@ export function eliminateDeadImports(mod: WasmModule): void {
   // Remap tags
   for (const tag of mod.tags) {
     if (tR.has(tag.typeIdx)) tag.typeIdx = tR.get(tag.typeIdx)!;
+  }
+
+  // #1899 — keep the codegen-context funcIdx side-tables in lockstep with the
+  // `fR` remap just applied to `mod`. Without this, a post-dead-elim consumer
+  // that bakes a `call` from one of these maps (fixups.ts `__unbox_number`
+  // repair, etc.) targets the wrong, now-shifted function. This is the REMOVE
+  // direction of the recurring late-shift class; the ADD direction is already
+  // handled by shiftLateImportIndices / reconcileNativeStrFinalizeShift. No-op
+  // when no dead func import was removed (`fR.size === 0`).
+  if (ctx && fR.size > 0) {
+    const remapMap = (m: Map<string, number>): void => {
+      for (const [name, idx] of m) {
+        const next = fR.get(idx);
+        if (next !== undefined) m.set(name, next);
+      }
+    };
+    remapMap(ctx.funcMap);
+    remapMap(ctx.nativeStrHelpers);
+    remapMap(ctx.nativeRegexHelpers);
+    remapMap(ctx.mapHelpers);
+    // Side-channel trampoline indices (plain numbers, not reachable via any
+    // Instr walk) — mirror the lockstep shiftLateImportIndices already applies
+    // on the ADD direction (#1525b).
+    for (const t of ctx.pendingMethodTrampolines) {
+      const m1 = fR.get(t.methodFuncIdx);
+      if (m1 !== undefined) t.methodFuncIdx = m1;
+      const t1 = fR.get(t.trampolineFuncIdx);
+      if (t1 !== undefined) t.trampolineFuncIdx = t1;
+    }
   }
 }

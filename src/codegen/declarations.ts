@@ -11,6 +11,7 @@ import {
   isBooleanType,
   isHeterogeneousUnion,
   isNumberType,
+  isNumberWrapperType,
   isStringType,
   isVoidType,
   mapTsTypeToWasm,
@@ -366,14 +367,33 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     ) {
       state.primitiveNeeded.add("number_toString");
     }
-    if (isNumberType(receiverType) && methodName === "toFixed") {
+    // (#2160 number-wrapper) Standalone `new Number(x).<fmt>()` recovers the
+    // wrapper's f64 (via __to_primitive in calls.ts) and dispatches to the SAME
+    // native `number_*` helpers as a primitive receiver. The wrapper type is
+    // `TypeFlags.Object` (symbol "Number"), not `isNumberType`, so it must be
+    // recognized here — this scan drives `emitNativeNumberFormat` in standalone —
+    // or the helper is never emitted and the call site returns null. Gated on
+    // standalone (the recovery path); host/WASI keep their existing routing.
+    const isNumFmtRecv = isNumberType(receiverType) || (ctx.standalone && isNumberWrapperType(receiverType));
+    if (isNumFmtRecv && methodName === "toFixed") {
       state.primitiveNeeded.add("number_toFixed");
     }
-    if (isNumberType(receiverType) && methodName === "toPrecision") {
+    if (isNumFmtRecv && methodName === "toPrecision") {
       state.primitiveNeeded.add("number_toPrecision");
     }
-    if (isNumberType(receiverType) && methodName === "toExponential") {
+    if (isNumFmtRecv && methodName === "toExponential") {
       state.primitiveNeeded.add("number_toExponential");
+    }
+    if (
+      ctx.standalone &&
+      isNumberWrapperType(receiverType) &&
+      (methodName === "toString" || methodName === "toLocaleString")
+    ) {
+      state.primitiveNeeded.add("number_toString");
+    }
+    if (ctx.standalone && isNumberWrapperType(receiverType) && methodName === "toString") {
+      // radix form needs the 2-arg helper
+      state.primitiveNeeded.add("number_toString_radix");
     }
     // ── collectStringMethodImports (also uses call+propertyAccess) ──
     if (isStringType(receiverType) && Object.prototype.hasOwnProperty.call(STRING_METHODS, methodName)) {
