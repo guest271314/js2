@@ -1,7 +1,7 @@
 ---
 id: 2591
 title: "Standalone RegExp `v`-flag `\\q{…}` string disjunction — implement (or complete the refusal)"
-status: ready
+status: done
 sprint: 65
 priority: medium
 feasibility: medium
@@ -11,6 +11,8 @@ goal: standalone-mode
 language_feature: regexp
 task_type: conformance
 created: 2026-06-22
+completed: 2026-06-22
+assignee: ttraenkler/dev-regex-2591
 ---
 
 # Standalone RegExp `v`-flag `\q{…}` string disjunction
@@ -142,3 +144,67 @@ removes the trap/silent-wrong state — only if A is infeasible.
 - `"zzabc".match(/[\q{abc}]/v)[0] === "abc"`
 - `/[\q{ab}c-e]/v.test("d") === true` (mixed with a range)
 - empty operand `/[\q{|a}]/v.test("") === true`
+
+## Resolution (2026-06-22) — Option A implemented (desugar to alternation)
+
+Implemented **Option A**: a v-mode `[…]` class containing `\q{…}` is desugared,
+at parse time, to an **alternation of literal-string arms** unioned with the
+residual code-point class. Each operand becomes a `concat` of single-code-point
+nodes; the residual members enumerate the usual Slice-B way. Arms are ordered
+**longest-first** (§22.2.2 ClassSetExpression matches longer strings before
+shorter ones), so multi-char operands precede the length-1 class and the empty
+operand sorts last (zero-width).
+
+### Changes
+- `src/codegen/regex/unicode.ts` — new exported `parseStringDisjunction(qBody)`
+  splits a `\q{…}` body on top-level `|` (respecting `\|`/`\}`/`\\` and `\u{…}`)
+  into per-operand code-point arrays. Resolves the `\q{}`-specific escape set
+  (`\b` = U+0008 backspace, `\u{…}`/`\uHHHH` incl. surrogate-pair joining,
+  `\xHH`, `\cX`, identity escapes). Throws `RegexUnsupportedError` on a malformed
+  escape (loud, never silent).
+- `src/codegen/regex/parse.ts` — `parseAtom`'s v-mode `[` branch routes classes
+  containing `\q{` to a new `uEnumClassWithStrings(source)` that extracts the
+  top-level `\q{…}` spans (skipping nested `\u{…}` braces), builds the
+  alternation, enumerates the residual class, and case-folds operands under `i`.
+  Top-level set operations (`&&`/`--`) carrying strings are **narrowly refused**
+  (loud `RegexUnsupportedError`) — string-set algebra is out of slice scope.
+
+### Carve-out (noted residual)
+Two combinations stay a **loud refusal** (`RegexUnsupportedError`), out of slice
+scope and **unchanged from before this fix** (no regression):
+
+1. **`\q{…}` inside a top-level v-mode set operation** (`[\q{ab}--_]`,
+   `[[0-9]--\q{…}]`, `[\q{…}&&\q{…}]`, `[\p{…}&&\q{…}]`) — needs string-aware set
+   algebra (a string survives `&&` only if both operands contain it). ~22 of the
+   33 `unicodeSets/generated` `\q{…}` files are these.
+2. **`\q{…}` unioned with a property-of-STRINGS** (`[\p{Emoji_Keycap_Sequence}\q{…}]`,
+   `\p{Basic_Emoji}`, `\p{RGI_Emoji…}` — the fixed §22.2.1.9 list) — the property
+   contributes multi-code-point members the single-code-point enumerator can't
+   represent. A guard (`PROPERTY_OF_STRINGS_RE`) refuses this **loudly** so the
+   property's strings are never silently dropped (which had given a wrong answer).
+   A `\p{…}` over *code points* (`\p{ASCII}`, `\p{L}`) is unaffected and still
+   unions fine with `\q{…}`.
+
+The recovered rows come from the **union** forms — `string-literal-union-*`
+(11 files), bare `[\q{…}]`, and `[\q{…}<ranges/escapes/code-point-props>]`.
+
+## Test Results
+
+All cases dual-run standalone (empty importObject, no `env`/`__extern_*` import)
+vs the native host engine — `tests/issue-2591-vflag-q-string-disjunction.test.ts`
+(60 assertions, all pass):
+
+- `/[\q{abc|xyz}]/v.test("xyz") === true`, `.test("abc") === true`, `.test("a") === false` ✓
+- `/[\q{abc}]/v.test("a") === false`, `"zzabc".match(...)[0] === "abc"` ✓
+- `/[\q{ab}c-e]/v.test("d") === true` (mixed with a range) ✓
+- empty operand `/[\q{|a}]/v.test("") === true`; empty body `/[\q{}]/v` matches "" ✓
+- longest-first ordering: `/[\q{a|ab}]/v.match("ab")[0] === "ab"` ✓
+- multi-disjunction `[\q{ab}\q{cd}]`, mixed-with-shorthand `[\q{xy}\d]` ✓
+- escapes `[\q{a\|b}]`/`[\q{a\}b}]`, astral `[\q{\u{1f600}x}]`, case-insensitive `vi` ✓
+- the real test262 union shape `^[\q{0|2|4|9️⃣}\q{…}]+$/v` (matchStrings +
+  nonMatchStrings) ✓
+- `#1911` `\q{…}`-narrowed-refusal test updated to assert the new compiling behaviour.
+
+`tsc --noEmit` clean; prettier clean; existing regex suites (`#1911`, `#1912`,
+`#1539`, `regex-bytecode`, `#2161` coercion) pass — the 5 unrelated failures in
+`#1474`/`#1539` dynamic-`new RegExp(var)` tests pre-date this change on `main`.
