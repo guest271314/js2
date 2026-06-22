@@ -88,8 +88,33 @@ Sequencing: Step 0 (ValType table) is dependency-safe now; Steps 1+ land
 AFTER the type-aware boxing P0 (#2072/#2080) so the engine consumes
 correct tags. Drift gate: #2108.
 
-## #1960 (Step 1) merge_group park — OPEN, NOT YET ADJUDICATED (sendev-coercion, 2026-06-23)
+## #1960 (Step 1) merge_group park — RESOLVED (sendev-coercion, 2026-06-23)
 
+**Outcome: GENUINE Step-1 regression (NOT drift), now FIXED by reverting the
+standalone native `+`-concat ToString migration. All 23 spec tests restored.**
+
+Resolution: commit `7de728208` on `issue-1917-emit-tostring` reverts
+`compileNativeConcatOperand` to its original hand-rolled cascade — the sole
+standalone-reachable Step-1 change. The host concat/template ToString migrations
+STAY (js-host-only, can't affect standalone). The engine number arm gained a
+defensive guard (return the scalar unchanged when `number_toString` is
+unavailable in native mode). Verified via faithful `runTest262File(…,
+"standalone")` reading `.status`: `S9.8.1_A2`, `concat/S15.5.4.6_A3`, `S9.8.1_A6`,
+`Number/S9.3.1_A3_T2` all flip compile_error → **pass**; trim/startsWith/replace
+controls stay pass. `#2108` string-ops 24 (pre-Step-1) → 19 (still net dedup).
+Fix propagated up the stack (tostring → tonumber → toboolean). The `hold` label
+removed once the fix is pushed.
+
+**Process lesson (worth remembering):** my first "baseline drift" verdict was
+WRONG — caused by a probe bug (read `r.outcome`, always `undefined`, instead of
+`r.status`). That made known-pass controls look like failures and fooled me into
+"the local harness is broken / it's drift." The correct discriminator was a
+genuinely-`pass` control run with the right field on clean-main vs branch. Lesson:
+when a local repro disagrees with a CI signal, FIRST verify the repro against a
+KNOWN-GOOD control reading the SAME field the source of truth uses — don't trust
+a tool that fails its own control. The lead's CI evidence was right all along.
+
+(Original park detail, for the record:)
 Step 1 PR #1960 was auto-parked by the bot (`hold` label) on a GENUINE
 `merge shard reports` failure: standalone gate net **−23** (`wasm_compile: 21`,
 `illegal_cast: 2`), bucket signature **`a4736523aee2aba2`**, cluster =
