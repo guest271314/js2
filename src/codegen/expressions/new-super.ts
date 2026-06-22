@@ -214,7 +214,27 @@ function resolvesToConstructableFunctionValue(ctx: CodegenContext, calleeExpr: t
   // Callable value (a function held in the binding). Construct-signature-bearing
   // values (real class ctors typed through the binding) are left to the static
   // class paths; here we target the ordinary-function-value cluster.
-  return t.getCallSignatures().length > 0;
+  const callSigs = t.getCallSignatures();
+  if (callSigs.length === 0) return false;
+  // Only a PLAIN constructable function gets the closure-construct bridge.
+  // Generator (`function*` / `*m()`), async, and async-generator functions, plus
+  // method/accessor/arrow values, have NO [[Construct]] (§14.4.13 / §15.x): e.g.
+  // `var m = { *m(){} }.m; new m()` MUST throw TypeError, not construct. The
+  // bridge would wrongly construct them. The call signature's DECLARATION (kind +
+  // asterisk/async modifiers) is the authoritative discriminator — a binding's
+  // type otherwise loses the AST. (Regressed
+  // `language/.../method-definition/generator-invoke-ctor.js` before this guard.)
+  for (const sig of callSigs) {
+    const sigDecl = sig.getDeclaration() as ts.SignatureDeclaration | undefined;
+    if (!sigDecl) return false; // unknown shape — don't claim it
+    if ("asteriskToken" in sigDecl && (sigDecl as ts.FunctionLikeDeclaration).asteriskToken) return false; // generator
+    if (ts.canHaveModifiers(sigDecl) && ts.getModifiers(sigDecl)?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword))
+      return false; // async / async-gen
+    // Only an ordinary function declaration / expression is constructable;
+    // method / accessor / arrow / constructor-type signatures are not.
+    if (!ts.isFunctionDeclaration(sigDecl) && !ts.isFunctionExpression(sigDecl)) return false;
+  }
+  return true;
 }
 
 /** Compile super.method(args) — resolve to ParentClass_method and call with this */

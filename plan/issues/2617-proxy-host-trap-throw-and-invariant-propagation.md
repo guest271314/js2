@@ -1,10 +1,12 @@
 ---
 id: 2617
 title: "Proxy (host): trap-thrown exceptions and §10.5 invariant TypeErrors are swallowed by the boundary try/catch (~40 fails)"
-status: ready
+status: done
 sprint: 65
 created: 2026-06-22
 updated: 2026-06-22
+completed: 2026-06-22
+assignee: ttraenkler/agent-acc861f0e7aea64c8
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -143,3 +145,31 @@ PRs don't fight over the same Proxy test files.
 Medium — the boundary `catch` is a hot path; the `_isUserProxy` gate keeps the
 non-proxy fast path identical. Validate full gc equivalence (broad-impact:
 boundary helpers).
+
+## Resolution (2026-06-22)
+
+**Runtime (`src/runtime.ts`):** added shared `_isUserProxy(obj)` +
+`_rethrowIfProxyOrRevoked(e, obj)` and applied to the boundary helpers that
+swallowed exceptions: `__extern_get`, `__extern_has`, `_safeSet`
+(`__extern_set`/`__extern_set_strict`), `__getPrototypeOf` (was coercing the
+§10.5.1 invariant TypeError to `null`), `__object_preventExtensions`. Helpers
+that call the native method with no try/catch (getOwnPropertyDescriptor,
+isExtensible, defineProperty_desc, reflect_*) already propagate — left unchanged.
+`__delete_property` re-throws a THROWN trap but maps the always-strict runtime's
+"trap returned falsish" delete-result TypeError to `return 0` (false) — in the
+user program's non-strict context `delete` yields false, not a throw
+(`deleteProperty/return-false-not-strict.js`, `flags:[noStrict]`). Added
+`_isStrictDeleteFalsishError` for that distinction.
+
+**Codegen (`src/codegen/binary-ops.ts`):** the `in` operator constant-folded
+`'k' in p` to the target struct's field membership (the TS type of a `new Proxy`
+var is its TARGET type), so `__extern_has` — and the `has` trap — never ran.
+Fixed by trusting the ACTUAL slot type: when the `in` receiver is an identifier
+slotted `externref`/`anyref` (via #2615), route through `__extern_has`.
+
+**Results (local harness, gc):** whole `built-ins/Proxy` vs current main
+(#2615+#2616): **+17 pass, 0 regressions** (107 → 124). Reflect unchanged
+(82/19/52). Gate set (`return-is-abrupt` + invariant): 12 pass / 1 err.
+`tests/issue-2617.test.ts` (6 cases) all pass; `tsc`/`prettier` clean.
+
+Cumulative Proxy progression: 78 → 83 (#2615) → 107 (#2616) → **124 (#2617)**.
