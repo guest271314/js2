@@ -1176,6 +1176,15 @@ export interface CodegenContext {
   refCellTypeMap: Map<string, number>;
   /** Type index of the $AnyValue boxed-any struct */
   anyValueTypeIdx: number;
+  /**
+   * (#2106 S1) Global index of the standalone `$undefined` singleton — an
+   * immutable tag-1 `$AnyValue`, reserved up-front at `ensureAnyValueType` time
+   * so `undefined` is distinguishable from `null` (`ref.null extern`) in
+   * standalone/native-strings mode. `undefined` otherwise has no host value and
+   * conflates with null. Reserved as a GLOBAL (not a late func import) to avoid
+   * the #329 native-string finalize-shift hazard. `undefined` until reserved.
+   */
+  undefinedGlobalIdx?: number;
   /** Map from any-value helper name → function index */
   anyHelpers: Map<string, number>;
   /** Whether any-value helper functions have been emitted */
