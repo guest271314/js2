@@ -180,6 +180,63 @@ function resolvesToNonConstructableValue(ctx: CodegenContext, calleeExpr: ts.Exp
   return false;
 }
 
+/**
+ * (#1632b-2 / #1528a residual) Does `new <id>(...)` target a runtime FUNCTION
+ * VALUE held in a binding — `const C = makeCtor(); new C()` — that is provably
+ * CONSTRUCTABLE (an ordinary `function` value, not an arrow / bound / prototype
+ * method, which `resolvesToNonConstructableValue` already routes to the throwing
+ * `__construct` brand check)? Such a callee is mis-classified by the unknown-ctor
+ * path as an `extern_class` host import (fails at instantiation with
+ * "No dependency provided for extern class …"); it must instead route through the
+ * `__construct_closure` host bridge, whose `_wrapCallableForHost` construct trap
+ * runs the compiled closure body (ECMA-262 §10.2.2).
+ *
+ * Gate strictly on the value-binding shape so no declared class, ambient/host
+ * constructor (Test262Error is a top-level `FunctionDeclaration`, kept on the
+ * existing path), or intrinsic ctor is intercepted:
+ *  - callee is a bare identifier whose **value declaration is a
+ *    `VariableDeclaration`** (a function held in a binding, not a hoisted
+ *    function/class declaration);
+ *  - the binding's TS type has **call signatures** (it is callable) and **no
+ *    construct signatures** that would have made a static guard fire;
+ *  - it is NOT a known compiled class and NOT a registered extern class.
+ */
+function resolvesToConstructableFunctionValue(ctx: CodegenContext, calleeExpr: ts.Expression): boolean {
+  if (!ts.isIdentifier(calleeExpr)) return false;
+  if (ctx.classSet.has(calleeExpr.text) || ctx.externClasses.has(calleeExpr.text)) return false;
+  // An arrow / bound / prototype-method value is non-constructable — that is the
+  // throwing path, handled by resolvesToNonConstructableValue. Do not claim it.
+  if (resolvesToNonConstructableValue(ctx, calleeExpr)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(calleeExpr);
+  const decl = sym?.valueDeclaration;
+  if (!decl || !ts.isVariableDeclaration(decl)) return false;
+  const t = ctx.checker.getTypeAtLocation(calleeExpr);
+  // Callable value (a function held in the binding). Construct-signature-bearing
+  // values (real class ctors typed through the binding) are left to the static
+  // class paths; here we target the ordinary-function-value cluster.
+  const callSigs = t.getCallSignatures();
+  if (callSigs.length === 0) return false;
+  // Only a PLAIN constructable function gets the closure-construct bridge.
+  // Generator (`function*` / `*m()`), async, and async-generator functions, plus
+  // method/accessor/arrow values, have NO [[Construct]] (§14.4.13 / §15.x): e.g.
+  // `var m = { *m(){} }.m; new m()` MUST throw TypeError, not construct. The
+  // bridge would wrongly construct them. The call signature's DECLARATION (kind +
+  // asterisk/async modifiers) is the authoritative discriminator — a binding's
+  // type otherwise loses the AST. (Regressed
+  // `language/.../method-definition/generator-invoke-ctor.js` before this guard.)
+  for (const sig of callSigs) {
+    const sigDecl = sig.getDeclaration() as ts.SignatureDeclaration | undefined;
+    if (!sigDecl) return false; // unknown shape — don't claim it
+    if ("asteriskToken" in sigDecl && (sigDecl as ts.FunctionLikeDeclaration).asteriskToken) return false; // generator
+    if (ts.canHaveModifiers(sigDecl) && ts.getModifiers(sigDecl)?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword))
+      return false; // async / async-gen
+    // Only an ordinary function declaration / expression is constructable;
+    // method / accessor / arrow / constructor-type signatures are not.
+    if (!ts.isFunctionDeclaration(sigDecl) && !ts.isFunctionExpression(sigDecl)) return false;
+  }
+  return true;
+}
+
 /** Compile super.method(args) — resolve to ParentClass_method and call with this */
 /**
  * (#1614) Dispatch `super.method(args)` where the parent is a builtin extern
@@ -3669,6 +3726,62 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       // fall through to the existing unknown-ctor path below.
       fctx.body.push({ op: "drop" });
       fctx.body.push({ op: "drop" });
+    }
+
+    // (#1632b-2 / #1528a residual) `new C(args)` where `C` is a runtime FUNCTION
+    // VALUE bound in a local (`const C = makeCtor(); new C(42)`) — provably
+    // constructable (ordinary function, not arrow/bound/method). Route through
+    // the `__construct_closure` host bridge: materialize args into a JS array,
+    // then `__construct_closure(callee, argv)` wraps the compiled closure with
+    // `_wrapCallableForHost` (constructible) and `Reflect.construct`s it. Without
+    // this the value is mis-routed to the unknown-ctor extern-class import and
+    // fails at instantiation with "No dependency provided for extern class C".
+    // ONE terminal `flushLateImportShifts` (after the call) — never mid-emission
+    // (the PR #608/#794 index-corruption hazard). JS-host only; standalone keeps
+    // the existing path (a Wasm-native dynamic Construct is a separate effort).
+    if (ts.isIdentifier(s1Callee) && !noJsHost(ctx) && resolvesToConstructableFunctionValue(ctx, s1Callee)) {
+      // Evaluate the callee value to externref.
+      const calleeTy = compileExpression(ctx, fctx, s1Callee, { kind: "externref" });
+      if (calleeTy && calleeTy.kind !== "externref") {
+        coerceType(ctx, fctx, calleeTy, { kind: "externref" });
+      } else if (calleeTy === null) {
+        fctx.body.push({ op: "ref.null.extern" });
+      }
+      const calleeLocal = allocLocal(fctx, `__cc_callee_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: calleeLocal });
+      // Build a JS array of the args (boxed externref each), in source order.
+      const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+      const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+      const ccIdx = ensureLateImport(
+        ctx,
+        "__construct_closure",
+        [{ kind: "externref" }, { kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      const finalArrNew = ctx.funcMap.get("__js_array_new") ?? arrNewIdx;
+      const finalArrPush = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
+      const finalCc = ctx.funcMap.get("__construct_closure") ?? ccIdx;
+      if (finalArrNew !== undefined && finalArrPush !== undefined && finalCc !== undefined) {
+        fctx.body.push({ op: "call", funcIdx: finalArrNew });
+        const argvLocal = allocLocal(fctx, `__cc_argv_${fctx.locals.length}`, { kind: "externref" });
+        fctx.body.push({ op: "local.set", index: argvLocal });
+        for (const arg of args) {
+          fctx.body.push({ op: "local.get", index: argvLocal });
+          const aTy = compileExpression(ctx, fctx, arg, { kind: "externref" });
+          if (aTy && aTy.kind !== "externref") {
+            coerceType(ctx, fctx, aTy, { kind: "externref" });
+          } else if (aTy === null) {
+            fctx.body.push({ op: "ref.null.extern" });
+          }
+          fctx.body.push({ op: "call", funcIdx: finalArrPush });
+        }
+        fctx.body.push({ op: "local.get", index: calleeLocal });
+        fctx.body.push({ op: "local.get", index: argvLocal });
+        fctx.body.push({ op: "call", funcIdx: finalCc });
+        return { kind: "externref" };
+      }
+      // Imports unavailable (shouldn't happen in JS-host): fall through.
     }
 
     // new ArrayBuffer(byteLength) — validate non-negative integer length
