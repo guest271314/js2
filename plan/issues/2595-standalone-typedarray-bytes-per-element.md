@@ -1,7 +1,9 @@
 ---
 id: 2595
 title: "Standalone TypedArray BYTES_PER_ELEMENT — static CE + instance returns 0"
-status: ready
+status: done
+completed: 2026-06-22
+assignee: ttraenkler/agent-typedarray-2595-2597
 sprint: 65
 created: 2026-06-22
 priority: medium

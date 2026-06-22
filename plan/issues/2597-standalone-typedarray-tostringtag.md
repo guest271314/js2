@@ -1,7 +1,9 @@
 ---
 id: 2597
 title: "Standalone TypedArray/DataView/ArrayBuffer @@toStringTag — Object.prototype.toString returns [object Object]"
-status: ready
+status: done
+completed: 2026-06-22
+assignee: ttraenkler/agent-typedarray-2595-2597
 sprint: 65
 created: 2026-06-22
 priority: medium
