@@ -2292,8 +2292,6 @@ export function compilePropertyAccess(
     const isBuffer = recvName === "ArrayBuffer" || recvName === "SharedArrayBuffer";
     const isTypedArr = recvName !== undefined && TYPED_ARRAY_NAMES.has(recvName);
     const isDataView = recvName === "DataView";
-    if (process.env.JS2WASM_DBG_2595)
-      console.error(`[2595] prop=${propName} recvName=${recvName} isTypedArr=${isTypedArr}`);
     // (#2159/#38) DataView `byteOffset` / `byteLength` honour the constructor's
     // window. The receiver is either a `$__dv_window` wrapper (windowed view) or
     // a bare `$__vec_i32_byte` (offset-0 default-length view). For the wrapper,
@@ -2382,6 +2380,105 @@ export function compilePropertyAccess(
         }
         if (!ctx.fast) fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
         return ctx.fast ? { kind: "i32" } : { kind: "f64" };
+      }
+    }
+  }
+
+  // (#2596) `view.buffer` for a TypedArray / DataView under no-host. Without a
+  // dedicated arm this fell to the generic `__extern_get(view, "buffer")` read
+  // whose externref result was `ref.cast` to the `i32_byte` ArrayBuffer vec —
+  // and since a `new TA(n)` view's backing is an `f64`/`i8` vec (not an
+  // `i32_byte` buffer) and standalone has no real buffer object, the cast
+  // trapped `illegal cast` at runtime, breaking EVERY `.buffer`-touching test.
+  //
+  // §22.2 / §25.x — `.buffer` is the view's [[ViewedArrayBuffer]]. We synthesize
+  // a fresh `i32_byte` ArrayBuffer vec whose byte length == the view's byte
+  // length (field-0 element count × BYTES_PER_ELEMENT for a TypedArray; the
+  // backing byte count for a DataView), zero-filled. This makes
+  // `view.buffer.byteLength` correct and non-trapping (the dominant test262 use).
+  // TRUE write-through aliasing (mutating `.buffer` mutates the view, and
+  // `a.buffer === b.buffer` identity) is OUT OF SCOPE — it needs the unified
+  // byte-storage representation (pairs with #2593's packed migration); this slice
+  // is the non-trapping floor. Host/gc mode keeps its host-import `.buffer`.
+  if (propName === "buffer" && noJsHost(ctx)) {
+    const bufRecvName =
+      objType.getSymbol()?.name ??
+      (ts.isNewExpression(expr.expression) && ts.isIdentifier(expr.expression.expression)
+        ? expr.expression.expression.text
+        : undefined);
+    const bufIsTypedArr = bufRecvName !== undefined && TYPED_ARRAY_BYTES_PER_ELEMENT[bufRecvName] !== undefined;
+    const bufIsDataView = bufRecvName === "DataView";
+    if (bufIsTypedArr || bufIsDataView) {
+      const byteVecTypeIdx = getOrRegisterVecType(ctx, "i32_byte", { kind: "i32" });
+      const byteArrTypeIdx = getArrTypeIdxFromVec(ctx, byteVecTypeIdx);
+      if (byteArrTypeIdx >= 0) {
+        const byteLenLocal = allocLocal(fctx, `__tabuf_len_${fctx.locals.length}`, { kind: "i32" });
+        if (bufIsDataView) {
+          // A DataView receiver is either a `$__dv_window` wrapper (windowed view
+          // → byte length is its field-2 `byteLength`) or a bare `$__vec_i32_byte`
+          // (offset-0 view → field-0 IS the byte count). Mirror the byteLength arm's
+          // runtime `ref.test $__dv_window` branch so both shapes work — a static
+          // cast to one shape would `illegal cast` the other.
+          const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
+          const recvType = compileExpression(ctx, fctx, expr.expression);
+          const anyLocal = allocLocal(fctx, `__tabuf_any_${fctx.locals.length}`, { kind: "anyref" });
+          if (recvType?.kind === "externref") {
+            fctx.body.push({ op: "any.convert_extern" } as Instr);
+          }
+          fctx.body.push({ op: "local.set", index: anyLocal } as Instr);
+          const winBranch: Instr[] = [
+            { op: "local.get", index: anyLocal } as Instr,
+            { op: "ref.cast", typeIdx: dvWinTypeIdx } as Instr,
+            { op: "struct.get", typeIdx: dvWinTypeIdx, fieldIdx: 2 } as Instr,
+          ];
+          const vecBranch: Instr[] = [
+            { op: "local.get", index: anyLocal } as Instr,
+            { op: "ref.cast", typeIdx: byteVecTypeIdx } as Instr,
+            { op: "struct.get", typeIdx: byteVecTypeIdx, fieldIdx: 0 } as Instr,
+          ];
+          fctx.body.push({ op: "local.get", index: anyLocal } as Instr);
+          fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
+          fctx.body.push({
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: winBranch,
+            else: vecBranch,
+          } as Instr);
+          fctx.body.push({ op: "local.set", index: byteLenLocal } as Instr);
+        } else {
+          // TypedArray: backing is an f64 vec (or i8 for standalone Uint8Array);
+          // byteLen = element-count (field 0) × BYTES_PER_ELEMENT.
+          const elemKey = noJsHost(ctx) && bufRecvName === "Uint8Array" ? "i8_byte" : "f64";
+          const elemType: ValType = elemKey === "i8_byte" ? { kind: "i8" } : { kind: "f64" };
+          const viewVecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
+          const recvType = compileExpression(ctx, fctx, expr.expression);
+          if (recvType?.kind === "externref") {
+            fctx.body.push({ op: "any.convert_extern" } as Instr);
+            fctx.body.push({ op: "ref.cast", typeIdx: viewVecTypeIdx } as Instr);
+          } else if (
+            (recvType?.kind === "ref" || recvType?.kind === "ref_null") &&
+            "typeIdx" in recvType &&
+            recvType.typeIdx !== viewVecTypeIdx
+          ) {
+            fctx.body.push({ op: "ref.cast", typeIdx: viewVecTypeIdx } as Instr);
+          }
+          fctx.body.push({ op: "struct.get", typeIdx: viewVecTypeIdx, fieldIdx: 0 } as Instr);
+          const bytesPerElem = TYPED_ARRAY_BYTES_PER_ELEMENT[bufRecvName!] ?? 1;
+          if (bytesPerElem !== 1) {
+            fctx.body.push({ op: "i32.const", value: bytesPerElem } as Instr);
+            fctx.body.push({ op: "i32.mul" } as Instr);
+          }
+          fctx.body.push({ op: "local.set", index: byteLenLocal } as Instr);
+        }
+        // Build the i32_byte ArrayBuffer vec: struct.new (byteLen, zero-filled
+        // array of byteLen bytes). One i32 per byte (0..255), matching the
+        // ArrayBuffer / DataView backing representation (dataview-native.ts).
+        fctx.body.push({ op: "local.get", index: byteLenLocal } as Instr);
+        fctx.body.push({ op: "i32.const", value: 0 } as Instr); // default byte value
+        fctx.body.push({ op: "local.get", index: byteLenLocal } as Instr);
+        fctx.body.push({ op: "array.new", typeIdx: byteArrTypeIdx } as Instr);
+        fctx.body.push({ op: "struct.new", typeIdx: byteVecTypeIdx } as Instr);
+        return { kind: "ref", typeIdx: byteVecTypeIdx };
       }
     }
   }
