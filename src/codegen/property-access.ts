@@ -22,6 +22,7 @@ import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collisio
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
+import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
 import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
@@ -2141,8 +2142,9 @@ function tryEmitConstructorViaTag(
       fctx.body.push({ op: "local.set", index: resLocal } as Instr);
     } else {
       // No singleton emitted (shouldn't happen — classObjectGlobals has it):
-      // leave resLocal null.
-      fctx.body.length = 0;
+      // leave resLocal null. This clears the DETACHED `arm` buffer (fctx.body is
+      // `arm` here via the manual swap above), not a speculative-compile probe.
+      fctx.body.length = 0; // not-a-probe-rollback (#1919): detached arm buffer
     }
     fctx.body = savedBody;
     if (arm.length === 0) continue;
@@ -3640,7 +3642,10 @@ export function compilePropertyAccess(
     // Fallback: compile the expression and check the actual wasm return type
     // This handles cases like strings.raw.length where TS doesn't know the type
     {
-      const savedLen = fctx.body.length;
+      // #1919 — transactional try-lower: keep the compiled receiver + struct.get
+      // when it lowers to a length-prefixed vec; otherwise roll back the body AND
+      // any locals / late imports / errors the compile leaked.
+      const snap = snapshotSpeculative(ctx, fctx);
       const exprType = compileExpression(ctx, fctx, expr.expression);
       if (
         exprType &&
@@ -3655,8 +3660,27 @@ export function compilePropertyAccess(
           return ctx.fast ? { kind: "i32" } : { kind: "f64" };
         }
       }
-      // Undo the compiled expression if it didn't match
-      fctx.body.length = savedLen;
+      // (#2580 M1 — DEFERRED TO M2, PR #1894 eject) The host `.length`-on-`any`
+      // dynamic-read arm was tried here (route through `__extern_get(recv,"length")`
+      // → uniform externref: the real value or JS `undefined` for an absent
+      // property, fixing `var obj={}; obj.length===undefined → false`). It EJECTED
+      // from the merge_group with 13 regressions and the faithful test262 runner
+      // proved the value-semantics is NOT a surgical slice: the genuinely-dynamic
+      // `any` receivers (host-builtin functions via Symbol-keyed prototype walks;
+      // `$AnyValue`-boxed for-await array-rest bindings) are RUNTIME-INDISTINGUISHABLE
+      // from a plain `{}`-absent-length at the bare-externref level — they all reach
+      // `__extern_get`→undefined→NaN where the prior numeric path returned a usable
+      // value, and the canary needs that SAME undefined to stay undefined. No
+      // `ref.test`/`ref.is_null`/`__extern_has` predicate separates them; only a
+      // TAG-AWARE reader (inspecting the boxed `$AnyValue` tag — M2's first
+      // primitive) can. So the arm is OFF: this `any`-receiver `.length` falls
+      // through to the origin path unchanged (zero regression; the #2580 fix lands
+      // in M2). `emitDynGet`/`ensureDynReadHelpers` (the M0 scaffold) stay registered
+      // for M2 to call. Standalone keeps its native `__extern_length` arm below.
+      //
+      // (#1919) Undo the compiled expression if it didn't match — transactional
+      // rollback (body + locals + late imports + errors), not a bare body truncate.
+      rollbackSpeculative(ctx, fctx, snap);
     }
     // #1472 Phase B Blocker B Slice 2 — standalone `.length` on an `any`/unknown
     // receiver. None of the vec fast-paths matched, so the receiver is an opaque
