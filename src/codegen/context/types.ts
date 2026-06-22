@@ -67,14 +67,14 @@ export interface CodegenOptions {
   wasi?: boolean;
   /**
    * #2524 Phase 1 — route `process.std{in,out,err}` IO through a separately
-   * compiled, linkable `js2wasm:node-io` shim instead of inlining the
+   * compiled, linkable `js2wasm:node-process` shim instead of inlining the
    * `wasi_snapshot_preview1.fd_read`/`fd_write` glue. When set (WASI only), the
    * user module imports `stdin_read`/`stdout_write`/`stderr_write` plus its
-   * linear memory from `js2wasm:node-io` and carries NO `wasi_snapshot_preview1`
-   * import for the stream IO path; `node-shim.wasm` implements the interface
+   * linear memory from `js2wasm:node-process` and carries NO `wasi_snapshot_preview1`
+   * import for the stream IO path; `node-process.wasm` implements the interface
    * over WASI. Default off — the inline fd_read/fd_write path stays as fallback.
    */
-  nodeIoShim?: boolean;
+  linkNodeShims?: boolean;
   /** Standalone target (#1470): pure WasmGC, no JS host imports and no WASI
    *  runtime. Implies `nativeStrings: true` and refuses to emit any
    *  `wasm:js-string` namespace or `env::__concat_*` / `__extern_toString` /
@@ -1537,16 +1537,16 @@ export interface CodegenContext {
   supportsAsyncIr: boolean;
   /**
    * #2524 Phase 1 — when true (WASI only), `process` stream IO is lowered to
-   * imported `js2wasm:node-io` calls (over a shim-owned, imported linear
-   * memory) instead of inline `fd_read`/`fd_write`. See `nodeIoShim` in
+   * imported `js2wasm:node-process` calls (over a shim-owned, imported linear
+   * memory) instead of inline `fd_read`/`fd_write`. See `linkNodeShims` in
    * `CodegenOptions`.
    */
-  nodeIoShim: boolean;
-  /** #2524: func index of the imported `js2wasm:node-io::stdout_write` (-1 = not registered). */
+  linkNodeShims: boolean;
+  /** #2524: func index of the imported `js2wasm:node-process::stdout_write` (-1 = not registered). */
   nodeIoStdoutWriteIdx: number;
-  /** #2524: func index of the imported `js2wasm:node-io::stderr_write` (-1 = not registered). */
+  /** #2524: func index of the imported `js2wasm:node-process::stderr_write` (-1 = not registered). */
   nodeIoStderrWriteIdx: number;
-  /** #2524: func index of the imported `js2wasm:node-io::stdin_read` (-1 = not registered). */
+  /** #2524: func index of the imported `js2wasm:node-process::stdin_read` (-1 = not registered). */
   nodeIoStdinReadIdx: number;
   /** WASI import indices */
   wasiFdWriteIdx: number;

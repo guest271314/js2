@@ -443,10 +443,10 @@ export function tryEmitLinearU8StdinRead(
   }
   fctx.body.push({ op: "local.set", index: offLocal } as Instr);
 
-  // #2524 Phase 1 — under the node-io shim, hand `(ptr+off, len-off)` to the
+  // #2524 Phase 1 — under the node-process shim, hand `(ptr+off, len-off)` to the
   // imported `stdin_read`; the shim builds the iovec + calls fd_read into the
   // shared memory and returns the byte count.
-  if (ctx.nodeIoShim) {
+  if (ctx.linkNodeShims) {
     fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
     fctx.body.push({ op: "local.get", index: offLocal } as Instr);
     fctx.body.push({ op: "i32.add" } as Instr);
@@ -501,10 +501,10 @@ export function tryEmitLinearU8StdWrite(
   const buf = getLinearU8Buffer(ctx, fctx, bufArg);
   if (!buf) return false;
 
-  // #2524 Phase 1 — under the node-io shim, the syscall + iovec live in the
+  // #2524 Phase 1 — under the node-process shim, the syscall + iovec live in the
   // shim. The user module just hands `(ptr, len)` to the imported write fn over
   // the shared memory: zero staging copy, no iovec, no nwritten cell.
-  if (ctx.nodeIoShim) {
+  if (ctx.linkNodeShims) {
     const ioIdx = useStderr ? ctx.nodeIoStderrWriteIdx : ctx.nodeIoStdoutWriteIdx;
     fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
     fctx.body.push({ op: "local.get", index: buf.lenLocalIdx } as Instr);

@@ -217,8 +217,8 @@ export function createCodegenContext(
     nullThisTypeErrorReady: false, // (#2025)
     funcClosureGlobals: new Map(),
     wasi: options?.wasi ?? false,
-    // #2524 Phase 1 — node-io shim only applies under WASI; ignored otherwise.
-    nodeIoShim: !!(options?.wasi && options?.nodeIoShim),
+    // #2625 — the linkable js2wasm:node-<mod> shims only apply under WASI; ignored otherwise.
+    linkNodeShims: !!(options?.wasi && options?.linkNodeShims),
     nodeIoStdoutWriteIdx: -1,
     nodeIoStderrWriteIdx: -1,
     nodeIoStdinReadIdx: -1,

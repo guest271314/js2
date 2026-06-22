@@ -55,10 +55,10 @@ export function tryCompileNodeProcessCall(
   // #1886 Slice B: zero-copy `process.std*.write(buf)` for a linear-backed
   // Uint8Array — fd_write reads straight from `ptr` for `len` bytes (no
   // GC→linear staging copy). Only fires for a registered linear-safe buffer.
-  // #2524: under the node-io shim there is no fd_write idx; `tryEmitLinearU8StdWrite`
+  // #2524: under the node-process shim there is no fd_write idx; `tryEmitLinearU8StdWrite`
   // routes to the imported `stdout_write`/`stderr_write` instead (the passed idx
   // is unused on that branch).
-  const writeSinkIdx = ctx.nodeIoShim ? ctx.nodeIoStdoutWriteIdx : ctx.wasiFdWriteIdx;
+  const writeSinkIdx = ctx.linkNodeShims ? ctx.nodeIoStdoutWriteIdx : ctx.wasiFdWriteIdx;
   if (writeSinkIdx !== undefined && writeSinkIdx >= 0) {
     if (tryEmitLinearU8StdWrite(ctx, fctx, argExpr, writeSinkIdx, useStderr)) {
       // Match the GC Uint8Array write path's contract: push `1` (write
@@ -142,9 +142,9 @@ function matchProcessStdStreamWrite(
   fctx: FunctionContext,
   expr: ts.CallExpression,
 ): { useStderr: boolean } | null {
-  // #2524 — under the node-io shim there is no fd_write import; the write sink
-  // is `js2wasm:node-io::stdout_write`/`stderr_write` instead.
-  const haveWriteSink = ctx.nodeIoShim
+  // #2524 — under the node-process shim there is no fd_write import; the write sink
+  // is `js2wasm:node-process::stdout_write`/`stderr_write` instead.
+  const haveWriteSink = ctx.linkNodeShims
     ? ctx.nodeIoStdoutWriteIdx >= 0
     : ctx.wasiFdWriteIdx !== undefined && ctx.wasiFdWriteIdx >= 0;
   if (!ctx.wasi || !haveWriteSink) return null;
@@ -174,9 +174,9 @@ function matchProcessStdStreamDrainOnce(ctx: CodegenContext, fctx: FunctionConte
 }
 
 function matchProcessStdinRead(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): boolean {
-  // #2524 — under the node-io shim there is no fd_read import; stdin is read via
-  // `js2wasm:node-io::stdin_read` instead.
-  const haveReadSink = ctx.nodeIoShim
+  // #2524 — under the node-process shim there is no fd_read import; stdin is read via
+  // `js2wasm:node-process::stdin_read` instead.
+  const haveReadSink = ctx.linkNodeShims
     ? ctx.nodeIoStdinReadIdx >= 0
     : ctx.wasiFdReadIdx !== undefined && ctx.wasiFdReadIdx >= 0;
   if (!ctx.wasi || !haveReadSink) return false;
@@ -189,10 +189,10 @@ function matchProcessStdinRead(ctx: CodegenContext, fctx: FunctionContext, expr:
 }
 
 function emitProcessStdinRead(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult | null {
-  // #2524 — under the node-io shim there is no fd_read import; stdin is read via
-  // `js2wasm:node-io::stdin_read`. `readSinkIdx` is the func index to call
+  // #2524 — under the node-process shim there is no fd_read import; stdin is read via
+  // `js2wasm:node-process::stdin_read`. `readSinkIdx` is the func index to call
   // (fd_read inline, or stdin_read under the shim).
-  const readSinkIdx = ctx.nodeIoShim ? ctx.nodeIoStdinReadIdx : ctx.wasiFdReadIdx;
+  const readSinkIdx = ctx.linkNodeShims ? ctx.nodeIoStdinReadIdx : ctx.wasiFdReadIdx;
   if (readSinkIdx === undefined || readSinkIdx < 0) return null;
 
   // #1886 Slice B: when the buffer arg is a linear-backed Uint8Array, read
@@ -269,7 +269,7 @@ function emitProcessStdinRead(ctx: CodegenContext, fctx: FunctionContext, expr: 
   } as Instr);
 
   const nreadLocal = allocLocal(fctx, `__stdin_nread_${fctx.locals.length}`, { kind: "i32" });
-  if (ctx.nodeIoShim) {
+  if (ctx.linkNodeShims) {
     // #2524 — nread = stdin_read(WASI_STDIN_BUF_START, cap); the shim builds the
     // iovec + calls fd_read into the shared memory and returns the byte count.
     fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
