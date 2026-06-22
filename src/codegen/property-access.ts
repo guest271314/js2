@@ -390,6 +390,14 @@ function typedArrayViewSignedness(ctx: CodegenContext, receiver: ts.Expression):
 function hasNativeBuiltinConstantHandler(builtinName: string, propName: string): boolean {
   if (builtinName === "Math") return MATH_CONSTANT_PROPS.has(propName);
   if (builtinName === "Number") return NUMBER_CONSTANT_PROPS.has(propName);
+  // (#2610) `Symbol.<wellKnown>` as a VALUE folds to its small i32 sentinel id
+  // at the downstream constant emitter (`getWellKnownSymbolId`, ~line 4072) —
+  // host-free, no builtin-prototype object needed (NOT #2175-gated). Defer the
+  // standalone builtin-static-value-read refusal to it, mirroring the
+  // Math/Number constant defers above. Gate is exact: only the well-known
+  // names the emitter actually folds (a non-well-known `Symbol.foo` returns
+  // undefined here, so it still refuses-loud — correct, no constant exists).
+  if (builtinName === "Symbol") return getWellKnownSymbolId(propName) !== undefined;
   // (#2595) `<TypedArrayName>.BYTES_PER_ELEMENT` static read has a downstream
   // constant emitter; defer the standalone `__get_builtin` refusal to it.
   if (propName === "BYTES_PER_ELEMENT") return builtinName in TYPED_ARRAY_BYTES_PER_ELEMENT;
