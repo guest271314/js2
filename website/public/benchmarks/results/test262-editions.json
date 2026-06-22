@@ -37,12 +37,12 @@
   },
   {
     "edition": "ES2017",
-    "pass": 451,
-    "fail": 208,
+    "pass": 470,
+    "fail": 189,
     "ce": 8,
     "skip": 0,
     "total": 667,
-    "pct": 68
+    "pct": 70
   },
   {
     "edition": "ES2018",
