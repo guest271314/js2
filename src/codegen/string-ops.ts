@@ -2066,6 +2066,52 @@ function compileStringIntegerArg(ctx: CodegenContext, fctx: FunctionContext, arg
     fctx.body.push({ op: "i32.const", value: 0 });
     return;
   }
+  // #2600 — the index/position is `ToIntegerOrInfinity(arg)` = truncate-toward-
+  // zero of `ToNumber(arg)` (§7.1.5), NOT a direct i32 coercion. In standalone
+  // a fast i32 coercion of a fractional / non-numeric-typed position
+  // (`"1.9"`, `{valueOf(){…}}`, `true`) resolves to a wrong index. Route the
+  // arg through the existing numeric coercion engine to f64 (string →
+  // `__str_to_number`, object → ToPrimitive("number") — both already present
+  // for `+str` / `Number(x)`), then apply ToIntegerOrInfinity (NaN → 0, then
+  // `i32.trunc_sat_f64_s`, which truncates toward zero and saturates ±∞ to the
+  // i32 bounds — the method's subsequent <0 / >=len range checks clamp it).
+  // No new #2108 coercion site (reuses the engine). The legacy direct-i32 path
+  // is kept for the JS-host nativeStrings mode (these slices are standalone).
+  if (noJsHost(ctx)) {
+    const argType = compileExpression(ctx, fctx, arg);
+    if (!argType) {
+      // void → undefined → ToNumber NaN → ToIntegerOrInfinity 0.
+      fctx.body.push({ op: "i32.const", value: 0 });
+      return;
+    }
+    if (argType.kind === "i64") {
+      // BigInt fell through static detection (e.g. `any` widened to bigint).
+      fctx.body.push({ op: "drop" } as Instr);
+      emitTypeErrorThrow(ctx, fctx, "TypeError: Cannot convert a BigInt value to a number");
+      fctx.body.push({ op: "i32.const", value: 0 });
+      return;
+    }
+    if (argType.kind === "i32") {
+      // Already an integer (boolean / int-typed position) — no ToNumber needed;
+      // an i32 is already integral and within range for the helper.
+      return;
+    }
+    // Coerce ToNumber → f64 via the engine, then ToIntegerOrInfinity.
+    coerceType(ctx, fctx, argType, { kind: "f64" }, "number");
+    const fTmp = allocLocal(fctx, `__strint_f_${fctx.locals.length}`, { kind: "f64" });
+    fctx.body.push({ op: "local.set", index: fTmp });
+    // ToIntegerOrInfinity: NaN → 0, else trunc toward zero (±∞ saturates).
+    fctx.body.push({ op: "local.get", index: fTmp });
+    fctx.body.push({ op: "local.get", index: fTmp });
+    fctx.body.push({ op: "f64.ne" }); // self != self ⇒ NaN
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } },
+      then: [{ op: "i32.const", value: 0 }],
+      else: [{ op: "local.get", index: fTmp }, { op: "i32.trunc_sat_f64_s" }],
+    } as Instr);
+    return;
+  }
   const argType = compileExpression(ctx, fctx, arg, { kind: "i32" });
   if (!argType) {
     fctx.body.push({ op: "i32.const", value: 0 });
