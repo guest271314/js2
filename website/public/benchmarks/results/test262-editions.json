@@ -19,9 +19,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11012,
-    "fail": 4157,
-    "ce": 228,
+    "pass": 11017,
+    "fail": 4151,
+    "ce": 229,
     "skip": 0,
     "total": 15397,
     "pct": 72
@@ -64,8 +64,8 @@
   },
   {
     "edition": "ES2020",
-    "pass": 1446,
-    "fail": 376,
+    "pass": 1451,
+    "fail": 371,
     "ce": 61,
     "skip": 18,
     "total": 1901,
@@ -73,8 +73,8 @@
   },
   {
     "edition": "ES2021",
-    "pass": 328,
-    "fail": 127,
+    "pass": 331,
+    "fail": 124,
     "ce": 8,
     "skip": 0,
     "total": 463,
