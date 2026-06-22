@@ -23,6 +23,7 @@ import { popBody, pushBody } from "./context/bodies.js";
 import { reportError, reportErrorNoNode } from "./context/errors.js";
 import { allocLocal, allocTempLocal, getLocalType, releaseTempLocal } from "./context/locals.js";
 import { snapshotSpeculative, rollbackSpeculative } from "./context/speculative.js";
+import { emitDynGet } from "./dyn-read.js"; // (#2580 M2 slice 1)
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitCachedMethodClosureAccess, emitFuncRefAsClosure, getOrCreateFuncRefWrapperTypes } from "./closures.js";
 import { emitLazyClassObjectGet, emitLazyProtoGet, findExternInfoForMember } from "./expressions/extern.js";
@@ -3788,27 +3789,62 @@ export function compilePropertyAccess(
           return ctx.fast ? { kind: "i32" } : { kind: "f64" };
         }
       }
-      // (#2580 M1 — DEFERRED TO M2, PR #1894 eject) The host `.length`-on-`any`
-      // dynamic-read arm was tried here (route through `__extern_get(recv,"length")`
-      // → uniform externref: the real value or JS `undefined` for an absent
-      // property, fixing `var obj={}; obj.length===undefined → false`). It EJECTED
-      // from the merge_group with 13 regressions and the faithful test262 runner
-      // proved the value-semantics is NOT a surgical slice: the genuinely-dynamic
-      // `any` receivers (host-builtin functions via Symbol-keyed prototype walks;
-      // `$AnyValue`-boxed for-await array-rest bindings) are RUNTIME-INDISTINGUISHABLE
-      // from a plain `{}`-absent-length at the bare-externref level — they all reach
-      // `__extern_get`→undefined→NaN where the prior numeric path returned a usable
-      // value, and the canary needs that SAME undefined to stay undefined. No
-      // `ref.test`/`ref.is_null`/`__extern_has` predicate separates them; only a
-      // TAG-AWARE reader (inspecting the boxed `$AnyValue` tag — M2's first
-      // primitive) can. So the arm is OFF: this `any`-receiver `.length` falls
-      // through to the origin path unchanged (zero regression; the #2580 fix lands
-      // in M2). `emitDynGet`/`ensureDynReadHelpers` (the M0 scaffold) stay registered
-      // for M2 to call. Standalone keeps its native `__extern_length` arm below.
-      //
-      // (#1919) Undo the compiled expression if it didn't match — transactional
-      // rollback (body + locals + late imports + errors), not a bare body truncate.
-      rollbackSpeculative(ctx, fctx, snap);
+      // (#2580 M2 slice 1) `.length` on a statically-`any`/`unknown` receiver in
+      // HOST mode, where the compiled receiver is NOT a length-bearing vec struct
+      // above. The origin path coerces the read to NUMERIC, turning a plain
+      // object's ABSENT `length` (spec `undefined`, §OrdinaryGet) into `0` / a
+      // bogus `typeof "boolean"` (`var obj={}; obj.length===undefined` → false —
+      // the #2580 headline bug). Route through the M2 tag/null-aware reader
+      // (`emitDynGet`), which returns a UNIFORM externref: a boxed number for a vec
+      // length / closure arity / null-undefined receiver (matching origin's prior
+      // numeric value — the #1894-eject Cluster A/B classes), JS `undefined` for a
+      // genuine non-null host object's absent property (the canary). The reader's
+      // receiver-kind dispatch (`__extern_is_undefined` → 0, `ref.test $vec` →
+      // field-0, `ref.test $closure` → 0, else `__extern_get`) is what a bare
+      // `__extern_get` could not do — the M1 over-broad arm's failure. Gated
+      // strictly on a static `any`/`unknown` receiver, host mode; the typed
+      // `.length` hot-path is byte-identical (handled + returned above).
+      // (#2580 M2 s1) DECLINE inside an async function/generator body. The
+      // async state machine (#1042 CPS lowering) can leave a destructuring rest /
+      // setter-captured local in a state where a speculative `compileExpression`
+      // recompile resolves a STALE value (the #2602-class desync; surfaces for the
+      // for-await array-rest `.length` reads incl. the setter-property variant).
+      // Origin reads those correctly via its own non-speculative path, so DECLINE
+      // here → fall through to origin (all 8 for-await rest `.length` tests stay
+      // green). The #2580 canary + Cluster A reads are NOT inside async functions,
+      // so they still take the reader. Walk to the nearest function-like ancestor
+      // and check the `async` modifier.
+      let inAsyncFn = false;
+      for (let p: ts.Node | undefined = expr.parent; p; p = p.parent) {
+        if (
+          ts.isFunctionDeclaration(p) ||
+          ts.isFunctionExpression(p) ||
+          ts.isArrowFunction(p) ||
+          ts.isMethodDeclaration(p)
+        ) {
+          inAsyncFn = ts.getModifiers(p)?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
+          break;
+        }
+      }
+      if (
+        !ctx.standalone &&
+        !inAsyncFn &&
+        (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 &&
+        exprType
+      ) {
+        if (exprType.kind !== "externref") {
+          coerceType(ctx, fctx, exprType, { kind: "externref" });
+        }
+        if (emitDynGet(ctx, fctx, "length")) {
+          return { kind: "externref" };
+        }
+        // emitDynGet bailed (no runtime) — roll back; the legacy paths recompile.
+        rollbackSpeculative(ctx, fctx, snap);
+      } else {
+        // (#1919) Undo the compiled expression if it didn't match — transactional
+        // rollback (body + locals + late imports + errors), not a bare truncate.
+        rollbackSpeculative(ctx, fctx, snap);
+      }
     }
     // #1472 Phase B Blocker B Slice 2 — standalone `.length` on an `any`/unknown
     // receiver. None of the vec fast-paths matched, so the receiver is an opaque
