@@ -61,6 +61,7 @@ import {
   nativeStringType,
   resolveWasmType,
   STRING_METHODS,
+  TYPED_ARRAY_NAMES,
 } from "../index.js";
 import {
   compileArrayConstructorCall,
@@ -95,7 +96,11 @@ import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 // (#2193 PR-B) reflective `m.call(thisArg, …)` on a `$NativeProto` member-closure value.
 import { ensureArrayNativeProtoGlue, ensureObjectNativeProtoGlue } from "../array-object-proto.js";
-import { ensureStandaloneNativeMethodClosure, getNativeProtoBuiltinGlue } from "../native-proto.js";
+import {
+  emitBrandCheckTypeError,
+  ensureStandaloneNativeMethodClosure,
+  getNativeProtoBuiltinGlue,
+} from "../native-proto.js";
 import { compileStatement, hoistFunctionDeclarations } from "../statements.js";
 import {
   emitSetExtrasArgv,
@@ -172,6 +177,7 @@ import {
 } from "../generators-native.js";
 import {
   ensureNativeStringExternBridge,
+  ensureNativeStringHelpers,
   ensureStrToCharVecHelper,
   ensureTextEncodingHelpers,
   nativeStringLiteralInstrs,
@@ -388,11 +394,26 @@ function resolveObjectToStringTag(ctx: CodegenContext, argExpr: ts.Expression | 
   if ((t.flags & ts.TypeFlags.Null) !== 0) return "Null";
   if ((t.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0) return "Undefined";
 
+  const symName = nn.getSymbol()?.name;
+
+  // (#2597) §23.2.3.38 — `%TypedArray%.prototype[@@toStringTag]` is the typed
+  // array's constructor name (`"Int32Array"`, …). §25.x give DataView /
+  // ArrayBuffer / SharedArrayBuffer. These receivers are opaque Wasm structs, so
+  // the host's `Object.prototype.toString` ALSO mis-tags them — return the static
+  // tag unconditionally (correct in BOTH host and standalone), not via
+  // `deferOrStandalone`. MUST precede the `resolveArrayInfo` "Array" arm below:
+  // a typed array is array-like to that resolver, so without this it would mis-tag
+  // `[object Array]` instead of `[object Int32Array]`. `.prototype` of a typed
+  // array was filtered earlier (no [[TypedArrayName]] slot → `[object Object]`).
+  if (symName !== undefined && TYPED_ARRAY_NAMES.has(symName)) return symName;
+  if (symName === "BigInt64Array" || symName === "BigUint64Array") return symName;
+  if (symName === "DataView") return "DataView";
+  if (symName === "ArrayBuffer") return "ArrayBuffer";
+  if (symName === "SharedArrayBuffer") return "SharedArrayBuffer";
+
   // Array (real `__vec_`/`__arr_` arrays, via the established resolver) — the
   // host sees an opaque GC vec and mis-tags it [object Object].
   if (resolveArrayInfo(ctx, nn)) return "Array";
-
-  const symName = nn.getSymbol()?.name;
 
   // Primitive-wrapper *objects* (`new Number(5)` / `new Boolean(true)` /
   // `new String("")`) box to the corresponding tag, but the host already
@@ -4282,6 +4303,43 @@ function compileCallExpression(
       if (mathResult !== undefined) return mathResult;
       // Unknown Math method — fall through to generic call handling
       // (e.g. Array.prototype.every.call(Math, ...) rewritten as Math.every(...))
+    }
+
+    // #2590 — RegExp.escape(s) (ES2025, §22.2.5). A pure string transform that
+    // escapes regex-syntax-significant code points. Standalone-only: routing it
+    // through the native `__regex_escape` helper avoids leaking the dynamic
+    // `env::__get_builtin` host import (which would otherwise refuse / fail to
+    // instantiate). Placed before the generic builtin-member fallthrough.
+    if (
+      ctx.standalone &&
+      ts.isIdentifier(propAccess.expression) &&
+      isGlobalRegExpIdentifier(ctx, propAccess.expression) &&
+      propAccess.name.text === "escape" &&
+      ctx.nativeStrings
+    ) {
+      const arg = expr.arguments[0];
+      const argTsType = arg ? ctx.checker.getTypeAtLocation(arg) : undefined;
+      const argFlags = argTsType?.flags ?? 0;
+      const isStringArg = arg !== undefined && (isStringType(argTsType!) || (argFlags & ts.TypeFlags.StringLike) !== 0);
+      const isUnresolvedArg = (argFlags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+      if (isStringArg) {
+        ensureNativeStringHelpers(ctx);
+        const escapeIdx = ctx.nativeStrHelpers.get("__regex_escape");
+        if (escapeIdx !== undefined) {
+          compileExpression(ctx, fctx, arg!, nativeStringType(ctx));
+          flushLateImportShifts(ctx, fctx);
+          fctx.body.push({ op: "call", funcIdx: ctx.nativeStrHelpers.get("__regex_escape")! } as Instr);
+          return nativeStringType(ctx);
+        }
+      } else if (arg !== undefined && !isUnresolvedArg) {
+        // §22.2.5 step 1: a statically non-String argument is a TypeError.
+        // (number / object / array / null / undefined literals — the
+        // non-string-inputs.js test exercises exactly these.)
+        emitBrandCheckTypeError(ctx, fctx.body, "RegExp.escape called on a non-string value");
+        fctx.body.push({ op: "unreachable" } as Instr);
+        return nativeStringType(ctx);
+      }
+      // `any`/`unknown` arg → narrow-refuse (fall through to the generic path).
     }
 
     // Handle Number.isNaN(n) and Number.isInteger(n)
