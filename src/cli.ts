@@ -71,11 +71,12 @@ Options:
                     is ON by default; this restores the pre-#1950 behaviour.
                     (No-op when binaryen/wasm-opt is unavailable — that path
                     already degrades to a one-line note, never a failure.)
-  --node-io-shim    (WASI, #2524 Phase 1) Route process.std{in,out,err} IO
-                    through the linkable js2wasm:node-io shim: the module imports
-                    stdin_read/stdout_write/stderr_write + its memory from
-                    js2wasm:node-io (no wasi_snapshot_preview1 for stream IO) and
-                    links node-shim.wasm. Off by default (inline fd_* fallback).
+  --link-node-shims (WASI, #2625) Emit the per-module linkable js2wasm:node-<mod>
+                    shims instead of inlining the host APIs. For node:process IO
+                    the module imports stdin_read/stdout_write/stderr_write + its
+                    memory from js2wasm:node-process (no wasi_snapshot_preview1 for
+                    stream IO) and links node-process.wasm. Off by default — the
+                    inline fd_read/fd_write path is self-contained.
   --emulate <env>   Emulate a host runtime's globals so they type-check without
                     @types/node. 'node' = ambient process/etc.; 'none' = off.
                     Auto-enabled (type-level only) when the source imports a
@@ -140,8 +141,9 @@ let utf8Storage = false;
 // default (strict-on under `--target wasi`); `true` / `false` = explicit
 // override from `--no-host-imports` / `--allow-host-imports`.
 let strictNoHostImports: boolean | undefined;
-// #2524 Phase 1 — process IO via the linkable js2wasm:node-io shim (WASI only).
-let nodeIoShim = false;
+// #2625 — emit the per-module linkable js2wasm:node-<mod> shims (WASI only);
+// default false keeps the self-contained inline fd_read/fd_write path.
+let linkNodeShims = false;
 // #2603 — `--emulate node`: opt into Node API emulation (ambient `process` typing).
 // `emulateExplicit` records that the user passed `--emulate`/`--no-emulate`, so a
 // `node:` import won't auto-enable over an explicit choice.
@@ -201,10 +203,11 @@ for (let i = 0; i < args.length; i++) {
     quiet = true;
   } else if (arg === "--utf8-storage") {
     utf8Storage = true;
-  } else if (arg === "--node-io-shim") {
-    // #2524 Phase 1 — route process.std* IO through the linkable js2wasm:node-io
-    // shim (WASI only). Off by default; the inline fd_read/fd_write path stays.
-    nodeIoShim = true;
+  } else if (arg === "--link-node-shims") {
+    // #2625 — emit the per-module linkable js2wasm:node-<mod> shims instead of
+    // inlining the host APIs (WASI only). Off by default; the self-contained
+    // inline fd_read/fd_write path stays.
+    linkNodeShims = true;
   } else if (arg === "--emulate" || arg.startsWith("--emulate=")) {
     // #2603 — opt into (or out of) Node API emulation. `--emulate node` gives the
     // checker an ambient `process` typing so Node globals type-check without
@@ -315,7 +318,7 @@ const result = await compile(source, {
   ...(emitWit ? { wit: witPackageName ? { packageName: witPackageName } : true } : {}),
   ...(allowFs ? { allowFs: true } : {}),
   ...(utf8Storage ? { utf8Storage: true } : {}),
-  ...(nodeIoShim ? { nodeIoShim: true } : {}),
+  ...(linkNodeShims ? { linkNodeShims: true } : {}),
   ...(emulateNode ? { emulateNode: true } : {}),
   fileName: absInput,
   ...(strictNoHostImports !== undefined ? { strictNoHostImports } : {}),

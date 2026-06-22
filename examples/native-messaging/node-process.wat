@@ -1,5 +1,5 @@
 (module
-  ;; js2wasm:node-io shim — implements the byte-boundary IO interface over WASI.
+  ;; js2wasm:node-process shim — implements the byte-boundary IO interface over WASI.
   (import "wasi_snapshot_preview1" "fd_write"
     (func $fd_write (param i32 i32 i32 i32) (result i32)))
   (import "wasi_snapshot_preview1" "fd_read"
