@@ -2303,6 +2303,28 @@ function tryEmitInlineDynamicCall(
   const undefinedIdx = needsUndefinedPad
     ? ensureLateImport(ctx, "__get_undefined", [], [{ kind: "externref" }])
     : undefined;
+  // (#2611) Flush the deferred late-import shift NOW — every other late-import
+  // call site in this file flushes after the add, but this one historically did
+  // not, leaving `ctx.pendingLateImportShift` dangling. `ensureLateImport`
+  // inserts the import at index `numImportFuncs` and defers the shift; until it
+  // is flushed, the funcMap entries + bodies of functions registered BEFORE the
+  // import stay stale-low while functions registered AFTER (e.g. `__module_init`,
+  // whose funcIdx is recomputed from the post-import `numImportFuncs`) are already
+  // correct. A flush left this late is then HALF-applied: shifting it at finalize
+  // re-bumps the already-correct post-import indices (`startFuncIdx` → invalid
+  // start function), while NOT flushing at all leaves the pre-import native
+  // runtime helpers (`__extern_length`/`__extern_get_idx`/…) stale, so a
+  // finalize reserve-then-fill resolves `funcMap.get(name) - numImportFuncs` to
+  // the WRONG `mod.functions[]` slot and corrupts that body ("local index out of
+  // range … #2043 class"). Flushing immediately — before any further function is
+  // registered — repairs only the genuinely-stale pre-import indices and keeps
+  // the index space self-consistent through the rest of compilation. Idempotent
+  // no-op when nothing is pending. This site (`tryEmitInlineDynamicCall` ->
+  // `__get_undefined` for the arity-pad path) is the one async-generator /
+  // destructuring-param trigger that reaches here, but the flush is correct for
+  // every path. (Mirrors `emitUndefined`, which already flushes after the same
+  // `ensureGetUndefined` add.)
+  if (undefinedIdx !== undefined) flushLateImportShifts(ctx, fctx);
   const pushUndefinedExternref = (body: Instr[]): void => {
     if (undefinedIdx !== undefined) {
       body.push({ op: "call", funcIdx: undefinedIdx } as Instr);

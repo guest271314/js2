@@ -1,9 +1,11 @@
 ---
 id: 2605
 title: "Standalone `x instanceof Set/Map/WeakMap/WeakSet` returns false for native collections"
-status: ready
+status: done
 sprint: 65
 created: 2026-06-22
+completed: 2026-06-22
+assignee: ttraenkler/dev-collections
 priority: high
 feasibility: easy
 reasoning_effort: medium
@@ -98,3 +100,43 @@ ref.test $Map                ;; ctx.mapTypeIdx
   `typeof-delete.ts`). Independent, easy, high-value — good first dispatch.
 - Gated on `ctx.nativeStrings`; host/gc `instanceof Set` already works via the
   host class table — verify host path unchanged.
+
+## Resolution (2026-06-22 — dev-collections)
+
+**Re-grounded against current main (`4bed9499c`, post-#2604/#2607).** The spec's
+predicted root cause (`compileInstanceOf` in `typeof-delete.ts` constant-folding
+`false`) was **stale** — `instanceof Set` does not flow through `compileInstanceOf`
+for a builtin RHS. The real dispatch is `expressions.ts:1061` →
+`compileHostInstanceOf` → `tryStaticInstanceOf`, and `Set` is already a registered
+builtin (`BUILTIN_TYPE_TAGS.Set`), so `combined instanceof Set` already
+statically resolves to `i32.const 1` standalone.
+
+**Actual root cause of the ~21 failing rows:** the test262 harness lowers
+`assert.sameValue(combined instanceof Set, true)` to
+`assert_sameValue_bool(actual: any, expected: boolean)` → `actual !== expected`.
+The `instanceof` result (a boolean) crosses into the `any` parameter as a boxed
+value; the standalone dynamic-equality tag dispatch
+(`binary-ops.ts` `noJsHost` arm) coerced the `boolean` operand to externref via
+`coerceType` (which uses `f64.convert_i32_s` + `__box_number` → tag **number**),
+while the other operand was a boxed boolean **true** (tag boolean). The
+tags mismatched → fell to reference identity → wrong `false`.
+
+**Fix:** in the `binary-ops.ts` strict/loose-equality externref tag-dispatch,
+box a **boolean** operand (known from the TS-level `leftIsBool`/`rightIsBool`
+flags) via `__box_boolean` instead of `__box_number`, so the "both typeof
+boolean → unbox i32, compare" arm fires. This is a broad fix — any standalone
+`x === <boolean>` / `assert.sameValue(bool, bool)` across test262 benefits, not
+just Set rows.
+
+**Files:** `src/codegen/binary-ops.ts` (`boxOperandToExternref` helper in the
+no-JS-host equality arm). No change to `typeof-delete.ts`.
+
+## Test Results
+
+Set/prototype standalone sweep (host-pass-but-standalone-fail rows in
+`built-ins/Set/prototype/{union,intersection,difference,symmetricDifference,
+isSubsetOf,isSupersetOf,isDisjointFrom,has}`): **110 → 65** (−45 fails) combined
+with #2606 Bug A. The instanceof/sameValue-bool rows (`combines-*`,
+`appends-new-values`, `add-not-called`, `has/returns-*-{boolean,number,string,
+symbol,nan}`) now pass. Dedicated vitest:
+`tests/issue-2605-2606-collections-bool-null.test.ts`.

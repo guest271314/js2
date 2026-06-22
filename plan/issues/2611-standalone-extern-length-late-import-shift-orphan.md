@@ -1,9 +1,11 @@
 ---
 id: 2611
 title: "standalone: `__extern_length` invalid-Wasm (#2043 late-import index-shift orphan) in async-gen-method destructuring-param defaults"
-status: ready
+status: done
 sprint: 65
 created: 2026-06-22
+completed: 2026-06-22
+assignee: sendev-flatten
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -191,3 +193,64 @@ compile (`WebAssembly.compile` / validate) the wrapped repro files above under
 `target:"standalone"` and assert NO `local index out of range` / invalid-binary
 error. Mirror `tests/issue-2158-dstr-param-default-nested-pattern.test.ts` (the
 Slice F-1 validate-only regression guard).
+
+## Resolution (2026-06-22, sendev-flatten)
+
+**Verified root cause — corrects the spec's hypothesis.** The diagnostic names
+the #2043 *funcIdx-call-shift* class, but the actual mechanism is a **name↔body
+desync from an UNFLUSHED deferred late-import shift that leaked past later
+function registrations** — confirmed via instrumented build + emitted-body dump,
+not the spec's `objLengthArm`-captured `externGetIdx2036` theory:
+
+1. The error `local index out of range — 4 at __extern_length` is a body-content
+   corruption, not a call-target shift: the dumped `__extern_length` body was
+   literally `__extern_get_idx`'s body (it used local 4 / `i32.trunc_sat_f64_s` /
+   `array.get` / `ref.null.extern` returns), spliced into the wrong function.
+
+2. `tryEmitInlineDynamicCall` (`src/codegen/expressions/calls.ts`) adds the
+   `__get_undefined` arity-pad late import via `ensureLateImport` — which DEFERS
+   the index shift (records `ctx.pendingLateImportShift`, bumps `numImportFuncs`)
+   — but, unlike every sibling late-import call site, **never flushed it**. The
+   async-generator class method's destructuring-param default is one path that
+   reaches this site (other adders `__array_from_iter_n` are flushed by their
+   own sites; `__get_undefined` here was the leak).
+
+3. The dangling pending shift then leaked past further function registrations.
+   `__module_init` (and any function registered after the import) got funcIdx =
+   post-import `numImportFuncs + arrayPos` — already correct. But the native
+   runtime helpers registered BEFORE the import (`__extern_length`,
+   `__extern_get_idx`, …) had stale-low `funcMap` entries. Instrumentation:
+   `funcMap{EL=127,EGI=128}` while `arraySlot{EL=109→128, EGI=110→129}` and
+   `pendingLateImportShift={importsBefore:18}` — stale-low by exactly the
+   unflushed `added`.
+
+4. At finalize, `fillExternGetIdxVecArms` resolved
+   `mod.functions[funcMap.get("__extern_get_idx") - numImportFuncs] =
+   mod.functions[128-19] = mod.functions[109]` = `__extern_length`, and spliced
+   `__extern_get_idx`'s vec arms into `__extern_length`'s body → invalid Wasm.
+
+**Why flushing at finalize is WRONG (rejected alternative).** The deferred shift
+is HALF-applied by finalize: `startFuncIdx` and post-import funcMap entries are
+already at post-shift values while pre-import native helpers are stale. Running
+the full `shiftLateImportIndices` at finalize re-bumps `startFuncIdx` → `invalid
+start function: non-zero parameter or return count` (verified: startFuncIdx 201
+→ wrongly 202; `__module_init` was already correctly at funcIdx 201). The shift
+must be flushed at the leak source, before any further function is registered.
+
+**Fix (1 line + comment, `src/codegen/expressions/calls.ts`).** After the
+`__get_undefined` add in `tryEmitInlineDynamicCall`, flush immediately:
+`if (undefinedIdx !== undefined) flushLateImportShifts(ctx, fctx);`. This repairs
+ONLY the genuinely-stale pre-import indices (no later function exists yet to be
+over-shifted) and keeps the index space self-consistent through finalize —
+mirroring `emitUndefined`, which already flushes after the same
+`ensureGetUndefined` add. Idempotent no-op when nothing pends.
+
+**Validation.** Repro (3 wrapped test262 files) now emit valid Wasm. New
+regression test `tests/issue-2611-extern-length-shift-async-gen-dstr-standalone.test.ts`
+(7 tests: standalone validate for async-gen/static/gen/array-rest dstr defaults +
+a `startFuncIdx` over-shift guard + host-runtime correctness). Regression-neutral:
+the #820/#2158/#2567/#2512/#2174/#2542/#2029 clusters pass; the equivalence
+async/generator/dstr/call subset passes (141/144 — the 3 tagged-template-cache
+failures + the 14 #820b/#820m failures are PRE-EXISTING on `origin/main`,
+A/B-confirmed, unrelated to this fix). tsc / prettier / biome / coercion-sites
+gates clean.
