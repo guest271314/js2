@@ -4442,8 +4442,12 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         boxInstrs = [{ op: "call", funcIdx: boxNumIdx } as Instr];
       } else if (elemKey === "i32" && boxNumIdx !== undefined) {
         boxInstrs = [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
-      } else if ((elemKey === "i32_byte" || elemKey === "i8_byte") && boxNumIdx !== undefined) {
-        // ArrayBuffer/DataView byte elements (i32, unsigned 0-255) — convert unsigned then box
+      } else if ((elemKey === "i32_byte" || elemKey === "i8_byte" || elemKey === "i16_byte") && boxNumIdx !== undefined) {
+        // ArrayBuffer/DataView/typed-array byte elements — convert unsigned then box.
+        // (#2593) i16_byte joins here: the GENERIC dynamic-read path (`__vec_get`,
+        // for an `any`-typed read of a typed-array vec) reads the packed element
+        // zero-extended; the per-VIEW signedness for the typed `a[i]` read site is
+        // handled separately in property-access.ts (typedArrayViewSignedness).
         boxInstrs = [{ op: "f64.convert_i32_u" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
       } else if (elemKey === "i64") {
         // i64 (BigInt) is a value type, not a ref type — extern.convert_any expects anyref.
@@ -4462,7 +4466,13 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
         { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr,
         { op: "local.get", index: 1 } as Instr, // index
-        { op: elemKey === "i8_byte" ? "array.get_u" : "array.get", typeIdx: arrTypeIdx } as Instr,
+        // (#2593) Packed i8/i16 elements REQUIRE array.get_u/_s (plain array.get
+        // is invalid Wasm on a packed array); read zero-extended in this generic
+        // path. i32_byte/f64 use plain array.get.
+        {
+          op: elemKey === "i8_byte" || elemKey === "i16_byte" ? "array.get_u" : "array.get",
+          typeIdx: arrTypeIdx,
+        } as Instr,
         ...boxInstrs,
         { op: "return" } as Instr,
       ];
@@ -4755,12 +4765,18 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         { name: `__vpop_vec_${vecTypeIdx}`, type: { kind: "ref_null", typeIdx: vecTypeIdx } },
         { name: `__vpop_len_${vecTypeIdx}`, type: { kind: "i32" } },
       );
+      // (#2593) Packed i8/i16 elements need array.get_u and unsigned→f64; plain
+      // `array.get` is invalid Wasm on a packed array. Generic dynamic path reads
+      // zero-extended (the per-view signedness is at the typed `a[i]` site).
+      const isPackedByte = elemKey === "i8_byte" || elemKey === "i16_byte";
       const boxInstrs: Instr[] =
         elemKey === "externref"
           ? []
           : elemKey === "f64"
             ? [{ op: "call", funcIdx: boxNumIdx2! } as Instr]
-            : [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx2! } as Instr];
+            : isPackedByte
+              ? [{ op: "f64.convert_i32_u" } as Instr, { op: "call", funcIdx: boxNumIdx2! } as Instr]
+              : [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx2! } as Instr];
       const thenBranch: Instr[] = [
         { op: "local.get", index: 1 } as Instr,
         { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
@@ -4782,7 +4798,7 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         { op: "local.get", index: lenL } as Instr,
         { op: "i32.const", value: 1 } as Instr,
         { op: "i32.sub" } as Instr,
-        { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+        { op: isPackedByte ? "array.get_u" : "array.get", typeIdx: arrTypeIdx } as Instr,
         ...boxInstrs,
         // vec.length = len - 1 (value stays beneath on the stack)
         { op: "local.get", index: vecL } as Instr,
