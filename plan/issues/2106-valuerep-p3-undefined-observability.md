@@ -332,3 +332,112 @@ measured test262 run, as the plan already says). Reverted the attempt cleanly
 (no code landed). Next agent: investigate why `__unbox_number(__box_number(x))`
 null-derefs in the find-HIT consuming context before re-widening — that
 box-protocol fix is the real prerequisite, not the find emit site itself.
+
+## S1 — Architect spec: standalone tag-1 `$undefined` singleton (sdev-async, 2026-06-23)
+
+Promoted from "fix direction" to a concrete, ripple-mapped implementation plan
+after the **S1a hold** (PR #1961) proved no inline strict-eq fix can split
+null/undefined while they share the `ref.null extern` bit pattern. S1 gives
+`undefined` a **distinct representation** so all four nullish strict-eq cases —
+and `typeof`, `Object.is`, `in`-vs-undefined — resolve correctly. Verified
+against `origin/main` @ `c8cd5ba8f`; re-grep anchors if drifted.
+
+### The core decision: undefined = a tag-1 `$AnyValue` singleton; null = `ref.null extern`
+
+In standalone (`ctx.nativeStrings`/`ctx.standalone`) there is no host `undefined`.
+Today `emitUndefined` (`late-imports.ts:596`) falls back to `ref.null.extern` —
+**identical to `null`**. The fix: a single immutable module global
+`$undefined : (ref $AnyValue)` holding a **tag-1** box
+(`{tag:1, i32val:0, f64val:NaN, refval:null, externval:null}` — the exact shape
+`__any_from_extern`'s `nullAny` already synthesises at `any-helpers.ts:186-193`).
+`null` stays `ref.null extern`. The two are then distinguishable everywhere a
+value flows as an externref/anyref because undefined is a *non-null* ref to the
+singleton, while null is a true null.
+
+### HARD CONSTRAINT — the null-vs-undefined RIPPLE is the whole difficulty
+
+This is NOT a localised change. The blast radius (measured on `origin/main`):
+- **33** `emitUndefined(...)` call sites (the producers).
+- **35** `__extern_is_undefined` emit sites + its native impl (`index.ts`
+  registers it as bare `ref.is_null` in standalone — `index.ts:4300` comments
+  the convention).
+- **42** `ref.is_null` uses across `src/codegen/`, of which **~13** are
+  *undefined-specific* checks and the rest are genuine null / generic-nullish
+  checks.
+
+The danger: making undefined a non-null singleton **breaks every `ref.is_null`
+site that currently relies on "undefined IS null"** to detect undefined. Those
+fall into three classes that MUST be triaged individually:
+
+1. **Genuine nullish checks (`== null`, `?.`, `??`, default-value fill,
+   array-hole, `Object.is` SameValueZero on nullish)** — these want BOTH null and
+   undefined to count. After S1 a bare `ref.is_null` no longer catches the
+   undefined singleton, so each must become `is_null(x) || is_undefined_singleton(x)`.
+   **This is the dominant ripple and the #1 regression source.** Centralise it:
+   add `emitIsNullish(ctx, fctx)` (= `ref.is_null` OR ref.eq-against-`$undefined`)
+   and route every nullish consumer through it.
+2. **Undefined-specific checks (`=== undefined`, `typeof x === "undefined"`,
+   `void`-result, optional-param absence)** — these want ONLY undefined. After S1
+   they become `is_undefined_singleton(x)` (ref.eq vs `$undefined` / tag==1),
+   NOT `ref.is_null`. The `__extern_is_undefined` native impl flips from
+   `ref.is_null` to the tag-1 check.
+3. **Null-specific checks (`=== null`, `typeof x === "object" && !x`)** — want ONLY
+   null. These STAY `ref.is_null` AND must additionally EXCLUDE the undefined
+   singleton (a non-null ref) — which they already do, since the singleton is
+   non-null. Low risk; audit only.
+
+### HAZARD — #329 native-string finalize shift (documented at late-imports.ts:581-584)
+
+A standalone undefined value that is NOT `ref.null extern` must NOT be introduced
+via a **late func import added AFTER the native-string helpers are emitted** — that
+re-drives `reconcileNativeStrFinalizeShift` and off-by-ones the baked
+`__str_flatten`→`__str_copy_tree` call (#329 repro: `let g: any; g = function(){…};
+g()` → invalid wasm). Mitigation: `$undefined` is a **GLOBAL**, not a func import,
+and is reserved **up-front at `ensureAnyValueType` time** (`any-helpers.ts:23`) so
+no late func-index shift occurs. The global's init (a `struct.new $AnyValue`) is a
+constant expression — emit it in the module's global-init, never lazily mid-body.
+
+### Staged plan (each stage independently green-mergeable; gate every change on `ctx.standalone`/`nativeStrings`; host mode byte-identical)
+
+- **S1.0 — reserve the singleton (INERT).** At `ensureAnyValueType`, also register
+  the `$undefined` global (tag-1 `$AnyValue`, constant init). Add
+  `ctx.undefinedGlobalIdx?: number`. Add two emit helpers in `late-imports.ts`:
+  `emitUndefinedSingleton(ctx, fctx)` (`global.get $undefined`) and
+  `emitIsUndefinedSingleton(ctx, fctx)` (recover tag, `i32.eq 1` — or `ref.eq`
+  against the singleton when the operand is already a `ref $AnyValue`). Nothing
+  calls them yet. *Acceptance: existing standalone tests byte-identical; the global
+  appears but is unreferenced.*
+- **S1.1 — flip the producers + the undefined-specific consumers TOGETHER.**
+  Standalone `emitUndefined` → `emitUndefinedSingleton`; `__extern_is_undefined`
+  native impl → tag-1 check; the `=== undefined` / `typeof === "undefined"`
+  consumers → `emitIsUndefinedSingleton`. These MUST land in one PR (a producer
+  flip without the matching undefined-consumer flip, or vice-versa, is a
+  half-state that regresses). *Acceptance: `undefined === undefined` true,
+  `null === null` true, `null === undefined` FALSE, `typeof undefined` →
+  "undefined" vs `typeof null` → "object" — all standalone, the issue's S1 test
+  gate. PLUS the strict-eq cascade in `binary-ops.ts` now distinguishes them with
+  NO `bothNullishGuard` collapse (this is where #1961's held guard becomes correct
+  — re-key it on the singleton, not bare `ref.is_null`).*
+- **S1.2 — sweep the nullish consumers (the ripple).** Route every `== null` /
+  `?.` / `??` / default-fill / array-hole / SameValueZero-nullish site through the
+  new `emitIsNullish` so they still catch the undefined singleton. This is the
+  largest, most regression-prone stage — do it last, with a full `merge_group`
+  baseline (value-rep broad-impact protocol — NEVER a scoped sweep, per
+  `project_broad_impact_validate_full_ci`). *Acceptance: `undefined == null` true,
+  `x ?? y` fires for undefined, `a?.b` short-circuits on undefined, destructuring
+  default fires for undefined, no test262 regression.*
+
+### #329 + funcIdx-authority cross-check (#1899)
+S1 lands after #1899's funcIdx-authority contract (task #36, done) — verify the
+`$undefined` global reservation composes with the finalize-shift accounting; the
+global path avoids the func-shift entirely but confirm the global-index
+accounting (`ctx.numImportGlobals + ctx.mod.globals.length`) is taken at
+reservation time, not lazily.
+
+### Why this is the real fix (and #1961 is held, not abandoned)
+#1961's `bothNullishGuard` is correct in shape but, keyed on bare `ref.is_null`,
+collapses null/undefined. Once S1.1 gives undefined distinct bits, that same guard
+— re-keyed on `is_null(x) || is_undefined_singleton(x)` for the loose arm and the
+plain tag check for strict — becomes exactly right. So #1961 stays open as the
+diagnosis + repro harness and folds into S1.1/S1.2. The acceptance-criterion
+"null vs undefined distinct standalone" is met ONLY by S1, not by #1961 alone.
