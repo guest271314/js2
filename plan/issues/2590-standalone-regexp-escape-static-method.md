@@ -1,7 +1,7 @@
 ---
 id: 2590
 title: "Standalone `RegExp.escape(str)` static method (ES2025 §22.2.5.x)"
-status: ready
+status: done
 sprint: 65
 priority: medium
 feasibility: medium
@@ -11,6 +11,8 @@ goal: standalone-mode
 language_feature: regexp
 task_type: conformance
 created: 2026-06-22
+completed: 2026-06-22
+assignee: ttraenkler/agent-regexp-escape
 ---
 
 # Standalone `RegExp.escape(str)` static method (ES2025)
@@ -123,3 +125,51 @@ the `RegExp/escape/cross-realm`/`escaped-*` variants that currently CE on
 - `RegExp.escape("\t") === "\\t"`
 - `RegExp.escape("") === ""`
 - host-JS parity check across the test262 `escaped-*` inputs
+
+## Resolution
+
+Implemented as a pure-Wasm native string transform — no regex engine, no host
+import — so a standalone binary instantiates with an **empty importObject** and
+never leaks `env::__get_builtin`.
+
+- **`src/codegen/native-strings.ts`** — new `__regex_escape(s: ref $AnyString)
+  -> ref $AnyString` helper, registered at the end of `ensureNativeStringHelpers`
+  (same late-import-shift reconciliation domain as its sibling-call targets
+  `__str_concat`/`__str_flatten`). Flattens the input, iterates UTF-16 code
+  units, and builds the output with `__str_concat` over per-character flat
+  pieces (`array.new_fixed` + `struct.new $NativeString`). Implements
+  EncodeForRegExpEscape exactly: first-char `[0-9A-Za-z]` → `\xHH`; syntax chars
+  `^ $ \ . * + ? ( ) [ ] { } |` + solidus `/` → `\c`; ControlEscape `\t \n \v
+  \f \r`; otherPunctuators / WhiteSpace / LineTerminator / lone surrogate →
+  `\xHH` (c ≤ 0xFF) or `\uHHHH`; a valid surrogate **pair** (decoded to a
+  >0xFFFF code point by StringToCodePoints) passes through unescaped — detected
+  *before* the lone-surrogate classification so it never gets double-`\u`-escaped.
+- **`src/codegen/expressions/calls.ts`** — `RegExp.escape(s)` dispatch placed
+  right after the `Math.*` block (before the generic builtin-member /
+  `__get_builtin` fallthrough), gated on `ctx.standalone` + `ctx.nativeStrings`
+  + `isGlobalRegExpIdentifier`. A statically `string`-typed arg compiles to a
+  native string and calls `__regex_escape`; a statically non-string literal
+  throws a catchable `TypeError` (§22.2.5 step 1, via `emitBrandCheckTypeError`);
+  an `any`/`unknown` arg narrow-refuses (falls through).
+
+## Test Results
+
+`tests/issue-2590.test.ts` — **28/28 pass** under `target: "standalone"`,
+asserting byte-for-byte via the same `isSameValue(a: any, b: any)` shape the
+test262 harness uses. Covers every escape category from the test262 `escaped-*`
+files (syntax / control / otherpunctuators / whitespace / lineterminator /
+surrogates / utf16encodecodepoint / initial-char / not-escaped) plus the
+non-string-input `TypeError` path. Each case also asserts **no
+`env::__get_builtin` import leaks** and the module instantiates with `{}`.
+
+Residual (out of scope — not behavior, needs runtime function-object reflection):
+the metadata tests `is-function.js` / `length.js` / `name.js` / `prop-desc.js` /
+`not-a-constructor.js` require `RegExp.escape` to be a reflectable first-class
+function object (`typeof`, `.length`, `verifyProperty`), which standalone
+compile-time dispatch does not expose.
+
+Scoped gates green: `tsc`, `prettier --check`, `check:coercion-sites`,
+`check:ir-fallbacks`, `check:issue-ids`. The 2 pre-existing `arr.entries()`
+failures in `tests/issue-1320-standalone.test.ts` (#2043 late-import shift at
+`__defineProperty_value`) are unrelated — confirmed present on the clean base
+commit before this change.
