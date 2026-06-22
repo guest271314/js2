@@ -102,3 +102,28 @@ and, end-to-end, compiled-acorn `parse("var x = 1;")` returning a Program AST.
 This is **separate** from #2608 (which is purely `new this` constructing with
 correct args — DONE and verified). #2628 is the method-dispatch-on-bridge-result
 follow-on. Sequence after #2608 lands.
+
+## Re-grounding (architect, 2026-06-22) — the IN-WASM acorn shape ALREADY WORKS
+
+Faithful compile probes against current main contradict the "viaThis THROWS"
+framing **for the acorn dogfood path**:
+
+- `new this({}, input).getLen()` chained **IN-WASM** (the exact acorn
+  `new this(options, input).parse()` shape) → **returns 5 ✓**. The
+  `__construct_closure` trap's `self` IS registered for the in-wasm read path
+  (`[protoHook]` fires for both `parse` and `getLen` via `_fnctorProtoLookup`),
+  so `__extern_method_call` resolves the prototype method. **The acorn `parse()`
+  dogfood lap is NOT blocked by #2628** — it advances past `new this(...).parse()`.
+- The residual gap is **host-side only**: `Parser.makeViaThis(input)` returned to
+  the JS harness, then `.getLen()` from JS → THROWS "getLen is not a function".
+  The bridge result handed to host JS is a plain `Object`
+  (`constructor.name === "Object"`) with no prototype link — the construct trap
+  builds a bare `self = {}` (`runtime.ts:4904-4918`) and never links it via
+  `_fnctorInstanceCtor` or sets its `[[Prototype]]`.
+
+**Disposition:** the host-side residual is folded into **#2623 slice 2623-B**
+(`__construct_closure` host-side instance identity + species — `Object.create(proto)`
++ `_fnctorInstanceCtor.set`), which also closes the `ctx-ctor` species rows. Do
+NOT dispatch #2628 as a standalone acorn blocker; the dogfood lap is unblocked,
+and the host-facing identity fix rides #2623-B. Re-probe the next acorn wall
+after #2623-B lands.
