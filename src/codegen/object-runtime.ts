@@ -5650,31 +5650,59 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   emitSetFlags("__object_seal", OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED);
   emitSetFlags("__object_freeze", OBJ_FLAG_NONEXTENSIBLE | OBJ_FLAG_SEALED | OBJ_FLAG_FROZEN);
 
-  // ── __extern_is_undefined(externref) -> i32 (#1472 Phase C) ───────────────
+  // ── __extern_is_undefined(externref) -> i32 (#1472 Phase C; #2106 S1.1) ────
   //
   // The JS-host import is `(v) => (v === undefined ? 1 : 0)` — it distinguishes
   // JS `undefined` (a defined externref produced by `__get_undefined`) from
-  // `null` (a null reference). Standalone has no `__get_undefined`: `emitUndefined`
-  // falls back to `ref.null.extern`, so the runtime represents BOTH `undefined`
-  // and `null` as the null externref. The standalone `__typeof_undefined` helper
-  // (addUnionImportsAsNativeFuncs) already encodes this same conflation as a bare
-  // `ref.is_null`. We mirror it here so the two are internally consistent.
+  // `null` (a null reference).
   //
-  // This is exactly the predicate every caller wants in standalone: the
-  // default-parameter / destructuring-default paths (function-body.ts,
-  // closures.ts, class-bodies.ts, destructuring.ts) and `x === undefined`
-  // (binary-ops.ts) use `__extern_is_undefined` to decide whether to apply a
-  // default — and a missing/omitted argument arrives as the null externref, the
-  // same value `undefined` lowers to. So `ref.is_null` applies the default in
-  // precisely the "value is undefined" cases, matching §14.3.3 (keyed/iterator
-  // binding initialization defaults fire when the bound value is `undefined`).
-  registerNative(
-    "__extern_is_undefined",
-    [{ kind: "externref" }],
-    [{ kind: "i32" }],
-    [],
-    [{ op: "local.get", index: 0 }, { op: "ref.is_null" }],
-  );
+  // (#2106 S1.1) Standalone now represents `undefined` as the tag-1 `$undefined`
+  // singleton (a NON-null externref produced by `emitUndefined`) and `null` as
+  // `ref.null extern`, so the two are distinguishable. The predicate is therefore
+  // "is the value the tag-1 `$AnyValue` singleton": recover anyref, `ref.test
+  // $AnyValue`, and on a hit compare field-0 tag === 1. A null externref (true
+  // JS `null`) returns 0; any non-undefined box returns 0.
+  //
+  // Every caller wants exactly this: default-parameter / destructuring-default
+  // paths (function-body.ts, closures.ts, class-bodies.ts, destructuring.ts) and
+  // `x === undefined` (binary-ops.ts) fire ONLY when the value is `undefined`,
+  // never for explicit `null` (§14.3.3 / §13.10) — which the pre-S1 `ref.is_null`
+  // got WRONG for explicit-null-passed-to-optional-param (it fired the default).
+  // Omitted/absent args are padded via `emitUndefined` (now the singleton), so
+  // they are still caught.
+  {
+    const anyTypeIdx = ctx.anyValueTypeIdx; // reserved by ensureAnyValueType (S1.0)
+    const isUndefBody: Instr[] =
+      anyTypeIdx >= 0
+        ? [
+            { op: "local.get", index: 0 },
+            { op: "any.convert_extern" },
+            { op: "local.tee", index: 1 } as Instr,
+            { op: "ref.test", typeIdx: anyTypeIdx } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "i32" } },
+              then: [
+                { op: "local.get", index: 1 } as Instr,
+                { op: "ref.cast", typeIdx: anyTypeIdx } as Instr,
+                { op: "struct.get", typeIdx: anyTypeIdx, fieldIdx: 0 } as Instr, // tag
+                { op: "i32.const", value: 1 },
+                { op: "i32.eq" },
+              ],
+              else: [{ op: "i32.const", value: 0 }],
+            } as Instr,
+          ]
+        : // Defensive: no $AnyValue type registered (module uses no `any`) →
+          // preserve the legacy ref.is_null predicate so undefined still flows.
+          [{ op: "local.get", index: 0 }, { op: "ref.is_null" }];
+    registerNative(
+      "__extern_is_undefined",
+      [{ kind: "externref" }],
+      [{ kind: "i32" }],
+      anyTypeIdx >= 0 ? [{ name: "anyv", type: { kind: "anyref" } }] : [],
+      isUndefBody,
+    );
+  }
 
   // ── __extern_method_call(externref recv, externref name, externref args)
   //    -> externref (#1888 Slice 2) ─────────────────────────────────────────

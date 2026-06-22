@@ -441,3 +441,69 @@ collapses null/undefined. Once S1.1 gives undefined distinct bits, that same gua
 plain tag check for strict — becomes exactly right. So #1961 stays open as the
 diagnosis + repro harness and folds into S1.1/S1.2. The acceptance-criterion
 "null vs undefined distinct standalone" is met ONLY by S1, not by #1961 alone.
+
+## Suspended Work — S1.0 done + S1.1 WIP (sdev-async, 2026-06-23)
+
+**Branch:** `issue-2106-s1-undefined-singleton`
+**Worktree:** `/workspace/.claude/worktrees/issue-2106-s1-undefined-singleton`
+**State:** tsc CLEAN. S1.0 (inert singleton reservation) is COMPLETE + validated.
+S1.1 (flip producer + chokepoints) is WIP — 3/6 repro cases pass, 3 fail with
+the precise causes diagnosed below. Resume from these failures.
+
+### Landed (committed)
+- **S1.0** (commit on branch): `$undefined` tag-1 global reserved at
+  `ensureAnyValueType` (`any-helpers.ts`), `ctx.undefinedGlobalIdx`,
+  `emitUndefinedSingleton` / `emitIsUndefinedSingleton` helpers. Inert, validated.
+- **S1.1 WIP** (this checkpoint):
+  - `emitUndefined` (`late-imports.ts`): standalone → `global.get $undefined` +
+    `extern.convert_any` (was `ref.null.extern`).
+  - `__extern_is_undefined` (`object-runtime.ts`): singleton-only (recover anyref,
+    `ref.test $AnyValue`, tag==1); legacy `ref.is_null` fallback when no `$AnyValue`.
+  - `__typeof_undefined` (`index.ts`): singleton-only (same tag-1 test).
+  - strict-eq cascade (`binary-ops.ts`): the loose-only nullish guard is now
+    applied to BOTH modes (`(lNull||rNull)?(lNull&&rNull):core`) — correct under S1
+    because undefined is the non-null singleton.
+
+### Repro status (`tests/issue-2106-standalone-nullish-strict-eq.test.ts`)
+PASS: `null===null`, `nullish!==non-nullish`, `5===5`.
+FAIL (3), with root causes:
+
+1. **`undefined === undefined` → false (want true)** AND **`undefined !== undefined`
+   → true (want false).** ROOT CAUSE: array/object literals push **raw
+   `ref.null.extern`** for `undefined`-like values (`literals.ts:575/605/646/657/685`
+   etc.), NOT `emitUndefined`. So `[undefined, undefined]` stores TWO NULLS, read
+   back as null — but then `null===null`-via-the-guard should give true... it gives
+   false, so the stored value is NOT plain null either (likely the S0 contextual-`any`
+   boxing path tags the literal `undefined` as a tag-1 `$AnyValue` element via
+   `boxToAny(jsStaticType=undefined)` — but `boxToAny`'s "undefined" case currently
+   `break`s at `value-tags.ts:168`, so it falls to the Wasm-kind dispatch and boxes
+   as... INVESTIGATE: dump the WAT of `[undefined,undefined]` element store).
+   **NEXT:** make the literal-`undefined` producers (and `boxToAny`'s undefined arm)
+   emit the singleton consistently so a stored `undefined` IS the singleton; then
+   two reads `ref.eq` true. Either route literal undefined through `emitUndefined`,
+   or implement `boxToAny`'s tag-1 arm to push the `$undefined` global.
+
+2. **loose `null == undefined` → false (want true).** ROOT CAUSE: the loose nullish
+   guard uses bare `ref.is_null`, which no longer catches the undefined singleton
+   (non-null). **NEXT (the S1.2 ripple):** add `emitIsNullish(ctx,fctx)` =
+   `is_null(x) || is_undefined_singleton(x)` and route the LOOSE `==`/`!=` nullish
+   arm (binary-ops `looseNullish` guard) + `??` + `?.` + default-fill +
+   array-hole + SameValueZero-nullish through it. ~42 `ref.is_null` sites to triage
+   (nullish-intent → `emitIsNullish`; null-specific `=== null` → stays `ref.is_null`).
+
+### Remaining work to finish S1 (atomic PR)
+- Fix (1): consistent singleton production for ALL `undefined` producers
+  (literals, `boxToAny` tag-1 arm, omitted-arg padding that uses raw
+  `ref.null.extern` e.g. `calls.ts:1352/1700` thisArg — verify those are
+  this-arg-only and not default-param relevant).
+- Fix (2): `emitIsNullish` + the nullish-consumer sweep (S1.2).
+- `typeof null` → "object": `__typeof_object` currently returns 0 for
+  `ref.is_null`; flip null→"object" (return 1) so typeof null is correct (separate
+  small follow-up, not strictly blocking the strict-eq fix).
+- Validate via merge_group (value-rep broad-impact). Report net delta to
+  sdev-coercion-impl / lead for the land decision. Supersede/close held PR #1961
+  if S1 lands net-positive.
+
+### Validation done so far
+tsc clean; S1.0 inert validated (36 tests green: #1776/#1021/strict+loose
+equality/#2106 S0/#2029). The 3 repro failures above are the WIP frontier.
