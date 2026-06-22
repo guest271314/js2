@@ -36,6 +36,7 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
 import {
   coerceSetArgToAnyref,
+  compileCollectionElementArg,
   compileNativeCollectionIterator,
   ensureMapHelpers,
   tryCompileNativeCollectionForEach,
@@ -210,16 +211,16 @@ export function tryCompileNativeSetMethodCall(
   const args = callExpr.arguments;
   switch (methodName) {
     case "add": {
-      const vt = args.length > 0 ? compileExpression(ctx, fctx, args[0]!) : null;
-      coerceSetArgToAnyref(ctx, fctx, vt);
+      // (#2606 Bug A) null/undefined-literal element → canonical ref.null
+      // NONE_HEAP (else the typed ref-null fails the externref coercion).
+      compileCollectionElementArg(ctx, fctx, args[0]);
       fctx.body.push({ op: "call", funcIdx: helperIdx });
       // __set_add returns ref $Map (the set) — chainable.
       return { kind: "ref", typeIdx: ctx.mapTypeIdx } as ValType;
     }
     case "has":
     case "delete": {
-      const vt = args.length > 0 ? compileExpression(ctx, fctx, args[0]!) : null;
-      coerceSetArgToAnyref(ctx, fctx, vt);
+      compileCollectionElementArg(ctx, fctx, args[0]);
       fctx.body.push({ op: "call", funcIdx: helperIdx });
       // has/delete → i32 (boolean).
       return { kind: "i32" } as ValType;
@@ -334,15 +335,14 @@ export function tryCompileSetReflectiveCall(
 
   switch (method) {
     case "add": {
-      const vt = callArgs.length > 1 ? compileExpression(ctx, fctx, callArgs[1]!) : null;
-      coerceSetArgToAnyref(ctx, fctx, vt);
+      // (#2606 Bug A) null/undefined-literal element → canonical ref.null NONE_HEAP.
+      compileCollectionElementArg(ctx, fctx, callArgs[1]);
       fctx.body.push({ op: "call", funcIdx: helperIdx });
       return { kind: "ref", typeIdx: ctx.mapTypeIdx } as ValType;
     }
     case "has":
     case "delete": {
-      const vt = callArgs.length > 1 ? compileExpression(ctx, fctx, callArgs[1]!) : null;
-      coerceSetArgToAnyref(ctx, fctx, vt);
+      compileCollectionElementArg(ctx, fctx, callArgs[1]);
       fctx.body.push({ op: "call", funcIdx: helperIdx });
       return { kind: "i32" } as ValType;
     }

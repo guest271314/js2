@@ -2139,16 +2139,36 @@ export function compileBinaryExpression(
       const unboxBool = ctx.funcMap.get("__unbox_boolean")!;
       const toBigint = ctx.funcMap.get("__to_bigint")!;
 
+      // (#2605) Box an operand to externref for the tag-dispatch below. A
+      // **boolean** i32 MUST be boxed via `__box_boolean` so its runtime tag is
+      // `boolean`, not `number`: the default `coerceType` i32→externref path uses
+      // `f64.convert_i32_s` + `__box_number`, which turns `true` into the number
+      // `1`. The other operand (e.g. an `any`-typed boxed boolean `true`, tag
+      // `boolean`) would then mismatch on tag and fall through to reference
+      // identity → wrong `false`. This is the dominant cause of standalone
+      // `assert.sameValue(x instanceof Set, true)`-style rows failing: the harness
+      // passes a boolean into an `any` param and compares it with `===`/`!==`
+      // against a `boolean` literal (#2605). Boxing booleans as booleans makes the
+      // "both typeof boolean → unbox i32, compare" arm fire correctly.
+      const boxOperandToExternref = (operandType: ValType, isBoolOperand: boolean): void => {
+        if (operandType.kind === "externref") return;
+        if (operandType.kind === "i32" && isBoolOperand) {
+          // addUnionImports (already called above) installs __box_boolean.
+          const boxBoolIdx = ctx.funcMap.get("__box_boolean");
+          if (boxBoolIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: boxBoolIdx });
+            return;
+          }
+        }
+        coerceType(ctx, fctx, operandType, { kind: "externref" });
+      };
+
       // Coerce both operands to externref temps (right is on top of stack).
       const rTmp = allocTempLocal(fctx, { kind: "externref" });
-      if (rightType.kind !== "externref") {
-        coerceType(ctx, fctx, rightType, { kind: "externref" });
-      }
+      boxOperandToExternref(rightType, rightIsBool);
       fctx.body.push({ op: "local.set", index: rTmp });
       const lTmp = allocTempLocal(fctx, { kind: "externref" });
-      if (leftType.kind !== "externref") {
-        coerceType(ctx, fctx, leftType, { kind: "externref" });
-      }
+      boxOperandToExternref(leftType, leftIsBool);
       fctx.body.push({ op: "local.set", index: lTmp });
 
       // (#1910 R1) §7.2.13 steps 11-12 — reduce an Object operand to a primitive
