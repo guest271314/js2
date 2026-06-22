@@ -19,7 +19,18 @@ depends_on: [1712, 2582]
 related: [1712, 2582, 1940, 1528]
 ---
 
-# #2586 — compiled-acorn `parse()` infinite-loops in `parseTopLevel` (4th blocker)
+# #2608 — compiled-acorn `parse()` infinite-loops in `parseTopLevel` (4th blocker)
+
+> **Issue reconciliation (2026-06-22).** This blocker was first hand-picked as
+> `#2586`, which collided with the unrelated `2586-standalone-arrayfrom-map.md`
+> on `main` (the #2531 hand-pick race). It was re-allocated to **#2608** —
+> the canonical id for this parse()-loop blocker. The `#2586` _file_
+> (`Array.from(Map) illegal_cast`) is a different, separately-`done` issue.
+> sd-acorn's mechanism diagnosis (the `new this(...)` defect + that the generic
+> `__construct` is typeof-gated and fails closure→Proxy, and #86 callable-params
+> is a different path) correctly scoped exactly what the fix had to handle; the
+> landed fix routes through #56 `__construct_closure` — the bounded path sd-acorn
+> had not tested.
 
 ## Context
 
