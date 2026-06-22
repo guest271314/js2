@@ -215,3 +215,40 @@ test's `var p1` (which holds the raw host Promise externref from
 `__new_Promise`). Next implementer: trace whether `p1` (a `new Promise(...)`
 binding) is stored as a raw externref or a struct ref at the push site, and
 ensure the push forwards the identical externref V8 will compare against.
+
+## Implementation attempt + definitive coupling finding (2026-06-22, senior-dev)
+
+**Attempted the bucket-1 "observable resolve" fix** in `src/runtime.ts`: the
+combinator/`Promise.resolve` host imports closed over the module-level intrinsic
+`Promise`, so a test that monkey-patches its realm's `globalSandbox.Promise.resolve`
+was never observed (`Get(C,"resolve")` read the unpatched intrinsic). Routing `C`
+(via `_resolveCtor` directCall) and `Promise.resolve`/`reject` through
+`globalSandbox.Promise ?? Promise` **fixed the observability/identity break** —
+the three identity probes pass and `all/race invoke-resolve` advanced past
+assert #1 (`nextValue === current` now holds).
+
+**But it is net-NEGATIVE and cannot ship as an independent slice:**
+- `all/invoke-resolve` / `race/invoke-resolve` still fail at **assert #2**
+  (`arguments.length === 1`): V8's native combinator calls the test's *compiled*
+  `Promise.resolve` closure through `wasmClosureDynamicBridge`
+  (`runtime.ts:1854`), and `arguments.length` inside a host→wasm-bridged closure
+  does not reflect the JS call's arg count. That is the mapped-`arguments`/bridge
+  machinery, not combinator code.
+- **REGRESSION**: `any/invoke-resolve-on-promises-every-iteration-of-promise.js`
+  flips **pass → `illegal cast in __call_fn_method_1`**. Routing `C` to the
+  sandbox-realm Promise makes `Promise.any.call(sandboxC, …)` do
+  `NewPromiseCapability(sandboxC)` → `Construct(sandboxC, executor)` where the
+  executor is a compiled wasm closure — the cross-realm construct hits the SAME
+  `__fn_tramp_Constructor` capability-bridge `illegal cast` as #2615/#1528.
+
+**Conclusion (validates the re-grounding):** the observable-resolve fix is
+**inseparable** from the closure-as-dynamic-constructor capability bridge owned
+by #2615 / #1528a-residual (#1632b-2, task #56). `Get(C,"resolve")` observability
+requires `C` to be the user's realm Promise, but the moment `C` is that realm's
+Promise, the combinator's `NewPromiseCapability(C)` construct routes a compiled
+executor through the cross-realm bridge that currently `illegal cast`s. #2614
+should be **blocked on / folded into the capability-bridge work**, not shipped as
+a standalone runtime.ts patch. The attempted diff is preserved out-of-tree
+(not committed — net-negative). Recommend: re-route #2614 behind #1632b-2 /
+#2615, or hand the combined combinator+capability slice to whoever owns that
+bridge.
