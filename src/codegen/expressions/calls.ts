@@ -11132,6 +11132,22 @@ function compileCallExpression(
         const hostCall = emitBoundFunctionCall(ctx, fctx, expr);
         if (hostCall !== null) return hostCall;
       }
+      // (#1528 / #56 follow-up — class-ctor arm) `executor(...)` inside a function
+      // used as a Promise-combinator capability constructor
+      // (`Promise.X.call(Constructor, …)` → V8 `Construct(Constructor, «executor»)`
+      // via the #1632b-2 bridge). The `executor` PARAM is an UNTYPED (`any`) value
+      // — no call signatures — so it never reaches the callable-param closure
+      // dispatch below; the no-sig fallback would `ref.cast` it to a closure
+      // struct and trap (`illegal cast in Constructor()`), because V8 supplies a
+      // HOST function there, not a wasm closure. Route it through the same
+      // `__call_function` host helper the bound-function path uses (it packs args
+      // into a JS array and calls `Reflect.apply`). JS-host only; narrow syntactic
+      // gate (the fn flows to a combinator capability-ctor site), so the #1941
+      // dual-mode guarantee for ordinary callable params is preserved.
+      if (isKnownVariable && !ctx.standalone && !noJsHost(ctx) && calleeIsCapabilityCtorParam(ctx, expr.expression)) {
+        const hostCall = emitBoundFunctionCall(ctx, fctx, expr);
+        if (hostCall !== null) return hostCall;
+      }
       if (callSigs && callSigs.length > 0) {
         const sig = callSigs[0]!;
         const sigParamCount = sig.parameters.length;
@@ -11382,11 +11398,12 @@ function compileCallExpression(
             // (which traps on the null cast). Narrowly gated to Promise-executor
             // params so the #1941 dual-mode guarantee for ordinary callable
             // params is preserved.
-            (calleeMayBeHostCallable(ctx, expr.expression) ||
-              calleeIsPromiseExecutorParam(ctx, expr.expression) ||
-              // (#1528 / #56 class-ctor arm) `executor` param of a capability
-              // constructor (`Promise.X.call(Constructor, …)`) is host-supplied.
-              calleeIsCapabilityCtorParam(ctx, expr.expression));
+            (calleeMayBeHostCallable(ctx, expr.expression) || calleeIsPromiseExecutorParam(ctx, expr.expression));
+          // NB: capability-ctor `executor` params (#1528/#56 class-ctor arm) are
+          // UNTYPED (`any`, no call signatures) so they never reach this
+          // callable-param dispatch — they are routed earlier through the
+          // `__call_function` host helper (see the calleeIsCapabilityCtorParam
+          // early-return alongside the bound-function path above).
 
           let fallbackInstrs: Instr[] | null = null;
           let dispatchOuterBody: Instr[] | null = null;
