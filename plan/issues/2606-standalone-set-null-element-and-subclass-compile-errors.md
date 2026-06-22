@@ -1,9 +1,11 @@
 ---
 id: 2606
-title: "Standalone Set: null/undefined element coercion + subclass-of-Set late-import desync (compile errors)"
-status: ready
+title: "Standalone Set: null/undefined element coercion (Bug A; Bug B split to #2620)"
+status: done
 sprint: 65
 created: 2026-06-22
+completed: 2026-06-22
+assignee: ttraenkler/dev-collections
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -123,3 +125,41 @@ global index is the tell: an unresolved/un-shifted reference.
   the subclass machinery proves deep.
 - Both gated on `ctx.nativeStrings`; host/gc unchanged.
 - Independent of #2580 (no dynamic property reads).
+
+## Resolution (2026-06-22 — dev-collections)
+
+**Bug A — DONE.** Two parts, both confirmed and fixed:
+1. *Compile error.* `compileExpression(<null/undefined literal>)` reports ValType
+   `externref` but emits a **typed** `ref.null` (a concrete bottom). The Set/Map
+   helper-arg coercion's `externref` arm then emitted `any.convert_extern`, which
+   fails validation ("expected externref, found ref.null of type (ref null N)").
+   Fix: a new `compileCollectionElementArg(ctx, fctx, argExpr)` in
+   `map-runtime.ts` detects a null/undefined literal (`isNullOrUndefinedLiteral`)
+   and emits a canonical `ref.null NONE_HEAP` directly, bypassing the typed-null
+   mismatch. Wired into both Set (`set-runtime.ts` direct + `.call` arms,
+   `add`/`has`/`delete`) and Map (`map-runtime.ts`, `get`/`has`/`delete`/`set`)
+   dispatch sites.
+2. *Runtime SameValueZero.* `__same_value_zero` covered i31/number-box/string/
+   eqref-identity but NOT null-vs-null — a `none`-null is not a non-null eqref, so
+   `ref.test (ref eq)` returned 0 and the identity arm never fired. Added a step-0
+   `ref.is_null(a) && ref.is_null(b) → 1` arm. `null`/`undefined` collapse to the
+   same `none` representation (matching `set.add(undefined); set.has(undefined)`).
+
+**Files (Bug A):** `src/codegen/map-runtime.ts`, `src/codegen/set-runtime.ts`.
+
+**Bug B — SPLIT to #2620.** Re-grounding against current main showed Bug B is
+deeper than the spec assumed: even a *bare* `class MySet extends Set {}` leaks
+`env::Set_*` host imports standalone (the subclass-of-native-collection
+construction path doesn't route through the WasmGC-native Set runtime), and the
+`-1` global only fires on the exact `size(...rest)`/`has`/`keys` super-call
+combination — a #2043-class late-import-shift in the synthetic accessor table.
+Both are substrate-deep and high-regression-risk; routed to the index-shift /
+value-rep owner via #2620 rather than risk the emit path here.
+
+## Test Results
+
+Bug A: `has/returns-{true,false}-when-value-{present,not-present}-{null,undefined}`
+and `…-undefined-added-deleted-not-present-undefined` (5 rows) now pass standalone
+(were `compile_error`). Combined Set/prototype standalone sweep with #2605:
+110 → 65 host-pass-but-standalone-fail. Dedicated vitest:
+`tests/issue-2605-2606-collections-bool-null.test.ts` (7 cases, all pass).
