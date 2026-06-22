@@ -261,8 +261,9 @@ export interface CompileOptions {
   optimize?: boolean | 1 | 2 | 3 | 4;
   /**
    * Experimental: route a narrow set of functions through the middle-end IR
-   * (see `src/ir/`). Defaults to off. Ship as off until the IR reaches
-   * parity with the legacy direct-emission path.
+   * (see `src/ir/`). Defaults to **on** since #1131 (the driver passes
+   * `experimentalIR !== false`); pass `false` to force the legacy
+   * direct-emission path (bit-by-bit divergence tests or emergency revert).
    */
   experimentalIR?: boolean;
   /** Compile-time constant definitions. Substitutes identifiers/dotted paths with literal values

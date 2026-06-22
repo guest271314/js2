@@ -83,8 +83,9 @@ export interface CodegenOptions {
   standalone?: boolean;
   /**
    * Experimental: route a narrow set of functions through the middle-end IR
-   * (see `src/ir/`). Defaults to off. Leave off in production until the IR
-   * reaches parity with the legacy direct-emission path.
+   * (see `src/ir/`). Defaults to **on** since #1131 (the front-end driver
+   * passes `experimentalIR !== false`); pass `false` to force the legacy
+   * direct-emission path (bit-by-bit divergence tests or emergency revert).
    */
   experimentalIR?: boolean;
   /**
