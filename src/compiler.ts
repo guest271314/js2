@@ -649,25 +649,39 @@ function runPipeline(input: PipelineInput): CompileResult {
   const emitWatOutput = options.emitWat !== false;
   const userSourceFiles = input.userSourceFiles;
 
+  // Each validation pass below gates on the errors IT produced, NOT on the whole
+  // accumulated `errors` array. This is load-bearing (#1927 regression fix): the
+  // pre-collected `errors` may already hold non-fatal TS diagnostics of severity
+  // "error" — e.g. TS2678 "Type '2' is not comparable to type '1'" on a switch
+  // case — which the single-source path has always TOLERATED (it compiles and
+  // succeeds, leaving the diagnostic in `errors`). The legacy single-source
+  // driver gated each pass only on that pass's fresh output; gating on the whole
+  // array here would turn every tolerated non-hard TS error into a hard failure.
+  const hasNewError = (added: { severity: string }[]) => added.some((e) => e.severity !== "warning");
+
   // Step 1a: ES early-error detection — catch spec syntax errors TS misses, on
   // EVERY user source file (#1931). allowJs dependency files are skipped (their
   // JS may use patterns we cannot control) — same scoping as the diagnostic
   // loop in the adapters.
   if (!options.allowJs) {
+    const earlyErrors: CompileError[] = [];
     for (const sf of userSourceFiles) {
-      errors.push(...detectEarlyErrors(sf));
+      earlyErrors.push(...detectEarlyErrors(sf));
     }
-    if (errors.some((e) => e.severity === "error")) {
+    errors.push(...earlyErrors);
+    if (hasNewError(earlyErrors)) {
       return failResult(errors);
     }
   }
 
   // Step 1b: Safe mode validation for all user source files.
   if (options.safe) {
+    const safeErrors: CompileError[] = [];
     for (const sf of userSourceFiles) {
-      errors.push(...validateSafeMode(sf, entryAst.checker, options));
+      safeErrors.push(...validateSafeMode(sf, entryAst.checker, options));
     }
-    if (errors.some((e) => e.severity === "error")) {
+    errors.push(...safeErrors);
+    if (hasNewError(safeErrors)) {
       return failResult(errors);
     }
   }
@@ -676,10 +690,12 @@ function runPipeline(input: PipelineInput): CompileResult {
   // this into the shared core gives the multi paths hardened-mode parity (they
   // previously skipped it entirely).
   if (options.hardened) {
+    const hardenedErrors: CompileError[] = [];
     for (const sf of userSourceFiles) {
-      errors.push(...validateHardenedMode(sf));
+      hardenedErrors.push(...validateHardenedMode(sf));
     }
-    if (errors.some((e) => e.severity === "error")) {
+    errors.push(...hardenedErrors);
+    if (hasNewError(hardenedErrors)) {
       return failResult(errors);
     }
   }
