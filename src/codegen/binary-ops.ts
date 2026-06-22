@@ -3804,6 +3804,109 @@ export function emitToInt32(fctx: FunctionContext): void {
   releaseTempLocal(fctx, tmp);
 }
 
+/**
+ * (#2593) ToUint8Clamp (§7.1.x, the `Uint8ClampedArray` element conversion). Input
+ * f64 on the stack → clamped i32 in [0, 255]. NOT modulo: NaN→0, ≤0→0, ≥255→255,
+ * else round-HALF-TO-EVEN (1.5→2, 2.5→2, 0.5→0). Differs from every other integer
+ * view (which truncate modulo via the packed `array.set`), so `Uint8ClampedArray`
+ * writes route through this helper before the store.
+ */
+export function emitToUint8Clamp(fctx: FunctionContext): void {
+  // x on stack (f64) → clamped i32 in [0,255]. Use DEDICATED locals (no reuse) to
+  // keep the stack types unambiguous. Result is built as an i32 in `out`.
+  const x = allocTempLocal(fctx, { kind: "f64" });
+  const f = allocTempLocal(fctx, { kind: "f64" }); // floor(x)
+  const d = allocTempLocal(fctx, { kind: "f64" }); // x - floor(x)
+  const out = allocTempLocal(fctx, { kind: "i32" });
+  fctx.body.push({ op: "local.set", index: x } as Instr);
+
+  // roundHalfEven(x) → i32 (only evaluated when 0 < x < 255, so trunc is exact):
+  //   f = floor(x); d = x - f;
+  //   d<0.5 → f ; d>0.5 → f+1 ; d==0.5 → (f even ? f : f+1)
+  const roundHalfEven: Instr[] = [
+    { op: "local.get", index: x } as Instr,
+    { op: "f64.floor" } as Instr,
+    { op: "local.set", index: f } as Instr,
+    { op: "local.get", index: x } as Instr,
+    { op: "local.get", index: f } as Instr,
+    { op: "f64.sub" } as Instr,
+    { op: "local.set", index: d } as Instr,
+    // d < 0.5 ?
+    { op: "local.get", index: d } as Instr,
+    { op: "f64.const", value: 0.5 } as Instr,
+    { op: "f64.lt" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "f64" } as ValType },
+      then: [{ op: "local.get", index: f } as Instr],
+      else: [
+        // d > 0.5 ?
+        { op: "local.get", index: d } as Instr,
+        { op: "f64.const", value: 0.5 } as Instr,
+        { op: "f64.gt" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "val", type: { kind: "f64" } as ValType },
+          then: [
+            { op: "local.get", index: f } as Instr,
+            { op: "f64.const", value: 1 } as Instr,
+            { op: "f64.add" } as Instr,
+          ],
+          else: [
+            // tie (d == 0.5): round to even. f even ⇔ floor(f/2) == f/2.
+            { op: "local.get", index: f } as Instr,
+            { op: "f64.const", value: 0.5 } as Instr,
+            { op: "f64.mul" } as Instr,
+            { op: "local.set", index: d } as Instr, // d := f/2 (reuse d, no longer needed)
+            { op: "local.get", index: d } as Instr,
+            { op: "f64.floor" } as Instr,
+            { op: "local.get", index: d } as Instr,
+            { op: "f64.eq" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "val", type: { kind: "f64" } as ValType },
+              then: [{ op: "local.get", index: f } as Instr],
+              else: [
+                { op: "local.get", index: f } as Instr,
+                { op: "f64.const", value: 1 } as Instr,
+                { op: "f64.add" } as Instr,
+              ],
+            } as Instr,
+          ],
+        } as Instr,
+      ],
+    } as Instr,
+    { op: "i32.trunc_sat_f64_u" } as Instr,
+    { op: "local.set", index: out } as Instr,
+  ];
+
+  // Clamp: x>=255 → 255 ; x>0 (NaN-false) → round ; else → 0.
+  fctx.body.push({ op: "local.get", index: x } as Instr);
+  fctx.body.push({ op: "f64.const", value: 255 } as Instr);
+  fctx.body.push({ op: "f64.ge" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [{ op: "i32.const", value: 255 } as Instr, { op: "local.set", index: out } as Instr],
+    else: [
+      { op: "local.get", index: x } as Instr,
+      { op: "f64.const", value: 0 } as Instr,
+      { op: "f64.gt" } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: roundHalfEven,
+        else: [{ op: "i32.const", value: 0 } as Instr, { op: "local.set", index: out } as Instr],
+      } as Instr,
+    ],
+  } as Instr);
+  fctx.body.push({ op: "local.get", index: out } as Instr);
+  releaseTempLocal(fctx, x);
+  releaseTempLocal(fctx, f);
+  releaseTempLocal(fctx, d);
+  releaseTempLocal(fctx, out);
+}
+
 /** Truncate two f64 operands to i32 via ToInt32, apply an i32 bitwise op, convert back to f64 */
 function compileBitwiseBinaryOp(
   fctx: FunctionContext,

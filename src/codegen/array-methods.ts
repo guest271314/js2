@@ -342,6 +342,12 @@ export function emitBoundsCheckedArrayGet(
   elementType: ValType,
   ctx?: CodegenContext,
   useUndefinedSentinel = false,
+  // (#2593) Explicit signedness for a packed i8/i16 element, driven by the
+  // typed-array VIEW name (not the storage kind): `Int8Array`/`Int16Array` read
+  // sign-extending (`get_s`), `Uint8Array`/`Uint8ClampedArray`/`Uint16Array` read
+  // zero-extending (`get_u`). When undefined, fall back to the legacy
+  // storage-kind heuristic (i8→get_u, i16→get_s) for non-typed-array callers.
+  signedness?: "s" | "u",
 ): void {
   // Save index and array ref to locals so we can use them in both branches
   const idxLocal = allocLocal(fctx, `__bounds_idx_${fctx.locals.length}`, { kind: "i32" });
@@ -368,9 +374,21 @@ export function emitBoundsCheckedArrayGet(
   fctx.body.push({ op: "array.len" });
   fctx.body.push({ op: "i32.lt_u" } as Instr);
 
-  // Build the "then" branch: in-bounds -> array.get
+  // Build the "then" branch: in-bounds -> array.get. (#2593) For a packed i8/i16
+  // element, prefer the view-name-driven `signedness` (get_s for signed views,
+  // get_u for unsigned); fall back to the legacy storage-kind heuristic when the
+  // caller did not supply it (i32 packed elements use plain `array.get` — i32 has
+  // no sign-extension distinction; the value IS the full 32 bits).
   const packedLoad =
-    elementType.kind === "i8" ? "array.get_u" : elementType.kind === "i16" ? "array.get_s" : "array.get";
+    elementType.kind === "i8" || elementType.kind === "i16"
+      ? signedness === "s"
+        ? "array.get_s"
+        : signedness === "u"
+          ? "array.get_u"
+          : elementType.kind === "i8"
+            ? "array.get_u"
+            : "array.get_s"
+      : "array.get";
   const valueType: ValType = elementType.kind === "i8" || elementType.kind === "i16" ? { kind: "i32" } : elementType;
 
   const thenInstrs: Instr[] = [
