@@ -3707,7 +3707,34 @@ export function compilePropertyAccess(
       // `__extern_get` could not do — the M1 over-broad arm's failure. Gated
       // strictly on a static `any`/`unknown` receiver, host mode; the typed
       // `.length` hot-path is byte-identical (handled + returned above).
-      if (!ctx.standalone && (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 && exprType) {
+      // (#2580 M2 s1) DECLINE inside an async function/generator body. The
+      // async state machine (#1042 CPS lowering) can leave a destructuring rest /
+      // setter-captured local in a state where a speculative `compileExpression`
+      // recompile resolves a STALE value (the #2602-class desync; surfaces for the
+      // for-await array-rest `.length` reads incl. the setter-property variant).
+      // Origin reads those correctly via its own non-speculative path, so DECLINE
+      // here → fall through to origin (all 8 for-await rest `.length` tests stay
+      // green). The #2580 canary + Cluster A reads are NOT inside async functions,
+      // so they still take the reader. Walk to the nearest function-like ancestor
+      // and check the `async` modifier.
+      let inAsyncFn = false;
+      for (let p: ts.Node | undefined = expr.parent; p; p = p.parent) {
+        if (
+          ts.isFunctionDeclaration(p) ||
+          ts.isFunctionExpression(p) ||
+          ts.isArrowFunction(p) ||
+          ts.isMethodDeclaration(p)
+        ) {
+          inAsyncFn = ts.getModifiers(p)?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword) ?? false;
+          break;
+        }
+      }
+      if (
+        !ctx.standalone &&
+        !inAsyncFn &&
+        (objType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 &&
+        exprType
+      ) {
         if (exprType.kind !== "externref") {
           coerceType(ctx, fctx, exprType, { kind: "externref" });
         }
