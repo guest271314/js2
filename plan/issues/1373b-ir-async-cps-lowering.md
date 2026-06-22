@@ -764,3 +764,98 @@ After Slice 3 lands and the gate is flipped:
 | `addFuncType` interning shifts funcIdx mid-emission | All state fns added in Phase 1 of `compileIrPathFunctions` before Phase 3 lowering — same pattern as monomorphize clones (line 434–452). |
 | Async fn called from a non-IR (legacy) caller has signature mismatch | The entry fn's signature is unchanged: `(params...) -> externref` (the Promise). Callers' `call $f` ops keep working. |
 | Slice 2 breaks `tests/ir/issue-1373b.test.ts` Slice 1 tests | Slice 2 must NOT modify Slice 1's FULFILLED/REJECTED inline branches — those remain the fast path for `await` on an already-settled Promise. The new PENDING branch is additive. |
+
+---
+
+## RE-MEASUREMENT + VERDICT (arch, 2026-06-22 — ASYNC lane, sprint 65)
+
+Re-measured the async test262 gap against the current baseline JSONL
+(`.test262-cache/test262-current.jsonl`, promoted off main 2026-06-20).
+**Following the sprint-65 pattern where every umbrella re-grounded far
+smaller, the CPS epic's actual addressable residual is tiny.**
+
+### Re-measured async cluster (host gc mode, current main)
+
+| Directory | total | pass | pass% |
+|---|---|---|---|
+| `language/expressions/await` | 22 | 10 | 45% |
+| `language/expressions/async-function` | 93 | 68 | 73% |
+| `language/statements/async-function` | 74 | 68 | 92% |
+| `language/expressions/async-arrow-function` | 60 | 45 | 75% |
+| `language/expressions/async-generator` | 623 | 507 | 81% |
+| `language/statements/async-generator` | 301 | 253 | 84% |
+| `language/statements/for-await-of` | 1234 | 921 | 75% |
+| `built-ins/AsyncFunction` | 18 | 9 | 50% |
+| `built-ins/AsyncGeneratorFunction` | 23 | 6 | 26% |
+| `built-ins/AsyncGeneratorPrototype` | 48 | 46 | 96% |
+| `built-ins/Promise` | 652 | 487 | 75% |
+| **async cluster TOTAL** | **3199** | **2449** | **76.6%** |
+
+### Verdict: do NOT prioritise the CPS epic this sprint. Slice the bounded bugs.
+
+The async cluster is **already 76.6% passing via the legacy
+synchronous-async path** (the no-op `await` + call-site `wrapAsyncReturn`).
+The CPS state machine in `async-cps.ts` is **fully implemented and verified
+correct when run** (senior-dev, 2026-06-03 — see #1042) but ships **gated OFF**
+because flipping `ASYNC_CPS_ENABLED` globally hits a confirmed **design wall**:
+the synchronous-consumption contract. A `def` is per-definition but
+consumption is per-call-site — the same async fn is consumed both as a raw
+value (`asyncFn() as any as number`, pervasive in test262 and the equivalence
+suite) and as a Promise (`asyncFn().then(...)`). A global return-type flip to
+`externref`-Promise satisfies the second and **breaks the first** (`Promise as
+any as number` → NaN). Turning CPS on for real needs either (a) whole-program
+consumption analysis to only rewrite fns consumed exclusively as Promises, or
+(b) teaching the value-consumption call sites to synchronously drive the
+returned Promise to its settled value. **Both are architect-level and neither
+is a sprint-65-sized win.** The epic remains correct and staged (Slices 1/1b/2
+landed inert; Slice 3 is the gate flip behind the consumption-contract work) —
+but it is the **wrong lever for this sprint's conformance budget**.
+
+### What the residual actually is (and where it's owned)
+
+The ~750 async-cluster failures decompose into buckets that are **mostly
+NOT CPS-shaped** and mostly belong to other lanes:
+
+- **for-await-of: 313 fails → 311 are `dstr-*` destructuring-pattern tests.**
+  Shared root cause with the destructuring lane (#2400/#2503/#2545/#2001/
+  #2169/#2602 — #2602 *for-await rest element* just landed). Only **2**
+  non-dstr for-await failures exist. The async-iteration mechanism itself
+  works. **Not this lane — destructuring lane.**
+- **Promise combinators: 125 fails** (all/allSettled/any/race). Split:
+  `resolve/reject not callable` (45) → **#2614** (new, this lane);
+  `[object Object] is not a constructor` (~8) → **#1528** (already ready,
+  sprint 65); `illegal_cast Constructor()` subclass-capability (~19) → #2614
+  secondary / follow-up.
+- **async-function expr `.then` on a var-bound async fn: ~18 fails** →
+  **#2612** (new, this lane) — a bounded `isAsyncCallExpression` detection
+  gap, not CPS.
+- **`await <thenable>`/`<non-Promise>` assimilation: ~15 fails** → **#2613**
+  (new, this lane) — the ONLY genuinely-suspension-shaped bucket, and it is
+  fixable in **JS-host mode via host `PromiseResolve` assimilation WITHOUT the
+  CPS gate**. Standalone thenable-await is the only piece that truly needs the
+  CPS epic, and it is a handful of tests.
+- **async-generator / AsyncGeneratorFunction residual** (~125 + 17) →
+  async-generator bucket (long-deferred, `async-generator` category — out of
+  this lane's scope, see #1344 for the receiver-check slice).
+
+### This lane's sliced output (sprint 65, ready)
+
+| id | title | est pass | role |
+|---|---|---|---|
+| **#2612** | async fn via var/expr binding consumed as thenable not wrapped | ~18 | dev |
+| **#2613** | `await` thenable/non-Promise assimilation (JS-host, no gate flip) | ~15 | dev |
+| **#2614** | Promise combinators read constructor `resolve` + callable element fns | ~45 | senior-dev |
+
+**~78 test262 pass from 3 bounded slices, zero dependence on the CPS gate.**
+
+### #1373b status after this re-measurement
+
+**Stays `ready` but DE-PRIORITISED from `priority: top` for sprint 65** — it is
+not a conformance win this sprint; its addressable residual (standalone
+thenable-await + the IR-fallback-budget `async-function` bucket retirement) is
+gated behind the consumption-contract architecture decision, which is itself a
+larger separate effort than a single sprint slice. When the team chooses to
+take the consumption contract on, the staged plan above (Slices 1b/2/3) is
+correct and ready — re-read the S53 joint spec as written. Until then, the
+bounded slices (#2612/#2613/#2614) harvest the async conformance that does
+**not** require flipping the model.
