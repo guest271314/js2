@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-22T16:59:34.139Z",
-  "baseline_generated_at": "2026-06-22T16:59:34.139Z",
-  "baseline_sha": "6d493d775ef165e6854a3046000027eb11f7dd11",
+  "timestamp": "2026-06-22T17:32:01.561Z",
+  "baseline_generated_at": "2026-06-22T17:32:01.561Z",
+  "baseline_sha": "46c9b52e6c969baccba897d21f2209515a9ca55d",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -1204,8 +1204,8 @@
         },
         "error_categories": {
           "runtime_error": 2463,
-          "illegal_cast": 14,
           "wasm_compile": 82,
+          "illegal_cast": 14,
           "null_deref": 51,
           "other": 184,
           "assertion_fail": 773,
@@ -1217,12 +1217,12 @@
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
-          "test/built-ins/Temporal/PlainMonthDay/refisoyear-undefined.js"
+          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
         ],
         "sample_signatures": [
           "runtime_error:Cannot convert object to primitive value",
-          "illegal_cast:illegal cast [in __str_to_number() ← test]",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
+          "illegal_cast:illegal cast [in __str_to_number() ← test]",
           "null_deref:L#:## dereferencing a null pointer [in test()]",
           "other:L#:## Temporal.PlainDate argument must be a string or property bag, not object"
         ]

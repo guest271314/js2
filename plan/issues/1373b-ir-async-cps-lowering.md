@@ -896,3 +896,29 @@ called back). Both are "a wasm continuation/closure invoked by host code"; fixin
 one likely fixes both. NOT a separate bounded arm — recommend a single
 multi-hop-callback substrate slice covering await-thenable + #2614 combinator
 residual. (The full IR Phase C #1373b epic verdict above is unchanged.)
+## Re-ground verdict (2026-06-22, sd-1838) — genuine EPIC, deferral is correct
+
+Re-grounded against current main (the task subject's "ASYNC_CPS already enabled
+on main; residual may be a narrow settlement-timing gap" is INACCURATE):
+
+- `CodegenContext.supportsAsyncIr` is `false` by default (`create-context.ts:232`)
+  and nothing flips it true — the IR async CPS path is OFF on main.
+- `isAsyncIrReady` (`src/ir/select.ts:190`) is HARDCODED `return false` with
+  `TODO(#1373b Slice 2): body-shape check … For now the gate is closed
+  regardless of body shape.` The gate has never been opened.
+- The `src/codegen/async-cps.ts` substrate now EXISTS (36KB, landed via #1042),
+  so the lowering module is present — but #1042 (async state-machine) is still
+  `in-progress`, and the IR-path Phase C wiring (Slice 2: CPS continuation
+  synthesis + body-shape acceptance + parity test vs the legacy direct-codegen
+  async path) is NOT implemented.
+
+**Verdict: this is the full Phase C feature (feasibility:hard, reasoning_effort:max),
+NOT a collapsed narrow fix.** It needs an architect spec first (the
+`async-cluster-architect-spec.md` exists but predates the landed async-cps.ts —
+re-spec the Slice 2 gate-open + parity plan against the current substrate), then
+senior-dev implementation, coordinated with #1042's in-progress state-machine,
+validated via merge_group. Correctly tagged `[DEFERRED EPIC — next-sprint]`.
+Recommend: route through /architect-spec, keep #55 `ready`/deferred, do NOT sink
+sprint-65 forcing it. The async row payoff this sprint already came via
+#2612/#2613 (landed) and the #2614 combinator cluster (gated behind #86, now
+landed — re-measure #2614 next).
