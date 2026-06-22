@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-22T13:46:59.981Z",
-  "baseline_generated_at": "2026-06-22T13:46:59.981Z",
-  "baseline_sha": "b90560f061a91dbf6d55ebd9d5c24801edeb50b4",
+  "timestamp": "2026-06-22T16:59:34.139Z",
+  "baseline_generated_at": "2026-06-22T16:59:34.139Z",
+  "baseline_sha": "6d493d775ef165e6854a3046000027eb11f7dd11",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -10,22 +10,22 @@
   },
   "summary": {
     "total": 43136,
-    "pass": 23793,
-    "fail": 13003,
-    "compile_error": 6316,
+    "pass": 23780,
+    "fail": 12992,
+    "compile_error": 6340,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 36796,
+    "compilable": 36772,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42050,
-        "pass": 23277,
-        "fail": 12566,
-        "compile_error": 6183,
+        "pass": 23264,
+        "fail": 12555,
+        "compile_error": 6207,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 35843,
+        "compilable": 35819,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -53,23 +53,23 @@
       },
       "official": {
         "total": 43136,
-        "pass": 23793,
-        "fail": 13003,
-        "compile_error": 6316,
+        "pass": 23780,
+        "fail": 12992,
+        "compile_error": 6340,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 36796,
+        "compilable": 36772,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48118,
-        "pass": 24933,
-        "fail": 14022,
-        "compile_error": 9033,
+        "pass": 24920,
+        "fail": 14011,
+        "compile_error": 9057,
         "compile_timeout": 7,
         "skip": 123,
-        "compilable": 38955,
+        "compilable": 38931,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -77,32 +77,32 @@
   },
   "official_summary": {
     "total": 43136,
-    "pass": 23793,
-    "fail": 13003,
-    "compile_error": 6316,
+    "pass": 23780,
+    "fail": 12992,
+    "compile_error": 6340,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 36796,
+    "compilable": 36772,
     "stale": 0
   },
   "full_summary": {
     "total": 48118,
-    "pass": 24933,
-    "fail": 14022,
-    "compile_error": 9033,
+    "pass": 24920,
+    "fail": 14011,
+    "compile_error": 9057,
     "compile_timeout": 7,
     "skip": 123,
-    "compilable": 38955,
+    "compilable": 38931,
     "stale": 0
   },
   "strict_summary": {
     "total": 40627,
-    "pass": 22653,
-    "fail": 12293,
-    "compile_error": 5657,
+    "pass": 22640,
+    "fail": 12282,
+    "compile_error": 5681,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 34946,
+    "compilable": 34922,
     "stale": 0
   },
   "scope_summaries": {
@@ -128,12 +128,12 @@
     },
     "standard": {
       "total": 42050,
-      "pass": 23277,
-      "fail": 12566,
-      "compile_error": 6183,
+      "pass": 23264,
+      "fail": 12555,
+      "compile_error": 6207,
       "compile_timeout": 6,
       "skip": 18,
-      "compilable": 35843,
+      "compilable": 35819,
       "stale": 0
     }
   },
@@ -632,8 +632,8 @@
       "name": "built-ins/Set",
       "path": "built-ins/Set",
       "pass": 195,
-      "fail": 110,
-      "compile_error": 78,
+      "fail": 102,
+      "compile_error": 86,
       "compile_timeout": 0,
       "skip": 0,
       "total": 383
@@ -891,9 +891,9 @@
     {
       "name": "language/expressions",
       "path": "language/expressions",
-      "pass": 7462,
+      "pass": 7458,
       "fail": 2751,
-      "compile_error": 804,
+      "compile_error": 808,
       "compile_timeout": 1,
       "skip": 18,
       "total": 11036
@@ -1051,9 +1051,9 @@
     {
       "name": "language/statements",
       "path": "language/statements",
-      "pass": 5960,
-      "fail": 2620,
-      "compile_error": 756,
+      "pass": 5951,
+      "fail": 2617,
+      "compile_error": 768,
       "compile_timeout": 1,
       "skip": 0,
       "total": 9337
@@ -1080,15 +1080,15 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 9676,
-    "illegal_cast": 1821,
+    "assertion_fail": 9675,
+    "illegal_cast": 1820,
     "negative_test_fail": 77,
     "null_deref": 422,
     "oob": 35,
-    "other": 3398,
+    "other": 3382,
     "promise_error": 197,
     "range_error": 16,
-    "runtime_error": 6259,
+    "runtime_error": 6290,
     "type_error": 18,
     "unreachable": 4,
     "wasm_compile": 1132
@@ -1101,39 +1101,39 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 23062,
-    "classified": 23062,
+    "total_non_pass_non_skip": 23075,
+    "classified": 23075,
     "unclassified_threshold": null,
     "buckets": [
       {
         "id": "late-import-index-shift",
         "issues": ["#2079", "#2043"],
         "label": "Late-import index-shift fail-loud CE (stale captured index across flushLateImportShifts) — standalone generators, class globals",
-        "count": 44,
+        "count": 37,
         "statuses": {
           "pass": 0,
           "fail": 0,
-          "compile_error": 44,
+          "compile_error": 37,
           "compile_timeout": 0,
           "skip": 0,
-          "total": 44
+          "total": 37
         },
         "error_categories": {
-          "other": 44
+          "other": 37
         },
         "sample_files": [
           "test/language/expressions/template-literal/tv-template-head.js",
-          "test/built-ins/Set/prototype/difference/subclass-receiver-methods.js",
           "test/built-ins/SuppressedError/prototype/name.js",
           "test/built-ins/TypedArray/prototype/toLocaleString/resizable-buffer.js",
-          "test/language/expressions/template-literal/tv-template-characters.js"
+          "test/language/expressions/template-literal/tv-template-characters.js",
+          "test/built-ins/String/prototype/replaceAll/searchValue-replacer-RegExp-call.js"
         ],
         "sample_signatures": [
           "other:L#:## Binary emit error: Codegen error: local index out of range — # (valid: [#, #)) at function 'test'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImports/add",
-          "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'MySet_size'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImp",
           "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'test'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionImports/a",
           "other:L#:## Binary emit error: Codegen error: function index out of range — # (valid: [#, #)) at function '__call_m_resize_1'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/add",
-          "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'RE_@@replace'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionI"
+          "other:L#:## Binary emit error: Codegen error: global index out of range — -# (valid: [#, #)) at function 'RE_@@replace'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShifts/addUnionI",
+          "other:L#:## Binary emit error: Codegen error: function index out of range — undefined (valid: [#, #)) at function 'invalidControls'. This is the late-import index-shift class (##): a captured index went stale across a deferred flushLateImportShif"
         ]
       },
       {
@@ -1204,8 +1204,8 @@
         },
         "error_categories": {
           "runtime_error": 2463,
-          "wasm_compile": 82,
           "illegal_cast": 14,
+          "wasm_compile": 82,
           "null_deref": 51,
           "other": 184,
           "assertion_fail": 773,
@@ -1215,14 +1215,14 @@
         "sample_files": [
           "test/built-ins/Temporal/Now/zonedDateTimeISO/return-value.js",
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
-          "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
           "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
-          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
+          "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
+          "test/built-ins/Temporal/PlainMonthDay/refisoyear-undefined.js"
         ],
         "sample_signatures": [
           "runtime_error:Cannot convert object to primitive value",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
           "illegal_cast:illegal cast [in __str_to_number() ← test]",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
           "null_deref:L#:## dereferencing a null pointer [in test()]",
           "other:L#:## Temporal.PlainDate argument must be a string or property bag, not object"
         ]
@@ -1360,8 +1360,8 @@
           "test/built-ins/JSON/parse/15.12.2-2-2.js",
           "test/built-ins/JSON/stringify/space-wrong-type.js",
           "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
-          "test/built-ins/JSON/stringify/replacer-array-empty.js",
-          "test/built-ins/JSON/parse/15.12.2-2-6.js"
+          "test/built-ins/JSON/parse/15.12.2-2-6.js",
+          "test/built-ins/JSON/stringify/replacer-array-empty.js"
         ],
         "sample_signatures": [
           "illegal_cast:L#:## illegal cast [in test()]",
@@ -1581,20 +1581,20 @@
         "id": "standalone-iterator-protocol",
         "issues": ["#1665", "#681", "#1718"],
         "label": "Generic iterator protocol still needs a pure-Wasm standalone path",
-        "count": 3249,
+        "count": 3248,
         "statuses": {
           "pass": 0,
-          "fail": 2503,
+          "fail": 2502,
           "compile_error": 745,
           "compile_timeout": 1,
           "skip": 0,
-          "total": 3249
+          "total": 3248
         },
         "error_categories": {
           "wasm_compile": 327,
           "assertion_fail": 1714,
           "runtime_error": 397,
-          "other": 267,
+          "other": 266,
           "illegal_cast": 458,
           "null_deref": 51,
           "type_error": 10,
@@ -1659,21 +1659,21 @@
         "id": "class-prototype-private-descriptor",
         "issues": ["#1591", "#1365", "#1364"],
         "label": "Class element, prototype, private-name, and descriptor reconciliation gaps",
-        "count": 5800,
+        "count": 5821,
         "statuses": {
           "pass": 0,
-          "fail": 3829,
-          "compile_error": 1968,
+          "fail": 3819,
+          "compile_error": 1999,
           "compile_timeout": 3,
           "skip": 0,
-          "total": 5800
+          "total": 5821
         },
         "error_categories": {
-          "assertion_fail": 3086,
+          "assertion_fail": 3085,
           "wasm_compile": 268,
-          "other": 985,
-          "illegal_cast": 172,
-          "runtime_error": 1087,
+          "other": 977,
+          "illegal_cast": 171,
+          "runtime_error": 1118,
           "promise_error": 44,
           "null_deref": 118,
           "negative_test_fail": 13,
@@ -1890,23 +1890,23 @@
         },
         "error_categories": {
           "assertion_fail": 194,
-          "other": 10,
           "runtime_error": 11,
+          "other": 10,
           "wasm_compile": 3
         },
         "sample_files": [
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
           "test/annexB/language/global-code/switch-case-global-update.js",
-          "test/annexB/language/comments/single-line-html-close-first-line-3.js",
-          "test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-of-lhs.js"
+          "test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-of-lhs.js",
+          "test/annexB/language/comments/single-line-html-close-first-line-3.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( f, undefined, 'Initialized binding created prior to evaluation' );",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');",
-          "other:L#:## ';' expected.",
-          "runtime_error:L#:## Invalid left-hand side in for-in/for-of"
+          "runtime_error:L#:## Invalid left-hand side in for-in/for-of",
+          "other:L#:## ';' expected."
         ]
       },
       {
@@ -2286,8 +2286,8 @@
         },
         "sample_files": [
           "test/language/expressions/object/method-definition/forbidden-ext/b2/async-meth-forbidden-ext-indirect-access-own-prop-caller-get.js",
-          "test/built-ins/Promise/all/resolve-element-function-extensible.js",
           "test/built-ins/Promise/race/same-resolve-function.js",
+          "test/built-ins/Promise/all/resolve-element-function-extensible.js",
           "test/built-ins/Promise/allSettled/reject-element-function-multiple-calls.js",
           "test/built-ins/Promise/any/ctx-non-ctor.js"
         ],
@@ -2324,7 +2324,7 @@
           "test/language/module-code/instn-star-props-circular.js",
           "test/language/module-code/top-level-await/syntax/early-does-not-propagate-to-fn-declaration-params.js",
           "test/language/module-code/instn-star-props-dflt-keep-indirect.js",
-          "test/language/module-code/top-level-await/new-await-parens.js"
+          "test/language/module-code/parse-err-hoist-lex-fun.js"
         ],
         "sample_signatures": [
           "other:[object WebAssembly.Exception]",
