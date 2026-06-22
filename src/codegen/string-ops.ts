@@ -135,47 +135,103 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
   // in-module `$__any_to_string` dispatcher. No JS-host bridge is involved.
   const tsType = valueExprTsType(ctx, operand); // #2176 ambient-shadow safe
   const opType = compileExpression(ctx, fctx, operand);
-
-  // #2007 — a statically-known vec (array) operand stringifies via
-  // Array.prototype.join semantics ("1,2"), not the `$__any_to_string`
-  // "[object Object]" fallthrough. The concrete vec type is known here, so emit
-  // the join lowering inline (index-shift-safe — see #1448). This vec pre-check
-  // is specific to the native `+`-concat path and stays in the caller (the
-  // single coercion engine's native ref arm is the struct/$__any_to_string
-  // tail); only fire it for a non-string ref operand.
-  if (
-    opType &&
-    (opType.kind === "ref" || opType.kind === "ref_null") &&
-    !isStringType(tsType) &&
-    tryCompileNativeVecConcatOperand(ctx, fctx, opType)
-  ) {
+  if (!opType) {
+    // void result → "undefined"
+    compileStringLiteral(ctx, fctx, "undefined", operand);
     return true;
   }
 
-  // Unknown ValType kind (e.g. funcref) — the original cascade declined
-  // (returned false) so the caller falls through to the legacy
-  // `compileExpression(value, nativeStringType)`. Preserve that: only the
-  // void/scalar/externref/ref kinds are engine-handled here.
-  if (
-    opType &&
-    opType.kind !== "f64" &&
-    opType.kind !== "i32" &&
-    opType.kind !== "i64" &&
-    opType.kind !== "externref" &&
-    opType.kind !== "ref" &&
-    opType.kind !== "ref_null"
-  ) {
-    return false;
+  // #1917 NOTE: this native (standalone) `+`-concat operand cascade is
+  // DELIBERATELY NOT migrated to the single coercion engine. The engine's
+  // `emitToString` number arm runs `emitNativeStringRefFromExternref`
+  // (`any.convert_extern`) on its scalar input; when `number_toString` is NOT
+  // registered (e.g. a `String(x)` result that returned a bare f64 reached the
+  // concat operand — the #1960 standalone S9.8.1 regression), that emits
+  // `any.convert_extern` on a bare f64 → INVALID Wasm, whereas the cascade below
+  // gates the numeric arm on `toStrIdx !== undefined` and DECLINES (returns
+  // false → legacy `compileExpression(value, nativeStringType)`), which stays
+  // valid. Folding this site needs the engine to model that decline exactly; it
+  // is a tracked follow-up increment. The HOST concat/template ToString sites
+  // ARE migrated (js-host-only, standalone-gate-proven safe).
+
+  // Already a native string operand (string-typed ref) — pass straight through.
+  if ((opType.kind === "ref" || opType.kind === "ref_null") && isStringType(tsType)) {
+    return true;
   }
 
-  // #1917 — the per-operand ToString cascade (void→"undefined", bool, number,
-  // null/undef, string passthrough, dynamic externref → `__extern_toString`,
-  // struct ref → `tryStructToString`/`$__any_to_string`) is now the single
-  // coercion engine in native mode. Hint "default" matches the `+`-concat
-  // policy; in native mode the engine's externref tail is `__extern_toString`
-  // (the string-hint tail this path always used) regardless of the hint.
-  emitToString(ctx, fctx, opType, tsType, "default");
-  return true;
+  const toStrIdx = ctx.funcMap.get("number_toString");
+
+  if (opType.kind === "i32" && isBooleanType(tsType)) {
+    // Boolean → "true"/"false" native literal selected at runtime.
+    const trueInstrs = nativeStringLiteralInstrs(ctx, "true");
+    const falseInstrs = nativeStringLiteralInstrs(ctx, "false");
+    fctx.body.push({
+      op: "if",
+      blockType: { kind: "val", type: nativeStringType(ctx) },
+      then: trueInstrs,
+      else: falseInstrs,
+    } as Instr);
+    return true;
+  }
+
+  if ((opType.kind === "f64" || opType.kind === "i32" || opType.kind === "i64") && toStrIdx !== undefined) {
+    if (opType.kind === "i32") fctx.body.push({ op: "f64.convert_i32_s" });
+    else if (opType.kind === "i64") fctx.body.push({ op: "f64.convert_i64_s" });
+    fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    emitNativeStringRefFromExternref(ctx, fctx);
+    return true;
+  }
+
+  if (opType.kind === "externref") {
+    // Statically null / undefined → direct native literal (avoids a host call).
+    const isNull = (tsType.flags & ts.TypeFlags.Null) !== 0;
+    const isUndef = (tsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+    if (isNull) {
+      fctx.body.push({ op: "drop" });
+      compileStringLiteral(ctx, fctx, "null", operand);
+      return true;
+    }
+    if (isUndef) {
+      fctx.body.push({ op: "drop" });
+      compileStringLiteral(ctx, fctx, "undefined", operand);
+      return true;
+    }
+    // Dynamic externref (boxed string / any / $Object) → runtime ToString.
+    // For standalone $Object values this routes through native
+    // OrdinaryToPrimitive("string") before the native-string concat helper.
+    const dynToStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    if (dynToStrIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: dynToStrIdx });
+    }
+    emitNativeStringRefFromExternref(ctx, fctx);
+    return true;
+  }
+
+  if (opType.kind === "ref" || opType.kind === "ref_null") {
+    // #2007 — a statically-known vec (array) operand stringifies via
+    // Array.prototype.join semantics ("1,2"), not the `$__any_to_string`
+    // "[object Object]" fallthrough. The concrete vec type is known here, so
+    // emit the join lowering inline (index-shift-safe — see #1448).
+    if (tryCompileNativeVecConcatOperand(ctx, fctx, opType)) {
+      return true;
+    }
+    // #1806 Phase 1 (string-hint): when the operand is a compile-time-resolvable
+    // object struct with its own `@@toPrimitive`/`toString`, dispatch that method
+    // (OrdinaryToPrimitive, hint "string") instead of `$__any_to_string`, which
+    // can only yield "[object Object]" for a struct it cannot introspect.
+    if (tryStructToString(ctx, fctx, opType)) {
+      return true;
+    }
+    // Object / array / any-boxed ref → $__any_to_string. The helper accepts
+    // anyref (the supertype), so the struct ref is already assignable.
+    const anyToStrIdx = ensureAnyToStringHelper(ctx);
+    fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+    return true;
+  }
+
+  // Unknown kind — leave on stack for the caller. (Should not happen for `+`.)
+  return false;
 }
 
 /**

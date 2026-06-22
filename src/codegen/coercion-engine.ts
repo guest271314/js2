@@ -134,7 +134,19 @@ export function emitToString(
 
   // ── f64 / i32 / i64 → number_toString ──
   if (valType.kind === "f64" || valType.kind === "i32" || valType.kind === "i64") {
+    // Defensive (#1960): in native/standalone mode the f64→native-string bridge
+    // REQUIRES `number_toString` — its externref result is what
+    // `emitNativeStringRefFromExternref` (`any.convert_extern; ref.cast`)
+    // consumes. If it is not registered, emitting `any.convert_extern` on the
+    // bare scalar is INVALID Wasm; return the scalar UNCHANGED instead so the
+    // caller can fall back. (The standalone `+`-concat site is NOT migrated to
+    // this engine precisely because it must DECLINE rather than mid-body-register
+    // `number_toString` — see `compileNativeConcatOperand`; this guard only
+    // protects any future native caller.)
     const toStrIdx = ctx.funcMap.get("number_toString");
+    if (native && toStrIdx === undefined) {
+      return valType;
+    }
     if (valType.kind === "i32") fctx.body.push({ op: "f64.convert_i32_s" });
     else if (valType.kind === "i64") fctx.body.push({ op: "f64.convert_i64_s" });
     if (toStrIdx !== undefined) fctx.body.push({ op: "call", funcIdx: toStrIdx });
