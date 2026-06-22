@@ -38,12 +38,7 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { nativeStringType } from "./index.js";
 import { ensureAnyToStringHelper } from "./native-strings.js";
-import {
-  compileExpression,
-  compileStringLiteral,
-  ensureLateImport,
-  flushLateImportShifts,
-} from "./shared.js";
+import { compileExpression, compileStringLiteral, ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { coerceType, tryStructToString } from "./type-coercion.js";
 
 /**
@@ -60,8 +55,7 @@ export type CoercionMode = "js-host" | "native-strings-host" | "standalone";
 
 export function coercionMode(ctx: CodegenContext): CoercionMode {
   if (noJsHost(ctx)) return "standalone";
-  if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0)
-    return "native-strings-host";
+  if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) return "native-strings-host";
   return "js-host";
 }
 
@@ -126,37 +120,24 @@ export function emitToString(
 
   // ── string-typed ref passthrough (native modes only — a native string-typed
   //    substitution is already an $AnyString/NativeString ref) ──
-  if (
-    native &&
-    (valType.kind === "ref" || valType.kind === "ref_null") &&
-    isStringType(tsType)
-  ) {
+  if (native && (valType.kind === "ref" || valType.kind === "ref_null") && isStringType(tsType)) {
     return valType;
   }
 
   // ── i32 boolean → "true"/"false" ──
   // Honour the boolean brand on the ValType (#2016/#2030: i32 predicates carry
   // `boolean: true`) as well as the static TS type.
-  if (
-    valType.kind === "i32" &&
-    (isBooleanType(tsType) || (valType as { boolean?: true }).boolean)
-  ) {
+  if (valType.kind === "i32" && (isBooleanType(tsType) || (valType as { boolean?: true }).boolean)) {
     emitBoolToString(ctx, fctx);
     return native ? nativeStringType(ctx) : { kind: "externref" };
   }
 
   // ── f64 / i32 / i64 → number_toString ──
-  if (
-    valType.kind === "f64" ||
-    valType.kind === "i32" ||
-    valType.kind === "i64"
-  ) {
+  if (valType.kind === "f64" || valType.kind === "i32" || valType.kind === "i64") {
     const toStrIdx = ctx.funcMap.get("number_toString");
     if (valType.kind === "i32") fctx.body.push({ op: "f64.convert_i32_s" });
-    else if (valType.kind === "i64")
-      fctx.body.push({ op: "f64.convert_i64_s" });
-    if (toStrIdx !== undefined)
-      fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    else if (valType.kind === "i64") fctx.body.push({ op: "f64.convert_i64_s" });
+    if (toStrIdx !== undefined) fctx.body.push({ op: "call", funcIdx: toStrIdx });
     if (native) {
       // number_toString returns an externref wrapping a native string; convert
       // it back to a native `ref $AnyString`.
@@ -169,8 +150,7 @@ export function emitToString(
   // ── externref ──
   if (valType.kind === "externref") {
     const isNull = (tsType.flags & ts.TypeFlags.Null) !== 0;
-    const isUndef =
-      (tsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+    const isUndef = (tsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
     if (isNull) {
       fctx.body.push({ op: "drop" });
       pushStringLiteral(ctx, fctx, "null");
@@ -191,20 +171,11 @@ export function emitToString(
     // the dynamic-externref operand always routes through `__extern_toString`
     // (the native `+`-concat and template callers both used the string-hint
     // tail there regardless of `+` vs template), then back to a native ref.
-    const importName =
-      !native && hint === "default"
-        ? "__extern_to_string_default"
-        : "__extern_toString";
-    const toStrIdx = ensureLateImport(
-      ctx,
-      importName,
-      [{ kind: "externref" }],
-      [{ kind: "externref" }],
-    );
+    const importName = !native && hint === "default" ? "__extern_to_string_default" : "__extern_toString";
+    const toStrIdx = ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "externref" }]);
     flushLateImportShifts(ctx, fctx);
     const finalIdx = ctx.funcMap.get(importName) ?? toStrIdx;
-    if (finalIdx !== undefined)
-      fctx.body.push({ op: "call", funcIdx: finalIdx });
+    if (finalIdx !== undefined) fctx.body.push({ op: "call", funcIdx: finalIdx });
     if (native) {
       emitNativeStringRefFromExternref(ctx, fctx);
       return nativeStringType(ctx);
@@ -237,10 +208,8 @@ export function emitToString(
         [{ kind: "externref" }],
       );
       flushLateImportShifts(ctx, fctx);
-      const finalIdx =
-        ctx.funcMap.get("__extern_to_string_default") ?? toStrIdx;
-      if (finalIdx !== undefined)
-        fctx.body.push({ op: "call", funcIdx: finalIdx });
+      const finalIdx = ctx.funcMap.get("__extern_to_string_default") ?? toStrIdx;
+      if (finalIdx !== undefined) fctx.body.push({ op: "call", funcIdx: finalIdx });
       return { kind: "externref" };
     }
     coerceType(ctx, fctx, valType, { kind: "externref" }, "string");
@@ -273,49 +242,32 @@ export function compileAndEmitToString(
  * externref string-constant in js-host mode) — exactly what every migrated
  * caller used via its own `pushStringConstant`/`compileStringLiteral` call.
  */
-function pushStringLiteral(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  value: string,
-): void {
+function pushStringLiteral(ctx: CodegenContext, fctx: FunctionContext, value: string): void {
   compileStringLiteral(ctx, fctx, value);
 }
 
 // emitBoolToString and emitNativeStringRefFromExternref live in string-ops.ts
 // and are not exported (string-ops.ts imports this module, so a direct import
 // here would be a cycle). They are bound lazily by string-ops.ts at module load.
-let boolToStringEmitter:
-  | ((ctx: CodegenContext, fctx: FunctionContext) => void)
-  | undefined;
-let nativeStringRefFromExternrefEmitter:
-  | ((ctx: CodegenContext, fctx: FunctionContext) => void)
-  | undefined;
+let boolToStringEmitter: ((ctx: CodegenContext, fctx: FunctionContext) => void) | undefined;
+let nativeStringRefFromExternrefEmitter: ((ctx: CodegenContext, fctx: FunctionContext) => void) | undefined;
 
 export function registerStringHelperEmitters(emitters: {
   boolToString: (ctx: CodegenContext, fctx: FunctionContext) => void;
-  nativeStringRefFromExternref: (
-    ctx: CodegenContext,
-    fctx: FunctionContext,
-  ) => void;
+  nativeStringRefFromExternref: (ctx: CodegenContext, fctx: FunctionContext) => void;
 }): void {
   boolToStringEmitter = emitters.boolToString;
   nativeStringRefFromExternrefEmitter = emitters.nativeStringRefFromExternref;
 }
 
 function emitBoolToString(ctx: CodegenContext, fctx: FunctionContext): void {
-  if (!boolToStringEmitter)
-    throw new Error("coercion-engine: bool-to-string emitter not registered");
+  if (!boolToStringEmitter) throw new Error("coercion-engine: bool-to-string emitter not registered");
   boolToStringEmitter(ctx, fctx);
 }
 
-function emitNativeStringRefFromExternref(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-): void {
+function emitNativeStringRefFromExternref(ctx: CodegenContext, fctx: FunctionContext): void {
   if (!nativeStringRefFromExternrefEmitter) {
-    throw new Error(
-      "coercion-engine: native-string-ref emitter not registered",
-    );
+    throw new Error("coercion-engine: native-string-ref emitter not registered");
   }
   nativeStringRefFromExternrefEmitter(ctx, fctx);
 }
