@@ -1,7 +1,7 @@
 ---
 id: 2614
 title: "Promise.{all,allSettled,any,race}: read constructor's own `resolve` + callable resolve/reject element functions (~45 fails)"
-status: in-progress
+status: blocked
 assignee: ttraenkler/senior-developer
 created: 2026-06-22
 updated: 2026-06-22
@@ -14,7 +14,8 @@ goal: async-model
 sprint: 65
 parent: 1042
 related: [1528, 1368, 1116, 1694]
-note: "Re-measured 2026-06-22 (arch, ASYNC lane). Largest single combinator bucket NOT owned by #1528 (which owns the non-constructor TypeError sub-bucket). Distinct root cause: the combinator must Get(constructor,'resolve') and the per-element resolve/reject functions must be observable callable functions."
+blocked_on: [1632b-2, 2615]
+note: "BLOCKED (2026-06-22, sd re-ground + impl attempt). The architect framing was wrong for current main: combinators delegate to native V8 (which already does Get(C,'resolve')). The real fix — route C to the user's realm Promise so a patched resolve is observed — is INSEPARABLE from the closure-as-dynamic-ctor capability bridge: the moment C is the realm Promise, NewPromiseCapability(C)→Construct(C, wasmExecutor) hits the same __fn_tramp_Constructor cross-realm illegal-cast as #2615/#1528a-residual (#1632b-2). Attempted observability fix proven net-NEGATIVE (regressed any/invoke-resolve pass→illegal-cast). Fold into / block behind the capability bridge; do NOT ship a standalone runtime.ts patch."
 ---
 # #2614 — Promise combinators: invoke the constructor's own `resolve` + expose callable resolve/reject element functions
 
