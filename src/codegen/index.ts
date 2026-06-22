@@ -4442,7 +4442,10 @@ function _emitVecAccessExportsInner(ctx: CodegenContext): void {
         boxInstrs = [{ op: "call", funcIdx: boxNumIdx } as Instr];
       } else if (elemKey === "i32" && boxNumIdx !== undefined) {
         boxInstrs = [{ op: "f64.convert_i32_s" } as Instr, { op: "call", funcIdx: boxNumIdx } as Instr];
-      } else if ((elemKey === "i32_byte" || elemKey === "i8_byte" || elemKey === "i16_byte") && boxNumIdx !== undefined) {
+      } else if (
+        (elemKey === "i32_byte" || elemKey === "i8_byte" || elemKey === "i16_byte") &&
+        boxNumIdx !== undefined
+      ) {
         // ArrayBuffer/DataView/typed-array byte elements — convert unsigned then box.
         // (#2593) i16_byte joins here: the GENERIC dynamic-read path (`__vec_get`,
         // for an `any`-typed read of a typed-array vec) reads the packed element

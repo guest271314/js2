@@ -1,7 +1,9 @@
 ---
 id: 2593
 title: "Standalone TypedArray integer element-width wrapping (ToInt8/ToUint16/Uint8Clamped) + signed read"
-status: ready
+status: done
+assignee: ttraenkler/senior-developer
+completed: 2026-06-22
 sprint: 65
 created: 2026-06-22
 priority: high
@@ -189,3 +191,63 @@ bucket in the residual.
   **Dispatch note**: #2592 and #2593 both touch `calls.ts`/`new-super.ts`
   element-init paths — sequence #2592 first (additive arm), then #2593 (changes
   storage), or assign both to one dev to avoid a `[CONFLICT]`.
+
+## Implementation Notes (2026-06-22, senior-developer)
+
+**Landed (standalone/WASI only; host/gc keeps the f64 lane).**
+
+### Root cause hierarchy
+Three layers had to agree on the SAME packed backing vec for an integer view:
+1. **Allocation** — `new TA(...)`. Before #2593 the count/literal constructors
+   hardcoded `isNativeUint8Array ? i8_byte : f64`, so `new Int32Array(n)`
+   allocated an **f64** vec while the read/`.byteLength` paths cast to
+   `i32_byte`. That mismatch was the *keystone* bug: an inline
+   `new Int32Array(4).byteLength` read field-0 through an `i32_byte` cast that
+   never matched (→ `0`), and an empty `new Int32Array(0)` trapped
+   (`illegal cast`). A *typed local* (`const a: Int32Array = ...`) happened to
+   work only because the binding's declared type coerced the f64 vec to the
+   packed vec at the store — inline expressions have no such coercion point.
+2. **Write** — element store applies the spec coercion (ToInt8/ToUint8/
+   ToInt16/ToUint16/ToInt32/ToUint32, and ToUint8Clamp round-half-to-even).
+3. **Read** — sign/zero extension keyed on the **view name** (signed→`array.get_s`,
+   unsigned→`array.get_u`), since signed/unsigned views share storage.
+
+### What changed
+- **`src/codegen/index.ts`** — `TYPED_ARRAY_PACKED_STORAGE` (Int8/Uint8/
+  Uint8Clamped→i8_byte, Int16/Uint16→i16_byte, Int32/Uint32→i32_byte), gated on
+  `wasi || standalone`; `typedArrayVecStorage` is now the single source of truth.
+  Exported `typedArrayPackedSignedness(name)`. `reserveTypedArraySubviewTypes`
+  reserves i16_byte/i32_byte subview backing. Generic vec accessors
+  (`__vec_get`, `__vec_pop`) read packed bytes with `array.get_u` (plain
+  `array.get` is INVALID on packed i8/i16) and unsigned-convert.
+- **`src/codegen/expressions/new-super.ts`** — BOTH count-ctor handlers now
+  allocate via `typedArrayVecStorage` (the keystone fix), so the constructor's
+  backing vec matches the read/byteLength paths.
+- **`src/codegen/property-access.ts`** — view-name-driven get_s/get_u at the vec
+  and bare-array read sites; Uint32 unsigned read (`f64.convert_i32_u`);
+  `.byteLength` reader uses `typedArrayVecStorage` and a runtime `ref.test`
+  guard before the packed-vec cast (empty/mismatched view → length 0, no trap).
+- **`src/codegen/array-methods.ts`** — `emitBoundsCheckedArrayGet` takes a
+  `signedness` param.
+- **`src/codegen/expressions/assignment.ts`** — write-site truncation; routes
+  Uint8Clamped through `emitToUint8Clamp`, other packed views through
+  `i32.trunc_sat_f64_s` into i32 (unpacked) hint.
+- **`src/codegen/binary-ops.ts`** — `emitToUint8Clamp` (clamp to [0,255] with
+  round-half-to-even).
+
+### Validation
+- New `tests/issue-2593-typedarray-intwidth.test.ts` (18/18) + the #1787
+  forward-looking suite flipped to live guards (9/9). Core typed-array sweep
+  77/77 (issue-2159, ta-fill, atomics, 2595-2597, 1787).
+- The legacy `tests/typed-array-basic.test.ts` / `tests/arraybuffer-dataview.test.ts`
+  failures (instantiate with `{}` and lack the now-mandatory `string_constants`
+  import added by a sibling PR) are PRE-EXISTING on `origin/main` — unrelated to
+  #2593.
+- Quality sub-gates green: tsc, prettier (all changed files), stack-balance,
+  coercion-sites, any-box-sites, codegen-fallbacks, ir-fallbacks, biome (changed
+  files).
+
+### Deliberately out of scope
+Cross-view copy conversion (`new Int32Array(someFloat64Array)`) keeps the
+pre-#2593 saturating `i32.trunc_sat_f64_s` rather than full modulo wrapping —
+that vec-to-vec conversion path is independent of the element write/read core.

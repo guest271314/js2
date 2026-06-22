@@ -36,7 +36,13 @@ import {
 } from "./expressions/helpers.js";
 import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { emitSymbolDescLoad } from "./symbol-native.js";
-import { addUnionImports, resolveWasmType, TYPED_ARRAY_NAMES, typedArrayPackedSignedness } from "./index.js";
+import {
+  addUnionImports,
+  resolveWasmType,
+  TYPED_ARRAY_NAMES,
+  typedArrayPackedSignedness,
+  typedArrayVecStorage,
+} from "./index.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
 import { tryCompileNativeSetSizeGet } from "./set-runtime.js";
@@ -2377,24 +2383,40 @@ export function compilePropertyAccess(
         // byteLength = field0 * BYTES_PER_ELEMENT. ArrayBuffer's field0 is already
         // a byte count, so its element size is 1.
         const bytesPerElem = isBuffer ? 1 : (TYPED_ARRAY_BYTES_PER_ELEMENT[recvName!] ?? 1);
-        const elemKey = isBuffer ? "i32_byte" : noJsHost(ctx) && recvName === "Uint8Array" ? "i8_byte" : "f64";
-        const elemType: ValType =
-          elemKey === "i8_byte" ? { kind: "i8" } : elemKey === "i32_byte" ? { kind: "i32" } : { kind: "f64" };
+        // (#2593) The vec storage MUST match the receiver's actual backing element
+        // type — `typedArrayVecStorage` now packs all integer views standalone
+        // (i8/i16/i32_byte), not just Uint8Array. Casting an Int32Array (i32_byte)
+        // receiver to an f64 vec read the wrong field-0 → wrong byteLength.
+        const storage = isBuffer
+          ? { key: "i32_byte", type: { kind: "i32" } as ValType }
+          : typedArrayVecStorage(ctx, recvName!);
+        const elemKey = storage.key;
+        const elemType: ValType = storage.type;
         const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
-        // Compile the receiver and recover the vec struct ref.
+        // (#2593) An EMPTY `new TA(0)` literal can compile to a different backing
+        // vec type (e.g. an f64/empty vec) than the packed `vecTypeIdx` for the
+        // declared view — an unconditional `ref.cast` then traps (`illegal cast`).
+        // Read field-0 (length) through a runtime `ref.test`: on a packed-vec hit
+        // read its length; on a miss (empty/mismatched backing) the length is 0
+        // (`byteLength` of an empty view is 0 regardless of element width).
         const recvType = compileExpression(ctx, fctx, expr.expression);
         if (recvType?.kind === "externref") {
           fctx.body.push({ op: "any.convert_extern" } as Instr);
-          fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
-        } else if (
-          (recvType?.kind === "ref" || recvType?.kind === "ref_null") &&
-          "typeIdx" in recvType &&
-          recvType.typeIdx !== vecTypeIdx
-        ) {
-          fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
         }
-        // field 0 → i32 (element count or byte count).
-        fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+        const lenTmpBL = allocLocal(fctx, `__bl_len_${fctx.locals.length}`, { kind: "anyref" });
+        fctx.body.push({ op: "local.set", index: lenTmpBL } as Instr);
+        fctx.body.push({ op: "local.get", index: lenTmpBL } as Instr);
+        fctx.body.push({ op: "ref.test", typeIdx: vecTypeIdx } as Instr);
+        fctx.body.push({
+          op: "if",
+          blockType: { kind: "val", type: { kind: "i32" } as ValType },
+          then: [
+            { op: "local.get", index: lenTmpBL } as Instr,
+            { op: "ref.cast", typeIdx: vecTypeIdx } as Instr,
+            { op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr,
+          ],
+          else: [{ op: "i32.const", value: 0 } as Instr],
+        } as Instr);
         if (bytesPerElem !== 1) {
           fctx.body.push({ op: "i32.const", value: bytesPerElem } as Instr);
           fctx.body.push({ op: "i32.mul" } as Instr);
@@ -5910,6 +5932,17 @@ export function compileElementAccessBody(
       // mapping fires for an externref-element (`any[]`) vec. (#2593) Thread the
       // view-name signedness for packed i8/i16 reads.
       emitBoundsCheckedArrayGet(fctx, arrTypeIdx, arrDef.element, ctx, false, taSignedness);
+    }
+    // (#2593) `Uint32Array` element read: the i32_byte storage holds the full 32
+    // bits; the value as a JS number is the UNSIGNED interpretation (0..2^32-1).
+    // `array.get` on an i32 array yields a raw i32 whose default i32→f64 coercion
+    // is SIGNED (−1 instead of 4294967295). For an unsigned i32 view convert the
+    // i32 to f64 UNSIGNED here and return f64 so no signed re-coerce follows.
+    // (Int32Array is signed → the default signed coercion is already correct;
+    // i8/i16 already sign/zero-extended into the i32 via array.get_s/_u above.)
+    if (arrDef.element.kind === "i32" && taSignedness === "u") {
+      fctx.body.push({ op: "f64.convert_i32_u" } as Instr);
+      return { kind: "f64" };
     }
     return valueType;
   }

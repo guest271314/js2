@@ -23,6 +23,7 @@ import {
   getOrRegisterRefCellType,
   getOrRegisterVecType,
   resolveWasmType,
+  typedArrayVecStorage,
 } from "../index.js";
 import { getOrRegisterDvWindowType } from "../dataview-native.js"; // (#2159/#38) DataView windowing wrapper
 import { emitBoundsCheckedArrayGet } from "../array-methods.js";
@@ -3230,9 +3231,17 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       "Float64Array",
     ]);
     if (TYPED_ARRAY_NAMES.has(expr.expression.text)) {
-      const isNativeUint8Array = noJsHost(ctx) && expr.expression.text === "Uint8Array";
-      const elemWasm: ValType = isNativeUint8Array ? { kind: "i8" } : { kind: "f64" };
-      const elemKey = isNativeUint8Array ? "i8_byte" : "f64";
+      // (#2593) Standalone/WASI packs integer views into i8/i16/i32 storage
+      // (Int8/Uint8/Uint8Clamped→i8_byte, Int16/Uint16→i16_byte,
+      // Int32/Uint32→i32_byte); host/gc and the float views keep f64.
+      // `typedArrayVecStorage` is the single source of truth so the
+      // count-constructor's backing vec matches the read / byteLength paths.
+      // Before #2593 only native Uint8Array packed (everything else f64), which
+      // left `new Int32Array(n)` on an f64 vec while the byteLength reader cast
+      // to i32_byte — a runtime type mismatch (read 0 / illegal cast).
+      const storage = typedArrayVecStorage(ctx, expr.expression.text);
+      const elemWasm: ValType = storage.type;
+      const elemKey = storage.key;
       const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemWasm);
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
       const args = expr.arguments ?? [];
@@ -4024,9 +4033,12 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
       "Float64Array",
     ]);
     if (className && TYPED_ARRAY_CTORS.has(className)) {
-      const isNativeUint8Array = noJsHost(ctx) && className === "Uint8Array";
-      const elemType: ValType = isNativeUint8Array ? { kind: "i8" } : { kind: "f64" };
-      const elemKey = isNativeUint8Array ? "i8_byte" : "f64";
+      // (#2593) packed integer storage standalone/WASI — see the matching
+      // count-ctor handler above. `typedArrayVecStorage` keeps host/gc on f64
+      // and packs Int8/Uint8/Uint8Clamped→i8, Int16/Uint16→i16, Int32/Uint32→i32.
+      const storage = typedArrayVecStorage(ctx, className);
+      const elemType: ValType = storage.type;
+      const elemKey = storage.key;
       const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
       const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
       const args = expr.arguments ?? [];
