@@ -249,7 +249,7 @@ class Parser {
   private uEnumClassWithStrings(source: string): ReNode {
     // Strip the outer brackets. `extractClassSource` guarantees a leading `[`
     // and trailing `]`.
-    let body = source.slice(1, -1);
+    const body = source.slice(1, -1);
     if (body.startsWith("^")) {
       // Should be unreachable — a negated class with strings is a host
       // SyntaxError pre-validated at the literal site — but refuse loudly.

@@ -117,7 +117,7 @@ describe("#2591 standalone RegExp v-flag \\q{…} string disjunction — dual-ru
     // than return a bogus boolean — but never claim a match it shouldn't.
     if (r.success) {
       // If the engine ever learns this case, the result must equal the host.
-      const expected = new RegExp("[\\q{ab}&&[a-z]]", "v").test("ab");
+      const expected = /[\q{ab}&&[a-z]]/v.test("ab");
       const { instance } = await WebAssembly.instantiate(r.binary, {});
       let got: boolean | null = null;
       try {
