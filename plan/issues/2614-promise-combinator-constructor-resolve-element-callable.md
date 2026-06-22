@@ -198,3 +198,20 @@ distinct narrow root causes, two of which (#2, and arguably #4) overlap the
 Re-scoping with the tech lead before implementing — the highest-ROI standalone
 slice here is the element-identity break (#1) + the getter-only writability (#3),
 which together are small and don't touch the contested capability path.
+
+### Bucket 1 (element-identity) — exact location pinpointed
+
+`emitIterableArg` (`src/codegen/expressions/calls.ts:1163`) materializes an
+array-literal iterable `[p1,p2,p3]` into a real JS array (`__js_array_new` +
+`__js_array_push` per element) so native V8 can `GetIterator` it. Each element
+is pushed via `compileExpression(ctx, fctx, el, { kind: "externref" })` with a
+belt-and-braces `extern.convert_any`. The candidate identity break is here OR in
+`_toIterable`'s `__vec_get` materialization (`src/runtime.ts` ~L9960) for the
+non-array-literal path. `__vec_get` for externref elements uses
+`extern.convert_any` (slot identity preserved), so the array-literal push path is
+the more likely culprit: if a `Promise` element is held as a wasm struct ref and
+`extern.convert_any`-wrapped at push time, V8 sees a wrapper distinct from the
+test's `var p1` (which holds the raw host Promise externref from
+`__new_Promise`). Next implementer: trace whether `p1` (a `new Promise(...)`
+binding) is stored as a raw externref or a struct ref at the push site, and
+ensure the push forwards the identical externref V8 will compare against.
