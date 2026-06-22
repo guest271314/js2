@@ -305,15 +305,25 @@ const ES_EARLY_ERROR_CODES = new Set([
   18050, // A rest element cannot have an initializer
 ]);
 
-// #2603: ambient `process` surface emulated under `--target wasi`. Served as a
-// synthetic root .d.ts (a global script — no import/export — so `process` is an
-// ambient global) ONLY when AnalyzeOptions.wasi is set. Declares the members the
-// node-process-api.ts lowering actually supports, so the checker resolves
-// `process` (no TS2580) without the user installing @types/node. Type-level
-// only — codegen lowers `process.*` syntactically regardless of this file.
+// #2603 / #2624: Node API emulation surface, injected when `--emulate node`
+// (or the `node:`-import auto-detect) is on. Served as a synthetic root .d.ts so
+// the checker resolves the emulated Node globals/modules (no TS2580 / TS2307)
+// without the user installing @types/node. Type-level only — codegen lowers
+// `process.*` and the IO calls syntactically regardless of this file.
+//
+// #2624 makes the injection **import-scoped, not blanket**: the .d.ts is built
+// DYNAMICALLY from the source (see `buildNodeEnvDts`) so it declares ONLY the
+// Node surface the program actually touches. A `node:fs`-only program does NOT
+// get an ambient `process` global; a bare `process` reference does NOT pull in
+// unrelated `node:*` module typings. This keeps the injected surface minimal
+// (goal: "type-checks, no TS2580/TS2307", nothing more) and mirrors the
+// per-module runtime-shim design (one shim per imported module).
 const NODE_ENV_DTS_NAME = "__js2wasm_node_env.d.ts";
-const NODE_ENV_DTS_SOURCE = `
-interface NodeJS_WritableStream {
+
+// The `process` member surface that node-process-api.ts actually lowers. Shared
+// between the bare ambient global (`declare var process`) and a `node:process`
+// default/namespace/named import.
+const PROCESS_INTERFACE_DECLS = `interface NodeJS_WritableStream {
   write(chunk: Uint8Array | ArrayBuffer | string): boolean;
   once(event: string, listener: (...args: any[]) => void): void;
 }
@@ -328,9 +338,170 @@ interface NodeJS_Process {
   readonly stdin: NodeJS_ReadableStream;
   readonly stdout: NodeJS_WritableStream;
   readonly stderr: NodeJS_WritableStream;
+}`;
+
+interface NodeEmuUsage {
+  /** node:<mod> -> set of imported member names ("" sentinel = default/namespace import). */
+  modules: Map<string, Set<string>>;
+  /** A bare global `process` is referenced (NOT via a `node:process` import). */
+  bareProcess: boolean;
 }
-declare var process: NodeJS_Process;
-`;
+
+/**
+ * Scan the source for the Node surface it touches: `import … from "node:<mod>"`
+ * (named / default / namespace), `require("node:<mod>")`, plus a bare global
+ * `process` reference. Cheap — a single `ts.createSourceFile` parse, no
+ * type-checking. The result drives the import-scoped .d.ts in `buildNodeEnvDts`.
+ */
+function scanNodeEmuUsage(source: string, scriptKind: ts.ScriptKind): NodeEmuUsage {
+  const modules = new Map<string, Set<string>>();
+  let importsNodeProcess = false;
+
+  const sf = ts.createSourceFile("__scan__.ts", source, ts.ScriptTarget.Latest, /*setParentNodes*/ true, scriptKind);
+
+  const recordModule = (mod: string, members: Iterable<string>): void => {
+    let set = modules.get(mod);
+    if (!set) {
+      set = new Set<string>();
+      modules.set(mod, set);
+    }
+    for (const m of members) set.add(m);
+  };
+
+  // 1. `import … from "node:<mod>"` (named / default / namespace).
+  // 2. `import "node:<mod>"` (side-effect; record the module, no members).
+  // 3. `require("node:<mod>")` (CommonJS — record the module, members unknown).
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
+      const spec = node.moduleSpecifier.text;
+      if (spec.startsWith("node:")) {
+        const members: string[] = [];
+        const clause = node.importClause;
+        if (clause) {
+          // default import: `import fs from "node:fs"`
+          if (clause.name) members.push("");
+          if (clause.namedBindings) {
+            if (ts.isNamespaceImport(clause.namedBindings)) {
+              // `import * as fs from "node:fs"` — namespace; whole module surface.
+              members.push("");
+            } else {
+              // `import { a, b as c } from "node:fs"` — record the LOCAL names.
+              for (const el of clause.namedBindings.elements) members.push(el.name.text);
+            }
+          }
+        }
+        if (spec === "node:process") importsNodeProcess = true;
+        recordModule(spec, members);
+      }
+    } else if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "require" &&
+      node.arguments.length === 1 &&
+      ts.isStringLiteral(node.arguments[0]) &&
+      node.arguments[0].text.startsWith("node:")
+    ) {
+      const spec = node.arguments[0].text;
+      if (spec === "node:process") importsNodeProcess = true;
+      recordModule(spec, [""]);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+
+  // A bare global `process` reference: we approximate "referenced" by a regex on
+  // the source, unless the program imports `node:process` (in which case
+  // `process` is the import binding, not the global). A precise binding analysis
+  // is overkill for a type-level emulation hint, and the dup-identifier fallback
+  // covers any user that declares its own `process`.
+  const bareProcess = !importsNodeProcess && /\bprocess\b/.test(source);
+
+  return { modules, bareProcess };
+}
+
+/**
+ * Build the import-scoped Node emulation `.d.ts` for `source`. Declares ONLY the
+ * surface the program touches:
+ *   - bare global `process` → the `process` interfaces + `declare var process`;
+ *   - `import … from "node:process"` → the `process` interfaces + a typed
+ *     `node:process` module (export-assignment of the process value);
+ *   - other `node:<mod>` imports → a permissive `declare module` declaring just
+ *     the imported member names (`export const <name>: any`) + a default, so
+ *     they type-check.
+ * Returns `undefined` when there's nothing to inject (no Node surface touched),
+ * so the caller can skip injection entirely (no empty synthetic root).
+ */
+function buildNodeEnvDts(usage: NodeEmuUsage): string | undefined {
+  const parts: string[] = [];
+  let processInterfacesEmitted = false;
+
+  const emitProcessInterfaces = (): void => {
+    if (!processInterfacesEmitted) {
+      parts.push(PROCESS_INTERFACE_DECLS);
+      processInterfacesEmitted = true;
+    }
+  };
+
+  // Bare ambient global `process`.
+  if (usage.bareProcess) {
+    emitProcessInterfaces();
+    parts.push(`declare var process: NodeJS_Process;`);
+  }
+
+  // `node:<mod>` modules, each scoped to its imported members.
+  for (const [mod, members] of usage.modules) {
+    if (mod === "node:process") {
+      emitProcessInterfaces();
+      // Default / namespace / named import of the process module. We expose the
+      // `NodeJS_Process` value as BOTH a default export and named re-exports of
+      // its members, so `import process from "node:process"`, `import * as
+      // process`, and `import { stdout } from "node:process"` all resolve under
+      // the checker's ESNext module mode (no `esModuleInterop` needed).
+      const lines: string[] = [`declare module "node:process" {`, `  const process: NodeJS_Process;`];
+      lines.push(`  export default process;`);
+      lines.push(`  export const argv: string[];`);
+      lines.push(`  export const env: Record<string, string | undefined>;`);
+      lines.push(`  export const platform: string;`);
+      lines.push(`  export function exit(code?: number): never;`);
+      lines.push(`  export const stdin: NodeJS_ReadableStream;`);
+      lines.push(`  export const stdout: NodeJS_WritableStream;`);
+      lines.push(`  export const stderr: NodeJS_WritableStream;`);
+      lines.push(`}`);
+      parts.push(lines.join("\n"));
+      continue;
+    }
+    // Other modules: permissive, just enough that the imported names resolve.
+    const named = [...members].filter((m) => m !== "");
+    const hasDefaultOrNs = members.has("");
+    const lines: string[] = [`declare module "${mod}" {`];
+    for (const name of named) lines.push(`  export const ${name}: any;`);
+    if (hasDefaultOrNs || named.length === 0) {
+      // Default/namespace import, or a side-effect/require import: give the whole
+      // module an `any` shape so `import fs from "node:fs"` / `import * as fs`
+      // resolve without enumerating members.
+      lines.push(`  const _default: any;`);
+      lines.push(`  export default _default;`);
+    }
+    lines.push(`}`);
+    parts.push(lines.join("\n"));
+  }
+
+  if (parts.length === 0) return undefined;
+  return parts.join("\n") + "\n";
+}
+
+/**
+ * #2624 — compose `scanNodeEmuUsage` + `buildNodeEnvDts` for a source. Exported
+ * so tests can assert the EXACT import-scoped surface that emulation injects
+ * (e.g. that a `node:fs`-only program does not declare the `process` global).
+ * Returns `undefined` when the program touches no Node surface.
+ */
+export function buildNodeEnvDtsForSource(
+  source: string,
+  scriptKind: ts.ScriptKind = ts.ScriptKind.TS,
+): string | undefined {
+  return buildNodeEnvDts(scanNodeEmuUsage(source, scriptKind));
+}
 
 /** Diagnostic codes for a duplicate `process` declaration (user declared it themselves). */
 const DUP_IDENTIFIER_CODES = new Set([
@@ -368,7 +539,13 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
     ...(isJsx ? { jsx: ts.JsxEmit.ReactJSX } : {}),
   };
 
-  const injectNodeEnv = analyzeOptions?.emulateNode === true;
+  // #2624: when emulation is on, build the injected Node `.d.ts` DYNAMICALLY from
+  // the source so it declares only the Node surface the program touches (see
+  // `buildNodeEnvDts`). If the program touches no Node surface, there is nothing
+  // to inject and `injectNodeEnv` stays false (no empty synthetic root).
+  const nodeEnvDtsSource =
+    analyzeOptions?.emulateNode === true ? buildNodeEnvDtsForSource(source, scriptKind) : undefined;
+  const injectNodeEnv = nodeEnvDtsSource !== undefined;
 
   const compilerHost: ts.CompilerHost = {
     getSourceFile(name, languageVersion) {
@@ -376,7 +553,7 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
         return ts.createSourceFile(name, source, languageVersion, true, scriptKind);
       }
       if (injectNodeEnv && name === NODE_ENV_DTS_NAME) {
-        return ts.createSourceFile(name, NODE_ENV_DTS_SOURCE, languageVersion, true, ts.ScriptKind.TS);
+        return ts.createSourceFile(name, nodeEnvDtsSource, languageVersion, true, ts.ScriptKind.TS);
       }
       const libSf = getLibSourceFile(name, languageVersion);
       if (libSf) return libSf;
@@ -399,11 +576,11 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
     compilerOptions.checkJs = true;
   }
 
-  // Build the program. Under WASI (#2603) add a synthetic ambient `process`
-  // .d.ts as an extra root so the checker resolves the emulated Node globals.
-  // If the user already declares `process`, that injection collides — detect
-  // the duplicate-identifier diagnostic and rebuild without it, so we never
-  // turn a benign warning into a hard error.
+  // Build the program. When Node emulation is on (#2603/#2624) add the
+  // import-scoped synthetic Node `.d.ts` as an extra root so the checker resolves
+  // the emulated Node globals/modules. If the user already declares `process`,
+  // that injection collides — detect the duplicate-identifier diagnostic and
+  // rebuild without it, so we never turn a benign warning into a hard error.
   function buildProgram(withNodeEnv: boolean) {
     const rootNames = withNodeEnv ? [fileName, NODE_ENV_DTS_NAME] : [fileName];
     const prog = ts.createProgram(rootNames, compilerOptions, compilerHost);
