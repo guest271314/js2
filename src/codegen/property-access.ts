@@ -5558,10 +5558,12 @@ export function compileElementAccessBody(
       typeDef.fields[1]?.name === "data" &&
       (typeDef.fields.length === 2 ||
         (typeDef.fields.length === 3 && typeDef.fields[2]?.name === "raw") ||
-        // #1914 — $__regexp_match_vec: the vec subtype carrying the spec
-        // exec/match result fields. Indexed reads use the same {length, data}
-        // prefix; index/input are property reads, not elements.
-        (typeDef.fields.length === 4 && typeDef.fields[2]?.name === "index" && typeDef.fields[3]?.name === "input"));
+        // #1914/#2588/#2589 — $__regexp_match_vec: the vec subtype carrying the
+        // spec exec/match result fields. Indexed reads use the same
+        // {length, data} prefix; index/input/groups/indices are property reads,
+        // not elements. Accept the 4-field (#1914) and 6-field (#2588 groups +
+        // #2589 indices) shapes.
+        (typeDef.fields.length >= 4 && typeDef.fields[2]?.name === "index" && typeDef.fields[3]?.name === "input"));
 
     if (!isVecStructAccess) {
       // Check if this is a tuple struct (registered in tupleTypeMap)
