@@ -22,6 +22,7 @@ import {
   stringConstantExternrefInstrs,
   tryCompileNativeVecConcatOperand,
 } from "./native-strings.js";
+import { emitNativeNumberFormat } from "./number-format-native.js";
 import {
   emitStandaloneRegExpToStringFromExpr,
   tryCompileStandaloneStringMatch,
@@ -216,6 +217,95 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
 
   // Unknown kind — leave on stack for the caller. (Should not happen for `+`.)
   return false;
+}
+
+/**
+ * Unwrap parenthesised / `as` / `!` / `<T>` wrappers to reach the underlying
+ * expression — mirrors {@link isStaticUndefinedArg}. Used by the IsRegExp
+ * static fold so `(/./ as any)`-style casts don't hide a RegExp literal.
+ */
+function unwrapArgExpr(arg: ts.Expression): ts.Expression {
+  let cur: ts.Expression = arg;
+  while (
+    ts.isParenthesizedExpression(cur) ||
+    ts.isAsExpression(cur) ||
+    ts.isNonNullExpression(cur) ||
+    ts.isTypeAssertionExpression(cur)
+  ) {
+    cur = (cur as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression | ts.TypeAssertion).expression;
+  }
+  return cur;
+}
+
+/**
+ * #2598 — Static IsRegExp (§22.1.3.{6,7,21}) for the `includes`/`startsWith`/
+ * `endsWith` search argument. Returns true when the argument is *statically* a
+ * RegExp (so the caller emits an unconditional `throw TypeError`):
+ *   - a RegExp literal (`/foo/`),
+ *   - `new RegExp(...)`,
+ *   - an expression whose static TS type is `RegExp`.
+ * The dynamic `Symbol.match`-presence form (an `any`/object arg that turns out
+ * to be a RegExp at runtime) is out of scope for this slice — the test262
+ * reachable set is the static literal form. (#2580 M2 covers `any` receivers.)
+ */
+function argIsStaticRegExp(ctx: CodegenContext, arg: ts.Expression): boolean {
+  const inner = unwrapArgExpr(arg);
+  if (ts.isRegularExpressionLiteral(inner)) return true;
+  if (ts.isNewExpression(inner) && ts.isIdentifier(inner.expression) && inner.expression.text === "RegExp") {
+    return true;
+  }
+  // Type-based: a variable / call statically typed `RegExp`.
+  try {
+    const t = ctx.checker.getTypeAtLocation(inner);
+    const sym = t.getSymbol() ?? t.aliasSymbol;
+    if (sym?.getName() === "RegExp") return true;
+  } catch {
+    /* type unavailable — fall through to "not static RegExp" */
+  }
+  return false;
+}
+
+/**
+ * #2598/#2599 — Coerce a String.prototype search/concat ARGUMENT to a native
+ * `ref $AnyString` via ToString (§7.1.17), reusing the existing native-string
+ * coercion engine ({@link compileNativeConcatOperand}, the same path `+`-concat
+ * uses) — NOT a new coercion site (respects the #2108 drift gate).
+ *
+ * Standalone / WASI (`noJsHost`) only: there the engine turns a number/boolean/
+ * null/undefined/object argument into a native string instead of feeding a
+ * mistyped ref to `__str_flatten`/`__str_concat` (which null-derefs). Symbol
+ * args throw a TypeError per §7.1.17. In the legacy JS-host `nativeStrings`
+ * mode the old `compileExpression(value, nativeStringType)` behaviour is kept
+ * byte-identical (these issues are scoped to standalone).
+ *
+ * Leaves exactly one `ref $AnyString` on the stack.
+ */
+function emitArgAsNativeString(ctx: CodegenContext, fctx: FunctionContext, value: ts.Expression): void {
+  if (noJsHost(ctx)) {
+    // §7.1.17 ToString(Symbol) throws. Guard before the engine (which would
+    // otherwise route a symbol through `$__any_to_string`).
+    if (tryThrowOnSymbolStringCoercion(ctx, fctx, value)) {
+      // After the unreachable throw the stack is polymorphic, but downstream
+      // code expects a native-string ref; push a null sentinel of that type.
+      fctx.body.push({ op: "ref.null", typeIdx: ctx.anyStrTypeIdx } as Instr);
+      return;
+    }
+    // A static / backend-created RegExp argument (`indexOf(/./)` — no IsRegExp
+    // guard) stringifies to its `RegExp.prototype.toString` source form
+    // ("/" + source + "/" + flags), NOT the `$__any_to_string` "[object Object]"
+    // fallthrough (#2161, same path the `+`/template engine uses). For the
+    // IsRegExp-throwing methods the caller has already thrown before this point.
+    const reStr = emitStandaloneRegExpToStringFromExpr(ctx, fctx, value);
+    if (reStr !== undefined && reStr !== null) return;
+    // The engine's f64/i32/i64 number arm needs `number_toString` in funcMap.
+    // Unlike the `+`-concat path, the string-method pre-pass does not flag a
+    // search/concat argument as needing it, so register it on demand here
+    // (idempotent — guarded by `funcMap.has`). Mirrors the numeric-`join` path.
+    emitNativeNumberFormat(ctx, new Set(["number_toString"]));
+    if (compileNativeConcatOperand(ctx, fctx, value)) return;
+    // Engine declined (unexpected shape) — fall through to the legacy coercion.
+  }
+  compileExpression(ctx, fctx, value, nativeStringType(ctx));
 }
 
 // ── String operations ─────────────────────────────────────────────────
@@ -2160,7 +2250,9 @@ export function compileNativeStringMethodCall(
   const compileStringValueToLocal = (value: ts.Expression | undefined, fallback: string, name: string): number => {
     const local = allocLocal(fctx, `${name}_${fctx.locals.length}`, nativeStringType(ctx));
     if (value) {
-      compileExpression(ctx, fctx, value, nativeStringType(ctx));
+      // #2598 — coerce a non-string search argument via ToString (§7.1.17)
+      // instead of feeding a mistyped ref to `__str_flatten` (null-deref).
+      emitArgAsNativeString(ctx, fctx, value);
     } else {
       compileStringLiteral(ctx, fctx, fallback);
     }
@@ -2333,8 +2425,12 @@ export function compileNativeStringMethodCall(
       return nativeStringType(ctx);
     }
     for (const arg of expr.arguments) {
-      // Accumulator is already on the stack; push the next operand and join.
-      compileExpression(ctx, fctx, arg, nativeStringType(ctx));
+      // Accumulator is already on the stack; ToString-coerce the next operand
+      // (§22.1.3.4 / §7.1.17) so a number/boolean/null/undefined/object arg
+      // becomes a native string instead of null-dereffing in `__str_concat`
+      // (#2599). Left-to-right fold order is preserved (each arg is evaluated
+      // in source order before its join).
+      emitArgAsNativeString(ctx, fctx, arg);
       fctx.body.push({ op: "call", funcIdx: concatIdx });
     }
     return nativeStringType(ctx);
@@ -2445,6 +2541,17 @@ export function compileNativeStringMethodCall(
 
   // includes: native helper
   if (method === "includes") {
+    // §22.1.3.7 step 3 — IsRegExp(searchString) ⇒ throw TypeError. Static fold
+    // for a RegExp-literal / `new RegExp(...)` / RegExp-typed arg (#2598). The
+    // throw replaces the whole call (no receiver/arg emitted).
+    if (expr.arguments.length > 0 && argIsStaticRegExp(ctx, expr.arguments[0]!)) {
+      emitTypeErrorThrow(
+        ctx,
+        fctx,
+        "TypeError: First argument to String.prototype.includes must not be a regular expression",
+      );
+      return { kind: "i32" };
+    }
     const receiverLocal = compileReceiverToLocal("__str_includes_recv");
     const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_includes_search");
     const fromLocal = compileIntegerValueToLocal(expr.arguments[1], 0, "__str_includes_from");
@@ -2458,6 +2565,15 @@ export function compileNativeStringMethodCall(
 
   // startsWith: native helper
   if (method === "startsWith") {
+    // §22.1.3.23 step 3 — IsRegExp(searchString) ⇒ throw TypeError (#2598).
+    if (expr.arguments.length > 0 && argIsStaticRegExp(ctx, expr.arguments[0]!)) {
+      emitTypeErrorThrow(
+        ctx,
+        fctx,
+        "TypeError: First argument to String.prototype.startsWith must not be a regular expression",
+      );
+      return { kind: "i32" };
+    }
     const receiverLocal = compileReceiverToLocal("__str_startsWith_recv");
     const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_startsWith_search");
     const posLocal = compileIntegerValueToLocal(expr.arguments[1], 0, "__str_startsWith_pos");
@@ -2471,6 +2587,15 @@ export function compileNativeStringMethodCall(
 
   // endsWith: native helper
   if (method === "endsWith") {
+    // §22.1.3.6 step 3 — IsRegExp(searchString) ⇒ throw TypeError (#2598).
+    if (expr.arguments.length > 0 && argIsStaticRegExp(ctx, expr.arguments[0]!)) {
+      emitTypeErrorThrow(
+        ctx,
+        fctx,
+        "TypeError: First argument to String.prototype.endsWith must not be a regular expression",
+      );
+      return { kind: "i32" };
+    }
     const receiverLocal = compileReceiverToLocal("__str_endsWith_recv");
     const searchLocal = compileStringValueToLocal(expr.arguments[0], "undefined", "__str_endsWith_search");
     const endLocal = compileIntegerValueToLocal(expr.arguments[1], 0x7fffffff, "__str_endsWith_end");
