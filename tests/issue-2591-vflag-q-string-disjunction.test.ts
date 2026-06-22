@@ -16,6 +16,8 @@
  */
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
+import { RE_FLAG_V } from "../src/codegen/regex/bytecode.js";
+import { parsePattern } from "../src/codegen/regex/parse.js";
 
 /** Compile `/pattern/flags.test(input)` standalone and run it. `input` is
  *  embedded as a string literal to avoid JS↔standalone string marshaling. */
@@ -129,5 +131,16 @@ describe("#2591 standalone RegExp v-flag \\q{…} string disjunction — dual-ru
     } else {
       expect(r.success).toBe(false);
     }
+  });
+
+  // A `\q{…}` unioned with a property-of-STRINGS (`\p{Basic_Emoji}` etc.) must
+  // be a LOUD parse-level refusal — never silently drop the property's
+  // multi-code-point members (which gave a wrong answer before #2591). A
+  // property over code points (`\p{ASCII}`) is unaffected and still parses.
+  it("refuses \\q{…} mixed with a property-of-strings, keeps code-point \\p{…}", () => {
+    expect(() => parsePattern("^[\\p{Emoji_Keycap_Sequence}\\q{0|2|4|9\\uFE0F\\u20E3}]+$", RE_FLAG_V)).toThrow();
+    expect(() => parsePattern("[\\p{RGI_Emoji}\\q{ab}]", RE_FLAG_V)).toThrow();
+    // Property of code points unioned with `\q{…}` still lowers fine.
+    expect(() => parsePattern("[\\p{ASCII}\\q{ab}]", RE_FLAG_V)).not.toThrow();
   });
 });

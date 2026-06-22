@@ -170,12 +170,23 @@ operand sorts last (zero-width).
   (loud `RegexUnsupportedError`) — string-set algebra is out of slice scope.
 
 ### Carve-out (noted residual)
-`\q{…}` inside a top-level v-mode set operation (`[\q{ab}--_]`, `[[0-9]--\q{…}]`,
-`[\q{…}&&\q{…}]`, `[\p{…}&&\q{…}]`) needs string-aware set algebra (a string
-survives `&&` only if both operands contain it). These remain a refusal — the
-behaviour is **unchanged from before this fix** (they already hit the
-single-code-point `\q{` guard), so no regression. The recovered rows come from
-the **union** forms (`string-literal-union-*`, bare `[\q{…}]`).
+Two combinations stay a **loud refusal** (`RegexUnsupportedError`), out of slice
+scope and **unchanged from before this fix** (no regression):
+
+1. **`\q{…}` inside a top-level v-mode set operation** (`[\q{ab}--_]`,
+   `[[0-9]--\q{…}]`, `[\q{…}&&\q{…}]`, `[\p{…}&&\q{…}]`) — needs string-aware set
+   algebra (a string survives `&&` only if both operands contain it). ~22 of the
+   33 `unicodeSets/generated` `\q{…}` files are these.
+2. **`\q{…}` unioned with a property-of-STRINGS** (`[\p{Emoji_Keycap_Sequence}\q{…}]`,
+   `\p{Basic_Emoji}`, `\p{RGI_Emoji…}` — the fixed §22.2.1.9 list) — the property
+   contributes multi-code-point members the single-code-point enumerator can't
+   represent. A guard (`PROPERTY_OF_STRINGS_RE`) refuses this **loudly** so the
+   property's strings are never silently dropped (which had given a wrong answer).
+   A `\p{…}` over *code points* (`\p{ASCII}`, `\p{L}`) is unaffected and still
+   unions fine with `\q{…}`.
+
+The recovered rows come from the **union** forms — `string-literal-union-*`
+(11 files), bare `[\q{…}]`, and `[\q{…}<ranges/escapes/code-point-props>]`.
 
 ## Test Results
 

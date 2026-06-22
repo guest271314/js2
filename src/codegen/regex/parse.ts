@@ -118,6 +118,17 @@ const NOT_WORD = complementRanges(WORD);
 const NOT_SPACE = complementRanges(SPACE);
 
 /**
+ * The fixed set of binary Unicode **properties of strings** (§22.2.1.9, Table
+ * 64) — `\p{…}` escapes whose members are multi-code-point STRINGS, not single
+ * code points. A v-mode class that unions one of these with a `\q{…}`
+ * disjunction can't be lowered by the single-code-point enumerator; #2591
+ * refuses that combination loudly. (A `\p{…}` over code points — `\p{ASCII}`,
+ * `\p{L}` — is unaffected and keeps working.)
+ */
+const PROPERTY_OF_STRINGS_RE =
+  /\\[pP]\{(?:Basic_Emoji|Emoji_Keycap_Sequence|RGI_Emoji(?:_Flag_Sequence|_Modifier_Sequence|_Tag_Sequence|_ZWJ_Sequence)?)\}/;
+
+/**
  * Pre-scan the pattern for the total capture-group count and the named-group
  * table. Both are needed *before* the descent parse: a decimal escape is a
  * backreference only when its value does not exceed the total group count
@@ -355,6 +366,17 @@ class Parser {
       const residualRanges = enumerateClassRanges(`[${residual}]`, flagStr);
       if (residualRanges.length > 0) {
         arms.push({ len: 1, node: cpRangesToNode(residualRanges) });
+      } else if (PROPERTY_OF_STRINGS_RE.test(residual)) {
+        // A residual that enumerates to NO code points but names a
+        // **property of strings** (`\p{Basic_Emoji}`, `\p{RGI_Emoji}`, …; the
+        // fixed §22.2.1.9 list) contributes multi-code-point members the
+        // single-code-point enumerator cannot represent. Refuse loudly rather
+        // than silently drop those members (which would make
+        // `[\p{Emoji_Keycap_Sequence}\q{…}]` return a wrong answer for the
+        // property's strings). #2591 residual.
+        throw new RegexUnsupportedError(
+          "v-mode class mixes \\q{…} with a property-of-strings (\\p{…}) member — #2591 residual",
+        );
       }
     }
 
