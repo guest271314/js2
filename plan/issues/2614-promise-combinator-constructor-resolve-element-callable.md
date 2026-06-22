@@ -1,7 +1,8 @@
 ---
 id: 2614
 title: "Promise.{all,allSettled,any,race}: read constructor's own `resolve` + callable resolve/reject element functions (~45 fails)"
-status: ready
+status: blocked
+assignee: ttraenkler/senior-developer
 created: 2026-06-22
 updated: 2026-06-22
 priority: medium
@@ -13,7 +14,8 @@ goal: async-model
 sprint: 65
 parent: 1042
 related: [1528, 1368, 1116, 1694]
-note: "Re-measured 2026-06-22 (arch, ASYNC lane). Largest single combinator bucket NOT owned by #1528 (which owns the non-constructor TypeError sub-bucket). Distinct root cause: the combinator must Get(constructor,'resolve') and the per-element resolve/reject functions must be observable callable functions."
+blocked_on: [1632b-2, 2615]
+note: "BLOCKED (2026-06-22, sd re-ground + impl attempt). The architect framing was wrong for current main: combinators delegate to native V8 (which already does Get(C,'resolve')). The real fix — route C to the user's realm Promise so a patched resolve is observed — is INSEPARABLE from the closure-as-dynamic-ctor capability bridge: the moment C is the realm Promise, NewPromiseCapability(C)→Construct(C, wasmExecutor) hits the same __fn_tramp_Constructor cross-realm illegal-cast as #2615/#1528a-residual (#1632b-2). Attempted observability fix proven net-NEGATIVE (regressed any/invoke-resolve pass→illegal-cast). Fold into / block behind the capability bridge; do NOT ship a standalone runtime.ts patch."
 ---
 # #2614 — Promise combinators: invoke the constructor's own `resolve` + expose callable resolve/reject element functions
 
@@ -147,3 +149,107 @@ combinator-internals work, not a one-line detector fix. Scope to the
 if not, file forward. Estimate ~120 LoC `runtime.ts` + ~30 LoC codegen +
 ~60 LoC tests. **~45-50 test262 pass** if the subclass path comes along, ~45
 otherwise. Suitable for a **senior-dev**.
+
+## Re-grounding against current main (2026-06-22, senior-dev)
+
+**The architect's root-cause framing does NOT hold on current main.** The
+combinators are NOT compiled-away with an internal resolve — `src/runtime.ts`
+(`Promise_all`/`_race`/`_allSettled`/`_any`, ~L10063-10082) **delegate to native
+V8** `Promise.all.call(C, _toIterable(arr))`. V8 itself performs
+`Get(C, "resolve")`, creates real callable resolve/reject element functions, and
+runs the full spec algorithm — so "rewrite the combinators to read C.resolve" is
+the wrong fix; that observable already works. Verified: `any/invoke-resolve-on-
+promises-every-iteration-of-promise.js` and `all/invoke-resolve-get-error.js`
+PASS today.
+
+**Faithful `runTest262File` re-measure of the actual residual buckets:**
+
+| Test | status | true signature |
+|---|---|---|
+| `all/invoke-resolve.js` | fail | `returned 2 \| assert #1 at L31` — patched `Promise.resolve` IS invoked, but `nextValue !== current` → **element-identity break** through the array round-trip, NOT a "not callable" guard |
+| `race/invoke-resolve.js` | fail | same `assert #1` identity break |
+| `allSettled/call-resolve-element.js` | fail | `illegal cast in Constructor() … __fn_tramp_Constructor_*` — subclass/capability path |
+| `race/resolve-from-same-thenable.js` | fail | same `illegal cast in Constructor()` |
+| `all/resolve-element-function-name.js` | fail | `Promise resolve or reject function is not callable` (reads `.name` off element fn) |
+| `all/invoke-resolve-error-close.js` | fail | `Cannot set property resolve of #<Object> which has only a getter` — host `Promise` exposes `resolve` getter-only, so `Promise.resolve =` throws |
+| `all/ctx-ctor.js` | fail | `instance.constructor !== SubPromise` — subclass species |
+
+**Revised bucket map (different from the spec's):**
+1. **Element-identity break** (`invoke-resolve` all/race) — the `[p1,p2,p3]`
+   array literal / `_toIterable` round-trip does not preserve the *same*
+   externref the user holds, so V8's per-element `resolve(nextValue)` sees a
+   different object than `current`. `__vec_get` uses `extern.convert_any` (slot
+   identity preserved), so the re-wrap is upstream — likely the array-literal
+   element store or the host-boundary box. **Needs pinning.**
+2. **`__fn_tramp_Constructor` illegal cast** (allSettled/race/ctx-ctor) — the
+   subclass/capability construct path; this is the `~19 illegal_cast` sub-bucket
+   the spec said "may not fall out" — and it's the SAME root as #1528 and the
+   #2615-class `__fn_tramp_Constructor` work.
+3. **`Promise.resolve` getter-only writability** — the host `Promise` mirror
+   exposes `resolve` as a non-writable getter, so a test's `Promise.resolve =`
+   throws. Narrow host-glue fix.
+4. **Element-fn `.name`/callable shape** (`resolve-element-function-name`) — the
+   spec's named ~45 bucket; needs the V8 element fns to surface to compiled
+   code as callable-with-`.name`. Since we delegate to V8 the element fns ARE
+   real — the gap is how a *compiled* callback reads `.name`/`.length` off them.
+
+**Recommendation:** this is NOT a single ~120-LoC runtime rewrite. It is 3-4
+distinct narrow root causes, two of which (#2, and arguably #4) overlap the
+`__fn_tramp_Constructor` capability work already in flight (#2615 / #1528).
+Re-scoping with the tech lead before implementing — the highest-ROI standalone
+slice here is the element-identity break (#1) + the getter-only writability (#3),
+which together are small and don't touch the contested capability path.
+
+### Bucket 1 (element-identity) — exact location pinpointed
+
+`emitIterableArg` (`src/codegen/expressions/calls.ts:1163`) materializes an
+array-literal iterable `[p1,p2,p3]` into a real JS array (`__js_array_new` +
+`__js_array_push` per element) so native V8 can `GetIterator` it. Each element
+is pushed via `compileExpression(ctx, fctx, el, { kind: "externref" })` with a
+belt-and-braces `extern.convert_any`. The candidate identity break is here OR in
+`_toIterable`'s `__vec_get` materialization (`src/runtime.ts` ~L9960) for the
+non-array-literal path. `__vec_get` for externref elements uses
+`extern.convert_any` (slot identity preserved), so the array-literal push path is
+the more likely culprit: if a `Promise` element is held as a wasm struct ref and
+`extern.convert_any`-wrapped at push time, V8 sees a wrapper distinct from the
+test's `var p1` (which holds the raw host Promise externref from
+`__new_Promise`). Next implementer: trace whether `p1` (a `new Promise(...)`
+binding) is stored as a raw externref or a struct ref at the push site, and
+ensure the push forwards the identical externref V8 will compare against.
+
+## Implementation attempt + definitive coupling finding (2026-06-22, senior-dev)
+
+**Attempted the bucket-1 "observable resolve" fix** in `src/runtime.ts`: the
+combinator/`Promise.resolve` host imports closed over the module-level intrinsic
+`Promise`, so a test that monkey-patches its realm's `globalSandbox.Promise.resolve`
+was never observed (`Get(C,"resolve")` read the unpatched intrinsic). Routing `C`
+(via `_resolveCtor` directCall) and `Promise.resolve`/`reject` through
+`globalSandbox.Promise ?? Promise` **fixed the observability/identity break** —
+the three identity probes pass and `all/race invoke-resolve` advanced past
+assert #1 (`nextValue === current` now holds).
+
+**But it is net-NEGATIVE and cannot ship as an independent slice:**
+- `all/invoke-resolve` / `race/invoke-resolve` still fail at **assert #2**
+  (`arguments.length === 1`): V8's native combinator calls the test's *compiled*
+  `Promise.resolve` closure through `wasmClosureDynamicBridge`
+  (`runtime.ts:1854`), and `arguments.length` inside a host→wasm-bridged closure
+  does not reflect the JS call's arg count. That is the mapped-`arguments`/bridge
+  machinery, not combinator code.
+- **REGRESSION**: `any/invoke-resolve-on-promises-every-iteration-of-promise.js`
+  flips **pass → `illegal cast in __call_fn_method_1`**. Routing `C` to the
+  sandbox-realm Promise makes `Promise.any.call(sandboxC, …)` do
+  `NewPromiseCapability(sandboxC)` → `Construct(sandboxC, executor)` where the
+  executor is a compiled wasm closure — the cross-realm construct hits the SAME
+  `__fn_tramp_Constructor` capability-bridge `illegal cast` as #2615/#1528.
+
+**Conclusion (validates the re-grounding):** the observable-resolve fix is
+**inseparable** from the closure-as-dynamic-constructor capability bridge owned
+by #2615 / #1528a-residual (#1632b-2, task #56). `Get(C,"resolve")` observability
+requires `C` to be the user's realm Promise, but the moment `C` is that realm's
+Promise, the combinator's `NewPromiseCapability(C)` construct routes a compiled
+executor through the cross-realm bridge that currently `illegal cast`s. #2614
+should be **blocked on / folded into the capability-bridge work**, not shipped as
+a standalone runtime.ts patch. The attempted diff is preserved out-of-tree
+(not committed — net-negative). Recommend: re-route #2614 behind #1632b-2 /
+#2615, or hand the combined combinator+capability slice to whoever owns that
+bridge.
