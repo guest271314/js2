@@ -88,7 +88,36 @@ Sequencing: Step 0 (ValType table) is dependency-safe now; Steps 1+ land
 AFTER the type-aware boxing P0 (#2072/#2080) so the engine consumes
 correct tags. Drift gate: #2108.
 
-## Implementation — Step 2 in progress (sendev-coercion, 2026-06-23)
+## Implementation — Step 3 in progress (sendev-coercion, 2026-06-23)
+
+Branch `issue-1917-emit-toboolean`, predecessor-stacked on the Step-2 branch.
+
+**New `emitToBoolean(ctx, valType, sink)`** in `coercion-engine.ts` — §7.1.2
+ToBoolean → i32, appended into a caller-supplied `Instr[]` sink. Consolidates the
+two hand-rolled truthiness sites that #2085 already aligned:
+- `ensureI32Condition` (`index.ts`, B1 — the canonical, pushes to `fctx.body`);
+  now delegates to `emitToBoolean(ctx, condType, fctx.body)` when `ctx` is
+  present (a ctx-free fallback subset stays inline for the few legacy
+  no-`ctx` callers).
+- `buildToBooleanInstrs` (`array-methods.ts`, B2 — returns `Instr[]`); now
+  `return emitToBoolean(ctx, retType, [])`.
+
+The `sink` parameter is what makes one function serve both emission styles
+(push-to-body vs return-array). **Behaviour-neutral:** the spec's "B2 is
+latently divergent (NaN-truthy)" claim is STALE — #2085 already changed B2 to
+`|x|>0` (NaN falsy) explicitly "matching `ensureI32Condition`", so there is no
+divergence left to surface; the two are equivalent and the engine's rows are
+transcribed verbatim.
+
+**#2108 ratcheted DOWN:** `array-methods.ts` 20→19, `index.ts` 34→33 (the
+`__is_truthy` uses moved into the sanctioned engine). No unsanctioned growth.
+
+**Remaining ToBoolean sites NOT in scope (documented for a follow-up):** B3
+(filter-extern callback truthiness, partial duplicate) and the B4 compile-time
+constant-fold tables (`tryConstantFoldToBoolean`) — these are smaller and B4 is a
+static-literal fold, not a runtime cascade.
+
+## Implementation — Step 2 (sendev-coercion, 2026-06-23) — PR #1962
 
 Branch `issue-1917-emit-tonumber`, predecessor-stacked on the Step-1 branch
 (`emitToNumber` extends the same `coercion-engine.ts`; PR merges after Step 1).
