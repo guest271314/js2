@@ -588,7 +588,7 @@ export function compileSourceSync(
     ast = analyzeSource(processedSource, effectiveFileName, {
       allowJs: options.allowJs,
       skipSemanticDiagnostics: options.skipSemanticDiagnostics,
-      wasi: options.target === "wasi",
+      emulateNode: options.emulateNode,
     });
   }
 
@@ -604,7 +604,7 @@ export function compileSourceSync(
         languageService.updateSource(processedSource, jsFileName);
         ast = languageService.analyze({ allowJs: true });
       } else {
-        ast = analyzeSource(processedSource, jsFileName, { allowJs: true, wasi: options.target === "wasi" });
+        ast = analyzeSource(processedSource, jsFileName, { allowJs: true, emulateNode: options.emulateNode });
       }
     }
   }
@@ -633,10 +633,19 @@ export function compileSourceSync(
         DOWNGRADE_DIAG_CODES.has(diag.code) || isGuardedNullablePrimitiveDiagnostic(diag, ast.checker)
           ? "warning"
           : "error";
+      // #1929 — flatten the full DiagnosticMessageChain (keeps the "because…"
+      // elaboration) instead of only the head .messageText.
+      let message = ts.flattenDiagnosticMessageText(diag.messageText, "\n");
+      // #2589 — TS2580 ("Cannot find name 'X'. Do you need to install type
+      // definitions for node?") flags a Node global. When node-emulation is off,
+      // point the user at `--emulate node` (which turns it on and silences this)
+      // rather than at @types/node.
+      if (!options.emulateNode && diag.code === 2580) {
+        const name = message.match(/Cannot find name '([^']+)'/)?.[1] ?? "process";
+        message = `Cannot find name '${name}'. Add \`--emulate node\` to enable Node API emulation (or install @types/node).`;
+      }
       errors.push({
-        // #1929 — flatten the full DiagnosticMessageChain (keeps the "because…"
-        // elaboration) instead of only the head .messageText.
-        message: ts.flattenDiagnosticMessageText(diag.messageText, "\n"),
+        message,
         line: pos.line + 1,
         column: pos.character + 1,
         severity: severity as "error" | "warning",
@@ -786,7 +795,7 @@ export function compileSourceSync(
         nativeStrings: options.nativeStrings,
         utf8Storage: options.utf8Storage,
         testRuntime: options.testRuntime,
-        wasi: options.target === "wasi",
+        emulateNode: options.emulateNode,
         nodeIoShim: options.nodeIoShim,
         standalone: options.target === "standalone",
         // (#2119) thread module-strictness inference for the single-source
@@ -1140,7 +1149,7 @@ export async function compileMultiSource(
         nativeStrings: options.nativeStrings,
         utf8Storage: options.utf8Storage,
         testRuntime: options.testRuntime,
-        wasi: options.target === "wasi",
+        emulateNode: options.emulateNode,
         nodeIoShim: options.nodeIoShim,
         strictNoHostImports: options.strictNoHostImports,
         standalone: options.target === "standalone",
@@ -1454,7 +1463,7 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
         nativeStrings: options.nativeStrings,
         utf8Storage: options.utf8Storage,
         testRuntime: options.testRuntime,
-        wasi: options.target === "wasi",
+        emulateNode: options.emulateNode,
         nodeIoShim: options.nodeIoShim,
         strictNoHostImports: options.strictNoHostImports,
         standalone: options.target === "standalone",

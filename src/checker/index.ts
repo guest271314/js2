@@ -274,15 +274,15 @@ export interface AnalyzeOptions {
   /** Skip semantic diagnostics collection (faster — checker still available for type queries) */
   skipSemanticDiagnostics?: boolean;
   /**
-   * WASI / node-emulation target (#2589). Serves a synthetic ambient `process`
-   * declaration so the checker resolves the Node globals js2wasm lowers under
-   * `--target wasi` (process.std{in,out,err}, argv, env, exit) without the user
+   * Node API emulation (#2589), opt-in via `--emulate node`. Serves a synthetic
+   * ambient `process` declaration so the checker resolves the Node globals
+   * js2wasm lowers (process.std{in,out,err}, argv, env, exit) without the user
    * installing @types/node — eliminating the repeated TS2580 "Cannot find name
    * 'process'" warnings. Type-level only; does not change emitted wasm (codegen
    * lowers `process.*` syntactically regardless). Falls back to no injection if
    * the user already declares `process`, so it never creates a dup-identifier error.
    */
-  wasi?: boolean;
+  emulateNode?: boolean;
 }
 
 /**
@@ -368,7 +368,7 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
     ...(isJsx ? { jsx: ts.JsxEmit.ReactJSX } : {}),
   };
 
-  const injectNodeEnv = analyzeOptions?.wasi === true;
+  const injectNodeEnv = analyzeOptions?.emulateNode === true;
 
   const compilerHost: ts.CompilerHost = {
     getSourceFile(name, languageVersion) {

@@ -1,6 +1,6 @@
 ---
 id: 2589
-title: "Auto-resolve ambient `process` typing under --target wasi (kill TS2580 'Cannot find name process' warnings)"
+title: "`--emulate node` flag: opt-in ambient `process` typing (and warn to add it otherwise)"
 status: done
 sprint: Backlog
 created: 2026-06-22
@@ -18,54 +18,55 @@ related: [2523, 2524, 1717, 389]
 
 ## Problem
 
-Compiling a host that uses `process` with `--target wasi` emits a repeated TS
-warning, once per use:
+Compiling a host that uses the global `process` (e.g. a bundled Native Messaging
+host, loopdive/js2#389) emits a TS2580 warning per use:
 
 ```
 warning: Cannot find name 'process'. Do you need to install type definitions for node? Try `npm i --save-dev @types/node`.
 ```
 
-This is the TS2580 diagnostic (downgraded to a warning in #1717) — `process`
-has no ambient declaration because we serve only the bundled TS lib files, not
-`@types/node`. But the compiler **already lowers** `process.stdin/stdout/stderr`,
-`process.argv`, `process.env`, `process.exit` for the WASI target
-(`node-process-api.ts`) — i.e. it genuinely emulates Node on this path. So the
-global is supported; only its *type* is missing, which produces noise on every
-use. Surfaced by an external user in loopdive/js2#389 (bundled Native Messaging
-host).
+`process` has no ambient declaration (we serve only the TS lib files, not
+`@types/node`), even though the compiler **already lowers** `process.std{in,out,err}`,
+`argv`, `env`, `exit` for WASI (`node-process-api.ts`).
 
-## Fix
+## Fix — an explicit opt-in flag, not a default
 
-When the WASI / node-emulation path is active, serve a synthetic ambient
-`process` `.d.ts` (a global script — no import/export) to the type-checker so it
-resolves `process` and never emits TS2580 for it. Declares exactly the surface
-the lowering supports (`std{in,out,err}`, `argv`, `env`, `platform`, `exit`) —
-not more, so unsupported members still surface.
+Add **`--emulate node`** (CompileOptions `emulateNode`). It is **off by default**.
 
-- `src/checker/index.ts` — `AnalyzeOptions.wasi`; `analyzeSource` adds the
-  synthetic root `__js2wasm_node_env.d.ts` when `wasi`. **Dup-safe**: if the
-  user already declares `process` themselves, the build detects the
-  duplicate-identifier diagnostic and rebuilds without injection, so we never
-  turn a benign warning into a hard error.
-- `src/compiler.ts` / `src/compiler/output.ts` — thread `wasi: options.target === "wasi"`.
+- **With `--emulate node`**: the checker is served a synthetic ambient `process`
+  `.d.ts` (`src/checker/index.ts`, `AnalyzeOptions.emulateNode`) declaring the
+  lowered surface, so `process` type-checks and the TS2580 warnings disappear.
+  **Dup-safe**: if the user already declares `process` (as the example
+  `nm_js2wasm.ts` does), the build detects the duplicate-identifier diagnostic
+  and rebuilds without injection — never a hard error.
+- **Without the flag**: the TS2580 message is rewritten to **suggest the flag** —
+  `Cannot find name 'process'. Add `--emulate node` to enable Node API emulation
+  (or install @types/node).` — in both warning-emitting paths (`compiler.ts`,
+  `compiler/output.ts`).
 
-**Type-level only** — emitted wasm is byte-identical (verified by md5: the
-example host compiles to the same `nm_js2wasm.wasm` with and without the change).
-Codegen lowers `process.*` syntactically regardless of this declaration.
+CLI: `--emulate <env>` (currently `node`; extensible to deno/etc.). Threaded as
+`emulateNode: options.emulateNode`.
+
+**Type-level only** — emitted wasm is byte-identical (md5-verified). Codegen
+lowers `process.*` syntactically regardless of this declaration.
 
 ## Verification
 
-- Example host `examples/native-messaging/nm_js2wasm.ts --target wasi`: 5 → **0**
-  `process` warnings; wasm md5 unchanged.
-- `tests/issue-2589-process-ambient-typing.test.ts` (4 tests): resolves under
-  wasi; still warns without wasi; genuinely-undefined names still warn (no
-  blanket suppression); user-declared `process` does not dup-error.
+- Bundled JS host (`esbuild … | --target wasi`, the #389 case): **without**
+  `--emulate node` → 5 warnings, each suggesting the flag; **with** it → **0**
+  warnings.
+- The `.ts` host (declares its own `process`) → no warning, no dup error.
+- `tests/issue-2589-process-ambient-typing.test.ts` (6 tests): resolves with
+  emulateNode; still flags without it; undefined names still warn; user-declared
+  `process` → no dup; the unflagged warning suggests `--emulate node`; the
+  flagged compile emits no `process` warning.
 
 ## Notes
 
-Pairs with #2523 (web vs node target) and #2524 (node-io shim). The gate chosen
-is **wasi-implies-node-emulation** (lower friction than a separate
-`--emulate-node` flag, since `--target wasi` already lowers `process.*`); a
-distinct flag remains a possible future refinement. The incremental
-`IncrementalLanguageService` path (used by the playground/tests, not the CLI)
-does not yet inject — follow-up if its warnings matter.
+Stakeholder steer (loopdive/js2#389): node emulation must be an **explicit
+`--emulate node` opt-in**, not implied by `--target wasi`, and the unflagged
+warning should point at the flag. Pairs with #2523 (web vs node target) and
+#2524 (node-io shim). The incremental `IncrementalLanguageService` path
+(playground/tests, not the CLI) does not yet inject — follow-up if needed.
+Only `process` is declared today; other Node globals (`Buffer`, …) can extend
+the ambient surface later.
