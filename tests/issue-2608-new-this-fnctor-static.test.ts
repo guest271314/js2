@@ -8,15 +8,19 @@
 // characters and `parseTopLevel` loops forever.
 //
 // Minimal repro: a static method `Fn.make = function(x,y){ return new this(x,y) }`.
-// `new Fn(x,y)` (by identifier) works; `new this(x,y)` throws
-// "is not a constructor" because by the time it reaches `compileNew`, `this`
-// has been rewritten from `ThisKeyword` to an `Identifier`, so the #1679
-// `new this` arm (new-super.ts) is skipped and the callee drops to the generic
-// dynamic-`new` path on a non-constructible wrapped-closure externref.
+// `new Fn(x,y)` (by identifier) works; `new this(x,y)` used to throw
+// "is not a constructor". Root cause: the checker types the `this` callee as the
+// bare `function`-value (CALL sigs, NO construct sigs) and resolves it to NO
+// className, so (1) the `callSigs>0 && constructSigs===0` Pattern-2 guard threw,
+// and (2) the #1679 ThisKeyword arm — gated on a resolved fnctor className — was
+// skipped. The callee then dropped to the generic dynamic-`new` path on a
+// non-constructible wrapped-closure externref.
 //
-// SKIPPED until the fix lands (see plan/issues/2608-...md for the fix
-// direction: resolve the rewritten-`this` callee to the enclosing fnctor ctor
-// + forward args in order to `<Class>_new`).
+// FIX (#2608): `this` IS a constructable function-value at runtime (`this === Fn`,
+// a WasmGC closure struct), so exclude a `this` callee from the Pattern-2 throw and
+// route `new this(...)` through the landed #56 `__construct_closure` host bridge
+// (JS-host) — the bridge detects `__is_closure`, wraps with `_wrapCallableForHost`,
+// and `Reflect.construct`s it with the args in order.
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 import { wrapExports } from "../src/runtime.js";
@@ -41,7 +45,7 @@ describe("#2586 — `new this(...)` in an fnctor static method", () => {
     expect(exp.probe()).toBe("inp");
   });
 
-  it.skip("`new this(x, y)` in a static method constructs with both args (acorn shape)", async () => {
+  it("`new this(x, y)` in a static method constructs with both args (acorn shape)", async () => {
     const exp = await run(`
       // @ts-nocheck
       var Parser = function Parser(a, b) { this.a = a; this.b = b; };

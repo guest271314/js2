@@ -1,10 +1,11 @@
 ---
 id: 2608
 title: "compiled-acorn parse() infinite-loops in parseTopLevel after instantiation (4th dogfood blocker)"
-status: in-progress
-assignee: sd-acorn
+status: done
+assignee: ttraenkler/dev-acorn
 created: 2026-06-21
-updated: 2026-06-21
+updated: 2026-06-22
+completed: 2026-06-22
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -12,10 +13,10 @@ task_type: fix
 area: codegen, runtime
 language_feature: multi
 goal: self-hosting-dogfood
-sprint: Backlog
+sprint: 65
 model: opus
 depends_on: [1712, 2582]
-related: [1712, 2582]
+related: [1712, 2582, 1940, 1528]
 ---
 
 # #2586 — compiled-acorn `parse()` infinite-loops in `parseTopLevel` (4th blocker)
@@ -91,10 +92,19 @@ The defect is **`new this(...)` inside an fnctor static method**, reproduced in
 ~8 lines (`.tmp/probe-static.ts`):
 
 ```ts
-var Parser = function Parser(a, b) { this.a = a; this.b = b; };
-Parser.simple   = function (x, y) { return y; };           // OK   (static, no `new this`)
-Parser.makeIdent= function (x, y) { return new Parser(x, y); }; // OK (`new Parser`)
-Parser.makeNew  = function (x, y) { return new this(x, y); };   // THROWS "is not a constructor"
+var Parser = function Parser(a, b) {
+  this.a = a;
+  this.b = b;
+};
+Parser.simple = function (x, y) {
+  return y;
+}; // OK   (static, no `new this`)
+Parser.makeIdent = function (x, y) {
+  return new Parser(x, y);
+}; // OK (`new Parser`)
+Parser.makeNew = function (x, y) {
+  return new this(x, y);
+}; // THROWS "is not a constructor"
 ```
 
 - `staticSimple` ✓, `staticNewIdent` (`new Parser(x,y)`) ✓,
@@ -161,3 +171,54 @@ enclosing fnctor ctor, and (b) forward the args in order to `<Class>_new`.
 - No test262 / equivalence regression.
 - #1712 stays open until the full parse + AST-match acceptance is met; this
   issue is the next slice toward it.
+
+## Resolution (2026-06-22, dev-acorn) — BOUNDED via the landed #56 bridge
+
+Fixed by routing `new this(...)` through the **already-landed #56
+`__construct_closure` host bridge** (#1940) — NOT the deep `__construct_fnctor`
+dispatcher substrate. Two parts in `src/codegen/expressions/new-super.ts`:
+
+1. **Exclude a `this` callee from the Pattern-2 throw.** The checker types the
+   `new this(...)` callee as the bare `function`-value (CALL sigs, NO construct
+   sigs), so the `callSigs.length > 0 && constructSigs.length === 0` guard
+   (~L2569) threw `"is not a constructor"` _before_ any `this`-aware arm ran.
+   Added `unwrappedNonId.kind !== ts.SyntaxKind.ThisKeyword` to that condition so
+   a `this` callee falls through.
+
+2. **New `new this(...)` bridge arm** (before the `if (!className)` unknown-ctor
+   block, ~L3683, JS-host only): when the callee is `ThisKeyword` and `className`
+   does not resolve to a registered class/fnctor, evaluate `this` → externref,
+   materialize args via `__js_array_new`/`__js_array_push` (source order), and
+   call `__construct_closure`. One terminal `flushLateImportShifts`. The bridge
+   detects `__is_closure`, wraps with `_wrapCallableForHost` (constructible), and
+   `Reflect.construct`s it. Standalone keeps the existing path.
+
+**Why it works without new substrate:** at runtime `this === Parser` (verified)
+and that value is a WasmGC closure struct — exactly what the #56 bridge already
+constructs. No static fnctor resolution is needed.
+
+### Root cause (corrected)
+
+The earlier analysis attributed the failure to `this` being _rewritten to an
+Identifier_. The actual cause is simpler: the checker resolves `this`'s type
+symbol to **no className** for a `Fn.method = function(){…}` static method, so
+the #1679 ThisKeyword arm (gated on a resolved className) is skipped, AND the
+Pattern-2 not-a-constructor guard fires first. Both are addressed above.
+
+### Test Results
+
+`tests/issue-2608-new-this-fnctor-static.test.ts` (sd-acorn's prior skipped case
+un-skipped + passing, 2/2 green):
+
+- `new this(x, y)` constructs and forwards args in order: `getA→10, getB→20`.
+- **Acorn shape** `Parser.parse = function(input,opts){ return new this(opts,input) }`
+  now preserves `this.input = String(input)`: `inputLen('var x = 1;')=10`,
+  `firstChar('Xyz')=88 ('X')`, `pos=0`. This is the empty-`this.input` root cause
+  that made `parseTopLevel` loop forever — RESOLVED.
+- Plain `new Parser(...)` + non-`new this` statics still work.
+- Standalone (`nativeStrings`) compiles clean (no crash).
+- Constructor/this/closure-construct regression suite (issue-1528, 1679,
+  fn-constructor, 2026-\*, 1742, 1636s1): 59 pass (2 pre-existing infra failures
+  unrelated to this change: a wrong relative import path in
+  `new-non-constructor.test.ts`, a bare-instantiate harness gap in
+  `constructor-arity.test.ts`).
