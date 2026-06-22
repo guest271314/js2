@@ -1,10 +1,12 @@
 ---
 id: 2616
 title: "Proxy (host): present-but-non-callable trap is silently dropped instead of throwing TypeError (~19 fails)"
-status: ready
+status: done
 sprint: 65
 created: 2026-06-22
 updated: 2026-06-22
+completed: 2026-06-22
+assignee: ttraenkler/agent-acc861f0e7aea64c8
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -13,102 +15,68 @@ area: runtime
 language_feature: proxy
 goal: spec-completeness
 parent: 1355
-related: [2180]
+related: [2180, 2615]
 test262_bucket: proxy-trap-not-callable
 ---
-# #2616 — Proxy (host): a present non-callable / non-undefined trap must throw TypeError, not be omitted
+# #2616 — Proxy (host): a present non-callable / non-undefined trap must throw TypeError
 
-Slice of #1355. **Host (gc) mode only.** Per §10.5 each internal method does
-`trap = GetMethod(handler, "<trapName>")`, and `GetMethod` (§7.3.10) throws a
-**TypeError** when the property is present but not callable (it only returns
-`undefined` when the value is `undefined`/`null`). Our host bridge instead
-*silently omits* a present-non-callable trap, so the host Proxy falls through to
-the target and the user's `assert.throws(TypeError, …)` never fires.
+Slice of #1355; stacked on #2615 (needs the externref Proxy slot so reads reach
+the bridge). Per §10.5 each internal method does `trap = GetMethod(handler,
+"<trapName>")`; §7.3.10 GetMethod throws a **TypeError** when the property is
+present but not callable (it returns `undefined` only for `undefined`/`null`).
 
-## Re-measured evidence (arch, 2026-06-22)
+## Two-part root cause (re-grounded against current main, #2615 on branch)
 
-19 host fails of the shape `new Proxy(t, { <trap>: <non-callable> })` then an
-operation expecting a TypeError. Examples (all `fail`, returned a value instead
-of throwing):
-`get/trap-is-not-callable.js`, `get/null-handler.js`,
-`apply/trap-is-not-callable.js`, `defineProperty/trap-is-not-callable.js`,
-`deleteProperty/trap-is-not-callable.js`,
-`getOwnPropertyDescriptor/trap-is-not-callable.js`,
-`getPrototypeOf/trap-is-not-callable.js`, `getPrototypeOf/null-handler.js`,
-`has/trap-is-not-callable.js`, `ownKeys/trap-is-not-callable.js`,
-`set/trap-is-not-callable.js`, `setPrototypeOf/trap-is-not-callable.js`,
-`preventExtensions/trap-is-not-callable.js`, `isExtensible/trap-is-not-callable.js`,
-`construct/trap-is-not-callable.js` (and the `null-handler` siblings).
+1. **TS-checker hard error (the real blocker, not in the original spec).**
+   `new Proxy({}, { get: {} })` — the test262 source itself — fails TS2322
+   (`Type '{}' is not assignable to type ProxyHandler<T>['get']`) **before
+   codegen**, so the runtime path is never reached. All 14
+   `*/trap-is-not-callable.js` tests were hard compile errors.
+2. **Runtime bridge silently omits** a present-non-callable trap.
+   `_buildProxyBridgeHandler` (`src/runtime.ts`) did
+   `if (typeof callable !== "function") continue;`, so the bridge had no trap,
+   the host engine used ordinary behavior, and the spec TypeError never fired.
 
-Representative test (`get/trap-is-not-callable.js`):
-```js
-var p = new Proxy({}, { get: {} });
-assert.throws(TypeError, function() { p.attr; });
-```
+## Fix
 
-## Root cause
+1. **`src/compiler.ts`** — `isProxyHandlerTrapDiagnostic(diag)`: downgrade a
+   TS2322 raised on a trap value **inside the handler (2nd) argument of a
+   `new Proxy(...)`** so the program compiles (and throws at runtime). Tightly
+   scoped — a non-Proxy 2322 still hard-errors (verified). The downstream
+   2339/2349 ("property/call on the target type") are already non-hard.
+2. **`src/runtime.ts`** — `_buildProxyBridgeHandler`: for a present-but-non-
+   callable trap, install a bridge trap that **throws a host TypeError on
+   invocation**. The throw surfaces at operation time (`p.attr` / `p(...)` /
+   `new p(...)`) and propagates through the Proxy MOP + lastCaughtException
+   bridge so `e instanceof TypeError` holds in the compiled program. Absent
+   (`undefined`/`null`) traps still omit → host forwards to target (correct).
 
-`_buildProxyBridgeHandler` (`src/runtime.ts` ~line 5070) builds the host bridge
-handler by reading each trap off the user handler struct:
+## Test Results (local harness, gc mode)
 
-```ts
-const rawTrap = _structFieldRaw(handler, name, exports);
-if (rawTrap == null) continue;                       // undefined/null → omit (CORRECT: §7.3.10 returns undefined)
-const callable = _maybeWrapCallableUnknownArity(rawTrap, callbackState);
-if (typeof callable !== "function") continue;        // <-- BUG: present-but-non-callable is silently omitted
-```
+`trap-is-not-callable.js` + `null-handler.js` corpus (26 files): incremental
+over #2615-only **5 pass / 14 err → 11 pass / 1 err** (+6 pass, −13 compile
+errors). `get/construct/defineProperty/getOwnPropertyDescriptor/isExtensible/
+setPrototypeOf` `trap-is-not-callable` now pass.
 
-A present non-callable trap (`{}`, `1`, `"x"`, …) hits the second `continue`,
-so the bridge has no `<trap>` method, the host engine uses its default
-(ordinary) behavior, and the spec-mandated TypeError never throws.
+Whole `built-ins/Proxy` directory (this branch = #2615 + #2616): **82 → 106
+pass** (+24 over #2615-alone; +28 over pure main), err **166 → 113**. The TS
+suppression unblocked many Proxy tests that contained non-callable trap literals,
+not just the 6 trap-is-not-callable rows. `built-ins/Reflect`: identical
+82/19/52 (no regression).
 
-Note the §7.3.10 *timing* nuance: GetMethod runs *inside each internal method*,
-so strictly the TypeError is thrown when the trapped operation is invoked, not at
-construction. For the test262 corpus, installing a bridge trap that **throws on
-invocation** reproduces the correct observable behavior (the throw happens when
-`p.attr` runs, which is exactly when the tests check it).
+`tests/issue-2616.test.ts` (5 cases) all pass.
 
-## Implementation Plan
+## Scope / deferred residual
 
-### Change
-**File: `src/runtime.ts`**, `_buildProxyBridgeHandler` (~line 5070).
-Replace the silent-omit second `continue` with: install a bridge trap that
-**throws a TypeError when invoked**, for a present-but-non-callable trap value.
+`set` / `has` / `deleteProperty` / `getPrototypeOf` / `ownKeys` /
+`preventExtensions` `trap-is-not-callable` still FAIL(2): those operations route
+through `__extern_set` / `__extern_has` / `__delete_property` / etc., which don't
+consult the bridge handler the way the real JS-Proxy get-path does — they need
+the boundary helpers to surface the non-callable TypeError (overlaps #2617). The
+`null-handler.js` cases are revoked-proxy tests (#2617 territory, mis-bucketed in
+the spec). `apply`/`construct` non-callable need the call path (#2618).
 
-```ts
-const rawTrap = _structFieldRaw(handler, name, exports);
-if (rawTrap == null) continue;                       // undefined/null → genuine absence, omit
-const callable = _maybeWrapCallableUnknownArity(rawTrap, callbackState);
-if (typeof callable !== "function") {
-  // §7.3.10 GetMethod: present but not IsCallable → TypeError when the
-  // owning internal method runs. Install a throwing bridge trap so the host
-  // engine surfaces the TypeError at operation time (matches test262 timing).
-  bridge[name] = () => {
-    throw new TypeError(`'${name}' on proxy: trap is not a function`);
-  };
-  continue;
-}
-```
+## Scoped checks
 
-### Edge cases / correctness
-- Distinguish **absent** (`undefined`/`null` → `rawTrap == null` → omit, host
-  forwards to target — CORRECT) from **present-non-callable** (→ throwing bridge
-  trap). The existing `if (rawTrap == null) continue;` already separates these;
-  only the *second* branch changes.
-- A Wasm-closure trap that `_maybeWrapCallableUnknownArity` *does* wrap into a
-  function stays on the normal path — unchanged.
-- The TypeError must be the *host engine's* (so `e instanceof TypeError` holds in
-  the compiled program via the exception bridge). Throwing a plain `TypeError`
-  inside the bridge trap propagates through the host Proxy MOP and the
-  `lastCaughtException` bridge — same path other host-thrown TypeErrors take.
-- `construct` / `apply` traps: same fix applies (a non-callable `apply`/`construct`
-  must throw when `p(...)` / `new p(...)` runs).
-
-### Test-gate (test262, gc mode)
-All `built-ins/Proxy/*/trap-is-not-callable.js` and `*/null-handler.js`
-(non-`-realm`, non-`-with`) — ~19 tests. Plus `tests/issue-2616.test.ts`
-(`new Proxy(t,{get:{}})` access throws TypeError; absent trap still forwards).
-
-### Risk
-Low — localized to the host bridge builder. No codegen change. Validate gc
-equivalence + the Proxy directory.
+`tsc --noEmit` clean · `prettier --check` clean · `tests/issue-2616.test.ts` 5/5
+· non-Proxy 2322 still hard-errors (scope guard) · Reflect unchanged.
