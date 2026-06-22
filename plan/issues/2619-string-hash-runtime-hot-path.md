@@ -149,7 +149,10 @@ prioritisation.
      a wasmtime build where `gc=y,function-references=y` alone suffices (this
      container's wasmtime 44.0.0 needs `+exceptions,+tail-call` to precompile
      current output). Overwriting cold with a mismatched-method number would be
-     worse than leaving it; documented in the row's provenance.
+     worse than leaving it; documented in the cold row's `wasmProvenance`.
+   - **Cold-row follow-up:** regen the cold `wasmUs` on a cargo-equipped runner
+     via `pnpm run refresh:benchmarks:wasmtime`; the `benchmark-refresh` CI on
+     push-to-main may also cover it. Not blocking this bounded warm fix.
 2. **Epic follow-up #2621** filed for the bounds-check-elimination lever.
 
 Probe artifacts: `$CLAUDE_JOB_DIR/tmp/{variants,floor,i32hash,gen-warm,presize-check,hashbench*}.mts`.

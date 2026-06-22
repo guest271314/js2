@@ -211,7 +211,8 @@
     "starlingMonkeyMinUs": 11011.333,
     "starlingMonkeyMaxUs": 11540.750000000002,
     "starlingMonkeyStdUs": 158.0714775179063,
-    "lanesProvenance": "cold javyUs/starlingMonkeyUs measured by scripts/generate-wasmtime-hot-runtime.mjs with benchmarks/wasmtime-cold-host: warm Wasmtime Engine + compiled artifacts, fresh Store + Instance per sample, fixed-argument no-return wrapper for Javy WIT compatibility."
+    "lanesProvenance": "cold javyUs/starlingMonkeyUs measured by scripts/generate-wasmtime-hot-runtime.mjs with benchmarks/wasmtime-cold-host: warm Wasmtime Engine + compiled artifacts, fresh Store + Instance per sample, fixed-argument no-return wrapper for Javy WIT compatibility.",
+    "wasmProvenance": "cold wasmUs NOT refreshed in #2619: a faithful cold measurement needs the Rust cold-host (pnpm run refresh:benchmarks:wasmtime, cargo) on a matching-wasmtime box; neither is on the container used for #2619's warm refresh. Follow-up: regen on a cargo-equipped runner — the benchmark-refresh CI on push-to-main may also cover it. Value here predates the #2619 warm refresh and is likely similarly pessimistic."
   },
   {
     "name": "string-hash",
