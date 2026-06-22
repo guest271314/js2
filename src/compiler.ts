@@ -439,10 +439,49 @@ function isGuardedNullablePrimitiveDiagnostic(diag: ts.Diagnostic, checker: ts.T
   return assignable ? assignable.call(checker, nonNullType, targetType) : false;
 }
 
+/**
+ * (#2616) Detect a TS2322 raised on a trap value inside a `new Proxy(target,
+ * handler)` handler object literal — e.g. `new Proxy({}, { get: {} })`, where
+ * `{}` is rejected against `ProxyHandler<T>['get']`'s call signature.
+ *
+ * Per §10.5 / §7.3.10 (GetMethod), a present-but-non-callable trap is NOT a
+ * static error: the program must compile and throw a **TypeError at operation
+ * time** (when `p.attr` / `p(...)` runs). The runtime host bridge
+ * (`_buildProxyBridgeHandler`) installs a throwing trap for exactly this case.
+ * TypeScript's `ProxyHandler<T>` typing is stricter than the spec, so it
+ * hard-errors before codegen and the runtime path is never reached. Downgrade
+ * the 2322 so the program compiles and the runtime TypeError fires.
+ *
+ * Tightly scoped: only a 2322 whose node sits inside the SECOND argument
+ * (handler) of a `new Proxy(...)` NewExpression qualifies. (The downstream
+ * 2339/2349 "property/call on the target type" errors are already non-hard, so
+ * they don't need suppression — they stem from the Proxy-no-brand typing.)
+ */
+function isProxyHandlerTrapDiagnostic(diag: ts.Diagnostic): boolean {
+  if (diag.code !== 2322) return false;
+  const file = diag.file;
+  if (!file || diag.start === undefined) return false;
+  let n = findSmallestNodeAtPosition(file, diag.start);
+  // Walk up to the enclosing `new Proxy(...)` and confirm the node is within
+  // its handler (2nd) argument.
+  while (n) {
+    if (ts.isNewExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "Proxy") {
+      const handlerArg = n.arguments?.[1];
+      if (handlerArg && diag.start >= handlerArg.getStart(file) && diag.start < handlerArg.getEnd()) {
+        return true;
+      }
+      return false;
+    }
+    n = n.parent;
+  }
+  return false;
+}
+
 function isHardTypeScriptDiagnostic(diag: ts.Diagnostic, checker?: ts.TypeChecker): boolean {
   if (diag.category !== 1 || !HARD_TS_DIAG_CODES.has(diag.code)) return false;
   if (checker && isBindingPatternFalsePositive(diag, checker)) return false;
   if (checker && isGuardedNullablePrimitiveDiagnostic(diag, checker)) return false;
+  if (isProxyHandlerTrapDiagnostic(diag)) return false;
   return true;
 }
 
