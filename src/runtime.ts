@@ -9299,6 +9299,53 @@ assert._isSameValue = isSameValue;
           const wrappedArgs = _isWasmStruct(argsArray) ? _wrapForHost(argsArray, exports) : argsArray;
           return Reflect.construct(wrappedCallee, wrappedArgs ?? []);
         };
+      // (#1632b-2 / #1528a residual) Dynamically CONSTRUCT a runtime function
+      // VALUE — `var C = makeCtor(); new C(args)` where `C` is a factory-returned
+      // `function C(){}` lowered to a WasmGC closure struct. Unlike `__construct`
+      // above (which wraps with the NON-callable `_wrapForHost` and therefore
+      // throws "not a constructor" for any closure — correct for arrows/bound/
+      // methods, wrong for a genuine constructable function), this helper wraps a
+      // closure with `_wrapCallableForHost`, whose `construct` trap runs the
+      // closure body as ECMA-262 §10.2.2 OrdinaryCallEvaluateBody. Non-closure
+      // structs and non-functions still throw the spec TypeError (preserves the
+      // ctx-non-object / ctx-non-ctor cases). Also resolves the Promise-combinator
+      // capability path (#2614): V8's NewPromiseCapability(C) → Construct(C,
+      // «executor») routes a compiled executor through this same bridge.
+      if (name === "__construct_closure")
+        return (callee: any, argsArray: any): any => {
+          const exports = callbackState?.getExports();
+          // A WasmGC closure → the callable wrapper (constructible). A non-closure
+          // struct stays on the non-callable `_wrapForHost`, so the IsConstructor
+          // probe below throws the spec TypeError for a non-constructor value.
+          let wrappedCallee: any = callee;
+          if (_isWasmStruct(callee)) {
+            const isClosureFn = exports?.__is_closure as ((v: any) => number) | undefined;
+            let isClosure = false;
+            if (typeof isClosureFn === "function") {
+              try {
+                isClosure = isClosureFn(callee) === 1;
+              } catch {
+                isClosure = false;
+              }
+            }
+            wrappedCallee = isClosure ? _wrapCallableForHost(callee, callbackState) : _wrapForHost(callee, exports);
+          }
+          let isCtor = false;
+          if (typeof wrappedCallee === "function") {
+            try {
+              Reflect.construct(function () {}, [], wrappedCallee);
+              isCtor = true;
+            } catch {
+              isCtor = false;
+            }
+          }
+          if (!isCtor) {
+            const nm = wrappedCallee && wrappedCallee.name ? wrappedCallee.name : String(wrappedCallee);
+            throw new TypeError(nm + " is not a constructor");
+          }
+          const wrappedArgs = _isWasmStruct(argsArray) ? _wrapForHost(argsArray, exports) : argsArray;
+          return Reflect.construct(wrappedCallee, wrappedArgs ?? []);
+        };
       // Symbol.for(key) — global symbol registry (#965)
       // Symbol.for(key) — §20.4.2.2: stringKey = ? ToString(key). Passing a
       // Symbol makes ToString throw TypeError (not stringify). `Symbol.for`
