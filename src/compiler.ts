@@ -588,6 +588,7 @@ export function compileSourceSync(
     ast = analyzeSource(processedSource, effectiveFileName, {
       allowJs: options.allowJs,
       skipSemanticDiagnostics: options.skipSemanticDiagnostics,
+      wasi: options.target === "wasi",
     });
   }
 
@@ -603,7 +604,7 @@ export function compileSourceSync(
         languageService.updateSource(processedSource, jsFileName);
         ast = languageService.analyze({ allowJs: true });
       } else {
-        ast = analyzeSource(processedSource, jsFileName, { allowJs: true });
+        ast = analyzeSource(processedSource, jsFileName, { allowJs: true, wasi: options.target === "wasi" });
       }
     }
   }

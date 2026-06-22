@@ -249,7 +249,10 @@ export function compileToObjectSource(source: string, options: CompileOptions = 
   const processedSource = preprocessed.source;
   const defaultFileName = options.fileName ?? (options.allowJs ? "input.js" : "input.ts");
   const effectiveFileName = options.moduleName ?? defaultFileName;
-  const ast = analyzeSource(processedSource, effectiveFileName, { allowJs: options.allowJs });
+  const ast = analyzeSource(processedSource, effectiveFileName, {
+    allowJs: options.allowJs,
+    wasi: options.target === "wasi",
+  });
 
   for (const diag of ast.diagnostics) {
     if (diag.category === 1) {
