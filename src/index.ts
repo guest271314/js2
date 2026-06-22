@@ -276,16 +276,18 @@ export interface CompileOptions {
    *  Default: false (calls to fs.readFileSync / fs.writeFileSync raise a compile error). */
   allowFs?: boolean;
   /**
-   * #2524 Phase 1 — route `process.std{in,out,err}` IO through a separately
-   * compiled, linkable `js2wasm:node-io` shim instead of inlining the
-   * `wasi_snapshot_preview1.fd_read`/`fd_write` glue. WASI-only (ignored for
-   * other targets). When set, the user module imports `stdin_read`/
-   * `stdout_write`/`stderr_write` plus its linear memory from `js2wasm:node-io`
-   * and carries no `wasi_snapshot_preview1` import for stream IO; link against
-   * `node-shim.wasm` (or `--preload js2wasm:node-io=node-shim.wasm` under
-   * wasmtime). Default off — the inline path stays as fallback.
+   * #2625 — emit the per-module linkable `js2wasm:node-<mod>` shims instead of
+   * inlining the host APIs. WASI-only (ignored for other targets). For
+   * `node:process` stream IO, when set, the user module imports `stdin_read`/
+   * `stdout_write`/`stderr_write` plus its linear memory from
+   * `js2wasm:node-process` and carries no `wasi_snapshot_preview1` import for
+   * stream IO; link against `node-process.wasm` (or
+   * `--preload js2wasm:node-process=node-process.wasm` under wasmtime).
+   * Default off — the self-contained inline `fd_read`/`fd_write` path stays.
+   * Which per-module shim is emitted is decided by which `node:` modules the
+   * program emulates, not by this flag (the flag only chooses inline vs linked).
    */
-  nodeIoShim?: boolean;
+  linkNodeShims?: boolean;
   /**
    * Node API emulation (#2603). Opt-in via `--emulate node`. When set, the
    * checker is given an ambient `process` declaration so Node globals js2wasm

@@ -1,16 +1,16 @@
-# `js2wasm:node-io` shim (#2524 Phase 1)
+# `js2wasm:node-process` shim (#2625; originally #2524 Phase 1)
 
-`--node-io-shim` factors the `process` stream IO host-API out of every compiled
+`--link-node-shims` factors the `process` stream IO host-API out of every compiled
 module into a separately-compiled, **linkable** core-wasm shim. Instead of
 inlining the `wasi_snapshot_preview1.fd_read` / `fd_write` glue, a module
-compiled with this flag **imports a stable `js2wasm:node-io` interface** and
-links against `node-shim.wasm`, which implements that interface over WASI.
+compiled with this flag **imports a stable `js2wasm:node-process` interface** and
+links against `node-process.wasm`, which implements that interface over WASI.
 
 This is the modularization mechanism that generalizes: the same interface can be
 backed by a deno shim, a browser shim, or an `fs`/`path` shim — swap the shim,
 keep the user module.
 
-## Interface (`js2wasm:node-io`)
+## Interface (`js2wasm:node-process`)
 
 A byte boundary over a **shared linear memory** — nothing GC-typed crosses the
 link (that is Phase 2, #2514):
@@ -26,7 +26,7 @@ link (that is Phase 2, #2514):
 The **shim owns + exports** the linear memory; the **user module imports** it
 (memory index 0) along with the three IO functions. So:
 
-1. Instantiate `node-shim.wasm` first — it imports only `wasi_snapshot_preview1`.
+1. Instantiate `node-process.wasm` first — it imports only `wasi_snapshot_preview1`.
 2. Instantiate the user module with `{ memory, stdin_read, stdout_write,
    stderr_write }` taken from the shim's exports.
 
@@ -39,22 +39,22 @@ iovec in its own reserved scratch, and issues the syscall.
 Compile the user module:
 
 ```sh
-npx js2wasm examples/native-messaging/nm_js2wasm.ts --target wasi --node-io-shim -o out
+npx js2wasm examples/native-messaging/nm_js2wasm.ts --target wasi --link-node-shims -o out
 ```
 
-The emitted `out/nm_js2wasm.wasm` imports only `js2wasm:node-io` (memory + the
+The emitted `out/nm_js2wasm.wasm` imports only `js2wasm:node-process` (memory + the
 IO functions it uses) and carries **no** `wasi_snapshot_preview1` import for the
 stream-IO path.
 
 (Re)generate the shim:
 
 ```sh
-node scripts/build-node-io-shim.mjs            # writes examples/native-messaging/node-shim.wasm + .wat
+node scripts/build-node-process-shim.mjs            # writes examples/native-messaging/node-process.wasm + .wat
 ```
 
-`node-shim.wasm` is a generated artifact (gitignored); `node-shim.wat` is the
+`node-process.wasm` is a generated artifact (gitignored); `node-process.wat` is the
 committed source. Run the generator once before linking, or call the exported
-`buildNodeIoShim()` to assemble it in-process (the test does this).
+`buildNodeProcessShim()` to assemble it in-process (the test does this).
 
 ## Link + run
 
@@ -63,7 +63,7 @@ committed source. Run the generator once before linking, or call the exported
 ```js
 import { readFileSync } from "node:fs";
 
-const shimBin = readFileSync("examples/native-messaging/node-shim.wasm");
+const shimBin = readFileSync("examples/native-messaging/node-process.wasm");
 const userBin = readFileSync("out/nm_js2wasm.wasm");
 
 // Minimal WASI fd_read/fd_write over the shim-owned memory (or use a real WASI).
@@ -76,7 +76,7 @@ const wasi = {
 const shim = await WebAssembly.instantiate(shimBin, { wasi_snapshot_preview1: wasi });
 mem = shim.instance.exports.memory;
 const user = await WebAssembly.instantiate(userBin, {
-  "js2wasm:node-io": {
+  "js2wasm:node-process": {
     memory:       shim.instance.exports.memory,
     stdin_read:   shim.instance.exports.stdin_read,
     stdout_write: shim.instance.exports.stdout_write,
@@ -90,13 +90,13 @@ user.instance.exports.main();
 
 ```sh
 wasmtime run \
-  --preload js2wasm:node-io=examples/native-messaging/node-shim.wasm \
+  --preload js2wasm:node-process=examples/native-messaging/node-process.wasm \
   --invoke main \
   out/nm_js2wasm.wasm
 ```
 
 `--preload <name>=<file>` registers the shim under the import module name
-`js2wasm:node-io`; wasmtime resolves the user module's imports against it and
+`js2wasm:node-process`; wasmtime resolves the user module's imports against it and
 provides `wasi_snapshot_preview1` to the shim.
 
 ## Scope

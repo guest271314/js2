@@ -1,14 +1,14 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #2524 Phase 1 — build `node-shim.wasm`, the linkable implementation of the
- * `js2wasm:node-io` interface.
+ * #2625 — build `node-process.wasm`, the linkable implementation of the
+ * `js2wasm:node-process` interface.
  *
  * The shim OWNS + exports the linear memory; a user module compiled with
- * `--node-io-shim` IMPORTS that memory (memory index 0) plus the three IO
+ * `--link-node-shims` IMPORTS that memory (memory index 0) plus the three IO
  * functions, so the shim can read/write the user's bytes over the SAME memory
  * with no instantiation cycle (the shim imports only `wasi_snapshot_preview1`).
  *
- * Interface (`js2wasm:node-io`, byte boundary over the shared linear memory):
+ * Interface (`js2wasm:node-process`, byte boundary over the shared linear memory):
  *   stdin_read  (ptr i32, len i32) -> (i32)   // bytes read into mem[ptr..ptr+len)
  *   stdout_write(ptr i32, len i32) -> (i32)   // bytes written from mem[ptr..]
  *   stderr_write(ptr i32, len i32)            // (void)
@@ -25,8 +25,8 @@
  * the shim grows on demand as the user module does, so its exported memory is
  * always large enough for the scratch at the top of the current size.
  *
- * Usage: `node scripts/build-node-io-shim.mjs [outPath]`
- *   default outPath: examples/native-messaging/node-shim.wasm
+ * Usage: `node scripts/build-node-process-shim.mjs [outPath]`
+ *   default outPath: examples/native-messaging/node-process.wasm
  * Also writes the `.wat` source next to the binary for inspection / wasmtime.
  */
 import binaryen from "binaryen";
@@ -45,8 +45,8 @@ const repoRoot = resolve(here, "..");
 const IOVEC = 0; // [0]=buf_ptr [4]=buf_len
 const NCELL = 8; // [8]=nread/nwritten
 
-export const NODE_IO_SHIM_WAT = `(module
-  ;; js2wasm:node-io shim — implements the byte-boundary IO interface over WASI.
+export const NODE_PROCESS_SHIM_WAT = `(module
+  ;; js2wasm:node-process shim — implements the byte-boundary IO interface over WASI.
   (import "wasi_snapshot_preview1" "fd_write"
     (func $fd_write (param i32 i32 i32 i32) (result i32)))
   (import "wasi_snapshot_preview1" "fd_read"
@@ -78,12 +78,12 @@ export const NODE_IO_SHIM_WAT = `(module
     (i32.load (i32.const ${NCELL}))))`;
 
 /** Assemble the shim WAT to a validated wasm binary (Uint8Array). */
-export function buildNodeIoShim() {
-  const m = binaryen.parseText(NODE_IO_SHIM_WAT);
+export function buildNodeProcessShim() {
+  const m = binaryen.parseText(NODE_PROCESS_SHIM_WAT);
   m.setFeatures(binaryen.Features.All);
   if (!m.validate()) {
     m.dispose();
-    throw new Error("node-io shim: binaryen validation failed");
+    throw new Error("node-process shim: binaryen validation failed");
   }
   const bin = m.emitBinary();
   m.dispose();
@@ -94,9 +94,9 @@ export function buildNodeIoShim() {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const out = process.argv[2]
     ? resolve(process.argv[2])
-    : resolve(repoRoot, "examples/native-messaging/node-shim.wasm");
-  const bin = buildNodeIoShim();
+    : resolve(repoRoot, "examples/native-messaging/node-process.wasm");
+  const bin = buildNodeProcessShim();
   writeFileSync(out, bin);
-  writeFileSync(out.replace(/\.wasm$/, ".wat"), NODE_IO_SHIM_WAT + "\n");
+  writeFileSync(out.replace(/\.wasm$/, ".wat"), NODE_PROCESS_SHIM_WAT + "\n");
   console.log(`wrote ${out} (${bin.length} B) + .wat source`);
 }
