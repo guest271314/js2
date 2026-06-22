@@ -87,4 +87,60 @@ describe("#1632b-2 closure-as-dynamic-constructor bridge", () => {
       `),
     ).toBe(11);
   });
+
+  // Regression guard (merge_group eject fix): the bridge gate must NOT CLAIM a
+  // non-constructable function VALUE — generator / async / method values have no
+  // [[Construct]]. The too-broad first cut routed `{ *m(){} }.m` (a generator
+  // method value) through `__construct_closure`, which CONSTRUCTED it and flipped
+  // `language/.../method-definition/generator-invoke-ctor.js` pass→fail. Whether
+  // such a value's `new` *throws* is a separate, pre-existing concern (it does not
+  // throw on baseline either) and is out of this bridge's scope; what this PR
+  // guarantees — and what these guards lock — is that the bridge does not make
+  // them WORSE by routing them to a constructing path. We assert the
+  // construct-closure import is NOT emitted for these shapes.
+  async function constructClosureImportEmitted(source: string): Promise<boolean> {
+    const r = await compile(source, {});
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    return (r.imports ?? []).some((i: { name?: string; intent?: { name?: string } }) => {
+      const n = i.name ?? i.intent?.name;
+      return n === "__construct_closure";
+    });
+  }
+
+  it("does NOT route a generator-method value through the construct bridge", async () => {
+    expect(
+      await constructClosureImportEmitted(`
+        const gen: any = { *m() {} }.m;
+        export function test(): number { const x: any = new gen(); return 0; }
+      `),
+    ).toBe(false);
+  });
+
+  it("does NOT route a generator-function value through the construct bridge", async () => {
+    expect(
+      await constructClosureImportEmitted(`
+        const g: any = function* gen() {};
+        export function test(): number { const x: any = new g(); return 0; }
+      `),
+    ).toBe(false);
+  });
+
+  it("does NOT route an async-function value through the construct bridge", async () => {
+    expect(
+      await constructClosureImportEmitted(`
+        const af: any = async function a() {};
+        export function test(): number { const x: any = new af(); return 0; }
+      `),
+    ).toBe(false);
+  });
+
+  it("DOES route a plain function value through the construct bridge", async () => {
+    expect(
+      await constructClosureImportEmitted(`
+        function mk() { return function C(x: number) { (this as any).x = x; }; }
+        const C = mk();
+        export function test(): number { const i: any = new C(1); return i.x; }
+      `),
+    ).toBe(true);
+  });
 });
