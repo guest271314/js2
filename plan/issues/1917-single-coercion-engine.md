@@ -88,6 +88,67 @@ Sequencing: Step 0 (ValType table) is dependency-safe now; Steps 1+ land
 AFTER the type-aware boxing P0 (#2072/#2080) so the engine consumes
 correct tags. Drift gate: #2108.
 
+## #1960 (Step 1) merge_group park — OPEN, NOT YET ADJUDICATED (sendev-coercion, 2026-06-23)
+
+Step 1 PR #1960 was auto-parked by the bot (`hold` label) on a GENUINE
+`merge shard reports` failure: standalone gate net **−23** (`wasm_compile: 21`,
+`illegal_cast: 2`), bucket signature **`a4736523aee2aba2`**, cluster =
+`built-ins/String/S9.8.1_A*` (ToString spec tests) + `Number/S9.3.1_A*` +
+`concat`/`localeCompare`. The standalone-floor gate only runs on `merge_group`,
+not PR (memory `project_standalone_floor_only_on_merge_group`), so PR-level
+checks were green.
+
+**RETRACTED earlier "baseline drift" verdict — it was built on a BROKEN local
+repro and is INVALID.** My local `runTest262File(…, "standalone")` fails a
+KNOWN-PASS control (`built-ins/String/prototype/charAt/S15.5.4.4_A1_T1`, one of
+12,507 standalone passes) on CLEAN origin/main — so it fails everything
+uniformly and CANNOT distinguish #1960's effect from main. The "byte-identical
+fails on the pre-Step-1 base" observation just reflects that uniform local
+breakage, NOT behaviour-neutrality. The local standalone harness is not
+CI-faithful (likely a `buildImports`/`getTestSandbox`/`setExports` /
+harness-include gap when calling `runTest262File` directly vs the CI sharded
+runner).
+
+**Status: whether #1960 (emitToString) is standalone-neutral is OPEN.** The
+lead's CI evidence (merge_group `a8f01c9c` FAILED with #1960 in it, SUCCEEDED
+after #1960 was parked out) indicates #1960-correlated and must be trusted over
+the broken local repro. The hidden-divergence case stands as a real possibility.
+A CI-faithful repro (or an artifact diff: #1960's standalone merged JSONL vs a
+clean main-only merge_group's, for the 23 tests) is needed to adjudicate. #1960
+stays HELD until resolved.
+
+<!-- SUPERSEDED below: the original "proof" is retained for the record but is
+     INVALID per the retraction above. -->
+
+**[SUPERSEDED — INVALID] Earlier (retracted) reasoning that claimed BASELINE
+DRIFT. Proof (now known to be from a broken local harness):**
+
+1. Pulled the 23 regressed files from the standalone merged-report artifact + the
+   standalone baseline JSONL; ran `diff-test262`. Cluster = `built-ins/String/
+   S9.8.1_A*` (the §9.8.1 **ToString** spec tests), `Number/S9.3.1_A*`,
+   `String/prototype/concat` + `localeCompare`.
+2. Ran the EXACT failing files (`S9.8.1_A2`, `concat/S15.5.4.6_A3`,
+   `Number/S9.3.1_A3_T2`, `localeCompare/S15.5.4.9_A1_T1`) through the real
+   `runTest262File(…, "standalone")` runner on BOTH the Step-1 branch AND the
+   pre-Step-1 merge-base `c4ef3fac2`.
+3. They fail **byte-identically** on both (same `any.convert_extern expected
+   externref, found f64.const` at the SAME offsets `@+29167`/`@+27034`/`@+34424`).
+   Step 1's `emitToString` migration does not touch this path.
+
+So these 23 tests already fail on current `main` independent of #1960; the
+standalone baseline JSONL is stale (baseline age was 2h29m at the run). This is
+exactly the gate's own warning: "signature `a4736523aee2aba2` … likely baseline
+drift — see `feedback_baseline_drift_cross_check`". Distinct from #1958's park
+(that one is a REAL `-24` eval-code `assertion_fail` regression in the #1927
+pipeline driver — different signature, different category).
+
+**Resolution path (CI-infra, not a code fix):** refresh the standalone baseline
+(or revert the `main` commit that regressed these 23 ToString tests), then
+re-enqueue #1960. The pre-existing `String(x)`-returns-bare-f64 →
+`any.convert_extern` bug in the `String()` / native-concat path is a SEPARATE
+real issue (reproduces on `c4ef3fac2`) worth its own ticket — but it is NOT
+introduced by #1917 Step 1.
+
 ## Implementation — Step 3 in progress (sendev-coercion, 2026-06-23)
 
 Branch `issue-1917-emit-toboolean`, predecessor-stacked on the Step-2 branch.
