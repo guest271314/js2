@@ -118,3 +118,50 @@ construct trap + §10.5.13 invariant). The runtime side mirrors #2180's
 Hard — touches the call/construct dispatch selection (hot path). Gate the dynamic
 routing strictly on externref-storage callees so non-proxy calls keep the
 fast path. Validate full gc equivalence (broad-impact: call path).
+
+## Investigation findings (2026-06-22, agent-acc861f0e7aea64c8) — DEFER / COORDINATE
+
+A working **apply direct-call** path was prototyped and reverted (net +4 / −1 in
+`built-ins/Proxy`, but the −1 is a hard PASS→ERR — not shippable). Four
+coupled changes were needed and they entangle with closure-capture + the
+call/construct dispatch sd-1838 is reworking under #56:
+
+1. **Runtime (`src/runtime.ts` `_hostProxyConstruct`)**: wrap a CALLABLE target
+   (`_maybeWrapCallableUnknownArity`) before `new Proxy(target, handler)` — a raw
+   wasm-closure target is opaque to the host, so `new Proxy(wasmClosure, …)` is
+   not host-callable and `p()` fails the host IsCallable check
+   ("... is not a function" / `String(fn)` "Cannot convert object to primitive").
+   **This change is clean and regression-free on its own** but useless without
+   the codegen changes below.
+2. **`src/codegen/statements/variables.ts`** — the `isCallable` branch
+   match-recasts a `new Proxy` externref result to a `$Closure` struct
+   (`ref.test` fails → NULLs `$p`). Needs a Proxy guard to keep externref
+   (mirroring the `isBindHostCall` branch). **Required for the apply win.**
+3. **`src/codegen/expressions/calls.ts`** — a callee whose slot is externref
+   (`calleeSlotIsExternref`) must route `p()` through `__call_function` (host
+   `[[Call]]` boundary) instead of the `ref.cast $Closure` fast path. Reuses
+   `emitBoundFunctionCall`. **Required for the apply win.**
+
+**The blocker (why it's deferred):** changes 2+3 make `$p` externref, which is
+correct for direct `p()` BUT regresses `apply/return-abrupt.js` — `p.call()`
+inside a nested `assert.throws(…, function(){ p.call(); })`. The OLD path
+recast `$p` to a closure struct so the nested-capture `.call()` dispatched via
+the struct-method path (which threw the Test262Error correctly); with `$p`
+externref the captured `.call()` hits an `illegal cast` in the closure-capture /
+method-call path. Getting the apply-direct win without the `.call()`-in-capture
+regression requires fixing the externref-Proxy `.call()`/`.apply()` method
+dispatch through closure capture — the same call/construct dispatch area
+**sd-1838 is reworking under #56** (`__fn_tramp_Constructor` cross-realm cast).
+
+**construct-trap-result:** `new p()` is statically lowered to a direct struct
+construction (the `new <expr>` path resolves `p`'s TS type to the target class),
+so the `construct` trap's return value is dropped (`o.x === 0`). Routing
+`new p()` through a host `Reflect.construct` boundary lives in the dynamic-new
+dispatch (`tryEmitDynamicNew`, new-super.ts) — **also the sd-1838 / #56 zone.**
+
+**Recommendation:** sequence #2618 AFTER sd-1838's #56 call/construct-dispatch
+rework lands (the capability bridge), then the apply+construct routing becomes
+"select the dynamic host path for externref callees/constructors + thread the
+result". Coordinate with sd-1838 before editing shared trampoline/call-dispatch.
+The runtime target-wrap (change 1) can land independently if useful. Branch was
+restored to pristine `origin/main`; no PR opened.
