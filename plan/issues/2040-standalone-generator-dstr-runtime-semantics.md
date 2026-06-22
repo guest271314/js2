@@ -538,3 +538,58 @@ broad-impact value-rep change remains the **merge_group standalone floor** (the
 CLEAN after the `hold` label is removed; net-positive in-cluster + 0 regressions
 means the prior stale park is very likely resolved by the rebase, but merge_group
 is the decider.
+
+## Merge_group EJECT + root-cause (cascade-lead, 2026-06-22) — #1888 is net-negative, MUST NOT land as-is
+
+#1888 (rebased onto current main d02038d8) was enqueued, built the merge_group,
+and **EJECTED on the standalone-highwater floor gate (#2097)**:
+`current pass=24771, mark=24933, floor=24883 → delta -162`. The mark is current
+(sha b90560f061, 2026-06-22 13:47; b90560..919cd76 are docs/baseline-only). So
+this is a **REAL −162 standalone regression**, NOT stale-baseline drift.
+
+The rolling regression-gate PASSED (net +0) — only the absolute highwater floor
+caught it. The floor runs ONLY in merge_group, which is why all PR-level checks +
+the scoped equality A/B (which was +10/0) were green: the −162 is in a DIFFERENT
+cluster than the A/B sample — **class / class-dstr / generator destructuring**.
+
+### Root cause (isolated by hunk-bisection on the live worktree)
+
+Canary: `language/statements/class/dstr/meth-dflt-ary-ptrn-empty` — spec
+`ArrayBindingPattern : [ ]` must NOT iterate; `method([] = iter)` with a generator
+default must leave `iterations === 0`. On clean main: PASS. On #1888: FAIL
+(`iterations` 0→2 — the empty pattern wrongly iterates the generator default).
+
+Bisection result (faithful runner, standalone target):
+- Revert WHOLE any-helpers.ts → main ⇒ PASS. (so it's in any-helpers; #1883's
+  closed-method-dispatch.ts + string-ops.ts are CLEAN — proven.)
+- Neutralize ALL THREE tag-5 consumers together (classifier call-sites →
+  `tag5StringEqThen`, `canNativeStrEq=false`, `tag5ToNumber`→inline) ⇒ PASS.
+- Re-enable ONLY the `tag5FieldEqDecision` classifier (others neutralized) ⇒ FAIL.
+- **⇒ the `tag5FieldEqDecision` classifier is the cause.** (Each of the three
+  consumers independently re-breaks it because they share the mechanism — all do
+  `any.convert_extern`+`ref.test`/`ref.cast`/`__any_to_f64` on the tag-5 field-4;
+  that is why reverting any ONE in isolation, with the others still active, did
+  not fix it.)
+
+### Why the classifier is semantically wrong here
+
+The default-parameter machinery compares the incoming arg against `undefined`
+(to decide whether to apply the default) via `__any_eq`/`__any_strict_eq`. When a
+tag-5-boxed **non-string GC object** (the generator/iterator default) reaches the
+both-tags-5 arm, the classifier's new objectEq (`ref.eq` after `ref.test (ref eq)`)
+or numeric (`f64.eq` via `__any_to_f64`) branch returns a DIFFERENT answer than
+main's `i32.const 0` stub — flipping the default-application decision so the empty
+pattern iterates. This is precisely the −788/−794 representation-contract risk the
+spec section + sd-3's earlier shelved attempt flagged: broadening the tag-5 arm to
+classify boxed objects/numbers changes equality semantics relied on elsewhere.
+
+### Disposition
+
+#1888 is **net-negative** (+10 equality rows vs −162 dstr) → MUST NOT land as-is.
+The classifier needs to be narrowed so it does not change equality results for
+tag-5 boxed GC objects consumed by the dstr/default-parameter path (e.g. gate the
+objectEq/numeric arms so they only fire for the cases #2040/#2585 actually need
+and fall back to the legacy behaviour for everything the default machinery sees).
+This is senior-dev design work, gated by merge_group re-validation. Cascade does
+NOT collapse to #1888 until then; #1883 (search arms, proven clean) is the lower-
+risk standalone-landable subset.
