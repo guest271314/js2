@@ -2563,10 +2563,18 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
     // Pattern 2: TypeScript knows the expression has call sigs but no construct sigs.
     // e.g. `new decodeURIComponent()`, `new Math.abs()`, `new Array.from()`.
     // Resolve on the unwrapped target so a cast doesn't widen it to `any`.
+    //
+    // (#2608) EXCEPT `new this(...)`: inside a function-constructor (fnctor) static
+    // method, the checker types `this` as the bare `function`-value, which has CALL
+    // signatures but NO construct signatures — so this guard would wrongly throw
+    // "is not a constructor". But `this` IS a constructable function-value at runtime
+    // (e.g. acorn's `Parser.parse = function(){ return new this(opts, src) }`, where
+    // `this === Parser`). Let a `this` callee fall through to the `__construct_closure`
+    // bridge arm below (JS-host), which constructs the runtime closure value directly.
     const exprType = ctx.checker.getTypeAtLocation(unwrappedNonId);
     const constructSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Construct);
     const callSigs = ctx.checker.getSignaturesOfType(exprType, ts.SignatureKind.Call);
-    if (callSigs.length > 0 && constructSigs.length === 0) {
+    if (unwrappedNonId.kind !== ts.SyntaxKind.ThisKeyword && callSigs.length > 0 && constructSigs.length === 0) {
       // #1528: real TypeError instance — spec requires `Construct(F)` to throw
       // `TypeError("F is not a constructor")` when F has no [[Construct]].
       emitThrowTypeError(ctx, fctx, "is not a constructor");
@@ -3660,6 +3668,74 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         }
       }
     }
+  }
+
+  // (#2608) `new this(...)` inside a function-constructor (fnctor) STATIC method
+  // — e.g. acorn's `Parser.parse = function(...) { ... return new this(opts, src) }`.
+  // The #1679 ThisKeyword arm above only fires when the checker resolves `this`'s
+  // type symbol to a known fnctor className. For a `Fn.method = function(){…}`
+  // static method the checker resolves `this` to NO symbol (className undefined),
+  // so that arm is skipped and control reaches the generic dynamic-`new` path
+  // below, which throws "is not a constructor" — the receiver is a wrapped
+  // closure externref with no compiled `<Class>_new`. At runtime, though, `this`
+  // IS correctly bound to the constructor function-value (verified `this === Fn`),
+  // and that value is a WasmGC closure struct. So route it through the landed #56
+  // `__construct_closure` host bridge (same machinery as the `new <localFnValue>()`
+  // identifier arm above): the bridge detects `__is_closure`, wraps the closure
+  // with `_wrapCallableForHost` (constructible), and `Reflect.construct`s it with
+  // the args — no static fnctor resolution needed. JS-host only; standalone keeps
+  // the existing throwing path (a Wasm-native dynamic Construct of `this` is a
+  // separate effort). ONE terminal `flushLateImportShifts` (after the call) —
+  // never mid-emission (the #608/#794 index-corruption hazard).
+  if (
+    expr.expression.kind === ts.SyntaxKind.ThisKeyword &&
+    !noJsHost(ctx) &&
+    (!className || (!ctx.classSet.has(className) && !ctx.funcConstructorMap.has(className)))
+  ) {
+    // Evaluate `this` to an externref value (the bound constructor function-value).
+    const calleeTy = compileExpression(ctx, fctx, expr.expression, { kind: "externref" });
+    if (calleeTy && calleeTy.kind !== "externref") {
+      coerceType(ctx, fctx, calleeTy, { kind: "externref" });
+    } else if (calleeTy === null) {
+      fctx.body.push({ op: "ref.null.extern" });
+    }
+    const calleeLocal = allocLocal(fctx, `__nt_callee_${fctx.locals.length}`, { kind: "externref" });
+    fctx.body.push({ op: "local.set", index: calleeLocal });
+    // Build a JS array of the args (boxed externref each), in source order.
+    const args = expr.arguments ?? [];
+    const arrNewIdx = ensureLateImport(ctx, "__js_array_new", [], [{ kind: "externref" }]);
+    const arrPushIdx = ensureLateImport(ctx, "__js_array_push", [{ kind: "externref" }, { kind: "externref" }], []);
+    const ccIdx = ensureLateImport(
+      ctx,
+      "__construct_closure",
+      [{ kind: "externref" }, { kind: "externref" }],
+      [{ kind: "externref" }],
+    );
+    flushLateImportShifts(ctx, fctx);
+    const finalArrNew = ctx.funcMap.get("__js_array_new") ?? arrNewIdx;
+    const finalArrPush = ctx.funcMap.get("__js_array_push") ?? arrPushIdx;
+    const finalCc = ctx.funcMap.get("__construct_closure") ?? ccIdx;
+    if (finalArrNew !== undefined && finalArrPush !== undefined && finalCc !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: finalArrNew });
+      const argvLocal = allocLocal(fctx, `__nt_argv_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: argvLocal });
+      for (const arg of args) {
+        fctx.body.push({ op: "local.get", index: argvLocal });
+        const aTy = compileExpression(ctx, fctx, arg, { kind: "externref" });
+        if (aTy && aTy.kind !== "externref") {
+          coerceType(ctx, fctx, aTy, { kind: "externref" });
+        } else if (aTy === null) {
+          fctx.body.push({ op: "ref.null.extern" });
+        }
+        fctx.body.push({ op: "call", funcIdx: finalArrPush });
+      }
+      fctx.body.push({ op: "local.get", index: calleeLocal });
+      fctx.body.push({ op: "local.get", index: argvLocal });
+      fctx.body.push({ op: "call", funcIdx: finalCc });
+      return { kind: "externref" };
+    }
+    // Imports unavailable (shouldn't happen in JS-host): fall through to the
+    // existing unknown-ctor path below.
   }
 
   if (!className) {
