@@ -1,6 +1,7 @@
-// #2588 — `--target wasi` hard emit error
+// #2609 — `--target wasi` hard emit error
 //   "Codegen error: function index out of range — undefined ... at function
 //    '__defineProperty_value'"
+//   (re-allocated off the hand-picked #2588/#2602 id collisions — #2531)
 //
 // Reported by an external user (loopdive/js2#389) compiling an esbuild-bundled
 // Native Messaging host with `--target wasi --wit`. The bundle pulls in the
@@ -70,7 +71,7 @@ const ESBUILD_PRELUDE_LIKE = `${DECL}
     process.stdout.write(out);
   }`;
 
-describe("#2588 WASI native defineProperty funcIdx (loopdive/js2#389)", () => {
+describe("#2609 WASI native defineProperty funcIdx (loopdive/js2#389)", () => {
   it("compiles a framed process.stdin.read loop under --target wasi without a funcIdx emit error", async () => {
     const result = await compile(FRAMED_STDIN, { fileName: "nm.ts", target: "wasi" });
     // Before the fix this failed with a hard emit error rather than producing a

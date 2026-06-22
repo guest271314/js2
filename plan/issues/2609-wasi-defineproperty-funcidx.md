@@ -1,5 +1,5 @@
 ---
-id: 2602
+id: 2609
 title: "WASI native __defineProperty_value bakes undefined funcIdx (host-free __object_is gate)"
 status: done
 sprint: Backlog
@@ -10,7 +10,11 @@ reasoning_effort: max
 external_ref: loopdive/js2#389
 ---
 
-# #2588 — `--target wasi` hard emit error at `__defineProperty_value`
+<!-- Re-allocated from hand-picked ids #2588 then #2602, both of which collided
+     with landed work on main (#2588 = standalone RegExp named groups, #2602 =
+     for-of rest-element). Fresh id #2609 via claim-issue.mjs --allocate (#2531). -->
+
+# #2609 — `--target wasi` hard emit error at `__defineProperty_value`
 
 ## Symptom
 
@@ -114,7 +118,7 @@ separately if numeric-key defineProperty under WASI is needed.
   `42` (S4 SameValue path intact).
 - Host mode (`Object.defineProperty` stays a JS import) compiles + validates —
   unchanged.
-- Regression tests: `tests/issue-2588-wasi-defineproperty-funcidx.test.ts` (4
+- Regression tests: `tests/issue-2609-wasi-defineproperty-funcidx.test.ts` (4
   cases — framed stdin loop, esbuild-prelude-like bundle, standalone, host).
 - No regressions in `define-property-patterns`, `issue-2042-s3-object-is`,
   `issue-1629-S6`, `issue-1127-samevalue`, `issue-2042-r2-topropkey-object`,

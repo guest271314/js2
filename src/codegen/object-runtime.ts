@@ -3818,7 +3818,7 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
   // bit patterns compare equal, and +0 (0x0…) vs -0 (0x8000…) compare unequal.
   // boolean → unbox i32; bigint → i64; both-null → equal; else ref identity.
   //
-  // HOST-FREE (`ctx.standalone || ctx.wasi`), NOT standalone-only (#2588). The
+  // HOST-FREE (`ctx.standalone || ctx.wasi`), NOT standalone-only (#2609). The
   // native `__defineProperty_value` block below is registered UNCONDITIONALLY by
   // this runtime and its #2042-S4 ValidateAndApplyPropertyDescriptor preflight
   // bakes a direct `call __object_is` for the SameValue value-change check. WASI
