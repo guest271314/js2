@@ -3055,11 +3055,26 @@ function compileElementAssignment(
       kind: "i32",
     });
     fctx.body.push({ op: "local.set", index: idxLocal });
-    // Compile value
-    const elemValResult = compileExpression(ctx, fctx, value, arrDef.element);
+    // Compile value. (#2593) Hint the UNPACKED value type (i32 for packed
+    // i8/i16 storage), NOT the packed `i8`/`i16` element type — `i8`/`i16` are
+    // storage-only and have no value-position encoding, so passing them as the
+    // compile hint produced an invalid local/value (the Int16/Uint16 element-write
+    // INVALID). `array.set` into the packed element re-truncates the i32 store
+    // value to the element width (free ToInt8/ToInt16/ToInt32/ToUint*). Float
+    // views keep their f64 element hint.
+    const valueHint: ValType =
+      arrDef.element.kind === "i8" || arrDef.element.kind === "i16" ? { kind: "i32" } : arrDef.element;
+    const elemValResult = compileExpression(ctx, fctx, value, valueHint);
     if (!elemValResult) {
       reportError(ctx, target, "Failed to compile element value");
       return null;
+    }
+    // (#2593) Ensure the store value is i32 for a packed i8/i16 element: if the
+    // value compiled to f64 (a number literal / arithmetic result), truncate to
+    // i32 (ToInt32 modulo semantics) so `array.set` re-packs to the element
+    // width. A value already i32 needs no conversion.
+    if ((arrDef.element.kind === "i8" || arrDef.element.kind === "i16") && elemValResult.kind === "f64") {
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
     }
     // #2159 — `i8`/`i16` are *packed storage* types, valid only inside array
     // elements / struct fields. The value temp holds the unpacked Wasm value

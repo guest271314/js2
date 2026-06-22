@@ -36,7 +36,7 @@ import {
 } from "./expressions/helpers.js";
 import { emitUndefined, patchStructNewForAddedField } from "./expressions/late-imports.js";
 import { emitSymbolDescLoad } from "./symbol-native.js";
-import { addUnionImports, resolveWasmType, TYPED_ARRAY_NAMES } from "./index.js";
+import { addUnionImports, resolveWasmType, TYPED_ARRAY_NAMES, typedArrayPackedSignedness } from "./index.js";
 import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js";
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
 import { tryCompileNativeSetSizeGet } from "./set-runtime.js";
@@ -344,6 +344,26 @@ const TYPED_ARRAY_BYTES_PER_ELEMENT: Record<string, number> = {
   BigInt64Array: 8,
   BigUint64Array: 8,
 };
+
+/**
+ * (#2593) Recover the packed-element signedness ("s"/"u") of a typed-array
+ * element-access receiver from its TS type. Returns undefined when the receiver
+ * is not a recognised integer typed-array view (callers then fall back to the
+ * legacy storage-kind heuristic). The signedness must come from the VIEW NAME,
+ * not the i8/i16 storage kind, because signed and unsigned views of the same
+ * width share storage but read with opposite sign-extension.
+ */
+function typedArrayViewSignedness(ctx: CodegenContext, receiver: ts.Expression): "s" | "u" | undefined {
+  const t = ctx.checker.getTypeAtLocation(receiver);
+  let name = t.getSymbol()?.name ?? t.aliasSymbol?.name;
+  // `new Int8Array(...)` receiver: recover the constructor name when the type
+  // symbol is missing (e.g. a fresh NewExpression whose type didn't resolve).
+  if ((!name || !TYPED_ARRAY_NAMES.has(name)) && ts.isNewExpression(receiver) && ts.isIdentifier(receiver.expression)) {
+    name = receiver.expression.text;
+  }
+  if (!name || !TYPED_ARRAY_NAMES.has(name)) return undefined;
+  return typedArrayPackedSignedness(name);
+}
 
 /**
  * True when `<builtinName>.<propName>` has a Wasm-native **f64 constant**
@@ -5855,6 +5875,11 @@ export function compileElementAccessBody(
       reportErrorNoNode(ctx, "Element access: vec data is not array");
       return null;
     }
+    // (#2593) Signedness of a packed i8/i16 typed-array element is driven by the
+    // VIEW NAME (Int8/Int16 → sign-extend; Uint8/Uint8Clamped/Uint16 →
+    // zero-extend), NOT the storage kind — a signed Int8Array and an unsigned
+    // Uint8Array share `i8` storage but read with opposite extension.
+    const taSignedness = typedArrayViewSignedness(ctx, expr.expression);
     // Unwrap: struct.get data field, then index into backing array
     fctx.body.push({ op: "struct.get", typeIdx, fieldIdx: 1 }); // get data from vec
     // #1179: hint i32 directly for the index. compileExpression will produce
@@ -5867,15 +5892,24 @@ export function compileElementAccessBody(
     if (isSafeBoundsEliminated(fctx, expr)) {
       // Bounds check elided: loop guard guarantees index < array.length
       const getOp =
-        arrDef.element.kind === "i8" ? "array.get_u" : arrDef.element.kind === "i16" ? "array.get_s" : "array.get";
+        arrDef.element.kind === "i8" || arrDef.element.kind === "i16"
+          ? taSignedness === "s"
+            ? "array.get_s"
+            : taSignedness === "u"
+              ? "array.get_u"
+              : arrDef.element.kind === "i8"
+                ? "array.get_u"
+                : "array.get_s"
+          : "array.get";
       fctx.body.push({ op: getOp, typeIdx: arrTypeIdx } as Instr);
       // (#2001 S1) Even bounds-eliminated externref reads must map a `$Hole`
       // slot back to `undefined` — the loop guard proves in-bounds, not present.
       if (ctx.usesArrayHoles && arrDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);
     } else {
       // (#2001 S1) Pass `ctx` so the in-bounds `$Hole → undefined` read-boundary
-      // mapping fires for an externref-element (`any[]`) vec.
-      emitBoundsCheckedArrayGet(fctx, arrTypeIdx, arrDef.element, ctx);
+      // mapping fires for an externref-element (`any[]`) vec. (#2593) Thread the
+      // view-name signedness for packed i8/i16 reads.
+      emitBoundsCheckedArrayGet(fctx, arrTypeIdx, arrDef.element, ctx, false, taSignedness);
     }
     return valueType;
   }
@@ -5885,6 +5919,8 @@ export function compileElementAccessBody(
     return null;
   }
 
+  // (#2593) View-name-driven signedness for a packed i8/i16 typed-array element.
+  const taSignednessArr = typedArrayViewSignedness(ctx, expr.expression);
   // Compile index and convert to i32 (#1179: hint i32 directly to skip the
   // f64.convert_i32_s + i32.trunc_sat_f64_s round-trip when the index is
   // already an i32 local or integer literal).
@@ -5895,14 +5931,23 @@ export function compileElementAccessBody(
   if (isSafeBoundsEliminated(fctx, expr)) {
     // Bounds check elided: loop guard guarantees index < array.length
     const getOp =
-      typeDef.element.kind === "i8" ? "array.get_u" : typeDef.element.kind === "i16" ? "array.get_s" : "array.get";
+      typeDef.element.kind === "i8" || typeDef.element.kind === "i16"
+        ? taSignednessArr === "s"
+          ? "array.get_s"
+          : taSignednessArr === "u"
+            ? "array.get_u"
+            : typeDef.element.kind === "i8"
+              ? "array.get_u"
+              : "array.get_s"
+        : "array.get";
     fctx.body.push({ op: getOp, typeIdx } as Instr);
     // (#2001 S1) Map a `$Hole` slot back to `undefined` on bounds-eliminated
     // externref reads too (in-bounds ≠ present).
     if (ctx.usesArrayHoles && typeDef.element.kind === "externref") emitHoleToUndefined(ctx, fctx);
   } else {
     // (#2001 S1) Pass `ctx` for the in-bounds `$Hole → undefined` mapping.
-    emitBoundsCheckedArrayGet(fctx, typeIdx, typeDef.element, ctx);
+    // (#2593) Thread the view-name signedness for packed i8/i16 reads.
+    emitBoundsCheckedArrayGet(fctx, typeIdx, typeDef.element, ctx, false, taSignednessArr);
   }
   return valueType;
 }
