@@ -1,19 +1,27 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.ts";
 
-// #2040/#2585 — unified tag-5 field-4 equality classifier.
+// #2040/#1888 — tag-5 field-4 equality (RESHAPED: string arm landed, the
+// both-tags-5 numeric/object classifier DEFERRED).
 //
 // The tag-5 (string) box's `externval` (field 4 of $AnyValue) is overloaded: it
 // holds genuine strings, `$BoxedNumber`s (the #1888 −794 "box-the-externref"
-// contract for numbers that pass through externref), and object/proto refs. The
-// tag-5 arm of both __any_eq and __any_strict_eq used to unconditionally run
-// string-eq on the two field-4 externrefs, which (with #2583's native string arm)
-// `ref.cast $AnyString` on a non-string → TRAPS, and otherwise mis-compares:
-//   - two boxed numbers → `a !== a` wrongly true / 23===23.0 wrongly false (#2040)
-//   - two object refs → identity lost (#2585 proto-identity)
-// The 3-way classifier picks: numeric (__any_to_f64 + f64.eq) when either field-4
-// is a $BoxedNumber, string-content when both are strings, ref.eq when both are
-// internal GC eqref objects.
+// contract for numbers that pass through externref), and non-string GC objects.
+// The tag-5 arm of both __any_eq and __any_strict_eq now routes to the GUARDED
+// native string-content compare (`ref.test $AnyString`-gated), which banks #2579
+// boxed-string `===` + #2583 `Array.prototype.{indexOf,…}.call(arrayLike)` and is
+// `0` for non-string tag-5 pairs (main's legacy answer).
+//
+// A broader CLASSIFIER (a #2040 numeric `f64.eq` arm for two boxed-NUMBERS, and a
+// #2585 `ref.eq` proto-identity arm for two boxed OBJECTS) was tried in #1888 but
+// EJECTED from the merge_group on the standalone-highwater floor (−162): changing
+// tag-5 boxed-VALUE equality for numbers/objects flips a comparison the
+// destructuring / generator-iterator lowering implicitly relied on (it counted on
+// the legacy always-false tag-5 non-string eq), regressing the class/dstr cluster.
+// Those two arms are DEFERRED to the value-rep substrate (#2580 M2 / #35); the
+// cases they would fix are `it.skip`ped below with that reference. The cross-tag
+// String⇄Number coercion (`tag5ToNumber`) is a separate, dstr-safe #2040 fix and
+// stays — `23===23.0`, NaN, ±0 below still pass via that path.
 
 async function runStandalone(src: string): Promise<unknown> {
   const r = await compile(src, { target: "standalone" } as never);
@@ -30,7 +38,10 @@ describe("#2040/#2585 unified tag-5 field-4 equality classifier (standalone)", (
     ).toBe(1);
   });
 
-  it("a !== a after a numeric op is false (a is a number, ===itself)", async () => {
+  // DEFERRED to #2580 M2 / #35: the both-tags-5 numeric `f64.eq` classifier arm
+  // regresses the class/dstr cluster (−162, ejected #1888). Re-enable when the
+  // value-rep substrate owns the dstr-iterator interaction.
+  it.skip("a !== a after a numeric op is false (a is a number, ===itself) — DEFERRED #2580 M2", async () => {
     // 1/a forces `a` through the boxed-number tag-5 path; a!==a must be false.
     expect(
       await runStandalone(
@@ -39,7 +50,7 @@ describe("#2040/#2585 unified tag-5 field-4 equality classifier (standalone)", (
     ).toBe(0);
   });
 
-  it("boxed-number === boxed-number (post-op) is true", async () => {
+  it.skip("boxed-number === boxed-number (post-op) is true — DEFERRED #2580 M2", async () => {
     expect(
       await runStandalone(
         `function f(a:any,b:any){const x=a+0;const y=b+0;return x===y;} export function main(): number { return f(7,7)?1:0; }`,
@@ -78,8 +89,13 @@ describe("#2040/#2585 unified tag-5 field-4 equality classifier (standalone)", (
     ).toBe(0);
   });
 
-  // ── #2585 object proto-identity (ref.eq branch) ───────────────────────
-  it("getPrototypeOf(Object.create(p)) === p is true", async () => {
+  // ── #2585 object proto-identity (ref.eq branch) — DEFERRED to #2580 M2 / #35 ──
+  // The both-tags-5 object `ref.eq` arm makes tag-5 boxed-object `===` reference-
+  // correct, but that flips a comparison the dstr/generator-iterator lowering
+  // relied on (it counted on the legacy always-false tag-5 object eq), regressing
+  // the class/dstr cluster (part of the −162 #1888 eject). Re-enable with the
+  // value-rep substrate.
+  it.skip("getPrototypeOf(Object.create(p)) === p is true — DEFERRED #2580 M2", async () => {
     expect(
       await runStandalone(
         `export function main(): number { const p:any={x:1}; const o=Object.create(p); return (Object.getPrototypeOf(o)===p)?1:0; }`,
@@ -87,7 +103,7 @@ describe("#2040/#2585 unified tag-5 field-4 equality classifier (standalone)", (
     ).toBe(1);
   });
 
-  it("same object via two reads === is true", async () => {
+  it.skip("same object via two reads === is true — DEFERRED #2580 M2", async () => {
     expect(
       await runStandalone(`export function main(): number { const o:any={x:1}; const p:any=o; return (o===p)?1:0; }`),
     ).toBe(1);

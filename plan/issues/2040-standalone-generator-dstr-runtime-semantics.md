@@ -4,8 +4,8 @@ title: "standalone: generator/destructuring runtime-semantics residual — rest-
 status: in-progress
 sprint: 64
 created: 2026-06-10
-updated: 2026-06-21
-assignee: sdev-vecdispatch
+updated: 2026-06-22
+assignee: cascade-lead
 priority: critical
 feasibility: hard
 reasoning_effort: high
@@ -593,3 +593,31 @@ and fall back to the legacy behaviour for everything the default machinery sees)
 This is senior-dev design work, gated by merge_group re-validation. Cascade does
 NOT collapse to #1888 until then; #1883 (search arms, proven clean) is the lower-
 risk standalone-landable subset.
+
+## RESHAPE LANDED (cascade-lead, 2026-06-22) — guard + string arm; numeric/object classifier deferred
+
+Lead+user approved reshaping #1888 to land the net-positive safe subset and defer
+the substrate-blocked piece. After full bisection the −162 split into pieces with a
+sharper boundary than first thought:
+
+- **FIX 1 (LANDED): restore #1864's `ref.test $AnyString` guard** on
+  `tag5StringEqThen`'s native arm (the #1888 `recoverNative` refactor dropped it).
+  Banks #2579 boxed-string `===` + #2583 `Array.prototype.{indexOf,…}.call`; `0`
+  for non-string tag-5 pairs (main's legacy answer). Alone, this fixes the dstr
+  canary AND keeps the search/string-eq wins.
+- **DEFERRED (both arms of the `tag5FieldEqDecision` classifier):** not just the
+  #2585 object `ref.eq` arm — the **#2040 numeric `f64.eq` arm ALSO regresses the
+  class/dstr cluster** (bisection: re-enabling ONLY the classifier, even with
+  `i32.and` numeric gating and objectEq removed, re-breaks the dstr canary). Both
+  arms change tag-5 boxed-VALUE equality that the destructuring / generator-iterator
+  lowering implicitly relies on (it counted on the legacy always-false tag-5
+  non-string eq). The whole both-tags-5 classifier (numeric + object) moves to the
+  value-rep substrate (#2580 M2 / #35). The cross-tag String⇄Number `tag5ToNumber`
+  arm in `__any_add` is dstr-safe and STAYS.
+
+**Validation:** dstr canaries 4/4 PASS (the −162 fix); #2583 search 2/2; A/B over
+the equality+search cluster vs clean main = **+2 / 0 regressions** (indexOf +
+lastIndexOf). `tests/issue-2040-tag5-field4-eq.test.ts`: 4 classifier cases
+`it.skip`ped with the #2580 M2 reference; the rest pass. `tests/issue-2579.test.ts`
+folded in (8/8) so closing #1864 loses no coverage. Authoritative gate = the
+merge_group standalone floor.
