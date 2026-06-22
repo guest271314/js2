@@ -324,8 +324,8 @@ sites, not the sanctioned helper bodies) counts drop. Commit baseline.
 ToNumber closure).
 
 **CRITICAL — this step is a WRAPPER, not a rewrite.** The hard part of equality —
-the **tag-5 field-4 3-way classifier** — is owned by the unified spec in
-`plan/issues/2040-...md` (arch commit `4cfb5b9c6`) and being implemented by
+the **tag-5 field-4 3-way classifier** — is owned by the unified spec
+(#2040 / #2585, arch commit `4cfb5b9c6`) and being implemented by
 **task #32** (`sdev-vecdispatch`, `fix(#2040/#2585)`). That classifier lives in
 the **`__any_strict_eq` / `__any_eq` helper bodies** (`any-helpers.ts`, builders
 at `:1482` / `:1221`) and does:
