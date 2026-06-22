@@ -287,7 +287,7 @@ export interface CompileOptions {
    */
   nodeIoShim?: boolean;
   /**
-   * Node API emulation (#2589). Opt-in via `--emulate node`. When set, the
+   * Node API emulation (#2603). Opt-in via `--emulate node`. When set, the
    * checker is given an ambient `process` declaration so Node globals js2wasm
    * lowers (process.std{in,out,err}, argv, env, exit) type-check without
    * @types/node — and the "Cannot find name 'process'" warning is suppressed.

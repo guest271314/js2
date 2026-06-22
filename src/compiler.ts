@@ -636,7 +636,7 @@ export function compileSourceSync(
       // #1929 — flatten the full DiagnosticMessageChain (keeps the "because…"
       // elaboration) instead of only the head .messageText.
       let message = ts.flattenDiagnosticMessageText(diag.messageText, "\n");
-      // #2589 — TS2580 ("Cannot find name 'X'. Do you need to install type
+      // #2603 — TS2580 ("Cannot find name 'X'. Do you need to install type
       // definitions for node?") flags a Node global. When node-emulation is off,
       // point the user at `--emulate node` (which turns it on and silences this)
       // rather than at @types/node.

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { analyzeSource } from "../src/checker/index.js";
 import { compile } from "../src/index.js";
 
-// #2589: `--emulate node` opts into Node API emulation — the checker is given an
+// #2603: `--emulate node` opts into Node API emulation — the checker is given an
 // ambient `process` declaration so the Node globals js2wasm lowers type-check
 // without @types/node, and the repeated TS2580 "Cannot find name 'process'"
 // warning disappears. Without the flag, that warning instead suggests adding it.
@@ -14,7 +14,7 @@ function messageOf(d: { messageText: string | { messageText: string } }): string
 const processNotFound = (diags: readonly { code: number; messageText: string | { messageText: string } }[]) =>
   diags.some((d) => (d.code === 2580 || d.code === 2304) && /'process'/.test(messageOf(d)));
 
-describe("#2589 ambient `process` typing via --emulate node", () => {
+describe("#2603 ambient `process` typing via --emulate node", () => {
   it("resolves `process` with emulateNode (no TS2580 'Cannot find name process')", () => {
     const src = [
       `process.stdout.write("hi");`,

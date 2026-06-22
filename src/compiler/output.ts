@@ -259,7 +259,7 @@ export function compileToObjectSource(source: string, options: CompileOptions = 
       const pos = diag.file ? diag.file.getLineAndCharacterOfPosition(diag.start ?? 0) : { line: 0, character: 0 };
       const severity = DOWNGRADE_DIAG_CODES.has(diag.code) ? "warning" : "error";
       let message = typeof diag.messageText === "string" ? diag.messageText : diag.messageText.messageText;
-      // #2589: TS2580 ("Cannot find name 'X'. Do you need to install type
+      // #2603: TS2580 ("Cannot find name 'X'. Do you need to install type
       // definitions for node?") flags a Node global. When node-emulation is
       // off, point the user at the flag that turns it on (and silences this)
       // rather than at @types/node.

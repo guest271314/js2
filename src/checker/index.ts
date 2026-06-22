@@ -274,7 +274,7 @@ export interface AnalyzeOptions {
   /** Skip semantic diagnostics collection (faster — checker still available for type queries) */
   skipSemanticDiagnostics?: boolean;
   /**
-   * Node API emulation (#2589), opt-in via `--emulate node`. Serves a synthetic
+   * Node API emulation (#2603), opt-in via `--emulate node`. Serves a synthetic
    * ambient `process` declaration so the checker resolves the Node globals
    * js2wasm lowers (process.std{in,out,err}, argv, env, exit) without the user
    * installing @types/node — eliminating the repeated TS2580 "Cannot find name
@@ -305,7 +305,7 @@ const ES_EARLY_ERROR_CODES = new Set([
   18050, // A rest element cannot have an initializer
 ]);
 
-// #2589: ambient `process` surface emulated under `--target wasi`. Served as a
+// #2603: ambient `process` surface emulated under `--target wasi`. Served as a
 // synthetic root .d.ts (a global script — no import/export — so `process` is an
 // ambient global) ONLY when AnalyzeOptions.wasi is set. Declares the members the
 // node-process-api.ts lowering actually supports, so the checker resolves
@@ -399,7 +399,7 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
     compilerOptions.checkJs = true;
   }
 
-  // Build the program. Under WASI (#2589) add a synthetic ambient `process`
+  // Build the program. Under WASI (#2603) add a synthetic ambient `process`
   // .d.ts as an extra root so the checker resolves the emulated Node globals.
   // If the user already declares `process`, that injection collides — detect
   // the duplicate-identifier diagnostic and rebuild without it, so we never

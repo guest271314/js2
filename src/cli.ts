@@ -78,7 +78,7 @@ Options:
                     links node-shim.wasm. Off by default (inline fd_* fallback).
   --emulate <env>   Emulate a host runtime's globals so they type-check without
                     @types/node. Currently: 'node' (ambient process). Off by
-                    default; using process then warns to add this flag (#2589).
+                    default; using process then warns to add this flag (#2603).
   --no-host-imports Strict dual-mode: reject JS-host 'env' imports not on
                     the allowlist (#1524). Implied by --target wasi.
   --allow-host-imports
@@ -140,7 +140,7 @@ let utf8Storage = false;
 let strictNoHostImports: boolean | undefined;
 // #2524 Phase 1 — process IO via the linkable js2wasm:node-io shim (WASI only).
 let nodeIoShim = false;
-// #2589 — `--emulate node`: opt into Node API emulation (ambient `process` typing).
+// #2603 — `--emulate node`: opt into Node API emulation (ambient `process` typing).
 let emulateNode = false;
 const defines: Record<string, string> = {};
 
@@ -201,7 +201,7 @@ for (let i = 0; i < args.length; i++) {
     // shim (WASI only). Off by default; the inline fd_read/fd_write path stays.
     nodeIoShim = true;
   } else if (arg === "--emulate" || arg.startsWith("--emulate=")) {
-    // #2589 — opt into Node API emulation. Gives the checker an ambient
+    // #2603 — opt into Node API emulation. Gives the checker an ambient
     // `process` typing so Node globals type-check without @types/node; without
     // it, the "Cannot find name 'process'" warning suggests adding this flag.
     const env = arg.startsWith("--emulate=") ? arg.slice("--emulate=".length) : args[++i];

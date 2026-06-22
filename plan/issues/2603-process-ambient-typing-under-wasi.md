@@ -1,5 +1,5 @@
 ---
-id: 2589
+id: 2603
 title: "`--emulate node` flag: opt-in ambient `process` typing (and warn to add it otherwise)"
 status: done
 sprint: Backlog
@@ -56,7 +56,7 @@ lowers `process.*` syntactically regardless of this declaration.
   `--emulate node` → 5 warnings, each suggesting the flag; **with** it → **0**
   warnings.
 - The `.ts` host (declares its own `process`) → no warning, no dup error.
-- `tests/issue-2589-process-ambient-typing.test.ts` (6 tests): resolves with
+- `tests/issue-2603-process-ambient-typing.test.ts` (6 tests): resolves with
   emulateNode; still flags without it; undefined names still warn; user-declared
   `process` → no dup; the unflagged warning suggests `--emulate node`; the
   flagged compile emits no `process` warning.
