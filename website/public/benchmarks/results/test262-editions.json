@@ -128,9 +128,9 @@
   {
     "edition": "Proposals",
     "pass": 1491,
-    "fail": 3164,
+    "fail": 3155,
     "ce": 231,
-    "skip": 96,
+    "skip": 105,
     "total": 4982,
     "pct": 30
   }
