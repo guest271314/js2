@@ -1,11 +1,12 @@
 ---
 id: 2106
 title: "value-rep P3: undefined observability — UNDEF_F64 sentinel, union-collapse reversal (flagged), standalone $undefined singleton"
-status: in-progress
-assignee: ttraenkler/sdev7
+status: suspended
+assignee: ttraenkler/sdev-async
 sprint: 65
 created: 2026-06-11
-updated: 2026-06-18
+updated: 2026-06-23
+suspend_note: "S1 substrate + strict-eq distinction DONE (S1.0 inert singleton validated; S1.1 producer/chokepoint flips tsc-clean, 3/6 repros pass). Remainder = mechanical-but-broad: consistent singleton production across ALL undefined producers (literals.ts element stores + boxToAny tag-1 arm) + emitIsNullish swept through ~42 nullish-intent ref.is_null sites (S1.2), then merge_group validation. Resume FRESH from ## Suspended Work. Branch issue-2106-s1-undefined-singleton (pushed). Held PR #1961 supersedes when S1 lands net-positive."
 priority: high
 feasibility: hard
 reasoning_effort: max
