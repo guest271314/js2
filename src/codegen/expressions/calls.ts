@@ -1565,6 +1565,83 @@ function calleeIsPromiseExecutorParam(ctx: CodegenContext, expr: ts.Expression):
 }
 
 /**
+ * (#1528 / #56 follow-up — class-ctor arm) Is `expr` an identifier resolving to a
+ * parameter of a function that is used as a Promise-combinator CAPABILITY
+ * CONSTRUCTOR — i.e. the `executor` of a `function Constructor(executor){…}` that
+ * flows to `Promise.{all,allSettled,race,any}.call(Constructor, …)`?
+ *
+ * V8's `NewPromiseCapability(Constructor)` does `Construct(Constructor, «executor»)`
+ * (run via #1632b-2's closure-construct bridge). Inside the compiled body the call
+ * `executor(resolve, reject)` is a call of a function-typed PARAMETER whose value
+ * is a HOST function V8 supplied — NOT a wasm closure struct. The default
+ * closure-struct `ref.cast`/`call_ref` dispatch then `illegal cast`s; such a param
+ * must take the `__call_function` host-callable arm instead. This mirrors the
+ * Promise-executor-param case (#2028) but for the capability-constructor entry.
+ *
+ * Gate is SYNTACTIC and narrow (NOT whole-program escape analysis), to preserve
+ * the #1941 dual-mode guarantee: the param's declaring function must be a
+ * `function` declaration / named function-expression whose identifier appears as
+ * the FIRST argument of a `Promise.<combinator>.call(...)` somewhere in the
+ * source file. Only such functions are entered as capability constructors with
+ * host-supplied params; ordinary callable params never match.
+ */
+function calleeIsCapabilityCtorParam(ctx: CodegenContext, expr: ts.Expression): boolean {
+  if (!ts.isIdentifier(expr)) return false;
+  const sym = ctx.checker.getSymbolAtLocation(expr);
+  const decl = sym?.valueDeclaration;
+  if (!decl || !ts.isParameter(decl)) return false;
+  // The declaring function: a FunctionDeclaration, or a function/arrow expression
+  // bound to a variable (so it has a stable referenceable name).
+  const fn = decl.parent;
+  let fnName: string | undefined;
+  if (ts.isFunctionDeclaration(fn) && fn.name) {
+    fnName = fn.name.text;
+  } else if (
+    (ts.isFunctionExpression(fn) || ts.isArrowFunction(fn)) &&
+    fn.parent &&
+    ts.isVariableDeclaration(fn.parent) &&
+    ts.isIdentifier(fn.parent.name)
+  ) {
+    fnName = fn.parent.name.text;
+  }
+  if (fnName === undefined) return false;
+  // Scan the source file for `Promise.<combinator>.call(<fnName>, …)`.
+  const COMBINATORS = new Set(["all", "allSettled", "race", "any"]);
+  const sf = decl.getSourceFile();
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    // `Promise.<combinator>.call(<id>, …)` — `(Promise.X).call`.
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "call" &&
+      ts.isPropertyAccessExpression(node.expression.expression) &&
+      ts.isIdentifier(node.expression.expression.expression) &&
+      node.expression.expression.expression.text === "Promise" &&
+      COMBINATORS.has(node.expression.expression.name.text)
+    ) {
+      // Unwrap `as`/paren/non-null on the capability arg so
+      // `Promise.X.call(Constructor as any, …)` matches the bare-identifier form.
+      let firstArg = node.arguments[0];
+      while (
+        firstArg &&
+        (ts.isAsExpression(firstArg) || ts.isParenthesizedExpression(firstArg) || ts.isNonNullExpression(firstArg))
+      ) {
+        firstArg = firstArg.expression;
+      }
+      if (firstArg && ts.isIdentifier(firstArg) && firstArg.text === fnName) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+/**
  * (#1337) Emit a call to a host bound-function externref via the
  * `__call_function(fn, thisArg, argsArray)` host helper. The bound function
  * already carries [[BoundThis]] and [[BoundArguments]], so `thisArg` is passed
@@ -11063,6 +11140,22 @@ function compileCallExpression(
         const hostCall = emitBoundFunctionCall(ctx, fctx, expr);
         if (hostCall !== null) return hostCall;
       }
+      // (#1528 / #56 follow-up — class-ctor arm) `executor(...)` inside a function
+      // used as a Promise-combinator capability constructor
+      // (`Promise.X.call(Constructor, …)` → V8 `Construct(Constructor, «executor»)`
+      // via the #1632b-2 bridge). The `executor` PARAM is an UNTYPED (`any`) value
+      // — no call signatures — so it never reaches the callable-param closure
+      // dispatch below; the no-sig fallback would `ref.cast` it to a closure
+      // struct and trap (`illegal cast in Constructor()`), because V8 supplies a
+      // HOST function there, not a wasm closure. Route it through the same
+      // `__call_function` host helper the bound-function path uses (it packs args
+      // into a JS array and calls `Reflect.apply`). JS-host only; narrow syntactic
+      // gate (the fn flows to a combinator capability-ctor site), so the #1941
+      // dual-mode guarantee for ordinary callable params is preserved.
+      if (isKnownVariable && !ctx.standalone && !noJsHost(ctx) && calleeIsCapabilityCtorParam(ctx, expr.expression)) {
+        const hostCall = emitBoundFunctionCall(ctx, fctx, expr);
+        if (hostCall !== null) return hostCall;
+      }
       if (callSigs && callSigs.length > 0) {
         const sig = callSigs[0]!;
         const sigParamCount = sig.parameters.length;
@@ -11314,6 +11407,11 @@ function compileCallExpression(
             // params so the #1941 dual-mode guarantee for ordinary callable
             // params is preserved.
             (calleeMayBeHostCallable(ctx, expr.expression) || calleeIsPromiseExecutorParam(ctx, expr.expression));
+          // NB: capability-ctor `executor` params (#1528/#56 class-ctor arm) are
+          // UNTYPED (`any`, no call signatures) so they never reach this
+          // callable-param dispatch — they are routed earlier through the
+          // `__call_function` host helper (see the calleeIsCapabilityCtorParam
+          // early-return alongside the bound-function path above).
 
           let fallbackInstrs: Instr[] | null = null;
           let dispatchOuterBody: Instr[] | null = null;
