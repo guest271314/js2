@@ -621,6 +621,18 @@ interface PipelineInput {
   sourcesContent: Map<string, string>;
   /** Anchor file for pushSourceAnchoredDiagnostic on codegen/emit throws. */
   diagnosticAnchor: ts.SourceFile;
+  /**
+   * Run ES early-error detection even when `options.allowJs` is set (#1958).
+   * The single-source path sets this `true`: its lone `userSourceFiles` entry is
+   * the *entry* source, and the legacy `compileSourceSync` ran `detectEarlyErrors`
+   * on it UNCONDITIONALLY — load-bearing for the `eval` host shim, which always
+   * compiles with `allowJs: true` and relies on early errors (e.g. `export` in
+   * eval code, strict-eval-in-params) failing the compile so it can throw a
+   * SyntaxError. The multi paths leave this `false`/undefined so their
+   * `userSourceFiles` allowJs *dependency* files (whose JS we can't control) keep
+   * being skipped — the original divergence between the single and multi drivers.
+   */
+  runEarlyErrorsOnAllowJs?: boolean;
   options: CompileOptions;
 }
 
@@ -662,8 +674,11 @@ function runPipeline(input: PipelineInput): CompileResult {
   // Step 1a: ES early-error detection — catch spec syntax errors TS misses, on
   // EVERY user source file (#1931). allowJs dependency files are skipped (their
   // JS may use patterns we cannot control) — same scoping as the diagnostic
-  // loop in the adapters.
-  if (!options.allowJs) {
+  // loop in the adapters. #1958 — EXCEPT the single-source path
+  // (`runEarlyErrorsOnAllowJs`), whose lone source IS the entry: the legacy
+  // `compileSourceSync` ran this pass unconditionally, and the `eval` host shim
+  // (always `allowJs: true`) depends on it to reject e.g. `export` in eval code.
+  if (!options.allowJs || input.runEarlyErrorsOnAllowJs) {
     const earlyErrors: CompileError[] = [];
     for (const sf of userSourceFiles) {
       earlyErrors.push(...detectEarlyErrors(sf));
@@ -1090,6 +1105,10 @@ export function compileSourceSync(
     }),
     sourcesContent,
     diagnosticAnchor: ast.sourceFile,
+    // #1958 — single-source: the lone source is the entry, so always run ES
+    // early-error detection (the `eval` host shim compiles with allowJs:true and
+    // relies on it). The multi paths keep the allowJs-dependency skip.
+    runEarlyErrorsOnAllowJs: true,
     options,
   });
 }
