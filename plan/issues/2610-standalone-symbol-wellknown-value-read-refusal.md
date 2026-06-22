@@ -1,7 +1,9 @@
 ---
 id: 2610
 title: "standalone: `Symbol.<wellKnown>` read as a VALUE refuses instead of folding to its i32 sentinel"
-status: ready
+status: done
+completed: 2026-06-22
+assignee: ttraenkler/dev-symbol-2610
 sprint: 65
 created: 2026-06-22
 priority: high
