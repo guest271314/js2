@@ -70,7 +70,7 @@ describe("real-world: WASI command-line programs", () => {
     expect(result.wat).toContain("proc_exit");
   });
 
-  // #1801 (was #6407): process.exit(N) under --target wasi used to emit an
+  // #1801 (was #2177): process.exit(N) under --target wasi used to emit an
   // invalid module — the exit-code argument was compiled as an i32 but then an
   // `i32.trunc_sat_f64_s` (which expects f64) was pushed on top of it, so the
   // module failed `WebAssembly.validate()`. The redundant truncation was

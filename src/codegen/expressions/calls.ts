@@ -4021,7 +4021,7 @@ function compileCallExpression(
           //   - Object.isPrototypeOf: route directly to the native open-object
           //     prototype-chain helper. Array/Number/Boolean/Function have no
           //     clean native borrowed path yet → refuse-loud below (Array brand
-          //     arm rides on #6407). Never a silent-wrong answer.
+          //     arm rides on #2177). Never a silent-wrong answer.
           if (ctx.standalone && expr.arguments.length >= 1 && !isBuiltinRegExpPrototype) {
             // Native String methods whose __str_* helper + return marshaling
             // round-trip correctly standalone (verified end-to-end). Methods
@@ -4105,7 +4105,7 @@ function compileCallExpression(
             // never leak the host import or return a silent-wrong value.
             const cite =
               typeName === "Array"
-                ? "the Array brand arm rides on #6407 ($Vec element retrieval)"
+                ? "the Array brand arm rides on #2177 ($Vec element retrieval)"
                 : typeName === "Object"
                   ? "only Object.prototype hasOwnProperty/propertyIsEnumerable/isPrototypeOf borrowed calls are wired (valueOf is a follow-on)"
                   : "this prototype's borrowed-method brand arm is not yet native";
