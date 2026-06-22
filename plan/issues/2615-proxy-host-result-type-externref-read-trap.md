@@ -45,8 +45,8 @@ This is the `project_proxy_no_ts_type_brand` memory in concrete form.
 
 `src/codegen/statements/variables.ts` — mirror the existing `isBindHostCall` /
 `isPromiseHostCall` slot-type overrides. Added `isProxyConstruction(expr)` and
-forced the variable's storage ValType to `externref` whenever the initializer is
-a `new Proxy(...)`, so member reads/writes/has/delete lower through the dynamic
+forced the variable's storage ValType to `externref` for a `new Proxy(...)`
+initializer, so member reads/writes/has/delete lower through the dynamic
 boundary helpers (`__extern_get` / `__extern_set` / `__extern_has`) — the only
 paths that run the Proxy MOP / trap. Two sites:
 1. The `wasmType` computation (the override chain) — fresh slots.
@@ -56,23 +56,43 @@ paths that run the Proxy MOP / trap. Two sites:
    the accessor-literal branch.
 
 Mode-agnostic: both host and standalone emit a Proxy externref, so both get the
-override. (Reflect directory unchanged — verified 82/19/52 identical.)
+override.
+
+### NARROWING (merge_group regression fix)
+
+The first attempt forced externref for **every** `new Proxy(...)` result. That
+over-applied and regressed 6 test262 rows in the merge_group (PR-level checks
+green, merged-state −1 net): `Object/prototype/toString/proxy-array`,
+`Proxy/getPrototypeOf/trap-is-undefined-target-is-proxy`,
+`Array/prototype/copyWithin/return-abrupt-from-has-start`, and two
+`Object/getOwnPropertySymbols/proxy-invariant-*`. Root cause: when the Proxy is
+handed to a host **generic-method / global** (`Object.prototype.toString.call(p)`,
+`Object.getPrototypeOf(p)`, `Array.prototype.X.call(p, …)`), a struct-typed slot
+let the host introspect the target (IsArray, prototype identity, the
+Array.prototype.* spec walk); a bare externref Proxy takes a different host path
+that loses Array-ness / prototype identity.
+
+So the override is now gated by `proxyResultEscapesToCall(decl, name)`: it fires
+**only when the Proxy stays local and is used purely in member position**
+(`p.x` / `p[k]` / `delete p.x` / `k in p`). If the variable appears as a
+call/new **argument** or a `.call`/`.apply` first-arg (the `this`), the struct
+typing is kept and the host generic-method path keeps working. The keystone
+read-trap fix still lands for the common direct-read case.
 
 ## Test Results (local harness, gc mode, via `wrapTest` + `compileAndInstantiate`)
 
-`built-ins/Proxy/get` directory: baseline **2 pass / 3 fail / 14 err** →
-**7 pass / 7 fail / 5 err** (+5 pass, −9 err).
-
-Whole `built-ins/Proxy` directory: baseline **78 pass / 52 fail / 181 err** →
-**82 pass / 63 fail / 166 err** (net **+4 pass**, −15 err). (Local harness lacks
-some host shims so the absolute pass count is below CI's 115; the *delta* is what
-matters.) `built-ins/Reflect`: identical 82/19/52 (no regression).
+Whole `built-ins/Proxy` directory (NARROWED): baseline **78 pass / 181 err** →
+**83 pass / 173 err** (net **+5 pass**). The 6 merge_group regressions all pass
+again (verified file-by-file: 5 PASS, 1 pre-existing ERR on baseline too).
+`built-ins/Reflect`: identical 82/19/52 (no regression).
 
 Acceptance: `built-ins/Proxy/get/return-trap-result.js` now PASSES (was an
 empty-message trap).
 
-Dedicated equivalence test: `tests/issue-2615.test.ts` (6 cases — get-trap read,
-read-through-no-trap-no-longer-traps, `in`, set, delete, set-trap) all pass.
+Dedicated equivalence test: `tests/issue-2615.test.ts` (8 cases — get-trap read,
+read-through-no-trap-no-longer-traps, `in`, set, delete, set-trap, plus two
+WAT-level narrowing guards: escaping Proxy keeps struct slot / member-only Proxy
+is externref) all pass.
 
 The closed-struct read-through value (`trap-is-undefined.js` returning the
 target's actual field for a non-`any` target) and the

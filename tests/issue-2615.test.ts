@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { compile } from "../src/index.js";
 import { compileAndInstantiate } from "../src/runtime-instantiate.js";
 
 // #2615 — `new Proxy(target, handler)` result must be storage-typed externref,
@@ -93,5 +94,37 @@ describe("#2615 — read through a host Proxy no longer traps", () => {
       }
     `;
     expect(await run(src)).toBe(7);
+  });
+
+  // Regression guard for the narrowing (#2615 merge_group regression): when the
+  // Proxy ESCAPES into a generic-method / global call, it must KEEP its struct
+  // typing so the host path sees through to the target. Forcing externref here
+  // broke Object.prototype.toString / Object.getPrototypeOf / copyWithin on a
+  // Proxy target (proxy-array, *-target-is-proxy, copyWithin/*-proxy-*). We
+  // assert the slot-type contract at the WAT level — harness-independent: an
+  // escaping Proxy var must NOT be slotted externref; a purely member-accessed
+  // one must be.
+  it("a Proxy (struct target) that escapes into a call keeps its struct slot, not externref", async () => {
+    const r = await compile(
+      `export function test(): number { const t = { x: 1 }; const p = new Proxy(t, {}); Object.prototype.toString.call(p); return 1; }`,
+      { fileName: "t.ts" },
+    );
+    expect(r.success).toBe(true);
+    // The `$p` local must NOT be flipped to externref when it escapes into the
+    // .call(p,…) — that path needs the struct so the host sees the target type.
+    const pLocal = r.wat.split("\n").find((l) => /\(local \$p\s/.test(l));
+    expect(pLocal).toBeDefined();
+    expect(pLocal).not.toMatch(/externref/);
+  });
+
+  it("a Proxy (struct target) that is only member-accessed IS slotted externref (keystone)", async () => {
+    const r = await compile(
+      `export function test(): number { const t = { attr: 1 }; const p = new Proxy(t, { get: function () { return 2; } }); return p.attr; }`,
+      { fileName: "t.ts" },
+    );
+    expect(r.success).toBe(true);
+    const pLocal = r.wat.split("\n").find((l) => /\(local \$p\s/.test(l));
+    expect(pLocal).toBeDefined();
+    expect(pLocal).toMatch(/externref/);
   });
 });
