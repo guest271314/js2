@@ -100,9 +100,10 @@ global index is the tell: an unresolved/un-shifted reference.
   accessor table.
 - Apply the SAME lockstep-shift discipline #2162 used for `mapHelpers`
   (see the "WeakMap/WeakSet stale-`mapHelpers`-index fix" slice in
-  `plan/issues/2162-*.md`): add the subclass-of-collection accessor indices to
-  every shift site, or defer their registration until after the collection
-  runtime + box helpers are registered.
+  the #2162 umbrella tracker
+  `plan/issues/2162-standalone-map-set-weak-collections-residual.md`): add the
+  subclass-of-collection accessor indices to every shift site, or defer their
+  registration until after the collection runtime + box helpers are registered.
 - If the subclass-of-Set machinery is too entangled to fix cleanly, the
   fallback is to make `extends Set`/`extends Map` a clean CE (not an invalid-
   Wasm emit) so it at least doesn't poison the binary — but prefer the real fix.
