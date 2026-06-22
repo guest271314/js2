@@ -481,3 +481,60 @@ wasi loose-eq (#2043 late-import shift, 10), `logical-conditional-identity` void
 **MUST be full-baseline (merge_group) gated** — the risk is in the −788/−794
 representation contracts; only the full standalone test262 lane confirms
 net-positive with zero regression bucket. Folds in #2585 (close it).
+
+## Cascade landing plan (cascade-lead, 2026-06-22) — re-grounded vs current origin/main
+
+Re-grounded all three tag-5 equality PRs against current `origin/main`
+(`d7f0524550`, 31769/43135) after a **215-commit** substrate shift since #1888's
+original merge-base (`0e482f2fc`). The shift landed #2611 (funcidx-desync fix),
+#2580 M1/M2 substrate, #1461/#54 native search arms, #2615 keystone, etc. — all of
+which directly touch the mechanisms the classifier interacts with, so the prior
+merge_group regressions (measured 2026-06-21 against the OLD main) are stale.
+
+### Supersession map (PROVEN by byte-diff, not narrative)
+
+- **#1888 is a complete superset of #1883 AND #1864.**
+  - `src/codegen/closed-method-dispatch.ts` (+177) and `src/codegen/string-ops.ts`
+    (+74) are **byte-identical** between #1888 and #1883 → #1888 contains all of
+    #1883's any-array indexOf/lastIndexOf/includes brand dispatch.
+  - #1888's `tag5StringEqThen()` already emits #1864's native
+    `__str_flatten`+`__str_equals` content-equality (attributed #2583/#2036, same
+    code, ref.test-guarded) → #1888 contains all of #1864's boxed tag-5 string
+    equality.
+  - #1888 adds the unique keystone: `tag5FieldEqDecision` 3-way classifier
+    (boxed-number→`f64.eq`, both-strings→content eq, both-eqref→`ref.eq`) that
+    #2040 numeric-eq + #2585 proto-identity need.
+
+### Disposition
+
+1. **LAND #1888 alone** (the keystone superset). Order: it is the only PR that
+   needs to merge.
+2. **CLOSE #1883 as superseded-by-#1888** (its code is byte-identical inside
+   #1888). Its issue #2583 is already `status: done`.
+3. **CLOSE #1864 as superseded-by-#1888** (its native string-eq is folded into
+   #1888's `tag5StringEqThen`). Issue #2579 → fold note.
+
+   Both closes REPORTED to team-lead with evidence — NOT closed unilaterally (they
+   are the user's PRs).
+
+### Re-grounded validation (NOT the stale −151 verdict)
+
+A/B faithful runner (`runTest262File(..., "standalone")`) over the classifier's
+direct blast-radius cluster (954 files: equals/does-not-equals/strict-equals/
+strict-does-not-equals + Object.getPrototypeOf/create/is + Array
+indexOf/lastIndexOf/includes), branch (1888 ⊕ current main) vs clean current main:
+
+- branch **400 pass / 327 fail / 18 ce**, main **390 pass / 337 fail / 18 ce**
+- per-file diff: **0 regressions, 10 improvements, 0 other flips.**
+  - +8 `S11.9.x` equality/strict-equality rows (`A2.1_T1`, `A7`)
+  - +2 `15.4.4.{14,15}` indexOf/lastIndexOf rows
+- The 3 `logical-conditional-identity` void→NaN **compile** failures are
+  PRE-EXISTING on clean current main (verified A/B, identical 3-fail count) — a
+  separate void-in-numeric-context defect, NOT a cascade regression.
+
+This cluster sweep is a **pre-flight de-risk only** — the authoritative gate for a
+broad-impact value-rep change remains the **merge_group standalone floor** (the
+−788/−794 contract can surface outside the sample). #1888 enqueued ONE-SHOT on
+CLEAN after the `hold` label is removed; net-positive in-cluster + 0 regressions
+means the prior stale park is very likely resolved by the rebase, but merge_group
+is the decider.
