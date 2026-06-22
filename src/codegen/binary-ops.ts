@@ -539,7 +539,31 @@ export function compileBinaryExpression(
     }
 
     const rightType = ctx.checker.getTypeAtLocation(expr.right);
-    const rightWasm = resolveWasmType(ctx, rightType);
+    let rightWasm = resolveWasmType(ctx, rightType);
+
+    // (#2617) The TS type of a `new Proxy(...)`-bound identifier is its TARGET
+    // type (ProxyConstructor returns T), so `resolveWasmType` yields the target
+    // struct and the static `in` fold below would constant-fold `'k' in p` to
+    // the target's field membership — never calling `__extern_has`, so a `has`
+    // trap (incl. one that throws, #2617) never runs. But #2615 slots that
+    // variable as `externref`. Trust the ACTUAL slot type: if the receiver is an
+    // identifier whose local slot is externref/anyref, treat the RHS as externref
+    // so the `in` routes through `__extern_has` (the host Proxy MOP).
+    if (
+      (rightWasm.kind === "ref" || rightWasm.kind === "ref_null") &&
+      ts.isIdentifier(expr.right) &&
+      fctx.localMap.has(expr.right.text)
+    ) {
+      const idx = fctx.localMap.get(expr.right.text)!;
+      const entry = idx < fctx.params.length ? fctx.params[idx] : fctx.locals[idx - fctx.params.length];
+      const slotType =
+        entry && typeof entry === "object" && "type" in entry
+          ? (entry as { type: ValType }).type
+          : (entry as ValType | undefined);
+      if (slotType?.kind === "externref" || slotType?.kind === "anyref") {
+        rightWasm = slotType;
+      }
+    }
 
     // Get struct field names if available; detect vec (array) types
     let structFieldNames: string[] | null = null;
