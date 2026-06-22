@@ -1621,7 +1621,15 @@ function calleeIsCapabilityCtorParam(ctx: CodegenContext, expr: ts.Expression): 
       node.expression.expression.expression.text === "Promise" &&
       COMBINATORS.has(node.expression.expression.name.text)
     ) {
-      const firstArg = node.arguments[0];
+      // Unwrap `as`/paren/non-null on the capability arg so
+      // `Promise.X.call(Constructor as any, …)` matches the bare-identifier form.
+      let firstArg = node.arguments[0];
+      while (
+        firstArg &&
+        (ts.isAsExpression(firstArg) || ts.isParenthesizedExpression(firstArg) || ts.isNonNullExpression(firstArg))
+      ) {
+        firstArg = firstArg.expression;
+      }
       if (firstArg && ts.isIdentifier(firstArg) && firstArg.text === fnName) {
         found = true;
         return;

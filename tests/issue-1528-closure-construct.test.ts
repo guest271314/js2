@@ -143,4 +143,57 @@ describe("#1632b-2 closure-as-dynamic-constructor bridge", () => {
       `),
     ).toBe(true);
   });
+
+  // #86 class-ctor arm: `executor(...)` inside a function used as a Promise
+  // combinator CAPABILITY CONSTRUCTOR (`Promise.X.call(Constructor, …)` → V8
+  // `Construct(Constructor, «executor»)` via the #1940 bridge) is a call of an
+  // UNTYPED (`any`) param that V8 fills with a HOST function. The no-call-sig
+  // fallback would `ref.cast` it to a closure struct and trap
+  // (`illegal cast in Constructor()`); the capability-ctor-param gate routes the
+  // OUTBOUND `executor(...)` call through `__call_function` instead, so the
+  // executor protocol runs. (The gate emits the `__call_function` import for the
+  // executor call — that is what this arm fixes.)
+  //
+  // KNOWN LIMITATION (documented follow-up): when the args passed to the host
+  // `executor` are CAPTURING inner closures (`function resolve(){ calls++; }`),
+  // the host→wasm marshalling of that captured-closure arg still casts (the
+  // multi-hop callback cast in the verdict). A NON-capturing executor arg works;
+  // the capturing case is the larger cluster effort. So we assert the gate WIRES
+  // the call through the host helper (the deliverable), not the end-to-end
+  // capturing-closure run.
+  async function importEmitted(source: string, importName: string): Promise<boolean> {
+    const r = await compile(source, {});
+    expect(r.success, r.errors.map((e) => e.message).join("\n")).toBe(true);
+    return (r.imports ?? []).some((i: { name?: string; intent?: { name?: string } }) => {
+      const n = i.name ?? i.intent?.name;
+      return n === importName;
+    });
+  }
+
+  it("routes the capability-ctor executor call through __call_function", async () => {
+    // Bare `Promise.allSettled.call(Constructor, …)` is the test262 shape the
+    // syntactic gate keys on (V8's NewPromiseCapability runs the executor).
+    expect(
+      await importEmitted(
+        `function Constructor(executor: any) {
+           function resolve(v: any) {}
+           executor(resolve, function () {});
+         }
+         (Constructor as any).resolve = function (v: any) { return v; };
+         const p1: any = { then: function (f: any) { f("x"); } };
+         export function test(): number { Promise.allSettled.call(Constructor as any, [p1]); return 0; }`,
+        "__call_function",
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT route an ordinary callable param (no capability-ctor flow) through __call_function (#1941 dual-mode)", async () => {
+    expect(
+      await importEmitted(
+        `function apply2(cb: any, v: number) { return cb(v); }
+         export function test(): number { return apply2((x: number) => x + 1, 10); }`,
+        "__call_function",
+      ),
+    ).toBe(false);
+  });
 });
