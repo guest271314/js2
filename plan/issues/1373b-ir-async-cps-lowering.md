@@ -860,6 +860,42 @@ correct and ready — re-read the S53 joint spec as written. Until then, the
 bounded slices (#2612/#2613/#2614) harvest the async conformance that does
 **not** require flipping the model.
 
+## Async-failure bucket scope (2026-06-22, sd-1838) — settlement-timing hypothesis tested
+
+Per lead directive: bucketed the failing async rows on current main and tested
+whether the "synchronous-settlement / microtask-drain" gap is a BOUNDED arm.
+
+**Bucket counts** (language/{expressions,statements}/{await,async-function,
+async-arrow-function}, 210 pass / 39 fail / 249):
+| n  | bucket | note |
+|----|--------|------|
+| 21 | assertion/return | DOMINANT — headed by `await <custom-thenable>` (`await-awaits-thenables*.js`) |
+| 6  | `with`-statement #1387 | unrelated (with-stmt closed-shape gate), not async |
+| 4  | null-deref in trigger/pushAwait/countdown | monkey-patched-promise / interleaved-await |
+| 2  | illegal_cast | await-in-nested-function/generator |
+| ~6 | parse/ident/misc | `await` as identifier, async-arrow name parse, etc. |
+
+**Settlement-timing hypothesis: NOT the mechanism, and NOT independently bounded.**
+- `await Promise.resolve(42)` PASSES; `await <custom thenable {then(res){res(42)}}>`
+  FAILS with `dereferencing a null pointer in __closure_N`. So it is NOT a
+  microtask-drain/ordering issue (the harness uses `asyncTest`/`asyncHelpers.js`
+  and real-Promise await settles correctly).
+- Root cause: `await V` lowers (async-cps.ts ~L421-433) to `Promise_resolve(V)` +
+  `Promise_then2(p, __make_callback(continuation))`. For a CUSTOM thenable, V8's
+  `p.then(resolve, reject)` calls the wasm continuation BACK as a host→wasm
+  callback, and that inbound callback null-derefs — the SAME multi-hop
+  host→wasm-callback substrate as #2614/#86's residual (a wasm closure handed to
+  host code and invoked back). The await resolve-continuation is the inbound
+  callback that fails.
+
+**Verdict: the dominant async-fail bucket (await-thenable, ~21 rows) is COUPLED
+to the multi-hop host→wasm callback cast/null-deref**, not a standalone
+settlement-timing fix. It should be folded into the same substrate slice that
+#2614's headline cluster needs (capturing inner closure passed to host executor,
+called back). Both are "a wasm continuation/closure invoked by host code"; fixing
+one likely fixes both. NOT a separate bounded arm — recommend a single
+multi-hop-callback substrate slice covering await-thenable + #2614 combinator
+residual. (The full IR Phase C #1373b epic verdict above is unchanged.)
 ## Re-ground verdict (2026-06-22, sd-1838) — genuine EPIC, deferral is correct
 
 Re-grounded against current main (the task subject's "ASYNC_CPS already enabled
