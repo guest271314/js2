@@ -153,6 +153,7 @@ import {
   tryCompileStandaloneRegExpToString,
 } from "../regexp-standalone.js";
 import {
+  emitThrowRangeError,
   emitThrowTypeError,
   getFuncParamTypes,
   getWasmFuncReturnType,
@@ -2806,9 +2807,9 @@ function compileFromCharCodeFamily(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.CallExpression,
-  opts: { native: boolean; helperIdx: number },
+  opts: { native: boolean; helperIdx: number; isFromCodePoint?: boolean },
 ): ValType | null {
-  const { native, helperIdx } = opts;
+  const { native, helperIdx, isFromCodePoint } = opts;
   const repr = native ? nativeStringRepr(ctx) : hostStringRepr(ctx);
   if (repr === undefined) return null;
 
@@ -2824,8 +2825,49 @@ function compileFromCharCodeFamily(
     fctx.body = buf;
     try {
       const argType = compileExpression(ctx, fctx, expr.arguments[i]!, { kind: "f64" });
+      // #2601 — §22.1.2.2 step 2b/2c: each fromCodePoint code point, after
+      // ToNumber, must be an INTEGRAL Number in [0, 0x10FFFF] else RangeError.
+      // (fromCharCode does ToUint16 with NO such check — fromCodePoint-only.)
+      // Scoped to standalone/WASI (`noJsHost`): the throw uses the in-module
+      // `__new_RangeError` constructor with no host bridge. The JS-host lane
+      // keeps its existing host-delegated behaviour (the slice is standalone).
+      const emitRangeGuard = isFromCodePoint === true && noJsHost(ctx);
+      if (emitRangeGuard) {
+        // Normalise to f64, then test `trunc(cp) != cp` (catches fractional AND
+        // NaN) OR `cp < 0` OR `cp > 0x10FFFF` (±∞ caught by the range test).
+        if (argType && argType.kind === "i32") buf.push({ op: "f64.convert_i32_s" });
+        const cpTmp = allocLocal(fctx, `__fcp_cp_${fctx.locals.length}`, { kind: "f64" });
+        buf.push({ op: "local.tee", index: cpTmp });
+        // integral: trunc(cp) != cp  → also true for NaN
+        buf.push({ op: "local.get", index: cpTmp });
+        buf.push({ op: "f64.trunc" });
+        buf.push({ op: "f64.ne" });
+        // range: cp < 0
+        buf.push({ op: "local.get", index: cpTmp });
+        buf.push({ op: "f64.const", value: 0 });
+        buf.push({ op: "f64.lt" });
+        // range: cp > 0x10FFFF
+        buf.push({ op: "local.get", index: cpTmp });
+        buf.push({ op: "f64.const", value: 0x10ffff });
+        buf.push({ op: "f64.gt" });
+        buf.push({ op: "i32.or" });
+        buf.push({ op: "i32.or" });
+        const throwBuf: Instr[] = [];
+        const savedForThrow = fctx.body;
+        fctx.body = throwBuf;
+        emitThrowRangeError(ctx, fctx, "RangeError: Invalid code point");
+        fctx.body = savedForThrow;
+        buf.push({ op: "if", blockType: { kind: "empty" }, then: throwBuf } as Instr);
+        // Re-push the validated code point for the helper.
+        buf.push({ op: "local.get", index: cpTmp });
+      }
       if (native) {
-        if (argType && argType.kind !== "i32") buf.push({ op: "i32.trunc_sat_f64_s" });
+        if (emitRangeGuard) {
+          // Already f64 in the temp above — trunc to the i32 the native helper wants.
+          buf.push({ op: "i32.trunc_sat_f64_s" });
+        } else if (argType && argType.kind !== "i32") {
+          buf.push({ op: "i32.trunc_sat_f64_s" });
+        }
       } else {
         if (argType && argType.kind === "i32") buf.push({ op: "f64.convert_i32_s" });
       }
@@ -4549,7 +4591,7 @@ function compileCallExpression(
       if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) {
         const helperIdx = ctx.nativeStrHelpers.get("__str_fromCodePoint");
         if (helperIdx !== undefined) {
-          const r = compileFromCharCodeFamily(ctx, fctx, expr, { native: true, helperIdx });
+          const r = compileFromCharCodeFamily(ctx, fctx, expr, { native: true, helperIdx, isFromCodePoint: true });
           if (r !== null) return r;
         }
       }
@@ -4559,7 +4601,11 @@ function compileCallExpression(
         // #2122: variadic — each code point produces a string joined via the
         // js-string `concat` import; register it before the shared fold.
         if (expr.arguments.length > 1) addStringImports(ctx);
-        const r = compileFromCharCodeFamily(ctx, fctx, expr, { native: false, helperIdx: funcIdx });
+        const r = compileFromCharCodeFamily(ctx, fctx, expr, {
+          native: false,
+          helperIdx: funcIdx,
+          isFromCodePoint: true,
+        });
         if (r === null) return r;
         return { kind: "externref" };
       }
