@@ -185,7 +185,12 @@ import {
 } from "../native-strings.js";
 import { emitVariadicStringConcat, hostStringRepr, nativeStringRepr } from "../builtin-scaffold.js";
 import { URI_DECODE_MASK, URI_ENCODE_MASK } from "../uri-encoding-native.js";
-import { emitArrayBufferSlice, emitDataViewAccessor, isDataViewAccessor } from "../dataview-native.js";
+import {
+  emitArrayBufferSlice,
+  emitDataViewAccessor,
+  getOrRegisterDvWindowType,
+  isDataViewAccessor,
+} from "../dataview-native.js";
 import {
   getLinearU8Buffer,
   getLinearU8ParamIndicesForCall,
@@ -6413,6 +6418,61 @@ function compileCallExpression(
       propAccess.name.text === "isView" &&
       expr.arguments.length >= 1
     ) {
+      // (#2594) Standalone/no-host: the host `__arraybuffer_isView` import does
+      // not exist — emitting it leaks `env.*` and breaks the WHOLE module at
+      // instantiate. §25.1.4.1 isView is `true` iff the arg has a
+      // [[ViewedArrayBuffer]] slot (any TypedArray or DataView). Decide it
+      // host-free.
+      if (noJsHost(ctx)) {
+        const arg0 = expr.arguments[0]!;
+        const argTs = ctx.checker.getNonNullableType(ctx.checker.getTypeAtLocation(arg0));
+        const argSym = argTs.getSymbol()?.name;
+        const rawTs = ctx.checker.getTypeAtLocation(arg0);
+        const isAnyOrUnknown = (rawTs.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+        const isView = argSym !== undefined && (TYPED_ARRAY_NAMES.has(argSym) || argSym === "DataView");
+        // A non-view whose static type is resolvable: ArrayBuffer itself, a
+        // primitive, null/undefined, a plain array, a class/object — all `false`.
+        const isResolvableNonView =
+          !isAnyOrUnknown && !isView && argSym !== "BigInt64Array" && argSym !== "BigUint64Array" && !rawTs.isUnion();
+        if (isView || argSym === "BigInt64Array" || argSym === "BigUint64Array") {
+          // Static `true`. Still evaluate the (possibly side-effecting) arg, drop it.
+          const at = compileExpression(ctx, fctx, arg0);
+          if (at !== null) fctx.body.push({ op: "drop" } as Instr);
+          fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+          return { kind: "i32" };
+        }
+        if (isResolvableNonView) {
+          const at = compileExpression(ctx, fctx, arg0);
+          if (at !== null) fctx.body.push({ op: "drop" } as Instr);
+          fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+          return { kind: "i32" };
+        }
+        // Runtime fallback for `any`/union/unresolved receivers: ref.test the
+        // registered vec carriers (TypedArrays lower to a `$Vec`) and the
+        // DataView window struct. NOTE: standalone shares the `$Vec` carrier
+        // between `number[]` and TypedArrays, so a plain array is
+        // indistinguishable here and reads as a view — an accepted imprecision
+        // for the rare `any` arg; the win is NOT leaking the host import (which
+        // breaks the whole module). Most isView call sites are statically typed.
+        const at = compileExpression(ctx, fctx, arg0, { kind: "externref" });
+        if (at && at.kind !== "externref") coerceType(ctx, fctx, at, { kind: "externref" });
+        const dvWinTypeIdx = getOrRegisterDvWindowType(ctx);
+        const vecTypeIdxs = Array.from(new Set(ctx.vecTypeMap.values()));
+        const anyTmp = allocLocal(fctx, `__isview_any_${fctx.locals.length}`, { kind: "anyref" } as ValType);
+        fctx.body.push({ op: "any.convert_extern" } as Instr);
+        fctx.body.push({ op: "local.set", index: anyTmp } as Instr);
+        let emitted = false;
+        for (const vi of vecTypeIdxs) {
+          fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
+          fctx.body.push({ op: "ref.test", typeIdx: vi } as Instr);
+          if (emitted) fctx.body.push({ op: "i32.or" } as Instr);
+          emitted = true;
+        }
+        fctx.body.push({ op: "local.get", index: anyTmp } as Instr);
+        fctx.body.push({ op: "ref.test", typeIdx: dvWinTypeIdx } as Instr);
+        if (emitted) fctx.body.push({ op: "i32.or" } as Instr);
+        return { kind: "i32" };
+      }
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
       if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
       const funcIdx = ensureLateImport(ctx, "__arraybuffer_isView", [{ kind: "externref" }], [{ kind: "i32" }]);
