@@ -88,6 +88,63 @@ Sequencing: Step 0 (ValType table) is dependency-safe now; Steps 1+ land
 AFTER the type-aware boxing P0 (#2072/#2080) so the engine consumes
 correct tags. Drift gate: #2108.
 
+## Implementation — Step 1 in progress (sendev-coercion, 2026-06-22; user un-parked)
+
+Branch `issue-1917-emit-tostring`. Phased behavior-neutral consolidation per the
+user override (deduplicate the coercion code; equality last/isolated). All Step
+1-4 named bugs are already fixed per-site, so EVERY step must be byte-neutral; a
+non-neutral step = a hidden divergence to surface, not paper over.
+
+**New `src/codegen/coercion-engine.ts`** — `coercionMode(ctx)` (the three ad-hoc
+spellings unified), `emitToString(ctx, fctx, valType, tsType, hint)` +
+`compileAndEmitToString(...)`. `emitToString` is the faithful consolidation of
+the per-operand ToString cascade the expression-based copies shared
+(void→"undefined", i32-bool→true/false, f64/i32/i64→number_toString,
+externref-null/undef→literal, externref-string→passthrough,
+externref-opaque→`__extern_toString`/`__extern_to_string_default` by hint,
+ref→`tryStructToString`+`$__any_to_string` native / `coerceType`(hint) host).
+Takes an explicit `hint`: templates/`String()` pass "string"; `+`-concat passes
+"default" (the #2022 valueOf-first policy on a ref operand) — so the per-context
+policy difference is preserved exactly. `emitBoolToString` /
+`emitNativeStringRefFromExternref` are bound lazily from string-ops.ts (cycle
+avoidance) via `registerStringHelperEmitters`.
+
+**Migrated (all tsc-clean):**
+- `compileAndCoerceConcatOperand` (host batched `__concat_N`) →
+  `compileAndEmitToString(…, "default")`.
+- `compileTemplateExpression` host span loop → `emitToString(…, "string")` (the
+  scalar-lowered null/undef pre-guard stays in the caller — the engine classifies
+  by ValType and would stringify the i32-0 sentinel as "0").
+- `compileNativeConcatOperand` (standalone `+`-concat operand) →
+  `emitToString(…, "default")`. Kept the `#2007 tryCompileNativeVecConcatOperand`
+  pre-check + the unknown-kind `return false` fall-through in the caller. All
+  callers are `noJsHost`-gated, so the engine's native externref tail
+  (`__extern_toString` + `emitNativeStringRefFromExternref`, NO `__str_from_extern`
+  bridge) is exactly right.
+
+**DEFERRED to a follow-up Step-1 increment (NOT a missed copy — each needs an
+engine extension; folding blindly would REGRESS = the hidden-divergence trap):**
+- `compileNativeTemplateExpression` — runs in BOTH standalone AND
+  native-strings-host mode; in native-strings-host it marshals via the
+  `__str_from_extern` externref bridge (`fromExternIdx`) the engine does not model
+  (it uses `emitNativeStringRefFromExternref` for both native modes). Concat
+  operand was safe only because it is standalone-ONLY.
+- `String()` lowering (calls.ts ~:10805) — heavy pre-processing (empty/null/undef
+  literals, Symbol descriptive string, array→toString, RegExp→toString) wraps the
+  generic cascade and each arm returns a ValType; careful extraction, next.
+- array-`join` `elemToStr` (array-methods.ts ~:5240) — operates on a raw array
+  SLOT (i8/i16/f64/externref), `$Hole`-aware; folds only once `emitToString`
+  grows a slot-source variant.
+
+**Cross-mode policy facts the engine now encodes (were implicit per-copy):**
+templates/`String()` hint = "string"; `+`-concat hint = "default" (#2022
+valueOf-first ref policy). The `__extern_to_string_default` default-hint externref
+tail applies ONLY in js-host mode; native modes always use `__extern_toString`.
+
+**Pending before PR:** ratchet `#2108` baseline DOWN for the migrated files;
+diff-neutrality over `playground/examples/`; standalone + host string suites;
+merge_group full-baseline watch.
+
 ## Implementation — Step 0 landed (sdev1, 2026-06-15)
 
 **Scope: Step 0 only** (the ValType `coercionPlan` table). Steps 1-4 (the
