@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-22T13:46:59.657Z",
-  "baseline_generated_at": "2026-06-22T13:46:59.657Z",
-  "baseline_sha": "b90560f061a91dbf6d55ebd9d5c24801edeb50b4",
+  "timestamp": "2026-06-22T16:59:33.813Z",
+  "baseline_generated_at": "2026-06-22T16:59:33.813Z",
+  "baseline_sha": "6d493d775ef165e6854a3046000027eb11f7dd11",
   "oracle_version": 1,
   "mode": {
     "target": "gc",
@@ -10,22 +10,22 @@
   },
   "summary": {
     "total": 43135,
-    "pass": 31732,
-    "fail": 10654,
+    "pass": 31756,
+    "fail": 10631,
     "compile_error": 650,
-    "compile_timeout": 81,
+    "compile_timeout": 80,
     "skip": 18,
-    "compilable": 42386,
+    "compilable": 42387,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42049,
-        "pass": 31133,
-        "fail": 10190,
+        "pass": 31157,
+        "fail": 10167,
         "compile_error": 627,
-        "compile_timeout": 81,
+        "compile_timeout": 80,
         "skip": 18,
-        "compilable": 41323,
+        "compilable": 41324,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -53,23 +53,23 @@
       },
       "official": {
         "total": 43135,
-        "pass": 31732,
-        "fail": 10654,
+        "pass": 31756,
+        "fail": 10631,
         "compile_error": 650,
-        "compile_timeout": 81,
+        "compile_timeout": 80,
         "skip": 18,
-        "compilable": 42386,
+        "compilable": 42387,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48117,
-        "pass": 33223,
-        "fail": 13809,
+        "pass": 33247,
+        "fail": 13786,
         "compile_error": 880,
-        "compile_timeout": 82,
+        "compile_timeout": 81,
         "skip": 123,
-        "compilable": 47032,
+        "compilable": 47033,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -77,32 +77,32 @@
   },
   "official_summary": {
     "total": 43135,
-    "pass": 31732,
-    "fail": 10654,
+    "pass": 31756,
+    "fail": 10631,
     "compile_error": 650,
-    "compile_timeout": 81,
+    "compile_timeout": 80,
     "skip": 18,
-    "compilable": 42386,
+    "compilable": 42387,
     "stale": 0
   },
   "full_summary": {
     "total": 48117,
-    "pass": 33223,
-    "fail": 13809,
+    "pass": 33247,
+    "fail": 13786,
     "compile_error": 880,
-    "compile_timeout": 82,
+    "compile_timeout": 81,
     "skip": 123,
-    "compilable": 47032,
+    "compilable": 47033,
     "stale": 0
   },
   "strict_summary": {
     "total": 40626,
-    "pass": 30439,
-    "fail": 9761,
+    "pass": 30463,
+    "fail": 9738,
     "compile_error": 327,
-    "compile_timeout": 81,
+    "compile_timeout": 80,
     "skip": 18,
-    "compilable": 40200,
+    "compilable": 40201,
     "stale": 0
   },
   "scope_summaries": {
@@ -128,12 +128,12 @@
     },
     "standard": {
       "total": 42049,
-      "pass": 31133,
-      "fail": 10190,
+      "pass": 31157,
+      "fail": 10167,
       "compile_error": 627,
-      "compile_timeout": 81,
+      "compile_timeout": 80,
       "skip": 18,
-      "compilable": 41323,
+      "compilable": 41324,
       "stale": 0
     }
   },
@@ -182,9 +182,9 @@
       "name": "built-ins/Array",
       "path": "built-ins/Array",
       "pass": 1631,
-      "fail": 1420,
+      "fail": 1421,
       "compile_error": 16,
-      "compile_timeout": 14,
+      "compile_timeout": 13,
       "skip": 0,
       "total": 3081
     },
@@ -551,8 +551,8 @@
     {
       "name": "built-ins/Object",
       "path": "built-ins/Object",
-      "pass": 2198,
-      "fail": 1203,
+      "pass": 2200,
+      "fail": 1201,
       "compile_error": 10,
       "compile_timeout": 0,
       "skip": 0,
@@ -591,8 +591,8 @@
     {
       "name": "built-ins/Proxy",
       "path": "built-ins/Proxy",
-      "pass": 120,
-      "fail": 181,
+      "pass": 142,
+      "fail": 159,
       "compile_error": 10,
       "compile_timeout": 0,
       "skip": 0,
@@ -1080,18 +1080,18 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 7574,
+    "assertion_fail": 7549,
     "illegal_cast": 123,
     "negative_test_fail": 77,
     "null_deref": 208,
     "oob": 38,
-    "other": 4037,
+    "other": 4041,
     "promise_error": 89,
     "range_error": 31,
     "runtime_error": 1207,
-    "type_error": 301,
+    "type_error": 300,
     "unreachable": 26,
-    "wasm_compile": 978
+    "wasm_compile": 977
   },
   "hard_errors": {},
   "skip_reasons": {
