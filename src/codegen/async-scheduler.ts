@@ -92,6 +92,42 @@ export interface AsyncSchedulerState {
   thenWrapperCounter: number;
   /** Whether `__drain_microtasks` has been added to the module's exports. */
   drainExported: boolean;
+
+  // ── #2632 Phase 1 — timer heap + run-loop reactor ──────────────────────
+  /** `$__arr_timer_func` funcref-array typeIdx (timer callback storage). -1 until registered. */
+  timerFuncArrTypeIdx: number;
+  /** `$__arr_i64` i64-array typeIdx (timer deadlines + interval periods). -1 until registered. */
+  timerI64ArrTypeIdx: number;
+  /** `$__arr_i32` i32-array typeIdx (timer cancelled flags). -1 until registered. */
+  timerI32ArrTypeIdx: number;
+  /** Wasm global: count of live timer slots (high-water; cancelled lazily). -1 until registered. */
+  timerCountGlobalIdx: number;
+  /** Wasm global: current capacity of the timer arrays. -1 until registered. */
+  timerCapGlobalIdx: number;
+  /** Wasm global: deadlines i64 array (ref.null until first add). -1 until registered. */
+  timerDeadlinesGlobalIdx: number;
+  /** Wasm global: callbacks funcref array. -1 until registered. */
+  timerCallbacksGlobalIdx: number;
+  /** Wasm global: captures externref array. -1 until registered. */
+  timerCapturesGlobalIdx: number;
+  /** Wasm global: interval periods i64 array (0 = one-shot). -1 until registered. */
+  timerIntervalsGlobalIdx: number;
+  /** Wasm global: cancelled i32 flags array. -1 until registered. */
+  timerCancelledGlobalIdx: number;
+  /** Func idx of `__timer_add(deadlineNs i64, cb funcref, cap externref, intervalNs i64) -> i32`. -1 until registered. */
+  timerAddFuncIdx: number;
+  /** Func idx of `__timer_cancel(id i32)`. -1 until registered. */
+  timerCancelFuncIdx: number;
+  /** Func idx of `__timer_peek_deadline() -> i64` (i64 max when none pending). -1 until registered. */
+  timerPeekDeadlineFuncIdx: number;
+  /** Func idx of `__timer_fire_due(nowNs i64)` — fires all due timers, re-arms intervals. -1 until registered. */
+  timerFireDueFuncIdx: number;
+  /** Func idx of `__run_event_loop()` — the reactor driver. -1 until registered. */
+  runLoopFuncIdx: number;
+  /** Func idx of the monotonic-now reader `__rl_now_ns() -> i64` (CLOCK_MONOTONIC). -1 until registered. */
+  runLoopNowFuncIdx: number;
+  /** Whether the timer heap was ever registered (drives run-loop emission + _start wiring). */
+  timerHeapRegistered: boolean;
 }
 
 function getOrInitState(ctx: CodegenContextWithScheduler): AsyncSchedulerState {
@@ -118,6 +154,23 @@ function getOrInitState(ctx: CodegenContextWithScheduler): AsyncSchedulerState {
       identityRejectWrapperFuncIdx: -1,
       thenWrapperCounter: 0,
       drainExported: false,
+      timerFuncArrTypeIdx: -1,
+      timerI64ArrTypeIdx: -1,
+      timerI32ArrTypeIdx: -1,
+      timerCountGlobalIdx: -1,
+      timerCapGlobalIdx: -1,
+      timerDeadlinesGlobalIdx: -1,
+      timerCallbacksGlobalIdx: -1,
+      timerCapturesGlobalIdx: -1,
+      timerIntervalsGlobalIdx: -1,
+      timerCancelledGlobalIdx: -1,
+      timerAddFuncIdx: -1,
+      timerCancelFuncIdx: -1,
+      timerPeekDeadlineFuncIdx: -1,
+      timerFireDueFuncIdx: -1,
+      runLoopFuncIdx: -1,
+      runLoopNowFuncIdx: -1,
+      timerHeapRegistered: false,
     };
   }
   return ctx.asyncScheduler;
@@ -1067,6 +1120,958 @@ export function getDrainFuncIdxForWasiStart(ctx: CodegenContext): number | null 
   const state = (ctx as CodegenContextWithScheduler).asyncScheduler;
   if (!state || state.drainFuncIdx === -1) return null;
   return state.drainFuncIdx;
+}
+
+// ── #2632 Phase 1 — timer heap + run-loop reactor ────────────────────────
+//
+// The reactor composes the EXISTING substrate into a single-threaded
+// cooperative event loop for the `--target wasi` WasmGC+linear path:
+//
+//   - the #1326 microtask queue (`__drain_microtasks`),
+//   - a timer table (parallel WasmGC arrays keyed by deadline-ns), and
+//   - the #1484 single-clock `poll_oneoff` sleep (`__wasi_sleep_ms`),
+//   - CLOCK_MONOTONIC via `clock_time_get`,
+//
+// into `__run_event_loop`, which replaces the one-shot `__drain_microtasks`
+// call in the WASI `_start` wrapper. When the timer table is empty the loop
+// drains microtasks once and exits — byte-effect-equivalent to the old
+// one-shot drain (the run loop is a strict superset of the drain).
+//
+// Timer table model (no binary heap — a linear scan finds the earliest live
+// deadline; timer counts are tiny so O(n) per tick is fine and far less
+// error-prone than a hand-rolled WasmGC binary heap):
+//   deadlines[i]  : i64  absolute fire time in monotonic ns
+//   callbacks[i]  : funcref ($__mt_func_type: (caps externref, val externref) -> externref)
+//   captures[i]   : externref  closure captures passed to the callback
+//   intervals[i]  : i64  re-arm period in ns (0 = one-shot setTimeout)
+//   cancelled[i]  : i32  1 = cancelled (lazy delete)
+// `count` is the high-water slot count; a cancelled / fired one-shot slot is
+// marked by setting cancelled[i]=1 (fired one-shots) so the scan skips it.
+
+const TIMER_QUEUE_INITIAL_SLOTS = 64;
+// Run-loop scratch offsets (inside the reserved 0..1023 bump zone, between the
+// clock-helpers' 16..31 region and `__wasi_sleep_ms`'s 64..147 region).
+const RL_NOW_OUT_OFFSET = 48; // i64 monotonic-now out-ptr for clock_time_get
+
+/**
+ * #2632 — Idempotently register the timer table (types, globals, helpers) and
+ * the run-loop driver. MUST be called in the deferred-helper phase (after
+ * `__wasi_sleep_ms` + `clock_time_get` are registered, before user bodies
+ * compile) so the `__timer_add` / `__timer_cancel` func indices referenced at
+ * timer call sites are final. Depends on `ensureMicrotaskQueue` (the loop
+ * drains microtasks each tick).
+ */
+export function ensureTimerHeap(ctx: CodegenContext): void {
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  if (state.timerHeapRegistered) return;
+
+  // The run loop drains microtasks — guarantee the queue exists first so its
+  // func indices (drain/enqueue) are stable below.
+  ensureMicrotaskQueue(ctx);
+
+  // The microtask queue already registered $__mt_func_type — reuse it as the
+  // uniform timer-callback signature so a timer callback and a microtask
+  // continuation are call_ref-compatible.
+  const mtFuncTypeIdx = state.microtaskFuncTypeIdx;
+
+  // ── 1. Types ──────────────────────────────────────────────────────────
+  // funcref array for callbacks (own typeIdx — funcref arrays are not keyed by
+  // getOrRegisterArrayType, mirroring the microtask queue's $__arr_mt_func).
+  const funcArrIdx = ctx.mod.types.length;
+  ctx.mod.types.push({
+    kind: "array",
+    name: "__arr_timer_func",
+    element: { kind: "funcref" } as ValType,
+    mutable: true,
+  } as unknown as import("../ir/types.js").ArrayTypeDef);
+  state.timerFuncArrTypeIdx = funcArrIdx;
+
+  const i64ArrIdx = getOrRegisterArrayType(ctx, "i64", { kind: "i64" });
+  state.timerI64ArrTypeIdx = i64ArrIdx;
+  const i32ArrIdx = getOrRegisterArrayType(ctx, "i32", { kind: "i32" });
+  state.timerI32ArrTypeIdx = i32ArrIdx;
+  const externArrIdx = getOrRegisterMicrotaskQueueType(ctx); // $__arr_externref
+
+  // ── 2. Globals ────────────────────────────────────────────────────────
+  const baseGlobalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+  state.timerCountGlobalIdx = baseGlobalIdx;
+  ctx.mod.globals.push({
+    name: "__timer_count",
+    type: { kind: "i32" },
+    mutable: true,
+    init: [{ op: "i32.const", value: 0 }],
+  });
+  state.timerCapGlobalIdx = baseGlobalIdx + 1;
+  ctx.mod.globals.push({
+    name: "__timer_cap",
+    type: { kind: "i32" },
+    mutable: true,
+    init: [{ op: "i32.const", value: 0 }],
+  });
+  state.timerDeadlinesGlobalIdx = baseGlobalIdx + 2;
+  ctx.mod.globals.push({
+    name: "__timer_deadlines",
+    type: { kind: "ref_null", typeIdx: i64ArrIdx },
+    mutable: true,
+    init: [{ op: "ref.null", typeIdx: i64ArrIdx } as Instr],
+  });
+  state.timerCallbacksGlobalIdx = baseGlobalIdx + 3;
+  ctx.mod.globals.push({
+    name: "__timer_callbacks",
+    type: { kind: "ref_null", typeIdx: funcArrIdx },
+    mutable: true,
+    init: [{ op: "ref.null", typeIdx: funcArrIdx } as Instr],
+  });
+  state.timerCapturesGlobalIdx = baseGlobalIdx + 4;
+  ctx.mod.globals.push({
+    name: "__timer_captures",
+    type: { kind: "ref_null", typeIdx: externArrIdx },
+    mutable: true,
+    init: [{ op: "ref.null", typeIdx: externArrIdx } as Instr],
+  });
+  state.timerIntervalsGlobalIdx = baseGlobalIdx + 5;
+  ctx.mod.globals.push({
+    name: "__timer_intervals",
+    type: { kind: "ref_null", typeIdx: i64ArrIdx },
+    mutable: true,
+    init: [{ op: "ref.null", typeIdx: i64ArrIdx } as Instr],
+  });
+  state.timerCancelledGlobalIdx = baseGlobalIdx + 6;
+  ctx.mod.globals.push({
+    name: "__timer_cancelled",
+    type: { kind: "ref_null", typeIdx: i32ArrIdx },
+    mutable: true,
+    init: [{ op: "ref.null", typeIdx: i32ArrIdx } as Instr],
+  });
+
+  // ── 3. Helper functions (push order = funcIdx order) ──────────────────
+  // grow → add → cancel → peek → fire_due → now → run_loop.
+  const baseFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+
+  const growIdx = baseFuncIdx;
+  ctx.mod.functions.push({
+    name: "__timer_grow",
+    typeIdx: addFuncType(ctx, [{ kind: "i32" }], [], "$__timer_grow_type"),
+    locals: buildTimerGrowLocals(state),
+    body: buildTimerGrowBody(state, funcArrIdx, i64ArrIdx, i32ArrIdx, externArrIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__timer_grow", growIdx);
+
+  state.timerAddFuncIdx = baseFuncIdx + 1;
+  ctx.mod.functions.push({
+    name: "__timer_add",
+    typeIdx: addFuncType(
+      ctx,
+      [{ kind: "i64" }, { kind: "funcref" } as ValType, { kind: "externref" }, { kind: "i64" }],
+      [{ kind: "i32" }],
+      "$__timer_add_type",
+    ),
+    locals: [],
+    body: buildTimerAddBody(state, growIdx, funcArrIdx, i64ArrIdx, i32ArrIdx, externArrIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__timer_add", state.timerAddFuncIdx);
+
+  state.timerCancelFuncIdx = baseFuncIdx + 2;
+  ctx.mod.functions.push({
+    name: "__timer_cancel",
+    typeIdx: addFuncType(ctx, [{ kind: "i32" }], [], "$__timer_cancel_type"),
+    locals: [],
+    body: buildTimerCancelBody(state, i32ArrIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__timer_cancel", state.timerCancelFuncIdx);
+
+  state.timerPeekDeadlineFuncIdx = baseFuncIdx + 3;
+  ctx.mod.functions.push({
+    name: "__timer_peek_deadline",
+    typeIdx: addFuncType(ctx, [], [{ kind: "i64" }], "$__timer_peek_type"),
+    locals: buildTimerPeekLocals(),
+    body: buildTimerPeekBody(state, i64ArrIdx, i32ArrIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__timer_peek_deadline", state.timerPeekDeadlineFuncIdx);
+
+  state.timerFireDueFuncIdx = baseFuncIdx + 4;
+  ctx.mod.functions.push({
+    name: "__timer_fire_due",
+    typeIdx: addFuncType(ctx, [{ kind: "i64" }], [], "$__timer_fire_type"),
+    locals: buildTimerFireLocals(state, mtFuncTypeIdx),
+    body: buildTimerFireBody(state, mtFuncTypeIdx, funcArrIdx, i64ArrIdx, i32ArrIdx, externArrIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__timer_fire_due", state.timerFireDueFuncIdx);
+
+  // Monotonic-now reader. clock_time_get(CLOCK_MONOTONIC=1, precision, out) →
+  // i64 ns recombined from two i32 loads (the binary emitter has no i64.load).
+  const clockIdx = ctx.wasiClockTimeGetIdx;
+  state.runLoopNowFuncIdx = baseFuncIdx + 5;
+  ctx.mod.functions.push({
+    name: "__rl_now_ns",
+    typeIdx: addFuncType(ctx, [], [{ kind: "i64" }], "$__rl_now_type"),
+    locals: [],
+    body: buildRunLoopNowBody(clockIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__rl_now_ns", state.runLoopNowFuncIdx);
+
+  // The run loop references __wasi_sleep_ms by funcIdx; it was registered
+  // earlier in the deferred-helper phase (needsPollOneoff). Resolve now.
+  const sleepMsIdx = ctx.funcMap.get("__wasi_sleep_ms");
+  state.runLoopFuncIdx = baseFuncIdx + 6;
+  ctx.mod.functions.push({
+    name: "__run_event_loop",
+    typeIdx: addFuncType(ctx, [], [], "$__run_event_loop_type"),
+    locals: buildRunLoopLocals(),
+    body: buildRunLoopBody(state, sleepMsIdx),
+    exported: false,
+  });
+  ctx.funcMap.set("__run_event_loop", state.runLoopFuncIdx);
+
+  state.timerHeapRegistered = true;
+}
+
+function buildTimerGrowLocals(_state: AsyncSchedulerState): import("../ir/types.js").LocalDef[] {
+  // Param 0: $newCap (i32).
+  return [
+    { name: "$oldDeadlines", type: { kind: "ref_null", typeIdx: _state.timerI64ArrTypeIdx } },
+    { name: "$oldCallbacks", type: { kind: "ref_null", typeIdx: _state.timerFuncArrTypeIdx } },
+    { name: "$oldCaptures", type: { kind: "ref_null", typeIdx: _state.microtaskArgsArrTypeIdx } },
+    { name: "$oldIntervals", type: { kind: "ref_null", typeIdx: _state.timerI64ArrTypeIdx } },
+    { name: "$oldCancelled", type: { kind: "ref_null", typeIdx: _state.timerI32ArrTypeIdx } },
+    { name: "$count", type: { kind: "i32" } },
+    { name: "$i", type: { kind: "i32" } },
+  ];
+}
+
+function buildTimerGrowBody(
+  state: AsyncSchedulerState,
+  funcArrIdx: number,
+  i64ArrIdx: number,
+  i32ArrIdx: number,
+  externArrIdx: number,
+): Instr[] {
+  const newCap = 0;
+  const oldDl = 1;
+  const oldCb = 2;
+  const oldCap = 3;
+  const oldIv = 4;
+  const oldCn = 5;
+  const count = 6;
+  const i = 7;
+
+  return [
+    // Snapshot old arrays + count.
+    { op: "global.get", index: state.timerDeadlinesGlobalIdx } as Instr,
+    { op: "local.set", index: oldDl },
+    { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
+    { op: "local.set", index: oldCb },
+    { op: "global.get", index: state.timerCapturesGlobalIdx } as Instr,
+    { op: "local.set", index: oldCap },
+    { op: "global.get", index: state.timerIntervalsGlobalIdx } as Instr,
+    { op: "local.set", index: oldIv },
+    { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
+    { op: "local.set", index: oldCn },
+    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "local.set", index: count },
+
+    // Allocate new arrays of $newCap (default-initialised).
+    { op: "i64.const", value: 0n },
+    { op: "local.get", index: newCap },
+    { op: "array.new", typeIdx: i64ArrIdx },
+    { op: "global.set", index: state.timerDeadlinesGlobalIdx } as Instr,
+
+    { op: "ref.null.func" } as Instr,
+    { op: "local.get", index: newCap },
+    { op: "array.new", typeIdx: funcArrIdx },
+    { op: "global.set", index: state.timerCallbacksGlobalIdx } as Instr,
+
+    { op: "ref.null.extern" },
+    { op: "local.get", index: newCap },
+    { op: "array.new", typeIdx: externArrIdx },
+    { op: "global.set", index: state.timerCapturesGlobalIdx } as Instr,
+
+    { op: "i64.const", value: 0n },
+    { op: "local.get", index: newCap },
+    { op: "array.new", typeIdx: i64ArrIdx },
+    { op: "global.set", index: state.timerIntervalsGlobalIdx } as Instr,
+
+    { op: "i32.const", value: 0 },
+    { op: "local.get", index: newCap },
+    { op: "array.new", typeIdx: i32ArrIdx },
+    { op: "global.set", index: state.timerCancelledGlobalIdx } as Instr,
+
+    // If oldDeadlines null → nothing to copy; set cap and return.
+    { op: "local.get", index: oldDl },
+    { op: "ref.is_null" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [
+        { op: "local.get", index: newCap },
+        { op: "global.set", index: state.timerCapGlobalIdx } as Instr,
+        { op: "return" } as Instr,
+      ],
+    },
+
+    // Copy [0, count) into the fresh arrays (compaction not needed — ids stay
+    // stable so live clearTimeout(id) keeps working).
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: i },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: i },
+            { op: "local.get", index: count },
+            { op: "i32.eq" } as Instr,
+            { op: "br_if", depth: 1 },
+
+            // deadlines[i] = old
+            { op: "global.get", index: state.timerDeadlinesGlobalIdx } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: i },
+            { op: "local.get", index: oldDl },
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: i },
+            { op: "array.get", typeIdx: i64ArrIdx },
+            { op: "array.set", typeIdx: i64ArrIdx },
+
+            // callbacks[i] = old
+            { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: i },
+            { op: "local.get", index: oldCb },
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: i },
+            { op: "array.get", typeIdx: funcArrIdx },
+            { op: "array.set", typeIdx: funcArrIdx },
+
+            // captures[i] = old
+            { op: "global.get", index: state.timerCapturesGlobalIdx } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: i },
+            { op: "local.get", index: oldCap },
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: i },
+            { op: "array.get", typeIdx: externArrIdx },
+            { op: "array.set", typeIdx: externArrIdx },
+
+            // intervals[i] = old
+            { op: "global.get", index: state.timerIntervalsGlobalIdx } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: i },
+            { op: "local.get", index: oldIv },
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: i },
+            { op: "array.get", typeIdx: i64ArrIdx },
+            { op: "array.set", typeIdx: i64ArrIdx },
+
+            // cancelled[i] = old
+            { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: i },
+            { op: "local.get", index: oldCn },
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: i },
+            { op: "array.get", typeIdx: i32ArrIdx },
+            { op: "array.set", typeIdx: i32ArrIdx },
+
+            { op: "local.get", index: i },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" } as Instr,
+            { op: "local.set", index: i },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+
+    { op: "local.get", index: newCap },
+    { op: "global.set", index: state.timerCapGlobalIdx } as Instr,
+  ];
+}
+
+function buildTimerAddBody(
+  state: AsyncSchedulerState,
+  growIdx: number,
+  funcArrIdx: number,
+  i64ArrIdx: number,
+  _i32ArrIdx: number,
+  externArrIdx: number,
+): Instr[] {
+  // Params: 0=deadlineNs(i64) 1=cb(funcref) 2=cap(externref) 3=intervalNs(i64)
+  const deadline = 0;
+  const cb = 1;
+  const cap = 2;
+  const interval = 3;
+
+  return [
+    // Lazy first-allocate when callbacks global is null.
+    { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
+    { op: "ref.is_null" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [
+        { op: "i32.const", value: TIMER_QUEUE_INITIAL_SLOTS },
+        { op: "call", funcIdx: growIdx },
+      ],
+    },
+    // If count == cap, double.
+    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerCapGlobalIdx } as Instr,
+    { op: "i32.eq" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [
+        { op: "global.get", index: state.timerCapGlobalIdx } as Instr,
+        { op: "i32.const", value: 1 },
+        { op: "i32.shl" } as Instr,
+        { op: "call", funcIdx: growIdx },
+      ],
+    },
+
+    // slot = count; write fields.
+    { op: "global.get", index: state.timerDeadlinesGlobalIdx } as Instr,
+    { op: "ref.as_non_null" } as Instr,
+    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "local.get", index: deadline },
+    { op: "array.set", typeIdx: i64ArrIdx },
+
+    { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
+    { op: "ref.as_non_null" } as Instr,
+    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "local.get", index: cb },
+    { op: "array.set", typeIdx: funcArrIdx },
+
+    { op: "global.get", index: state.timerCapturesGlobalIdx } as Instr,
+    { op: "ref.as_non_null" } as Instr,
+    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "local.get", index: cap },
+    { op: "array.set", typeIdx: externArrIdx },
+
+    { op: "global.get", index: state.timerIntervalsGlobalIdx } as Instr,
+    { op: "ref.as_non_null" } as Instr,
+    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "local.get", index: interval },
+    { op: "array.set", typeIdx: i64ArrIdx },
+
+    // cancelled[slot] is already 0 from array.new default.
+
+    // id = count; count++; return id.
+    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "i32.const", value: 1 },
+    { op: "i32.add" } as Instr,
+    { op: "global.set", index: state.timerCountGlobalIdx } as Instr,
+    // (id left on stack as result)
+  ];
+}
+
+function buildTimerCancelBody(state: AsyncSchedulerState, i32ArrIdx: number): Instr[] {
+  // Param 0 = id (i32). Lazy delete: bounds-check then set cancelled[id]=1.
+  const id = 0;
+  return [
+    { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
+    { op: "ref.is_null" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [{ op: "return" } as Instr],
+    },
+    // if id < 0 || id >= count: return
+    { op: "local.get", index: id },
+    { op: "i32.const", value: 0 },
+    { op: "i32.lt_s" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [{ op: "return" } as Instr],
+    },
+    { op: "local.get", index: id },
+    { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [{ op: "return" } as Instr],
+    },
+    { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
+    { op: "ref.as_non_null" } as Instr,
+    { op: "local.get", index: id },
+    { op: "i32.const", value: 1 },
+    { op: "array.set", typeIdx: i32ArrIdx },
+  ];
+}
+
+function buildTimerPeekLocals(): import("../ir/types.js").LocalDef[] {
+  return [
+    { name: "$i", type: { kind: "i32" } },
+    { name: "$best", type: { kind: "i64" } },
+    { name: "$d", type: { kind: "i64" } },
+  ];
+}
+
+const I64_MAX = 0x7fffffffffffffffn;
+
+function buildTimerPeekBody(state: AsyncSchedulerState, i64ArrIdx: number, i32ArrIdx: number): Instr[] {
+  // Linear scan of live (non-cancelled) timers; return the minimum deadline,
+  // or i64 max when none. The run loop compares against i64 max to detect "no
+  // pending timers".
+  const i = 0;
+  const best = 1;
+  const d = 2;
+  return [
+    { op: "i64.const", value: I64_MAX },
+    { op: "local.set", index: best },
+    { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
+    { op: "ref.is_null" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [{ op: "local.get", index: best }, { op: "return" } as Instr],
+    },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: i },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: i },
+            { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+            { op: "i32.ge_s" } as Instr,
+            { op: "br_if", depth: 1 },
+
+            // skip if cancelled[i] != 0
+            { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: i },
+            { op: "array.get", typeIdx: i32ArrIdx },
+            { op: "i32.eqz" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "empty" } as any,
+              then: [
+                // d = deadlines[i]
+                { op: "global.get", index: state.timerDeadlinesGlobalIdx } as Instr,
+                { op: "ref.as_non_null" } as Instr,
+                { op: "local.get", index: i },
+                { op: "array.get", typeIdx: i64ArrIdx },
+                { op: "local.set", index: d },
+                // if d < best: best = d
+                { op: "local.get", index: d },
+                { op: "local.get", index: best },
+                { op: "i64.lt_s" } as Instr,
+                {
+                  op: "if",
+                  blockType: { kind: "empty" } as any,
+                  then: [
+                    { op: "local.get", index: d },
+                    { op: "local.set", index: best },
+                  ],
+                },
+              ],
+            },
+
+            { op: "local.get", index: i },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" } as Instr,
+            { op: "local.set", index: i },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+    { op: "local.get", index: best },
+  ];
+}
+
+function buildTimerFireLocals(state: AsyncSchedulerState, _mtFuncTypeIdx: number): import("../ir/types.js").LocalDef[] {
+  return [
+    { name: "$i", type: { kind: "i32" } },
+    { name: "$fn", type: { kind: "funcref" } as ValType },
+    { name: "$cap", type: { kind: "externref" } },
+    { name: "$iv", type: { kind: "i64" } },
+    { name: "$dl", type: { kind: "i64" } },
+  ];
+}
+
+function buildTimerFireBody(
+  state: AsyncSchedulerState,
+  mtFuncTypeIdx: number,
+  funcArrIdx: number,
+  i64ArrIdx: number,
+  i32ArrIdx: number,
+  externArrIdx: number,
+): Instr[] {
+  // Param 0 = nowNs (i64). Single pass over [0,count): every live timer whose
+  // deadline <= now fires once. A one-shot is then marked cancelled; an
+  // interval is re-armed (deadline += period) so it can fire again on a later
+  // tick. Re-arming in place keeps the id stable for clearInterval.
+  //
+  // A callback that schedules a NEW timer appends past `count`; we snapshot
+  // count at entry implicitly by reading the global each iteration but only
+  // process indices < the count observed at loop test — newly added timers
+  // (index >= old count) are picked up by the next run-loop tick, matching
+  // Node (a timer scheduled inside a timer callback runs on a later turn).
+  const nowNs = 0;
+  const i = 1;
+  const fn = 2;
+  const cap = 3;
+  const iv = 4;
+  const dl = 5;
+
+  return [
+    { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
+    { op: "ref.is_null" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [{ op: "return" } as Instr],
+    },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: i },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: i },
+            { op: "global.get", index: state.timerCountGlobalIdx } as Instr,
+            { op: "i32.ge_s" } as Instr,
+            { op: "br_if", depth: 1 },
+
+            // live = cancelled[i] == 0
+            { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
+            { op: "ref.as_non_null" } as Instr,
+            { op: "local.get", index: i },
+            { op: "array.get", typeIdx: i32ArrIdx },
+            { op: "i32.eqz" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "empty" } as any,
+              then: [
+                // dl = deadlines[i]
+                { op: "global.get", index: state.timerDeadlinesGlobalIdx } as Instr,
+                { op: "ref.as_non_null" } as Instr,
+                { op: "local.get", index: i },
+                { op: "array.get", typeIdx: i64ArrIdx },
+                { op: "local.set", index: dl },
+                // due = dl <= now
+                { op: "local.get", index: dl },
+                { op: "local.get", index: nowNs },
+                { op: "i64.le_s" } as Instr,
+                {
+                  op: "if",
+                  blockType: { kind: "empty" } as any,
+                  then: [
+                    // iv = intervals[i]
+                    { op: "global.get", index: state.timerIntervalsGlobalIdx } as Instr,
+                    { op: "ref.as_non_null" } as Instr,
+                    { op: "local.get", index: i },
+                    { op: "array.get", typeIdx: i64ArrIdx },
+                    { op: "local.set", index: iv },
+
+                    // Re-arm or retire BEFORE invoking, so a callback that
+                    // calls clearInterval(id) on itself still cancels the next
+                    // fire (it sets cancelled[i]=1 over our re-arm here).
+                    { op: "local.get", index: iv },
+                    { op: "i64.const", value: 0n },
+                    { op: "i64.gt_s" } as Instr,
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" } as any,
+                      then: [
+                        // interval: deadlines[i] = dl + iv (re-arm relative to
+                        // the scheduled deadline so cadence doesn't drift).
+                        { op: "global.get", index: state.timerDeadlinesGlobalIdx } as Instr,
+                        { op: "ref.as_non_null" } as Instr,
+                        { op: "local.get", index: i },
+                        { op: "local.get", index: dl },
+                        { op: "local.get", index: iv },
+                        { op: "i64.add" } as Instr,
+                        { op: "array.set", typeIdx: i64ArrIdx },
+                      ],
+                      else: [
+                        // one-shot: mark cancelled so it never fires again.
+                        { op: "global.get", index: state.timerCancelledGlobalIdx } as Instr,
+                        { op: "ref.as_non_null" } as Instr,
+                        { op: "local.get", index: i },
+                        { op: "i32.const", value: 1 },
+                        { op: "array.set", typeIdx: i32ArrIdx },
+                      ],
+                    },
+
+                    // Load callback + captures.
+                    { op: "global.get", index: state.timerCallbacksGlobalIdx } as Instr,
+                    { op: "ref.as_non_null" } as Instr,
+                    { op: "local.get", index: i },
+                    { op: "array.get", typeIdx: funcArrIdx },
+                    { op: "local.set", index: fn },
+                    { op: "global.get", index: state.timerCapturesGlobalIdx } as Instr,
+                    { op: "ref.as_non_null" } as Instr,
+                    { op: "local.get", index: i },
+                    { op: "array.get", typeIdx: externArrIdx },
+                    { op: "local.set", index: cap },
+
+                    // Invoke fn(cap, null) via call_ref (uniform $__mt_func_type).
+                    { op: "local.get", index: cap },
+                    { op: "ref.null.extern" },
+                    { op: "local.get", index: fn },
+                    { op: "ref.cast", typeIdx: mtFuncTypeIdx },
+                    { op: "call_ref", typeIdx: mtFuncTypeIdx },
+                    { op: "drop" },
+                  ],
+                },
+              ],
+            },
+
+            { op: "local.get", index: i },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" } as Instr,
+            { op: "local.set", index: i },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+  ];
+}
+
+function buildRunLoopNowBody(clockIdx: number | undefined): Instr[] {
+  // clock_time_get(CLOCK_MONOTONIC=1, precision=1us, out=RL_NOW_OUT_OFFSET) then
+  // recombine the LE u64 from two i32 loads (binary emitter lacks i64.load).
+  if (clockIdx === undefined || clockIdx < 0) {
+    // Safety: no clock import → return 0 (timers all appear immediately due).
+    return [{ op: "i64.const", value: 0n }];
+  }
+  return [
+    { op: "i32.const", value: 1 } as Instr, // CLOCK_MONOTONIC
+    { op: "i64.const", value: 1000n }, // precision 1us
+    { op: "i32.const", value: RL_NOW_OUT_OFFSET } as Instr,
+    { op: "call", funcIdx: clockIdx } as Instr,
+    { op: "drop" } as Instr,
+    // hi << 32 | lo
+    { op: "i32.const", value: RL_NOW_OUT_OFFSET + 4 } as Instr,
+    { op: "i32.load", align: 2, offset: 0 } as Instr,
+    { op: "i64.extend_i32_u" } as Instr,
+    { op: "i64.const", value: 32n },
+    { op: "i64.shl" } as Instr,
+    { op: "i32.const", value: RL_NOW_OUT_OFFSET } as Instr,
+    { op: "i32.load", align: 2, offset: 0 } as Instr,
+    { op: "i64.extend_i32_u" } as Instr,
+    { op: "i64.or" } as Instr,
+  ];
+}
+
+function buildRunLoopLocals(): import("../ir/types.js").LocalDef[] {
+  return [
+    { name: "$now", type: { kind: "i64" } },
+    { name: "$next", type: { kind: "i64" } },
+    { name: "$waitMs", type: { kind: "i64" } },
+  ];
+}
+
+function buildRunLoopBody(state: AsyncSchedulerState, sleepMsIdx: number | undefined): Instr[] {
+  const now = 0;
+  const next = 1;
+  const waitMs = 2;
+
+  // Each tick:
+  //   drain microtasks → now = clock → fire due timers (which may enqueue more
+  //   microtasks / timers) → drain again → next = peek_deadline.
+  //   if next == i64_max: no pending timers → exit.
+  //   else: waitMs = ceil((next-now)/1e6); if waitMs > 0 sleep that long; loop.
+  // The post-fire drain settles any Promise reactions a timer callback queued
+  // before we decide whether to block, so a `setTimeout(()=>p.then(...))`
+  // chain runs its microtasks promptly.
+  const tickBody: Instr[] = [
+    { op: "call", funcIdx: state.drainFuncIdx },
+    { op: "call", funcIdx: state.runLoopNowFuncIdx },
+    { op: "local.set", index: now },
+    { op: "local.get", index: now },
+    { op: "call", funcIdx: state.timerFireDueFuncIdx },
+    { op: "call", funcIdx: state.drainFuncIdx },
+
+    // next = peek
+    { op: "call", funcIdx: state.timerPeekDeadlineFuncIdx },
+    { op: "local.set", index: next },
+
+    // if next == I64_MAX → no pending handles → break out of the loop.
+    { op: "local.get", index: next },
+    { op: "i64.const", value: I64_MAX },
+    { op: "i64.eq" } as Instr,
+    { op: "br_if", depth: 1 },
+
+    // waitMs = (next - now) / 1e6 ; clamp negative to 0.
+    { op: "local.get", index: next },
+    { op: "call", funcIdx: state.runLoopNowFuncIdx },
+    { op: "i64.sub" } as Instr,
+    { op: "local.set", index: waitMs },
+    { op: "local.get", index: waitMs },
+    { op: "i64.const", value: 0n },
+    { op: "i64.gt_s" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then:
+        sleepMsIdx === undefined
+          ? []
+          : [
+              // ms = (ns + 999_999) / 1_000_000 (round up so we never wake early)
+              { op: "local.get", index: waitMs },
+              { op: "i64.const", value: 999999n },
+              { op: "i64.add" } as Instr,
+              { op: "i64.const", value: 1000000n },
+              { op: "i64.div_s" } as Instr,
+              { op: "i32.wrap_i64" } as Instr,
+              { op: "call", funcIdx: sleepMsIdx } as Instr,
+            ],
+    },
+    // continue looping.
+    { op: "br", depth: 0 },
+  ];
+
+  return [
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: tickBody,
+        },
+      ],
+    },
+  ];
+}
+
+/**
+ * #2632 — Emit a `setTimeout`/`setInterval` registration at a call site.
+ * Pushes the timer id (i32) onto the caller stack. `cbFuncRefInstrs` push the
+ * uniform `$__mt_func_type` funcref; `capInstrs` push the closure-captures
+ * externref; `deadlineInstrs` push the absolute deadline (i64 ns);
+ * `intervalInstrs` push the re-arm period (i64 ns, 0 = one-shot).
+ */
+export function emitTimerAdd(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  deadlineInstrs: Instr[],
+  cbFuncRefInstrs: Instr[],
+  capInstrs: Instr[],
+  intervalInstrs: Instr[],
+): void {
+  const state = (ctx as CodegenContextWithScheduler).asyncScheduler;
+  if (!state || state.timerAddFuncIdx === -1) {
+    throw new Error("emitTimerAdd called before ensureTimerHeap registered __timer_add");
+  }
+  for (const i of deadlineInstrs) fctx.body.push(i);
+  for (const i of cbFuncRefInstrs) fctx.body.push(i);
+  for (const i of capInstrs) fctx.body.push(i);
+  for (const i of intervalInstrs) fctx.body.push(i);
+  fctx.body.push({ op: "call", funcIdx: state.timerAddFuncIdx });
+}
+
+/** #2632 — Emit a `clearTimeout`/`clearInterval` at a call site. Consumes the
+ *  id already pushed by `idInstrs`. */
+export function emitTimerCancel(ctx: CodegenContext, fctx: FunctionContext, idInstrs: Instr[]): void {
+  const state = (ctx as CodegenContextWithScheduler).asyncScheduler;
+  if (!state || state.timerCancelFuncIdx === -1) {
+    throw new Error("emitTimerCancel called before ensureTimerHeap registered __timer_cancel");
+  }
+  for (const i of idInstrs) fctx.body.push(i);
+  fctx.body.push({ op: "call", funcIdx: state.timerCancelFuncIdx });
+}
+
+/** #2632 — The monotonic-now reader func idx (`__rl_now_ns() -> i64`), or -1.
+ *  Timer call sites read it to compute `deadlineNs = now + ms*1e6`. */
+export function getRunLoopNowFuncIdx(ctx: CodegenContext): number {
+  const state = (ctx as CodegenContextWithScheduler).asyncScheduler;
+  return state ? state.runLoopNowFuncIdx : -1;
+}
+
+/**
+ * #2632 — Synthesise a uniform `$__mt_func_type` timer-callback wrapper for a
+ * user closure. The timer table stores the closure struct itself as the
+ * `captures` externref; this wrapper (param 0 = caps externref = the closure
+ * struct, param 1 = value externref = unused/null) decodes the struct and
+ * invokes the closure via `call_ref` with default args for every parameter
+ * (a timer callback receives no arguments in Node — extra `setTimeout` args
+ * are out of Phase-1 scope). Returns the wrapper func idx.
+ *
+ * Mirrors the `.then` wrapper shape (closure call_ref = `[self, ...args,
+ * typed_funcref]`) but without promise settlement.
+ */
+export function emitTimerCallbackWrapper(ctx: CodegenContext, info: ClosureInfo): number {
+  ensureTimerHeap(ctx);
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  const wrapperId = state.thenWrapperCounter++;
+  const wrapperName = `__timer_cb_${wrapperId}`;
+  const callbackLocal = 2; // decoded closure struct
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+
+  const locals: LocalDef[] = [{ name: "$callback", type: { kind: "ref", typeIdx: info.structTypeIdx } }];
+  const body: Instr[] = [
+    // caps (param 0) is the closure struct, lifted to externref. Decode it.
+    { op: "local.get", index: 0 },
+    { op: "any.convert_extern" },
+    { op: "ref.cast", typeIdx: info.structTypeIdx },
+    { op: "local.set", index: callbackLocal },
+
+    // call_ref shape: [closure_self, ...default_args, typed_funcref]
+    { op: "local.get", index: callbackLocal },
+  ];
+  for (let i = 0; i < info.paramTypes.length; i++) {
+    pushDefaultForType(body, info.paramTypes[i]!);
+  }
+  body.push(
+    { op: "local.get", index: callbackLocal },
+    { op: "struct.get", typeIdx: info.structTypeIdx, fieldIdx: 0 } as Instr,
+    { op: "ref.cast", typeIdx: info.funcTypeIdx } as Instr,
+    { op: "call_ref", typeIdx: info.funcTypeIdx },
+  );
+  // Discard the closure's return value; coerce to externref result of the
+  // wrapper (the run loop drops it). For a non-externref/void return, pop it
+  // and push a null externref so the function signature ($__mt_func_type:
+  // -> externref) is satisfied.
+  coerceStackValueToExternref(ctx, body, info.returnType);
+
+  ctx.mod.functions.push({
+    name: wrapperName,
+    typeIdx: state.microtaskFuncTypeIdx,
+    locals,
+    body,
+    exported: false,
+  });
+  ctx.funcMap.set(wrapperName, funcIdx);
+  return funcIdx;
+}
+
+/**
+ * #2632 — Run-loop hook for WASI `_start`. Returns the funcIdx of
+ * `__run_event_loop` when the timer heap was registered (the loop supersedes
+ * the one-shot drain — it drains microtasks itself), else `null` so the caller
+ * falls back to the bare drain.
+ */
+export function getRunLoopFuncIdxForWasiStart(ctx: CodegenContext): number | null {
+  const state = (ctx as CodegenContextWithScheduler).asyncScheduler;
+  if (!state || !state.timerHeapRegistered || state.runLoopFuncIdx === -1) return null;
+  return state.runLoopFuncIdx;
 }
 
 /**

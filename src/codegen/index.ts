@@ -77,7 +77,12 @@ import {
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";
-import { exportDrainMicrotasksIfRegistered, getDrainFuncIdxForWasiStart } from "./async-scheduler.js";
+import {
+  ensureTimerHeap,
+  exportDrainMicrotasksIfRegistered,
+  getDrainFuncIdxForWasiStart,
+  getRunLoopFuncIdxForWasiStart,
+} from "./async-scheduler.js";
 import { flushLateImportShifts, registerAddStringImports, registerAddUnionImports } from "./shared.js";
 import { stackBalance, getFixupEvents, summarizeFixups, strictBalanceDiagnostics } from "./stack-balance.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
@@ -2079,13 +2084,21 @@ function addWasiStartExport(ctx: CodegenContext): void {
     const startFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     const body: Instr[] = [{ op: "call", funcIdx: targetIdx }];
 
-    // #1326c Phase 1C-A — auto-drain the microtask queue after the entry
-    // function returns. Only emits the call when the async scheduler
-    // actually registered the queue helpers; otherwise leaves the body
-    // unchanged (no perf cost for modules that never schedule microtasks).
-    const drainFuncIdx = getDrainFuncIdxForWasiStart(ctx);
-    if (drainFuncIdx !== null) {
-      body.push({ op: "call", funcIdx: drainFuncIdx });
+    // #2632 Phase 1 — drive the event-loop reactor after the entry function
+    // returns. When the timer heap was registered, `__run_event_loop`
+    // SUPERSEDES the one-shot drain: it drains microtasks AND fires timers in a
+    // loop until no pending handles remain (and it calls `__drain_microtasks`
+    // itself, so we must NOT also emit the bare drain). When no timer heap was
+    // registered, fall back to the #1326c one-shot drain — byte-identical to
+    // the prior behaviour for every program that uses no timers.
+    const runLoopFuncIdx = getRunLoopFuncIdxForWasiStart(ctx);
+    if (runLoopFuncIdx !== null) {
+      body.push({ op: "call", funcIdx: runLoopFuncIdx });
+    } else {
+      const drainFuncIdx = getDrainFuncIdxForWasiStart(ctx);
+      if (drainFuncIdx !== null) {
+        body.push({ op: "call", funcIdx: drainFuncIdx });
+      }
     }
 
     ctx.mod.functions.push({
@@ -5786,6 +5799,11 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // the helper here keeps the infrastructure in place for the follow-up that
   // lowers timer calls to synchronous sleeps via the async scheduler.
   let needsPollOneoff = false;
+  // #2632 Phase 1 — source references a timer / microtask scheduler global
+  // (setTimeout/setInterval/clearTimeout/clearInterval/queueMicrotask). Drives
+  // ensureTimerHeap + the run-loop reactor in emitDeferredWasiHelpers, and the
+  // `getRunLoopFuncIdxForWasiStart` wiring in addWasiStartExport.
+  let needsTimerHeap = false;
   // #1482: process.env.X access — register environ_get / environ_sizes_get +
   // the JS-polyfill fast-path host import.
   let needsEnviron = false;
@@ -5860,10 +5878,35 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     // #1484 — track setTimeout/setInterval/setImmediate to drive poll_oneoff
     // helper emission. Only bare-identifier call positions count (member-name
     // positions like `obj.setTimeout` are skipped).
+    // #2632 Phase 1 — setTimeout/setInterval/clearTimeout/clearInterval are now
+    // LOWERED onto the timer heap + run-loop reactor (no longer rejected). They
+    // require poll_oneoff (the blocking sleep), clock_time_get (monotonic now),
+    // and the timer heap. queueMicrotask needs only the microtask queue, which
+    // the reactor also drives, so it sets needsTimerHeap to wire the run loop.
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
       const callee = node.expression.text;
-      if (callee === "setTimeout" || callee === "setInterval" || callee === "setImmediate") {
+      // A user function/local shadowing the global keeps its own semantics —
+      // the reactor must NOT register/lower for it. The global timer names are
+      // declared ONLY in lib .d.ts files; a user shadow has a declaration in a
+      // real (.ts) source file. (Mirrors the call-site guard in calls.ts.)
+      const isGlobalShadowed = (() => {
+        const sym = ctx.checker.getSymbolAtLocation(node.expression);
+        const decls = sym?.declarations;
+        return !!decls && decls.length > 0 && !decls.every((d) => d.getSourceFile().isDeclarationFile);
+      })();
+      if (!isGlobalShadowed && (callee === "setTimeout" || callee === "setInterval" || callee === "setImmediate")) {
         needsPollOneoff = true;
+      }
+      if (!isGlobalShadowed && (callee === "setTimeout" || callee === "setInterval")) {
+        needsPollOneoff = true;
+        needsClockTimeGet = true;
+        needsTimerHeap = true;
+      }
+      if (
+        !isGlobalShadowed &&
+        (callee === "clearTimeout" || callee === "clearInterval" || callee === "queueMicrotask")
+      ) {
+        needsTimerHeap = true;
       }
     }
     // #1482: detect `process.env.X` (PropertyAccessExpression nested two deep)
@@ -6073,6 +6116,13 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   if (needsPollOneoff) {
     ctx.wasiPendingSleepMsHelper = true;
   }
+  // #2632 Phase 1 — defer timer-heap + run-loop registration to
+  // emitDeferredWasiHelpers (after __wasi_sleep_ms + clock_time_get are
+  // registered, before user bodies compile), so __timer_add / __timer_cancel
+  // func indices referenced at timer call sites are final.
+  if (needsTimerHeap) {
+    ctx.wasiPendingTimerHeap = true;
+  }
 }
 
 /**
@@ -6103,6 +6153,14 @@ export function emitDeferredWasiHelpers(ctx: CodegenContext): void {
   // async scheduler to call this for setTimeout/await sleep().
   if (ctx.wasiPendingSleepMsHelper && !ctx.funcMap.has("__wasi_sleep_ms")) {
     emitWasiSleepMsHelper(ctx);
+  }
+
+  // #2632 Phase 1 — register the timer heap + run-loop reactor. MUST run after
+  // __wasi_sleep_ms (the run loop calls it) and clock_time_get registration
+  // (for __rl_now_ns), and BEFORE user bodies compile so the __timer_add /
+  // __timer_cancel func indices baked into timer call sites are final.
+  if (ctx.wasiPendingTimerHeap && !ctx.funcMap.has("__run_event_loop")) {
+    ensureTimerHeap(ctx);
   }
 }
 
@@ -12652,7 +12710,12 @@ function checkWasiDomUsage(ctx: CodegenContext, sourceFile: ts.SourceFile): void
  * NOTE: `requestAnimationFrame` / `cancelAnimationFrame` are already covered
  * by DOM_ONLY_GLOBALS above, so they are not duplicated here.
  */
-const WASI_REJECTED_TIMER_GLOBALS = new Set(["setTimeout", "setInterval", "setImmediate", "queueMicrotask"]);
+// #2632 Phase 1 — setTimeout/setInterval/clearTimeout/clearInterval and
+// queueMicrotask are now LOWERED onto the timer-heap + run-loop reactor under
+// --target wasi (see ensureTimerHeap / emitTimerAdd). Only `setImmediate`
+// remains rejected: its Node "check phase" ordering (after I/O poll, distinct
+// from a 0ms timer) is a later-phase concern not modelled by the Phase-1 loop.
+const WASI_REJECTED_TIMER_GLOBALS = new Set(["setImmediate"]);
 
 /**
  * In WASI mode, scan source for timer / event-loop globals (setTimeout etc.)

@@ -1575,6 +1575,8 @@ export interface CodegenContext {
   wasiClockHelpersPending?: boolean;
   /** (#1484) Pending flag — emit `__wasi_sleep_ms` after lib-globals scan. */
   wasiPendingSleepMsHelper?: boolean;
+  /** (#2632) Pending flag — register timer heap + run-loop reactor after lib-globals scan. */
+  wasiPendingTimerHeap?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
   wasiNodeFsFuncs: Set<string>;
   /**

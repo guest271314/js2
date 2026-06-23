@@ -28,9 +28,15 @@ import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
 import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
 import {
+  emitMicrotaskEnqueue,
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
   emitStandalonePromiseThen,
+  emitTimerAdd,
+  emitTimerCallbackWrapper,
+  emitTimerCancel,
+  ensureTimerHeap,
+  getRunLoopNowFuncIdx,
   isStandalonePromiseActive,
   type StandalonePromiseThenCallback,
 } from "../async-scheduler.js";
@@ -3044,6 +3050,154 @@ function emitJsonReplacerAllowList(
   fctx.body.push({ op: "local.get", index: allowLocal } as Instr);
 }
 
+/**
+ * #2632 Phase 1 — lower `setTimeout` / `setInterval` / `clearTimeout` /
+ * `clearInterval` / `queueMicrotask` onto the WASI timer-heap + run-loop
+ * reactor. Returns `undefined` when this is not a WASI timer call (so the
+ * generic dispatcher continues), or an `InnerResult` when handled.
+ *
+ * Only bare-identifier callees fire (a member call like `obj.setTimeout(...)`
+ * is a user method, never the global). The timer heap was registered in the
+ * deferred-helper phase (`ensureTimerHeap`), so `__timer_add` / `__timer_cancel`
+ * func indices are already final.
+ */
+function tryWasiTimerCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult | undefined {
+  if (!ctx.wasi) return undefined;
+  if (!ts.isIdentifier(expr.expression)) return undefined;
+  const name = expr.expression.text;
+  if (
+    name !== "setTimeout" &&
+    name !== "setInterval" &&
+    name !== "clearTimeout" &&
+    name !== "clearInterval" &&
+    name !== "queueMicrotask"
+  ) {
+    return undefined;
+  }
+  // Guard against a user-defined local/function shadowing the global name. The
+  // global timer functions are declared ONLY in lib .d.ts files; a user shadow
+  // has at least one declaration in a real (.ts) source file. (`setTimeout` &c
+  // are also registered as inlinable lib stubs in ctx.funcMap, so a funcMap
+  // membership check would false-positive — use the symbol's declarations.)
+  {
+    const sym = ctx.checker.getSymbolAtLocation(expr.expression);
+    const decls = sym?.declarations;
+    if (decls && decls.length > 0 && !decls.every((d) => d.getSourceFile().isDeclarationFile)) {
+      return undefined; // user-defined shadow → not the global timer
+    }
+  }
+
+  // Ensure the timer heap exists. It is normally registered eagerly in the
+  // deferred-helper phase; this call is idempotent and a safety net.
+  ensureTimerHeap(ctx);
+
+  // ── clearTimeout(id) / clearInterval(id) ──────────────────────────────
+  if (name === "clearTimeout" || name === "clearInterval") {
+    if (expr.arguments.length < 1) return VOID_RESULT;
+    // id is a JS number (f64). Convert to the i32 slot id.
+    const saved = pushBody(fctx);
+    compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
+    const idInstrs = fctx.body;
+    popBody(fctx, saved);
+    idInstrs.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    emitTimerCancel(ctx, fctx, idInstrs);
+    return VOID_RESULT;
+  }
+
+  // ── setTimeout / setInterval / queueMicrotask: compile the callback ──
+  const cbArg = expr.arguments[0];
+  if (cbArg === undefined) return VOID_RESULT;
+
+  // Compile the callback into its own buffer, yielding a closure struct pushed
+  // as externref + its ClosureInfo (mirrors compileStandalonePromiseThenCallback).
+  let capInstrs: Instr[];
+  let closureInfo: ClosureInfo | undefined;
+  {
+    const saved = pushBody(fctx);
+    try {
+      const type =
+        ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)
+          ? compileArrowAsClosure(ctx, fctx, cbArg)
+          : compileExpression(ctx, fctx, cbArg);
+      if (type && (type.kind === "ref" || type.kind === "ref_null")) {
+        closureInfo = ctx.closureInfoByTypeIdx.get(type.typeIdx);
+      }
+      if (!closureInfo && ts.isIdentifier(cbArg)) {
+        closureInfo = ctx.closureMap.get(cbArg.text);
+      }
+      if (closureInfo && type && type.kind !== "externref") {
+        coerceType(ctx, fctx, type, { kind: "externref" });
+      }
+    } finally {
+      capInstrs = fctx.body;
+      popBody(fctx, saved);
+    }
+  }
+  if (!closureInfo) {
+    // Not a recognised closure (e.g. a string-bodied setTimeout, unsupported).
+    // Bail to the generic path, which will reject/handle it.
+    return undefined;
+  }
+
+  const wrapperFuncIdx = emitTimerCallbackWrapper(ctx, closureInfo);
+
+  // ── queueMicrotask(cb) — enqueue directly onto the microtask queue ────
+  if (name === "queueMicrotask") {
+    emitMicrotaskEnqueue(
+      ctx,
+      fctx,
+      [{ op: "ref.func", funcIdx: wrapperFuncIdx } as Instr],
+      capInstrs, // captures externref = the closure struct
+      [{ op: "ref.null.extern" } as Instr], // value = undefined
+    );
+    return VOID_RESULT;
+  }
+
+  // ── setTimeout(cb, ms) / setInterval(cb, ms) ──────────────────────────
+  // delayNs = max(0, ms) * 1e6 ; deadlineNs = now + delayNs.
+  const nowIdx = getRunLoopNowFuncIdx(ctx);
+  const delayNsLocal = allocLocal(fctx, `__timer_delay_${fctx.locals.length}`, { kind: "i64" });
+
+  // Compute delayNs into a local: trunc(ms) clamped to >= 0, times 1e6.
+  if (expr.arguments.length >= 2) {
+    compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "f64" });
+  } else {
+    fctx.body.push({ op: "f64.const", value: 0 });
+  }
+  // Clamp negative / NaN ms to 0 (Node treats ms<=0 or NaN as 0).
+  fctx.body.push({ op: "f64.const", value: 0 });
+  fctx.body.push({ op: "f64.max" } as Instr);
+  fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "i64.const", value: 1000000n });
+  fctx.body.push({ op: "i64.mul" } as Instr);
+  fctx.body.push({ op: "local.set", index: delayNsLocal });
+
+  const deadlineInstrs: Instr[] = [
+    { op: "call", funcIdx: nowIdx } as Instr,
+    { op: "local.get", index: delayNsLocal } as Instr,
+    { op: "i64.add" } as Instr,
+  ];
+  // interval period: setInterval re-arms with delayNs; setTimeout = 0 (one-shot).
+  const intervalInstrs: Instr[] =
+    name === "setInterval" ? [{ op: "local.get", index: delayNsLocal } as Instr] : [{ op: "i64.const", value: 0n }];
+
+  emitTimerAdd(
+    ctx,
+    fctx,
+    deadlineInstrs,
+    [{ op: "ref.func", funcIdx: wrapperFuncIdx } as Instr],
+    capInstrs, // captures externref = the closure struct
+    intervalInstrs,
+  );
+  // __timer_add returns the i32 id; setTimeout/setInterval return a JS number.
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  return { kind: "f64" };
+}
+
 function compileCallExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3075,6 +3229,15 @@ function compileCallExpression(
   // the matching `__jsx_runtime_*` host import. Extracted to calls-guards.ts (#742).
   {
     const r = tryJsxRuntimeCall(ctx, fctx, expr);
+    if (r !== undefined) return r;
+  }
+
+  // #2632 Phase 1 — WASI event-loop timers / microtasks. setTimeout/setInterval/
+  // clearTimeout/clearInterval/queueMicrotask lower onto the timer heap + run-loop
+  // reactor (async-scheduler.ts). Only fires under --target wasi; everything else
+  // falls through to the JS-host import path unchanged.
+  {
+    const r = tryWasiTimerCall(ctx, fctx, expr);
     if (r !== undefined) return r;
   }
 

@@ -58,8 +58,14 @@ describe("#1326c Phase 1C-A — microtask queue + drain export", () => {
     expect(typeof scheduler.emitStandalonePromiseResolve).toBe("function");
     expect(typeof scheduler.emitStandalonePromiseReject).toBe("function");
     expect(typeof scheduler.emitStandalonePromiseThen).toBe("function");
-    // emitStandalonePromiseThen still throws in 1C-A (Phase 1C-B fills it in).
-    expect(() => scheduler.emitStandalonePromiseThen({} as any, {} as any, [], [])).toThrow(/Phase 1C-B/);
+    // Phase 1C-B has landed: emitStandalonePromiseThen is fully implemented (the
+    // standalone microtask queue + Promise.then path). It is no longer a stub
+    // that throws "Phase 1C-B". (#2632 corrects this stale 1C-A assertion — the
+    // function's real behaviour is exercised by the #1326 Phase 1C-B suite.)
+    expect(typeof scheduler.emitStandalonePromiseThen).toBe("function");
+    // #2632 also adds the timer-heap + run-loop reactor surface.
+    expect(typeof scheduler.ensureTimerHeap).toBe("function");
+    expect(typeof scheduler.getRunLoopFuncIdxForWasiStart).toBe("function");
   });
 
   it("microtask queue helpers self-register lazily on first emitDrainMicrotasks", async () => {

@@ -958,7 +958,7 @@ export function compileSourceSync(
   // it contributes an identity map and is omitted from the composition.
   const cjsRewritten2 = rewriteEvalSuperCall(cjsRewritten);
   const wasiNodeFsFuncs = detectNodeFsImports(cjsRewritten);
-  const preprocessed = preprocessImports(cjsRewritten2);
+  const preprocessed = preprocessImports(cjsRewritten2, { wasi: options.target === "wasi" });
   const processedSource = preprocessed.source;
   // Composed map: processedSource → original source. Pipeline output order is
   // define → cjs → (eval/super, identity) → imports, so compose outermost-first.
