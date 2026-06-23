@@ -4972,6 +4972,37 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           if (!resp.ok) throw new Error(`unavailable: ${url}`);
           return resp.json();
         };
+        // (#2636) Per-edition standalone buckets, mirroring the JS-host
+        // `test262-editions.json` mechanism. Built by generate-editions.ts over
+        // the standalone-lane baseline JSONL and published to the same public
+        // dir. Memoised; resolves to a Map keyed by normalized edition label
+        // ("ES2015", "ES3 / Core", …) → { pass, fail, ce, skip, total }.
+        // Returns an empty Map (never throws) when the file is absent so the
+        // donut degrades to the pre-#2636 "Unavailable" state instead of erroring.
+        const loadStandaloneEditionBuckets = (() => {
+          let pending;
+          return async () => {
+            if (!pending) {
+              pending = (async () => {
+                try {
+                  const resp = await fetch("./benchmarks/results/test262-standalone-editions.json");
+                  if (!resp.ok) return new Map();
+                  const rows = await resp.json();
+                  if (!Array.isArray(rows)) return new Map();
+                  const map = new Map();
+                  for (const row of rows) {
+                    const label = normalizeEditionLabel(String(row?.edition || ""));
+                    if (label) map.set(label, row);
+                  }
+                  return map;
+                } catch {
+                  return new Map();
+                }
+              })();
+            }
+            return pending;
+          };
+        })();
         const standalonePayloadFromHostReport = (report) => {
           if (report?.standalone?.summary || report?.standalone?.official_summary) {
             return report.standalone;
@@ -5056,6 +5087,26 @@ console.log(instance.exports.run()); // &rarr; 55</pre
               : getNamedSummary(report, ["full_summary", "standalone_full_summary"]);
           } else {
             summary = getStandaloneEditionSummary(report, scope, strictOnly);
+            // (#2636) The standalone report carries only headline/scope
+            // summaries — never per-edition breakdowns. Fall back to the
+            // dedicated standalone editions file (built by generate-editions.ts
+            // over the standalone-lane baseline JSONL), so selecting an edition
+            // other than the latest shows real standalone numbers instead of
+            // "Unavailable". Strict-mode per-edition standalone data isn't
+            // computed, so approximate it by scaling the edition bucket by the
+            // standalone strict/overall ratio — the same approach the JS-host
+            // path uses for its strict edition donuts.
+            if (!hasUsableSummary(summary) && standaloneData.editionBuckets instanceof Map) {
+              const bucket =
+                standaloneData.editionBuckets.get(scope) ??
+                standaloneData.editionBuckets.get(normalizeEditionLabel(scope));
+              if (hasUsableSummary(bucket)) {
+                summary =
+                  strictOnly && standaloneData.strictRatios
+                    ? applySummaryRatios(normalizeSummary(bucket), standaloneData.strictRatios)
+                    : bucket;
+              }
+            }
           }
 
           if (!hasUsableSummary(summary)) {
@@ -5100,6 +5151,24 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             withProposal.skip !== overall.skip ||
             withProposal.total !== overall.total;
           const standaloneData = await loadStandaloneReport(report);
+          if (standaloneData) {
+            // (#2636) Attach per-edition standalone buckets + a standalone
+            // strict/overall ratio so getStandaloneSummary can render a donut
+            // for any selected edition, in either strict or non-strict mode.
+            standaloneData.editionBuckets = await loadStandaloneEditionBuckets();
+            const saOverall = standaloneData.report?.summary ?? standaloneData.report?.official_summary;
+            const saStrict = standaloneData.report?.strict_summary ?? standaloneData.report?.standalone_strict_summary;
+            if (saOverall && saStrict) {
+              const saO = normalizeSummary(saOverall);
+              const saS = normalizeSummary(saStrict, saO);
+              standaloneData.strictRatios = {
+                pass: statusRatio(saS, saO, "pass"),
+                fail: statusRatio(saS, saO, "fail"),
+                ce: statusRatio(saS, saO, "ce"),
+                skip: statusRatio(saS, saO, "skip"),
+              };
+            }
+          }
 
           let lastDetail = null;
           const conformanceOptions = () => {
