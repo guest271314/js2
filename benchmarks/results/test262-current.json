@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-23T00:03:34.189Z",
-  "baseline_generated_at": "2026-06-23T00:03:34.189Z",
-  "baseline_sha": "8add8b4c55cc2385de26d6d6c490f0012cd00c3c",
+  "timestamp": "2026-06-23T00:56:16.532Z",
+  "baseline_generated_at": "2026-06-23T00:56:16.532Z",
+  "baseline_sha": "96c7cbcb36267617c38049334fe7c977620af779",
   "oracle_version": 1,
   "mode": {
     "target": "gc",
@@ -1080,12 +1080,12 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 7562,
+    "assertion_fail": 7565,
     "illegal_cast": 123,
     "negative_test_fail": 77,
     "null_deref": 208,
     "oob": 38,
-    "other": 4042,
+    "other": 4039,
     "promise_error": 52,
     "range_error": 31,
     "runtime_error": 1215,
