@@ -541,6 +541,61 @@ function compileObjectAssignArg(ctx: CodegenContext, fctx: FunctionContext, arg:
 }
 
 /**
+ * #2580 M3 Stage A — compile a `[[Prototype]]` argument (the proto operand of
+ * `Object.create(proto)` / `Object.setPrototypeOf(obj, proto)`) so that an
+ * INLINE OBJECT LITERAL proto is built as a native `$Object`, pushing an
+ * externref onto the stack.
+ *
+ * Root cause (standalone): the native `__object_create` / `__object_setPrototypeOf`
+ * helpers write the link field `$Object.$proto` only when the proto value
+ * `ref.test $Object` succeeds (a non-`$Object` externref coerces to null, by
+ * design — see object-runtime.ts `__object_create`/`__object_setPrototypeOf`).
+ * `compileObjectLiteral` lowers an inline literal whose TS contextual type is a
+ * CONCRETE object type (not `any`) to a CLOSED-shape struct (`struct.new <typeIdx>`),
+ * which fails `ref.test $Object`. So `Object.create({foo:7}).foo` and
+ * `Object.setPrototypeOf(o,{foo:7}); o.foo` silently lose the proto link (the
+ * chain walk reads a null `$proto` → property absent → 0). A proto passed via a
+ * `const p:any = {foo:7}` *named variable* already works because the `any`
+ * annotation diverts that literal to the open-`$Object` builder (literals.ts).
+ *
+ * Fix mirrors the merged #2076 `compileObjectAssignArg` precedent: when the proto
+ * is a plain data-property / spread object literal (the same shapes the `$Object`
+ * builder accepts), build it directly as a native `$Object` via
+ * `compileObjectLiteralAsExternref` so `ref.test $Object` succeeds and the link
+ * is recorded. Any other proto expression (identifiers, calls, `null`,
+ * `Foo.prototype`, accessor-bearing literals) keeps the ordinary
+ * `compileExpression` path unchanged. Standalone-only — host/GC mode owns the
+ * `__object_create` JS import and a separate (still-broken, tracked) proto-link
+ * mechanism, untouched here.
+ */
+function compileProtoArg(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
+  if (
+    ctx.standalone &&
+    ts.isObjectLiteralExpression(arg) &&
+    arg.properties.length > 0 &&
+    arg.properties.every(
+      (p) => ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) || ts.isSpreadAssignment(p),
+    ) &&
+    arg.properties.every((p) => ts.isSpreadAssignment(p) || resolvePropertyNameText(ctx, p) !== undefined)
+  ) {
+    const objResult = compileObjectLiteralAsExternref(ctx, fctx, arg);
+    if (objResult) {
+      if (objResult.kind !== "externref") coerceType(ctx, fctx, objResult, { kind: "externref" });
+      return;
+    }
+    // fall through to the ordinary path if the $Object builder declined.
+  }
+  const t = compileExpression(ctx, fctx, arg, { kind: "externref" });
+  if (!t) {
+    // Expression produced no value — push null so the stack stays balanced for
+    // the consuming __object_create / __object_setPrototypeOf call.
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (t.kind !== "externref") {
+    coerceType(ctx, fctx, t, { kind: "externref" });
+  }
+}
+
+/**
  * #2160 — `String(arr)` / `Number(arr)` array→primitive coercion in standalone.
  *
  * In native-strings (standalone / WASI) mode there is no JS host
@@ -5567,12 +5622,12 @@ function compileCallExpression(
           coerceType(ctx, fctx, objType, { kind: "externref" });
         }
         // proto (externref)
-        const protoType = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
-        if (!protoType) {
-          fctx.body.push({ op: "ref.null.extern" });
-        } else if (protoType.kind !== "externref") {
-          coerceType(ctx, fctx, protoType, { kind: "externref" });
-        }
+        // #2580 M3 Stage A — build an INLINE-LITERAL proto as a native `$Object`
+        // (compileProtoArg) so __object_setPrototypeOf's `ref.test $Object`
+        // succeeds and writes $Object.$proto; a closed-shape literal struct fails
+        // that test → null proto → inherited reads return 0. compileProtoArg keeps
+        // the ordinary externref path for non-literal protos (incl. `null`).
+        compileProtoArg(ctx, fctx, expr.arguments[1]!);
         const spoIdx = ensureLateImport(
           ctx,
           "__object_setPrototypeOf",
@@ -5737,6 +5792,14 @@ function compileCallExpression(
         // Compile the proto argument
         if (arg0.kind === ts.SyntaxKind.NullKeyword) {
           fctx.body.push({ op: "ref.null.extern" });
+        } else if (ctx.standalone) {
+          // #2580 M3 Stage A — build an INLINE-LITERAL proto as a native `$Object`
+          // (compileProtoArg) so __object_create's `ref.test $Object` succeeds and
+          // the $proto link is recorded; a closed-shape literal struct would fail
+          // that test → null proto → inherited reads return 0. Non-literal protos
+          // (identifiers, calls, Foo.prototype) keep the ordinary path inside
+          // compileProtoArg.
+          compileProtoArg(ctx, fctx, arg0);
         } else {
           const argType = compileExpression(ctx, fctx, arg0);
           if (!argType) {
