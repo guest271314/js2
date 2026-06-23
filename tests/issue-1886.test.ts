@@ -263,16 +263,22 @@ describe("#1886 linear-safe Uint8Array analysis", () => {
   });
 
   it("classifies every buffer in the native-messaging host as linear-safe", () => {
+    // #2631 — the example now uses node:fs fd-based readSync/writeSync (the
+    // faithful synchronous Node primitives) instead of process.std*.{read,write}.
+    // The #1886 analysis recognises readSync(fd, buf, …)/writeSync(fd, buf, …) as
+    // byte-I/O buffer sinks (ioBufferArgIndex), so every buffer stays linear-safe.
     const nmPath = resolve(here, "../examples/native-messaging/nm_js2wasm.ts");
     const src = readFileSync(nmPath, "utf-8");
     const { safeNames, linearParamFns } = analyze(src);
-    // Buffers declared in main + the per-frame temporaries.
-    for (const name of ["header", "one", "buf", "small", "tmp", "frame", "src"]) {
+    // Buffers declared in main + the per-frame temporaries + the write buffer
+    // (`out`) and the stderr-telemetry byte buffer (`bytes`).
+    for (const name of ["header", "one", "buf", "tmp", "out", "src", "bytes"]) {
       expect(safeNames.has(name), `expected '${name}' linear-safe`).toBe(true);
     }
     // Helper params that carry buffers must be linear-rewritten.
     expect(linearParamFns.get("readExact")).toContain(0);
     expect(linearParamFns.get("readAt")).toContain(0);
+    expect(linearParamFns.get("writeAll")).toContain(0);
     expect(linearParamFns.get("decodeLength")).toContain(0);
     expect(linearParamFns.get("emitRun")).toContain(0);
   });
@@ -388,14 +394,19 @@ describe("#1886 Slice B intraprocedural eligibility (localOnlyBindings)", () => 
   });
 
   it("the native-messaging host: per-frame temporaries are Slice-B-eligible, the threaded read window is not", () => {
+    // #2631 — with node:fs readSync/writeSync, `bytes` (the stderr-telemetry
+    // buffer in `logFrameBodyRead`) is built + written entirely within one
+    // function and only flows into writeSync (an I/O sink), so it is Slice-B
+    // (local-only) eligible.
     const nmPath = resolve(here, "../examples/native-messaging/nm_js2wasm.ts");
     const src = readFileSync(nmPath, "utf-8");
     const { localOnlyNames } = analyze(src);
-    // `frame` (emitRun) and the `writeLength` 4-byte literal are local-only.
-    expect(localOnlyNames.has("frame")).toBe(true);
-    // `buf`/`header`/`one`/`small`/`tmp` flow through readExact/readAt user
-    // params → param-threaded → deferred to Slice C, not linear-backed now.
-    for (const name of ["buf", "header", "one", "small", "tmp", "src"]) {
+    // `bytes` (logFrameBodyRead) is local-only — never threaded into a user fn.
+    expect(localOnlyNames.has("bytes")).toBe(true);
+    // `buf`/`header`/`one`/`tmp`/`out`/`src` flow through readExact/readAt/
+    // writeAll/emitRun user params → param-threaded → deferred to Slice C, not
+    // linear-backed now.
+    for (const name of ["buf", "header", "one", "tmp", "out", "src"]) {
       expect(localOnlyNames.has(name), `expected '${name}' deferred (param-threaded)`).toBe(false);
     }
   });
