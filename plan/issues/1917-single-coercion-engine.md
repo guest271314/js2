@@ -224,6 +224,15 @@ both lanes.** Pre-existing fails (charAt both lanes; logical-and standalone) are
 identical on main and branch; everything else passes on both. `.tmp/` probe:
 `neutrality-toboolean.mts` (gitignored). tsc clean, prettier clean.
 
+**Re-verified post-#1962-landing (sdev-coercion-impl-2, 2026-06-23).** After #1962
+(emitToNumber) landed on main (merge `96c7cbcb3`), merged `origin/main` into this
+branch — the Step-2 commit `d357aaad1` is now subsumed, so the delta vs main is a
+clean **Step-3-only** change (`array-methods.ts`, `coercion-engine.ts`,
+`index.ts`; `calls.ts` dropped with Step 2). Re-ran the identical both-lane probe
+against a FRESH detached `origin/main` worktree (now carrying emitToNumber):
+**NEUTRAL — 0 status changes across both lanes.** tsc + prettier clean. New head
+`6e9aba31d`. Stacking-hold lifted (predecessor landed); handed to PR-shepherd.
+
 ## Implementation — Step 2 (sendev-coercion, 2026-06-23) — PR #1962
 
 Branch `issue-1917-emit-tonumber`, predecessor-stacked on the Step-1 branch
