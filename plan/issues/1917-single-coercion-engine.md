@@ -203,6 +203,27 @@ transcribed verbatim.
 constant-fold tables (`tryConstantFoldToBoolean`) — these are smaller and B4 is a
 static-literal fold, not a runtime cascade.
 
+**One intentional, behaviour-safe divergence from the verbatim transcription:**
+the engine guards the native-string arm with `ctx.anyStrTypeIdx >= 0 &&
+ctx.nativeStrTypeIdx >= 0` (the original `ensureI32Condition` matched on
+`condType.typeIdx === ctx.anyStrTypeIdx` *without* the `>= 0` floor). When native
+strings are off, `anyStrTypeIdx` is `-1`; an opaque ref whose `typeIdx` is also
+`-1` would have wrongly taken the flatten path in the old code. The guard routes
+it to the correct non-null arm instead. This is strictly more correct and is the
+common WasmGC-string-helper guard idiom; both-lane neutrality (below) confirms it
+surfaces no regression.
+
+**Both-lane neutrality proof (sendev-coercion, 2026-06-23).** Faithful
+`runTest262File` probe reading `r.status` (NOT `.outcome`), control (charAt) run
+first, executed on BOTH the default JS-host (gc) lane AND `--target standalone`,
+then diffed against an identical probe on a detached `origin/main` worktree.
+13 truthiness-exercising files × 2 lanes — `if`/`while`/`&&`/`||`/`!`/ternary,
+`Boolean(x)`, and `Array.prototype.filter`/`every`/`some` callback truthiness
+(the B2 `buildToBooleanInstrs` path). Result: **NEUTRAL — 0 status changes across
+both lanes.** Pre-existing fails (charAt both lanes; logical-and standalone) are
+identical on main and branch; everything else passes on both. `.tmp/` probe:
+`neutrality-toboolean.mts` (gitignored). tsc clean, prettier clean.
+
 ## Implementation — Step 2 (sendev-coercion, 2026-06-23) — PR #1962
 
 Branch `issue-1917-emit-tonumber`, predecessor-stacked on the Step-1 branch
