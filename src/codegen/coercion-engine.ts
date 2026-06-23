@@ -36,7 +36,7 @@ import type { ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
-import { nativeStringType } from "./index.js";
+import { addUnionImports, nativeStringType } from "./index.js";
 import { ensureAnyToStringHelper } from "./native-strings.js";
 import { compileExpression, compileStringLiteral, ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { coerceType, tryStructToString } from "./type-coercion.js";
@@ -246,6 +246,81 @@ export function compileAndEmitToString(
 ): ValType {
   const valType = compileExpression(ctx, fctx, operand);
   return emitToString(ctx, fctx, valType, tsType, hint);
+}
+
+/**
+ * Emit `ToNumber(operand)` (→ f64) for an operand ALREADY compiled to the top of
+ * the value stack with ValType `valType`. The consolidation of the `Number(x)`
+ * matrix (N2) and the unary `+`/`-`/`~` coercion arms (N1):
+ *
+ *   i64 (BigInt)         → f64.convert_i64_s
+ *   externref            → __unbox_number (js-host) | coerceType(f64,"number") (standalone)
+ *   ref/ref_null         → coerceType(f64,"number")  (object @@toPrimitive("number")/valueOf)
+ *   i32 (number/bool)    → f64.convert_i32_s
+ *   f64                  → no-op
+ *
+ * Returns the ValType left on the stack (`{kind:"f64"}` for every coercing arm;
+ * the original `valType` for the already-f64 no-op).
+ *
+ * NOTE — what stays in the caller (NOT folded here, because each is a *source*
+ * special-case that must run BEFORE the operand is on the stack as a plain
+ * value, or is policy that differs per caller):
+ *   - ToNumber(Symbol) throws TypeError (§7.1.4) — guarded before operand eval.
+ *   - the #2160 `Number(arr)` array→ToString→StringToNumber pre-check.
+ *   - the native-string-ref (`$AnyString`/`$NativeString`) → `__str_to_number`
+ *     (§7.1.4.1) arm — it dispatches on the ref's *typeIdx* (string-struct vs a
+ *     generic object struct), which the caller already resolves; a generic ref
+ *     falls to `coerceType(f64,"number")` here.
+ * The caller handles those, then calls `emitToNumber` for the remaining cascade.
+ */
+export function emitToNumber(ctx: CodegenContext, fctx: FunctionContext, valType: ValType | null): ValType {
+  if (!valType) {
+    // void result in a number context → NaN (ToNumber(undefined) = NaN).
+    fctx.body.push({ op: "f64.const", value: Number.NaN });
+    return { kind: "f64" };
+  }
+
+  // BigInt → number.
+  if (valType.kind === "i64") {
+    fctx.body.push({ op: "f64.convert_i64_s" });
+    return { kind: "f64" };
+  }
+
+  // externref → number. js-host calls `Number(v)` via `__unbox_number`
+  // (ToNumber semantics: Number(null)=0, Number("")=0, Number("0x1F")=31 — NOT
+  // parseFloat). `--target standalone` has no host import, so coerceType does the
+  // ToPrimitive("number") walk in pure Wasm. NOTE: gated on `ctx.standalone`
+  // EXACTLY (not `noJsHost`) to match the migrated `Number(x)` site byte-for-byte
+  // — under `--target wasi` (wasi && !standalone) the original took the
+  // `__unbox_number` host path, and this preserves that (any WASI-specific
+  // correction is a separate, non-neutral change).
+  if (valType.kind === "externref") {
+    if (ctx.standalone) {
+      coerceType(ctx, fctx, valType, { kind: "f64" }, "number");
+      return { kind: "f64" };
+    }
+    addUnionImports(ctx);
+    const unboxIdx = ctx.funcMap.get("__unbox_number");
+    if (unboxIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: unboxIdx });
+    }
+    return { kind: "f64" };
+  }
+
+  // Object/struct ref → number via @@toPrimitive("number")/valueOf.
+  if (valType.kind === "ref" || valType.kind === "ref_null") {
+    coerceType(ctx, fctx, valType, { kind: "f64" }, "number");
+    return { kind: "f64" };
+  }
+
+  // i32 (number or boolean) → f64.
+  if (valType.kind === "i32") {
+    fctx.body.push({ op: "f64.convert_i32_s" });
+    return { kind: "f64" };
+  }
+
+  // Already f64 — no-op.
+  return valType;
 }
 
 /**

@@ -94,6 +94,7 @@ import {
   receiverMayBeNativeStringAtRuntime,
   typeErrorThrowInstrs,
 } from "../property-access.js";
+import { emitToNumber } from "../coercion-engine.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 // (#2193 PR-B) reflective `m.call(thisArg, …)` on a `$NativeProto` member-closure value.
@@ -10672,31 +10673,12 @@ function compileCallExpression(
       }
 
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
-      if (argType?.kind === "i64") {
-        // BigInt → number: f64.convert_i64_s
-        fctx.body.push({ op: "f64.convert_i64_s" });
-        return { kind: "f64" };
-      }
-      if (argType?.kind === "externref") {
-        if (ctx.standalone) {
-          coerceType(ctx, fctx, argType, { kind: "f64" }, "number");
-          return { kind: "f64" };
-        }
-        // Number(x) uses ToNumber semantics — __unbox_number calls Number(v) in JS.
-        // parseFloat is wrong here: Number(null)=0 but parseFloat(null)=NaN,
-        // Number("")=0 but parseFloat("")=NaN, Number("0x1F")=31 but parseFloat gives 0.
-        addUnionImports(ctx);
-        const unboxIdx = ctx.funcMap.get("__unbox_number");
-        if (unboxIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx: unboxIdx });
-          return { kind: "f64" };
-        }
-      }
+      // Native-string ref (WasmGC AnyString/NativeString) → §7.1.4.1
+      // StringToNumber. The generic ToNumber engine (coerceType "number") has no
+      // string-struct case and silently yields 0 in standalone (#1688), so this
+      // typeIdx-keyed string-ref pre-check stays in the caller and routes to the
+      // pure-Wasm __str_to_number BEFORE the engine's generic object-ref arm.
       if (argType?.kind === "ref" || argType?.kind === "ref_null") {
-        // Native-string ref (WasmGC AnyString/NativeString) → §7.1.4.1
-        // StringToNumber. The generic struct ToPrimitive path below has no
-        // string case and silently yields 0 in standalone (#1688), so detect
-        // the string struct type and route to the pure-Wasm __str_to_number.
         const refTypeIdx = (argType as { typeIdx?: number }).typeIdx;
         if (
           ctx.nativeStrings &&
@@ -10706,17 +10688,15 @@ function compileCallExpression(
           // Emitted upfront during the parseNeeded finalize (declarations.ts)
           // when `Number` is referenced under native strings, so no mid-body
           // function registration (which would shift func indices) happens here.
-          // Routes through the shared `emitStrRefToNumber` (single
-          // `__str_to_number` call site for this block); the ref needs
+          // Single `__str_to_number` call site for this block; the ref needs
           // `extern.convert_any` first (alreadyExternref = false).
           if (emitStrRefToNumber(false)) return { kind: "f64" };
         }
-        // Object → number: coerce via @@toPrimitive("number") or valueOf
-        coerceType(ctx, fctx, argType, { kind: "f64" }, "number");
-        return { kind: "f64" };
       }
-      // Already numeric — no-op
-      return argType;
+      // #1917 — the remaining ToNumber cascade (i64→f64, externref→__unbox_number
+      // host / coerceType("number") standalone, object ref→coerceType("number"),
+      // i32→f64, f64 no-op) is now the single coercion engine.
+      return emitToNumber(ctx, fctx, argType);
     }
 
     // BigInt(x) — §21.2.1.1 constructor. (#1644 Slice A+B) The result is
