@@ -4,7 +4,7 @@ title: "linear Uint8Array (WASI): silent-corruption holes — name-keyed buffer 
 status: in-progress
 sprint: 65
 created: 2026-06-10
-updated: 2026-06-17
+updated: 2026-06-23
 priority: critical
 feasibility: medium
 reasoning_effort: high
@@ -193,3 +193,148 @@ gates clean.
 **Still open:** B.3/B.4 (escape-analysis demotion) and C.5–C.7 (loop-arena
 rewind ordering, all-target while-loop gate, `process.stdin.read` clamp/errno).
 **#2045 stays in-progress.**
+
+---
+
+## Implementation Plan (2026-06-23, architect) — B.3/B.4 escape-analysis demotion
+
+### Re-probe against current main (`b4ed81215`)
+
+Confirmed the two Part-B gaps still reproduce on current main, `--target wasi`
+(`.tmp/` battery). These are **fail-closed regressions on valid WASI programs**
+— the param-rewrite analysis (`linear-uint8-analysis.ts`) over-trusts a
+linear-safe param and never demotes it when a *call site* hands it a buffer the
+analysis cannot prove is linear-backed:
+
+| Probe | Shape | Result on main |
+|---|---|---|
+| **B.3a** | `f(make())` where `make(): Uint8Array { return new Uint8Array(4) }` | `Codegen error: linear Uint8Array helper argument is not backed by linear memory (#1886)` |
+| **B.3b** | `const a = new Uint8Array(buf); f(a)` (view over an ArrayBuffer) | same `not backed by linear memory` error |
+| **B.3c** | `f(c ? a : b)` (conditional arg) | same `not backed by linear memory` error |
+| **B.4** | `const g = fill; g(a, 5)` (function-value escape, indirect call) | **no `.wasm` emitted** — the indirect call lowers against the source-level GC signature while the body was rewritten to `(ptr,len)` → silent emit/validation failure, no binary |
+
+All four are valid programs that compiled before #1886 Slice C widened the
+rewrite to params. None is a soundness hole (they fail closed), but each
+*regresses a previously-compiling WASI program*, so the acceptance criterion is:
+**either compile correctly OR demote the helper to the GC representation — never
+a `reportError` / missing binary on valid code.**
+
+### Root cause
+
+`buildLinearU8Analysis` (`src/codegen/linear-uint8-analysis.ts`) seeds every
+top-level helper's `Uint8Array` param as linear-safe (Pass 1, `if (pSym &&
+rewriteParams) safe.add(pSym)`), then Pass 2 only demotes a *buffer binding*
+that flows into a disqualifying position (`isAllowedUse`). It never runs the
+**inverse** check: a linear param stays safe even when a call site passes it an
+argument that is **not** a provably-linear-backed identifier. Two missing
+demotion directions:
+
+- **B.3** — `isAllowedUse`'s call-arg arm (`linear-uint8-analysis.ts`
+  ~line 381) verifies the *callee param* is currently safe, but does NOT verify
+  the *argument expression* is itself a linear-backed buffer. The actual
+  `(ptr,len)` thread happens later in `calls.ts` (~line 12085, the `reportError`
+  site), which requires the arg to be a tracked linear identifier; a `make()`
+  result / `new Uint8Array(buffer)` view / conditional is untracked → hard error.
+- **B.4** — `linearParams` is consumed only by the *direct-identifier* call path
+  (`calls.ts:~8886` threads `(ptr,len)`); an indirect call through a function
+  value (`const g = fill; g(...)`, `fill.call(...)`, `arr.map(fill)`) lowers the
+  callee against its source GC signature → arity/type mismatch → invalid/missing
+  binary. The function's name escaping by value is never detected.
+
+### Changes
+
+**File: `src/codegen/linear-uint8-analysis.ts`** (single file for both slices —
+they share the fixpoint loop; sequence B.4 first since it's the simpler, then
+B.3 on top, OR land both in one PR — see decomposition).
+
+**Slice B.4 — demote a helper whose function-value escapes (function-name
+non-direct-call use).**
+- Add a scan (folds into the existing Pass-1 `collect` or a dedicated walk
+  before the `linearParams` freeze, ~line 244): for every `ts.Identifier` whose
+  symbol is a key of `fnParamSyms` (a tracked helper), classify its use. A use is
+  a *direct call callee* iff `ts.isCallExpression(parent) && parent.expression
+  === id` (the form `calls.ts` threads). **Any other use of the function name** —
+  `const g = fill`, `fill.call(...)` (property-access parent), `arr.map(fill)`
+  (call-arg parent), `[fill]`, `return fill`, `typeof fill` — marks the function
+  symbol as *escaped*.
+- At the `linearParams` freeze (~line 244–251), skip (`continue`) any `fnSym` in
+  the escaped set. With no `linearParams` entry, the helper keeps its source GC
+  signature end-to-end; `calls.ts` lowers every call (direct or indirect) against
+  the GC ABI — consistent, valid Wasm. The body's `b[i]` lowers via the GC array
+  path (already the fallback when the param isn't registered as a linear buffer).
+- **Edge case:** a recursive helper calls itself directly — that's a
+  direct-call callee use, NOT an escape; do not demote on self-recursion.
+- **Edge case:** the function is both directly called AND escapes (`g = fill;
+  fill(a); g(b)`) — escape wins, demote (conservative, correct).
+
+**Slice B.3 — demote a param that receives a non-linear-backed argument.**
+- Extend the fixpoint loop (`while (changed)`, ~line 219–242) with a second
+  classifier that walks every **direct user call** (`resolveDirectCallee`
+  resolves a tracked helper). For each arg index `i` that the callee currently
+  lists as safe, check the **argument expression**: it is linear-backed iff it is
+  a `ts.Identifier` whose symbol is currently in `safe` (a tracked linear
+  local/param). **Anything else** — a call result (`make()`), `new
+  Uint8Array(arrayBuffer)` view, a `ConditionalExpression`, an element/property
+  access, a literal — means the param cannot be proven linear-backed → remove the
+  callee's param symbol from `safe` and set `changed = true`.
+- Because this lives in the existing fixpoint, the demotion **cascades**: a
+  demoted param that itself flowed into a deeper helper re-examines that edge on
+  the next pass (monotone — only ever demotes — so it still terminates).
+- After demotion, the callee param uses the GC array representation; `calls.ts`
+  lowers the call against the GC signature, and the untracked arg is passed as a
+  plain GC `Uint8Array` — no `not backed by linear memory` error.
+- **Distinguish the two `new Uint8Array` forms:** `new Uint8Array(n)` (length
+  ctor) over a local IS linear-backable (already seeded safe in Pass 1); `new
+  Uint8Array(buffer)` (view ctor) is NOT — gate on whether the sole arg types as
+  a `number`/length vs an `ArrayBuffer`/`Uint8Array` (reuse the existing
+  `isNewUint8Array` predicate's arg inspection, or add `isLengthCtor`).
+
+### Wasm IR / behavioral note
+No new Wasm patterns — both slices are pure **analysis demotion** that route the
+affected helpers/params back to the already-correct GC `array.get`/`array.set`
+lowering. The win is removing a `reportError`/invalid-emit on valid code, not new
+codegen. Net effect: programs that previously errored now compile (slower GC
+path for that one helper) and run correctly.
+
+### Lane / blast-radius
+- **WASI/linear lane only.** Gated entirely inside `linear-uint8-analysis.ts`,
+  reached only on `--target wasi` (the linear-Uint8 path). The WasmGC/host lane
+  never builds this analysis. **Not** a value-rep / standalone-floor change → a
+  scoped WASI compile+run sweep is sufficient validation; not merge_group-broad.
+- No overlap with the #1917 coercion cascade (string-ops/coercion/value-rep).
+  Disjoint file (`linear-uint8-analysis.ts`) — safe to run concurrently.
+
+### Decomposition into landable dev slices
+- **Slice B.4** (function-value escape demotion) — smaller, self-contained, no
+  fixpoint interaction. ~30–50 lines in one file. Land first.
+- **Slice B.3** (untracked-arg param demotion) — folds into the fixpoint loop;
+  depends on nothing from B.4 but both touch the same freeze block, so if landed
+  separately, B.3 should rebase on B.4 (trivial). **Recommended: one PR for both**
+  (same file, same review surface, ~80 lines total).
+
+### Acceptance probe (per slice)
+- **B.4:** `const g = fill; const a = new Uint8Array(4); g(a, 5); a[0]` →
+  compiles to a valid `.wasm`, runs under the `runWasiMain` fd_write harness,
+  prints `5`. Also `fill.call(null, a, 5)` and `[fill]` compile (helper demoted).
+- **B.3:** all three shapes compile + run:
+  `function make(): Uint8Array { return new Uint8Array(4) } fill(make(), 7)` → no
+  `not backed` error, prints `7`; `const a = new Uint8Array(buf); fill(a, 9)`;
+  `fill(c ? a : b, 3)`.
+- **Regression:** `tests/issue-1886*.test.ts` (16), `tests/issue-2045-*` (the
+  soundness + compound suites), `linear-*` (22), `real-world-wasi.test.ts` stay
+  green; a pure-linear helper (`fill(localBuf, v)` with `localBuf = new
+  Uint8Array(n)`) STILL takes the fast `(ptr,len)` path (no over-demotion).
+- New test: `tests/issue-2045-escape-demotion.test.ts` — B.3 ×3 shapes + B.4 ×2
+  shapes compile+run, plus a fast-path no-regression assertion.
+
+### Out of scope (this plan covers B.3/B.4 only)
+- **C.5** (loop-arena rewind vs `var b = new Uint8Array(n)` read after the loop)
+  — confirmed still broken on main (`.tmp/p_c5` fails to emit). Separate slice:
+  a `var`-in-loop linear buffer read after the loop reads a rewound arena. Likely
+  needs the loop-arena reset (`loops.ts:70/773/1024`) to skip buffers whose live
+  range extends past the loop — its own analysis edge, route as a follow-up
+  slice after B.3/B.4.
+- **C.6** (all-target while-loop restructure gate) — a correctness-neutral
+  documentation/gating item, not a bug; low priority.
+- **C.7** (`process.stdin.read` offset clamp + `fd_read` errno) — independent
+  I/O-correctness slice.

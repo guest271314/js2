@@ -5,7 +5,7 @@ Unlike a linear roadmap, multiple independent goals can be worked on in parallel
 and a goal being "ready" doesn't mean it should be worked on immediately.
 
 <!-- AUTO:conformance-start -->
-**test262 conformance**: 31,756 / 43,135 (73.6 %)
+**test262 conformance**: 31,770 / 43,135 (73.7 %)
 <!-- AUTO:conformance-end -->
 
 ## DAG
@@ -86,6 +86,20 @@ and a goal being "ready" doesn't mean it should be worked on immediately.
    Depends on:           Independent
    standalone-mode
 
+   +-----------------------------+
+   |  wasi-async-runtime         |  NEW (not active)
+   |  (event-loop reactor:       |
+   |   scheduler + poll_oneoff + |
+   |   process.stdin Readable)   |
+   +-----------------------------+
+   Depends on:
+   async-model (microtask substrate, #1326)
+   standalone-mode (WASI target + poll_oneoff, #1484)
+   ── enables GENERAL async/streaming Node programs (true        ──
+   ── process.stdin streaming, timers, promise-driven I/O) on    ──
+   ── --target wasi. Phase 1 (scheduler/timers) is activatable   ──
+   ── now; later phases gate on standalone-mode maturing. #2632.  ──
+
    +-------------------+   +----------------------+
    | self-hosting-     |   | backend-agnostic-ir  |
    |   dogfood         |   | (IR independent of   |
@@ -118,6 +132,7 @@ and a goal being "ready" doesn't mean it should be worked on immediately.
 | **spec-completeness** | Blocked | ~90% | async-model, symbol-protocol, builtin-methods, property-model | #696, #661, #674, #671 |
 | **full-conformance** | Blocked | 100% | spec-completeness | All remaining |
 | **standalone-mode** | Activatable | WASI works | iterator-protocol, generator-model | #680, #681, #682 |
+| **wasi-async-runtime** | New (not active) | event-loop reactor on WASI; real `process.stdin` Readable, timers, promise-driven I/O | async-model (microtask substrate #1326), standalone-mode (WASI + poll_oneoff #1484) | #2632 (refs #389 reporter; #2631 is the orthogonal synchronous host) |
 | **performance** | Activatable | faster output | core-semantics | #743, #773, #745, #744, #824 (timeouts) |
 | **platform** | Blocked | edge deploy | standalone-mode | #639, #640, #641, #644 |
 | **refactoring** | Independent | maintainability | -- | #688, #741, #788, #803-#811 |

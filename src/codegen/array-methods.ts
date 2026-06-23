@@ -16,6 +16,7 @@ import { emitHoleToUndefined, holeTestInstrs, holeToUndefinedInstrs } from "./ar
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
 import { addArrayIteratorImports, addStringImports, addUnionImports, resolveWasmType } from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
+import { emitToBoolean } from "./coercion-engine.js";
 import { compileStringLiteral } from "./shared.js";
 import {
   getArrTypeIdxFromVec,
@@ -37,12 +38,7 @@ import {
   VOID_RESULT,
 } from "./shared.js";
 import { emitUndefined, ensureGetUndefined } from "./expressions/late-imports.js";
-import {
-  ensureAnyHelpers,
-  ensureExternSameValueZeroHelper,
-  ensureExternStrictEqHelper,
-  isAnyValue,
-} from "./any-helpers.js";
+import { ensureExternSameValueZeroHelper, ensureExternStrictEqHelper } from "./any-helpers.js";
 import {
   ensureNativeStringHelpers,
   nativeStringLiteralInstrs,
@@ -6219,49 +6215,10 @@ function buildTruthyCheck(ctx: CodegenContext, setup: ArrayCallbackSetup): Instr
  *   - other ref  → non-null (the only observable truthiness for opaque structs)
  */
 function buildToBooleanInstrs(ctx: CodegenContext, retType: ValType): Instr[] {
-  const retKind = retType.kind;
-  if (retKind === "f64") {
-    return [{ op: "f64.abs" } as Instr, { op: "f64.const", value: 0 } as Instr, { op: "f64.gt" } as Instr];
-  }
-  if (retKind === "i32") {
-    return []; // already truthy/falsy
-  }
-  if (retKind === "i64") {
-    return [{ op: "i64.eqz" } as Instr, { op: "i32.eqz" } as Instr];
-  }
-  if (retKind === "externref") {
-    addUnionImports(ctx);
-    const isTruthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
-    if (isTruthyIdx !== undefined) {
-      return [{ op: "call", funcIdx: isTruthyIdx } as Instr];
-    }
-    return [{ op: "ref.is_null" } as Instr, { op: "i32.eqz" } as Instr];
-  }
-  if (retKind === "ref" || retKind === "ref_null") {
-    // Boxed `any` value — proper JS truthiness (false/0/NaN/""/null → falsy).
-    if (isAnyValue(retType, ctx)) {
-      ensureAnyHelpers(ctx);
-      const unboxBoolIdx = ctx.funcMap.get("__any_unbox_bool");
-      if (unboxBoolIdx !== undefined) {
-        return [{ op: "call", funcIdx: unboxBoolIdx } as Instr];
-      }
-    }
-    // Native string ref — empty string is falsy (check len > 0 after flatten).
-    if (retType.typeIdx === ctx.anyStrTypeIdx && ctx.anyStrTypeIdx >= 0) {
-      const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
-      if (flattenIdx !== undefined && ctx.nativeStrTypeIdx >= 0) {
-        return [
-          { op: "call", funcIdx: flattenIdx } as Instr,
-          { op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 0 } as Instr,
-          { op: "i32.const", value: 0 } as Instr,
-          { op: "i32.gt_s" } as Instr,
-        ];
-      }
-    }
-    // Opaque struct ref — non-null is truthy.
-    return [{ op: "ref.is_null" } as Instr, { op: "i32.eqz" } as Instr];
-  }
-  return []; // default: assume already i32
+  // #1917 — delegate to the single coercion engine (sink pattern: pass a fresh
+  // array and return it). Behaviour-neutral — the engine's rows were transcribed
+  // from this body (and #2085 already aligned it with `ensureI32Condition`).
+  return emitToBoolean(ctx, retType, []);
 }
 
 /** Build instructions to check falsiness of a callback result (-> i32). */

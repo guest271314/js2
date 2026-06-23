@@ -36,6 +36,9 @@ Opus model. **Only touches `plan/` directory.** Creates/updates issues, manages 
 ### Developer (teammate, worktree)
 Opus model, worktree isolation. Implements fixes in `src/` and `tests/`. Opens PRs → CI validates → self-merges if green → **terminates** (kills own tmux pane). One agent per task — no multi-task agents.
 
+### PR-queue Shepherd (standing teammate, worktree)
+A **standing** teammate (team `js2wasm`, `isolation: "worktree"`) that **owns the merge queue end-to-end** — it is the **primary** enqueuer; the `auto-enqueue.yml` cron is only the **backstop**. Each loop it sweeps open PRs, one-shot enqueues every CLEAN/non-`hold`/non-draft PR not already queued (GraphQL `enqueuePullRequest`, **user PAT**, NEVER re-enqueue), monitors `merge_group` results, and handles parks/ejections. It escalates real regressions to the tech lead; ordinary drift/flake it resolves itself. Rationale: hand-shepherding the queue ad-hoc from the lead loop strands PRs and burns lead attention — the queue needs a dedicated owner. See the **PR-queue shepherd** and **Auto-park handling rules** sections in `/workspace/CLAUDE.md` for the full protocol.
+
 ## Team Spawn
 
 ```

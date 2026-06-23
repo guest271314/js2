@@ -859,3 +859,66 @@ take the consumption contract on, the staged plan above (Slices 1b/2/3) is
 correct and ready — re-read the S53 joint spec as written. Until then, the
 bounded slices (#2612/#2613/#2614) harvest the async conformance that does
 **not** require flipping the model.
+
+## Async-failure bucket scope (2026-06-22, sd-1838) — settlement-timing hypothesis tested
+
+Per lead directive: bucketed the failing async rows on current main and tested
+whether the "synchronous-settlement / microtask-drain" gap is a BOUNDED arm.
+
+**Bucket counts** (language/{expressions,statements}/{await,async-function,
+async-arrow-function}, 210 pass / 39 fail / 249):
+| n  | bucket | note |
+|----|--------|------|
+| 21 | assertion/return | DOMINANT — headed by `await <custom-thenable>` (`await-awaits-thenables*.js`) |
+| 6  | `with`-statement #1387 | unrelated (with-stmt closed-shape gate), not async |
+| 4  | null-deref in trigger/pushAwait/countdown | monkey-patched-promise / interleaved-await |
+| 2  | illegal_cast | await-in-nested-function/generator |
+| ~6 | parse/ident/misc | `await` as identifier, async-arrow name parse, etc. |
+
+**Settlement-timing hypothesis: NOT the mechanism, and NOT independently bounded.**
+- `await Promise.resolve(42)` PASSES; `await <custom thenable {then(res){res(42)}}>`
+  FAILS with `dereferencing a null pointer in __closure_N`. So it is NOT a
+  microtask-drain/ordering issue (the harness uses `asyncTest`/`asyncHelpers.js`
+  and real-Promise await settles correctly).
+- Root cause: `await V` lowers (async-cps.ts ~L421-433) to `Promise_resolve(V)` +
+  `Promise_then2(p, __make_callback(continuation))`. For a CUSTOM thenable, V8's
+  `p.then(resolve, reject)` calls the wasm continuation BACK as a host→wasm
+  callback, and that inbound callback null-derefs — the SAME multi-hop
+  host→wasm-callback substrate as #2614/#86's residual (a wasm closure handed to
+  host code and invoked back). The await resolve-continuation is the inbound
+  callback that fails.
+
+**Verdict: the dominant async-fail bucket (await-thenable, ~21 rows) is COUPLED
+to the multi-hop host→wasm callback cast/null-deref**, not a standalone
+settlement-timing fix. It should be folded into the same substrate slice that
+#2614's headline cluster needs (capturing inner closure passed to host executor,
+called back). Both are "a wasm continuation/closure invoked by host code"; fixing
+one likely fixes both. NOT a separate bounded arm — recommend a single
+multi-hop-callback substrate slice covering await-thenable + #2614 combinator
+residual. (The full IR Phase C #1373b epic verdict above is unchanged.)
+## Re-ground verdict (2026-06-22, sd-1838) — genuine EPIC, deferral is correct
+
+Re-grounded against current main (the task subject's "ASYNC_CPS already enabled
+on main; residual may be a narrow settlement-timing gap" is INACCURATE):
+
+- `CodegenContext.supportsAsyncIr` is `false` by default (`create-context.ts:232`)
+  and nothing flips it true — the IR async CPS path is OFF on main.
+- `isAsyncIrReady` (`src/ir/select.ts:190`) is HARDCODED `return false` with
+  `TODO(#1373b Slice 2): body-shape check … For now the gate is closed
+  regardless of body shape.` The gate has never been opened.
+- The `src/codegen/async-cps.ts` substrate now EXISTS (36KB, landed via #1042),
+  so the lowering module is present — but #1042 (async state-machine) is still
+  `in-progress`, and the IR-path Phase C wiring (Slice 2: CPS continuation
+  synthesis + body-shape acceptance + parity test vs the legacy direct-codegen
+  async path) is NOT implemented.
+
+**Verdict: this is the full Phase C feature (feasibility:hard, reasoning_effort:max),
+NOT a collapsed narrow fix.** It needs an architect spec first (the
+`async-cluster-architect-spec.md` exists but predates the landed async-cps.ts —
+re-spec the Slice 2 gate-open + parity plan against the current substrate), then
+senior-dev implementation, coordinated with #1042's in-progress state-machine,
+validated via merge_group. Correctly tagged `[DEFERRED EPIC — next-sprint]`.
+Recommend: route through /architect-spec, keep #55 `ready`/deferred, do NOT sink
+sprint-65 forcing it. The async row payoff this sprint already came via
+#2612/#2613 (landed) and the #2614 combinator cluster (gated behind #86, now
+landed — re-measure #2614 next).

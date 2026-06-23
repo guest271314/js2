@@ -1,10 +1,10 @@
-// #2524 Phase 1 — process IO via the linkable `js2wasm:node-io` shim.
+// #2524 Phase 1 — process IO via the linkable `js2wasm:node-process` shim.
 //
-// Under `--target wasi` + `nodeIoShim: true`, a module that uses
-// process.std{in,out,err} imports the `js2wasm:node-io` interface
+// Under `--target wasi` + `linkNodeShims: true`, a module that uses
+// process.std{in,out,err} imports the `js2wasm:node-process` interface
 // (stdin_read/stdout_write/stderr_write) plus its linear memory from
-// `js2wasm:node-io`, and carries NO `wasi_snapshot_preview1` import for the
-// stream IO path. A separately compiled `node-shim.wasm` implements that
+// `js2wasm:node-process`, and carries NO `wasi_snapshot_preview1` import for the
+// stream IO path. A separately compiled `node-process.wasm` implements that
 // interface over WASI; the user module links against it (the shim OWNS +
 // exports the shared memory, the user IMPORTS it — no instantiation cycle).
 //
@@ -13,7 +13,7 @@
 
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
-import { buildNodeIoShim } from "../scripts/build-node-io-shim.mjs";
+import { buildNodeProcessShim } from "../scripts/build-node-process-shim.mjs";
 
 const DECL = `declare const process: {
   stdin: { read(buf: Uint8Array | ArrayBuffer, offset?: number): number };
@@ -45,13 +45,13 @@ const FRAMED_ECHO = `${DECL}
   }`;
 
 /**
- * Link the node-io shim + the user module and round-trip a fixed stdin payload,
+ * Link the node-process shim + the user module and round-trip a fixed stdin payload,
  * capturing fd=1 bytes. The shim owns the memory; the user module imports it
  * along with the three IO functions. A minimal WASI fd_read/fd_write serves the
  * payload incrementally over the shim-owned memory — exactly like a real host.
  */
 function linkAndRun(userBinary: Uint8Array, stdin: Uint8Array): Uint8Array {
-  const shimBinary = buildNodeIoShim();
+  const shimBinary = buildNodeProcessShim();
   const ref: { mem: WebAssembly.Memory | undefined } = { mem: undefined };
   const memView = () => new DataView(ref.mem!.buffer);
   const captured: number[] = [];
@@ -92,7 +92,7 @@ function linkAndRun(userBinary: Uint8Array, stdin: Uint8Array): Uint8Array {
   });
   ref.mem = shim.exports.memory as WebAssembly.Memory;
   const user = new WebAssembly.Instance(new WebAssembly.Module(userBinary), {
-    "js2wasm:node-io": {
+    "js2wasm:node-process": {
       memory: shim.exports.memory,
       stdout_write: shim.exports.stdout_write,
       stderr_write: shim.exports.stderr_write,
@@ -104,15 +104,15 @@ function linkAndRun(userBinary: Uint8Array, stdin: Uint8Array): Uint8Array {
   return Uint8Array.from(captured);
 }
 
-describe("#2524 Phase 1 — js2wasm:node-io shim", () => {
-  it("user module imports js2wasm:node-io (memory + io fns), no wasi_snapshot_preview1", async () => {
-    const result = await compile(FRAMED_ECHO, { fileName: "x.ts", target: "wasi", nodeIoShim: true });
+describe("#2524 Phase 1 — js2wasm:node-process shim", () => {
+  it("user module imports js2wasm:node-process (memory + io fns), no wasi_snapshot_preview1", async () => {
+    const result = await compile(FRAMED_ECHO, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
     expect(result.success).toBe(true);
     const wat = result.wat ?? "";
-    // Imports the node-io interface: memory + the IO functions it uses.
-    expect(wat).toContain('(import "js2wasm:node-io" "memory" (memory');
-    expect(wat).toContain('(import "js2wasm:node-io" "stdin_read"');
-    expect(wat).toContain('(import "js2wasm:node-io" "stdout_write"');
+    // Imports the node-process interface: memory + the IO functions it uses.
+    expect(wat).toContain('(import "js2wasm:node-process" "memory" (memory');
+    expect(wat).toContain('(import "js2wasm:node-process" "stdin_read"');
+    expect(wat).toContain('(import "js2wasm:node-process" "stdout_write"');
     // NO wasi_snapshot_preview1 import survives for the stream IO path.
     expect(wat).not.toContain("wasi_snapshot_preview1");
     // The user module does NOT declare/own its own memory — it imports it.
@@ -129,11 +129,11 @@ describe("#2524 Phase 1 — js2wasm:node-io shim", () => {
     expect(wat).toContain("fd_write");
     // Inline path declares + exports its own memory.
     expect(wat).toContain('(export "memory"');
-    expect(wat).not.toContain("js2wasm:node-io");
+    expect(wat).not.toContain("js2wasm:node-process");
   });
 
-  it("links node-shim.wasm and round-trips a framed message byte-for-byte", async () => {
-    const result = await compile(FRAMED_ECHO, { fileName: "x.ts", target: "wasi", nodeIoShim: true });
+  it("links node-process.wasm and round-trips a framed message byte-for-byte", async () => {
+    const result = await compile(FRAMED_ECHO, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
     expect(result.success).toBe(true);
     // frame: len=5 (LE) + a body with non-printable / high bytes.
     const frame = Uint8Array.from([0x05, 0x00, 0x00, 0x00, 0x00, 0xff, 0x0a, 0x7f, 0x80]);
@@ -165,7 +165,7 @@ describe("#2524 Phase 1 — js2wasm:node-io shim", () => {
           process.stdout.write(body);
         }
       }`;
-    const result = await compile(src, { fileName: "x.ts", target: "wasi", nodeIoShim: true });
+    const result = await compile(src, { fileName: "x.ts", target: "wasi", linkNodeShims: true });
     expect(result.success).toBe(true);
     // frame1: len=2 "AB"; frame2: len=3 "XYZ"
     const frames = Uint8Array.from([0x02, 0, 0, 0, 0x41, 0x42, 0x03, 0, 0, 0, 0x58, 0x59, 0x5a]);
@@ -173,10 +173,10 @@ describe("#2524 Phase 1 — js2wasm:node-io shim", () => {
     expect(Array.from(out)).toEqual([0x02, 0, 0, 0, 0x41, 0x42, 0x03, 0, 0, 0, 0x58, 0x59, 0x5a]);
   });
 
-  it("nodeIoShim is ignored for non-WASI targets (no node-io import)", async () => {
+  it("linkNodeShims is ignored for non-WASI targets (no node-process import)", async () => {
     const src = `export function add(a: number, b: number): number { return a + b; }`;
-    const result = await compile(src, { fileName: "x.ts", nodeIoShim: true });
+    const result = await compile(src, { fileName: "x.ts", linkNodeShims: true });
     expect(result.success).toBe(true);
-    expect(result.wat ?? "").not.toContain("js2wasm:node-io");
+    expect(result.wat ?? "").not.toContain("js2wasm:node-process");
   });
 });

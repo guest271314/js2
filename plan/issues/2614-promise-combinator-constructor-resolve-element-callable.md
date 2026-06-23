@@ -14,7 +14,7 @@ goal: async-model
 sprint: 65
 parent: 1042
 related: [1528, 1368, 1116, 1694]
-blocked_on: [1632b-2, 2615]
+blocked_on: [2623]
 note: "BLOCKED (2026-06-22, sd re-ground + impl attempt). The architect framing was wrong for current main: combinators delegate to native V8 (which already does Get(C,'resolve')). The real fix — route C to the user's realm Promise so a patched resolve is observed — is INSEPARABLE from the closure-as-dynamic-ctor capability bridge: the moment C is the realm Promise, NewPromiseCapability(C)→Construct(C, wasmExecutor) hits the same __fn_tramp_Constructor cross-realm illegal-cast as #2615/#1528a-residual (#1632b-2). Attempted observability fix proven net-NEGATIVE (regressed any/invoke-resolve pass→illegal-cast). Fold into / block behind the capability bridge; do NOT ship a standalone runtime.ts patch."
 ---
 # #2614 — Promise combinators: invoke the constructor's own `resolve` + expose callable resolve/reject element functions
@@ -253,3 +253,30 @@ a standalone runtime.ts patch. The attempted diff is preserved out-of-tree
 (not committed — net-negative). Recommend: re-route #2614 behind #1632b-2 /
 #2615, or hand the combined combinator+capability slice to whoever owns that
 bridge.
+
+## Status update (2026-06-22, post #56+#86 merge)
+
+#56/#1940 (closure-construct bridge) and #86/#1945 (capability-ctor executor-call
+host-routing) BOTH MERGED. #86 banked **+2 rows** for this cluster
+(`capability-executor-called-twice`, `species-get-error`) — the executor-call
+surface is now on main.
+
+The DOMINANT rows remain blocked, re-pointed to the new follow-up **#2623**
+(Promise capability-cluster — multi-hop host→wasm callback cast + species/proto
+identity):
+- `invoke-resolve` (all/race) — observable-resolve identity, coupled to the
+  inbound-callback substrate (proven net-negative alone pre-#1940).
+- `call-resolve-element` / `resolve-from-same-thenable` — the inner CAPTURING
+  `resolve` closure passed to the host executor null-derefs/casts on the inbound
+  callback (the #86 capturing-residual; same root as the await-thenable bucket).
+- `ctx-ctor` (all/allSettled/race/any) — `instance.constructor === SubPromise`
+  species/prototype identity through the bridge.
+
+`blocked_on` updated to `[2623]`. This issue stays `blocked` until #2623 lands
+the inbound-callback substrate.
+
+**Sibling consumers (2026-06-23, #1528 probe):** the same arms-B/D substrate also
+gates `.finally` (7 fails) and `Promise.try` (3 fails) — see the
+"Downstream consumers (observed gaps)" section in
+`plan/issues/2623-promise-capability-cluster-multihop-callback-cast.md` for the
+exact test paths to fold into the #42 re-spec acceptance set.

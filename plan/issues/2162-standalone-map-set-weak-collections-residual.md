@@ -4,7 +4,7 @@ title: "Standalone Map/Set/WeakMap/WeakSet conformance residual (~532 tests)"
 status: in-progress
 sprint: 65
 created: 2026-06-15
-updated: 2026-06-18
+updated: 2026-06-23
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -346,3 +346,32 @@ slices closed them. The original 532-row estimate (`Set` 286, `Map` 148,
 Combined tractable reachable: **~125–130 Set rows.** The remaining ~75 Set rows
 are value-rep substrate (#2580 M2) / reflection (#1472/#2158) / iterator-object —
 **deferred, not sliced here.**
+
+---
+
+## Umbrella reconciliation (2026-06-23, architect) — drained; residual is substrate-deferred
+
+Re-verified against current main (`b4ed81215`): **all 4 dev-tractable Set
+sub-issues are landed.** #2604 (brand-check `.call`), #2605 (instanceof),
+#2606 (null-element coercion + `extends Set` compile errors), #2607 (GetSetRecord
+arg-validation) are all `status: done` on `origin/main` (PRs incl. #1915's
+`fix(#2605,#2606)` and the brand-check work). Map/WeakMap/WeakSet were already
+closed (the RE-MEASUREMENT above proved zero host-pass/standalone-fail rows for
+them). The ~75 deferred Set rows remain on their tracked substrates:
+
+- boxed `assert.sameValue(s.has(0), true)` confounds → **#2580 M2 / #2104** value-rep
+  (the Set core is correct; only the boxed `=== literal` compare fails).
+- set-algebra over a genuine set-**like** object (`__dyn_get` dynamic read) →
+  **#2580 M2**.
+- `Symbol.species`/`Symbol.iterator`/`@@toStringTag`/descriptor reflection →
+  **#1472 / #2158**.
+- `set.entries()`/`.values()` returning a real iterator OBJECT with `.next()` →
+  the #2162 iterator-object follow-up (needs a standalone Set/Map iterator-result
+  object; substrate-ish, pairs with the entries-mode materialization
+  late-registration note above).
+
+**Disposition:** #2162's dev-tractable surface is **exhausted**. Recommend closing
+the umbrella as `done` once the 4 sub-issues are confirmed merged (they are), with
+the residual carried by #2580/#2104 (value-rep), #1472/#2158 (reflection),
+#2622 (native subclass), and the iterator-object follow-up. No new dev slice from
+this architect pass — do NOT re-dispatch #2162 as fresh dev work.

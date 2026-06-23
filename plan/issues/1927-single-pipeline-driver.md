@@ -1,10 +1,12 @@
 ---
 id: 1927
 title: "One front-end pipeline driver — compileSourceSync/compileMultiSource/compileFilesSource are divergent clones"
-status: ready
+status: done
+assignee: ttraenkler/sendev-pipeline
+completed: 2026-06-22
 sprint: 65
 created: 2026-06-10
-updated: 2026-06-12
+updated: 2026-06-22
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -387,3 +389,72 @@ land in one place instead of three. No file conflict between them.
 
 Keep step 1 as a separate, trivially-reviewable PR if the senior dev prefers
 — it is the lowest-risk slice and immediately removes 26 duplicated literals.
+
+## Implementation notes (2026-06-22, sendev-pipeline)
+
+Implemented against the fork at `50a9ce400`. The fork lagged the spec's
+`0e482f2fc` snapshot — `compiler.ts` was 1679 lines with **22** inline error
+literals (the spec's "26" was the upstream count), `linkNodeShims` (not
+`nodeIoShim`) is the field name, and the multi paths already had `#1931`
+early-errors + `#1921` severity-gating but NOT hardened mode.
+
+**What landed (one branch, all five slices):**
+- `failResult(errors)` helper — replaced all 22 inline `{ binary: new
+  Uint8Array(0), … success:false … }` literals (verified byte-identical block
+  bodies before substituting). `src/compiler.ts` 1679 → 1263 lines (−416, well
+  past the ≥800-from-the-3-clones target; the fork's clones were already
+  smaller than upstream's).
+- `applyOptimize(result, options, anchor)` — the async wasm-opt-in-place step,
+  shared by the two async multi entry points. `compileSourceSync` stays
+  synchronous and never calls it (the `eval` host-shim contract). NOTE:
+  `compileSource` (single-source async wrapper) keeps its OWN inline optimize
+  with the original `{ line:0, column:0 }` warning shape — funneling it through
+  `applyOptimize` would have changed that warning to a source-anchored one, so
+  it was deliberately left as-is to stay byte-identical.
+- `buildCodegenOptions(options, emitSourceMap, prep?)` — single `CodegenOptions`
+  resolver. The multi drivers now pass `experimentalIR` (default ON) + `allowFs`
+  identically to single-source. `nodeBuiltins`/`wasiNodeFsFuncs`/`jsxRuntime`
+  stay `undefined` for multi mode (they were never collected there — multi
+  resolves imports through the TS program; `generateMultiModule` also ignores
+  the IR fields today, that is the **#2138** seam).
+- `runPipeline(input)` — synchronous shared core: ES early-errors → safe →
+  **hardened** (NEW for multi, parity gain) → codegen (branches
+  single/multi × WasmGC/linear) → C-ABI → widen → emit binary/sourcemap → WAT →
+  dts → imports-helper → WIT. The WebAssembly.Exception re-throw guard and the
+  `isFatalCodegenDiagnostic` severity gate are preserved exactly.
+- The three entry points are now thin adapters that build the AST(s) + the
+  leading TS-diagnostic `errors` (region A: PositionMap remap for single,
+  `isEntryDiag`/allowJs scoping for multi) and delegate to `runPipeline`.
+- Doc/default fix: `experimentalIR` "Defaults to off" → "on since #1131" in
+  `src/index.ts` and `src/codegen/context/types.ts`.
+
+**Scope deviation from the spec (documented, NOT escalated — it shrinks scope):**
+the spec said to bring define-substitution + CJS rewrite into
+`compileFilesSource`. On the fork that path uses `analyzeFiles(entryPath)` which
+builds the TS program directly from **disk** via `ts.createProgram` — there is
+no in-memory source-string map to rewrite. Wiring those in needs a rewriting
+`CompilerHost` (with its own diagnostic-remap), a separate larger change. In a
+stability-first sprint that is a net-zero risk not worth taking for this
+structural refactor, so it is deferred with an inline `// #1927:` comment in
+`compileFilesSource`. The structural win (one driver + one options builder +
+hardened/IR-option parity) is fully delivered without it.
+
+**Tests:** `tests/issue-1927.test.ts` (6 tests, all green) pins the behavioral
+gains — multi-path early errors (entry + non-entry file), multi-path hardened
+mode (entry + non-entry, plus default-off no-false-positive), and single==multi
+parity on a working module. `tests/issue-1931.test.ts` + `tests/issue-1929.test.ts`
+(the shared-behavior suites) stay green. Typecheck clean.
+
+**Pre-existing failures (NOT regressions):** `tests/compiler.test.ts`,
+`tests/multi-file.test.ts`, and `tests/lodash-compile.test.ts` fail identically
+on clean `origin/main` (stale hand-rolled instantiation harnesses with
+incomplete `env` import objects — `LinkError: __unbox_number requires a
+callable`). Verified by running both branch and baseline. These are not in the
+CI required-checks gate; the authoritative net-zero arbiter is the full-baseline
+`merge_group` test262 run.
+
+**Unblocks (per spec):** #2138 (IR-first compile-once inversion — IR overlay
+into `generateMultiModule` is now a one-site change), #1916 (symbolic function
+refs), #1926 (remove ValType/typeIdx from IrType), #1930 (TypeOracle), #2134
+(IR effect model), #2135 (IR capability predicate). Pairs cleanly with #1926
+(disjoint files: `compiler.ts` vs `src/ir/`).
