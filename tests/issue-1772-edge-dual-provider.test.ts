@@ -109,9 +109,21 @@ describe("#1772 — node:fs same-binary dual-provider compatibility", () => {
       writeFileSync(wasmPath, userBinary);
       writeFileSync(shimPath, buildNodeFsShim());
 
+      // js2wasm emits a WasmGC module, so enable the GC/function-references/
+      // tail-call/exceptions proposals (mirrors examples/native-messaging/
+      // smoke-test.sh's WASMTIME_FLAGS).
       const wasmtimeOut = execFileSync(
         "wasmtime",
-        ["run", "--preload", `node:fs=${shimPath}`, "--invoke", "main", wasmPath],
+        [
+          "run",
+          "-W",
+          "gc=y,function-references=y,tail-call=y,exceptions=y",
+          "--preload",
+          `node:fs=${shimPath}`,
+          "--invoke",
+          "main",
+          wasmPath,
+        ],
         { input: Buffer.from(FRAME), maxBuffer: 4 * 1024 * 1024 },
       );
 

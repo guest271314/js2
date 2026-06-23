@@ -1,9 +1,10 @@
 ---
 id: 1772
 title: "Node API imports from @types/node, satisfied by one ABI across pure-WASI shim / edge.js→node / JS+WASI hosts (anchor: node:fs readSync/writeSync)"
-status: ready
+status: in-progress
 created: 2026-06-01
-updated: 2026-06-23
+updated: 2026-06-24
+assignee: ttraenkler/agent-a9512a06
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -13,7 +14,7 @@ language_feature: node-api-compat
 goal: platform
 sprint: Backlog
 es_edition: n/a
-related: [389, 1575, 1766, 2527, 2528, 2624, 2625, 2631, 2632, 2083, 2181]
+related: [389, 1575, 1766, 2527, 2528, 2624, 2625, 2631, 2632, 2083, 2181, 2634, 2635]
 origin: "Follow-up from PR #1010 review direction; regrounded 2026-06-23 against the landed node:fs/node:process shim work"
 ---
 # #1772 — Node API imports from @types/node, one ABI, swappable host providers
@@ -215,3 +216,54 @@ The user's `nm_js2wasm.wasm` is **agnostic** to the provider. Compatibility hold
 The Phase-1 proof: the **same compiled binary** runs under (1) wasmtime via the
 `.wat` shim and (2) native Node via `edge.js`, with byte-identical output for the
 same stdin frames.
+
+---
+
+## Phase 1 — edge.js provider + compatibility proof (DONE 2026-06-24)
+
+**Result: the same-binary dual-provider proof works byte-identically.** ✓
+
+Deliverables (on `main` via this issue's PR):
+
+- `examples/native-messaging/edge.js` — a dependency-free native-Node provider of
+  the `node:fs` import interface. `createNodeFsProvider()` owns + exports the
+  linear memory (mirrors `node-fs.wat`) and implements `readSync(fd, ptr, len)` /
+  `writeSync(fd, ptr, len)` by translating the pointer-ABI ↔ Node Buffer-ABI over
+  that memory, delegating to the **real `node:fs`** (`fs.readSync(fd, buf, 0,
+  len, null)` / `fs.writeSync(fd, buf, 0, len, null)`). `runWithEdge()`
+  instantiates a compiled module with edge.js as the `node:fs` provider and runs
+  it.
+- `examples/native-messaging/run-edge.mjs` — runs a compiled module under edge.js
+  with **real fds** 0/1/2 (so real `node:fs` syscalls carry the bytes).
+- `tests/issue-1772-edge-dual-provider.test.ts` — the proof. It compiles **one**
+  `node:fs`-importing wasm binary and runs it under **both** providers:
+  - (a) **pure-WASI**: `node-fs.wat` shim under wasmtime
+    (`-W gc=y,function-references=y,tail-call=y,exceptions=y --preload
+    node:fs=<shim> --invoke main`);
+  - (b) **native Node**: `edge.js` → real `node:fs` over real fds (child process).
+  Both echo a framed message containing non-printable / high bytes
+  (`[0x05,0,0,0, 0x00,0xff,0x0a,0x7f,0x80]`) **byte-for-byte identically** — a
+  UTF-8-collapsing provider would diverge on `0x00`/`0xff`/`0x80`. Test green.
+
+**Verdict on the JS-provider substrate (acceptance item).** `edge.js` is the
+right substrate, and it is a **thin, dependency-free adapter** (two closures over
+the instance's exported memory), **not** a framework. The only irreducible job is
+the pointer-ABI ↔ Buffer-ABI translation (calling-convention impedance wrinkle):
+real `fs.readSync(fd, buffer, offset, length, position)` ≠ wasm `readSync(fd,
+ptr, len)`, so native Node is never a *direct* provider — it always needs this
+adapter. A heavier "edge.js framework" would add nothing the pinned ABI doesn't
+already specify. One implementation detail worth recording: edge.js copies the
+wasm byte range into a standalone `Buffer` before each syscall (rather than
+passing a `Uint8Array` view onto `memory.buffer` directly), because a
+`memory.grow` between calls can detach a cached view — copying keeps the adapter
+correct across growth.
+
+### Phase status
+
+- **Phase 0 — ABI**: ✅ done (pinned above + `docs/architecture/node-fs-abi.md`).
+- **Phase 1 — edge.js + proof**: ✅ done (byte-identical dual-provider proof).
+- **Phase 2 — `@types/node` → capability map**: ⏭️ split out to **#2634**.
+- **Phase 3 — async members**: ⏭️ split out to **#2635** (blocked on #2632).
+
+Issue stays `in-progress` because Phase 2 (#2634) remains. Phases 0+1 acceptance
+criteria are met.
