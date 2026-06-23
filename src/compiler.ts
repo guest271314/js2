@@ -6,11 +6,13 @@ import {
   analyzeSource,
   IncrementalLanguageService,
   type TypedAST,
+  type MultiTypedAST,
 } from "./checker/index.js";
 import { getNullablePrimitiveInfo } from "./checker/type-mapper.js";
 import { generateLinearModule, generateLinearMultiModule } from "./codegen-linear/index.js";
 import { resetCompileDepth } from "./codegen/expressions.js";
 import { generateModule, generateMultiModule } from "./codegen/index.js";
+import type { CodegenOptions } from "./codegen/context/types.js";
 import { assertCodegenRegistrationsComplete } from "./codegen/shared.js";
 import { isFatalCodegenDiagnostic } from "./codegen/context/errors.js";
 import type { WasmModule } from "./ir/types.js";
@@ -508,6 +510,358 @@ function detectNodeFsImports(source: string): Set<string> {
   return result;
 }
 
+/** The canonical empty failure result. #1927 — replaces the inline copies. */
+function failResult(errors: CompileError[]): CompileResult {
+  return {
+    binary: new Uint8Array(0),
+    wat: "",
+    dts: "",
+    importsHelper: "",
+    success: false,
+    errors,
+    stringPool: [],
+    imports: [],
+    hasMain: false,
+    hasTopLevelStatements: false,
+  };
+}
+
+/**
+ * #1927 — apply the optional Binaryen wasm-opt pass in place over an already
+ * produced {@link CompileResult}. This is the ONLY async step in the pipeline;
+ * the synchronous core ({@link runPipeline}) never runs it. The two async entry
+ * points and {@link compileSource} all funnel through here so the optimize
+ * behavior is defined once. A no-op when `options.optimize` is unset or the
+ * compile already failed. `anchor` supplies the source file used to attribute a
+ * wasm-opt warning diagnostic (single-source vs multi entry).
+ */
+async function applyOptimize(
+  result: CompileResult,
+  options: CompileOptions,
+  anchor: ts.SourceFile,
+): Promise<CompileResult> {
+  if (!options.optimize || !result.success) return result;
+  const level = typeof options.optimize === "number" ? options.optimize : 3;
+  const optResult = await optimizeBinaryAsync(result.binary, { level });
+  if (optResult.optimized) {
+    result.binary = optResult.binary;
+  }
+  if (optResult.warning) {
+    pushSourceAnchoredDiagnostic(result.errors, anchor, optResult.warning, "warning");
+  }
+  return result;
+}
+
+/**
+ * #1927 — single resolver that maps {@link CompileOptions} → the backend
+ * {@link CodegenOptions} bundle, so every driver (single / multi / files)
+ * passes an IDENTICAL object to the generator. Before this, only the
+ * single-source path forwarded `experimentalIR` / `nodeBuiltins` /
+ * `wasiNodeFsFuncs` / `allowFs` / `jsxRuntime`, silently giving multi-file
+ * users a weaker, different compiler with the IR overlay off.
+ *
+ * `prep` carries the single-source-only import-preprocessing results
+ * (`nodeBuiltins`, `wasiNodeFsFuncs`, `jsxRuntime`). They are `undefined` for
+ * the multi paths because `analyzeMultiSource` / `analyzeFiles` resolve imports
+ * through the TS program rather than `preprocessImports`; collecting them for
+ * multi mode is a separate, larger change (tracked alongside #2138).
+ */
+function buildCodegenOptions(
+  options: CompileOptions,
+  emitSourceMap: boolean,
+  prep?: {
+    nodeBuiltins?: import("./import-resolver.js").NodeBuiltinImport[];
+    wasiNodeFsFuncs?: Set<string>;
+    jsxRuntime?: import("./import-resolver.js").JsxRuntimeImport;
+  },
+): CodegenOptions {
+  return {
+    sourceMap: emitSourceMap,
+    fast: options.fast,
+    nativeStrings: options.nativeStrings,
+    utf8Storage: options.utf8Storage,
+    testRuntime: options.testRuntime,
+    wasi: options.target === "wasi",
+    linkNodeShims: options.linkNodeShims,
+    standalone: options.target === "standalone",
+    strictNoHostImports: options.strictNoHostImports,
+    // (#2119) thread module-strictness inference uniformly across all drivers.
+    inferModuleStrictArguments: options.inferModuleStrictArguments,
+    // Phase 2 (#1131): default experimentalIR to on so recursive numeric
+    // kernels (fib, factorial, etc.) compile without the boxing roundtrip the
+    // legacy path emits for untyped JS parameters. Pass `experimentalIR: false`
+    // to force the legacy path for bit-by-bit divergence tests or emergency
+    // revert. Forwarded to ALL drivers now (#1927); `generateMultiModule`
+    // ignores it until #2138 wires the IR overlay into the multi generator.
+    experimentalIR: options.experimentalIR !== false,
+    // Single-source-only import-preprocessing results (undefined in multi mode).
+    // #1927: multi paths do not yet collect node-builtin / fs / jsx imports —
+    // they resolve imports through the TS program; closing that gap is a
+    // separate change (tracked alongside #2138).
+    nodeBuiltins: prep?.nodeBuiltins,
+    wasiNodeFsFuncs: prep?.wasiNodeFsFuncs,
+    allowFs: options.allowFs ?? false,
+    jsxRuntime: prep?.jsxRuntime,
+  };
+}
+
+/** #1927 — the shared pipeline core. See {@link runPipeline}. */
+interface PipelineInput {
+  /** Per-file user sources for early-error / safe / hardened passes. */
+  userSourceFiles: ts.SourceFile[];
+  /** The AST surface codegen + dts/wit consume (single = the file; multi = entry). */
+  entryAst: TypedAST;
+  /** Multi-file AST when present; null for single-source. Selects the generator. */
+  multiAst: MultiTypedAST | null;
+  /** Pre-collected error/warning diagnostics (TS + JS-coverage warnings). */
+  errors: CompileError[];
+  /** Resolved codegen option bundle (see buildCodegenOptions). */
+  codegenOptions: CodegenOptions;
+  /** For source-map sourcesContent: original-name → original text. */
+  sourcesContent: Map<string, string>;
+  /** Anchor file for pushSourceAnchoredDiagnostic on codegen/emit throws. */
+  diagnosticAnchor: ts.SourceFile;
+  /**
+   * Run ES early-error detection even when `options.allowJs` is set (#1958).
+   * The single-source path sets this `true`: its lone `userSourceFiles` entry is
+   * the *entry* source, and the legacy `compileSourceSync` ran `detectEarlyErrors`
+   * on it UNCONDITIONALLY — load-bearing for the `eval` host shim, which always
+   * compiles with `allowJs: true` and relies on early errors (e.g. `export` in
+   * eval code, strict-eval-in-params) failing the compile so it can throw a
+   * SyntaxError. The multi paths leave this `false`/undefined so their
+   * `userSourceFiles` allowJs *dependency* files (whose JS we can't control) keep
+   * being skipped — the original divergence between the single and multi drivers.
+   */
+  runEarlyErrorsOnAllowJs?: boolean;
+  options: CompileOptions;
+}
+
+function isWasmException(e: unknown): boolean {
+  return (
+    typeof WebAssembly !== "undefined" &&
+    !!(WebAssembly as unknown as { Exception?: Function }).Exception &&
+    e instanceof (WebAssembly as unknown as { Exception: Function }).Exception
+  );
+}
+
+/**
+ * #1927 — the single, shared front-end pipeline core. Owns everything from ES
+ * early-error detection down through binary/WAT/dts/WIT emit. It is SYNCHRONOUS
+ * and STOPS before the optional wasm-opt pass — the async entry points apply
+ * {@link applyOptimize} over its result. This preserves the asymmetry that
+ * `compileSourceSync` (the `eval` host shim's entry) must stay synchronous and
+ * ignore `optimize`, while the multi entry points are async.
+ *
+ * The three entry adapters differ ONLY in how they build the AST(s) and collect
+ * the leading TS-diagnostic `errors` (region A); everything below the
+ * parse/check split is identical and lives here.
+ */
+function runPipeline(input: PipelineInput): CompileResult {
+  const { errors, options, entryAst, multiAst, diagnosticAnchor } = input;
+  const emitWatOutput = options.emitWat !== false;
+  const userSourceFiles = input.userSourceFiles;
+
+  // Each validation pass below gates on the errors IT produced, NOT on the whole
+  // accumulated `errors` array. This is load-bearing (#1927 regression fix): the
+  // pre-collected `errors` may already hold non-fatal TS diagnostics of severity
+  // "error" — e.g. TS2678 "Type '2' is not comparable to type '1'" on a switch
+  // case — which the single-source path has always TOLERATED (it compiles and
+  // succeeds, leaving the diagnostic in `errors`). The legacy single-source
+  // driver gated each pass only on that pass's fresh output; gating on the whole
+  // array here would turn every tolerated non-hard TS error into a hard failure.
+  const hasNewError = (added: { severity: string }[]) => added.some((e) => e.severity !== "warning");
+
+  // Step 1a: ES early-error detection — catch spec syntax errors TS misses, on
+  // EVERY user source file (#1931). allowJs dependency files are skipped (their
+  // JS may use patterns we cannot control) — same scoping as the diagnostic
+  // loop in the adapters. #1958 — EXCEPT the single-source path
+  // (`runEarlyErrorsOnAllowJs`), whose lone source IS the entry: the legacy
+  // `compileSourceSync` ran this pass unconditionally, and the `eval` host shim
+  // (always `allowJs: true`) depends on it to reject e.g. `export` in eval code.
+  if (!options.allowJs || input.runEarlyErrorsOnAllowJs) {
+    const earlyErrors: CompileError[] = [];
+    for (const sf of userSourceFiles) {
+      earlyErrors.push(...detectEarlyErrors(sf));
+    }
+    errors.push(...earlyErrors);
+    if (hasNewError(earlyErrors)) {
+      return failResult(errors);
+    }
+  }
+
+  // Step 1b: Safe mode validation for all user source files.
+  if (options.safe) {
+    const safeErrors: CompileError[] = [];
+    for (const sf of userSourceFiles) {
+      safeErrors.push(...validateSafeMode(sf, entryAst.checker, options));
+    }
+    errors.push(...safeErrors);
+    if (hasNewError(safeErrors)) {
+      return failResult(errors);
+    }
+  }
+
+  // Step 1c: Hardened mode validation for all user source files. #1927 — moving
+  // this into the shared core gives the multi paths hardened-mode parity (they
+  // previously skipped it entirely).
+  if (options.hardened) {
+    const hardenedErrors: CompileError[] = [];
+    for (const sf of userSourceFiles) {
+      hardenedErrors.push(...validateHardenedMode(sf));
+    }
+    errors.push(...hardenedErrors);
+    if (hasNewError(hardenedErrors)) {
+      return failResult(errors);
+    }
+  }
+
+  const emitSourceMap = options.sourceMap === true;
+  const useLinear = options.target === "linear";
+
+  // Step 2: Generate the module (IR/codegen).
+  let mod;
+  let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
+  let capturedIrPostClaimErrors: import("./index.js").CompileResult["irPostClaimErrors"];
+  try {
+    if (useLinear) {
+      mod = multiAst
+        ? generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" })
+        : generateLinearModule(entryAst, { exposeArenaReset: options.allocator === "arena-reset" });
+      // Fail the compile on unsupported linear-backend constructs instead of
+      // emitting a structurally invalid binary (#1868).
+      if (collectLinearCodegenErrors(mod, errors)) {
+        return failResult(errors);
+      }
+    } else {
+      const result = multiAst
+        ? generateMultiModule(multiAst, input.codegenOptions)
+        : generateModule(entryAst, input.codegenOptions);
+      mod = result.module;
+      capturedFallbackCounts = result.fallbackCounts;
+      capturedIrPostClaimErrors = result.irPostClaimErrors;
+      // Propagate codegen errors with source locations. #1921 — a deliberate
+      // "degrade" diagnostic is surfaced as a non-fatal "warning"; the fatal
+      // decision is made by isFatalCodegenDiagnostic on the raw severity.
+      for (const err of result.errors) {
+        errors.push({
+          message: err.message,
+          line: err.line,
+          column: err.column,
+          severity: isFatalCodegenDiagnostic(err) ? "error" : "warning",
+        });
+      }
+      // #1921 — gate on severity, not a "Codegen error:" message prefix.
+      if (result.errors.some(isFatalCodegenDiagnostic)) {
+        return failResult(errors);
+      }
+    }
+  } catch (e) {
+    // Let host WebAssembly exceptions propagate instead of swallowing them as a
+    // "Codegen error:" (so e.g. an `eval` host shim throw surfaces to the host).
+    if (isWasmException(e)) throw e;
+    pushSourceAnchoredDiagnostic(
+      errors,
+      diagnosticAnchor,
+      `Codegen error: ${e instanceof Error ? e.message : String(e)}`,
+      "error",
+    );
+    return failResult(errors);
+  }
+
+  // Step 2b: Apply C ABI transformations if requested (linear target only).
+  let cHeader: string | undefined;
+  if (options.abi === "c" && options.target === "linear") {
+    const cabiResult = applyCabiTransform(mod, options.moduleName ?? "module", entryAst);
+    cHeader = cabiResult.cHeader;
+  }
+
+  // Step 2c: Widen non-defaultable ref types to ref_null in locals, params, and
+  // results. Avoids "uninitialized non-defaultable local" and struct.get/set
+  // type errors.
+  widenNonDefaultableTypes(mod);
+
+  // Step 3: Emit binary (with source map collection if enabled).
+  let binary: Uint8Array;
+  let sourceMapJson: string | undefined;
+  try {
+    if (emitSourceMap) {
+      const emitResult = emitBinaryWithSourceMap(mod);
+      const sourceMap = generateSourceMap(emitResult.sourceMapEntries, input.sourcesContent);
+      sourceMapJson = JSON.stringify(sourceMap);
+      // Append sourceMappingURL custom section to the binary.
+      const sourceMapUrl = options.sourceMapUrl ?? "module.wasm.map";
+      const urlSection = new WasmEncoder();
+      emitSourceMappingURLSection(urlSection, sourceMapUrl);
+      const urlSectionBytes = urlSection.finish();
+      const combined = new Uint8Array(emitResult.binary.length + urlSectionBytes.length);
+      combined.set(emitResult.binary);
+      combined.set(urlSectionBytes, emitResult.binary.length);
+      binary = combined;
+    } else {
+      binary = emitBinary(mod);
+    }
+  } catch (e) {
+    if (isWasmException(e)) throw e;
+    pushSourceAnchoredDiagnostic(
+      errors,
+      diagnosticAnchor,
+      `Binary emit error: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`,
+      "error",
+    );
+    return failResult(errors);
+  }
+
+  // Step 3b: Optimize — applied by the async entry adapters via applyOptimize,
+  // not here. This synchronous core ignores options.optimize.
+
+  // Step 4: Emit WAT (optional, non-fatal on failure).
+  let wat = "";
+  if (emitWatOutput) {
+    try {
+      wat = emitWat(mod);
+    } catch (e) {
+      pushSourceAnchoredDiagnostic(
+        errors,
+        diagnosticAnchor,
+        `WAT emit warning: ${e instanceof Error ? e.message : String(e)}`,
+        "warning",
+      );
+    }
+  }
+
+  // Step 5: Generate .d.ts.
+  const dts = generateDts(entryAst, mod);
+
+  // Step 6: Generate imports helper.
+  const importsHelper = generateImportsHelper(mod);
+
+  // Step 7: Generate WIT interface (optional).
+  let witOutput: string | undefined;
+  if (options.wit) {
+    const witOpts = typeof options.wit === "object" ? options.wit : undefined;
+    witOutput = generateWit(entryAst, { ...witOpts, imports: mod.imports, types: mod.types });
+  }
+
+  return {
+    binary,
+    wat,
+    dts,
+    importsHelper,
+    success: true,
+    errors,
+    stringPool: mod.stringPool,
+    sourceMap: sourceMapJson,
+    imports: buildImportManifest(mod),
+    cHeader,
+    wit: witOutput,
+    hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
+    hasTopLevelStatements: mod.hasTopLevelStatements === true,
+    exportSignatures: mod.exportSignatures,
+    fallbackCounts: capturedFallbackCounts,
+    irPostClaimErrors: capturedIrPostClaimErrors,
+  };
+}
+
 /**
  * Orchestrates the full compilation pipeline:
  * TS Source → tsc Parser+Checker → Codegen → Binary + WAT
@@ -572,7 +926,6 @@ export function compileSourceSync(
   assertCodegenRegistrationsComplete();
 
   const errors: CompileError[] = [];
-  const emitWatOutput = options.emitWat !== false;
 
   // Step 0a: Apply compile-time define substitutions (#1043)
   // #1928 — each pre-parse rewrite returns a PositionMap (output → its input);
@@ -728,304 +1081,36 @@ export function compileSourceSync(
   const hasHardTypeErrors = ast.diagnostics.some((d) => isHardTypeScriptDiagnostic(d, ast.checker));
 
   if ((hasSyntaxErrors || hasHardTypeErrors) && errors.length > 0) {
-    return {
-      binary: new Uint8Array(0),
-      wat: "",
-      dts: "",
-      importsHelper: "",
-      success: false,
-      errors,
-      stringPool: [],
-      imports: [],
-      hasMain: false,
-      hasTopLevelStatements: false,
-    };
+    return failResult(errors);
   }
 
-  // Step 1a: Early error detection — catch ES-spec syntax errors that TypeScript misses
-  const earlyErrors = detectEarlyErrors(ast.sourceFile);
-  errors.push(...earlyErrors);
-  const hasHardEarlyErrors = earlyErrors.some((e) => e.severity !== "warning");
-  if (hasHardEarlyErrors) {
-    return {
-      binary: new Uint8Array(0),
-      wat: "",
-      dts: "",
-      importsHelper: "",
-      success: false,
-      errors,
-      stringPool: [],
-      imports: [],
-      hasMain: false,
-      hasTopLevelStatements: false,
-    };
-  }
-
-  // Step 1b: Safe mode validation
-  if (options.safe) {
-    const safeErrors = validateSafeMode(ast.sourceFile, ast.checker, options);
-    errors.push(...safeErrors);
-    if (safeErrors.length > 0) {
-      return {
-        binary: new Uint8Array(0),
-        wat: "",
-        dts: "",
-        importsHelper: "",
-        success: false,
-        errors,
-        stringPool: [],
-        imports: [],
-        hasMain: false,
-        hasTopLevelStatements: false,
-      };
-    }
-  }
-
-  // Step 1c: Hardened mode validation
-  if (options.hardened) {
-    const hardenedErrors = validateHardenedMode(ast.sourceFile);
-    errors.push(...hardenedErrors);
-    if (hardenedErrors.length > 0) {
-      return {
-        binary: new Uint8Array(0),
-        wat: "",
-        dts: "",
-        importsHelper: "",
-        success: false,
-        errors,
-        stringPool: [],
-        imports: [],
-        hasMain: false,
-        hasTopLevelStatements: false,
-      };
-    }
-  }
-
+  // #1927 — everything from ES early-error detection down through emit is the
+  // shared pipeline core. The single-source path is the only one that runs the
+  // full pre-parse rewrite prologue + import preprocessing above; it threads the
+  // single-source-only `nodeBuiltins`/`wasiNodeFsFuncs`/`jsxRuntime` through
+  // `buildCodegenOptions`. `compileSourceSync` stays synchronous and never runs
+  // wasm-opt (the `eval` host shim contract) — `runPipeline` stops before it.
   const emitSourceMap = options.sourceMap === true;
-  const useLinear = options.target === "linear";
-
-  // Step 2: Generate IR
-  let mod;
-  let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
-  let capturedIrPostClaimErrors: import("./index.js").CompileResult["irPostClaimErrors"];
-  try {
-    if (useLinear) {
-      mod = generateLinearModule(ast, { exposeArenaReset: options.allocator === "arena-reset" });
-      // Fail the compile on unsupported linear-backend constructs instead of
-      // emitting a structurally invalid binary (#1868).
-      if (collectLinearCodegenErrors(mod, errors)) {
-        return {
-          binary: new Uint8Array(0),
-          wat: "",
-          dts: "",
-          importsHelper: "",
-          success: false,
-          errors,
-          stringPool: [],
-          imports: [],
-          hasMain: false,
-          hasTopLevelStatements: false,
-        };
-      }
-    } else {
-      const result = generateModule(ast, {
-        sourceMap: emitSourceMap,
-        fast: options.fast,
-        nativeStrings: options.nativeStrings,
-        utf8Storage: options.utf8Storage,
-        testRuntime: options.testRuntime,
-        wasi: options.target === "wasi",
-        linkNodeShims: options.linkNodeShims,
-        standalone: options.target === "standalone",
-        // (#2119) thread module-strictness inference for the single-source
-        // path (test262 + the playground both compile via `compile()` here).
-        inferModuleStrictArguments: options.inferModuleStrictArguments,
-        // Phase 2 (#1131): default experimentalIR to on so recursive
-        // numeric kernels (fib, factorial, etc.) compile without the
-        // boxing roundtrip the legacy path emits for untyped JS
-        // parameters. Pass `experimentalIR: false` to force legacy path
-        // for bit-by-bit divergence tests or emergency revert.
-        experimentalIR: options.experimentalIR !== false,
-        nodeBuiltins: preprocessed.nodeBuiltins,
-        wasiNodeFsFuncs,
-        allowFs: options.allowFs ?? false,
-        strictNoHostImports: options.strictNoHostImports,
-        jsxRuntime: preprocessed.jsxRuntime,
-      });
-      mod = result.module;
-      capturedFallbackCounts = result.fallbackCounts;
-      capturedIrPostClaimErrors = result.irPostClaimErrors;
-      // Propagate codegen errors with source locations. #1921 — a deliberate
-      // "degrade" diagnostic is surfaced as a non-fatal "warning"; the fatal
-      // decision is made by isFatalCodegenDiagnostic on the raw severity.
-      for (const err of result.errors) {
-        errors.push({
-          message: err.message,
-          line: err.line,
-          column: err.column,
-          severity: isFatalCodegenDiagnostic(err) ? "error" : "warning",
-        });
-      }
-      // #1921 — gate on severity, not a "Codegen error:" message prefix.
-      if (result.errors.some(isFatalCodegenDiagnostic)) {
-        return {
-          binary: new Uint8Array(0),
-          wat: "",
-          dts: "",
-          importsHelper: "",
-          success: false,
-          errors,
-          stringPool: [],
-          imports: [],
-          hasMain: false,
-          hasTopLevelStatements: false,
-        };
-      }
-    }
-  } catch (e) {
-    if (
-      typeof WebAssembly !== "undefined" &&
-      (WebAssembly as unknown as { Exception?: Function }).Exception &&
-      e instanceof (WebAssembly as unknown as { Exception: Function }).Exception
-    )
-      throw e;
-    pushSourceAnchoredDiagnostic(
-      errors,
-      ast.sourceFile,
-      `Codegen error: ${e instanceof Error ? e.message : String(e)}`,
-      "error",
-    );
-    return {
-      binary: new Uint8Array(0),
-      wat: "",
-      dts: "",
-      importsHelper: "",
-      success: false,
-      errors,
-      stringPool: [],
-      imports: [],
-      hasMain: false,
-      hasTopLevelStatements: false,
-    };
-  }
-
-  // Step 2b: Apply C ABI transformations if requested
-  let cHeader: string | undefined;
-  if (options.abi === "c" && options.target === "linear") {
-    const cabiResult = applyCabiTransform(mod, options.moduleName ?? "module", ast);
-    cHeader = cabiResult.cHeader;
-  }
-
-  // Step 2c: Widen non-defaultable ref types to ref_null in locals, params, and results.
-  // This avoids "uninitialized non-defaultable local" and struct.get/set type errors.
-  widenNonDefaultableTypes(mod);
-
-  // Step 3: Emit binary (with source map collection if enabled)
-  let binary: Uint8Array;
-  let sourceMapJson: string | undefined;
-  try {
-    if (emitSourceMap) {
-      const emitResult = emitBinaryWithSourceMap(mod);
-
-      // Generate source map JSON
-      const sourcesContent = new Map<string, string>();
-      sourcesContent.set(effectiveFileName, source);
-      const sourceMap = generateSourceMap(emitResult.sourceMapEntries, sourcesContent);
-      sourceMapJson = JSON.stringify(sourceMap);
-
-      // Append sourceMappingURL custom section to the binary
-      const sourceMapUrl = options.sourceMapUrl ?? "module.wasm.map";
-      const urlSection = new WasmEncoder();
-      emitSourceMappingURLSection(urlSection, sourceMapUrl);
-      const urlSectionBytes = urlSection.finish();
-
-      // Concatenate the binary with the sourceMappingURL section
-      const combined = new Uint8Array(emitResult.binary.length + urlSectionBytes.length);
-      combined.set(emitResult.binary);
-      combined.set(urlSectionBytes, emitResult.binary.length);
-      binary = combined;
-    } else {
-      binary = emitBinary(mod);
-    }
-  } catch (e) {
-    if (
-      typeof WebAssembly !== "undefined" &&
-      (WebAssembly as unknown as { Exception?: Function }).Exception &&
-      e instanceof (WebAssembly as unknown as { Exception: Function }).Exception
-    )
-      throw e;
-    pushSourceAnchoredDiagnostic(
-      errors,
-      ast.sourceFile,
-      `Binary emit error: ${e instanceof Error ? e.message : String(e)}`,
-      "error",
-    );
-    return {
-      binary: new Uint8Array(0),
-      wat: "",
-      dts: "",
-      importsHelper: "",
-      success: false,
-      errors,
-      stringPool: [],
-      imports: [],
-      hasMain: false,
-      hasTopLevelStatements: false,
-    };
-  }
-
-  // Step 3b: Optimize binary with Binaryen (optional) — applied by the async
-  // compileSource wrapper, not here (the optimizer is lazy-loaded only when
-  // wasm-opt is requested, #1757). This synchronous core ignores
-  // options.optimize.
-
-  // Step 4: Emit WAT (optional)
-  let wat = "";
-  if (emitWatOutput) {
-    try {
-      wat = emitWat(mod);
-    } catch (e) {
-      // WAT emit failure is non-fatal
-      pushSourceAnchoredDiagnostic(
-        errors,
-        ast.sourceFile,
-        `WAT emit warning: ${e instanceof Error ? e.message : String(e)}`,
-        "warning",
-      );
-    }
-  }
-
-  // Step 5: Generate .d.ts
-  const dts = generateDts(ast, mod);
-
-  // Step 6: Generate imports helper
-  const importsHelper = generateImportsHelper(mod);
-
-  // Step 7: Generate WIT interface (optional)
-  let witOutput: string | undefined;
-  if (options.wit) {
-    const witOpts = typeof options.wit === "object" ? options.wit : undefined;
-    witOutput = generateWit(ast, { ...witOpts, imports: mod.imports, types: mod.types });
-  }
-
-  return {
-    binary,
-    wat,
-    dts,
-    importsHelper,
-    success: true,
+  const sourcesContent = new Map<string, string>();
+  sourcesContent.set(effectiveFileName, source);
+  return runPipeline({
+    userSourceFiles: [ast.sourceFile],
+    entryAst: ast,
+    multiAst: null,
     errors,
-    stringPool: mod.stringPool,
-    sourceMap: sourceMapJson,
-    imports: buildImportManifest(mod),
-    cHeader,
-    wit: witOutput,
-    hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
-    hasTopLevelStatements: mod.hasTopLevelStatements === true,
-    exportSignatures: mod.exportSignatures,
-    fallbackCounts: capturedFallbackCounts,
-    irPostClaimErrors: capturedIrPostClaimErrors,
-  };
+    codegenOptions: buildCodegenOptions(options, emitSourceMap, {
+      nodeBuiltins: preprocessed.nodeBuiltins,
+      wasiNodeFsFuncs,
+      jsxRuntime: preprocessed.jsxRuntime,
+    }),
+    sourcesContent,
+    diagnosticAnchor: ast.sourceFile,
+    // #1958 — single-source: the lone source is the entry, so always run ES
+    // early-error detection (the `eval` host shim compiles with allowJs:true and
+    // relies on it). The multi paths keep the allowJs-dependency skip.
+    runEarlyErrorsOnAllowJs: true,
+    options,
+  });
 }
 
 /**
@@ -1038,7 +1123,6 @@ export async function compileMultiSource(
   options: CompileOptions = {},
 ): Promise<CompileResult> {
   const errors: CompileError[] = [];
-  const emitWatOutput = options.emitWat !== false;
 
   // Apply define substitutions to all source files (#1043)
   const definedFiles = options.define
@@ -1094,249 +1178,18 @@ export async function compileMultiSource(
     multiAst.diagnostics.some((d) => isHardTypeScriptDiagnostic(d, multiAst.checker) && isEntryDiag(d));
 
   if ((hasSyntaxErrors || hasHardTypeErrors) && errors.length > 0) {
-    return {
-      binary: new Uint8Array(0),
-      wat: "",
-      dts: "",
-      importsHelper: "",
-      success: false,
-      errors,
-      stringPool: [],
-      imports: [],
-      hasMain: false,
-      hasTopLevelStatements: false,
-    };
+    return failResult(errors);
   }
 
-  // Early error detection — catch ES-spec syntax errors that TypeScript misses,
-  // on every user source file (#1931). Previously the multi-source path skipped
-  // ES early errors entirely; now compileSource and compileMultiSource share the
-  // same detectEarlyErrors pass so e.g. a duplicate-`let` is rejected in a
-  // multi-file compile too. allowJs dependency files are skipped (their JS may
-  // use patterns we cannot control) — same scoping as the diagnostic loop above.
-  if (!options.allowJs) {
-    for (const sf of multiAst.sourceFiles) {
-      errors.push(...detectEarlyErrors(sf));
-    }
-    if (errors.some((e) => e.severity === "error")) {
-      return {
-        binary: new Uint8Array(0),
-        wat: "",
-        dts: "",
-        importsHelper: "",
-        success: false,
-        errors,
-        stringPool: [],
-        imports: [],
-        hasMain: false,
-        hasTopLevelStatements: false,
-      };
-    }
-  }
-
-  // Safe mode validation for all source files
-  if (options.safe) {
-    for (const sf of multiAst.sourceFiles) {
-      const safeErrors = validateSafeMode(sf, multiAst.checker, options);
-      errors.push(...safeErrors);
-    }
-    if (errors.some((e) => e.severity === "error")) {
-      return {
-        binary: new Uint8Array(0),
-        wat: "",
-        dts: "",
-        importsHelper: "",
-        success: false,
-        errors,
-        stringPool: [],
-        imports: [],
-        hasMain: false,
-        hasTopLevelStatements: false,
-      };
-    }
-  }
-
+  // #1927 — early-errors / safe / hardened validation + codegen + emit are the
+  // shared pipeline core (runPipeline). The multi path runs hardened mode now
+  // too (parity gain). `nodeBuiltins`/`wasiNodeFsFuncs`/`jsxRuntime` stay
+  // undefined for multi mode — imports resolve through the TS program, not
+  // `preprocessImports` (a separate change, tracked alongside #2138). Multi
+  // diagnostics use direct `getLineAndCharacterOfPosition` (no PositionMap
+  // remap), so the diagnostic loop stays in this adapter.
   const emitSourceMap = options.sourceMap === true;
-  const useLinear = options.target === "linear";
-
-  let mod;
-  let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
-  let capturedIrPostClaimErrors: import("./index.js").CompileResult["irPostClaimErrors"];
-  try {
-    if (useLinear) {
-      mod = generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" });
-      // Fail the compile on unsupported linear-backend constructs instead of
-      // emitting a structurally invalid binary (#1868).
-      if (collectLinearCodegenErrors(mod, errors)) {
-        return {
-          binary: new Uint8Array(0),
-          wat: "",
-          dts: "",
-          importsHelper: "",
-          success: false,
-          errors,
-          stringPool: [],
-          imports: [],
-          hasMain: false,
-          hasTopLevelStatements: false,
-        };
-      }
-    } else {
-      const result = generateMultiModule(multiAst, {
-        sourceMap: emitSourceMap,
-        fast: options.fast,
-        nativeStrings: options.nativeStrings,
-        utf8Storage: options.utf8Storage,
-        testRuntime: options.testRuntime,
-        wasi: options.target === "wasi",
-        linkNodeShims: options.linkNodeShims,
-        strictNoHostImports: options.strictNoHostImports,
-        standalone: options.target === "standalone",
-        // (#2119) default true (module input is strict → unmapped arguments);
-        // the test262 harness passes false for script tests to avoid the
-        // synthetic `export function test()` wrapper unmapping sloppy arguments.
-        inferModuleStrictArguments: options.inferModuleStrictArguments,
-      });
-      mod = result.module;
-      capturedFallbackCounts = result.fallbackCounts;
-      capturedIrPostClaimErrors = result.irPostClaimErrors;
-      // Propagate codegen errors with source locations. #1921 — a deliberate
-      // "degrade" diagnostic is surfaced as a non-fatal "warning"; the fatal
-      // decision is made by isFatalCodegenDiagnostic on the raw severity.
-      for (const err of result.errors) {
-        errors.push({
-          message: err.message,
-          line: err.line,
-          column: err.column,
-          severity: isFatalCodegenDiagnostic(err) ? "error" : "warning",
-        });
-      }
-      // #1921 — gate on severity, not a "Codegen error:" message prefix.
-      if (result.errors.some(isFatalCodegenDiagnostic)) {
-        return {
-          binary: new Uint8Array(0),
-          wat: "",
-          dts: "",
-          importsHelper: "",
-          success: false,
-          errors,
-          stringPool: [],
-          imports: [],
-          hasMain: false,
-          hasTopLevelStatements: false,
-        };
-      }
-    }
-  } catch (e) {
-    if (
-      typeof WebAssembly !== "undefined" &&
-      (WebAssembly as unknown as { Exception?: Function }).Exception &&
-      e instanceof (WebAssembly as unknown as { Exception: Function }).Exception
-    )
-      throw e;
-    pushSourceAnchoredDiagnostic(
-      errors,
-      multiAst.entryFile,
-      `Codegen error: ${e instanceof Error ? e.message : String(e)}`,
-      "error",
-    );
-    return {
-      binary: new Uint8Array(0),
-      wat: "",
-      dts: "",
-      importsHelper: "",
-      success: false,
-      errors,
-      stringPool: [],
-      imports: [],
-      hasMain: false,
-      hasTopLevelStatements: false,
-    };
-  }
-
-  // Widen non-defaultable ref types to ref_null in locals, params, and results
-  widenNonDefaultableTypes(mod);
-
-  let binary: Uint8Array;
-  let sourceMapJson: string | undefined;
-  try {
-    if (emitSourceMap) {
-      const emitResult = emitBinaryWithSourceMap(mod);
-
-      // Build sources content from input files
-      const sourcesContent = new Map<string, string>();
-      for (const [name, content] of Object.entries(files)) {
-        sourcesContent.set(name, content);
-      }
-      const sourceMap = generateSourceMap(emitResult.sourceMapEntries, sourcesContent);
-      sourceMapJson = JSON.stringify(sourceMap);
-
-      // Append sourceMappingURL custom section
-      const sourceMapUrl = options.sourceMapUrl ?? "module.wasm.map";
-      const urlSection = new WasmEncoder();
-      emitSourceMappingURLSection(urlSection, sourceMapUrl);
-      const urlSectionBytes = urlSection.finish();
-
-      const combined = new Uint8Array(emitResult.binary.length + urlSectionBytes.length);
-      combined.set(emitResult.binary);
-      combined.set(urlSectionBytes, emitResult.binary.length);
-      binary = combined;
-    } else {
-      binary = emitBinary(mod);
-    }
-  } catch (e) {
-    if (
-      typeof WebAssembly !== "undefined" &&
-      (WebAssembly as unknown as { Exception?: Function }).Exception &&
-      e instanceof (WebAssembly as unknown as { Exception: Function }).Exception
-    )
-      throw e;
-    pushSourceAnchoredDiagnostic(
-      errors,
-      multiAst.entryFile,
-      `Binary emit error: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`,
-      "error",
-    );
-    return {
-      binary: new Uint8Array(0),
-      wat: "",
-      dts: "",
-      importsHelper: "",
-      success: false,
-      errors,
-      stringPool: [],
-      imports: [],
-      hasMain: false,
-      hasTopLevelStatements: false,
-    };
-  }
-
-  // Optimize binary with Binaryen (optional)
-  if (options.optimize) {
-    const level = typeof options.optimize === "number" ? options.optimize : 3;
-    const optResult = await optimizeBinaryAsync(binary, { level });
-    if (optResult.optimized) {
-      binary = optResult.binary;
-    }
-    if (optResult.warning) {
-      pushSourceAnchoredDiagnostic(errors, multiAst.entryFile, optResult.warning, "warning");
-    }
-  }
-
-  let wat = "";
-  if (emitWatOutput) {
-    try {
-      wat = emitWat(mod);
-    } catch (e) {
-      pushSourceAnchoredDiagnostic(
-        errors,
-        multiAst.entryFile,
-        `WAT emit warning: ${e instanceof Error ? e.message : String(e)}`,
-        "warning",
-      );
-    }
-  }
-
+  // The AST surface codegen/dts/wit consume — the synthesized entry TypedAST.
   const entryAst: TypedAST = {
     sourceFile: multiAst.entryFile,
     checker: multiAst.checker,
@@ -1344,31 +1197,24 @@ export async function compileMultiSource(
     diagnostics: multiAst.diagnostics,
     syntacticDiagnostics: multiAst.syntacticDiagnostics,
   };
-  const dts = generateDts(entryAst, mod);
-  const importsHelper = generateImportsHelper(mod);
-  let witOutput: string | undefined;
-  if (options.wit) {
-    const witOpts = typeof options.wit === "object" ? options.wit : undefined;
-    witOutput = generateWit(entryAst, { ...witOpts, imports: mod.imports, types: mod.types });
+  const sourcesContent = new Map<string, string>();
+  for (const [name, content] of Object.entries(files)) {
+    sourcesContent.set(name, content);
   }
-
-  return {
-    binary,
-    wat,
-    dts,
-    importsHelper,
-    success: true,
-    errors,
-    stringPool: mod.stringPool,
-    sourceMap: sourceMapJson,
-    imports: buildImportManifest(mod),
-    wit: witOutput,
-    hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
-    hasTopLevelStatements: mod.hasTopLevelStatements === true,
-    exportSignatures: mod.exportSignatures,
-    fallbackCounts: capturedFallbackCounts,
-    irPostClaimErrors: capturedIrPostClaimErrors,
-  };
+  return applyOptimize(
+    runPipeline({
+      userSourceFiles: multiAst.sourceFiles,
+      entryAst,
+      multiAst,
+      errors,
+      codegenOptions: buildCodegenOptions(options, emitSourceMap),
+      sourcesContent,
+      diagnosticAnchor: multiAst.entryFile,
+      options,
+    }),
+    options,
+    multiAst.entryFile,
+  );
 }
 
 /**
@@ -1378,8 +1224,14 @@ export async function compileMultiSource(
  */
 export async function compileFilesSource(entryPath: string, options: CompileOptions = {}): Promise<CompileResult> {
   const errors: CompileError[] = [];
-  const emitWatOutput = options.emitWat !== false;
 
+  // #1927 — NOTE: unlike compileMultiSource, this path does NOT apply
+  // define-substitution or the CJS `require` rewrite. analyzeFiles() builds the
+  // TS program directly from disk via ts.createProgram (no in-memory source
+  // map to rewrite), so wiring those in requires a rewriting CompilerHost — a
+  // separate, larger change deferred to a follow-up rather than risk a behavior
+  // leak in this structural refactor. The shared core (runPipeline) still gives
+  // this path early-errors / hardened-mode / IR-option parity with the others.
   const multiAst = analyzeFiles(entryPath, {
     allowJs: options.allowJs,
     skipSemanticDiagnostics: options.skipSemanticDiagnostics,
@@ -1411,238 +1263,13 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
   const hasHardTypeErrors = multiAst.diagnostics.some((d) => isHardTypeScriptDiagnostic(d, multiAst.checker));
 
   if ((hasSyntaxErrors || hasHardTypeErrors) && errors.length > 0) {
-    return {
-      binary: new Uint8Array(0),
-      wat: "",
-      dts: "",
-      importsHelper: "",
-      success: false,
-      errors,
-      stringPool: [],
-      imports: [],
-      hasMain: false,
-      hasTopLevelStatements: false,
-    };
+    return failResult(errors);
   }
 
-  // Early error detection — catch ES-spec syntax errors that TypeScript misses,
-  // on every user source file (#1931). compileFilesSource previously skipped ES
-  // early errors; wire the same detectEarlyErrors pass here too.
-  if (!options.allowJs) {
-    for (const sf of multiAst.sourceFiles) {
-      errors.push(...detectEarlyErrors(sf));
-    }
-    if (errors.some((e) => e.severity === "error")) {
-      return {
-        binary: new Uint8Array(0),
-        wat: "",
-        dts: "",
-        importsHelper: "",
-        success: false,
-        errors,
-        stringPool: [],
-        imports: [],
-        hasMain: false,
-        hasTopLevelStatements: false,
-      };
-    }
-  }
-
-  // Safe mode validation for all source files
-  if (options.safe) {
-    for (const sf of multiAst.sourceFiles) {
-      const safeErrors = validateSafeMode(sf, multiAst.checker, options);
-      errors.push(...safeErrors);
-    }
-    if (errors.some((e) => e.severity === "error")) {
-      return {
-        binary: new Uint8Array(0),
-        wat: "",
-        dts: "",
-        importsHelper: "",
-        success: false,
-        errors,
-        stringPool: [],
-        imports: [],
-        hasMain: false,
-        hasTopLevelStatements: false,
-      };
-    }
-  }
-
+  // #1927 — early-errors / safe / hardened validation + codegen + emit are the
+  // shared pipeline core (runPipeline). This path gains hardened-mode parity
+  // too. The source-map sourcesContent comes from the on-disk source files.
   const emitSourceMap = options.sourceMap === true;
-  const useLinear = options.target === "linear";
-
-  let mod;
-  let capturedFallbackCounts: import("./index.js").CompileResult["fallbackCounts"];
-  let capturedIrPostClaimErrors: import("./index.js").CompileResult["irPostClaimErrors"];
-  try {
-    if (useLinear) {
-      mod = generateLinearMultiModule(multiAst, { exposeArenaReset: options.allocator === "arena-reset" });
-      // Fail the compile on unsupported linear-backend constructs instead of
-      // emitting a structurally invalid binary (#1868).
-      if (collectLinearCodegenErrors(mod, errors)) {
-        return {
-          binary: new Uint8Array(0),
-          wat: "",
-          dts: "",
-          importsHelper: "",
-          success: false,
-          errors,
-          stringPool: [],
-          imports: [],
-          hasMain: false,
-          hasTopLevelStatements: false,
-        };
-      }
-    } else {
-      const result = generateMultiModule(multiAst, {
-        sourceMap: emitSourceMap,
-        fast: options.fast,
-        nativeStrings: options.nativeStrings,
-        utf8Storage: options.utf8Storage,
-        testRuntime: options.testRuntime,
-        wasi: options.target === "wasi",
-        linkNodeShims: options.linkNodeShims,
-        strictNoHostImports: options.strictNoHostImports,
-        standalone: options.target === "standalone",
-        // (#2119) default true (module input is strict → unmapped arguments);
-        // the test262 harness passes false for script tests to avoid the
-        // synthetic `export function test()` wrapper unmapping sloppy arguments.
-        inferModuleStrictArguments: options.inferModuleStrictArguments,
-      });
-      mod = result.module;
-      capturedFallbackCounts = result.fallbackCounts;
-      capturedIrPostClaimErrors = result.irPostClaimErrors;
-      // #1921 — a deliberate "degrade" diagnostic is surfaced as a non-fatal
-      // "warning"; the fatal decision is made by isFatalCodegenDiagnostic.
-      for (const err of result.errors) {
-        errors.push({
-          message: err.message,
-          line: err.line,
-          column: err.column,
-          severity: isFatalCodegenDiagnostic(err) ? "error" : "warning",
-        });
-      }
-      // #1921 — gate on severity, not a "Codegen error:" message prefix.
-      if (result.errors.some(isFatalCodegenDiagnostic)) {
-        return {
-          binary: new Uint8Array(0),
-          wat: "",
-          dts: "",
-          importsHelper: "",
-          success: false,
-          errors,
-          stringPool: [],
-          imports: [],
-          hasMain: false,
-          hasTopLevelStatements: false,
-        };
-      }
-    }
-  } catch (e) {
-    if (
-      typeof WebAssembly !== "undefined" &&
-      (WebAssembly as unknown as { Exception?: Function }).Exception &&
-      e instanceof (WebAssembly as unknown as { Exception: Function }).Exception
-    )
-      throw e;
-    pushSourceAnchoredDiagnostic(
-      errors,
-      multiAst.entryFile,
-      `Codegen error: ${e instanceof Error ? e.message : String(e)}`,
-      "error",
-    );
-    return {
-      binary: new Uint8Array(0),
-      wat: "",
-      dts: "",
-      importsHelper: "",
-      success: false,
-      errors,
-      stringPool: [],
-      imports: [],
-      hasMain: false,
-      hasTopLevelStatements: false,
-    };
-  }
-
-  widenNonDefaultableTypes(mod);
-
-  let binary: Uint8Array;
-  let sourceMapJson: string | undefined;
-  try {
-    if (emitSourceMap) {
-      const emitResult = emitBinaryWithSourceMap(mod);
-      const sourcesContent = new Map<string, string>();
-      for (const sf of multiAst.sourceFiles) {
-        sourcesContent.set(sf.fileName, sf.getFullText());
-      }
-      const sourceMap = generateSourceMap(emitResult.sourceMapEntries, sourcesContent);
-      sourceMapJson = JSON.stringify(sourceMap);
-      const sourceMapUrl = options.sourceMapUrl ?? "module.wasm.map";
-      const urlSection = new WasmEncoder();
-      emitSourceMappingURLSection(urlSection, sourceMapUrl);
-      const urlSectionBytes = urlSection.finish();
-      const combined = new Uint8Array(emitResult.binary.length + urlSectionBytes.length);
-      combined.set(emitResult.binary);
-      combined.set(urlSectionBytes, emitResult.binary.length);
-      binary = combined;
-    } else {
-      binary = emitBinary(mod);
-    }
-  } catch (e) {
-    if (
-      typeof WebAssembly !== "undefined" &&
-      (WebAssembly as unknown as { Exception?: Function }).Exception &&
-      e instanceof (WebAssembly as unknown as { Exception: Function }).Exception
-    )
-      throw e;
-    pushSourceAnchoredDiagnostic(
-      errors,
-      multiAst.entryFile,
-      `Binary emit error: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`,
-      "error",
-    );
-    return {
-      binary: new Uint8Array(0),
-      wat: "",
-      dts: "",
-      importsHelper: "",
-      success: false,
-      errors,
-      stringPool: [],
-      imports: [],
-      hasMain: false,
-      hasTopLevelStatements: false,
-    };
-  }
-
-  if (options.optimize) {
-    const level = typeof options.optimize === "number" ? options.optimize : 3;
-    const optResult = await optimizeBinaryAsync(binary, { level });
-    if (optResult.optimized) {
-      binary = optResult.binary;
-    }
-    if (optResult.warning) {
-      pushSourceAnchoredDiagnostic(errors, multiAst.entryFile, optResult.warning, "warning");
-    }
-  }
-
-  let wat = "";
-  if (emitWatOutput) {
-    try {
-      wat = emitWat(mod);
-    } catch (e) {
-      pushSourceAnchoredDiagnostic(
-        errors,
-        multiAst.entryFile,
-        `WAT emit warning: ${e instanceof Error ? e.message : String(e)}`,
-        "warning",
-      );
-    }
-  }
-
   const entryAst: TypedAST = {
     sourceFile: multiAst.entryFile,
     checker: multiAst.checker,
@@ -1650,29 +1277,22 @@ export async function compileFilesSource(entryPath: string, options: CompileOpti
     diagnostics: multiAst.diagnostics,
     syntacticDiagnostics: multiAst.syntacticDiagnostics,
   };
-  const dts = generateDts(entryAst, mod);
-  const importsHelper = generateImportsHelper(mod);
-  let witOutput: string | undefined;
-  if (options.wit) {
-    const witOpts = typeof options.wit === "object" ? options.wit : undefined;
-    witOutput = generateWit(entryAst, { ...witOpts, imports: mod.imports, types: mod.types });
+  const sourcesContent = new Map<string, string>();
+  for (const sf of multiAst.sourceFiles) {
+    sourcesContent.set(sf.fileName, sf.getFullText());
   }
-
-  return {
-    binary,
-    wat,
-    dts,
-    importsHelper,
-    success: true,
-    errors,
-    stringPool: mod.stringPool,
-    sourceMap: sourceMapJson,
-    imports: buildImportManifest(mod),
-    wit: witOutput,
-    hasMain: mod.exports.some((e) => e.name === "main" && e.desc.kind === "func"),
-    hasTopLevelStatements: mod.hasTopLevelStatements === true,
-    exportSignatures: mod.exportSignatures,
-    fallbackCounts: capturedFallbackCounts,
-    irPostClaimErrors: capturedIrPostClaimErrors,
-  };
+  return applyOptimize(
+    runPipeline({
+      userSourceFiles: multiAst.sourceFiles,
+      entryAst,
+      multiAst,
+      errors,
+      codegenOptions: buildCodegenOptions(options, emitSourceMap),
+      sourcesContent,
+      diagnosticAnchor: multiAst.entryFile,
+      options,
+    }),
+    options,
+    multiAst.entryFile,
+  );
 }
