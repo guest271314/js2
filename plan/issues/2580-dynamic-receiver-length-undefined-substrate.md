@@ -774,3 +774,479 @@ double-walking), (4) staging that banks rows full-gate-validated (the named-read
 canary `new Con().foo` first, then indexed, then the generic-method cluster).
 No code landed this session — read-only re-grounding only; branch carries this
 finding doc.
+
+---
+
+# M3 — Implementation Plan (architect spec, 2026-06-23)
+
+> SPEC-ONLY. Read-only re-ground against current `main` confirmed the re-grounding
+> verdict and refined it: **the standalone walk machinery already exists; the gap
+> is POPULATE + a few non-walking arms. The host side has THREE inconsistent
+> half-mechanisms and one outright STUB.** The plan unifies both onto a single
+> canonical `[[Prototype]]` link + one shared walk, staged so the first
+> merge_group-floor-validatable PR is the `new Con().foo` named-read canary.
+
+## Re-ground delta vs. the re-grounding section above (what changed under inspection)
+
+The re-grounding said "the compiled object rep carries NO runtime `[[Prototype]]`
+link." Reading the source, that is true **end-to-end** but the pieces are
+asymmetric, and naming them precisely is what makes the staging tractable:
+
+**Standalone (`--target standalone`)** — the substrate is *mostly built*:
+- `$Object` **already has** `(field $proto (mut (ref null $Object)))` at field
+  index 0 (`object-runtime.ts:239`, struct def ~262).
+- `__extern_get` (`object-runtime.ts:746`, body ~761) **already walks** the
+  `$proto` chain (the `o = o.$proto` loop at ~844-848, `struct.get $Object 0`),
+  including the §6.2.5.5 accessor-`Get`-on-original-receiver arm.
+- `__extern_has` (`object-runtime.ts:~1932`) **already walks** the chain (mirror
+  of `__extern_get`). So the `in` operator's standalone arm is *already*
+  proto-aware once the link is populated.
+- `__object_create` (`object-runtime.ts:~2348`) and `__object_setPrototypeOf`
+  (`~2394`) **already write** `$Object.$proto` correctly (with the
+  extensibility + cycle checks).
+- `__getPrototypeOf` / `__object_isPrototypeOf` (`~2319`, `~2544`) already read
+  the chain.
+
+So in standalone the inherited-NAMED read should *already* resolve **for objects
+that are native `$Object`s with a populated `$proto`**. It fails because:
+  (S-a) **`{}`/object-literal alloc sets `$proto: null`** (`__new_plain_object`
+  body, `object-runtime.ts:621`; the inline `struct.new $Object` at ~1058) — so
+  `Object.create(proto)` is fine (it writes `$proto`) but the *common* literal
+  path leaves a null chain.
+  (S-b) **`new F()` (fnctor) construction does not link `instance.$proto` to
+  `F.prototype`** — standalone construction is "pure Wasm" (per the #1712 comment
+  at `new-super.ts:1110`, the host bridge is JS-host-only) and never writes the
+  instance's `$proto`.
+  (S-c) **`F.prototype = plainObj` reassignment is not modeled** — there is no
+  standalone notion of a per-constructor `.prototype` object that `new F()` reads
+  to seed `instance.$proto`.
+  (S-d) **INDEXED reads do NOT proto-walk.** `__extern_get_idx`
+  (`object-runtime.ts:3351`) array-like arm reads `obj.length` + `obj[i]` via
+  `__extern_get` on the *string* key — but its `$Object` arm only handles the
+  array-like-with-own-`length` shape; an inherited indexed element
+  (`Object.create({5:99})[5]`) needs the index→string-key read to go through the
+  proto-walking `__extern_get`, which it can once (S-a/b/c) populate `$proto`.
+
+**Host / GC mode (`!standalone && !wasi`)** — the substrate is *three
+half-mechanisms and a stub*, and this is why the re-grounding saw host fail too:
+- (H-a) `new F()` instances link to their ctor via `_fnctorInstanceCtor`
+  (`runtime.ts:71`), and a property MISS resolves through
+  `_fnctorProtoLookup` (`runtime.ts:74`) → `_sidecarGet(ctor, "prototype")` →
+  walks that vivified object. **BUT** `_fnctorProtoLookup` reads the ctor's
+  vivified-`prototype` *sidecar slot* (`_getOrVivifyFnPrototype`, `runtime.ts:96`,
+  writes `_sidecarSet(obj,"prototype",{})`). A WHOLE-prototype reassignment
+  `F.prototype = {foo:7}` only resolves IF that write lands in the SAME sidecar
+  slot the vivify/read path uses — and if the `{foo:7}` literal is reachable as a
+  real readable object (a closed WasmGC struct read by `_fnctorProtoLookup`'s
+  `Object.getOwnPropertyDescriptor` returns nothing).
+- (H-b) `Object.create(proto)` → real JS `Object.create` (`runtime.ts:7463`:
+  `(proto)=>Object.create(proto)`). Native JS proto-walk works **only if `proto`
+  is a real readable JS object**. A `{x:99}` literal that compiled to an opaque
+  WasmGC struct is NOT walkable by V8's native `Object.getPrototypeOf` →
+  `child.x` misses.
+- (H-c) **`Object.setPrototypeOf` is a STUB in host/GC mode** (`calls.ts:5562`):
+  it compiles both args, **`drop`s the proto**, and returns obj. So
+  `o={}; Object.setPrototypeOf(o,{y:99}); o.y` *cannot* work host-side — the link
+  is literally discarded at compile time. (Standalone routes to the native
+  helper; host drops it.)
+- (H-d) **`in` / HasProperty is OWN-only host-side.** `_wasmStructHasOwn`
+  (`runtime.ts:2900`) consults sidecar + descriptors + registered class-proto
+  method-names + static struct fields — it **never calls `_fnctorProtoLookup`**,
+  so `(5 in child)` and `("foo" in new Con())` return false even when `child.foo`
+  *would* resolve via the read path. The read path and the has path **disagree**.
+
+**Unified root cause (sharpened):** there is no single canonical `[[Prototype]]`
+link nor one shared walk. Standalone has ONE correct walk (`__extern_get`/
+`__extern_has`) but no populate; host has THREE partial links (vivified-sidecar,
+real-JS-create, dropped-setPrototypeOf) and a separate OWN-only `has`. M3's job is
+to (1) pick the single link location, (2) make ONE walk that read/has/in/for-in/
+host-mirror all call, (3) populate it at all five sites, in both modes.
+
+## DECISION 1 — WHERE the `[[Prototype]]` link lives
+
+**Standalone: the existing `$Object.$proto` field (field 0). Keep it. Do NOT add
+a sidecar.**
+
+Rationale:
+- The field already exists, is already walked by `__extern_get`/`__extern_has`,
+  and is already written by `__object_create`/`__object_setPrototypeOf`. A
+  sidecar map would *duplicate* a working field and force every walk to consult
+  two sources (the exact "N walks not one" anti-pattern the task warns against).
+- **Object identity is preserved** — `$proto` is a `(ref null $Object)`, an
+  intrusive link on the object itself; no external WeakMap keyed by object
+  identity, no GC-liveness coupling, no canonicalization hazard (the field was
+  added when `$Object` was first defined; it does NOT reopen the closed-struct /
+  iso-recursive-canonicalization risk that #1100/#2009 flagged — we are *using* an
+  existing field, not changing the struct shape).
+- **Size**: one `ref null` slot already allocated. Zero new per-object cost.
+- **The link target is always another `$Object`** (`ref null $Object`). A
+  non-`$Object` proto (e.g. `Object.create(someClassInstanceExternref)`) is
+  coerced to null at the write site exactly as `__object_create`/
+  `__object_setPrototypeOf` already do (`ref.test $Object ? cast : null`). This is
+  a known, already-shipped limitation of the standalone object model; M3 does NOT
+  expand it (cross-rep proto chains — `$Object` → class-struct → `$Vec` — are a
+  separate future lap, out of scope; the reachable test262 cluster is `$Object`
+  → `$Object`).
+
+**Host/GC: a single canonical link via the `_fnctorInstanceCtor` +
+vivified-`prototype`-sidecar mechanism (#1712), GENERALIZED.** Do NOT add a new
+parallel WeakMap; do NOT try to make the closed-struct literals natively
+JS-walkable. Instead:
+- Treat the **vivified `.prototype` sidecar object** (`runtime.ts:96-121`) as the
+  canonical per-constructor prototype OBJECT, and the **`_fnctorInstanceCtor`
+  WeakMap** (`runtime.ts:71`) as the canonical per-instance `[[Prototype]]` link.
+- Add ONE new instance→proto WeakMap **`_objProto`** keyed by the instance, for
+  the two host sites that today bypass the fnctor mechanism entirely
+  (`Object.create`, `Object.setPrototypeOf`). `_safeGet`/`__extern_has`'s walk
+  consults `_objProto` first, then falls through to `_fnctorProtoLookup`. This is
+  the host analogue of `$Object.$proto`: an intrusive-by-WeakMap link the single
+  shared walk reads. (A WeakMap, not a real `Object.setPrototypeOf` on the JS
+  object, because the instance is an opaque WasmGC struct on which V8's native
+  proto chain is unreadable for our keys — H-b's failure mode.)
+
+**Why host can't just reuse standalone's field:** host-mode `{}` / `new F()`
+instances are **host JS objects / opaque WasmGC structs (externref)**, NOT native
+`$Object` structs (the native object runtime is standalone-only — `literals.ts`
+#1901/#2542 gate is `ctx.standalone`). There is no `$Object.$proto` field to write
+host-side. So the two modes necessarily use two link *substrates* (Wasm field vs
+WeakMap) but expose ONE walk protocol (Decision 2) so call sites are mode-agnostic.
+
+## DECISION 2 — the SHARED walk protocol (one walk, not N)
+
+Define a single logical operation per mode that read / `in` / for-in / host-mirror
+all funnel through. **Do not write a fourth walk.**
+
+**Standalone — the walk already exists; the rule is "every dynamic op routes
+through `__extern_get` / `__extern_has`, never a bespoke own-only scan":**
+- Inherited NAMED read → `__extern_get(recv, key)` (walks `$proto`). ✓ exists.
+- `in` / HasProperty → `__extern_has(recv, key)` (walks `$proto`). ✓ exists.
+- Inherited INDEXED read `recv[i]` → `__extern_get_idx(recv, i)`
+  (`object-runtime.ts:3351`). **CHANGE (M3-S):** its `$Object` array-like arm must
+  reduce the index to a string key and call the proto-walking `__extern_get`
+  (`number_toString(i)` → `__extern_get(recv, key)`), NOT an own-table-only
+  `__obj_find`. The helper already imports `__extern_get` for the array-like arm
+  (`object-runtime.ts:3347`); the change is to route the inherited-index case
+  through it. Indexed HasProperty `i in recv` → `__extern_has_idx`
+  (`object-runtime.ts:3623`) similarly delegates to `__extern_has`.
+- for-in (#2572/#2575 lane) → enumerate own keys, then walk `$proto` and append
+  each proto object's enumerable keys not already shadowed. **CHANGE (M3-D, M4):**
+  `__object_keys`/the for-in key-collector currently scans own-only
+  (`object-runtime.ts:~1837` `__hasOwnProperty` is explicitly own-only); for-in
+  must walk `$proto`. Stage this in the for-in/`in`-cluster step, NOT the canary
+  (the canary `new Con().foo` is a named read, not enumeration).
+
+**Host — define ONE resolver `_protoChainLookup(obj, key) -> PropertyDescriptor |
+undefined` that supersedes `_fnctorProtoLookup` and is the SINGLE walk:**
+```
+_protoChainLookup(obj, key):
+  # canonical link 1: the new _objProto WeakMap (Object.create / setPrototypeOf)
+  let p = _objProto.get(obj)
+  while p != null (guard 16):
+     desc = _readOwn(p, key)        # sidecar | wasm-struct field | native own
+     if desc: return desc
+     p = _objProto.get(p) ?? _nativeProtoOf(p)
+  # canonical link 2: fnctor instance → ctor vivified .prototype (#1712, reused)
+  return _fnctorProtoLookup(obj, key)   # unchanged body, now the TAIL of one walk
+```
+- `_safeGet` (`runtime.ts:~3817`) replaces its direct `_fnctorProtoLookup` call
+  with `_protoChainLookup` (which still ends in `_fnctorProtoLookup`, so the #1712
+  class/fnctor path is preserved verbatim — **no double-walk**: it is ONE call
+  that internally tries the WeakMap chain then the fnctor tail).
+- `__extern_has` host arm / `_wasmStructHasOwn`'s caller: add a proto tier so
+  `in` agrees with read. **CHANGE (M3-H-has):** the `in` host path must call
+  `_protoChainLookup(obj,key) !== undefined` AFTER the own-only
+  `_wasmStructHasOwn` returns false — closing the read/has disagreement (H-d).
+  Keep `__hasOwnProperty` own-only (it must NOT walk — §20.1.3.2).
+- host-mirror Proxy (`_wrapForHost`): its `get`/`has` traps already delegate to
+  `_safeGet` / the has path (`runtime.ts:~3257`, ~3979), so once those route
+  through `_protoChainLookup` the mirror inherits the fix **for free** — verify,
+  do not duplicate.
+
+**Invariant for both modes:** read, `in`, for-in, and the host-mirror Proxy each
+call the ONE walk for their mode (`__extern_get`/`__extern_has` standalone;
+`_protoChainLookup` host). No call site re-implements a proto scan.
+
+## DECISION 3 — the POPULATE sites (compose with #1712, no double-walk)
+
+Five sites set the link. Each writes the canonical location from Decision 1.
+
+| Site | Standalone (`$Object.$proto`) | Host (`_objProto` / fnctor sidecar) |
+|---|---|---|
+| **`{}` / object literal** | leave `$proto: null` (correct — plain objects inherit `Object.prototype`, which the native runtime models as the null-terminated chain end). NO CHANGE. | host JS `{}` already inherits `Object.prototype` natively. NO CHANGE. |
+| **`Object.create(p)`** | ✓ already writes `$proto` (`__object_create`). NO CHANGE. | **CHANGE:** the host `__object_create` import (`runtime.ts:7463`) must ALSO record `_objProto.set(result, p)` when `p` is one of our opaque structs, so the shared walk can read `p`'s keys (V8's native `Object.create(opaqueStruct)` can't). Keep the real `Object.create` for the plain-JS-`p` fast path. |
+| **`new F()` (fnctor)** | **CHANGE (M3-S-new, the canary):** after constructing the instance struct, set `instance.$proto = F's prototype $Object`. Requires F's `.prototype` to be a native `$Object` (Decision: synthesize a per-fnctor prototype `$Object` global, seeded from `F.prototype = …` writes; see below). | ✓ `_fnctorInstanceCtor.set(inst, ctor)` already linked (`new-super.ts:1104-1138`, `__register_fnctor_instance`). NO new link — the canary's host fix is making the *vivified-prototype write* (next row) land where `_fnctorProtoLookup` reads. |
+| **`F.prototype = x`** | **CHANGE (M3-S-protoassign):** model a per-constructor prototype `$Object`. When `F.prototype = plainObjLiteral` is assigned, build that literal as an `$Object` and record it as F's prototype (a compile-time map `ctx.fnctorPrototypeObject` keyed by the fnctor name → its prototype `$Object` global), so `new F()` seeds `instance.$proto` from it. | **CHANGE (M3-H-protoassign):** route `F.prototype = x` to `_sidecarSet(ctorClosure, "prototype", x)` — the SAME slot `_getOrVivifyFnPrototype`/`_fnctorProtoLookup` read. Today a whole-prototype reassignment may not land there; make it land there, and make `x` (if an opaque struct) readable by `_fnctorProtoLookup` (it uses `Object.getOwnPropertyDescriptor`, which misses struct fields — so either build `x` as a host-readable object or have `_readOwn` consult the sidecar/struct getters). |
+| **`Object.setPrototypeOf(o,p)`** | ✓ already writes `$proto` (`__object_setPrototypeOf`). NO CHANGE. | **CHANGE (the host stub fix, H-c):** `calls.ts:5562` must STOP dropping the proto. Route host/GC `setPrototypeOf` to a real host import `__object_setPrototypeOf` (host impl: `_objProto.set(o, p)` with the §10.1.2.1 cycle/extensibility check) instead of `drop`. This is the single highest-leverage host change. |
+
+**Composition with #1712 (no double-walk):** the #1712 fnctor mechanism is
+**reused as the TAIL of the one host walk**, never run in addition to it.
+`_protoChainLookup` tries the `_objProto` WeakMap chain first (Object.create /
+setPrototypeOf sites) and falls through to `_fnctorProtoLookup` (new F() + ctor
+vivified prototype). An instance is in AT MOST one of the two link tiers
+(`Object.create` result is not a fnctor instance; a `new F()` instance has no
+`_objProto` entry), so the walk reads exactly one chain — no node is visited
+twice. Standalone composes by construction: there is one field, one walk.
+
+## DECISION 4 — STAGING (each independently merge_group-floor-validatable)
+
+Gated on the static receiver mode + the static populate site so the typed/closed-
+shape hot paths stay byte-identical. **Every step full-gate (merge_group /
+local-ci), NEVER a scoped sweep** — this is value-rep / object-model substrate,
+the `project_broad_impact_validate_full_ci` rule applies (the session's three
+scoped-sweep ejects are the precedent). Stop-the-line on any eject.
+
+- **Stage A — NAMED-read canary `new Con().foo` (smallest, highest-signal).**
+  Both modes. Standalone: M3-S-new + M3-S-protoassign (per-fnctor prototype
+  `$Object`, seed `instance.$proto`). Host: M3-H-protoassign (land
+  `F.prototype = x` in the vivified sidecar slot `_fnctorProtoLookup` reads +
+  make `x` readable). Canary assertion:
+  `function Con(){}; Con.prototype={foo:7}; new Con().foo === 7` (host AND
+  standalone). This is the re-grounding's first canary. **If Stage A ejects on a
+  hidden typed-`.prototype`/typed-instance case, the gating is wrong — STOP**
+  (mirrors the M1 stop-the-line discipline). Lands the `new F()` + `F.prototype=x`
+  link; banks the named-inherited-read subset.
+- **Stage B — `Object.create` + `setPrototypeOf` named reads.** Host: the
+  `setPrototypeOf` stub→real-import fix (H-c) + `Object.create` `_objProto` record
+  (H-b). Standalone: already works for native `$Object` `p` (verify, likely
+  0-delta) — the change is ensuring the `{x:99}`/`{5:99}` literal `p` is built as
+  an `$Object` so its keys are present. Canaries:
+  `Object.create({x:99}).x === 99`; `o={}; Object.setPrototypeOf(o,{y:99}); o.y
+  === 99`. Banks the create/setPrototypeOf reproducers.
+- **Stage C — INDEXED inherited reads + `in`.** Standalone M3-S
+  (`__extern_get_idx`/`__extern_has_idx` route inherited indices through the
+  proto-walking `__extern_get`/`__extern_has`). Host M3-H-has (the `in` path calls
+  `_protoChainLookup`, closing the read/has disagreement). Canaries:
+  `proto={5:99,length:10}; Con.prototype=proto; child=new Con(); child[5]===99`;
+  `(5 in child)===1`. Banks the `Object.create({5:99})[5]` indexed reproducer +
+  the `in` reproducer.
+- **Stage D — the generic-method cluster (`-c-i-`/`-b-i-`).** With reads + `in`
+  proto-aware, `Array.prototype.forEach.call(child, cb)` etc. visit inherited
+  indices correctly. Standalone: the array-method-on-arraylike path
+  (`array-methods.ts`) already reads via `__extern_length`/`__extern_get_idx` →
+  now proto-aware from Stage C. Host: `__proto_method_call` reads via `_safeGet` →
+  now proto-aware from Stage A/B. Canary: `forEach.call(child,cb)` visits index 5
+  (count 1, not 0). This is the bulk of the **168-row** cluster; expect it to flip
+  largely from C's substrate, with a residual subset still needing the #983d
+  method-dispatch body (track separately — do NOT block D on #983d).
+- **(Deferred to M4, not M3) — for-in proto enumeration + `delete`/`hasOwnProperty`
+  honoring the chain.** for-in walks `$proto` for enumerable inherited keys
+  (the #2572/#2575 lane). Out of M3 scope; M3 is read + `in` + indexed +
+  generic-method. Flag for M4 so the for-in lane sequences after M3's walk lands.
+
+Order rationale: A (named, the existing-link-populate proof, both modes) → B
+(create/setPrototypeOf, the host stub fix) → C (indexed + `in`, the
+read/has-agreement fix) → D (generic-method, the row bulk). Each banks a distinct
+reproducer; A is the canary that proves the populate+walk wiring before C/D scale
+it.
+
+## TDD canaries (the 4 reproducers from the Suspended Work resume steps)
+
+Drive each stage with these (all wrong on current main, host AND standalone
+identical — see the re-grounding bisection). Add as a dedicated regression suite
+`tests/issue-2580-m3-protochain.test.ts`, run BOTH modes:
+1. `function Con(){}; Con.prototype={foo:7}; new Con().foo` → want 7 (Stage A)
+2. `Object.create({x:99}).x` → want 99; `Object.create({5:99})[5]` → want 99
+   (Stage B named / Stage C indexed)
+3. `o={}; Object.setPrototypeOf(o,{y:99}); o.y` → want 99 (Stage B)
+4. `proto={5:99,length:10}; Con.prototype=proto; child=new Con();`
+   `(5 in child)` → want 1; `Array.prototype.forEach.call(child,cb)` visits index
+   5 → want count 1 (Stage C / D)
+
+## RUNNER TRAP — flag prominently for the implementing dev
+
+> ⚠️ **VALIDATE PER-PROCESS, NOT an in-process `runTest262File` loop.** Bucketing
+> the 170 `-c-i-`/`-b-i-` rows IN ONE in-process loop falsely reports ~42 as
+> `compile_error: Cannot read properties of undefined (reading 'kind')` — a
+> TS-parser (`createSourceFile` → `canHaveModifiers`) crash from cross-compile
+> state bleed in the in-process runner. It is FALSE: each test in a FRESH process
+> is a clean result. Use the sharded `compiler-fork-worker.mjs` (one fork per
+> test, the path that records the committed JSONL) — it is unaffected. Always
+> isolate per-process when measuring this cluster, and treat the FULL merge_group
+> floor as the only authoritative conformance signal (never a scoped sweep).
+
+## Risk register
+
+- **Hot-path byte-identity (prime directive).** Gate every change on the dynamic
+  receiver mode + populate site. Typed/closed-shape instances (`class C` with a
+  static struct, `number[]`, typed `new TypedClass()`) must NOT enter the new
+  arms — they have a compile-time-known shape and their `.foo`/`[i]` reads are
+  struct.get/vec.get, untouched. Stage A's canary is the regression tripwire.
+- **The standalone non-`$Object` proto target** (a class-struct or `$Vec` as a
+  proto) is coerced to null at the write site (existing `__object_create`/
+  `__object_setPrototypeOf` behavior). M3 does NOT add cross-rep proto chains;
+  if a reachable test needs `$Object`→class-struct inheritance, that is a tracked
+  follow-on, not an M3 eject.
+- **Host `setPrototypeOf` cycle check** (§10.1.2.1) — port the standalone helper's
+  cycle/extensibility logic into the new host import; do NOT ship a host
+  `_objProto.set` without it (a cyclic chain would loop the 16-guard walk; keep
+  the guard AND refuse cycles).
+- **`__hasOwnProperty` / `propertyIsEnumerable` must stay own-only** (§20.1.3.2/4)
+  even after `in` becomes proto-aware — they are separate predicates; do not route
+  them through the proto walk.
+- **for-in is M4, not M3** — keep it out of scope so the M3 walk lands without the
+  enumeration-shadowing complexity; sequence the #2572/#2575 for-in lane after.
+
+## Files / functions to touch (precise sites)
+
+- **Standalone link + walk (mostly exists):** `src/codegen/object-runtime.ts` —
+  `__extern_get_idx` (`:3351`, body `buildExternGetIdxBody`) and `__extern_has_idx`
+  (`:3623`): route inherited indices through `__extern_get`/`__extern_has`
+  (Stage C). `__new_plain_object` (`:631`) stays `$proto: null` (no change).
+- **Standalone populate:** `src/codegen/expressions/new-super.ts`
+  `compileFnctorNew` (the `__fnctor_<name>` ctor builder, ~`:998`-1166): after
+  constructing the instance, set `instance.$proto` to F's prototype `$Object`
+  (Stage A). New compile-time map `ctx.fnctorPrototypeObject` (add to
+  `src/codegen/context/types.ts`) keyed by fnctor name → prototype `$Object`
+  global; seeded by the `F.prototype = x` assignment site
+  (`src/codegen/object-ops.ts` / the property-write path).
+- **Host link + walk:** `src/runtime.ts` — add `_objProto` WeakMap (near
+  `_fnctorInstanceCtor`, `:71`); add `_protoChainLookup` (supersede the direct
+  `_fnctorProtoLookup` call in `_safeGet`, `:~3817`); add the proto tier to the
+  `in`/HasProperty host path (after `_wasmStructHasOwn`, `:2900`). `__object_create`
+  import (`:7463`): record `_objProto` for opaque-struct protos.
+- **Host setPrototypeOf stub fix:** `src/codegen/expressions/calls.ts` `:5562`
+  (the GC/host arm) — replace the `drop` with a real `__object_setPrototypeOf`
+  host import; implement that import in `src/runtime.ts` (`_objProto.set` + cycle
+  check) (Stage B).
+- **Host `F.prototype = x`:** the property-write path for a `.prototype` LHS on a
+  fnctor — land the assignment in `_sidecarSet(ctor,"prototype",x)` and ensure
+  `_fnctorProtoLookup`'s `_readOwn` can read `x`'s keys when `x` is an opaque
+  struct (Stage A).
+- **Tests:** `tests/issue-2580-m3-protochain.test.ts` (new), both modes.
+
+## Estimate / sequencing note
+
+~3–5 senior-dev days as the re-grounding sized, but **Stage A is a ~1–2 day
+landable canary** (the standalone walk + host fnctor mechanism already exist; A is
+populate-wiring + the host vivified-slot fix). B is the host `setPrototypeOf`
+stub→import fix (~1 day, the single highest-host-leverage change). C is the
+indexed + `in` agreement (~1–2 days). D rides on A–C's substrate plus #983d
+coordination for the residual. **Hold B–D behind Stage A's full-gate result.**
+This is senior-dev / value-rep lane (coordinate `project_standalone_any_string_
+value_read_substrate`); NOT dev-claimable until Stage A's gating is proven.
+
+---
+
+# M3 — STAGE A: SPEC MIS-ATTRIBUTED — DEFER (verified 2026-06-23, sd-value-rep, max-reasoning)
+
+> Per the implementer's verify-before-commit guardrail (architect specs this
+> session proved fallible — the #2623 Slice-A spec mis-attributed its mechanism
+> end-to-end). I drove the 4 TDD canaries against CURRENT main with a faithful
+> **per-process** harness (`.tmp/repro.mjs` — one snippet, one mode, one fresh
+> `WebAssembly.instantiate`, both host + standalone). The fault reproduces, but
+> **Stage A's specified mechanism does not match the actual fault** — the same
+> failure class as #2623-A. NO code landed; this is a clean docs-only stop.
+
+## What I verified (faithful per-process, NOT the in-process loop trap)
+
+The canary `function Con(){}; Con.prototype = {foo:7}; new Con().foo`:
+- **HOST** → `undefined` (spec said "NaN"; the NaN was the test262 runner's numeric
+  coercion of the `undefined` miss — confirmed: the raw `.foo` value is `undefined`).
+- **STANDALONE** → numeric `0` (the inherited read misses; `typeof v === "number"`).
+
+Both wrong, both modes — consistent with the re-grounding's headline. So the
+*symptom* is real. But bisecting the *mechanism* contradicts the spec's
+link-location decision in BOTH modes:
+
+### STANDALONE — the spec's "seed `instance.$proto`" is NOT IMPLEMENTABLE as written
+
+The spec (Decision 1 + M3-S-new) says: reuse the existing `$Object.$proto` field
+(field 0), and `new F()` should "set `instance.$proto = F's prototype $Object`."
+**But a standalone `new Con()` instance is NOT an `$Object`** — it is a bespoke
+`$__fnctor_Con` struct built field-by-field from the ctor's `this.x=` assignments
+(`new-super.ts:998` `struct.new ${structName}`, fields collected at ~981). For the
+canary `function Con(){}` (empty body) the struct is literally `(struct )` — **no
+fields, and crucially NO `$proto` field to seed.** Verified from the emitted WAT:
+`(type $__fnctor_Con (struct ))`. The `c.foo` read routes through the M2 reader
+`emitDynGet` → `__dyn_get` → `__extern_get`, whose `$proto` walk only knows
+`$Object` (`object-runtime.ts:844` `struct.get $Object 0`); it `ref.test $Object`
+MISSES the `$__fnctor_Con` struct and returns absent.
+
+So "seed `instance.$proto`" has no field to write. Closing the standalone canary
+requires one of (all object-model-substrate, NOT the ~1–2-day populate-wiring the
+spec promised, and all with the broad blast radius Stage A was meant to AVOID):
+1. **Add a `$proto` field to every `$__fnctor_<name>` struct** — shifts every
+   fnctor own-field index, the `this.x=` write paths, and the own-field
+   `struct.get`; AND teach `__extern_get`/`__extern_has`'s walk a new arm that
+   recognizes fnctor structs and reads *their* `$proto` (today it only walks
+   `$Object`). Two walks, the anti-pattern the spec itself warns against.
+2. **Construct fnctor instances as `$Object`s** — changes object identity for
+   every `new F()` (Decision 1's explicitly-rejected option (b), "far larger
+   blast radius").
+3. A per-fnctor compile-time prototype-`$Object` map + a NEW fnctor-struct read
+   arm in `__extern_get` — still a new walk + a struct-shape interaction.
+
+The spec's premise "the standalone walk machinery already exists; the gap is
+purely POPULATE" is the mis-attribution: the walk exists **only for `$Object`**,
+and the canary's receiver is never an `$Object`. There is no `$proto` to populate.
+
+> **Counter-evidence the spec missed (and the actually-tractable seam):** the
+> standalone `$proto` walk *does* work when the receiver IS a real `$Object` with
+> a materialized `$Object` proto — `const p:any={foo:7}; const c:any=Object.create(p);
+> c.foo` → **7** ✓, and `const p:any={foo:7}; const o:any={}; Object.setPrototypeOf(o,p);
+> o.foo` → **7** ✓ (both verified). Only the **inline-literal** proto arg
+> (`Object.create({foo:7})`) regresses to `0` — a literal-materialization gap, not
+> a walk gap. So the genuinely landable standalone first-canary is NOT the fnctor
+> `new Con()` (Stage A) but the **`Object.create`/`setPrototypeOf` named-proto
+> path, already green**, with a narrow inline-literal-as-`$Object` fix — i.e. the
+> spec's Stage B is *more* tractable standalone than its Stage A.
+
+### HOST — the spec's H-a link is ABSENT for the canary's exact shape, + the write is dropped
+
+Spec H-a: "`new F()` instances link to their ctor via `_fnctorInstanceCtor`;
+a miss resolves through `_fnctorProtoLookup`." Verified FALSE for the canary:
+- For a **plain `function Con(){}` declaration**, there is NO closure global, so
+  the `__register_fnctor_instance` emission is gated OFF (`new-super.ts:1118-1138`
+  requires `ctx.moduleGlobals.get(funcName) ?? ctx.funcClosureGlobals.get(funcName)`,
+  which is `undefined` for a hoisted decl). Confirmed from the emitted imports:
+  the canary module imports only `__extern_get`/`__box_number`/`__unbox_number` —
+  **no `__register_fnctor_instance`** — so the instance→ctor link is never
+  established. `_fnctorProtoLookup` returns `undefined` for the canary instance.
+  (The #1712 mechanism the spec leans on fires only for a *closure-valued*
+  `const Con = function(){}` — verified: `const Con=function(){}; Con.prototype.foo=7;
+  new Con().foo` → **7** ✓. The canary uses a declaration, which the link skips.)
+- The whole-object write `Con.prototype = {foo:7}` is **dropped entirely** — no
+  host call is emitted for it (verified in WAT: no `__extern_set`, no sidecar
+  write). Even `(Con as any).prototype.foo` reads `undefined` directly.
+- `Object.create(namedProtoVar)` host → `undefined`/NaN too (H-b: V8's native
+  `Object.create(opaqueStruct)` can't walk our struct's keys).
+
+So host Stage A is THREE gaps stacked (no link for declarations · dropped write ·
+unreadable opaque-struct proto), not the single "land the write in the vivified
+slot" the spec scoped.
+
+## VERDICT: Stage A as specified is mis-attributed — DEFER, do not force
+
+This is the #2623-A failure class the task flagged: the spec's central mechanism
+("populate the existing `$proto`/vivified-slot — ~1–2 days") does not match the
+fault. The standalone canary has **no `$proto` field on the fnctor instance to
+populate** (the receiver is never an `$Object`); the host canary has **no
+instance→ctor link for a function declaration** plus a **dropped prototype write**.
+Forcing it means an object-model struct-shape change (add `$proto` to every fnctor
+struct, or reconstruct fnctor instances as `$Object`s) + a second walk arm — the
+exact broad-blast-radius, hot-path-regression-prone substrate change Stage A's
+"smallest, highest-signal canary" framing was designed to avoid, and the
+stop-the-line tripwire ("if Stage A ejects on a typed-instance case, gating is
+wrong → STOP") would almost certainly fire.
+
+**Recommended re-spec (flagged to lead):**
+1. **Re-pick the standalone canary**: the fnctor `new Con()` is the *hardest*
+   standalone shape, not the easiest — its instance isn't an `$Object`. The
+   genuinely-landable standalone first canary is the **`Object.create` /
+   `setPrototypeOf` named-proto path (already green)** + a narrow
+   inline-literal-proto-as-`$Object` materialization fix. Make that the new Stage A.
+2. **Decide the fnctor-instance representation explicitly** (the real Decision 1
+   the spec skipped): does a standalone `new F()` instance carry a `$proto` (struct
+   field, with the index-shift + walk-arm cost), or is it reconstructed as an
+   `$Object`? This is an architect call, not a populate-wiring task — and it is
+   the precondition for the fnctor named-read AND the indexed/`in`/generic-method
+   stages (C/D) that all assume the instance participates in the `$proto` walk.
+3. **Host**: emit `__register_fnctor_instance` for **function-declaration** ctors
+   too (not only closure-valued ones), and land `F.prototype = x` in the
+   `_fnctorProtoLookup`-read sidecar slot AND make an opaque-struct `x` readable —
+   three concrete sub-fixes, each its own small gated PR, none of which is the
+   single "vivified-slot write" the spec named.
+
+No source changed. Per-process harness was in `.tmp/` (gitignored). Issue stays
+`in-progress`; claim released. This finding is the durable deliverable — the spec
+needs the fnctor-instance-representation decision before Stage A is implementable.

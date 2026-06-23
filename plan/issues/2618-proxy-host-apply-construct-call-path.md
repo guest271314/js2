@@ -1,10 +1,12 @@
 ---
 id: 2618
 title: "Proxy (host): calling / constructing a Proxy whose target is callable traps (illegal cast) or ignores the construct trap result (~15 fails)"
-status: ready
+status: blocked
 sprint: 65
 created: 2026-06-22
-updated: 2026-06-22
+updated: 2026-06-23
+blocked_on: [56]
+reconcile_note: "DEFERRED 2026-06-23 — per #1944 investigation the prototype was net-negative (+4/-1 hard PASS→ERR). Depends on #2615 (landed) AND blocked on sd-1838's #56 call/construct-dispatch rework (the __fn_tramp_Constructor cross-realm path). Defer until #56 lands; not staffing-ready."
 priority: medium
 feasibility: hard
 reasoning_effort: high

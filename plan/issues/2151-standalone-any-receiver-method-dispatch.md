@@ -1,10 +1,12 @@
 ---
 id: 2151
 title: "standalone: any-receiver method dispatch — o.method() on a closed object-literal struct doesn't invoke"
-status: in-progress
+status: done
+completed: 2026-06-23
 sprint: 65
 created: 2026-06-14
-updated: 2026-06-17
+updated: 2026-06-23
+reconcile_note: "DONE 2026-06-23 — Slices 1-5 all merged (0-arg → N-ary → static-spread → dynamic-spread PR#1766 → mixed-spread PR#1814). The standalone any-receiver dispatch path is closed. Remaining edges belong to OTHER lanes: --target wasi array-like arms (broader WASI change) and ref/string-typed any-receiver params (#2580 M2 coercion-on-any). No standalone dev slice remains under this issue."
 priority: high
 feasibility: hard
 reasoning_effort: max
