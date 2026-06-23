@@ -1549,6 +1549,10 @@ export interface CodegenContext {
   nodeIoStderrWriteIdx: number;
   /** #2524: func index of the imported `js2wasm:node-process::stdin_read` (-1 = not registered). */
   nodeIoStdinReadIdx: number;
+  /** #2631: func index of the imported `js2wasm:node-fs::read_sync` (fd,ptr,len)->i32 (-1 = not registered). */
+  nodeFsReadSyncIdx: number;
+  /** #2631: func index of the imported `js2wasm:node-fs::write_sync` (fd,ptr,len)->i32 (-1 = not registered). */
+  nodeFsWriteSyncIdx: number;
   /** WASI import indices */
   wasiFdWriteIdx: number;
   wasiFdReadIdx?: number;

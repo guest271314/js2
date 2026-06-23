@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { compile } from "../src/index.js";
+import { buildNodeFsShim } from "../scripts/build-node-fs-shim.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm.ts");
@@ -62,8 +63,23 @@ function runCaptureWrites(binary: Uint8Array, stdin: Uint8Array): { sizes: numbe
       return 0;
     },
   };
-  const inst = new WebAssembly.Instance(new WebAssembly.Module(binary), { wasi_snapshot_preview1: wasi, env: {} });
-  ref.mem = inst.exports.memory as WebAssembly.Memory;
+  // #2631 — the example now uses node:fs readSync/writeSync via the node:fs
+  // shim (--link-node-shims). Instantiate the shim FIRST (it owns the memory and
+  // makes the fd_read/fd_write WASI calls), then the user module importing
+  // {memory, readSync, writeSync} from the shim. fd=1 writes are still issued by
+  // the shim's writeSync over the shared memory, so the size capture is unchanged.
+  const shim = new WebAssembly.Instance(new WebAssembly.Module(buildNodeFsShim()), {
+    wasi_snapshot_preview1: wasi,
+  });
+  ref.mem = shim.exports.memory as WebAssembly.Memory;
+  const inst = new WebAssembly.Instance(new WebAssembly.Module(binary), {
+    "node:fs": {
+      memory: shim.exports.memory,
+      readSync: shim.exports.readSync,
+      writeSync: shim.exports.writeSync,
+    },
+    env: {},
+  });
   (inst.exports.main as () => void)();
   const out = Uint8Array.from(chunks.flatMap((c) => Array.from(c)));
   return { sizes, out };
@@ -79,7 +95,11 @@ function frame(jsonBody: string): Uint8Array {
 
 describe("#2526 Native Messaging host — atomic frame writes", () => {
   it("writes a small (<=1 MiB) message as one fd_write (no bare 4-byte length write)", async () => {
-    const r = await compile(readFileSync(hostPath, "utf-8"), { fileName: "nm_js2wasm.ts", target: "wasi" });
+    const r = await compile(readFileSync(hostPath, "utf-8"), {
+      fileName: "nm_js2wasm.ts",
+      target: "wasi",
+      linkNodeShims: true,
+    });
     expect(r.success).toBe(true);
     const { sizes } = runCaptureWrites(r.binary, frame(JSON.stringify([1, 2, 3])));
     expect(sizes).not.toContain(4); // no standalone length-prefix write
@@ -88,7 +108,11 @@ describe("#2526 Native Messaging host — atomic frame writes", () => {
   });
 
   it("writes each re-chunked frame of a >1 MiB message atomically (writes == frames, none is 4 bytes)", async () => {
-    const r = await compile(readFileSync(hostPath, "utf-8"), { fileName: "nm_js2wasm.ts", target: "wasi" });
+    const r = await compile(readFileSync(hostPath, "utf-8"), {
+      fileName: "nm_js2wasm.ts",
+      target: "wasi",
+      linkNodeShims: true,
+    });
     expect(r.success).toBe(true);
     const N = 209715 * 2; // ~2 MiB → multiple re-chunked frames
     const body = JSON.stringify(Array(N));
