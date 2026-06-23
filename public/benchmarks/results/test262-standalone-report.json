@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-23T22:02:31.265Z",
-  "baseline_generated_at": "2026-06-23T22:02:31.265Z",
-  "baseline_sha": "763341d859654a91aa536a2296ab9260eeacd7f7",
+  "timestamp": "2026-06-23T22:32:30.462Z",
+  "baseline_generated_at": "2026-06-23T22:32:30.462Z",
+  "baseline_sha": "2dea71179f1d47422933383387677e6ce7640204",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -1259,7 +1259,7 @@
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(stack.adopt(resource, _ => {}), resource);",
           "other:L#:## Codegen error: AsyncDisposableStack.length built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
           "wasm_compile:L#:## Symbol(Symbol.dispose) is not a function",
-          "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).; L#:## Codegen error: AsyncDisposableStack.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a nat"
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { AsyncDisposableStack(); });"
         ]
       },
       {
@@ -1450,23 +1450,23 @@
           "total": 424
         },
         "error_categories": {
-          "runtime_error": 164,
           "assertion_fail": 129,
+          "runtime_error": 164,
           "other": 16,
           "illegal_cast": 50,
           "wasm_compile": 20,
           "null_deref": 45
         },
         "sample_files": [
-          "test/built-ins/RegExp/prototype/flags/coercion-ignoreCase.js",
           "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
+          "test/built-ins/RegExp/prototype/flags/coercion-ignoreCase.js",
           "test/annexB/built-ins/RegExp/legacy-accessors/leftContext/this-not-regexp-constructor.js",
           "test/language/literals/regexp/S7.8.5_A2.3_T4.js",
           "test/built-ins/Proxy/has/trap-is-missing-target-is-proxy.js"
         ],
         "sample_signatures": [
-          "runtime_error:Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
+          "runtime_error:Cannot convert object to primitive value",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "runtime_error:L#:## Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert(Reflect.has(regExpProxy, \"ignoreCase\"));"
@@ -1992,8 +1992,8 @@
           "total": 302
         },
         "error_categories": {
-          "assertion_fail": 161,
           "runtime_error": 119,
+          "assertion_fail": 161,
           "illegal_cast": 4,
           "other": 5,
           "wasm_compile": 6,
@@ -2002,15 +2002,15 @@
           "negative_test_fail": 1
         },
         "sample_files": [
-          "test/language/function-code/10.4.3-1-98-s.js",
           "test/language/function-code/10.4.3-1-74gs.js",
+          "test/language/function-code/10.4.3-1-98-s.js",
           "test/language/expressions/arrow-function/lexical-this.js",
           "test/built-ins/Function/S15.3.5_A2_T1.js",
           "test/language/function-code/10.4.3-1-101gs.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: assert((function () {\"use strict\"; return f.bind(o)();})());",
           "runtime_error:Cannot convert object to primitive value",
+          "assertion_fail:returned # — assert ## at L#: assert((function () {\"use strict\"; return f.bind(o)();})());",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(f.af(), f);",
           "illegal_cast:L#:## illegal cast [in test()]",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { C(); });"
@@ -2066,8 +2066,8 @@
           "assertion_fail": 74,
           "null_deref": 6,
           "other": 1,
-          "wasm_compile": 4,
           "negative_test_fail": 4,
+          "wasm_compile": 4,
           "illegal_cast": 1
         },
         "sample_files": [
@@ -2286,8 +2286,8 @@
         },
         "sample_files": [
           "test/language/expressions/object/method-definition/forbidden-ext/b2/async-meth-forbidden-ext-indirect-access-own-prop-caller-get.js",
-          "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/all/resolve-element-function-extensible.js",
+          "test/built-ins/Promise/race/same-resolve-function.js",
           "test/built-ins/Promise/allSettled/reject-element-function-multiple-calls.js",
           "test/built-ins/Promise/any/ctx-non-ctor.js"
         ],
@@ -2324,7 +2324,7 @@
           "test/language/module-code/instn-star-props-circular.js",
           "test/language/module-code/top-level-await/syntax/early-does-not-propagate-to-fn-declaration-params.js",
           "test/language/module-code/instn-star-props-dflt-keep-indirect.js",
-          "test/language/module-code/top-level-await/new-await-parens.js"
+          "test/language/module-code/parse-err-hoist-lex-fun.js"
         ],
         "sample_signatures": [
           "other:[object WebAssembly.Exception]",
@@ -2402,8 +2402,8 @@
           "negative_test_fail:expected parse/early SyntaxError but compiled and instantiated successfully",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.convert_i32_s of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local",
           "assertion_fail:returned # — assert ## at L#: assert(foo.call(undefined));",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.lt of type i32 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (l",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.sub of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) ("
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.sub of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.lt of type i32 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (l"
         ]
       },
       {
@@ -2458,14 +2458,14 @@
           "test/built-ins/Atomics/load/expected-return-value.js",
           "test/built-ins/SharedArrayBuffer/negative-length-throws.js",
           "test/built-ins/SharedArrayBuffer/length-is-too-large-throws.js",
-          "test/built-ins/WeakRef/throws-when-target-cannot-be-held-weakly.js"
+          "test/built-ins/WeakRef/undefined-newtarget-throws.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { FinalizationRegistry(); });",
           "illegal_cast:L#:## illegal cast [in test()]",
           "assertion_fail:returned # — assert ## at L#: assert.throws(RangeError, function() { new SharedArrayBuffer(-#); });",
           "assertion_fail:returned # — assert ## at L#: assert.throws(RangeError, function() { // Math.pow(#, #) = # new SharedArrayBuffer(#); }, \"`length` parameter is too large\");",
-          "runtime_error:L#:## WeakRef: invalid target"
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { WeakRef(); });"
         ]
       },
       {
