@@ -671,7 +671,7 @@ function compileObjectLiteralWithAccessors(
         continue;
       }
       if (methodName === undefined) continue;
-      // (#6408) Same dual-mode key fix as the data-property arm above: the raw
+      // (#2194) Same dual-mode key fix as the data-property arm above: the raw
       // `global.get <stringGlobalMap.get(method)>` baked `global.get -1` in
       // standalone for a method key on a literal that also takes the accessor
       // path. Route through the guarded helper.
@@ -782,7 +782,7 @@ function emitObjectLiteralAccessorFn(
 }
 
 /**
- * (#6408 follow-up) Compile an object-literal METHOD body and leave a callable
+ * (#2194 follow-up) Compile an object-literal METHOD body and leave a callable
  * externref on the stack for `__extern_set`. Mirrors the getter/setter routing
  * in `emitObjectLiteralAccessorFn`: standalone → host-free closure
  * (`compileArrowAsClosure`, converted to externref) so the method does NOT leak

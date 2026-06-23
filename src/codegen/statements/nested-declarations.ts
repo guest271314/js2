@@ -258,6 +258,22 @@ export function compileNestedFunctionDeclaration(
     hasTdzFlag: boolean;
     /** Outer-fctx flag local index (i32 flag OR boxed ref-cell ref). */
     tdzFlagIdx?: number;
+    /**
+     * #2623 Slice A: the captured local is ALREADY a ref cell in the outer
+     * scope (registered in `fctx.boxedCaptures`) — e.g. an outer fn that is
+     * itself materialized as a closure VALUE threads a mutable capture as a
+     * boxed `$cell` param, and a nested fn re-captures the SAME name. The
+     * outer slot IS the canonical cell; re-boxing it here produced a
+     * `$cell-of-cell` whose deref depth desynced the construction-site cast
+     * (illegal cast in Constructor()) AND the lifted body's struct.get/set
+     * (read garbage → callCount never increments). Mirrors the arrow path's
+     * `alreadyBoxed` handling (closures.ts:1681/1728-1748/2457-2476). When
+     * set, thread the existing cell through instead of wrapping again.
+     */
+    alreadyBoxed: boolean;
+    /** Inner value type of the outer cell (when alreadyBoxed) — the depth the
+     * lifted body's struct.get/set should produce/consume. */
+    boxedValType?: ValType;
   }[] = [];
   for (const name of referencedNames) {
     if (ownLocals.has(name)) continue;
@@ -322,7 +338,23 @@ export function compileNestedFunctionDeclaration(
     // the destructure-assign path to be box-aware. Both are out of scope
     // for this PR; the test is marked `.todo` until that follow-up lands.
     const isMutable = writtenInBody.has(name);
-    captures.push({ name, type, localIdx, mutable: isMutable, hasTdzFlag, tdzFlagIdx });
+    // #2623 Slice A: detect a capture whose outer slot is already the canonical
+    // ref cell (the outer scope boxed it). For such a name `type` above is the
+    // cell ref type, so the generic mutable-capture path would re-box to a
+    // cell-of-cell. Remember the outer cell's inner value type so the lifted
+    // body derefs to the right depth.
+    const outerBoxedEntry = fctx.boxedCaptures?.get(name);
+    const alreadyBoxed = !!outerBoxedEntry;
+    captures.push({
+      name,
+      type,
+      localIdx,
+      mutable: isMutable,
+      hasTdzFlag,
+      tdzFlagIdx,
+      alreadyBoxed,
+      boxedValType: outerBoxedEntry?.valType,
+    });
   }
 
   // (#2172 / SF-1 of #2157) Wasm-native lowering for a NESTED `function*` in
@@ -578,6 +610,14 @@ export function compileNestedFunctionDeclaration(
     // For mutable captures, use ref cell types so writes propagate back
     const valueCaptureParamTypes: ValType[] = captures.map((c) => {
       if (c.mutable) {
+        // #2623 Slice A: when the outer slot is ALREADY the canonical cell,
+        // thread it through unchanged (single box) rather than wrapping again
+        // into a cell-of-cell — the construction site (emitFuncRefAsClosure)
+        // pushes the existing cell when `boxedCaptures.has(name)`, and the
+        // lifted body's struct.get/set must match that single depth.
+        if (c.alreadyBoxed) {
+          return c.type;
+        }
         const refCellTypeIdx = getOrRegisterRefCellType(ctx, c.type);
         return { kind: "ref" as const, typeIdx: refCellTypeIdx };
       }
@@ -636,6 +676,20 @@ export function compileNestedFunctionDeclaration(
     // scope, so the body code dereferences through the ref cell.
     for (const cap of captures) {
       if (cap.mutable) {
+        // #2623 Slice A: when the outer slot is already the canonical cell, the
+        // param carries that cell type directly (see valueCaptureParamTypes
+        // above). Register the EXISTING cell's typeidx + its inner value type so
+        // the lifted body's struct.get/set deref exactly once to the value
+        // (matching the single-box param), not twice through a cell-of-cell.
+        if (cap.alreadyBoxed && (cap.type.kind === "ref" || cap.type.kind === "ref_null")) {
+          const refCellTypeIdx = (cap.type as { typeIdx: number }).typeIdx;
+          if (!liftedFctx.boxedCaptures) liftedFctx.boxedCaptures = new Map();
+          liftedFctx.boxedCaptures.set(cap.name, {
+            refCellTypeIdx,
+            valType: cap.boxedValType ?? { kind: "f64" },
+          });
+          continue;
+        }
         const refCellTypeIdx = getOrRegisterRefCellType(ctx, cap.type);
         if (!liftedFctx.boxedCaptures) liftedFctx.boxedCaptures = new Map();
         liftedFctx.boxedCaptures.set(cap.name, { refCellTypeIdx, valType: cap.type });

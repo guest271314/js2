@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
+import { buildNodeFsShim } from "../scripts/build-node-fs-shim.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm.ts");
@@ -23,7 +24,7 @@ async function compileHost(): Promise<Uint8Array> {
   if (!hostBinary) {
     hostBinary = (async () => {
       const src = readFileSync(hostPath, "utf-8");
-      const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
+      const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi", linkNodeShims: true });
       expect(result.success, result.success ? "" : result.errors.map((e) => e.message).join("\n")).toBe(true);
       expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
       return result.binary;
@@ -173,11 +174,21 @@ function runHostWithPatternInput(binary: Uint8Array, totalBodyBytes: number): Ho
     },
   };
 
-  const inst = new WebAssembly.Instance(new WebAssembly.Module(binary), {
+  // #2631 — the host uses node:fs readSync/writeSync via the node:fs shim.
+  // Instantiate the shim first (it owns the memory + makes the WASI fd_* calls),
+  // then the user module importing {memory, readSync, writeSync} from the shim.
+  const shim = new WebAssembly.Instance(new WebAssembly.Module(buildNodeFsShim()), {
     wasi_snapshot_preview1: wasi,
+  });
+  ref.mem = shim.exports.memory as WebAssembly.Memory;
+  const inst = new WebAssembly.Instance(new WebAssembly.Module(binary), {
+    "node:fs": {
+      memory: shim.exports.memory,
+      readSync: shim.exports.readSync,
+      writeSync: shim.exports.writeSync,
+    },
     env: {},
   });
-  ref.mem = inst.exports.memory as WebAssembly.Memory;
   (inst.exports.main as () => void)();
 
   return {

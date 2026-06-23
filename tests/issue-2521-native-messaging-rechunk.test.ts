@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { compile } from "../src/index.js";
+import { buildNodeFsShim } from "../scripts/build-node-fs-shim.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm.ts");
@@ -69,11 +70,20 @@ function runWasiRaw(binary: Uint8Array, stdin: Uint8Array): Uint8Array {
       return 0;
     },
   };
-  const inst = new WebAssembly.Instance(new WebAssembly.Module(binary), {
+  // #2631 — node:fs shim: instantiate it first (owns memory + WASI fd_*), then
+  // the user module importing {memory, readSync, writeSync} from the shim.
+  const shim = new WebAssembly.Instance(new WebAssembly.Module(buildNodeFsShim()), {
     wasi_snapshot_preview1: wasi,
+  });
+  ref.mem = shim.exports.memory as WebAssembly.Memory;
+  const inst = new WebAssembly.Instance(new WebAssembly.Module(binary), {
+    "node:fs": {
+      memory: shim.exports.memory,
+      readSync: shim.exports.readSync,
+      writeSync: shim.exports.writeSync,
+    },
     env: {},
   });
-  ref.mem = inst.exports.memory as WebAssembly.Memory;
   (inst.exports.main as () => void)();
   const fd1 = writes.filter(([fd]) => fd === 1).flatMap(([, b]) => Array.from(b));
   return Uint8Array.from(fd1);
@@ -115,14 +125,22 @@ function parseFrames(bytes: Uint8Array): string[] {
 
 describe("#2521 Native Messaging host — >1 MiB re-chunking + multi-message sequence", () => {
   it("echoes a <=1 MiB message verbatim in a single frame", async () => {
-    const result = await compile(readFileSync(hostPath, "utf-8"), { fileName: "nm_js2wasm.ts", target: "wasi" });
+    const result = await compile(readFileSync(hostPath, "utf-8"), {
+      fileName: "nm_js2wasm.ts",
+      target: "wasi",
+      linkNodeShims: true,
+    });
     expect(result.success).toBe(true);
     const frames = parseFrames(runWasiRaw(result.binary, frame(JSON.stringify([1, 2, 3]))));
     expect(frames).toEqual(["[1,2,3]"]);
   });
 
   it("re-chunks a >1 MiB array into multiple <=1 MiB JSON-array frames that reassemble to the original", async () => {
-    const result = await compile(readFileSync(hostPath, "utf-8"), { fileName: "nm_js2wasm.ts", target: "wasi" });
+    const result = await compile(readFileSync(hostPath, "utf-8"), {
+      fileName: "nm_js2wasm.ts",
+      target: "wasi",
+      linkNodeShims: true,
+    });
     expect(result.success).toBe(true);
     const N = 209715 * 2; // ~2 MiB JSON body — strictly above the 1 MiB cap
     const big = Array(N); // sparse → JSON renders as [null, null, …]
@@ -143,7 +161,11 @@ describe("#2521 Native Messaging host — >1 MiB re-chunking + multi-message seq
   });
 
   it("processes the reporter's multi-message sequence (big then small) with no desync", async () => {
-    const result = await compile(readFileSync(hostPath, "utf-8"), { fileName: "nm_js2wasm.ts", target: "wasi" });
+    const result = await compile(readFileSync(hostPath, "utf-8"), {
+      fileName: "nm_js2wasm.ts",
+      target: "wasi",
+      linkNodeShims: true,
+    });
     expect(result.success).toBe(true);
     const N = 209715 * 2; // ~2 MiB
     const big = Array(N);

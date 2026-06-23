@@ -958,7 +958,7 @@ export function compileSourceSync(
   // it contributes an identity map and is omitted from the composition.
   const cjsRewritten2 = rewriteEvalSuperCall(cjsRewritten);
   const wasiNodeFsFuncs = detectNodeFsImports(cjsRewritten);
-  const preprocessed = preprocessImports(cjsRewritten2);
+  const preprocessed = preprocessImports(cjsRewritten2, { wasi: options.target === "wasi" });
   const processedSource = preprocessed.source;
   // Composed map: processedSource → original source. Pipeline output order is
   // define → cjs → (eval/super, identity) → imports, so compose outermost-first.
@@ -1074,6 +1074,16 @@ export function compileSourceSync(
     1100, // "Invalid use of 'X' in strict mode" — sloppy-mode JS allows eval/arguments (#331)
     1121, // "Octal literals are not allowed in strict mode" — valid sloppy-mode JS
     1489, // "Decimals with leading zeros are not allowed" — valid sloppy-mode JS octal literals
+    // #2631/#1768 — "Signature declarations can only be used in TypeScript files."
+    // Fires under checkJs at the import site when a `.js` file imports a value
+    // whose synthetic `.d.ts` typing is a callable/overloaded declaration (e.g.
+    // `import { readSync, writeSync } from "node:fs"` resolving to the node-emu
+    // typings). Benign for codegen — the import resolves and lowers regardless.
+    // Scoped to this exact code so it does NOT relax the gate for genuine
+    // strict-mode SyntaxErrors (e.g. duplicate params), which the eval shim
+    // (src/runtime-eval.ts) relies on `compileSourceSync(...).success === false`
+    // to surface as a thrown SyntaxError (the 17 strict-eval test262 cases).
+    8017,
   ]);
   const hasSyntaxErrors = ast.syntacticDiagnostics.some(
     (d) => d.category === 1 && d.file === ast.sourceFile && !TOLERATED_SYNTAX_CODES.has(d.code),

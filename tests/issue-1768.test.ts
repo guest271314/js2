@@ -16,12 +16,13 @@ import { compile } from "../src/index.js";
 const here = dirname(fileURLToPath(import.meta.url));
 const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm.ts");
 
-async function compileWasiJs(source: string) {
+async function compileWasiJs(source: string, linkNodeShims = false) {
   return await compile(source, {
     fileName: "nm_js2wasm.js",
     allowJs: true,
     target: "wasi",
     optimize: 0,
+    ...(linkNodeShims ? { linkNodeShims: true } : {}),
   });
 }
 
@@ -73,7 +74,9 @@ describe("#1768 allowJs Native Messaging sendMessage validates under --target wa
       },
     }).outputText;
 
-    const result = await compileWasiJs(source);
+    // #2631 — the example now imports node:fs readSync/writeSync, lowered via the
+    // node:fs shim under --link-node-shims (the transpiled JS keeps the import).
+    const result = await compileWasiJs(source, /* linkNodeShims */ true);
     expect(result.success, result.success ? "" : result.errors.map((e) => e.message).join("\n")).toBe(true);
     expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
     expect(result.wat).not.toContain('(import "env"');

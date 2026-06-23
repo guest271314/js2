@@ -63,8 +63,27 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const ASSIGN_REF = "issue-assignments";
-const REMOTE = process.env.CLAIM_REMOTE || "origin";
-const MAIN_REF = `${REMOTE}/main`;
+// The issue-assignments orphan ref lives on the FORK (origin) — keep REMOTE =
+// origin for ALL reservation-ref operations (ls-remote / fetch / push of claims).
+const REMOTE = process.env.CLAIM_ASSIGN_REMOTE || "origin";
+// The MAIN id scan, however, must use UPSTREAM (loopdive/js2). The fork's
+// `origin/main` lags upstream by thousands of commits, so "next free off
+// origin/main" returns ids already taken on upstream/main — every such
+// allocation then collides at the required `check:issue-ids:against-main` gate
+// (which checks upstream/main), ejecting PRs from the merge queue (this is what
+// mis-numbered two issues into the 6000s, since renumbered to #2177/#2194).
+// Prefer the `upstream` remote when it exists; `CLAIM_REMOTE` overrides.
+function pickMainRemote() {
+  if (process.env.CLAIM_REMOTE) return process.env.CLAIM_REMOTE;
+  const r = gitTry(["remote"]);
+  const remotes = r.ok ? r.out.split(/\s+/).filter(Boolean) : [];
+  return remotes.includes("upstream") ? "upstream" : "origin";
+}
+const MAIN_REMOTE = pickMainRemote();
+const MAIN_REF = `${MAIN_REMOTE}/main`;
+// Best-effort refresh of the main tip — only when allocating (frequent
+// --check/--list calls shouldn't pay a network round-trip).
+if (process.argv.includes("--allocate")) gitTry(["fetch", "--quiet", MAIN_REMOTE, "main"]);
 const MAX_RETRIES = 6;
 
 function git(args, opts = {}) {
@@ -191,7 +210,7 @@ function mainIssueStatus(id) {
 const ISSUE_ID_RE = /(?:^|\/)plan\/issues\/(\d+)[a-z]?-[^/]*\.md$/;
 
 // Stray ids separated from the contiguous body by a large gap (a mis-typed
-// 6406 when the real range is ~2500) must not poison max+1 and hand out a 6408
+// 6406 when the real range is ~2500) must not poison max+1 and hand out a 2194
 // — the #1858 mis-allocation. Drop anything > GAP above the running max.
 const STRAY_GAP = 1000;
 

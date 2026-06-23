@@ -1,39 +1,34 @@
 // #1484 — WASI timer diagnostic + poll_oneoff helper.
 //
-// Under `--target wasi`, setTimeout/setInterval/setImmediate/queueMicrotask
-// must produce a compile-time diagnostic (not a silent runtime hang from a
-// missing `env::setTimeout` import). The compiler also registers
-// `wasi_snapshot_preview1::poll_oneoff` and emits a `__wasi_sleep_ms` helper
-// (gated on timer references) so a follow-up issue can lower timer call
-// sites to synchronous sleeps via the async scheduler. The poll_oneoff
-// polyfill in runtime.ts is the JS-side counterpart used by vitest.
+// #2632 Phase 1 UPDATE: under `--target wasi`, setTimeout/setInterval/
+// clearTimeout/clearInterval/queueMicrotask are now LOWERED onto the standalone
+// event-loop reactor (timer heap + run loop driven by poll_oneoff /
+// clock_time_get) — they COMPILE and RUN rather than being rejected. The
+// `__wasi_sleep_ms` helper this diagnostic introduced (#1484) is the blocking
+// sleep the reactor uses. Only `setImmediate` remains rejected (its Node
+// check-phase ordering is a later-phase concern). End-to-end timer ordering is
+// covered by `tests/issue-2632-event-loop.test.ts` (run under wasmtime).
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
 import { buildWasiPolyfill } from "../src/runtime.js";
 
-describe("WASI timers (#1484) — compile-time diagnostic", () => {
-  it("rejects setTimeout under --target wasi with a clear diagnostic", async () => {
+describe("WASI timers (#1484 → #2632 Phase 1) — now lowered, not rejected", () => {
+  it("setTimeout under --target wasi compiles and emits the run loop", async () => {
     const src = `setTimeout(() => { console.log("late"); }, 100);`;
-    const result = await compile(src, { target: "wasi" });
-    expect(result.success).toBe(false);
-    expect(result.errors.length).toBeGreaterThan(0);
-    const msg = result.errors.map((e) => e.message).join("\n");
-    expect(msg).toMatch(/setTimeout/);
-    expect(msg).toMatch(/wasi/i);
-    // Must surface as a `Codegen error:` so compiler.ts short-circuits and
-    // never emits an unresolvable `env::setTimeout` import.
-    expect(msg).toMatch(/Codegen error:/);
+    const result = await compile(src, { target: "wasi", skipSemanticDiagnostics: true });
+    expect(result.success, result.success ? "" : result.errors?.[0]?.message).toBe(true);
+    expect(result.wat!).toContain("$__run_event_loop");
+    expect(result.wat!).toContain("$__timer_add");
   });
 
-  it("rejects setInterval under --target wasi", async () => {
+  it("setInterval under --target wasi compiles", async () => {
     const src = `setInterval(() => {}, 50);`;
-    const result = await compile(src, { target: "wasi" });
-    expect(result.success).toBe(false);
-    const msg = result.errors.map((e) => e.message).join("\n");
-    expect(msg).toMatch(/setInterval/);
+    const result = await compile(src, { target: "wasi", skipSemanticDiagnostics: true });
+    expect(result.success, result.success ? "" : result.errors?.[0]?.message).toBe(true);
+    expect(result.wat!).toContain("$__timer_add");
   });
 
-  it("rejects setImmediate under --target wasi", async () => {
+  it("setImmediate under --target wasi remains rejected (out of Phase-1 scope)", async () => {
     const src = `setImmediate(() => {});`;
     const result = await compile(src, { target: "wasi" });
     expect(result.success).toBe(false);
@@ -41,12 +36,11 @@ describe("WASI timers (#1484) — compile-time diagnostic", () => {
     expect(msg).toMatch(/setImmediate/);
   });
 
-  it("rejects queueMicrotask under --target wasi", async () => {
+  it("queueMicrotask under --target wasi compiles and enqueues onto the microtask queue", async () => {
     const src = `queueMicrotask(() => {});`;
-    const result = await compile(src, { target: "wasi" });
-    expect(result.success).toBe(false);
-    const msg = result.errors.map((e) => e.message).join("\n");
-    expect(msg).toMatch(/queueMicrotask/);
+    const result = await compile(src, { target: "wasi", skipSemanticDiagnostics: true });
+    expect(result.success, result.success ? "" : result.errors?.[0]?.message).toBe(true);
+    expect(result.wat!).toContain("$__microtask_enqueue");
   });
 
   it("does NOT reject when setTimeout appears as a member name (e.g. obj.setTimeout)", async () => {

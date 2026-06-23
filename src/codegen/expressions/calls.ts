@@ -28,9 +28,15 @@ import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
 import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
 import {
+  emitMicrotaskEnqueue,
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
   emitStandalonePromiseThen,
+  emitTimerAdd,
+  emitTimerCallbackWrapper,
+  emitTimerCancel,
+  ensureTimerHeap,
+  getRunLoopNowFuncIdx,
   isStandalonePromiseActive,
   type StandalonePromiseThenCallback,
 } from "../async-scheduler.js";
@@ -117,7 +123,7 @@ import {
   compileStringLiteral,
   emitBoolToString,
 } from "../string-ops.js";
-import { tryCompileNodeProcessCall } from "../node-process-api.js";
+import { tryCompileNodeFsCall, tryCompileNodeProcessCall } from "../node-process-api.js";
 import { resolvePromiseSubclassName, tryEmitPromiseSubclassReceiver } from "./promise-subclass.js";
 import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import {
@@ -254,6 +260,32 @@ const BUILTIN_CLASS_NAMES = new Set([
   "Float64Array",
   "BigInt64Array",
   "BigUint64Array",
+]);
+
+/**
+ * (#2631) Path-based node:fs functions that require a filesystem (path_open /
+ * preopens). Distinct from the fd-based synchronous primitives readSync /
+ * writeSync (no path). Under --target wasi these are rejected — standalone WASI
+ * has no filesystem. `writeFileSync` is intentionally excluded: it has a
+ * dedicated WASI lowering above (`__wasi_write_file_sync`).
+ */
+const PATH_BASED_FS_FNS = new Set([
+  "readFileSync",
+  "readFile",
+  "writeFile",
+  "appendFileSync",
+  "appendFile",
+  "openSync",
+  "open",
+  "unlinkSync",
+  "unlink",
+  "mkdirSync",
+  "mkdir",
+  "readdirSync",
+  "readdir",
+  "statSync",
+  "stat",
+  "existsSync",
 ]);
 
 /**
@@ -3065,6 +3097,154 @@ function emitJsonReplacerAllowList(
   fctx.body.push({ op: "local.get", index: allowLocal } as Instr);
 }
 
+/**
+ * #2632 Phase 1 — lower `setTimeout` / `setInterval` / `clearTimeout` /
+ * `clearInterval` / `queueMicrotask` onto the WASI timer-heap + run-loop
+ * reactor. Returns `undefined` when this is not a WASI timer call (so the
+ * generic dispatcher continues), or an `InnerResult` when handled.
+ *
+ * Only bare-identifier callees fire (a member call like `obj.setTimeout(...)`
+ * is a user method, never the global). The timer heap was registered in the
+ * deferred-helper phase (`ensureTimerHeap`), so `__timer_add` / `__timer_cancel`
+ * func indices are already final.
+ */
+function tryWasiTimerCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult | undefined {
+  if (!ctx.wasi) return undefined;
+  if (!ts.isIdentifier(expr.expression)) return undefined;
+  const name = expr.expression.text;
+  if (
+    name !== "setTimeout" &&
+    name !== "setInterval" &&
+    name !== "clearTimeout" &&
+    name !== "clearInterval" &&
+    name !== "queueMicrotask"
+  ) {
+    return undefined;
+  }
+  // Guard against a user-defined local/function shadowing the global name. The
+  // global timer functions are declared ONLY in lib .d.ts files; a user shadow
+  // has at least one declaration in a real (.ts) source file. (`setTimeout` &c
+  // are also registered as inlinable lib stubs in ctx.funcMap, so a funcMap
+  // membership check would false-positive — use the symbol's declarations.)
+  {
+    const sym = ctx.checker.getSymbolAtLocation(expr.expression);
+    const decls = sym?.declarations;
+    if (decls && decls.length > 0 && !decls.every((d) => d.getSourceFile().isDeclarationFile)) {
+      return undefined; // user-defined shadow → not the global timer
+    }
+  }
+
+  // Ensure the timer heap exists. It is normally registered eagerly in the
+  // deferred-helper phase; this call is idempotent and a safety net.
+  ensureTimerHeap(ctx);
+
+  // ── clearTimeout(id) / clearInterval(id) ──────────────────────────────
+  if (name === "clearTimeout" || name === "clearInterval") {
+    if (expr.arguments.length < 1) return VOID_RESULT;
+    // id is a JS number (f64). Convert to the i32 slot id.
+    const saved = pushBody(fctx);
+    compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
+    const idInstrs = fctx.body;
+    popBody(fctx, saved);
+    idInstrs.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    emitTimerCancel(ctx, fctx, idInstrs);
+    return VOID_RESULT;
+  }
+
+  // ── setTimeout / setInterval / queueMicrotask: compile the callback ──
+  const cbArg = expr.arguments[0];
+  if (cbArg === undefined) return VOID_RESULT;
+
+  // Compile the callback into its own buffer, yielding a closure struct pushed
+  // as externref + its ClosureInfo (mirrors compileStandalonePromiseThenCallback).
+  let capInstrs: Instr[];
+  let closureInfo: ClosureInfo | undefined;
+  {
+    const saved = pushBody(fctx);
+    try {
+      const type =
+        ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)
+          ? compileArrowAsClosure(ctx, fctx, cbArg)
+          : compileExpression(ctx, fctx, cbArg);
+      if (type && (type.kind === "ref" || type.kind === "ref_null")) {
+        closureInfo = ctx.closureInfoByTypeIdx.get(type.typeIdx);
+      }
+      if (!closureInfo && ts.isIdentifier(cbArg)) {
+        closureInfo = ctx.closureMap.get(cbArg.text);
+      }
+      if (closureInfo && type && type.kind !== "externref") {
+        coerceType(ctx, fctx, type, { kind: "externref" });
+      }
+    } finally {
+      capInstrs = fctx.body;
+      popBody(fctx, saved);
+    }
+  }
+  if (!closureInfo) {
+    // Not a recognised closure (e.g. a string-bodied setTimeout, unsupported).
+    // Bail to the generic path, which will reject/handle it.
+    return undefined;
+  }
+
+  const wrapperFuncIdx = emitTimerCallbackWrapper(ctx, closureInfo);
+
+  // ── queueMicrotask(cb) — enqueue directly onto the microtask queue ────
+  if (name === "queueMicrotask") {
+    emitMicrotaskEnqueue(
+      ctx,
+      fctx,
+      [{ op: "ref.func", funcIdx: wrapperFuncIdx } as Instr],
+      capInstrs, // captures externref = the closure struct
+      [{ op: "ref.null.extern" } as Instr], // value = undefined
+    );
+    return VOID_RESULT;
+  }
+
+  // ── setTimeout(cb, ms) / setInterval(cb, ms) ──────────────────────────
+  // delayNs = max(0, ms) * 1e6 ; deadlineNs = now + delayNs.
+  const nowIdx = getRunLoopNowFuncIdx(ctx);
+  const delayNsLocal = allocLocal(fctx, `__timer_delay_${fctx.locals.length}`, { kind: "i64" });
+
+  // Compute delayNs into a local: trunc(ms) clamped to >= 0, times 1e6.
+  if (expr.arguments.length >= 2) {
+    compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "f64" });
+  } else {
+    fctx.body.push({ op: "f64.const", value: 0 });
+  }
+  // Clamp negative / NaN ms to 0 (Node treats ms<=0 or NaN as 0).
+  fctx.body.push({ op: "f64.const", value: 0 });
+  fctx.body.push({ op: "f64.max" } as Instr);
+  fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "i64.const", value: 1000000n });
+  fctx.body.push({ op: "i64.mul" } as Instr);
+  fctx.body.push({ op: "local.set", index: delayNsLocal });
+
+  const deadlineInstrs: Instr[] = [
+    { op: "call", funcIdx: nowIdx } as Instr,
+    { op: "local.get", index: delayNsLocal } as Instr,
+    { op: "i64.add" } as Instr,
+  ];
+  // interval period: setInterval re-arms with delayNs; setTimeout = 0 (one-shot).
+  const intervalInstrs: Instr[] =
+    name === "setInterval" ? [{ op: "local.get", index: delayNsLocal } as Instr] : [{ op: "i64.const", value: 0n }];
+
+  emitTimerAdd(
+    ctx,
+    fctx,
+    deadlineInstrs,
+    [{ op: "ref.func", funcIdx: wrapperFuncIdx } as Instr],
+    capInstrs, // captures externref = the closure struct
+    intervalInstrs,
+  );
+  // __timer_add returns the i32 id; setTimeout/setInterval return a JS number.
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  return { kind: "f64" };
+}
+
 function compileCallExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3099,10 +3279,23 @@ function compileCallExpression(
     if (r !== undefined) return r;
   }
 
+  // #2632 Phase 1 — WASI event-loop timers / microtasks. setTimeout/setInterval/
+  // clearTimeout/clearInterval/queueMicrotask lower onto the timer heap + run-loop
+  // reactor (async-scheduler.ts). Only fires under --target wasi; everything else
+  // falls through to the JS-host import path unchanged.
+  {
+    const r = tryWasiTimerCall(ctx, fctx, expr);
+    if (r !== undefined) return r;
+  }
+
   // Node-shaped process APIs are lowered in their own module so the generic
   // call-expression compiler does not accumulate host API special cases.
   const nodeProcessCall = tryCompileNodeProcessCall(ctx, fctx, expr);
   if (nodeProcessCall !== undefined) return nodeProcessCall;
+
+  // #2631 — node:fs fd-based readSync/writeSync → `node:fs` shim calls.
+  const nodeFsCall = tryCompileNodeFsCall(ctx, fctx, expr);
+  if (nodeFsCall !== undefined) return nodeFsCall;
 
   // RegExp(pattern, flags) called without `new`. Extracted to calls-guards.ts (#742).
   {
@@ -4043,7 +4236,7 @@ function compileCallExpression(
           //   - Object.isPrototypeOf: route directly to the native open-object
           //     prototype-chain helper. Array/Number/Boolean/Function have no
           //     clean native borrowed path yet → refuse-loud below (Array brand
-          //     arm rides on #6407). Never a silent-wrong answer.
+          //     arm rides on #2177). Never a silent-wrong answer.
           if (ctx.standalone && expr.arguments.length >= 1 && !isBuiltinRegExpPrototype) {
             // Native String methods whose __str_* helper + return marshaling
             // round-trip correctly standalone (verified end-to-end). Methods
@@ -4127,7 +4320,7 @@ function compileCallExpression(
             // never leak the host import or return a silent-wrong value.
             const cite =
               typeName === "Array"
-                ? "the Array brand arm rides on #6407 ($Vec element retrieval)"
+                ? "the Array brand arm rides on #2177 ($Vec element retrieval)"
                 : typeName === "Object"
                   ? "only Object.prototype hasOwnProperty/propertyIsEnumerable/isPrototypeOf borrowed calls are wired (valueOf is a follow-on)"
                   : "this prototype's borrowed-method brand arm is not yet native";
@@ -10513,6 +10706,40 @@ function compileCallExpression(
       fctx.body.push({ op: "call", funcIdx: writeFileSyncIdx });
       return VOID_RESULT;
     }
+  }
+
+  // #2631 — path-based node:fs functions (readFileSync, readFile, …) are NOT
+  // the fd-based readSync/writeSync handled by the node:fs shim: they need a
+  // filesystem (path_open / preopens). They are gated behind --allow-fs and are
+  // rejected outright under --target wasi (standalone has no filesystem). The
+  // fd-based readSync/writeSync (no path) were already lowered above via
+  // tryCompileNodeFsCall, so anything reaching here named like a path-based fs
+  // reader is unsupported in WASI.
+  if (
+    ctx.wasi &&
+    ts.isIdentifier(expr.expression) &&
+    ctx.wasiNodeFsFuncs.has(expr.expression.text) &&
+    PATH_BASED_FS_FNS.has(expr.expression.text)
+  ) {
+    const fnName = expr.expression.text;
+    const { line, character } = expr.getSourceFile().getLineAndCharacterOfPosition(expr.getStart());
+    ctx.errors.push({
+      message:
+        `'node:fs' path-based call to '${fnName}' is not available under --target wasi (#2631): ` +
+        `standalone WASI has no filesystem (no path_open / preopens). Only the fd-based synchronous ` +
+        `primitives readSync(fd, …) / writeSync(fd, …) are supported (they map to fd_read / fd_write ` +
+        `via the node:fs shim). For host file access, target a JS host with --allow-fs instead.`,
+      line: line + 1,
+      column: character + 1,
+      severity: "error",
+    });
+    // Drop args, emit a safe placeholder so codegen can continue.
+    for (const arg of expr.arguments) {
+      const t = compileExpression(ctx, fctx, arg);
+      if (t) fctx.body.push({ op: "drop" });
+    }
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return { kind: "externref" };
   }
 
   // Handle global isNaN(n) / isFinite(n) / parseInt / parseFloat — inline wasm

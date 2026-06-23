@@ -21,10 +21,11 @@ import {
   getArrTypeIdxFromVec,
   getOrRegisterVecType,
   WASI_STDIN_BUF_START,
+  WASI_WRITE_SCRATCH_START,
 } from "./index.js";
 import type { InnerResult } from "./shared.js";
 import { compileExpression, VOID_RESULT } from "./shared.js";
-import { tryEmitLinearU8StdinRead, tryEmitLinearU8StdWrite } from "./linear-uint8-codegen.js";
+import { getLinearU8Buffer, tryEmitLinearU8StdinRead, tryEmitLinearU8StdWrite } from "./linear-uint8-codegen.js";
 
 export function tryCompileNodeProcessCall(
   ctx: CodegenContext,
@@ -332,4 +333,393 @@ function emitProcessStdinRead(ctx: CodegenContext, fctx: FunctionContext, expr: 
   fctx.body.push({ op: "local.get", index: nreadLocal } as Instr);
   fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
   return { kind: "f64" };
+}
+
+// ---------------------------------------------------------------------------
+// #2631 — node:fs fd-based readSync / writeSync via the `js2wasm:node-fs` shim.
+//
+// `readSync(fd, buf, …)` / `writeSync(fd, buf, …)` are the faithful synchronous
+// Node primitives the Native Messaging host needs (process.stdin is an async
+// Duplex with no synchronous buffer-filling read — loopdive/js2#389). They are
+// fd-based (integer fd 0/1/2), NOT path-based: they map 1:1 to fd_read/fd_write
+// with NO filesystem. The path-based `fs` family (readFileSync(path)) stays on
+// the --allow-fs path and is rejected in standalone WASI.
+//
+// The compiler's only job is to recognize the imported `readSync`/`writeSync`
+// bindings and call the registered `js2wasm:node-fs` shim funcs with (fd, ptr,
+// len) — the syscall lives in node-fs.wat, not in codegen.
+// ---------------------------------------------------------------------------
+
+/**
+ * Recognize + lower an imported node:fs `readSync(fd, buf, …)` /
+ * `writeSync(fd, buf, …)` call. Returns the result (a byte count, f64), or
+ * `undefined` when this isn't a node-fs fd-based call we handle (the generic
+ * compiler then proceeds — path-based fs is handled / rejected elsewhere).
+ */
+export function tryCompileNodeFsCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult | undefined {
+  if (!ctx.wasi || !ctx.linkNodeShims) return undefined;
+  if (expr.questionDotToken) return undefined;
+  if (!ts.isIdentifier(expr.expression)) return undefined;
+  const callee = expr.expression.text;
+  if (callee !== "readSync" && callee !== "writeSync") return undefined;
+  // Only treat it as the fd-based node:fs primitive when it was imported from
+  // node:fs (detected pre-preprocessing) and is not shadowed by a local.
+  if (!ctx.wasiNodeFsFuncs.has(callee)) return undefined;
+  if (fctx.localMap.has(callee) || (fctx.boxedCaptures?.has(callee) ?? false)) return undefined;
+  // fd-based form requires at least (fd, buffer). A bare/path-based call is not ours.
+  if (expr.arguments.length < 2) return undefined;
+  const shimIdx = callee === "readSync" ? ctx.nodeFsReadSyncIdx : ctx.nodeFsWriteSyncIdx;
+  if (shimIdx < 0) return undefined;
+
+  return callee === "readSync"
+    ? emitNodeFsReadSync(ctx, fctx, expr, shimIdx)
+    : emitNodeFsWriteSync(ctx, fctx, expr, shimIdx);
+}
+
+/**
+ * Extract the optional `offset` / `length` arguments shared by readSync and
+ * writeSync. Supports both the positional form
+ * `(fd, buf, offset?, length?, position?)` and the options form
+ * `(fd, buf, { offset?, length?, position? })`. Emits two i32 locals
+ * (offset, length); `length` defaults to `buf.length - offset` when absent, so
+ * over-read/over-write past the buffer is impossible by construction.
+ *
+ * `bufLenLocal` is an i32 local already holding the buffer's element length.
+ */
+function emitNodeFsOffsetLength(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  bufLenLocal: number,
+): { offLocal: number; lenLocal: number } {
+  const offLocal = allocLocal(fctx, `__nodefs_off_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__nodefs_len_${fctx.locals.length}`, { kind: "i32" });
+
+  const arg2 = expr.arguments[2];
+  const optionsObj = arg2 && ts.isObjectLiteralExpression(arg2) ? arg2 : undefined;
+
+  // ---- offset ----
+  let offsetExpr: ts.Expression | undefined;
+  if (optionsObj) {
+    offsetExpr = findObjectProp(optionsObj, "offset");
+  } else {
+    offsetExpr = arg2;
+  }
+  if (offsetExpr) {
+    compileExpression(ctx, fctx, offsetExpr, { kind: "f64" });
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  } else {
+    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
+
+  // ---- length ----  (default: buf.length - offset)
+  let lengthExpr: ts.Expression | undefined;
+  if (optionsObj) {
+    lengthExpr = findObjectProp(optionsObj, "length");
+  } else {
+    lengthExpr = expr.arguments[3];
+  }
+  if (lengthExpr) {
+    compileExpression(ctx, fctx, lengthExpr, { kind: "f64" });
+    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  } else {
+    fctx.body.push({ op: "local.get", index: bufLenLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: offLocal } as Instr);
+    fctx.body.push({ op: "i32.sub" } as Instr);
+  }
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+
+  return { offLocal, lenLocal };
+}
+
+/** Find a non-shorthand object-literal property initializer by name, or undefined. */
+function findObjectProp(obj: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined {
+  for (const prop of obj.properties) {
+    if (
+      ts.isPropertyAssignment(prop) &&
+      ((ts.isIdentifier(prop.name) && prop.name.text === name) ||
+        (ts.isStringLiteral(prop.name) && prop.name.text === name))
+    ) {
+      return prop.initializer;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the GC `$Vec`-backed Uint8Array argument into its (vecTypeIdx,
+ * arrTypeIdx) and emit code that leaves nothing on the stack but stores the vec
+ * ref + the underlying i8 array ref + the element length into fresh i32/ref
+ * locals. Returns those locals, or `null` if the arg isn't a GC Uint8Array.
+ */
+function emitNodeFsResolveGcU8(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  bufExpr: ts.Expression,
+): { arrLocal: number; arrTypeIdx: number; lenLocal: number } | null {
+  const bufType = compileExpression(ctx, fctx, bufExpr);
+  if (!bufType || (bufType.kind !== "ref" && bufType.kind !== "ref_null") || !("typeIdx" in bufType)) {
+    if (bufType) fctx.body.push({ op: "drop" } as Instr);
+    return null;
+  }
+  const vecTypeIdx = bufType.typeIdx;
+  const vecDef = ctx.mod.types[vecTypeIdx];
+  if (!vecDef || vecDef.kind !== "struct" || vecDef.fields.length < 2) {
+    fctx.body.push({ op: "drop" } as Instr);
+    return null;
+  }
+  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
+  if (arrTypeIdx < 0) {
+    fctx.body.push({ op: "drop" } as Instr);
+    return null;
+  }
+  if (bufType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+
+  const vecLocal = allocLocal(fctx, `__nodefs_vec_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
+  fctx.body.push({ op: "local.set", index: vecLocal } as Instr);
+  // element length = vec.length (field 0)
+  const lenLocal = allocLocal(fctx, `__nodefs_buflen_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+  // backing i8 array = vec.data (field 1)
+  const arrLocal = allocLocal(fctx, `__nodefs_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
+  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
+
+  return { arrLocal, arrTypeIdx, lenLocal };
+}
+
+/** Emit `fd` (arg0) truncated to i32 into a fresh local; returns the local. */
+function emitNodeFsFd(ctx: CodegenContext, fctx: FunctionContext, fdExpr: ts.Expression): number {
+  const fdLocal = allocLocal(fctx, `__nodefs_fd_${fctx.locals.length}`, { kind: "i32" });
+  compileExpression(ctx, fctx, fdExpr, { kind: "f64" });
+  fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "local.set", index: fdLocal } as Instr);
+  return fdLocal;
+}
+
+/**
+ * `readSync(fd, buf, offset?, length?, position?)` /
+ * `readSync(fd, buf, { offset?, length?, position? })` → read up to `length`
+ * bytes from `fd` into `buf[offset .. offset+length)`; return the byte count.
+ *
+ * Lowering: call the shim `read_sync(fd, WASI_STDIN_BUF_START, length)` into the
+ * shared linear scratch, then copy the returned bytes into the GC array at
+ * `offset`. (Linear-backed buffers read straight into `ptr+offset`, zero-copy.)
+ */
+function emitNodeFsReadSync(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  shimIdx: number,
+): InnerResult {
+  const fdLocal = emitNodeFsFd(ctx, fctx, expr.arguments[0]!);
+
+  // Zero-copy fast path: linear-backed Uint8Array reads straight into ptr+off.
+  const linBuf = getLinearU8Buffer(ctx, fctx, expr.arguments[1]!);
+  if (linBuf) {
+    const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, linBuf.lenLocalIdx);
+    fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: linBuf.ptrLocalIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: offLocal } as Instr);
+    fctx.body.push({ op: "i32.add" } as Instr);
+    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+    fctx.body.push({ op: "call", funcIdx: shimIdx } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    return { kind: "f64" };
+  }
+
+  const gc = emitNodeFsResolveGcU8(ctx, fctx, expr.arguments[1]!);
+  if (!gc) {
+    // Not a recognizable buffer — emit 0 (no bytes read) so codegen continues.
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    return { kind: "f64" };
+  }
+  const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, gc.lenLocal);
+
+  // Grow memory if the scratch read region (WASI_STDIN_BUF_START + length) would
+  // exceed current pages. Mirrors emitProcessStdinRead.
+  ensureScratchPages(fctx, WASI_STDIN_BUF_START, lenLocal);
+
+  // nread = read_sync(fd, WASI_STDIN_BUF_START, length)
+  const nreadLocal = allocLocal(fctx, `__nodefs_nread_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "call", funcIdx: shimIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: nreadLocal } as Instr);
+
+  // Copy buf_dest[off + j] = scratch[j] for j in [0, nread).
+  emitScratchToArrayCopy(fctx, gc.arrTypeIdx, gc.arrLocal, offLocal, WASI_STDIN_BUF_START, nreadLocal);
+
+  fctx.body.push({ op: "local.get", index: nreadLocal } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  return { kind: "f64" };
+}
+
+/**
+ * `writeSync(fd, buf, offset?, length?, position?)` → write
+ * `buf[offset .. offset+length)` to `fd`; return the byte count.
+ *
+ * Lowering: copy the GC array slice into the shared linear scratch, then call
+ * the shim `write_sync(fd, WASI_WRITE_SCRATCH_START, length)`. (Linear-backed
+ * buffers write straight from `ptr+offset`, zero-copy.)
+ */
+function emitNodeFsWriteSync(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  shimIdx: number,
+): InnerResult {
+  const fdLocal = emitNodeFsFd(ctx, fctx, expr.arguments[0]!);
+
+  // Zero-copy fast path: linear-backed Uint8Array writes straight from ptr+off.
+  const linBuf = getLinearU8Buffer(ctx, fctx, expr.arguments[1]!);
+  if (linBuf) {
+    const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, linBuf.lenLocalIdx);
+    fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: linBuf.ptrLocalIdx } as Instr);
+    fctx.body.push({ op: "local.get", index: offLocal } as Instr);
+    fctx.body.push({ op: "i32.add" } as Instr);
+    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+    fctx.body.push({ op: "call", funcIdx: shimIdx } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    return { kind: "f64" };
+  }
+
+  const gc = emitNodeFsResolveGcU8(ctx, fctx, expr.arguments[1]!);
+  if (!gc) {
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    return { kind: "f64" };
+  }
+  const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, gc.lenLocal);
+
+  // Grow memory if the write scratch region would exceed current pages.
+  ensureScratchPages(fctx, WASI_WRITE_SCRATCH_START, lenLocal);
+
+  // Copy scratch[j] = buf[off + j] for j in [0, length).
+  emitArrayToScratchCopy(fctx, gc.arrTypeIdx, gc.arrLocal, offLocal, WASI_WRITE_SCRATCH_START, lenLocal);
+
+  // nwritten = write_sync(fd, WASI_WRITE_SCRATCH_START, length)
+  fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "call", funcIdx: shimIdx } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  return { kind: "f64" };
+}
+
+/** Grow linear memory so [scratchStart, scratchStart + lenLocal) is addressable. */
+function ensureScratchPages(fctx: FunctionContext, scratchStart: number, lenLocal: number): void {
+  const needPagesLocal = allocLocal(fctx, `__nodefs_pages_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: scratchStart } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "i32.const", value: 65535 } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "i32.const", value: 16 } as Instr);
+  fctx.body.push({ op: "i32.shr_u" } as Instr);
+  fctx.body.push({ op: "local.set", index: needPagesLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: needPagesLocal } as Instr);
+  fctx.body.push({ op: "memory.size" } as Instr);
+  fctx.body.push({ op: "i32.gt_u" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: needPagesLocal } as Instr,
+      { op: "memory.size" } as Instr,
+      { op: "i32.sub" } as Instr,
+      { op: "memory.grow" } as Instr,
+      { op: "drop" } as Instr,
+    ],
+  } as Instr);
+}
+
+/** for j in [0, countLocal): dest[off + j] = scratch[scratchStart + j] (i8 array). */
+function emitScratchToArrayCopy(
+  fctx: FunctionContext,
+  arrTypeIdx: number,
+  arrLocal: number,
+  offLocal: number,
+  scratchStart: number,
+  countLocal: number,
+): void {
+  const jLocal = allocLocal(fctx, `__nodefs_j_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: jLocal } as Instr);
+  const loopBody: Instr[] = [
+    { op: "local.get", index: jLocal } as Instr,
+    { op: "local.get", index: countLocal } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    { op: "local.get", index: arrLocal } as Instr,
+    { op: "local.get", index: offLocal } as Instr,
+    { op: "local.get", index: jLocal } as Instr,
+    { op: "i32.add" } as Instr,
+    // value = scratch[scratchStart + j]
+    { op: "i32.const", value: scratchStart } as Instr,
+    { op: "local.get", index: jLocal } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "i32.load8_u", align: 0, offset: 0 } as Instr,
+    { op: "array.set", typeIdx: arrTypeIdx } as Instr,
+    { op: "local.get", index: jLocal } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "local.set", index: jLocal } as Instr,
+    { op: "br", depth: 0 } as Instr,
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+}
+
+/** for j in [0, countLocal): scratch[scratchStart + j] = src[off + j] (i8 array). */
+function emitArrayToScratchCopy(
+  fctx: FunctionContext,
+  arrTypeIdx: number,
+  arrLocal: number,
+  offLocal: number,
+  scratchStart: number,
+  countLocal: number,
+): void {
+  const jLocal = allocLocal(fctx, `__nodefs_wj_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: jLocal } as Instr);
+  const loopBody: Instr[] = [
+    { op: "local.get", index: jLocal } as Instr,
+    { op: "local.get", index: countLocal } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    // addr = scratchStart + j
+    { op: "i32.const", value: scratchStart } as Instr,
+    { op: "local.get", index: jLocal } as Instr,
+    { op: "i32.add" } as Instr,
+    // value = src[off + j]  (array.get_u on i8 array)
+    { op: "local.get", index: arrLocal } as Instr,
+    { op: "local.get", index: offLocal } as Instr,
+    { op: "local.get", index: jLocal } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "array.get_u", typeIdx: arrTypeIdx } as Instr,
+    { op: "i32.store8", align: 0, offset: 0 } as Instr,
+    { op: "local.get", index: jLocal } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "local.set", index: jLocal } as Instr,
+    { op: "br", depth: 0 } as Instr,
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
 }

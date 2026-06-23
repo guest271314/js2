@@ -1549,6 +1549,10 @@ export interface CodegenContext {
   nodeIoStderrWriteIdx: number;
   /** #2524: func index of the imported `js2wasm:node-process::stdin_read` (-1 = not registered). */
   nodeIoStdinReadIdx: number;
+  /** #2631: func index of the imported `js2wasm:node-fs::read_sync` (fd,ptr,len)->i32 (-1 = not registered). */
+  nodeFsReadSyncIdx: number;
+  /** #2631: func index of the imported `js2wasm:node-fs::write_sync` (fd,ptr,len)->i32 (-1 = not registered). */
+  nodeFsWriteSyncIdx: number;
   /** WASI import indices */
   wasiFdWriteIdx: number;
   wasiFdReadIdx?: number;
@@ -1575,6 +1579,8 @@ export interface CodegenContext {
   wasiClockHelpersPending?: boolean;
   /** (#1484) Pending flag — emit `__wasi_sleep_ms` after lib-globals scan. */
   wasiPendingSleepMsHelper?: boolean;
+  /** (#2632) Pending flag — register timer heap + run-loop reactor after lib-globals scan. */
+  wasiPendingTimerHeap?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
   wasiNodeFsFuncs: Set<string>;
   /**

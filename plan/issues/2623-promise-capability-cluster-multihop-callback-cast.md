@@ -502,6 +502,95 @@ conformance payoff.
 
 ---
 
+## Slice 2623-A — SHIPPED — box-depth lowering (senior-dev sendev-2623a, 2026-06-24)
+
+**Verdict: the box-depth double-box IS a real, fixable codegen bug — and the
+prior A re-grounding's blocker ("collapsing the box regresses #1312 async
+recursion") was a MIS-ATTRIBUTION. Shipped a clean, bounded fix; zero scoped
+regressions.**
+
+### Corrected root cause (binaryen-decoded on current main)
+The double-box is a missing `alreadyBoxed` disambiguation in the
+**FunctionDeclaration** capture path (`src/codegen/statements/nested-declarations.ts`),
+which the **arrow** path already has (`src/codegen/closures.ts:1681 / 1728-1748 /
+2457-2476`). Concretely, for the capability shape
+(`Promise.allSettled.call(Constructor, [thenable])`, `Constructor` materialized
+as a host-routed closure VALUE):
+- `callCount` is boxed once into `$__ref_cell_f64` and threaded as a leading
+  `(ref null $cell_f64)` param of `Constructor`.
+- The nested `function resolve(){ callCount++ }` re-captures `callCount`. In
+  `nested-declarations.ts` the mutable-capture param TYPE was computed as
+  `getOrRegisterRefCellType(ctx, c.type)` where `c.type` was ALREADY the
+  `$cell_f64` → it produced `$__ref_cell_ref_N (struct (mut (ref null
+  $cell_f64)))` — a **cell-of-cell** (single positional decode:
+  `resolve.cap0 = (ref null 26)` vs `Constructor.cap0 = (ref null 24)`).
+- **Two breakages from that one depth mismatch:** (1) the construction site
+  (`emitFuncRefAsClosure`) pushed the existing single `$cell_f64` into a closure
+  field typed as the double cell → the `struct.new` field-coerce in
+  `src/codegen/stack-balance.ts:1870` inserted an UNGUARDED `ref.cast $cell_f64
+  → $cell_of_cell` → **`illegal cast in Constructor()`**. (2) the lifted
+  `resolve` body derefed once (`struct.get $cell_of_cell`) and got the inner
+  `$cell` (a ref) where it expected the f64 → `callCount += 1` read garbage
+  (decoded body literally computed `f64.const 0 + 1` and dropped it) → callCount
+  never incremented.
+
+### Canonical box-depth verdict
+**Capture by the existing single `$cell`; do NOT re-box at the nested-capture
+boundary.** When the captured name is already in the outer scope's
+`boxedCaptures`, the outer slot IS the canonical cell — thread it through. This
+is exactly the arrow path's `alreadyBoxed` rule, now ported to the
+FunctionDeclaration path. Both producer (closure field type, via the lifted fn's
+param type) and consumer (lifted body `struct.get/set`, registered at the cell's
+INNER value depth) now agree at depth 1.
+
+### Fix (one file, `src/codegen/statements/nested-declarations.ts`)
+1. capture record gains `alreadyBoxed` (= `fctx.boxedCaptures?.has(name)`) +
+   `boxedValType` (the outer cell's inner value type).
+2. `valueCaptureParamTypes`: `if (c.mutable && c.alreadyBoxed) return c.type;`
+   (the existing cell) instead of re-wrapping.
+3. `boxedCaptures` registration: when `alreadyBoxed`, register the EXISTING
+   cell's typeidx + its inner valType so the body derefs exactly once.
+   `emitFuncRefAsClosure` already pushes the existing cell when
+   `boxedCaptures.has(name)` — no change needed there.
+
+### Why the prior "regresses #1312 async" was wrong
+The `#1312` "async inner recursion via param with mutable ref-cell capture" test
+is **ALREADY NaN on clean `origin/main`**, independent of any box change. Its
+async `next` is **single-boxed** already (`cap0 = $__ref_cell_f64`) and my fix
+does not touch it. The NaN is a SEPARATE bug: the async helper `call(fn){ return
+await fn() }`'s await-of-closure dispatch only handles the VOID wrapper arm; for
+an **f64-returning** callback it does `call_ref; drop; ref.null extern` — it
+**discards the callback's return value** → the recursion's accumulated value is
+lost → NaN. That is an `await`-callback-result-drop bug in the await/call-of-
+closure dispatch, NOT box depth. (File forward as a separate async-lane issue.)
+
+### Results
+- `tests/issue-2623-capture-box-depth.test.ts` (new): asserts no
+  `__ref_cell_ref_*` cell-of-cell + `resolve.cap0 == Constructor.cap0` on the
+  real `allSettled/call-resolve-element.js` fixture. PASS with fix, FAIL on
+  baseline (both assertions flip).
+- The two headline rows (`allSettled/call-resolve-element`,
+  `race/resolve-from-same-thenable`) **no longer trap `illegal cast in
+  Constructor()`** — they advance to a DOWNSTREAM **test-harness shim gap**
+  (`Promise resolve or reject function is not callable` = `Test262Error.thrower`
+  / `promiseHelper.js` not shimmed in `tests/test262-runner.ts`). The substrate
+  is fixed; the row flips additionally require those runner shims (separable
+  follow-up, NOT codegen — documented in the prior A re-grounding, lines
+  410-414).
+- Scoped sweep: 9 capture/closure/async failures (#585 ×4, #1712, #1312-async,
+  …) are ALL identical on clean baseline = **zero regressions**. (The
+  `helpers.js` file-load errors in 4 unrelated suites are a pre-existing infra
+  gap on main — `tests/helpers.ts` is not on `origin/main`.)
+- Broad-impact (hot closure-capture path) → **merge_group floor authoritative**
+  (#2097), per `project_broad_impact_validate_full_ci`.
+
+### Follow-ups (NOT in this PR)
+- `await`-callback-result-drop (the real #1312-async NaN) — async-lane.
+- `Test262Error.thrower` + `promiseHelper.js` runner shims — to actually flip the
+  two headline rows green once on top of this substrate fix.
+
+---
+
 ## Slice 2623-B re-grounding #2 — senior-dev (2026-06-23): identity unification IS landable (+1 row, regression-free); executor-body half deferred
 
 Re-verified Slice B end-to-end against current `origin/main` (binaryen-decoded +

@@ -77,7 +77,12 @@ import {
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";
-import { exportDrainMicrotasksIfRegistered, getDrainFuncIdxForWasiStart } from "./async-scheduler.js";
+import {
+  ensureTimerHeap,
+  exportDrainMicrotasksIfRegistered,
+  getDrainFuncIdxForWasiStart,
+  getRunLoopFuncIdxForWasiStart,
+} from "./async-scheduler.js";
 import { flushLateImportShifts, registerAddStringImports, registerAddUnionImports } from "./shared.js";
 import { stackBalance, getFixupEvents, summarizeFixups, strictBalanceDiagnostics } from "./stack-balance.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
@@ -1066,7 +1071,17 @@ export function generateModule(
       // (never escape the GC heap) so they can be backed by linear memory with
       // zero-copy fd_read/fd_write. Side-effect free; codegen consumers are
       // additive (empty result ⇒ emitted module identical to today).
-      ctx.linearUint8 = analyzeLinearUint8(ast.checker, ast.sourceFile);
+      // #2631 — pass the node:fs readSync/writeSync binding names from the
+      // ORIGINAL source (import preprocessing has already stripped the `node:fs`
+      // import from `ast.sourceFile`, so the analysis can't rediscover them).
+      // `ctx.wasiNodeFsFuncs` records the local names of node:fs imports; the
+      // byte-IO sink recognition only fires for these, so it's byte-neutral for
+      // every program that doesn't import them.
+      const nodeFsSyncNames = new Set<string>();
+      for (const name of ctx.wasiNodeFsFuncs) {
+        if (name === "readSync" || name === "writeSync") nodeFsSyncNames.add(name);
+      }
+      ctx.linearUint8 = analyzeLinearUint8(ast.checker, ast.sourceFile, nodeFsSyncNames);
       // #1886 Slice B: reserve the `__lin_u8_alloc` bump-allocator's
       // `(i32)->(i32)` func TYPE eagerly, here — BEFORE any WasmGC struct/array
       // type or native-string helper is registered. This keeps the shared
@@ -2079,13 +2094,21 @@ function addWasiStartExport(ctx: CodegenContext): void {
     const startFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     const body: Instr[] = [{ op: "call", funcIdx: targetIdx }];
 
-    // #1326c Phase 1C-A — auto-drain the microtask queue after the entry
-    // function returns. Only emits the call when the async scheduler
-    // actually registered the queue helpers; otherwise leaves the body
-    // unchanged (no perf cost for modules that never schedule microtasks).
-    const drainFuncIdx = getDrainFuncIdxForWasiStart(ctx);
-    if (drainFuncIdx !== null) {
-      body.push({ op: "call", funcIdx: drainFuncIdx });
+    // #2632 Phase 1 — drive the event-loop reactor after the entry function
+    // returns. When the timer heap was registered, `__run_event_loop`
+    // SUPERSEDES the one-shot drain: it drains microtasks AND fires timers in a
+    // loop until no pending handles remain (and it calls `__drain_microtasks`
+    // itself, so we must NOT also emit the bare drain). When no timer heap was
+    // registered, fall back to the #1326c one-shot drain — byte-identical to
+    // the prior behaviour for every program that uses no timers.
+    const runLoopFuncIdx = getRunLoopFuncIdxForWasiStart(ctx);
+    if (runLoopFuncIdx !== null) {
+      body.push({ op: "call", funcIdx: runLoopFuncIdx });
+    } else {
+      const drainFuncIdx = getDrainFuncIdxForWasiStart(ctx);
+      if (drainFuncIdx !== null) {
+        body.push({ op: "call", funcIdx: drainFuncIdx });
+      }
     }
 
     ctx.mod.functions.push({
@@ -5705,6 +5728,42 @@ function collectConsoleImports(ctx: CodegenContext, sourceFile: ts.SourceFile): 
   }
 }
 
+/**
+ * #2631 — does the source use process/console stream IO that the node-process
+ * shim backs (process.std{in,out,err}.*, console.log/warn/error)? Drives the
+ * node-shim memory-ownership decision in `registerWasiImports`: when a program
+ * uses ONLY node:fs (`readSync`/`writeSync`) and no process/console IO, the
+ * node-fs shim owns the shared linear memory instead of node-process. Cheap
+ * syntactic scan — codegen lowers the calls regardless; this only picks the
+ * memory provider.
+ */
+function sourceUsesNodeProcessOrConsoleIo(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isPropertyAccessExpression(node)) {
+      // console.log/warn/error
+      if (
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "console" &&
+        (node.name.text === "log" || node.name.text === "warn" || node.name.text === "error")
+      ) {
+        found = true;
+        return;
+      }
+      // process.<anything> — exit/env/stdin/stdout/stderr/argv/platform are all
+      // node-process-backed; any process member reference means node-process is live.
+      if (ts.isIdentifier(node.expression) && node.expression.text === "process") {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
 /** Register WASI imports: fd_write, proc_exit, path_open, fd_close, linear memory, bump pointer global */
 function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
   // Add linear memory for string data + iovec structs.
@@ -5719,29 +5778,69 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // the write scratch in page 2 (WASI_WRITE_SCRATCH_START), well above any
   // data segment, and reserve 3 pages so both regions always exist.
   if (ctx.linkNodeShims) {
-    // #2524 Phase 1 — the node-process shim OWNS + exports the linear memory; the
-    // user module IMPORTS it (memory index 0) so the shim can read/write the
-    // user's bytes over the SAME memory with no instantiation cycle (shim
-    // imports only wasi_snapshot_preview1; user imports {memory + io fns} from
-    // the already-instantiated shim). The user module therefore declares NO
-    // memory and exports none. `min: 3` mirrors the inline path's reservation
-    // (page 0 scratch/data, page 1 stdin buffer, page 2 write scratch); the
-    // shim's exported memory must be at least this large (its source declares
-    // the same min). Imports MUST precede the func imports below so the memory
-    // sits at memory-index 0 (loads/stores/`memory.size`/`memory.grow` all
-    // target it). The import order within the import section does not perturb
-    // the func index space — only func imports increment it.
-    addImport(ctx, "js2wasm:node-process", "memory", { kind: "memory", min: 3 });
-    // The three byte-boundary IO functions (over the shared memory):
-    //   stdout_write(ptr,len)->i32 · stderr_write(ptr,len) · stdin_read(ptr,len)->i32
-    const ioWriteType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], "$node_io_write");
-    const ioWriteVoidType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [], "$node_io_write_void");
-    addImport(ctx, "js2wasm:node-process", "stdout_write", { kind: "func", typeIdx: ioWriteType });
-    ctx.nodeIoStdoutWriteIdx = ctx.funcMap.get("stdout_write")!;
-    addImport(ctx, "js2wasm:node-process", "stderr_write", { kind: "func", typeIdx: ioWriteVoidType });
-    ctx.nodeIoStderrWriteIdx = ctx.funcMap.get("stderr_write")!;
-    addImport(ctx, "js2wasm:node-process", "stdin_read", { kind: "func", typeIdx: ioWriteType });
-    ctx.nodeIoStdinReadIdx = ctx.funcMap.get("stdin_read")!;
+    // #2631 — the per-module shims (`js2wasm:node-process`, `js2wasm:node-fs`)
+    // each conceptually own+export the shared linear memory, but only ONE module
+    // may provide memory index 0. We pick a single memory OWNER and the other
+    // shim's funcs operate over that same imported memory:
+    //   - if the program uses process/console stream IO → node-process owns the
+    //     memory (unchanged from #2524) and node-fs (if also used) is func-only,
+    //     importing nothing else (it reads/writes the shared memory by ptr).
+    //   - else if the program uses node:fs readSync/writeSync but NOT process IO →
+    //     node-fs owns the memory (the native-messaging example's shape: it drops
+    //     `process` entirely and uses only `node:fs`).
+    // Both shims' memories are byte-identical (min 3, same layout), so whichever
+    // owns it the other links against the same bytes. The owner must precede the
+    // func imports so its memory sits at memory-index 0.
+    const usesNodeFsFdShim = ctx.wasiNodeFsFuncs.has("readSync") || ctx.wasiNodeFsFuncs.has("writeSync");
+    const usesNodeProcessIo = sourceUsesNodeProcessOrConsoleIo(sourceFile);
+    const nodeFsOwnsMemory = usesNodeFsFdShim && !usesNodeProcessIo;
+    const memoryOwnerModule = nodeFsOwnsMemory ? "node:fs" : "js2wasm:node-process";
+
+    // #2524 Phase 1 — the shim OWNS + exports the linear memory; the user module
+    // IMPORTS it (memory index 0) so the shim can read/write the user's bytes
+    // over the SAME memory with no instantiation cycle (shim imports only
+    // wasi_snapshot_preview1; user imports {memory + io fns} from the
+    // already-instantiated shim). The user module declares NO memory and exports
+    // none. `min: 3` mirrors the inline path's reservation (page 0 scratch/data,
+    // page 1 stdin buffer, page 2 write scratch). Imports MUST precede the func
+    // imports below so the memory sits at memory-index 0 (loads/stores/
+    // `memory.size`/`memory.grow` all target it). Import order within the import
+    // section does not perturb the func index space — only func imports increment it.
+    addImport(ctx, memoryOwnerModule, "memory", { kind: "memory", min: 3 });
+
+    // node-process IO funcs (process.std*/console) — registered only when the
+    // program actually uses process/console stream IO, so a node:fs-only program
+    // (the example) does NOT pull in unused node-process imports.
+    if (usesNodeProcessIo) {
+      // The three byte-boundary IO functions (over the shared memory):
+      //   stdout_write(ptr,len)->i32 · stderr_write(ptr,len) · stdin_read(ptr,len)->i32
+      const ioWriteType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], "$node_io_write");
+      const ioWriteVoidType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [], "$node_io_write_void");
+      addImport(ctx, "js2wasm:node-process", "stdout_write", { kind: "func", typeIdx: ioWriteType });
+      ctx.nodeIoStdoutWriteIdx = ctx.funcMap.get("stdout_write")!;
+      addImport(ctx, "js2wasm:node-process", "stderr_write", { kind: "func", typeIdx: ioWriteVoidType });
+      ctx.nodeIoStderrWriteIdx = ctx.funcMap.get("stderr_write")!;
+      addImport(ctx, "js2wasm:node-process", "stdin_read", { kind: "func", typeIdx: ioWriteType });
+      ctx.nodeIoStdinReadIdx = ctx.funcMap.get("stdin_read")!;
+    }
+
+    // #2631 — node:fs fd-based IO funcs: readSync(fd,ptr,len)->i32 /
+    // writeSync(fd,ptr,len)->i32 over the shared memory. The user module imports
+    // module `"node:fs"` (declaring WHAT it needs, not the shim that provides
+    // it); the `node-fs.wat` shim is one provider. Registered only when the
+    // program imports readSync/writeSync from node:fs.
+    if (usesNodeFsFdShim) {
+      const fsIoType = addFuncType(
+        ctx,
+        [{ kind: "i32" }, { kind: "i32" }, { kind: "i32" }],
+        [{ kind: "i32" }],
+        "$node_fs_io",
+      );
+      addImport(ctx, "node:fs", "readSync", { kind: "func", typeIdx: fsIoType });
+      ctx.nodeFsReadSyncIdx = ctx.funcMap.get("readSync")!;
+      addImport(ctx, "node:fs", "writeSync", { kind: "func", typeIdx: fsIoType });
+      ctx.nodeFsWriteSyncIdx = ctx.funcMap.get("writeSync")!;
+    }
   } else {
     ctx.mod.memories.push({ min: 3 });
     // WASI requires the memory to be exported as "memory"
@@ -5786,6 +5885,11 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // the helper here keeps the infrastructure in place for the follow-up that
   // lowers timer calls to synchronous sleeps via the async scheduler.
   let needsPollOneoff = false;
+  // #2632 Phase 1 — source references a timer / microtask scheduler global
+  // (setTimeout/setInterval/clearTimeout/clearInterval/queueMicrotask). Drives
+  // ensureTimerHeap + the run-loop reactor in emitDeferredWasiHelpers, and the
+  // `getRunLoopFuncIdxForWasiStart` wiring in addWasiStartExport.
+  let needsTimerHeap = false;
   // #1482: process.env.X access — register environ_get / environ_sizes_get +
   // the JS-polyfill fast-path host import.
   let needsEnviron = false;
@@ -5860,10 +5964,35 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     // #1484 — track setTimeout/setInterval/setImmediate to drive poll_oneoff
     // helper emission. Only bare-identifier call positions count (member-name
     // positions like `obj.setTimeout` are skipped).
+    // #2632 Phase 1 — setTimeout/setInterval/clearTimeout/clearInterval are now
+    // LOWERED onto the timer heap + run-loop reactor (no longer rejected). They
+    // require poll_oneoff (the blocking sleep), clock_time_get (monotonic now),
+    // and the timer heap. queueMicrotask needs only the microtask queue, which
+    // the reactor also drives, so it sets needsTimerHeap to wire the run loop.
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
       const callee = node.expression.text;
-      if (callee === "setTimeout" || callee === "setInterval" || callee === "setImmediate") {
+      // A user function/local shadowing the global keeps its own semantics —
+      // the reactor must NOT register/lower for it. The global timer names are
+      // declared ONLY in lib .d.ts files; a user shadow has a declaration in a
+      // real (.ts) source file. (Mirrors the call-site guard in calls.ts.)
+      const isGlobalShadowed = (() => {
+        const sym = ctx.checker.getSymbolAtLocation(node.expression);
+        const decls = sym?.declarations;
+        return !!decls && decls.length > 0 && !decls.every((d) => d.getSourceFile().isDeclarationFile);
+      })();
+      if (!isGlobalShadowed && (callee === "setTimeout" || callee === "setInterval" || callee === "setImmediate")) {
         needsPollOneoff = true;
+      }
+      if (!isGlobalShadowed && (callee === "setTimeout" || callee === "setInterval")) {
+        needsPollOneoff = true;
+        needsClockTimeGet = true;
+        needsTimerHeap = true;
+      }
+      if (
+        !isGlobalShadowed &&
+        (callee === "clearTimeout" || callee === "clearInterval" || callee === "queueMicrotask")
+      ) {
+        needsTimerHeap = true;
       }
     }
     // #1482: detect `process.env.X` (PropertyAccessExpression nested two deep)
@@ -6073,6 +6202,13 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   if (needsPollOneoff) {
     ctx.wasiPendingSleepMsHelper = true;
   }
+  // #2632 Phase 1 — defer timer-heap + run-loop registration to
+  // emitDeferredWasiHelpers (after __wasi_sleep_ms + clock_time_get are
+  // registered, before user bodies compile), so __timer_add / __timer_cancel
+  // func indices referenced at timer call sites are final.
+  if (needsTimerHeap) {
+    ctx.wasiPendingTimerHeap = true;
+  }
 }
 
 /**
@@ -6103,6 +6239,14 @@ export function emitDeferredWasiHelpers(ctx: CodegenContext): void {
   // async scheduler to call this for setTimeout/await sleep().
   if (ctx.wasiPendingSleepMsHelper && !ctx.funcMap.has("__wasi_sleep_ms")) {
     emitWasiSleepMsHelper(ctx);
+  }
+
+  // #2632 Phase 1 — register the timer heap + run-loop reactor. MUST run after
+  // __wasi_sleep_ms (the run loop calls it) and clock_time_get registration
+  // (for __rl_now_ns), and BEFORE user bodies compile so the __timer_add /
+  // __timer_cancel func indices baked into timer call sites are final.
+  if (ctx.wasiPendingTimerHeap && !ctx.funcMap.has("__run_event_loop")) {
+    ensureTimerHeap(ctx);
   }
 }
 
@@ -6297,7 +6441,7 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
  * `registerWasiImports` reserves 3 pages so both always exist.
  */
 export const WASI_STDIN_BUF_START = 64 * 1024;
-const WASI_WRITE_SCRATCH_START = 128 * 1024;
+export const WASI_WRITE_SCRATCH_START = 128 * 1024;
 
 /**
  * #1886 Slice B — start of the linear-backed `Uint8Array` arena (page 4,
@@ -12460,6 +12604,19 @@ function registerNodeBuiltinImports(ctx: CodegenContext, builtins: NodeBuiltinIm
       // preprocessing leaves a type-level `process` binding in the AST and
       // node-process-api.ts lowers supported stream calls directly to WASI.
       if (builtin.moduleName === "process") continue;
+      // #2631 — `node:fs` is likewise a compile-time API surface under
+      // --link-node-shims when the program uses the fd-based synchronous
+      // primitives readSync / writeSync: those are stripped by import
+      // preprocessing and lowered to imported `node:fs` shim calls by
+      // node-process-api.ts (tryCompileNodeFsCall). Path-based fs usage is
+      // rejected at the call site (see PATH_BASED_FS_FNS in calls.ts), not here.
+      if (
+        builtin.moduleName === "fs" &&
+        ctx.linkNodeShims &&
+        (ctx.wasiNodeFsFuncs.has("readSync") || ctx.wasiNodeFsFuncs.has("writeSync"))
+      ) {
+        continue;
+      }
       ctx.errors.push({
         message: `Node builtin module '${builtin.moduleName}' is not available in WASI target. Use compile-time syscall path for node:fs (#1035).`,
         line: 1,
@@ -12652,7 +12809,12 @@ function checkWasiDomUsage(ctx: CodegenContext, sourceFile: ts.SourceFile): void
  * NOTE: `requestAnimationFrame` / `cancelAnimationFrame` are already covered
  * by DOM_ONLY_GLOBALS above, so they are not duplicated here.
  */
-const WASI_REJECTED_TIMER_GLOBALS = new Set(["setTimeout", "setInterval", "setImmediate", "queueMicrotask"]);
+// #2632 Phase 1 — setTimeout/setInterval/clearTimeout/clearInterval and
+// queueMicrotask are now LOWERED onto the timer-heap + run-loop reactor under
+// --target wasi (see ensureTimerHeap / emitTimerAdd). Only `setImmediate`
+// remains rejected: its Node "check phase" ordering (after I/O poll, distinct
+// from a 0ms timer) is a later-phase concern not modelled by the Phase-1 loop.
+const WASI_REJECTED_TIMER_GLOBALS = new Set(["setImmediate"]);
 
 /**
  * In WASI mode, scan source for timer / event-loop globals (setTimeout etc.)

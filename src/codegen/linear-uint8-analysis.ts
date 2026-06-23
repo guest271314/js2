@@ -103,14 +103,41 @@ function isNewUint8Array(expr: ts.Node): expr is ts.NewExpression {
 }
 
 /**
- * Recognise `process.std{in.read,out.write,err.write}(buf, …)` and return the
- * argument index that carries the buffer (0 for both), or `-1` if this is not a
- * std-stream I/O call. We only match the global `process` shape the WASI
- * lowering supports (`node-process-api.ts`); a local `process` shadow makes
- * this not match (the conservative path).
+ * Recognise a byte-I/O intrinsic call that takes a `Uint8Array` buffer and
+ * return the argument index that carries the buffer, or `-1` if this is not one.
+ *
+ * Two shapes are recognised (both lowered by `node-process-api.ts`):
+ *   - `process.std{in.read,out.write,err.write}(buf, …)` — buffer at arg 0. We
+ *     only match the global `process` shape the WASI lowering supports; a local
+ *     `process` shadow makes this not match (the conservative path).
+ *   - #2631: `readSync(fd, buf, …)` / `writeSync(fd, buf, …)` (the node:fs
+ *     fd-based primitives) — buffer at arg 1. Like `process.std*`, these are
+ *     non-escaping byte-I/O sinks. **BUT** `readSync`/`writeSync` are plain
+ *     identifiers that collide with ordinary user/test code (e.g. a test262
+ *     harness helper named `writeSync`), so we ONLY treat them as sinks when the
+ *     program actually imported them from `node:fs` (the `nodeFsBindings` set,
+ *     scoped to the binding SYMBOL so a local shadow can't masquerade). Without
+ *     this gate the recognition rewrites codegen for unrelated Uint8Array
+ *     programs — a wasm-byte regression caught in the #2631 merge_group
+ *     (17 TypedArray/byte-IO assertion_fail). Keeping the gate makes the change
+ *     byte-neutral for every program that does NOT import node:fs readSync/writeSync.
  */
-function ioBufferArgIndex(call: ts.CallExpression): number {
+function ioBufferArgIndex(call: ts.CallExpression, nodeFsBindings: Set<string>): number {
   const callee = call.expression;
+  // node:fs fd-based readSync(fd, buf, …) / writeSync(fd, buf, …): buffer at 1 —
+  // ONLY when the callee is a LOCAL BINDING NAME imported from node:fs (the
+  // `nodeFsBindings` set is empty unless the program imports readSync/writeSync
+  // from node:fs, so this is a no-op — byte-neutral — for unrelated programs).
+  // Name-based (not symbol-based) so it stays robust when the `node:fs` module
+  // doesn't resolve (e.g. the #1886 unit-test program built with `noLib: true`).
+  if (
+    nodeFsBindings.size > 0 &&
+    ts.isIdentifier(callee) &&
+    nodeFsBindings.has(callee.text) &&
+    call.arguments.length >= 2
+  ) {
+    return 1;
+  }
   if (!ts.isPropertyAccessExpression(callee)) return -1;
   const method = callee.name.text;
   const stream = callee.expression;
@@ -121,6 +148,43 @@ function ioBufferArgIndex(call: ts.CallExpression): number {
   if (streamName === "stdin" && method === "read") return 0;
   if ((streamName === "stdout" || streamName === "stderr") && method === "write") return 0;
   return -1;
+}
+
+/**
+ * #2631 — collect the LOCAL BINDING NAMES of `readSync`/`writeSync` imported
+ * from `node:fs` (named imports, honoring an `as` alias — the local name is what
+ * appears at the call site). Returns an EMPTY set for any program that doesn't
+ * import them, so the byte-IO sink recognition is a no-op (byte-identical to
+ * origin/main) for unrelated Uint8Array programs. Name-based rather than
+ * symbol-based so it works even when the `node:fs` module type doesn't resolve
+ * (e.g. a unit-test program built with `noLib: true`); the per-call shadow guard
+ * in the lowering (`fctx.localMap.has`) still protects against a local override.
+ */
+function collectNodeFsSyncBindings(sourceFile: ts.SourceFile): Set<string> {
+  const out = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isImportDeclaration(node) &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      (node.moduleSpecifier.text === "node:fs" || node.moduleSpecifier.text === "fs")
+    ) {
+      const named = node.importClause?.namedBindings;
+      if (named && ts.isNamedImports(named)) {
+        for (const el of named.elements) {
+          // `propertyName` is the imported name (readSync/writeSync); `name` is
+          // the LOCAL binding (possibly aliased). Gate on the imported name,
+          // record the local name (used at the call site).
+          const importedName = (el.propertyName ?? el.name).text;
+          if (importedName === "readSync" || importedName === "writeSync") {
+            out.add(el.name.text);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return out;
 }
 
 /**
@@ -161,7 +225,22 @@ function resolveDirectCallee(
  *     is currently demoted. Repeat until no demotions occur in a full pass.
  *  4. Freeze: the survivors are the linear-safe set.
  */
-export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.SourceFile): LinearUint8Result {
+export function analyzeLinearUint8(
+  checker: ts.TypeChecker,
+  sourceFile: ts.SourceFile,
+  nodeFsSyncNames?: ReadonlySet<string>,
+): LinearUint8Result {
+  // #2631 — the LOCAL NAMES of node:fs readSync/writeSync imports (empty unless
+  // the program imports them). Gates the byte-IO sink recognition so it stays a
+  // no-op (byte-neutral) for unrelated Uint8Array programs.
+  //
+  // The real compile path strips the `node:fs` import BEFORE this analysis runs
+  // (import preprocessing), so the import declaration is gone from `sourceFile`.
+  // The caller therefore passes the names detected from the ORIGINAL source
+  // (`ctx.wasiNodeFsFuncs`, via `detectNodeFsImports`). When that's not supplied
+  // (e.g. the #1886 unit tests, which analyze the raw source with the import
+  // intact), fall back to scanning the AST.
+  const nodeFsBindings = nodeFsSyncNames ? new Set(nodeFsSyncNames) : collectNodeFsSyncBindings(sourceFile);
   // candidate bindings (locals + params), seeded safe; demote on disqualifying use.
   const safe = new Set<ts.Symbol>();
   // Symbols introduced by a `new Uint8Array(...)` LOCAL init (not parameters).
@@ -229,7 +308,7 @@ export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.Sourc
       if (ts.isIdentifier(node)) {
         const sym = checker.getSymbolAtLocation(node);
         if (sym && safe.has(sym) && !isBindingSite(node)) {
-          if (!isAllowedUse(checker, node, safe, fnDecls, fnParamSyms)) {
+          if (!isAllowedUse(checker, node, safe, fnDecls, fnParamSyms, nodeFsBindings)) {
             safe.delete(sym);
             changed = true;
           }
@@ -261,7 +340,7 @@ export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.Sourc
   const localOnly = new Set<ts.Symbol>(newLocalSyms);
   const dropParamThreaded = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
-      const ioIdx = ioBufferArgIndex(node);
+      const ioIdx = ioBufferArgIndex(node, nodeFsBindings);
       node.arguments.forEach((arg, argIdx) => {
         if (!ts.isIdentifier(arg)) return;
         const sym = checker.getSymbolAtLocation(arg);
@@ -366,6 +445,7 @@ function isAllowedUse(
   safe: Set<ts.Symbol>,
   fnDecls: Map<ts.Symbol, FnDecl>,
   fnParamSyms: Map<ts.Symbol, (ts.Symbol | undefined)[]>,
+  nodeFsBindings: Set<string>,
 ): boolean {
   const p = id.parent;
 
@@ -382,8 +462,8 @@ function isAllowedUse(
   if (ts.isCallExpression(p) && p.expression !== id) {
     const argIdx = p.arguments.indexOf(id);
     if (argIdx < 0) return false; // appears in callee position somehow → unsafe
-    // process.std*.{read,write}(buf …)
-    const ioIdx = ioBufferArgIndex(p);
+    // process.std*.{read,write}(buf …) / node:fs readSync/writeSync(fd, buf …)
+    const ioIdx = ioBufferArgIndex(p, nodeFsBindings);
     if (ioIdx === argIdx) return true;
     // direct user call → corresponding param must be currently linear-safe.
     const resolved = resolveDirectCallee(checker, p);
@@ -397,7 +477,7 @@ function isAllowedUse(
   // Parenthesised buffer: `(b)[i]`, `(b).length` — unwrap one paren level.
   if (ts.isParenthesizedExpression(p)) {
     // Re-classify the paren as if it were the buffer reference.
-    return isAllowedUse(checker, p as unknown as ts.Identifier, safe, fnDecls, fnParamSyms);
+    return isAllowedUse(checker, p as unknown as ts.Identifier, safe, fnDecls, fnParamSyms, nodeFsBindings);
   }
 
   // Everything else is a potential escape:
