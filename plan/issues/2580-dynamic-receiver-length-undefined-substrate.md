@@ -1124,3 +1124,129 @@ indexed + `in` agreement (~1–2 days). D rides on A–C's substrate plus #983d
 coordination for the residual. **Hold B–D behind Stage A's full-gate result.**
 This is senior-dev / value-rep lane (coordinate `project_standalone_any_string_
 value_read_substrate`); NOT dev-claimable until Stage A's gating is proven.
+
+---
+
+# M3 — STAGE A: SPEC MIS-ATTRIBUTED — DEFER (verified 2026-06-23, sd-value-rep, max-reasoning)
+
+> Per the implementer's verify-before-commit guardrail (architect specs this
+> session proved fallible — the #2623 Slice-A spec mis-attributed its mechanism
+> end-to-end). I drove the 4 TDD canaries against CURRENT main with a faithful
+> **per-process** harness (`.tmp/repro.mjs` — one snippet, one mode, one fresh
+> `WebAssembly.instantiate`, both host + standalone). The fault reproduces, but
+> **Stage A's specified mechanism does not match the actual fault** — the same
+> failure class as #2623-A. NO code landed; this is a clean docs-only stop.
+
+## What I verified (faithful per-process, NOT the in-process loop trap)
+
+The canary `function Con(){}; Con.prototype = {foo:7}; new Con().foo`:
+- **HOST** → `undefined` (spec said "NaN"; the NaN was the test262 runner's numeric
+  coercion of the `undefined` miss — confirmed: the raw `.foo` value is `undefined`).
+- **STANDALONE** → numeric `0` (the inherited read misses; `typeof v === "number"`).
+
+Both wrong, both modes — consistent with the re-grounding's headline. So the
+*symptom* is real. But bisecting the *mechanism* contradicts the spec's
+link-location decision in BOTH modes:
+
+### STANDALONE — the spec's "seed `instance.$proto`" is NOT IMPLEMENTABLE as written
+
+The spec (Decision 1 + M3-S-new) says: reuse the existing `$Object.$proto` field
+(field 0), and `new F()` should "set `instance.$proto = F's prototype $Object`."
+**But a standalone `new Con()` instance is NOT an `$Object`** — it is a bespoke
+`$__fnctor_Con` struct built field-by-field from the ctor's `this.x=` assignments
+(`new-super.ts:998` `struct.new ${structName}`, fields collected at ~981). For the
+canary `function Con(){}` (empty body) the struct is literally `(struct )` — **no
+fields, and crucially NO `$proto` field to seed.** Verified from the emitted WAT:
+`(type $__fnctor_Con (struct ))`. The `c.foo` read routes through the M2 reader
+`emitDynGet` → `__dyn_get` → `__extern_get`, whose `$proto` walk only knows
+`$Object` (`object-runtime.ts:844` `struct.get $Object 0`); it `ref.test $Object`
+MISSES the `$__fnctor_Con` struct and returns absent.
+
+So "seed `instance.$proto`" has no field to write. Closing the standalone canary
+requires one of (all object-model-substrate, NOT the ~1–2-day populate-wiring the
+spec promised, and all with the broad blast radius Stage A was meant to AVOID):
+1. **Add a `$proto` field to every `$__fnctor_<name>` struct** — shifts every
+   fnctor own-field index, the `this.x=` write paths, and the own-field
+   `struct.get`; AND teach `__extern_get`/`__extern_has`'s walk a new arm that
+   recognizes fnctor structs and reads *their* `$proto` (today it only walks
+   `$Object`). Two walks, the anti-pattern the spec itself warns against.
+2. **Construct fnctor instances as `$Object`s** — changes object identity for
+   every `new F()` (Decision 1's explicitly-rejected option (b), "far larger
+   blast radius").
+3. A per-fnctor compile-time prototype-`$Object` map + a NEW fnctor-struct read
+   arm in `__extern_get` — still a new walk + a struct-shape interaction.
+
+The spec's premise "the standalone walk machinery already exists; the gap is
+purely POPULATE" is the mis-attribution: the walk exists **only for `$Object`**,
+and the canary's receiver is never an `$Object`. There is no `$proto` to populate.
+
+> **Counter-evidence the spec missed (and the actually-tractable seam):** the
+> standalone `$proto` walk *does* work when the receiver IS a real `$Object` with
+> a materialized `$Object` proto — `const p:any={foo:7}; const c:any=Object.create(p);
+> c.foo` → **7** ✓, and `const p:any={foo:7}; const o:any={}; Object.setPrototypeOf(o,p);
+> o.foo` → **7** ✓ (both verified). Only the **inline-literal** proto arg
+> (`Object.create({foo:7})`) regresses to `0` — a literal-materialization gap, not
+> a walk gap. So the genuinely landable standalone first-canary is NOT the fnctor
+> `new Con()` (Stage A) but the **`Object.create`/`setPrototypeOf` named-proto
+> path, already green**, with a narrow inline-literal-as-`$Object` fix — i.e. the
+> spec's Stage B is *more* tractable standalone than its Stage A.
+
+### HOST — the spec's H-a link is ABSENT for the canary's exact shape, + the write is dropped
+
+Spec H-a: "`new F()` instances link to their ctor via `_fnctorInstanceCtor`;
+a miss resolves through `_fnctorProtoLookup`." Verified FALSE for the canary:
+- For a **plain `function Con(){}` declaration**, there is NO closure global, so
+  the `__register_fnctor_instance` emission is gated OFF (`new-super.ts:1118-1138`
+  requires `ctx.moduleGlobals.get(funcName) ?? ctx.funcClosureGlobals.get(funcName)`,
+  which is `undefined` for a hoisted decl). Confirmed from the emitted imports:
+  the canary module imports only `__extern_get`/`__box_number`/`__unbox_number` —
+  **no `__register_fnctor_instance`** — so the instance→ctor link is never
+  established. `_fnctorProtoLookup` returns `undefined` for the canary instance.
+  (The #1712 mechanism the spec leans on fires only for a *closure-valued*
+  `const Con = function(){}` — verified: `const Con=function(){}; Con.prototype.foo=7;
+  new Con().foo` → **7** ✓. The canary uses a declaration, which the link skips.)
+- The whole-object write `Con.prototype = {foo:7}` is **dropped entirely** — no
+  host call is emitted for it (verified in WAT: no `__extern_set`, no sidecar
+  write). Even `(Con as any).prototype.foo` reads `undefined` directly.
+- `Object.create(namedProtoVar)` host → `undefined`/NaN too (H-b: V8's native
+  `Object.create(opaqueStruct)` can't walk our struct's keys).
+
+So host Stage A is THREE gaps stacked (no link for declarations · dropped write ·
+unreadable opaque-struct proto), not the single "land the write in the vivified
+slot" the spec scoped.
+
+## VERDICT: Stage A as specified is mis-attributed — DEFER, do not force
+
+This is the #2623-A failure class the task flagged: the spec's central mechanism
+("populate the existing `$proto`/vivified-slot — ~1–2 days") does not match the
+fault. The standalone canary has **no `$proto` field on the fnctor instance to
+populate** (the receiver is never an `$Object`); the host canary has **no
+instance→ctor link for a function declaration** plus a **dropped prototype write**.
+Forcing it means an object-model struct-shape change (add `$proto` to every fnctor
+struct, or reconstruct fnctor instances as `$Object`s) + a second walk arm — the
+exact broad-blast-radius, hot-path-regression-prone substrate change Stage A's
+"smallest, highest-signal canary" framing was designed to avoid, and the
+stop-the-line tripwire ("if Stage A ejects on a typed-instance case, gating is
+wrong → STOP") would almost certainly fire.
+
+**Recommended re-spec (flagged to lead):**
+1. **Re-pick the standalone canary**: the fnctor `new Con()` is the *hardest*
+   standalone shape, not the easiest — its instance isn't an `$Object`. The
+   genuinely-landable standalone first canary is the **`Object.create` /
+   `setPrototypeOf` named-proto path (already green)** + a narrow
+   inline-literal-proto-as-`$Object` materialization fix. Make that the new Stage A.
+2. **Decide the fnctor-instance representation explicitly** (the real Decision 1
+   the spec skipped): does a standalone `new F()` instance carry a `$proto` (struct
+   field, with the index-shift + walk-arm cost), or is it reconstructed as an
+   `$Object`? This is an architect call, not a populate-wiring task — and it is
+   the precondition for the fnctor named-read AND the indexed/`in`/generic-method
+   stages (C/D) that all assume the instance participates in the `$proto` walk.
+3. **Host**: emit `__register_fnctor_instance` for **function-declaration** ctors
+   too (not only closure-valued ones), and land `F.prototype = x` in the
+   `_fnctorProtoLookup`-read sidecar slot AND make an opaque-struct `x` readable —
+   three concrete sub-fixes, each its own small gated PR, none of which is the
+   single "vivified-slot write" the spec named.
+
+No source changed. Per-process harness was in `.tmp/` (gitignored). Issue stays
+`in-progress`; claim released. This finding is the durable deliverable — the spec
+needs the fnctor-instance-representation decision before Stage A is implementable.
