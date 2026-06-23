@@ -643,7 +643,7 @@ while a class `assert.sameValue(...)` assertion failure reclassifies to
   local `symphony/1908` and the published PR head.
 - `pnpm exec vitest run tests/issue-1908.test.ts` passed.
 - PR #1257 is open, non-draft, targets `main`, and the published branch points
-  at `dc0329b64079c36cfc40b4b1992e6d60cdf6fdc4`.
+  at `dc0329b21779c36cfc40b4b1992e6d60cdf6fdc4`.
 - GraphQL reports `mergeStateStatus: BLOCKED`, `mergeable: MERGEABLE`, and
   `mergeQueueEntry.state: QUEUED`, `position: 13`, `enqueuedAt:
   2026-06-07T12:34:54Z`.

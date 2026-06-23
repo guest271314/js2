@@ -78,7 +78,7 @@ coerced to externref, then read by string key**, plus its ToPrimitive sibling
   per coercion.
 - **(B) Teach `__extern_get`/`__extern_method_call` to read struct/$Vec-backed
   externrefs.** Add a `ref.test`-chain arm over the registered closed-struct types
-  (mirroring the `$Vec` arm pattern from #6407's spec) that does `struct.get fieldIdx`
+  (mirroring the `$Vec` arm pattern from #2177's spec) that does `struct.get fieldIdx`
   by a compile-time key→field-index map. No per-coercion alloc, but needs a
   per-struct-type field-name table threaded to the runtime, and must also force
   `ensureObjectRuntime`. Larger runtime surface; closer to zero-copy.

@@ -680,7 +680,7 @@ through `__iterator`/`__iterator_next`/`__iterator_rest` exactly as values/keys 
 - empty-receiver spread → length 0; `--target wasi` parity.
 - values()/keys() (Slice 1) unchanged; JS-host `__array_entries` path untouched.
 
-**Deferred to the open-any element-retrieval layer (#1888 S5b / #6407 Slice 1,
+**Deferred to the open-any element-retrieval layer (#1888 S5b / #2177 Slice 1,
 senior-dev) — NOT producer bugs:**
 - `pair[0]`/`pair[1]` indexed read returns 0: `compileElementAccessBody`
   (property-access.ts:3525) routes externref element-access through `__extern_get`

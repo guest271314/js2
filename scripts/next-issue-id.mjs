@@ -66,8 +66,8 @@ try {
 }
 
 // Exclude outlier ids separated from the main body by a large gap. A single
-// stray out-of-range file (e.g. a mis-typed `6406`/`6407` when the real range
-// is ~1800) must not poison `max + 1` and hand out a 6408 — that mis-allocation
+// stray out-of-range file (e.g. a mis-typed `6406`/`2177` when the real range
+// is ~1800) must not poison `max + 1` and hand out a 2194 — that mis-allocation
 // is exactly what #1858 hit. Real issue numbering increments by 1 and never
 // jumps more than a few dozen, so anything beyond GAP above the running max is
 // treated as a stray and ignored (logged to stderr for visibility).

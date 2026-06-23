@@ -1,5 +1,5 @@
 ---
-id: 6407
+id: 2177
 title: "Array.prototype.<m>.call(receiver, cb) never reads elements of a compiled $Vec / open-object receiver"
 status: done
 created: 2026-06-04
@@ -14,7 +14,7 @@ goal: correctness
 sprint: 61
 blocks: [1828, 1830, 1831, 1832]
 ---
-# #6407 — `Array.prototype.<m>.call(receiver, …)` can't read elements of a compiled receiver
+# #2177 — `Array.prototype.<m>.call(receiver, …)` can't read elements of a compiled receiver
 
 ## RESOLUTION (sd-s2, 2026-06-05) — ALREADY FIXED ON MAIN + regression-pinned
 
@@ -31,7 +31,7 @@ work that landed since the spec was written 2026-06-04 (the
 `#1828`/`#1830`/`#1831`/`#1832` family + dispatch routing).
 
 Verified working (all run through `assertEquivalent` = compile-to-Wasm vs
-native-JS equality) in **`tests/equivalence/issue-6407.test.ts`** (17 cases,
+native-JS equality) in **`tests/equivalence/issue-2177.test.ts`** (17 cases,
 added by this issue as a regression pin):
 
 - `findIndex` / `find` / `indexOf` / `includes` / `forEach` / `every` / `some`
@@ -40,19 +40,19 @@ added by this issue as a regression pin):
   `__vec_`/`__arr_` bailout path the spec's §(A) targeted — no longer broken);
 - `findIndex` `.call` on an **`any`-typed array** (the generic loop path);
 - `indexOf` `.call` on an **open-object numeric-key array-like**
-  `{0:10,1:20,2:30,length:3}` (the #6407b candidate — also working).
+  `{0:10,1:20,2:30,length:3}` (the #2177b candidate — also working).
 
 **Slices 1 & 2 (JS-host dispatch + host backstop) are therefore moot** — no
 code change is needed for the JS-host path, only the regression test.
 
-### Standalone (`--target wasi` / `nativeStrings`) — NOT a #6407 gap
+### Standalone (`--target wasi` / `nativeStrings`) — NOT a #2177 gap
 
 The spec's §(C)/Slice 3 native `$Vec` arm: in `nativeStrings` mode the
 array-callback element boxing still routes through host `__box_number` /
 `__unbox_number` imports — **but this is true for a plain `arr.findIndex(...)`
 direct method call too**, not just the `.call` borrowed form. So it is a
 general standalone-array-callback boxing gap, NOT a `$Vec`-element-read gap
-specific to `Array.prototype.<m>.call`. It does not belong to #6407's thesis
+specific to `Array.prototype.<m>.call`. It does not belong to #2177's thesis
 and is left to the broader standalone-array-callback boxing work. Noted in the
 test file header.
 
@@ -62,7 +62,7 @@ test file header.
 (their fixes already merged; `#1830` is `done`, the other three have merged
 fix commits but stale `ready` status — a TaskList/issue-status reconcile, not
 new work). The combined String+Array borrowed-method brand table (#1888 follow-on)
-can ride on the existing element read for the Array arm — no #6407 impl gate
+can ride on the existing element read for the Array arm — no #2177 impl gate
 remains for it in JS-host mode.
 
 ## Symptom (dev-w1, 2026-06-04)
@@ -246,7 +246,7 @@ end
   externref-vs-host-object gap and, if so, that the open-object arm of
   `__extern_get_idx` (the `__sget_${idx}` path) actually fires — it may be that
   the open-object struct doesn't surface `__sget_N` for purely-numeric keys.
-  Carve a sub-check; if open-objects need a separate fix, file it as #6407b.
+  Carve a sub-check; if open-objects need a separate fix, file it as #2177b.
 - **`map` result shape**: `map.call($Vec, cb)` must return a fresh array of the
   callback results — confirm the typed-path `compileArrayMethodCall` map builds
   a new `$Vec`, not a compacted/hole-losing one (the #1828 hole-handling fix
@@ -266,7 +266,7 @@ end
   happen to be a `$Vec`). ~100 LOC.
 - **Slice 3 — standalone native arm (C).** `$Vec` `ref.test` arm in the native
   `__extern_get_idx`/`__extern_length` so `--target wasi` reaches parity. ~80 LOC.
-- **Slice 4 (conditional) — open-object numeric-key retrieval (#6407b).** Only
+- **Slice 4 (conditional) — open-object numeric-key retrieval (#2177b).** Only
   if the `{0:1,2:3}` symptom is a distinct open-object gap, not covered by
   Slices 1–3.
 - Slice 1 is independently shippable and unblocks the four dependent issues'
@@ -274,7 +274,7 @@ end
 
 ### Test files to verify
 
-- Add `tests/issue-6407.test.ts` (equivalence): `findIndex`/`find`/`map`/
+- Add `tests/issue-2177.test.ts` (equivalence): `findIndex`/`find`/`map`/
   `every`/`some`/`forEach`/`indexOf`/`includes` `.call` on a dense compiled
   array literal `[10,20,30]`, asserting the result matches native JS. Run BOTH
   default (JS-host) and `nativeStrings:true` (standalone) so Slices 2 and 3 are
