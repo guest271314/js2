@@ -2,7 +2,7 @@
 id: 2580
 title: "`.length` on an any/dynamically-mutated receiver returns numeric 0, not undefined (runtime property-presence)"
 status: in-progress
-assignee: ttraenkler/sd-value-rep
+assignee: ttraenkler/sd-value-rep-m3
 sprint: 65
 created: 2026-06-21
 priority: medium
@@ -1250,3 +1250,158 @@ wrong → STOP") would almost certainly fire.
 No source changed. Per-process harness was in `.tmp/` (gitignored). Issue stays
 `in-progress`; claim released. This finding is the durable deliverable — the spec
 needs the fnctor-instance-representation decision before Stage A is implementable.
+
+---
+
+# M3 — CORRECTED Implementation Plan + Stage A LANDED (2026-06-23, sd-value-rep-m3, max-reasoning)
+
+> Verify-first. Re-ran the 4 TDD canaries + a 6-shape seam matrix
+> **per-process** (one snippet · one mode · one fresh `WebAssembly.instantiate`)
+> against current `main`, then bisected the standalone failure to the emitted WAT.
+> This confirms the prior session's DEFER verdict AND finds the genuinely-landable
+> first slice the brief pointed at. **Stage A (inline-literal proto
+> materialization) is implemented in this PR.**
+
+## THE ARCHITECTURE DECISION (fnctor-instance `[[Prototype]]` representation)
+
+The prior session asked the right question and stopped at it: a standalone
+`new Con()` instance is a bespoke `$__fnctor_<Name>` struct (empty ctor body →
+`(struct )`, no `$proto` field), NOT an `$Object`, so the `$proto` walk in
+`__extern_get`/`__extern_has` misses it. There is **nothing to populate** on a
+fnctor struct. Decided:
+
+**DECISION (fnctor instances): reconstruct/route fnctor `new F()` instances so
+they participate in the `$Object.$proto` walk — option (ii) over option (i).**
+Rationale, weighed:
+
+- **Option (i) — add a `$proto` field to every `$__fnctor_<Name>` struct + a 2nd
+  walk arm.** REJECTED for the fnctor lap. It is the broad-blast-radius change the
+  task warns against: it shifts every fnctor own-field index (the `this.x=` write
+  paths + own-field `struct.get`), AND forces `__extern_get`/`__extern_has` to
+  carry a SECOND walk arm that recognizes fnctor structs and reads *their*
+  `$proto` (today the walk is `$Object`-only, `object-runtime.ts:844`
+  `struct.get $Object 0`). Two walks is exactly the "N walks not one" anti-pattern
+  the spec itself forbids. It also re-enters the iso-recursive-canonicalization
+  hazard zone (#1100/#2009) by changing a closed struct's shape.
+- **Option (ii) — make fnctor instances `$Object`-participating (one walk).**
+  CHOSEN. The single canonical link stays `$Object.$proto` (field 0, already
+  walked by `__extern_get`/`__extern_has`, already written by
+  `__object_create`/`__object_setPrototypeOf`). The fnctor lap's job is to make a
+  `new F()` instance's reads resolve through that ONE walk — either by allocating
+  the instance as an `$Object` (when it has no typed-struct consumers) or by
+  synthesizing a per-fnctor prototype `$Object` global the instance's dynamic
+  reads consult. This is bigger than Stage A and is the **fnctor lap** below; it
+  does NOT block the inline-literal slice, which needs no fnctor change at all.
+
+This keeps the invariant: **ONE link location (`$Object.$proto`), ONE walk
+(`__extern_get`/`__extern_has`).** No second walk arm, no struct-shape change to
+closed types.
+
+## STAGING — re-ordered so the genuinely-landable slice goes FIRST
+
+The prior spec's Stage A (the fnctor `new Con().foo` canary) is the **hardest**
+standalone shape, not the easiest (its receiver is never an `$Object`). The brief's
+guidance is correct and verified: **`Object.create(namedProtoVar)` /
+`setPrototypeOf(o, namedProtoVar)` ALREADY work standalone; only INLINE-LITERAL
+protos regress.** So the new staging:
+
+- **Stage A (THIS PR) — inline-literal-proto materialization, standalone.** Narrow,
+  no struct-shape change, no fnctor change. Build the inline-literal proto operand
+  of `Object.create({…})` / `Object.setPrototypeOf(o,{…})` as a native `$Object`
+  so `ref.test $Object` succeeds and `__object_create`/`__object_setPrototypeOf`
+  record the link. The existing `$proto` walk then resolves inherited NAMED and
+  INDEXED reads. **Landed below.**
+- **Stage B (next) — the fnctor lap (option ii), standalone.** `new F()` /
+  `F.prototype = x` participate in the `$Object` walk. The architecture decision
+  above. ~3–5 days, the real object-model substrate.
+- **Stage C — host/GC `[[Prototype]]`.** ALL host shapes currently → NaN (even
+  named-var `Object.create`/`setPrototypeOf` — verified). Host needs the
+  `_objProto` WeakMap + the `setPrototypeOf`-stub→real-import fix (calls.ts:5562
+  still `drop`s the proto in host mode) + `Object.create` recording opaque-struct
+  protos. Separate, larger; do NOT block on it.
+- **Stage D — generic-method cluster (`-c-i-`/`-b-i-`, the 168-row bulk)** rides on
+  B/C once `new F()`-instance + host reads are proto-aware.
+
+## Stage A — ROOT CAUSE (bisected from the emitted WAT, standalone)
+
+`const c:any = Object.create(p)` where `p` is a **named var** `const p:any={foo:7}`
+emits: `call __new_plain_object` + `call __extern_set` (a real `$Object`) → stored
+in `$p` → `call __object_create` on that `$Object` externref. `__object_create`'s
+`ref.test $Object` SUCCEEDS → writes `$proto` → `c.foo` walks the chain → **7**. ✓
+
+`const c:any = Object.create({foo:7})` (INLINE literal) emits instead:
+```
+f64.const 7
+struct.new 82          ;; CLOSED-shape literal struct (the literal's own type), NOT $Object
+extern.convert_any
+call __object_create    ;; proto is a closed struct → ref.test $Object FAILS → coerced to null
+```
+The inline literal's TS contextual type is a CONCRETE object type (not `any`), so
+`compileObjectLiteral` picks the closed-shape struct path (`struct.new <typeIdx>`),
+which `ref.test $Object` MISSES. `__object_create` coerces a non-`$Object` proto to
+null (by design) → `c.foo` walks a null `$proto` → absent → **0**. ✗
+
+This is the **same bug class as the merged #2076 `Object.assign` fix**:
+`__object_assign` also reads operands via `ref.test $Object`, and a closed-struct
+literal silently dropped its props. The fix template already exists in-tree
+(`compileObjectAssignArg`, calls.ts).
+
+## Stage A — THE FIX (implemented, 2-site + 1 shared helper, standalone-gated)
+
+`src/codegen/expressions/calls.ts`:
+- New helper `compileProtoArg(ctx, fctx, arg)` — mirrors `compileObjectAssignArg`:
+  when `arg` is a plain data-property / spread object literal (the same shapes the
+  `$Object` builder accepts) AND `ctx.standalone`, build it via
+  `compileObjectLiteralAsExternref` (a real `$Object`); else fall through to the
+  ordinary `compileExpression(arg, externref)`. Pushes `ref.null.extern` when the
+  expression yields no value (stack-balance for the consuming call).
+- `Object.create(proto)` standalone arm (~5757): the non-`null` proto compile now
+  routes through `compileProtoArg`. `null`, `Foo.prototype` fast path, and the
+  descriptor 2nd-arg static-expansion are all unchanged.
+- `Object.setPrototypeOf(obj, proto)` standalone arm (~5540): the proto compile now
+  routes through `compileProtoArg` (it already null-guards via the helper).
+
+**Hot-path byte-identity:** the change is gated on `ctx.standalone` AND
+`ts.isObjectLiteralExpression(arg)`. Host/GC mode is untouched (the entire host
+`__object_create`/`setPrototypeOf`-stub path is byte-identical). Non-literal protos
+(identifiers, calls, `Foo.prototype`, `null`) take the unchanged ordinary path.
+Typed `.length` / array hot paths never enter these arms.
+
+## Stage A — VERIFICATION (per-process, both modes; the runner-trap avoided)
+
+Seam matrix, standalone, BEFORE → AFTER:
+- `Object.create({foo:7}).foo`            0 → **7** ✓
+- `Object.setPrototypeOf(o,{foo:7}); o.foo` 0 → **7** ✓
+- `Object.create({5:99})[5]` (indexed)    0 → **99** ✓ (indexed inherited read also
+  fixed — `__extern_get_idx` routes through the now-populated `$proto` walk)
+- `Object.create({foo:7}).foo` with own shadow `c.foo=9` → **9** ✓
+- named-var proto (regression guard)      7 → **7** ✓ (unchanged)
+- `Object.create(null)` absent read → undefined ✓; `Object.create(Foo.prototype)`
+  class fast path ✓; `setPrototypeOf(o,null)` ✓; array `.length` → 3 ✓.
+
+Regression suite `tests/issue-2580-m3-protochain.test.ts` (11 cases) green; `tsc`
++ `prettier` clean. Sibling 2580 suites green. `prototype-chain.test.ts` (6/11) and
+`object-create.test.ts` (missing `./helpers.js`) fail IDENTICALLY on clean
+origin/main — **pre-existing test-harness artifacts, not this change** (verified
+against `/workspace`).
+
+## KNOWN-ORTHOGONAL (NOT this slice; do not chase in Stage A)
+
+`c.a + c.b` reading TWO inherited `any`-typed props in one `+` expression returns
+0 — but so does `p.a + p.b` reading two OWN props of a plain `any` object **on
+clean origin/main** (verified). It is a pre-existing `any + any` arithmetic-add bug
+(the #2580 M1/core uniform-externref *consumer* issue, NOT the proto LINK). My
+slice fixes the link; single-read inherited access is fully correct. Stored-to-local
+sums (`const x=c.a; const y=c.b; return x+y`) → 30 ✓, proving the values resolve.
+Track the add-path bug with M1/core, not M3.
+
+## Files changed (Stage A)
+
+- `src/codegen/expressions/calls.ts` — `compileProtoArg` helper + 2 standalone
+  call-site routings (Object.create proto, Object.setPrototypeOf proto).
+- `tests/issue-2580-m3-protochain.test.ts` — new standalone regression suite.
+
+This is value-rep / object-model substrate → the merge_group standalone floor
+(#2097, runs only in merge_group) is the authoritative gate. Stop-the-line on any
+eject (broad-impact value-rep) and escalate; fix-forward once, never re-enqueue,
+never force-push public main.
