@@ -1,7 +1,8 @@
 ---
 id: 2632
 title: WASI async runtime — event-loop reactor (process.stdin Readable, timers, promise-driven I/O)
-status: ready
+status: in-progress
+assignee: ttraenkler/senior-dev-2632
 sprint: Backlog
 goal: wasi-async-runtime
 feasibility: hard
@@ -9,6 +10,13 @@ kind: goal
 created: 2026-06-23
 refs: [389, 2631, 1326, 1326c, 1484, 1653, 2524]
 ---
+
+> **PHASED ISSUE — Phase 1 has LANDED; Phases 2-4 remain (status stays
+> `in-progress`).** Phase 1 (scheduler + timers + microtasks) is implemented and
+> merged; the event-loop reactor now drives `setTimeout`/`setInterval`/
+> `clearTimeout`/`clearInterval`/`queueMicrotask` under `--target wasi`. The
+> fd-readiness reactor (Phase 2), the `process.stdin` Readable stream (Phase 3),
+> and the Preview-2 backend (Phase 4) are still open — do NOT close this issue.
 
 # WASI async runtime — event-loop reactor
 
@@ -136,23 +144,75 @@ loop, not building from scratch.
 
 ## Acceptance criteria (phased)
 
-### Phase 1 — scheduler + timers + microtasks (smallest viable first slice)
-- [ ] A **run-loop driver** function (`__run_event_loop`) replaces the one-shot
+### Phase 1 — scheduler + timers + microtasks (smallest viable first slice) ✅ LANDED
+- [x] A **run-loop driver** function (`__run_event_loop`) replaces the one-shot
       `__drain_microtasks` call in the WASI `_start` wrapper. It loops:
       drain microtasks → if any timer is due, fire it → if timers remain pending,
       `poll_oneoff` on the nearest deadline → repeat → exit when no pending handles.
-- [ ] `setTimeout(cb, ms)` / `setInterval(cb, ms)` / `clearTimeout`/`clearInterval`
-      compile under `--target wasi` (remove them from `WASI_REJECTED_TIMER_GLOBALS`)
-      and are driven by the loop via a **timer heap**, not a blocking sleep.
-- [ ] `queueMicrotask(cb)` compiles under WASI and enqueues onto the existing
+- [x] `setTimeout(cb, ms)` / `setInterval(cb, ms)` / `clearTimeout`/`clearInterval`
+      compile under `--target wasi` (removed from `WASI_REJECTED_TIMER_GLOBALS`)
+      and are driven by the loop via a **timer table**, not a blocking sleep.
+- [x] `queueMicrotask(cb)` compiles under WASI and enqueues onto the existing
       microtask queue.
-- [ ] Ordering: all microtasks drain **before** the first due timer fires; timers fire
+- [x] Ordering: all microtasks drain **before** the first due timer fires; timers fire
       in non-decreasing deadline order; a `setTimeout(…, 0)` fires after sync code and
-      after pending microtasks.
-- [ ] Existing #1326/#1326c Promise tests still pass; existing `wasi-timers.test.ts`
-      (the #1484 diagnostic) is updated from "rejects" to "compiles + runs".
-- [ ] New `tests/issue-2632-wasi-event-loop.test.ts` covering timer ordering,
-      microtask-before-timer, and nested `setTimeout` scheduling.
+      after pending microtasks. (Verified under real wasmtime.)
+- [x] Existing #1326/#1326c Promise tests still pass; `wasi-timers.test.ts`
+      (the #1484 diagnostic) updated from "rejects" to "compiles + runs".
+- [x] New `tests/issue-2632-event-loop.test.ts` covering timer ordering,
+      microtask-before-timer, nested `setTimeout`, interval+clearInterval, and
+      clearTimeout — each compiled `--target wasi` and run under wasmtime.
+
+**Scope boundary hit — top-level `await`**: left rejected/unlowered as the spec
+predicted. The CPS machine lowers `await` only inside `async function` bodies;
+module-suspending top-level await would need module-init itself lowered to a
+state machine. Phase 1 does not need it (top level schedules work synchronously
+and returns; the loop then runs), and it is in the test262 skip set. Untouched.
+
+#### Phase 1 implementation notes (WHY, for Phase 2+ maintainers)
+- **Timer table, not a binary min-heap.** The spec sketched a binary heap; I used
+  **parallel WasmGC arrays** (`deadlines:i64`, `callbacks:funcref`,
+  `captures:externref`, `intervals:i64`, `cancelled:i32`) with an O(n) linear scan
+  for the earliest live deadline (`__timer_peek_deadline`) and a single-pass
+  `__timer_fire_due`. Timer counts are tiny, so O(n)/tick is irrelevant, and a
+  linear scan is far less bug-prone than a hand-rolled WasmGC heap. Ids are stable
+  slot indices (no compaction on grow), so `clearTimeout(id)`/`clearInterval(id)`
+  keep working across a grow; cancellation is a lazy `cancelled[id]=1` flag.
+- **The reactor is byte-neutral for non-timer programs.** `__run_event_loop` is only
+  registered when the source references a timer/microtask global (`needsTimerHeap`);
+  otherwise `_start` keeps the exact `getDrainFuncIdxForWasiStart` one-shot-drain (or
+  empty) body. Verified: a `console.log`, a `for`-loop, a `Promise.resolve().then`,
+  and a plain function program all produce **byte-identical** Wasm (same SHA256 +
+  length) vs the branch base. The run loop with zero timers is also behaviourally a
+  strict superset of the one-shot drain (drains once, peeks empty → exits).
+- **Index discipline (`project_type_index_shift_and_deadelim`).** The timer heap
+  (struct/array types, globals, and the 7 helper funcs `__timer_grow/add/cancel/
+  peek_deadline/fire_due`, `__rl_now_ns`, `__run_event_loop`) is registered in the
+  **deferred-helper phase** (`emitDeferredWasiHelpers`, after `__wasi_sleep_ms` +
+  `clock_time_get`, BEFORE user bodies compile) so the `__timer_add`/`__timer_cancel`
+  func indices baked into call sites are final. The per-callback wrapper
+  (`__timer_cb_N`) is append-only during body compile (safe). The timer callback
+  reuses the microtask queue's uniform `$__mt_func_type` `(externref,externref)->
+  externref` signature, so a timer callback and a microtask continuation are
+  `call_ref`-compatible; the closure struct itself is stored as the `captures`
+  externref and re-cast in the wrapper.
+- **`now` = CLOCK_MONOTONIC.** `__rl_now_ns` calls `clock_time_get(1, …)` into linear
+  scratch[48..55] and recombines the LE u64 from two i32 loads (the binary emitter
+  has no `i64.load`). The blocking wait reuses the existing #1484 single-clock
+  `__wasi_sleep_ms` (relative-ms `poll_oneoff`); Phase 2 swaps this for a
+  multi-subscription `poll_oneoff` (fd0 + clock).
+- **The #1501 timer host-import shim is suppressed under WASI.** `preprocessImports`
+  injects a `function setTimeout(cb,ms){ return __timer_set_timeout(cb,ms); }` stub
+  into the user source for the **JS-host** path. Under `--target wasi` that stub (a)
+  pulls in an unresolvable host import and (b) makes `setTimeout` resolve to a
+  user-file declaration, which *defeated the reactor lowering* (the call inlined the
+  no-op stub). The fix threads `{ wasi }` into `preprocessImports` and skips the shim
+  entirely for WASI. The call-site + detection guards additionally honour a *genuine*
+  user `function setTimeout` shadow (decls not all in `.d.ts`) so a real shadow keeps
+  its own semantics.
+- **`setImmediate` stays rejected.** Its Node "check phase" ordering (after I/O poll,
+  distinct from a 0ms timer) is a later-phase concern; only `setImmediate` remains in
+  `WASI_REJECTED_TIMER_GLOBALS`.
 
 ### Phase 2 — poll_oneoff reactor + non-blocking fds
 - [ ] Set fd 0 non-blocking via `fd_fdstat_set_flags` at loop start.
