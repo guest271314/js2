@@ -39,6 +39,7 @@ import { reportSilentFallback } from "../fallback-telemetry.js";
 import { emitThrowReferenceError, noJsHost } from "./helpers.js";
 import { emitWithBindingGet, findWithBinding } from "../with-scope.js";
 import { emitBuiltinNamespaceObject, isSupportedBuiltinNamespace } from "../builtin-static-globals.js";
+import { tryEmitPromiseSubclassValue } from "./promise-subclass.js";
 
 /**
  * #1473 — Build the set of `$Error_struct` `$tag` values compatible with an
@@ -727,6 +728,30 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
       if (emitLazyClassObjectGet(ctx, fctx, resolvedClassName)) {
         return { kind: "externref" };
       }
+    }
+  }
+
+  // (#2623 Slice B) A `class … extends Promise` is externref-backed (#1366a/b)
+  // and therefore has NO `__class_<Name>` singleton global (the block above is
+  // skipped — `classObjectGlobals` never holds it). Reading the class as a VALUE
+  // (`Sub` on the RHS of `=== Sub`, `instanceof Sub`, `Promise.try.call(Sub,…)`)
+  // previously fell through to the `ref.null.extern` graceful-default, yielding
+  // `null` — a DIFFERENT object than the synthesized `__promise_subclass_ctor`
+  // the combinator capability path builds the instance from, so
+  // `instance.constructor === Sub` / `instance instanceof Sub` were always
+  // false. Route the value-read through the SAME cached singleton so there is
+  // exactly one constructor object per Promise-subclass name. JS-host only;
+  // the helper returns false in standalone/WASI so the fallback default stands.
+  // Order: AFTER local/captured/module/declared-global shadowing (so a user
+  // binding wins) and AFTER the class-object-singleton block (a non-Promise
+  // class keeps its `__class_<Name>` identity); BEFORE the null fallback.
+  if (
+    ctx.classSet.has(ctx.classExprNameMap.get(name) ?? name) &&
+    !fctx.localMap.has(name) &&
+    !(fctx.boxedCaptures?.has(name) ?? false)
+  ) {
+    if (tryEmitPromiseSubclassValue(ctx, fctx, name)) {
+      return { kind: "externref" };
     }
   }
 

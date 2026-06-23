@@ -118,6 +118,7 @@ import {
   emitBoolToString,
 } from "../string-ops.js";
 import { tryCompileNodeProcessCall } from "../node-process-api.js";
+import { resolvePromiseSubclassName, tryEmitPromiseSubclassReceiver } from "./promise-subclass.js";
 import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import {
   defaultValueInstrs,
@@ -512,6 +513,61 @@ function compileObjectAssignArg(ctx: CodegenContext, fctx: FunctionContext, arg:
   }
   const t = compileExpression(ctx, fctx, arg, { kind: "externref" });
   if (t && t.kind !== "externref") coerceType(ctx, fctx, t, { kind: "externref" });
+}
+
+/**
+ * #2580 M3 Stage A — compile a `[[Prototype]]` argument (the proto operand of
+ * `Object.create(proto)` / `Object.setPrototypeOf(obj, proto)`) so that an
+ * INLINE OBJECT LITERAL proto is built as a native `$Object`, pushing an
+ * externref onto the stack.
+ *
+ * Root cause (standalone): the native `__object_create` / `__object_setPrototypeOf`
+ * helpers write the link field `$Object.$proto` only when the proto value
+ * `ref.test $Object` succeeds (a non-`$Object` externref coerces to null, by
+ * design — see object-runtime.ts `__object_create`/`__object_setPrototypeOf`).
+ * `compileObjectLiteral` lowers an inline literal whose TS contextual type is a
+ * CONCRETE object type (not `any`) to a CLOSED-shape struct (`struct.new <typeIdx>`),
+ * which fails `ref.test $Object`. So `Object.create({foo:7}).foo` and
+ * `Object.setPrototypeOf(o,{foo:7}); o.foo` silently lose the proto link (the
+ * chain walk reads a null `$proto` → property absent → 0). A proto passed via a
+ * `const p:any = {foo:7}` *named variable* already works because the `any`
+ * annotation diverts that literal to the open-`$Object` builder (literals.ts).
+ *
+ * Fix mirrors the merged #2076 `compileObjectAssignArg` precedent: when the proto
+ * is a plain data-property / spread object literal (the same shapes the `$Object`
+ * builder accepts), build it directly as a native `$Object` via
+ * `compileObjectLiteralAsExternref` so `ref.test $Object` succeeds and the link
+ * is recorded. Any other proto expression (identifiers, calls, `null`,
+ * `Foo.prototype`, accessor-bearing literals) keeps the ordinary
+ * `compileExpression` path unchanged. Standalone-only — host/GC mode owns the
+ * `__object_create` JS import and a separate (still-broken, tracked) proto-link
+ * mechanism, untouched here.
+ */
+function compileProtoArg(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
+  if (
+    ctx.standalone &&
+    ts.isObjectLiteralExpression(arg) &&
+    arg.properties.length > 0 &&
+    arg.properties.every(
+      (p) => ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) || ts.isSpreadAssignment(p),
+    ) &&
+    arg.properties.every((p) => ts.isSpreadAssignment(p) || resolvePropertyNameText(ctx, p) !== undefined)
+  ) {
+    const objResult = compileObjectLiteralAsExternref(ctx, fctx, arg);
+    if (objResult) {
+      if (objResult.kind !== "externref") coerceType(ctx, fctx, objResult, { kind: "externref" });
+      return;
+    }
+    // fall through to the ordinary path if the $Object builder declined.
+  }
+  const t = compileExpression(ctx, fctx, arg, { kind: "externref" });
+  if (!t) {
+    // Expression produced no value — push null so the stack stays balanced for
+    // the consuming __object_create / __object_setPrototypeOf call.
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (t.kind !== "externref") {
+    coerceType(ctx, fctx, t, { kind: "externref" });
+  }
 }
 
 /**
@@ -1720,48 +1776,13 @@ function emitBoundFunctionCall(
  * if the caller should fall back to plain `compileExpression`.
  */
 function resolvePromiseSubclassThisArg(ctx: CodegenContext, fctx: FunctionContext, argExpr: ts.Expression): boolean {
-  // (E7) Standalone (WASI) mode has no JS host, so `__promise_subclass_ctor`
-  // is unsatisfiable. Never emit the import there.
-  if (isStandalonePromiseActive(ctx)) return false;
-  // Only fires for a bare identifier (or class-expr alias) naming a class.
-  if (!ts.isIdentifier(argExpr)) return false;
-  const resolved = ctx.classExprNameMap.get(argExpr.text) ?? argExpr.text;
-  // Walk the parent chain so a chained subclass (E3 — `class B extends A`,
-  // `class A extends Promise`) still resolves: `classBuiltinParentMap` only
-  // records the *immediate* builtin parent, so B maps to "A", not "Promise".
-  let cursor: string | undefined = resolved;
-  let extendsPromise = false;
-  const seen = new Set<string>();
-  while (cursor !== undefined && !seen.has(cursor)) {
-    seen.add(cursor);
-    if (ctx.classBuiltinParentMap.get(cursor) === "Promise") {
-      extendsPromise = true;
-      break;
-    }
-    cursor = ctx.classParentMap.get(cursor);
-  }
-  if (!extendsPromise) return false;
-  const importName = "__promise_subclass_ctor";
-  let funcIdx =
-    ctx.funcMap.get(importName) ?? ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "externref" }]);
-  flushLateImportShifts(ctx, fctx);
-  funcIdx = ctx.funcMap.get(importName) ?? funcIdx;
-  if (funcIdx === undefined) return false;
-  // Push the class name (the synthesized subclass is cached per name). Use the
-  // same host-string mechanism as extern method dispatch so it works in both
-  // string backends.
-  addStringConstantGlobal(ctx, resolved);
-  const nameIdx = ctx.stringGlobalMap.get(resolved);
-  // (#2515 S0) `>= 0`, not `!== undefined`: standalone/nativeStrings stores the
-  // `-1` sentinel, which would bake `global.get -1` and fail binary emit. Fall
-  // to the inline-materializing `compileStringLiteral` for the sentinel.
-  if (nameIdx !== undefined && nameIdx >= 0) {
-    fctx.body.push({ op: "global.get", index: nameIdx } as Instr);
-  } else {
-    compileStringLiteral(ctx, fctx, resolved);
-  }
-  fctx.body.push({ op: "call", funcIdx });
-  return true;
+  // (#2623 Slice B) Unified with the value-read path: both the combinator
+  // `thisArg` receiver here and a bare-identifier read-as-value in
+  // `identifiers.ts` now go through the same cached `__promise_subclass_ctor`
+  // singleton, so the constructor the user observes IS the one used to build
+  // the subclassed promise (one object, not two). Detection (parent-chain
+  // walk, standalone gate) + emission live in `promise-subclass.ts`.
+  return tryEmitPromiseSubclassReceiver(ctx, fctx, argExpr);
 }
 
 function usesArguments(node: ts.Node): boolean {
@@ -5537,12 +5558,12 @@ function compileCallExpression(
           coerceType(ctx, fctx, objType, { kind: "externref" });
         }
         // proto (externref)
-        const protoType = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
-        if (!protoType) {
-          fctx.body.push({ op: "ref.null.extern" });
-        } else if (protoType.kind !== "externref") {
-          coerceType(ctx, fctx, protoType, { kind: "externref" });
-        }
+        // #2580 M3 Stage A — build an INLINE-LITERAL proto as a native `$Object`
+        // (compileProtoArg) so __object_setPrototypeOf's `ref.test $Object`
+        // succeeds and writes $Object.$proto; a closed-shape literal struct fails
+        // that test → null proto → inherited reads return 0. compileProtoArg keeps
+        // the ordinary externref path for non-literal protos (incl. `null`).
+        compileProtoArg(ctx, fctx, expr.arguments[1]!);
         const spoIdx = ensureLateImport(
           ctx,
           "__object_setPrototypeOf",
@@ -5707,6 +5728,14 @@ function compileCallExpression(
         // Compile the proto argument
         if (arg0.kind === ts.SyntaxKind.NullKeyword) {
           fctx.body.push({ op: "ref.null.extern" });
+        } else if (ctx.standalone) {
+          // #2580 M3 Stage A — build an INLINE-LITERAL proto as a native `$Object`
+          // (compileProtoArg) so __object_create's `ref.test $Object` succeeds and
+          // the $proto link is recorded; a closed-shape literal struct would fail
+          // that test → null proto → inherited reads return 0. Non-literal protos
+          // (identifiers, calls, Foo.prototype) keep the ordinary path inside
+          // compileProtoArg.
+          compileProtoArg(ctx, fctx, arg0);
         } else {
           const argType = compileExpression(ctx, fctx, arg0);
           if (!argType) {
@@ -7303,17 +7332,7 @@ function compileCallExpression(
       // resolution below switches it to directCall=0).
       const isPromiseSubclassReceiver =
         ts.isIdentifier(propAccess.expression) &&
-        (() => {
-          const name = ctx.classExprNameMap.get(propAccess.expression.text) ?? propAccess.expression.text;
-          let cursor: string | undefined = name;
-          const seen = new Set<string>();
-          while (cursor !== undefined && !seen.has(cursor)) {
-            seen.add(cursor);
-            if (ctx.classBuiltinParentMap.get(cursor) === "Promise") return true;
-            cursor = ctx.classParentMap.get(cursor);
-          }
-          return false;
-        })();
+        resolvePromiseSubclassName(ctx, propAccess.expression.text) !== undefined;
       const isAggregator =
         ts.isIdentifier(propAccess.expression) &&
         (propAccess.expression.text === "Promise" || isPromiseSubclassReceiver) &&
