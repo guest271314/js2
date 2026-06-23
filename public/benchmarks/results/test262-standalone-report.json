@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-23T00:56:16.849Z",
-  "baseline_generated_at": "2026-06-23T00:56:16.849Z",
-  "baseline_sha": "96c7cbcb36267617c38049334fe7c977620af779",
+  "timestamp": "2026-06-23T01:20:06.377Z",
+  "baseline_generated_at": "2026-06-23T01:20:06.377Z",
+  "baseline_sha": "f28667b7b36de04e3ac0eefad058789f577b9a2f",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -1204,8 +1204,8 @@
         },
         "error_categories": {
           "runtime_error": 2463,
-          "wasm_compile": 82,
           "illegal_cast": 14,
+          "wasm_compile": 82,
           "null_deref": 51,
           "other": 184,
           "assertion_fail": 773,
@@ -1217,12 +1217,12 @@
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
-          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
+          "test/built-ins/Temporal/PlainMonthDay/refisoyear-undefined.js"
         ],
         "sample_signatures": [
           "runtime_error:Cannot convert object to primitive value",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
           "illegal_cast:illegal cast [in __str_to_number() ← test]",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
           "null_deref:L#:## dereferencing a null pointer [in test()]",
           "other:L#:## Temporal.PlainDate argument must be a string or property bag, not object"
         ]
@@ -1450,23 +1450,23 @@
           "total": 424
         },
         "error_categories": {
-          "runtime_error": 164,
           "assertion_fail": 129,
+          "runtime_error": 164,
           "other": 16,
           "illegal_cast": 50,
           "wasm_compile": 20,
           "null_deref": 45
         },
         "sample_files": [
-          "test/built-ins/RegExp/prototype/flags/coercion-ignoreCase.js",
           "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
+          "test/built-ins/RegExp/prototype/flags/coercion-ignoreCase.js",
           "test/annexB/built-ins/RegExp/legacy-accessors/leftContext/this-not-regexp-constructor.js",
           "test/language/literals/regexp/S7.8.5_A2.3_T4.js",
           "test/built-ins/Proxy/has/trap-is-missing-target-is-proxy.js"
         ],
         "sample_signatures": [
-          "runtime_error:Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
+          "runtime_error:Cannot convert object to primitive value",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "runtime_error:L#:## Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert(Reflect.has(regExpProxy, \"ignoreCase\"));"
@@ -2179,14 +2179,14 @@
           "test/language/arguments-object/10.6-6-4.js",
           "test/language/arguments-object/10.6-13-a-3.js",
           "test/language/arguments-object/10.6-2gs.js",
-          "test/language/arguments-object/10.6-13-c-1-s.js"
+          "test/language/arguments-object/10.5-7-b-4-s.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert(called, 'called !== true');",
           "null_deref:L#:## dereferencing a null pointer [in __iife_0() ← testcase ← test]",
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { f_10_6_1_gs(); });",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { arguments.callee; });",
-          "assertion_fail:returned # — assert ## at L#: assert(_10_5_7_b_4_fun(#, #), '_10_5_7_b_4_fun(#, #) !== true');"
+          "assertion_fail:returned # — assert ## at L#: assert(_10_5_7_b_4_fun(#, #), '_10_5_7_b_4_fun(#, #) !== true');",
+          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { arguments.callee; });"
         ]
       },
       {
