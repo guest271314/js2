@@ -1,12 +1,13 @@
 ---
 id: 2618
 title: "Proxy (host): calling / constructing a Proxy whose target is callable traps (illegal cast) or ignores the construct trap result (~15 fails)"
-status: blocked
+status: in-progress
+assignee: ttraenkler/sd-2618
 sprint: 65
 created: 2026-06-22
-updated: 2026-06-23
+updated: 2026-06-24
 blocked_on: [56]
-reconcile_note: "DEFERRED 2026-06-23 — per #1944 investigation the prototype was net-negative (+4/-1 hard PASS→ERR). Depends on #2615 (landed) AND blocked on sd-1838's #56 call/construct-dispatch rework (the __fn_tramp_Constructor cross-realm path). Defer until #56 lands; not staffing-ready."
+reconcile_note: "SLICE 1 LANDING 2026-06-24 (sd-2618): pure-runtime START-timing + callable-target [[ProxyTarget]] wrap. Verified per-process (faithful test262 wrap): +1 gc row (apply/call-parameters fail→pass), zero local regressions. REMAINING (deferred, deep #56 dispatch substrate): externref-callee CALL dispatch (multi-arg p.call(a,b) → illegal cast, tryEmitInlineDynamicCall) + dynamic-new construct-result routing (new p() → 'is not a constructor', tryEmitDynamicNew). See '## Slice 1 (sd-2618, 2026-06-24)'."
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -167,3 +168,92 @@ rework lands (the capability bridge), then the apply+construct routing becomes
 result". Coordinate with sd-1838 before editing shared trampoline/call-dispatch.
 The runtime target-wrap (change 1) can land independently if useful. Branch was
 restored to pristine `origin/main`; no PR opened.
+
+---
+
+## Slice 1 (sd-2618, 2026-06-24) — START-timing + callable-target wrap (pure runtime)
+
+**Verify-first re-grounding against current `origin/main` (faithful per-PROCESS
+test262 wrap: `parseMeta` + `wrapTest` + `compileSource` + `buildImports` +
+`setExports`, one node process per file — NOT in-process `runTest262File`
+loops).** Reconfirmed all three sd-2623 prerequisites per-process; two of the
+three framings have MOVED since the 2026-06-22 spec.
+
+### Re-grounding evidence (current main, faithful runner)
+
+| Probe | Prior framing | ACTUAL on current main (per-process) |
+|---|---|---|
+| **START-timing** (top-level `new Proxy(...)`) | "null-derefs at `_hostProxyConstruct`" | **REAL but no crash** — the eager bridge builds with `getExports()` undefined, so EVERY trap is mis-resolved and the host falls back to its default internal methods. A genuine module-top-level `new Proxy({a:1},{get:()=>99}).x` returned the **target's** value (effectively `0`/dropped), NOT `99`. **Verified flip with fix: 99.** BUT — see below — **test262's harness never triggers it.** |
+| START-timing's test262 reach | (assumed it blocks the rows) | **test262 `wrapTest` injects `var p = new Proxy(...)` INSIDE the synthetic `export function test()` body** (proxy at wrapped-line 46, `function test` at line 38). So in the harness EVERY proxy is built post-`setExports`; START-timing **flips 0 test262 rows**. It is a latent correctness fix for genuine module-scope proxies only. |
+| `apply/call-parameters.js` | `illegal cast in __call_fn_method_3` | `FAIL: call is not a function` (proxy of a wasm-closure target is not host-callable). **Fixed by the callable-target wrap → PASS (+1 row).** |
+| `apply/call-result.js` & most apply rows | illegal cast | still `FAIL illegal cast` — the externref-callee **CALL dispatch** (`p.call(...)`) casts in codegen; NOT fixed by this slice. |
+| `construct/call-result.js`, `construct/call-parameters*.js` | trap result dropped | `FAIL: … is not a constructor` / `No dependency provided for extern class "P"` — the **dynamic-new** path (`tryEmitDynamicNew`) doesn't route an externref Proxy ctor through host `[[Construct]]`; NOT fixed by this slice. |
+
+### What this slice changes (PURE RUNTIME — `src/runtime.ts` only; NO codegen)
+
+1. **START-timing lazy bridge** (`_buildProxyBridgeHandler` → `_buildLazyProxyBridgeHandler`
+   + `_proxyForwardDefault`): when `getExports()` is undefined at construct time
+   (a module-top-level `new Proxy`), defer trap resolution to first invocation
+   (post-`setExports`, when the program actually calls through the proxy). The
+   eager branch (exports present) is byte-for-byte unchanged. Absent-trap →
+   forward to the target default (§7.3.10); non-callable trap → TypeError
+   (§7.3.10 GetMethod); callable trap → forward with `this` = raw handler.
+2. **Callable-target [[ProxyTarget]] wrap** (`_proxyTargetFor` in
+   `_hostProxyConstruct` / `_hostProxyConstructRevocable`): a Proxy whose target
+   is a wasm closure must be host-callable (V8 derives [[Call]]/[[Construct]]
+   from [[ProxyTarget]]; a raw struct is not callable). Use the target's
+   `_maybeWrapCallableUnknownArity` JS wrapper as [[ProxyTarget]]; the bridge
+   substitutes the **raw struct** back as the apply/construct trap's `target`
+   arg (`_wrapPlainHandlerForRawTarget` for plain-JS handlers; `rawTarget` arg
+   threaded through both eager + lazy WasmGC-handler paths) so
+   `assert.sameValue(t, target)` holds (`apply/call-parameters.js`).
+
+### Verified result (per-process faithful runner, gc mode)
+- `built-ins/Proxy/{apply,construct}` non-realm matrix (29 files): **baseline 14
+  PASS → fix 15 PASS, exactly +1** (`apply/call-parameters.js` fail→pass), **zero
+  regressions** (byte-for-byte identical on all other rows).
+- `get`/`has`/`set`/`defineProperty`/`getPrototypeOf`/`ownKeys`/`deleteProperty`
+  `call-parameters` rows: identical baseline↔fix (they already pass; the
+  identity wrap doesn't disturb them).
+- vitest proxy/reflect/closure suites (`issue-2615/2616/2180/1466`,
+  `proxy-passthrough`, `struct-proxy-wrappers`, `issue-1312`,
+  `issue-1712-capture-closure-dispatch`): the 8 fails are **PRE-EXISTING on
+  pristine `origin/main`** (verified by reverting `runtime.ts` and re-running) —
+  no new regressions from this slice.
+- `tests/issue-2618.test.ts` (6 cases, green): top-level get/has/set/apply traps
+  fire; top-level==inner no-trap parity; apply-result via `p.call()`.
+
+### Broad-impact note (validation gate)
+The target-wrap changes `[[ProxyTarget]]` for **every** callable-target proxy
+(not just test262 ones) — affects `proxy===target` probes, `_userProxies`
+reverse-mapping, `typeof`/`instanceof`. Per `project_broad_impact_validate_full_ci`
+the **merge_group floor (#2097) is authoritative**; this PR is full-gate via
+merge_group, not a scoped sweep.
+
+### REMAINING work — prerequisite ordering (deferred, the deep #56 dispatch zone)
+
+The two remaining failure classes are **codegen call/construct dispatch**, NOT
+runtime — exactly the `#56` substrate sd-2623 flagged. They are a separate
+slice and MUST NOT be forced half-built into this PR (the #1888-class floor-eject
+hazard):
+
+1. **Slice 2618-apply-dispatch** — `p.call(a, b)` / `p(args)` for an
+   externref-Proxy callee still casts (`illegal cast`). Locus
+   `src/codegen/expressions/calls.ts` `tryEmitInlineDynamicCall` (the closure-
+   struct dispatch chain whose default `else` is `ref.null.extern`; route an
+   externref-Proxy callee through `__call_function`/host apply). Confirmed
+   fragile: no-arg `p.call()` works (host apply MOP), but multi-arg
+   `p.call(a,b)` → illegal cast — the dispatch is only partially functional
+   without this. **This is the broad-impact dispatch change; full-CI before
+   landing.**
+2. **Slice 2618-construct** — `new p()` for an externref-Proxy ctor fails (`is
+   not a constructor` / `No dependency provided for extern class`). Locus
+   `src/codegen/expressions/new-super.ts` `tryEmitDynamicNew` — route through host
+   `[[Construct]]`/`Reflect.construct` and USE the trap result as the new object
+   (§10.5.13). The runtime callable-target wrap (this slice) already makes the
+   Proxy host-constructable, so slice 2618-construct narrows to the codegen
+   routing + threading the construct-trap result + `new.target`.
+
+Ordering: **this slice (runtime, foundational) FIRST** → then 2618-apply-dispatch
+and 2618-construct (each its own PR, each merge_group-floor-validated). Neither
+touches the value-rep substrate (#2580) or the `__call_fn_N` funcref loop body.
