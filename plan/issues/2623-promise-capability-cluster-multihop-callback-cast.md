@@ -353,3 +353,148 @@ land, sweep these 10 test paths as acceptance fixtures. `allKeyed`/
 `allSettledKeyed` are the Stage-1 `await-dictionary` proposal (NOT standard ECMA)
 — exclude, no payload. See `plan/issues/1528-non-constructor-typeerror-promise-and-species.md`
 "Re-grounded against current main — 2026-06-22/23" for the full cluster table.
+
+---
+
+## Slice 2623-A re-grounding — senior-dev (2026-06-23): mechanism MIS-ATTRIBUTED, fix is NOT inbound marshalling
+
+Implemented and traced Slice A end-to-end against current main. **The architect's
+mechanism (a) — "inbound host→wasm callback of a capturing closure needs a
+`__unwrap_closure` on the `emitClosureCallExportN` buildArgConversion arg path" —
+does NOT match the actual failure.** No `__unwrap_closure` is needed; the inbound
+dispatcher is not where the `illegal cast in Constructor()` originates.
+
+### True root cause of `illegal cast in Constructor()` (binaryen-decoded)
+`allSettled/call-resolve-element` and `race/resolve-from-same-thenable` trap in the
+**OUTBOUND** materialization of the capturing inner `resolve`, not on any inbound
+callback. Decoded types (binaryen, not the WAT printer which mis-numbers ref
+operands):
+- `callCount` is boxed once as a ref cell `$10 = (struct (mut f64))`.
+- The user `function Constructor(executor)` is itself materialized as a closure
+  VALUE (`Promise.allSettled.call(Constructor, …)` → `__construct_closure`), so it
+  captures `callCount` as `$10` (its param-0).
+- The nested `function resolve(){ callCount++ }` is lifted by
+  `processNestedDeclaration` (`src/codegen/statements/nested-declarations.ts`).
+  Its mutable-capture param type is computed as
+  `getOrRegisterRefCellType(ctx, c.type)` — but `c.type` is ALREADY the cell
+  `$10`, so it boxes a SECOND time into `$17 = (struct (mut (ref null $10)))`.
+- At resolve's construction site inside Constructor, the available value is `$10`
+  (single box); the field expects `$17` (double box). The `struct-field-coerce`
+  fixup (`src/codegen/stack-balance.ts:1870`) inserts an UNGUARDED `ref.cast`
+  `$10 → $17` that traps at runtime → `illegal cast in Constructor()`.
+
+The fix locus is therefore **`nested-declarations.ts` capture typing** (avoid
+re-boxing an already-boxed mutable capture), NOT `emitClosureCallExportN` /
+runtime `__unwrap_closure`.
+
+### Why the narrow fix is NOT bounded (regresses the hot async path)
+A surgical "don't re-box when the captured local IS already a ref cell" change
+(thread the existing cell through; register `boxedCaptures` with the existing
+`refCellTypeIdx` + inner valType) **fixes the `illegal cast`** but **regresses
+`tests/issue-1312.test.ts` "async inner recursion via param with mutable ref-cell
+capture" (→ NaN) and a case in `tests/async-await.test.ts`.** Both decode to the
+same shape: an async nested function whose lifted body / state machine was compiled
+expecting the DOUBLE-box deref depth (`$newcell → $cell → f64`); collapsing to a
+single box desyncs the body's deref depth → NaN. Gating on the local TYPE being the
+cell (not mere `boxedCaptures` membership) was not enough — the async-recursion case
+ALSO reads its capture type as the cell at collection time. This is exactly the
+documented #1205/#1312 force-boxing hazard. The capability case WANTS single-box
+reuse; the async-recursion case BREAKS under it — they are indistinguishable at the
+capture-typing step without a deeper async-aware deref-depth model.
+
+### Downstream layers (independent of the substrate)
+After locally applying the capture fix, the two named rows reveal TWO MORE blockers
+that are **test-harness gaps, not substrate**, so the rows cannot flip on the
+substrate fix alone:
+1. `Test262Error.thrower` is not shimmed in `tests/test262-runner.ts` (test262
+   `sta.js` defines it; passed as the REJECT fn → "Promise resolve or reject
+   function is not callable").
+2. `promiseHelper.js` (`checkSettledPromises` / `checkSequence`) is not shimmed
+   (the `includes:` is ignored) → the resolve body calls an undefined helper.
+
+### await-thenable bucket — NOT blocked by `illegal cast`
+`await <custom thenable>` compiles and runs on current main WITHOUT the
+`__closure_N` null-deref the spec predicted. The residual await rows
+(`await-awaits-thenables` returns 2/assert#1, `await-non-promise-thenable` null
+deref in `trigger()`) are SEPARATE failures, not this substrate.
+
+### Recommendation (architect re-spec required — NOT a dev-claimable slice)
+Slice A as written is mis-framed and the genuine fix is a deeper closure-capture
+boxing-depth disambiguation that must NOT regress the async-recursion path.
+Re-spec is needed to decide one of:
+  (a) make the async state-machine lowering deref-depth-aware so a shared single
+      cell works for both sync and async nested captures, or
+  (b) detect the capability-ctor shape syntactically narrowly (outer fn is
+      materialized-as-value AND nested capture is non-async non-self-recursive)
+      and only collapse the box there — risk: hidden async cases.
+The branch `issue-2623a-inbound-marshalling` was reverted to clean (no codegen
+change shipped) because every attempted gate regressed #1312 / async-await.
+Slices B (`__construct_closure` identity/species) and C (#2618 Proxy
+apply/construct) are independent of this and remain claimable.
+
+---
+
+## Slice 2623-B re-grounding — senior-dev (2026-06-23): SPLITS into two mechanisms, NEITHER is the spec's construct-trap fix; NOT bounded
+
+Verified Slice B against the actual faults (traced + decoded). The spec's B
+mechanism — "`_wrapCallableForHost` construct trap → `Object.create(vivified
+proto)` + `_fnctorInstanceCtor.set`" — does NOT match the ctx-ctor rows, and the
+#2628 acorn host residual does not reproduce as the clean bounded fix the
+re-grounding describes. **Verdict: DEFER (mis-specced / not bounded).**
+
+### ctx-ctor rows (all/allSettled/race/any) — `class extends Promise` IDENTITY, not the construct trap
+Repro: all four fail `assert #1: instance.constructor === SubPromise`. Traced via
+host instrumentation on `Promise_all`:
+- `Promise.all.call(SubPromise, [])` passes `thisArg = the synthesized host
+  SubPromise` (`__promise_subclass_ctor`, a `class extends Promise {}` keyed by
+  name). The instance V8 builds from it is CORRECT: `inst.constructor === C` is
+  TRUE, `Object.getPrototypeOf(inst) === C.prototype` is TRUE,
+  `inst.constructor.name === "SubPromise"`.
+- The assert fails on **identity divergence**: the test's RHS `SubPromise`
+  read-as-VALUE goes through `identifiers.ts` and emits the wasm **class-object
+  singleton** (`__class_<Name>`, via `emitLazyClassObjectGet`), a DIFFERENT object
+  than the synthesized host `C` used by the capability. So
+  `inst.constructor (=C) === SubPromise (=__class singleton)` → false.
+- **The spec's `_wrapCallableForHost` construct-trap mechanism never touches this
+  path** — these rows use a host-synthesized Promise subclass, not a compiled
+  closure's construct trap.
+
+A narrow identity-unification fix (route a `class extends Promise` VALUE read
+through the same cached `__promise_subclass_ctor` — mirrors
+`resolvePromiseSubclassThisArg` for the value position; ~40 LoC in
+`identifiers.ts`) WAS prototyped and DOES flip `assert #1`+`#2` for all/race/any
+(allSettled stays at #1 — empty-array capability path differs). **But all three
+then fail `assert #3: callCount === 1` and `#4: typeof executor === 'function'`**
+— the synthesized `class extends Promise {}` is BARE and never invokes the user's
+wasm constructor body (`super(a); executor=a; callCount++`). So the identity fix
+yields **0 net test262 rows** on its own while adding a broad-impact change to the
+hot identifier-as-value path. Reverted. Completing ctx-ctor requires the
+synthesized subclass to run the user wasm constructor body (capability-executor
+protocol THROUGH a host-synthesized Promise subclass) — a deep change, NOT bounded.
+
+### #2628 acorn host residual — does NOT reproduce as the bounded construct-trap fix
+The re-grounding (this file, the #2628 §) claims `viaIdent → 5` works and only
+`viaThis` (host-side) throws, pinning it to the bare-`self={}` construct trap. On
+current main I could NOT reproduce that clean split: for BOTH a `var Parser =
+function` shape AND an ES `class` shape, an instance returned to host JS and read
+via the host proxy has `constructor.name === "?"` and `.getLen()` does NOT resolve
+for `viaIdent` AND `viaThis` alike. So the host-facing prototype-method dispatch
+on a returned instance is a broader gap than "the construct trap forgot to link
+the result", and the architect's shape-specific "viaThis-only" residual is not the
+general case. There is also **no test262 row gated on #2628** (acorn dogfood is
+in-wasm and already works per the re-grounding), so even a clean fix has ~0
+conformance payoff.
+
+### Verdict
+**Slice B is DEFER — mis-specced and not a bounded dev slice.**
+- ctx-ctor = `class extends Promise` host/wasm identity unification PLUS running
+  the user constructor body through the synthesized subclass (capability-executor
+  protocol). Two coupled deep changes; architect re-spec on the
+  `__promise_subclass_ctor` ↔ class-object-singleton unification + executor-body
+  invocation.
+- #2628 host residual = a broader host-facing returned-instance prototype-dispatch
+  gap, not the bare-`{}` construct-trap fix; ~0 test262 payoff; fold into the
+  acorn-host lane, not #2623-B.
+- The branch `issue-2623b-construct-identity` is reverted to clean (no codegen
+  shipped). **Row delta: 0.** Slice C (#2618 Proxy apply/construct) is independent
+  and not yet verified — recommend the same verify-first treatment before claiming.

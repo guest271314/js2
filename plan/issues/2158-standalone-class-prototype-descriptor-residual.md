@@ -1,11 +1,13 @@
 ---
 id: 2158
 title: "Standalone class/prototype/private-name/descriptor conformance residual (~1,388 tests)"
-status: in-progress
+status: done
+completed: 2026-06-23
 assignee: ttraenkler/cs-2158
 sprint: 65
 created: 2026-06-15
-updated: 2026-06-22
+updated: 2026-06-23
+reconcile_note: "DRAINED 2026-06-23 — both sliced sub-issues merged (#2610 PR#1935, #2611 #1936); architect re-measure (2026-06-22) found the class object-model umbrella largely closed standalone. Residual is substrate-deferred (#2175 builtin-prototype, #2580 value-rep-on-any)."
 children: [2610, 2611]
 priority: high
 feasibility: hard

@@ -1,11 +1,12 @@
 ---
 id: 1528
 title: "spec gap: non-constructor TypeError — Promise.all / allSettled species and executor paths"
-status: blocked
+status: done
+completed: 2026-06-23
 created: 2026-05-20
-updated: 2026-06-22
+updated: 2026-06-23
 assignee: ttraenkler/dev-promise
-blocked_on: capability-bridge (#2614) — multi-hop host→wasm callback cast + Reflect.construct-with-newTarget ctor identity
+reconcile_note: "DONE 2026-06-23 — every non-constructor-TypeError arm of THIS issue is merged (#1921 arrow-noctor, #1940 closure-construct-bridge, #1945 classctor-arm, #1957 re-ground). Remaining isConstructor failures are NOT this issue's shape: 4 → capability bridge (#2614/#2623), 3 → unimplemented Promise methods (Promise.try / .finally / allKeyed) for PO to re-bucket."
 priority: medium
 feasibility: medium
 reasoning_effort: medium
