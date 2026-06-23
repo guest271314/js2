@@ -57,6 +57,16 @@ jobs:
               # cumulative numbers (~65%) while the donut shows ~71% (#1885).
               cp /tmp/js2wasm-baselines/test262-current.jsonl benchmarks/results/test262-current.jsonl
             fi
+            # (#2636) Pre-place the standalone-lane baseline JSONL into the cache
+            # dir that fetch-baseline-jsonl.mjs --standalone reads, so build:pages
+            # → run-pages-build.mjs regenerates test262-standalone-editions.json
+            # from the FRESH standalone baseline (its idempotent fetch then no-ops
+            # on the already-present cache file). Without this the standalone
+            # editions file falls back to the stale committed copy.
+            if [ -f /tmp/js2wasm-baselines/test262-standalone-current.jsonl ]; then
+              mkdir -p .test262-cache
+              cp /tmp/js2wasm-baselines/test262-standalone-current.jsonl .test262-cache/test262-standalone-current.jsonl
+            fi
             [ -f /tmp/js2wasm-baselines/runs/index.json ] && \
               cp /tmp/js2wasm-baselines/runs/index.json benchmarks/results/runs/index.json
             echo "Fetched baseline data from js2wasm-baselines."
