@@ -5705,6 +5705,42 @@ function collectConsoleImports(ctx: CodegenContext, sourceFile: ts.SourceFile): 
   }
 }
 
+/**
+ * #2631 — does the source use process/console stream IO that the node-process
+ * shim backs (process.std{in,out,err}.*, console.log/warn/error)? Drives the
+ * node-shim memory-ownership decision in `registerWasiImports`: when a program
+ * uses ONLY node:fs (`readSync`/`writeSync`) and no process/console IO, the
+ * node-fs shim owns the shared linear memory instead of node-process. Cheap
+ * syntactic scan — codegen lowers the calls regardless; this only picks the
+ * memory provider.
+ */
+function sourceUsesNodeProcessOrConsoleIo(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isPropertyAccessExpression(node)) {
+      // console.log/warn/error
+      if (
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "console" &&
+        (node.name.text === "log" || node.name.text === "warn" || node.name.text === "error")
+      ) {
+        found = true;
+        return;
+      }
+      // process.<anything> — exit/env/stdin/stdout/stderr/argv/platform are all
+      // node-process-backed; any process member reference means node-process is live.
+      if (ts.isIdentifier(node.expression) && node.expression.text === "process") {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
 /** Register WASI imports: fd_write, proc_exit, path_open, fd_close, linear memory, bump pointer global */
 function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
   // Add linear memory for string data + iovec structs.
@@ -5719,29 +5755,69 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // the write scratch in page 2 (WASI_WRITE_SCRATCH_START), well above any
   // data segment, and reserve 3 pages so both regions always exist.
   if (ctx.linkNodeShims) {
-    // #2524 Phase 1 — the node-process shim OWNS + exports the linear memory; the
-    // user module IMPORTS it (memory index 0) so the shim can read/write the
-    // user's bytes over the SAME memory with no instantiation cycle (shim
-    // imports only wasi_snapshot_preview1; user imports {memory + io fns} from
-    // the already-instantiated shim). The user module therefore declares NO
-    // memory and exports none. `min: 3` mirrors the inline path's reservation
-    // (page 0 scratch/data, page 1 stdin buffer, page 2 write scratch); the
-    // shim's exported memory must be at least this large (its source declares
-    // the same min). Imports MUST precede the func imports below so the memory
-    // sits at memory-index 0 (loads/stores/`memory.size`/`memory.grow` all
-    // target it). The import order within the import section does not perturb
-    // the func index space — only func imports increment it.
-    addImport(ctx, "js2wasm:node-process", "memory", { kind: "memory", min: 3 });
-    // The three byte-boundary IO functions (over the shared memory):
-    //   stdout_write(ptr,len)->i32 · stderr_write(ptr,len) · stdin_read(ptr,len)->i32
-    const ioWriteType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], "$node_io_write");
-    const ioWriteVoidType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [], "$node_io_write_void");
-    addImport(ctx, "js2wasm:node-process", "stdout_write", { kind: "func", typeIdx: ioWriteType });
-    ctx.nodeIoStdoutWriteIdx = ctx.funcMap.get("stdout_write")!;
-    addImport(ctx, "js2wasm:node-process", "stderr_write", { kind: "func", typeIdx: ioWriteVoidType });
-    ctx.nodeIoStderrWriteIdx = ctx.funcMap.get("stderr_write")!;
-    addImport(ctx, "js2wasm:node-process", "stdin_read", { kind: "func", typeIdx: ioWriteType });
-    ctx.nodeIoStdinReadIdx = ctx.funcMap.get("stdin_read")!;
+    // #2631 — the per-module shims (`js2wasm:node-process`, `js2wasm:node-fs`)
+    // each conceptually own+export the shared linear memory, but only ONE module
+    // may provide memory index 0. We pick a single memory OWNER and the other
+    // shim's funcs operate over that same imported memory:
+    //   - if the program uses process/console stream IO → node-process owns the
+    //     memory (unchanged from #2524) and node-fs (if also used) is func-only,
+    //     importing nothing else (it reads/writes the shared memory by ptr).
+    //   - else if the program uses node:fs readSync/writeSync but NOT process IO →
+    //     node-fs owns the memory (the native-messaging example's shape: it drops
+    //     `process` entirely and uses only `node:fs`).
+    // Both shims' memories are byte-identical (min 3, same layout), so whichever
+    // owns it the other links against the same bytes. The owner must precede the
+    // func imports so its memory sits at memory-index 0.
+    const usesNodeFsFdShim = ctx.wasiNodeFsFuncs.has("readSync") || ctx.wasiNodeFsFuncs.has("writeSync");
+    const usesNodeProcessIo = sourceUsesNodeProcessOrConsoleIo(sourceFile);
+    const nodeFsOwnsMemory = usesNodeFsFdShim && !usesNodeProcessIo;
+    const memoryOwnerModule = nodeFsOwnsMemory ? "node:fs" : "js2wasm:node-process";
+
+    // #2524 Phase 1 — the shim OWNS + exports the linear memory; the user module
+    // IMPORTS it (memory index 0) so the shim can read/write the user's bytes
+    // over the SAME memory with no instantiation cycle (shim imports only
+    // wasi_snapshot_preview1; user imports {memory + io fns} from the
+    // already-instantiated shim). The user module declares NO memory and exports
+    // none. `min: 3` mirrors the inline path's reservation (page 0 scratch/data,
+    // page 1 stdin buffer, page 2 write scratch). Imports MUST precede the func
+    // imports below so the memory sits at memory-index 0 (loads/stores/
+    // `memory.size`/`memory.grow` all target it). Import order within the import
+    // section does not perturb the func index space — only func imports increment it.
+    addImport(ctx, memoryOwnerModule, "memory", { kind: "memory", min: 3 });
+
+    // node-process IO funcs (process.std*/console) — registered only when the
+    // program actually uses process/console stream IO, so a node:fs-only program
+    // (the example) does NOT pull in unused node-process imports.
+    if (usesNodeProcessIo) {
+      // The three byte-boundary IO functions (over the shared memory):
+      //   stdout_write(ptr,len)->i32 · stderr_write(ptr,len) · stdin_read(ptr,len)->i32
+      const ioWriteType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], "$node_io_write");
+      const ioWriteVoidType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [], "$node_io_write_void");
+      addImport(ctx, "js2wasm:node-process", "stdout_write", { kind: "func", typeIdx: ioWriteType });
+      ctx.nodeIoStdoutWriteIdx = ctx.funcMap.get("stdout_write")!;
+      addImport(ctx, "js2wasm:node-process", "stderr_write", { kind: "func", typeIdx: ioWriteVoidType });
+      ctx.nodeIoStderrWriteIdx = ctx.funcMap.get("stderr_write")!;
+      addImport(ctx, "js2wasm:node-process", "stdin_read", { kind: "func", typeIdx: ioWriteType });
+      ctx.nodeIoStdinReadIdx = ctx.funcMap.get("stdin_read")!;
+    }
+
+    // #2631 — node:fs fd-based IO funcs: readSync(fd,ptr,len)->i32 /
+    // writeSync(fd,ptr,len)->i32 over the shared memory. The user module imports
+    // module `"node:fs"` (declaring WHAT it needs, not the shim that provides
+    // it); the `node-fs.wat` shim is one provider. Registered only when the
+    // program imports readSync/writeSync from node:fs.
+    if (usesNodeFsFdShim) {
+      const fsIoType = addFuncType(
+        ctx,
+        [{ kind: "i32" }, { kind: "i32" }, { kind: "i32" }],
+        [{ kind: "i32" }],
+        "$node_fs_io",
+      );
+      addImport(ctx, "node:fs", "readSync", { kind: "func", typeIdx: fsIoType });
+      ctx.nodeFsReadSyncIdx = ctx.funcMap.get("readSync")!;
+      addImport(ctx, "node:fs", "writeSync", { kind: "func", typeIdx: fsIoType });
+      ctx.nodeFsWriteSyncIdx = ctx.funcMap.get("writeSync")!;
+    }
   } else {
     ctx.mod.memories.push({ min: 3 });
     // WASI requires the memory to be exported as "memory"
@@ -6297,7 +6373,7 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
  * `registerWasiImports` reserves 3 pages so both always exist.
  */
 export const WASI_STDIN_BUF_START = 64 * 1024;
-const WASI_WRITE_SCRATCH_START = 128 * 1024;
+export const WASI_WRITE_SCRATCH_START = 128 * 1024;
 
 /**
  * #1886 Slice B — start of the linear-backed `Uint8Array` arena (page 4,
@@ -12460,6 +12536,19 @@ function registerNodeBuiltinImports(ctx: CodegenContext, builtins: NodeBuiltinIm
       // preprocessing leaves a type-level `process` binding in the AST and
       // node-process-api.ts lowers supported stream calls directly to WASI.
       if (builtin.moduleName === "process") continue;
+      // #2631 — `node:fs` is likewise a compile-time API surface under
+      // --link-node-shims when the program uses the fd-based synchronous
+      // primitives readSync / writeSync: those are stripped by import
+      // preprocessing and lowered to imported `node:fs` shim calls by
+      // node-process-api.ts (tryCompileNodeFsCall). Path-based fs usage is
+      // rejected at the call site (see PATH_BASED_FS_FNS in calls.ts), not here.
+      if (
+        builtin.moduleName === "fs" &&
+        ctx.linkNodeShims &&
+        (ctx.wasiNodeFsFuncs.has("readSync") || ctx.wasiNodeFsFuncs.has("writeSync"))
+      ) {
+        continue;
+      }
       ctx.errors.push({
         message: `Node builtin module '${builtin.moduleName}' is not available in WASI target. Use compile-time syscall path for node:fs (#1035).`,
         line: 1,

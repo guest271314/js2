@@ -44,6 +44,13 @@ export const ALWAYS_ALLOWED_IMPORT_MODULES: ReadonlySet<string> = new Set([
   // `node-process.wasm` (or any conforming deno/browser shim), no JS runtime
   // required. Per-module Node shims are named `js2wasm:node-<mod>`.
   "js2wasm:node-process",
+  // #2631 — `node:fs` fd-based readSync/writeSync. The module declares WHAT host
+  // API it needs (`node:fs`), not HOW it's satisfied: the import is bound at
+  // LINK time by our `node-fs.wat` shim (over WASI fd_read/fd_write), a native
+  // WASI host, or the real `node:fs` module under a JS host. Like
+  // `wasi_snapshot_preview1`, it is a linkable interface, not a JS-host binding,
+  // so it is always allowed under strict dual-mode.
+  "node:fs",
 ]);
 
 export interface HostImportAllowlistEntry {

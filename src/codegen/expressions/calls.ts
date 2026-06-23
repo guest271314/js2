@@ -117,7 +117,7 @@ import {
   compileStringLiteral,
   emitBoolToString,
 } from "../string-ops.js";
-import { tryCompileNodeProcessCall } from "../node-process-api.js";
+import { tryCompileNodeFsCall, tryCompileNodeProcessCall } from "../node-process-api.js";
 import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import {
   defaultValueInstrs,
@@ -253,6 +253,32 @@ const BUILTIN_CLASS_NAMES = new Set([
   "Float64Array",
   "BigInt64Array",
   "BigUint64Array",
+]);
+
+/**
+ * (#2631) Path-based node:fs functions that require a filesystem (path_open /
+ * preopens). Distinct from the fd-based synchronous primitives readSync /
+ * writeSync (no path). Under --target wasi these are rejected — standalone WASI
+ * has no filesystem. `writeFileSync` is intentionally excluded: it has a
+ * dedicated WASI lowering above (`__wasi_write_file_sync`).
+ */
+const PATH_BASED_FS_FNS = new Set([
+  "readFileSync",
+  "readFile",
+  "writeFile",
+  "appendFileSync",
+  "appendFile",
+  "openSync",
+  "open",
+  "unlinkSync",
+  "unlink",
+  "mkdirSync",
+  "mkdir",
+  "readdirSync",
+  "readdir",
+  "statSync",
+  "stat",
+  "existsSync",
 ]);
 
 /**
@@ -3082,6 +3108,10 @@ function compileCallExpression(
   // call-expression compiler does not accumulate host API special cases.
   const nodeProcessCall = tryCompileNodeProcessCall(ctx, fctx, expr);
   if (nodeProcessCall !== undefined) return nodeProcessCall;
+
+  // #2631 — node:fs fd-based readSync/writeSync → `node:fs` shim calls.
+  const nodeFsCall = tryCompileNodeFsCall(ctx, fctx, expr);
+  if (nodeFsCall !== undefined) return nodeFsCall;
 
   // RegExp(pattern, flags) called without `new`. Extracted to calls-guards.ts (#742).
   {
@@ -10494,6 +10524,40 @@ function compileCallExpression(
       fctx.body.push({ op: "call", funcIdx: writeFileSyncIdx });
       return VOID_RESULT;
     }
+  }
+
+  // #2631 — path-based node:fs functions (readFileSync, readFile, …) are NOT
+  // the fd-based readSync/writeSync handled by the node:fs shim: they need a
+  // filesystem (path_open / preopens). They are gated behind --allow-fs and are
+  // rejected outright under --target wasi (standalone has no filesystem). The
+  // fd-based readSync/writeSync (no path) were already lowered above via
+  // tryCompileNodeFsCall, so anything reaching here named like a path-based fs
+  // reader is unsupported in WASI.
+  if (
+    ctx.wasi &&
+    ts.isIdentifier(expr.expression) &&
+    ctx.wasiNodeFsFuncs.has(expr.expression.text) &&
+    PATH_BASED_FS_FNS.has(expr.expression.text)
+  ) {
+    const fnName = expr.expression.text;
+    const { line, character } = expr.getSourceFile().getLineAndCharacterOfPosition(expr.getStart());
+    ctx.errors.push({
+      message:
+        `'node:fs' path-based call to '${fnName}' is not available under --target wasi (#2631): ` +
+        `standalone WASI has no filesystem (no path_open / preopens). Only the fd-based synchronous ` +
+        `primitives readSync(fd, …) / writeSync(fd, …) are supported (they map to fd_read / fd_write ` +
+        `via the node:fs shim). For host file access, target a JS host with --allow-fs instead.`,
+      line: line + 1,
+      column: character + 1,
+      severity: "error",
+    });
+    // Drop args, emit a safe placeholder so codegen can continue.
+    for (const arg of expr.arguments) {
+      const t = compileExpression(ctx, fctx, arg);
+      if (t) fctx.body.push({ op: "drop" });
+    }
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return { kind: "externref" };
   }
 
   // Handle global isNaN(n) / isFinite(n) / parseInt / parseFloat — inline wasm

@@ -222,6 +222,8 @@ export function createCodegenContext(
     nodeIoStdoutWriteIdx: -1,
     nodeIoStderrWriteIdx: -1,
     nodeIoStdinReadIdx: -1,
+    nodeFsReadSyncIdx: -1,
+    nodeFsWriteSyncIdx: -1,
     standalone: options?.standalone ?? false,
     // #682 — native standalone RegExp engine hook. Standalone mode enables the
     // reduced literal-substring backend; broader QuickJS libregexp ABI linking

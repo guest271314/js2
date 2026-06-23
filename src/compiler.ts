@@ -1075,10 +1075,17 @@ export function compileSourceSync(
     1121, // "Octal literals are not allowed in strict mode" — valid sloppy-mode JS
     1489, // "Decimals with leading zeros are not allowed" — valid sloppy-mode JS octal literals
   ]);
-  const hasSyntaxErrors = ast.syntacticDiagnostics.some(
-    (d) => d.category === 1 && d.file === ast.sourceFile && !TOLERATED_SYNTAX_CODES.has(d.code),
-  );
-  const hasHardTypeErrors = ast.diagnostics.some((d) => isHardTypeScriptDiagnostic(d, ast.checker));
+  // When allowJs is set, don't bail on TS diagnostics — JS packages with JSDoc
+  // annotations (and `.js` files importing overloaded typed declarations from
+  // `node:*`, e.g. node:fs readSync/writeSync — TS8017 "signature-in-JS" at the
+  // import site, #2631/#1768) produce false-positive errors; codegen handles it.
+  // This mirrors the multi-source path's `!options.allowJs` gate below.
+  const hasSyntaxErrors =
+    !options.allowJs &&
+    ast.syntacticDiagnostics.some(
+      (d) => d.category === 1 && d.file === ast.sourceFile && !TOLERATED_SYNTAX_CODES.has(d.code),
+    );
+  const hasHardTypeErrors = !options.allowJs && ast.diagnostics.some((d) => isHardTypeScriptDiagnostic(d, ast.checker));
 
   if ((hasSyntaxErrors || hasHardTypeErrors) && errors.length > 0) {
     return failResult(errors);

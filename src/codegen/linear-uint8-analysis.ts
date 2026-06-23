@@ -103,14 +103,29 @@ function isNewUint8Array(expr: ts.Node): expr is ts.NewExpression {
 }
 
 /**
- * Recognise `process.std{in.read,out.write,err.write}(buf, …)` and return the
- * argument index that carries the buffer (0 for both), or `-1` if this is not a
- * std-stream I/O call. We only match the global `process` shape the WASI
- * lowering supports (`node-process-api.ts`); a local `process` shadow makes
- * this not match (the conservative path).
+ * Recognise a byte-I/O intrinsic call that takes a `Uint8Array` buffer and
+ * return the argument index that carries the buffer, or `-1` if this is not one.
+ *
+ * Two shapes are recognised (both lowered by `node-process-api.ts`):
+ *   - `process.std{in.read,out.write,err.write}(buf, …)` — buffer at arg 0. We
+ *     only match the global `process` shape the WASI lowering supports; a local
+ *     `process` shadow makes this not match (the conservative path).
+ *   - #2631: `readSync(fd, buf, …)` / `writeSync(fd, buf, …)` (the node:fs
+ *     fd-based primitives) — buffer at arg 1. Like `process.std*`, these are
+ *     non-escaping byte-I/O sinks: the buffer's bytes are read/written in place
+ *     (the lowering reads them straight from the GC/linear array), so a buffer
+ *     flowing into them stays linear-safe. (Recognising readSync/writeSync as a
+ *     buffer SINK here keeps the #1886 analysis consistent: without it, a buffer
+ *     passed to readSync/writeSync would be treated as escaping, demoting the
+ *     whole helper chain to non-linear and breaking the Slice-C signature
+ *     rewrite of element-only helpers like `decodeLength`/`emitRun`.)
  */
 function ioBufferArgIndex(call: ts.CallExpression): number {
   const callee = call.expression;
+  // node:fs fd-based readSync(fd, buf, …) / writeSync(fd, buf, …): buffer at 1.
+  if (ts.isIdentifier(callee) && (callee.text === "readSync" || callee.text === "writeSync")) {
+    return call.arguments.length >= 2 ? 1 : -1;
+  }
   if (!ts.isPropertyAccessExpression(callee)) return -1;
   const method = callee.name.text;
   const stream = callee.expression;
