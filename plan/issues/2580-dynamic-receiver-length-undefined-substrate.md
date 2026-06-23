@@ -1538,3 +1538,165 @@ NO Stage B code landed (correctly — no bankable one-pass sub-slice; rushing
 broad value-rep risks the #1888-class floor eject). Stage A (PR #1975) is the
 banked deliverable. Representation decision (option ii / realization ii-a) +
 the B1→B4 staging is the durable handoff. Issue stays `in-progress`.
+
+---
+
+# M3 — STAGE B DEDICATED SESSION: independent verify-first re-ground + cluster-composition CORRECTION (2026-06-24, sd-value-rep-m3-stageB, max-reasoning)
+
+> Dedicated Stage-B session off current main (Stage A + handoff landed). Drove the
+> canaries AND the REAL cluster test262 files **per-process** (one snippet/file ·
+> one mode · fresh instantiate; the in-process-loop trap avoided) + decoded the
+> emitted WAT. Two outcomes: (1) the prior session's "no bankable one-pass Stage-B
+> sub-slice" verdict is **independently CONFIRMED** — and the closure-isn't-an-
+> `$Object` mechanism nailed down precisely; (2) a **material correction to the
+> cluster composition** that re-frames where the 168 rows actually live. **NO Stage
+> B code landed** — there is no small, verified-safe, row-banking increment, and
+> the handoff's B1 scaffold banks 0 rows with no de-risking value (it is not a
+> reusable primitive like M0's `__dyn_has`; its only consumer is the high-risk B2).
+
+## CORRECTION 1 — the 168-row `-c-i-`/`-b-i-` cluster is NOT primarily the fnctor `new F()` lap
+
+The handoff (and the Stage-B brief) framed the 168-row bulk as the fnctor
+`new F()` `[[Prototype]]` lap (Decision ii-a, the `Con.prototype = proto; new Con()`
+shape). **Measured against the actual test262 bodies, that shape is a MINORITY.**
+Counts over the 266 `-c-i-`/`-b-i-` files under `Array/prototype/`:
+
+| construction mechanism | files | what it needs |
+|---|---|---|
+| **`Object.defineProperty`** (own/inherited ACCESSOR props on `{length:N}`) | **181** | `$Object` accessor-`Get` arm + generic-method HasProperty-visit |
+| `.prototype =` assignment (the fnctor lap) | 51 | the fnctor `new F()` `$proto` link (ii-a) |
+| `.prototype[idx]` / `Object.prototype[i]=v` | 41 | inherited read on a plain receiver via `Object.prototype` (the built-in) |
+| `arguments` object | 27 | `arguments`-as-array-like generic-method read |
+| `new <ctor>` (incl. `new Boolean()` etc., not only user fnctors) | 71 | mixed |
+
+So the dominant lever is **`Object.defineProperty` accessor reads on array-like
+`{length:N}` objects passed to `Array.prototype.X.call(obj, cb)`** — the `$Object`
+accessor + generic-method-HasProperty path, **independent of any fnctor**. The
+fnctor lap (Decision ii-a) addresses ~51 files, not the 168 bulk.
+
+Representative bodies (verified, real test262):
+- `forEach/15.4.4.18-7-c-i-17`: `obj={length:2}; Object.defineProperty(obj,"1",{set:fn});
+  forEach.call(obj,cb)` — visit index 1 (accessor present, get→undefined). NO fnctor.
+- `indexOf/15.4.4.14-9-b-i-8`: `Object.prototype[0]=true; indexOf.call({length:3},true)`
+  — inherited-from-`Object.prototype` data read on a plain literal. NO fnctor.
+- `some/15.4.4.17-7-c-i-15`: `proto={}; Object.defineProperty(proto,"1",{get});
+  var Con=function(){}; Con.prototype=proto; child=new Con(); child.length=20;
+  some.call(child,cb)` — THIS is the fnctor lap (the `.prototype=` subset). Verified
+  `fail` via `runTest262File` in BOTH host AND standalone (one fresh process each).
+
+## CORRECTION 2 — the shared standalone blocker is the generic-method host-import leak, BELOW the proto substrate
+
+The whole standalone array-like-method cluster is blocked by a more basic gap than
+proto-walking: **`Array.prototype.X.call(arrayLike, cb)` emits a host import even
+in standalone mode** and cannot instantiate at all. Verified per-process (WAT):
+
+```
+forEach.call({0:5,1:6,length:2}, cb)  --target standalone
+→ (import "env" "__make_callback" (func ... ))   ;; host-callback bridge
+→ WebAssembly.instantiate(binary, {}) → "Import #0 env: module is not an object"
+```
+
+This is the generic-method *dispatch* not being standalone-native (the #983d /
+`__make_callback` lane), NOT the `$proto` substrate. It blocks **even the simplest
+own-data array-like** (`{0:5,1:6,length:2}`) standalone — no inheritance, no
+accessor, no fnctor involved. So a proto-walk fix banks **zero standalone cluster
+rows** until this host-import leak is closed first. (Host mode HAS the
+generic-method machinery — `forEach.call({0:5,1:6,length:2})` → 11 ✓ host — but
+its accessor/inherited HasProperty-visit is incomplete, so the cluster fails host
+too: all three real files above → `fail` host AND standalone via `runTest262File`.)
+
+## CONFIRMED — the fnctor lap is genuinely blocked (closure is not an `$Object`)
+
+Independently reproduced the handoff's blocker and pinned the exact mechanism from
+the WAT. For `const Con=function(){}; Con.prototype={foo:7}`:
+- `Con.prototype = {foo:7}` compiles to: build the proto as a real `$Object`
+  (`__new_plain_object` + `__extern_set($proto,"foo",...)`), then
+  `__extern_set($closure, "prototype", $proto)` where `$closure` is the
+  **`$6` trampoline struct** (`struct.new $6 (ref.func $__fn_tramp_Con_cached)`),
+  NOT an `$Object`. `__extern_set`'s `ref.test $Object` MISSES the `$6` closure →
+  **the prototype write lands nowhere readable.**
+- Read-back `Con.prototype` → `__extern_get($closure,"prototype")` → `ref.test
+  $Object` misses `$6` → null → `RUN_FAIL`/absent. Verified: reading
+  `(Con as any).prototype` back standalone traps/returns non-`$Object`;
+  `Object.create((Con as any).prototype).foo` → 0 (the proto arg isn't a readable
+  `$Object`).
+- `new Con()` → `$__fnctor_Con_new` returns a bespoke `$__fnctor_Con` struct
+  (empty body → `(struct )`), NOT an `$Object`; the `c.foo` read dead-ends at
+  `__extern_get`'s `ref.test $Object` miss. (The earlier session's bisection,
+  re-confirmed.)
+
+So the fnctor lap needs BOTH a readable per-fnctor prototype location (the closure
+`$6` cannot hold it) AND the `new F()` instance to participate in the `$Object.$proto`
+walk — exactly the two pieces the handoff identified, both absent, both object-model
+substrate.
+
+## Why realization (ii-a) cannot land safely in one verified pass
+
+(ii-a) "reconstruct the dynamically-used instance AS an `$Object`" requires gating
+on *"this `new F()` instance is consumed dynamically AND has no typed `struct.get`
+own-field consumer"* — a whole-program escape analysis. The `$__fnctor_<Name>`
+struct type is woven through the new-super lowering: inheritance ancestors
+(new-super.ts:602/747), the ctor result type (:1019), and the typed own-field read
+arm (the `ref.test $23 → struct.get $23 0` the WAT shows for `new Con(){this.x=3}`,
+which makes `c.x` → 3 work). Reconstructing the instance as an `$Object`
+*unconditionally* would move own-field reads to `__extern_set`/`__extern_get` and
+regress every `new F()` with a typed field read (the hot path). Gating it correctly
+needs the escape-analysis infrastructure that does not exist. **A wrong gate is the
+#1888-class floor-eject — the documented stop-the-line risk.** This is why there is
+no narrowly-gated one-pass B2.
+
+## VERDICT (this session): NO Stage-B code landed — no small safe bankable unit
+
+Per the dedicated-session brief ("if a B-slice has no small safe bankable unit, say
+so explicitly with the WAT evidence rather than forcing it"): **Stage B has no
+verified-safe, row-banking, one-pass increment, and the inert B1 scaffold banks 0
+rows with no reusable-primitive de-risking value.** Forcing the inert scaffold, or
+rushing the escape-analysis-gated (ii-a) reconstruct, both violate the verify-first
+/ full-gate / stop-the-line discipline this lap demands. NO source changed; the
+per-process harness lived in `.tmp/` (gitignored). This finding doc is the durable
+deliverable.
+
+## RE-SEQUENCED CONTINUATION (next value-rep session) — corrects the B1→B4 order
+
+The cluster-composition correction re-prioritises the substrate work AWAY from the
+fnctor lap and ONTO the two higher-leverage, more-tractable gaps:
+
+- **B-pre (standalone generic-method host-import leak) — DO THIS FIRST, separate
+  issue.** Make `Array.prototype.X.call(arrayLike, cb)` standalone-native (remove
+  the `__make_callback`/`env` dependency, the #983d / `array-methods.ts` lane). It
+  blocks EVERY standalone array-like-method row (even own-data, no proto needed).
+  This is the precondition for ANY standalone cluster row and is independent of the
+  proto substrate — likely the single highest-leverage standalone unblock. Size it
+  as its own issue; it is not value-rep object-model, it is standalone-completeness.
+- **B-acc (host generic-method HasProperty-visit + accessor `Get`) — the 181-file
+  bulk.** Host already runs the own-data generic method (`forEach.call` own-data →
+  11 ✓) but mis-visits accessor/inherited indices. Make the host generic-method
+  HasProperty-visit consult the full `[[HasProperty]]` (own accessor + inherited)
+  and the element `Get` invoke the accessor. This is the **dominant 181-file**
+  `Object.defineProperty` lever and does NOT need the fnctor lap. (Coordinates with
+  the host `_protoChainLookup` walk the M3 architect spec scoped — Decision 2/3.)
+- **B-fnctor (the ii-a fnctor lap) — the ~51-file `.prototype=` subset, LAST.** Only
+  after B-pre + B-acc. Needs the escape-analysis gate to reconstruct dynamically-used
+  `new F()` instances as `$Object`s (or a contained alternative an architect decides).
+  Broad-impact value-rep; full-gate, stop-the-line. This is the part with no
+  one-pass safe slice today — it should wait until the escape-analysis (or a
+  per-fnctor prototype-`$Object` global keyed off the *closure-global*, not the
+  unreadable closure-struct slot) infrastructure is specced.
+- **B-protoextend (`Object.prototype[i]=v` inherited on plain receivers) — the
+  `-b-i-` data subset.** Make a plain `{length:N}` literal's `$proto` terminate at a
+  walkable `Object.prototype` `$Object` so inherited indices resolve. Shares the
+  walk with B-acc.
+
+Order rationale: B-pre (unblocks all standalone rows, no proto needed) → B-acc
+(181-file host bulk, accessor/HasProperty) → B-protoextend (`Object.prototype`
+chain) → B-fnctor (51-file fnctor lap, last + hardest, needs escape analysis). The
+handoff's B1→B4 (fnctor-first) is **de-prioritised**: the fnctor lap is the
+smallest AND hardest slice, not the lever.
+
+RUNNER TRAP (re-confirmed): validate per-process (one snippet/file · one mode ·
+fresh instantiate), NEVER an in-process `runTest262File` loop. Reduced `compile()`
+probes MISLEAD — this session found its own reduced host probe (`forEach.call`
+accessor → 1) disagreed with the REAL `c-i-17` file (`fail`); ALWAYS confirm the
+authoritative signal with the real test262 file via `runTest262File` in a fresh
+process, and the full merge_group floor (#2097) for conformance. Issue stays
+`in-progress`; claim released.
