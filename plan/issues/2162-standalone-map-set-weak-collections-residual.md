@@ -1,10 +1,12 @@
 ---
 id: 2162
 title: "Standalone Map/Set/WeakMap/WeakSet conformance residual (~532 tests)"
-status: in-progress
+status: done
+completed: 2026-06-23
 sprint: 65
 created: 2026-06-15
 updated: 2026-06-23
+reconcile_note: "DRAINED 2026-06-23 — all 4 Set sub-issues merged (#2604/#2607 PR#1926, #2605/#2606 #1937); Map/WeakMap/WeakSet proven zero-gap. Residual is substrate-deferred (#2580/#2104 value-rep, #1472/#2158 reflection, #2622 collection-subclass)."
 priority: high
 feasibility: medium
 reasoning_effort: medium

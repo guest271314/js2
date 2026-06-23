@@ -1,9 +1,10 @@
 ---
 id: 2524
 title: "Phase 1: process IO via linkable js2wasm:node-io shim (--node-io-shim)"
-status: in-progress
+status: done
+completed: 2026-06-23
 created: 2026-06-19
-updated: 2026-06-20
+updated: 2026-06-23
 priority: high
 feasibility: hard
 reasoning_effort: max
