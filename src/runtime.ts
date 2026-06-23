@@ -5046,13 +5046,23 @@ function _hostProxyConstruct(
   if (!_isObjectLike(handler)) {
     throw new TypeError(`Cannot create ${ctor} with a non-object as handler`);
   }
-  const bridgeHandler = _buildProxyBridgeHandler(handler, callbackState);
-  // Use the raw target as [[ProxyTarget]] so `t === target` holds in traps and
-  // `proxy`-vs-`target` identity probes resolve. WasmGC structs are valid
-  // exotic targets for the host engine; the bridge handler routes every MOP
-  // operation through the user trap (or, when a trap is absent, the host's
-  // default which reads the struct via the same boundary helpers).
-  const proxy = new Proxy(target, bridgeHandler);
+  // (#2618) A Proxy whose target is CALLABLE is itself callable / constructable
+  // (§10.5.12 / §10.5.13). The host engine derives the proxy's [[Call]] /
+  // [[Construct]] exotic-ness from its [[ProxyTarget]] — but a raw wasm-closure
+  // struct is NOT callable to V8, so `new Proxy(rawClosure, h)()` fails the host
+  // IsCallable check ("... is not a function" / "call is not a function"). When
+  // the user's target is a wasm closure, use its JS-callable wrapper as the
+  // [[ProxyTarget]] so the proxy gains [[Call]]/[[Construct]] and host-side
+  // `p(...)` / `p.call(...)` dispatch correctly. The bridge handler substitutes
+  // the RAW struct back as the `target` argument of the apply/construct traps
+  // (see `rawTarget` in `_buildProxyBridgeHandler`) so the user-observable trap
+  // `target` is identity-equal to the value the program passed to `new Proxy`
+  // (`assert.sameValue(t, target)` in apply/construct/call-parameters.js). A
+  // non-callable target keeps the raw struct as before (identity-preserving, no
+  // behavior change).
+  const { proxyTarget, rawTarget } = _proxyTargetFor(target, callbackState);
+  const bridgeHandler = _buildProxyBridgeHandler(handler, callbackState, rawTarget);
+  const proxy = new Proxy(proxyTarget, bridgeHandler);
   _userProxies.add(proxy);
   return proxy;
 }
@@ -5069,10 +5079,36 @@ function _hostProxyConstructRevocable(
   if (!_isObjectLike(handler)) {
     throw new TypeError("Cannot create proxy with a non-object as handler");
   }
-  const bridgeHandler = _buildProxyBridgeHandler(handler, callbackState);
-  const rv = Proxy.revocable(target, bridgeHandler);
+  // (#2618) Mirror `_hostProxyConstruct`: a callable target makes the revocable
+  // proxy callable/constructable; use its JS wrapper as [[ProxyTarget]] and
+  // restore the raw struct in the apply/construct traps.
+  const { proxyTarget, rawTarget } = _proxyTargetFor(target, callbackState);
+  const bridgeHandler = _buildProxyBridgeHandler(handler, callbackState, rawTarget);
+  const rv = Proxy.revocable(proxyTarget, bridgeHandler);
   if (rv && typeof rv.proxy === "object" && rv.proxy !== null) _userProxies.add(rv.proxy);
   return rv;
+}
+
+/**
+ * (#2618) Decide the host [[ProxyTarget]] for a user `new Proxy(target, …)`.
+ * If `target` is a wasm-closure struct, V8 cannot treat it as callable, so a
+ * proxy built on it is not callable/constructable host-side. Wrap it into a
+ * JS-callable function and use THAT as [[ProxyTarget]] (gives the proxy
+ * [[Call]]/[[Construct]]); return `rawTarget` = the original struct so the
+ * apply/construct trap bridge can substitute it back for target identity. For a
+ * non-callable target (or when exports aren't wired yet so the wrap can't be
+ * built), keep the raw target unchanged and signal "no substitution"
+ * (`rawTarget === undefined`).
+ */
+function _proxyTargetFor(
+  target: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+): { proxyTarget: any; rawTarget: any } {
+  const callable = _maybeWrapCallableUnknownArity(target, callbackState);
+  if (typeof callable === "function" && callable !== target) {
+    return { proxyTarget: callable, rawTarget: target };
+  }
+  return { proxyTarget: target, rawTarget: undefined };
 }
 
 /**
@@ -5111,12 +5147,54 @@ function _structFieldRaw(obj: any, name: string, exports: Record<string, Functio
 function _buildProxyBridgeHandler(
   handler: any,
   callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+  // (#2618) When the proxy's [[ProxyTarget]] is a substituted JS-callable
+  // WRAPPER (because the user's target was a wasm closure V8 can't treat as
+  // callable), the engine passes that wrapper as `args[0]` to the
+  // `apply`/`construct` traps. `rawTarget` is the original struct the user
+  // passed to `new Proxy`; the apply/construct bridge substitutes it back so
+  // `assert.sameValue(trapTarget, target)` holds. `undefined` ⇒ no substitution
+  // (non-callable target, identity-preserving — the prior behavior).
+  rawTarget?: any,
 ): any {
   // Plain JS handler (created host-side, not a WasmGC struct) already exposes
-  // its traps directly — use it verbatim so identity/`this` are untouched.
-  if (!_isWasmStruct(handler)) return handler;
+  // its traps directly. BUT if the [[ProxyTarget]] is a substituted callable
+  // wrapper, even a plain-JS handler's apply/construct trap would observe the
+  // wrapper as `target` — so wrap just those two traps to restore the raw
+  // target. With no substitution this returns the handler verbatim (identity /
+  // `this` untouched, exactly as before).
+  if (!_isWasmStruct(handler)) {
+    return rawTarget === undefined ? handler : _wrapPlainHandlerForRawTarget(handler, rawTarget);
+  }
 
   const exports = callbackState?.getExports();
+
+  // (#2618) START-timing: a TOP-LEVEL `new Proxy(target, handler)` — the
+  // dominant test262 shape (`var p = new Proxy(...)` at module scope; every
+  // non-realm `built-ins/Proxy/{apply,construct}/*` file does this) — runs
+  // inside the wasm module's START function, BEFORE `setExports` wires
+  // `__is_closure` and the `__sget_*` field getters. With `exports` still
+  // undefined we can neither (a) read each trap field off the WasmGC handler
+  // struct (`__sget_<name>` unavailable, so `_structFieldRaw` falls through to a
+  // sidecar miss) nor (b) classify a found field as a wasm closure
+  // (`__is_closure` unavailable → `_maybeWrapCallableUnknownArity` returns the
+  // raw struct). The previous eager build therefore lost EVERY user trap on a
+  // top-level proxy: the host fell back to its default internal methods (so
+  // `p.x` / `p()` / `new p()` silently returned the WRONG value — verified:
+  // top-level `new Proxy({a:1},{get:()=>99}).x` returned the target's value,
+  // not 99). The program only INVOKES the proxy later, from an exported
+  // function, by which time exports ARE wired — so deferring trap resolution
+  // to invocation time recovers correct behaviour.
+  //
+  // Fix: when exports are not yet available, build a lazy bridge whose traps
+  // resolve the underlying user trap on first invocation through the
+  // now-wired exports. Fully self-contained — no global proxy registry, no
+  // setExports replay. The common case (exports present at construct time, i.e.
+  // a proxy built inside an exported function) is unchanged: the eager branch
+  // below is byte-for-byte the prior logic.
+  if (!exports) {
+    return _buildLazyProxyBridgeHandler(handler, callbackState, rawTarget);
+  }
+
   const bridge: Record<string, any> = {};
   for (const name of _PROXY_TRAP_NAMES) {
     const rawTrap = _structFieldRaw(handler, name, exports);
@@ -5142,11 +5220,128 @@ function _buildProxyBridgeHandler(
     // body's `this` is the same value the program sees as `handler` and
     // `assert.sameValue(this, handler)` passes. Spec-correct args (raw target,
     // property key, receiver = our user Proxy) flow through unchanged.
+    //
+    // (#2618) For the `apply`/`construct` traps, when the [[ProxyTarget]] is a
+    // substituted callable wrapper, V8 passes that wrapper as args[0]; restore
+    // the raw struct so the trap's `target` parameter is identity-equal to the
+    // value the program passed to `new Proxy` (apply/construct/call-parameters).
+    const substituteTarget = rawTarget !== undefined && (name === "apply" || name === "construct");
     bridge[name] = function (this: any, ...args: any[]): any {
+      if (substituteTarget && args.length > 0) args[0] = rawTarget;
       return (callable as Function).apply(handler, args);
     };
   }
   return bridge;
+}
+
+/**
+ * (#2618) Wrap a plain-JS handler so its `apply`/`construct` traps see the raw
+ * wasm-struct target instead of the substituted callable wrapper installed as
+ * [[ProxyTarget]]. Every other trap is copied through unchanged so identity /
+ * `this` are preserved.
+ */
+function _wrapPlainHandlerForRawTarget(handler: any, rawTarget: any): any {
+  const wrapped: Record<string, any> = {};
+  for (const k of Reflect.ownKeys(handler)) wrapped[k as string] = (handler as any)[k];
+  for (const tn of ["apply", "construct"] as const) {
+    const userTrap = (handler as any)[tn];
+    if (typeof userTrap === "function") {
+      wrapped[tn] = function (this: any, _t: any, ...rest: any[]): any {
+        return userTrap.call(this, rawTarget, ...rest);
+      };
+    }
+  }
+  return wrapped;
+}
+
+/**
+ * (#2618) START-timing bridge for a WasmGC-struct handler built BEFORE
+ * `setExports` (a top-level `new Proxy(...)`). Trap fields can't be read or
+ * classified at construct time, so install a thunk for EVERY MOP name; each
+ * thunk resolves the underlying user trap lazily on first invocation — by which
+ * point the program is running an exported function and exports are wired.
+ *
+ * Lazy semantics deliberately mirror the eager builder so behaviour is
+ * identical whether the proxy was built before or after `setExports`:
+ *  - field absent (undefined/null) at resolve time → forward to the target's
+ *    DEFAULT internal method (§7.3.10 missing trap), exactly as omitting the
+ *    bridge key would have made the host do.
+ *  - field present but non-callable → TypeError (§7.3.10 GetMethod), same text
+ *    as the eager throwing stub.
+ *  - field a callable closure → forward to it with `this` = the raw handler
+ *    struct (identity-preserving), same as the eager path.
+ */
+function _buildLazyProxyBridgeHandler(
+  handler: any,
+  callbackState: { getExports: () => Record<string, Function> | undefined } | undefined,
+  rawTarget?: any,
+): any {
+  const bridge: Record<string, any> = {};
+  for (const name of _PROXY_TRAP_NAMES) {
+    const substituteTarget = rawTarget !== undefined && (name === "apply" || name === "construct");
+    bridge[name] = function (this: any, ...args: any[]): any {
+      const lateExports = callbackState?.getExports();
+      const rawTrap = _structFieldRaw(handler, name, lateExports);
+      if (rawTrap == null) {
+        // Trap genuinely absent → forward to the target's default internal
+        // method. `args[0]` is the [[ProxyTarget]] (the callable WRAPPER when a
+        // wasm-closure target was substituted) — forward through it unchanged so
+        // a default apply/construct lands on a host-callable value.
+        return _proxyForwardDefault(name, args);
+      }
+      // (#2618) restore the raw target for apply/construct (see eager path) only
+      // when actually invoking the user trap, so the trap's `target` parameter
+      // is identity-equal to what the program passed to `new Proxy`.
+      if (substituteTarget && args.length > 0) args[0] = rawTarget;
+      const callable = _maybeWrapCallableUnknownArity(rawTrap, callbackState);
+      if (typeof callable !== "function") {
+        throw new TypeError(`'${name}' on proxy: trap is not a function`);
+      }
+      return (callable as Function).apply(handler, args);
+    };
+  }
+  return bridge;
+}
+
+/**
+ * (#2618) Forward a Proxy MOP to the target's DEFAULT internal method, used by
+ * the lazy bridge when a trap turns out to be absent at resolve time. The host
+ * passes the bridge trap the spec-mandated argument list whose first element is
+ * always the [[ProxyTarget]]; mapping each trap name to the corresponding
+ * Reflect.* default reproduces "missing trap ⇒ ordinary behaviour" (§7.3.10).
+ */
+function _proxyForwardDefault(name: string, args: any[]): any {
+  const target = args[0];
+  switch (name) {
+    case "get":
+      return Reflect.get(target, args[1], args[2] ?? target);
+    case "set":
+      return Reflect.set(target, args[1], args[2], args[3] ?? target);
+    case "has":
+      return Reflect.has(target, args[1]);
+    case "deleteProperty":
+      return Reflect.deleteProperty(target, args[1]);
+    case "defineProperty":
+      return Reflect.defineProperty(target, args[1], args[2]);
+    case "getOwnPropertyDescriptor":
+      return Reflect.getOwnPropertyDescriptor(target, args[1]);
+    case "ownKeys":
+      return Reflect.ownKeys(target);
+    case "getPrototypeOf":
+      return Reflect.getPrototypeOf(target);
+    case "setPrototypeOf":
+      return Reflect.setPrototypeOf(target, args[1]);
+    case "isExtensible":
+      return Reflect.isExtensible(target);
+    case "preventExtensions":
+      return Reflect.preventExtensions(target);
+    case "apply":
+      return Reflect.apply(target, args[1], args[2] ?? []);
+    case "construct":
+      return Reflect.construct(target, args[1] ?? [], args[2] ?? target);
+    default:
+      return undefined;
+  }
 }
 
 // ── #1234 — sparse-aware Array.prototype fast paths ─────────────────────────
