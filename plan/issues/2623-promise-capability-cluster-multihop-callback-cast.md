@@ -1,7 +1,8 @@
 ---
 id: 2623
 title: "Promise capability-cluster: multi-hop host→wasm resolve-element callback cast + ctx-ctor species/prototype identity through the bridge"
-status: backlog
+status: in-progress
+assignee: ttraenkler/sendev-promise-subclass
 created: 2026-06-22
 priority: medium
 feasibility: hard
@@ -587,3 +588,79 @@ closure dispatch, NOT box depth. (File forward as a separate async-lane issue.)
 - `await`-callback-result-drop (the real #1312-async NaN) — async-lane.
 - `Test262Error.thrower` + `promiseHelper.js` runner shims — to actually flip the
   two headline rows green once on top of this substrate fix.
+
+---
+
+## Slice 2623-B re-grounding #2 — senior-dev (2026-06-23): identity unification IS landable (+1 row, regression-free); executor-body half deferred
+
+Re-verified Slice B end-to-end against current `origin/main` (binaryen-decoded +
+per-process runner — one `npx tsx` process per file, NO in-process
+`runTest262File` loop). The identity-divergence root cause is **confirmed and
+SPLIT into a landable half and a deferred half**. The prior re-grounding above
+was right that the executor-body is the deep half, but it made two factual
+errors that I corrected, and it under-reported the payoff.
+
+### Correction 1 — the value-read does NOT emit a `__class_<Name>` singleton; it emits `ref.null.extern`
+The prior note said the RHS `SubPromise` "goes through `identifiers.ts` and emits
+the wasm class-object singleton (`__class_<Name>`)". **False.** A
+`class extends Promise` is externref-backed (#1366a/b) and `class-bodies.ts:762`
+**skips** the `__class_<Name>` global for any class with a builtin parent
+(`if (!ctx.classBuiltinParentMap.has(className))`). So `classObjectGlobals` never
+holds it, the `emitLazyClassObjectGet` branch in `identifiers.ts` is skipped, and
+the bare-identifier value-read fell through to the `ref.null.extern`
+graceful-default. Decoded WAT: `(func $subPromiseValue (result externref)
+ref.null extern return)`. The divergence is **synthesized-ctor vs. null**, not
+synthesized-ctor vs. `__class` singleton.
+
+### Correction 2 — identity unification ALONE banks a real test262 row (+1, not 0)
+The prior note's "0 net test262 rows" is true ONLY for the `ctx-ctor` rows that
+additionally assert the executor body ran (`callCount===1`, `typeof
+executor==='function'`). But **`built-ins/Promise/withResolvers/ctx-ctor.js`**
+uses a default-ctor `class SubPromise extends Promise {}` and asserts ONLY
+identity (`instance.promise.constructor === SubPromise`, `instanceof SubPromise`)
+— no executor body. Full main-vs-branch per-process diff over the entire
+`extends Promise` corpus (24 Promise + 4 language files):
+
+```
+FLIP: built-ins/Promise/withResolvers/ctx-ctor.js   fail -> pass
+(every other row unchanged; 0 regressions)
+```
+
+The `all/race/any/reject/resolve/try` ctx-ctor rows correctly **advance from
+assert #1 to assert #3** (identity now passes; the bare synthesized subclass
+still doesn't run `super(a); executor=a; callCount++`). `allSettled/ctx-ctor`
+stays at #1 (empty-array capability path differs). The already-passing
+`finally/subclass-{reject,resolve}-count` stay green. Non-Promise subclass
+value-reads (`Error`/`Array`/`Map`) and plain-class identity (`C === C`) are
+**unaffected** — the branch is gated to `classSet ∩ extends-Promise ∩
+unshadowed ∩ JS-host`.
+
+### What shipped (PR — Slice 2623-B identity unification)
+A new shared module `src/codegen/expressions/promise-subclass.ts`
+(`resolvePromiseSubclassName` + `emitPromiseSubclassCtor` +
+`tryEmitPromiseSubclassValue`/`Receiver`) is the single detection+emission core.
+- `calls.ts`: `resolvePromiseSubclassThisArg` now delegates to it (the combinator
+  receiver path), and the `isPromiseSubclassReceiver` IIFE uses
+  `resolvePromiseSubclassName` (dedup; −122 LoC of inline duplication).
+- `identifiers.ts`: a new value-read branch (after the `__class` singleton block,
+  before the `ref.null.extern` fallback) routes a `class extends Promise`
+  identifier-as-value through the SAME cached `__promise_subclass_ctor` singleton.
+- The receiver and the value-read can never diverge again — one object per name.
+- Standalone/WASI-safe (`isStandalonePromiseActive` short-circuits → fallback).
+- merge_group-floor validated (broad-impact: identifier-as-value hot path).
+- `tests/issue-2623-promise-subclass-identity.test.ts` (7 tests: identity, the
+  withResolvers row, chained subclass, + plain-class / Error-subclass / local-
+  shadow / combinator-capability regressions).
+
+### Deferred (executor-body half — the other ctx-ctor rows + #3/#4)
+Completing `all/race/any/reject/resolve/try/allSettled ctx-ctor` (asserts
+#3/#4) requires the synthesized `__promise_subclass_ctor` `class extends Promise
+{}` to RUN the user's wasm constructor body on V8's NewPromiseCapability-provided
+`this` + executor. That is a deep, coupled change:
+(1) thread `callbackState` into `__promise_subclass_ctor`;
+(2) re-architect the externref-backed `<Sub>_new` so it runs as a ctor body on a
+    host-provided `this` (today it builds its OWN promise via `__new_Promise`);
+(3) marshal the executor closure inbound — the **#2623-A** substrate (capturing
+    inner `resolve`).
+This overlaps #2623-A and is NOT bounded; keep deferred. The identity unification
+is its prerequisite foundation and is now landed.
