@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
 
 /**
- * #6408 — standalone object-literal data/method property keys must not bake the
+ * #2194 — standalone object-literal data/method property keys must not bake the
  * `-1` string-global sentinel into a `global.get`.
  *
  * Defect: in `--target standalone` (`nativeStrings` / `ctx.standalone`) there is
@@ -28,7 +28,7 @@ async function compilesStandalone(source: string): Promise<void> {
   expect(WebAssembly.validate(r.binary), "module must be valid Wasm").toBe(true);
 }
 
-describe("#6408 — object-literal data/method keys avoid the -1 string-global sentinel (standalone)", () => {
+describe("#2194 — object-literal data/method keys avoid the -1 string-global sentinel (standalone)", () => {
   it("data property + getter (top-level literal)", async () => {
     await compilesStandalone(
       `const o = { index: 0, get val() { return this.index; } };

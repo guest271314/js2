@@ -14,7 +14,7 @@ area: codegen, runtime
 language_feature: objects, prototype chain, method dispatch, built-ins
 goal: host-independence
 sprint: 61
-related: [1472, 6407, 1629, 1104, 1539, 1103]
+related: [1472, 2177, 1629, 1104, 1539, 1103]
 parent: 1472
 claimed_by: codex-developer
 claimed_at: 2026-06-07T10:22:55.064Z
@@ -337,7 +337,7 @@ matters only where noted**; (b)-path slices are the high-value core.
 - Extend `__extern_method_call` with `ref.test $Vec` / string-brand /
   Map / Set arms, each routing `methodName` to the existing native helper.
   This is additive over Slice 2's `$Object`-only body.
-- Coordinate with **#6407** (receiver-element-retrieval for
+- Coordinate with **#2177** (receiver-element-retrieval for
   `Array.proto.<m>.call($Vec/open-obj)`) — that spec is the element-read
   side of the same brand-dispatch; reuse its helper, don't duplicate.
 - Tests: `(x as any).push(1)` where `x` is a `$Vec` at runtime; string
@@ -524,7 +524,7 @@ its own finding/issue; do not fold into S6-b.
   `src/codegen/expressions/new-super.ts` L150/L187 (super.method),
   `src/codegen/property-access.ts` L1452 (`Builtin.prop` read).
 - `setPrototypeOf` stub: `src/codegen/expressions/calls.ts` ~L3857.
-- Brand-arm element read shared with #6407 receiver-element-retrieval spec.
+- Brand-arm element read shared with #2177 receiver-element-retrieval spec.
 
 ## Slice 0 — fast-path audit (sd-1472c-recover, 2026-06-05)
 

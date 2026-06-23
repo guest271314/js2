@@ -1,11 +1,13 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * Node process API lowering for WASI.
+ * Node `node:fs` + `process` std-IO lowering for WASI (#2633).
  *
  * This keeps Node-shaped host API support out of the generic call-expression
- * compiler. User code can import `process` from `node:process`; the import
- * resolver turns that into a type-level stub, and this module compiles the
- * supported stream calls directly to WASI syscalls.
+ * compiler. It recognizes the synchronous std-IO surface — `node:fs`
+ * `readSync`/`writeSync(fd, buf, …)` and `process.stdout`/`stderr.write` — and
+ * lowers them to WASI syscalls (or, under `--link-node-shims`, to the imported
+ * `node:fs` shim). It also rejects the hallucinated `process.stdin.read(buf,
+ * offset)` with a clear pointer to `node:fs` `readSync`.
  */
 import { isStringType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";

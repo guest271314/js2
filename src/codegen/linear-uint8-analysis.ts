@@ -106,7 +106,7 @@ function isNewUint8Array(expr: ts.Node): expr is ts.NewExpression {
  * Recognise a byte-I/O intrinsic call that takes a `Uint8Array` buffer and
  * return the argument index that carries the buffer, or `-1` if this is not one.
  *
- * Two shapes are recognised (both lowered by `node-process-api.ts`):
+ * Two shapes are recognised (both lowered by `node-fs-api.ts`):
  *   - `process.std{out.write,err.write}(buf, …)` — buffer at arg 0. We only
  *     match the global `process` shape the WASI lowering supports; a local
  *     `process` shadow makes this not match (the conservative path). (#2633 —

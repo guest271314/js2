@@ -18,7 +18,7 @@ Filed `sprint: 64`, `status: ready`:
 
 ## Sprint-61 merged-PR code review (2026-06-10)
 
-Static review of all 24 sprint-61 merged PRs (9 issues). #1909/#1910/#1902/#6407
+Static review of all 24 sprint-61 merged PRs (9 issues). #1909/#1910/#1902/#2177
 clean; #1832 fix correct (test-only PR); the rest produced these follow-ups.
 Also backfilled `status: done` on the 7 merged-but-in-review issues
 (#1832, #1886, #1904, #1905, #1907, #1909, #1910).
@@ -323,7 +323,7 @@ tracked elsewhere are noted under "Already covered" below.
 Found while adding `tests/real-world-*.test.ts` (real-world code patterns
 test262 doesn't cover: ESM, Web/WASI/Node/Deno APIs, Hono/React/Express):
 
-- [#1801](../1801-wasi-process-exit-invalid-binary.md) — WASI `process.exit(code)` emits an invalid binary: the exit code is compiled as i32 but an `i32.trunc_sat_f64_s` (expects f64) is pushed on top (`calls.ts:3180-3186`); `wasi-target.test.ts` only checks WAT so missed it. Sentinel via `it.fails` in `real-world-wasi.test.ts` — medium, easy, **sprint 60, DONE** (2026-06-05). _(Was mistakenly cited as phantom "#6407" — corrected.)_
+- [#1801](../1801-wasi-process-exit-invalid-binary.md) — WASI `process.exit(code)` emits an invalid binary: the exit code is compiled as i32 but an `i32.trunc_sat_f64_s` (expects f64) is pushed on top (`calls.ts:3180-3186`); `wasi-target.test.ts` only checks WAT so missed it. Sentinel via `it.fails` in `real-world-wasi.test.ts` — medium, easy, **sprint 60, DONE** (2026-06-05). _(Was mistakenly cited as phantom "#2177" — corrected.)_
 
 ### Fable-team findings (2026-06-10)
 

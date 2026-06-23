@@ -167,3 +167,58 @@ rework lands (the capability bridge), then the apply+construct routing becomes
 result". Coordinate with sd-1838 before editing shared trampoline/call-dispatch.
 The runtime target-wrap (change 1) can land independently if useful. Branch was
 restored to pristine `origin/main`; no PR opened.
+
+## Re-grounding (senior-dev #2623 Slice C, 2026-06-23) — CONFIRM DEFER; faults have MOVED
+
+Verify-first re-measure of the two faults on current `origin/main` (after
+#2615/#56 siblings landed). **Confirm DEFER — not bounded.** The faults moved
+since the 2026-06-22 measure, and the new blockers are START-timing + the
+`.call()`-on-Proxy dispatch, not a clean routing select.
+
+### apply — fault has split by callee TS type; the real test262 shape adds two new blockers
+- `const p: any = new Proxy(fn, {apply:()=>42}); p()` → returns **0** (silent
+  wrong; the `any`-callee dispatch chain `ref.test (ref $closure)` misses and the
+  ELSE arm is `i32.const 0`, NOT an illegal cast anymore).
+- inferred-type `const p = new Proxy(fn, …)` (no annotation — the test262 shape) →
+  `p()` **null-derefs** in the matched-closure dispatch (the proxy externref is
+  `ref.cast`→null, then `struct.get` of null).
+- A prototyped fix (add `receiverMayBeProxy` to the `hostCallFallback` gate at
+  `calls.ts` ~11389 so a Proxy callee routes through `__call_function`, PLUS wrap a
+  callable wasm-closure target in `_hostProxyConstruct` via
+  `_maybeWrapCallableUnknownArity`) advances the inferred case past the null-deref
+  — but then hits **TWO blockers the real `apply/call-result.js` shape always has**:
+  1. **START-timing.** `apply/call-result.js` builds `var p = new Proxy(…)` at
+     **top level**, so `_hostProxyConstruct` runs during the module START function
+     BEFORE `setExports` wires `__is_closure` — instrumented: `isClosure = noFn`.
+     The callable-target wrap therefore can NOT fire at construct time (the same
+     lazy-exports hazard as `_wrapWasmClosure`/#1712). A callable target IS
+     required at construct time for V8 to make the proxy `[[Call]]`-able, so the
+     wrap can't simply be deferred to the trap. (Deferred construction inside a
+     post-instantiation function DOES wrap — `isClosure=1` — confirming the
+     mechanism, but that is not the test shape.)
+  2. **`.call()`-on-Proxy.** The test invokes `p.call()`, not `p()` — the
+     Proxy-method dispatch path that the 2026-06-22 investigation already flagged
+     as the `.call()`-in-capture regression blocked on #56.
+
+### construct — trap result still dropped; routing lives in the #56 dynamic-new zone
+- `new Proxy(C, {construct:()=>({x:9})})` then `new p(); o.x` → returns **0** (trap
+  result dropped) at BOTH top level and inside a function. `new p()` is statically
+  lowered to a direct `C` struct construction (the `new <expr>` path resolves `p`'s
+  TS type to the target class), so the construct trap never runs. Routing
+  `new <externref Proxy>` through a host `Reflect.construct` boundary lives in
+  `tryEmitDynamicNew` / `emitDynamicNewFallback` (`new-super.ts`) — the same
+  call/construct dispatch zone #56 reworks, and it needs the same START-timing-safe
+  callable-target representation as apply.
+
+### Verdict
+**DEFER — confirmed, NOT bounded.** The three coupled prerequisites — a
+START-timing-safe host-callable representation of a wasm-closure Proxy target,
+`.call()`/`.apply()`-on-Proxy method dispatch through closure capture, and the
+dynamic-`new`-on-externref construct-result threading — are all in the #56
+call/construct-dispatch rework. The isolated runtime target-wrap is correct in
+principle but inert at module-START construct time, so it cannot land usefully
+alone. Sequence AFTER #56; do not staff as a standalone slice. Branch
+`issue-2623b-construct-identity`-adjacent work (Slice C) was kept pristine — no
+codegen shipped. This closes the #2623 cluster verdict: A + B + C all DEFER to
+architect re-spec / #56-sequencing (see the #2623 Slice A & B
+re-groundings).

@@ -32,6 +32,41 @@ if (hasPlanningArtifacts) {
 }
 
 run(process.execPath, ["--experimental-strip-types", "scripts/generate-editions.ts"]);
+
+// (#2636) Per-edition STANDALONE buckets. The host pass above wrote
+// test262-editions.json from the JS-host baseline JSONL; run the same edition
+// classifier over the standalone-lane baseline JSONL so the landing-page
+// host/standalone toggle has per-edition *standalone* pass rates, not just the
+// latest edition. Best-effort: fetching the standalone baseline and the
+// classifier itself are both wrapped so an offline local build (or a transient
+// baseline outage) skips the standalone editions file instead of failing the
+// whole Pages build — the reader then falls back to the committed file, or to
+// the pre-#2636 "Unavailable" state for standalone editions.
+try {
+  try {
+    run("node", ["scripts/fetch-baseline-jsonl.mjs", "--standalone"]);
+  } catch {
+    // network / baseline unavailable — the existsSync guard below skips cleanly
+  }
+  const standaloneJsonl = resolve(ROOT, ".test262-cache", "test262-standalone-current.jsonl");
+  if (existsSync(standaloneJsonl)) {
+    run(process.execPath, [
+      "--experimental-strip-types",
+      "scripts/generate-editions.ts",
+      "--results",
+      standaloneJsonl,
+      "--output",
+      resolve(ROOT, "website", "public", "benchmarks", "results", "test262-standalone-editions.json"),
+    ]);
+  } else {
+    console.warn(
+      "[run-pages-build] standalone baseline JSONL unavailable — keeping committed test262-standalone-editions.json",
+    );
+  }
+} catch (error) {
+  console.warn(`[run-pages-build] standalone edition generation skipped: ${error?.message ?? error}`);
+}
+
 run("pnpm", ["run", "build:playground"]);
 run("pnpm", ["run", "build:compiler-bundle"]);
 // Experimental Wasm flags required by generate-size-benchmarks (Node 25):

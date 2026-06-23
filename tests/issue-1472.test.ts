@@ -1235,7 +1235,7 @@ describe("#1888 Slice 2 — standalone open-any method dispatch", () => {
  * → native __str_* over a $NativeString-branded receiver) and the
  * Object.prototype hasOwnProperty/propertyIsEnumerable arms (→ native own-property
  * helpers) plus Object.prototype.isPrototypeOf (→ native prototype-chain helper).
- * Everything else (Array — rides on #6407; Object valueOf — a separate follow-on)
+ * Everything else (Array — rides on #2177; Object valueOf — a separate follow-on)
  * refuses-loud with a #1888 cite, never silent-wrong.
  *
  * String-returning methods are asserted via a numeric projection (`.length` /
@@ -1311,7 +1311,7 @@ describe("#1888 Slice 3 — standalone Type.prototype.<m>.call borrowed dispatch
     expect((instance.exports as NumExports).run()).toBe(1);
   });
 
-  it("Array.prototype.push.call refuses-loud (rides on #6407, no silent-wrong)", async () => {
+  it("Array.prototype.push.call refuses-loud (rides on #2177, no silent-wrong)", async () => {
     const r = await compile(
       `export function run(): number { const a: any = []; Array.prototype.push.call(a, 5); return 1; }`,
       STD,
@@ -1319,7 +1319,7 @@ describe("#1888 Slice 3 — standalone Type.prototype.<m>.call borrowed dispatch
     expect(r.success).toBe(false);
     const joined = r.errors.map((e) => e.message).join("\n");
     expect(joined).toMatch(/#1888 Slice 3\/4/);
-    expect(joined).toMatch(/#6407/);
+    expect(joined).toMatch(/#2177/);
   });
 
   it("Object.prototype.isPrototypeOf.call routes native (prototype-chain helper)", async () => {
