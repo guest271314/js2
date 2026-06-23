@@ -1074,18 +1074,21 @@ export function compileSourceSync(
     1100, // "Invalid use of 'X' in strict mode" — sloppy-mode JS allows eval/arguments (#331)
     1121, // "Octal literals are not allowed in strict mode" — valid sloppy-mode JS
     1489, // "Decimals with leading zeros are not allowed" — valid sloppy-mode JS octal literals
+    // #2631/#1768 — "Signature declarations can only be used in TypeScript files."
+    // Fires under checkJs at the import site when a `.js` file imports a value
+    // whose synthetic `.d.ts` typing is a callable/overloaded declaration (e.g.
+    // `import { readSync, writeSync } from "node:fs"` resolving to the node-emu
+    // typings). Benign for codegen — the import resolves and lowers regardless.
+    // Scoped to this exact code so it does NOT relax the gate for genuine
+    // strict-mode SyntaxErrors (e.g. duplicate params), which the eval shim
+    // (src/runtime-eval.ts) relies on `compileSourceSync(...).success === false`
+    // to surface as a thrown SyntaxError (the 17 strict-eval test262 cases).
+    8017,
   ]);
-  // When allowJs is set, don't bail on TS diagnostics — JS packages with JSDoc
-  // annotations (and `.js` files importing overloaded typed declarations from
-  // `node:*`, e.g. node:fs readSync/writeSync — TS8017 "signature-in-JS" at the
-  // import site, #2631/#1768) produce false-positive errors; codegen handles it.
-  // This mirrors the multi-source path's `!options.allowJs` gate below.
-  const hasSyntaxErrors =
-    !options.allowJs &&
-    ast.syntacticDiagnostics.some(
-      (d) => d.category === 1 && d.file === ast.sourceFile && !TOLERATED_SYNTAX_CODES.has(d.code),
-    );
-  const hasHardTypeErrors = !options.allowJs && ast.diagnostics.some((d) => isHardTypeScriptDiagnostic(d, ast.checker));
+  const hasSyntaxErrors = ast.syntacticDiagnostics.some(
+    (d) => d.category === 1 && d.file === ast.sourceFile && !TOLERATED_SYNTAX_CODES.has(d.code),
+  );
+  const hasHardTypeErrors = ast.diagnostics.some((d) => isHardTypeScriptDiagnostic(d, ast.checker));
 
   if ((hasSyntaxErrors || hasHardTypeErrors) && errors.length > 0) {
     return failResult(errors);
