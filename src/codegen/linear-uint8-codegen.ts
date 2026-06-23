@@ -416,106 +416,38 @@ export function getLinearU8Buffer(
 }
 
 /**
- * Zero-copy `process.stdin.read(buf, off?)` for a linear-backed buffer.
- * `fd_read` targets `ptr + off` directly (no GC↔linear element-copy loop) and
- * returns the byte count (f64). Returns `null` if `buf` is not linear-backed.
- *
- * Layout reuse: the iovec lives at memory[0..7] and nwritten/nread at
- * memory[8..11] — the same scratch slots the existing `__wasi_write_*` helpers
- * and the GC stdin-read path use.
- */
-export function tryEmitLinearU8StdinRead(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  expr: ts.CallExpression,
-  fdReadIdx: number,
-): ValType | null {
-  const buf = getLinearU8Buffer(ctx, fctx, expr.arguments[0]!);
-  if (!buf) return null;
-
-  // off = arg1 (trunc) or 0
-  const offLocal = allocLocal(fctx, `__linu8_rdoff_${fctx.locals.length}`, { kind: "i32" });
-  if (expr.arguments.length >= 2) {
-    compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "f64" });
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  } else {
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  }
-  fctx.body.push({ op: "local.set", index: offLocal } as Instr);
-
-  // #2524 Phase 1 — under the node-process shim, hand `(ptr+off, len-off)` to the
-  // imported `stdin_read`; the shim builds the iovec + calls fd_read into the
-  // shared memory and returns the byte count.
-  if (ctx.linkNodeShims) {
-    fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
-    fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-    fctx.body.push({ op: "i32.add" } as Instr);
-    fctx.body.push({ op: "local.get", index: buf.lenLocalIdx } as Instr);
-    fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-    fctx.body.push({ op: "i32.sub" } as Instr);
-    fctx.body.push({ op: "call", funcIdx: ctx.nodeIoStdinReadIdx } as Instr);
-    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
-    return { kind: "f64" };
-  }
-
-  // iovec.buf = ptr + off   (memory[0])
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
-  fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
-  // iovec.buf_len = len - off   (memory[4])
-  fctx.body.push({ op: "i32.const", value: 4 } as Instr);
-  fctx.body.push({ op: "local.get", index: buf.lenLocalIdx } as Instr);
-  fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-  fctx.body.push({ op: "i32.sub" } as Instr);
-  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
-  // fd_read(fd=0, iovs=0, iovs_len=1, nread=8) — bytes land directly in linear
-  // memory at ptr+off (zero copy).
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-  fctx.body.push({ op: "i32.const", value: 8 } as Instr);
-  fctx.body.push({ op: "call", funcIdx: fdReadIdx } as Instr);
-  fctx.body.push({ op: "drop" } as Instr);
-  // return nread (memory[8]) as f64
-  fctx.body.push({ op: "i32.const", value: 8 } as Instr);
-  fctx.body.push({ op: "i32.load", align: 2, offset: 0 } as Instr);
-  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
-  return { kind: "f64" };
-}
-
-/**
  * Zero-copy `process.stdout/stderr.write(buf)` for a linear-backed buffer.
  * `fd_write` reads straight from `ptr` for `len` bytes — no GC→linear staging
  * copy. Returns `true` if handled (and leaves the i32 `1` write-result on the
- * stack, matching the GC write path), `null` if `buf` is not linear-backed.
+ * stack, matching the GC write path), `false` if `buf` is not linear-backed.
+ *
+ * `writeSinkIdx` is the func to call: `node:fs::writeSync(fd,ptr,len)` under the
+ * node shims, or `wasi_snapshot_preview1.fd_write` inline. `fd` is 1 (stdout) or
+ * 2 (stderr).
  */
 export function tryEmitLinearU8StdWrite(
   ctx: CodegenContext,
   fctx: FunctionContext,
   bufArg: ts.Expression,
-  fdWriteIdx: number,
-  useStderr: boolean,
+  writeSinkIdx: number,
+  fd: number,
 ): boolean {
   const buf = getLinearU8Buffer(ctx, fctx, bufArg);
   if (!buf) return false;
 
-  // #2524 Phase 1 — under the node-process shim, the syscall + iovec live in the
-  // shim. The user module just hands `(ptr, len)` to the imported write fn over
-  // the shared memory: zero staging copy, no iovec, no nwritten cell.
+  // #2633 — under the node shims, the syscall + iovec live in the shim. The user
+  // module just hands `(fd, ptr, len)` to the imported `node:fs::writeSync` over
+  // the shared memory: zero staging copy, no iovec, no nwritten cell. `writeSync`
+  // returns bytes-written (i32) → drop to match the fd_write path's stack contract.
   if (ctx.linkNodeShims) {
-    const ioIdx = useStderr ? ctx.nodeIoStderrWriteIdx : ctx.nodeIoStdoutWriteIdx;
+    fctx.body.push({ op: "i32.const", value: fd } as Instr);
     fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
     fctx.body.push({ op: "local.get", index: buf.lenLocalIdx } as Instr);
-    fctx.body.push({ op: "call", funcIdx: ioIdx } as Instr);
-    // stdout_write returns bytes-written (i32) → drop to match the fd_write
-    // path's stack contract; stderr_write returns void → nothing to drop.
-    if (!useStderr) fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "call", funcIdx: writeSinkIdx } as Instr);
+    fctx.body.push({ op: "drop" } as Instr);
     return true;
   }
 
-  const fd = useStderr ? 2 : 1;
   // iovec.buf = ptr (memory[0])
   fctx.body.push({ op: "i32.const", value: 0 } as Instr);
   fctx.body.push({ op: "local.get", index: buf.ptrLocalIdx } as Instr);
@@ -529,7 +461,7 @@ export function tryEmitLinearU8StdWrite(
   fctx.body.push({ op: "i32.const", value: 0 } as Instr);
   fctx.body.push({ op: "i32.const", value: 1 } as Instr);
   fctx.body.push({ op: "i32.const", value: 8 } as Instr);
-  fctx.body.push({ op: "call", funcIdx: fdWriteIdx } as Instr);
+  fctx.body.push({ op: "call", funcIdx: writeSinkIdx } as Instr);
   fctx.body.push({ op: "drop" } as Instr);
   return true;
 }

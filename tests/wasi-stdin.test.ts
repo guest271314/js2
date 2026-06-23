@@ -2,53 +2,48 @@ import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
 import { buildWasiPolyfill } from "../src/runtime.js";
 
-const PROCESS_DECL = `declare const process: {
-  stdin: { read(buf: Uint8Array, offset?: number): number };
-  stdout: { write(c: Uint8Array): void };
-};`;
-
-describe("WASI stdin via fd_read (#1653)", () => {
-  it("registers fd_read import when process.stdin.read() is used", async () => {
+// #2633 — synchronous stdin is `node:fs` `readSync(0, …)` (the hallucinated
+// `process.stdin.read` surface was removed). `readSync`/`writeSync` are
+// supported under `--link-node-shims`; the shim owns the WASI fd_read/fd_write.
+describe("WASI stdin via fd_read (#1653/#2633)", () => {
+  it("imports node:fs readSync when readSync(0, …) is used (--link-node-shims)", async () => {
     const result = await compile(
       `
-      ${PROCESS_DECL}
+      import { readSync, writeSync } from "node:fs";
       export function main(): void {
         const buf = new Uint8Array(4);
-        const n = process.stdin.read(buf, 0);
-        process.stdout.write(buf);
+        const n = readSync(0, buf, 0, 4);
+        writeSync(1, buf);
       }
       `,
-      { target: "wasi" },
+      { target: "wasi", linkNodeShims: true },
     );
-    expect(result.success).toBe(true);
-    expect(result.wat).toContain("wasi_snapshot_preview1");
-    expect(result.wat).toContain("fd_read");
+    expect(result.success, result.errors.map((e) => e.message).join("\n")).toBe(true);
+    // The user module imports the node:fs interface; the shim owns fd_read.
+    expect(result.wat).toContain('(import "node:fs" "readSync"');
+    expect(result.wat).not.toContain("js2wasm:node-process");
     expect(result.binary.length).toBeGreaterThan(0);
   });
 
-  it("does NOT register fd_read when process.stdin.read() is not used", async () => {
+  it("does NOT register fd_read when readSync is not used", async () => {
     const result = await compile(`console.log("no stdin here");`, { target: "wasi" });
     expect(result.success).toBe(true);
     expect(result.wat).not.toContain("fd_read");
   });
 
-  it("does not add WASI imports in default (non-wasi) mode", async () => {
-    // In non-wasi mode the codegen path is gated by ctx.wasi, so no WASI
-    // imports should leak in.
+  it("process.stdin.read(buf, offset) is rejected (no real Node API)", async () => {
     const result = await compile(
       `
-      ${PROCESS_DECL}
+      declare const process: { stdin: { read(buf: Uint8Array, offset?: number): number } };
       export function main(): void {
         const buf = new Uint8Array(4);
         process.stdin.read(buf, 0);
       }
       `,
+      { target: "wasi" },
     );
-    // We don't care if it compiles; we only assert WASI imports are not added.
-    if (result.success) {
-      expect(result.wat).not.toContain("wasi_snapshot_preview1");
-      expect(result.wat).not.toContain("fd_read");
-    }
+    expect(result.success).toBe(false);
+    expect(result.errors.map((e) => e.message).join("\n")).toContain("readSync");
   });
 
   it("buildWasiPolyfill exposes fd_read and setStdin", () => {

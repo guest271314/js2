@@ -10,8 +10,9 @@
 //
 // Scope:
 //   - fd_write fd=1 (console.log) and fd=2 (console.error / console.warn)
-//   - fd_read fd=0 (process.stdin.read) — polyfill-level; the binary,
-//     incremental Node-API stdin read (#1653).
+//   - fd_read fd=0 — polyfill-level; the binary, incremental synchronous stdin
+//     read is `node:fs` `readSync(0, …)` (#2633; the hallucinated
+//     `process.stdin.read` surface from #1653 was removed).
 //   - proc_exit (process.exit) — import-presence only; running
 //     process.exit(N) trips an i32/f64 mismatch in the current codegen,
 //     so e2e is covered once that's fixed.
@@ -218,26 +219,37 @@ describe("WASI: proc_exit (compile-time / ABI level)", () => {
 });
 
 describe("WASI: fd_read — stdin polyfill", () => {
-  // The binary, incremental Node-API stdin read (process.stdin.read, #1653).
-  // We validate the polyfill itself + the import registration here.
+  // Synchronous stdin is `node:fs` `readSync(0, …)` (#2633 — the hallucinated
+  // `process.stdin.read` surface was removed). We validate the polyfill itself
+  // (used by readSync under the node:fs shim) + the rejection of the old surface.
 
-  it("emits fd_read import only when process.stdin.read() is used", async () => {
-    const used = await compile(
+  it("rejects the hallucinated process.stdin.read; readSync(0, …) imports node:fs", async () => {
+    const rejected = await compile(
       `
-        declare const process: {
-          stdin: { read(buf: Uint8Array, offset?: number): number };
-          stdout: { write(c: Uint8Array): void };
-        };
+        declare const process: { stdin: { read(buf: Uint8Array, offset?: number): number } };
         export function main(): void {
           const buf = new Uint8Array(4);
           process.stdin.read(buf, 0);
-          process.stdout.write(buf);
         }
       `,
       { target: "wasi" },
     );
-    expect(used.success).toBe(true);
-    expect(used.wat).toContain("fd_read");
+    expect(rejected.success).toBe(false);
+    expect(rejected.errors.map((e) => e.message).join("\n")).toContain("readSync");
+
+    const used = await compile(
+      `
+        import { readSync, writeSync } from "node:fs";
+        export function main(): void {
+          const buf = new Uint8Array(4);
+          readSync(0, buf, 0, 4);
+          writeSync(1, buf);
+        }
+      `,
+      { target: "wasi", linkNodeShims: true },
+    );
+    expect(used.success, used.errors.map((e) => e.message).join("\n")).toBe(true);
+    expect(used.wat).toContain('(import "node:fs" "readSync"');
 
     const unused = await compile(`console.log("nope");`, { target: "wasi" });
     expect(unused.success).toBe(true);

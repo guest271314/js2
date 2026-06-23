@@ -13,8 +13,8 @@
  * `.subarray`/`.slice`/`.set`, JSON-stringified, …) and its *only* uses are:
  *   - element load/store `b[i]` / `b[i] = v`
  *   - `b.length`
- *   - `process.stdin.read(b)` / `process.stdin.read(b, off)`
  *   - `process.stdout.write(b)` / `process.stderr.write(b)`
+ *   - `readSync(fd, b, …)` / `writeSync(fd, b, …)` (node:fs fd-based primitives)
  *   - being passed as a call argument to a function whose corresponding
  *     parameter is *itself* linear-safe (interprocedural threading).
  *
@@ -107,9 +107,11 @@ function isNewUint8Array(expr: ts.Node): expr is ts.NewExpression {
  * return the argument index that carries the buffer, or `-1` if this is not one.
  *
  * Two shapes are recognised (both lowered by `node-process-api.ts`):
- *   - `process.std{in.read,out.write,err.write}(buf, …)` — buffer at arg 0. We
- *     only match the global `process` shape the WASI lowering supports; a local
- *     `process` shadow makes this not match (the conservative path).
+ *   - `process.std{out.write,err.write}(buf, …)` — buffer at arg 0. We only
+ *     match the global `process` shape the WASI lowering supports; a local
+ *     `process` shadow makes this not match (the conservative path). (#2633 —
+ *     `process.stdin.read` is no longer a recognised surface: it was a
+ *     hallucinated API; synchronous stdin is `node:fs` `readSync(0, …)`.)
  *   - #2631: `readSync(fd, buf, …)` / `writeSync(fd, buf, …)` (the node:fs
  *     fd-based primitives) — buffer at arg 1. Like `process.std*`, these are
  *     non-escaping byte-I/O sinks. **BUT** `readSync`/`writeSync` are plain
@@ -145,7 +147,6 @@ function ioBufferArgIndex(call: ts.CallExpression, nodeFsBindings: Set<string>):
   const streamName = stream.name.text;
   const root = stream.expression;
   if (!(ts.isIdentifier(root) && root.text === "process")) return -1;
-  if (streamName === "stdin" && method === "read") return 0;
   if ((streamName === "stdout" || streamName === "stderr") && method === "write") return 0;
   return -1;
 }
