@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
+import { emitToBoolean } from "./coercion-engine.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
@@ -13605,63 +13606,29 @@ export function unwrapGeneratorYieldType(type: ts.Type, ctx: CodegenContext): Va
  * Handles: f64 (truthy != 0), externref (JS truthiness via __is_truthy), null (push 0).
  */
 export function ensureI32Condition(fctx: FunctionContext, condType: ValType | null, ctx?: CodegenContext): void {
+  if (ctx) {
+    // #1917 — the canonical ToBoolean cascade is now the single coercion engine.
+    // (Behaviour-neutral: the engine's rows are transcribed from this body.)
+    emitToBoolean(ctx, condType, fctx.body);
+    return;
+  }
+  // No ctx available (a few legacy callers) — keep the ctx-free subset inline:
+  // the engine's helper-call arms (__is_truthy / __any_unbox_bool / __str_flatten)
+  // need ctx, so without it fall back to the same non-null / scalar handling the
+  // old body used in that case.
   if (!condType) {
-    // Expression compilation failed — push false to keep Wasm valid
     fctx.body.push({ op: "i32.const", value: 0 });
     return;
   }
   if (condType.kind === "f64") {
-    // Use f64.abs + f64.gt(0) so that NaN, +0, and -0 are all falsy
-    // (f64.ne(0) treats NaN as truthy which is wrong for JS semantics)
     fctx.body.push({ op: "f64.abs" });
     fctx.body.push({ op: "f64.const", value: 0 });
     fctx.body.push({ op: "f64.gt" });
-  } else if (condType.kind === "externref") {
-    // Use __is_truthy for proper JS truthiness (0, NaN, null, undefined, "" → falsy)
-    if (ctx) {
-      addUnionImports(ctx);
-      const funcIdx = ctx.funcMap.get("__is_truthy");
-      if (funcIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx });
-        return;
-      }
-    }
-    // Fallback: non-null → true
-    fctx.body.push({ op: "ref.is_null" });
-    fctx.body.push({ op: "i32.eqz" });
-  } else if (condType.kind === "ref" || condType.kind === "ref_null") {
-    // Boxed any value — use __any_unbox_bool for proper JS truthiness
-    if (ctx && isAnyValue(condType, ctx)) {
-      ensureAnyHelpers(ctx);
-      const funcIdx = ctx.funcMap.get("__any_unbox_bool");
-      if (funcIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx });
-        return;
-      }
-    }
-    // Native string or struct ref — non-empty string is truthy
-    // For strings: check length > 0 via string.measure_utf8 or ref.is_null fallback
-    if (ctx && condType.typeIdx === ctx.anyStrTypeIdx) {
-      // Native string — check length > 0
-      const lengthIdx = ctx.nativeStrHelpers.get("__str_flatten");
-      if (lengthIdx !== undefined) {
-        // Flatten then check len field
-        fctx.body.push({ op: "call", funcIdx: lengthIdx });
-        fctx.body.push({
-          op: "struct.get",
-          typeIdx: ctx.nativeStrTypeIdx,
-          fieldIdx: 0,
-        }); // len field
-        fctx.body.push({ op: "i32.const", value: 0 });
-        fctx.body.push({ op: "i32.gt_s" });
-        return;
-      }
-    }
-    // Fallback: non-null → true
+  } else if (condType.kind === "externref" || condType.kind === "ref" || condType.kind === "ref_null") {
+    // Fallback: non-null → true (no ctx → no helper imports available).
     fctx.body.push({ op: "ref.is_null" });
     fctx.body.push({ op: "i32.eqz" });
   } else if (condType.kind === "i64") {
-    // i64 truthiness: nonzero → true
     fctx.body.push({ op: "i64.eqz" });
     fctx.body.push({ op: "i32.eqz" });
   }

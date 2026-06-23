@@ -32,13 +32,20 @@
  * top and never re-hand-rolls a box/unbox row.
  */
 import { isBooleanType, isStringType } from "../checker/type-mapper.js";
-import type { ValType } from "../ir/types.js";
+import type { Instr, ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { addUnionImports, nativeStringType } from "./index.js";
 import { ensureAnyToStringHelper } from "./native-strings.js";
-import { compileExpression, compileStringLiteral, ensureLateImport, flushLateImportShifts } from "./shared.js";
+import {
+  compileExpression,
+  compileStringLiteral,
+  ensureAnyHelpers,
+  ensureLateImport,
+  flushLateImportShifts,
+  isAnyValue,
+} from "./shared.js";
 import { coerceType, tryStructToString } from "./type-coercion.js";
 
 /**
@@ -321,6 +328,86 @@ export function emitToNumber(ctx: CodegenContext, fctx: FunctionContext, valType
 
   // Already f64 — no-op.
   return valType;
+}
+
+/**
+ * Append `ToBoolean(value)` (§7.1.2 → i32, 1 = truthy) for a value of ValType
+ * `valType` already on the stack into `sink`. The consolidation of the two
+ * hand-rolled truthiness sites that #2085 already aligned:
+ *   - `ensureI32Condition` (index.ts, B1 — the canonical, pushes to `fctx.body`)
+ *   - `buildToBooleanInstrs` (array-methods.ts, B2 — returns an `Instr[]`)
+ *
+ * The `sink` parameter unifies those two emission styles: B1 passes `fctx.body`,
+ * B2 passes a fresh array it then returns. Both produce the SAME sequence — this
+ * is behaviour-neutral (the #2085 fix already made B2 use `|x|>0` like B1, so
+ * there is no longer a NaN-truthy divergence to surface).
+ *
+ *   null valType → i32.const 0  (compile failed upstream → keep Wasm valid: falsy)
+ *   f64          → |x| > 0       (NaN, +0, -0 all falsy)
+ *   externref    → __is_truthy   (0/NaN/null/undefined/"" → falsy); ref.is_null fallback
+ *   any-boxed ref→ __any_unbox_bool (proper JS truthiness on the boxed value)
+ *   native str ref→ flatten → len > 0 (empty string falsy)
+ *   other ref    → non-null (ref.is_null; i32.eqz)
+ *   i64          → nonzero
+ *   i32          → as-is (already 0/1-valued)
+ */
+export function emitToBoolean(ctx: CodegenContext, valType: ValType | null, sink: Instr[]): Instr[] {
+  if (!valType) {
+    // Upstream compile failed — push false to keep the module valid.
+    sink.push({ op: "i32.const", value: 0 });
+    return sink;
+  }
+  const kind = valType.kind;
+  if (kind === "f64") {
+    // |x| > 0 so NaN, +0, -0 are all falsy (f64.ne 0 would make NaN truthy).
+    sink.push({ op: "f64.abs" }, { op: "f64.const", value: 0 }, { op: "f64.gt" });
+    return sink;
+  }
+  if (kind === "externref") {
+    addUnionImports(ctx);
+    const isTruthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
+    if (isTruthyIdx !== undefined) {
+      sink.push({ op: "call", funcIdx: isTruthyIdx });
+      return sink;
+    }
+    // Fallback: non-null → true.
+    sink.push({ op: "ref.is_null" }, { op: "i32.eqz" });
+    return sink;
+  }
+  if (kind === "ref" || kind === "ref_null") {
+    // Boxed `any` value — proper JS truthiness (false/0/NaN/""/null → falsy).
+    if (isAnyValue(valType, ctx)) {
+      ensureAnyHelpers(ctx);
+      const unboxBoolIdx = ctx.funcMap.get("__any_unbox_bool");
+      if (unboxBoolIdx !== undefined) {
+        sink.push({ op: "call", funcIdx: unboxBoolIdx });
+        return sink;
+      }
+    }
+    // Native string ref — empty string is falsy (check len > 0 after flatten).
+    if (valType.typeIdx === ctx.anyStrTypeIdx && ctx.anyStrTypeIdx >= 0) {
+      const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+      if (flattenIdx !== undefined && ctx.nativeStrTypeIdx >= 0) {
+        sink.push(
+          { op: "call", funcIdx: flattenIdx },
+          { op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 0 },
+          { op: "i32.const", value: 0 },
+          { op: "i32.gt_s" },
+        );
+        return sink;
+      }
+    }
+    // Opaque struct ref — non-null is truthy.
+    sink.push({ op: "ref.is_null" }, { op: "i32.eqz" });
+    return sink;
+  }
+  if (kind === "i64") {
+    // nonzero → true.
+    sink.push({ op: "i64.eqz" }, { op: "i32.eqz" });
+    return sink;
+  }
+  // i32 is already a valid 0/1 condition — no-op.
+  return sink;
 }
 
 /**
