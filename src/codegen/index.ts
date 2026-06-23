@@ -1066,7 +1066,17 @@ export function generateModule(
       // (never escape the GC heap) so they can be backed by linear memory with
       // zero-copy fd_read/fd_write. Side-effect free; codegen consumers are
       // additive (empty result ⇒ emitted module identical to today).
-      ctx.linearUint8 = analyzeLinearUint8(ast.checker, ast.sourceFile);
+      // #2631 — pass the node:fs readSync/writeSync binding names from the
+      // ORIGINAL source (import preprocessing has already stripped the `node:fs`
+      // import from `ast.sourceFile`, so the analysis can't rediscover them).
+      // `ctx.wasiNodeFsFuncs` records the local names of node:fs imports; the
+      // byte-IO sink recognition only fires for these, so it's byte-neutral for
+      // every program that doesn't import them.
+      const nodeFsSyncNames = new Set<string>();
+      for (const name of ctx.wasiNodeFsFuncs) {
+        if (name === "readSync" || name === "writeSync") nodeFsSyncNames.add(name);
+      }
+      ctx.linearUint8 = analyzeLinearUint8(ast.checker, ast.sourceFile, nodeFsSyncNames);
       // #1886 Slice B: reserve the `__lin_u8_alloc` bump-allocator's
       // `(i32)->(i32)` func TYPE eagerly, here — BEFORE any WasmGC struct/array
       // type or native-string helper is registered. This keeps the shared
