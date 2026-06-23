@@ -116,7 +116,7 @@ describe("#1320 Slice 1 standalone iterator bridge", () => {
   // imports. The producer is fully native; the pair *reads back* through the
   // consumers that route via __iterator_rest (spread) and the for-of drive.
   // (Indexed `pair[0]` read and `[k,v]` array-dstr over a *stored* entries()
-  // depend on the open-any element-retrieval layer (#1888 S5/#6407) and are
+  // depend on the open-any element-retrieval layer (#1888 S5/#2177) and are
   // covered there; the direct `for ([k,v] of arr.entries())` form is native via
   // the #681 recognizer and is exercised in issue-681-standalone-iterators.)
 

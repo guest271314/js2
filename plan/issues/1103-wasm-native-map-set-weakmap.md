@@ -272,7 +272,7 @@ via `call_ref`. Closure captures fix from #859 applies here unchanged.
   and saves one anyref slot per entry × N entries.
 - Methods: `add, has, delete, clear, size, forEach, values, keys, entries,
   [Symbol.iterator], union, intersection, difference, symmetricDifference,
-  isSubsetOf, isSupersetOf, isDisjointFrom` (per index.ts:6381-6408).
+  isSubsetOf, isSupersetOf, isDisjointFrom` (per index.ts:6381-2194).
 - Set-theoretic operations (intersection etc.) iterate one set and probe the
   other — straight-line code in `__set_intersection(a, b)`.
 

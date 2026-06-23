@@ -267,7 +267,7 @@ yield suspends, so the partial results survive the suspension).
 > **Routing recommendation:** this issue is `feasibility: hard` /
 > `reasoning_effort: high` and architecturally entangled with #1042/#1665.
 > Slice 0 belongs to a **senior-dev** as a design task, not a routine dev pickup.
-> The other four sprint-59 specs (#1818/#1644/#1320/#1348/#6407) are
+> The other four sprint-59 specs (#1818/#1644/#1320/#1348/#2177) are
 > dev-claimable; this one should be senior-dev-gated on Slice 0 first.
 
 ## Implementation Update — 2026-06-06

@@ -9,7 +9,7 @@ metadata:
 
 In js2wasm, the CI `quality` job's **Format check** is `prettier --check 'src/**/*.ts' 'tests/**/*.ts' 'scripts/**/*.ts'` (repo `.prettierrc`: printWidth 120, double quotes, trailing-comma all, 2-space). Biome is used **only for linting** (`biome lint ... --diagnostic-level=error`), NOT formatting.
 
-**Pitfall:** running `biome check --write` (or `biome format --write`) on a `.ts` file reformats the WHOLE file to biome's style (e.g. collapses multi-line imports to single lines), which diverges from prettier on hundreds of lines and then **fails `prettier --check`** in CI. This produced an 800–1100-line whole-file churn + a `quality` failure on a 3-line fix (#6408, 2026-06-19).
+**Pitfall:** running `biome check --write` (or `biome format --write`) on a `.ts` file reformats the WHOLE file to biome's style (e.g. collapses multi-line imports to single lines), which diverges from prettier on hundreds of lines and then **fails `prettier --check`** in CI. This produced an 800–1100-line whole-file churn + a `quality` failure on a 3-line fix (#2194, 2026-06-19).
 
 **How to format correctly:**
 - Run `pnpm exec prettier --write <files>` LAST (after any edits). Use `pnpm exec` (pinned 3.8.1), not bare `npx`.
