@@ -220,5 +220,5 @@ principle but inert at module-START construct time, so it cannot land usefully
 alone. Sequence AFTER #56; do not staff as a standalone slice. Branch
 `issue-2623b-construct-identity`-adjacent work (Slice C) was kept pristine — no
 codegen shipped. This closes the #2623 cluster verdict: A + B + C all DEFER to
-architect re-spec / #56-sequencing (see `plan/issues/2623-...md` Slice A & B
+architect re-spec / #56-sequencing (see the #2623 Slice A & B
 re-groundings).
