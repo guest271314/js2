@@ -138,3 +138,80 @@ honors the same pointer-ABI per member.** The synchronous fd core (`readSync`/
   `fs.promises`) — gated on the event loop (#2632).
 - Path-based `node:fs` (`readFileSync(path)`, `open`) — needs a filesystem
   (`--allow-fs`/preopens); a separate capability tier from the fd-based core.
+
+---
+
+## Phase 0 — ABI (PINNED 2026-06-23)
+
+> Companion doc: [`docs/architecture/node-fs-abi.md`](../../docs/architecture/node-fs-abi.md).
+> This section is the normative pin; the doc expands the rationale.
+
+### Canonical per-member pointer-ABI (anchor members)
+
+The wasm import module is `"node:fs"` (real Node member names). Each member is a
+flat `(i32, …) -> i32` function over the module's **exported linear memory** —
+nothing GC-typed crosses the link:
+
+| Member      | Wasm import signature                     | Contract |
+|-------------|-------------------------------------------|----------|
+| `readSync`  | `(fd i32, ptr i32, len i32) -> i32`       | Read up to `len` bytes from descriptor `fd` into `mem[ptr, ptr+len)`. Returns the count actually read (`0` = EOF). MUST NOT write past `ptr+len`. |
+| `writeSync` | `(fd i32, ptr i32, len i32) -> i32`       | Write `mem[ptr, ptr+len)` to descriptor `fd`. Returns the count actually written (a short write is legal — callers loop). |
+
+`fd` is **load-bearing**: `0`=stdin, `1`=stdout, `2`=stderr. `writeSync(2, …)`
+routes telemetry to stderr, off the stdout protocol stream — a provider MUST
+honor the integer fd, never collapse all writes to stdout.
+
+This is the **single** ABI every provider implements. It is fd-based and
+filesystem-free (no `path_open`, no preopens). Path-based `node:fs`
+(`readFileSync(path)`) is a *different* capability tier (needs `--allow-fs`) and
+is rejected under `--target wasi`.
+
+**Caller ↔ ABI bridge.** Source code calls the *Node-shaped* signatures
+(`readSync(0, buf, { offset, length })`, `writeSync(1, buf, offset)`); the
+compiler bridges the GC/linear `Uint8Array` to the flat `(fd, ptr, len)` over the
+shared memory. So the **same `.ts`** runs unmodified under real `node` (where
+`node:fs` is the real module) *and* compiles to a wasm module whose imports honor
+the pointer-ABI above. The pointer-ABI is the wasm-link contract; the Node-shaped
+signature is the source-level contract. `edge.js` is exactly the adapter that
+reconciles the two on the native-Node path.
+
+### Memory-ownership / linking model
+
+**Today — shim-owned exported memory** (mirrors `examples/native-messaging/node-fs.wat`):
+
+1. The **provider owns and exports** the linear memory (`(memory (export "memory") 3)`).
+2. The **user module imports** memory index 0 from `"node:fs"` along with
+   `readSync`/`writeSync`. It declares NO memory of its own.
+3. No instantiation cycle: instantiate the provider first (it imports only its
+   own backing — `wasi_snapshot_preview1` for the `.wat` shim, or nothing for
+   `edge.js`), then instantiate the user module with `{ memory, readSync,
+   writeSync }` taken from the provider's exports.
+4. The provider reads/writes the user's bytes over the **same** memory. The
+   `.wat` shim builds its WASI iovec in reserved scratch at `mem[0, 12)`; `edge.js`
+   reads/writes the byte range directly from JS — no scratch needed.
+
+   (If a module uses **both** `node:process`/`console` IO and `node:fs`, the
+   `node-process` shim owns the memory and `node-fs` links the same bytes —
+   byte-identical layout, min 3 pages.)
+
+**Durable form — #2527 core-wasm linking.** The shim-owned-memory convention is
+a stop-gap that works on any plain `WebAssembly.instantiate`. The durable form is
+WebAssembly core-module linking (#2527): the user module and provider are linked
+as components/core modules with an explicitly shared memory, so neither side
+hard-codes "who owns memory". The pointer-ABI per member is unchanged by that
+migration — only the memory-binding mechanism changes.
+
+### Contract table — one binary, three providers
+
+The user's `nm_js2wasm.wasm` is **agnostic** to the provider. Compatibility holds
+**by construction** iff every provider honors the pointer-ABI above:
+
+| Host class | Provider | Satisfies `node:fs::readSync(fd, ptr, len) -> i32` by |
+|---|---|---|
+| **Pure WASI** (wasmtime, no JS) | `node-fs.wat`/`.wasm` shim (#2631) | WASI `fd_read`/`fd_write` over the shim-owned linear memory (iovec in `mem[0,12)`). |
+| **Native Node** (JS, no WASI) | **`edge.js` adapter** (Phase 1) | reads/writes `mem[ptr, ptr+len)` from JS, calls real `fs.readSync(fd, Buffer, 0, len, null)` / `fs.writeSync(fd, Buffer)`, copies bytes back, returns the count. |
+| **JS + WASI** (browser / Node-WASI) | `edge.js` over a WASI polyfill | delegates to a WASI `fd_read`/`fd_write` polyfill or platform fd APIs over the same memory. |
+
+The Phase-1 proof: the **same compiled binary** runs under (1) wasmtime via the
+`.wat` shim and (2) native Node via `edge.js`, with byte-identical output for the
+same stdin frames.
