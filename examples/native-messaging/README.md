@@ -29,19 +29,29 @@ little-endian length prefix plus the JSON body — to stdout (fd=1) with no
 trailing newline. The two stdout gaps that previously blocked this are closed
 (#1618, #1651).
 
-| Capability                                            | Status | Detail                                                                                                                                                                                                                      |
-| ----------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Read framed message from stdin                        | works  | `process.stdin.read(buf, offset?)` does a binary, incremental fd=0 read into the caller's buffer, returning the byte count (#1653); read-until loops assemble each frame without blocking on speculative continuation reads |
-| Decode the 4-byte LE length prefix                    | works  | byte math on the first 4 bytes of the read header buffer                                                                                                                                                                    |
-| Route debug to stderr (fd=2)                          | works  | `console.error` / `console.warn` (#1493) — keeps the stdout protocol stream clean                                                                                                                                           |
-| Print a **string literal** to stdout                  | works  | `console.log("…")` emits UTF-8 + `\n` (#1480)                                                                                                                                                                               |
-| Print a **runtime/computed string** to stdout         | works  | `console.log(x)` / `process.stdout.write(x)` of a variable, concatenation, or template literal emit the actual content (#1618)                                                                                              |
-| Write a **string** to stdout with no newline          | works  | `process.stdout.write(str)` → `fd_write(1, …)`, no `\n` (#1651)                                                                                                                                                             |
-| Emit the **binary 4-byte LE length prefix** on stdout | works  | `process.stdout.write(new Uint8Array([…]))` writes raw bytes (incl. NUL) verbatim to fd=1 (#1651)                                                                                                                           |
+As of **#2631** the host uses the **real Node fd-based synchronous primitives**
+`fs.readSync(fd, …)` / `fs.writeSync(fd, …)` from `node:fs` instead of the
+js2wasm-specific `process.stdin.read(buf, offset)` shape — which matched **no**
+real Node API (`process.stdin` is an async Duplex stream with no synchronous
+buffer-filling `read`; loopdive/js2#389). The same source now (a) compiles via
+js2wasm to standalone WASI **and** (b) runs **unmodified** under real `node`.
+Compile with `--target wasi --link-node-shims`; the `node:fs` import is bound at
+link time by [`node-fs.wat`](./node-fs.wat) (which maps `readSync`/`writeSync` to
+WASI `fd_read`/`fd_write`). See [`NODE-FS-SHIM.md`](./NODE-FS-SHIM.md).
 
-The response is framed with `process.stdout.write` — a `Uint8Array` for each
-binary length prefix, then the body bytes — mirroring the Node.js host API used
-by the reference hosts (`nm_assemblyscript.ts`, `nm_javy.js`, `nm_qjs_wasi.js`).
+| Capability                                            | Status | Detail                                                                                                                                                                                                            |
+| ----------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Read framed message from stdin                        | works  | `readSync(0, buf, { offset, length })` does a binary, incremental fd=0 read into the caller's buffer, returning the byte count (#2631); `length` is the remaining-to-target count so a read never over-reads into the next message |
+| Decode the 4-byte LE length prefix                    | works  | byte math on the first 4 bytes of the read header buffer                                                                                                                                                                    |
+| Route debug to stderr (fd=2)                          | works  | `writeSync(2, bytes, …)` — keeps the stdout protocol stream clean (#2631)                                                                                                                                                   |
+| Write raw bytes to stdout with no newline             | works  | `writeSync(1, bytes, off)` → `fd_write(1, …)`, partial-write loop drains the whole buffer, no `\n` (#2631)                                                                                                                  |
+| Emit the **binary 4-byte LE length prefix** on stdout | works  | the length prefix + body live in ONE buffer written with a single `writeSync` (atomic framing, #2526)                                                                                                                       |
+
+The response is framed with `writeSync(1, …)` — the 4-byte LE length prefix and
+the body bytes in one `Uint8Array`, written atomically — mirroring the Node.js
+host API used by the reference hosts (`nm_assemblyscript.ts`, `nm_javy.js`,
+`nm_qjs_wasi.js`). `fs.readSync`/`fs.writeSync` are also what Javy uses
+(`Javy.IO.readSync`).
 Request bodies larger than 1 MiB can be streamed into the host as successive
 <=1 MiB Native Messaging frames, and each frame is echoed independently. It is
 a drop-in host for byte-exact request/response framing; the only
@@ -58,12 +68,12 @@ guest271314 uses across runtimes:
 
 - **`readMessageLength()` / `readFrameBody()`** — read the 4-byte
   little-endian length header, then exactly that many body bytes via
-  `process.stdin.read` read-until loops (a `readExact` helper handles short
-  reads). Bodies up to 1 MiB stay raw **`Uint8Array`** values and round-trip
-  byte-exactly (#389, #1753).
-- **`sendMessage(message)`** — frames a `Uint8Array` body: writes the 4-byte LE
-  length prefix, then the body bytes, to stdout with no trailing newline. Bodies
-  up to 1 MiB are echoed byte-for-byte.
+  `readSync(0, buf, { offset, length })` read-until loops (a `readExact` helper
+  handles short reads). Bodies up to 1 MiB stay raw **`Uint8Array`** values and
+  round-trip byte-exactly (#389, #1753, #2631).
+- **`emitRun()` / `writeAll()`** — frame a `Uint8Array` body: the 4-byte LE
+  length prefix + body live in ONE buffer written with a single `writeSync(1, …)`
+  (atomic, no trailing newline). Bodies up to 1 MiB are echoed byte-for-byte.
 - **`sendLargeStringChunks(declaredLen)`** — handles the large single-frame
   JSON string stress shape by reading the string body incrementally and writing
   each chunk as its own valid JSON string Native Messaging response frame.
@@ -88,15 +98,20 @@ From the repo root (works immediately after `pnpm install`, no build step):
 
 ```bash
 mkdir -p examples/native-messaging/out
-npx tsx src/cli.ts examples/native-messaging/nm_js2wasm.ts --target wasi -o examples/native-messaging/out
+npx tsx src/cli.ts examples/native-messaging/nm_js2wasm.ts --target wasi --link-node-shims -o examples/native-messaging/out
 ```
 
 (Once the package is built — `pnpm run build` — or installed from npm, you can
-use the `js2wasm` bin directly: `npx js2wasm nm_js2wasm.ts --target wasi -o out`.)
+use the `js2wasm` bin directly: `npx js2wasm nm_js2wasm.ts --target wasi --link-node-shims -o out`.)
 
-This produces `out/nm_js2wasm.wasm`. The module imports only from
-`wasi_snapshot_preview1` (`fd_read`, `fd_write`) — no `env.*` imports — so it
-runs on any standards-compliant WASI preview1 runtime.
+This produces `out/nm_js2wasm.wasm`. The module imports its IO interface from
+`node:fs` (`readSync`, `writeSync`) plus the shared linear `memory` — bound at
+link time by [`node-fs.wat`](./node-fs.wat), which maps them to
+`wasi_snapshot_preview1` `fd_read`/`fd_write`. So the module declares **what**
+host API it needs (`node:fs`), not how it's satisfied: link it against
+`node-fs.wasm` (built from `node-fs.wat`), a native WASI host, or the real
+`node:fs` module under a JS host. See [`NODE-FS-SHIM.md`](./NODE-FS-SHIM.md) for
+the link step.
 
 > The `-o` flag is an **output directory**, not a filename. js2wasm names the
 > output after the input basename (`nm_js2wasm.wasm`).

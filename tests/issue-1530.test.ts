@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { compile } from "../src/index.js";
+import { buildNodeFsShim } from "../scripts/build-node-fs-shim.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm.ts");
@@ -24,25 +25,32 @@ const hostPath = join(here, "..", "examples", "native-messaging", "nm_js2wasm.ts
 describe("#1530 Native Messaging host example", () => {
   it("compiles examples/native-messaging/nm_js2wasm.ts under --target wasi", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi", linkNodeShims: true });
     expect(result.success).toBe(true);
     expect(result.binary.length).toBeGreaterThan(0);
   });
 
-  it("imports stdin (fd_read) and stdout (fd_write) WASI syscalls, no env imports", async () => {
+  it("imports the node:fs interface (readSync/writeSync + memory), no direct WASI fd_* or env imports", async () => {
+    // #2631 — the example now uses node:fs fd-based readSync/writeSync via the
+    // linkable node:fs shim, so it imports module "node:fs" (the declared
+    // interface) and NOT wasi_snapshot_preview1 fd_read/fd_write directly. The
+    // shim (node-fs.wat) maps node:fs → WASI; the user module stays host-agnostic.
     const src = readFileSync(hostPath, "utf-8");
-    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi", linkNodeShims: true });
     expect(result.success).toBe(true);
-    expect(result.wat).toContain("wasi_snapshot_preview1");
-    expect(result.wat).toContain("fd_read"); // process.stdin.read()
-    expect(result.wat).toContain("fd_write"); // console.log / console.error
-    // Standalone: no JS host env.* imports leak in.
+    expect(result.wat).toContain('(import "node:fs" "readSync"'); // fs.readSync(0, …)
+    expect(result.wat).toContain('(import "node:fs" "writeSync"'); // fs.writeSync(1|2, …)
+    expect(result.wat).toContain('(import "node:fs" "memory"'); // shared linear memory
+    // The shim implementation name must NOT leak into the declared dependency.
+    expect(result.wat).not.toContain("js2wasm:node-fs");
+    // No direct WASI syscall import for the IO path, and no JS host env.* imports.
+    expect(result.wat).not.toContain("wasi_snapshot_preview1");
     expect(result.wat).not.toContain('(import "env"');
   });
 
   it("produces a binary that WebAssembly accepts", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi", linkNodeShims: true });
     expect(result.success).toBe(true);
     // Throws on an invalid module; passing means the structure/types are sound.
     expect(() => new WebAssembly.Module(result.binary)).not.toThrow();
@@ -59,7 +67,11 @@ describe("#1530 Native Messaging host example", () => {
 describe("#1618/#1651 framed stdin→stdout round-trip", () => {
   // Minimal raw-byte WASI shim: fd_read drains a preloaded stdin buffer, fd_write
   // appends the exact bytes to an ordered capture list keyed by fd.
-  function runWasiRaw(binary: Uint8Array, stdin: Uint8Array): Uint8Array {
+  // #2631 — `linkShim` links the node-fs shim for example binaries (which import
+  // node:fs readSync/writeSync over a shim-owned memory). Self-contained sources
+  // that still use the inline process.std* path own their own memory (linkShim
+  // false).
+  function runWasiRaw(binary: Uint8Array, stdin: Uint8Array, linkShim = false): Uint8Array {
     // Boxed so the WASI closures can read it after the instance is created.
     const ref: { mem: WebAssembly.Memory | undefined } = { mem: undefined };
     const memView = () => new DataView(ref.mem!.buffer);
@@ -103,11 +115,27 @@ describe("#1618/#1651 framed stdin→stdout round-trip", () => {
         return 0;
       },
     };
-    const inst = new WebAssembly.Instance(new WebAssembly.Module(binary), {
-      wasi_snapshot_preview1: wasi,
-      env: {},
-    });
-    ref.mem = inst.exports.memory as WebAssembly.Memory;
+    let inst: WebAssembly.Instance;
+    if (linkShim) {
+      const shim = new WebAssembly.Instance(new WebAssembly.Module(buildNodeFsShim()), {
+        wasi_snapshot_preview1: wasi,
+      });
+      ref.mem = shim.exports.memory as WebAssembly.Memory;
+      inst = new WebAssembly.Instance(new WebAssembly.Module(binary), {
+        "node:fs": {
+          memory: shim.exports.memory,
+          readSync: shim.exports.readSync,
+          writeSync: shim.exports.writeSync,
+        },
+        env: {},
+      });
+    } else {
+      inst = new WebAssembly.Instance(new WebAssembly.Module(binary), {
+        wasi_snapshot_preview1: wasi,
+        env: {},
+      });
+      ref.mem = inst.exports.memory as WebAssembly.Memory;
+    }
     (inst.exports.main as () => void)();
     // Reassemble the fd=1 (stdout) byte stream in write order.
     const fd1 = writes.filter(([fd]) => fd === 1).flatMap(([, b]) => Array.from(b));
@@ -173,12 +201,12 @@ export function main(): void {
 
   it("compiles the shipped example and round-trips it byte-exactly", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi", linkNodeShims: true });
     expect(result.success).toBe(true);
 
     // The shipped host echoes the received body verbatim (byte-for-byte, no
     // wrapper), so the response body equals the input body exactly.
-    const out = runWasiRaw(result.binary, frame('{"cmd":"ping"}'));
+    const out = runWasiRaw(result.binary, frame('{"cmd":"ping"}'), true);
     const expectedBody = '{"cmd":"ping"}';
     expect(new DataView(out.buffer, out.byteOffset).getUint32(0, true)).toBe(expectedBody.length);
     expect(new TextDecoder().decode(out.subarray(4))).toBe(expectedBody);
@@ -199,7 +227,7 @@ export function main(): void {
   // assert the response is the exact same 1 MiB body with the right prefix.
   it("echoes a 1 MiB framed body byte-exactly (#389 large-message regression)", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi", linkNodeShims: true });
     expect(result.success).toBe(true);
 
     const SIZE = 1024 * 1024; // 1 MiB
@@ -209,7 +237,7 @@ export function main(): void {
     new DataView(input.buffer).setUint32(0, SIZE, true);
     input.set(body, 4);
 
-    const out = runWasiRaw(result.binary, input);
+    const out = runWasiRaw(result.binary, input, true);
     // 4-byte LE prefix declares the full 1 MiB length…
     expect(new DataView(out.buffer, out.byteOffset).getUint32(0, true)).toBe(SIZE);
     // …and the body is the exact same bytes, with no truncation/null-fill.
@@ -238,7 +266,7 @@ export function main(): void {
   // exceeds the 1 MiB cap, and the flattened elements equal the inputs in order.
   it("re-chunks large JSON arrays into valid <=1 MiB JSON frames across one session (#389)", async () => {
     const src = readFileSync(hostPath, "utf-8");
-    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi" });
+    const result = await compile(src, { fileName: "nm_js2wasm.ts", target: "wasi", linkNodeShims: true });
     expect(result.success).toBe(true);
 
     const CHUNK = 1024 * 1024;
@@ -263,7 +291,7 @@ export function main(): void {
       off += p.length;
     }
 
-    const out = runWasiRaw(result.binary, stdin);
+    const out = runWasiRaw(result.binary, stdin, true);
 
     // Parse every response frame as JSON; flatten elements in arrival order.
     const view = new DataView(out.buffer, out.byteOffset);
