@@ -118,6 +118,7 @@ import {
   emitBoolToString,
 } from "../string-ops.js";
 import { tryCompileNodeFsCall, tryCompileNodeProcessCall } from "../node-process-api.js";
+import { resolvePromiseSubclassName, tryEmitPromiseSubclassReceiver } from "./promise-subclass.js";
 import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import {
   defaultValueInstrs,
@@ -1801,48 +1802,13 @@ function emitBoundFunctionCall(
  * if the caller should fall back to plain `compileExpression`.
  */
 function resolvePromiseSubclassThisArg(ctx: CodegenContext, fctx: FunctionContext, argExpr: ts.Expression): boolean {
-  // (E7) Standalone (WASI) mode has no JS host, so `__promise_subclass_ctor`
-  // is unsatisfiable. Never emit the import there.
-  if (isStandalonePromiseActive(ctx)) return false;
-  // Only fires for a bare identifier (or class-expr alias) naming a class.
-  if (!ts.isIdentifier(argExpr)) return false;
-  const resolved = ctx.classExprNameMap.get(argExpr.text) ?? argExpr.text;
-  // Walk the parent chain so a chained subclass (E3 — `class B extends A`,
-  // `class A extends Promise`) still resolves: `classBuiltinParentMap` only
-  // records the *immediate* builtin parent, so B maps to "A", not "Promise".
-  let cursor: string | undefined = resolved;
-  let extendsPromise = false;
-  const seen = new Set<string>();
-  while (cursor !== undefined && !seen.has(cursor)) {
-    seen.add(cursor);
-    if (ctx.classBuiltinParentMap.get(cursor) === "Promise") {
-      extendsPromise = true;
-      break;
-    }
-    cursor = ctx.classParentMap.get(cursor);
-  }
-  if (!extendsPromise) return false;
-  const importName = "__promise_subclass_ctor";
-  let funcIdx =
-    ctx.funcMap.get(importName) ?? ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "externref" }]);
-  flushLateImportShifts(ctx, fctx);
-  funcIdx = ctx.funcMap.get(importName) ?? funcIdx;
-  if (funcIdx === undefined) return false;
-  // Push the class name (the synthesized subclass is cached per name). Use the
-  // same host-string mechanism as extern method dispatch so it works in both
-  // string backends.
-  addStringConstantGlobal(ctx, resolved);
-  const nameIdx = ctx.stringGlobalMap.get(resolved);
-  // (#2515 S0) `>= 0`, not `!== undefined`: standalone/nativeStrings stores the
-  // `-1` sentinel, which would bake `global.get -1` and fail binary emit. Fall
-  // to the inline-materializing `compileStringLiteral` for the sentinel.
-  if (nameIdx !== undefined && nameIdx >= 0) {
-    fctx.body.push({ op: "global.get", index: nameIdx } as Instr);
-  } else {
-    compileStringLiteral(ctx, fctx, resolved);
-  }
-  fctx.body.push({ op: "call", funcIdx });
-  return true;
+  // (#2623 Slice B) Unified with the value-read path: both the combinator
+  // `thisArg` receiver here and a bare-identifier read-as-value in
+  // `identifiers.ts` now go through the same cached `__promise_subclass_ctor`
+  // singleton, so the constructor the user observes IS the one used to build
+  // the subclassed promise (one object, not two). Detection (parent-chain
+  // walk, standalone gate) + emission live in `promise-subclass.ts`.
+  return tryEmitPromiseSubclassReceiver(ctx, fctx, argExpr);
 }
 
 function usesArguments(node: ts.Node): boolean {
@@ -7396,17 +7362,7 @@ function compileCallExpression(
       // resolution below switches it to directCall=0).
       const isPromiseSubclassReceiver =
         ts.isIdentifier(propAccess.expression) &&
-        (() => {
-          const name = ctx.classExprNameMap.get(propAccess.expression.text) ?? propAccess.expression.text;
-          let cursor: string | undefined = name;
-          const seen = new Set<string>();
-          while (cursor !== undefined && !seen.has(cursor)) {
-            seen.add(cursor);
-            if (ctx.classBuiltinParentMap.get(cursor) === "Promise") return true;
-            cursor = ctx.classParentMap.get(cursor);
-          }
-          return false;
-        })();
+        resolvePromiseSubclassName(ctx, propAccess.expression.text) !== undefined;
       const isAggregator =
         ts.isIdentifier(propAccess.expression) &&
         (propAccess.expression.text === "Promise" || isPromiseSubclassReceiver) &&

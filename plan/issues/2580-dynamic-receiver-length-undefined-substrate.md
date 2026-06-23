@@ -1405,3 +1405,136 @@ This is value-rep / object-model substrate → the merge_group standalone floor
 (#2097, runs only in merge_group) is the authoritative gate. Stop-the-line on any
 eject (broad-impact value-rep) and escalate; fix-forward once, never re-enqueue,
 never force-push public main.
+
+---
+
+# M3 — STAGE B SCOPING + CONTINUATION HANDOFF (2026-06-23, sd-value-rep-m3, max-reasoning)
+
+> Verify-first re-ground of the fnctor `new F()` lap against current main (with
+> Stage A landed). Per-process probes (NOT in-process loops — the runner trap).
+> **Conclusion: Stage B has NO small, safe, bankable sub-slice that lands in one
+> verified pass.** Every entry point needs populate + link machinery together,
+> and it is broad-impact value-rep where a floor eject is the documented risk
+> (#1888 −162). Recording the representation decision + the precisely-scoped
+> sub-slice breakdown as a continuation handoff rather than rushing a half-built
+> broad change into the queue. NO Stage B code landed this pass.
+
+## Re-ground (per-process, both modes, current main + Stage A)
+
+| reproducer | standalone | host (gc) |
+|---|---|---|
+| `function Con(){}; Con.prototype={foo:7}; new Con().foo` (canary) | **0** ✗ | **NaN** ✗ |
+| `function Con(){}; Con.prototype.foo=7; new Con().foo` | **0** ✗ | **NaN** ✗ |
+| `const Con=function(){}; Con.prototype.foo=7; new Con().foo` | **0** ✗ | **7** ✓ |
+| `const Con=function(){}; Con.prototype={foo:7}; new Con().foo` | **0** ✗ | **0** ✗ |
+| `function Con(this:any){this.x=3;} new Con().x` (OWN field) | **3** ✓ | **3** ✓ |
+
+Read-path bisected from emitted WAT (standalone canary): `new Con()` →
+`call $__fnctor_Con_new` → `extern.convert_any` (box) → `c.foo` lowers to
+`call __extern_get(instance, "foo")`. `__extern_get` does `ref.test $Object`
+(object-runtime.ts:767) and **returns null immediately** for the non-`$Object`
+`$__fnctor_Con` struct — the proto walk (`struct.get $Object 0`, :844-848) only
+knows `$Object`. So the receiver dead-ends before any walk. OWN fields work
+because they read through the typed `struct.get` path, not `__extern_get`.
+
+## DECISION 1 (confirmed concrete): fnctor-instance representation = option (ii)
+
+Route `new F()` instances through the ONE `$Object.$proto` walk; do NOT add a
+`$proto` field to the bespoke `$__fnctor_<Name>` struct (option (i) — rejected:
+shifts every fnctor own-field index, forces a SECOND walk arm = "N walks not one"
+anti-pattern, re-enters the iso-recursive-canonicalization hazard #1100/#2009 by
+changing a closed struct's shape). Two concrete realizations of (ii), both require
+the SAME two pieces (populate F's prototype as an `$Object` + link the instance to
+the walk):
+
+- **(ii-a) Reconstruct the dynamically-used instance AS an `$Object`** — at
+  `new F()`, when F is used dynamically (any-typed reads, the test262 cluster
+  shape), build an `$Object` whose own props are the `this.x=` fields and whose
+  `$proto` is F's prototype `$Object`. Own-field reads then go through
+  `__extern_get` (already how the cluster reads them — these instances are passed
+  to `Array.prototype.forEach.call(child, cb)` as `any`, never read via typed
+  `struct.get`). Empty-body fnctors (`function Con(){}`, the canary) have NO own
+  fields → trivially an empty `$Object` + `$proto`. **This is the chosen
+  realization** — it keeps ONE walk and one link, and the cluster's instances are
+  already consumed dynamically.
+- (ii-b) Keep the `$__fnctor_<Name>` struct + teach the walk a fnctor→prototype
+  sidecar — rejected: needs a sidecar (contradicts "one link") and a fnctor-arm in
+  the walk (contradicts "one walk").
+
+## DECISION 2: the missing machinery (what Stage B must BUILD — not just wire)
+
+There is no pre-existing per-fnctor prototype `$Object` standalone, and the
+host declaration-ctor has no closure global. Stage B must build, IN BOTH MODES:
+
+1. **A per-fnctor prototype object** (standalone: an `$Object` global per fnctor
+   name; host: the vivified-`.prototype` sidecar #1712 already exists for
+   closure-valued fns — extend to declarations).
+2. **Populate it** from `F.prototype = x` (whole reassign) AND `F.prototype.p = v`
+   (per-prop) writes — neither lands today (the writes are effectively dropped:
+   standalone canary `c.foo`→0, host `cfe-whole`→0).
+3. **Link `new F()` to it** — standalone (ii-a): build the instance as an `$Object`
+   with `$proto` = the per-fnctor prototype `$Object`. Host: emit
+   `__register_fnctor_instance` for DECLARATION ctors too (today gated off at
+   new-super.ts:1118-1138 because a declaration has no `moduleGlobals`/
+   `funcClosureGlobals` entry — confirmed from WAT: no `__register_fnctor_instance`
+   import for `function Con(){}`).
+
+## Why NO sub-slice banks rows alone (the honest blocker)
+
+The canary needs populate (#2) AND link (#3) together — neither alone resolves
+`c.foo`. The narrowest host sub-slice (B-host-1: register declaration-ctors) is
+NOT a one-line gate-widen: a declaration lacks the closure global that BOTH the
+link and the prototype-write vivify-slot key against, so it must first MINT a
+closure global for declaration-ctors and route the prototype-write to it. The
+narrowest standalone sub-slice (empty-body fnctor as `$Object`) still needs the
+prototype-write→`$Object` populate, which does not exist. So the smallest
+bankable unit IS the full populate+link lap — ~3-5 days, broad-impact value-rep.
+
+## PRECISE CONTINUATION (next senior-dev session, value-rep lane)
+
+Implement realization (ii-a), staged; each step full-gate (merge_group floor
+#2097 authoritative), stop-the-line on any eject. Start STANDALONE (the walk
+already exists; host adds the declaration-global complexity):
+
+- **B1 (standalone populate) — per-fnctor prototype `$Object`.** Add
+  `ctx.fnctorPrototypeObject: Map<string, globalIdx>` (context/types.ts). On
+  `F.prototype = {literal}` / `F.prototype.p = v` for a fnctor `F` (NOT a class),
+  build/extend an `$Object` global (via `compileObjectLiteralAsExternref` for the
+  whole-reassign case; `__extern_set` on the global for per-prop). Gate: `F` is in
+  `funcConstructorMap` and NOT in `classSet`. Standalone-only. NO rows yet (no
+  reader) — validates the global builds + is dead-elim-safe. Low risk.
+- **B2 (standalone link) — `new F()` builds an `$Object` with `$proto`.** At
+  compileFnctorNew (new-super.ts:998-1166), when F has a `fnctorPrototypeObject`
+  entry AND the instance is used dynamically, emit an `$Object`
+  (`__new_plain_object`) with own props = the `this.x=` fields (via `__extern_set`)
+  and `$proto` = the fnctor prototype `$Object` global, INSTEAD of the bespoke
+  struct. Gate strictly so typed class instances + non-dynamic fnctors are
+  byte-identical (the hot-path tripwire — if B2 ejects on a typed-instance case the
+  gate is wrong → STOP). Banks the standalone canary + indexed/`in` (Stage C reads
+  ride free once `$proto` is populated). **The row-banking slice; highest risk.**
+- **B3 (host) — declaration-ctor link + whole-prototype-reassign vivify-slot.**
+  Mint a closure global for declaration-ctors; widen the new-super.ts:1118 gate to
+  register them; route `F.prototype = x` whole-reassign into the
+  `_fnctorProtoLookup`-read sidecar slot (today only per-prop on closures lands).
+  Reuses #1712 verbatim. Banks the host canary.
+- **B4 (Stage C/D ride) — indexed inherited + generic-method cluster.** Once B2/B3
+  populate `$proto`, the indexed `__extern_get_idx` arm + `forEach.call(child,cb)`
+  visit inherited indices (the 168-row `-c-i-`/`-b-i-` bulk). Largely free from
+  the substrate; residual needs #983d method-dispatch (track separately).
+
+TDD canaries (all in `tests/issue-2580-m3-protochain.test.ts`, extend it):
+`function Con(){}; Con.prototype={foo:7}; new Con().foo` → 7 (B2 standalone / B3
+host); `Con.prototype.foo=7` variant; `new Con().x` own field stays 3 (regression
+guard); the indexed + `forEach.call` cluster (B4).
+
+RUNNER TRAP: validate per-process (one snippet, one mode, fresh instantiate), NOT
+an in-process `runTest262File` loop (false `compile_error reading 'kind'` from
+cross-compile state bleed). Full merge_group floor is the only authoritative
+conformance signal.
+
+## Status
+
+NO Stage B code landed (correctly — no bankable one-pass sub-slice; rushing
+broad value-rep risks the #1888-class floor eject). Stage A (PR #1975) is the
+banked deliverable. Representation decision (option ii / realization ii-a) +
+the B1→B4 staging is the durable handoff. Issue stays `in-progress`.
