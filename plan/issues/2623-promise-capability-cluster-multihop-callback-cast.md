@@ -431,3 +431,70 @@ The branch `issue-2623a-inbound-marshalling` was reverted to clean (no codegen
 change shipped) because every attempted gate regressed #1312 / async-await.
 Slices B (`__construct_closure` identity/species) and C (#2618 Proxy
 apply/construct) are independent of this and remain claimable.
+
+---
+
+## Slice 2623-B re-grounding — senior-dev (2026-06-23): SPLITS into two mechanisms, NEITHER is the spec's construct-trap fix; NOT bounded
+
+Verified Slice B against the actual faults (traced + decoded). The spec's B
+mechanism — "`_wrapCallableForHost` construct trap → `Object.create(vivified
+proto)` + `_fnctorInstanceCtor.set`" — does NOT match the ctx-ctor rows, and the
+#2628 acorn host residual does not reproduce as the clean bounded fix the
+re-grounding describes. **Verdict: DEFER (mis-specced / not bounded).**
+
+### ctx-ctor rows (all/allSettled/race/any) — `class extends Promise` IDENTITY, not the construct trap
+Repro: all four fail `assert #1: instance.constructor === SubPromise`. Traced via
+host instrumentation on `Promise_all`:
+- `Promise.all.call(SubPromise, [])` passes `thisArg = the synthesized host
+  SubPromise` (`__promise_subclass_ctor`, a `class extends Promise {}` keyed by
+  name). The instance V8 builds from it is CORRECT: `inst.constructor === C` is
+  TRUE, `Object.getPrototypeOf(inst) === C.prototype` is TRUE,
+  `inst.constructor.name === "SubPromise"`.
+- The assert fails on **identity divergence**: the test's RHS `SubPromise`
+  read-as-VALUE goes through `identifiers.ts` and emits the wasm **class-object
+  singleton** (`__class_<Name>`, via `emitLazyClassObjectGet`), a DIFFERENT object
+  than the synthesized host `C` used by the capability. So
+  `inst.constructor (=C) === SubPromise (=__class singleton)` → false.
+- **The spec's `_wrapCallableForHost` construct-trap mechanism never touches this
+  path** — these rows use a host-synthesized Promise subclass, not a compiled
+  closure's construct trap.
+
+A narrow identity-unification fix (route a `class extends Promise` VALUE read
+through the same cached `__promise_subclass_ctor` — mirrors
+`resolvePromiseSubclassThisArg` for the value position; ~40 LoC in
+`identifiers.ts`) WAS prototyped and DOES flip `assert #1`+`#2` for all/race/any
+(allSettled stays at #1 — empty-array capability path differs). **But all three
+then fail `assert #3: callCount === 1` and `#4: typeof executor === 'function'`**
+— the synthesized `class extends Promise {}` is BARE and never invokes the user's
+wasm constructor body (`super(a); executor=a; callCount++`). So the identity fix
+yields **0 net test262 rows** on its own while adding a broad-impact change to the
+hot identifier-as-value path. Reverted. Completing ctx-ctor requires the
+synthesized subclass to run the user wasm constructor body (capability-executor
+protocol THROUGH a host-synthesized Promise subclass) — a deep change, NOT bounded.
+
+### #2628 acorn host residual — does NOT reproduce as the bounded construct-trap fix
+The re-grounding (this file, the #2628 §) claims `viaIdent → 5` works and only
+`viaThis` (host-side) throws, pinning it to the bare-`self={}` construct trap. On
+current main I could NOT reproduce that clean split: for BOTH a `var Parser =
+function` shape AND an ES `class` shape, an instance returned to host JS and read
+via the host proxy has `constructor.name === "?"` and `.getLen()` does NOT resolve
+for `viaIdent` AND `viaThis` alike. So the host-facing prototype-method dispatch
+on a returned instance is a broader gap than "the construct trap forgot to link
+the result", and the architect's shape-specific "viaThis-only" residual is not the
+general case. There is also **no test262 row gated on #2628** (acorn dogfood is
+in-wasm and already works per the re-grounding), so even a clean fix has ~0
+conformance payoff.
+
+### Verdict
+**Slice B is DEFER — mis-specced and not a bounded dev slice.**
+- ctx-ctor = `class extends Promise` host/wasm identity unification PLUS running
+  the user constructor body through the synthesized subclass (capability-executor
+  protocol). Two coupled deep changes; architect re-spec on the
+  `__promise_subclass_ctor` ↔ class-object-singleton unification + executor-body
+  invocation.
+- #2628 host residual = a broader host-facing returned-instance prototype-dispatch
+  gap, not the bare-`{}` construct-trap fix; ~0 test262 payoff; fold into the
+  acorn-host lane, not #2623-B.
+- The branch `issue-2623b-construct-identity` is reverted to clean (no codegen
+  shipped). **Row delta: 0.** Slice C (#2618 Proxy apply/construct) is independent
+  and not yet verified — recommend the same verify-first treatment before claiming.
