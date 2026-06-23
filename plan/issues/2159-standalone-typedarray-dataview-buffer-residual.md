@@ -4,7 +4,7 @@ title: "Standalone TypedArray/DataView/ArrayBuffer conformance residual (~1,308 
 status: in-progress
 sprint: 65
 created: 2026-06-15
-updated: 2026-06-18
+updated: 2026-06-23
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -333,3 +333,31 @@ DataView OOB→RangeError, `DataView(buf,off,len).byteLength`, `byteLength`/
 - Detached-buffer semantics beyond the DataView bounds case (#2199, done) —
   `ArrayBuffer.transfer`/`resize` detach + post-detach TypedArray traps are a
   separate ArrayBuffer-lifecycle concern, not sliced here.
+
+---
+
+## Umbrella reconciliation (2026-06-23, architect) — drained; residual is substrate-deferred
+
+Re-verified against current main (`b4ed81215`): **all 6 dev-tractable sub-issues
+are landed.** #2592 (factories), #2593 (integer element-width wrapping),
+#2594 (host-import leaks), #2595 (BYTES_PER_ELEMENT), #2596 (.buffer accessor),
+#2597 (@@toStringTag) are all `status: done` and their fixes are on
+`origin/main` (PRs #1912/#1915 merged). The faithful-runner host-vs-standalone
+diff over the TypedArray buckets is now small and the remaining gaps are the
+**deferred** residuals the prior slicing already flagged — NOT new dev slices:
+
+- `TypedArrayConstructors/from/inherited` + `TypedArray/prototype/*/
+  this-is-not-typedarray-instance` → subclass-receiver + **brand-check on `.call`**
+  (parallels the Set #2604 brand-check; needs native `.call` dispatch + `ref.test`
+  guard) and the #2622 native-collection/TA-subclass substrate.
+- BigInt typed-array tails (`from/BigInt/*`, `find/BigInt/*`) → BigInt64Array
+  ctor + BigInt element semantics (#2594 covered the host-import leak; the
+  value-fidelity is BigInt-i64-brand substrate, #1349/#1644 family).
+- The unified byte-storage `.buffer` write-through aliasing + `$__subview`
+  element-access windowing (#2357) — representation-level, deferred.
+
+**Disposition:** #2159's dev-tractable surface is **exhausted**. Recommend closing
+the umbrella as `done` once the 6 sub-issues are confirmed merged (they are), with
+the residual carried by #2622 (subclass), the TA brand-check follow-up, and the
+#2357/#2580 representation substrate. No new dev slice from this architect pass —
+do NOT re-dispatch #2159 as fresh dev work.
