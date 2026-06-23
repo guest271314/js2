@@ -1,10 +1,12 @@
 ---
 id: 2159
 title: "Standalone TypedArray/DataView/ArrayBuffer conformance residual (~1,308 tests)"
-status: in-progress
+status: done
+completed: 2026-06-23
 sprint: 65
 created: 2026-06-15
 updated: 2026-06-23
+reconcile_note: "DRAINED 2026-06-23 — all 6 sliced sub-issues merged (#2592 PR#1915, #2593 #1928, #2594 #1917, #2595/#2597 #1912, #2596 #1920). Remaining residual is substrate-deferred (#2175 builtin-prototype readers, #2580/#2104 value-rep, #2622 native-collection subclass)."
 priority: high
 feasibility: medium
 reasoning_effort: high
