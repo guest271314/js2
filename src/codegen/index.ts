@@ -13597,7 +13597,16 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
       if (ts.isIdentifier(decl.name)) {
         const name = decl.name.text;
         if (fctx.localMap.has(name)) continue;
-        if (ctx.moduleGlobals.has(name)) continue;
+        // #2641: do NOT skip names that collide with a module global. A
+        // function-body let/const that shadows a same-named module variable
+        // MUST get its own Wasm local (proper lexical shadowing). Previously
+        // this `continue` suppressed the shadow, so every read/write of the
+        // local fell through to the module global of the same name — invalid
+        // Wasm with mismatched types (string-tree value → class-struct global,
+        // the #2641 symptom) and a silent miscompilation (module var clobbered)
+        // with matching types. This walker runs ONLY for real function bodies
+        // (free functions and, after #2641, class methods/ctors); __module_init
+        // does NOT run it, so top-level let/const still become module globals.
         const varType = ctx.checker.getTypeAtLocation(decl);
         // #1120: pre-allocate as i32 if collectI32CoercedLocals tagged this
         // local — keeps the hoisted slot in sync with what compileVariableStatement
