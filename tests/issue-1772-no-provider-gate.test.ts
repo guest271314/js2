@@ -86,9 +86,7 @@ export function main(): void {
     // capability-map "no provider under --target wasi" error must NOT appear.
     const result = await compile(src, { fileName: "x.ts" });
     const msgs = (result.errors ?? []).map((e) => e.message).join("\n");
-    expect(msgs).not.toMatch(
-      /needs a filesystem provider, unavailable under `--target wasi`/,
-    );
+    expect(msgs).not.toMatch(/needs a filesystem provider, unavailable under `--target wasi`/);
   });
 
   it("a same-named LOCAL function (not imported from node:fs) is NOT gated", async () => {

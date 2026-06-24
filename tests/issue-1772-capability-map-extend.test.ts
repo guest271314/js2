@@ -14,10 +14,7 @@
 //   3. Adding the `node:process` map entry is byte-neutral for the injected dts of
 //      a NON-process program (the entry only affects programs touching node:process).
 import { describe, expect, it } from "vitest";
-import {
-  isKnownMember,
-  isMemberSatisfiable,
-} from "../src/checker/node-capability-map.js";
+import { isKnownMember, isMemberSatisfiable } from "../src/checker/node-capability-map.js";
 import { buildNodeEnvDtsForSource } from "../src/checker/index.js";
 
 describe("#1772 P2-b — node:process std-IO capability entries", () => {
@@ -44,15 +41,9 @@ describe("#1772 P2-b — node:process std-IO capability entries", () => {
     const wasi = { wasi: true, allowFs: false };
     // An unmapped member returns `undefined` (caller decides — usually permissive),
     // and is certainly not `true`.
-    expect(
-      isMemberSatisfiable("node:process", "__nope_no_such_member__", wasi),
-    ).toBe(undefined);
-    expect(
-      isMemberSatisfiable("node:process", "__nope_no_such_member__", wasi),
-    ).not.toBe(true);
-    expect(isKnownMember("node:process", "__nope_no_such_member__")).toBe(
-      false,
-    );
+    expect(isMemberSatisfiable("node:process", "__nope_no_such_member__", wasi)).toBe(undefined);
+    expect(isMemberSatisfiable("node:process", "__nope_no_such_member__", wasi)).not.toBe(true);
+    expect(isKnownMember("node:process", "__nope_no_such_member__")).toBe(false);
   });
 
   it("the node:process map entry is byte-neutral for a non-process program's injected dts", () => {

@@ -247,8 +247,7 @@ function buildFsCapability(): NodeModuleCapability {
 // `buildModuleDecls` — so this map entry can NOT double-declare `stdout`/`stderr`.
 // A full migration of the `node:process` decls into the map is a separate
 // follow-up; this slice adds only the satisfiability metadata.
-const PROCESS_STDIO_PROVIDERS = (t: CapabilityTarget): NodeProvider[] =>
-  t.wasi ? ["wasi-fd"] : ["js-host-fs"];
+const PROCESS_STDIO_PROVIDERS = (t: CapabilityTarget): NodeProvider[] => (t.wasi ? ["wasi-fd"] : ["js-host-fs"]);
 
 function buildProcessCapability(): NodeModuleCapability {
   const members = new Map<string, NodeMemberCapability>();
@@ -277,9 +276,7 @@ const NODE_CAPABILITY_MAP = new Map<string, NodeModuleCapability>([
 ]);
 
 /** Look up the capability entry for a `node:<mod>` specifier, if mapped. */
-export function getModuleCapability(
-  module: string,
-): NodeModuleCapability | undefined {
+export function getModuleCapability(module: string): NodeModuleCapability | undefined {
   return NODE_CAPABILITY_MAP.get(module);
 }
 
@@ -294,11 +291,7 @@ export function isKnownMember(module: string, member: string): boolean {
  * deliberate-error case). Returns `undefined` for an unknown member (caller
  * decides — usually permissive).
  */
-export function isMemberSatisfiable(
-  module: string,
-  member: string,
-  target: CapabilityTarget,
-): boolean | undefined {
+export function isMemberSatisfiable(module: string, member: string, target: CapabilityTarget): boolean | undefined {
   const cap = NODE_CAPABILITY_MAP.get(module)?.members.get(member);
   if (!cap) return undefined;
   return cap.providersFor(target).length > 0;
@@ -312,10 +305,7 @@ export function isMemberSatisfiable(
  * `undefined` if the module is not in the capability map (caller falls back to
  * the permissive generic module shape).
  */
-export function buildModuleDecls(
-  module: string,
-  imported: Iterable<string>,
-): string[] | undefined {
+export function buildModuleDecls(module: string, imported: Iterable<string>): string[] | undefined {
   const cap = NODE_CAPABILITY_MAP.get(module);
   if (!cap) return undefined;
   const lines: string[] = [cap.supportDecls];
