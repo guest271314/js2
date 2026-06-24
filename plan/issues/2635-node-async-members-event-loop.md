@@ -11,7 +11,7 @@ task_type: feature
 area: host-interop
 language_feature: node-api-compat
 goal: platform
-sprint: Backlog
+sprint: 65
 es_edition: n/a
 depends_on: [2632]
 related: [1772, 2631, 2632, 2634]

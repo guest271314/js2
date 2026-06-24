@@ -2,7 +2,7 @@
 id: 2631
 title: "node:fs fd-based readSync/writeSync via a per-module shim (Native Messaging example)"
 status: done
-sprint: Backlog
+sprint: 65
 assignee: ttraenkler/agent-a0c9d00fc32018cde
 completed: 2026-06-23
 feasibility: medium

@@ -2,7 +2,7 @@
 id: 2633
 title: "Migrate synchronous std-IO off the hallucinated process.std* surface onto node:fs readSync/writeSync"
 status: done
-sprint: Backlog
+sprint: 65
 assignee: ttraenkler/agent-a0c10078166a3b3a5
 completed: 2026-06-24
 depends_on: [2631, 1968]
