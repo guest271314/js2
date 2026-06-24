@@ -536,6 +536,18 @@ export { getEntryExportNames, treeshake } from "./treeshake.js";
 export { generateWit } from "./wit-generator.js";
 export type { WitGeneratorOptions } from "./wit-generator.js";
 
+// #2527 / #2514 — canonical runtime-type rec-group identity primitive for
+// core-wasm module linking (shared store). Pure analysis over a WasmModule's
+// type table; the foundation for the runtime.wasm ABI drift gate.
+export {
+  canonicalHashOfTypeGroup,
+  extractRuntimeGroup,
+  fingerprintRuntimeGroup,
+  RUNTIME_RECGROUP_ABI_VERSION,
+  RUNTIME_RECGROUP_TYPE_NAMES,
+} from "./emit/canonical-recgroup.js";
+export type { RuntimeGroupFingerprint, RuntimeGroupMember } from "./emit/canonical-recgroup.js";
+
 export {
   buildImports,
   buildStringConstants,

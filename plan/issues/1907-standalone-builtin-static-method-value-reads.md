@@ -170,3 +170,20 @@ whitelist** — top unmapped pairs by record count: `Symbol.iterator` 805,
 `Symbol.toStringTag`, `*.BYTES_PER_ELEMENT`). Not a regression (count fell);
 flagged so the residual under umbrella #1888 stays visible for the next
 standalone-mode push.
+
+## Harvest refresh — 2026-06-24 (run `426e28e8`) — still the #1 standalone codegen-refusal family
+
+Stable vs 2026-06-19. By the highest-signal metric (embedded `#NNNN` citation,
+deduped per record) the #1888/#1907 S6-b family is **1,631 records** — the
+single largest standalone *codegen-refusal* family (tied #1888 = #1907; the same
+refusal cites both). Top still-unmapped `Builtin.prototype` value-read pairs by
+record count (from the `… built-in static property value read is not supported
+in --target standalone (#1888 / #1907 S6-b)` signatures): `Int8Array.prototype`
+460+52, `ArrayBuffer.prototype` 129, `DataView.prototype` 100, `Atomics.waitAsync`
+93, `Iterator.prototype` 48, `TypeError.prototype` 43, `SharedArrayBuffer.prototype`
+38, plus the long tail (`Reflect.*` Phase-C, `DisposableStack`/
+`AsyncDisposableStack.prototype`, `Symbol.matchAll`, `Uint8Array.prototype`,
+`Array.fromAsync`). Separately the generic `'__get_builtin' … not yet supported
+… (Phase B)` refusal is 536 records. Mechanism is landed (PR #1292); the residual
+is the **incomplete per-builtin whitelist** — still the clearest standalone-mode
+lever for the next push.

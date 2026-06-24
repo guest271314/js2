@@ -7292,6 +7292,21 @@ assert._isSameValue = isSameValue;
           if (vs !== undefined) return vs;
           const svs = _sidecarGet(obj, strKey);
           if (svs !== undefined) return svs;
+          // (#2580 B-acc) Accessor descriptor defined via Object.defineProperty
+          // on this index (e.g. `defineProperty(o, "1", {get})`). The descriptor
+          // lives in the struct-prop sidecar (`__get_<idx>`) or the symbol/accessor
+          // map; INVOKE the getter per §6.2.5.5 (`Get` runs `[[Get]]`). A
+          // setter-only accessor has no getter → §6.2.5.5 returns undefined, which
+          // the index-loop reads as a *present* element holding undefined (its
+          // HasProperty is true via __extern_has_idx below). Route through _safeGet,
+          // which already performs the `__get_<key>` / `_wasmStructAccessors`
+          // invocation with the receiver bound.
+          if (_isWasmStruct(obj)) {
+            const wasmSc = _wasmStructProps.get(obj);
+            if (wasmSc && (`__get_${strKey}` in wasmSc || `__set_${strKey}` in wasmSc)) {
+              return _safeGet(obj, strKey, callbackState);
+            }
+          }
           // Try struct getter export __sget_N (for WasmGC struct fields like "0", "1", etc.)
           const exports = callbackState?.getExports();
           const getter = exports?.[`__sget_${strKey}`];
@@ -7322,6 +7337,19 @@ assert._isSameValue = isSameValue;
           }
           if (_sidecarGet(obj, idx) !== undefined) return 1;
           if (_sidecarGet(obj, strKey) !== undefined) return 1;
+          // (#2580 B-acc) Accessor-descriptor presence. A property defined via
+          // `Object.defineProperty(o, "<idx>", {get/set})` is PRESENT for
+          // HasProperty (§7.3.12) regardless of whether `Get` yields a value — a
+          // setter-only accessor has no readable value, so `_sidecarGet` above is
+          // undefined, yet the property exists and the generic-method loop MUST
+          // visit it. The descriptor's get/set live in the struct-prop sidecar
+          // (`__get_<idx>` / `__set_<idx>`) or, for symbol keys, in
+          // `_wasmStructAccessors` (not reachable by a numeric index, so only the
+          // string-keyed sidecar matters here).
+          {
+            const wasmSc = _wasmStructProps.get(obj);
+            if (wasmSc && (`__get_${strKey}` in wasmSc || `__set_${strKey}` in wasmSc)) return 1;
+          }
           // _safeSet routes numeric keys 1-15 onto Symbol.<wellKnown> sidecar
           // entries. Reverse that mapping so index 1-15 values remain visible.
           // #1830 — range covers every id in `_symbolIdToKeys` (15 = @@matchAll).

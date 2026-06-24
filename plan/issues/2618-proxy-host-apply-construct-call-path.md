@@ -1,13 +1,14 @@
 ---
 id: 2618
 title: "Proxy (host): calling / constructing a Proxy whose target is callable traps (illegal cast) or ignores the construct trap result (~15 fails)"
-status: in-progress
+status: blocked
 assignee: ttraenkler/sd-2618
 sprint: 65
 created: 2026-06-22
 updated: 2026-06-24
+reconcile_status_note: "2026-06-24 (PO reconcile vs upstream/main): Slice 1 LANDED (PR #1984, commit 1cc09f72f — pure-runtime START-timing + callable-target wrap, +1 gc row). REMAINING work (externref-callee p.call(a,b) CALL dispatch + dynamic-new construct-result routing) is gated on the deep #56 dispatch substrate (blocked_on:[56] already set). NOT dev-claimable until #56 lands. → blocked (was in-progress)."
 blocked_on: [56]
-reconcile_note: "SLICE 1 LANDING 2026-06-24 (sd-2618): pure-runtime START-timing + callable-target [[ProxyTarget]] wrap. Verified per-process (faithful test262 wrap): +1 gc row (apply/call-parameters fail→pass), zero local regressions. REMAINING (deferred, deep #56 dispatch substrate): externref-callee CALL dispatch (multi-arg p.call(a,b) → illegal cast, tryEmitInlineDynamicCall) + dynamic-new construct-result routing (new p() → 'is not a constructor', tryEmitDynamicNew). See '## Slice 1 (sd-2618, 2026-06-24)'."
+reconcile_note: "SLICE 1 MERGED #1984 (sd-2618): pure-runtime START-timing + callable-target [[ProxyTarget]] wrap; +1 gc row (apply/call-parameters), zero regr. DEFERRED slices SCOPED+HANDED OFF 2026-06-24 (sd-2618): both apply-dispatch AND construct bottom out in the SAME root cause — the inbound __call_fn_method_N dispatcher ref.cast-ing a host JS argArray to a wasm vec struct (illegal cast). == 2623-A inbound-marshalling KEYSTONE (codegen/index.ts buildArgConversion 3356/3659). Construct codegen routing (compileNewExpression Proxy guard + constructable-target wrapper) prototyped, correct, but INERT (0 rows) without the keystone. NOT shipped — broad surface for 0 rows = #1888 floor-eject hazard. See '## Deferred slices … SCOPE+HANDOFF' for WAT evidence + ordering. Architect/2623-A territory, not a standalone dev slice."
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -325,3 +326,109 @@ alone. Sequence AFTER #56; do not staff as a standalone slice. Branch
 codegen shipped. This closes the #2623 cluster verdict: A + B + C all DEFER to
 architect re-spec / #56-sequencing (see the #2623 Slice A & B
 re-groundings).
+
+---
+
+## Deferred slices (apply-dispatch + construct) — SCOPE+HANDOFF with WAT evidence (sd-2618, 2026-06-24)
+
+After Slice 1 (#1984) merged, I re-grounded the two deferred slices per-process
+(faithful `wrapTest`+compile+execute, binaryen-decoded WAT). **Both bottom out in
+the SAME single root cause — the 2623-A inbound-marshalling substrate — and
+neither is a narrow safe row-positive slice. HANDOFF, do not force half-built.**
+
+### Root cause (one fault, surfaces on BOTH apply and construct)
+
+The inbound host→wasm callback dispatcher **`__call_fn_method_N`**
+(`emitClosureCallExportN` → `buildArgConversion` → `externToClosureParamRef`,
+`src/codegen/index.ts:3356-3378` and `:3659-3690`) **unconditionally
+`ref.cast`s** each host-supplied callback arg to the closure's declared wasm
+struct param type. When a trap's parameter is typed `any[]`/array-ish → lowers to
+`(ref null $vec)`, but the host passes a real **JS array** as that arg → the
+`ref.cast (ref null $vec)` traps with `illegal cast`.
+
+**WAT evidence — `apply/call-result.js` (`p.call()`), decoded `__call_fn_method_3`:**
+```wat
+(call_ref $5
+  (ref.cast (ref $0) (local.get $5))   ;; self
+  (local.get $2)                        ;; arg t (externref, raw)
+  (local.get $3)                        ;; arg c (externref, raw)
+  (ref.cast (ref null $4)               ;; arg `args` — CAST host JS array -> $vec -> ILLEGAL CAST
+    (any.convert_extern (local.get $4)))
+  (ref.cast (ref $5) (local.get $7)))
+```
+The passing row `apply/call-parameters.js` differs ONLY in that its trap's `args`
+param inferred to `externref` (no cast) — so the fault is purely "is the trap
+param a concrete struct ref?", call-shape/type-inference-sensitive, not a routing
+choice.
+
+**Runtime call chain (both apply & construct):** `p.call()` / `new p()` ->
+`__extern_method_call` / `__construct_closure` -> host `[[Call]]`/`[[Construct]]`
+MOP -> bridge trap (slice 1) -> `wasmClosureDynamicBridge` (`runtime.ts:1897`) ->
+`__call_fn_method_3` -> **illegal cast on the args param**. Identical stack for
+construct (verified: `construct/call-result.js` throws `illegal cast` at
+`__call_fn_method_3` once the proxy is made constructable).
+
+### apply-dispatch — NOT "route through `__call_function`"
+The codegen routing is already correct: `p.call()` lowers to
+`__extern_method_call(p, "call", argv)` (WAT-confirmed; NO `ref.cast $Closure` in
+`$test`). The `illegal cast` is in the INBOUND dispatcher, not the outbound call.
+So the "route the externref-Proxy callee through `__call_function`" framing does
+not match the actual fault — the call already routes correctly; the trap's
+arg-marshalling is what casts. **Fix = the 2623-A inbound `__call_fn_*` arg path
+(broad, hot callback dispatch), not a routing select.**
+
+### construct — codegen routing FIXED, but inert without the inbound fix
+Two real sub-faults found & prototyped (reverted — inert):
+1. **`new p()` mis-routes by TS type.** `new Proxy<C>(C,h)` types as `C`, so the
+   static class / extern-class arm fires -> "No dependency provided for extern
+   class P", dropping the construct trap. **Fix (prototyped, correct):** a
+   syntactic Proxy guard (`receiverMayBeProxy`, exported from `calls.ts`) early in
+   `compileNewExpression` (`new-super.ts`) routes a `new Proxy(...)`-bound callee
+   through `__construct_closure` (host `Reflect.construct` -> fires the construct
+   trap, threads the result; `new.target` === the proxy is the default). JS-host
+   only, syntactically narrow.
+2. **The callable-target wrapper is an ARROW -> not constructable.** The Proxy
+   target compiles to a `callback_maker` ARROW (`runtime.ts:11506`,
+   `(...args)=>exports[__cb_id](...)`) which has NO `[[Construct]]`, so the host
+   proxy is not constructable -> "is not a constructor". **Fix (prototyped):**
+   `_proxyTargetFor` wraps a non-constructable callable target in a constructable
+   forwarding function-expression (`_wrapConstructableForwarder`). NOTE: this is
+   semantically over-broad (makes ALL callable-target proxies constructable; spec
+   §10.5.13 says constructable iff target is) — no test in the suite regresses
+   (no negative non-constructable-target test), but a cleaner fix plumbs
+   source-constructability through `callback_maker`.
+
+With BOTH construct fixes applied, `construct/call-result.js` advances from "is
+not a constructor" -> the construct trap FIRES -> then dies at the SAME
+`__call_fn_method_3` `illegal cast` on the trap's `args` param. **Net construct
+row delta of the two construct fixes ALONE: 0** (baseline 10 PASS -> 10 PASS, no
+regressions). They are correct and necessary but inert until the inbound fix
+lands. Landing them alone adds broad surface for 0 rows -> NOT shipped.
+
+### Prerequisite ordering (the gate for ALL remaining apply+construct rows)
+
+```
+2618-inbound-marshalling (== 2623-A)  -- KEYSTONE, blocks everything
+   the __call_fn_method_N arg cast: a host JS array passed for an `any[]`/array
+   trap param must be MARSHALLED into the expected wasm vec struct (or the cast
+   guarded with ref.test + a marshalling fallback), NOT blindly `ref.cast`.
+   Locus: src/codegen/index.ts buildArgConversion (3356/3659) +
+   externToClosureParamRef (3212). BROAD: the hot inbound callback path (every
+   .map/.forEach/Promise-executor/await-continuation callback). Per
+   project_broad_impact_validate_full_ci -> full local-ci / merge_group, NOT a
+   scoped sweep. This is the #2623 Slice A inbound capturing-closure marshalling.
+   |-> 2618-apply rows (call-result, trap-is-null, trap-is-undefined, ...)
+   |     flip once the trap's args param marshals correctly.
+   +-> 2618-construct rows -- ALSO need the two construct fixes above
+         (compileNewExpression Proxy guard + constructable-target wrapper),
+         which are ready/prototyped and land trivially ON TOP of the inbound fix.
+```
+
+**Recommendation:** this is architect/2623-A territory (the inbound-marshalling
+keystone), not a standalone dev slice. Sequence: land 2623-A inbound marshalling
+first (full-gate), THEN the construct codegen guard + constructable wrapper
+(small, prototyped) compose on top to flip the construct rows, and the apply rows
+flip for free. Forcing either deferred slice now would ship broad dispatch
+surface for **0 rows** — the #1888-class floor-eject hazard. Branch
+`issue-2618-apply-dispatch` kept pristine (all prototyped changes reverted; no
+codegen shipped).
