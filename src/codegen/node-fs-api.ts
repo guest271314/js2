@@ -14,9 +14,11 @@ import type { Instr, ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
 import { allocLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { emitDataViewToWriteScratch } from "./dataview-native.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { flushLateImportShifts } from "./expressions/late-imports.js";
 import {
+  ensureWasiWriteAnyStringFdHelper,
   ensureWasiWriteAnyStringHelper,
   ensureWasiWriteArrayBufferHelper,
   ensureWasiWriteUint8ArrayHelper,
@@ -454,6 +456,27 @@ function emitNodeFsWriteSync(
   expr: ts.CallExpression,
   shimIdx: number,
 ): InnerResult {
+  const arg1 = expr.arguments[1]!;
+  const arg1Type = ctx.checker.getTypeAtLocation(arg1);
+
+  // #2639 — STRING overload: writeSync(fd, str, position?, encoding?). The fd is
+  // a runtime arg (not just 1/2), so encode the string to UTF-8 and write via the
+  // runtime-fd string helper, which returns the bytes written. `encoding?` (arg3)
+  // defaults to utf8; an explicit non-UTF-8 encoding is a clear compile error
+  // rather than a silent mis-encode. `position?` (arg2) is ignored for the fd
+  // streaming case, exactly as the buffer overload ignores it for fd 0/1/2.
+  if (isStringType(arg1Type)) {
+    return emitNodeFsWriteSyncString(ctx, fctx, expr);
+  }
+
+  // #2639 — DataView arg: resolve its i32_byte backing + byteOffset/byteLength to
+  // a (ptr, len) over the write scratch, then write via the shim. DataView is
+  // part of __NodeFsArrayBufferView but isn't a GC $Vec the offset/length path
+  // recognizes, so handle it explicitly before the generic resolution.
+  if (arg1Type.getSymbol?.()?.name === "DataView") {
+    return emitNodeFsWriteSyncDataView(ctx, fctx, expr, shimIdx);
+  }
+
   const fdLocal = emitNodeFsFd(ctx, fctx, expr.arguments[0]!);
 
   // Zero-copy fast path: linear-backed Uint8Array writes straight from ptr+off.
@@ -484,6 +507,106 @@ function emitNodeFsWriteSync(
   emitArrayToScratchCopy(fctx, gc.arrTypeIdx, gc.arrLocal, offLocal, WASI_WRITE_SCRATCH_START, lenLocal);
 
   // nwritten = write_sync(fd, WASI_WRITE_SCRATCH_START, length)
+  fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "call", funcIdx: shimIdx } as Instr);
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  return { kind: "f64" };
+}
+
+/**
+ * The `node:fs` `writeSync(fd, str, position?, encoding?)` STRING overload's
+ * supported encodings. We materialize the string as UTF-8 bytes (the WasmGC
+ * native-string lowering's only byte form), so only the utf8 aliases are
+ * faithful; any other listed `BufferEncoding` would silently mis-encode, so we
+ * reject it at compile time with a clear pointer.
+ */
+const WRITESYNC_UTF8_ENCODINGS = new Set(["utf8", "utf-8"]);
+
+/**
+ * #2639 — lower the STRING overload `writeSync(fd, str, position?, encoding?)`:
+ * encode `str` to UTF-8 and write to the runtime `fd` via the shim, returning the
+ * byte count (f64). `encoding?` defaults to utf8; an explicit non-utf8 literal is
+ * a compile error. `position?` is ignored for the fd streaming case (matching the
+ * buffer overload). Returns `VOID_RESULT` (after pushing a diagnostic) on an
+ * unsupported encoding or when the native-string runtime is unavailable.
+ */
+function emitNodeFsWriteSyncString(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
+  // Reject an explicit non-utf8 string-literal encoding (arg index 3).
+  const encArg = expr.arguments[3];
+  if (encArg && ts.isStringLiteralLike(encArg) && !WRITESYNC_UTF8_ENCODINGS.has(encArg.text.toLowerCase())) {
+    ctx.errors.push({
+      message:
+        `node:fs writeSync(fd, str, position?, encoding) only supports the utf8 encoding under ` +
+        `--target wasi (got "${encArg.text}"). Encode the string yourself and pass the bytes as a ` +
+        `Uint8Array/DataView if you need another encoding.`,
+      line: 1,
+      column: 1,
+      severity: "error",
+    });
+    return VOID_RESULT;
+  }
+
+  // fd (arg0) → i32 local.
+  const fdLocal = emitNodeFsFd(ctx, fctx, expr.arguments[0]!);
+
+  // Compile the string arg to a native-string ref, then call the runtime-fd
+  // string writer: __wasi_write_any_string_fd(str, fd) -> bytesWritten (i32).
+  const compiled = compileExpression(ctx, fctx, expr.arguments[1]!);
+  flushLateImportShifts(ctx, fctx);
+  const writeStrFdIdx = ensureWasiWriteAnyStringFdHelper(ctx);
+  if (compiled && ctx.nativeStrTypeIdx >= 0 && writeStrFdIdx >= 0) {
+    if (compiled.kind === "ref_null") {
+      fctx.body.push({ op: "ref.as_non_null" } as Instr);
+    }
+    // Stash the string ref, push (str, fd), call, convert byte count to f64.
+    const strLocal = allocLocal(fctx, `__nodefs_wstr_${fctx.locals.length}`, {
+      kind: "ref",
+      typeIdx: ctx.nativeStrTypeIdx,
+    });
+    fctx.body.push({ op: "local.set", index: strLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: strLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+    fctx.body.push({ op: "call", funcIdx: writeStrFdIdx } as Instr);
+    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    return { kind: "f64" };
+  }
+
+  // Native-string runtime unavailable — drop the compiled string and report 0.
+  if (compiled) fctx.body.push({ op: "drop" } as Instr);
+  fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+  return { kind: "f64" };
+}
+
+/**
+ * #2639 — lower `writeSync(fd, dataView, …)`: stage the DataView's bytes (its
+ * backing i32_byte array windowed by byteOffset/byteLength) into the write
+ * scratch, then `writeSync(fd, scratch, viewLen)`. Returns the byte count (f64);
+ * on an unresolvable backing it drops the operands and reports 0.
+ */
+function emitNodeFsWriteSyncDataView(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+  shimIdx: number,
+): InnerResult {
+  const fdLocal = emitNodeFsFd(ctx, fctx, expr.arguments[0]!);
+
+  // Compile the DataView arg; emitDataViewToWriteScratch consumes the value on
+  // the stack, recovers its (backing, base, byteLength), grows memory, and copies
+  // the bytes into the scratch — returning the byte-length local.
+  const recvType = compileExpression(ctx, fctx, expr.arguments[1]!);
+  flushLateImportShifts(ctx, fctx);
+  const lenLocal = emitDataViewToWriteScratch(ctx, fctx, recvType, WASI_WRITE_SCRATCH_START);
+  if (lenLocal < 0) {
+    // Couldn't resolve the DataView backing — drop the operand and report 0.
+    if (recvType) fctx.body.push({ op: "drop" } as Instr);
+    fctx.body.push({ op: "f64.const", value: 0 } as Instr);
+    return { kind: "f64" };
+  }
+
+  // nwritten = write_sync(fd, WASI_WRITE_SCRATCH_START, viewLen)
   fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
   fctx.body.push({ op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr);
   fctx.body.push({ op: "local.get", index: lenLocal } as Instr);

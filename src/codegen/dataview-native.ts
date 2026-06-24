@@ -891,3 +891,99 @@ function emitWriteBytes(
     else: storeAll(false),
   });
 }
+
+/**
+ * (#2639) Stage a native DataView's bytes into the linear write scratch so
+ * `node:fs` `writeSync(fd, dv)` can hand the shim a (ptr, len) pair.
+ *
+ * The DataView arg (an externref / GC ref already produced by compiling the
+ * argument expression — its `recvType` passed in) is resolved via
+ * {@link recoverDvBacking} to its i32_byte backing array + base byte offset +
+ * view byte length, mirroring exactly what the DataView accessors use. Then it
+ * copies `viewLen` bytes from `arr[base + j]` (masked to a byte) into
+ * `scratch[scratchStart + j]`. The DataView's backing array is `i32_byte` (one
+ * i32 per byte, 0..255), so each element is `& 0xff`-ed before the byte store.
+ *
+ * Returns the i32 local holding the view byte length (the count to write), or
+ * `-1` when the receiver isn't a resolvable DataView/ArrayBuffer view. The
+ * receiver value must already be on the stack (its `recvType` is consumed here).
+ * Memory is assumed already grown for `[scratchStart, scratchStart+viewLen)` —
+ * the caller grows it (it must, since the length is only known at runtime).
+ */
+export function emitDataViewToWriteScratch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  recvType: ValType | null,
+  scratchStart: number,
+): number {
+  const { vecTypeIdx, arrTypeIdx } = i32ByteVec(ctx);
+  if (arrTypeIdx < 0) return -1;
+
+  const arrLocal = allocLocal(fctx, `__dvw_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const baseLocal = allocLocal(fctx, `__dvw_base_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__dvw_len_${fctx.locals.length}`, { kind: "i32" });
+  if (!recoverDvBacking(ctx, fctx, recvType, arrLocal, baseLocal, vecTypeIdx, arrTypeIdx, lenLocal)) {
+    return -1;
+  }
+
+  // Grow linear memory so [scratchStart, scratchStart + len) is addressable.
+  const needPagesLocal = allocLocal(fctx, `__dvw_pages_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: scratchStart } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "i32.const", value: 65535 } as Instr);
+  fctx.body.push({ op: "i32.add" } as Instr);
+  fctx.body.push({ op: "i32.const", value: 16 } as Instr);
+  fctx.body.push({ op: "i32.shr_u" } as Instr);
+  fctx.body.push({ op: "local.set", index: needPagesLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: needPagesLocal } as Instr);
+  fctx.body.push({ op: "memory.size" } as Instr);
+  fctx.body.push({ op: "i32.gt_u" } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [
+      { op: "local.get", index: needPagesLocal } as Instr,
+      { op: "memory.size" } as Instr,
+      { op: "i32.sub" } as Instr,
+      { op: "memory.grow" } as Instr,
+      { op: "drop" } as Instr,
+    ],
+  } as Instr);
+
+  // for j in [0, len): scratch[scratchStart + j] = arr[base + j] & 0xff
+  const jLocal = allocLocal(fctx, `__dvw_j_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.set", index: jLocal } as Instr);
+  const loopBody: Instr[] = [
+    { op: "local.get", index: jLocal } as Instr,
+    { op: "local.get", index: lenLocal } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "br_if", depth: 1 } as Instr,
+    // addr = scratchStart + j
+    { op: "i32.const", value: scratchStart } as Instr,
+    { op: "local.get", index: jLocal } as Instr,
+    { op: "i32.add" } as Instr,
+    // value = arr[base + j] & 0xff
+    { op: "local.get", index: arrLocal } as Instr,
+    { op: "local.get", index: baseLocal } as Instr,
+    { op: "local.get", index: jLocal } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "array.get", typeIdx: arrTypeIdx } as Instr,
+    { op: "i32.const", value: 0xff } as Instr,
+    { op: "i32.and" } as Instr,
+    { op: "i32.store8", align: 0, offset: 0 } as Instr,
+    { op: "local.get", index: jLocal } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "local.set", index: jLocal } as Instr,
+    { op: "br", depth: 0 } as Instr,
+  ];
+  fctx.body.push({
+    op: "block",
+    blockType: { kind: "empty" },
+    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+  } as Instr);
+
+  return lenLocal;
+}
