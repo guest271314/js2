@@ -40,6 +40,8 @@ import { addStringConstantGlobal } from "../index.js";
 import { isStandalonePromiseActive } from "../async-scheduler.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { compileStringLiteral } from "../string-ops.js";
+import { classMemberFuncKey } from "../class-member-keys.js"; // (#2637 B2.1) onhost-ctor funcMap key
+import { emitFuncRefAsClosure } from "../closures.js"; // (#2637 B2.1) materialize $Class_new__onhost as a no-capture closure
 
 /**
  * Returns the resolved class name if `name` (a user-visible identifier or
@@ -77,6 +79,17 @@ export function resolvePromiseSubclassName(ctx: CodegenContext, name: string): s
  * not be registered (caller should fall back to its default emission).
  */
 export function emitPromiseSubclassCtor(ctx: CodegenContext, fctx: FunctionContext, resolved: string): boolean {
+  // (#2637 B2.1) If this class declared a user constructor, register its
+  // run-on-host body (`$<Class>_new__onhost`) with the runtime FIRST, so that
+  // when V8's `NewPromiseCapability(C)` performs `new C(internalExecutor)` the
+  // synthesized JS ctor (in `__promise_subclass_ctor`) finds and runs the body
+  // on the capability promise. Emitting here — at the single chokepoint every
+  // combinator / value-read path funnels through — guarantees the registration
+  // executes before the `__promise_subclass_ctor` call below at runtime, with
+  // no module-init plumbing. Idempotent (once per class per compile; the
+  // runtime Map.set is idempotent too).
+  emitRegisterPromiseSubclassCtor(ctx, fctx, resolved);
+
   const importName = "__promise_subclass_ctor";
   let funcIdx =
     ctx.funcMap.get(importName) ?? ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "externref" }]);
@@ -98,6 +111,66 @@ export function emitPromiseSubclassCtor(ctx: CodegenContext, fctx: FunctionConte
   }
   fctx.body.push({ op: "call", funcIdx });
   return true;
+}
+
+/**
+ * (#2637 B2.1) Emit a `__register_promise_subclass_ctor(<name>, <closure>)`
+ * call for `resolved`, where `<closure>` is a no-capture closure materializing
+ * the pre-registered `$<resolved>_new__onhost` body (the run-on-host-`this`
+ * constructor, B2.3). No-op when the class has no `__onhost` body — i.e. a
+ * default-constructor subclass (no user ctor): the runtime's bare forwarder is
+ * correct there and there is nothing to run (the #1977 identity-only row).
+ *
+ * Emitted at EVERY combinator / value-read site (not deduped per compile),
+ * because whichever site executes first at runtime must perform the
+ * registration before `__promise_subclass_ctor` synthesizes / uses `C`. The
+ * runtime `Map.set` is idempotent, so repeated registrations are harmless; the
+ * wrapper STRUCT type is shared per-signature via `getOrCreateFuncRefWrapperTypes`
+ * so only a thin per-site trampoline duplicates.
+ *
+ * Late-import discipline: `ensureLateImport` for the registration import is
+ * flushed BEFORE the closure's `ref.func`/`struct.new` are emitted, so the
+ * trampoline funcidx baked by `emitFuncRefAsClosure` cannot be left stale by
+ * the import shift (cf. project_standalone_hostimport_gate_index_shift).
+ */
+function emitRegisterPromiseSubclassCtor(ctx: CodegenContext, fctx: FunctionContext, resolved: string): void {
+  const onHostKey = classMemberFuncKey(ctx, `${resolved}_new__onhost`);
+  const onHostFuncIdx = ctx.funcMap.get(onHostKey);
+  if (onHostFuncIdx === undefined) return; // default-ctor subclass — nothing to register
+
+  const registerName = "__register_promise_subclass_ctor";
+  ensureLateImport(ctx, registerName, [{ kind: "externref" }, { kind: "externref" }], []);
+  flushLateImportShifts(ctx, fctx);
+  const registerIdx = ctx.funcMap.get(registerName);
+  if (registerIdx === undefined) return;
+
+  // arg 0 — the class name (same host-string mechanism as the ctor call below).
+  addStringConstantGlobal(ctx, resolved);
+  const nameIdx = ctx.stringGlobalMap.get(resolved);
+  if (nameIdx !== undefined && nameIdx >= 0) {
+    fctx.body.push({ op: "global.get", index: nameIdx } as Instr);
+  } else {
+    compileStringLiteral(ctx, fctx, resolved);
+  }
+
+  // arg 1 — a no-capture closure over `$<resolved>_new__onhost`. Re-resolve the
+  // funcidx AFTER the flush above (it may have shifted). `emitFuncRefAsClosure`
+  // pushes a `(ref $wrapperStruct)`; the import expects externref, so lift it
+  // with `extern.convert_any`.
+  const onHostIdxNow = ctx.funcMap.get(onHostKey) ?? onHostFuncIdx;
+  const closureType = emitFuncRefAsClosure(ctx, fctx, onHostKey, onHostIdxNow);
+  if (closureType === null) {
+    // Could not materialize (defensive) — drop the name we already pushed and
+    // bail so the stack stays balanced.
+    fctx.body.push({ op: "drop" } as Instr);
+    return;
+  }
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+
+  // Re-resolve the register import idx as well (emitFuncRefAsClosure adds a
+  // defined function but no import, so no shift — still, be defensive).
+  const registerIdxNow = ctx.funcMap.get(registerName) ?? registerIdx;
+  fctx.body.push({ op: "call", funcIdx: registerIdxNow } as Instr);
 }
 
 /**
