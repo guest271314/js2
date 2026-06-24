@@ -7441,6 +7441,108 @@ function compileCallExpression(
           }
           return fallbackReturn(0, "i32-false");
         }
+
+        if (reflectMethod === "getPrototypeOf" && expr.arguments.length >= 1) {
+          // (#2046 PR-C) Route Reflect.getPrototypeOf(target) to the native
+          // __getPrototypeOf — the SAME helper backing standalone
+          // Object.getPrototypeOf (calls.ts ~5943). It returns
+          // extern.convert_any($Object.$proto) (may be null) for an $Object
+          // target. §28.1.1 Reflect.getPrototypeOf(target):
+          //   step 1: target not an Object → throw a TypeError. The native
+          //     returns null for a non-$Object receiver (correct for
+          //     Object.getPrototypeOf after its ToObject), so — exactly as the
+          //     deleteProperty / getOwnPropertyDescriptor PR-A guards — enforce
+          //     the §28.1.1 step-1 throw at the CALL SITE with the shared
+          //     emitNonObjectArgGuard (fires for a statically-primitive / null /
+          //     undefined target). The shared native is untouched.
+          //   step 2: return ? target.[[GetPrototypeOf]]() — the native read.
+          const arg0 = expr.arguments[0]!;
+          if (emitNonObjectArgGuard(ctx, fctx, arg0, "Reflect.getPrototypeOf")) {
+            fctx.body.push({ op: "ref.null.extern" }); // unreachable after throw
+            return { kind: "externref" };
+          }
+          const argType = compileExpression(ctx, fctx, arg0, externRef);
+          if (!argType) {
+            fctx.body.push({ op: "ref.null.extern" });
+            return { kind: "externref" };
+          }
+          if (argType.kind !== "externref") coerceType(ctx, fctx, argType, externRef);
+          const gpoIdx = ensureLateImport(ctx, "__getPrototypeOf", [externRef], [externRef]);
+          flushLateImportShifts(ctx, fctx);
+          if (gpoIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: gpoIdx });
+            return { kind: "externref" };
+          }
+          return fallbackReturn(0, "extern-null");
+        }
+
+        if (reflectMethod === "setPrototypeOf" && expr.arguments.length >= 2) {
+          // (#2046 PR-C) Route Reflect.setPrototypeOf(target, proto) to the
+          // native __object_setPrototypeOf — the SAME helper backing standalone
+          // Object.setPrototypeOf (calls.ts ~5829). It performs the §10.1.2.1
+          // OrdinarySetPrototypeOf extensibility + cycle checks, writes
+          // $Object.$proto (field 0) on success, and returns `obj` (NOT a
+          // boolean). §28.1.14 Reflect.setPrototypeOf(target, proto):
+          //   step 1: target not an Object → throw a TypeError. The native
+          //     silently no-ops (returns obj) on a non-$Object receiver, so
+          //     enforce the step-1 throw at the CALL SITE with the shared
+          //     emitNonObjectArgGuard (statically-primitive / null / undefined
+          //     target).
+          //   step 2: proto not Object and not null → throw a TypeError. Reuse
+          //     the same static guard on the proto arg, but `null` is a LEGAL
+          //     proto here (unlike target), so only reject a statically-
+          //     primitive NON-null proto. A `null`/`undefined`/object proto
+          //     passes; a number/string/boolean proto literal throws.
+          //   step 4: return the boolean [[SetPrototypeOf]] result. The native
+          //     has no failure channel (a refused set — non-extensible target or
+          //     a cycle — silently no-ops and still returns obj), so we drop obj
+          //     and return i32 `true`. KNOWN LIMITATION (identical to the
+          //     standalone Reflect.defineProperty arm above): a *refused* set
+          //     returns the spec's `true` instead of `false`. Faithful handling
+          //     needs a boolean failure channel in __object_setPrototypeOf and is
+          //     out of this slice; converting the common refusal→working path is
+          //     the win.
+          const targetArg = expr.arguments[0]!;
+          const protoArg = expr.arguments[1]!;
+          // §28.1.14 step 1: statically-non-object target → throw TypeError.
+          if (emitNonObjectArgGuard(ctx, fctx, targetArg, "Reflect.setPrototypeOf")) {
+            fctx.body.push({ op: "i32.const", value: 0 }); // unreachable after throw
+            return { kind: "i32" };
+          }
+          // §28.1.14 step 2: a statically-primitive proto that is NOT null/
+          // undefined is illegal. `null`/`undefined` set the prototype to null
+          // (legal), so let them through to the native (which maps a non-$Object
+          // proto to a null $proto).
+          const protoIsNullish =
+            protoArg.kind === ts.SyntaxKind.NullKeyword ||
+            (ts.isIdentifier(protoArg) && protoArg.text === "undefined") ||
+            protoArg.kind === ts.SyntaxKind.UndefinedKeyword;
+          if (!protoIsNullish && emitNonObjectArgGuard(ctx, fctx, protoArg, "Reflect.setPrototypeOf")) {
+            fctx.body.push({ op: "i32.const", value: 0 }); // unreachable after throw
+            return { kind: "i32" };
+          }
+          // obj (externref)
+          const objType = compileExpression(ctx, fctx, targetArg, externRef);
+          if (!objType) {
+            fctx.body.push({ op: "i32.const", value: 1 });
+            return { kind: "i32" };
+          }
+          if (objType.kind !== "externref") coerceType(ctx, fctx, objType, externRef);
+          // proto (externref) — compileProtoArg reifies an inline-literal proto
+          // into a native $Object so __object_setPrototypeOf's `ref.test $Object`
+          // succeeds (the same #2580 M3 Stage A handling Object.setPrototypeOf
+          // uses); keeps the ordinary externref path for non-literal / null protos.
+          compileProtoArg(ctx, fctx, protoArg);
+          const spoIdx = ensureLateImport(ctx, "__object_setPrototypeOf", [externRef, externRef], [externRef]);
+          flushLateImportShifts(ctx, fctx);
+          if (spoIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: spoIdx });
+            fctx.body.push({ op: "drop" }); // native returns obj; Reflect wants a boolean
+            fctx.body.push({ op: "i32.const", value: 1 }); // success → true (see KNOWN LIMITATION)
+            return { kind: "i32" };
+          }
+          return fallbackReturn(0, "i32-true");
+        }
         // Boolean-returning methods need an i32 on the stack; the rest return
         // externref. Pick the fallback shape per method so the surrounding
         // expression still type-checks even though the module is already marked

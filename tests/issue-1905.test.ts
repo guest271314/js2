@@ -72,9 +72,12 @@ describe("#1905 standalone native Reflect object subset", () => {
     // NOTE: defineProperty is no longer in this list — #2046 routes it to the
     // native __obj_define_from_desc applier (the same path backing standalone
     // Object.defineProperty). getOwnPropertyDescriptor was likewise removed by
-    // the #2046 S5 slice.
+    // the #2046 S5 slice. getPrototypeOf / setPrototypeOf were removed by the
+    // #2046 PR-C slice (routed to __getPrototypeOf / __object_setPrototypeOf,
+    // the same natives backing standalone Object.getPrototypeOf/setPrototypeOf).
+    // apply (needs CreateListFromArrayLike + a call/spread analog) and construct
+    // (#2158-gated) remain refused.
     const cases: ReadonlyArray<[string, string]> = [
-      ["getPrototypeOf", `export function f(o: any): any { return Reflect.getPrototypeOf(o); }`],
       ["apply", `export function f(fn: any, t: any, a: any): any { return Reflect.apply(fn, t, a); }`],
       ["construct", `export function f(c: any, a: any): any { return Reflect.construct(c, a); }`],
     ];

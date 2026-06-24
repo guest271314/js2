@@ -303,4 +303,122 @@ describe("#2046 standalone Reflect spec gaps", () => {
       }`),
     ).toBe(1);
   });
+
+  // ── PR-C: Reflect.getPrototypeOf / setPrototypeOf (§26.1.8 / §26.1.14) ─────
+  // Routed to the SAME natives backing standalone Object.getPrototypeOf
+  // (__getPrototypeOf) / Object.setPrototypeOf (__object_setPrototypeOf).
+  // Reflect/Object share the §10.1.2.1 OrdinarySetPrototypeOf semantics and the
+  // closed-struct-vs-$Object substrate gap (#2580 M3): the round-trip is only
+  // observable for dynamic ($any-typed / Object.create) objects, which is what
+  // the test262 Reflect rows use — these tests pin that working path.
+
+  it("Reflect.setPrototypeOf then getPrototypeOf round-trips by identity", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const proto: any = { m: 42 };
+        const o: any = {};
+        Reflect.setPrototypeOf(o, proto);
+        return Reflect.getPrototypeOf(o) === proto ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.setPrototypeOf returns true on a successful set", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const proto: any = { m: 1 };
+        const o: any = {};
+        return Reflect.setPrototypeOf(o, proto) ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.getPrototypeOf returns the proto set via Object.create", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const proto: any = { m: 7 };
+        const o: any = Object.create(proto);
+        return Reflect.getPrototypeOf(o) === proto ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.getPrototypeOf of a plain object is null (standalone models null proto)", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const o: any = { a: 1 };
+        return Reflect.getPrototypeOf(o) === null ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.getPrototypeOf returns a stable identity across calls", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const proto: any = { m: 1 };
+        const o: any = {};
+        Reflect.setPrototypeOf(o, proto);
+        return Reflect.getPrototypeOf(o) === Reflect.getPrototypeOf(o) ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.setPrototypeOf with a null proto is legal and returns true (§26.1.14)", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const o: any = {};
+        return Reflect.setPrototypeOf(o, null) ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.getPrototypeOf on a primitive throws a catchable TypeError (§26.1.8 step 1)", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        try { Reflect.getPrototypeOf(5); return 0; }
+        catch (e) { return 1; }
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.getPrototypeOf on undefined/null throws a catchable TypeError", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        let caught = 0;
+        try { Reflect.getPrototypeOf(undefined); } catch (e) { caught++; }
+        try { Reflect.getPrototypeOf(null); } catch (e) { caught++; }
+        return caught === 2 ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.setPrototypeOf on a primitive target throws a catchable TypeError (§26.1.14 step 1)", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        try { Reflect.setPrototypeOf(5, {}); return 0; }
+        catch (e) { return 1; }
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.setPrototypeOf with a non-null primitive proto throws a catchable TypeError (§26.1.14 step 2)", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const o: any = {};
+        try { Reflect.setPrototypeOf(o, 42); return 0; }
+        catch (e) { return 1; }
+      }`),
+    ).toBe(1);
+  });
+
+  // ── PR-C: Reflect.apply stays out of scope (no native call/spread analog) ──
+  it("Reflect.apply is still refused at compile time in standalone (out of PR-C scope)", async () => {
+    await expectCompileRefusal(
+      `function add(a: number, b: number): number { return a + b; }
+       export function test(): number {
+         return Reflect.apply(add, undefined, [2, 3]);
+       }`,
+      "Reflect.apply not supported in standalone mode",
+    );
+  });
 });
