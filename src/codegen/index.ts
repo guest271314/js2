@@ -1,5 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts, forEachChild } from "../ts-api.js";
+import { emitToBoolean } from "./coercion-engine.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
@@ -50,6 +51,7 @@ import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
 import { fillApplyClosure, fillExternGetIdxVecArms, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
+import { fillClassToPrimitive } from "./class-to-primitive.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -76,7 +78,13 @@ import {
   getOrRegisterTemplateVecType,
   getOrRegisterVecType,
 } from "./registry/types.js";
-import { exportDrainMicrotasksIfRegistered, getDrainFuncIdxForWasiStart } from "./async-scheduler.js";
+import {
+  enableStdinReactor,
+  ensureTimerHeap,
+  exportDrainMicrotasksIfRegistered,
+  getDrainFuncIdxForWasiStart,
+  getRunLoopFuncIdxForWasiStart,
+} from "./async-scheduler.js";
 import { flushLateImportShifts, registerAddStringImports, registerAddUnionImports } from "./shared.js";
 import { stackBalance, getFixupEvents, summarizeFixups, strictBalanceDiagnostics } from "./stack-balance.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
@@ -1065,7 +1073,17 @@ export function generateModule(
       // (never escape the GC heap) so they can be backed by linear memory with
       // zero-copy fd_read/fd_write. Side-effect free; codegen consumers are
       // additive (empty result ⇒ emitted module identical to today).
-      ctx.linearUint8 = analyzeLinearUint8(ast.checker, ast.sourceFile);
+      // #2631 — pass the node:fs readSync/writeSync binding names from the
+      // ORIGINAL source (import preprocessing has already stripped the `node:fs`
+      // import from `ast.sourceFile`, so the analysis can't rediscover them).
+      // `ctx.wasiNodeFsFuncs` records the local names of node:fs imports; the
+      // byte-IO sink recognition only fires for these, so it's byte-neutral for
+      // every program that doesn't import them.
+      const nodeFsSyncNames = new Set<string>();
+      for (const name of ctx.wasiNodeFsFuncs) {
+        if (name === "readSync" || name === "writeSync") nodeFsSyncNames.add(name);
+      }
+      ctx.linearUint8 = analyzeLinearUint8(ast.checker, ast.sourceFile, nodeFsSyncNames);
       // #1886 Slice B: reserve the `__lin_u8_alloc` bump-allocator's
       // `(i32)->(i32)` func TYPE eagerly, here — BEFORE any WasmGC struct/array
       // type or native-string helper is registered. This keeps the shared
@@ -1804,6 +1822,15 @@ export function generateModule(
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch (#866)
     emitToPrimitiveMethodExports(ctx);
 
+    // (#2638) Fill the reserved `__class_to_primitive` driver now that the
+    // per-struct `__call_valueOf`/`__call_toString` dispatchers exist (emitted
+    // just above). `__to_primitive`'s standalone class arm baked a `call` to the
+    // reserved funcIdx at emit time; here it gets the real §7.1.1.1
+    // valueOf/toString dispatch so `(new C() as any) - 8` / `Number(new C() as any)`
+    // reduce via the class's methods host-free. No-op when no standalone
+    // `__to_primitive` reserved it (`ctx.classToPrimitiveReserved`).
+    fillClassToPrimitive(ctx);
+
     // #1326c Phase 1C-A — export __drain_microtasks BEFORE WASI _start so the
     // _start wrapper (which appends a drain call) can find its funcIdx.
     // Idempotent + no-op when the queue was never registered.
@@ -2078,13 +2105,21 @@ function addWasiStartExport(ctx: CodegenContext): void {
     const startFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
     const body: Instr[] = [{ op: "call", funcIdx: targetIdx }];
 
-    // #1326c Phase 1C-A — auto-drain the microtask queue after the entry
-    // function returns. Only emits the call when the async scheduler
-    // actually registered the queue helpers; otherwise leaves the body
-    // unchanged (no perf cost for modules that never schedule microtasks).
-    const drainFuncIdx = getDrainFuncIdxForWasiStart(ctx);
-    if (drainFuncIdx !== null) {
-      body.push({ op: "call", funcIdx: drainFuncIdx });
+    // #2632 Phase 1 — drive the event-loop reactor after the entry function
+    // returns. When the timer heap was registered, `__run_event_loop`
+    // SUPERSEDES the one-shot drain: it drains microtasks AND fires timers in a
+    // loop until no pending handles remain (and it calls `__drain_microtasks`
+    // itself, so we must NOT also emit the bare drain). When no timer heap was
+    // registered, fall back to the #1326c one-shot drain — byte-identical to
+    // the prior behaviour for every program that uses no timers.
+    const runLoopFuncIdx = getRunLoopFuncIdxForWasiStart(ctx);
+    if (runLoopFuncIdx !== null) {
+      body.push({ op: "call", funcIdx: runLoopFuncIdx });
+    } else {
+      const drainFuncIdx = getDrainFuncIdxForWasiStart(ctx);
+      if (drainFuncIdx !== null) {
+        body.push({ op: "call", funcIdx: drainFuncIdx });
+      }
     }
 
     ctx.mod.functions.push({
@@ -4221,6 +4256,12 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
       name: exportName,
       desc: { kind: "func", index: funcIdx },
     });
+
+    // (#2638) Record the dispatcher funcIdx so `fillClassToPrimitive` can `call`
+    // it from the reserved `__class_to_primitive` driver. The host-side
+    // `_hostToPrimitive` loop reaches these via the export, not funcMap, so this
+    // is purely additive (the iterator dispatchers already use this convention).
+    ctx.funcMap.set(exportName, funcIdx);
   };
 
   emitDispatchForMethod("toString", "__call_toString");
@@ -5704,6 +5745,49 @@ function collectConsoleImports(ctx: CodegenContext, sourceFile: ts.SourceFile): 
   }
 }
 
+/**
+ * #2633 — does the source use stream-write IO that lowers, under
+ * `--link-node-shims`, to `node:fs` `writeSync` (console.log/warn/error,
+ * process.stdout/stderr.write)? Drives the node:fs import registration in
+ * `registerWasiImports`: even a program that never `import`s `node:fs`
+ * explicitly needs the `node:fs` `writeSync` import the moment it writes to a
+ * stream, because the std-IO write path is lowered to `node:fs` `writeSync(fd,
+ * …)` (fd 1/2) — the bespoke `js2wasm:node-process` shim was retired (#2633).
+ * Cheap syntactic scan — codegen lowers the calls regardless; this only decides
+ * whether the `node:fs` write import is pulled in.
+ */
+function sourceUsesStreamWriteIo(sourceFile: ts.SourceFile): boolean {
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if (ts.isPropertyAccessExpression(node)) {
+      // console.log/warn/error
+      if (
+        ts.isIdentifier(node.expression) &&
+        node.expression.text === "console" &&
+        (node.name.text === "log" || node.name.text === "warn" || node.name.text === "error")
+      ) {
+        found = true;
+        return;
+      }
+      // process.stdout.write / process.stderr.write
+      if (
+        node.name.text === "write" &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        ts.isIdentifier(node.expression.expression) &&
+        node.expression.expression.text === "process" &&
+        (node.expression.name.text === "stdout" || node.expression.name.text === "stderr")
+      ) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
 /** Register WASI imports: fd_write, proc_exit, path_open, fd_close, linear memory, bump pointer global */
 function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): void {
   // Add linear memory for string data + iovec structs.
@@ -5718,29 +5802,53 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // the write scratch in page 2 (WASI_WRITE_SCRATCH_START), well above any
   // data segment, and reserve 3 pages so both regions always exist.
   if (ctx.linkNodeShims) {
-    // #2524 Phase 1 — the node-process shim OWNS + exports the linear memory; the
-    // user module IMPORTS it (memory index 0) so the shim can read/write the
-    // user's bytes over the SAME memory with no instantiation cycle (shim
-    // imports only wasi_snapshot_preview1; user imports {memory + io fns} from
-    // the already-instantiated shim). The user module therefore declares NO
-    // memory and exports none. `min: 3` mirrors the inline path's reservation
-    // (page 0 scratch/data, page 1 stdin buffer, page 2 write scratch); the
-    // shim's exported memory must be at least this large (its source declares
-    // the same min). Imports MUST precede the func imports below so the memory
-    // sits at memory-index 0 (loads/stores/`memory.size`/`memory.grow` all
-    // target it). The import order within the import section does not perturb
-    // the func index space — only func imports increment it.
-    addImport(ctx, "js2wasm:node-process", "memory", { kind: "memory", min: 3 });
-    // The three byte-boundary IO functions (over the shared memory):
-    //   stdout_write(ptr,len)->i32 · stderr_write(ptr,len) · stdin_read(ptr,len)->i32
-    const ioWriteType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [{ kind: "i32" }], "$node_io_write");
-    const ioWriteVoidType = addFuncType(ctx, [{ kind: "i32" }, { kind: "i32" }], [], "$node_io_write_void");
-    addImport(ctx, "js2wasm:node-process", "stdout_write", { kind: "func", typeIdx: ioWriteType });
-    ctx.nodeIoStdoutWriteIdx = ctx.funcMap.get("stdout_write")!;
-    addImport(ctx, "js2wasm:node-process", "stderr_write", { kind: "func", typeIdx: ioWriteVoidType });
-    ctx.nodeIoStderrWriteIdx = ctx.funcMap.get("stderr_write")!;
-    addImport(ctx, "js2wasm:node-process", "stdin_read", { kind: "func", typeIdx: ioWriteType });
-    ctx.nodeIoStdinReadIdx = ctx.funcMap.get("stdin_read")!;
+    // #2633 — std-IO under `--link-node-shims` is satisfied entirely by the
+    // `node:fs` interface (fd-based `readSync`/`writeSync`), the faithful
+    // synchronous Node primitives. The bespoke `js2wasm:node-process` shim
+    // (`stdout_write`/`stderr_write`/`stdin_read`) was retired: its functions
+    // were a 1:1 fd-fixed special-case of `writeSync(1|2, …)` / `readSync(0,
+    // …)`, so the std-IO write path (console.log/warn/error,
+    // process.stdout/stderr.write) now lowers to `node:fs` `writeSync(fd, …)`
+    // with the fd pushed explicitly. `node:fs` OWNS + exports the single shared
+    // linear memory.
+    //
+    // The shim OWNS + exports the linear memory; the user module IMPORTS it
+    // (memory index 0) so the shim can read/write the user's bytes over the
+    // SAME memory with no instantiation cycle (shim imports only
+    // wasi_snapshot_preview1; user imports {memory + io fns} from the
+    // already-instantiated shim). The user module declares NO memory and exports
+    // none. `min: 3` mirrors the inline path's reservation (page 0 scratch/data,
+    // page 1 stdin buffer, page 2 write scratch). The memory import MUST precede
+    // the func imports below so it sits at memory-index 0 (loads/stores/
+    // `memory.size`/`memory.grow` all target it). Import order within the import
+    // section does not perturb the func index space — only func imports increment it.
+    addImport(ctx, "node:fs", "memory", { kind: "memory", min: 3 });
+
+    // node:fs fd-based IO funcs: readSync(fd,ptr,len)->i32 /
+    // writeSync(fd,ptr,len)->i32 over the shared memory. The user module imports
+    // module `"node:fs"` (declaring WHAT it needs, not the shim that provides
+    // it); the `node-fs.wat` shim is one provider. `writeSync` is registered
+    // whenever the program does any stream write (explicit `import { writeSync }`
+    // OR console.log/process.std*.write), `readSync` whenever it imports
+    // `readSync` from node:fs.
+    const usesWriteSync = ctx.wasiNodeFsFuncs.has("writeSync") || sourceUsesStreamWriteIo(sourceFile);
+    const usesReadSync = ctx.wasiNodeFsFuncs.has("readSync");
+    if (usesReadSync || usesWriteSync) {
+      const fsIoType = addFuncType(
+        ctx,
+        [{ kind: "i32" }, { kind: "i32" }, { kind: "i32" }],
+        [{ kind: "i32" }],
+        "$node_fs_io",
+      );
+      if (usesReadSync) {
+        addImport(ctx, "node:fs", "readSync", { kind: "func", typeIdx: fsIoType });
+        ctx.nodeFsReadSyncIdx = ctx.funcMap.get("readSync")!;
+      }
+      if (usesWriteSync) {
+        addImport(ctx, "node:fs", "writeSync", { kind: "func", typeIdx: fsIoType });
+        ctx.nodeFsWriteSyncIdx = ctx.funcMap.get("writeSync")!;
+      }
+    }
   } else {
     ctx.mod.memories.push({ min: 3 });
     // WASI requires the memory to be exported as "memory"
@@ -5785,6 +5893,16 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // the helper here keeps the infrastructure in place for the follow-up that
   // lowers timer calls to synchronous sleeps via the async scheduler.
   let needsPollOneoff = false;
+  // #2632 Phase 1 — source references a timer / microtask scheduler global
+  // (setTimeout/setInterval/clearTimeout/clearInterval/queueMicrotask). Drives
+  // ensureTimerHeap + the run-loop reactor in emitDeferredWasiHelpers, and the
+  // `getRunLoopFuncIdxForWasiStart` wiring in addWasiStartExport.
+  let needsTimerHeap = false;
+  // #2632 Phase 2 — source references the fd0 stdin reactor (a `__wasiStdinReadByte()`
+  // call, or `process.stdin` streaming usage). Activates the multi-subscription
+  // poll_oneoff (fd0 + timer) + internal stdin buffer; implies fd_read,
+  // fd_fdstat_set_flags, poll_oneoff, clock_time_get, and the timer heap/run loop.
+  let needsStdinReactor = false;
   // #1482: process.env.X access — register environ_get / environ_sizes_get +
   // the JS-polyfill fast-path host import.
   let needsEnviron = false;
@@ -5859,10 +5977,54 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     // #1484 — track setTimeout/setInterval/setImmediate to drive poll_oneoff
     // helper emission. Only bare-identifier call positions count (member-name
     // positions like `obj.setTimeout` are skipped).
+    // #2632 Phase 1 — setTimeout/setInterval/clearTimeout/clearInterval are now
+    // LOWERED onto the timer heap + run-loop reactor (no longer rejected). They
+    // require poll_oneoff (the blocking sleep), clock_time_get (monotonic now),
+    // and the timer heap. queueMicrotask needs only the microtask queue, which
+    // the reactor also drives, so it sets needsTimerHeap to wire the run loop.
     if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
       const callee = node.expression.text;
-      if (callee === "setTimeout" || callee === "setInterval" || callee === "setImmediate") {
+      // A user function/local shadowing the global keeps its own semantics —
+      // the reactor must NOT register/lower for it. The global timer names are
+      // declared ONLY in lib .d.ts files; a user shadow has a declaration in a
+      // real (.ts) source file. (Mirrors the call-site guard in calls.ts.)
+      const isGlobalShadowed = (() => {
+        const sym = ctx.checker.getSymbolAtLocation(node.expression);
+        const decls = sym?.declarations;
+        return !!decls && decls.length > 0 && !decls.every((d) => d.getSourceFile().isDeclarationFile);
+      })();
+      if (!isGlobalShadowed && (callee === "setTimeout" || callee === "setInterval" || callee === "setImmediate")) {
         needsPollOneoff = true;
+      }
+      if (!isGlobalShadowed && (callee === "setTimeout" || callee === "setInterval")) {
+        needsPollOneoff = true;
+        needsClockTimeGet = true;
+        needsTimerHeap = true;
+      }
+      if (
+        !isGlobalShadowed &&
+        (callee === "clearTimeout" || callee === "clearInterval" || callee === "queueMicrotask")
+      ) {
+        needsTimerHeap = true;
+      }
+      // #2632 Phase 2 — `__wasiStdinReadByte()` is the internal-buffer primitive
+      // exposed for the fd0 reactor (Phase 3's process.stdin Readable builds on
+      // it). It activates the fd-readiness reactor + run loop. (No user shadow
+      // applies — it is a js2wasm-internal name, not a lib global.)
+      // #2632 Phase 3 adds three more internal stdin primitives the library
+      // `process.stdin` Readable uses: read-N / available / EOF query and the
+      // reactor-tick reader hook. They all activate the same fd0 reactor.
+      if (
+        callee === "__wasiStdinReadByte" ||
+        callee === "__wasiStdinAvailable" ||
+        callee === "__wasiStdinEof" ||
+        callee === "__wasiStdinSetReader"
+      ) {
+        needsStdinReactor = true;
+        needsFdRead = true;
+        needsPollOneoff = true;
+        needsClockTimeGet = true;
+        needsTimerHeap = true;
       }
     }
     // #1482: detect `process.env.X` (PropertyAccessExpression nested two deep)
@@ -5899,24 +6061,27 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
 
   // #2524 — remember whether the source needs a stream/console *write* helper
   // (console.log/warn/error, process.std*.write) independent of the syscall
-  // import decision below. Under the node-process shim those helpers still get
-  // emitted, but they call `js2wasm:node-process::std{out,err}_write` instead of
-  // `wasi_snapshot_preview1.fd_write`.
+  // import decision below. Under the node shims those helpers still get
+  // emitted, but they call `node:fs::writeSync(fd, …)` instead of
+  // `wasi_snapshot_preview1.fd_write` (#2633).
   const needsStreamWriteHelper = needsFdWrite;
 
   // writeFileSync also needs fd_write for the actual file data write
   if (needsPathOpen) needsFdWrite = true;
 
-  // #2524 Phase 1 — when the node-process shim is active, the stream/console IO path
-  // (process.std*.write, process.stdin.read, console.log/warn/error) is lowered
-  // to `js2wasm:node-process` calls (registered above), so it does NOT pull
-  // wasi_snapshot_preview1.fd_read/fd_write into the user module. Only a file
-  // write (writeFileSync → path_open) still needs the real syscalls. Recompute
-  // the syscall-import needs accordingly: keep fd_write solely for the file
-  // path, and drop fd_read entirely (stdin goes through the shim).
+  // #2633 — under the node shims the stream/console IO path (process.std*.write,
+  // console.log/warn/error) is lowered to `node:fs::writeSync` calls (registered
+  // above), so it does NOT pull wasi_snapshot_preview1.fd_read/fd_write into the
+  // user module. Only a file write (writeFileSync → path_open) still needs the
+  // real syscalls. Recompute the syscall-import needs accordingly: keep fd_write
+  // solely for the file path, and drop fd_read entirely (the `node:fs` shim owns
+  // the read syscall; the hallucinated `process.stdin.read` was removed).
   if (ctx.linkNodeShims) {
     needsFdWrite = needsPathOpen;
-    needsFdRead = false;
+    // #2632 Phase 2 — the fd0 reactor drives `fd_read` directly from readiness
+    // (not the node-process shim's stdin_read). Keep the inline fd_read import
+    // when the reactor is active; otherwise stdin flows through the shim.
+    needsFdRead = needsStdinReactor;
   }
 
   // fd_write(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) -> i32
@@ -5948,6 +6113,21 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     );
     addImport(ctx, "wasi_snapshot_preview1", "fd_read", { kind: "func", typeIdx: fdReadType });
     ctx.wasiFdReadIdx = ctx.funcMap.get("fd_read")!;
+  }
+
+  // #2632 Phase 2 — fd_fdstat_set_flags(fd, flags) -> errno (i32). Used by the
+  // fd0 stdin reactor to put fd 0 in non-blocking mode so a post-readiness
+  // fd_read can't block. Registered BEFORE any defined helper so its late-import
+  // shift discipline matches fd_read / poll_oneoff (CLAUDE.md "addUnionImports").
+  if (needsStdinReactor) {
+    const setFlagsType = addFuncType(
+      ctx,
+      [{ kind: "i32" }, { kind: "i32" }],
+      [{ kind: "i32" }],
+      "$wasi_fd_fdstat_set_flags",
+    );
+    addImport(ctx, "wasi_snapshot_preview1", "fd_fdstat_set_flags", { kind: "func", typeIdx: setFlagsType });
+    ctx.wasiFdFdstatSetFlagsIdx = ctx.funcMap.get("fd_fdstat_set_flags")!;
   }
 
   // #1322: random_get(buf_ptr: i32, buf_len: i32) -> errno (i32)
@@ -6072,6 +6252,18 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   if (needsPollOneoff) {
     ctx.wasiPendingSleepMsHelper = true;
   }
+  // #2632 Phase 1 — defer timer-heap + run-loop registration to
+  // emitDeferredWasiHelpers (after __wasi_sleep_ms + clock_time_get are
+  // registered, before user bodies compile), so __timer_add / __timer_cancel
+  // func indices referenced at timer call sites are final.
+  if (needsTimerHeap) {
+    ctx.wasiPendingTimerHeap = true;
+  }
+  // #2632 Phase 2 — activate the fd0 stdin reactor before timer-heap registration
+  // (so the run-loop body builds in the fd-reactor shape).
+  if (needsStdinReactor) {
+    ctx.wasiPendingStdinReactor = true;
+  }
 }
 
 /**
@@ -6102,6 +6294,22 @@ export function emitDeferredWasiHelpers(ctx: CodegenContext): void {
   // async scheduler to call this for setTimeout/await sleep().
   if (ctx.wasiPendingSleepMsHelper && !ctx.funcMap.has("__wasi_sleep_ms")) {
     emitWasiSleepMsHelper(ctx);
+  }
+
+  // #2632 Phase 2 — activate the fd0 stdin reactor BEFORE ensureTimerHeap so the
+  // run-loop body is built in the multi-sub-poll / internal-buffer shape and the
+  // Phase-2 globals + helpers (`__rl_stdin_drain`, `__rl_poll_fd0_or_clock`)
+  // register at stable func indices ahead of `__run_event_loop`.
+  if (ctx.wasiPendingStdinReactor) {
+    enableStdinReactor(ctx);
+  }
+
+  // #2632 Phase 1 — register the timer heap + run-loop reactor. MUST run after
+  // __wasi_sleep_ms (the run loop calls it) and clock_time_get registration
+  // (for __rl_now_ns), and BEFORE user bodies compile so the __timer_add /
+  // __timer_cancel func indices baked into timer call sites are final.
+  if (ctx.wasiPendingTimerHeap && !ctx.funcMap.has("__run_event_loop")) {
+    ensureTimerHeap(ctx);
   }
 }
 
@@ -6198,14 +6406,15 @@ function emitWasiWriteStringHelper(ctx: CodegenContext): void {
   ctx.funcMap.set("__wasi_write_string", funcIdx);
 
   // Parameters: 0=ptr, 1=len
-  // #2524 Phase 1 — under the node-process shim, delegate straight to the imported
-  // `js2wasm:node-process::stdout_write(ptr, len)` (the shim owns the iovec/syscall);
-  // no fd_write import exists in the user module.
+  // #2633 — under the node shims, delegate to the imported `node:fs`
+  // `writeSync(fd=1, ptr, len)` (the shim owns the iovec/syscall); no fd_write
+  // import exists in the user module.
   const body: Instr[] = ctx.linkNodeShims
     ? [
+        { op: "i32.const", value: 1 } as Instr, // fd = stdout
         { op: "local.get", index: 0 } as Instr,
         { op: "local.get", index: 1 } as Instr,
-        { op: "call", funcIdx: ctx.nodeIoStdoutWriteIdx } as Instr,
+        { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
         { op: "drop" } as Instr, // drop bytes-written
       ]
     : [
@@ -6247,13 +6456,15 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
   ctx.funcMap.set("__wasi_write_string_stderr", funcIdx);
 
   // Parameters: 0=ptr, 1=len
-  // #2524 Phase 1 — under the node-process shim, delegate to the imported
-  // `js2wasm:node-process::stderr_write(ptr, len)` (returns void).
+  // #2633 — under the node shims, delegate to the imported `node:fs`
+  // `writeSync(fd=2, ptr, len)` (returns bytes-written → drop).
   const body: Instr[] = ctx.linkNodeShims
     ? [
+        { op: "i32.const", value: 2 } as Instr, // fd = stderr
         { op: "local.get", index: 0 } as Instr,
         { op: "local.get", index: 1 } as Instr,
-        { op: "call", funcIdx: ctx.nodeIoStderrWriteIdx } as Instr,
+        { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
+        { op: "drop" } as Instr, // drop bytes-written
       ]
     : [
         // iovec at memory[0]: { buf_ptr: i32, buf_len: i32 }; nwritten at memory[8]
@@ -6296,7 +6507,7 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
  * `registerWasiImports` reserves 3 pages so both always exist.
  */
 export const WASI_STDIN_BUF_START = 64 * 1024;
-const WASI_WRITE_SCRATCH_START = 128 * 1024;
+export const WASI_WRITE_SCRATCH_START = 128 * 1024;
 
 /**
  * #1886 Slice B — start of the linear-backed `Uint8Array` arena (page 4,
@@ -6315,20 +6526,18 @@ const LINEAR_U8_ARENA_START = 256 * 1024;
  * Inline (default) path: build the iovec at memory[0..7] pointing at
  * `srcConst`, call `fd_write(fd, iovs=0, iovs_len=1, nwritten=8)`, drop errno.
  *
- * Shim path (`ctx.linkNodeShims`): call the imported `js2wasm:node-process`
- * `stdout_write`/`stderr_write(srcConst, len)` directly — the shim owns the
- * iovec + syscall over the shared memory. `stdout_write` returns bytes-written
- * (dropped); `stderr_write` returns void.
+ * Shim path (`ctx.linkNodeShims`): call the imported `node:fs`
+ * `writeSync(fd, srcConst, len)` directly — the shim owns the iovec + syscall
+ * over the shared memory. `writeSync` returns bytes-written (dropped). (#2633)
  */
 function emitWasiWriteTail(ctx: CodegenContext, fd: number, srcConst: number, lenLocalIdx: number): Instr[] {
   if (ctx.linkNodeShims) {
-    const useStderr = fd === 2;
-    const ioIdx = useStderr ? ctx.nodeIoStderrWriteIdx : ctx.nodeIoStdoutWriteIdx;
     return [
+      { op: "i32.const", value: fd } as Instr,
       { op: "i32.const", value: srcConst } as Instr,
       { op: "local.get", index: lenLocalIdx } as Instr,
-      { op: "call", funcIdx: ioIdx } as Instr,
-      ...(useStderr ? [] : [{ op: "drop" } as Instr]),
+      { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
+      { op: "drop" } as Instr, // drop bytes-written
     ];
   }
   return [
@@ -6497,71 +6706,79 @@ export function ensureLinearU8AllocHelper(ctx: CodegenContext): number {
 }
 
 /**
- * #1618: Ensure __wasi_write_any_string(s: ref NativeString) -> void exists and
- * return its function index (lazy, emitted during expression compilation).
- *
- * Writes a *runtime* string (variable, concatenation, template span) to fd=1
- * (stdout) or fd=2 (stderr). Previously these refs fell through to the
- * `[object]` placeholder in emitWasiValueToStdout, corrupting the stream.
- *
- * Strategy: flatten any AnyString (FlatString / ConsString / Utf8String) to a
- * NativeString via the existing __str_flatten helper, then encode the WTF-16
- * code units as UTF-8 bytes directly into linear memory before issuing
- * fd_write. This keeps WASI string output on the pure-Wasm path (#1470) without
- * routing through the JS-host `__str_to_mem` / `TextEncoder` bridge.
- *
- * Param 0 is typed `ref NativeString` so callers can hand us a value compiled
- * as `{ kind: "ref", typeIdx: ctx.nativeStrTypeIdx }` directly; __str_flatten
- * accepts the NativeString supertype (AnyString) and returns the flat form.
+ * Local-index layout for the shared WTF-16 → UTF-8 encoder. `S` is the AnyString
+ * param's index; the ten work-locals (`FLAT`..`LO`) are laid out contiguously
+ * starting at `base`. In Wasm, params occupy the low indices then declared
+ * locals follow, so a helper with N params declares its work-locals starting at
+ * index N. The fixed-fd writer has one param (s=0) ⇒ base 1; the runtime-fd
+ * writer has two params (s=0, fd=1) ⇒ base 2 (#2639).
  */
-export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: boolean = false): number {
-  const helperName = useStderr ? "__wasi_write_any_string_stderr" : "__wasi_write_any_string";
-  const existing = ctx.funcMap.get(helperName);
-  if (existing !== undefined) return existing;
+interface WasiStrEncodeLayout {
+  S: number;
+  FLAT: number;
+  LEN: number;
+  OFF: number;
+  DATA: number;
+  I: number;
+  O: number;
+  NEED_PAGES: number;
+  CU: number;
+  CP: number;
+  LO: number;
+}
 
-  // #2524 — node-process shim path needs no fd_write idx (see Uint8Array helper).
-  if (!ctx.wasi || (!ctx.linkNodeShims && ctx.wasiFdWriteIdx === undefined) || ctx.nativeStrTypeIdx < 0) return -1;
+/** Build the encoder local layout: AnyString param `s` at 0, work-locals at `base..base+9`. */
+function wasiStrEncodeLayout(base: number): WasiStrEncodeLayout {
+  return {
+    S: 0,
+    FLAT: base + 0,
+    LEN: base + 1,
+    OFF: base + 2,
+    DATA: base + 3,
+    I: base + 4,
+    O: base + 5,
+    NEED_PAGES: base + 6,
+    CU: base + 7,
+    CP: base + 8,
+    LO: base + 9,
+  };
+}
 
-  // Make sure the native-string runtime (incl. __str_flatten) is emitted.
-  ensureNativeStringHelpers(ctx);
-  // __str_flatten via funcMap (shift-maintained), not nativeStrHelpers (which can
-  // be stale-low after late imports). See the registration in
-  // ensureNativeStringHelpers. (#1618)
-  const flattenIdx = ctx.funcMap.get("__str_flatten");
-  if (flattenIdx === undefined) return -1;
+/** The (named, ordered) work-local declarations matching {@link wasiStrEncodeLayout}. */
+function wasiStrEncodeLocalDecls(strTypeIdx: number, strDataTypeIdx: number) {
+  return [
+    { name: "flat", type: { kind: "ref" as const, typeIdx: strTypeIdx } },
+    { name: "len", type: { kind: "i32" as const } },
+    { name: "off", type: { kind: "i32" as const } },
+    { name: "data", type: { kind: "ref" as const, typeIdx: strDataTypeIdx } },
+    { name: "i", type: { kind: "i32" as const } },
+    { name: "o", type: { kind: "i32" as const } },
+    { name: "needPages", type: { kind: "i32" as const } },
+    { name: "cu", type: { kind: "i32" as const } },
+    { name: "cp", type: { kind: "i32" as const } },
+    { name: "lo", type: { kind: "i32" as const } },
+  ];
+}
 
-  const fd = useStderr ? 2 : 1;
-  const strTypeIdx = ctx.nativeStrTypeIdx;
-  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
-  // #1723: the param MUST be the AnyString supertype, NOT the concrete
-  // NativeString. A runtime concat / template span can be a ConsString (rope),
-  // and the caller hands us whatever the expression produced. If the param were
-  // typed NativeString, the call site would have to `ref.cast` the argument down
-  // to NativeString first — which TRAPS ("illegal cast") for a ConsString. By
-  // accepting AnyString here, both NativeString and ConsString pass without any
-  // downcast, and `__str_flatten` (which takes AnyString and collapses ropes)
-  // does the flattening internally. The original NativeString param + call-site
-  // downcast is exactly what made `writeMessage` trap on a multi-segment
-  // response in the Native Messaging host (#1723).
-  const anyStrTypeIdx = ctx.anyStrTypeIdx >= 0 ? ctx.anyStrTypeIdx : strTypeIdx;
-
-  // param: s(0); locals: flat(1), len(2), off(3), data(4), i(5), o(6),
-  // needPages(7), cu(8), cp(9), lo(10)
-  const S = 0;
-  const FLAT = 1;
-  const LEN = 2;
-  const OFF = 3;
-  const DATA = 4;
-  const I = 5;
-  const O = 6;
-  const NEED_PAGES = 7;
-  const CU = 8;
-  const CP = 9;
-  const LO = 10;
-
-  const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: anyStrTypeIdx }], []);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.funcMap.set(helperName, funcIdx);
+/**
+ * Build the WTF-16 → UTF-8 encode-to-linear-scratch instruction sequence shared
+ * by every WASI write-string helper. Flattens the AnyString param (local `S`)
+ * via `__str_flatten`, grows linear memory for the worst-case 3 bytes/code-unit
+ * staging region, then encodes the code points into
+ * `[WASI_WRITE_SCRATCH_START .. WASI_WRITE_SCRATCH_START + O)`. On return the
+ * output-cursor local `O` holds the exact UTF-8 byte count; the caller appends
+ * its own write tail (fixed-fd fd_write, or runtime-fd node:fs writeSync). No
+ * value is left on the stack. (#2639 factored this out of
+ * {@link ensureWasiWriteAnyStringHelper} byte-for-byte so existing fd 1/2 output
+ * is unchanged.)
+ */
+function buildWasiStringEncodeToScratch(
+  flattenIdx: number,
+  strTypeIdx: number,
+  strDataTypeIdx: number,
+  layout: WasiStrEncodeLayout,
+): Instr[] {
+  const { FLAT, LEN, OFF, DATA, I, O, NEED_PAGES, CU, CP, LO, S } = layout;
 
   const storeByte = (offsetFromO: number, value: Instr[]): Instr[] => [
     { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
@@ -6688,7 +6905,7 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
     } as Instr,
   ];
 
-  const body: Instr[] = [
+  return [
     // flat = __str_flatten(s)
     { op: "local.get", index: S } as Instr,
     { op: "call", funcIdx: flattenIdx } as Instr,
@@ -6700,14 +6917,8 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
     { op: "local.set", index: LEN } as Instr,
 
     // #1723/#1470: grow linear memory if the staging buffer could overflow.
-    // UTF-8/WTF-8 needs at most 3 bytes per UTF-16 code unit: BMP scalars and
-    // lone surrogates are 1..3 bytes, while a surrogate pair is 4 bytes across
-    // two code units. The final fd_write length is the actual output cursor O.
-    //
+    // UTF-8/WTF-8 needs at most 3 bytes per UTF-16 code unit.
     //   neededPages = ceil((WASI_WRITE_SCRATCH_START + len*3) / 65536)
-    //
-    // ceil(x / 65536) == (x + 65535) >> 16. We `i32.shr_u` so a large length
-    // near 2^31 still computes a non-negative page count.
     { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
     { op: "local.get", index: LEN } as Instr,
     { op: "i32.const", value: 3 } as Instr,
@@ -6718,7 +6929,6 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
     { op: "i32.const", value: 16 } as Instr,
     { op: "i32.shr_u" } as Instr,
     { op: "local.set", index: NEED_PAGES } as Instr,
-    // if (needPages > memory.size) memory.grow(needPages - memory.size)
     { op: "local.get", index: NEED_PAGES } as Instr,
     { op: "memory.size" } as Instr,
     { op: "i32.gt_u" } as Instr,
@@ -6779,8 +6989,7 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
             { op: "i32.add" } as Instr,
             { op: "local.set", index: I } as Instr,
 
-            // If cu is a high surrogate and the next code unit is a low
-            // surrogate, combine them into one scalar and consume the low unit.
+            // Combine a high+low surrogate pair into one scalar.
             { op: "local.get", index: CU } as Instr,
             { op: "i32.const", value: 0xd800 } as Instr,
             { op: "i32.ge_u" } as Instr,
@@ -6840,27 +7049,132 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
         },
       ],
     },
+  ];
+}
 
-    // #2524 — write the staged UTF-8 region (`O` bytes) via fd_write or the
-    // node-process shim's stdout/stderr_write.
-    ...emitWasiWriteTail(ctx, fd, WASI_WRITE_SCRATCH_START, O),
+/**
+ * #1618: Ensure __wasi_write_any_string(s: ref NativeString) -> void exists and
+ * return its function index (lazy, emitted during expression compilation).
+ *
+ * Writes a *runtime* string (variable, concatenation, template span) to fd=1
+ * (stdout) or fd=2 (stderr). Previously these refs fell through to the
+ * `[object]` placeholder in emitWasiValueToStdout, corrupting the stream.
+ *
+ * Strategy: flatten any AnyString (FlatString / ConsString / Utf8String) to a
+ * NativeString via the existing __str_flatten helper, then encode the WTF-16
+ * code units as UTF-8 bytes directly into linear memory before issuing
+ * fd_write. This keeps WASI string output on the pure-Wasm path (#1470) without
+ * routing through the JS-host `__str_to_mem` / `TextEncoder` bridge.
+ *
+ * Param 0 is typed `ref NativeString` so callers can hand us a value compiled
+ * as `{ kind: "ref", typeIdx: ctx.nativeStrTypeIdx }` directly; __str_flatten
+ * accepts the NativeString supertype (AnyString) and returns the flat form.
+ */
+export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: boolean = false): number {
+  const helperName = useStderr ? "__wasi_write_any_string_stderr" : "__wasi_write_any_string";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  // #2524 — node-process shim path needs no fd_write idx (see Uint8Array helper).
+  if (!ctx.wasi || (!ctx.linkNodeShims && ctx.wasiFdWriteIdx === undefined) || ctx.nativeStrTypeIdx < 0) return -1;
+
+  // Make sure the native-string runtime (incl. __str_flatten) is emitted.
+  ensureNativeStringHelpers(ctx);
+  // __str_flatten via funcMap (shift-maintained), not nativeStrHelpers (which can
+  // be stale-low after late imports). See the registration in
+  // ensureNativeStringHelpers. (#1618)
+  const flattenIdx = ctx.funcMap.get("__str_flatten");
+  if (flattenIdx === undefined) return -1;
+
+  const fd = useStderr ? 2 : 1;
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
+  // #1723: the param MUST be the AnyString supertype, NOT the concrete
+  // NativeString. A runtime concat / template span can be a ConsString (rope),
+  // and the caller hands us whatever the expression produced. If the param were
+  // typed NativeString, the call site would have to `ref.cast` the argument down
+  // to NativeString first — which TRAPS ("illegal cast") for a ConsString. By
+  // accepting AnyString here, both NativeString and ConsString pass without any
+  // downcast, and `__str_flatten` (which takes AnyString and collapses ropes)
+  // does the flattening internally. The original NativeString param + call-site
+  // downcast is exactly what made `writeMessage` trap on a multi-segment
+  // response in the Native Messaging host (#1723).
+  const anyStrTypeIdx = ctx.anyStrTypeIdx >= 0 ? ctx.anyStrTypeIdx : strTypeIdx;
+
+  // One param (s=0) ⇒ work-locals start at index 1.
+  const layout = wasiStrEncodeLayout(1);
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: anyStrTypeIdx }], []);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const body: Instr[] = [
+    ...buildWasiStringEncodeToScratch(flattenIdx, strTypeIdx, strDataTypeIdx, layout),
+    // #2524/#2633 — write the staged UTF-8 region (`O` bytes) via fd_write or
+    // the node:fs shim's writeSync(fd, …). Result (bytes-written) is dropped.
+    ...emitWasiWriteTail(ctx, fd, WASI_WRITE_SCRATCH_START, layout.O),
   ];
 
   ctx.mod.functions.push({
     name: helperName,
     typeIdx: funcTypeIdx,
-    locals: [
-      { name: "flat", type: { kind: "ref", typeIdx: strTypeIdx } },
-      { name: "len", type: { kind: "i32" } },
-      { name: "off", type: { kind: "i32" } },
-      { name: "data", type: { kind: "ref", typeIdx: strDataTypeIdx } },
-      { name: "i", type: { kind: "i32" } },
-      { name: "o", type: { kind: "i32" } },
-      { name: "needPages", type: { kind: "i32" } },
-      { name: "cu", type: { kind: "i32" } },
-      { name: "cp", type: { kind: "i32" } },
-      { name: "lo", type: { kind: "i32" } },
-    ],
+    locals: wasiStrEncodeLocalDecls(strTypeIdx, strDataTypeIdx),
+    body,
+    exported: false,
+  });
+
+  return funcIdx;
+}
+
+/**
+ * #2639: Ensure `__wasi_write_any_string_fd(s: ref AnyString, fd: i32) -> i32`
+ * exists and return its function index (lazy). Encodes the string to UTF-8 in
+ * the shared linear scratch (the same encoder as the fixed-fd writer) and writes
+ * it to the *runtime* fd via the imported `node:fs` `writeSync(fd, ptr, len)`
+ * shim, returning the byte count `writeSync` reports. This backs the STRING
+ * overload of `node:fs` `writeSync(fd, str, position?, encoding?)`, where the fd
+ * is an arbitrary integer (not just stdout/stderr). It is gated to the
+ * `linkNodeShims` path — the only path on which `writeSync(fd, …)` lowers — so
+ * no inline `fd_write` tail is needed here.
+ */
+export function ensureWasiWriteAnyStringFdHelper(ctx: CodegenContext): number {
+  const helperName = "__wasi_write_any_string_fd";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  // Runtime-fd writes only exist on the node:fs shim path.
+  if (!ctx.wasi || !ctx.linkNodeShims || ctx.nodeFsWriteSyncIdx < 0 || ctx.nativeStrTypeIdx < 0) return -1;
+
+  ensureNativeStringHelpers(ctx);
+  const flattenIdx = ctx.funcMap.get("__str_flatten");
+  if (flattenIdx === undefined) return -1;
+
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
+  const anyStrTypeIdx = ctx.anyStrTypeIdx >= 0 ? ctx.anyStrTypeIdx : strTypeIdx;
+
+  // Two params: s(0), fd(1). The ten encoder work-locals therefore start at
+  // index 2; the byte cursor `O` holds the encoded length after the encoder runs.
+  const FD = 1;
+  const layout = wasiStrEncodeLayout(2);
+
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: anyStrTypeIdx }, { kind: "i32" }], [{ kind: "i32" }]);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const body: Instr[] = [
+    ...buildWasiStringEncodeToScratch(flattenIdx, strTypeIdx, strDataTypeIdx, layout),
+    // return writeSync(fd, WASI_WRITE_SCRATCH_START, O)  — bytes written.
+    { op: "local.get", index: FD } as Instr,
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "local.get", index: layout.O } as Instr,
+    { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
+  ];
+
+  ctx.mod.functions.push({
+    name: helperName,
+    typeIdx: funcTypeIdx,
+    // Work-locals follow the two params (s, fd); no extra local for fd.
+    locals: wasiStrEncodeLocalDecls(strTypeIdx, strDataTypeIdx),
     body,
     exported: false,
   });
@@ -6888,8 +7202,8 @@ export function ensureWasiWriteUint8ArrayHelper(
   vecTypeIdx: number,
   useStderr: boolean = false,
 ): number {
-  // #2524 — under the node-process shim the write is satisfied by the imported
-  // `js2wasm:node-process` fns (no fd_write idx); otherwise it needs the real fd_write.
+  // #2524/#2633 — under the node shims the write is satisfied by the imported
+  // `node:fs::writeSync` (no fd_write idx); otherwise it needs the real fd_write.
   if (!ctx.wasi || (!ctx.linkNodeShims && ctx.wasiFdWriteIdx === undefined)) return -1;
   const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
   if (arrTypeIdx < 0) return -1;
@@ -12488,8 +12802,21 @@ function registerNodeBuiltinImports(ctx: CodegenContext, builtins: NodeBuiltinIm
     if (ctx.wasi) {
       // `node:process` is a compile-time API surface for WASI: import
       // preprocessing leaves a type-level `process` binding in the AST and
-      // node-process-api.ts lowers supported stream calls directly to WASI.
+      // node-fs-api.ts lowers supported stream calls directly to WASI.
       if (builtin.moduleName === "process") continue;
+      // #2631 — `node:fs` is likewise a compile-time API surface under
+      // --link-node-shims when the program uses the fd-based synchronous
+      // primitives readSync / writeSync: those are stripped by import
+      // preprocessing and lowered to imported `node:fs` shim calls by
+      // node-fs-api.ts (tryCompileNodeFsCall). Path-based fs usage is
+      // rejected at the call site (see PATH_BASED_FS_FNS in calls.ts), not here.
+      if (
+        builtin.moduleName === "fs" &&
+        ctx.linkNodeShims &&
+        (ctx.wasiNodeFsFuncs.has("readSync") || ctx.wasiNodeFsFuncs.has("writeSync"))
+      ) {
+        continue;
+      }
       ctx.errors.push({
         message: `Node builtin module '${builtin.moduleName}' is not available in WASI target. Use compile-time syscall path for node:fs (#1035).`,
         line: 1,
@@ -12682,7 +13009,12 @@ function checkWasiDomUsage(ctx: CodegenContext, sourceFile: ts.SourceFile): void
  * NOTE: `requestAnimationFrame` / `cancelAnimationFrame` are already covered
  * by DOM_ONLY_GLOBALS above, so they are not duplicated here.
  */
-const WASI_REJECTED_TIMER_GLOBALS = new Set(["setTimeout", "setInterval", "setImmediate", "queueMicrotask"]);
+// #2632 Phase 1 — setTimeout/setInterval/clearTimeout/clearInterval and
+// queueMicrotask are now LOWERED onto the timer-heap + run-loop reactor under
+// --target wasi (see ensureTimerHeap / emitTimerAdd). Only `setImmediate`
+// remains rejected: its Node "check phase" ordering (after I/O poll, distinct
+// from a 0ms timer) is a later-phase concern not modelled by the Phase-1 loop.
+const WASI_REJECTED_TIMER_GLOBALS = new Set(["setImmediate"]);
 
 /**
  * In WASI mode, scan source for timer / event-loop globals (setTimeout etc.)
@@ -13409,7 +13741,16 @@ function walkStmtForLetConst(ctx: CodegenContext, fctx: FunctionContext, stmt: t
       if (ts.isIdentifier(decl.name)) {
         const name = decl.name.text;
         if (fctx.localMap.has(name)) continue;
-        if (ctx.moduleGlobals.has(name)) continue;
+        // #2641: do NOT skip names that collide with a module global. A
+        // function-body let/const that shadows a same-named module variable
+        // MUST get its own Wasm local (proper lexical shadowing). Previously
+        // this `continue` suppressed the shadow, so every read/write of the
+        // local fell through to the module global of the same name — invalid
+        // Wasm with mismatched types (string-tree value → class-struct global,
+        // the #2641 symptom) and a silent miscompilation (module var clobbered)
+        // with matching types. This walker runs ONLY for real function bodies
+        // (free functions and, after #2641, class methods/ctors); __module_init
+        // does NOT run it, so top-level let/const still become module globals.
         const varType = ctx.checker.getTypeAtLocation(decl);
         // #1120: pre-allocate as i32 if collectI32CoercedLocals tagged this
         // local — keeps the hoisted slot in sync with what compileVariableStatement
@@ -13636,63 +13977,29 @@ export function unwrapGeneratorYieldType(type: ts.Type, ctx: CodegenContext): Va
  * Handles: f64 (truthy != 0), externref (JS truthiness via __is_truthy), null (push 0).
  */
 export function ensureI32Condition(fctx: FunctionContext, condType: ValType | null, ctx?: CodegenContext): void {
+  if (ctx) {
+    // #1917 — the canonical ToBoolean cascade is now the single coercion engine.
+    // (Behaviour-neutral: the engine's rows are transcribed from this body.)
+    emitToBoolean(ctx, condType, fctx.body);
+    return;
+  }
+  // No ctx available (a few legacy callers) — keep the ctx-free subset inline:
+  // the engine's helper-call arms (__is_truthy / __any_unbox_bool / __str_flatten)
+  // need ctx, so without it fall back to the same non-null / scalar handling the
+  // old body used in that case.
   if (!condType) {
-    // Expression compilation failed — push false to keep Wasm valid
     fctx.body.push({ op: "i32.const", value: 0 });
     return;
   }
   if (condType.kind === "f64") {
-    // Use f64.abs + f64.gt(0) so that NaN, +0, and -0 are all falsy
-    // (f64.ne(0) treats NaN as truthy which is wrong for JS semantics)
     fctx.body.push({ op: "f64.abs" });
     fctx.body.push({ op: "f64.const", value: 0 });
     fctx.body.push({ op: "f64.gt" });
-  } else if (condType.kind === "externref") {
-    // Use __is_truthy for proper JS truthiness (0, NaN, null, undefined, "" → falsy)
-    if (ctx) {
-      addUnionImports(ctx);
-      const funcIdx = ctx.funcMap.get("__is_truthy");
-      if (funcIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx });
-        return;
-      }
-    }
-    // Fallback: non-null → true
-    fctx.body.push({ op: "ref.is_null" });
-    fctx.body.push({ op: "i32.eqz" });
-  } else if (condType.kind === "ref" || condType.kind === "ref_null") {
-    // Boxed any value — use __any_unbox_bool for proper JS truthiness
-    if (ctx && isAnyValue(condType, ctx)) {
-      ensureAnyHelpers(ctx);
-      const funcIdx = ctx.funcMap.get("__any_unbox_bool");
-      if (funcIdx !== undefined) {
-        fctx.body.push({ op: "call", funcIdx });
-        return;
-      }
-    }
-    // Native string or struct ref — non-empty string is truthy
-    // For strings: check length > 0 via string.measure_utf8 or ref.is_null fallback
-    if (ctx && condType.typeIdx === ctx.anyStrTypeIdx) {
-      // Native string — check length > 0
-      const lengthIdx = ctx.nativeStrHelpers.get("__str_flatten");
-      if (lengthIdx !== undefined) {
-        // Flatten then check len field
-        fctx.body.push({ op: "call", funcIdx: lengthIdx });
-        fctx.body.push({
-          op: "struct.get",
-          typeIdx: ctx.nativeStrTypeIdx,
-          fieldIdx: 0,
-        }); // len field
-        fctx.body.push({ op: "i32.const", value: 0 });
-        fctx.body.push({ op: "i32.gt_s" });
-        return;
-      }
-    }
-    // Fallback: non-null → true
+  } else if (condType.kind === "externref" || condType.kind === "ref" || condType.kind === "ref_null") {
+    // Fallback: non-null → true (no ctx → no helper imports available).
     fctx.body.push({ op: "ref.is_null" });
     fctx.body.push({ op: "i32.eqz" });
   } else if (condType.kind === "i64") {
-    // i64 truthiness: nonzero → true
     fctx.body.push({ op: "i64.eqz" });
     fctx.body.push({ op: "i32.eqz" });
   }

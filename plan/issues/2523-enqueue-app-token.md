@@ -1,7 +1,8 @@
 ---
 id: 2523
 title: "enqueue/unstick must use a GitHub App token, not GITHUB_TOKEN (merge-queue wedge fix)"
-status: in-progress
+status: done
+completed: 2026-06-23
 priority: high
 feasibility: medium
 reasoning_effort: medium

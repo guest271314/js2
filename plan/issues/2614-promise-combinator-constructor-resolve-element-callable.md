@@ -4,14 +4,14 @@ title: "Promise.{all,allSettled,any,race}: read constructor's own `resolve` + ca
 status: blocked
 assignee: ttraenkler/senior-developer
 created: 2026-06-22
-updated: 2026-06-22
+updated: 2026-06-24
 priority: medium
 feasibility: medium
 task_type: bug
 area: async, codegen, promise
 language_feature: promise
 goal: async-model
-sprint: 65
+sprint: 66
 parent: 1042
 related: [1528, 1368, 1116, 1694]
 blocked_on: [2623]
@@ -274,3 +274,9 @@ identity):
 
 `blocked_on` updated to `[2623]`. This issue stays `blocked` until #2623 lands
 the inbound-callback substrate.
+
+**Sibling consumers (2026-06-23, #1528 probe):** the same arms-B/D substrate also
+gates `.finally` (7 fails) and `Promise.try` (3 fails) — see the
+"Downstream consumers (observed gaps)" section in
+`plan/issues/2623-promise-capability-cluster-multihop-callback-cast.md` for the
+exact test paths to fold into the #42 re-spec acceptance set.

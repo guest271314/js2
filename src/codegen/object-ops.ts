@@ -35,6 +35,25 @@ import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { compileNativeStringLiteral, compileStringLiteral } from "./string-ops.js";
 import { getVecInfo } from "./type-coercion.js";
 
+/**
+ * (#2580 B-acc) ES §6.1.7 — a canonical *array index* is a String that is a
+ * canonical numeric string whose numeric value is an integer in `[0, 2^32-1)`.
+ * Such a key is the one accessed via integer-indexed element retrieval
+ * (`__extern_get_idx` / `__extern_has_idx`) in the generic
+ * `Array.prototype.X.call(arrayLike, cb)` loops, so an accessor defined on it
+ * must live in the runtime sidecar (which those helpers read), not in the
+ * compiled named-accessor fast path. Excludes `"-0"`, leading-zero forms, and
+ * `4294967295` (2^32-1) per the canonical-numeric-string round-trip rule.
+ */
+function _isCanonicalArrayIndexString(s: string): boolean {
+  if (s.length === 0 || s.length > 10) return false;
+  // Canonical: ToString(ToUint32(s)) === s, and value < 2^32-1.
+  if (!/^[0-9]+$/.test(s)) return false;
+  if (s.length > 1 && s[0] === "0") return false; // no leading zeros ("01" is not canonical)
+  const n = Number(s);
+  return Number.isInteger(n) && n >= 0 && n < 0xffffffff;
+}
+
 // ── Compile-time ToBoolean coercion of descriptor flag initializers ──
 /**
  * Try to constant-fold `ToBoolean(<expr>)` at compile time. Returns:
@@ -1253,13 +1272,33 @@ export function compileObjectDefineProperty(
   // `_safeGet` / S1 `_readOwnDescriptor` / GOPD all consult). One write reconciles
   // every reader — the symmetric mirror the data-value path already emits via
   // `__defineProperty_value`.
+  // (#2580 B-acc) A *canonical array-index* accessor key (e.g. "0", "1") on a
+  // statically struct-typed array-like receiver must NOT be captured into the
+  // compiled `${structName}_<idx>` accessor below: that fast path is reachable
+  // ONLY from the NAMED read site (`compilePropertyAccess`'s `classAccessorSet`
+  // dispatch), but an INDEXED element retrieval — exactly what the generic
+  // `Array.prototype.X.call(arrayLike, cb)` cluster does — reads via
+  // `__extern_get_idx` / `__extern_has_idx`, which consult the runtime sidecar
+  // (`_wasmStructProps` / `_wasmStructAccessors`), never `classAccessorSet`. When
+  // the index isn't an own struct field (`fieldIdx < 0`), the compiled accessor
+  // is unreachable from BOTH read paths and the descriptor is silently dropped —
+  // so `forEach.call({length:N}, cb)` after `Object.defineProperty(obj, "1",
+  // {get/set})` never visits index 1 (verified per-process: index visit skipped).
+  // Decline for that exact shape so it falls through to
+  // `emitExternDefinePropertyNoValue` → `__defineProperty_accessor`, which mirrors
+  // the accessor into the sidecar the indexed-read path DOES consult. Named-key
+  // accessors (field OR non-field, e.g. `obj.computed`) are unchanged — they stay
+  // on the compiled fast path that the named read resolves.
+  const isCanonicalArrayIndexAccessorKey =
+    propName !== undefined && fieldIdx < 0 && _isCanonicalArrayIndexString(propName);
   if (
     receiverIsStaticStruct &&
     (getNode || setNode) &&
     !valueExpr &&
     structName &&
     structTypeIdx !== undefined &&
-    propName
+    propName &&
+    !isCanonicalArrayIndexAccessorKey
   ) {
     // Compile obj and save to local
     const objType = compileExpression(ctx, fctx, objArg);

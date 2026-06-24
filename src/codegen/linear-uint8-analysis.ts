@@ -13,8 +13,8 @@
  * `.subarray`/`.slice`/`.set`, JSON-stringified, …) and its *only* uses are:
  *   - element load/store `b[i]` / `b[i] = v`
  *   - `b.length`
- *   - `process.stdin.read(b)` / `process.stdin.read(b, off)`
  *   - `process.stdout.write(b)` / `process.stderr.write(b)`
+ *   - `readSync(fd, b, …)` / `writeSync(fd, b, …)` (node:fs fd-based primitives)
  *   - being passed as a call argument to a function whose corresponding
  *     parameter is *itself* linear-safe (interprocedural threading).
  *
@@ -103,14 +103,83 @@ function isNewUint8Array(expr: ts.Node): expr is ts.NewExpression {
 }
 
 /**
- * Recognise `process.std{in.read,out.write,err.write}(buf, …)` and return the
- * argument index that carries the buffer (0 for both), or `-1` if this is not a
- * std-stream I/O call. We only match the global `process` shape the WASI
- * lowering supports (`node-process-api.ts`); a local `process` shadow makes
- * this not match (the conservative path).
+ * #2045 B.3 — true iff this is a `new Uint8Array(...)` that allocates a FRESH
+ * linear arena: the length ctor `new Uint8Array(n)`, the array-literal ctor
+ * `new Uint8Array([a,b,…])`, or the zero-arg ctor `new Uint8Array()`. It is
+ * **false** for the *view* ctors — `new Uint8Array(arrayBuffer)`,
+ * `new Uint8Array(arrayBuffer, offset, len)`, `new Uint8Array(otherTypedArray)`
+ * — which alias an existing buffer rather than allocating one, so they are NOT
+ * linear-backable (the linear-new lowering only arena-allocates a length; a
+ * view's bytes live elsewhere). Seeding a view as a linear local made it look
+ * threadable, then codegen hit the "not backed by linear memory" reportError
+ * (probe B.3b).
+ *
+ * The discriminator is **fail-OPEN, exclusion-based**: a single arg is a length
+ * unless we can PROVE it is a buffer/typed-array view source. This keeps the
+ * permissive default (a length ctor whose arg type doesn't fully resolve — e.g.
+ * `new Uint8Array(msg.length)` under the analysis's `noLib` unit-test program —
+ * stays a fresh arena, as before #2045). Only a provable view-source type, or a
+ * multi-arg `(buffer, offset, len)` shape, is excluded.
  */
-function ioBufferArgIndex(call: ts.CallExpression): number {
+function isLengthCtorUint8Array(checker: ts.TypeChecker, expr: ts.NewExpression): boolean {
+  const args = expr.arguments;
+  if (!args || args.length === 0) return true; // `new Uint8Array()` ⇒ empty arena
+  const first = args[0]!;
+  // `new Uint8Array([a, b, c])` — element-count arena.
+  if (args.length === 1 && ts.isArrayLiteralExpression(first)) return true;
+  // `new Uint8Array(buffer, offset[, len])` — only the view ctor takes >1 arg.
+  if (args.length > 1) return false;
+  // Single arg: a length UNLESS its type is provably a view source
+  // (ArrayBuffer / SharedArrayBuffer / a TypedArray such as Uint8Array). The
+  // length form's arg is a `number`; anything that resolves to a buffer/typed
+  // -array type is a view. Fail open (treat as length) when the type is `any` /
+  // unresolved so the permissive pre-#2045 default is preserved.
+  const t = checker.getTypeAtLocation(first);
+  const name = t.getSymbol()?.name ?? t.aliasSymbol?.name;
+  if (name === "ArrayBuffer" || name === "SharedArrayBuffer" || name === "ArrayBufferLike") return false;
+  // A typed-array view source (Uint8Array, Int8Array, …, Uint8ClampedArray).
+  if (name && /^(Uint|Int|Float|BigUint|BigInt)\w*Array$/.test(name)) return false;
+  return true;
+}
+
+/**
+ * Recognise a byte-I/O intrinsic call that takes a `Uint8Array` buffer and
+ * return the argument index that carries the buffer, or `-1` if this is not one.
+ *
+ * Two shapes are recognised (both lowered by `node-fs-api.ts`):
+ *   - `process.std{out.write,err.write}(buf, …)` — buffer at arg 0. We only
+ *     match the global `process` shape the WASI lowering supports; a local
+ *     `process` shadow makes this not match (the conservative path). (#2633 —
+ *     `process.stdin.read` is no longer a recognised surface: it was a
+ *     hallucinated API; synchronous stdin is `node:fs` `readSync(0, …)`.)
+ *   - #2631: `readSync(fd, buf, …)` / `writeSync(fd, buf, …)` (the node:fs
+ *     fd-based primitives) — buffer at arg 1. Like `process.std*`, these are
+ *     non-escaping byte-I/O sinks. **BUT** `readSync`/`writeSync` are plain
+ *     identifiers that collide with ordinary user/test code (e.g. a test262
+ *     harness helper named `writeSync`), so we ONLY treat them as sinks when the
+ *     program actually imported them from `node:fs` (the `nodeFsBindings` set,
+ *     scoped to the binding SYMBOL so a local shadow can't masquerade). Without
+ *     this gate the recognition rewrites codegen for unrelated Uint8Array
+ *     programs — a wasm-byte regression caught in the #2631 merge_group
+ *     (17 TypedArray/byte-IO assertion_fail). Keeping the gate makes the change
+ *     byte-neutral for every program that does NOT import node:fs readSync/writeSync.
+ */
+function ioBufferArgIndex(call: ts.CallExpression, nodeFsBindings: Set<string>): number {
   const callee = call.expression;
+  // node:fs fd-based readSync(fd, buf, …) / writeSync(fd, buf, …): buffer at 1 —
+  // ONLY when the callee is a LOCAL BINDING NAME imported from node:fs (the
+  // `nodeFsBindings` set is empty unless the program imports readSync/writeSync
+  // from node:fs, so this is a no-op — byte-neutral — for unrelated programs).
+  // Name-based (not symbol-based) so it stays robust when the `node:fs` module
+  // doesn't resolve (e.g. the #1886 unit-test program built with `noLib: true`).
+  if (
+    nodeFsBindings.size > 0 &&
+    ts.isIdentifier(callee) &&
+    nodeFsBindings.has(callee.text) &&
+    call.arguments.length >= 2
+  ) {
+    return 1;
+  }
   if (!ts.isPropertyAccessExpression(callee)) return -1;
   const method = callee.name.text;
   const stream = callee.expression;
@@ -118,9 +187,45 @@ function ioBufferArgIndex(call: ts.CallExpression): number {
   const streamName = stream.name.text;
   const root = stream.expression;
   if (!(ts.isIdentifier(root) && root.text === "process")) return -1;
-  if (streamName === "stdin" && method === "read") return 0;
   if ((streamName === "stdout" || streamName === "stderr") && method === "write") return 0;
   return -1;
+}
+
+/**
+ * #2631 — collect the LOCAL BINDING NAMES of `readSync`/`writeSync` imported
+ * from `node:fs` (named imports, honoring an `as` alias — the local name is what
+ * appears at the call site). Returns an EMPTY set for any program that doesn't
+ * import them, so the byte-IO sink recognition is a no-op (byte-identical to
+ * origin/main) for unrelated Uint8Array programs. Name-based rather than
+ * symbol-based so it works even when the `node:fs` module type doesn't resolve
+ * (e.g. a unit-test program built with `noLib: true`); the per-call shadow guard
+ * in the lowering (`fctx.localMap.has`) still protects against a local override.
+ */
+function collectNodeFsSyncBindings(sourceFile: ts.SourceFile): Set<string> {
+  const out = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isImportDeclaration(node) &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      (node.moduleSpecifier.text === "node:fs" || node.moduleSpecifier.text === "fs")
+    ) {
+      const named = node.importClause?.namedBindings;
+      if (named && ts.isNamedImports(named)) {
+        for (const el of named.elements) {
+          // `propertyName` is the imported name (readSync/writeSync); `name` is
+          // the LOCAL binding (possibly aliased). Gate on the imported name,
+          // record the local name (used at the call site).
+          const importedName = (el.propertyName ?? el.name).text;
+          if (importedName === "readSync" || importedName === "writeSync") {
+            out.add(el.name.text);
+          }
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return out;
 }
 
 /**
@@ -161,7 +266,22 @@ function resolveDirectCallee(
  *     is currently demoted. Repeat until no demotions occur in a full pass.
  *  4. Freeze: the survivors are the linear-safe set.
  */
-export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.SourceFile): LinearUint8Result {
+export function analyzeLinearUint8(
+  checker: ts.TypeChecker,
+  sourceFile: ts.SourceFile,
+  nodeFsSyncNames?: ReadonlySet<string>,
+): LinearUint8Result {
+  // #2631 — the LOCAL NAMES of node:fs readSync/writeSync imports (empty unless
+  // the program imports them). Gates the byte-IO sink recognition so it stays a
+  // no-op (byte-neutral) for unrelated Uint8Array programs.
+  //
+  // The real compile path strips the `node:fs` import BEFORE this analysis runs
+  // (import preprocessing), so the import declaration is gone from `sourceFile`.
+  // The caller therefore passes the names detected from the ORIGINAL source
+  // (`ctx.wasiNodeFsFuncs`, via `detectNodeFsImports`). When that's not supplied
+  // (e.g. the #1886 unit tests, which analyze the raw source with the import
+  // intact), fall back to scanning the AST.
+  const nodeFsBindings = nodeFsSyncNames ? new Set(nodeFsSyncNames) : collectNodeFsSyncBindings(sourceFile);
   // candidate bindings (locals + params), seeded safe; demote on disqualifying use.
   const safe = new Set<ts.Symbol>();
   // Symbols introduced by a `new Uint8Array(...)` LOCAL init (not parameters).
@@ -182,10 +302,13 @@ export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.Sourc
     if (ts.isVariableDeclaration(node) && node.initializer && ts.isIdentifier(node.name)) {
       if (isNewUint8Array(node.initializer) || isUint8ArrayNode(checker, node.initializer)) {
         const sym = checker.getSymbolAtLocation(node.name);
-        // only `new Uint8Array(...)` inits are linear-candidates; an init from
-        // another expression (a returned/aliased array) is left to the escape
-        // checks (it will not be a `new` site we can back linearly).
-        if (sym && isNewUint8Array(node.initializer)) {
+        // only a FRESH-arena `new Uint8Array(...)` init is a linear-candidate:
+        // the length / array-literal / zero-arg ctor. A *view* ctor
+        // (`new Uint8Array(arrayBuffer)`, `new Uint8Array(otherTypedArray)`)
+        // aliases an existing buffer that is NOT linear-backed (#2045 B.3b), and
+        // an init from any other expression (a returned/aliased array) is left
+        // to the escape checks. Either way it stays on the GC path.
+        if (sym && isNewUint8Array(node.initializer) && isLengthCtorUint8Array(checker, node.initializer)) {
           safe.add(sym);
           newLocalSyms.add(sym);
         }
@@ -215,6 +338,31 @@ export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.Sourc
   };
   collect(sourceFile);
 
+  // ---- Pass 1b: demote helpers that escape as a function value (#2045 B.4) ---
+  // Only a *direct* call `f(args)` threads the rewritten `(ptr,len)` ABI to a
+  // linear helper (the call-site lowering in `calls.ts` keys off a direct
+  // identifier callee). ANY other reference to a tracked helper's name reaches
+  // the function value through its *source-level* GC signature, while the body
+  // was rewritten to expect linear `(ptr,len)` params — `const g = fill`,
+  // `fill.call(...)`, `arr.map(fill)`, `[fill]`, `return fill`, `typeof fill`,
+  // an argument to another call. That mismatch hands a GC array into the linear
+  // slot at runtime (a null-pointer deref). So if a helper's name appears in any
+  // non-direct-call position, demote ALL of its params back to the GC ABI by
+  // removing them from `safe`. This runs BEFORE the fixpoint so a buffer that
+  // flowed into the helper via a direct call is then re-examined (its target
+  // param is no longer linear-safe) and itself demoted.
+  const demoteEscapedHelpers = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && !isBindingSite(node) && !isDirectCalleePosition(node)) {
+      const sym = checker.getSymbolAtLocation(node);
+      if (sym && fnParamSyms.has(sym)) {
+        const paramSyms = fnParamSyms.get(sym);
+        if (paramSyms) for (const pSym of paramSyms) if (pSym) safe.delete(pSym);
+      }
+    }
+    ts.forEachChild(node, demoteEscapedHelpers);
+  };
+  demoteEscapedHelpers(sourceFile);
+
   // ---- Pass 2..N: fixpoint demotion ----------------------------------------
   // For each candidate symbol, scan all references; a reference in a
   // disqualifying position demotes it. Iterate until stable (a demotion can
@@ -229,7 +377,7 @@ export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.Sourc
       if (ts.isIdentifier(node)) {
         const sym = checker.getSymbolAtLocation(node);
         if (sym && safe.has(sym) && !isBindingSite(node)) {
-          if (!isAllowedUse(checker, node, safe, fnDecls, fnParamSyms)) {
+          if (!isAllowedUse(checker, node, safe, fnDecls, fnParamSyms, nodeFsBindings)) {
             safe.delete(sym);
             changed = true;
           }
@@ -238,6 +386,39 @@ export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.Sourc
       ts.forEachChild(node, visit);
     };
     visit(sourceFile);
+    // #2045 B.3 — demote a callee param that receives a NON-linear-backed arg.
+    // Walk every direct user call; for each arg index the callee still lists as
+    // linear-safe, the argument must itself be a provably linear-backed buffer —
+    // a `ts.Identifier` whose symbol is currently in `safe`. Anything else (a
+    // call result `make()`, a `new Uint8Array(buffer)` view, a conditional
+    // `c ? a : b`, an element/property access, a literal) cannot be threaded as
+    // `(ptr,len)` and would hit the `calls.ts` "not backed by linear memory"
+    // reportError — so demote that callee param. This shares the fixpoint, so a
+    // demotion cascades to deeper helpers on the next pass (monotone: only ever
+    // demotes → terminates).
+    const demoteUntrackedArgs = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        const resolved = resolveDirectCallee(checker, node);
+        if (resolved) {
+          const paramSyms = fnParamSyms.get(resolved.sym);
+          if (paramSyms) {
+            node.arguments.forEach((arg, argIdx) => {
+              const calleeParamSym = paramSyms[argIdx];
+              if (!calleeParamSym || !safe.has(calleeParamSym)) return;
+              // The callee param is currently linear-safe; verify the arg is a
+              // tracked linear-backed identifier. Otherwise demote the param.
+              const argSym = ts.isIdentifier(arg) ? checker.getSymbolAtLocation(arg) : undefined;
+              if (!argSym || !safe.has(argSym)) {
+                safe.delete(calleeParamSym);
+                changed = true;
+              }
+            });
+          }
+        }
+      }
+      ts.forEachChild(node, demoteUntrackedArgs);
+    };
+    demoteUntrackedArgs(sourceFile);
   }
 
   // ---- Freeze: derive per-function linear param sets -----------------------
@@ -261,7 +442,7 @@ export function analyzeLinearUint8(checker: ts.TypeChecker, sourceFile: ts.Sourc
   const localOnly = new Set<ts.Symbol>(newLocalSyms);
   const dropParamThreaded = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
-      const ioIdx = ioBufferArgIndex(node);
+      const ioIdx = ioBufferArgIndex(node, nodeFsBindings);
       node.arguments.forEach((arg, argIdx) => {
         if (!ts.isIdentifier(arg)) return;
         const sym = checker.getSymbolAtLocation(arg);
@@ -343,6 +524,20 @@ function canRewriteLinearParams(node: FnDecl, exported: boolean): boolean {
   );
 }
 
+/**
+ * True iff this identifier sits in the **callee** position of a direct call —
+ * `f(...)`. Only this position threads the rewritten `(ptr,len)` ABI to a linear
+ * helper (`calls.ts` keys the thread off a direct identifier callee). A
+ * `.call`/`.apply`/`.bind`/`.map(f)` reaches the function value as a
+ * property-access object or a call *argument*, not the callee, so it binds the
+ * source-level GC signature and is an escape (returns false here). Self-recursion
+ * `f(...)` inside `f`'s own body is a direct-callee position, so it is correctly
+ * NOT treated as an escape. (#2045 B.4)
+ */
+function isDirectCalleePosition(id: ts.Identifier): boolean {
+  return ts.isCallExpression(id.parent) && id.parent.expression === id;
+}
+
 /** True if this identifier is its own declaration name (not a use). */
 function isBindingSite(id: ts.Identifier): boolean {
   const p = id.parent;
@@ -366,6 +561,7 @@ function isAllowedUse(
   safe: Set<ts.Symbol>,
   fnDecls: Map<ts.Symbol, FnDecl>,
   fnParamSyms: Map<ts.Symbol, (ts.Symbol | undefined)[]>,
+  nodeFsBindings: Set<string>,
 ): boolean {
   const p = id.parent;
 
@@ -382,8 +578,8 @@ function isAllowedUse(
   if (ts.isCallExpression(p) && p.expression !== id) {
     const argIdx = p.arguments.indexOf(id);
     if (argIdx < 0) return false; // appears in callee position somehow → unsafe
-    // process.std*.{read,write}(buf …)
-    const ioIdx = ioBufferArgIndex(p);
+    // process.std*.{read,write}(buf …) / node:fs readSync/writeSync(fd, buf …)
+    const ioIdx = ioBufferArgIndex(p, nodeFsBindings);
     if (ioIdx === argIdx) return true;
     // direct user call → corresponding param must be currently linear-safe.
     const resolved = resolveDirectCallee(checker, p);
@@ -397,7 +593,7 @@ function isAllowedUse(
   // Parenthesised buffer: `(b)[i]`, `(b).length` — unwrap one paren level.
   if (ts.isParenthesizedExpression(p)) {
     // Re-classify the paren as if it were the buffer reference.
-    return isAllowedUse(checker, p as unknown as ts.Identifier, safe, fnDecls, fnParamSyms);
+    return isAllowedUse(checker, p as unknown as ts.Identifier, safe, fnDecls, fnParamSyms, nodeFsBindings);
   }
 
   // Everything else is a potential escape:

@@ -2,7 +2,7 @@ import { describe, it } from "vitest";
 import { assertEquivalent } from "./helpers.js";
 
 /**
- * #6407 — `Array.prototype.<m>.call(receiver, …)` element retrieval for a
+ * #2177 — `Array.prototype.<m>.call(receiver, …)` element retrieval for a
  * compiled receiver (`$Vec` array literal, typed array variable, `any`-typed
  * array, or open-object numeric-key array-like).
  *
@@ -25,9 +25,9 @@ import { assertEquivalent } from "./helpers.js";
  * through the host `__box_number` / `__unbox_number` helpers for BOTH the
  * `.call` form and a plain `arr.findIndex(...)` call, so it is a general
  * standalone-array-callback boxing gap, not a `$Vec`-element-read gap specific
- * to #6407. Tracked separately.
+ * to #2177. Tracked separately.
  */
-describe("#6407 — Array.prototype.<m>.call on a compiled receiver (element read)", () => {
+describe("#2177 — Array.prototype.<m>.call on a compiled receiver (element read)", () => {
   it("findIndex.call finds a dense element (headline symptom)", async () => {
     await assertEquivalent(
       `export function test(): number {
@@ -67,7 +67,7 @@ describe("#6407 — Array.prototype.<m>.call on a compiled receiver (element rea
   it("includes.call reports membership", async () => {
     // Coerced to number — a Wasm export marshals a boolean as i32 (1/0), so an
     // `Object.is(1, true)` comparison in the equivalence harness would
-    // false-fail on a return-marshaling artifact unrelated to #6407's element
+    // false-fail on a return-marshaling artifact unrelated to #2177's element
     // read. The `? 1 : 0` projection asserts the element read + comparison are
     // correct without tripping that artifact.
     await assertEquivalent(
@@ -194,7 +194,7 @@ describe("#6407 — Array.prototype.<m>.call on a compiled receiver (element rea
   it("indexOf.call on an open-object numeric-key array-like", async () => {
     // {0:..,1:..,2:..,length:3} — an open-object struct with integer-named
     // props, NOT a $Vec. Reads through the per-field getter path; this is the
-    // #6407b candidate, confirmed working alongside the $Vec read.
+    // #2177b candidate, confirmed working alongside the $Vec read.
     await assertEquivalent(
       `export function test(): number {
         const o: any = { 0: 10, 1: 20, 2: 30, length: 3 };

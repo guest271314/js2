@@ -34,8 +34,12 @@ import {
   extractConstantDefault,
   hasAbstractModifier,
   hasStaticModifier,
+  hoistLetConstWithTdz, // (#2641) lexical shadowing in class method/ctor/generator bodies
+  hoistVarDeclarations, // (#2641)
   resolveWasmType,
 } from "./index.js";
+import { detectStringBuilders } from "./string-builder.js"; // (#2641/#1210) string-builder fast-path parity in class methods
+import type { StringBuilderPresizeInfo } from "./string-builder.js";
 import { emitUndefined } from "./expressions/late-imports.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { emitWasiErrorConstructor, getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
@@ -1776,6 +1780,21 @@ function compileClassBodiesInner(
         "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
       );
     } else if (ctor?.body) {
+      // (#2641) Hoist var + let/const declarations BEFORE the body loop, just
+      // like free functions (function-body.ts). Without this, a constructor-local
+      // `let`/`const` that shadows a same-named module variable never gets a Wasm
+      // local and falls through to the module global (invalid Wasm with native
+      // strings, silent miscompilation otherwise). Hoisting BEFORE the loop leaves
+      // the super-call inlining below undisturbed. The #1210 string-builder
+      // detector runs first so the hoist skips builder bindings (parity gate).
+      if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+        const presize = new Map<ts.VariableDeclaration, StringBuilderPresizeInfo>();
+        const builders = detectStringBuilders(ctx, ctor.body, presize);
+        if (builders.size > 0) fctx.pendingStringBuilders = builders;
+        if (presize.size > 0) fctx.stringBuilderPresize = presize;
+      }
+      hoistVarDeclarations(ctx, fctx, ctor.body.statements);
+      hoistLetConstWithTdz(ctx, fctx, ctor.body.statements);
       for (const stmt of ctor.body.statements) {
         // Handle super(args) calls: inline parent constructor field initialization
         if (
@@ -2141,6 +2160,19 @@ function compileClassBodiesInner(
         for (let i = 0; i < fctx.breakStack.length; i++) fctx.breakStack[i]!++;
         for (let i = 0; i < fctx.continueStack.length; i++) fctx.continueStack[i]!++;
 
+        // (#2641) Hoist var + let/const so a generator-method-local that shadows
+        // a same-named module variable gets its own Wasm local (mirrors the
+        // free-function generator path in function-body.ts). Hoist into the
+        // same fctx, inside the pushBody scope, before the body loop.
+        if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+          const presize = new Map<ts.VariableDeclaration, StringBuilderPresizeInfo>();
+          const builders = detectStringBuilders(ctx, member.body, presize);
+          if (builders.size > 0) fctx.pendingStringBuilders = builders;
+          if (presize.size > 0) fctx.stringBuilderPresize = presize;
+        }
+        hoistVarDeclarations(ctx, fctx, member.body.statements);
+        hoistLetConstWithTdz(ctx, fctx, member.body.statements);
+
         for (const stmt of member.body.statements) {
           compileStatement(ctx, fctx, stmt);
         }
@@ -2176,6 +2208,19 @@ function compileClassBodiesInner(
         fctx.body.push({ op: "local.get", index: pendingThrowLocal });
         fctx.body.push({ op: "call", funcIdx: createGenIdx });
       } else if (member.body) {
+        // (#2641) Hoist var + let/const BEFORE the body loop so a method-local
+        // `let`/`const` shadowing a same-named module variable gets its own Wasm
+        // local rather than aliasing the module global (the #2641 invalid-Wasm
+        // symptom under native strings; a silent miscompilation otherwise).
+        // Mirrors free functions in function-body.ts.
+        if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+          const presize = new Map<ts.VariableDeclaration, StringBuilderPresizeInfo>();
+          const builders = detectStringBuilders(ctx, member.body, presize);
+          if (builders.size > 0) fctx.pendingStringBuilders = builders;
+          if (presize.size > 0) fctx.stringBuilderPresize = presize;
+        }
+        hoistVarDeclarations(ctx, fctx, member.body.statements);
+        hoistLetConstWithTdz(ctx, fctx, member.body.statements);
         for (const stmt of member.body.statements) {
           compileStatement(ctx, fctx, stmt);
         }
@@ -2270,6 +2315,16 @@ function compileClassBodiesInner(
       ctx.currentFunc = fctx;
 
       if (member.body) {
+        // (#2641) Hoist so a getter-body local shadowing a module variable gets
+        // its own Wasm local (same vulnerability as method/ctor bodies).
+        if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+          const presize = new Map<ts.VariableDeclaration, StringBuilderPresizeInfo>();
+          const builders = detectStringBuilders(ctx, member.body, presize);
+          if (builders.size > 0) fctx.pendingStringBuilders = builders;
+          if (presize.size > 0) fctx.stringBuilderPresize = presize;
+        }
+        hoistVarDeclarations(ctx, fctx, member.body.statements);
+        hoistLetConstWithTdz(ctx, fctx, member.body.statements);
         for (const stmt of member.body.statements) {
           compileStatement(ctx, fctx, stmt);
         }
@@ -2414,6 +2469,16 @@ function compileClassBodiesInner(
       }
 
       if (member.body) {
+        // (#2641) Hoist so a setter-body local shadowing a module variable gets
+        // its own Wasm local (same vulnerability as method/ctor bodies).
+        if (ctx.nativeStrings && ctx.anyStrTypeIdx >= 0) {
+          const presize = new Map<ts.VariableDeclaration, StringBuilderPresizeInfo>();
+          const builders = detectStringBuilders(ctx, member.body, presize);
+          if (builders.size > 0) fctx.pendingStringBuilders = builders;
+          if (presize.size > 0) fctx.stringBuilderPresize = presize;
+        }
+        hoistVarDeclarations(ctx, fctx, member.body.statements);
+        hoistLetConstWithTdz(ctx, fctx, member.body.statements);
         for (const stmt of member.body.statements) {
           compileStatement(ctx, fctx, stmt);
         }

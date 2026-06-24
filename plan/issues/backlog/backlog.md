@@ -2,6 +2,21 @@
 
 Lightweight pointer index for unscheduled issues that need sprint candidacy. Authoritative status lives in each issue file's frontmatter.
 
+## 2026-06-23 — Sprint-65 value-rep substrate landings (session)
+
+Architecture-spine slices that merged this session (0-regr vs `merge_group`
+floor #2097). They **advance** their parent epics — none close them, so the
+parents remain carried to s66 (see `plan/issues/sprints/65.md` carry-over):
+- [#2580](../2580-dynamic-receiver-length-undefined-substrate.md) M3 Stage A (PR #1975) — standalone inline-literal `[[Prototype]]` link; M3 B-pre `__is_truthy` desync fix open as PR #1986 (BLOCKED).
+- #2623 (PR #1977) — class-extends-Promise value-read identity unified (+1 row); feeds Promise epic #1042/#2614/promise-async-capability-residual.
+- #2623-A (PR #1981) — async-closure `alreadyBoxed` capture box-depth; feeds async epic #1042.
+- [#2637](../2637-promise-subclass-executor-body-protocol.md) — NEW architecture epic: the #2623 executor-body half (ctx-ctor asserts #3/#4), VERIFIED not-bounded with WAT evidence (PR #1996). `__promise_subclass_ctor ↔ <Sub>_new ↔ NewPromiseCapability` protocol re-architecture, B1→B2 sequenced; route to architect, not a dev slice.
+- [#2618](../2618-proxy-host-apply-construct-call-path.md) Slice 1 (PR #1984) — Proxy START-timing + callable-target wrap, apply/construct 14→15; Slice C confirmed DEFER (#56-zone); feeds Proxy epic #1355.
+
+**Corrected M3 sequencing** (supersedes the "168-row functor lap" framing):
+accessor cluster (`Object.defineProperty`, 181/266 files) first → functor
+`.prototype=` lap (51 files, escape-analysis-gated, #1888-eject risk) last.
+
 ## 2026-06-19 — Sprint-64 conformance-pool refill (PO standalone failure mining)
 
 Mined current standalone test262 failures (`.test262-cache/test262-standalone-current.jsonl`)
@@ -18,7 +33,7 @@ Filed `sprint: 64`, `status: ready`:
 
 ## Sprint-61 merged-PR code review (2026-06-10)
 
-Static review of all 24 sprint-61 merged PRs (9 issues). #1909/#1910/#1902/#6407
+Static review of all 24 sprint-61 merged PRs (9 issues). #1909/#1910/#1902/#2177
 clean; #1832 fix correct (test-only PR); the rest produced these follow-ups.
 Also backfilled `status: done` on the 7 merged-but-in-review issues
 (#1832, #1886, #1904, #1905, #1907, #1909, #1910).
@@ -323,7 +338,7 @@ tracked elsewhere are noted under "Already covered" below.
 Found while adding `tests/real-world-*.test.ts` (real-world code patterns
 test262 doesn't cover: ESM, Web/WASI/Node/Deno APIs, Hono/React/Express):
 
-- [#1801](../1801-wasi-process-exit-invalid-binary.md) — WASI `process.exit(code)` emits an invalid binary: the exit code is compiled as i32 but an `i32.trunc_sat_f64_s` (expects f64) is pushed on top (`calls.ts:3180-3186`); `wasi-target.test.ts` only checks WAT so missed it. Sentinel via `it.fails` in `real-world-wasi.test.ts` — medium, easy, **sprint 60, DONE** (2026-06-05). _(Was mistakenly cited as phantom "#6407" — corrected.)_
+- [#1801](../1801-wasi-process-exit-invalid-binary.md) — WASI `process.exit(code)` emits an invalid binary: the exit code is compiled as i32 but an `i32.trunc_sat_f64_s` (expects f64) is pushed on top (`calls.ts:3180-3186`); `wasi-target.test.ts` only checks WAT so missed it. Sentinel via `it.fails` in `real-world-wasi.test.ts` — medium, easy, **sprint 60, DONE** (2026-06-05). _(Was mistakenly cited as phantom "#2177" — corrected.)_
 
 ### Fable-team findings (2026-06-10)
 

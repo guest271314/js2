@@ -28,9 +28,19 @@ import { reserveClosedMethodDispatch, reserveClosedMethodDispatchVararg } from "
 import { emitNativeDateParse } from "../date-parse-native.js"; // (#2164) pure-Wasm Date.parse / new Date(str)
 import { ensureObjVecBuilders, ensureObjectRuntime } from "../object-runtime.js";
 import {
+  emitMicrotaskEnqueue,
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
   emitStandalonePromiseThen,
+  emitStdinAvailable,
+  emitStdinEof,
+  emitStdinReadByte,
+  emitStdinSetReader,
+  emitTimerAdd,
+  emitTimerCallbackWrapper,
+  emitTimerCancel,
+  ensureTimerHeap,
+  getRunLoopNowFuncIdx,
   isStandalonePromiseActive,
   type StandalonePromiseThenCallback,
 } from "../async-scheduler.js";
@@ -94,6 +104,7 @@ import {
   receiverMayBeNativeStringAtRuntime,
   typeErrorThrowInstrs,
 } from "../property-access.js";
+import { emitToNumber } from "../coercion-engine.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 // (#2193 PR-B) reflective `m.call(thisArg, …)` on a `$NativeProto` member-closure value.
@@ -116,7 +127,8 @@ import {
   compileStringLiteral,
   emitBoolToString,
 } from "../string-ops.js";
-import { tryCompileNodeProcessCall } from "../node-process-api.js";
+import { tryCompileNodeFsCall, tryCompileNodeProcessCall } from "../node-fs-api.js";
+import { resolvePromiseSubclassName, tryEmitPromiseSubclassReceiver } from "./promise-subclass.js";
 import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import {
   defaultValueInstrs,
@@ -252,6 +264,32 @@ const BUILTIN_CLASS_NAMES = new Set([
   "Float64Array",
   "BigInt64Array",
   "BigUint64Array",
+]);
+
+/**
+ * (#2631) Path-based node:fs functions that require a filesystem (path_open /
+ * preopens). Distinct from the fd-based synchronous primitives readSync /
+ * writeSync (no path). Under --target wasi these are rejected — standalone WASI
+ * has no filesystem. `writeFileSync` is intentionally excluded: it has a
+ * dedicated WASI lowering above (`__wasi_write_file_sync`).
+ */
+const PATH_BASED_FS_FNS = new Set([
+  "readFileSync",
+  "readFile",
+  "writeFile",
+  "appendFileSync",
+  "appendFile",
+  "openSync",
+  "open",
+  "unlinkSync",
+  "unlink",
+  "mkdirSync",
+  "mkdir",
+  "readdirSync",
+  "readdir",
+  "statSync",
+  "stat",
+  "existsSync",
 ]);
 
 /**
@@ -511,6 +549,61 @@ function compileObjectAssignArg(ctx: CodegenContext, fctx: FunctionContext, arg:
   }
   const t = compileExpression(ctx, fctx, arg, { kind: "externref" });
   if (t && t.kind !== "externref") coerceType(ctx, fctx, t, { kind: "externref" });
+}
+
+/**
+ * #2580 M3 Stage A — compile a `[[Prototype]]` argument (the proto operand of
+ * `Object.create(proto)` / `Object.setPrototypeOf(obj, proto)`) so that an
+ * INLINE OBJECT LITERAL proto is built as a native `$Object`, pushing an
+ * externref onto the stack.
+ *
+ * Root cause (standalone): the native `__object_create` / `__object_setPrototypeOf`
+ * helpers write the link field `$Object.$proto` only when the proto value
+ * `ref.test $Object` succeeds (a non-`$Object` externref coerces to null, by
+ * design — see object-runtime.ts `__object_create`/`__object_setPrototypeOf`).
+ * `compileObjectLiteral` lowers an inline literal whose TS contextual type is a
+ * CONCRETE object type (not `any`) to a CLOSED-shape struct (`struct.new <typeIdx>`),
+ * which fails `ref.test $Object`. So `Object.create({foo:7}).foo` and
+ * `Object.setPrototypeOf(o,{foo:7}); o.foo` silently lose the proto link (the
+ * chain walk reads a null `$proto` → property absent → 0). A proto passed via a
+ * `const p:any = {foo:7}` *named variable* already works because the `any`
+ * annotation diverts that literal to the open-`$Object` builder (literals.ts).
+ *
+ * Fix mirrors the merged #2076 `compileObjectAssignArg` precedent: when the proto
+ * is a plain data-property / spread object literal (the same shapes the `$Object`
+ * builder accepts), build it directly as a native `$Object` via
+ * `compileObjectLiteralAsExternref` so `ref.test $Object` succeeds and the link
+ * is recorded. Any other proto expression (identifiers, calls, `null`,
+ * `Foo.prototype`, accessor-bearing literals) keeps the ordinary
+ * `compileExpression` path unchanged. Standalone-only — host/GC mode owns the
+ * `__object_create` JS import and a separate (still-broken, tracked) proto-link
+ * mechanism, untouched here.
+ */
+function compileProtoArg(ctx: CodegenContext, fctx: FunctionContext, arg: ts.Expression): void {
+  if (
+    ctx.standalone &&
+    ts.isObjectLiteralExpression(arg) &&
+    arg.properties.length > 0 &&
+    arg.properties.every(
+      (p) => ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p) || ts.isSpreadAssignment(p),
+    ) &&
+    arg.properties.every((p) => ts.isSpreadAssignment(p) || resolvePropertyNameText(ctx, p) !== undefined)
+  ) {
+    const objResult = compileObjectLiteralAsExternref(ctx, fctx, arg);
+    if (objResult) {
+      if (objResult.kind !== "externref") coerceType(ctx, fctx, objResult, { kind: "externref" });
+      return;
+    }
+    // fall through to the ordinary path if the $Object builder declined.
+  }
+  const t = compileExpression(ctx, fctx, arg, { kind: "externref" });
+  if (!t) {
+    // Expression produced no value — push null so the stack stays balanced for
+    // the consuming __object_create / __object_setPrototypeOf call.
+    fctx.body.push({ op: "ref.null.extern" });
+  } else if (t.kind !== "externref") {
+    coerceType(ctx, fctx, t, { kind: "externref" });
+  }
 }
 
 /**
@@ -1719,48 +1812,13 @@ function emitBoundFunctionCall(
  * if the caller should fall back to plain `compileExpression`.
  */
 function resolvePromiseSubclassThisArg(ctx: CodegenContext, fctx: FunctionContext, argExpr: ts.Expression): boolean {
-  // (E7) Standalone (WASI) mode has no JS host, so `__promise_subclass_ctor`
-  // is unsatisfiable. Never emit the import there.
-  if (isStandalonePromiseActive(ctx)) return false;
-  // Only fires for a bare identifier (or class-expr alias) naming a class.
-  if (!ts.isIdentifier(argExpr)) return false;
-  const resolved = ctx.classExprNameMap.get(argExpr.text) ?? argExpr.text;
-  // Walk the parent chain so a chained subclass (E3 — `class B extends A`,
-  // `class A extends Promise`) still resolves: `classBuiltinParentMap` only
-  // records the *immediate* builtin parent, so B maps to "A", not "Promise".
-  let cursor: string | undefined = resolved;
-  let extendsPromise = false;
-  const seen = new Set<string>();
-  while (cursor !== undefined && !seen.has(cursor)) {
-    seen.add(cursor);
-    if (ctx.classBuiltinParentMap.get(cursor) === "Promise") {
-      extendsPromise = true;
-      break;
-    }
-    cursor = ctx.classParentMap.get(cursor);
-  }
-  if (!extendsPromise) return false;
-  const importName = "__promise_subclass_ctor";
-  let funcIdx =
-    ctx.funcMap.get(importName) ?? ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "externref" }]);
-  flushLateImportShifts(ctx, fctx);
-  funcIdx = ctx.funcMap.get(importName) ?? funcIdx;
-  if (funcIdx === undefined) return false;
-  // Push the class name (the synthesized subclass is cached per name). Use the
-  // same host-string mechanism as extern method dispatch so it works in both
-  // string backends.
-  addStringConstantGlobal(ctx, resolved);
-  const nameIdx = ctx.stringGlobalMap.get(resolved);
-  // (#2515 S0) `>= 0`, not `!== undefined`: standalone/nativeStrings stores the
-  // `-1` sentinel, which would bake `global.get -1` and fail binary emit. Fall
-  // to the inline-materializing `compileStringLiteral` for the sentinel.
-  if (nameIdx !== undefined && nameIdx >= 0) {
-    fctx.body.push({ op: "global.get", index: nameIdx } as Instr);
-  } else {
-    compileStringLiteral(ctx, fctx, resolved);
-  }
-  fctx.body.push({ op: "call", funcIdx });
-  return true;
+  // (#2623 Slice B) Unified with the value-read path: both the combinator
+  // `thisArg` receiver here and a bare-identifier read-as-value in
+  // `identifiers.ts` now go through the same cached `__promise_subclass_ctor`
+  // singleton, so the constructor the user observes IS the one used to build
+  // the subclassed promise (one object, not two). Detection (parent-chain
+  // walk, standalone gate) + emission live in `promise-subclass.ts`.
+  return tryEmitPromiseSubclassReceiver(ctx, fctx, argExpr);
 }
 
 function usesArguments(node: ts.Node): boolean {
@@ -3043,6 +3101,215 @@ function emitJsonReplacerAllowList(
   fctx.body.push({ op: "local.get", index: allowLocal } as Instr);
 }
 
+/**
+ * #2632 Phase 1 — lower `setTimeout` / `setInterval` / `clearTimeout` /
+ * `clearInterval` / `queueMicrotask` onto the WASI timer-heap + run-loop
+ * reactor. Returns `undefined` when this is not a WASI timer call (so the
+ * generic dispatcher continues), or an `InnerResult` when handled.
+ *
+ * Only bare-identifier callees fire (a member call like `obj.setTimeout(...)`
+ * is a user method, never the global). The timer heap was registered in the
+ * deferred-helper phase (`ensureTimerHeap`), so `__timer_add` / `__timer_cancel`
+ * func indices are already final.
+ */
+function tryWasiTimerCall(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult | undefined {
+  if (!ctx.wasi) return undefined;
+  if (!ts.isIdentifier(expr.expression)) return undefined;
+  const name = expr.expression.text;
+
+  // #2632 Phase 2 — `__wasiStdinReadByte()` reads the next byte the fd0 reactor
+  // buffered into the internal stdin buffer (or -1 if empty), as a JS number.
+  // This is the internal-buffer primitive Phase 3's `process.stdin.read()`
+  // builds on. The timer heap + run loop were registered in the deferred phase.
+  if (name === "__wasiStdinReadByte") {
+    emitStdinReadByte(ctx, fctx);
+    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    return { kind: "f64" };
+  }
+
+  // #2632 Phase 3 — internal-buffer query primitives the library `process.stdin`
+  // Readable builds on: how many bytes are buffered+unread, and whether fd0 has
+  // hit EOF with the buffer fully drained.
+  if (name === "__wasiStdinAvailable") {
+    emitStdinAvailable(ctx, fctx);
+    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    return { kind: "f64" };
+  }
+  if (name === "__wasiStdinEof") {
+    emitStdinEof(ctx, fctx);
+    // boolean result (i32 0/1)
+    return { kind: "i32" };
+  }
+  // #2632 Phase 3 — `__wasiStdinSetReader(cb)` registers the Readable's pump as
+  // the reactor-tick hook (run loop call_ref's it each tick after the drain).
+  // The callback closure is compiled into a `$__mt_func_type` wrapper + captures
+  // exactly like a timer callback, then stored into the hook globals.
+  if (name === "__wasiStdinSetReader") {
+    ensureTimerHeap(ctx);
+    const cbArg = expr.arguments[0];
+    if (cbArg === undefined) return VOID_RESULT;
+    let capInstrs: Instr[];
+    let closureInfo: ClosureInfo | undefined;
+    {
+      const saved = pushBody(fctx);
+      try {
+        const type =
+          ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)
+            ? compileArrowAsClosure(ctx, fctx, cbArg)
+            : compileExpression(ctx, fctx, cbArg);
+        if (type && (type.kind === "ref" || type.kind === "ref_null")) {
+          closureInfo = ctx.closureInfoByTypeIdx.get(type.typeIdx);
+        }
+        if (!closureInfo && ts.isIdentifier(cbArg)) {
+          closureInfo = ctx.closureMap.get(cbArg.text);
+        }
+        if (closureInfo && type && type.kind !== "externref") {
+          coerceType(ctx, fctx, type, { kind: "externref" });
+        }
+      } finally {
+        capInstrs = fctx.body;
+        popBody(fctx, saved);
+      }
+    }
+    if (!closureInfo) return undefined;
+    const wrapperFuncIdx = emitTimerCallbackWrapper(ctx, closureInfo);
+    emitStdinSetReader(ctx, fctx, [{ op: "ref.func", funcIdx: wrapperFuncIdx } as Instr], capInstrs);
+    return VOID_RESULT;
+  }
+
+  if (
+    name !== "setTimeout" &&
+    name !== "setInterval" &&
+    name !== "clearTimeout" &&
+    name !== "clearInterval" &&
+    name !== "queueMicrotask"
+  ) {
+    return undefined;
+  }
+  // Guard against a user-defined local/function shadowing the global name. The
+  // global timer functions are declared ONLY in lib .d.ts files; a user shadow
+  // has at least one declaration in a real (.ts) source file. (`setTimeout` &c
+  // are also registered as inlinable lib stubs in ctx.funcMap, so a funcMap
+  // membership check would false-positive — use the symbol's declarations.)
+  {
+    const sym = ctx.checker.getSymbolAtLocation(expr.expression);
+    const decls = sym?.declarations;
+    if (decls && decls.length > 0 && !decls.every((d) => d.getSourceFile().isDeclarationFile)) {
+      return undefined; // user-defined shadow → not the global timer
+    }
+  }
+
+  // Ensure the timer heap exists. It is normally registered eagerly in the
+  // deferred-helper phase; this call is idempotent and a safety net.
+  ensureTimerHeap(ctx);
+
+  // ── clearTimeout(id) / clearInterval(id) ──────────────────────────────
+  if (name === "clearTimeout" || name === "clearInterval") {
+    if (expr.arguments.length < 1) return VOID_RESULT;
+    // id is a JS number (f64). Convert to the i32 slot id.
+    const saved = pushBody(fctx);
+    compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "f64" });
+    const idInstrs = fctx.body;
+    popBody(fctx, saved);
+    idInstrs.push({ op: "i32.trunc_sat_f64_s" } as Instr);
+    emitTimerCancel(ctx, fctx, idInstrs);
+    return VOID_RESULT;
+  }
+
+  // ── setTimeout / setInterval / queueMicrotask: compile the callback ──
+  const cbArg = expr.arguments[0];
+  if (cbArg === undefined) return VOID_RESULT;
+
+  // Compile the callback into its own buffer, yielding a closure struct pushed
+  // as externref + its ClosureInfo (mirrors compileStandalonePromiseThenCallback).
+  let capInstrs: Instr[];
+  let closureInfo: ClosureInfo | undefined;
+  {
+    const saved = pushBody(fctx);
+    try {
+      const type =
+        ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)
+          ? compileArrowAsClosure(ctx, fctx, cbArg)
+          : compileExpression(ctx, fctx, cbArg);
+      if (type && (type.kind === "ref" || type.kind === "ref_null")) {
+        closureInfo = ctx.closureInfoByTypeIdx.get(type.typeIdx);
+      }
+      if (!closureInfo && ts.isIdentifier(cbArg)) {
+        closureInfo = ctx.closureMap.get(cbArg.text);
+      }
+      if (closureInfo && type && type.kind !== "externref") {
+        coerceType(ctx, fctx, type, { kind: "externref" });
+      }
+    } finally {
+      capInstrs = fctx.body;
+      popBody(fctx, saved);
+    }
+  }
+  if (!closureInfo) {
+    // Not a recognised closure (e.g. a string-bodied setTimeout, unsupported).
+    // Bail to the generic path, which will reject/handle it.
+    return undefined;
+  }
+
+  const wrapperFuncIdx = emitTimerCallbackWrapper(ctx, closureInfo);
+
+  // ── queueMicrotask(cb) — enqueue directly onto the microtask queue ────
+  if (name === "queueMicrotask") {
+    emitMicrotaskEnqueue(
+      ctx,
+      fctx,
+      [{ op: "ref.func", funcIdx: wrapperFuncIdx } as Instr],
+      capInstrs, // captures externref = the closure struct
+      [{ op: "ref.null.extern" } as Instr], // value = undefined
+    );
+    return VOID_RESULT;
+  }
+
+  // ── setTimeout(cb, ms) / setInterval(cb, ms) ──────────────────────────
+  // delayNs = max(0, ms) * 1e6 ; deadlineNs = now + delayNs.
+  const nowIdx = getRunLoopNowFuncIdx(ctx);
+  const delayNsLocal = allocLocal(fctx, `__timer_delay_${fctx.locals.length}`, { kind: "i64" });
+
+  // Compute delayNs into a local: trunc(ms) clamped to >= 0, times 1e6.
+  if (expr.arguments.length >= 2) {
+    compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "f64" });
+  } else {
+    fctx.body.push({ op: "f64.const", value: 0 });
+  }
+  // Clamp negative / NaN ms to 0 (Node treats ms<=0 or NaN as 0).
+  fctx.body.push({ op: "f64.const", value: 0 });
+  fctx.body.push({ op: "f64.max" } as Instr);
+  fctx.body.push({ op: "i64.trunc_sat_f64_s" } as Instr);
+  fctx.body.push({ op: "i64.const", value: 1000000n });
+  fctx.body.push({ op: "i64.mul" } as Instr);
+  fctx.body.push({ op: "local.set", index: delayNsLocal });
+
+  const deadlineInstrs: Instr[] = [
+    { op: "call", funcIdx: nowIdx } as Instr,
+    { op: "local.get", index: delayNsLocal } as Instr,
+    { op: "i64.add" } as Instr,
+  ];
+  // interval period: setInterval re-arms with delayNs; setTimeout = 0 (one-shot).
+  const intervalInstrs: Instr[] =
+    name === "setInterval" ? [{ op: "local.get", index: delayNsLocal } as Instr] : [{ op: "i64.const", value: 0n }];
+
+  emitTimerAdd(
+    ctx,
+    fctx,
+    deadlineInstrs,
+    [{ op: "ref.func", funcIdx: wrapperFuncIdx } as Instr],
+    capInstrs, // captures externref = the closure struct
+    intervalInstrs,
+  );
+  // __timer_add returns the i32 id; setTimeout/setInterval return a JS number.
+  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+  return { kind: "f64" };
+}
+
 function compileCallExpression(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -3077,10 +3344,23 @@ function compileCallExpression(
     if (r !== undefined) return r;
   }
 
+  // #2632 Phase 1 — WASI event-loop timers / microtasks. setTimeout/setInterval/
+  // clearTimeout/clearInterval/queueMicrotask lower onto the timer heap + run-loop
+  // reactor (async-scheduler.ts). Only fires under --target wasi; everything else
+  // falls through to the JS-host import path unchanged.
+  {
+    const r = tryWasiTimerCall(ctx, fctx, expr);
+    if (r !== undefined) return r;
+  }
+
   // Node-shaped process APIs are lowered in their own module so the generic
   // call-expression compiler does not accumulate host API special cases.
   const nodeProcessCall = tryCompileNodeProcessCall(ctx, fctx, expr);
   if (nodeProcessCall !== undefined) return nodeProcessCall;
+
+  // #2631 — node:fs fd-based readSync/writeSync → `node:fs` shim calls.
+  const nodeFsCall = tryCompileNodeFsCall(ctx, fctx, expr);
+  if (nodeFsCall !== undefined) return nodeFsCall;
 
   // RegExp(pattern, flags) called without `new`. Extracted to calls-guards.ts (#742).
   {
@@ -4021,7 +4301,7 @@ function compileCallExpression(
           //   - Object.isPrototypeOf: route directly to the native open-object
           //     prototype-chain helper. Array/Number/Boolean/Function have no
           //     clean native borrowed path yet → refuse-loud below (Array brand
-          //     arm rides on #6407). Never a silent-wrong answer.
+          //     arm rides on #2177). Never a silent-wrong answer.
           if (ctx.standalone && expr.arguments.length >= 1 && !isBuiltinRegExpPrototype) {
             // Native String methods whose __str_* helper + return marshaling
             // round-trip correctly standalone (verified end-to-end). Methods
@@ -4105,7 +4385,7 @@ function compileCallExpression(
             // never leak the host import or return a silent-wrong value.
             const cite =
               typeName === "Array"
-                ? "the Array brand arm rides on #6407 ($Vec element retrieval)"
+                ? "the Array brand arm rides on #2177 ($Vec element retrieval)"
                 : typeName === "Object"
                   ? "only Object.prototype hasOwnProperty/propertyIsEnumerable/isPrototypeOf borrowed calls are wired (valueOf is a follow-on)"
                   : "this prototype's borrowed-method brand arm is not yet native";
@@ -5536,12 +5816,12 @@ function compileCallExpression(
           coerceType(ctx, fctx, objType, { kind: "externref" });
         }
         // proto (externref)
-        const protoType = compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "externref" });
-        if (!protoType) {
-          fctx.body.push({ op: "ref.null.extern" });
-        } else if (protoType.kind !== "externref") {
-          coerceType(ctx, fctx, protoType, { kind: "externref" });
-        }
+        // #2580 M3 Stage A — build an INLINE-LITERAL proto as a native `$Object`
+        // (compileProtoArg) so __object_setPrototypeOf's `ref.test $Object`
+        // succeeds and writes $Object.$proto; a closed-shape literal struct fails
+        // that test → null proto → inherited reads return 0. compileProtoArg keeps
+        // the ordinary externref path for non-literal protos (incl. `null`).
+        compileProtoArg(ctx, fctx, expr.arguments[1]!);
         const spoIdx = ensureLateImport(
           ctx,
           "__object_setPrototypeOf",
@@ -5706,6 +5986,14 @@ function compileCallExpression(
         // Compile the proto argument
         if (arg0.kind === ts.SyntaxKind.NullKeyword) {
           fctx.body.push({ op: "ref.null.extern" });
+        } else if (ctx.standalone) {
+          // #2580 M3 Stage A — build an INLINE-LITERAL proto as a native `$Object`
+          // (compileProtoArg) so __object_create's `ref.test $Object` succeeds and
+          // the $proto link is recorded; a closed-shape literal struct would fail
+          // that test → null proto → inherited reads return 0. Non-literal protos
+          // (identifiers, calls, Foo.prototype) keep the ordinary path inside
+          // compileProtoArg.
+          compileProtoArg(ctx, fctx, arg0);
         } else {
           const argType = compileExpression(ctx, fctx, arg0);
           if (!argType) {
@@ -7302,17 +7590,7 @@ function compileCallExpression(
       // resolution below switches it to directCall=0).
       const isPromiseSubclassReceiver =
         ts.isIdentifier(propAccess.expression) &&
-        (() => {
-          const name = ctx.classExprNameMap.get(propAccess.expression.text) ?? propAccess.expression.text;
-          let cursor: string | undefined = name;
-          const seen = new Set<string>();
-          while (cursor !== undefined && !seen.has(cursor)) {
-            seen.add(cursor);
-            if (ctx.classBuiltinParentMap.get(cursor) === "Promise") return true;
-            cursor = ctx.classParentMap.get(cursor);
-          }
-          return false;
-        })();
+        resolvePromiseSubclassName(ctx, propAccess.expression.text) !== undefined;
       const isAggregator =
         ts.isIdentifier(propAccess.expression) &&
         (propAccess.expression.text === "Promise" || isPromiseSubclassReceiver) &&
@@ -10495,6 +10773,40 @@ function compileCallExpression(
     }
   }
 
+  // #2631 — path-based node:fs functions (readFileSync, readFile, …) are NOT
+  // the fd-based readSync/writeSync handled by the node:fs shim: they need a
+  // filesystem (path_open / preopens). They are gated behind --allow-fs and are
+  // rejected outright under --target wasi (standalone has no filesystem). The
+  // fd-based readSync/writeSync (no path) were already lowered above via
+  // tryCompileNodeFsCall, so anything reaching here named like a path-based fs
+  // reader is unsupported in WASI.
+  if (
+    ctx.wasi &&
+    ts.isIdentifier(expr.expression) &&
+    ctx.wasiNodeFsFuncs.has(expr.expression.text) &&
+    PATH_BASED_FS_FNS.has(expr.expression.text)
+  ) {
+    const fnName = expr.expression.text;
+    const { line, character } = expr.getSourceFile().getLineAndCharacterOfPosition(expr.getStart());
+    ctx.errors.push({
+      message:
+        `'node:fs' path-based call to '${fnName}' is not available under --target wasi (#2631): ` +
+        `standalone WASI has no filesystem (no path_open / preopens). Only the fd-based synchronous ` +
+        `primitives readSync(fd, …) / writeSync(fd, …) are supported (they map to fd_read / fd_write ` +
+        `via the node:fs shim). For host file access, target a JS host with --allow-fs instead.`,
+      line: line + 1,
+      column: character + 1,
+      severity: "error",
+    });
+    // Drop args, emit a safe placeholder so codegen can continue.
+    for (const arg of expr.arguments) {
+      const t = compileExpression(ctx, fctx, arg);
+      if (t) fctx.body.push({ op: "drop" });
+    }
+    fctx.body.push({ op: "ref.null.extern" } as Instr);
+    return { kind: "externref" };
+  }
+
   // Handle global isNaN(n) / isFinite(n) / parseInt / parseFloat — inline wasm
   if (ts.isIdentifier(expr.expression)) {
     // Resolve aliases like `var freeParseInt = parseInt; freeParseInt(...)` (#1109)
@@ -10672,31 +10984,12 @@ function compileCallExpression(
       }
 
       const argType = compileExpression(ctx, fctx, expr.arguments[0]!);
-      if (argType?.kind === "i64") {
-        // BigInt → number: f64.convert_i64_s
-        fctx.body.push({ op: "f64.convert_i64_s" });
-        return { kind: "f64" };
-      }
-      if (argType?.kind === "externref") {
-        if (ctx.standalone) {
-          coerceType(ctx, fctx, argType, { kind: "f64" }, "number");
-          return { kind: "f64" };
-        }
-        // Number(x) uses ToNumber semantics — __unbox_number calls Number(v) in JS.
-        // parseFloat is wrong here: Number(null)=0 but parseFloat(null)=NaN,
-        // Number("")=0 but parseFloat("")=NaN, Number("0x1F")=31 but parseFloat gives 0.
-        addUnionImports(ctx);
-        const unboxIdx = ctx.funcMap.get("__unbox_number");
-        if (unboxIdx !== undefined) {
-          fctx.body.push({ op: "call", funcIdx: unboxIdx });
-          return { kind: "f64" };
-        }
-      }
+      // Native-string ref (WasmGC AnyString/NativeString) → §7.1.4.1
+      // StringToNumber. The generic ToNumber engine (coerceType "number") has no
+      // string-struct case and silently yields 0 in standalone (#1688), so this
+      // typeIdx-keyed string-ref pre-check stays in the caller and routes to the
+      // pure-Wasm __str_to_number BEFORE the engine's generic object-ref arm.
       if (argType?.kind === "ref" || argType?.kind === "ref_null") {
-        // Native-string ref (WasmGC AnyString/NativeString) → §7.1.4.1
-        // StringToNumber. The generic struct ToPrimitive path below has no
-        // string case and silently yields 0 in standalone (#1688), so detect
-        // the string struct type and route to the pure-Wasm __str_to_number.
         const refTypeIdx = (argType as { typeIdx?: number }).typeIdx;
         if (
           ctx.nativeStrings &&
@@ -10706,17 +10999,15 @@ function compileCallExpression(
           // Emitted upfront during the parseNeeded finalize (declarations.ts)
           // when `Number` is referenced under native strings, so no mid-body
           // function registration (which would shift func indices) happens here.
-          // Routes through the shared `emitStrRefToNumber` (single
-          // `__str_to_number` call site for this block); the ref needs
+          // Single `__str_to_number` call site for this block; the ref needs
           // `extern.convert_any` first (alreadyExternref = false).
           if (emitStrRefToNumber(false)) return { kind: "f64" };
         }
-        // Object → number: coerce via @@toPrimitive("number") or valueOf
-        coerceType(ctx, fctx, argType, { kind: "f64" }, "number");
-        return { kind: "f64" };
       }
-      // Already numeric — no-op
-      return argType;
+      // #1917 — the remaining ToNumber cascade (i64→f64, externref→__unbox_number
+      // host / coerceType("number") standalone, object ref→coerceType("number"),
+      // i32→f64, f64 no-op) is now the single coercion engine.
+      return emitToNumber(ctx, fctx, argType);
     }
 
     // BigInt(x) — §21.2.1.1 constructor. (#1644 Slice A+B) The result is

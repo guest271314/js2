@@ -1,11 +1,12 @@
 ---
 id: 2160
 title: "Standalone String/Number method & coercion conformance residual (~635 tests)"
-status: ready
+status: done
+completed: 2026-06-24
 assignee: ttraenkler/cs-2160
 sprint: 65
 created: 2026-06-15
-updated: 2026-06-18
+updated: 2026-06-24
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -15,6 +16,7 @@ language_feature: string-number
 goal: standalone-mode
 parent: 1470
 depends_on: [1917, 2104]
+reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): DONE as a tracker — all 4 dev-tractable child slices merged on main: #2598+#2599 (PR #1911, string search-method + concat arg ToString), #2600+#2601 (PR #1916, string index ToIntegerOrInfinity + fromCodePoint RangeError); plus Number.parseInt/parseFloat, substr, String(array). The remaining residual (new String()/new Number() wrapper boxing + Number(array) string→number) is value-rep / single-coercion-engine territory tracked under #1917 (still open), NOT this tracker. → done."
 ---
 
 # Standalone String/Number method & coercion conformance residual
@@ -368,3 +370,60 @@ landable either order).
 String work is now the four child slices. The remaining residual is #2161 (RegExp),
 #2580 M2 (dynamic receiver), #1917 (object→primitive), and the builtin-method-as-value
 closure substrate — all tracked elsewhere.
+
+---
+
+## Slice (2026-06-24, agent-a8b4) — `padStart`/`padEnd` explicit-`undefined` fillString
+
+**Status stays `ready`** — one more independent, substrate-independent slice of
+the bucket, landable now (typed string receiver, no dynamic/boxed `this`).
+
+Re-measured the host-pass / standalone-fail gap for `built-ins/String` against
+current main `74564c6958c3` with the **per-process** runner (a fresh node process
+per file — `runTest262File` host-mode vs `target:"standalone"`; the in-process
+loop the instruction warns about falsely reports ~42 `compile_error reading
+'kind'` from prototype-poisoning carry-over). 635/1073 `String/prototype` files
+sampled → 256 host-pass/standalone-fail rows, bucketed by standalone failure
+signature: 85 "Cannot convert object to primitive" (#1917 / #2580 M2), 54 null-
+pointer + 18 illegal-cast, 24 TypeError, the rest `match`/`matchAll`/`split`-with-
+regex (#2161). Most null-pointer/illegal-cast rows are `.call(null/undefined)`
+RequireObjectCoercible or dynamic-object receivers (#2580 M2 territory).
+
+**The one clean typed-receiver bug in that set:** `"abc".padEnd(n, undefined)` /
+`"abc".padStart(n, undefined)` **TRAP** "dereferencing a null pointer in
+`__str_flatten`" in standalone (the *omitted*-arg form already works; the
+*explicit-undefined* form crashes). Per §22.1.4.1 StringPad step 2, an
+`undefined` fillString is spec-equivalent to omission → default single SPACE.
+
+**Root cause** (`src/codegen/string-ops.ts`, the `padStart`/`padEnd` arms): the
+padString branch keyed on `expr.arguments.length > 1`, so an explicit-`undefined`
+2nd arg took the `compileExpression(undefined) + emitFlatten()` path — flattening
+a null ref → trap. **Fix:** gate that branch with `&& !isStaticUndefinedArg(arg)`
+(the EXISTING #2124 predicate, already used for substring/slice/endsWith index
+args), so a statically-`undefined`/`void 0` fill falls through to the existing
+default-space emission. No new coercion vocabulary — the coercion-sites (#2108),
+any-box, stack-balance gates are untouched. `nativeStrings`/standalone path only;
+gc/host mode keeps the live behaviour (already correct there).
+
+**Rows landed (per-process main-vs-branch):** `built-ins/String/prototype/padEnd/
+fill-string-omitted.js` and `built-ins/String/prototype/padStart/
+fill-string-omitted.js` — both `standalone:fail → standalone:pass` (the two
+`undefined`/omitted assertions in each file).
+
+**Validation.** `tests/issue-2160-pad-undefined-fill-standalone.test.ts` (9/9):
+padEnd/padStart with explicit `undefined` and `void 0` fill, omitted-fill no-
+regression, explicit non-undefined `'*'` fill unchanged, multi-char fill, a
+no-host-import-leak assertion (no `env::__*` / `wasm:js-string::*` in
+`result.imports`; standalone instantiated with an empty import object), and a
+gc-mode no-regression guard. Prior #2160 suites (wrapper-strmethod / #2598-2599 /
+#2600) green (44). native-strings + string-methods regression suites green (120;
+the one suite-load failure `tests/string-methods.test.ts` → missing `./helpers.js`
+reproduces identically on pristine `origin/main`). tsc + prettier + biome lint +
+coercion-sites + any-box + stack-balance + codegen-fallbacks gates clean.
+
+**Still open (NOT regressed):** the remaining padEnd/padStart gap rows are
+`exception-symbol`/`exception-fill-string-symbol` (Symbol-arg TypeError),
+`exception-not-object-coercible` (#2580 M2 `.call(undefined)`), `not-a-constructor`
+(builtin-method-as-value substrate), `observable-operations` (dynamic-object
+receiver, #1917). All other in-lane #2160 String residual stays #2161 (RegExp) /
+#2580 M2 (dynamic receiver) / #1917 (object→primitive).

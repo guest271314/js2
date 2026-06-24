@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts } from "../ts-api.js";
 import { getDefaultEnvironment } from "../env.js";
+import { buildModuleDecls } from "./node-capability-map.js";
 
 // All Node builtin access goes through the environment adapter (#1096).
 // This module no longer probes `typeof window` / `typeof process` directly
@@ -320,7 +321,7 @@ const ES_EARLY_ERROR_CODES = new Set([
 // per-module runtime-shim design (one shim per imported module).
 const NODE_ENV_DTS_NAME = "__js2wasm_node_env.d.ts";
 
-// The `process` member surface that node-process-api.ts actually lowers. Shared
+// The `process` member surface that node-fs-api.ts actually lowers. Shared
 // between the bare ambient global (`declare var process`) and a `node:process`
 // default/namespace/named import.
 const PROCESS_INTERFACE_DECLS = `interface NodeJS_WritableStream {
@@ -466,6 +467,31 @@ function buildNodeEnvDts(usage: NodeEmuUsage): string | undefined {
       lines.push(`  export const stdin: NodeJS_ReadableStream;`);
       lines.push(`  export const stdout: NodeJS_WritableStream;`);
       lines.push(`  export const stderr: NodeJS_WritableStream;`);
+      lines.push(`}`);
+      parts.push(lines.join("\n"));
+      continue;
+    }
+    // #2634 — `node:fs` (and any other capability-mapped `node:<mod>`): drive
+    // the importable surface + types from the capability map
+    // (`node-capability-map.ts`), which mirrors the REAL `@types/node`
+    // signatures — every overload, the precise `NodeJS.ArrayBufferView` buffer
+    // type — instead of the old collapsed/approximate hand-roll. Faithful
+    // OVERLOADS are bodiless `export function` declarations; those are illegal
+    // in a `.ts`/`.js` (non-declaration) file (TS8017) but LEGAL here because
+    // this synthetic surface is a `.d.ts`-typed source (NODE_ENV_DTS_NAME ends
+    // in `.d.ts`, so `isDeclarationFile` is true). The user's import site only
+    // *references* the names, so TS8017 never fires there (#2631 / #1768
+    // transpiled-host case stays green — verified by the allowJs `.js` host
+    // test). Any imported member outside the map stays permissive `any`.
+    const capLines = buildModuleDecls(mod, members);
+    if (capLines) {
+      const named = [...members].filter((m) => m !== "");
+      const hasDefaultOrNs = members.has("");
+      const lines: string[] = [`declare module "${mod}" {`, ...capLines];
+      if (hasDefaultOrNs || named.length === 0) {
+        lines.push(`  const _default: any;`);
+        lines.push(`  export default _default;`);
+      }
       lines.push(`}`);
       parts.push(lines.join("\n"));
       continue;

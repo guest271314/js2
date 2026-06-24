@@ -1,0 +1,575 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+/**
+ * #1917 Step 1 — the single JS-semantic coercion engine (ToString first).
+ *
+ * Background: the §7.1.17 ToString matrix was hand-rolled across the WasmGC
+ * backend — the host `+`-concat operand coercion, the host template span loop,
+ * the standalone/native `+`-concat operand, the native template span loop, and
+ * the `String(x)` lowering each re-implemented the same value→string cascade.
+ * A fix to one copy was structurally invisible to the others (the June-2026
+ * bug corpus: #2005/#2006/#1998/#2074 — all fixed per-copy, but the *next*
+ * divergence had nowhere to be caught). This module is the §5 single home those
+ * sites delegate to; the #2108 drift gate ratchets the per-file vocabulary
+ * counts down as each site migrates. See
+ * plan/log/analysis-2026-06/03-coercion-engine-spec.md and the Implementation
+ * Plan in plan/issues/1917-single-coercion-engine.md.
+ *
+ * Scope of THIS module right now: `emitToString` for the **expression-based**
+ * ToString sites (an operand already on the value stack, classified from its
+ * compiled `ValType` + static TS type). It is a faithful, behaviour-neutral
+ * consolidation of those copies — each caller keeps its exact hint, output
+ * type, and dynamic tail; the engine just owns the one cascade they shared.
+ *
+ * Deliberately NOT in this module yet (later #1917 increments):
+ *   - the array-`join` `elemToStr` builder (operates on a raw array *slot*, not
+ *     a compiled expression, and is `$Hole`-aware) — folds in only once
+ *     `emitToString` grows a slot-source variant;
+ *   - `emitToNumber` / `emitToBoolean` / `emitToPrimitive` / equality (Steps
+ *     2-5).
+ *
+ * Representation-level (ValType→ValType) conversions still go through Step 0's
+ * `coercionPlan` (coercion-plan.ts); this module is the JS-semantic layer on
+ * top and never re-hand-rolls a box/unbox row.
+ */
+import { isBooleanType, isStringType } from "../checker/type-mapper.js";
+import type { Instr, ValType } from "../ir/types.js";
+import { ts } from "../ts-api.js";
+import type { CodegenContext, FunctionContext } from "./context/types.js";
+import { noJsHost } from "./expressions/helpers.js";
+import { addUnionImports, nativeStringType } from "./index.js";
+import { ensureAnyFromExternHelper } from "./any-helpers.js";
+import { ensureAnyToStringHelper } from "./native-strings.js";
+import {
+  compileExpression,
+  compileStringLiteral,
+  ensureAnyHelpers,
+  ensureLateImport,
+  flushLateImportShifts,
+  isAnyValue,
+} from "./shared.js";
+import { coerceType, tryStructToString } from "./type-coercion.js";
+
+/**
+ * The three coercion modes the backend dispatches over. Derived once from the
+ * three ad-hoc spellings that exist today so callers stop re-testing them.
+ *
+ *   - `"standalone"`        — `noJsHost(ctx)` (--target wasi / standalone): pure
+ *     Wasm, native `$AnyString` strings, no JS host bridge.
+ *   - `"native-strings-host"` — `ctx.nativeStrings` with a JS host present:
+ *     native `$AnyString` strings but the host `__extern_*` bridge is available.
+ *   - `"js-host"`           — classic externref `wasm:js-string` strings.
+ */
+export type CoercionMode = "js-host" | "native-strings-host" | "standalone";
+
+export function coercionMode(ctx: CodegenContext): CoercionMode {
+  if (noJsHost(ctx)) return "standalone";
+  if (ctx.nativeStrings && ctx.nativeStrTypeIdx >= 0) return "native-strings-host";
+  return "js-host";
+}
+
+/** True when the active mode represents strings as a native `$AnyString` GC ref. */
+function isNativeStringMode(mode: CoercionMode): boolean {
+  return mode === "standalone" || mode === "native-strings-host";
+}
+
+/**
+ * The ToString hint, distinguishing the genuinely-different per-context spec
+ * operations the matrices encode for a struct/ref operand:
+ *   - `"string"`  — ToString proper (§7.1.17): a template span (`` `${obj}` ``)
+ *     and `String(obj)` walk @@toPrimitive("string")/toString.
+ *   - `"default"` — the `+` operator's ToPrimitive(default) (valueOf-first,
+ *     §7.1.1.1 / #2022): `obj + ""` must use `valueOf`. Only differs from
+ *     `"string"` on the struct/ref arm.
+ */
+export type ToStringHint = "string" | "default";
+
+/**
+ * Emit `ToString(operand)` for an operand that has ALREADY been compiled to the
+ * top of the value stack with ValType `valType` and static TS type `tsType`.
+ *
+ * This is the consolidated cascade the expression-based ToString copies shared:
+ *   void            → "undefined"
+ *   i32 boolean     → "true"/"false"          (emitBoolToString)
+ *   f64/i32/i64     → number_toString          (numeric stringify)
+ *   externref null  → "null"
+ *   externref undef → "undefined"
+ *   externref str   → passthrough (already a string)
+ *   externref other → __extern_toString / __extern_to_string_default (by hint)
+ *   ref/ref_null    → tryStructToString → $__any_to_string  (native)
+ *                     coerceType(hint) / __extern_to_string_default (host)
+ *
+ * Returns the ValType left on the stack (externref in js-host mode, a native
+ * `ref $AnyString` in native/standalone mode), or `null` for the void arm where
+ * a string literal was pushed (callers treat both as "a string is on the stack").
+ *
+ * Each caller passes its own `hint` so the per-context policy (template "string"
+ * vs `+` "default") is preserved byte-for-byte.
+ *
+ * NOTE on Symbol: §7.1.17 ToString(Symbol) throws TypeError. The callers guard
+ * that BEFORE compiling the operand (`tryThrowOnSymbolStringCoercion`), because
+ * the throw must short-circuit operand evaluation; the engine assumes a
+ * non-symbol operand on the stack.
+ */
+export function emitToString(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  valType: ValType | null,
+  tsType: ts.Type,
+  hint: ToStringHint,
+): ValType {
+  const mode = coercionMode(ctx);
+  const native = isNativeStringMode(mode);
+
+  // ── void → "undefined" ──
+  if (!valType) {
+    pushStringLiteral(ctx, fctx, "undefined");
+    return native ? nativeStringType(ctx) : { kind: "externref" };
+  }
+
+  // ── string-typed ref passthrough (native modes only — a native string-typed
+  //    substitution is already an $AnyString/NativeString ref) ──
+  if (native && (valType.kind === "ref" || valType.kind === "ref_null") && isStringType(tsType)) {
+    return valType;
+  }
+
+  // ── i32 boolean → "true"/"false" ──
+  // Honour the boolean brand on the ValType (#2016/#2030: i32 predicates carry
+  // `boolean: true`) as well as the static TS type.
+  if (valType.kind === "i32" && (isBooleanType(tsType) || (valType as { boolean?: true }).boolean)) {
+    emitBoolToString(ctx, fctx);
+    return native ? nativeStringType(ctx) : { kind: "externref" };
+  }
+
+  // ── f64 / i32 / i64 → number_toString ──
+  if (valType.kind === "f64" || valType.kind === "i32" || valType.kind === "i64") {
+    // Defensive (#1960): in native/standalone mode the f64→native-string bridge
+    // REQUIRES `number_toString` — its externref result is what
+    // `emitNativeStringRefFromExternref` (`any.convert_extern; ref.cast`)
+    // consumes. If it is not registered, emitting `any.convert_extern` on the
+    // bare scalar is INVALID Wasm; return the scalar UNCHANGED instead so the
+    // caller can fall back. (The standalone `+`-concat site is NOT migrated to
+    // this engine precisely because it must DECLINE rather than mid-body-register
+    // `number_toString` — see `compileNativeConcatOperand`; this guard only
+    // protects any future native caller.)
+    const toStrIdx = ctx.funcMap.get("number_toString");
+    if (native && toStrIdx === undefined) {
+      return valType;
+    }
+    if (valType.kind === "i32") fctx.body.push({ op: "f64.convert_i32_s" });
+    else if (valType.kind === "i64") fctx.body.push({ op: "f64.convert_i64_s" });
+    if (toStrIdx !== undefined) fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    if (native) {
+      // number_toString returns an externref wrapping a native string; convert
+      // it back to a native `ref $AnyString`.
+      emitNativeStringRefFromExternref(ctx, fctx);
+      return nativeStringType(ctx);
+    }
+    return { kind: "externref" };
+  }
+
+  // ── externref ──
+  if (valType.kind === "externref") {
+    const isNull = (tsType.flags & ts.TypeFlags.Null) !== 0;
+    const isUndef = (tsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
+    if (isNull) {
+      fctx.body.push({ op: "drop" });
+      pushStringLiteral(ctx, fctx, "null");
+      return native ? nativeStringType(ctx) : { kind: "externref" };
+    }
+    if (isUndef) {
+      fctx.body.push({ op: "drop" });
+      pushStringLiteral(ctx, fctx, "undefined");
+      return native ? nativeStringType(ctx) : { kind: "externref" };
+    }
+    if (isStringType(tsType)) {
+      // A real string externref — already concat-ready.
+      return { kind: "externref" };
+    }
+    // Dynamic externref (boxed string / any / $Object) → runtime ToString.
+    // The default-hint host tail (`__extern_to_string_default`, the #2022
+    // valueOf-first `+` policy) applies ONLY in js-host mode. In native modes
+    // the dynamic-externref operand always routes through `__extern_toString`
+    // (the native `+`-concat and template callers both used the string-hint
+    // tail there regardless of `+` vs template), then back to a native ref.
+    const importName = !native && hint === "default" ? "__extern_to_string_default" : "__extern_toString";
+    const toStrIdx = ensureLateImport(ctx, importName, [{ kind: "externref" }], [{ kind: "externref" }]);
+    flushLateImportShifts(ctx, fctx);
+    const finalIdx = ctx.funcMap.get(importName) ?? toStrIdx;
+    if (finalIdx !== undefined) fctx.body.push({ op: "call", funcIdx: finalIdx });
+    if (native) {
+      emitNativeStringRefFromExternref(ctx, fctx);
+      return nativeStringType(ctx);
+    }
+    return { kind: "externref" };
+  }
+
+  // ── struct / ref / ref_null ──
+  if (valType.kind === "ref" || valType.kind === "ref_null") {
+    if (native) {
+      // #2007 — a compile-time-resolvable object struct with its own
+      // @@toPrimitive/toString dispatches that (OrdinaryToPrimitive, hint
+      // "string"); otherwise the $__any_to_string tag dispatcher.
+      if (tryStructToString(ctx, fctx, valType)) {
+        return nativeStringType(ctx);
+      }
+      const anyToStrIdx = ensureAnyToStringHelper(ctx);
+      fctx.body.push({ op: "call", funcIdx: anyToStrIdx });
+      return nativeStringType(ctx);
+    }
+    // js-host: hint decides ToString(string) vs ToPrimitive(default). The `+`
+    // path (#2022) converts via the default-hint host helper; templates /
+    // String() walk @@toPrimitive("string")/toString through coerceType.
+    if (hint === "default") {
+      coerceType(ctx, fctx, valType, { kind: "externref" });
+      const toStrIdx = ensureLateImport(
+        ctx,
+        "__extern_to_string_default",
+        [{ kind: "externref" }],
+        [{ kind: "externref" }],
+      );
+      flushLateImportShifts(ctx, fctx);
+      const finalIdx = ctx.funcMap.get("__extern_to_string_default") ?? toStrIdx;
+      if (finalIdx !== undefined) fctx.body.push({ op: "call", funcIdx: finalIdx });
+      return { kind: "externref" };
+    }
+    coerceType(ctx, fctx, valType, { kind: "externref" }, "string");
+    return { kind: "externref" };
+  }
+
+  // Unknown kind — leave on stack (should not happen for a string context).
+  return valType;
+}
+
+/**
+ * Compile `operand` then emit `ToString(operand)`. The expression-based
+ * convenience wrapper for the `+`-concat / String() callers. Symbol guarding is
+ * the caller's responsibility (must short-circuit before operand evaluation).
+ */
+export function compileAndEmitToString(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  operand: ts.Expression,
+  tsType: ts.Type,
+  hint: ToStringHint,
+): ValType {
+  const valType = compileExpression(ctx, fctx, operand);
+  return emitToString(ctx, fctx, valType, tsType, hint);
+}
+
+/**
+ * Emit `ToNumber(operand)` (→ f64) for an operand ALREADY compiled to the top of
+ * the value stack with ValType `valType`. The consolidation of the `Number(x)`
+ * matrix (N2) and the unary `+`/`-`/`~` coercion arms (N1):
+ *
+ *   i64 (BigInt)         → f64.convert_i64_s
+ *   externref            → __unbox_number (js-host) | coerceType(f64,"number") (standalone)
+ *   ref/ref_null         → coerceType(f64,"number")  (object @@toPrimitive("number")/valueOf)
+ *   i32 (number/bool)    → f64.convert_i32_s
+ *   f64                  → no-op
+ *
+ * Returns the ValType left on the stack (`{kind:"f64"}` for every coercing arm;
+ * the original `valType` for the already-f64 no-op).
+ *
+ * NOTE — what stays in the caller (NOT folded here, because each is a *source*
+ * special-case that must run BEFORE the operand is on the stack as a plain
+ * value, or is policy that differs per caller):
+ *   - ToNumber(Symbol) throws TypeError (§7.1.4) — guarded before operand eval.
+ *   - the #2160 `Number(arr)` array→ToString→StringToNumber pre-check.
+ *   - the native-string-ref (`$AnyString`/`$NativeString`) → `__str_to_number`
+ *     (§7.1.4.1) arm — it dispatches on the ref's *typeIdx* (string-struct vs a
+ *     generic object struct), which the caller already resolves; a generic ref
+ *     falls to `coerceType(f64,"number")` here.
+ * The caller handles those, then calls `emitToNumber` for the remaining cascade.
+ */
+export function emitToNumber(ctx: CodegenContext, fctx: FunctionContext, valType: ValType | null): ValType {
+  if (!valType) {
+    // void result in a number context → NaN (ToNumber(undefined) = NaN).
+    fctx.body.push({ op: "f64.const", value: Number.NaN });
+    return { kind: "f64" };
+  }
+
+  // BigInt → number.
+  if (valType.kind === "i64") {
+    fctx.body.push({ op: "f64.convert_i64_s" });
+    return { kind: "f64" };
+  }
+
+  // externref → number. js-host calls `Number(v)` via `__unbox_number`
+  // (ToNumber semantics: Number(null)=0, Number("")=0, Number("0x1F")=31 — NOT
+  // parseFloat). `--target standalone` has no host import, so coerceType does the
+  // ToPrimitive("number") walk in pure Wasm. NOTE: gated on `ctx.standalone`
+  // EXACTLY (not `noJsHost`) to match the migrated `Number(x)` site byte-for-byte
+  // — under `--target wasi` (wasi && !standalone) the original took the
+  // `__unbox_number` host path, and this preserves that (any WASI-specific
+  // correction is a separate, non-neutral change).
+  if (valType.kind === "externref") {
+    if (ctx.standalone) {
+      coerceType(ctx, fctx, valType, { kind: "f64" }, "number");
+      return { kind: "f64" };
+    }
+    addUnionImports(ctx);
+    const unboxIdx = ctx.funcMap.get("__unbox_number");
+    if (unboxIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: unboxIdx });
+    }
+    return { kind: "f64" };
+  }
+
+  // Object/struct ref → number via @@toPrimitive("number")/valueOf.
+  if (valType.kind === "ref" || valType.kind === "ref_null") {
+    coerceType(ctx, fctx, valType, { kind: "f64" }, "number");
+    return { kind: "f64" };
+  }
+
+  // i32 (number or boolean) → f64.
+  if (valType.kind === "i32") {
+    fctx.body.push({ op: "f64.convert_i32_s" });
+    return { kind: "f64" };
+  }
+
+  // Already f64 — no-op.
+  return valType;
+}
+
+/**
+ * Append `ToBoolean(value)` (§7.1.2 → i32, 1 = truthy) for a value of ValType
+ * `valType` already on the stack into `sink`. The consolidation of the two
+ * hand-rolled truthiness sites that #2085 already aligned:
+ *   - `ensureI32Condition` (index.ts, B1 — the canonical, pushes to `fctx.body`)
+ *   - `buildToBooleanInstrs` (array-methods.ts, B2 — returns an `Instr[]`)
+ *
+ * The `sink` parameter unifies those two emission styles: B1 passes `fctx.body`,
+ * B2 passes a fresh array it then returns. Both produce the SAME sequence — this
+ * is behaviour-neutral (the #2085 fix already made B2 use `|x|>0` like B1, so
+ * there is no longer a NaN-truthy divergence to surface).
+ *
+ *   null valType → i32.const 0  (compile failed upstream → keep Wasm valid: falsy)
+ *   f64          → |x| > 0       (NaN, +0, -0 all falsy)
+ *   externref    → __is_truthy   (0/NaN/null/undefined/"" → falsy); ref.is_null fallback
+ *   any-boxed ref→ __any_unbox_bool (proper JS truthiness on the boxed value)
+ *   native str ref→ flatten → len > 0 (empty string falsy)
+ *   other ref    → non-null (ref.is_null; i32.eqz)
+ *   i64          → nonzero
+ *   i32          → as-is (already 0/1-valued)
+ */
+export function emitToBoolean(ctx: CodegenContext, valType: ValType | null, sink: Instr[]): Instr[] {
+  if (!valType) {
+    // Upstream compile failed — push false to keep the module valid.
+    sink.push({ op: "i32.const", value: 0 });
+    return sink;
+  }
+  const kind = valType.kind;
+  if (kind === "f64") {
+    // |x| > 0 so NaN, +0, -0 are all falsy (f64.ne 0 would make NaN truthy).
+    sink.push({ op: "f64.abs" }, { op: "f64.const", value: 0 }, { op: "f64.gt" });
+    return sink;
+  }
+  if (kind === "externref") {
+    addUnionImports(ctx);
+    const isTruthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
+    if (isTruthyIdx !== undefined) {
+      sink.push({ op: "call", funcIdx: isTruthyIdx });
+      return sink;
+    }
+    // Fallback: non-null → true.
+    sink.push({ op: "ref.is_null" }, { op: "i32.eqz" });
+    return sink;
+  }
+  if (kind === "ref" || kind === "ref_null") {
+    // Boxed `any` value — proper JS truthiness (false/0/NaN/""/null → falsy).
+    if (isAnyValue(valType, ctx)) {
+      ensureAnyHelpers(ctx);
+      const unboxBoolIdx = ctx.funcMap.get("__any_unbox_bool");
+      if (unboxBoolIdx !== undefined) {
+        sink.push({ op: "call", funcIdx: unboxBoolIdx });
+        return sink;
+      }
+    }
+    // Native string ref — empty string is falsy (check len > 0 after flatten).
+    if (valType.typeIdx === ctx.anyStrTypeIdx && ctx.anyStrTypeIdx >= 0) {
+      const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
+      if (flattenIdx !== undefined && ctx.nativeStrTypeIdx >= 0) {
+        sink.push(
+          { op: "call", funcIdx: flattenIdx },
+          { op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 0 },
+          { op: "i32.const", value: 0 },
+          { op: "i32.gt_s" },
+        );
+        return sink;
+      }
+    }
+    // Opaque struct ref — non-null is truthy.
+    sink.push({ op: "ref.is_null" }, { op: "i32.eqz" });
+    return sink;
+  }
+  if (kind === "i64") {
+    // nonzero → true.
+    sink.push({ op: "i64.eqz" }, { op: "i32.eqz" });
+    return sink;
+  }
+  // i32 is already a valid 0/1 condition — no-op.
+  return sink;
+}
+
+/**
+ * Compile both operands of an `any`-typed equality expression, boxing each side
+ * that did not naturally produce a `$AnyValue` to `(ref null $AnyValue)` — the
+ * shared parameter shape of the `__any_eq` / `__any_strict_eq` helpers. Returns
+ * `false` (no instructions appended) if either operand fails to compile, so the
+ * caller can fall back exactly as it did before.
+ *
+ * This is the operand-marshalling half of the §7.2.13/§7.2.15 equality dispatch,
+ * lifted verbatim from `compileAnyBinaryDispatch` (binary-ops.ts) — same
+ * `compileExpression` → `isAnyValue` guard → `coerceType(ref_null $AnyValue)`
+ * sequence (#1211), so the emitted bytes are identical.
+ */
+function emitAnyEqOperands(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): boolean {
+  const anyValueTarget: ValType = { kind: "ref_null", typeIdx: ctx.anyValueTypeIdx };
+  const leftType = compileExpression(ctx, fctx, expr.left);
+  if (!leftType) return false;
+  if (!isAnyValue(leftType, ctx)) {
+    coerceType(ctx, fctx, leftType, anyValueTarget);
+  }
+  const rightType = compileExpression(ctx, fctx, expr.right);
+  if (!rightType) return false;
+  if (!isAnyValue(rightType, ctx)) {
+    coerceType(ctx, fctx, rightType, anyValueTarget);
+  }
+  return true;
+}
+
+/**
+ * #1917 Step E3 — `emitStrictEq` / `emitLooseEq`: the **dispatch layer** for
+ * `any`-operand equality. These decide WHICH helper to call (`__any_strict_eq`
+ * for `===`/`!==`; `__any_eq` for `==`/`!=`), marshal both operands into the
+ * boxed `$AnyValue` shape, emit the `call`, and apply the `!=`/`!==` negation.
+ *
+ * They are a WRAPPER, not a re-derivation: the tag-5 field-4 3-way classifier
+ * (boxed-number vs proto-identity vs content equality, #2040/#2585 — the
+ * `tag5StringEqThen` machinery) lives in the `__any_eq`/`__any_strict_eq` helper
+ * *bodies* in any-helpers.ts. The engine never copies that logic; it only
+ * selects the helper and boxes the operands. This is a byte-neutral extraction
+ * of the equality arms of `compileAnyBinaryDispatch`.
+ *
+ * @param negate when true, the loose/strict-equal result is i32.eqz'd (the
+ *   `!=` / `!==` half). The helper itself always computes `==`/`===`.
+ * @returns the i32 result ValType, or `null` if the helper is unavailable or an
+ *   operand failed to compile (caller falls back).
+ */
+export function emitStrictEq(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  negate: boolean,
+): ValType | null {
+  return emitAnyEquality(ctx, fctx, expr, "__any_strict_eq", negate);
+}
+
+export function emitLooseEq(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  negate: boolean,
+): ValType | null {
+  return emitAnyEquality(ctx, fctx, expr, "__any_eq", negate);
+}
+
+function emitAnyEquality(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  helperName: "__any_eq" | "__any_strict_eq",
+  negate: boolean,
+): ValType | null {
+  ensureAnyHelpers(ctx);
+  const funcIdx = ctx.funcMap.get(helperName);
+  if (funcIdx === undefined) return null;
+
+  if (!emitAnyEqOperands(ctx, fctx, expr)) return null;
+
+  fctx.body.push({ op: "call", funcIdx });
+
+  if (negate) {
+    fctx.body.push({ op: "i32.eqz" });
+  }
+
+  return { kind: "i32" };
+}
+
+/**
+ * #1917 equality finale, slice E6 — the standalone externref-vs-externref
+ * loose-equality tail.
+ *
+ * For two opaque `any` externref operands that were NOT eqref-identical, the
+ * standalone/WASI lane (no JS host) routes through the NATIVE §7.2.15
+ * IsLooselyEqual instead of the unsatisfiable `__host_loose_eq` import (#2081):
+ * box both externrefs to `$AnyValue` via `__any_from_extern` (tag5 string / tag3
+ * number / tag4 bool / tag1 null) and call the keystone `__any_eq` helper (whose
+ * tag-5 field-4 classifier owns the String⇄Number / proto-identity arms). This
+ * is the SAME tag-5-sensitive boxing E3 does for the any/any case, just sourced
+ * from two pre-computed externref temps instead of freshly-compiled operands.
+ *
+ * Returns the instruction SEQUENCE (this caller builds an `Instr[]` for an
+ * `if`-arm, it does not emit live), or `null` when the helpers are unavailable so
+ * the caller can fall through to its host-import path exactly as before. WRAPPER,
+ * not a re-derivation: the classifier stays in `__any_eq`'s body (any-helpers.ts).
+ *
+ * @param tmpLeft  local index holding the left externref operand.
+ * @param tmpRight local index holding the right externref operand.
+ * @param negate   append `i32.eqz` for the `!=` form.
+ */
+export function emitAnyEqFromExternTemps(
+  ctx: CodegenContext,
+  tmpLeft: number,
+  tmpRight: number,
+  negate: boolean,
+): Instr[] | null {
+  ensureAnyHelpers(ctx);
+  const fromExternIdx = ensureAnyFromExternHelper(ctx);
+  const anyEqIdx = ctx.funcMap.get("__any_eq");
+  if (fromExternIdx === undefined || anyEqIdx === undefined) return null;
+  return [
+    { op: "local.get", index: tmpLeft },
+    { op: "call", funcIdx: fromExternIdx },
+    { op: "local.get", index: tmpRight },
+    { op: "call", funcIdx: fromExternIdx },
+    { op: "call", funcIdx: anyEqIdx },
+    ...(negate ? [{ op: "i32.eqz" } as Instr] : []),
+  ];
+}
+
+/**
+ * Emit a string literal in the active mode. `compileStringLiteral` is already
+ * mode-agnostic (a native `$AnyString` constant in native/standalone mode, an
+ * externref string-constant in js-host mode) — exactly what every migrated
+ * caller used via its own `pushStringConstant`/`compileStringLiteral` call.
+ */
+function pushStringLiteral(ctx: CodegenContext, fctx: FunctionContext, value: string): void {
+  compileStringLiteral(ctx, fctx, value);
+}
+
+// emitBoolToString and emitNativeStringRefFromExternref live in string-ops.ts
+// and are not exported (string-ops.ts imports this module, so a direct import
+// here would be a cycle). They are bound lazily by string-ops.ts at module load.
+let boolToStringEmitter: ((ctx: CodegenContext, fctx: FunctionContext) => void) | undefined;
+let nativeStringRefFromExternrefEmitter: ((ctx: CodegenContext, fctx: FunctionContext) => void) | undefined;
+
+export function registerStringHelperEmitters(emitters: {
+  boolToString: (ctx: CodegenContext, fctx: FunctionContext) => void;
+  nativeStringRefFromExternref: (ctx: CodegenContext, fctx: FunctionContext) => void;
+}): void {
+  boolToStringEmitter = emitters.boolToString;
+  nativeStringRefFromExternrefEmitter = emitters.nativeStringRefFromExternref;
+}
+
+function emitBoolToString(ctx: CodegenContext, fctx: FunctionContext): void {
+  if (!boolToStringEmitter) throw new Error("coercion-engine: bool-to-string emitter not registered");
+  boolToStringEmitter(ctx, fctx);
+}
+
+function emitNativeStringRefFromExternref(ctx: CodegenContext, fctx: FunctionContext): void {
+  if (!nativeStringRefFromExternrefEmitter) {
+    throw new Error("coercion-engine: native-string-ref emitter not registered");
+  }
+  nativeStringRefFromExternrefEmitter(ctx, fctx);
+}

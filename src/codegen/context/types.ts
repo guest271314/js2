@@ -66,13 +66,14 @@ export interface CodegenOptions {
   /** WASI target: emit WASI imports (fd_write, proc_exit) instead of JS host imports */
   wasi?: boolean;
   /**
-   * #2524 Phase 1 — route `process.std{in,out,err}` IO through a separately
-   * compiled, linkable `js2wasm:node-process` shim instead of inlining the
-   * `wasi_snapshot_preview1.fd_read`/`fd_write` glue. When set (WASI only), the
-   * user module imports `stdin_read`/`stdout_write`/`stderr_write` plus its
-   * linear memory from `js2wasm:node-process` and carries NO `wasi_snapshot_preview1`
-   * import for the stream IO path; `node-process.wasm` implements the interface
-   * over WASI. Default off — the inline fd_read/fd_write path stays as fallback.
+   * #2524 / #2633 — route std-IO through a separately compiled, linkable
+   * `node:fs` shim instead of inlining the `wasi_snapshot_preview1.fd_read`/
+   * `fd_write` glue. When set (WASI only), the user module imports
+   * `readSync`/`writeSync` plus its linear memory from `node:fs` and carries NO
+   * `wasi_snapshot_preview1` import for the stream IO path; console.log /
+   * process.std*.write lower to `writeSync(1|2, …)`. `node-fs.wasm` implements
+   * the interface over WASI. The bespoke `js2wasm:node-process` shim was retired
+   * (#2633). Default off — the inline fd_read/fd_write path stays as fallback.
    */
   linkNodeShims?: boolean;
   /** Standalone target (#1470): pure WasmGC, no JS host imports and no WASI
@@ -83,8 +84,9 @@ export interface CodegenOptions {
   standalone?: boolean;
   /**
    * Experimental: route a narrow set of functions through the middle-end IR
-   * (see `src/ir/`). Defaults to off. Leave off in production until the IR
-   * reaches parity with the legacy direct-emission path.
+   * (see `src/ir/`). Defaults to **on** since #1131 (the front-end driver
+   * passes `experimentalIR !== false`); pass `false` to force the legacy
+   * direct-emission path (bit-by-bit divergence tests or emergency revert).
    */
   experimentalIR?: boolean;
   /**
@@ -916,6 +918,17 @@ export interface CodegenContext {
    */
   arrayToPrimitiveReserved?: boolean;
   /**
+   * (#2638) True once `__to_primitive` has reserved the `__class_to_primitive`
+   * driver — standalone routing of a nominal CLASS-instance struct (neither
+   * `$Object` nor `$Vec`) through the per-struct `__call_valueOf`/`__call_toString`
+   * dispatchers per §7.1.1.1. Those dispatchers are emitted at FINALIZE (after
+   * `__to_primitive`), so the driver body is filled by `fillClassToPrimitive`
+   * post-`emitToPrimitiveMethodExports`; same reserve/fill funcIdx discipline as
+   * `arrayToPrimitiveReserved`. Lets `(new C() as any) - 8` / `Number(new C() as any)`
+   * reduce via the class's valueOf/toString host-free, standalone only.
+   */
+  classToPrimitiveReserved?: boolean;
+  /**
    * (#2038) True once the native iterator runtime (`ensureNativeIteratorRuntime`,
    * iterator-native.ts) has emitted `__iterator` / `__iterator_next` with a
    * vec-only body and is awaiting its USER-iterator arm. The USER arm dispatches
@@ -947,6 +960,24 @@ export interface CodegenContext {
   }[];
   /** Counter for generated closure types/functions */
   closureCounter: number;
+  /**
+   * (#2640) When set, `compileArrowAsClosure` widens any callback parameter
+   * whose resolved type is a typed WasmGC vec/array (`__vec_*`/`__arr_*`/
+   * `$__vec_base`) to `externref`. Set transiently by
+   * `compileArrayLikePrototypeCall` around the callback compile: that path
+   * dispatches a generic `Array.prototype.X.call(arrayLike, cb)` over a
+   * DYNAMIC (non-vec) array-like receiver, and passes that receiver to the
+   * callback's array parameter as an `externref`. Without the widening,
+   * TypeScript infers the callback's array param as `T[]` → a typed vec ref,
+   * so the dispatch loop must pass `ref.null` (the receiver fails the vec
+   * `ref.test`) and the callback's `obj.length`/`obj[i]` lowers to a
+   * `struct.get` on null → "dereferencing a null pointer". Widening to
+   * externref routes those reads through the tag-aware dynamic reader.
+   * This path is ONLY entered for non-vec array-like receivers (real
+   * `__vec_`/`__arr_` receivers bail out of `compileArrayLikePrototypeCall`
+   * upstream), so the typed `arr.forEach(cb)` hot path is never touched.
+   */
+  forceExternrefCallbackParams?: boolean;
   /** Map from local variable name → closure metadata (for call_ref dispatch) */
   closureMap: Map<string, ClosureInfo>;
   /** Map from closure struct type index → closure metadata (for anonymous closures) */
@@ -1545,18 +1576,18 @@ export interface CodegenContext {
    */
   supportsAsyncIr: boolean;
   /**
-   * #2524 Phase 1 — when true (WASI only), `process` stream IO is lowered to
-   * imported `js2wasm:node-process` calls (over a shim-owned, imported linear
-   * memory) instead of inline `fd_read`/`fd_write`. See `linkNodeShims` in
+   * #2524 / #2633 — when true (WASI only), std-IO is lowered to imported
+   * `node:fs` `readSync`/`writeSync` calls (over a shim-owned, imported linear
+   * memory) instead of inline `fd_read`/`fd_write`. console.log/warn/error and
+   * process.std*.write lower to `writeSync(1|2, …)`; the bespoke
+   * `js2wasm:node-process` shim was retired (#2633). See `linkNodeShims` in
    * `CodegenOptions`.
    */
   linkNodeShims: boolean;
-  /** #2524: func index of the imported `js2wasm:node-process::stdout_write` (-1 = not registered). */
-  nodeIoStdoutWriteIdx: number;
-  /** #2524: func index of the imported `js2wasm:node-process::stderr_write` (-1 = not registered). */
-  nodeIoStderrWriteIdx: number;
-  /** #2524: func index of the imported `js2wasm:node-process::stdin_read` (-1 = not registered). */
-  nodeIoStdinReadIdx: number;
+  /** #2631/#2633: func index of the imported `node:fs::readSync` (fd,ptr,len)->i32 (-1 = not registered). */
+  nodeFsReadSyncIdx: number;
+  /** #2631/#2633: func index of the imported `node:fs::writeSync` (fd,ptr,len)->i32 (-1 = not registered). */
+  nodeFsWriteSyncIdx: number;
   /** WASI import indices */
   wasiFdWriteIdx: number;
   wasiFdReadIdx?: number;
@@ -1564,6 +1595,8 @@ export interface CodegenContext {
   wasiPathOpenIdx: number;
   wasiFdCloseIdx: number;
   wasiPollOneoffIdx?: number;
+  /** (#2632 Phase 2) wasi_snapshot_preview1::fd_fdstat_set_flags import func idx — undefined if not registered. */
+  wasiFdFdstatSetFlagsIdx?: number;
   wasiBumpPtrGlobalIdx: number;
   /** #1482: wasi_snapshot_preview1::environ_sizes_get import index (-1 = not registered) */
   wasiEnvironSizesGetIdx: number;
@@ -1583,6 +1616,10 @@ export interface CodegenContext {
   wasiClockHelpersPending?: boolean;
   /** (#1484) Pending flag — emit `__wasi_sleep_ms` after lib-globals scan. */
   wasiPendingSleepMsHelper?: boolean;
+  /** (#2632) Pending flag — register timer heap + run-loop reactor after lib-globals scan. */
+  wasiPendingTimerHeap?: boolean;
+  /** (#2632 Phase 2) Pending flag — activate the fd0 stdin reactor (multi-sub poll + internal buffer) before timer-heap registration. */
+  wasiPendingStdinReactor?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
   wasiNodeFsFuncs: Set<string>;
   /**

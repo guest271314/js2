@@ -1,5 +1,5 @@
 ---
-id: 6408
+id: 2194
 title: "standalone object-literal data/method property keys emit `global.get -1` sentinel → binary emit error (~17 tests; subcluster of a 155-test #51-family residual)"
 status: done
 assignee: ttraenkler/sd2
@@ -20,7 +20,7 @@ test262_count: 155
 origin: "2026-06-18 sprint-63 standalone harvest (sdev-harvest): re-bucketed the fresh standalone baseline JSONL. The `-1` string-global sentinel CE class (#51) has a 155-test residual on main, all in object-literal data/method property keys (the accessor-key arm was fixed in #1888 S5c but the sibling PropertyAssignment + MethodDeclaration arms were not)."
 ---
 
-# #6408 — standalone object-literal data/method property keys bake the `-1` string-global sentinel into `global.get`
+# #2194 — standalone object-literal data/method property keys bake the `-1` string-global sentinel into `global.get`
 
 ## Problem
 
@@ -157,7 +157,7 @@ main:
 | literal shape | env import (standalone) |
 |---|---|
 | `{ get id() {…} }` | (none) ✓ |
-| `{ tag: 7, get id() {…} }` (data + getter, #6408 key fix) | (none) ✓ |
+| `{ tag: 7, get id() {…} }` (data + getter, #2194 key fix) | (none) ✓ |
 | `{ describe() {…}, get id() {…} }` (method + getter) | **`__make_getter_callback`** ✗ |
 
 **Root cause** (`src/codegen/literals.ts`, `compileObjectLiteralWithAccessors`):
@@ -178,12 +178,12 @@ arms now route through it. The standalone method closure is dispatched via the
 same `__current_this`-bound closure-call path the getter closures already use,
 so `this` binds correctly. GC mode is unchanged (same `compileArrowAsCallback`).
 
-**Verified** (`tests/issue-6408-objlit-method-host-leak.test.ts`, 6 cases, all
+**Verified** (`tests/issue-2194-objlit-method-host-leak.test.ts`, 6 cases, all
 standalone, asserting BOTH zero `env` imports AND correct `this`-bound runtime
 values): getter-sibling still works; method reads `this` data (7); `this`-mutating
 method sees mutation (2); computed-key method (9); iterator-shaped `next()` method
 + getter (0); method-only-no-getter regression guard (4). The 4 existing
-`issue-6408-objlit-key-sentinel` cases stay green; `accessor-side-effects` +
+`issue-2194-objlit-key-sentinel` cases stay green; `accessor-side-effects` +
 `object-literals` suites green (37). `tsc --noEmit` clean; prettier + biome clean.
 The two pre-existing failures (`issue-1888` 2-4-arg dispatch; the
 `object-*-getters-setters` / `object-define-property-accessors` `./helpers.js`

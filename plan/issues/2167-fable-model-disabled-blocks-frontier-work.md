@@ -1,16 +1,17 @@
 ---
 id: 2167
 title: "Fable model disabled — frontier-reasoning work blocked"
-status: in-progress
-sprint: 65
+status: blocked
+sprint: 66
 created: 2026-06-15
-updated: 2026-06-15
+updated: 2026-06-24
 priority: high
 feasibility: external
 reasoning_effort: low
 task_type: infra
 area: process
 goal: process
+reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): EXTERNAL/INFRA blocker — NOT dev-claimable. The Fable model is disabled outside the team's control (feasibility: external). It remains the IR-cluster reasoning gate but there is no code action a dev can take. → blocked (was mislabelled in-progress)."
 ---
 
 # Fable model disabled — frontier-reasoning work blocked

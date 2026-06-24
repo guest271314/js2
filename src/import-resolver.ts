@@ -256,7 +256,7 @@ function buildTimerShim(used: Set<string>, definedNames: Set<string>): string {
   return `// #1501 timer host-import shim (auto-injected)\n${lines.join("\n")}\n`;
 }
 
-export function preprocessImports(source: string): PreprocessResult {
+export function preprocessImports(source: string, opts?: { wasi?: boolean }): PreprocessResult {
   const sf = ts.createSourceFile("__preprocess__.ts", source, ts.ScriptTarget.Latest, true);
 
   // #1501 — detect bare-identifier calls to timer globals BEFORE the early
@@ -264,7 +264,15 @@ export function preprocessImports(source: string): PreprocessResult {
   // without any `import` statements still gets the shim. (The
   // `definedNames` reachable at this point includes the same scan used
   // below for the existing import resolution path.)
-  const timerCalls = detectTimerCallSites(sf);
+  //
+  // #2632 Phase 1 — under `--target wasi` the timer shim is SUPPRESSED: the
+  // standalone event-loop reactor lowers setTimeout/setInterval/clearTimeout/
+  // clearInterval natively (no `__timer_set_*` host import, no injected
+  // `function setTimeout` stub). Injecting the stub here would (a) pull in an
+  // unresolvable host import and (b) make `setTimeout` resolve to a user-file
+  // declaration, defeating the codegen reactor lowering (the call would inline
+  // the no-op stub instead). So skip it entirely for WASI.
+  const timerCalls = opts?.wasi ? new Set<string>() : detectTimerCallSites(sf);
 
   // Step 1: Find all imports
   const nsImports = new Map<string, { start: number; end: number; moduleSpec: string }>();

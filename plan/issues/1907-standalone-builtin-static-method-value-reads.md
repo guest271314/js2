@@ -170,3 +170,34 @@ whitelist** — top unmapped pairs by record count: `Symbol.iterator` 805,
 `Symbol.toStringTag`, `*.BYTES_PER_ELEMENT`). Not a regression (count fell);
 flagged so the residual under umbrella #1888 stays visible for the next
 standalone-mode push.
+
+## Harvest refresh — 2026-06-24 (run `426e28e8`) — still the #1 standalone codegen-refusal family
+
+Stable vs 2026-06-19. By the highest-signal metric (embedded `#NNNN` citation,
+deduped per record) the #1888/#1907 S6-b family is **1,631 records** — the
+single largest standalone *codegen-refusal* family (tied #1888 = #1907; the same
+refusal cites both). Top still-unmapped `Builtin.prototype` value-read pairs by
+record count (from the `… built-in static property value read is not supported
+in --target standalone (#1888 / #1907 S6-b)` signatures): `Int8Array.prototype`
+460+52, `ArrayBuffer.prototype` 129, `DataView.prototype` 100, `Atomics.waitAsync`
+93, `Iterator.prototype` 48, `TypeError.prototype` 43, `SharedArrayBuffer.prototype`
+38, plus the long tail (`Reflect.*` Phase-C, `DisposableStack`/
+`AsyncDisposableStack.prototype`, `Symbol.matchAll`, `Uint8Array.prototype`,
+`Array.fromAsync`). Separately the generic `'__get_builtin' … not yet supported
+… (Phase B)` refusal is 536 records. Mechanism is landed (PR #1292); the residual
+is the **incomplete per-builtin whitelist** — still the clearest standalone-mode
+lever for the next push.
+
+> **Follow-up #2651 (s66, 2026-06-24): the TypedArray *constructor*-as-value
+> tier.** Verified (per-process WAT probe, `main` `c2847896d8`) that the bulk of
+> standalone `built-ins/TypedArray/prototype/*` rows are gated not on the method
+> body (fixed in #2648/#2644) but on reading the **builtin constructor itself as
+> a VALUE** — the `testWithTypedArrayConstructors` harness iterates the ctors and
+> reads each as a value (`new TA(arg)`, `TA.name`, `TA.prototype`,
+> `TA.BYTES_PER_ELEMENT`, `Object.getPrototypeOf(TA)`). Under the host-free
+> contract that read resolves to `ref.null.extern` (null ctor); under default
+> standalone it leaks `env.global_<Name>` (the #2094 class). #2651 specs the
+> demand-driven `$NativeCtor` singleton (D1) + reserved-TypedArray `$NativeProto`
+> wiring (D2) + dynamic-`new` brand-dispatch (D3) + `%TypedArray%` intrinsic
+> identity (D4, coordinates #2580 M3). This is the constructor-tier extension of
+> this issue's case-(c). See `plan/issues/2651-builtin-constructor-prototype-as-value-substrate.md`.

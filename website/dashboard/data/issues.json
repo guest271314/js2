@@ -3140,9 +3140,9 @@
   "review": [],
   "done": [
     {
-      "id": "6408",
+      "id": "2194",
       "title": "standalone object-literal data/method property keys emit `global.get -1` sentinel → binary emit error (~17 tests; subcluster of a 155-test #51-family residual)",
-      "slug": "6408-standalone-objlit-data-method-key-sentinel-emit",
+      "slug": "2194-standalone-objlit-data-method-key-sentinel-emit",
       "priority": "high",
       "feasibility": "medium",
       "depends_on": [],
@@ -3151,9 +3151,9 @@
       "sprint": "64"
     },
     {
-      "id": "6407",
+      "id": "2177",
       "title": "Array.prototype.<m>.call(receiver, cb) never reads elements of a compiled $Vec / open-object receiver",
-      "slug": "6407-array-method-call-vec-receiver-element-retrieval",
+      "slug": "2177-array-method-call-vec-receiver-element-retrieval",
       "priority": "high",
       "feasibility": "medium",
       "depends_on": [],

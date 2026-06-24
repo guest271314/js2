@@ -3,9 +3,10 @@ id: 2135
 title: "Single IR capability predicate shared by selector and builder (retire select.ts/from-ast.ts drift)"
 status: blocked
 blocked_by: [2167]
-sprint: 65
+pipeline_unblocked: 1927
+sprint: 66
 created: 2026-06-12
-updated: 2026-06-12
+updated: 2026-06-24
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -14,7 +15,7 @@ task_type: architecture
 area: compiler
 language_feature: compiler-internals
 goal: correctness
-related: [1923, 1804, 1922]
+related: [1923, 1804, 1922, 2138]
 origin: "2026-06-12 sprint-62 architecture analysis (IR workstream N2)"
 ---
 
@@ -47,3 +48,13 @@ expression family. Architect spec first (Fable), staged impl follows.
 
 Size L staged; spec is sprint-62, implementation can spill into 63 per
 family. Depends on #1923 (metering) for the acceptance measurement.
+
+### Cluster sequencing note (2026-06-23, architect)
+
+Pipeline prerequisite **#1927 has landed** (PR #1958). This issue is best
+sequenced **right after #2138 Slice 2** (the `JS2WASM_IR_FIRST` compile-once
+inversion): under that flag a selector↔builder disagreement stops being a
+silent legacy demote and becomes a hard trap on a skipped function, so the
+`select.ts` ⇄ `from-ast.ts` capability drift this issue closes is exactly the
+divergence #2138's measurement surfaces. #2138's `## Implementation Plan` records
+the same dependency. Still parked on **#2167** (Fable disabled) for dispatch.

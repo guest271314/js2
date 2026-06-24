@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 
 /**
- * #6408 follow-up — a regular METHOD on an object literal that ALSO carries a
+ * #2194 follow-up — a regular METHOD on an object literal that ALSO carries a
  * getter/setter must not leak the `__make_getter_callback` JS host import in
  * `--target standalone`.
  *
@@ -42,7 +42,7 @@ async function buildStandalone(body: string): Promise<{
   return { result, envImports };
 }
 
-describe("#6408 follow-up — object-literal method + getter is host-import-free standalone", () => {
+describe("#2194 follow-up — object-literal method + getter is host-import-free standalone", () => {
   it("the getter still works and no env import leaks", async () => {
     const { result, envImports } = await buildStandalone(
       `const o: any = { describe() { return 5; }, get id() { return 1; } }; return o.id as number;`,

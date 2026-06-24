@@ -14,8 +14,15 @@ import { allocLocal, allocTempLocal, getLocalType } from "./context/locals.js";
 import { probeCompiledType } from "./context/speculative.js";
 import { emitHoleToUndefined, holeTestInstrs, holeToUndefinedInstrs } from "./array-holes.js"; // (#2001 S1)
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
-import { addArrayIteratorImports, addStringImports, addUnionImports, resolveWasmType } from "./index.js";
+import {
+  addArrayIteratorImports,
+  addStringImports,
+  addUnionImports,
+  resolveWasmType,
+  typedArrayPackedSignedness,
+} from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
+import { emitToBoolean } from "./coercion-engine.js";
 import { compileStringLiteral } from "./shared.js";
 import {
   getArrTypeIdxFromVec,
@@ -37,12 +44,7 @@ import {
   VOID_RESULT,
 } from "./shared.js";
 import { emitUndefined, ensureGetUndefined } from "./expressions/late-imports.js";
-import {
-  ensureAnyHelpers,
-  ensureExternSameValueZeroHelper,
-  ensureExternStrictEqHelper,
-  isAnyValue,
-} from "./any-helpers.js";
+import { ensureExternSameValueZeroHelper, ensureExternStrictEqHelper } from "./any-helpers.js";
 import {
   ensureNativeStringHelpers,
   nativeStringLiteralInstrs,
@@ -140,6 +142,51 @@ function throwStringInstrs(ctx: CodegenContext, message: string): Instr[] {
   addStringConstantGlobal(ctx, message);
   const tagIdx = ensureExnTag(ctx);
   return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx } as Instr];
+}
+
+/**
+ * Value-position type for a (possibly packed) array element. A packed `i8`/`i16`
+ * storage type is only valid as a struct field / array element — it MUST NOT
+ * appear in a param/result/local/global position (the binary emitter rejects it
+ * with "packed storage type … is not valid in a value position"). A packed
+ * element loaded via `array.get_s`/`array.get_u` is already widened to `i32`, so
+ * a search-value local / comparison operand for the sub-32-bit typed arrays
+ * (Int8/Uint8/Int16/Uint16) must use `i32`, not the raw packed `elemType`
+ * (#2648 — `Int8Array.prototype.{indexOf,lastIndexOf,includes}` standalone CE).
+ */
+function unpackedElemType(elemType: ValType): ValType {
+  return elemType.kind === "i8" || elemType.kind === "i16" ? { kind: "i32" } : elemType;
+}
+
+/**
+ * (#2648, mirrors #2593) Recover the packed-element load signedness ("s"/"u") of
+ * a typed-array search-method receiver from its VIEW NAME — `Int8Array`/
+ * `Int16Array` read sign-extending (`array.get_s`), `Uint8Array`/
+ * `Uint8ClampedArray`/`Uint16Array` read zero-extending (`array.get_u`). Signed
+ * and unsigned views share the same i8/i16 storage but read with opposite
+ * sign-extension, so `indexOf`/`lastIndexOf`/`includes` MUST drive the element
+ * load off the view name, not the storage kind. Returns undefined for a
+ * non-integer-view receiver (caller falls back to the storage-kind heuristic).
+ */
+function typedArraySearchSignedness(ctx: CodegenContext, receiver: ts.Expression): "s" | "u" | undefined {
+  const t = ctx.checker.getTypeAtLocation(receiver);
+  let name = t.getSymbol()?.name ?? t.aliasSymbol?.name;
+  if (!name && ts.isNewExpression(receiver) && ts.isIdentifier(receiver.expression)) {
+    name = receiver.expression.text;
+  }
+  return name ? typedArrayPackedSignedness(name) : undefined;
+}
+
+/** Pick the element-load op for a (possibly packed) typed-array element, driven
+ *  by the view-name signedness when available, else the legacy storage-kind
+ *  heuristic (i8→get_u, i16→get_s). i32/f64/ref elements use plain `array.get`. */
+function elemGetOp(elemType: ValType, signedness: "s" | "u" | undefined): "array.get" | "array.get_s" | "array.get_u" {
+  if (elemType.kind === "i8" || elemType.kind === "i16") {
+    if (signedness === "s") return "array.get_s";
+    if (signedness === "u") return "array.get_u";
+    return elemType.kind === "i8" ? "array.get_u" : "array.get_s";
+  }
+  return "array.get";
 }
 
 /**
@@ -807,8 +854,12 @@ export function compileArrayLikePrototypeCall(
     [{ kind: "i32" }],
   );
   // __is_truthy for JS-correct truthiness when callback returns externref
-  // (boxed boolean false is non-null, so ref.is_null alone is wrong).
-  const isTruthyFn = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
+  // (boxed boolean false is non-null, so ref.is_null alone is wrong). The name
+  // is captured ONCE here (the single coercion-engine ToBoolean primitive, #1917
+  // / #2108) so the funcidx re-resolve below references the same string rather
+  // than hand-rolling a second coercion site.
+  const IS_TRUTHY = "__is_truthy";
+  const isTruthyFn = ensureLateImport(ctx, IS_TRUTHY, [{ kind: "externref" }], [{ kind: "i32" }]);
   if (lenFn === undefined || getIdxFn === undefined || hasIdxFn === undefined || isTruthyFn === undefined)
     return undefined;
   // #16 — pre-register the result-array build helpers used by the filter/map/
@@ -845,11 +896,24 @@ export function compileArrayLikePrototypeCall(
   fctx.body.push({ op: "i32.trunc_sat_f64_s" });
   fctx.body.push({ op: "local.set", index: lenTmp });
 
-  // Compile callback to closure
+  // Compile callback to closure.
+  // (#2640) This is the generic `Array.prototype.X.call(arrayLike, cb)` path
+  // over a DYNAMIC (non-vec) array-like receiver — the loop passes that
+  // receiver to the callback's array parameter (`cb`'s 3rd/4th arg) as an
+  // `externref`. TS infers that param as `T[]` → a typed vec ref, so without
+  // widening the dispatch below passes `ref.null` (the receiver fails the vec
+  // `ref.test`) and the callback's `obj.length`/`obj[i]` lowers to a
+  // `struct.get` on null → "dereferencing a null pointer". Force the
+  // callback's vec/array params to externref so those reads route through the
+  // tag-aware dynamic reader. Restore the prior flag afterward (nested
+  // closures outside this path must keep their typed params).
+  const savedForceExternrefCbParams = ctx.forceExternrefCallbackParams;
+  ctx.forceExternrefCallbackParams = true;
   const cbResult =
     ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)
       ? compileArrowAsClosure(ctx, fctx, cbArg)
       : compileExpression(ctx, fctx, cbArg);
+  ctx.forceExternrefCallbackParams = savedForceExternrefCbParams;
   if (!cbResult || (cbResult.kind !== "ref" && cbResult.kind !== "ref_null")) return undefined;
   const closureTypeIdx = (cbResult as { typeIdx: number }).typeIdx;
   const closureInfo = ctx.closureInfoByTypeIdx.get(closureTypeIdx);
@@ -866,6 +930,18 @@ export function compileArrayLikePrototypeCall(
   // also register __js_array_* below, a further shift source.)
   const getIdxFnNow = ctx.funcMap.get("__extern_get_idx") ?? getIdxFn;
   const hasIdxFnNow = ctx.funcMap.get("__extern_has_idx") ?? hasIdxFn;
+  // #2580 B-pre — `__is_truthy` is the SAME funcidx-desync hazard: in
+  // standalone/WASI it is an IN-MODULE native defined func (#1471 routes the
+  // helper name to the native body), so the callback compile shifts its
+  // defined-func index. A stale-low `isTruthyFn` (captured before the compile)
+  // makes `call isTruthyFn` land on the wrong function (one returning
+  // externref) → `if expected i32, found externref` invalid Wasm for an
+  // `any`/null-returning predicate (e.g. `some.call(obj, () => null)`).
+  // Re-resolve by name here, exactly as the get/has helpers above. (Host mode:
+  // `__is_truthy` is a stable import, so `??` keeps the original index.) Reuses
+  // the SAME `IS_TRUTHY` engine primitive captured above — this is not a new
+  // hand-rolled coercion site, just a funcidx-desync re-resolve (#2108).
+  const isTruthyFnNow = ctx.funcMap.get(IS_TRUTHY) ?? isTruthyFn;
 
   // i = 0
   const iTmp = allocLocal(fctx, `__ali_i_${fctx.locals.length}`, { kind: "i32" });
@@ -929,7 +1005,7 @@ export function compileArrayLikePrototypeCall(
           ? []
           : closureInfo.returnType.kind === "externref"
             ? // Boxed value: __is_truthy unwraps JS semantics (false/0/NaN/""/null → falsy).
-              [{ op: "call", funcIdx: isTruthyFn } as Instr]
+              [{ op: "call", funcIdx: isTruthyFnNow } as Instr]
             : closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null"
               ? // Non-externref struct/string refs: fall back to null check. JS truthiness on
                 // these uncommon shapes is not observable here (callbacks usually return any).
@@ -3777,10 +3853,51 @@ function compileArrayAt(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 });
   fctx.body.push({ op: "local.set", index: lenTmp });
 
-  // Compile index argument
-  const argType = compileExpression(ctx, fctx, callExpr.arguments[0]!, { kind: "i32" });
-  if (argType && argType.kind === "f64") {
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+  // Compile index argument. §23.1.3.1 Array.prototype.at step 2:
+  // relativeIndex = ToIntegerOrInfinity(index) = truncate-toward-zero of
+  // ToNumber(index) (§7.1.5), NOT a direct i32 coercion. In standalone a fast
+  // i32 coercion of a non-integer-typed index (a numeric *string* like `"1"`,
+  // a `{valueOf(){…}}` object) resolves to the wrong slot — `a.at("1")` landed
+  // on index 0 instead of 1 (#2644, the Array analog of the String-method fix
+  // #2600). Route the arg through the existing numeric coercion engine to f64
+  // (string → `__str_to_number`, object → ToPrimitive("number") — both already
+  // present for `+x` / `Number(x)`), then apply ToIntegerOrInfinity: NaN → 0,
+  // else `i32.trunc_sat_f64_s` (truncates toward zero; ±∞ saturates and the
+  // following <0 wrap + bounds check clamp it). No new #2108 coercion site —
+  // `coerceType` reuse only. The legacy direct-i32 path is kept for the JS-host
+  // mode (which coerces strings via a host import).
+  if (noJsHost(ctx)) {
+    const argType = compileExpression(ctx, fctx, callExpr.arguments[0]!);
+    if (!argType) {
+      // void → undefined → ToNumber NaN → ToIntegerOrInfinity 0.
+      fctx.body.push({ op: "i32.const", value: 0 });
+    } else if (argType.kind === "i32") {
+      // Already an integer (boolean / int-typed index) — in range, no ToNumber.
+    } else if (argType.kind === "i64") {
+      // BigInt index → TypeError per ToNumber (§7.1.4).
+      fctx.body.push({ op: "drop" } as Instr);
+      emitThrowString(ctx, fctx, "TypeError: Cannot convert a BigInt value to a number");
+      fctx.body.push({ op: "i32.const", value: 0 });
+    } else {
+      // Coerce ToNumber → f64 via the engine, then ToIntegerOrInfinity.
+      coerceType(ctx, fctx, argType, { kind: "f64" }, "number");
+      const fTmp = allocLocal(fctx, `__arr_at_f_${fctx.locals.length}`, { kind: "f64" });
+      fctx.body.push({ op: "local.set", index: fTmp });
+      fctx.body.push({ op: "local.get", index: fTmp });
+      fctx.body.push({ op: "local.get", index: fTmp });
+      fctx.body.push({ op: "f64.ne" }); // self != self ⇒ NaN
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "val", type: { kind: "i32" } },
+        then: [{ op: "i32.const", value: 0 }],
+        else: [{ op: "local.get", index: fTmp }, { op: "i32.trunc_sat_f64_s" }],
+      } as Instr);
+    }
+  } else {
+    const argType = compileExpression(ctx, fctx, callExpr.arguments[0]!, { kind: "i32" });
+    if (argType && argType.kind === "f64") {
+      fctx.body.push({ op: "i32.trunc_sat_f64_s" });
+    }
   }
   fctx.body.push({ op: "local.set", index: idxTmp });
 
@@ -3831,7 +3948,10 @@ function compileArrayIndexOf(
   const dataTmp = allocLocal(fctx, `__arr_iof_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const iTmp = allocLocal(fctx, `__arr_iof_i_${fctx.locals.length}`, { kind: "i32" });
   const lenTmp = allocLocal(fctx, `__arr_iof_len_${fctx.locals.length}`, { kind: "i32" });
-  const valTmp = allocLocal(fctx, `__arr_iof_val_${fctx.locals.length}`, elemType);
+  // Packed i8/i16 elements load (and compare) as i32 — never store the raw
+  // packed type in a local (#2648).
+  const valType = unpackedElemType(elemType);
+  const valTmp = allocLocal(fctx, `__arr_iof_val_${fctx.locals.length}`, valType);
 
   // Compile receiver -> vec ref
   compileExpression(ctx, fctx, propAccess.expression);
@@ -3886,7 +4006,10 @@ function compileArrayIndexOf(
   }
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
+  // (#2648) Drive the packed i8/i16 load off the VIEW NAME signedness so a
+  // signed Int8/Int16 value (`Int8Array([-1]).indexOf(-1)`) and an unsigned
+  // high Uint16 value (`Uint16Array([40000]).indexOf(40000)`) both match.
+  const getOp = elemGetOp(elemType, typedArraySearchSignedness(ctx, propAccess.expression));
 
   // For externref elements, use __host_eq (JS Strict Equality, §7.2.16) so
   // object identity, cross-type (e.g. `[false].indexOf(0)`), and string
@@ -4012,7 +4135,10 @@ function compileArrayIncludes(
   const dataTmp = allocLocal(fctx, `__arr_inc_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const iTmp = allocLocal(fctx, `__arr_inc_i_${fctx.locals.length}`, { kind: "i32" });
   const lenTmp = allocLocal(fctx, `__arr_inc_len_${fctx.locals.length}`, { kind: "i32" });
-  const valTmp = allocLocal(fctx, `__arr_inc_val_${fctx.locals.length}`, elemType);
+  // Packed i8/i16 elements load (and compare) as i32 — never store the raw
+  // packed type in a local (#2648).
+  const valType = unpackedElemType(elemType);
+  const valTmp = allocLocal(fctx, `__arr_inc_val_${fctx.locals.length}`, valType);
 
   // Compile receiver -> vec ref
   compileExpression(ctx, fctx, propAccess.expression);
@@ -4028,7 +4154,7 @@ function compileArrayIncludes(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
 
-  compileExpression(ctx, fctx, callExpr.arguments[0]!, elemType);
+  compileExpression(ctx, fctx, callExpr.arguments[0]!, valType);
   fctx.body.push({ op: "local.set", index: valTmp });
 
   // fromIndex (optional 2nd arg, default 0)
@@ -4067,7 +4193,8 @@ function compileArrayIncludes(
   }
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
+  // (#2648) View-name-driven signedness for the packed i8/i16 element load.
+  const getOp = elemGetOp(elemType, typedArraySearchSignedness(ctx, propAccess.expression));
 
   // SameValueZero comparison for includes:
   // - For f64: a === b OR (isNaN(a) AND isNaN(b))
@@ -6219,49 +6346,10 @@ function buildTruthyCheck(ctx: CodegenContext, setup: ArrayCallbackSetup): Instr
  *   - other ref  → non-null (the only observable truthiness for opaque structs)
  */
 function buildToBooleanInstrs(ctx: CodegenContext, retType: ValType): Instr[] {
-  const retKind = retType.kind;
-  if (retKind === "f64") {
-    return [{ op: "f64.abs" } as Instr, { op: "f64.const", value: 0 } as Instr, { op: "f64.gt" } as Instr];
-  }
-  if (retKind === "i32") {
-    return []; // already truthy/falsy
-  }
-  if (retKind === "i64") {
-    return [{ op: "i64.eqz" } as Instr, { op: "i32.eqz" } as Instr];
-  }
-  if (retKind === "externref") {
-    addUnionImports(ctx);
-    const isTruthyIdx = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
-    if (isTruthyIdx !== undefined) {
-      return [{ op: "call", funcIdx: isTruthyIdx } as Instr];
-    }
-    return [{ op: "ref.is_null" } as Instr, { op: "i32.eqz" } as Instr];
-  }
-  if (retKind === "ref" || retKind === "ref_null") {
-    // Boxed `any` value — proper JS truthiness (false/0/NaN/""/null → falsy).
-    if (isAnyValue(retType, ctx)) {
-      ensureAnyHelpers(ctx);
-      const unboxBoolIdx = ctx.funcMap.get("__any_unbox_bool");
-      if (unboxBoolIdx !== undefined) {
-        return [{ op: "call", funcIdx: unboxBoolIdx } as Instr];
-      }
-    }
-    // Native string ref — empty string is falsy (check len > 0 after flatten).
-    if (retType.typeIdx === ctx.anyStrTypeIdx && ctx.anyStrTypeIdx >= 0) {
-      const flattenIdx = ctx.nativeStrHelpers.get("__str_flatten");
-      if (flattenIdx !== undefined && ctx.nativeStrTypeIdx >= 0) {
-        return [
-          { op: "call", funcIdx: flattenIdx } as Instr,
-          { op: "struct.get", typeIdx: ctx.nativeStrTypeIdx, fieldIdx: 0 } as Instr,
-          { op: "i32.const", value: 0 } as Instr,
-          { op: "i32.gt_s" } as Instr,
-        ];
-      }
-    }
-    // Opaque struct ref — non-null is truthy.
-    return [{ op: "ref.is_null" } as Instr, { op: "i32.eqz" } as Instr];
-  }
-  return []; // default: assume already i32
+  // #1917 — delegate to the single coercion engine (sink pattern: pass a fresh
+  // array and return it). Behaviour-neutral — the engine's rows were transcribed
+  // from this body (and #2085 already aligned it with `ensureI32Condition`).
+  return emitToBoolean(ctx, retType, []);
 }
 
 /** Build instructions to check falsiness of a callback result (-> i32). */
@@ -8455,7 +8543,10 @@ function compileArrayLastIndexOf(
   const vecTmp = allocLocal(fctx, `__arr_liof_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_liof_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const iTmp = allocLocal(fctx, `__arr_liof_i_${fctx.locals.length}`, { kind: "i32" });
-  const valTmp = allocLocal(fctx, `__arr_liof_val_${fctx.locals.length}`, elemType);
+  // Packed i8/i16 elements load (and compare) as i32 — never store the raw
+  // packed type in a local (#2648).
+  const valType = unpackedElemType(elemType);
+  const valTmp = allocLocal(fctx, `__arr_liof_val_${fctx.locals.length}`, valType);
 
   // Compile receiver -> vec ref
   compileExpression(ctx, fctx, propAccess.expression);
@@ -8520,10 +8611,11 @@ function compileArrayLastIndexOf(
   fctx.body.push({ op: "local.set", index: dataTmp });
 
   // Compile search value
-  compileExpression(ctx, fctx, callExpr.arguments[0]!, elemType);
+  compileExpression(ctx, fctx, callExpr.arguments[0]!, valType);
   fctx.body.push({ op: "local.set", index: valTmp });
 
-  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
+  // (#2648) View-name-driven signedness for the packed i8/i16 element load.
+  const getOp = elemGetOp(elemType, typedArraySearchSignedness(ctx, propAccess.expression));
 
   // For externref elements, use __host_eq (JS Strict Equality, §7.2.16) so
   // object identity, cross-type, and string comparisons follow spec. The

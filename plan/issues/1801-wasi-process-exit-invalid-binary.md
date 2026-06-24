@@ -17,7 +17,7 @@ related: [1858]
 ---
 # #1801 — WASI `process.exit(code)` emits an invalid binary
 
-> Renumbered from a stray `6407-*` id (see #1858 allocator-hygiene note). Example
+> Renumbered from a stray `2177-*` id (see #1858 allocator-hygiene note). Example
 > of the audit's "no `WebAssembly.validate()` in the pipeline → silent invalid
 > binary" theme.
 

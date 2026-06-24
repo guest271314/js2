@@ -261,8 +261,9 @@ export interface CompileOptions {
   optimize?: boolean | 1 | 2 | 3 | 4;
   /**
    * Experimental: route a narrow set of functions through the middle-end IR
-   * (see `src/ir/`). Defaults to off. Ship as off until the IR reaches
-   * parity with the legacy direct-emission path.
+   * (see `src/ir/`). Defaults to **on** since #1131 (the driver passes
+   * `experimentalIR !== false`); pass `false` to force the legacy
+   * direct-emission path (bit-by-bit divergence tests or emergency revert).
    */
   experimentalIR?: boolean;
   /** Compile-time constant definitions. Substitutes identifiers/dotted paths with literal values
@@ -276,16 +277,17 @@ export interface CompileOptions {
    *  Default: false (calls to fs.readFileSync / fs.writeFileSync raise a compile error). */
   allowFs?: boolean;
   /**
-   * #2625 — emit the per-module linkable `js2wasm:node-<mod>` shims instead of
-   * inlining the host APIs. WASI-only (ignored for other targets). For
-   * `node:process` stream IO, when set, the user module imports `stdin_read`/
-   * `stdout_write`/`stderr_write` plus its linear memory from
-   * `js2wasm:node-process` and carries no `wasi_snapshot_preview1` import for
-   * stream IO; link against `node-process.wasm` (or
-   * `--preload js2wasm:node-process=node-process.wasm` under wasmtime).
-   * Default off — the self-contained inline `fd_read`/`fd_write` path stays.
-   * Which per-module shim is emitted is decided by which `node:` modules the
-   * program emulates, not by this flag (the flag only chooses inline vs linked).
+   * #2625 / #2633 — emit the per-module linkable `node:<mod>` shims instead of
+   * inlining the host APIs. WASI-only (ignored for other targets). When set,
+   * std-IO is routed through `node:fs`: the user module imports `readSync`/
+   * `writeSync` plus its linear memory from `node:fs` and carries no
+   * `wasi_snapshot_preview1` import for stream IO; console.log / process.std*.write
+   * lower to `writeSync(1|2, …)` and synchronous stdin is `readSync(0, …)`. Link
+   * against `node-fs.wasm` (or `--preload node:fs=node-fs.wasm` under wasmtime).
+   * Default off — the self-contained inline `fd_read`/`fd_write` path stays. The
+   * bespoke `js2wasm:node-process` shim (`process.stdin.read`/`stdout_write`/…)
+   * was retired in #2633; `process.stdin.read(buf, offset)` is no longer a
+   * recognised API (it matched no real Node surface — use `node:fs` `readSync`).
    */
   linkNodeShims?: boolean;
   /**
@@ -533,6 +535,18 @@ export { preloadLibFiles } from "./checker/index.js";
 export { getEntryExportNames, treeshake } from "./treeshake.js";
 export { generateWit } from "./wit-generator.js";
 export type { WitGeneratorOptions } from "./wit-generator.js";
+
+// #2527 / #2514 — canonical runtime-type rec-group identity primitive for
+// core-wasm module linking (shared store). Pure analysis over a WasmModule's
+// type table; the foundation for the runtime.wasm ABI drift gate.
+export {
+  canonicalHashOfTypeGroup,
+  extractRuntimeGroup,
+  fingerprintRuntimeGroup,
+  RUNTIME_RECGROUP_ABI_VERSION,
+  RUNTIME_RECGROUP_TYPE_NAMES,
+} from "./emit/canonical-recgroup.js";
+export type { RuntimeGroupFingerprint, RuntimeGroupMember } from "./emit/canonical-recgroup.js";
 
 export {
   buildImports,

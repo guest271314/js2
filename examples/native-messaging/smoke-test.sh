@@ -20,13 +20,18 @@ trap 'rm -rf "$OUT_DIR"' EXIT
 
 echo "== Compiling examples/native-messaging/nm_js2wasm.ts --target wasi =="
 CLI="$OUT_DIR/js2wasm-cli.mjs"
+# #2631 — the host now uses node:fs readSync/writeSync via the linkable `node:fs`
+# shim, so compile with --link-node-shims and build node-fs.wasm to preload.
+SHIM="$OUT_DIR/node-fs.wasm"
 (
   cd "$REPO_ROOT"
   node scripts/build-standalone-cli.mjs --outfile "$CLI"
-  node "$CLI" examples/native-messaging/nm_js2wasm.ts --target wasi -o "$OUT_DIR" --quiet
+  node "$CLI" examples/native-messaging/nm_js2wasm.ts --target wasi --link-node-shims -o "$OUT_DIR" --quiet
+  node scripts/build-node-fs-shim.mjs "$SHIM"
 )
 WASM="$OUT_DIR/nm_js2wasm.wasm"
 [ -f "$WASM" ] || { echo "FAIL: $WASM was not produced" >&2; exit 1; }
+[ -f "$SHIM" ] || { echo "FAIL: $SHIM was not produced" >&2; exit 1; }
 
 # Framed input: 4-byte LE length prefix (0x0d = 13) + the 13-byte body.
 # Total stdin = 17 bytes → the host's stderr should report
@@ -42,8 +47,11 @@ STDOUT_FILE="$OUT_DIR/stdout.bin"
 STDERR_FILE="$OUT_DIR/stderr.txt"
 
 echo "== Running under wasmtime ($(wasmtime --version)) =="
+# `--preload node:fs=<file>` registers the shim under the import module name
+# `node:fs`; wasmtime resolves the user module's imports against it and provides
+# wasi_snapshot_preview1 to the shim (#2631).
 # shellcheck disable=SC2086
-printf "$FRAME" | wasmtime $WASMTIME_FLAGS "$WASM" >"$STDOUT_FILE" 2>"$STDERR_FILE"
+printf "$FRAME" | wasmtime $WASMTIME_FLAGS --preload "node:fs=$SHIM" "$WASM" >"$STDOUT_FILE" 2>"$STDERR_FILE"
 
 # ---- Expected stdout frame -------------------------------------------------
 # Strict echo: the response body is the received body verbatim, byte-for-byte.

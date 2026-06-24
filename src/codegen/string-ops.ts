@@ -8,6 +8,8 @@ import type { Instr, ValType } from "../ir/types.js";
  */
 import { ts } from "../ts-api.js";
 import { compileNumericBinaryOp } from "./binary-ops.js";
+import { reserveClosedMethodDispatch } from "./closed-method-dispatch.js";
+import { compileAndEmitToString, emitToString, registerStringHelperEmitters } from "./coercion-engine.js";
 import { popBody, pushBody } from "./context/bodies.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal } from "./context/locals.js";
@@ -31,7 +33,6 @@ import {
   tryCompileStandaloneStringSearch,
   tryCompileStandaloneStringSplit,
 } from "./regexp-standalone.js";
-import { reserveClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { addStringConstantGlobal, ensureExnTag, nextModuleGlobalIdx } from "./registry/imports.js";
 import { getArrTypeIdxFromVec, getOrRegisterTemplateVecType, getOrRegisterVecType } from "./registry/types.js";
 import { compileExpression, ensureLateImport, flushLateImportShifts, registerCompileStringLiteral } from "./shared.js";
@@ -140,6 +141,19 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
     return true;
   }
 
+  // #1917 NOTE: this native (standalone) `+`-concat operand cascade is
+  // DELIBERATELY NOT migrated to the single coercion engine. The engine's
+  // `emitToString` number arm runs `emitNativeStringRefFromExternref`
+  // (`any.convert_extern`) on its scalar input; when `number_toString` is NOT
+  // registered (e.g. a `String(x)` result that returned a bare f64 reached the
+  // concat operand — the #1960 standalone S9.8.1 regression), that emits
+  // `any.convert_extern` on a bare f64 → INVALID Wasm, whereas the cascade below
+  // gates the numeric arm on `toStrIdx !== undefined` and DECLINES (returns
+  // false → legacy `compileExpression(value, nativeStringType)`), which stays
+  // valid. Folding this site needs the engine to model that decline exactly; it
+  // is a tracked follow-up increment. The HOST concat/template ToString sites
+  // ARE migrated (js-host-only, standalone-gate-proven safe).
+
   // Already a native string operand (string-typed ref) — pass straight through.
   if ((opType.kind === "ref" || opType.kind === "ref_null") && isStringType(tsType)) {
     return true;
@@ -185,10 +199,10 @@ function compileNativeConcatOperand(ctx: CodegenContext, fctx: FunctionContext, 
     // Dynamic externref (boxed string / any / $Object) → runtime ToString.
     // For standalone $Object values this routes through native
     // OrdinaryToPrimitive("string") before the native-string concat helper.
-    const toStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
+    const dynToStrIdx = ensureLateImport(ctx, "__extern_toString", [{ kind: "externref" }], [{ kind: "externref" }]);
     flushLateImportShifts(ctx, fctx);
-    if (toStrIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: toStrIdx });
+    if (dynToStrIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: dynToStrIdx });
     }
     emitNativeStringRefFromExternref(ctx, fctx);
     return true;
@@ -454,58 +468,18 @@ export function compileTemplateExpression(
     const spanType = compileExpression(ctx, fctx, span.expression);
     if ((spanIsUndefType || spanIsNullType) && spanType && spanType.kind !== "externref") {
       // Scalar-lowered null/undefined → drop the placeholder value and push the
-      // matching string constant (#2005 undefined, #2006 null).
+      // matching string constant (#2005 undefined, #2006 null). This stays in
+      // the caller: the engine classifies by ValType + TS type and would
+      // otherwise stringify the scalar (i32 0) as "0". (#2515 S0) sentinel-safe.
       fctx.body.push({ op: "drop" });
       const word = spanIsNullType ? "null" : "undefined";
-      // (#2515 S0) sentinel-safe: standalone materializes inline, host uses the
-      // string_constants global — never bakes `global.get -1`.
       pushStringConstant(ctx, fctx, word);
-    } else if (
-      spanType &&
-      spanType.kind === "i32" &&
-      (isBooleanType(spanTsType) || (spanType as { boolean?: true }).boolean)
-    ) {
-      // boolean i32 → "true"/"false" (#2005). #2016/#2030: also covers branded
-      // i32 predicates (`.boolean`), which render "true"/"false", not "1"/"0".
-      // emitBoolToString returns an externref the following concat accepts.
-      emitBoolToString(ctx, fctx);
-    } else if (spanType && spanType.kind === "f64" && toStrIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: toStrIdx });
-    } else if (spanType && spanType.kind === "i32" && toStrIdx !== undefined) {
-      fctx.body.push({ op: "f64.convert_i32_s" });
-      fctx.body.push({ op: "call", funcIdx: toStrIdx });
-    } else if (spanType && spanType.kind === "i64" && toStrIdx !== undefined) {
-      // BigInt → f64 → string
-      fctx.body.push({ op: "f64.convert_i64_s" });
-      fctx.body.push({ op: "call", funcIdx: toStrIdx });
-    } else if (spanType && spanType.kind === "externref") {
-      // null/undefined externref spans must become "null"/"undefined" strings;
-      // a raw ref.null extern trips the js-string concat cast (#2006). Opaque
-      // externrefs route through __extern_toString so wasmGC structs run their
-      // ToPrimitive walker before reaching concat.
-      const spanIsNull = (spanTsType.flags & ts.TypeFlags.Null) !== 0;
-      const spanIsUndef = (spanTsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
-      if (spanIsNull) {
-        fctx.body.push({ op: "drop" });
-        pushStringConstant(ctx, fctx, "null");
-      } else if (spanIsUndef) {
-        fctx.body.push({ op: "drop" });
-        pushStringConstant(ctx, fctx, "undefined");
-      } else if (!isStringType(spanTsType)) {
-        const externToStrIdx = ensureLateImport(
-          ctx,
-          "__extern_toString",
-          [{ kind: "externref" }],
-          [{ kind: "externref" }],
-        );
-        flushLateImportShifts(ctx, fctx);
-        const finalIdx = ctx.funcMap.get("__extern_toString") ?? externToStrIdx;
-        if (finalIdx !== undefined) fctx.body.push({ op: "call", funcIdx: finalIdx });
-      }
-      // otherwise a real string externref — already concat-ready
-    } else if (spanType && (spanType.kind === "ref" || spanType.kind === "ref_null")) {
-      // Struct ref → externref: use coerceType which checks @@toPrimitive("string") first
-      coerceType(ctx, fctx, spanType, { kind: "externref" }, "string");
+    } else {
+      // #1917 — template spans apply ToString proper (hint "string": a ref
+      // operand walks @@toPrimitive("string")/toString). The single coercion
+      // engine owns the bool/number/i64/externref-null-undef/opaque-extern/ref
+      // cascade that was hand-rolled here.
+      emitToString(ctx, fctx, spanType, spanTsType, "string");
     }
 
     // If we had a head (or previous spans), concat with accumulated string
@@ -1507,57 +1481,16 @@ function createSyntheticStringLiteral(value: string, positionSource: ts.Node): t
  * null/undefined externref → string constant, struct ref → extern.convert_any.
  */
 function compileAndCoerceConcatOperand(ctx: CodegenContext, fctx: FunctionContext, operand: ts.Expression): void {
-  // §7.1.17 ToString(Symbol) throws — `"x" + sym` must throw TypeError.
+  // §7.1.17 ToString(Symbol) throws — `"x" + sym` must throw TypeError. The
+  // throw must short-circuit operand evaluation, so it stays before the engine.
   if (tryThrowOnSymbolStringCoercion(ctx, fctx, operand)) return;
   const tsType = valueExprTsType(ctx, operand); // #2176 ambient-shadow safe
-  const valType = compileExpression(ctx, fctx, operand);
-
-  if (!valType) {
-    // Void function return → push "undefined"
-    pushStringConstant(ctx, fctx, "undefined");
-  } else if (valType.kind === "f64" || valType.kind === "i32" || valType.kind === "i64") {
-    // #2016/#2030: honour the boolean brand on the ValType, not just the TS type.
-    // i32-returning predicates (hasOwnProperty, IteratorResult.done, …) carry
-    // `boolean: true` so their string form is "true"/"false", not "1"/"0".
-    if (valType.kind === "i32" && (isBooleanType(tsType) || (valType as { boolean?: true }).boolean)) {
-      emitBoolToString(ctx, fctx);
-    } else {
-      if (valType.kind === "i32") fctx.body.push({ op: "f64.convert_i32_s" });
-      else if (valType.kind === "i64") fctx.body.push({ op: "f64.convert_i64_s" });
-      const toStr = ctx.funcMap.get("number_toString");
-      if (toStr !== undefined) fctx.body.push({ op: "call", funcIdx: toStr });
-    }
-  } else if (valType.kind === "externref") {
-    const isNull = (tsType.flags & ts.TypeFlags.Null) !== 0;
-    const isUndef = (tsType.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0;
-    if (isNull) {
-      fctx.body.push({ op: "drop" });
-      pushStringConstant(ctx, fctx, "null");
-    } else if (isUndef) {
-      fctx.body.push({ op: "drop" });
-      pushStringConstant(ctx, fctx, "undefined");
-    }
-  } else if (valType.kind === "ref" || valType.kind === "ref_null") {
-    // #2022 — `+` applies ToPrimitive with the DEFAULT hint (valueOf-first),
-    // not the string hint. Convert the struct to externref and route through
-    // `__extern_to_string_default`. (Was `coerceType(..., "string")`, which
-    // walked @@toPrimitive("string")/toString — the wrong hint for `+`; e.g.
-    // `objWithValueOf + ""` must use valueOf.) The bare extern.convert_any
-    // alone would also let the wasm:js-string concat polyfill throw on the
-    // opaque struct, so the host stringify call is still required.
-    coerceType(ctx, fctx, valType, { kind: "externref" });
-    const toStrIdx = ensureLateImport(
-      ctx,
-      "__extern_to_string_default",
-      [{ kind: "externref" }],
-      [{ kind: "externref" }],
-    );
-    flushLateImportShifts(ctx, fctx);
-    const finalIdx = ctx.funcMap.get("__extern_to_string_default") ?? toStrIdx;
-    if (finalIdx !== undefined) {
-      fctx.body.push({ op: "call", funcIdx: finalIdx });
-    }
-  }
+  // #1917 — the per-operand ToString cascade is now the single coercion engine.
+  // `+` applies ToPrimitive with the DEFAULT hint (valueOf-first, #2022) on a
+  // struct/ref operand, so pass hint "default" (the engine routes the ref arm
+  // through `__extern_to_string_default`, the externref/number/bool/null arms
+  // unchanged).
+  compileAndEmitToString(ctx, fctx, operand, tsType, "default");
 }
 
 /**
@@ -2189,7 +2122,9 @@ function compileStringIntegerArg(ctx: CodegenContext, fctx: FunctionContext, arg
     }
     // Coerce ToNumber → f64 via the engine, then ToIntegerOrInfinity.
     coerceType(ctx, fctx, argType, { kind: "f64" }, "number");
-    const fTmp = allocLocal(fctx, `__strint_f_${fctx.locals.length}`, { kind: "f64" });
+    const fTmp = allocLocal(fctx, `__strint_f_${fctx.locals.length}`, {
+      kind: "f64",
+    });
     fctx.body.push({ op: "local.set", index: fTmp });
     // ToIntegerOrInfinity: NaN → 0, else trunc toward zero (±∞ saturates).
     fctx.body.push({ op: "local.get", index: fTmp });
@@ -2685,8 +2620,12 @@ export function compileNativeStringMethodCall(
     } else {
       fctx.body.push({ op: "i32.const", value: 0 });
     }
-    // padString (default: " ")
-    if (expr.arguments.length > 1) {
+    // padString (default: " "). §22.1.4.1 StringPad step 2: an `undefined`
+    // fillString (explicit `padStart(n, undefined)` / `padStart(n, void 0)`)
+    // is spec-equivalent to omission and defaults to a single space — emitting
+    // it through `compileExpression(undefined) + emitFlatten()` flattens a null
+    // ref and traps in `__str_flatten` (#2160 standalone residual).
+    if (expr.arguments.length > 1 && !isStaticUndefinedArg(expr.arguments[1])) {
       compileExpression(ctx, fctx, expr.arguments[1]!);
       emitFlatten();
     } else {
@@ -2716,8 +2655,12 @@ export function compileNativeStringMethodCall(
     } else {
       fctx.body.push({ op: "i32.const", value: 0 });
     }
-    // padString (default: " ")
-    if (expr.arguments.length > 1) {
+    // padString (default: " "). §22.1.4.1 StringPad step 2: an `undefined`
+    // fillString (explicit `padEnd(n, undefined)` / `padEnd(n, void 0)`) is
+    // spec-equivalent to omission and defaults to a single space — emitting it
+    // through `compileExpression(undefined) + emitFlatten()` flattens a null
+    // ref and traps in `__str_flatten` (#2160 standalone residual).
+    if (expr.arguments.length > 1 && !isStaticUndefinedArg(expr.arguments[1])) {
       compileExpression(ctx, fctx, expr.arguments[1]!);
       emitFlatten();
     } else {
@@ -3203,7 +3146,9 @@ export function compileGuardedNativeStringMethodCall(
   } else if (!recvType) {
     fctx.body.push({ op: "ref.null.extern" } as Instr);
   }
-  const recvExt = allocLocal(fctx, `__strm_ext_${fctx.locals.length}`, { kind: "externref" });
+  const recvExt = allocLocal(fctx, `__strm_ext_${fctx.locals.length}`, {
+    kind: "externref",
+  });
   fctx.body.push({ op: "local.set", index: recvExt });
 
   // Build the then-arm (native method on the cast $AnyString receiver) into a
@@ -3279,7 +3224,10 @@ export function compileGuardedNativeStringMethodCall(
     } else if (resultType.kind === "i32") {
       elseInstrs.push({ op: "i32.const", value: 0 } as Instr);
     } else if (resultType.kind === "ref" || resultType.kind === "ref_null") {
-      elseInstrs.push({ op: "ref.null", typeIdx: (resultType as { typeIdx: number }).typeIdx } as Instr);
+      elseInstrs.push({
+        op: "ref.null",
+        typeIdx: (resultType as { typeIdx: number }).typeIdx,
+      } as Instr);
     } else {
       elseInstrs.push({ op: "ref.null.extern" } as Instr);
     }
@@ -3300,3 +3248,11 @@ export function compileGuardedNativeStringMethodCall(
 // Register the compileStringLiteral delegate so property-access.ts can emit
 // string constants without importing string-ops.ts directly (cycle prevention).
 registerCompileStringLiteral(compileStringLiteral);
+
+// #1917 Step 1 — register the two leaf string emitters the coercion engine
+// needs (both defined here and not exported; string-ops.ts imports the engine,
+// so the engine binds them lazily to avoid a module cycle).
+registerStringHelperEmitters({
+  boolToString: emitBoolToString,
+  nativeStringRefFromExternref: emitNativeStringRefFromExternref,
+});

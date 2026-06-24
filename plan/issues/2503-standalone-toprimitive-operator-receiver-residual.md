@@ -169,3 +169,44 @@ this). That is the `#10` array-ToPrimitive fold already specced in **#2358**.
 Two further out-of-cluster items observed: `String(obj)` builtin null-deref, and
 `valueOf`-returns-object / Date / template coercion. None are the operator
 RECEIVER mis-routing #2503 scoped; the operator/binding routing portion is closed.
+
+## Harvest update — 2026-06-24 (run `426e28e8`) — bucket grew; residual is substrate, NOT this issue
+
+`/harvest-errors` on the 2026-06-24 standalone baseline measured the
+`Cannot convert object to primitive value` bucket at **3,622** records
+(`runtime_error: …` 2,348 + `runtime_error: L#:## …` 1,274) — **up from the
+2,835 this issue was filed against** (2026-06-18). It remains the single
+largest standalone runtime-failure bucket (host lane: 48).
+
+**This is not a regression of #2503's landed fix, and #2503 stays `done`.** The
+operator/binding ToPrimitive *routing* slice this issue scoped (string `==`
+object/wrapper) is closed and did not regress. The growth is **diffuse and
+substrate-level** — clustering by test directory shows it is no longer
+operator-shaped at all:
+
+| cluster | records | nature |
+|---|---|---|
+| `built-ins/Object/{defineProperty,create,getOwnPropertyDescriptor,defineProperties}` | ~720 | shared ToPrimitive/ToPropertyKey path in property-descriptor APIs (old ES5 string-key tests — substrate, not object-key bug) |
+| `built-ins/{Array,String,TypedArray}/prototype` | ~690 | ToPrimitive on built-in method args |
+| `built-ins/RegExp/prototype` | 121 | coercion in RegExp methods |
+| `language/{statements,expressions}/class` + dstr + for-of | ~330 | class field / destructuring coercion |
+
+Two reads on *why it grew*: (1) **exposure** — as upstream standalone blockers
+cleared, more tests now compile+run far enough to reach the shared ToPrimitive
+throw (cf. memory `feedback_regression_analysis` — growth can be progress
+elsewhere); (2) the dominant residual is the **standalone ToPrimitive/ToNumber
+*substrate*** reached through many built-in entry points, which is owned by the
+**open sprint-65** coercion work, **not** a focused operator fix:
+
+- **#1917** "one coercion engine" (in-progress, sendev-eq) — unifies the four
+  divergent coercion matrices; the `ref→f64` NaN-vs-0 / `__to_primitive`
+  divergence behind this bucket is exactly its scope.
+- **#2160** standalone String/Number coercion residual (ready, `depends_on:
+  [1917]`) — owns the `String/TypedArray.prototype` method-arg slice.
+
+The earlier sd-3 hand-off line pointing the array half at "#2358" is stale —
+local #2358 (`__to_primitive` nominal object structs) is `done`, and the "#10"
+it cited is the **upstream GitHub** issue, not local #10. No new focused issue
+is filed: fragmenting a substrate gap already covered by #1917/#2160 would add
+issue-number sprawl without adding signal. Tracked here as a drift note + the
+downstream cross-link added to #1917.

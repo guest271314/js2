@@ -1,11 +1,12 @@
 ---
 id: 2013
 title: "JSON.parse reviver argument silently ignored (parse arm compiles only arguments[0]; host import drops it)"
-status: blocked
-blocked_on: [23]
+status: done
+completed: 2026-06-23
 sprint: 65
 created: 2026-06-10
-updated: 2026-06-14
+updated: 2026-06-23
+reconcile_note: "DONE 2026-06-23 — headline reviver-transform fix landed on main via PR #1454 (§25.5.1 InternalizeJSONProperty; _internalizeJSONProperty/_invokeJsonCallable runtime present). The old `blocked_on: [23]` was a bad reference (issue #23 = bitwise-operators, unrelated/done) and is removed. Narrow residual only: Object.defineProperty(this,…) inside a reviver (~-4 test262) — file as a separate follow-up if revisited."
 priority: medium
 feasibility: medium
 reasoning_effort: medium

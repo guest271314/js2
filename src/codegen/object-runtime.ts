@@ -71,6 +71,7 @@ import { addFuncType, getArrTypeIdxFromVec, getOrRegisterVecBaseType } from "./r
 import { addUnionImportsViaRegistry, flushLateImportShifts } from "./shared.js";
 import { reserveAccessorGetDriver, reserveAccessorSetDriver } from "./accessor-driver.js";
 import { reserveArrayToPrimitiveString } from "./array-to-primitive.js";
+import { reserveClassToPrimitive } from "./class-to-primitive.js";
 
 /** Initial `$PropMap` capacity. Must be a power of two (mask = cap - 1). */
 const INITIAL_CAP = 8;
@@ -2033,6 +2034,16 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
     const arrayLikeReduce = ctx.standalone;
     const vecBaseTypeIdx = arrayLikeReduce ? getOrRegisterVecBaseType(ctx) : -1;
     const arrayToPrimIdx = arrayLikeReduce ? reserveArrayToPrimitiveString(ctx) : -1;
+    // (#2638) Standalone CLASS-instance → primitive. A nominal class struct is
+    // neither `$Object` nor `$Vec`, so the `ref.test objectTypeIdx` arm below
+    // misses it and ToPrimitive returns the struct unchanged → `__unbox_number`
+    // → NaN. Route it through the per-struct `__call_valueOf`/`__call_toString`
+    // dispatchers (§7.1.1.1) via the reserved `__class_to_primitive` driver. The
+    // dispatchers are emitted at FINALIZE (after `__to_primitive`), so we reserve
+    // the placeholder here (stable call target) and fill it post-processing
+    // (`fillClassToPrimitive`, after `emitToPrimitiveMethodExports`). Same
+    // reserve/fill funcIdx discipline as `arrayToPrimIdx`.
+    const classToPrimIdx = arrayLikeReduce ? reserveClassToPrimitive(ctx) : -1;
     const typeofNumberIdx = ctx.funcMap.get("__typeof_number")!;
     const typeofStringIdx = ctx.funcMap.get("__typeof_string")!;
     const typeofBooleanIdx = ctx.funcMap.get("__typeof_boolean")!;
@@ -2183,8 +2194,6 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                 // (#2358 #10) A real array (`$__vec_base`) reduces to its
                 // Array.prototype.toString (`join(",")`) — a primitive string the
                 // caller's hint then coerces (`__str_to_number` / string concat).
-                // Any other non-$Object value (a nominal struct without a user
-                // ToPrimitive, a closure, etc.) returns unchanged as before.
                 { op: "local.get", index: L_ANY },
                 { op: "ref.test", typeIdx: vecBaseTypeIdx },
                 {
@@ -2192,6 +2201,25 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
                   blockType: { kind: "empty" },
                   then: [{ op: "local.get", index: 0 }, { op: "call", funcIdx: arrayToPrimIdx }, { op: "return" }],
                 } as Instr,
+                // (#2638) A nominal CLASS instance is neither `$Object` nor `$Vec`.
+                // Route it through `__class_to_primitive(obj, stringHint)`, which
+                // calls the per-struct `__call_valueOf`/`__call_toString`
+                // dispatchers per §7.1.1.1 and returns a boxed primitive on a
+                // method match, or the input unchanged otherwise. If the driver
+                // produced a primitive (the class had valueOf/toString), return
+                // it; else fall through to "return unchanged" (a struct/closure
+                // with no user ToPrimitive — today's behaviour, no regression).
+                ...(classToPrimIdx >= 0
+                  ? [
+                      { op: "local.get", index: 0 } as Instr,
+                      ...isStringHint,
+                      { op: "call", funcIdx: classToPrimIdx } as Instr,
+                      { op: "local.set", index: L_RESULT } as Instr,
+                      ...returnIfPrimitive(L_RESULT),
+                    ]
+                  : []),
+                // Any other non-$Object value (a struct/closure without a user
+                // ToPrimitive) returns unchanged as before.
                 { op: "local.get", index: 0 },
                 { op: "return" },
               ]

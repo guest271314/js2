@@ -15,7 +15,7 @@ import {
   isWrapperObjectType,
 } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
-import { ensureAnyFromExternHelper, isAnyValue } from "./any-helpers.js";
+import { isAnyValue } from "./any-helpers.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -43,6 +43,7 @@ import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts } from "./shared.js";
 import { isLogicalAssignNamedEvalNameRead, resolveStructNameForExpr } from "./property-access.js";
 import { compileStringBinaryOp } from "./string-ops.js";
+import { emitAnyEqFromExternTemps, emitLooseEq, emitStrictEq } from "./coercion-engine.js";
 import { compileInstanceOf, compileTypeofComparison } from "./typeof-delete.js";
 
 // ── Binary operations ─────────────────────────────────────────────────
@@ -2858,23 +2859,17 @@ export function compileBinaryExpression(
             // (incl. the String⇄Number arm added in this PR) implement the spec
             // coercion natively. Host mode keeps `__host_loose_eq` (JS `==`),
             // unchanged.
+            // (#1917 E6) The standalone native IsLooselyEqual tail — box both
+            // externrefs to `$AnyValue` and call the keystone `__any_eq` — is the
+            // same tag-5-sensitive dispatch the coercion engine owns for E3, so it
+            // lives in `emitAnyEqFromExternTemps`. `null` ⇒ helpers unavailable
+            // (should not happen) → fall through to the host import below.
             const noJsHost = ctx.standalone === true || ctx.wasi === true;
             if (noJsHost) {
-              ensureAnyHelpers(ctx);
-              const fromExternIdx = ensureAnyFromExternHelper(ctx);
-              const anyEqIdx = ctx.funcMap.get("__any_eq");
-              if (fromExternIdx !== undefined && anyEqIdx !== undefined) {
-                return [
-                  { op: "local.get", index: tmpLeft },
-                  { op: "call", funcIdx: fromExternIdx } as Instr,
-                  { op: "local.get", index: tmpRight },
-                  { op: "call", funcIdx: fromExternIdx } as Instr,
-                  { op: "call", funcIdx: anyEqIdx } as Instr,
-                  ...(isNeqOp ? [{ op: "i32.eqz" } as Instr] : []),
-                ] as Instr[];
+              const nativeLooseEq = emitAnyEqFromExternTemps(ctx, tmpLeft, tmpRight, isNeqOp);
+              if (nativeLooseEq !== null) {
+                return nativeLooseEq;
               }
-              // Helpers unavailable (should not happen) — fall through to the
-              // host import below rather than emit nothing.
             }
             // Loose equality: __host_loose_eq (JS ==) handles all coercion
             // rules including null==undefined per §7.2.15. The result is
@@ -2981,6 +2976,26 @@ function compileAnyBinaryDispatch(
   expr: ts.BinaryExpression,
   op: ts.SyntaxKind,
 ): InnerResult {
+  // (#1917 Step E3) Equality (`==`/`===`/`!=`/`!==`) is the dispatch layer the
+  // coercion engine owns: `emitStrictEq`/`emitLooseEq` select the helper, box
+  // both operands, emit the call, and negate for `!=`/`!==`. This is a
+  // byte-neutral extraction of the four equality arms below — same helper, same
+  // operand boxing, same `i32.eqz` negation — so the engine becomes the single
+  // home for equality dispatch while the tag-5 classifier stays in the
+  // `__any_eq`/`__any_strict_eq` helper bodies (any-helpers.ts).
+  switch (op) {
+    case ts.SyntaxKind.EqualsEqualsToken:
+      return emitLooseEq(ctx, fctx, expr, /*negate*/ false);
+    case ts.SyntaxKind.ExclamationEqualsToken:
+      return emitLooseEq(ctx, fctx, expr, /*negate*/ true);
+    case ts.SyntaxKind.EqualsEqualsEqualsToken:
+      return emitStrictEq(ctx, fctx, expr, /*negate*/ false);
+    case ts.SyntaxKind.ExclamationEqualsEqualsToken:
+      return emitStrictEq(ctx, fctx, expr, /*negate*/ true);
+    default:
+      break;
+  }
+
   // Map operator to helper name and result type
   let helperName: string | null = null;
   let resultIsI32 = false; // true for comparison/equality operators
@@ -3001,22 +3016,9 @@ function compileAnyBinaryDispatch(
     case ts.SyntaxKind.PercentToken:
       helperName = "__any_mod";
       break;
-    case ts.SyntaxKind.EqualsEqualsToken:
-      helperName = "__any_eq";
-      resultIsI32 = true;
-      break;
-    case ts.SyntaxKind.EqualsEqualsEqualsToken:
-      helperName = "__any_strict_eq";
-      resultIsI32 = true;
-      break;
-    case ts.SyntaxKind.ExclamationEqualsToken:
-      helperName = "__any_eq";
-      resultIsI32 = true;
-      break;
-    case ts.SyntaxKind.ExclamationEqualsEqualsToken:
-      helperName = "__any_strict_eq";
-      resultIsI32 = true;
-      break;
+    // NOTE: `==`/`===`/`!=`/`!==` are handled above by emitLooseEq/emitStrictEq
+    // (the coercion engine owns equality dispatch, #1917 Step E3) and never reach
+    // this switch.
     case ts.SyntaxKind.LessThanToken:
       helperName = "__any_lt";
       resultIsI32 = true;
@@ -3062,10 +3064,10 @@ function compileAnyBinaryDispatch(
 
   fctx.body.push({ op: "call", funcIdx });
 
-  // For != / !==, negate the __any_eq result
-  if (op === ts.SyntaxKind.ExclamationEqualsToken || op === ts.SyntaxKind.ExclamationEqualsEqualsToken) {
-    fctx.body.push({ op: "i32.eqz" });
-  }
+  // NOTE: the `!=` / `!==` negation that used to live here is now applied by
+  // `emitLooseEq`/`emitStrictEq` (the equality ops return early above and never
+  // reach this point — #1917 Step E3). The remaining ops here are arithmetic /
+  // relational, which need no negation.
 
   if (resultIsI32) {
     return { kind: "i32" };

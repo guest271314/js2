@@ -2,10 +2,11 @@
 id: 1917
 title: "One coercion engine — four divergent coercion matrices disagree about lossiness"
 status: in-progress
-sprint: 65
+assignee: ttraenkler/sendev-eq
+sprint: 66
 model: opus
 created: 2026-06-10
-updated: 2026-06-17
+updated: 2026-06-24
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -87,6 +88,362 @@ plan/log/analysis-2026-06/03-coercion-engine-spec.md and
 Sequencing: Step 0 (ValType table) is dependency-safe now; Steps 1+ land
 AFTER the type-aware boxing P0 (#2072/#2080) so the engine consumes
 correct tags. Drift gate: #2108.
+
+## #1960 (Step 1) merge_group park — RESOLVED (sendev-coercion, 2026-06-23)
+
+**Outcome: GENUINE Step-1 regression (NOT drift), now FIXED by reverting the
+standalone native `+`-concat ToString migration. All 23 spec tests restored.**
+
+Resolution: commit `7de728208` on `issue-1917-emit-tostring` reverts
+`compileNativeConcatOperand` to its original hand-rolled cascade — the sole
+standalone-reachable Step-1 change. The host concat/template ToString migrations
+STAY (js-host-only, can't affect standalone). The engine number arm gained a
+defensive guard (return the scalar unchanged when `number_toString` is
+unavailable in native mode). Verified via faithful `runTest262File(…,
+"standalone")` reading `.status`: `S9.8.1_A2`, `concat/S15.5.4.6_A3`, `S9.8.1_A6`,
+`Number/S9.3.1_A3_T2` all flip compile_error → **pass**; trim/startsWith/replace
+controls stay pass. `#2108` string-ops 24 (pre-Step-1) → 19 (still net dedup).
+Fix propagated up the stack (tostring → tonumber → toboolean). The `hold` label
+removed once the fix is pushed.
+
+**Process lesson (worth remembering):** my first "baseline drift" verdict was
+WRONG — caused by a probe bug (read `r.outcome`, always `undefined`, instead of
+`r.status`). That made known-pass controls look like failures and fooled me into
+"the local harness is broken / it's drift." The correct discriminator was a
+genuinely-`pass` control run with the right field on clean-main vs branch. Lesson:
+when a local repro disagrees with a CI signal, FIRST verify the repro against a
+KNOWN-GOOD control reading the SAME field the source of truth uses — don't trust
+a tool that fails its own control. The lead's CI evidence was right all along.
+
+(Original park detail, for the record:)
+Step 1 PR #1960 was auto-parked by the bot (`hold` label) on a GENUINE
+`merge shard reports` failure: standalone gate net **−23** (`wasm_compile: 21`,
+`illegal_cast: 2`), bucket signature **`a4736523aee2aba2`**, cluster =
+`built-ins/String/S9.8.1_A*` (ToString spec tests) + `Number/S9.3.1_A*` +
+`concat`/`localeCompare`. The standalone-floor gate only runs on `merge_group`,
+not PR (memory `project_standalone_floor_only_on_merge_group`), so PR-level
+checks were green.
+
+**RETRACTED earlier "baseline drift" verdict — it was built on a BROKEN local
+repro and is INVALID.** My local `runTest262File(…, "standalone")` fails a
+KNOWN-PASS control (`built-ins/String/prototype/charAt/S15.5.4.4_A1_T1`, one of
+12,507 standalone passes) on CLEAN origin/main — so it fails everything
+uniformly and CANNOT distinguish #1960's effect from main. The "byte-identical
+fails on the pre-Step-1 base" observation just reflects that uniform local
+breakage, NOT behaviour-neutrality. The local standalone harness is not
+CI-faithful (likely a `buildImports`/`getTestSandbox`/`setExports` /
+harness-include gap when calling `runTest262File` directly vs the CI sharded
+runner).
+
+**Status: whether #1960 (emitToString) is standalone-neutral is OPEN.** The
+lead's CI evidence (merge_group `a8f01c9c` FAILED with #1960 in it, SUCCEEDED
+after #1960 was parked out) indicates #1960-correlated and must be trusted over
+the broken local repro. The hidden-divergence case stands as a real possibility.
+A CI-faithful repro (or an artifact diff: #1960's standalone merged JSONL vs a
+clean main-only merge_group's, for the 23 tests) is needed to adjudicate. #1960
+stays HELD until resolved.
+
+<!-- SUPERSEDED below: the original "proof" is retained for the record but is
+     INVALID per the retraction above. -->
+
+**[SUPERSEDED — INVALID] Earlier (retracted) reasoning that claimed BASELINE
+DRIFT. Proof (now known to be from a broken local harness):**
+
+1. Pulled the 23 regressed files from the standalone merged-report artifact + the
+   standalone baseline JSONL; ran `diff-test262`. Cluster = `built-ins/String/
+   S9.8.1_A*` (the §9.8.1 **ToString** spec tests), `Number/S9.3.1_A*`,
+   `String/prototype/concat` + `localeCompare`.
+2. Ran the EXACT failing files (`S9.8.1_A2`, `concat/S15.5.4.6_A3`,
+   `Number/S9.3.1_A3_T2`, `localeCompare/S15.5.4.9_A1_T1`) through the real
+   `runTest262File(…, "standalone")` runner on BOTH the Step-1 branch AND the
+   pre-Step-1 merge-base `c4ef3fac2`.
+3. They fail **byte-identically** on both (same `any.convert_extern expected
+   externref, found f64.const` at the SAME offsets `@+29167`/`@+27034`/`@+34424`).
+   Step 1's `emitToString` migration does not touch this path.
+
+So these 23 tests already fail on current `main` independent of #1960; the
+standalone baseline JSONL is stale (baseline age was 2h29m at the run). This is
+exactly the gate's own warning: "signature `a4736523aee2aba2` … likely baseline
+drift — see `feedback_baseline_drift_cross_check`". Distinct from #1958's park
+(that one is a REAL `-24` eval-code `assertion_fail` regression in the #1927
+pipeline driver — different signature, different category).
+
+**Resolution path (CI-infra, not a code fix):** refresh the standalone baseline
+(or revert the `main` commit that regressed these 23 ToString tests), then
+re-enqueue #1960. The pre-existing `String(x)`-returns-bare-f64 →
+`any.convert_extern` bug in the `String()` / native-concat path is a SEPARATE
+real issue (reproduces on `c4ef3fac2`) worth its own ticket — but it is NOT
+introduced by #1917 Step 1.
+
+## Implementation — Equality finale, slice E6 (standalone externref loose-eq tail) (sendev-eq, 2026-06-24)
+
+Branch `issue-1917-emit-eq-e5e6`, branched from `upstream/main` (which carries the
+merged E3, #1989). The follow-up slice to E3 — the tag-5-sensitive externref
+dispatch we deferred — scoped to **pure code-motion** (the behaviour fixes
+#1986/#1987/#2081 remain separate).
+
+**What E5/E6 actually is, on current main.** After E3 migrated the four any/any
+arms of `compileAnyBinaryDispatch`, there was exactly **ONE** remaining direct
+call to a keystone equality helper (`__any_eq`/`__any_strict_eq`) left anywhere in
+`binary-ops.ts`: the **standalone externref-vs-externref loose-eq tail**
+(`compileStringBinaryOp`, the `noJsHost` arm of the not-eqref-identical branch).
+It boxes two opaque `any` externrefs to `$AnyValue` via `__any_from_extern` (tag5
+string / tag3 number / tag4 bool / tag1 null) and calls `__any_eq` — the §7.2.15
+native IsLooselyEqual (#2081). That is the tag-5-sensitive dispatch; the strict
+externref path goes through `__host_eq` + numeric-unbox (NOT the keystone), and
+its routing-to-`__any_strict_eq` is the deferred #1986 behaviour change.
+
+**New `emitAnyEqFromExternTemps(ctx, tmpLeft, tmpRight, negate): Instr[] | null`**
+in `coercion-engine.ts` — returns the `__any_from_extern`×2 → `__any_eq` →
+optional `i32.eqz` instruction SEQUENCE (the caller builds an `Instr[]` for an
+`if`-arm, not a live emit), or `null` when the helpers are unavailable so the
+caller falls through to its `__host_loose_eq` import exactly as before. WRAPPER,
+not a re-derivation: the tag-5 classifier stays in `__any_eq`'s body
+(`any-helpers.ts`). With this, the coercion engine now owns **every** keystone
+equality-helper invocation; `binary-ops.ts` no longer references `__any_eq`
+directly (its `ensureAnyFromExternHelper` import is dropped).
+
+**Byte-neutral (authoritative gate):** `.tmp/e6-neutrality.mjs` compiled 5 programs
+exercising the standalone externref loose-eq path (`"1"==1`, `!=`, mixed any/any,
+plus a strict-eq control and an object-identity control) on BOTH the gc (host) and
+standalone lanes, SHA-256'd `result.binary`, and diffed against a fresh detached
+`upstream/main` (E3-inclusive) worktree: **0 byte differences across all 10
+(program × lane) outputs** — including the `standalone` cases E6 actually rewrites.
+
+**Behaviour guard:** new `tests/issue-1917-emit-eq-e6.test.ts` — 6 cases (3/lane),
+all pass. `"1" == 1 → true`, `"1" != 1 → false`, same-identity object `==` →
+true, on both lanes.
+
+**Pre-existing failure confirmed NOT introduced by E6:** `issue-2081.test.ts`'s
+`null == undefined → true` (standalone) fails IDENTICALLY on the E3-only
+`upstream/main` control — it is the deferred standalone nullish-coercion gap
+(#2081's full behaviour fix), not a code-motion regression. Consistent with the 0
+byte-SHA diff.
+
+**#2108 ratcheted DOWN:** `binary-ops.ts` 34 → 33 (the last keystone `__any_eq`
+call moved into the sanctioned engine). tsc clean, prettier clean.
+
+**Still deferred (separate PRs):** the strict-externref routing-to-`__any_strict_eq`
+(#1986 `null===0`), `0===-0` numeric-merge (#1987), and the standalone
+nullish/full-coercion widening (#2081) — these are classifier/gate-logic
+*behaviour* changes, not dispatch motion.
+
+## Implementation — Equality finale, slice E3 (any/any) (sendev-eq, 2026-06-24)
+
+Branch `issue-1917-emit-eq` (this PR). The LAST step of the dedup series, phased:
+**E3 (any/any) first** as the cleanest byte-neutral wrapper; E5/E6
+(tag-5-sensitive externref typed-side boxing) deferred to a separate isolated PR
+with extra standalone scrutiny vs the frozen #1888 −794 contract; the deferred
+behaviour fixes #1986/#1987/#2081 stay separate (they are classifier-side, not
+dispatch-side).
+
+**New `emitStrictEq(ctx, fctx, expr, negate)` / `emitLooseEq(ctx, fctx, expr,
+negate)`** in `coercion-engine.ts` — the **dispatch layer** for `any`-operand
+equality. They select the helper (`__any_strict_eq` for `===`/`!==`; `__any_eq`
+for `==`/`!=`), marshal both operands into the boxed `(ref null $AnyValue)` shape
+via the shared `emitAnyEqOperands` helper (the verbatim #1211 boxing sequence),
+emit the `call`, and apply the `!=`/`!==` `i32.eqz` negation. They return
+`{ kind: "i32" }`, or `null` (helper unavailable / operand failed) so the caller
+falls back exactly as before.
+
+**WRAPPER, not a re-derivation (the load-bearing invariant).** The hard part —
+the §7.2.15 tag-5 field-4 3-way classifier (`tag5StringEqThen`: genuine-string
+content-eq → `__str_equals`; `$BoxedNumber` → `__any_to_f64`+`f64.eq`; both-eqref
+objects → `ref.eq`; else conservative content-eq, the unified #2040/#2585 spec) —
+lives ENTIRELY in the `__any_eq`/`__any_strict_eq` helper *bodies*
+(`any-helpers.ts`). The engine never copies that logic; it only chooses the
+helper and boxes the operands. Folding a second classifier copy here would
+reproduce the #2585/#2040 disease this issue exists to prevent.
+
+**Migrated:** the four equality arms of `compileAnyBinaryDispatch`
+(`binary-ops.ts`, the `compileAnyBinaryDispatch` tail) now early-return into
+`emitLooseEq`/`emitStrictEq`; the `__any_eq`/`__any_strict_eq` rows are removed
+from the helper-name switch (a comment marks why they never reach it). The
+non-equality arms (`+`/`-`/`*`/`/`/`%`/`<`/`>`/`<=`/`>=`) are untouched.
+
+**Byte-neutral by construction:** the extraction reproduces the SAME helper
+selection, the SAME operand-boxing sequence (`compileExpression` → `isAnyValue`
+guard → `coerceType(ref_null $AnyValue)`), and the SAME `i32.eqz` negation —
+verified identical to the prior in-worktree implementation and gated by both-lane
+(host + standalone) Wasm-byte-SHA diff over equality programs + `playground/
+examples/` vs a fresh detached `origin/main` worktree (0 status changes required).
+
+**Deferred (NOT in this slice):** E5/E6 typed-side externref boxing (tag-5
+sensitive — needs the static-class routing + extra standalone scrutiny); the
+behaviour fixes #1986 (`null===0`), #1987 (`0===-0`), #2081 (SA `'1'==1`) — those
+are classifier/widening changes, intentionally separate from this neutral
+extraction.
+
+**Validation (sendev-eq, 2026-06-24):**
+- **Byte-SHA neutrality (authoritative):** `.tmp/eq-neutrality.mjs` compiled 7
+  programs (`==`/`===`/`!=`/`!==` on several operand shapes + arithmetic +
+  relational controls) on BOTH the gc (host) and standalone lanes and SHA-256'd
+  `result.binary`, then diffed against a fresh detached `origin/main` worktree:
+  **0 byte differences across all 14 (program × lane) outputs.** This is a
+  structural proof the extraction is byte-for-byte identical — it does not depend
+  on the test262 harness.
+- **Behaviour guard:** new `tests/issue-1917-emit-eq.test.ts` — 12 cases (6 per
+  lane) via the real `compile` + `WebAssembly.instantiate`; all pass. Pins each
+  lane's established equality behaviour (incl. the pre-existing standalone
+  `3 === 3.0 → false` numeric-tag gap, verified identical on `origin/main`).
+- **tsc clean, prettier clean.** Removed a now-dead `!=`/`!==` negation block in
+  `compileAnyBinaryDispatch` that tsc correctly flagged as unreachable once the
+  equality ops early-return into the engine (the prior in-worktree draft of this
+  slice had left it in and would not have typechecked).
+- **#2108 ratcheted DOWN:** `binary-ops.ts` 38 → 34 (the four equality arms
+  migrated into the sanctioned engine); baseline committed. No unsanctioned
+  growth.
+- **Caveat — local faithful test262 disregarded:** a direct `runTest262File`
+  probe failed its KNOWN-PASS control (`charAt/S15.5.4.4_A1_T1`) on clean
+  `origin/main` on both lanes — the standard broken-local-harness signature
+  (`feedback_verify_local_repro_against_known_good_control`). Its status readings
+  are therefore non-authoritative and disregarded; the byte-SHA diff above is the
+  neutrality gate, and the CI sharded test262 (faithful) is the conformance gate.
+
+## Implementation — Step 3 in progress (sendev-coercion, 2026-06-23)
+
+Branch `issue-1917-emit-toboolean`, predecessor-stacked on the Step-2 branch.
+
+**New `emitToBoolean(ctx, valType, sink)`** in `coercion-engine.ts` — §7.1.2
+ToBoolean → i32, appended into a caller-supplied `Instr[]` sink. Consolidates the
+two hand-rolled truthiness sites that #2085 already aligned:
+- `ensureI32Condition` (`index.ts`, B1 — the canonical, pushes to `fctx.body`);
+  now delegates to `emitToBoolean(ctx, condType, fctx.body)` when `ctx` is
+  present (a ctx-free fallback subset stays inline for the few legacy
+  no-`ctx` callers).
+- `buildToBooleanInstrs` (`array-methods.ts`, B2 — returns `Instr[]`); now
+  `return emitToBoolean(ctx, retType, [])`.
+
+The `sink` parameter is what makes one function serve both emission styles
+(push-to-body vs return-array). **Behaviour-neutral:** the spec's "B2 is
+latently divergent (NaN-truthy)" claim is STALE — #2085 already changed B2 to
+`|x|>0` (NaN falsy) explicitly "matching `ensureI32Condition`", so there is no
+divergence left to surface; the two are equivalent and the engine's rows are
+transcribed verbatim.
+
+**#2108 ratcheted DOWN:** `array-methods.ts` 20→19, `index.ts` 34→33 (the
+`__is_truthy` uses moved into the sanctioned engine). No unsanctioned growth.
+
+**Remaining ToBoolean sites NOT in scope (documented for a follow-up):** B3
+(filter-extern callback truthiness, partial duplicate) and the B4 compile-time
+constant-fold tables (`tryConstantFoldToBoolean`) — these are smaller and B4 is a
+static-literal fold, not a runtime cascade.
+
+**One intentional, behaviour-safe divergence from the verbatim transcription:**
+the engine guards the native-string arm with `ctx.anyStrTypeIdx >= 0 &&
+ctx.nativeStrTypeIdx >= 0` (the original `ensureI32Condition` matched on
+`condType.typeIdx === ctx.anyStrTypeIdx` *without* the `>= 0` floor). When native
+strings are off, `anyStrTypeIdx` is `-1`; an opaque ref whose `typeIdx` is also
+`-1` would have wrongly taken the flatten path in the old code. The guard routes
+it to the correct non-null arm instead. This is strictly more correct and is the
+common WasmGC-string-helper guard idiom; both-lane neutrality (below) confirms it
+surfaces no regression.
+
+**Both-lane neutrality proof (sendev-coercion, 2026-06-23).** Faithful
+`runTest262File` probe reading `r.status` (NOT `.outcome`), control (charAt) run
+first, executed on BOTH the default JS-host (gc) lane AND `--target standalone`,
+then diffed against an identical probe on a detached `origin/main` worktree.
+13 truthiness-exercising files × 2 lanes — `if`/`while`/`&&`/`||`/`!`/ternary,
+`Boolean(x)`, and `Array.prototype.filter`/`every`/`some` callback truthiness
+(the B2 `buildToBooleanInstrs` path). Result: **NEUTRAL — 0 status changes across
+both lanes.** Pre-existing fails (charAt both lanes; logical-and standalone) are
+identical on main and branch; everything else passes on both. `.tmp/` probe:
+`neutrality-toboolean.mts` (gitignored). tsc clean, prettier clean.
+
+**Re-verified post-#1962-landing (sdev-coercion-impl-2, 2026-06-23).** After #1962
+(emitToNumber) landed on main (merge `96c7cbcb3`), merged `origin/main` into this
+branch — the Step-2 commit `d357aaad1` is now subsumed, so the delta vs main is a
+clean **Step-3-only** change (`array-methods.ts`, `coercion-engine.ts`,
+`index.ts`; `calls.ts` dropped with Step 2). Re-ran the identical both-lane probe
+against a FRESH detached `origin/main` worktree (now carrying emitToNumber):
+**NEUTRAL — 0 status changes across both lanes.** tsc + prettier clean. New head
+`6e9aba31d`. Stacking-hold lifted (predecessor landed); handed to PR-shepherd.
+
+## Implementation — Step 2 (sendev-coercion, 2026-06-23) — PR #1962
+
+Branch `issue-1917-emit-tonumber`, predecessor-stacked on the Step-1 branch
+(`emitToNumber` extends the same `coercion-engine.ts`; PR merges after Step 1).
+
+**New `emitToNumber(ctx, fctx, valType)`** in `coercion-engine.ts` — the
+consolidated ToNumber cascade (void→NaN, i64→f64, externref→`__unbox_number`
+js-host / `coerceType(f64,"number")` standalone, object-ref→`coerceType(f64,
+"number")`, i32→f64, f64 no-op). Externref arm gated on `ctx.standalone`
+EXACTLY (not `noJsHost`) to match the migrated `Number(x)` site byte-for-byte
+under `--target wasi`.
+
+**Migrated:** the `Number(x)` lowering (`calls.ts` ~:10674) — its post-pre-check
+cascade now calls `emitToNumber`. The `#2160` array pre-check, the Symbol-throw,
+and the native-string-ref→`__str_to_number` typeIdx-keyed pre-check stay in the
+caller (each is a *source* special-case that must run before / dispatches on
+facts the engine doesn't carry).
+
+**DEFERRED to a follow-up increment (NOT a missed copy — different ToNumber
+policy; folding would REGRESS):** the unary `+`/`-`/`~` arms (`unary.ts`) use
+`coerceType(f64)` with the **default** hint for externref/ref operands, whereas
+`Number(x)` uses the `"number"` hint / `__unbox_number`. Unifying them neutrally
+needs `emitToNumber` to take an explicit `hint` AND careful tracing of
+`coerceType(externref→f64)` no-hint vs `__unbox_number` equivalence — a separate
+neutrality analysis, deferred rather than risked.
+
+**#2108 ratcheted DOWN:** `calls.ts` 27→26 (the `Number(x)` `__unbox_number` use
+now lives in the sanctioned engine). No unsanctioned growth.
+
+## Implementation — Step 1 (sendev-coercion, 2026-06-22; user un-parked) — PR #1960
+
+Branch `issue-1917-emit-tostring`. Phased behavior-neutral consolidation per the
+user override (deduplicate the coercion code; equality last/isolated). All Step
+1-4 named bugs are already fixed per-site, so EVERY step must be byte-neutral; a
+non-neutral step = a hidden divergence to surface, not paper over.
+
+**New `src/codegen/coercion-engine.ts`** — `coercionMode(ctx)` (the three ad-hoc
+spellings unified), `emitToString(ctx, fctx, valType, tsType, hint)` +
+`compileAndEmitToString(...)`. `emitToString` is the faithful consolidation of
+the per-operand ToString cascade the expression-based copies shared
+(void→"undefined", i32-bool→true/false, f64/i32/i64→number_toString,
+externref-null/undef→literal, externref-string→passthrough,
+externref-opaque→`__extern_toString`/`__extern_to_string_default` by hint,
+ref→`tryStructToString`+`$__any_to_string` native / `coerceType`(hint) host).
+Takes an explicit `hint`: templates/`String()` pass "string"; `+`-concat passes
+"default" (the #2022 valueOf-first policy on a ref operand) — so the per-context
+policy difference is preserved exactly. `emitBoolToString` /
+`emitNativeStringRefFromExternref` are bound lazily from string-ops.ts (cycle
+avoidance) via `registerStringHelperEmitters`.
+
+**Migrated (all tsc-clean):**
+- `compileAndCoerceConcatOperand` (host batched `__concat_N`) →
+  `compileAndEmitToString(…, "default")`.
+- `compileTemplateExpression` host span loop → `emitToString(…, "string")` (the
+  scalar-lowered null/undef pre-guard stays in the caller — the engine classifies
+  by ValType and would stringify the i32-0 sentinel as "0").
+- `compileNativeConcatOperand` (standalone `+`-concat operand) →
+  `emitToString(…, "default")`. Kept the `#2007 tryCompileNativeVecConcatOperand`
+  pre-check + the unknown-kind `return false` fall-through in the caller. All
+  callers are `noJsHost`-gated, so the engine's native externref tail
+  (`__extern_toString` + `emitNativeStringRefFromExternref`, NO `__str_from_extern`
+  bridge) is exactly right.
+
+**DEFERRED to a follow-up Step-1 increment (NOT a missed copy — each needs an
+engine extension; folding blindly would REGRESS = the hidden-divergence trap):**
+- `compileNativeTemplateExpression` — runs in BOTH standalone AND
+  native-strings-host mode; in native-strings-host it marshals via the
+  `__str_from_extern` externref bridge (`fromExternIdx`) the engine does not model
+  (it uses `emitNativeStringRefFromExternref` for both native modes). Concat
+  operand was safe only because it is standalone-ONLY.
+- `String()` lowering (calls.ts ~:10805) — heavy pre-processing (empty/null/undef
+  literals, Symbol descriptive string, array→toString, RegExp→toString) wraps the
+  generic cascade and each arm returns a ValType; careful extraction, next.
+- array-`join` `elemToStr` (array-methods.ts ~:5240) — operates on a raw array
+  SLOT (i8/i16/f64/externref), `$Hole`-aware; folds only once `emitToString`
+  grows a slot-source variant.
+
+**Cross-mode policy facts the engine now encodes (were implicit per-copy):**
+templates/`String()` hint = "string"; `+`-concat hint = "default" (#2022
+valueOf-first ref policy). The `__extern_to_string_default` default-hint externref
+tail applies ONLY in js-host mode; native modes always use `__extern_toString`.
+
+**Pending before PR:** ratchet `#2108` baseline DOWN for the migrated files;
+diff-neutrality over `playground/examples/`; standalone + host string suites;
+merge_group full-baseline watch.
 
 ## Implementation — Step 0 landed (sdev1, 2026-06-15)
 
@@ -451,3 +808,17 @@ count down, this step:
   #2005/#2006/etc. landing solo first, but each such fix MUST land **as the
   engine row** (Step 1 can split per-issue if scheduling prefers), never as an
   8th hand-rolled copy. The #2108 gate enforces this.
+
+## Downstream signal — standalone `Cannot convert object to primitive` (3,622, /harvest 2026-06-24)
+
+The single largest standalone runtime-failure bucket — `Cannot convert object
+to primitive value` at **3,622** records on run `426e28e8` (host lane: 48) — is
+a key **acceptance signal** for this engine. After #2503 closed the operator
+*routing* slice, the residual is diffuse and substrate-shaped: the shared
+standalone ToPrimitive/ToNumber path reached through `Object.{defineProperty,
+create,getOwnPropertyDescriptor}` (~720), `{Array,String,TypedArray}.prototype`
+method args (~690), RegExp, and class/destructuring coercion. That is the exact
+`ref→f64` / `__to_primitive` divergence this issue unifies. Use this bucket
+dropping substantially as a coarse post-unification check; the String/Number
+slice is owned by **#2160** (`depends_on: [1917]`). Drift note + breakdown in
+**#2503** (Harvest update 2026-06-24).
