@@ -538,6 +538,31 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
     }
     if (name === "parseInt" || name === "parseFloat") {
       state.parseNeeded.add(name);
+      // (#2652) In standalone / WASI the native parse helpers take a string ref;
+      // a NON-string primitive arg (`parseInt(true)` / `parseInt(-1)`) must be
+      // run through ToString at the call site (emitToString) BEFORE the call.
+      // Pre-register the helpers/literals that lowering needs so no late
+      // module-function shift is forced mid-body:
+      //   numeric arg  → `number_toString`
+      //   boolean arg  → "true"/"false" string literals (emitBoolToString)
+      //   void arg     → "undefined" literal
+      if ((ctx.standalone || ctx.wasi) && node.arguments.length >= 1) {
+        const arg0 = node.arguments[0]!;
+        const arg0Type = ctx.checker.getTypeAtLocation(arg0);
+        const isStr = isStringType(arg0Type);
+        if (!isStr) {
+          if (isBooleanType(arg0Type)) {
+            state.stringLiterals.add("true");
+            state.stringLiterals.add("false");
+          } else if (isNumberType(arg0Type)) {
+            state.primitiveNeeded.add("number_toString");
+          } else if (arg0Type.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Void)) {
+            state.stringLiterals.add("undefined");
+          } else if (arg0Type.flags & ts.TypeFlags.Null) {
+            state.stringLiterals.add("null");
+          }
+        }
+      }
     }
     if (
       name === "decodeURI" ||
