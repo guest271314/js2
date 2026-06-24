@@ -187,3 +187,17 @@ in --target standalone (#1888 / #1907 S6-b)` signatures): `Int8Array.prototype`
 … (Phase B)` refusal is 536 records. Mechanism is landed (PR #1292); the residual
 is the **incomplete per-builtin whitelist** — still the clearest standalone-mode
 lever for the next push.
+
+> **Follow-up #2651 (s66, 2026-06-24): the TypedArray *constructor*-as-value
+> tier.** Verified (per-process WAT probe, `main` `c2847896d8`) that the bulk of
+> standalone `built-ins/TypedArray/prototype/*` rows are gated not on the method
+> body (fixed in #2648/#2644) but on reading the **builtin constructor itself as
+> a VALUE** — the `testWithTypedArrayConstructors` harness iterates the ctors and
+> reads each as a value (`new TA(arg)`, `TA.name`, `TA.prototype`,
+> `TA.BYTES_PER_ELEMENT`, `Object.getPrototypeOf(TA)`). Under the host-free
+> contract that read resolves to `ref.null.extern` (null ctor); under default
+> standalone it leaks `env.global_<Name>` (the #2094 class). #2651 specs the
+> demand-driven `$NativeCtor` singleton (D1) + reserved-TypedArray `$NativeProto`
+> wiring (D2) + dynamic-`new` brand-dispatch (D3) + `%TypedArray%` intrinsic
+> identity (D4, coordinates #2580 M3). This is the constructor-tier extension of
+> this issue's case-(c). See `plan/issues/2651-builtin-constructor-prototype-as-value-substrate.md`.

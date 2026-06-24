@@ -1,0 +1,415 @@
+---
+id: 2651
+title: "standalone: builtin constructor + prototype as a first-class VALUE (TypedArray ctor-iteration substrate)"
+status: ready
+sprint: 66
+created: 2026-06-24
+priority: high
+feasibility: hard
+reasoning_effort: max
+task_type: feature
+area: codegen, runtime, value-rep
+language_feature: built-ins, constructors, prototype chain, TypedArray
+goal: standalone-mode
+parent: 1888
+related: [1907, 1888, 2580, 2648, 2649, 2650, 2595, 1395, 2026]
+test262_bucket: standalone-dynamic-object-property
+---
+
+# #2651 — Builtin constructor + prototype as a first-class readable VALUE (standalone)
+
+> Architectural sub-issue of **#1888 case-(c)** ("named built-in
+> constructor/namespace as a value") and the residual tail of **#1907 S6-b**
+> (the per-builtin whitelist). #1907/#1888 landed the *mechanism* for builtin
+> **namespaces** (`Array`, `Object`) and builtin **prototypes**
+> (`String.prototype`, `Date.prototype`, …) as values; this issue extends it to
+> the **constructor functions themselves** — `Int8Array`, `Uint8Array`, … —
+> read as first-class values, which is the gate for the bulk of standalone
+> `built-ins/TypedArray/prototype/*` test262 rows. **SPEC ONLY — no code here.**
+> Conservative dual-mode invariant from #1472/#1888 holds throughout: GC/host
+> path unchanged and default; standalone is the new native path; any uncertainty
+> ⇒ fail loud, never invalid Wasm.
+
+## Verified mechanism (per-process probe, current `main` `c2847896d8`, 2026-06-24)
+
+The `testWithTypedArrayConstructors(f, …)` harness
+(`test262/harness/testTypedArray.js`) builds a runtime **array of constructor
+values** (`typedArrayConstructors = [Float64Array, Float32Array, Int32Array, …]`)
+and, for each, binds an arg-factory, then inside `f` reads the constructor **as a
+value**: `new TA(arg)`, `TA.name`, `TA.prototype`, `TA.BYTES_PER_ELEMENT`, and
+`Object.getPrototypeOf(TA)` (the `%TypedArray%` intrinsic). Every
+`built-ins/TypedArray/prototype/{indexOf,lastIndexOf,includes,at,…}` row routes
+through this harness, so the per-row gate is the **constructor-as-value read**,
+not the method body (the method bodies were fixed in #2648/#2644).
+
+**Probe 1 — which read fails, and how it is lowered.** Compiling each value-read
+shape `--target standalone` and decoding the WAT (per-process, NOT the in-process
+`runTest262File` loop — see the #2580 runner-artifact warning):
+
+| shape (receiver is the bare builtin ctor as a VALUE) | default `--target standalone` | strict host-free (`strictNoHostImports`) |
+|---|---|---|
+| `const c = [Int8Array, Uint8Array]` (into array) | emits `env.global_Int8Array`, `env.global_Uint8Array` host imports | **`ref.null.extern`** → value is null |
+| `const TA: any = Int8Array; TA.name` | `env.global_Int8Array` | `ref.null.extern` → `.name` throws "Cannot access property of null" |
+| `TA.prototype` (via `any` alias) | `env.global_Int8Array` | `ref.null.extern` → `undefined` |
+| `TA.BYTES_PER_ELEMENT` (via `any` alias) | `env.global_Int8Array` | `ref.null.extern` → `undefined` |
+| `Object.getPrototypeOf(Int8Array)` | `env.global_Int8Array` | `ref.null.extern` → `undefined` |
+| **baseline** `new Int8Array([1,2,3])` (ctor in NEW position) | **0 env imports** (native fast path) | **0 env imports**, correct |
+
+The WAT for `const TA = Int8Array; TA.name` decodes to:
+`(local $TA externref) … ref.null extern; local.tee $TA; ref.is_null; (if (then <throw "Cannot access property of null">))`.
+So the bare TypedArray constructor read **as a value** resolves to
+`ref.null.extern` (the graceful-default fallback), and every downstream member
+read (`.name`/`.prototype`/`.BYTES_PER_ELEMENT`/`new TA(...)`/identity)
+degrades to `undefined`/null/throw — the whole `test` export returns
+`undefined`.
+
+**Probe 2 — it is NOT a compile-error refusal anymore.** Under #1907/#1888 the
+old `__get_builtin` refusal is gone; the value read *compiles* and either (a) in
+default standalone leaks a host import `env.global_<Name>` (so the test runner's
+`buildImports` satisfies it with the *real host* constructor and the row PASSES
+in the non-strict lane — masking the gap), or (b) under the strict host-free
+contract resolves to `ref.null.extern` (so a genuinely standalone binary is
+wrong). **The default-standalone test262 lane currently PASSES these rows
+because the harness provides `env.global_<Name>`** — confirmed by running
+`indexOf/fromIndex-infinity`, `indexOf/fromIndex-minus-zero`,
+`lastIndexOf/fromIndex-infinity`, `includes/tointeger-fromindex` per-process via
+the real `runTest262File`: all four `pass` in BOTH host and standalone targets.
+
+> **IMPORTANT scoping correction (sizing the lever honestly).** Because the
+> non-strict standalone lane satisfies `env.global_<Name>` from the harness, the
+> *test262-current standalone baseline* (the #2097 floor's input report) already
+> counts many of these rows as PASS. The true conformance lever this substrate
+> unlocks is therefore **(i)** the rows that read the constructor value in a way
+> the host import canNOT paper over — e.g. `Object.getPrototypeOf(TA) ===
+> Object.getPrototypeOf(OtherTA)` (the `%TypedArray%` intrinsic-identity rows),
+> `TA.prototype` identity/`isPrototypeOf` rows, and constructor-identity
+> (`sample.constructor === TA`) rows where the host externref and the native vec
+> brand disagree — PLUS **(ii)** the **true host-free standalone floor**
+> (`strictNoHostImports`), where EVERY ctor-iteration harness row is currently
+> `undefined` (null ctor) rather than pass. The substrate's headline value is
+> making the standalone lane *genuinely host-free* for the whole TypedArray
+> harness family (removing the `env.global_<Name>` leak, which is also the
+> #2094 leaked-host-import class), and flipping the identity/intrinsic rows that
+> the host import cannot satisfy. **Measure both buckets at Slice 0 before
+> committing to M2+** (see Acceptance / "sizing gate").
+
+### Loci (file:line, current `main`)
+
+1. **Leak / null source — `collectDeclaredGlobals`**, `src/codegen/index.ts:12676-12734`.
+   `AMBIENT_BUILTIN_CTORS` (includes every TypedArray ctor) registers
+   `env.global_<Name>` as a declared global for any **bare value use**
+   (`valueRefNames`, `isBareValueUse` at :12634). This path is **NOT gated on
+   standalone** — under `--target standalone` it leaks a host import; under
+   `strictNoHostImports` the import is suppressed by the strict gate and the
+   identifier falls through to `ref.null.extern`.
+2. **Bare-identifier resolution — `compileIdentifier`**,
+   `src/codegen/expressions/identifiers.ts:687-690`. The standalone native-value
+   path `emitBuiltinNamespaceObject` fires ONLY for
+   `isSupportedBuiltinNamespace(name)` = `{Array, Object}`
+   (`src/codegen/builtin-static-globals.ts:20-27`). TypedArray ctors are not in
+   that set → fall through to `declaredGlobals` (:693, host import) or the
+   `ref.null.extern` default (end of `compileIdentifier`).
+3. **`<Name>.BYTES_PER_ELEMENT` static fast path** —
+   `src/codegen/property-access.ts:333-403` (#2595). Works for a **direct**
+   `Int8Array.BYTES_PER_ELEMENT` access (static receiver), but the harness reads
+   it off an `any`-typed alias (`const TA = ctors[i]; TA.BYTES_PER_ELEMENT`),
+   which is a runtime externref → the static fast path can't fire.
+4. **`<Name>.prototype.<member>` value reads** —
+   `src/codegen/property-access.ts:759-787` (`tryCompileStandaloneBuiltinProtoMemberRead`)
+   + the brand table `src/codegen/native-proto.ts:71-127` (TypedArray brands
+   `BUILTIN_BRAND_BASE+4..+14` are **reserved but NOT wired** — no
+   `ensure<View>NativeProtoGlue` exists). This handles the **direct** two-level
+   `Int8Array.prototype.<member>` shape only; an `any`-aliased `TA.prototype` is
+   again a runtime externref.
+5. **Dynamic `new TA(...)`** — `src/codegen/expressions/new-super.ts`
+   (`emitDynamicNewFallback`, the `__construct`/`__construct_closure`
+   brand-dispatch, ~:3678-3810). A `new (anyCtorValue)(args)` already has a
+   dynamic path, but it dispatches on a runtime brand/closure; a builtin-ctor
+   *value* currently carries no brand it recognizes (it's a null externref or a
+   host import), so `new TA(...)` over an iterated ctor value does not reach the
+   native TypedArray construct path.
+
+## Why this is substrate, not a point-fix
+
+The harness **captures the constructor into a value first** (`ctors[i]` → `TA`),
+which structurally defeats every *static-receiver* fast path the compiler has
+(the #2595 `BYTES_PER_ELEMENT` fold, the #2375 direct-`new` view path, the
+`tryCompileStandaloneBuiltinProtoMemberRead` two-level shape). To serve the
+iterated form, the builtin constructor must exist as a **real first-class value**
+that simultaneously:
+
+- **carries identity** so `TA === Int8Array`, `sample.constructor === TA`, and
+  `Object.getPrototypeOf(Int8Array) === Object.getPrototypeOf(Uint8Array)` (the
+  `%TypedArray%` intrinsic) hold;
+- **answers value reads** `.name` → `"Int8Array"`, `.BYTES_PER_ELEMENT` → 1,
+  `.prototype` → the (native) view prototype object, host-free;
+- **remains constructible** so `new TA(arg)` reaches the existing native
+  TypedArray construct path (`new-super.ts` view construction), keyed off the
+  value's brand rather than a static identifier.
+
+This is the **#1888 case-(c)** "built-ins as static globals" representation,
+already proven for `Array`/`Object` namespaces and the wrapper prototypes —
+extended to the constructor-functions tier with a **construct brand** and an
+**intrinsic-parent link**. It couples to the **#2580 value-rep substrate**
+(`project_standalone_any_string_value_read_substrate`): the iterated `TA` is an
+`any`-typed receiver, so its member reads and its `new`-dispatch are exactly the
+"dynamic read on an `any` receiver" the M2/M3 dynamic-read protocol governs —
+this issue is the *builtin-constructor* specialization of that substrate and
+MUST share the boxed-family `ref.test`/brand dispatch, not invent a parallel one.
+
+## Architectural decisions
+
+### D1 — Representation: a demand-driven lazy singleton `$NativeCtor` value per referenced builtin constructor (mirror `__class_<Name>`), NOT a `globalThis` ctor table.
+
+Per `feedback_compile_away` + the #1888 D4 design, materialize ONLY the
+constructors the program references as values (the harness references all
+non-bigint TypedArray ctors; a typical program references few). For each
+referenced builtin ctor `<Name>`, emit a **lazily-initialised nullable Wasm
+global** `$__builtin_ctor_<Name> : (ref null externref)` holding a singleton
+value object, exactly as `classObjectGlobals` / `emitLazyClassObjectGet`
+(`identifiers.ts:727`, `extern.ts`) does for user classes (`__class_<Name>`).
+The singleton is the constructor's first-class identity; bare `<Name>` value
+reads and `ctors[i]` element reads both resolve to the same global ⇒ identity
+holds.
+
+**The singleton's shape — reuse the `$NativeProto`/boxed-family struct, add a
+construct-brand and a parent link.** Fields the value object must answer:
+
+- `name` (string) — `"Int8Array"`; a compile-time constant per ctor.
+- `BYTES_PER_ELEMENT` (i32, boxed-number on read) — the static element width
+  (the #2595 `TYPED_ARRAY_BYTES_PER_ELEMENT` table is the source of truth).
+- `prototype` (externref) — the native view prototype object (the
+  `$NativeProto` materialized via a new `ensure<View>NativeProtoGlue`, D2).
+- a **construct brand** (i32) — the view's runtime brand (the existing
+  TypedArray vec-element kind / view tag) so `new <ctorValue>(args)` dispatches
+  to the native construct path (D3).
+- a **`[[Prototype]]` link** to the shared `%TypedArray%` intrinsic singleton
+  (D4) so `Object.getPrototypeOf(Int8Array) === Object.getPrototypeOf(Uint8Array)`.
+
+> **Do NOT box every method.** The ctor value carries `name`/`BYTES_PER_ELEMENT`/
+> `prototype`/brand/parent only. Static methods (`TA.from`, `TA.of`) are already
+> intercepted at the static-receiver property-access site for the *direct* form;
+> the *iterated* `TA.from` form is out of scope for slice 1 (refuse-loud, a later
+> slice) — the harness rows do not read iterated `TA.from`.
+
+### D2 — Wire the reserved TypedArray `$NativeProto` glue (`ensure<View>NativeProtoGlue`).
+
+The brand table (`native-proto.ts:71-127`) already reserves
+`Int8Array … Float64Array` + `%TypedArray%`. Add the `ensure<View>NativeProtoGlue`
+registrations (mirroring `ensureDateNativeProtoGlue`,
+`array-object-proto.ts:536`) so `<Name>.prototype` materializes a `$NativeProto`
+object host-free, with the `%TypedArray%.prototype` method CSV
+(`indexOf,lastIndexOf,includes,at,subarray,…`). The concrete view protos share
+the abstract `%TypedArray%.prototype` member set (their own-prototype is mostly
+empty; the methods live on the intrinsic). So register **one** `%TypedArray%`
+glue with the full method CSV, and the concrete-view protos link to it as parent
+(D4) — keeping binary size proportional. Per the #2375 caution
+(`property-access.ts:660`), TypedArray views carry vec/runtime-state
+entanglement, so the proto-object materialization MUST be a pure value object
+(member CSV + name; `emitLazyNativeProtoGet` never calls `emitMemberBody`) — the
+method *bodies* already exist as the native vec method helpers and are reached
+via the existing instance-method dispatch, NOT re-emitted on the proto value.
+
+### D3 — `new <ctorValue>(args)` dispatches on the construct brand to the existing native view-construct path.
+
+The ctor value carries the view brand (D1). Extend the dynamic-`new` fallback
+(`new-super.ts` `emitDynamicNewFallback`): when the callee value `ref.test`s as a
+`$NativeCtor` (the builtin-ctor singleton struct), read its brand field and
+branch to the **already-existing** native TypedArray construct emitter (the same
+code `new Int8Array([...])` reaches in the static-callee case). This is a
+brand-switch over the concrete views — keyed at runtime by the brand the value
+carries, NOT a `call_indirect` (the construct impls are compile-time-known native
+helpers). Refuse-loud for any brand whose native construct impl is not yet
+reachable (none expected — all non-bigint views have a native construct path
+today via the static form).
+
+### D4 — The `%TypedArray%` intrinsic singleton + `[[Prototype]]` links.
+
+`Object.getPrototypeOf(Int8Array)` returns the abstract `%TypedArray%`
+constructor intrinsic; ALL concrete views share it. Materialize **one** lazy
+`$__builtin_ctor_%TypedArray%` singleton (using the reserved
+`%TypedArray%` brand) and link every concrete-view ctor singleton's
+`[[Prototype]]` field to it. `Object.getPrototypeOf(<ctorValue>)` reads that link
+(reuse the dynamic-`[[Prototype]]` walk the #2580 M3 substrate is building — see
+the M3 architect spec in `plan/issues/2580-…md`; this is the same
+`[[Prototype]]`-on-a-dynamic-object read, specialized to the builtin-ctor
+singleton). Likewise `<ctorValue>.prototype`'s `[[Prototype]]` links to
+`%TypedArray%.prototype` so view-proto inheritance holds. **Coordinate with the
+#2580 M3 lane** — do NOT duplicate the `[[Prototype]]`-link field/walk; consume
+it. If #2580 M3 has not landed the link field when this issue starts, this
+issue's slice M3 (intrinsic identity) stacks on the #2580 M3 branch as an
+explicit predecessor (CLAUDE.md predecessor-stacking).
+
+### D5 — Suppress the `env.global_<Name>` host import under standalone; the singleton replaces it.
+
+`collectDeclaredGlobals` (`index.ts:12721`) must NOT register
+`env.global_<Name>` for a TypedArray ctor when `ctx.standalone` AND the native
+ctor-singleton path covers it (slice-gated: only for the views the slice wires).
+This removes the leaked host import (the #2094 class) so the default-standalone
+binary is genuinely host-free and the strict floor stops null-resolving. **Gate
+narrowly** — only suppress for ctors the singleton actually materializes; an
+un-wired ctor keeps the existing behaviour (host import in non-strict, refuse in
+strict) so no row regresses before its slice lands.
+
+## Host-vs-standalone split
+
+- **GC/host mode: byte-for-byte unchanged.** `global_<Name>` host imports and the
+  V8-backed constructor objects stay; the native-singleton path is
+  `ctx.standalone`-gated. Verify with a host-mode WAT byte-identity guard on
+  `new Int8Array([...])` and `Int8Array.BYTES_PER_ELEMENT`.
+- **Standalone (default + strict): the native singleton is the value.** The
+  singleton path is gated on `ctx.standalone`; under `strictNoHostImports` the
+  `global_<Name>` suppression (D5) means the singleton is the ONLY source, so the
+  value is correct host-free. The default-standalone lane ALSO uses the singleton
+  (not the host import) once D5 fires — which is what removes the leak.
+
+## INDEPENDENT SLICES (each a full-gate-validated PR; standalone floor #2097 authoritative)
+
+> **Validation discipline (load-bearing — this is the #1888-class eject zone).**
+> Every slice touches value-rep / builtin resolution → **broad-impact**. Per
+> `project_broad_impact_validate_full_ci` and
+> `project_standalone_floor_only_on_merge_group`, each slice MUST validate via
+> the **merge_group** (the standalone floor #2097 runs only there, NOT on PR) /
+> local-ci, NEVER a scoped sweep — the three s64 ejects (#1837/#1838/#1844) all
+> passed scoped sweeps then failed the full gate. Gate the whole feature behind a
+> `BUILTIN_CTOR_VALUE_WIRED` boolean (mirror `S2_OPENANY_DISPATCH_WIRED`) so it
+> can land dark and flip on after the floor is green. Add a host-mode
+> byte-identity guard + a standalone determinism guard per slice; STOP-THE-LINE
+> on any host-`new Int8Array` / `BYTES_PER_ELEMENT` byte-diff or floor eject.
+
+### Slice 0 — SIZING GATE (no runtime; measure, do first)
+
+Before any code, settle the honest row count (the scoping-correction above):
+1. Run the FULL `built-ins/TypedArray/prototype/{indexOf,lastIndexOf,includes,at,
+   find,findIndex,every,some,…}` dir per-process (isolated, NOT the in-process
+   loop — see the #2580 runner-artifact warning) under BOTH the default and the
+   `strictNoHostImports` standalone target; bucket each row by `{host-pass /
+   standalone-pass-nonstrict / standalone-pass-strict}`.
+2. The lever = (strict-fail − default-fail) [the host-free floor rows] PLUS the
+   identity/intrinsic rows the host import cannot satisfy in EITHER lane
+   (`Object.getPrototypeOf(TA)===…`, `sample.constructor===TA`,
+   `TA.prototype`-identity). Record the per-bucket counts in this issue file.
+3. **Decision:** if the host-free-floor + identity bucket is < ~40 rows, land
+   only M1 (the host-free correctness + leak removal) and PARK M2/M3; if it is
+   the expected ~hundreds (whole harness family × strict), proceed M1→M3.
+- **Deliverable:** the bucket table here + a go/no-go on M2/M3.
+
+### Slice M1 — ctor-value singleton + name/BYTES_PER_ELEMENT/prototype reads (the core; depends on D1/D2/D5)
+
+- New `src/codegen/builtin-ctor-globals.ts` (mirror `builtin-static-globals.ts`):
+  `emitBuiltinCtorValue(ctx, fctx, name)` → lazy `$__builtin_ctor_<Name>`
+  singleton populated with `name`/`BYTES_PER_ELEMENT`/`prototype`/brand. Register
+  the reserved TypedArray `$NativeProto` glue (D2). Wire bare-identifier
+  resolution (`identifiers.ts:687`) + the `any`-aliased member reads
+  (`.name`/`.BYTES_PER_ELEMENT`/`.prototype` off a runtime ctor value, via the
+  boxed-family read site). Suppress `env.global_<Name>` under standalone (D5).
+- **Acceptance rows:** the strict-host-free harness rows (every
+  `indexOf`/`includes`/`at`/… row, currently `undefined`-ctor under
+  `strictNoHostImports`) compile + run host-free with the singleton; `TA.name ===
+  "Int8Array"`, `TA.BYTES_PER_ELEMENT === 1`, `TA.prototype` non-null. Zero
+  `env.global_<Name>` in the standalone binary for the wired views.
+- Full-gate (merge_group / standalone floor). **Canary for the leak-removal +
+  the value-read correctness.**
+
+### Slice M2 — `new <ctorValue>(args)` dynamic construct (depends on M1, D3)
+
+- Extend `emitDynamicNewFallback` (`new-super.ts`) with the `$NativeCtor`
+  brand-switch → native view construct. The harness's `new TA(makeCtorArg(...))`
+  over the iterated ctor value now constructs the correct concrete view host-free.
+- **Acceptance:** `iterate-ctors-construct` (build `[Int8Array,Uint8Array,
+  Int16Array]`, `new ctors[i]([1,2,3])`, sum `.length`) → 9 host-free; each view
+  is the correct concrete type (`sample instanceof TA`, element-width-correct
+  round-trip). The full ctor-iteration harness rows flip in the strict lane.
+- Full-gate.
+
+### Slice M3 — `%TypedArray%` intrinsic identity + ctor/proto `[[Prototype]]` (depends on M2, D4; coordinates #2580 M3)
+
+- Materialize the `%TypedArray%` intrinsic singleton; link concrete-view ctor +
+  proto `[[Prototype]]`. `Object.getPrototypeOf(Int8Array) ===
+  Object.getPrototypeOf(Uint8Array)` true; `sample.constructor === TA` true;
+  view-proto `isPrototypeOf` chain correct. **Consume the #2580 M3
+  `[[Prototype]]`-link field/walk** — predecessor-stack on its branch if not yet
+  landed; do NOT fork a parallel `[[Prototype]]` mechanism.
+- **Acceptance:** the intrinsic-identity + constructor-identity TypedArray rows
+  (the ones the host import canNOT satisfy) flip in BOTH lanes.
+- Full-gate. Hardest, last.
+
+## Acceptance criteria
+
+- [ ] **Sizing gate (Slice 0)**: the per-bucket TypedArray-prototype row table is
+      recorded here, with a go/no-go on M2/M3.
+- [ ] **M1**: bare `Int8Array` (and every wired view) read as a VALUE resolves to
+      a native singleton host-free; `TA.name`/`TA.BYTES_PER_ELEMENT`/`TA.prototype`
+      correct standalone (default + strict); ZERO `env.global_<Name>` import for
+      the wired views; host-mode `new Int8Array`/`BYTES_PER_ELEMENT` byte-identical.
+- [ ] **M2**: `new <iterated-ctor-value>(arg)` constructs the correct concrete
+      view host-free; the ctor-iteration harness rows run.
+- [ ] **M3**: `Object.getPrototypeOf(TA)` intrinsic identity + `sample.constructor
+      === TA` hold; the identity/intrinsic rows flip.
+- [ ] No regression on the default-`gc`/host suite (Int8Array/TypedArray guards);
+      no standalone floor #2097 regression (validated in merge_group, not a sweep).
+- [ ] Any un-wired builtin ctor / un-reachable view brand refuses-loud with a
+      `#2651 / #1888 S6-c` cite; never invalid Wasm, never a silent null ctor.
+
+## Risks / coordination
+
+- **R1 — the leaked-host-import mask hides the win (sizing trap).** The default
+  standalone lane already passes many rows via `env.global_<Name>`. If M1 is
+  measured only against the default lane it looks 0-row. The REAL win is the
+  host-free floor (strict) + the identity rows. **Slice 0 must bucket strict vs
+  non-strict** or the lever is mis-sized (this is exactly the #2573 "0-row"
+  trap, inverted).
+- **R2 — value-rep / `.length` hot-path coupling (#2580).** The iterated `TA` is
+  an `any` receiver; its `.prototype`/`.name`/`new` reads flow through the same
+  boxed-family / dynamic-read site #2580 M2/M3 governs. A naive new `.prototype`
+  arm could perturb the hot `any`-`.length` path (the #1868 eject precedent).
+  Gate strictly on the `$NativeCtor` `ref.test` (a NEW struct brand, disjoint
+  from vec/closure/$Object) so typed and existing-`any` reads are byte-identical;
+  validate the `any[].length` arithmetic guard every slice.
+- **R3 — `%TypedArray%` `[[Prototype]]` link duplication.** Don't fork a parallel
+  `[[Prototype]]` mechanism; consume #2580 M3's link field/walk. Predecessor-stack
+  if needed.
+- **R4 — #2375 TypedArray-init-trap class.** The view proto materialization must
+  be a pure value object (member CSV + name; no `emitMemberBody`), else the
+  runtime vec-state entanglement that tripped the #2375 init-trap and the Promise
+  proto exclusion (`property-access.ts:667`) recurs. Keep the proto value
+  body-free; method bodies stay on the existing instance-method vec dispatch.
+- **R5 — late-import / type-index shift discipline.** The singleton init runs a
+  body-swap (the `emitBuiltinNamespaceObject` `savedBody`/`liveBodies` pattern,
+  `builtin-static-globals.ts:177-200`) and may trigger late imports / register
+  `$NativeProto` types mid-stream. Follow the
+  `project_type_index_shift_and_deadelim` + `project_brand_check_swap_savedbodies`
+  discipline: register shared types late+once; use `pushBody`/`popBody`
+  (savedBodies) for any throw/else branch capture; `ref.test typeIdx` (append-only
+  type indices) over `call __is_<brand>` (funcidx-shift hazard) — the same lesson
+  the #2580 M1a vec-dispatch arm relied on.
+
+## Cross-links
+
+- **#1907** (S6-b mechanism — builtin static-method/prototype values; LANDED PR
+  #1292) — this extends its case-(c) to the constructor tier.
+- **#1888** (the open-any dispatch + built-ins-as-static-globals spec; D4 case-(c)
+  is the parent design) — `Array`/`Object` namespace + wrapper-proto singletons
+  are the proven precedent.
+- **#2580** (the value-rep dynamic-read substrate; M2/M3 `[[Prototype]]`-link +
+  boxed-family dispatch) — this is the *builtin-constructor* specialization;
+  share the substrate, coordinate the `[[Prototype]]` link.
+- **#2648** (standalone TypedArray `{indexOf,lastIndexOf,includes}` packed
+  i8/i16 — LANDED) — the method BODIES this substrate gates the per-row harness
+  access TO.
+- **#2649** (TypedArray.prototype.subarray empty view), **#2650** (member-read on
+  String.prototype.at result) — adjacent standalone TypedArray/String value-read
+  residuals; same value-rep family, separate rows.
+- **#2595** (`BYTES_PER_ELEMENT` static fast path) — the source of truth for the
+  per-view byte width the singleton reads; the static form stays, the iterated
+  form is what this adds.
+- **#1395** (`__class_<Name>` lazy class-object singleton), **#2026** (dynamic
+  `new K()` brand-dispatch) — the precedents for D1 (singleton-as-value) and D3
+  (dynamic-new brand-switch).
+
+## Routing
+
+s66 architect/senior-dev (value-rep lane). Coordinate with the #2580 M3 owner
+(`sd-value-rep-m3-…`) on the shared `[[Prototype]]` link (D4/R3) before starting
+slice M3. M1 + M2 are independent of #2580 and can start immediately after the
+Slice-0 sizing gate confirms the lever.
