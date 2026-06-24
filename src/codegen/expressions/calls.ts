@@ -95,6 +95,8 @@ import {
   compileObjectDefineProperty,
   compileObjectKeysOrValues,
   compilePropertyIntrospection,
+  emitDefinePropertyDescRuntime,
+  emitNonObjectArgGuard,
 } from "../object-ops.js";
 import {
   emitArrayIsArrayExternrefPredicate,
@@ -7374,6 +7376,70 @@ function compileCallExpression(
             return { kind: "externref" };
           }
           return fallbackReturn(0, "extern-null");
+        }
+
+        if (reflectMethod === "defineProperty" && expr.arguments.length >= 3) {
+          // (#2046) Route Reflect.defineProperty(target, key, desc) through the
+          // SAME standalone runtime-descriptor applier that backs
+          // Object.defineProperty — `emitDefinePropertyDescRuntime`
+          // (object-ops.ts). Reusing it (rather than hand-rolling a
+          // `__obj_define_from_desc` call here) is essential because that helper
+          // performs the **#2372 descriptor struct reify**: an INLINE descriptor
+          // object literal (`{ value: 42, … }`) is typed by the TS checker as a
+          // closed WasmGC struct, which the native `__obj_define_from_desc`'s
+          // internal `ref.test $Object` rejects as "not an object" → spurious
+          // §10.1.6 TypeError. The helper reifies that struct into a fresh
+          // `$Object` first, so inline-literal descriptors work. The issue file
+          // recorded this arm as blocked on a write-side native (#2043); that
+          // blocker is STALE — the native is registered by ensureObjectRuntime
+          // and reachable end-to-end (it has backed Object.defineProperty since
+          // #1629b).
+          //
+          // §28.1.3 Reflect.defineProperty(target, propertyKey, attributes):
+          //   step 1: target not an Object → throw a TypeError. The native
+          //     applier silently no-ops on a non-$Object target (matching the
+          //     pre-existing standalone Object.defineProperty gap), so enforce
+          //     the §28.1.3 step-1 throw HERE with the shared
+          //     `emitNonObjectArgGuard` — it fires for a statically primitive /
+          //     null / undefined target (the test262 non-object subtests use
+          //     bare primitive literals). A runtime-`any` primitive still slips
+          //     through, an accepted imprecision shared with Object.defineProperty.
+          //   step 2: key = ? ToPropertyKey(propertyKey) — handled inside the
+          //     native via __to_property_key (#2042 S1), so numeric keys coerce.
+          //   step 3: desc = ? ToPropertyDescriptor(attributes) — a malformed
+          //     descriptor (data+accessor conflict, non-callable get/set) throws
+          //     a catchable TypeError, which the native already raises (these
+          //     originate in ToPropertyDescriptor, BEFORE [[DefineOwnProperty]],
+          //     so they throw for Reflect too).
+          //   step 4: return the boolean [[DefineOwnProperty]] result. The native
+          //     returns the obj (always truthy) and has no failure channel, so we
+          //     drop it and return i32 `true`.
+          //
+          // KNOWN LIMITATION (shared with standalone Object.defineProperty): a
+          // *rejected* redefine of an existing non-configurable property silently
+          // no-ops in the native rather than surfacing failure, so we cannot
+          // return the spec's `false` for that case — it returns `true`. Faithful
+          // handling needs a failure channel in __defineProperty_value and is out
+          // of this slice; converting the common refusal→working path is the win.
+          const objArg = expr.arguments[0];
+          const keyArg = expr.arguments[1];
+          const descArg = expr.arguments[2];
+          if (objArg !== undefined && keyArg !== undefined && descArg !== undefined) {
+            // §28.1.3 step 1: statically-non-object target → throw TypeError.
+            if (emitNonObjectArgGuard(ctx, fctx, objArg, "Reflect.defineProperty")) {
+              fctx.body.push({ op: "i32.const", value: 0 }); // unreachable after throw
+              return { kind: "i32" };
+            }
+            // `undefinedFields` is the host-only ToPropertyDescriptor presence
+            // sidecar — unused on the standalone path, so pass empty.
+            const r = emitDefinePropertyDescRuntime(ctx, fctx, objArg, keyArg, descArg, []);
+            if (r !== null) {
+              fctx.body.push({ op: "drop" }); // applier returns the obj; Reflect wants a boolean
+              fctx.body.push({ op: "i32.const", value: 1 }); // success → true
+              return { kind: "i32" };
+            }
+          }
+          return fallbackReturn(0, "i32-false");
         }
         // Boolean-returning methods need an i32 on the stack; the rest return
         // externref. Pick the fallback shape per method so the surrounding
