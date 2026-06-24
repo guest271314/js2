@@ -12,7 +12,7 @@ task_type: bugfix
 area: codegen, wasi
 language_feature: typed-arrays, linear-memory
 goal: standalone-mode
-assignee: ttraenkler/cs-2164
+assignee: ttraenkler/agent-acafb1
 related: [1886, 817]
 origin: "2026-06-10 sprint-61 code review of merged PR #1288 (#1886 Slice C): two pre-existing Slice-B silent-corruption routes were materially widened to function parameters, and the new interprocedural escape analysis has two fail-closed demotion gaps that break previously-valid WASI programs."
 ---
@@ -338,3 +338,63 @@ path for that one helper) and run correctly.
   documentation/gating item, not a bug; low priority.
 - **C.7** (`process.stdin.read` offset clamp + `fd_read` errno) — independent
   I/O-correctness slice.
+
+---
+
+## B.3 / B.4 — escape-analysis demotion (LANDED 2026-06-24, agent-acafb1)
+
+**Done — both fail-closed regressions on valid WASI programs are fixed.** All
+four architect probes now compile to valid `.wasm` and run correctly under
+`--target wasi`, and a pure-linear helper still keeps the fast `(ptr,len)` path
+(verified via `analyzeLinearUint8` output: `fill`'s `linearParams[0]` retained on
+the fast-path probe, dropped on the demoted ones).
+
+| Probe | Shape | Before | After |
+|---|---|---|---|
+| **B.4** | `const g = fill; g(a, 5)` | runtime null-pointer deref | runs → `5` |
+| **B.3a** | `fill(make(), 7)` | `not backed by linear memory` CE | runs → `7` |
+| **B.3b** | `const a = new Uint8Array(buf); fill(a, 9)` | `not backed` CE | runs → `9` |
+| **B.3c** | `fill(c ? a : b, 3)` | `not backed` CE | runs → `3` |
+
+**Fix** (all in `src/codegen/linear-uint8-analysis.ts`, WASI/linear lane only):
+
+- **B.4 — function-value escape demotion (`demoteEscapedHelpers`, Pass 1b).**
+  A new walk runs after `collect` and before the fixpoint: any `ts.Identifier`
+  that references a tracked helper (a key of `fnParamSyms`) and is NOT in
+  direct-callee position (`isDirectCalleePosition`) marks the helper escaped, so
+  ALL its params are removed from `safe`. With no `linearParams` entry the helper
+  keeps its source GC signature end-to-end and `calls.ts` lowers every call (direct
+  or indirect) against the GC ABI. Self-recursion `f(...)` inside `f` is a
+  direct-callee position → correctly NOT an escape (regression test covers it).
+
+- **B.3 — untracked-arg param demotion (`demoteUntrackedArgs`, in the fixpoint).**
+  After each fixpoint pass, walk every direct user call; for each arg index the
+  callee still lists as safe, the argument must itself be a `ts.Identifier` whose
+  symbol is currently in `safe`. Anything else (a call result `make()`, a
+  conditional, an element/property access, a literal) demotes that callee param and
+  sets `changed = true`, so the demotion cascades (monotone → terminates).
+
+- **B.3b — view-ctor seeding gate (`isLengthCtorUint8Array`).** `new
+  Uint8Array(buffer)` (view ctor) was seeded as a linear local just like `new
+  Uint8Array(n)` (length ctor), then hit `not backed`. The seed in `collect` now
+  gates on `isLengthCtorUint8Array`, which is **fail-OPEN, exclusion-based**: a
+  single arg is treated as a length unless its type is *provably* a view source
+  (`ArrayBuffer`/`SharedArrayBuffer`/`ArrayBufferLike` or a `*Array` typed-array),
+  or the ctor has >1 arg (`(buffer, offset, len)`). Fail-open preserves the
+  permissive pre-#2045 default for a length arg whose type doesn't fully resolve
+  (e.g. `new Uint8Array(msg.length)` under the analysis unit-test's `noLib`
+  program — the native-messaging-host fixture), so #1886's existing classifications
+  are unchanged.
+
+**Validation.** New `tests/issue-2045-escape-demotion.test.ts` (8, WASI run): B.4
+×4 (value-alias, `.call`, array-literal escape, self-recursion-NOT-escape), B.3 ×3
+(function-result, view-ctor, conditional), plus a fast-path no-over-demotion
+assertion. Regression-clean: `tests/issue-1886*.test.ts` (16), `issue-2045-*`
+soundness + compound (25), `linear-*` + WASI suites (39). tsc + prettier +
+biome(error) + stack-balance + any-box + coercion-sites gates clean.
+(`typed-array-basic.test.ts` and `issue-1655` subarray have pre-existing failures
+— a `string_constants` harness-import issue — verified byte-identical on
+origin/main, unrelated to this change.)
+
+**Still open:** C.5–C.7 (loop-arena rewind ordering, all-target while-loop gate,
+`process.stdin.read` clamp/errno). **#2045 stays in-progress.**
