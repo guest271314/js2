@@ -6011,7 +6011,15 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
       // exposed for the fd0 reactor (Phase 3's process.stdin Readable builds on
       // it). It activates the fd-readiness reactor + run loop. (No user shadow
       // applies — it is a js2wasm-internal name, not a lib global.)
-      if (callee === "__wasiStdinReadByte") {
+      // #2632 Phase 3 adds three more internal stdin primitives the library
+      // `process.stdin` Readable uses: read-N / available / EOF query and the
+      // reactor-tick reader hook. They all activate the same fd0 reactor.
+      if (
+        callee === "__wasiStdinReadByte" ||
+        callee === "__wasiStdinAvailable" ||
+        callee === "__wasiStdinEof" ||
+        callee === "__wasiStdinSetReader"
+      ) {
         needsStdinReactor = true;
         needsFdRead = true;
         needsPollOneoff = true;

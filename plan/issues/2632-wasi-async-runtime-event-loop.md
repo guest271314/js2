@@ -306,6 +306,90 @@ and returns; the loop then runs), and it is in the test262 skip set. Untouched.
 - [ ] An end-to-end example program (echo / line-count over stdin) compiles to WASI
       and runs under wasmtime with correct streaming behaviour.
 
+#### Phase 3 implementation notes (WHY + the BLOCKER, for the next maintainer)
+
+**Status: reactor-integration substrate LANDED + PROVEN; the faithful (string)
+`process.stdin` library is BLOCKED on a pre-existing native-string index-shift
+compiler bug. Not auto-injected to avoid exposing that bug to users.**
+
+**Architecture decided + proven.** `process.stdin` is provided as **compiled TS
+library code** — a `Readable`/EventEmitter class that pulls bytes from the
+Phase-2 internal buffer via the `__wasiStdinReadByte()` intrinsic, NOT codegen
+builtins (honours `feedback_node_apis_via_per_module_shim_not_builtin`).
+**Reconciliation of the stale spec ref:** the Phase-3 acceptance above says
+"provided via the `js2wasm:node-process` shim" — that shim was **RETIRED by
+#2633 (PR #1985)**. Phase 3 does NOT resurrect it; the Node surface rides on
+**library TS code + the reactor/`node:fs` primitives**. The library is intended
+to be prepended as a position-mapped source prelude (the exact mechanism Phase 1
+uses for the `setTimeout` shim: `timerShim` in `import-resolver.ts` +
+`buildPreprocessPositionMap`), with `process.stdin` rewritten to a library
+factory call so `.on/.read/.pause/.resume` are ordinary method calls on the
+library class (zero new member-access codegen).
+
+**Reactor ↔ stream wiring — the core, LANDED + PROVEN.** A single **reactor-tick
+hook** was added to the fd-reactor run loop (`buildRunLoopBodyWithFdReactor`,
+`async-scheduler.ts`): a nullable `$__mt_func_type` funcref global
+(`__stdin_reader_hook`) + its captures (`__stdin_reader_cap`). Each tick, AFTER
+`__rl_stdin_drain` fills the internal buffer and BEFORE firing timers, the loop
+`call_ref`s the hook as `pump(captures, null)` — so callbacks run as LOOP WORK,
+not synchronously inside `poll_oneoff` (matches Node "data as loop work"). The
+library registers its pump via the new `__wasiStdinSetReader(cb)` intrinsic
+(wraps the closure into a `$__mt_func_type` wrapper + captures exactly like a
+timer callback). This preserves Phase-2's blocking `poll_oneoff` (no busy-spin)
+AND dispatches on readiness. EOF (`__stdin_fd_active==0` && buffer drained) is
+queryable via the new `__wasiStdinEof()` intrinsic; buffered-byte count via
+`__wasiStdinAvailable()`. The pump emits `'end'` and stops on EOF; `.pause()`/
+`.resume()` gate flowing-mode delivery in the library.
+
+  - **Byte-neutrality preserved.** The hook globals + hook call register ONLY
+    under `state.stdinReactor` (inside the existing `if (state.stdinReactor)`
+    blocks). Timer-only and non-stdin programs are byte-identical to Phase 2
+    (verified: the Phase-2 "timer-only does NOT register the fd reactor" test
+    still passes; all 21 Phase-1+Phase-2 reactor tests green).
+  - **No late-import lockstep change needed** for the hook: it is a GLOBAL index
+    (globals are append-only and never shifted by late FUNC imports), not a
+    stored func index. The `__wasiStdinSetReader` wrapper reuses the existing
+    `emitTimerCallbackWrapper` path, already covered by the #2632 scheduler
+    func-index lockstep in `flushLateImportShifts`.
+
+**Proven end-to-end (runtime polyfill + the reactor):**
+  - A `Readable` class with `.on('data', cb)` + `.on('end', cb)` driven by the
+    reader hook: `"Hi"` → data fires per chunk, `'end'` at EOF; `""` → `'end'`
+    only. Correct.
+  - The same library with **`number[]` (byte) chunks** — `.on`, `.read(size)`,
+    `.pause()`/`.resume()`, flowing/paused, EOF — compiles to VALID Wasm and
+    runs correctly. So the FULL faithful semantics ARE expressible over the
+    Phase-2 buffer; this is NOT a "semantics don't fit" situation.
+
+**THE BLOCKER (pre-existing, NOT introduced by Phase 3) — #2637.** The
+Node-faithful representation needs **string/Buffer** chunks (`String.fromCharCode`
++ string concat to turn buffered bytes into a chunk). A `Readable` library class
+of realistic size, compiled `--target wasi`, that uses the native-string helpers
+(`__str_concat`/`__str_fromCharCode`) inside a class method, produces **invalid
+Wasm**: `global.set[0] expected type (ref null 52 = the class struct), found call
+of type (ref null 6 = the string-tree array)` in the method body — the native
+string-helper call sites get desynced by the index-shift regime when the WASI
+reactor's deferred helpers register. **Confirmed PRE-EXISTING on origin/main**
+(Phase-2-only, timer-driven, ZERO Phase-3 code: the string library is invalid;
+the identical `number[]` library is valid). Root cause is the
+`reconcileNativeStrFinalizeShift` / native-string finalize double-shift family
+(#1677/#1903/#2039/#2563) interacting with `emitDeferredWasiHelpers`
+(timer-heap/microtask/reactor helper registration) + class-method bodies. This
+is the most fragile index-shift area of the compiler; a fix needs its own focused
+issue + architect review (do NOT band-aid it here). Until #2637 lands, the
+string-based `process.stdin` library would emit invalid Wasm for many user
+programs, so it is NOT auto-injected (shipping it would be the "approximation /
+hallucinated semantics" the Phase-3 brief forbids).
+
+**What landed in this PR (substrate only):** the reader-tick hook +
+`__wasiStdinSetReader`/`__wasiStdinEof`/`__wasiStdinAvailable` intrinsics +
+detection wiring + tests. The `process.stdin` Readable source-prelude injection
++ `read([size])` form reconciliation are deferred behind #2637. The #2633
+`process.stdin.read(buf, off)` compile-error path is UNCHANGED (still rejects the
+bogus buffer-arg form); the faithful `read([size])` lands with the library once
+#2637 unblocks it. **#2635** (dual-provider proof for async members) remains the
+natural follow-up.
+
 ### Phase 4 — Preview 2 `wasi:io/poll` backend (future)
 - [ ] An alternative reactor backend targeting `wasi:io/poll` + `wasi:io/streams`
       (Component Model), selected by target flag, with the same Node surface on top.
