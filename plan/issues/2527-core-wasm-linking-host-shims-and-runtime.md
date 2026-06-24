@@ -1,10 +1,10 @@
 ---
 id: 2527
 title: "Core-wasm module linking (shared store + canonical rec-group) for host-API shims and the shared runtime — CHOSEN approach"
-status: ready
+status: in-progress
 sprint: 65
 created: 2026-06-20
-updated: 2026-06-20
+updated: 2026-06-24
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -167,6 +167,66 @@ import over a **shared linear memory** — so nothing GC-typed crosses the link
 - Index-space / memory-export plumbing in the WASI codegen path.
 - `--preload` is wasmtime-specific; document the equivalent for Node (instantiate
   shim, pass its exports as imports — exactly the Phase 0 harness) and browsers.
+
+## Phase 2 progress (2026-06-24) — canonical rec-group IDENTITY PRIMITIVE landed
+
+Phase 1 (host-API shims, #2524) merged (PR #1791, renamed node-process #2625,
+migrated to node:fs #2633). The remaining work for this issue is **Phase 2 —
+shared runtime helpers (#2514) on the GC boundary**, whose documented *main
+risk* (#2514 risk #2) is "Binaryen must preserve the canonical rec group
+verbatim" and whose precondition is a *verifiable* notion of "two modules
+declare the identical canonical rec group".
+
+**This slice delivers that identity primitive** (`src/emit/canonical-recgroup.ts`),
+which is the keystone every later Phase-2 step builds on. It is **pure analysis,
+behavior-neutral** (zero codegen change):
+
+- `RUNTIME_RECGROUP_TYPE_NAMES` — the closed, ordered, *name-stable* set of GC
+  runtime types that cross a shared-store link boundary (string family +
+  vec/arr family). `RUNTIME_RECGROUP_ABI_VERSION` versions it.
+- `canonicalHashOfTypeGroup()` — a deterministic structural hash that is
+  **name-independent and absolute-index-independent** (matching WasmGC
+  isorecursive canonicalization) but **order/structure/topology-sensitive**.
+  Equal hash ⇒ the engine canonicalizes the groups to the same runtime type ⇒
+  GC objects can cross the link with zero copy.
+- `extractRuntimeGroup()` / `fingerprintRuntimeGroup()` — locate the runtime
+  types in a module's flat type table and produce a stable fingerprint, the
+  building block for a CI drift gate (capture the reference `runtime.wasm`
+  fingerprint, assert every user module reproduces it, including AFTER
+  `wasm-opt`).
+
+Exported from the public API (`src/index.ts`). Proven by
+`tests/canonical-recgroup.test.ts`: (A) reproducible across recompiles, (B)
+stable across *different* user programs sharing runtime types (the core ABI
+premise), (C1–C4) name/index-independent but order/structure/topology-sensitive.
+
+**Two empirical findings that shape Phase 2 (recorded here so the follow-on
+doesn't re-discover them):**
+
+1. **Today the GC runtime types are NOT in a `(rec …)` group at all** — a probe
+   of a real string+array module shows `computeRecGroups` (in
+   `src/emit/binary.ts`) emits every one of them as a *singleton* (it only
+   groups types with *forward* references; the string/vec families reference
+   each other by *lower* index). So the next concrete Phase-2 step is to emit
+   the ABI members as **one contiguous frozen rec group in the canonical
+   order**, not to "preserve" an existing group.
+2. **`wasm-opt` renames/renumbers all named types** (`$__str_data` → `$6`) and
+   is free to merge/reorder them — confirming risk #2 is real. The fingerprint
+   is name/index-independent precisely so it can detect a post-`wasm-opt`
+   *structural* perturbation; the mitigation (pin the type section / disable
+   GC type-merging for the ABI group) is the follow-on engineering, now
+   measurable against this hash.
+
+**Note on member naming:** the externref vec/arr variants are emitted with an
+index-suffixed name (`__arr_ref_6`, `__vec_ref_6`) that is NOT stable across
+modules, so they are intentionally excluded from the *name-keyed* ABI list;
+their structure is still verified transitively (as external `x` ref tokens)
+when a group member references them.
+
+Follow-on (not in this slice): (P2a) emit the ABI members as one frozen
+contiguous rec group; (P2b) wasm-opt rec-group preservation / post-emit
+canonical-hash gate wired into CI; (P2c) `runtime.wasm` exporting GC helpers +
+user modules importing them.
 
 ## Notes
 
