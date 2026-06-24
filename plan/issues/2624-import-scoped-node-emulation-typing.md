@@ -2,7 +2,7 @@
 id: 2624
 title: "Node API emulation typing is import-scoped, not blanket"
 status: done
-sprint: Backlog
+sprint: 65
 created: 2026-06-22
 updated: 2026-06-22
 completed: 2026-06-22

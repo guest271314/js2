@@ -2620,8 +2620,12 @@ export function compileNativeStringMethodCall(
     } else {
       fctx.body.push({ op: "i32.const", value: 0 });
     }
-    // padString (default: " ")
-    if (expr.arguments.length > 1) {
+    // padString (default: " "). §22.1.4.1 StringPad step 2: an `undefined`
+    // fillString (explicit `padStart(n, undefined)` / `padStart(n, void 0)`)
+    // is spec-equivalent to omission and defaults to a single space — emitting
+    // it through `compileExpression(undefined) + emitFlatten()` flattens a null
+    // ref and traps in `__str_flatten` (#2160 standalone residual).
+    if (expr.arguments.length > 1 && !isStaticUndefinedArg(expr.arguments[1])) {
       compileExpression(ctx, fctx, expr.arguments[1]!);
       emitFlatten();
     } else {
@@ -2651,8 +2655,12 @@ export function compileNativeStringMethodCall(
     } else {
       fctx.body.push({ op: "i32.const", value: 0 });
     }
-    // padString (default: " ")
-    if (expr.arguments.length > 1) {
+    // padString (default: " "). §22.1.4.1 StringPad step 2: an `undefined`
+    // fillString (explicit `padEnd(n, undefined)` / `padEnd(n, void 0)`) is
+    // spec-equivalent to omission and defaults to a single space — emitting it
+    // through `compileExpression(undefined) + emitFlatten()` flattens a null
+    // ref and traps in `__str_flatten` (#2160 standalone residual).
+    if (expr.arguments.length > 1 && !isStaticUndefinedArg(expr.arguments[1])) {
       compileExpression(ctx, fctx, expr.arguments[1]!);
       emitFlatten();
     } else {

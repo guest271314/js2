@@ -3,7 +3,7 @@ id: 2632
 title: WASI async runtime — event-loop reactor (process.stdin Readable, timers, promise-driven I/O)
 status: in-progress
 assignee: ttraenkler/senior-dev-2632
-sprint: Backlog
+sprint: 65
 goal: wasi-async-runtime
 feasibility: hard
 kind: goal

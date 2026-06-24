@@ -11,7 +11,7 @@ task_type: bug
 area: async, codegen, promise
 language_feature: promise
 goal: async-model
-sprint: 66
+sprint: 65
 parent: 1042
 related: [1528, 1368, 1116, 1694]
 blocked_on: [2623]

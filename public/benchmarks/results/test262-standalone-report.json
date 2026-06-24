@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-24T01:48:32.638Z",
-  "baseline_generated_at": "2026-06-24T01:48:32.638Z",
-  "baseline_sha": "805df7f42bf6b1e43bd5191cc0f784106cfa7b19",
+  "timestamp": "2026-06-24T07:56:19.780Z",
+  "baseline_generated_at": "2026-06-24T07:56:19.780Z",
+  "baseline_sha": "b5c22c7b10cf070e650f7aaa480f95be708d7cb5",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -10,8 +10,8 @@
   },
   "summary": {
     "total": 43136,
-    "pass": 23769,
-    "fail": 13000,
+    "pass": 23771,
+    "fail": 12998,
     "compile_error": 6343,
     "compile_timeout": 6,
     "skip": 18,
@@ -20,8 +20,8 @@
     "by_category": {
       "standard": {
         "total": 42050,
-        "pass": 23253,
-        "fail": 12563,
+        "pass": 23255,
+        "fail": 12561,
         "compile_error": 6210,
         "compile_timeout": 6,
         "skip": 18,
@@ -53,8 +53,8 @@
       },
       "official": {
         "total": 43136,
-        "pass": 23769,
-        "fail": 13000,
+        "pass": 23771,
+        "fail": 12998,
         "compile_error": 6343,
         "compile_timeout": 6,
         "skip": 18,
@@ -64,8 +64,8 @@
       },
       "full": {
         "total": 48118,
-        "pass": 24909,
-        "fail": 14019,
+        "pass": 24911,
+        "fail": 14017,
         "compile_error": 9060,
         "compile_timeout": 7,
         "skip": 123,
@@ -77,8 +77,8 @@
   },
   "official_summary": {
     "total": 43136,
-    "pass": 23769,
-    "fail": 13000,
+    "pass": 23771,
+    "fail": 12998,
     "compile_error": 6343,
     "compile_timeout": 6,
     "skip": 18,
@@ -87,8 +87,8 @@
   },
   "full_summary": {
     "total": 48118,
-    "pass": 24909,
-    "fail": 14019,
+    "pass": 24911,
+    "fail": 14017,
     "compile_error": 9060,
     "compile_timeout": 7,
     "skip": 123,
@@ -97,8 +97,8 @@
   },
   "strict_summary": {
     "total": 40627,
-    "pass": 22629,
-    "fail": 12289,
+    "pass": 22631,
+    "fail": 12287,
     "compile_error": 5685,
     "compile_timeout": 6,
     "skip": 18,
@@ -128,8 +128,8 @@
     },
     "standard": {
       "total": 42050,
-      "pass": 23253,
-      "fail": 12563,
+      "pass": 23255,
+      "fail": 12561,
       "compile_error": 6210,
       "compile_timeout": 6,
       "skip": 18,
@@ -671,8 +671,8 @@
     {
       "name": "built-ins/String",
       "path": "built-ins/String",
-      "pass": 454,
-      "fail": 606,
+      "pass": 456,
+      "fail": 604,
       "compile_error": 163,
       "compile_timeout": 0,
       "skip": 0,
@@ -1080,12 +1080,12 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 9679,
+    "assertion_fail": 9680,
     "illegal_cast": 1801,
     "negative_test_fail": 77,
-    "null_deref": 422,
+    "null_deref": 420,
     "oob": 35,
-    "other": 3383,
+    "other": 3382,
     "promise_error": 217,
     "range_error": 16,
     "runtime_error": 6292,
@@ -1101,8 +1101,8 @@
   },
   "root_cause_map": {
     "target": "standalone",
-    "total_non_pass_non_skip": 23086,
-    "classified": 23086,
+    "total_non_pass_non_skip": 23084,
+    "classified": 23084,
     "unclassified_threshold": null,
     "buckets": [
       {
@@ -1360,8 +1360,8 @@
           "test/built-ins/JSON/parse/15.12.2-2-2.js",
           "test/built-ins/JSON/stringify/space-wrong-type.js",
           "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
-          "test/built-ins/JSON/parse/15.12.2-2-6.js",
-          "test/built-ins/JSON/stringify/replacer-array-empty.js"
+          "test/built-ins/JSON/stringify/replacer-array-empty.js",
+          "test/built-ins/JSON/parse/15.12.2-2-6.js"
         ],
         "sample_signatures": [
           "illegal_cast:L#:## illegal cast [in test()]",
@@ -1521,8 +1521,8 @@
         "error_categories": {
           "illegal_cast": 1005,
           "runtime_error": 823,
-          "assertion_fail": 1237,
-          "other": 756,
+          "assertion_fail": 1238,
+          "other": 755,
           "promise_error": 16,
           "null_deref": 12,
           "wasm_compile": 48,
@@ -1567,14 +1567,14 @@
           "test/built-ins/Reflect/enumerate/undefined.js",
           "test/built-ins/Object/prototype/setPrototypeOf-with-non-circular-values-__proto__.js",
           "test/built-ins/DataView/custom-proto-access-throws.js",
-          "test/built-ins/Reflect/get/return-value.js"
+          "test/built-ins/Reflect/set/not-a-constructor.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(Reflect.has(o1, 'p'), true, 'true from own property');",
           "other:L#:## Codegen error: Reflect.hasOwnProperty not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Reflect.setPrototypeOf not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue( Reflect.get(o, 'p1'), 'value #', 'Return value from data descriptor' );"
+          "other:L#:## Codegen error: Reflect.set built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair."
         ]
       },
       {
@@ -1659,14 +1659,14 @@
         "id": "class-prototype-private-descriptor",
         "issues": ["#1591", "#1365", "#1364"],
         "label": "Class element, prototype, private-name, and descriptor reconciliation gaps",
-        "count": 5830,
+        "count": 5828,
         "statuses": {
           "pass": 0,
-          "fail": 3824,
+          "fail": 3822,
           "compile_error": 2003,
           "compile_timeout": 3,
           "skip": 0,
-          "total": 5830
+          "total": 5828
         },
         "error_categories": {
           "assertion_fail": 3088,
@@ -1675,7 +1675,7 @@
           "illegal_cast": 171,
           "runtime_error": 1120,
           "promise_error": 44,
-          "null_deref": 118,
+          "null_deref": 116,
           "negative_test_fail": 13,
           "oob": 23,
           "unreachable": 1
@@ -2402,8 +2402,8 @@
           "negative_test_fail:expected parse/early SyntaxError but compiled and instantiated successfully",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.convert_i32_s of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local",
           "assertion_fail:returned # — assert ## at L#: assert(foo.call(undefined));",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.sub of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.lt of type i32 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (l"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.lt of type i32 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (l",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.sub of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) ("
         ]
       },
       {

@@ -2,7 +2,7 @@
 id: 2625
 title: "Rename js2wasm:node-io shim to js2wasm:node-process + unify --link-node-shims flag"
 status: done
-sprint: Backlog
+sprint: 65
 created: 2026-06-22
 updated: 2026-06-22
 completed: 2026-06-22

@@ -2,8 +2,9 @@
 id: 1762
 title: "perf(strings): linear-memory string backing for the build/hash hot path — drop the WasmGC (array i16) GC barrier"
 status: ready
+needs_arch_spec: true
 created: 2026-05-31
-updated: 2026-05-31
+updated: 2026-06-24
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -11,8 +12,9 @@ task_type: perf
 area: codegen
 language_feature: strings
 goal: spec-completeness
-sprint: Backlog
+sprint: 65
 related: [1746, 1580, 679, 682, 1714]
+reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): GENUINELY OPEN — stays ready. CORRECTION: #1762 is NOT gated on #1760 (the #1760 warm-runtime bench lane is the measurement harness, in-flight PR/owner sdev-strback, and only validates the perf win — it does not block design). #1762 is gated ONLY on a missing architect `## Implementation Plan` settling the backing-store representation + the WasmGC↔linear-memory boundary. NO dev should claim this until an architect spec lands — route through /architect-spec first. NEEDS-ARCH-SPEC, do NOT mark done."
 ---
 # #1762 — linear-memory string backing for the build/hash hot path
 

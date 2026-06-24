@@ -3,7 +3,7 @@ id: 1917
 title: "One coercion engine — four divergent coercion matrices disagree about lossiness"
 status: in-progress
 assignee: ttraenkler/sendev-eq
-sprint: 66
+sprint: 65
 model: opus
 created: 2026-06-10
 updated: 2026-06-24
@@ -808,3 +808,17 @@ count down, this step:
   #2005/#2006/etc. landing solo first, but each such fix MUST land **as the
   engine row** (Step 1 can split per-issue if scheduling prefers), never as an
   8th hand-rolled copy. The #2108 gate enforces this.
+
+## Downstream signal — standalone `Cannot convert object to primitive` (3,622, /harvest 2026-06-24)
+
+The single largest standalone runtime-failure bucket — `Cannot convert object
+to primitive value` at **3,622** records on run `426e28e8` (host lane: 48) — is
+a key **acceptance signal** for this engine. After #2503 closed the operator
+*routing* slice, the residual is diffuse and substrate-shaped: the shared
+standalone ToPrimitive/ToNumber path reached through `Object.{defineProperty,
+create,getOwnPropertyDescriptor}` (~720), `{Array,String,TypedArray}.prototype`
+method args (~690), RegExp, and class/destructuring coercion. That is the exact
+`ref→f64` / `__to_primitive` divergence this issue unifies. Use this bucket
+dropping substantially as a coarse post-unification check; the String/Number
+slice is owned by **#2160** (`depends_on: [1917]`). Drift note + breakdown in
+**#2503** (Harvest update 2026-06-24).

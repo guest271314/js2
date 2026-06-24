@@ -51,6 +51,7 @@ import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
 import { fillApplyClosure, fillExternGetIdxVecArms, fillExternIsArray, fillProxyDispatch } from "./object-runtime.js";
 import { fillArrayToPrimitive } from "./array-to-primitive.js";
+import { fillClassToPrimitive } from "./class-to-primitive.js";
 import {
   fixupExternConvertAny,
   fixupStructNewArgCounts,
@@ -1820,6 +1821,15 @@ export function generateModule(
 
     // Emit __call_toString/__call_valueOf exports for ToPrimitive dispatch (#866)
     emitToPrimitiveMethodExports(ctx);
+
+    // (#2638) Fill the reserved `__class_to_primitive` driver now that the
+    // per-struct `__call_valueOf`/`__call_toString` dispatchers exist (emitted
+    // just above). `__to_primitive`'s standalone class arm baked a `call` to the
+    // reserved funcIdx at emit time; here it gets the real §7.1.1.1
+    // valueOf/toString dispatch so `(new C() as any) - 8` / `Number(new C() as any)`
+    // reduce via the class's methods host-free. No-op when no standalone
+    // `__to_primitive` reserved it (`ctx.classToPrimitiveReserved`).
+    fillClassToPrimitive(ctx);
 
     // #1326c Phase 1C-A — export __drain_microtasks BEFORE WASI _start so the
     // _start wrapper (which appends a drain call) can find its funcIdx.
@@ -4246,6 +4256,12 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
       name: exportName,
       desc: { kind: "func", index: funcIdx },
     });
+
+    // (#2638) Record the dispatcher funcIdx so `fillClassToPrimitive` can `call`
+    // it from the reserved `__class_to_primitive` driver. The host-side
+    // `_hostToPrimitive` loop reaches these via the export, not funcMap, so this
+    // is purely additive (the iterator dispatchers already use this convention).
+    ctx.funcMap.set(exportName, funcIdx);
   };
 
   emitDispatchForMethod("toString", "__call_toString");

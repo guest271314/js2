@@ -13,7 +13,7 @@ task_type: feature
 area: host-interop
 language_feature: node-api-compat
 goal: platform
-sprint: Backlog
+sprint: 65
 es_edition: n/a
 related: [1772, 2624, 2625, 2631, 2528, 2083, 2181, 2527]
 origin: "Phase 2 split out of #1772 once Phase 0 (ABI) + Phase 1 (edge.js dual-provider proof) landed"
