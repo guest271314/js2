@@ -106,7 +106,7 @@ import {
   receiverMayBeNativeStringAtRuntime,
   typeErrorThrowInstrs,
 } from "../property-access.js";
-import { emitToNumber } from "../coercion-engine.js";
+import { emitToNumber, emitToString } from "../coercion-engine.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 // (#2193 PR-B) reflective `m.call(thisArg, …)` on a `$NativeProto` member-closure value.
@@ -10920,9 +10920,43 @@ function compileCallExpression(
       const importFuncIdx = ctx.funcMap.get(funcName);
       if (importFuncIdx !== undefined) {
         const arg0 = expr.arguments[0]!;
+        // (#2652) §19.2.5 step 1 / §19.2.4 step 1: ToString(argument) BEFORE
+        // parsing. In standalone / WASI the native `parseInt` / `parseFloat`
+        // helpers take a string ref and immediately do `any.convert_extern;
+        // ref.cast $AnyString` on it — a NON-string primitive argument
+        // (`parseInt(true)`, `parseInt(-1)`) boxed as boolean/number tripped
+        // that cast ("illegal cast in parseInt()"). The JS-host imports do the
+        // `String(arg)` themselves, so host mode keeps its existing boxing path
+        // byte-for-byte. Here we run the SAME native ToString engine the `+` /
+        // template sites use (`emitToString`: boolean → "true"/"false", numeric
+        // → `number_toString`, void → "undefined") and hand the resulting
+        // native string ref to the helper as an externref. Only scalar
+        // (i32/f64/i64), void, and statically-`null`/`undefined` args take this
+        // path; a real string (externref / native ref) keeps the existing
+        // passthrough, and a dynamic externref wrapper object is left to the
+        // (separate, deferred) wrapper substrate.
+        const nativeParse = ctx.standalone || ctx.wasi;
+        const arg0TsType = ctx.checker.getTypeAtLocation(arg0);
         const arg0Type = compileExpression(ctx, fctx, arg0);
-        // Coerce to externref, preserving boolean identity (not boxing as number)
-        if (arg0Type && arg0Type.kind !== "externref") {
+        // A statically-typed `null`/`undefined`/`void` arg lowers to an externref
+        // but its ToString is the literal "null"/"undefined" — emitToString's
+        // externref arm handles it (it drops the ref and pushes the literal).
+        const isStaticNullish =
+          arg0Type?.kind === "externref" &&
+          !isStringType(arg0TsType) &&
+          (arg0TsType.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0 &&
+          (arg0TsType.flags & ts.TypeFlags.Any) === 0;
+        const isScalarArg = !arg0Type || arg0Type.kind === "i32" || arg0Type.kind === "f64" || arg0Type.kind === "i64";
+        if (nativeParse && (isScalarArg || isStaticNullish)) {
+          const strType = emitToString(ctx, fctx, arg0Type, arg0TsType, "string");
+          // emitToString returns a native `ref $AnyString` (native modes) — the
+          // helper wants an externref, so convert via `extern.convert_any`.
+          if (strType.kind !== "externref") {
+            coerceType(ctx, fctx, strType, { kind: "externref" });
+          }
+        } else if (arg0Type && arg0Type.kind !== "externref") {
+          // Host mode (or a native-string ref) — preserve the original boxing,
+          // which keeps boolean identity so the host `String(true)` → "true".
           if (
             arg0Type.kind === "i32" &&
             (arg0.kind === ts.SyntaxKind.TrueKeyword || arg0.kind === ts.SyntaxKind.FalseKeyword)
