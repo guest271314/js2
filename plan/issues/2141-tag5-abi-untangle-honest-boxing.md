@@ -3,9 +3,9 @@ id: 2141
 title: "Retire the tag-5 box-the-externref ABI: make consumers tag-agnostic, then allow honest generic boxing"
 status: blocked
 blocked_by: [2167]
-sprint: 65
+sprint: 66
 created: 2026-06-12
-updated: 2026-06-12
+updated: 2026-06-24
 priority: high
 feasibility: hard
 reasoning_effort: max

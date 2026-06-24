@@ -4,7 +4,7 @@ title: "spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return
 status: suspended
 assignee: ttraenkler/sen-1
 created: 2026-05-08
-updated: 2026-06-19
+updated: 2026-06-24
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -12,7 +12,7 @@ task_type: bugfix
 area: codegen
 language_feature: generators
 goal: spec-completeness
-sprint: 65
+sprint: 66
 parent: 1328
 depends_on: [1665]
 ---

@@ -6,6 +6,10 @@ pick any "ready" item and start.
 
 ## Sprint 65 landings (2026-06-23 session — value-rep substrate spine)
 
+> **Sprint 65 CLOSED 2026-06-24** (user-approved): 58 done, 34 carried to s66
+> (reassigned `sprint: 65 → 66`) + #2637 pulled from backlog. The parent epics
+> below now carry on s66 — see [`plan/issues/sprints/66.md`](../issues/sprints/66.md).
+
 This session's merged architecture slices (all 0-regr vs the `merge_group`
 standalone floor #2097 + per-process test262 floor). These advance — but do
 not close — their parent epics; the parent issues stay carried.

@@ -2,9 +2,9 @@
 id: 2083
 title: "per-module exported host-glue suite (__call_fn_*, __sget_*, __vec_*) dominates small-binary size and is unstrippable by wasm-opt"
 status: ready
-sprint: 65
+sprint: 66
 created: 2026-06-11
-updated: 2026-06-12
+updated: 2026-06-24
 priority: medium
 feasibility: medium
 reasoning_effort: medium

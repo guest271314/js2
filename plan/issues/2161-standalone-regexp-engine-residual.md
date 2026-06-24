@@ -3,9 +3,9 @@ id: 2161
 title: "Standalone RegExp engine conformance residual (~579 tests)"
 status: blocked
 assignee: ttraenkler/sd1
-sprint: 65
+sprint: 66
 created: 2026-06-15
-updated: 2026-06-23
+updated: 2026-06-24
 blocked_on: [2175]
 reconcile_note: "RECONCILED 2026-06-23 — all 4 sliced sub-issues merged (#2588/#2589 PR#1914, #2590 #1908, #2591 #1907). Remaining residual = RegExp.prototype reflection (gated on the #2175 builtin-prototype-readers substrate) + dynamic/any-typed regex receivers. No substrate-independent dev slice left; umbrella tracker blocked on #2175."
 priority: high

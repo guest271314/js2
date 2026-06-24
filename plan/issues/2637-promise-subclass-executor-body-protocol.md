@@ -10,7 +10,7 @@ task_type: feature
 area: codegen, promise, async, capability-bridge, class
 language_feature: promise, async, class
 goal: async-model
-sprint: Backlog
+sprint: 66
 parent: 2623
 related: [2623, 2614, 1528, 1042, 86, 56]
 note: "Spun off from #2623 as the architecture epic for the executor-body half. The #2623 landable substrate (box-depth #1981, identity #1977) is banked; this is the deep tail that both #2623-A and #2623-B re-groundings, plus the #1996 verify-first probe, characterized as NOT a bounded dev slice. Deep-tracing-dev-wrote-the-plan (sendev-2623a), NOT a speculative implementation."

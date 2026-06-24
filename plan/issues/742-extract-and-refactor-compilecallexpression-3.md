@@ -4,11 +4,11 @@ title: "Extract and refactor compileCallExpression (3,350 lines)"
 status: in-progress
 assignee: ttraenkler/cs-1931
 created: 2026-03-17
-updated: 2026-06-17
+updated: 2026-06-24
 priority: medium
 feasibility: medium
 goal: maintainability
-sprint: 65
+sprint: 66
 depends_on: [688]
 files:
   src/codegen/expressions.ts:
