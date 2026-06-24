@@ -220,4 +220,87 @@ describe("#2046 standalone Reflect spec gaps", () => {
       }`),
     ).toBe(42);
   });
+
+  // ── #2046 defineProperty slice: route to the native __obj_define_from_desc ──
+  // applier (the SAME path backing standalone Object.defineProperty, incl. the
+  // #2372 descriptor-struct reify so INLINE object-literal descriptors work).
+  it("Reflect.defineProperty applies a data descriptor (inline literal) and reads back", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const o: any = {};
+        Reflect.defineProperty(o, "x", { value: 42, writable: true, enumerable: true, configurable: true });
+        return o.x === 42 ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.defineProperty returns the boolean true on success", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const o: any = {};
+        return Reflect.defineProperty(o, "y", { value: 7 }) === true ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.defineProperty coerces a numeric key via ToPropertyKey", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const o: any = {};
+        Reflect.defineProperty(o, 1, { value: 99, writable: true, enumerable: true, configurable: true });
+        return o["1"] === 99 ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.defineProperty applies an accessor descriptor (get runs on read)", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const o: any = {};
+        Reflect.defineProperty(o, "g", { get() { return 13; }, enumerable: true, configurable: true });
+        return o.g === 13 ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.defineProperty accepts a pre-built (dynamic) descriptor object", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const o: any = { a: 1 };
+        const d: any = { value: 5, writable: true, enumerable: true, configurable: true };
+        Reflect.defineProperty(o, "z", d);
+        return o.z === 5 ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.defineProperty honors enumerable:false (key hidden from for-in)", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        const o: any = {};
+        Reflect.defineProperty(o, "h", { value: 1, enumerable: false });
+        let count = 0;
+        for (const k in o) count++;
+        return count === 0 ? 1 : 0;
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.defineProperty on a primitive target throws a catchable TypeError (§28.1.3 step 1)", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        try { Reflect.defineProperty(5, "x", { value: 1 }); return 0; }
+        catch (e) { return 1; }
+      }`),
+    ).toBe(1);
+  });
+
+  it("Reflect.defineProperty on a null target throws a catchable TypeError", async () => {
+    expect(
+      await runStandalone(`export function test(): number {
+        try { Reflect.defineProperty(null, "x", { value: 1 }); return 0; }
+        catch (e) { return 1; }
+      }`),
+    ).toBe(1);
+  });
 });
