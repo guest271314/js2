@@ -201,7 +201,10 @@ export function main(): string {
     expect(result.success).toBe(false);
     const msgs = (result.errors ?? []).map((e) => e.message).join("\n");
     expect(msgs).toMatch(/readFileSync/);
-    expect(msgs).toMatch(/not available under --target wasi|no filesystem|#2631/);
+    // #1772 P2-a — the capability-map-driven gate in `tryCompileNodeFsCall` now
+    // owns this rejection (it consumes the call before the legacy
+    // `PATH_BASED_FS_FNS` gate in calls.ts), so the message is the map gate's text.
+    expect(msgs).toMatch(/(un)?available under `?--target wasi`?|no filesystem|filesystem provider|#2631/);
   });
 
   it("linkNodeShims is ignored for non-WASI targets (no node:fs shim import)", async () => {

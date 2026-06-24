@@ -9,6 +9,10 @@
  * `node:fs` shim). It also rejects the hallucinated `process.stdin.read(buf,
  * offset)` with a clear pointer to `node:fs` `readSync`.
  */
+import {
+  isKnownMember,
+  isMemberSatisfiable,
+} from "../checker/node-capability-map.js";
 import { isStringType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
@@ -29,7 +33,10 @@ import {
 } from "./index.js";
 import type { InnerResult } from "./shared.js";
 import { compileExpression, VOID_RESULT } from "./shared.js";
-import { getLinearU8Buffer, tryEmitLinearU8StdWrite } from "./linear-uint8-codegen.js";
+import {
+  getLinearU8Buffer,
+  tryEmitLinearU8StdWrite,
+} from "./linear-uint8-codegen.js";
 
 export function tryCompileNodeProcessCall(
   ctx: CodegenContext,
@@ -78,7 +85,9 @@ export function tryCompileNodeProcessCall(
   // #2633: under the node shims there is no fd_write idx; `tryEmitLinearU8StdWrite`
   // routes to the imported `node:fs` `writeSync(fd, ptr, len)` instead (the passed
   // idx is unused on that branch).
-  const writeSinkIdx = ctx.linkNodeShims ? ctx.nodeFsWriteSyncIdx : ctx.wasiFdWriteIdx;
+  const writeSinkIdx = ctx.linkNodeShims
+    ? ctx.nodeFsWriteSyncIdx
+    : ctx.wasiFdWriteIdx;
   if (writeSinkIdx !== undefined && writeSinkIdx >= 0) {
     if (tryEmitLinearU8StdWrite(ctx, fctx, argExpr, writeSinkIdx, fd)) {
       // Match the GC Uint8Array write path's contract: push `1` (write
@@ -109,11 +118,20 @@ export function tryCompileNodeProcessCall(
   }
 
   const argSymName = argTsType.getSymbol?.()?.name;
-  const isArrayBufferArg = argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer";
+  const isArrayBufferArg =
+    argSymName === "ArrayBuffer" || argSymName === "SharedArrayBuffer";
   const elemKey: "i8_byte" | "i32_byte" | "f64" =
-    noJsHost(ctx) && argSymName === "Uint8Array" ? "i8_byte" : isArrayBufferArg ? "i32_byte" : "f64";
+    noJsHost(ctx) && argSymName === "Uint8Array"
+      ? "i8_byte"
+      : isArrayBufferArg
+        ? "i32_byte"
+        : "f64";
   const elemType: ValType =
-    elemKey === "i8_byte" ? { kind: "i8" } : elemKey === "i32_byte" ? { kind: "i32" } : { kind: "f64" };
+    elemKey === "i8_byte"
+      ? { kind: "i8" }
+      : elemKey === "i32_byte"
+        ? { kind: "i32" }
+        : { kind: "f64" };
   const vecTypeIdx = getOrRegisterVecType(ctx, elemKey, elemType);
   const argType = compileExpression(ctx, fctx, argExpr);
   flushLateImportShifts(ctx, fctx);
@@ -125,7 +143,11 @@ export function tryCompileNodeProcessCall(
       } else {
         fctx.body.push({ op: "ref.as_non_null" } as Instr);
       }
-    } else if (argType.kind === "ref" && "typeIdx" in argType && argType.typeIdx !== vecTypeIdx) {
+    } else if (
+      argType.kind === "ref" &&
+      "typeIdx" in argType &&
+      argType.typeIdx !== vecTypeIdx
+    ) {
       fctx.body.push({ op: "ref.cast", typeIdx: vecTypeIdx } as Instr);
     }
   }
@@ -142,7 +164,10 @@ export function tryCompileNodeProcessCall(
   return VOID_RESULT;
 }
 
-function isUnshadowedProcessIdentifier(fctx: FunctionContext, expr: ts.Expression): boolean {
+function isUnshadowedProcessIdentifier(
+  fctx: FunctionContext,
+  expr: ts.Expression,
+): boolean {
   return (
     ts.isIdentifier(expr) &&
     expr.text === "process" &&
@@ -170,25 +195,39 @@ function matchProcessStdStreamWrite(
   if (!ctx.wasi || !haveWriteSink) return null;
   if (expr.questionDotToken || expr.arguments.length !== 1) return null;
   const writeAccess = expr.expression;
-  if (!ts.isPropertyAccessExpression(writeAccess) || writeAccess.name.text !== "write") return null;
+  if (
+    !ts.isPropertyAccessExpression(writeAccess) ||
+    writeAccess.name.text !== "write"
+  )
+    return null;
   const streamAccess = writeAccess.expression;
   if (!ts.isPropertyAccessExpression(streamAccess)) return null;
   const streamName = streamAccess.name.text;
   if (streamName !== "stdout" && streamName !== "stderr") return null;
-  if (!isUnshadowedProcessIdentifier(fctx, streamAccess.expression)) return null;
+  if (!isUnshadowedProcessIdentifier(fctx, streamAccess.expression))
+    return null;
   return { useStderr: streamName === "stderr" };
 }
 
-function matchProcessStdStreamDrainOnce(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): boolean {
+function matchProcessStdStreamDrainOnce(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): boolean {
   if (!ctx.wasi) return false;
   if (expr.questionDotToken || expr.arguments.length !== 2) return false;
   const onceAccess = expr.expression;
-  if (!ts.isPropertyAccessExpression(onceAccess) || onceAccess.name.text !== "once") return false;
+  if (
+    !ts.isPropertyAccessExpression(onceAccess) ||
+    onceAccess.name.text !== "once"
+  )
+    return false;
   const streamAccess = onceAccess.expression;
   if (!ts.isPropertyAccessExpression(streamAccess)) return false;
   const streamName = streamAccess.name.text;
   if (streamName !== "stdout" && streamName !== "stderr") return false;
-  if (!isUnshadowedProcessIdentifier(fctx, streamAccess.expression)) return false;
+  if (!isUnshadowedProcessIdentifier(fctx, streamAccess.expression))
+    return false;
   const eventArg = expr.arguments[0]!;
   return ts.isStringLiteralLike(eventArg) && eventArg.text === "drain";
 }
@@ -201,12 +240,23 @@ function matchProcessStdStreamDrainOnce(ctx: CodegenContext, fctx: FunctionConte
  * (any local/captured `process` shadow is left alone). Non-WASI targets keep the
  * generic call path (it resolves through the JS host).
  */
-function matchProcessStdinRead(fctx: FunctionContext, expr: ts.CallExpression): boolean {
+function matchProcessStdinRead(
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): boolean {
   if (expr.questionDotToken) return false;
   const readAccess = expr.expression;
-  if (!ts.isPropertyAccessExpression(readAccess) || readAccess.name.text !== "read") return false;
+  if (
+    !ts.isPropertyAccessExpression(readAccess) ||
+    readAccess.name.text !== "read"
+  )
+    return false;
   const streamAccess = readAccess.expression;
-  if (!ts.isPropertyAccessExpression(streamAccess) || streamAccess.name.text !== "stdin") return false;
+  if (
+    !ts.isPropertyAccessExpression(streamAccess) ||
+    streamAccess.name.text !== "stdin"
+  )
+    return false;
   return isUnshadowedProcessIdentifier(fctx, streamAccess.expression);
 }
 
@@ -239,7 +289,46 @@ export function tryCompileNodeFsCall(
   fctx: FunctionContext,
   expr: ts.CallExpression,
 ): InnerResult | undefined {
-  if (!ctx.wasi || !ctx.linkNodeShims) return undefined;
+  // The "no provider" gate (#1772 P2-a) fires under `--target wasi` regardless of
+  // `--link-node-shims`, so it must sit AFTER the `!ctx.wasi` guard but BEFORE the
+  // combined `!ctx.linkNodeShims` short-circuit and the readSync/writeSync match.
+  if (!ctx.wasi) return undefined;
+
+  // #1772 P2-a — deliberate "no provider" compile error. A `node:fs` member that
+  // the program imported, is known to the capability map, but is NOT satisfiable
+  // under the active target (e.g. path-based `readFileSync` under standalone WASI
+  // with no `--allow-fs`), must error here at compile time rather than fall
+  // through to a silent link-time failure. The fd-based `readSync`/`writeSync`
+  // stay satisfiable (providersFor → ["wasi-fd"]) so this is a no-op for them.
+  if (ts.isIdentifier(expr.expression) && !expr.questionDotToken) {
+    const member = expr.expression.text;
+    // Only gate members the program actually imported from `node:fs`, and that
+    // are not shadowed by a local binding — a local `function readFileSync(){}`
+    // must NOT be gated. `ctx.wasiNodeFsFuncs` is the set of node:fs imports.
+    const importedFromNodeFs =
+      ctx.wasiNodeFsFuncs.has(member) &&
+      !fctx.localMap.has(member) &&
+      !(fctx.boxedCaptures?.has(member) ?? false);
+    if (importedFromNodeFs && isKnownMember("node:fs", member)) {
+      const target = { wasi: ctx.wasi, allowFs: false };
+      if (isMemberSatisfiable("node:fs", member, target) === false) {
+        ctx.errors.push({
+          message:
+            `\`node:fs.${member}\` needs a filesystem provider, unavailable under \`--target wasi\`. ` +
+            "Pass `--allow-fs` for the JS-host filesystem provider, or use the fd-based " +
+            "`readSync`/`writeSync(fd, …)` for standalone WASI (no path_open/preopens).",
+          line: 1,
+          column: 1,
+          severity: "error",
+        });
+        // Consumed: return the file's "handled" sentinel so the generic
+        // host-import path does not also fire on this call.
+        return VOID_RESULT;
+      }
+    }
+  }
+
+  if (!ctx.linkNodeShims) return undefined;
   if (expr.questionDotToken) return undefined;
   if (!ts.isIdentifier(expr.expression)) return undefined;
   const callee = expr.expression.text;
@@ -247,10 +336,12 @@ export function tryCompileNodeFsCall(
   // Only treat it as the fd-based node:fs primitive when it was imported from
   // node:fs (detected pre-preprocessing) and is not shadowed by a local.
   if (!ctx.wasiNodeFsFuncs.has(callee)) return undefined;
-  if (fctx.localMap.has(callee) || (fctx.boxedCaptures?.has(callee) ?? false)) return undefined;
+  if (fctx.localMap.has(callee) || (fctx.boxedCaptures?.has(callee) ?? false))
+    return undefined;
   // fd-based form requires at least (fd, buffer). A bare/path-based call is not ours.
   if (expr.arguments.length < 2) return undefined;
-  const shimIdx = callee === "readSync" ? ctx.nodeFsReadSyncIdx : ctx.nodeFsWriteSyncIdx;
+  const shimIdx =
+    callee === "readSync" ? ctx.nodeFsReadSyncIdx : ctx.nodeFsWriteSyncIdx;
   if (shimIdx < 0) return undefined;
 
   return callee === "readSync"
@@ -274,11 +365,16 @@ function emitNodeFsOffsetLength(
   expr: ts.CallExpression,
   bufLenLocal: number,
 ): { offLocal: number; lenLocal: number } {
-  const offLocal = allocLocal(fctx, `__nodefs_off_${fctx.locals.length}`, { kind: "i32" });
-  const lenLocal = allocLocal(fctx, `__nodefs_len_${fctx.locals.length}`, { kind: "i32" });
+  const offLocal = allocLocal(fctx, `__nodefs_off_${fctx.locals.length}`, {
+    kind: "i32",
+  });
+  const lenLocal = allocLocal(fctx, `__nodefs_len_${fctx.locals.length}`, {
+    kind: "i32",
+  });
 
   const arg2 = expr.arguments[2];
-  const optionsObj = arg2 && ts.isObjectLiteralExpression(arg2) ? arg2 : undefined;
+  const optionsObj =
+    arg2 && ts.isObjectLiteralExpression(arg2) ? arg2 : undefined;
 
   // ---- offset ----
   let offsetExpr: ts.Expression | undefined;
@@ -316,7 +412,10 @@ function emitNodeFsOffsetLength(
 }
 
 /** Find a non-shorthand object-literal property initializer by name, or undefined. */
-function findObjectProp(obj: ts.ObjectLiteralExpression, name: string): ts.Expression | undefined {
+function findObjectProp(
+  obj: ts.ObjectLiteralExpression,
+  name: string,
+): ts.Expression | undefined {
   for (const prop of obj.properties) {
     if (
       ts.isPropertyAssignment(prop) &&
@@ -341,7 +440,11 @@ function emitNodeFsResolveGcU8(
   bufExpr: ts.Expression,
 ): { arrLocal: number; arrTypeIdx: number; lenLocal: number } | null {
   const bufType = compileExpression(ctx, fctx, bufExpr);
-  if (!bufType || (bufType.kind !== "ref" && bufType.kind !== "ref_null") || !("typeIdx" in bufType)) {
+  if (
+    !bufType ||
+    (bufType.kind !== "ref" && bufType.kind !== "ref_null") ||
+    !("typeIdx" in bufType)
+  ) {
     if (bufType) fctx.body.push({ op: "drop" } as Instr);
     return null;
   }
@@ -356,27 +459,50 @@ function emitNodeFsResolveGcU8(
     fctx.body.push({ op: "drop" } as Instr);
     return null;
   }
-  if (bufType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
+  if (bufType.kind === "ref_null")
+    fctx.body.push({ op: "ref.as_non_null" } as Instr);
 
-  const vecLocal = allocLocal(fctx, `__nodefs_vec_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
+  const vecLocal = allocLocal(fctx, `__nodefs_vec_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: vecTypeIdx,
+  });
   fctx.body.push({ op: "local.set", index: vecLocal } as Instr);
   // element length = vec.length (field 0)
-  const lenLocal = allocLocal(fctx, `__nodefs_buflen_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__nodefs_buflen_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({
+    op: "struct.get",
+    typeIdx: vecTypeIdx,
+    fieldIdx: 0,
+  } as Instr);
   fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
   // backing i8 array = vec.data (field 1)
-  const arrLocal = allocLocal(fctx, `__nodefs_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const arrLocal = allocLocal(fctx, `__nodefs_arr_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: arrTypeIdx,
+  });
   fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({
+    op: "struct.get",
+    typeIdx: vecTypeIdx,
+    fieldIdx: 1,
+  } as Instr);
   fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
 
   return { arrLocal, arrTypeIdx, lenLocal };
 }
 
 /** Emit `fd` (arg0) truncated to i32 into a fresh local; returns the local. */
-function emitNodeFsFd(ctx: CodegenContext, fctx: FunctionContext, fdExpr: ts.Expression): number {
-  const fdLocal = allocLocal(fctx, `__nodefs_fd_${fctx.locals.length}`, { kind: "i32" });
+function emitNodeFsFd(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  fdExpr: ts.Expression,
+): number {
+  const fdLocal = allocLocal(fctx, `__nodefs_fd_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   compileExpression(ctx, fctx, fdExpr, { kind: "f64" });
   fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
   fctx.body.push({ op: "local.set", index: fdLocal } as Instr);
@@ -403,7 +529,12 @@ function emitNodeFsReadSync(
   // Zero-copy fast path: linear-backed Uint8Array reads straight into ptr+off.
   const linBuf = getLinearU8Buffer(ctx, fctx, expr.arguments[1]!);
   if (linBuf) {
-    const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, linBuf.lenLocalIdx);
+    const { offLocal, lenLocal } = emitNodeFsOffsetLength(
+      ctx,
+      fctx,
+      expr,
+      linBuf.lenLocalIdx,
+    );
     fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
     fctx.body.push({ op: "local.get", index: linBuf.ptrLocalIdx } as Instr);
     fctx.body.push({ op: "local.get", index: offLocal } as Instr);
@@ -420,14 +551,21 @@ function emitNodeFsReadSync(
     fctx.body.push({ op: "f64.const", value: 0 } as Instr);
     return { kind: "f64" };
   }
-  const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, gc.lenLocal);
+  const { offLocal, lenLocal } = emitNodeFsOffsetLength(
+    ctx,
+    fctx,
+    expr,
+    gc.lenLocal,
+  );
 
   // Grow memory if the scratch read region (WASI_STDIN_BUF_START + length) would
   // exceed current pages.
   ensureScratchPages(fctx, WASI_STDIN_BUF_START, lenLocal);
 
   // nread = read_sync(fd, WASI_STDIN_BUF_START, length)
-  const nreadLocal = allocLocal(fctx, `__nodefs_nread_${fctx.locals.length}`, { kind: "i32" });
+  const nreadLocal = allocLocal(fctx, `__nodefs_nread_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
   fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
   fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
@@ -435,7 +573,14 @@ function emitNodeFsReadSync(
   fctx.body.push({ op: "local.set", index: nreadLocal } as Instr);
 
   // Copy buf_dest[off + j] = scratch[j] for j in [0, nread).
-  emitScratchToArrayCopy(fctx, gc.arrTypeIdx, gc.arrLocal, offLocal, WASI_STDIN_BUF_START, nreadLocal);
+  emitScratchToArrayCopy(
+    fctx,
+    gc.arrTypeIdx,
+    gc.arrLocal,
+    offLocal,
+    WASI_STDIN_BUF_START,
+    nreadLocal,
+  );
 
   fctx.body.push({ op: "local.get", index: nreadLocal } as Instr);
   fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
@@ -482,7 +627,12 @@ function emitNodeFsWriteSync(
   // Zero-copy fast path: linear-backed Uint8Array writes straight from ptr+off.
   const linBuf = getLinearU8Buffer(ctx, fctx, expr.arguments[1]!);
   if (linBuf) {
-    const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, linBuf.lenLocalIdx);
+    const { offLocal, lenLocal } = emitNodeFsOffsetLength(
+      ctx,
+      fctx,
+      expr,
+      linBuf.lenLocalIdx,
+    );
     fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
     fctx.body.push({ op: "local.get", index: linBuf.ptrLocalIdx } as Instr);
     fctx.body.push({ op: "local.get", index: offLocal } as Instr);
@@ -498,13 +648,25 @@ function emitNodeFsWriteSync(
     fctx.body.push({ op: "f64.const", value: 0 } as Instr);
     return { kind: "f64" };
   }
-  const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, gc.lenLocal);
+  const { offLocal, lenLocal } = emitNodeFsOffsetLength(
+    ctx,
+    fctx,
+    expr,
+    gc.lenLocal,
+  );
 
   // Grow memory if the write scratch region would exceed current pages.
   ensureScratchPages(fctx, WASI_WRITE_SCRATCH_START, lenLocal);
 
   // Copy scratch[j] = buf[off + j] for j in [0, length).
-  emitArrayToScratchCopy(fctx, gc.arrTypeIdx, gc.arrLocal, offLocal, WASI_WRITE_SCRATCH_START, lenLocal);
+  emitArrayToScratchCopy(
+    fctx,
+    gc.arrTypeIdx,
+    gc.arrLocal,
+    offLocal,
+    WASI_WRITE_SCRATCH_START,
+    lenLocal,
+  );
 
   // nwritten = write_sync(fd, WASI_WRITE_SCRATCH_START, length)
   fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
@@ -532,10 +694,18 @@ const WRITESYNC_UTF8_ENCODINGS = new Set(["utf8", "utf-8"]);
  * buffer overload). Returns `VOID_RESULT` (after pushing a diagnostic) on an
  * unsupported encoding or when the native-string runtime is unavailable.
  */
-function emitNodeFsWriteSyncString(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
+function emitNodeFsWriteSyncString(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.CallExpression,
+): InnerResult {
   // Reject an explicit non-utf8 string-literal encoding (arg index 3).
   const encArg = expr.arguments[3];
-  if (encArg && ts.isStringLiteralLike(encArg) && !WRITESYNC_UTF8_ENCODINGS.has(encArg.text.toLowerCase())) {
+  if (
+    encArg &&
+    ts.isStringLiteralLike(encArg) &&
+    !WRITESYNC_UTF8_ENCODINGS.has(encArg.text.toLowerCase())
+  ) {
     ctx.errors.push({
       message:
         `node:fs writeSync(fd, str, position?, encoding) only supports the utf8 encoding under ` +
@@ -598,7 +768,12 @@ function emitNodeFsWriteSyncDataView(
   // the bytes into the scratch — returning the byte-length local.
   const recvType = compileExpression(ctx, fctx, expr.arguments[1]!);
   flushLateImportShifts(ctx, fctx);
-  const lenLocal = emitDataViewToWriteScratch(ctx, fctx, recvType, WASI_WRITE_SCRATCH_START);
+  const lenLocal = emitDataViewToWriteScratch(
+    ctx,
+    fctx,
+    recvType,
+    WASI_WRITE_SCRATCH_START,
+  );
   if (lenLocal < 0) {
     // Couldn't resolve the DataView backing — drop the operand and report 0.
     if (recvType) fctx.body.push({ op: "drop" } as Instr);
@@ -616,8 +791,16 @@ function emitNodeFsWriteSyncDataView(
 }
 
 /** Grow linear memory so [scratchStart, scratchStart + lenLocal) is addressable. */
-function ensureScratchPages(fctx: FunctionContext, scratchStart: number, lenLocal: number): void {
-  const needPagesLocal = allocLocal(fctx, `__nodefs_pages_${fctx.locals.length}`, { kind: "i32" });
+function ensureScratchPages(
+  fctx: FunctionContext,
+  scratchStart: number,
+  lenLocal: number,
+): void {
+  const needPagesLocal = allocLocal(
+    fctx,
+    `__nodefs_pages_${fctx.locals.length}`,
+    { kind: "i32" },
+  );
   fctx.body.push({ op: "i32.const", value: scratchStart } as Instr);
   fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
   fctx.body.push({ op: "i32.add" } as Instr);
@@ -651,7 +834,9 @@ function emitScratchToArrayCopy(
   scratchStart: number,
   countLocal: number,
 ): void {
-  const jLocal = allocLocal(fctx, `__nodefs_j_${fctx.locals.length}`, { kind: "i32" });
+  const jLocal = allocLocal(fctx, `__nodefs_j_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "i32.const", value: 0 } as Instr);
   fctx.body.push({ op: "local.set", index: jLocal } as Instr);
   const loopBody: Instr[] = [
@@ -678,7 +863,9 @@ function emitScratchToArrayCopy(
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+    body: [
+      { op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr,
+    ],
   } as Instr);
 }
 
@@ -691,7 +878,9 @@ function emitArrayToScratchCopy(
   scratchStart: number,
   countLocal: number,
 ): void {
-  const jLocal = allocLocal(fctx, `__nodefs_wj_${fctx.locals.length}`, { kind: "i32" });
+  const jLocal = allocLocal(fctx, `__nodefs_wj_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "i32.const", value: 0 } as Instr);
   fctx.body.push({ op: "local.set", index: jLocal } as Instr);
   const loopBody: Instr[] = [
@@ -719,6 +908,8 @@ function emitArrayToScratchCopy(
   fctx.body.push({
     op: "block",
     blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
+    body: [
+      { op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr,
+    ],
   } as Instr);
 }
