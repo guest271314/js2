@@ -267,3 +267,162 @@ correct across growth.
 
 Issue stays `in-progress` because Phase 2 (#2634) remains. Phases 0+1 acceptance
 criteria are met.
+
+---
+
+## Implementation Plan (Phase 2 completion — the generalization)
+
+> Scoping pass 2026-06-24 (architect), regrounded against current `main`.
+> **What is already landed is larger than the issue text implies.** Phase 0 (ABI
+> doc), Phase 1 (edge.js dual-provider proof + `tests/issue-1772-edge-dual-provider.test.ts`),
+> and the **#2634 capability-map *data + type surface*** are all on `main`. The
+> remaining Phase-2 work is narrow and concentrated in **one missing wire** plus
+> two small extensions. This plan specs ONLY that residual.
+
+### Root cause / what is actually missing
+
+`src/checker/node-capability-map.ts` (#2634) already provides: the
+`NODE_CAPABILITY_MAP` registry, faithful overloaded `.d.ts` for `readSync`/
+`writeSync`, the `FS_PATH_BASED_MEMBERS` list, and three query functions —
+`getModuleCapability`, `isKnownMember`, **`isMemberSatisfiable(module, member,
+target)`**. `src/checker/index.ts::buildNodeEnvDts` already consumes
+`buildModuleDecls` to emit the import-scoped surface (#2624).
+
+**The gap:** `isMemberSatisfiable` is dead code. Verified on `main` — nothing
+under `src/codegen/` imports it (`grep -rn isMemberSatisfiable src/codegen/` is
+empty). So a path-based member (`readFileSync(path)`) under `--target wasi` does
+**not** produce the promised *precise* "no provider under --target wasi" compile
+error; it falls through `node-fs-api.ts`'s `tryCompileNodeFsCall` (which only
+matches `readSync`/`writeSync`, returns `undefined` for the rest) onto the
+generic host-import path and becomes a silent link-time failure / dropped
+import. The capability map's central promise — "type-checks clean, but
+unsatisfiable members error at compile time, not at link" — is **unrealized at
+codegen**. Closing that is the bulk of Phase 2.
+
+### Slice P2-a — wire the deliberate "no provider" codegen gate (the core gap)
+
+**File: `src/codegen/node-fs-api.ts`** — `tryCompileNodeFsCall` (line ~237).
+- It currently early-returns `undefined` for any callee that is not
+  `readSync`/`writeSync`. Add, BEFORE that early return, a capability check for
+  imported `node:fs` members that the program actually bound:
+  - Import `getModuleCapability` + `isKnownMember` + `isMemberSatisfiable` from
+    `../checker/node-capability-map.js`.
+  - Build the `CapabilityTarget` from codegen context: `{ wasi: ctx.wasi,
+    allowFs: ctx.allowFs ?? false }`. (Confirm/add an `allowFs` field on
+    `CodegenContext` in `src/codegen/context/types.ts` — there is an
+    `--allow-fs` notion referenced in comments but no plumbed flag yet. **For
+    this slice, hardcode `allowFs: false`** so the gate produces the correct
+    standalone-WASI error and stays atomic; the flag plumbing lands later
+    (P2-a.0) without touching the gate.)
+  - If `isKnownMember("node:fs", callee)` and
+    `isMemberSatisfiable("node:fs", callee, target) === false`, push a precise
+    error to `ctx.errors` (follow the exact shape already used at line ~46 and
+    ~539 in this file) with message text:
+    `` `node:fs.${callee}` needs a filesystem provider, unavailable under `--target wasi`. Pass `--allow-fs` for the JS-host filesystem provider, or use the fd-based `readSync`/`writeSync(fd, …)` for standalone WASI (no path_open/preopens). `` Then return a handled sentinel (a `VOID_RESULT`-style f64 0 / the file's existing "consumed" return) so the generic path does not also fire.
+- **Edge case:** only gate members the program *imported from `node:fs`* — do not
+  gate a same-named user function. `tryCompileNodeFsCall` already keys off the
+  imported binding; reuse that binding set so a local `function readFileSync(){}`
+  is untouched.
+- **Edge case:** `readSync`/`writeSync` stay satisfiable under `--target wasi`
+  (`providersFor` returns `["wasi-fd"]`) — the gate is a no-op for them, the
+  existing lowering proceeds unchanged.
+- **Edge case:** non-WASI target — under a JS host, path-based members resolve
+  through the real `node:fs`; do not gate when `!ctx.wasi` (the
+  `tryCompileNodeFsCall` body already early-returns on `!ctx.wasi`, so the gate
+  must sit AFTER that guard but BEFORE the `readSync`/`writeSync` match).
+
+**P2-a.0 (deferred prerequisite, tiny):** thread `--allow-fs` → `compile()` opts
+→ `ctx.allowFs`, swapping the hardcoded `false`. Independent follow-up; does not
+block P2-a.
+
+- **Role:** developer. **PR-able alone.** Test:
+  `tests/issue-1772-no-provider-gate.test.ts` — compile a program importing
+  `readFileSync` from `node:fs` under `--target wasi`, assert `r.success ===
+  false` and the error names the member + `--allow-fs`. Assert a
+  `readSync`/`writeSync` program still compiles green and a non-WASI compile of
+  the same `readFileSync` program is NOT gated.
+
+### Slice P2-b — extend the capability map beyond the fd anchor (the "mechanism", not new surface)
+
+**File: `src/checker/node-capability-map.ts`** — add a second capability-mapped
+module to *prove the data-not-code extension mechanism* the #2634 design header
+promises ("adding `node:process`/`node:os` members later is a new entry in
+`NODE_CAPABILITY_MAP`, not a code change").
+- Add the **already-lowered** `process.stdout.write` / `process.stderr.write`
+  surface as *satisfiability entries* so P2-a's gate can reason about them. These
+  lower today via `node-fs-api.ts::tryCompileProcessStdoutWrite` to
+  `writeSync(1|2, …)`; gate `providersFor: (t) => (t.wasi ? ["wasi-fd"] :
+  ["js-host-fs"])`.
+- **Important boundary:** `node:process` is *partially* handled today by the
+  bespoke `PROCESS_INTERFACE_DECLS` branch in `buildNodeEnvDts` (line ~454). Do
+  **NOT** rip that out in this slice — the two must not double-declare
+  `stdout`/`stderr`. Keep `node:process` decl emission on the existing bespoke
+  branch; add ONLY the capability *satisfiability* metadata (not new decls) so
+  the map's query functions cover the process std-IO members. A full migration of
+  `node:process` decls into the map is a separate follow-up.
+- **Verdict to record in code (acceptance item — hand-authored vs literal
+  `@types/node`):** *Keep the hand-authored faithful mirror.* Write this into the
+  map's header comment. Reasoning: (1) the checker uses an in-memory lib host and
+  deliberately does NOT load `node_modules/@types/node` (the support-decls
+  comment says so), so literal sourcing means shipping/parsing the full
+  `@types/node` graph (`NodeJS.*`, `Buffer`, stream types, thousands of members)
+  at checker-init — heavy, and ~99% un-linkable. (2) The gate's whole point is
+  that the *type surface must equal the runtime surface*; literal `@types/node`
+  is the opposite (type ≫ runtime). (3) The mirror is already verified faithful
+  against `node_modules/@types/node/fs.d.ts` per member (the #2634 comments cite
+  the exact source files). **So literal-sourcing is rejected; the design is
+  hand-authored-per-member-with-a-cited-source-of-truth.** The "extraction from
+  `@types/node`" language in the original Phase-2 scope is satisfied by *faithful
+  mirroring with a cited source*, not by runtime parsing.
+
+- **Role:** developer. **PR-able alone** (the map entry is independent of P2-a;
+  only a cross-cutting test that exercises the gate on a process member needs
+  P2-a). Test: `tests/issue-1772-capability-map-extend.test.ts` — assert
+  `isMemberSatisfiable("node:process", "stdout"/"write", {wasi:true,allowFs:false})`
+  is truthy and a fabricated unsatisfiable member is falsy; assert
+  `buildNodeEnvDtsForSource` for a `process.stdout.write` program is byte-neutral
+  for a non-process program.
+
+### Slice P2-c — compose with #2528 `--platform node|web` (ambient surface)
+
+**Files: `src/codegen/index.ts`** (the `LIB_GLOBALS`/`DOM_ONLY_GLOBALS` sets
+referenced by #2528) and `src/checker/index.ts` (the `emulateNode` gate at
+line ~573 that decides whether to inject `buildNodeEnvDtsForSource`).
+- #2528 is `status: backlog` and is the **ambient-global** axis; #1772 Phase 2 is
+  the **importable `node:<mod>`** axis. They compose at exactly one decision
+  point: today `buildNodeEnvDts` injection is gated on
+  `analyzeOptions?.emulateNode === true`. When #2528 lands `--platform node`,
+  that flag SHOULD imply `emulateNode = true` (the node platform auto-provides
+  both the ambient `process` global AND the capability-mapped `node:<mod>` import
+  surface). Under `--platform web`, the `node:<mod>` import surface stays
+  available (an explicit `import` is explicit intent) but the bare ambient
+  `process` global is NOT auto-declared.
+- **This slice is a written composition note + the one-line
+  `emulateNode ||= (platform === "node")` wire**, gated on #2528 landing first.
+  **Mark P2-c `depends_on: 2528`; do not dispatch until #2528 is in progress.**
+  If #2528 is not scheduled, P2-c reduces to a paragraph in
+  `docs/architecture/node-fs-abi.md` recording the intended composition and is
+  **deferrable**.
+- **Role:** developer (trivial wire) once #2528 lands; **architect/PO note**
+  meanwhile.
+
+### Verdict on edge.js as the JS-provider substrate (acceptance item — confirmed)
+
+Already recorded in the Phase-1 section above and **confirmed by this scoping
+pass**: edge.js is the right substrate and is a thin, dependency-free adapter
+(two closures over exported memory), NOT a framework. Phase 2 does not change
+that verdict — the capability map decides *what is linkable*; edge.js is *one
+provider* satisfying the fd-based tier on the native-Node host. The async
+extension of edge.js is specced in **#2635** (a genuinely larger surface).
+
+### Phase 2 decomposition summary
+
+| Slice | What | Role | Depends on | PR-able alone |
+|-------|------|------|-----------|---------------|
+| **P2-a** | Wire `isMemberSatisfiable` → precise "no provider" codegen error in `tryCompileNodeFsCall`; hardcode `allowFs:false` | developer | — | yes |
+| **P2-b** | Add `node:process` std-IO satisfiability entries (mechanism proof) + record the hand-authored-mirror verdict in code | developer | — (P2-a only for the cross-test) | yes |
+| **P2-c** | Compose with #2528 `--platform node` (`emulateNode ||= platform==="node"`) | developer | **#2528** | no (gated) |
+
+P2-a is the only true "completes the acceptance" slice; P2-b proves the
+extension mechanism + lands the written verdict; P2-c is deferrable until #2528.
+**Suggested order: P2-a → P2-b (parallel-safe); P2-c last/deferred.**
