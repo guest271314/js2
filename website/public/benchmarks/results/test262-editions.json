@@ -46,9 +46,9 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3541,
+    "pass": 3542,
     "fail": 673,
-    "ce": 37,
+    "ce": 36,
     "skip": 0,
     "total": 4251,
     "pct": 83
@@ -128,9 +128,9 @@
   {
     "edition": "Proposals",
     "pass": 1491,
-    "fail": 3155,
+    "fail": 3164,
     "ce": 231,
-    "skip": 105,
+    "skip": 96,
     "total": 4982,
     "pct": 30
   }
