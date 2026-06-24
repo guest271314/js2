@@ -27,6 +27,22 @@
 //      `.d.ts`-typed synthetic source where overloads ARE legal; the user's
 //      import site only *references* the names, so TS8017 never fires there.
 //      See `buildNodeEnvDts` in `src/checker/index.ts`.
+//
+// VERDICT — hand-authored faithful mirror vs literal `@types/node` sourcing
+// (#1772 Phase 2 acceptance item). **Literal `@types/node` sourcing is REJECTED;
+// the design is hand-authored-per-member-with-a-cited-source-of-truth.** Reasons:
+//   1. The checker uses an in-memory lib host and deliberately does NOT load
+//      `node_modules/@types/node` (see the support-decls comment below). Literal
+//      sourcing would mean parsing the full `@types/node` graph (`NodeJS.*`,
+//      `Buffer`, the stream/event types, thousands of members) at checker-init —
+//      heavy, and ~99% of that surface is un-linkable (no runtime provider).
+//   2. The gate's entire purpose is that the **type surface == the runtime
+//      surface**; literal `@types/node` is the exact opposite (type ≫ runtime),
+//      which is what produces the silent link failures this map exists to prevent.
+//   3. The mirror is already verified faithful PER MEMBER against
+//      `node_modules/@types/node/fs.d.ts` (cited in the #2634 review comments).
+//   So "extraction from @types/node" in the original Phase-2 scope is satisfied by
+//   *faithful mirroring with a cited source*, not by runtime parsing of the graph.
 
 /**
  * A provider that can satisfy a member at link time. Informational today
@@ -213,11 +229,51 @@ function buildFsCapability(): NodeModuleCapability {
 }
 
 // ---------------------------------------------------------------------------
-// Registry — one entry per supported `node:<mod>`. Extend here (data) to add
-// `node:process` / `node:os` members later, NOT in the checker code.
+// node:process — std-IO satisfiability (metadata ONLY, NOT new decls)
 // ---------------------------------------------------------------------------
 
-const NODE_CAPABILITY_MAP = new Map<string, NodeModuleCapability>([["node:fs", buildFsCapability()]]);
+// #1772 P2-b — capability *satisfiability* entries for the `process` std-IO
+// surface, proving the #2634 "data-not-code extension" promise (adding a module
+// is a new map entry, not a checker code change). These members already LOWER
+// today via `src/codegen/node-fs-api.ts` (`process.stdout`/`stderr.write` →
+// `node:fs::writeSync(1|2, …)`); this entry just lets the map's query functions
+// (`isKnownMember` / `isMemberSatisfiable`) reason about them so P2-a's gate has
+// a uniform view of `node:<mod>` satisfiability.
+//
+// IMPORTANT — these are METADATA ONLY (empty `decls`). The `node:process` *type
+// surface* is still emitted by the bespoke `PROCESS_INTERFACE_DECLS` /
+// `declare module "node:process"` branch in `buildNodeEnvDts`
+// (`src/checker/index.ts` ~L454), which `continue`s BEFORE reaching
+// `buildModuleDecls` — so this map entry can NOT double-declare `stdout`/`stderr`.
+// A full migration of the `node:process` decls into the map is a separate
+// follow-up; this slice adds only the satisfiability metadata.
+const PROCESS_STDIO_PROVIDERS = (t: CapabilityTarget): NodeProvider[] => (t.wasi ? ["wasi-fd"] : ["js-host-fs"]);
+
+function buildProcessCapability(): NodeModuleCapability {
+  const members = new Map<string, NodeMemberCapability>();
+  // The actual call member (`process.stdout.write(...)` / `process.stderr.write`)
+  // plus the two stream handles it dispatches through. All lower to the fd-based
+  // `writeSync` sink, so all share the std-IO provider set. `decls: ""` keeps the
+  // type surface owned by the bespoke `node:process` branch (no double-declare).
+  for (const name of ["write", "stdout", "stderr"]) {
+    members.set(name, {
+      name,
+      decls: "",
+      providersFor: PROCESS_STDIO_PROVIDERS,
+    });
+  }
+  return { module: "node:process", supportDecls: "", members };
+}
+
+// ---------------------------------------------------------------------------
+// Registry — one entry per supported `node:<mod>`. Extend here (data) to add
+// `node:os` members later, NOT in the checker code.
+// ---------------------------------------------------------------------------
+
+const NODE_CAPABILITY_MAP = new Map<string, NodeModuleCapability>([
+  ["node:fs", buildFsCapability()],
+  ["node:process", buildProcessCapability()],
+]);
 
 /** Look up the capability entry for a `node:<mod>` specifier, if mapped. */
 export function getModuleCapability(module: string): NodeModuleCapability | undefined {

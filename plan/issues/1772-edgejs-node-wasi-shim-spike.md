@@ -4,7 +4,7 @@ title: "Node API imports from @types/node, satisfied by one ABI across pure-WASI
 status: in-progress
 created: 2026-06-01
 updated: 2026-06-24
-assignee: ttraenkler/agent-a9512a06
+assignee: ttraenkler/dev-1772-p2
 priority: medium
 feasibility: medium
 reasoning_effort: medium
@@ -426,3 +426,49 @@ extension of edge.js is specced in **#2635** (a genuinely larger surface).
 P2-a is the only true "completes the acceptance" slice; P2-b proves the
 extension mechanism + lands the written verdict; P2-c is deferrable until #2528.
 **Suggested order: P2-a → P2-b (parallel-safe); P2-c last/deferred.**
+
+---
+
+## Phase 2 progress — slices P2-a + P2-b LANDED (2026-06-24)
+
+Architect scoping (PR #2011, `## Implementation Plan` above) split the residual
+Phase-2 work into P2-a (wire the gate), P2-b (extend the map + record the
+verdict), and P2-c (compose with #2528, gated). This PR lands **P2-a + P2-b**.
+
+- **P2-a — no-provider codegen gate (DONE).** `src/codegen/node-fs-api.ts`
+  `tryCompileNodeFsCall` now consults the capability map: a `node:fs` member the
+  program imported, known to the map, and **unsatisfiable** under the active
+  target (`isMemberSatisfiable("node:fs", member, { wasi: ctx.wasi, allowFs:
+  false }) === false`) pushes a precise error naming the member + `--allow-fs`,
+  and returns the `VOID_RESULT` "consumed" sentinel so the generic host-import
+  path does not also fire. The gate sits AFTER the `!ctx.wasi` guard but BEFORE
+  the `!ctx.linkNodeShims` short-circuit, so it fires under `--target wasi`
+  regardless of `--link-node-shims`, and is a no-op for the satisfiable fd-based
+  `readSync`/`writeSync`. It keys off `ctx.wasiNodeFsFuncs` (the node:fs import
+  set) so a same-named local function is never gated. This wires up what was
+  **dead code** (`isMemberSatisfiable` had no codegen consumer) and makes the
+  map the source of truth; the legacy hardcoded `PATH_BASED_FS_FNS` gate in
+  `calls.ts` (byte-identical member set) is now a harmless backstop the map gate
+  pre-empts. `allowFs` is hardcoded `false` this PR — the `--allow-fs` plumbing
+  is the tiny deferred follow-up **P2-a.0**.
+  Test: `tests/issue-1772-no-provider-gate.test.ts`.
+
+- **P2-b — capability-map extension + verdict (DONE).**
+  `src/checker/node-capability-map.ts` gains a `node:process` entry with std-IO
+  satisfiability metadata (`write`/`stdout`/`stderr`, `providersFor: t.wasi ?
+  ["wasi-fd"] : ["js-host-fs"]`) — **metadata only, empty decls**. The
+  `node:process` type surface stays owned by the bespoke `PROCESS_INTERFACE_DECLS`
+  branch in `buildNodeEnvDts` (which `continue`s before `buildModuleDecls`), so no
+  double-declaration; the map entry just lets the query functions reason about
+  the std-IO members (proving the #2634 "data-not-code extension" promise). The
+  **hand-authored-mirror verdict is recorded in the map header**: literal
+  `@types/node` sourcing is REJECTED (in-memory lib host doesn't load
+  `@types/node`; the gate needs type-surface == runtime-surface, the opposite of
+  `@types/node`; the mirror is per-member faithful with a cited source).
+  Test: `tests/issue-1772-capability-map-extend.test.ts`.
+
+- **P2-c — deferred (gated on #2528).** Compose with `--platform node|web`
+  (`emulateNode ||= platform === "node"`). Not dispatched until #2528 lands.
+- **Phase 3 (#2635)** — async members; out of scope here.
+
+**#1772 stays `in-progress`** — P2-c (gated on #2528) and Phase 3 (#2635) remain.

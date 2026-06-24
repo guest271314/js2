@@ -130,7 +130,10 @@ export function main(): void {
     const msgs = (result.errors ?? []).map((e) => e.message).join("\n");
     // Precise, deliberate — names the member and the target, not an opaque crash.
     expect(msgs).toMatch(/openSync/);
-    expect(msgs).toMatch(/not available under --target wasi|no filesystem|#2631/);
+    // #1772 P2-a — the capability-map-driven gate in `tryCompileNodeFsCall` now
+    // owns this rejection (it consumes the call before the legacy
+    // `PATH_BASED_FS_FNS` gate), so the message is the map gate's precise text.
+    expect(msgs).toMatch(/(un)?available under `?--target wasi`?|no filesystem|filesystem provider|#2631/);
   });
 
   // ── allowJs / TS8017: faithful OVERLOADS must not trip the transpiled host ─

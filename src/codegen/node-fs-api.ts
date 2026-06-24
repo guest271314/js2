@@ -9,6 +9,7 @@
  * `node:fs` shim). It also rejects the hallucinated `process.stdin.read(buf,
  * offset)` with a clear pointer to `node:fs` `readSync`.
  */
+import { isKnownMember, isMemberSatisfiable } from "../checker/node-capability-map.js";
 import { isStringType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
 import { ts } from "../ts-api.js";
@@ -239,7 +240,44 @@ export function tryCompileNodeFsCall(
   fctx: FunctionContext,
   expr: ts.CallExpression,
 ): InnerResult | undefined {
-  if (!ctx.wasi || !ctx.linkNodeShims) return undefined;
+  // The "no provider" gate (#1772 P2-a) fires under `--target wasi` regardless of
+  // `--link-node-shims`, so it must sit AFTER the `!ctx.wasi` guard but BEFORE the
+  // combined `!ctx.linkNodeShims` short-circuit and the readSync/writeSync match.
+  if (!ctx.wasi) return undefined;
+
+  // #1772 P2-a — deliberate "no provider" compile error. A `node:fs` member that
+  // the program imported, is known to the capability map, but is NOT satisfiable
+  // under the active target (e.g. path-based `readFileSync` under standalone WASI
+  // with no `--allow-fs`), must error here at compile time rather than fall
+  // through to a silent link-time failure. The fd-based `readSync`/`writeSync`
+  // stay satisfiable (providersFor → ["wasi-fd"]) so this is a no-op for them.
+  if (ts.isIdentifier(expr.expression) && !expr.questionDotToken) {
+    const member = expr.expression.text;
+    // Only gate members the program actually imported from `node:fs`, and that
+    // are not shadowed by a local binding — a local `function readFileSync(){}`
+    // must NOT be gated. `ctx.wasiNodeFsFuncs` is the set of node:fs imports.
+    const importedFromNodeFs =
+      ctx.wasiNodeFsFuncs.has(member) && !fctx.localMap.has(member) && !(fctx.boxedCaptures?.has(member) ?? false);
+    if (importedFromNodeFs && isKnownMember("node:fs", member)) {
+      const target = { wasi: ctx.wasi, allowFs: false };
+      if (isMemberSatisfiable("node:fs", member, target) === false) {
+        ctx.errors.push({
+          message:
+            `\`node:fs.${member}\` needs a filesystem provider, unavailable under \`--target wasi\`. ` +
+            "Pass `--allow-fs` for the JS-host filesystem provider, or use the fd-based " +
+            "`readSync`/`writeSync(fd, …)` for standalone WASI (no path_open/preopens).",
+          line: 1,
+          column: 1,
+          severity: "error",
+        });
+        // Consumed: return the file's "handled" sentinel so the generic
+        // host-import path does not also fire on this call.
+        return VOID_RESULT;
+      }
+    }
+  }
+
+  if (!ctx.linkNodeShims) return undefined;
   if (expr.questionDotToken) return undefined;
   if (!ts.isIdentifier(expr.expression)) return undefined;
   const callee = expr.expression.text;
@@ -274,8 +312,12 @@ function emitNodeFsOffsetLength(
   expr: ts.CallExpression,
   bufLenLocal: number,
 ): { offLocal: number; lenLocal: number } {
-  const offLocal = allocLocal(fctx, `__nodefs_off_${fctx.locals.length}`, { kind: "i32" });
-  const lenLocal = allocLocal(fctx, `__nodefs_len_${fctx.locals.length}`, { kind: "i32" });
+  const offLocal = allocLocal(fctx, `__nodefs_off_${fctx.locals.length}`, {
+    kind: "i32",
+  });
+  const lenLocal = allocLocal(fctx, `__nodefs_len_${fctx.locals.length}`, {
+    kind: "i32",
+  });
 
   const arg2 = expr.arguments[2];
   const optionsObj = arg2 && ts.isObjectLiteralExpression(arg2) ? arg2 : undefined;
@@ -358,17 +400,33 @@ function emitNodeFsResolveGcU8(
   }
   if (bufType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
 
-  const vecLocal = allocLocal(fctx, `__nodefs_vec_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
+  const vecLocal = allocLocal(fctx, `__nodefs_vec_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: vecTypeIdx,
+  });
   fctx.body.push({ op: "local.set", index: vecLocal } as Instr);
   // element length = vec.length (field 0)
-  const lenLocal = allocLocal(fctx, `__nodefs_buflen_${fctx.locals.length}`, { kind: "i32" });
+  const lenLocal = allocLocal(fctx, `__nodefs_buflen_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({
+    op: "struct.get",
+    typeIdx: vecTypeIdx,
+    fieldIdx: 0,
+  } as Instr);
   fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
   // backing i8 array = vec.data (field 1)
-  const arrLocal = allocLocal(fctx, `__nodefs_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
+  const arrLocal = allocLocal(fctx, `__nodefs_arr_${fctx.locals.length}`, {
+    kind: "ref",
+    typeIdx: arrTypeIdx,
+  });
   fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
+  fctx.body.push({
+    op: "struct.get",
+    typeIdx: vecTypeIdx,
+    fieldIdx: 1,
+  } as Instr);
   fctx.body.push({ op: "local.set", index: arrLocal } as Instr);
 
   return { arrLocal, arrTypeIdx, lenLocal };
@@ -376,7 +434,9 @@ function emitNodeFsResolveGcU8(
 
 /** Emit `fd` (arg0) truncated to i32 into a fresh local; returns the local. */
 function emitNodeFsFd(ctx: CodegenContext, fctx: FunctionContext, fdExpr: ts.Expression): number {
-  const fdLocal = allocLocal(fctx, `__nodefs_fd_${fctx.locals.length}`, { kind: "i32" });
+  const fdLocal = allocLocal(fctx, `__nodefs_fd_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   compileExpression(ctx, fctx, fdExpr, { kind: "f64" });
   fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
   fctx.body.push({ op: "local.set", index: fdLocal } as Instr);
@@ -427,7 +487,9 @@ function emitNodeFsReadSync(
   ensureScratchPages(fctx, WASI_STDIN_BUF_START, lenLocal);
 
   // nread = read_sync(fd, WASI_STDIN_BUF_START, length)
-  const nreadLocal = allocLocal(fctx, `__nodefs_nread_${fctx.locals.length}`, { kind: "i32" });
+  const nreadLocal = allocLocal(fctx, `__nodefs_nread_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
   fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
   fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
@@ -651,7 +713,9 @@ function emitScratchToArrayCopy(
   scratchStart: number,
   countLocal: number,
 ): void {
-  const jLocal = allocLocal(fctx, `__nodefs_j_${fctx.locals.length}`, { kind: "i32" });
+  const jLocal = allocLocal(fctx, `__nodefs_j_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "i32.const", value: 0 } as Instr);
   fctx.body.push({ op: "local.set", index: jLocal } as Instr);
   const loopBody: Instr[] = [
@@ -691,7 +755,9 @@ function emitArrayToScratchCopy(
   scratchStart: number,
   countLocal: number,
 ): void {
-  const jLocal = allocLocal(fctx, `__nodefs_wj_${fctx.locals.length}`, { kind: "i32" });
+  const jLocal = allocLocal(fctx, `__nodefs_wj_${fctx.locals.length}`, {
+    kind: "i32",
+  });
   fctx.body.push({ op: "i32.const", value: 0 } as Instr);
   fctx.body.push({ op: "local.set", index: jLocal } as Instr);
   const loopBody: Instr[] = [
