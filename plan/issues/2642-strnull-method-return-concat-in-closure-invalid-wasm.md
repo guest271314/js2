@@ -1,13 +1,15 @@
 ---
 id: 2642
-title: "Class method returning string|null, narrowed-and-concatenated inside a closure, emits invalid Wasm under --target wasi"
-status: ready
-sprint: Backlog
+title: "Stale cached __wasi_write_string funcIdx across a late-import boundary emits invalid Wasm for a console.log of a string|null/undefined concat under --target wasi"
+status: done
+completed: 2026-06-24
+sprint: 65
 goal: wasi-async-runtime
-feasibility: hard
+feasibility: medium
 kind: bug
 created: 2026-06-24
-refs: [2632, 2641, 1677, 1903, 2039, 2563]
+updated: 2026-06-24
+refs: [2632, 2641, 1677, 1903, 2039, 2563, 1461, 2193]
 ---
 
 # Class method `string | null` return, concatenated in a closure → invalid Wasm
@@ -105,3 +107,60 @@ boxes a captured `T | null` local and the string-concat helper's operand coercio
 (`coerceType` for the first operand). This is a fragile index-shift / value-rep
 area — pair with an architect review before changing the boxing (see #2632 Phase-3
 notes and the native-string finalize-shift memory cluster).
+
+## Resolution (2026-06-24) — VERIFIED root cause: stale funcIdx, NOT closure boxing
+
+The closure / class-method / `process.stdin` framing above is **all incidental**.
+The minimal repro is a plain **free function**:
+
+```ts
+function rd(): string | null { return "x"; }
+export function main(): void { const x = rd(); if (x !== null) { console.log("r:" + x); } }
+```
+
+Compiled `{ target: "wasi" }` → invalid Wasm
+(`call expected (ref null N), found i32.const`) on main. (The earlier "free
+function ... valid" bisection row was misled by a coincidental shape; the true
+trigger is *insert-a-late-import while compiling a console.log argument, then
+write again with a cached helper index*.)
+
+### Root cause
+
+`compileConsoleCallWasi` (and the sibling `emitWasiValueToStdout`) in
+`src/codegen/expressions/builtins.ts` read `__wasi_write_string`'s function index
+**once** (`const writeStringIdx = ctx.funcMap.get(helperName)`) and reused it for
+the separator / template-part / trailing-newline / `[object]`-placeholder writes.
+
+Compiling the inline-concat argument whose value is a `string | null` /
+`string | undefined` externref union inserts the `__extern_toString` late import
+via `ensureLateImport` + `flushLateImportShifts` (`src/codegen/binary-ops.ts`),
+which shifts **every** function index by +1. The trailing newline / separator
+writes then emitted the **stale** index → post-shift it resolves to a *different*
+function (`__regex_escape`, a `(ref null N)` parameter), so the `i32.const`
+offset/length operands meant for `__wasi_write_string` fail the `call` type check
+→ `call expected (ref null N), found i32.const` → invalid module.
+
+Same family as `reference_1461_reduce_noinit_funcidx_desync` /
+`reference_2193_call_ref_funcref_not_wrapper`.
+
+### Fix
+
+Re-resolve the helper index **by NAME** from `ctx.funcMap` at every emission site
+that writes *after* a `compileExpression` / `ensure*Helper` call (via a local
+`writeStr(offset, length)` helper in both functions). No funcIdx is held across
+the union-concat argument's compilation.
+
+**Invariant (enforced + commented in both functions):** a funcIdx read once must
+NEVER be reused across an `ensureLateImport` / late-import insertion — re-read it
+from `ctx.funcMap` (by name) after any call that can add an import.
+
+### Validation
+
+`tests/issue-2642.test.ts` — 5 validity guards (string|null, string|undefined,
+union-concat as first of multiple args, union-concat + a second console.log, and
+the `console.warn` stderr-helper variant), each failing `WebAssembly.compile`
+pre-fix and passing post-fix, + 2 negative-control runtime stdout checks. Per
+#1968 (shared-state index-shift family) an isolated byte-diff would be a FALSE
+NEGATIVE, so the guard is "the module validates"; full `merge_group` / test262
+re-validation in CI confirms byte-neutrality for programs that do not hit the
+union-concat-then-write pattern. tsc + biome lint clean.
