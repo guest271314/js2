@@ -128,6 +128,28 @@ export interface AsyncSchedulerState {
   runLoopNowFuncIdx: number;
   /** Whether the timer heap was ever registered (drives run-loop emission + _start wiring). */
   timerHeapRegistered: boolean;
+
+  // ── #2632 Phase 2 — fd-readiness reactor (fd0 + internal stdin buffer) ──
+  /**
+   * Whether the run loop should wait on fd0-readable OR the nearest timer
+   * (multi-subscription `poll_oneoff`) instead of the Phase-1 single-clock
+   * sleep, and drain fd0 into an internal stdin buffer each tick. Set BEFORE
+   * `ensureTimerHeap` runs so the run-loop body is built in the fd-reactor
+   * shape. When false, the run loop is byte-identical to Phase 1.
+   */
+  stdinReactor: boolean;
+  /** Wasm global: 1 once fd0's non-blocking flag has been set (set-once guard). -1 until registered. */
+  stdinNonblockSetGlobalIdx: number;
+  /** Wasm global: 1 while fd0 is still subscribed (not at EOF); 0 after EOF. -1 until registered. */
+  stdinFdActiveGlobalIdx: number;
+  /** Wasm global: byte count currently buffered in the internal stdin region (write cursor). -1 until registered. */
+  stdinBufLenGlobalIdx: number;
+  /** Wasm global: read cursor into the internal stdin region (Phase-3 consumer advances it). -1 until registered. */
+  stdinBufPosGlobalIdx: number;
+  /** Func idx of `__rl_stdin_drain() -> i32` — fd_read available bytes into the internal buffer; returns bytes read (0 = EOF). -1 until registered. */
+  stdinDrainFuncIdx: number;
+  /** Func idx of `__rl_poll_fd0_or_clock(deadlineNs i64, nowNs i64) -> i32` — 1 if fd0 readable, 0 if timeout/no-fd. -1 until registered. */
+  pollFd0OrClockFuncIdx: number;
 }
 
 function getOrInitState(ctx: CodegenContextWithScheduler): AsyncSchedulerState {
@@ -171,6 +193,13 @@ function getOrInitState(ctx: CodegenContextWithScheduler): AsyncSchedulerState {
       runLoopFuncIdx: -1,
       runLoopNowFuncIdx: -1,
       timerHeapRegistered: false,
+      stdinReactor: false,
+      stdinNonblockSetGlobalIdx: -1,
+      stdinFdActiveGlobalIdx: -1,
+      stdinBufLenGlobalIdx: -1,
+      stdinBufPosGlobalIdx: -1,
+      stdinDrainFuncIdx: -1,
+      pollFd0OrClockFuncIdx: -1,
     };
   }
   return ctx.asyncScheduler;
@@ -1153,6 +1182,30 @@ const TIMER_QUEUE_INITIAL_SLOTS = 64;
 // clock-helpers' 16..31 region and `__wasi_sleep_ms`'s 64..147 region).
 const RL_NOW_OUT_OFFSET = 48; // i64 monotonic-now out-ptr for clock_time_get
 
+// ── #2632 Phase 2 — fd-readiness reactor scratch + buffer constants ──────
+//
+// The multi-subscription poll scratch lives ABOVE `__wasi_sleep_ms`'s 64..147
+// region so the two paths never alias (a program can register both — the
+// single-clock sleep is unused on the fd-reactor path, but the helper still
+// exists). Layout inside the reserved page-0 bump zone (160..303):
+//   [160..207]  subscription_t[0] (48 bytes) — FD_READ on fd 0
+//   [208..255]  subscription_t[1] (48 bytes) — CLOCK on CLOCK_MONOTONIC
+//   [256..319]  event_t[0..1] out buffer (32 bytes each, 2 events max)
+//   [320..323]  nevents out (u32)
+//   [324..335]  fd_read iovec scratch (iov_base @324, iov_len @328, nread @332)
+const RL_POLL_SUB0_OFFSET = 160; // fd0 FD_READ subscription
+const RL_POLL_SUB1_OFFSET = 208; // clock subscription
+const RL_POLL_EVT_OFFSET = 256; // event_t out buffer (2 events)
+const RL_POLL_NEVENTS_OFFSET = 320; // nevents out u32
+const RL_FDREAD_IOV_OFFSET = 324; // iovec (base,len) for fd_read
+const RL_FDREAD_NREAD_OFFSET = 332; // nread out u32 for fd_read
+
+// Internal stdin accumulation buffer. Reuses the page-1 stdin region (#1653,
+// WASI_STDIN_BUF_START = 64 KiB). Defined locally to avoid a circular import
+// from index.ts; MUST stay in sync with that export.
+const RL_STDIN_BUF_START = 64 * 1024;
+const RL_STDIN_BUF_CAP = 64 * 1024; // one page
+
 /**
  * #2632 — Idempotently register the timer table (types, globals, helpers) and
  * the run-loop driver. MUST be called in the deferred-helper phase (after
@@ -1244,8 +1297,45 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
     init: [{ op: "ref.null", typeIdx: i32ArrIdx } as Instr],
   });
 
+  // #2632 Phase 2 — fd-readiness reactor globals. Registered ONLY when the
+  // stdin reactor is active (a program that references `process.stdin` under
+  // --target wasi), so timer-only programs keep Phase 1's exact global table
+  // and stay byte-identical.
+  if (state.stdinReactor) {
+    const rlBase = ctx.numImportGlobals + ctx.mod.globals.length;
+    state.stdinNonblockSetGlobalIdx = rlBase;
+    ctx.mod.globals.push({
+      name: "__stdin_nonblock_set",
+      type: { kind: "i32" },
+      mutable: true,
+      init: [{ op: "i32.const", value: 0 }],
+    });
+    state.stdinFdActiveGlobalIdx = rlBase + 1;
+    ctx.mod.globals.push({
+      name: "__stdin_fd_active",
+      type: { kind: "i32" },
+      mutable: true,
+      init: [{ op: "i32.const", value: 1 }], // fd0 starts subscribed (until EOF)
+    });
+    state.stdinBufLenGlobalIdx = rlBase + 2;
+    ctx.mod.globals.push({
+      name: "__stdin_buf_len",
+      type: { kind: "i32" },
+      mutable: true,
+      init: [{ op: "i32.const", value: 0 }],
+    });
+    state.stdinBufPosGlobalIdx = rlBase + 3;
+    ctx.mod.globals.push({
+      name: "__stdin_buf_pos",
+      type: { kind: "i32" },
+      mutable: true,
+      init: [{ op: "i32.const", value: 0 }],
+    });
+  }
+
   // ── 3. Helper functions (push order = funcIdx order) ──────────────────
-  // grow → add → cancel → peek → fire_due → now → run_loop.
+  // grow → add → cancel → peek → fire_due → now
+  //   → (Phase 2: stdin_drain → poll_fd0_or_clock) → run_loop.
   const baseFuncIdx = ctx.numImportFuncs + ctx.mod.functions.length;
 
   const growIdx = baseFuncIdx;
@@ -1316,14 +1406,48 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
   });
   ctx.funcMap.set("__rl_now_ns", state.runLoopNowFuncIdx);
 
+  // #2632 Phase 2 — fd-readiness reactor helpers. Registered ONLY when the
+  // stdin reactor is active, BETWEEN __rl_now_ns and __run_event_loop (the run
+  // loop calls them). When inactive, the run-loop func idx stays baseFuncIdx+6
+  // exactly as Phase 1, preserving byte-neutrality for timer-only programs.
+  let nextFuncIdx = baseFuncIdx + 6;
+  if (state.stdinReactor) {
+    // __rl_stdin_drain() -> i32 : non-blocking fd_read available bytes from fd0
+    // into the internal stdin buffer; returns bytes read (0 = EOF → drop the
+    // fd subscription). Reuses the page-1 stdin buffer (WASI_STDIN_BUF_START).
+    state.stdinDrainFuncIdx = nextFuncIdx++;
+    ctx.mod.functions.push({
+      name: "__rl_stdin_drain",
+      typeIdx: addFuncType(ctx, [], [{ kind: "i32" }], "$__rl_stdin_drain_type"),
+      locals: buildStdinDrainLocals(),
+      body: buildStdinDrainBody(ctx, state),
+      exported: false,
+    });
+    ctx.funcMap.set("__rl_stdin_drain", state.stdinDrainFuncIdx);
+
+    // __rl_poll_fd0_or_clock(deadlineNs i64, nowNs i64) -> i32 : multi-sub
+    // poll_oneoff on (fd0 readable, nearest-timer clock). Returns 1 if fd0 is
+    // readable, else 0 (clock fired / timeout). When no timer is pending
+    // (deadline == I64_MAX) it polls fd0 alone (blocking until readable/EOF).
+    state.pollFd0OrClockFuncIdx = nextFuncIdx++;
+    ctx.mod.functions.push({
+      name: "__rl_poll_fd0_or_clock",
+      typeIdx: addFuncType(ctx, [{ kind: "i64" }, { kind: "i64" }], [{ kind: "i32" }], "$__rl_poll_fd0_type"),
+      locals: buildPollFd0Locals(),
+      body: buildPollFd0OrClockBody(ctx, state),
+      exported: false,
+    });
+    ctx.funcMap.set("__rl_poll_fd0_or_clock", state.pollFd0OrClockFuncIdx);
+  }
+
   // The run loop references __wasi_sleep_ms by funcIdx; it was registered
   // earlier in the deferred-helper phase (needsPollOneoff). Resolve now.
   const sleepMsIdx = ctx.funcMap.get("__wasi_sleep_ms");
-  state.runLoopFuncIdx = baseFuncIdx + 6;
+  state.runLoopFuncIdx = nextFuncIdx++;
   ctx.mod.functions.push({
     name: "__run_event_loop",
     typeIdx: addFuncType(ctx, [], [], "$__run_event_loop_type"),
-    locals: buildRunLoopLocals(),
+    locals: buildRunLoopLocals(state),
     body: buildRunLoopBody(state, sleepMsIdx),
     exported: false,
   });
@@ -1878,15 +2002,22 @@ function buildRunLoopNowBody(clockIdx: number | undefined): Instr[] {
   ];
 }
 
-function buildRunLoopLocals(): import("../ir/types.js").LocalDef[] {
-  return [
+function buildRunLoopLocals(state: AsyncSchedulerState): import("../ir/types.js").LocalDef[] {
+  const locals: import("../ir/types.js").LocalDef[] = [
     { name: "$now", type: { kind: "i64" } },
     { name: "$next", type: { kind: "i64" } },
     { name: "$waitMs", type: { kind: "i64" } },
   ];
+  if (state.stdinReactor) {
+    // $pending: i32 — 1 while any timer OR the fd0 subscription is still live.
+    locals.push({ name: "$pending", type: { kind: "i32" } });
+  }
+  return locals;
 }
 
 function buildRunLoopBody(state: AsyncSchedulerState, sleepMsIdx: number | undefined): Instr[] {
+  if (state.stdinReactor) return buildRunLoopBodyWithFdReactor(state);
+
   const now = 0;
   const next = 1;
   const waitMs = 2;
@@ -1959,6 +2090,502 @@ function buildRunLoopBody(state: AsyncSchedulerState, sleepMsIdx: number | undef
       ],
     },
   ];
+}
+
+/**
+ * #2632 Phase 2 — the fd-readiness reactor variant of the run loop. Waits on
+ * "fd0-readable OR the nearest timer deadline" (multi-subscription poll) and
+ * drains fd0 into the internal stdin buffer each tick, until no timers AND no
+ * fd0 subscription remain. Used only when `state.stdinReactor` is set.
+ *
+ * Each tick:
+ *   drain microtasks
+ *   now = clock
+ *   if fd0 active: set fd0 non-blocking (once); drain available bytes (fd_read);
+ *                  a 0-byte read at a readable fd is EOF → drop the subscription
+ *   fire due timers (a timer callback may consume the buffered bytes / read more)
+ *   drain microtasks
+ *   next = peek_deadline
+ *   pending = (next != I64_MAX) || fd0 active
+ *   if !pending: break
+ *   poll_fd0_or_clock(next, now)   ;; block on fd0-readable OR the nearest deadline
+ *   loop
+ */
+function buildRunLoopBodyWithFdReactor(state: AsyncSchedulerState): Instr[] {
+  const now = 0;
+  const next = 1;
+  // $waitMs (2) is unused in the fd-reactor path (poll computes the timeout
+  // internally) but kept in the locals list for a stable layout.
+  const pending = 3;
+
+  const tickBody: Instr[] = [
+    { op: "call", funcIdx: state.drainFuncIdx },
+    { op: "call", funcIdx: state.runLoopNowFuncIdx },
+    { op: "local.set", index: now },
+
+    // Drain fd0 into the internal stdin buffer if the subscription is live.
+    {
+      op: "global.get",
+      index: state.stdinFdActiveGlobalIdx,
+    } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [{ op: "call", funcIdx: state.stdinDrainFuncIdx }, { op: "drop" }],
+    },
+
+    // Fire due timers (callbacks may read the buffered stdin bytes), then drain.
+    { op: "local.get", index: now },
+    { op: "call", funcIdx: state.timerFireDueFuncIdx },
+    { op: "call", funcIdx: state.drainFuncIdx },
+
+    // next = peek
+    { op: "call", funcIdx: state.timerPeekDeadlineFuncIdx },
+    { op: "local.set", index: next },
+
+    // pending = (next != I64_MAX) | fd0_active
+    { op: "local.get", index: next },
+    { op: "i64.const", value: I64_MAX },
+    { op: "i64.ne" } as Instr,
+    { op: "global.get", index: state.stdinFdActiveGlobalIdx } as Instr,
+    { op: "i32.or" } as Instr,
+    { op: "local.set", index: pending },
+
+    // if !pending → no timers and no fd subscription → exit.
+    { op: "local.get", index: pending },
+    { op: "i32.eqz" } as Instr,
+    { op: "br_if", depth: 1 },
+
+    // Block on fd0-readable OR the nearest timer deadline. The result (1 if
+    // fd0 readable) is dropped; the next iteration's drain reads whatever is
+    // ready and fires whichever timer is now due.
+    { op: "local.get", index: next },
+    { op: "call", funcIdx: state.runLoopNowFuncIdx },
+    { op: "call", funcIdx: state.pollFd0OrClockFuncIdx } as Instr,
+    { op: "drop" },
+
+    { op: "br", depth: 0 },
+  ];
+
+  return [
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: tickBody,
+        },
+      ],
+    },
+  ];
+}
+
+// ── #2632 Phase 2 — fd-readiness reactor helper bodies ───────────────────
+
+function buildStdinDrainLocals(): import("../ir/types.js").LocalDef[] {
+  return [
+    { name: "$errno", type: { kind: "i32" } },
+    { name: "$nread", type: { kind: "i32" } },
+    { name: "$space", type: { kind: "i32" } },
+    { name: "$dst", type: { kind: "i32" } },
+  ];
+}
+
+/**
+ * #2632 Phase 2 — `__rl_stdin_drain() -> i32`.
+ *
+ * Sets fd 0 non-blocking once (`fd_fdstat_set_flags(0, FDFLAG_NONBLOCK)`), then
+ * does a single non-blocking `fd_read` of fd 0 into the internal stdin buffer
+ * (RL_STDIN_BUF_START), appending at the write cursor `__stdin_buf_len`.
+ * Returns the number of bytes read. A 0-byte read at a *readable* fd is EOF
+ * (the reactor only drains after a readiness signal / on the first tick), so a
+ * 0-byte read drops the fd0 subscription (`__stdin_fd_active = 0`). EAGAIN
+ * (no data yet, errno 6) is treated as "0 bytes this tick" WITHOUT EOF.
+ *
+ * Buffer management: when the read cursor has consumed the whole buffer
+ * (`pos == len`), reset both cursors to 0 to reclaim space before appending.
+ */
+function buildStdinDrainBody(ctx: CodegenContext, state: AsyncSchedulerState): Instr[] {
+  const fdReadIdx = ctx.wasiFdReadIdx;
+  const setFlagsIdx = ctx.wasiFdFdstatSetFlagsIdx;
+  const errno = 0;
+  const nread = 1;
+  const space = 2;
+  const dst = 3;
+  // WASI errno: 6 = EAGAIN (would block — no data available right now).
+  const EAGAIN = 6;
+  const FDFLAG_NONBLOCK = 0x4;
+
+  if (fdReadIdx === undefined || fdReadIdx < 0) {
+    // No fd_read import → nothing to drain; report EOF so the loop can exit.
+    return [
+      { op: "i32.const", value: 0 },
+      { op: "global.set", index: state.stdinFdActiveGlobalIdx } as Instr,
+      { op: "i32.const", value: 0 },
+    ];
+  }
+
+  return [
+    // Set fd0 non-blocking once.
+    { op: "global.get", index: state.stdinNonblockSetGlobalIdx } as Instr,
+    { op: "i32.eqz" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [
+        { op: "i32.const", value: 1 },
+        { op: "global.set", index: state.stdinNonblockSetGlobalIdx } as Instr,
+        ...(setFlagsIdx === undefined || setFlagsIdx < 0
+          ? []
+          : [
+              { op: "i32.const", value: 0 } as Instr, // fd 0
+              { op: "i32.const", value: FDFLAG_NONBLOCK } as Instr,
+              { op: "call", funcIdx: setFlagsIdx } as Instr,
+              { op: "drop" } as Instr, // ignore errno (best-effort)
+            ]),
+      ],
+    },
+
+    // Reclaim space when the buffer is fully consumed: if pos == len, reset both.
+    { op: "global.get", index: state.stdinBufPosGlobalIdx } as Instr,
+    { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [
+        { op: "i32.const", value: 0 },
+        { op: "global.set", index: state.stdinBufPosGlobalIdx } as Instr,
+        { op: "i32.const", value: 0 },
+        { op: "global.set", index: state.stdinBufLenGlobalIdx } as Instr,
+      ],
+    },
+
+    // space = CAP - len ; dst = BUF_START + len.
+    { op: "i32.const", value: RL_STDIN_BUF_CAP },
+    { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
+    { op: "i32.sub" } as Instr,
+    { op: "local.set", index: space },
+    { op: "i32.const", value: RL_STDIN_BUF_START },
+    { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
+    { op: "i32.add" } as Instr,
+    { op: "local.set", index: dst },
+
+    // If no space left, report 0 bytes (consumer must drain first).
+    { op: "local.get", index: space },
+    { op: "i32.eqz" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [{ op: "i32.const", value: 0 }, { op: "return" } as Instr],
+    },
+
+    // Build the iovec at RL_FDREAD_IOV_OFFSET: { base=dst, len=space }.
+    { op: "i32.const", value: RL_FDREAD_IOV_OFFSET } as Instr,
+    { op: "local.get", index: dst },
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+    { op: "i32.const", value: RL_FDREAD_IOV_OFFSET + 4 } as Instr,
+    { op: "local.get", index: space },
+    { op: "i32.store", align: 2, offset: 0 } as Instr,
+
+    // errno = fd_read(0, iovs=RL_FDREAD_IOV_OFFSET, iovs_len=1, nread=RL_FDREAD_NREAD_OFFSET)
+    { op: "i32.const", value: 0 } as Instr, // fd 0
+    { op: "i32.const", value: RL_FDREAD_IOV_OFFSET } as Instr,
+    { op: "i32.const", value: 1 } as Instr,
+    { op: "i32.const", value: RL_FDREAD_NREAD_OFFSET } as Instr,
+    { op: "call", funcIdx: fdReadIdx } as Instr,
+    { op: "local.set", index: errno },
+
+    // EAGAIN → no data yet, return 0 WITHOUT EOF.
+    { op: "local.get", index: errno },
+    { op: "i32.const", value: EAGAIN },
+    { op: "i32.eq" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [{ op: "i32.const", value: 0 }, { op: "return" } as Instr],
+    },
+
+    // nread = mem[RL_FDREAD_NREAD_OFFSET]
+    { op: "i32.const", value: RL_FDREAD_NREAD_OFFSET } as Instr,
+    { op: "i32.load", align: 2, offset: 0 } as Instr,
+    { op: "local.set", index: nread },
+
+    // If errno != 0 (and not EAGAIN), treat as EOF (e.g. EBADF) to avoid spin.
+    { op: "local.get", index: errno },
+    { op: "i32.const", value: 0 },
+    { op: "i32.ne" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [
+        { op: "i32.const", value: 0 },
+        { op: "global.set", index: state.stdinFdActiveGlobalIdx } as Instr,
+        { op: "i32.const", value: 0 },
+        { op: "return" } as Instr,
+      ],
+    },
+
+    // nread == 0 at a readable fd → EOF: drop the subscription.
+    { op: "local.get", index: nread },
+    { op: "i32.eqz" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [{ op: "i32.const", value: 0 }, { op: "global.set", index: state.stdinFdActiveGlobalIdx } as Instr],
+      else: [
+        // len += nread
+        { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
+        { op: "local.get", index: nread },
+        { op: "i32.add" } as Instr,
+        { op: "global.set", index: state.stdinBufLenGlobalIdx } as Instr,
+      ],
+    },
+
+    { op: "local.get", index: nread },
+  ];
+}
+
+function buildPollFd0Locals(): import("../ir/types.js").LocalDef[] {
+  return [
+    { name: "$timeoutNs", type: { kind: "i64" } },
+    { name: "$nsubs", type: { kind: "i32" } },
+    { name: "$nev", type: { kind: "i32" } },
+    { name: "$i", type: { kind: "i32" } },
+    { name: "$evType", type: { kind: "i32" } },
+    { name: "$readable", type: { kind: "i32" } },
+  ];
+}
+
+/**
+ * #2632 Phase 2 — `__rl_poll_fd0_or_clock(deadlineNs i64, nowNs i64) -> i32`.
+ *
+ * Builds a multi-subscription `poll_oneoff`:
+ *   sub[0] = FD_READ on fd 0 (always, while the loop calls this — fd0 is active)
+ *   sub[1] = CLOCK on CLOCK_MONOTONIC with timeout = max(0, deadlineNs - nowNs),
+ *            included ONLY when a timer is pending (deadlineNs != I64_MAX).
+ * Reads back the event_t array and returns 1 if any event is an FD_READ
+ * (type tag 1) → fd0 became readable; else 0 (the clock fired / timeout).
+ *
+ * `subscription_t` layout (48 bytes), matching `emitWasiSleepMsHelper`:
+ *   [0..7]   userdata (u64)
+ *   [8]      tag (u8): 0=CLOCK, 1=FD_READ
+ *   [16..]   union: FD_READ → fd (u32) @16 ; CLOCK → clockid @16, timeout @24, …
+ * `event_t` layout (32 bytes): [0..7] userdata, [8..9] errno (u16),
+ *   [10] type (u8): 0=CLOCK, 1=FD_READ, …
+ */
+function buildPollFd0OrClockBody(ctx: CodegenContext, state: AsyncSchedulerState): Instr[] {
+  const pollIdx = ctx.wasiPollOneoffIdx;
+  const deadline = 0;
+  const nowNs = 1;
+  const timeoutNs = 2;
+  const nsubs = 3;
+  const nev = 4;
+  const i = 5;
+  const evType = 6;
+  const readable = 7;
+
+  if (pollIdx === undefined || pollIdx < 0) {
+    // No poll import → cannot wait; report not-readable so the caller loops
+    // (the drain on the next tick will detect EOF/no-fd and exit).
+    return [{ op: "i32.const", value: 0 }];
+  }
+
+  return [
+    // ── sub[0] @ RL_POLL_SUB0_OFFSET = FD_READ on fd 0 ──
+    // userdata @0 = 0
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET } as Instr,
+    { op: "i64.const", value: 0n },
+    { op: "i64.store", align: 3, offset: 0 },
+    // tag @8 = 1 (EVENTTYPE_FD_READ); pad → store 1 over 8 bytes
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 8 } as Instr,
+    { op: "i64.const", value: 1n },
+    { op: "i64.store", align: 3, offset: 0 },
+    // fd @16 = 0 (and clear the rest of the fd_read union, 32 bytes → 4×i64)
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 16 } as Instr,
+    { op: "i64.const", value: 0n },
+    { op: "i64.store", align: 3, offset: 0 },
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 24 } as Instr,
+    { op: "i64.const", value: 0n },
+    { op: "i64.store", align: 3, offset: 0 },
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 32 } as Instr,
+    { op: "i64.const", value: 0n },
+    { op: "i64.store", align: 3, offset: 0 },
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET + 40 } as Instr,
+    { op: "i64.const", value: 0n },
+    { op: "i64.store", align: 3, offset: 0 },
+
+    // nsubs = 1 (fd0 only) unless a timer is pending.
+    { op: "i32.const", value: 1 },
+    { op: "local.set", index: nsubs },
+
+    // If deadline != I64_MAX → add the clock subscription as sub[1].
+    { op: "local.get", index: deadline },
+    { op: "i64.const", value: I64_MAX },
+    { op: "i64.ne" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "empty" } as any,
+      then: [
+        // timeoutNs = max(0, deadline - now)
+        { op: "local.get", index: deadline },
+        { op: "local.get", index: nowNs },
+        { op: "i64.sub" } as Instr,
+        { op: "local.set", index: timeoutNs },
+        { op: "local.get", index: timeoutNs },
+        { op: "i64.const", value: 0n },
+        { op: "i64.lt_s" } as Instr,
+        {
+          op: "if",
+          blockType: { kind: "empty" } as any,
+          then: [
+            { op: "i64.const", value: 0n },
+            { op: "local.set", index: timeoutNs },
+          ],
+        },
+        // sub[1] @ RL_POLL_SUB1_OFFSET = CLOCK on CLOCK_MONOTONIC.
+        // userdata @0 = 0
+        { op: "i32.const", value: RL_POLL_SUB1_OFFSET } as Instr,
+        { op: "i64.const", value: 0n },
+        { op: "i64.store", align: 3, offset: 0 },
+        // tag @8 = 0 (EVENTTYPE_CLOCK), pad → 0
+        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 8 } as Instr,
+        { op: "i64.const", value: 0n },
+        { op: "i64.store", align: 3, offset: 0 },
+        // clockid @16 = 1 (CLOCK_MONOTONIC), pad @20 = 0 → combined i64
+        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 16 } as Instr,
+        { op: "i64.const", value: 1n },
+        { op: "i64.store", align: 3, offset: 0 },
+        // timeout @24 = timeoutNs
+        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 24 } as Instr,
+        { op: "local.get", index: timeoutNs },
+        { op: "i64.store", align: 3, offset: 0 },
+        // precision @32 = 0
+        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 32 } as Instr,
+        { op: "i64.const", value: 0n },
+        { op: "i64.store", align: 3, offset: 0 },
+        // flags @40 = 0 (relative), pad → clear 8 bytes
+        { op: "i32.const", value: RL_POLL_SUB1_OFFSET + 40 } as Instr,
+        { op: "i64.const", value: 0n },
+        { op: "i64.store", align: 3, offset: 0 },
+        // nsubs = 2
+        { op: "i32.const", value: 2 },
+        { op: "local.set", index: nsubs },
+      ],
+    },
+
+    // poll_oneoff(in=SUB0, out=EVT, nsubs, nevents_out=NEVENTS) — errno dropped.
+    { op: "i32.const", value: RL_POLL_SUB0_OFFSET } as Instr,
+    { op: "i32.const", value: RL_POLL_EVT_OFFSET } as Instr,
+    { op: "local.get", index: nsubs },
+    { op: "i32.const", value: RL_POLL_NEVENTS_OFFSET } as Instr,
+    { op: "call", funcIdx: pollIdx } as Instr,
+    { op: "drop" } as Instr,
+
+    // nev = mem[RL_POLL_NEVENTS_OFFSET]
+    { op: "i32.const", value: RL_POLL_NEVENTS_OFFSET } as Instr,
+    { op: "i32.load", align: 2, offset: 0 } as Instr,
+    { op: "local.set", index: nev },
+
+    // readable = 0 ; scan events for an FD_READ (event_t.type @ +10 == 1).
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: readable },
+    { op: "i32.const", value: 0 },
+    { op: "local.set", index: i },
+    {
+      op: "block",
+      blockType: { kind: "empty" },
+      body: [
+        {
+          op: "loop",
+          blockType: { kind: "empty" },
+          body: [
+            { op: "local.get", index: i },
+            { op: "local.get", index: nev },
+            { op: "i32.ge_s" } as Instr,
+            { op: "br_if", depth: 1 },
+
+            // evType = u8 mem[EVT + i*32 + 10]
+            { op: "local.get", index: i },
+            { op: "i32.const", value: 32 },
+            { op: "i32.mul" } as Instr,
+            { op: "i32.const", value: RL_POLL_EVT_OFFSET + 10 },
+            { op: "i32.add" } as Instr,
+            { op: "i32.load8_u", align: 0, offset: 0 } as Instr,
+            { op: "local.set", index: evType },
+
+            // if evType == 1 (FD_READ) → readable = 1
+            { op: "local.get", index: evType },
+            { op: "i32.const", value: 1 },
+            { op: "i32.eq" } as Instr,
+            {
+              op: "if",
+              blockType: { kind: "empty" } as any,
+              then: [
+                { op: "i32.const", value: 1 },
+                { op: "local.set", index: readable },
+              ],
+            },
+
+            { op: "local.get", index: i },
+            { op: "i32.const", value: 1 },
+            { op: "i32.add" } as Instr,
+            { op: "local.set", index: i },
+            { op: "br", depth: 0 },
+          ],
+        },
+      ],
+    },
+
+    { op: "local.get", index: readable },
+  ];
+}
+
+/**
+ * #2632 Phase 2 — emit a `__wasiStdinReadByte()` lowering at a call site.
+ * Pushes an i32 onto the caller stack: the next buffered stdin byte (0..255),
+ * or -1 when the internal buffer is empty. The reactor (running in `_start`)
+ * drains fd0 into the buffer; a timer/microtask callback reads it one byte at a
+ * time via this primitive. This is the internal-buffer access path Phase 3's
+ * `process.stdin` Readable will build `.read()` on top of.
+ */
+export function emitStdinReadByte(ctx: CodegenContext, fctx: FunctionContext): void {
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  // pos < len ? (byte = mem[BUF_START + pos]; pos++; byte) : -1
+  fctx.body.push(
+    { op: "global.get", index: state.stdinBufPosGlobalIdx } as Instr,
+    { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
+    { op: "i32.lt_s" } as Instr,
+    {
+      op: "if",
+      blockType: { kind: "val", type: { kind: "i32" } } as any,
+      then: [
+        // byte = mem[BUF_START + pos]
+        { op: "i32.const", value: RL_STDIN_BUF_START } as Instr,
+        { op: "global.get", index: state.stdinBufPosGlobalIdx } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "i32.load8_u", align: 0, offset: 0 } as Instr,
+        // pos++
+        { op: "global.get", index: state.stdinBufPosGlobalIdx } as Instr,
+        { op: "i32.const", value: 1 } as Instr,
+        { op: "i32.add" } as Instr,
+        { op: "global.set", index: state.stdinBufPosGlobalIdx } as Instr,
+      ] as Instr[],
+      else: [{ op: "i32.const", value: -1 } as Instr] as Instr[],
+    } as Instr,
+  );
+}
+
+/**
+ * #2632 Phase 2 — mark the stdin reactor active for this module. MUST be called
+ * BEFORE `ensureTimerHeap` so the run-loop body is built in the fd-reactor
+ * shape and the Phase-2 globals/helpers register. Idempotent.
+ */
+export function enableStdinReactor(ctx: CodegenContext): void {
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  state.stdinReactor = true;
 }
 
 /**

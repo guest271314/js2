@@ -32,6 +32,7 @@ import {
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
   emitStandalonePromiseThen,
+  emitStdinReadByte,
   emitTimerAdd,
   emitTimerCallbackWrapper,
   emitTimerCancel,
@@ -3116,6 +3117,17 @@ function tryWasiTimerCall(
   if (!ctx.wasi) return undefined;
   if (!ts.isIdentifier(expr.expression)) return undefined;
   const name = expr.expression.text;
+
+  // #2632 Phase 2 — `__wasiStdinReadByte()` reads the next byte the fd0 reactor
+  // buffered into the internal stdin buffer (or -1 if empty), as a JS number.
+  // This is the internal-buffer primitive Phase 3's `process.stdin.read()`
+  // builds on. The timer heap + run loop were registered in the deferred phase.
+  if (name === "__wasiStdinReadByte") {
+    emitStdinReadByte(ctx, fctx);
+    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    return { kind: "f64" };
+  }
+
   if (
     name !== "setTimeout" &&
     name !== "setInterval" &&

@@ -1557,6 +1557,8 @@ export interface CodegenContext {
   wasiPathOpenIdx: number;
   wasiFdCloseIdx: number;
   wasiPollOneoffIdx?: number;
+  /** (#2632 Phase 2) wasi_snapshot_preview1::fd_fdstat_set_flags import func idx — undefined if not registered. */
+  wasiFdFdstatSetFlagsIdx?: number;
   wasiBumpPtrGlobalIdx: number;
   /** #1482: wasi_snapshot_preview1::environ_sizes_get import index (-1 = not registered) */
   wasiEnvironSizesGetIdx: number;
@@ -1578,6 +1580,8 @@ export interface CodegenContext {
   wasiPendingSleepMsHelper?: boolean;
   /** (#2632) Pending flag — register timer heap + run-loop reactor after lib-globals scan. */
   wasiPendingTimerHeap?: boolean;
+  /** (#2632 Phase 2) Pending flag — activate the fd0 stdin reactor (multi-sub poll + internal buffer) before timer-heap registration. */
+  wasiPendingStdinReactor?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
   wasiNodeFsFuncs: Set<string>;
   /**
