@@ -4,6 +4,26 @@ Issues organized by dependency order -- work items at the top are ready now,
 items below unlock when their dependencies complete. No sprint batching needed:
 pick any "ready" item and start.
 
+## Sprint 65 landings (2026-06-23 session — value-rep substrate spine)
+
+This session's merged architecture slices (all 0-regr vs the `merge_group`
+standalone floor #2097 + per-process test262 floor). These advance — but do
+not close — their parent epics; the parent issues stay carried.
+
+| PR | Issue / parent epic | What landed |
+|----|---------------------|-------------|
+| #1975 | #2580 M3 Stage A (value-rep) | standalone inline-literal `[[Prototype]]` link — `Object.create({...}).foo` resolves |
+| #1977 | #2623 → Promise epic (#1042/#2614) | class-extends-Promise value-read identity unified w/ capability ctor (+1 row) |
+| #1981 | #2623-A → async epic (#1042) | single-box nested capture of an already-boxed var (`alreadyBoxed`); fixes `illegal cast in Constructor()` |
+| #1984 | #2618 Slice 1 → Proxy epic (#1355) | Proxy START-timing bridge + callable-target wrap; apply/construct 14→15 (+1) |
+| #1986 *(open, BLOCKED)* | #2580 M3 B-pre | re-resolve `__is_truthy` funcidx after callback compile (some/every/filter invalid-Wasm) |
+
+Docs/staging this session: #1973 (M3-A spec mis-attributed → DEFER), #1976/#1979
+(M3 Stage B scoping + cluster-composition re-ground), #1974 (#2618/#2623-C Slice
+C → CONFIRM DEFER, #56-zone). The corrected M3 sequence is **accessor cluster
+(`Object.defineProperty`, 181/266 files) first → functor `.prototype=` lap
+(51 files, escape-analysis-gated, #1888-eject risk) last** — not a row-count lap.
+
 ## Sprint 57 — acorn dogfood + backend-agnostic IR (added 2026-05-29)
 
 Architectural sprint. Two tracks; conformance guard is zero-regression.
