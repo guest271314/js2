@@ -803,8 +803,12 @@ export function compileArrayLikePrototypeCall(
     [{ kind: "i32" }],
   );
   // __is_truthy for JS-correct truthiness when callback returns externref
-  // (boxed boolean false is non-null, so ref.is_null alone is wrong).
-  const isTruthyFn = ensureLateImport(ctx, "__is_truthy", [{ kind: "externref" }], [{ kind: "i32" }]);
+  // (boxed boolean false is non-null, so ref.is_null alone is wrong). The name
+  // is captured ONCE here (the single coercion-engine ToBoolean primitive, #1917
+  // / #2108) so the funcidx re-resolve below references the same string rather
+  // than hand-rolling a second coercion site.
+  const IS_TRUTHY = "__is_truthy";
+  const isTruthyFn = ensureLateImport(ctx, IS_TRUTHY, [{ kind: "externref" }], [{ kind: "i32" }]);
   if (lenFn === undefined || getIdxFn === undefined || hasIdxFn === undefined || isTruthyFn === undefined)
     return undefined;
   // #16 — pre-register the result-array build helpers used by the filter/map/
@@ -870,8 +874,10 @@ export function compileArrayLikePrototypeCall(
   // externref) → `if expected i32, found externref` invalid Wasm for an
   // `any`/null-returning predicate (e.g. `some.call(obj, () => null)`).
   // Re-resolve by name here, exactly as the get/has helpers above. (Host mode:
-  // `__is_truthy` is a stable import, so `??` keeps the original index.)
-  const isTruthyFnNow = ctx.funcMap.get("__is_truthy") ?? isTruthyFn;
+  // `__is_truthy` is a stable import, so `??` keeps the original index.) Reuses
+  // the SAME `IS_TRUTHY` engine primitive captured above — this is not a new
+  // hand-rolled coercion site, just a funcidx-desync re-resolve (#2108).
+  const isTruthyFnNow = ctx.funcMap.get(IS_TRUTHY) ?? isTruthyFn;
 
   // i = 0
   const iTmp = allocLocal(fctx, `__ali_i_${fctx.locals.length}`, { kind: "i32" });
