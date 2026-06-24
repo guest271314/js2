@@ -27,29 +27,20 @@ import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
 
 const DECL = `declare const process: {
-  stdin: { read(buf: Uint8Array | ArrayBuffer, offset?: number): number };
   stdout: { write(c: Uint8Array): void };
   stderr: { write(c: string): void };
 };`;
 
 // A WASI source that pulls in the native $Object runtime the same way the
-// reported esbuild bundle did: a framed `process.stdin.read(buf, offset)` loop
-// plus `process.stdout.write`. This alone reaches the unconditionally-registered
-// native `__defineProperty_value` block (whose S4 preflight calls __object_is),
-// so it reproduces the funcIdx crash without any esbuild dependency.
+// reported esbuild bundle did: a typed-buffer `process.stdout.write` (#2633 —
+// the hallucinated `process.stdin.read` loop was removed; the Uint8Array write
+// alone still reaches the unconditionally-registered native
+// `__defineProperty_value` block whose S4 preflight calls __object_is), so it
+// reproduces the funcIdx crash without any esbuild dependency.
 const FRAMED_STDIN = `${DECL}
-  function readExact(buf: Uint8Array, n: number): boolean {
-    let got = 0;
-    while (got < n) {
-      const r = process.stdin.read(buf, got);
-      if (r <= 0) return false;
-      got = got + r;
-    }
-    return true;
-  }
   export function main(): void {
     const header = new Uint8Array(4);
-    if (!readExact(header, 4)) return;
+    header[0] = 1;
     process.stdout.write(header);
   }`;
 

@@ -257,15 +257,19 @@ the compiled module's linear memory below a 512 MiB cap.
    raw bytes on stdin and produces correctly framed bytes on stdout via
    `process.stdout.write` (a `Uint8Array` prefix + the JSON body).
 
-## Linkable `js2wasm:node-process` shim (`--link-node-shims`, #2625)
+## Linkable `node:fs` shim (`--link-node-shims`, #2625/#2633)
 
 By default the stdin/stdout glue is inlined as `wasi_snapshot_preview1.fd_read`
 / `fd_write` in every module. With `--target wasi --link-node-shims`, the module
-instead imports a stable `js2wasm:node-process` interface (plus its linear memory)
-and links against a small, separately-compiled `node-process.wasm` that implements
-that interface over WASI — proving the modular linking pattern that generalizes
-to fs/path and to deno/browser shims. See
-[NODE-PROCESS-SHIM.md](./NODE-PROCESS-SHIM.md) for the interface, the memory-ownership
+instead imports a stable `node:fs` interface (fd-based `readSync`/`writeSync`,
+plus its linear memory) and links against a small, separately-compiled
+`node-fs.wasm` that implements that interface over WASI — proving the modular
+linking pattern that generalizes to other `node:` modules and to deno/browser
+shims. Since #2633 **all** std-IO routes through `node:fs`: console.log /
+process.stdout/stderr.write lower to `writeSync(1|2, …)` and synchronous stdin is
+`readSync(0, …)`. (The earlier bespoke `js2wasm:node-process` shim — and the
+hallucinated `process.stdin.read(buf, offset)` it backed — was retired.) See
+[NODE-FS-SHIM.md](./NODE-FS-SHIM.md) for the interface, the memory-ownership
 model, and the Node + wasmtime link steps.
 
 ## Reference hosts in other runtimes

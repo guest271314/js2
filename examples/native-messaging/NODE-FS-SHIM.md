@@ -54,9 +54,10 @@ There is no cycle (the shim never imports anything from the user module). The
 shim reads/writes the user's bytes over the *same* memory, builds the WASI iovec
 in its own reserved scratch, and issues the syscall.
 
-(If a module uses **both** `process`/`console` IO and `node:fs`, the
-`node-process` shim owns the memory and node-fs links against the same bytes —
-the memory is byte-identical, min 3 pages, same layout.)
+(Since #2633, **all** std-IO under `--link-node-shims` goes through `node:fs`:
+console.log / process.stdout/stderr.write lower to `writeSync(1|2, …)` and
+synchronous stdin is `readSync(0, …)`. `node:fs` owns the single shared linear
+memory; the bespoke `js2wasm:node-process` shim was retired.)
 
 ## Build
 

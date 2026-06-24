@@ -37,19 +37,15 @@
 /** Modules other than `env` whose imports are not JS-host bindings and are always allowed. */
 export const ALWAYS_ALLOWED_IMPORT_MODULES: ReadonlySet<string> = new Set([
   "wasi_snapshot_preview1",
-  // #2625 — `js2wasm:node-process` is a canonical linkable Wasm interface
-  // (a separately-compiled per-module shim implements it over WASI), NOT a
-  // JS-host binding. Like `wasi_snapshot_preview1`, it is always allowed under
-  // strict dual-mode: the module that imports it links against
-  // `node-process.wasm` (or any conforming deno/browser shim), no JS runtime
-  // required. Per-module Node shims are named `js2wasm:node-<mod>`.
-  "js2wasm:node-process",
-  // #2631 — `node:fs` fd-based readSync/writeSync. The module declares WHAT host
-  // API it needs (`node:fs`), not HOW it's satisfied: the import is bound at
-  // LINK time by our `node-fs.wat` shim (over WASI fd_read/fd_write), a native
-  // WASI host, or the real `node:fs` module under a JS host. Like
+  // #2631 / #2633 — `node:fs` fd-based readSync/writeSync. The module declares
+  // WHAT host API it needs (`node:fs`), not HOW it's satisfied: the import is
+  // bound at LINK time by our `node-fs.wat` shim (over WASI fd_read/fd_write), a
+  // native WASI host, or the real `node:fs` module under a JS host. Like
   // `wasi_snapshot_preview1`, it is a linkable interface, not a JS-host binding,
-  // so it is always allowed under strict dual-mode.
+  // so it is always allowed under strict dual-mode. Since #2633 it is the sole
+  // std-IO substrate under `--link-node-shims` (console.log / process.std*.write
+  // lower to `writeSync(1|2, …)`); the bespoke `js2wasm:node-process` shim was
+  // retired. Per-module Node shims are named after the declared module (`node:<mod>`).
   "node:fs",
 ]);
 

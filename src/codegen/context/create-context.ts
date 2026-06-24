@@ -219,9 +219,6 @@ export function createCodegenContext(
     wasi: options?.wasi ?? false,
     // #2625 — the linkable js2wasm:node-<mod> shims only apply under WASI; ignored otherwise.
     linkNodeShims: !!(options?.wasi && options?.linkNodeShims),
-    nodeIoStdoutWriteIdx: -1,
-    nodeIoStderrWriteIdx: -1,
-    nodeIoStdinReadIdx: -1,
     nodeFsReadSyncIdx: -1,
     nodeFsWriteSyncIdx: -1,
     standalone: options?.standalone ?? false,

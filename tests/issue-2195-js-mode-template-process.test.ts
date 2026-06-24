@@ -6,7 +6,7 @@
 //      number_toString" — the checker-based primitiveNeeded pre-pass missed it
 //      while codegen still lowered the value as numeric.
 //   2. `process` raised TS2580 at *error* severity even though it is supported
-//      natively under WASI (node-process-api.ts).
+//      natively under WASI (node-fs-api.ts).
 import { describe, it, expect } from "vitest";
 import { compile } from "../src/index.js";
 
