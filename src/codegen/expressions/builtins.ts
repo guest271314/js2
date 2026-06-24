@@ -2521,17 +2521,32 @@ function compileConsoleCallWasi(
 ): InnerResult {
   const useStderr = method === "warn" || method === "error";
   const helperName = useStderr ? "__wasi_write_string_stderr" : "__wasi_write_string";
-  const writeStringIdx = ctx.funcMap.get(helperName);
-  if (writeStringIdx === undefined) return VOID_RESULT;
+  if (ctx.funcMap.get(helperName) === undefined) return VOID_RESULT;
+
+  // #2642 INVARIANT: a funcIdx read from ctx.funcMap must NEVER be reused
+  // across a compileExpression / ensure*-Helper call. Those calls can insert a
+  // late import (e.g. __extern_toString via ensureLateImport for a
+  // string|null / string|undefined externref-union concat argument), which
+  // shifts EVERY function index by +1 via flushLateImportShifts. A funcIdx
+  // captured BEFORE such a call resolves to the WRONG function afterward (it
+  // pointed at __wasi_write_string, post-shift it lands on __regex_escape),
+  // emitting `call expected (ref null N), found i32.const` — invalid Wasm under
+  // --target wasi. So re-read the index by NAME at every emission site instead
+  // of caching it. Same family as #1461 / #2193 — name-based repoint is the fix.
+  const writeStr = (offset: number, length: number): void => {
+    const idx = ctx.funcMap.get(helperName);
+    if (idx === undefined) return;
+    fctx.body.push({ op: "i32.const", value: offset } as Instr);
+    fctx.body.push({ op: "i32.const", value: length } as Instr);
+    fctx.body.push({ op: "call", funcIdx: idx });
+  };
 
   let first = true;
   for (const arg of expr.arguments) {
     // Add space separator between arguments (like console.log does)
     if (!first) {
       const spaceData = wasiAllocStringData(ctx, " ");
-      fctx.body.push({ op: "i32.const", value: spaceData.offset } as Instr);
-      fctx.body.push({ op: "i32.const", value: spaceData.length } as Instr);
-      fctx.body.push({ op: "call", funcIdx: writeStringIdx });
+      writeStr(spaceData.offset, spaceData.length);
     }
     first = false;
 
@@ -2539,41 +2554,37 @@ function compileConsoleCallWasi(
     if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) {
       const strValue = arg.text;
       const data = wasiAllocStringData(ctx, strValue);
-      fctx.body.push({ op: "i32.const", value: data.offset } as Instr);
-      fctx.body.push({ op: "i32.const", value: data.length } as Instr);
-      fctx.body.push({ op: "call", funcIdx: writeStringIdx });
+      writeStr(data.offset, data.length);
     } else if (ts.isTemplateExpression(arg)) {
       // Template literal: handle head + spans
       if (arg.head.text) {
         const headData = wasiAllocStringData(ctx, arg.head.text);
-        fctx.body.push({ op: "i32.const", value: headData.offset } as Instr);
-        fctx.body.push({ op: "i32.const", value: headData.length } as Instr);
-        fctx.body.push({ op: "call", funcIdx: writeStringIdx });
+        writeStr(headData.offset, headData.length);
       }
       for (const span of arg.templateSpans) {
-        // Compile the expression and convert to string output
+        // Compile the expression and convert to string output. These calls can
+        // add a late import → the trailing literal write below MUST re-read the
+        // index (writeStr does); do not cache it across compileExpression.
         const exprType = compileExpression(ctx, fctx, span.expression);
         emitWasiValueToStdout(ctx, fctx, exprType, span.expression, useStderr);
         if (span.literal.text) {
           const litData = wasiAllocStringData(ctx, span.literal.text);
-          fctx.body.push({ op: "i32.const", value: litData.offset } as Instr);
-          fctx.body.push({ op: "i32.const", value: litData.length } as Instr);
-          fctx.body.push({ op: "call", funcIdx: writeStringIdx });
+          writeStr(litData.offset, litData.length);
         }
       }
     } else {
-      // For non-literal arguments, compile the expression and handle by type
-      const argType = ctx.checker.getTypeAtLocation(arg);
+      // For non-literal arguments, compile the expression and handle by type.
+      // compileExpression can insert a late import (string|null concat) → the
+      // trailing newline write below MUST re-read the index (writeStr does).
       const exprType = compileExpression(ctx, fctx, arg);
       emitWasiValueToStdout(ctx, fctx, exprType, arg, useStderr);
     }
   }
 
-  // Emit newline at the end
+  // Emit newline at the end — re-read the index (it may have shifted while
+  // compiling a union-concat argument above).
   const newlineData = wasiAllocStringData(ctx, "\n");
-  fctx.body.push({ op: "i32.const", value: newlineData.offset } as Instr);
-  fctx.body.push({ op: "i32.const", value: newlineData.length } as Instr);
-  fctx.body.push({ op: "call", funcIdx: writeStringIdx });
+  writeStr(newlineData.offset, newlineData.length);
 
   return VOID_RESULT;
 }
@@ -2605,8 +2616,19 @@ function emitWasiValueToStdout(
 ): void {
   // #1493: pick stdout (fd=1) or stderr (fd=2) helper based on call site.
   const writeStringName = useStderr ? "__wasi_write_string_stderr" : "__wasi_write_string";
-  const writeStringIdx = ctx.funcMap.get(writeStringName);
-  if (writeStringIdx === undefined) return;
+  if (ctx.funcMap.get(writeStringName) === undefined) return;
+
+  // #2642 INVARIANT: never cache writeStringName's funcIdx across an
+  // ensure*-Helper call below — those can add a late import that shifts every
+  // index by +1. The placeholder-write fallbacks happen AFTER
+  // ensureWasiWriteAnyStringHelper, so they MUST re-read the index by name.
+  const writeStr = (offset: number, length: number): void => {
+    const idx = ctx.funcMap.get(writeStringName);
+    if (idx === undefined) return;
+    fctx.body.push({ op: "i32.const", value: offset } as Instr);
+    fctx.body.push({ op: "i32.const", value: length } as Instr);
+    fctx.body.push({ op: "call", funcIdx: idx });
+  };
 
   if (exprType === VOID_RESULT || exprType === null) {
     // void expression, nothing to write — drop already handled
@@ -2666,17 +2688,13 @@ function emitWasiValueToStdout(
       // Helper unavailable (no native strings) — fall back to placeholder.
       fctx.body.push({ op: "drop" } as Instr);
       const placeholder = wasiAllocStringData(ctx, "[object]");
-      fctx.body.push({ op: "i32.const", value: placeholder.offset } as Instr);
-      fctx.body.push({ op: "i32.const", value: placeholder.length } as Instr);
-      fctx.body.push({ op: "call", funcIdx: writeStringIdx });
+      writeStr(placeholder.offset, placeholder.length);
     }
   } else {
     // For other types (externref, etc.), just drop and write a placeholder
     fctx.body.push({ op: "drop" } as Instr);
     const placeholder = wasiAllocStringData(ctx, "[object]");
-    fctx.body.push({ op: "i32.const", value: placeholder.offset } as Instr);
-    fctx.body.push({ op: "i32.const", value: placeholder.length } as Instr);
-    fctx.body.push({ op: "call", funcIdx: writeStringIdx });
+    writeStr(placeholder.offset, placeholder.length);
   }
 }
 
