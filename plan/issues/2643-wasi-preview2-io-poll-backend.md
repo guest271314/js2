@@ -1,7 +1,8 @@
 ---
 id: 2643
 title: "WASI Preview 2 wasi:io/poll backend for the async event-loop reactor (#2632 Phase 4)"
-status: backlog
+status: done
+completed: 2026-06-24
 sprint: Backlog
 goal: wasi-async-runtime
 feasibility: hard
@@ -9,6 +10,28 @@ kind: feature
 created: 2026-06-24
 refs: [2632, 1774]
 ---
+
+> **Status (Slice A landed, 2026-06-24):** The issue's end-to-end acceptance
+> criterion — "the `process.stdin` Readable runs under a Preview-2 host with
+> identical behaviour" — is satisfied **behaviourally** via the official jco
+> Preview-1→Preview-2 adapter, with **zero codegen change**. The unchanged
+> `--target wasi` Preview-1 core module is adapted to a Preview-2 component
+> (`scripts/wasi-p2-component.mjs`, `jco new --adapt wasi_snapshot_preview1=…`)
+> and runs under wasmtime 44's component model, where `poll_oneoff`/`fd_read`/
+> `clock_time_get` are backed by the host's real `wasi:io/poll` + `wasi:clocks`
+> + `wasi:io/streams`. `tests/issue-2643-wasi-p2-adapter.test.ts` asserts
+> **byte-identical** streaming output to the Preview-1 wasmtime arm for the
+> Phase-3 stdin programs. The Preview-1 path is untouched (byte-neutral).
+>
+> **Deferred backlog (component-model epic, #2525 track):** Slices **B2–B4**
+> below — the *native* `wasi:io/poll` / `wasi:io/streams` / `output-stream`
+> reactor lowering (making js2wasm a component producer: canonical ABI,
+> resource tables, `cabi_realloc`, a `component-type` custom section) — deliver
+> **no new behaviour** over the adapter (its only payoff is ABI purity, no
+> adapter shim) and live inside the territory deferred by
+> `project_wasm_linking_core_over_component`. They stay in the backlog, gated on
+> the #2525 Component-Model track being picked up. Slice **B1** (flag plumbing
+> only) is the cheap seam for a future B2 but has no standalone value.
 
 # WASI Preview 2 `wasi:io/poll` backend (#2632 Phase 4)
 
