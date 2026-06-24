@@ -15,7 +15,7 @@ import {
   isWrapperObjectType,
 } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
-import { ensureAnyFromExternHelper, isAnyValue } from "./any-helpers.js";
+import { isAnyValue } from "./any-helpers.js";
 import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
@@ -43,7 +43,7 @@ import type { InnerResult } from "./shared.js";
 import { coerceType, compileExpression, ensureAnyHelpers, flushLateImportShifts } from "./shared.js";
 import { isLogicalAssignNamedEvalNameRead, resolveStructNameForExpr } from "./property-access.js";
 import { compileStringBinaryOp } from "./string-ops.js";
-import { emitLooseEq, emitStrictEq } from "./coercion-engine.js";
+import { emitAnyEqFromExternTemps, emitLooseEq, emitStrictEq } from "./coercion-engine.js";
 import { compileInstanceOf, compileTypeofComparison } from "./typeof-delete.js";
 
 // ── Binary operations ─────────────────────────────────────────────────
@@ -2851,23 +2851,17 @@ export function compileBinaryExpression(
             // (incl. the String⇄Number arm added in this PR) implement the spec
             // coercion natively. Host mode keeps `__host_loose_eq` (JS `==`),
             // unchanged.
+            // (#1917 E6) The standalone native IsLooselyEqual tail — box both
+            // externrefs to `$AnyValue` and call the keystone `__any_eq` — is the
+            // same tag-5-sensitive dispatch the coercion engine owns for E3, so it
+            // lives in `emitAnyEqFromExternTemps`. `null` ⇒ helpers unavailable
+            // (should not happen) → fall through to the host import below.
             const noJsHost = ctx.standalone === true || ctx.wasi === true;
             if (noJsHost) {
-              ensureAnyHelpers(ctx);
-              const fromExternIdx = ensureAnyFromExternHelper(ctx);
-              const anyEqIdx = ctx.funcMap.get("__any_eq");
-              if (fromExternIdx !== undefined && anyEqIdx !== undefined) {
-                return [
-                  { op: "local.get", index: tmpLeft },
-                  { op: "call", funcIdx: fromExternIdx } as Instr,
-                  { op: "local.get", index: tmpRight },
-                  { op: "call", funcIdx: fromExternIdx } as Instr,
-                  { op: "call", funcIdx: anyEqIdx } as Instr,
-                  ...(isNeqOp ? [{ op: "i32.eqz" } as Instr] : []),
-                ] as Instr[];
+              const nativeLooseEq = emitAnyEqFromExternTemps(ctx, tmpLeft, tmpRight, isNeqOp);
+              if (nativeLooseEq !== null) {
+                return nativeLooseEq;
               }
-              // Helpers unavailable (should not happen) — fall through to the
-              // host import below rather than emit nothing.
             }
             // Loose equality: __host_loose_eq (JS ==) handles all coercion
             // rules including null==undefined per §7.2.15. The result is
