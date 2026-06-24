@@ -103,6 +103,46 @@ function isNewUint8Array(expr: ts.Node): expr is ts.NewExpression {
 }
 
 /**
+ * #2045 B.3 — true iff this is a `new Uint8Array(...)` that allocates a FRESH
+ * linear arena: the length ctor `new Uint8Array(n)`, the array-literal ctor
+ * `new Uint8Array([a,b,…])`, or the zero-arg ctor `new Uint8Array()`. It is
+ * **false** for the *view* ctors — `new Uint8Array(arrayBuffer)`,
+ * `new Uint8Array(arrayBuffer, offset, len)`, `new Uint8Array(otherTypedArray)`
+ * — which alias an existing buffer rather than allocating one, so they are NOT
+ * linear-backable (the linear-new lowering only arena-allocates a length; a
+ * view's bytes live elsewhere). Seeding a view as a linear local made it look
+ * threadable, then codegen hit the "not backed by linear memory" reportError
+ * (probe B.3b).
+ *
+ * The discriminator is **fail-OPEN, exclusion-based**: a single arg is a length
+ * unless we can PROVE it is a buffer/typed-array view source. This keeps the
+ * permissive default (a length ctor whose arg type doesn't fully resolve — e.g.
+ * `new Uint8Array(msg.length)` under the analysis's `noLib` unit-test program —
+ * stays a fresh arena, as before #2045). Only a provable view-source type, or a
+ * multi-arg `(buffer, offset, len)` shape, is excluded.
+ */
+function isLengthCtorUint8Array(checker: ts.TypeChecker, expr: ts.NewExpression): boolean {
+  const args = expr.arguments;
+  if (!args || args.length === 0) return true; // `new Uint8Array()` ⇒ empty arena
+  const first = args[0]!;
+  // `new Uint8Array([a, b, c])` — element-count arena.
+  if (args.length === 1 && ts.isArrayLiteralExpression(first)) return true;
+  // `new Uint8Array(buffer, offset[, len])` — only the view ctor takes >1 arg.
+  if (args.length > 1) return false;
+  // Single arg: a length UNLESS its type is provably a view source
+  // (ArrayBuffer / SharedArrayBuffer / a TypedArray such as Uint8Array). The
+  // length form's arg is a `number`; anything that resolves to a buffer/typed
+  // -array type is a view. Fail open (treat as length) when the type is `any` /
+  // unresolved so the permissive pre-#2045 default is preserved.
+  const t = checker.getTypeAtLocation(first);
+  const name = t.getSymbol()?.name ?? t.aliasSymbol?.name;
+  if (name === "ArrayBuffer" || name === "SharedArrayBuffer" || name === "ArrayBufferLike") return false;
+  // A typed-array view source (Uint8Array, Int8Array, …, Uint8ClampedArray).
+  if (name && /^(Uint|Int|Float|BigUint|BigInt)\w*Array$/.test(name)) return false;
+  return true;
+}
+
+/**
  * Recognise a byte-I/O intrinsic call that takes a `Uint8Array` buffer and
  * return the argument index that carries the buffer, or `-1` if this is not one.
  *
@@ -262,10 +302,13 @@ export function analyzeLinearUint8(
     if (ts.isVariableDeclaration(node) && node.initializer && ts.isIdentifier(node.name)) {
       if (isNewUint8Array(node.initializer) || isUint8ArrayNode(checker, node.initializer)) {
         const sym = checker.getSymbolAtLocation(node.name);
-        // only `new Uint8Array(...)` inits are linear-candidates; an init from
-        // another expression (a returned/aliased array) is left to the escape
-        // checks (it will not be a `new` site we can back linearly).
-        if (sym && isNewUint8Array(node.initializer)) {
+        // only a FRESH-arena `new Uint8Array(...)` init is a linear-candidate:
+        // the length / array-literal / zero-arg ctor. A *view* ctor
+        // (`new Uint8Array(arrayBuffer)`, `new Uint8Array(otherTypedArray)`)
+        // aliases an existing buffer that is NOT linear-backed (#2045 B.3b), and
+        // an init from any other expression (a returned/aliased array) is left
+        // to the escape checks. Either way it stays on the GC path.
+        if (sym && isNewUint8Array(node.initializer) && isLengthCtorUint8Array(checker, node.initializer)) {
           safe.add(sym);
           newLocalSyms.add(sym);
         }
@@ -295,6 +338,31 @@ export function analyzeLinearUint8(
   };
   collect(sourceFile);
 
+  // ---- Pass 1b: demote helpers that escape as a function value (#2045 B.4) ---
+  // Only a *direct* call `f(args)` threads the rewritten `(ptr,len)` ABI to a
+  // linear helper (the call-site lowering in `calls.ts` keys off a direct
+  // identifier callee). ANY other reference to a tracked helper's name reaches
+  // the function value through its *source-level* GC signature, while the body
+  // was rewritten to expect linear `(ptr,len)` params — `const g = fill`,
+  // `fill.call(...)`, `arr.map(fill)`, `[fill]`, `return fill`, `typeof fill`,
+  // an argument to another call. That mismatch hands a GC array into the linear
+  // slot at runtime (a null-pointer deref). So if a helper's name appears in any
+  // non-direct-call position, demote ALL of its params back to the GC ABI by
+  // removing them from `safe`. This runs BEFORE the fixpoint so a buffer that
+  // flowed into the helper via a direct call is then re-examined (its target
+  // param is no longer linear-safe) and itself demoted.
+  const demoteEscapedHelpers = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && !isBindingSite(node) && !isDirectCalleePosition(node)) {
+      const sym = checker.getSymbolAtLocation(node);
+      if (sym && fnParamSyms.has(sym)) {
+        const paramSyms = fnParamSyms.get(sym);
+        if (paramSyms) for (const pSym of paramSyms) if (pSym) safe.delete(pSym);
+      }
+    }
+    ts.forEachChild(node, demoteEscapedHelpers);
+  };
+  demoteEscapedHelpers(sourceFile);
+
   // ---- Pass 2..N: fixpoint demotion ----------------------------------------
   // For each candidate symbol, scan all references; a reference in a
   // disqualifying position demotes it. Iterate until stable (a demotion can
@@ -318,6 +386,39 @@ export function analyzeLinearUint8(
       ts.forEachChild(node, visit);
     };
     visit(sourceFile);
+    // #2045 B.3 — demote a callee param that receives a NON-linear-backed arg.
+    // Walk every direct user call; for each arg index the callee still lists as
+    // linear-safe, the argument must itself be a provably linear-backed buffer —
+    // a `ts.Identifier` whose symbol is currently in `safe`. Anything else (a
+    // call result `make()`, a `new Uint8Array(buffer)` view, a conditional
+    // `c ? a : b`, an element/property access, a literal) cannot be threaded as
+    // `(ptr,len)` and would hit the `calls.ts` "not backed by linear memory"
+    // reportError — so demote that callee param. This shares the fixpoint, so a
+    // demotion cascades to deeper helpers on the next pass (monotone: only ever
+    // demotes → terminates).
+    const demoteUntrackedArgs = (node: ts.Node): void => {
+      if (ts.isCallExpression(node)) {
+        const resolved = resolveDirectCallee(checker, node);
+        if (resolved) {
+          const paramSyms = fnParamSyms.get(resolved.sym);
+          if (paramSyms) {
+            node.arguments.forEach((arg, argIdx) => {
+              const calleeParamSym = paramSyms[argIdx];
+              if (!calleeParamSym || !safe.has(calleeParamSym)) return;
+              // The callee param is currently linear-safe; verify the arg is a
+              // tracked linear-backed identifier. Otherwise demote the param.
+              const argSym = ts.isIdentifier(arg) ? checker.getSymbolAtLocation(arg) : undefined;
+              if (!argSym || !safe.has(argSym)) {
+                safe.delete(calleeParamSym);
+                changed = true;
+              }
+            });
+          }
+        }
+      }
+      ts.forEachChild(node, demoteUntrackedArgs);
+    };
+    demoteUntrackedArgs(sourceFile);
   }
 
   // ---- Freeze: derive per-function linear param sets -----------------------
@@ -421,6 +522,20 @@ function canRewriteLinearParams(node: FnDecl, exported: boolean): boolean {
   return node.parameters.every(
     (p) => ts.isIdentifier(p.name) && !p.dotDotDotToken && !p.questionToken && !p.initializer,
   );
+}
+
+/**
+ * True iff this identifier sits in the **callee** position of a direct call —
+ * `f(...)`. Only this position threads the rewritten `(ptr,len)` ABI to a linear
+ * helper (`calls.ts` keys the thread off a direct identifier callee). A
+ * `.call`/`.apply`/`.bind`/`.map(f)` reaches the function value as a
+ * property-access object or a call *argument*, not the callee, so it binds the
+ * source-level GC signature and is an escape (returns false here). Self-recursion
+ * `f(...)` inside `f`'s own body is a direct-callee position, so it is correctly
+ * NOT treated as an escape. (#2045 B.4)
+ */
+function isDirectCalleePosition(id: ts.Identifier): boolean {
+  return ts.isCallExpression(id.parent) && id.parent.expression === id;
 }
 
 /** True if this identifier is its own declaration name (not a use). */
