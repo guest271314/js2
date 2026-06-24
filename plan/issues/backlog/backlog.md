@@ -10,6 +10,7 @@ parents remain carried to s66 (see `plan/issues/sprints/65.md` carry-over):
 - [#2580](../2580-dynamic-receiver-length-undefined-substrate.md) M3 Stage A (PR #1975) — standalone inline-literal `[[Prototype]]` link; M3 B-pre `__is_truthy` desync fix open as PR #1986 (BLOCKED).
 - #2623 (PR #1977) — class-extends-Promise value-read identity unified (+1 row); feeds Promise epic #1042/#2614/promise-async-capability-residual.
 - #2623-A (PR #1981) — async-closure `alreadyBoxed` capture box-depth; feeds async epic #1042.
+- [#2637](../2637-promise-subclass-executor-body-protocol.md) — NEW architecture epic: the #2623 executor-body half (ctx-ctor asserts #3/#4), VERIFIED not-bounded with WAT evidence (PR #1996). `__promise_subclass_ctor ↔ <Sub>_new ↔ NewPromiseCapability` protocol re-architecture, B1→B2 sequenced; route to architect, not a dev slice.
 - [#2618](../2618-proxy-host-apply-construct-call-path.md) Slice 1 (PR #1984) — Proxy START-timing + callable-target wrap, apply/construct 14→15; Slice C confirmed DEFER (#56-zone); feeds Proxy epic #1355.
 
 **Corrected M3 sequencing** (supersedes the "168-row functor lap" framing):

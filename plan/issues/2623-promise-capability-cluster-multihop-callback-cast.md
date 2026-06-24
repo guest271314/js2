@@ -740,3 +740,9 @@ A bounded slice does not exist here; this is an architectural re-spec on the
 - The #2623 capability cluster's landable substrate (box-depth #1981, identity
   #1977) is now banked; the executor-body remainder is the deep tail and should be
   scheduled as architect-specced work, not a dev slice.
+
+**Formalized as #2637** — `plan/issues/2637-promise-subclass-executor-body-protocol.md`
+carries the full architecture spec (B1 → B2 sequencing, WAT evidence, ABI shape,
+floor discipline). #2623's landable slices are done (box-depth #1981 + identity
+#1977 merged); #2618 (Proxy apply/construct, Slice C) and #2623-D (invoke-resolve)
+remain as separate forward items.
