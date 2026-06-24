@@ -242,3 +242,43 @@ B1 (executor unwrap at super(builtin Promise))  ──► prerequisite, 0 rows a
   substrate).
 - The #2614 combinator headline coupling (the executor body running is the
   precondition for the observable-resolve composition in #2623-D).
+
+## B2 design grounding (sdev-definebuiltin, 2026-06-24 — code surface confirmed)
+
+Read the actual B2 surface against current main. The spec's "ABI + protocol
+re-architecture, genuinely multi-PR" framing is **confirmed accurate** — B2 is a
+deep three-way coupled change, validatable only via the merge_group test262 floor
+(the 6 ctx-ctor rows). Concretely:
+
+- **B2.1 closure materialization is the hard unknown.** A class constructor is
+  emitted as a top-level function `$<Class>_new` (`class-bodies.ts:779`,
+  `ctorName = `${className}_new``), NOT a closure struct. The host can only invoke
+  a wasm function via the closure-dispatch path (`__call_fn_N(closure, ...args)`,
+  `runtime.ts:1834`/`1880`), which requires an actual closure STRUCT recognized by
+  `__is_closure`. So B2.1 must materialize `$<Class>_new`'s funcref into a
+  no-capture closure struct and register it under the class name via a NEW host
+  import `__register_promise_subclass_ctor(name, closure)` — emitted once per
+  `class extends Promise` with a user ctor. This couples to the closure
+  representation in `closures.ts` and to late-import funcidx-shift discipline
+  (`flushLateImportShifts`, cf. `emitPromiseSubclassCtor` + the
+  `project_standalone_hostimport_gate_index_shift` hazard).
+- **B2.2 (runtime)** reworks `__promise_subclass_ctor` (`runtime.ts:~10397`) so
+  the synthesized `C`'s constructor calls the registered closure (threading
+  `callbackState` for `__call_fn_N`) after `super(exec)` — instead of the current
+  bare `class extends Promise {}`.
+- **B2.3 (codegen) is the deepest.** The ctor body maps `this → $__self`
+  (`class-bodies.ts:1553`), and `$__self` is produced by the `super()` →
+  `__new_Promise` path (the one B1 just fixed). B2.3 must SPLIT the ctor into
+  "allocate-own-promise" (direct-new, legacy — the B1 path) vs "run-on-host-`this`"
+  (NewPromiseCapability — bind `$__self` to V8's capability promise, run only the
+  side effects + proto wiring, do NOT call `__new_Promise` again). This changes
+  the ctor's allocation contract and MUST NOT regress the B1 direct-new path.
+
+**Why none of this is a quick slice**: B2.1/B2.2/B2.3 are mutually dependent
+(closure must exist before the runtime can call it; the run-on-host-`this` split
+can't be validated without the registration+dispatch wired through), and the only
+positive signal is the merge_group test262 floor — there is no isolated unit-test
+green for B2 short of the whole protocol. This is `reasoning_effort: max` work
+that warrants a fresh, dedicated session (B1's prerequisite must also LAND first
+before B2 can enqueue). B1 (PR #2019) is queued; B2 should be picked up as its own
+focused session once B1 merges.
