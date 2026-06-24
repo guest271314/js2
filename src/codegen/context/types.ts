@@ -918,6 +918,17 @@ export interface CodegenContext {
    */
   arrayToPrimitiveReserved?: boolean;
   /**
+   * (#2638) True once `__to_primitive` has reserved the `__class_to_primitive`
+   * driver — standalone routing of a nominal CLASS-instance struct (neither
+   * `$Object` nor `$Vec`) through the per-struct `__call_valueOf`/`__call_toString`
+   * dispatchers per §7.1.1.1. Those dispatchers are emitted at FINALIZE (after
+   * `__to_primitive`), so the driver body is filled by `fillClassToPrimitive`
+   * post-`emitToPrimitiveMethodExports`; same reserve/fill funcIdx discipline as
+   * `arrayToPrimitiveReserved`. Lets `(new C() as any) - 8` / `Number(new C() as any)`
+   * reduce via the class's valueOf/toString host-free, standalone only.
+   */
+  classToPrimitiveReserved?: boolean;
+  /**
    * (#2038) True once the native iterator runtime (`ensureNativeIteratorRuntime`,
    * iterator-native.ts) has emitted `__iterator` / `__iterator_next` with a
    * vec-only body and is awaiting its USER-iterator arm. The USER arm dispatches
