@@ -1,7 +1,8 @@
 ---
 id: 2637
 title: "Promise capability executor-body protocol: __promise_subclass_ctor ↔ <Sub>_new ↔ NewPromiseCapability re-architecture"
-status: ready
+status: in-progress
+assignee: sdev-definebuiltin
 created: 2026-06-24
 priority: medium
 feasibility: hard
@@ -145,7 +146,40 @@ To run the user body under `NewPromiseCapability(C)`, three interdependent piece
 
 ## Implementation Plan (architect spec — B1 → B2 sequencing)
 
-### Phase B1 — executor unwrap at `super(<builtin Promise>)` (prerequisite)
+### Phase B1 — executor unwrap at `super(<builtin Promise>)` — ✅ LANDED (sdev-definebuiltin, 2026-06-24)
+
+**Implemented** the spec's PREFERRED pure-runtime approach (host-shim unwrap, no
+funcidx shift, no codegen change). The locus is the generic extern-class `new`
+host handler in `src/runtime.ts` (the `intent.action === "new"` arm, the closure
+`return (...args) => { … new Ctor(...args) }` that backs `__new_Promise` /
+`__new_<Builtin>`). It returns `new Ctor(...args)` with the executor forwarded
+verbatim; for `intent.className === "Promise"` the first arg now passes through
+`_maybeWrapCallable(args[0], 2, callbackState)` first — exactly the unwrap the
+`Promise_new` shim already applies (`new Promise(_maybeWrapCallable(executor, 2,
+callbackState))`).
+
+- **Repro confirmed on clean main first**: the B1 unit test fails on unfixed
+  runtime (throws at the `new Ctor(...args)` line — "Promise resolver
+  [object Object] is not a function"), passes with the unwrap. So the fix is
+  load-bearing, not vacuous.
+- **Behavior-neutral elsewhere**: `_maybeWrapCallable` is a no-op for raw
+  functions (edge case a) and for null/undefined; the unwrap is gated on the
+  `Promise` parent only (edge case b — `extends Array` etc. unchanged); the
+  host-only `new` handler never runs under standalone (edge case c, #1941).
+- **Tests**: `tests/issue-2637-b1-executor-unwrap.test.ts` (4 cases: direct
+  `new SubPromise(executor)` runs the body + callCount=1; executor actually
+  invoked; `extends Array` regression; plain `new Promise(fn)` regression).
+- **No-regression sweep** (#2623 identity / #1366a/b / #1977 / #1981 /
+  #28-promise-executor / promise-combinators): all green EXCEPT 2 PRE-EXISTING
+  failures in `promise-combinators.test.ts` (`Promise.race`/`Promise.allSettled`
+  "undefined is not iterable" at `runtime.ts:10444`) — verified identical on
+  clean origin/main, unrelated to B1.
+- **0 test262 rows flip on B1 alone** (as the spec predicted — the ctx-ctor rows
+  go through the combinator / NewPromiseCapability path, addressed by B2). B1 is
+  the prerequisite for B2; the issue stays OPEN for B2.
+
+Original spec direction (retained for B2 reference):
+
 - **Locus**: the extern-class `super(builtin)` construction lowering (the path
   that emits `__new_Promise(executor)` inside `$<Sub>_new`). Find it via the
   `classBuiltinParentMap` consumers in `src/codegen/class-bodies.ts`
