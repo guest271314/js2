@@ -3,7 +3,7 @@ id: 2618
 title: "Proxy (host): calling / constructing a Proxy whose target is callable traps (illegal cast) or ignores the construct trap result (~15 fails)"
 status: in-progress
 assignee: ttraenkler/sd-2618
-sprint: 65
+sprint: 66
 created: 2026-06-22
 updated: 2026-06-24
 blocked_on: [56]

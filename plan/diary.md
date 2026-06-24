@@ -214,3 +214,37 @@ sprint 62.
 consistent compiler architecture (one pipeline driver, one coercion engine, value-rep
 doctrine, IR verifier, backend symmetry). Flat test262 headline accepted by design;
 conformance payoff lands in sprint 63.
+
+## Sprint 65 (2026-06-21 → 2026-06-24) — architecture epics + value-rep substrate
+
+**Baseline**: 31,678 / 43,135 (sprint-65/begin) → **31,776 / 43,135 (73.7%)** at
+close (origin/main 5ca4931a7). **Net +98 passes.** 43 issues done (0 wont-fix),
+32 carried to sprint 66.
+
+**Key wins**:
+- **#1917 single-coercion-engine series COMPLETED** — the marquee architecture
+  deliverable. The four divergent coercion matrices unified into one engine:
+  Steps 1–3 emitToString/Number/Boolean (#1960/#1962/#1963) + equality E3
+  (#1989) merged; E6 (#1992) + #2045 presence work (#1991) landed through the
+  queue at close. Byte-neutral / regression-free — banks the spine the s62
+  "Fable architecture sprint" set out to land.
+- **#2580 value-rep dynamic-read substrate** driven through M3 staging (M0–M2
+  landed; M3 B-pre #1986 in flight). The single highest-leverage lever
+  (~390 floor / ~1030 ceiling rows); payoff is unlock-shaped this window.
+- **Proxy/Promise identity slices**: #1977 class-extends-Promise capability-ctor
+  identity (+1), #1984 Proxy apply/construct (14→15), #1981 async-closure
+  box-depth.
+
+**Process**:
+- **Architect-spec-first mis-fired 3×** on the substrate (#2623-A/-B, #2580 M3
+  Stage A) — each handed off with a mis-attributed mechanism; a senior-dev had
+  to deep-trace before a regression-free slice landed. Keeper: trace-first,
+  spec-as-hypothesis for value-rep/substrate work.
+- **Per-process sharded runner + merge_group standalone floor (#2097)** are the
+  only trustworthy broad-impact signals — never in-process loops.
+- The **dedicated PR-queue shepherd** standing role held; one-shot enqueue,
+  never re-enqueue (no merge-queue churn this session).
+
+**Carried to sprint 66**: the #2580 spine (M3→M4), the IR effect-model lane
+(#1373b/#2134/#2135/#2138/#2140/#2141), async/Promise (#1042/#2613/#2614),
+Proxy (#1355/#2618), standalone residual tails, type-oracle/pipeline refactors.
