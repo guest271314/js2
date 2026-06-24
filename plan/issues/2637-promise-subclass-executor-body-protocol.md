@@ -368,7 +368,9 @@ In `src/runtime.ts`:
    scripts/claim-issue.mjs 2637 ttraenkler/<agent> --branch
    issue-2637-b2-ctor-closure-registration --force`.
 2. Enter worktree on branch `issue-2637-b2-ctor-closure-registration` (runtime
-   half already committed). `git merge origin/main` if B1 has landed.
+   half already committed + pushed). **B1 (PR #2019) HAS LANDED on main**
+   (origin/main commit 3f73d6ab3, 2026-06-24) — so `git merge origin/main`
+   first, then B2 is free to enqueue once its codegen half is green.
 3. Implement B2.1 (closure materialization + registration emit) and B2.3
    (`$<Class>_new__onhost` run-on-host-`this` variant) per above.
 4. Validate via merge_group (broad-impact, no scoped sweep). One-shot enqueue
