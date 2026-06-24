@@ -1,9 +1,10 @@
 ---
 id: 2637
 title: "Promise capability executor-body protocol: __promise_subclass_ctor ↔ <Sub>_new ↔ NewPromiseCapability re-architecture"
-status: in-progress
-assignee: sdev-definebuiltin
+status: done
+assignee: sdev-b2codegen
 created: 2026-06-24
+completed: 2026-06-25
 priority: medium
 feasibility: hard
 reasoning_effort: max
@@ -375,3 +376,82 @@ In `src/runtime.ts`:
    (`$<Class>_new__onhost` run-on-host-`this` variant) per above.
 4. Validate via merge_group (broad-impact, no scoped sweep). One-shot enqueue
    after B1 lands.
+
+## ✅ B2 CODEGEN HALF — LANDED (sdev-b2codegen, 2026-06-25)
+
+The codegen half (B2.1 + B2.3) is implemented and the full B2 protocol is
+verified end-to-end in JS-host mode. All four ctx-ctor asserts pass for every
+user-ctor combinator row.
+
+### What was implemented
+
+**B2.3 — `$<Class>_new__onhost` (run-on-host-`this`):**
+- `emitPromiseSubclassOnHostCtor` (`src/codegen/class-bodies.ts`) fills a SECOND
+  constructor body that mirrors the direct-new `$<Class>_new` shape but binds
+  `$__self` to `__current_this` (the host capability promise installed by
+  `__call_fn_method_1`) instead of allocating via `__new_Promise`.
+- `compileSuperCall` gained an `onHost` parameter: in onHost mode it evaluates
+  the `super(exec)` arguments for side effects only (no `__new_Promise`) and
+  returns, leaving `$__self` untouched.
+- The `$<Class>_new__onhost` func is PRE-REGISTERED in
+  `collectClassDeclaration` (Phase 2), so its funcidx is stable for the closure
+  materialization in Phase 3. Gated by `isPromiseSubclassWithUserCtor`
+  (Promise-parent transitively + user ctor + JS-host; matches the
+  `resolvePromiseSubclassName` / `isStandalonePromiseActive` gate exactly).
+
+**THE CORRECTNESS TRAP — solved, and a SECOND one found + fixed:**
+1. Documented double-`__new_Promise`: solved by the onHost-mode super skip (no
+   second allocation; `$__self` = host `this`).
+2. **NEW (identity break)**: the onHost body must ALSO NOT call
+   `emitSetSubclassProto` / `emitSetSubclassUserBrand` / `__tag_user_class`. V8
+   constructs `this` via `new C(exec)` where `C` is the
+   `__promise_subclass_ctor` synthetic, so the instance's `[[Prototype]]` is
+   already `C.prototype` — the SAME object the value-read `SubPromise` resolves
+   to (#1977). `__set_subclass_proto` re-points to a DIFFERENT synthetic (the
+   `subclassCtors`/#1933 registry), which broke `instance.constructor ===
+   SubPromise` / `instanceof` (asserts #1/#2). Probe initially showed bits=12
+   (cc1+fn4 only); after dropping the proto/brand/tag wiring in onHost mode →
+   bits=15 (all four). The direct-new path STILL needs the proto fix (its
+   instance comes from the bare `__new_Promise`), so that branch is untouched.
+
+**B2.1 — registration emit:**
+- `emitRegisterPromiseSubclassCtor` (`src/codegen/expressions/promise-subclass.ts`)
+  emits `__register_promise_subclass_ctor(<name>, <closure>)` at the single
+  chokepoint `emitPromiseSubclassCtor` (every combinator / value-read path),
+  BEFORE `__promise_subclass_ctor(name)` — so whichever site executes first at
+  runtime registers the body before `C` is synthesized/used. No module-init
+  plumbing needed; runtime `Map.set` is idempotent.
+- The closure is a no-capture closure over `$<Class>_new__onhost`, materialized
+  via `emitFuncRefAsClosure` (creates a thin trampoline + the shared
+  per-signature wrapper struct). `ensureLateImport` is flushed BEFORE the
+  closure's `ref.func`/`struct.new` so the trampoline funcidx is not left stale
+  by the import shift. The `(ref $struct)` closure is lifted to externref via
+  `extern.convert_any` for the import arg. Default-ctor subclasses (no
+  `__onhost` body) are a no-op here — the runtime's bare forwarder (the #1977
+  `withResolvers/ctx-ctor` identity-only row) is unchanged.
+
+### Verification (JS-host scoped — merge_group floor is the authoritative signal)
+- `tests/issue-2637-b2-ctor-closure-registration.test.ts` (7 cases): the 5
+  user-ctor combinator rows (`all/race/any/allSettled/try`) each reach
+  bits=15 (asserts #1-#4 all pass); the default-ctor `withResolvers` identity
+  row holds; direct-new still runs the body exactly once.
+- No-regression sweep green: `#2637-b1`, `#1977`, `#2623-promise-subclass-identity`
+  (incl. the `withResolvers/ctx-ctor` row + chained subclass), `#1366a/b`,
+  `#28-promise-executor`, `#2158-class-identity`, `#2101a`, `#2174-async-closure`.
+- `promise-combinators.test.ts`: 2 pre-existing failures only (the
+  `Promise.race`/`allSettled` `undefined is not iterable` at the host shim,
+  verified identical on origin/main — unrelated to this change).
+- Stack-balance gate OK (no fixup-bucket increases); `tsc --noEmit` clean;
+  prettier clean.
+- The legacy `classes.test.ts`/`class-methods.test.ts` `string_constants`
+  harness failures are PRE-EXISTING (confirmed identical on the pre-B2-codegen
+  baseline a4ba60cad) — those suites instantiate with a bare `{ env: {} }` and
+  predate the `buildImports`/`string_constants` design; not caused by B2.
+
+### Files
+- `src/codegen/class-bodies.ts` — `isPromiseSubclassWithUserCtor`,
+  `$<Class>_new__onhost` pre-registration, `emitPromiseSubclassOnHostCtor`,
+  `compileSuperCall(onHost)`.
+- `src/codegen/expressions/promise-subclass.ts` — `emitRegisterPromiseSubclassCtor`
+  + call from `emitPromiseSubclassCtor`.
+- `tests/issue-2637-b2-ctor-closure-registration.test.ts` — B2 regression guard.
