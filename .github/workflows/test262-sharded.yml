@@ -1768,6 +1768,17 @@ jobs:
           # baseline commit.
           node scripts/check-coercion-sites.mjs --update || \
             echo "WARN: coercion-site baseline update failed (non-fatal)"
+          # Re-derive the landing-page feature-support badges from the freshly
+          # promoted test262-current.json, so the badges and the committed
+          # baseline land in ONE atomic commit. SAME wedge-avoidance contract as
+          # sync-conformance-numbers above: the `quality` gate's
+          # generate:feature-badges:check validates the PR merged with main, so
+          # if the baseline bumps here without re-baking the badges, every
+          # in-flight PR at the merge-queue head is dropped by that gate. Badges
+          # only (--no-refresh-data); the served report/categories JSON is
+          # refreshed independently at deploy time (deploy-pages.yml).
+          node scripts/derive-feature-badges.mjs --no-refresh-data || \
+            echo "WARN: feature-badge derive failed (non-fatal) — badges may drift"
           stage_files() {
             git add -f benchmarks/results/test262-current.json \
               benchmarks/results/test262-report.json \
@@ -1790,6 +1801,11 @@ jobs:
               git add -f website/public/benchmarks/results/test262-editions.json || true
             [ -f website/public/benchmarks/results/test262-category-editions.json ] && \
               git add -f website/public/benchmarks/results/test262-category-editions.json || true
+            # Landing-page feature-support badges, re-derived from the promoted
+            # baseline just above. Staged so the badges and the committed
+            # test262-current.json land in ONE atomic commit (keeps
+            # generate:feature-badges:check green for in-flight PRs).
+            git add -f website/index.html 2>/dev/null || true
             # Conformance numbers in prose docs (synced just above). Staged so
             # the number and its derived docs land in ONE atomic commit.
             git add -f README.md ROADMAP.md CLAUDE.md plan/goals/goal-graph.md \
