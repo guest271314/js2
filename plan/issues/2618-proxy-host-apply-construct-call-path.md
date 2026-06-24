@@ -1,11 +1,12 @@
 ---
 id: 2618
 title: "Proxy (host): calling / constructing a Proxy whose target is callable traps (illegal cast) or ignores the construct trap result (~15 fails)"
-status: in-progress
+status: blocked
 assignee: ttraenkler/sd-2618
 sprint: 65
 created: 2026-06-22
 updated: 2026-06-24
+reconcile_status_note: "2026-06-24 (PO reconcile vs upstream/main): Slice 1 LANDED (PR #1984, commit 1cc09f72f — pure-runtime START-timing + callable-target wrap, +1 gc row). REMAINING work (externref-callee p.call(a,b) CALL dispatch + dynamic-new construct-result routing) is gated on the deep #56 dispatch substrate (blocked_on:[56] already set). NOT dev-claimable until #56 lands. → blocked (was in-progress)."
 blocked_on: [56]
 reconcile_note: "SLICE 1 LANDING 2026-06-24 (sd-2618): pure-runtime START-timing + callable-target [[ProxyTarget]] wrap. Verified per-process (faithful test262 wrap): +1 gc row (apply/call-parameters fail→pass), zero local regressions. REMAINING (deferred, deep #56 dispatch substrate): externref-callee CALL dispatch (multi-arg p.call(a,b) → illegal cast, tryEmitInlineDynamicCall) + dynamic-new construct-result routing (new p() → 'is not a constructor', tryEmitDynamicNew). See '## Slice 1 (sd-2618, 2026-06-24)'."
 priority: medium

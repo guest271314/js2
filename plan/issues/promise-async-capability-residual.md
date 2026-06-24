@@ -1,10 +1,10 @@
 ---
 id: promise-async-capability-residual
 title: "Promise residual: NewPromiseCapability(C) for custom constructors + resolver-element-function object semantics (~163 fails)"
-status: ready
+status: blocked
 sprint: 65
 created: 2026-06-17
-updated: 2026-06-18
+updated: 2026-06-24
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -12,8 +12,9 @@ task_type: bugfix
 area: runtime
 language_feature: promises
 goal: spec-completeness
-related: [1368, 1382, 1042, 1326, 1116]
+related: [1368, 1382, 1042, 1326, 1116, 2614, 2623, 2637]
 routing: senior-dev — fold into the #1042 async epic (shared async-capability machinery, broad blast radius)
+reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): FOLDED, NOT dev-claimable. The whole 163-fail residual converges on the NewPromiseCapability(C) async-capability substrate, which was escalated out of the dev lane. The landable combinator slice is #2614 (sdev); the deep substrate tail moved to #2623 → #2637 (Promise executor-body architecture epic, OPEN/unmerged, commit 13a0b7c7b). Gated on that substrate epic. → blocked (was ready)."
 origin: "2026-06-17 dev-mech2 investigation of TaskList #28 [STANDING] Promise residual"
 ---
 

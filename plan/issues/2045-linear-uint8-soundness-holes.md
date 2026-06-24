@@ -15,7 +15,7 @@ goal: standalone-mode
 assignee: ttraenkler/agent-acafb1
 related: [1886, 817]
 origin: "2026-06-10 sprint-61 code review of merged PR #1288 (#1886 Slice C): two pre-existing Slice-B silent-corruption routes were materially widened to function parameters, and the new interprocedural escape analysis has two fail-closed demotion gaps that break previously-valid WASI programs."
----
+reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): GENUINELY OPEN — stays in-progress. Part A (A.1/A.2 silent-corruption) landed; C.8 (compound/inc-dec) landed (cs-2164); B.3/B.4 escape-demotion landed PR #1991 (commit a49198bbf). REMAINING dev-claimable residual = ONLY Part C C.5-C.7: loop-arena rewind ordering (loops.ts:70/773/1024), all-target while-loop restructure gate, process.stdin.read offset clamp + fd_read errno. Do NOT reground B.3/B.4 — they merged. Dispatch C.5-C.7."
 
 # #2045 — Linear Uint8Array soundness holes (#1886 follow-up)
 

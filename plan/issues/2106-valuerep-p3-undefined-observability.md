@@ -1,11 +1,11 @@
 ---
 id: 2106
 title: "value-rep P3: undefined observability — UNDEF_F64 sentinel, union-collapse reversal (flagged), standalone $undefined singleton"
-status: in-progress
+status: backlog
 assignee: ttraenkler/sdev7
 sprint: 65
 created: 2026-06-11
-updated: 2026-06-18
+updated: 2026-06-24
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -15,6 +15,7 @@ language_feature: type-coercion
 goal: core-semantics
 related: [2004, 2051, 2030, 2001]
 origin: "2026-06-11 analysis program (report 02 phase P3); stub 08-E21"
+reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): SUSPENDED, not dev-claimable as a fresh sprint task. P3 headline landed (PR #1701, commit 347f3c79a). The remaining S1 standalone $undefined tag-1 singleton is an ATOMIC ~40-site change (producer flip breaks all ref.is_null nullish consumers) — see memory project_2106_undefined_singleton_s1_atomic; branch issue-2106-s1-undefined-singleton. Resume-only for a senior-dev (max effort), NOT a routine sprint-65 dev pull. → backlog."
 ---
 
 # #2106 — T | undefined collapses to bare T

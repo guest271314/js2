@@ -1,10 +1,10 @@
 ---
 id: 2527
 title: "Core-wasm module linking (shared store + canonical rec-group) for host-API shims and the shared runtime — CHOSEN approach"
-status: ready
+status: in-progress
 sprint: 65
 created: 2026-06-20
-updated: 2026-06-20
+updated: 2026-06-24
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -12,6 +12,7 @@ task_type: architecture
 area: codegen
 language_feature: module-linking
 goal: architecture
+reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): GENUINELY OPEN, actively in-flight — open PR #1997 (feat: canonical runtime rec-group identity primitive for core-wasm linking, senior-dev). Phase 0 spike is GREEN; the linking implementation has NOT merged yet (no feat commit on main; only docs #2524/#2512/#2514). Senior-dev/architecture lane — NOT a routine dev pull. → in-progress (was ready; TaskList #56 'completed' was premature — impl not on main)."
 related: [2512, 2514, 2525, 2523]
 ---
 
