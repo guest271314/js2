@@ -6706,71 +6706,79 @@ export function ensureLinearU8AllocHelper(ctx: CodegenContext): number {
 }
 
 /**
- * #1618: Ensure __wasi_write_any_string(s: ref NativeString) -> void exists and
- * return its function index (lazy, emitted during expression compilation).
- *
- * Writes a *runtime* string (variable, concatenation, template span) to fd=1
- * (stdout) or fd=2 (stderr). Previously these refs fell through to the
- * `[object]` placeholder in emitWasiValueToStdout, corrupting the stream.
- *
- * Strategy: flatten any AnyString (FlatString / ConsString / Utf8String) to a
- * NativeString via the existing __str_flatten helper, then encode the WTF-16
- * code units as UTF-8 bytes directly into linear memory before issuing
- * fd_write. This keeps WASI string output on the pure-Wasm path (#1470) without
- * routing through the JS-host `__str_to_mem` / `TextEncoder` bridge.
- *
- * Param 0 is typed `ref NativeString` so callers can hand us a value compiled
- * as `{ kind: "ref", typeIdx: ctx.nativeStrTypeIdx }` directly; __str_flatten
- * accepts the NativeString supertype (AnyString) and returns the flat form.
+ * Local-index layout for the shared WTF-16 → UTF-8 encoder. `S` is the AnyString
+ * param's index; the ten work-locals (`FLAT`..`LO`) are laid out contiguously
+ * starting at `base`. In Wasm, params occupy the low indices then declared
+ * locals follow, so a helper with N params declares its work-locals starting at
+ * index N. The fixed-fd writer has one param (s=0) ⇒ base 1; the runtime-fd
+ * writer has two params (s=0, fd=1) ⇒ base 2 (#2639).
  */
-export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: boolean = false): number {
-  const helperName = useStderr ? "__wasi_write_any_string_stderr" : "__wasi_write_any_string";
-  const existing = ctx.funcMap.get(helperName);
-  if (existing !== undefined) return existing;
+interface WasiStrEncodeLayout {
+  S: number;
+  FLAT: number;
+  LEN: number;
+  OFF: number;
+  DATA: number;
+  I: number;
+  O: number;
+  NEED_PAGES: number;
+  CU: number;
+  CP: number;
+  LO: number;
+}
 
-  // #2524 — node-process shim path needs no fd_write idx (see Uint8Array helper).
-  if (!ctx.wasi || (!ctx.linkNodeShims && ctx.wasiFdWriteIdx === undefined) || ctx.nativeStrTypeIdx < 0) return -1;
+/** Build the encoder local layout: AnyString param `s` at 0, work-locals at `base..base+9`. */
+function wasiStrEncodeLayout(base: number): WasiStrEncodeLayout {
+  return {
+    S: 0,
+    FLAT: base + 0,
+    LEN: base + 1,
+    OFF: base + 2,
+    DATA: base + 3,
+    I: base + 4,
+    O: base + 5,
+    NEED_PAGES: base + 6,
+    CU: base + 7,
+    CP: base + 8,
+    LO: base + 9,
+  };
+}
 
-  // Make sure the native-string runtime (incl. __str_flatten) is emitted.
-  ensureNativeStringHelpers(ctx);
-  // __str_flatten via funcMap (shift-maintained), not nativeStrHelpers (which can
-  // be stale-low after late imports). See the registration in
-  // ensureNativeStringHelpers. (#1618)
-  const flattenIdx = ctx.funcMap.get("__str_flatten");
-  if (flattenIdx === undefined) return -1;
+/** The (named, ordered) work-local declarations matching {@link wasiStrEncodeLayout}. */
+function wasiStrEncodeLocalDecls(strTypeIdx: number, strDataTypeIdx: number) {
+  return [
+    { name: "flat", type: { kind: "ref" as const, typeIdx: strTypeIdx } },
+    { name: "len", type: { kind: "i32" as const } },
+    { name: "off", type: { kind: "i32" as const } },
+    { name: "data", type: { kind: "ref" as const, typeIdx: strDataTypeIdx } },
+    { name: "i", type: { kind: "i32" as const } },
+    { name: "o", type: { kind: "i32" as const } },
+    { name: "needPages", type: { kind: "i32" as const } },
+    { name: "cu", type: { kind: "i32" as const } },
+    { name: "cp", type: { kind: "i32" as const } },
+    { name: "lo", type: { kind: "i32" as const } },
+  ];
+}
 
-  const fd = useStderr ? 2 : 1;
-  const strTypeIdx = ctx.nativeStrTypeIdx;
-  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
-  // #1723: the param MUST be the AnyString supertype, NOT the concrete
-  // NativeString. A runtime concat / template span can be a ConsString (rope),
-  // and the caller hands us whatever the expression produced. If the param were
-  // typed NativeString, the call site would have to `ref.cast` the argument down
-  // to NativeString first — which TRAPS ("illegal cast") for a ConsString. By
-  // accepting AnyString here, both NativeString and ConsString pass without any
-  // downcast, and `__str_flatten` (which takes AnyString and collapses ropes)
-  // does the flattening internally. The original NativeString param + call-site
-  // downcast is exactly what made `writeMessage` trap on a multi-segment
-  // response in the Native Messaging host (#1723).
-  const anyStrTypeIdx = ctx.anyStrTypeIdx >= 0 ? ctx.anyStrTypeIdx : strTypeIdx;
-
-  // param: s(0); locals: flat(1), len(2), off(3), data(4), i(5), o(6),
-  // needPages(7), cu(8), cp(9), lo(10)
-  const S = 0;
-  const FLAT = 1;
-  const LEN = 2;
-  const OFF = 3;
-  const DATA = 4;
-  const I = 5;
-  const O = 6;
-  const NEED_PAGES = 7;
-  const CU = 8;
-  const CP = 9;
-  const LO = 10;
-
-  const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: anyStrTypeIdx }], []);
-  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
-  ctx.funcMap.set(helperName, funcIdx);
+/**
+ * Build the WTF-16 → UTF-8 encode-to-linear-scratch instruction sequence shared
+ * by every WASI write-string helper. Flattens the AnyString param (local `S`)
+ * via `__str_flatten`, grows linear memory for the worst-case 3 bytes/code-unit
+ * staging region, then encodes the code points into
+ * `[WASI_WRITE_SCRATCH_START .. WASI_WRITE_SCRATCH_START + O)`. On return the
+ * output-cursor local `O` holds the exact UTF-8 byte count; the caller appends
+ * its own write tail (fixed-fd fd_write, or runtime-fd node:fs writeSync). No
+ * value is left on the stack. (#2639 factored this out of
+ * {@link ensureWasiWriteAnyStringHelper} byte-for-byte so existing fd 1/2 output
+ * is unchanged.)
+ */
+function buildWasiStringEncodeToScratch(
+  flattenIdx: number,
+  strTypeIdx: number,
+  strDataTypeIdx: number,
+  layout: WasiStrEncodeLayout,
+): Instr[] {
+  const { FLAT, LEN, OFF, DATA, I, O, NEED_PAGES, CU, CP, LO, S } = layout;
 
   const storeByte = (offsetFromO: number, value: Instr[]): Instr[] => [
     { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
@@ -6897,7 +6905,7 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
     } as Instr,
   ];
 
-  const body: Instr[] = [
+  return [
     // flat = __str_flatten(s)
     { op: "local.get", index: S } as Instr,
     { op: "call", funcIdx: flattenIdx } as Instr,
@@ -6909,14 +6917,8 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
     { op: "local.set", index: LEN } as Instr,
 
     // #1723/#1470: grow linear memory if the staging buffer could overflow.
-    // UTF-8/WTF-8 needs at most 3 bytes per UTF-16 code unit: BMP scalars and
-    // lone surrogates are 1..3 bytes, while a surrogate pair is 4 bytes across
-    // two code units. The final fd_write length is the actual output cursor O.
-    //
+    // UTF-8/WTF-8 needs at most 3 bytes per UTF-16 code unit.
     //   neededPages = ceil((WASI_WRITE_SCRATCH_START + len*3) / 65536)
-    //
-    // ceil(x / 65536) == (x + 65535) >> 16. We `i32.shr_u` so a large length
-    // near 2^31 still computes a non-negative page count.
     { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
     { op: "local.get", index: LEN } as Instr,
     { op: "i32.const", value: 3 } as Instr,
@@ -6927,7 +6929,6 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
     { op: "i32.const", value: 16 } as Instr,
     { op: "i32.shr_u" } as Instr,
     { op: "local.set", index: NEED_PAGES } as Instr,
-    // if (needPages > memory.size) memory.grow(needPages - memory.size)
     { op: "local.get", index: NEED_PAGES } as Instr,
     { op: "memory.size" } as Instr,
     { op: "i32.gt_u" } as Instr,
@@ -6988,8 +6989,7 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
             { op: "i32.add" } as Instr,
             { op: "local.set", index: I } as Instr,
 
-            // If cu is a high surrogate and the next code unit is a low
-            // surrogate, combine them into one scalar and consume the low unit.
+            // Combine a high+low surrogate pair into one scalar.
             { op: "local.get", index: CU } as Instr,
             { op: "i32.const", value: 0xd800 } as Instr,
             { op: "i32.ge_u" } as Instr,
@@ -7049,27 +7049,132 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
         },
       ],
     },
+  ];
+}
 
+/**
+ * #1618: Ensure __wasi_write_any_string(s: ref NativeString) -> void exists and
+ * return its function index (lazy, emitted during expression compilation).
+ *
+ * Writes a *runtime* string (variable, concatenation, template span) to fd=1
+ * (stdout) or fd=2 (stderr). Previously these refs fell through to the
+ * `[object]` placeholder in emitWasiValueToStdout, corrupting the stream.
+ *
+ * Strategy: flatten any AnyString (FlatString / ConsString / Utf8String) to a
+ * NativeString via the existing __str_flatten helper, then encode the WTF-16
+ * code units as UTF-8 bytes directly into linear memory before issuing
+ * fd_write. This keeps WASI string output on the pure-Wasm path (#1470) without
+ * routing through the JS-host `__str_to_mem` / `TextEncoder` bridge.
+ *
+ * Param 0 is typed `ref NativeString` so callers can hand us a value compiled
+ * as `{ kind: "ref", typeIdx: ctx.nativeStrTypeIdx }` directly; __str_flatten
+ * accepts the NativeString supertype (AnyString) and returns the flat form.
+ */
+export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: boolean = false): number {
+  const helperName = useStderr ? "__wasi_write_any_string_stderr" : "__wasi_write_any_string";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  // #2524 — node-process shim path needs no fd_write idx (see Uint8Array helper).
+  if (!ctx.wasi || (!ctx.linkNodeShims && ctx.wasiFdWriteIdx === undefined) || ctx.nativeStrTypeIdx < 0) return -1;
+
+  // Make sure the native-string runtime (incl. __str_flatten) is emitted.
+  ensureNativeStringHelpers(ctx);
+  // __str_flatten via funcMap (shift-maintained), not nativeStrHelpers (which can
+  // be stale-low after late imports). See the registration in
+  // ensureNativeStringHelpers. (#1618)
+  const flattenIdx = ctx.funcMap.get("__str_flatten");
+  if (flattenIdx === undefined) return -1;
+
+  const fd = useStderr ? 2 : 1;
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
+  // #1723: the param MUST be the AnyString supertype, NOT the concrete
+  // NativeString. A runtime concat / template span can be a ConsString (rope),
+  // and the caller hands us whatever the expression produced. If the param were
+  // typed NativeString, the call site would have to `ref.cast` the argument down
+  // to NativeString first — which TRAPS ("illegal cast") for a ConsString. By
+  // accepting AnyString here, both NativeString and ConsString pass without any
+  // downcast, and `__str_flatten` (which takes AnyString and collapses ropes)
+  // does the flattening internally. The original NativeString param + call-site
+  // downcast is exactly what made `writeMessage` trap on a multi-segment
+  // response in the Native Messaging host (#1723).
+  const anyStrTypeIdx = ctx.anyStrTypeIdx >= 0 ? ctx.anyStrTypeIdx : strTypeIdx;
+
+  // One param (s=0) ⇒ work-locals start at index 1.
+  const layout = wasiStrEncodeLayout(1);
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: anyStrTypeIdx }], []);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const body: Instr[] = [
+    ...buildWasiStringEncodeToScratch(flattenIdx, strTypeIdx, strDataTypeIdx, layout),
     // #2524/#2633 — write the staged UTF-8 region (`O` bytes) via fd_write or
-    // the node:fs shim's writeSync(fd, …).
-    ...emitWasiWriteTail(ctx, fd, WASI_WRITE_SCRATCH_START, O),
+    // the node:fs shim's writeSync(fd, …). Result (bytes-written) is dropped.
+    ...emitWasiWriteTail(ctx, fd, WASI_WRITE_SCRATCH_START, layout.O),
   ];
 
   ctx.mod.functions.push({
     name: helperName,
     typeIdx: funcTypeIdx,
-    locals: [
-      { name: "flat", type: { kind: "ref", typeIdx: strTypeIdx } },
-      { name: "len", type: { kind: "i32" } },
-      { name: "off", type: { kind: "i32" } },
-      { name: "data", type: { kind: "ref", typeIdx: strDataTypeIdx } },
-      { name: "i", type: { kind: "i32" } },
-      { name: "o", type: { kind: "i32" } },
-      { name: "needPages", type: { kind: "i32" } },
-      { name: "cu", type: { kind: "i32" } },
-      { name: "cp", type: { kind: "i32" } },
-      { name: "lo", type: { kind: "i32" } },
-    ],
+    locals: wasiStrEncodeLocalDecls(strTypeIdx, strDataTypeIdx),
+    body,
+    exported: false,
+  });
+
+  return funcIdx;
+}
+
+/**
+ * #2639: Ensure `__wasi_write_any_string_fd(s: ref AnyString, fd: i32) -> i32`
+ * exists and return its function index (lazy). Encodes the string to UTF-8 in
+ * the shared linear scratch (the same encoder as the fixed-fd writer) and writes
+ * it to the *runtime* fd via the imported `node:fs` `writeSync(fd, ptr, len)`
+ * shim, returning the byte count `writeSync` reports. This backs the STRING
+ * overload of `node:fs` `writeSync(fd, str, position?, encoding?)`, where the fd
+ * is an arbitrary integer (not just stdout/stderr). It is gated to the
+ * `linkNodeShims` path — the only path on which `writeSync(fd, …)` lowers — so
+ * no inline `fd_write` tail is needed here.
+ */
+export function ensureWasiWriteAnyStringFdHelper(ctx: CodegenContext): number {
+  const helperName = "__wasi_write_any_string_fd";
+  const existing = ctx.funcMap.get(helperName);
+  if (existing !== undefined) return existing;
+
+  // Runtime-fd writes only exist on the node:fs shim path.
+  if (!ctx.wasi || !ctx.linkNodeShims || ctx.nodeFsWriteSyncIdx < 0 || ctx.nativeStrTypeIdx < 0) return -1;
+
+  ensureNativeStringHelpers(ctx);
+  const flattenIdx = ctx.funcMap.get("__str_flatten");
+  if (flattenIdx === undefined) return -1;
+
+  const strTypeIdx = ctx.nativeStrTypeIdx;
+  const strDataTypeIdx = ctx.nativeStrDataTypeIdx;
+  const anyStrTypeIdx = ctx.anyStrTypeIdx >= 0 ? ctx.anyStrTypeIdx : strTypeIdx;
+
+  // Two params: s(0), fd(1). The ten encoder work-locals therefore start at
+  // index 2; the byte cursor `O` holds the encoded length after the encoder runs.
+  const FD = 1;
+  const layout = wasiStrEncodeLayout(2);
+
+  const funcTypeIdx = addFuncType(ctx, [{ kind: "ref", typeIdx: anyStrTypeIdx }, { kind: "i32" }], [{ kind: "i32" }]);
+  const funcIdx = ctx.numImportFuncs + ctx.mod.functions.length;
+  ctx.funcMap.set(helperName, funcIdx);
+
+  const body: Instr[] = [
+    ...buildWasiStringEncodeToScratch(flattenIdx, strTypeIdx, strDataTypeIdx, layout),
+    // return writeSync(fd, WASI_WRITE_SCRATCH_START, O)  — bytes written.
+    { op: "local.get", index: FD } as Instr,
+    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+    { op: "local.get", index: layout.O } as Instr,
+    { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
+  ];
+
+  ctx.mod.functions.push({
+    name: helperName,
+    typeIdx: funcTypeIdx,
+    // Work-locals follow the two params (s, fd); no extra local for fd.
+    locals: wasiStrEncodeLocalDecls(strTypeIdx, strDataTypeIdx),
     body,
     exported: false,
   });
