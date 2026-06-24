@@ -270,3 +270,41 @@ export const NATIVE_COLLECTION_BUILTINS: ReadonlySet<string> = new Set<string>([
 export function isNativeCollectionBuiltin(name: string): boolean {
   return NATIVE_COLLECTION_BUILTINS.has(name);
 }
+
+/**
+ * (#2029) The primitive-wrapper builtins whose standalone SUBCLASS construction
+ * is broken. `Number` and `Boolean` are in
+ * `BUILTIN_PARENTS_HOST_CONSTRUCTIBLE` so a `class N extends Number {}` takes
+ * the externref-backed host path under `--target standalone`/`wasi`, lowering
+ * `super()`/`new Sub()` to `call $__new_Number` — but the standalone
+ * `__new_Number`/`__new_Boolean` internals take an **f64** argument, while the
+ * synthetic `<Class>_new` forwarder passes the constructor's externref local
+ * (`local.get $0`). The arg types don't match → `wasm-validator error in
+ * function N_new: call param types must match` (invalid Wasm — the binary still
+ * serializes but dies at instantiate/validate). No native primitive-wrapper
+ * *subclass* box exists standalone yet.
+ *
+ * `String` is deliberately NOT in this set: its standalone
+ * `__new_String(externref) -> externref` is externref-in/externref-out, which
+ * the externref forwarder matches exactly — `class S extends String {}` already
+ * compiles, instantiates with an empty import object, and answers
+ * `new S() instanceof S` → `true` standalone (verified on main). Refusing it
+ * would regress a working case.
+ *
+ * Until a native wrapper-box subclass substrate lands (value-rep follow-up,
+ * pairs with #1629b boxed-primitive work), a standalone subclass of
+ * `Number`/`Boolean` is refused at compile time (clean CE, never invalid Wasm —
+ * the #1888 dual-mode invariant). gc/host mode is unaffected (the externClass
+ * host path handles the subclass there). See the refusal in class-bodies.ts.
+ */
+export const PRIMITIVE_WRAPPER_SUBCLASS_UNSUPPORTED: ReadonlySet<string> = new Set<string>(["Number", "Boolean"]);
+
+/**
+ * (#2029) Returns true if `name` is a primitive-wrapper builtin whose
+ * standalone subclass construction is not yet supported (Number/Boolean) —
+ * used to refuse a standalone subclass of one of them. `String` is excluded
+ * (it works standalone). See {@link PRIMITIVE_WRAPPER_SUBCLASS_UNSUPPORTED}.
+ */
+export function isPrimitiveWrapperSubclassUnsupported(name: string): boolean {
+  return PRIMITIVE_WRAPPER_SUBCLASS_UNSUPPORTED.has(name);
+}
