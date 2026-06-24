@@ -8,8 +8,8 @@
     },
     "ES2015": {
       "pass": 1399,
-      "fail": 1041,
-      "ce": 24,
+      "fail": 1040,
+      "ce": 25,
       "skip": 0
     },
     "ES2016": {
@@ -151,14 +151,6 @@
       "skip": 0
     }
   },
-  "built-ins/ArrayIteratorPrototype": {
-    "ES2015": {
-      "pass": 17,
-      "fail": 10,
-      "ce": 0,
-      "skip": 0
-    }
-  },
   "annexB/language": {
     "ES5": {
       "pass": 406,
@@ -175,6 +167,14 @@
     "ES2026": {
       "pass": 13,
       "fail": 13,
+      "ce": 0,
+      "skip": 0
+    }
+  },
+  "built-ins/ArrayIteratorPrototype": {
+    "ES2015": {
+      "pass": 17,
+      "fail": 10,
       "ce": 0,
       "skip": 0
     }
@@ -895,6 +895,26 @@
       "skip": 0
     }
   },
+  "language/identifier-resolution": {
+    "ES5": {
+      "pass": 3,
+      "fail": 7,
+      "ce": 1,
+      "skip": 0
+    },
+    "ES2015": {
+      "pass": 1,
+      "fail": 1,
+      "ce": 0,
+      "skip": 0
+    },
+    "ES2022": {
+      "pass": 1,
+      "fail": 0,
+      "ce": 0,
+      "skip": 0
+    }
+  },
   "built-ins/Math": {
     "ES5": {
       "pass": 81,
@@ -917,26 +937,6 @@
     "ES2026": {
       "pass": 2,
       "fail": 8,
-      "ce": 0,
-      "skip": 0
-    }
-  },
-  "language/identifier-resolution": {
-    "ES5": {
-      "pass": 3,
-      "fail": 7,
-      "ce": 1,
-      "skip": 0
-    },
-    "ES2015": {
-      "pass": 1,
-      "fail": 1,
-      "ce": 0,
-      "skip": 0
-    },
-    "ES2022": {
-      "pass": 1,
-      "fail": 0,
       "ce": 0,
       "skip": 0
     }
@@ -987,6 +987,14 @@
       "skip": 0
     }
   },
+  "built-ins/RegExpStringIteratorPrototype": {
+    "ES2020": {
+      "pass": 6,
+      "fail": 10,
+      "ce": 1,
+      "skip": 0
+    }
+  },
   "built-ins/WeakMap": {
     "ES2015": {
       "pass": 114,
@@ -998,14 +1006,6 @@
       "pass": 3,
       "fail": 3,
       "ce": 0,
-      "skip": 0
-    }
-  },
-  "built-ins/RegExpStringIteratorPrototype": {
-    "ES2020": {
-      "pass": 6,
-      "fail": 10,
-      "ce": 1,
       "skip": 0
     }
   },
