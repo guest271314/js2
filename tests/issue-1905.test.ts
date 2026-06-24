@@ -69,8 +69,11 @@ describe("#1905 standalone native Reflect object subset", () => {
   });
 
   it("unsupported standalone Reflect methods still refuse without __reflect_* imports", async () => {
+    // NOTE: defineProperty is no longer in this list — #2046 routes it to the
+    // native __obj_define_from_desc applier (the same path backing standalone
+    // Object.defineProperty). getOwnPropertyDescriptor was likewise removed by
+    // the #2046 S5 slice.
     const cases: ReadonlyArray<[string, string]> = [
-      ["defineProperty", `export function f(o: any): boolean { return Reflect.defineProperty(o, "k", {}); }`],
       ["getPrototypeOf", `export function f(o: any): any { return Reflect.getPrototypeOf(o); }`],
       ["apply", `export function f(fn: any, t: any, a: any): any { return Reflect.apply(fn, t, a); }`],
       ["construct", `export function f(c: any, a: any): any { return Reflect.construct(c, a); }`],
