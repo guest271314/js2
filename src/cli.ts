@@ -83,6 +83,12 @@ Options:
                     Auto-enabled (type-level only) when the source imports a
                     'node:' builtin (use 'none' to disable that); otherwise off,
                     and using process warns to add this flag (#2603).
+  --platform <p>    Target host environment for the AMBIENT global surface
+                    (#2528). 'web' = DOM globals (window/document/…) in scope
+                    (today's default); 'node' = DOM globals NOT in scope (so
+                    window.stop is a type error) and Node API emulation on
+                    (implies --emulate node). Orthogonal to --target (backend).
+                    Unset preserves today's behaviour (DOM surface loaded).
   --no-host-imports Strict dual-mode: reject JS-host 'env' imports not on
                     the allowlist (#1524). Implied by --target wasi.
   --allow-host-imports
@@ -150,6 +156,9 @@ let linkNodeShims = false;
 // `node:` import won't auto-enable over an explicit choice.
 let emulateNode = false;
 let emulateExplicit = false;
+// #2528 — `--platform node|web`: scope the AMBIENT global surface (DOM vs node).
+// `undefined` preserves today's behaviour exactly (DOM ambient surface loaded).
+let platform: "web" | "node" | undefined;
 const defines: Record<string, string> = {};
 
 for (let i = 0; i < args.length; i++) {
@@ -223,6 +232,17 @@ for (let i = 0; i < args.length; i++) {
       emulateExplicit = true;
     } else {
       console.error(`Unknown --emulate value: ${env ?? "(missing)"} (expected: node | none)`);
+      process.exit(1);
+    }
+  } else if (arg === "--platform" || arg.startsWith("--platform=")) {
+    // #2528 — select the ambient global surface. `node` drops the DOM globals
+    // (and implies Node API emulation, #2645); `web` keeps the DOM surface and
+    // excludes node-only globals. Orthogonal to `--target` (the backend axis).
+    const p = arg.startsWith("--platform=") ? arg.slice("--platform=".length) : args[++i];
+    if (p === "node" || p === "web") {
+      platform = p;
+    } else {
+      console.error(`Unknown --platform value: ${p ?? "(missing)"} (expected: node | web)`);
       process.exit(1);
     }
   } else if (arg === "--no-host-imports") {
@@ -321,6 +341,7 @@ const result = await compile(source, {
   ...(utf8Storage ? { utf8Storage: true } : {}),
   ...(linkNodeShims ? { linkNodeShims: true } : {}),
   ...(emulateNode ? { emulateNode: true } : {}),
+  ...(platform ? { platform } : {}),
   fileName: absInput,
   ...(strictNoHostImports !== undefined ? { strictNoHostImports } : {}),
   ...(Object.keys(defines).length > 0 ? { define: defines } : {}),
