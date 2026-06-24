@@ -2,6 +2,7 @@
 id: 2046
 title: "standalone Reflect: receiver arg silently dropped, deleteProperty ignores freeze/configurable, no ToPropertyKey (#1905 follow-up)"
 status: in-progress
+assignee: ttraenkler/dev-reflect-c
 sprint: 64
 created: 2026-06-10
 updated: 2026-06-25
@@ -296,3 +297,65 @@ instance" fails identically on clean main (host-mode construct gap).
   machinery (coordinate with #2158).
 - **PR-C (real receiver plumbing)** — senior/deferred (#1888 Slice 5).
 - `getPrototypeOf` / `setPrototypeOf` / `apply` standalone arms.
+
+## PR-C slice — getPrototypeOf + setPrototypeOf routed (2026-06-25)
+
+REGROUND against current main HEAD (669600612) before any change confirmed all
+three §26.1 prototype/apply methods still refused in standalone (`Codegen error:
+Reflect.{getPrototypeOf,setPrototypeOf,apply} not supported … #1472 Phase C`).
+
+**Change** (`src/codegen/expressions/calls.ts`, inside the `if (ctx.standalone)`
+Reflect dispatch block, after the `defineProperty` arm):
+
+- **`Reflect.getPrototypeOf(target)` → native `__getPrototypeOf`** — the SAME
+  helper backing standalone `Object.getPrototypeOf` (calls.ts ~5943). Returns
+  `extern.convert_any($Object.$proto)` (may be null). §26.1.8 step 1 (non-object
+  target → TypeError) enforced at the CALL SITE with the shared
+  `emitNonObjectArgGuard` (the same static-type / bare-literal guard the
+  `defineProperty` arm uses); the shared native is untouched.
+- **`Reflect.setPrototypeOf(target, proto)` → native `__object_setPrototypeOf`**
+  — the SAME helper backing standalone `Object.setPrototypeOf` (calls.ts ~5829),
+  which performs the §10.1.2.1 OrdinarySetPrototypeOf extensibility + cycle
+  checks and writes `$Object.$proto`. §26.1.14 step 1 (non-object target →
+  TypeError) and step 2 (non-null primitive proto → TypeError) enforced at the
+  CALL SITE; `null`/`undefined` proto is legal (passes through to the native,
+  which maps a non-`$Object` proto to a null `$proto`). The proto arg goes
+  through `compileProtoArg` (the #2580 M3 Stage A inline-literal reify) just like
+  `Object.setPrototypeOf`. Returns i32 `true` on success.
+  - **KNOWN LIMITATION** (identical to the `Reflect.defineProperty` arm above):
+    `__object_setPrototypeOf` has no boolean failure channel — a *refused* set
+    (non-extensible target or a proto cycle) silently no-ops and still returns
+    `obj`, so the Reflect path returns the spec's `true` instead of `false` for
+    those cases. Faithful handling needs a failure channel in the native; out of
+    this slice (converting the common refusal→working path is the win).
+
+**Verified** (probe + tests, both against the test262 compile path
+`skipSemanticDiagnostics: true`): setProto→getProto round-trips by identity for
+dynamic (`any`-typed / `Object.create`) objects; getProto of a plain object is
+null; getProto identity is stable; non-object target throws (getProto and
+setProto); non-null primitive proto throws; null proto is legal.
+
+**Verified subtlety** — the setProto→getProto round-trip is only OBSERVABLE for
+dynamic `$Object`s (`any`-typed / `Object.create`). Closed-struct object literals
+(`var o = {}` with no `any` annotation) do NOT round-trip — but this is the
+**pre-existing #2580 M3 closed-struct-vs-`$Object` substrate gap shared with
+`Object.setPrototypeOf`** (the `Object.*` control shows the identical var-typed
+0), NOT introduced by this routing. The test262 Reflect prototype rows use the
+dynamic shape, which works.
+
+**`Reflect.apply` stays refused** — needs CreateListFromArrayLike + a call/spread
+analog with no native helper in this slice; kept its loud refusal (pinned by a
+test). Out of PR-C scope.
+
+New tests in `tests/issue-2046.test.ts` (35/35 green): getProto/setProto
+round-trip identity, setProto-returns-true, getProto-via-Object.create,
+plain-object-null-proto, stable-identity, null-proto-legal, four non-object /
+primitive-proto TypeError guards, and the apply-still-refused pin.
+`tests/issue-1905.test.ts` updated (4/4 green) — `getPrototypeOf` removed from the
+"still refuses" list.
+
+**Still refused after PR-C (issue stays `in-progress`):**
+- **`Reflect.construct`** — gated on standalone construct machinery (#2158).
+- **`Reflect.apply`** — needs a call/spread native analog.
+- **Real receiver plumbing** (explicit-receiver get/set) — senior/deferred,
+  #1888 Slice 5.
