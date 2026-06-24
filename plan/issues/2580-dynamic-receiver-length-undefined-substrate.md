@@ -2,7 +2,7 @@
 id: 2580
 title: "`.length` on an any/dynamically-mutated receiver returns numeric 0, not undefined (runtime property-presence)"
 status: in-progress
-assignee: ttraenkler/sd-value-rep-m3
+assignee: ttraenkler/sd-m3b-pre
 sprint: 65
 created: 2026-06-21
 priority: medium
@@ -47,7 +47,7 @@ if (obj.length !== undefined) throw ...;   // obj is `any`; obj.length === 0, fa
 Making `any`/dynamic-receiver `.length` correct requires a **runtime**
 property-presence check at the read site: `ref.test $Object` → if it's a plain
 `$Object`, `__extern_get(obj, "length")` (returns `undefined` when absent);
-else (array / $ObjVec / string) read the numeric length. To express *both*
+else (array / $ObjVec / string) read the numeric length. To express _both_
 outcomes from one expression, `.length` on an `any` receiver must return a
 **uniform externref** (the numeric array length **boxed** too). That is a
 return-type change on the hot `any[].length` path — `for (;i<a.length;)` loops
@@ -100,7 +100,7 @@ correct `.length` alone would not flip the whole cluster.
 
 The sprint-64 sparse-array tail (#2001 S2/S3/S4) and the open-object work
 (#2580/#2573/#983d) **all converged on the same wall**: the compiler's
-**dense/typed WasmGC representation cannot model a *dynamic read*** — reading a
+**dense/typed WasmGC representation cannot model a _dynamic read_** — reading a
 property (indexed or named) from a receiver whose true shape is only known at
 runtime. Each slice was individually spec-correct but conformance-flat or
 net-negative because the rows it targeted need the dynamic-read substrate, not a
@@ -110,7 +110,7 @@ point-fix:
   surface is "inherited accessor on `Array.prototype`" — HasProperty walks the
   **prototype chain**, which the dense vec can't model.
 - **#2001 S3 (index-grow `$Hole` fill)** — 0 rows. The reachable form
-  `var a=[1]; a[5]=9` lowers the assignment *target* to an **f64 vec** (numeric
+  `var a=[1]; a[5]=9` lowers the assignment _target_ to an **f64 vec** (numeric
   inference), so the externref hole-fill never fires; and test262 detects
   sparseness via `in`/`hasOwnProperty`/`delete`, not `join`.
 - **#2001 S4 (dstr-past-length)** — 0 rows. The target family already passes;
@@ -126,7 +126,7 @@ object dynamically given array-like shape) has no compile-time-known field
 layout, so indexed/`.length`/method reads must be resolved at RUNTIME against the
 actual heap value — but the current codegen commits to a typed vec / numeric
 field-0 / static dispatch at compile time.** Fixing one symptom (e.g. `.length`)
-in isolation either moves 0 rows (the cluster needs the *whole* dynamic read) or
+in isolation either moves 0 rows (the cluster needs the _whole_ dynamic read) or
 regresses the hot typed path.
 
 ## 1. What it unblocks — enumerated, with baseline row counts
@@ -134,22 +134,22 @@ regresses the hot typed path.
 Measured against the host test262 baseline (`.test262-cache/test262-current.jsonl`,
 26m-old at measure time; **15,237** total host failures):
 
-| Cluster | Failing rows | What it needs from the substrate |
-|---|---|---|
-| **`built-ins/Array/prototype/S15.4.4.*` — generic array method on an Array-LIKE object** | **~993** | `Array.prototype.{reduce,reduceRight,filter,every,some,forEach,map,indexOf,lastIndexOf,splice,slice,sort}.call({length:N, 0:…, 1:…}, cb)` — read `obj.length` + `obj[i]` from an arbitrary runtime object, HasProperty-skip absent indices. **This is the bulk of the lever.** |
-| — of which: inherited/accessor/sparse element-retrieval (`-c-i-`/`-b-i-`) | 350 | prototype-chain HasProperty + accessor `Get` (the #2001 S2 ejection family) |
-| — of which: `-2-N` "applied to Array-like, `length` own/inherited data prop" + `-5-N` length-coercion | ~640 ("other") | runtime `obj.length` read (own OR inherited) + ToLength coercion |
-| **`any`/dynamic-receiver `.length` → undefined** (#2580 core) | ~12 (`S15.4.4.*_A2_T*` + `var obj={}; obj.length`) | runtime property-presence: plain-object `.length` is absent → `undefined` |
-| **`Object.prototype.{hasOwnProperty,propertyIsEnumerable}` on dynamic objects** | 17 | runtime own-property presence on `$Object` |
-| **`delete arr[i]` Array sparseness** | 11 | `delete` writes a hole the dynamic read honours (`in`/HOF skip) |
-| **acorn dogfood** (#1712/#2582 family — dynamic struct read identity) | (non-test262, unblocks the tokenizer loop) | canonical struct rep on dynamic read paths |
+| Cluster                                                                                               | Failing rows                                       | What it needs from the substrate                                                                                                                                                                                                                                               |
+| ----------------------------------------------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **`built-ins/Array/prototype/S15.4.4.*` — generic array method on an Array-LIKE object**              | **~993**                                           | `Array.prototype.{reduce,reduceRight,filter,every,some,forEach,map,indexOf,lastIndexOf,splice,slice,sort}.call({length:N, 0:…, 1:…}, cb)` — read `obj.length` + `obj[i]` from an arbitrary runtime object, HasProperty-skip absent indices. **This is the bulk of the lever.** |
+| — of which: inherited/accessor/sparse element-retrieval (`-c-i-`/`-b-i-`)                             | 350                                                | prototype-chain HasProperty + accessor `Get` (the #2001 S2 ejection family)                                                                                                                                                                                                    |
+| — of which: `-2-N` "applied to Array-like, `length` own/inherited data prop" + `-5-N` length-coercion | ~640 ("other")                                     | runtime `obj.length` read (own OR inherited) + ToLength coercion                                                                                                                                                                                                               |
+| **`any`/dynamic-receiver `.length` → undefined** (#2580 core)                                         | ~12 (`S15.4.4.*_A2_T*` + `var obj={}; obj.length`) | runtime property-presence: plain-object `.length` is absent → `undefined`                                                                                                                                                                                                      |
+| **`Object.prototype.{hasOwnProperty,propertyIsEnumerable}` on dynamic objects**                       | 17                                                 | runtime own-property presence on `$Object`                                                                                                                                                                                                                                     |
+| **`delete arr[i]` Array sparseness**                                                                  | 11                                                 | `delete` writes a hole the dynamic read honours (`in`/HOF skip)                                                                                                                                                                                                                |
+| **acorn dogfood** (#1712/#2582 family — dynamic struct read identity)                                 | (non-test262, unblocks the tokenizer loop)         | canonical struct rep on dynamic read paths                                                                                                                                                                                                                                     |
 
 **Rough reachable payoff: ~1,000 test262 host rows** concentrated in
 `Array.prototype.*` generic-method-on-arraylike, plus the open-object/`delete`
 tails. Caveat: not all ~993 flip from the substrate alone — a subset also needs
 the #983d method-dispatch piece and a standalone-ToPrimitive fix (§4). A
 conservative **first-wave estimate is the 350 `-c-i-`/`-b-i-` element-retrieval +
-the ~640 `-2-/-5-` length/this-coercion rows that are *purely* runtime-read
+the ~640 `-2-/-5-` length/this-coercion rows that are _purely_ runtime-read
 gated**; the prototype-chain-accessor subset (the hardest) is a later wave. Even
 the conservative slice dwarfs any single point-fix this session moved.
 
@@ -160,7 +160,7 @@ Three runtime-read operations the dense/typed rep can't express:
 1. **Indexed read `recv[i]` on an `any`/array-like receiver** — needs
    "does the object have own/inherited property `i`?" (HasProperty) then
    `Get(recv, i)`. The typed vec commits to `array.get` on a typed backing
-   array, which (a) traps/0-fills for array-like *objects* (no vec), and (b)
+   array, which (a) traps/0-fills for array-like _objects_ (no vec), and (b)
    can't see prototype-chain entries.
 2. **`recv.length` on an `any`/array-like receiver** — needs runtime
    property-presence: a plain object → `undefined`; an array/arguments/string →
@@ -169,7 +169,7 @@ Three runtime-read operations the dense/typed rep can't express:
 3. **`recv.method(...)` dispatch on an `any` receiver** — needs runtime
    resolution of `method` against the actual object (own/inherited/Array.proto
    generic), not a static funcMap lookup. (#983d's domain — the over-broad
-   fallback regressed; the substrate gives it a *typed* dispatch surface.)
+   fallback regressed; the substrate gives it a _typed_ dispatch surface.)
 
 All three share one requirement: **a canonical runtime object representation that
 carries (or can answer) property-presence + value for a dynamically-shaped
@@ -188,13 +188,13 @@ calls:
 
 - **`__dyn_has(recv: anyref, key) -> i32`** — HasProperty including the prototype
   chain. For `$Object`: walk own fields + the proto link. For `$Vec`: `idx <
-  length && slot !== $Hole`. For array-like `$Object` with a numeric `length`
+length && slot !== $Hole`. For array-like `$Object` with a numeric `length`
   field: `idx < length` (own/inherited). For string: `idx < len`.
 - **`__dyn_get(recv: anyref, key) -> externref`** — `Get`: returns the value as a
   **uniform externref** (numeric boxed), or the spec `undefined` (externref) when
   absent. `.length` is just `__dyn_get(recv, "length")`.
 
-**Representation choice for `.length` / indexed reads on a *statically-`any`*
+**Representation choice for `.length` / indexed reads on a _statically-`any`_
 receiver: uniform externref** (option (a) in the existing problem section) —
 `recv.length` and `recv[i]` on an `any` receiver return a boxed externref, with
 the numeric length/element boxed too. The **typed** path is UNCHANGED:
@@ -204,15 +204,15 @@ numeric vec-field-0 read (no boxing, byte-identical). The branch is on the
 invariant: only `any`/`unknown`/dynamic-shaped receivers pay the runtime cost.
 
 **Why uniform-externref, not "represent `var obj={}` as `$Object`" (option b):**
-option (b) requires deciding the dynamic-object representation at *allocation*
+option (b) requires deciding the dynamic-object representation at _allocation_
 time (every object literal), a far larger blast radius; option (a) is a
-*read-site* change scoped to `any`-typed reads, which is where the cluster lives
+_read-site_ change scoped to `any`-typed reads, which is where the cluster lives
 and where the migration can be gated and incremental.
 
 ## 4. Blast radius + the −794-class risk
 
 The hot path is `a.length` in `for (;i<a.length;)` loops and `.length`
-arithmetic — read *everywhere*. The #1868 (#2573) ejection and the #1844 (#983d)
+arithmetic — read _everywhere_. The #1868 (#2573) ejection and the #1844 (#983d)
 −200 are the cautionary precedents: any change that perturbs the **typed**
 `.length`/method path regresses hundreds of rows. **The migration's prime
 directive: the statically-typed read path stays byte-identical; only
@@ -232,7 +232,7 @@ static receiver type so typed reads are byte-identical:
   scaffolding; validates the helpers compile + the boxed-family dispatch is
   sound). Lands first, de-risks everything after.
 - **M1 — `any`-receiver `.length` → `__dyn_get(recv,"length")`** (the #2580
-  core). Gate strictly on a *statically-`any`/unknown* receiver; typed
+  core). Gate strictly on a _statically-`any`/unknown_ receiver; typed
   `.length` untouched. ~12 rows + de-risks the read-site branch. **This is the
   smallest real-row slice and the canary for the hot-path regression risk** —
   if M1 ejects on a hidden typed-`.length` case, the gating is wrong and we stop
@@ -241,12 +241,12 @@ static receiver type so typed reads are byte-identical:
   `__dyn_get`.** Route the array-method-on-arraylike path (the ~640 `-2-/-5-`
   length/this-coercion rows) through the runtime read instead of the typed vec.
   Coordinates with #983d's method-dispatch (task #20) — the generic-method
-  *resolution* + the *read* land together here.
+  _resolution_ + the _read_ land together here.
 - **M3 — prototype-chain HasProperty for indexed reads** (the 350 `-c-i-`/`-b-i-`
   element-retrieval rows + the #2001 S2 visit-skip, now correctly gated on
   `__dyn_has` so an inherited `Array.prototype[N]` accessor is "present"). This
-  retroactively un-blocks #2001 S2 (re-land the visit-skip *driven by
-  `__dyn_has`*, not own-only). Hardest, last.
+  retroactively un-blocks #2001 S2 (re-land the visit-skip _driven by
+  `__dyn_has`_, not own-only). Hardest, last.
 - **M4 — `delete arr[i]` + `in`/`hasOwnProperty` honour the dynamic read** (the
   11 delete-Array + 17 Object-presence rows). Retroactively gives #2001 S3 its
   payoff (`3 in a` correct after a grow/delete).
@@ -281,24 +281,24 @@ actual test bodies (e.g. `reduce/15.4.4.21-2-1`: `obj={0:12,1:11,2:9,length:2};
 Array.prototype.reduce.call(obj,cb,1)` — a runtime read of `obj.length` +
 `obj[i]` from a plain object).
 
-| Cluster | Rows | Substrate fixes it? | Why / milestone |
-|---|---|---|---|
-| `Array.prototype.X.call(arrayLike, cb)` — `{0:..,length:N}` | **~640** | **YES — substrate IS the fix** | reads `obj.length` (own/inherited) + `obj[i]` at runtime = `__dyn_get`/`__dyn_has`. M2. |
-| inherited/accessor/sparse element-retrieval (`-c-i-`/`-b-i-`) | **350** | **YES — `__dyn_has` prototype-chain arm** | HasProperty walks the proto chain (the #2001 S2 ejection family). M3 re-lands S2 *driven by `__dyn_has`*. |
-| `any`-receiver `.length` → undefined (#2580 core) | **~12** | **YES — direct** | `recv.length` = `__dyn_get(recv,"length")`. M1. |
-| `Object.prototype.{hasOwnProperty,propertyIsEnumerable}` | **17** | **YES — `__dyn_has` own-arm** | own-property presence on `$Object`. M4-adjacent. |
-| `delete arr[i]` sparseness (`in`/HOF skip) | **11** | **YES — `__dyn_has` vec-arm honours `$Hole`** | M4 re-lands #2001 S3's `join` payoff via `in`. |
-| #983d host-method dispatch | (overlap) | **PARTIAL — necessary, not sufficient** | `__dyn_get(recv,"method")` gives the *typed* dispatch surface #983d's over-broad fallback lacked; the generic-method *body* + a standalone-ToPrimitive throw are separate. M2 coordinates. |
-| **#2001 S3 — `var a=[1]; a[5]=9` target → f64** | (0) | **NO — separate axis (WRITE-target type inference)** | the array-LITERAL element heuristic picks f64 for `[1]`, so the assignment *target* `a[5]` resolves f64. The substrate is dynamic *reads* on `any` *receivers*; it never touches a typed-write-target resolution. S3's externref grow-fill (`ba634ef44`) is correct for genuine-externref vecs but its headline needs a *literal-inference* fix, not this substrate. |
-| **#2001 S4 — `const [p,q]=[1]` binding → numeric** | (0) | **NO — separate axis (binding-type inference)** | S4's fix (`779e98fa5`) re-types an OOB tuple-binding to externref — destructuring binding-local inference, orthogonal to dynamic receiver reads. |
+| Cluster                                                       | Rows      | Substrate fixes it?                                  | Why / milestone                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------- | --------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Array.prototype.X.call(arrayLike, cb)` — `{0:..,length:N}`   | **~640**  | **YES — substrate IS the fix**                       | reads `obj.length` (own/inherited) + `obj[i]` at runtime = `__dyn_get`/`__dyn_has`. M2.                                                                                                                                                                                                                                                                              |
+| inherited/accessor/sparse element-retrieval (`-c-i-`/`-b-i-`) | **350**   | **YES — `__dyn_has` prototype-chain arm**            | HasProperty walks the proto chain (the #2001 S2 ejection family). M3 re-lands S2 _driven by `__dyn_has`_.                                                                                                                                                                                                                                                            |
+| `any`-receiver `.length` → undefined (#2580 core)             | **~12**   | **YES — direct**                                     | `recv.length` = `__dyn_get(recv,"length")`. M1.                                                                                                                                                                                                                                                                                                                      |
+| `Object.prototype.{hasOwnProperty,propertyIsEnumerable}`      | **17**    | **YES — `__dyn_has` own-arm**                        | own-property presence on `$Object`. M4-adjacent.                                                                                                                                                                                                                                                                                                                     |
+| `delete arr[i]` sparseness (`in`/HOF skip)                    | **11**    | **YES — `__dyn_has` vec-arm honours `$Hole`**        | M4 re-lands #2001 S3's `join` payoff via `in`.                                                                                                                                                                                                                                                                                                                       |
+| #983d host-method dispatch                                    | (overlap) | **PARTIAL — necessary, not sufficient**              | `__dyn_get(recv,"method")` gives the _typed_ dispatch surface #983d's over-broad fallback lacked; the generic-method _body_ + a standalone-ToPrimitive throw are separate. M2 coordinates.                                                                                                                                                                           |
+| **#2001 S3 — `var a=[1]; a[5]=9` target → f64**               | (0)       | **NO — separate axis (WRITE-target type inference)** | the array-LITERAL element heuristic picks f64 for `[1]`, so the assignment _target_ `a[5]` resolves f64. The substrate is dynamic _reads_ on `any` _receivers_; it never touches a typed-write-target resolution. S3's externref grow-fill (`ba634ef44`) is correct for genuine-externref vecs but its headline needs a _literal-inference_ fix, not this substrate. |
+| **#2001 S4 — `const [p,q]=[1]` binding → numeric**            | (0)       | **NO — separate axis (binding-type inference)**      | S4's fix (`779e98fa5`) re-types an OOB tuple-binding to externref — destructuring binding-local inference, orthogonal to dynamic receiver reads.                                                                                                                                                                                                                     |
 
 **Verdict: GENERALIZES to ~1,030 READ rows (640+350+12+17+11) — the big lever.**
-The two NON-generalizing axes (S3 headline, S4) are *type-inference* problems,
+The two NON-generalizing axes (S3 headline, S4) are _type-inference_ problems,
 not dynamic-read problems; they were correctly parked but are NOT what #2580
 unblocks (they'd need their own smaller literal/binding-inference fixes).
 
-**Floor vs. ceiling (honest):** M1 (12) and M3 (350) are *substrate-pure*. M2's
-640 *also* needs the #983d generic-method body (task #20) + a standalone-
+**Floor vs. ceiling (honest):** M1 (12) and M3 (350) are _substrate-pure_. M2's
+640 _also_ needs the #983d generic-method body (task #20) + a standalone-
 ToPrimitive fix to fully flip, so M2 is "substrate + #983d", not substrate
 alone. **Substrate-pure floor ≈ 390 rows (M1 12 + M3 350 + M4 28); ceiling
 ≈ 1,030 with #983d coordination.**
@@ -330,8 +330,8 @@ decision.
 The two Wasm-native read primitives + a `ctx.usesDynRead` gate + finalize-phase
 wiring (`src/codegen/dyn-read.ts`). **Provably inert / 0-risk**: the helpers are
 gated on `usesDynRead`, which M0 sets nowhere, so they are never emitted and every
-module is byte-identical (the *gate*, not dead-elim, is the guarantee — an
-uncalled *defined* function is not import-pruned). Validated three ways: inert for
+module is byte-identical (the _gate_, not dead-elim, is the guarantee — an
+uncalled _defined_ function is not import-pruned). Validated three ways: inert for
 normal programs (incl. `any[].length`, `o.length===undefined`); valid when
 force-emitted (`JS2WASM_FORCE_DYN_READ=1`, host + standalone — the bodies-are-sound
 self-test); 0 regression on the array/object suites. Merged clean through the
@@ -344,20 +344,20 @@ decision before M2 sank any effort**, with the typed-`.length` safety property
 cleanly bounded. Branch `issue-2580-m1-length-canary` (WIP, NOT pushed).
 
 - **SOLVED — the #2043 `-1` type-index desync.** In HOST mode `__extern_get` is a
-  JS *import*, not the native `$Object` runtime; the call-site helper called
+  JS _import_, not the native `$Object` runtime; the call-site helper called
   `ensureObjectRuntime`, which in host mode registers `$PropEntry` with
   `key: ref $AnyString` where `anyStrTypeIdx === -1` → a struct field referencing
   typeidx -1 → binary-emit fail. Fix: host uses `ensureLateImport("__extern_get")`,
   `ensureObjectRuntime` only in standalone. (Same family as
   `project_type_index_shift_and_deadelim`.)
 - **SOLID — the typed safety property HOLDS.** `number[]`/`string`/`arguments`/
-  `rest` `.length` are byte-identical: they return from the typed arms *above* the
+  `rest` `.length` are byte-identical: they return from the typed arms _above_ the
   new `any`-gated arm and never reach it. The substrate's hot-path risk is bounded.
 - **THE FINDING (the re-assessment).** `.length` on an `any` receiver returning a
-  uniform externref fights every downstream *numeric* consumer. Scouting the five
+  uniform externref fights every downstream _numeric_ consumer. Scouting the five
   `obj.length` consumer contexts (`const x = obj.length` inference, `===`,
   arithmetic `+`, `String()`, `if`-truthiness) shows **none route through the
-  `compilePropertyAccess` arm** — `obj.length`-on-`any` is lowered *independently*
+  `compilePropertyAccess` arm** — `obj.length`-on-`any` is lowered _independently_
   by multiple expression handlers (the `===` HasProperty fold, the arithmetic
   numeric-coercion path, …), each with its own `.length` handling. So the
   uniform-externref `.length` representation is **not one front-end change** but
@@ -374,7 +374,7 @@ cleanly bounded. Branch `issue-2580-m1-length-canary` (WIP, NOT pushed).
   `__extern_get` is non-null, which **conflates "present with value `undefined`"
   vs "absent"** (`{}.x === undefined` own-property edge, and a real `undefined`
   value). HasProperty-proper (own + prototype-chain presence, independent of the
-  *value*) is needed in M2/M3 where the distinction matters. M1's `.length` /
+  _value_) is needed in M2/M3 where the distinction matters. M1's `.length` /
   the array-like cluster only need non-null-Get ⇔ present, so this is deferred,
   not a blocker for M0/M1.
 - **`__dyn_get` standalone arm** — M0 delegates to `__extern_get`; the
@@ -396,7 +396,7 @@ truthiness, `const x = obj.length` inference, `String()`/template) found
 `compileExpression` (expressions.ts:~1171) routes every `PropertyAccessExpression`
 through it with no exceptions, and **no consumer structurally special-cases
 `.length`** before `compileExpression`. The apparent "bypass" (M1's first read)
-is an *illusion of type coercion*: my arm returns externref, then each consumer's
+is an _illusion of type coercion_: my arm returns externref, then each consumer's
 existing coercion converts it — sometimes WRONGLY (unboxing the externref back to
 numeric, losing `undefined`).
 
@@ -439,7 +439,7 @@ Expect **2–4 small consumer fixes + the arm**, not a sweeping refactor.
 
 - **M1a — the arm + `=== undefined` canary** (smallest, highest-signal). Land the
   externref arm + whatever the `=== undefined` path needs so `var obj={};
-  obj.length === undefined` → true and the S15.4.4 `.length`-property rows flip.
+obj.length === undefined` → true and the S15.4.4 `.length`-property rows flip.
   Full-gate. **The viability proof.**
 - **M1b — binding-inference + truthiness + arithmetic + String** consumer fixes
   (only the ones M1a's audit flags). Full-gate.
@@ -469,10 +469,11 @@ classifier — so the question is collision vs. clean layering.
 
 **VERDICT: CLEAN LAYERING — zero overlapping lines** (read-only `binary-ops.ts`
 trace). My canary's `===` shapes land in arms DISJOINT from theirs:
+
 - `obj.length === undefined` (my PRIMARY assertion) → the **presence arm**,
   `binary-ops.ts:429-435` (`__extern_is_undefined`). Not the classifier.
 - `obj.length === <number>` → the **numeric-fallback arm**, `binary-ops.ts:
-  2853-2876` (`__unbox_number` + `f64.eq`). Not the classifier.
+2853-2876` (`__unbox_number` + `f64.eq`). Not the classifier.
 - Their tag-5 content-equality rewrite lives at `binary-ops.ts:2804-2823`
   (`__any_from_extern` → `__any_eq` tag-dispatch), and is **strict-vs-loose
   disjoint** from mine: that arm is the LOOSE-equality (`==`/`!=`) + standalone
@@ -497,7 +498,7 @@ The `.length`-on-`any` HOST arm landed as a clean **2-file** change
 
 **Where the arm sits (the key root-cause fix).** It is NOT a new `propName ===
 "length"` block placed ahead of the existing ones — that was the first (wrong)
-attempt and it *clobbered the working array path*. Origin already reads
+attempt and it _clobbered the working array path_. Origin already reads
 `const o: any = [1,2,3]; o.length` correctly as `3` because `o`'s value is an
 externref wrapping a WasmGC vec; the existing handler eventually reaches a generic
 externref reader that ref.test-dispatches the vec. Intercepting `any`-`.length`
@@ -509,10 +510,12 @@ non-vec dynamic receiver.
 
 **`emitDynGet` host path = runtime receiver-kind dispatch (no funcidx hazard).**
 For the `length` key it emits, inline:
+
 ```
 ref.test $vec_i  → if hit:  box_number(f64(struct.get $vec_i 0))   // the array length
                    else:    __extern_get(recv, "length")            // value or undefined
 ```
+
 nested as one if/else chain over every registered `{length,data}` vec type in
 `ctx.vecTypeMap`. `ref.test typeIdx` uses **type** indices (append-only /
 dead-elim-stable via the rec-group), so unlike a `call __is_vec` it carries no
@@ -552,17 +555,17 @@ exact 13 split into two clusters, BOTH the `.length`-on-any arm firing on a
 receiver the prior numeric path handled correctly:
 
 - **A (5): function/closure `.length` = ARITY.** `verifyProperty(IteratorProto[
-  Symbol.iterator], 'length', {value:0})` etc. `(fn as any).length`: origin = `0`
+Symbol.iterator], 'length', {value:0})` etc. `(fn as any).length`: origin = `0`
   (matches the arity the tests assert), my arm = **NaN** (a closure externref →
   `__extern_get(closure,"length")` → undefined → NaN coercion).
 - **B (8): for-await-of array-rest destructuring `.length`.** `for ([x, ...y] of
-  …)` then `y.length`. The rest binding `y` is `let`-declared → `any`, and in the
+…)` then `y.length`. The rest binding `y` is `let`-declared → `any`, and in the
   loop-head-destructuring desugaring it ends up as a boxed/wrapped externref that
   is NEITHER a directly-`ref.test`-able vec NOR a plain host object — so my vec
   chain misses and `__extern_get` returns undefined → **NaN** (origin returned the
   correct count). (A reduced `for ([x,...y] of [[1,2,3]]) {}; return y.length`
   reproduces NaN locally; note `typeof y` is `"undefined"` / `Array.isArray(y)`
-  false in this reduced shape — there is a *separate* for-of-rest-binding
+  false in this reduced shape — there is a _separate_ for-of-rest-binding
   representation quirk here, orthogonal to M1a, that the prior numeric `.length`
   path happened to read correctly.)
 
@@ -582,7 +585,7 @@ WasmGC `$Object` struct — it's a host JS object (externref). There is no struc
 
 The host-mode picture (confirmed by probing): plain `{}` is a host externref that
 `ref.test`-misses ALL structs (→ `__extern_get` → undefined, the canary —
-*already* works via the current vec-MISS branch); array/closure are WasmGC
+_already_ works via the current vec-MISS branch); array/closure are WasmGC
 structs; the for-of/await rest binding points at a vec (the v1 arm matched it and
 read the SOURCE array's length 3, hence "returned 3" for expected 2).
 
@@ -659,10 +662,10 @@ CURRENT main, all three premises are stale:
    `built-ins/Array/prototype/{reduce,reduceRight}` test262 file standalone:
    - **refusal ON (current main): PASS 363, FAIL 8, CE 68** (520 files)
    - **refusal OFF (the un-refuse): PASS 306 (−57), FAIL 57 (+49)**
-   The native no-init arm returns WRONG results for the real corpus shapes
-   (defineProperty-getter array-likes, sparse holes, proto-chain receivers,
-   `arguments`); a bare object-literal array-like (`{0:..,1:..,length:n}`) is the
-   only best-case shape that returns correctly, and it is not representative.
+     The native no-init arm returns WRONG results for the real corpus shapes
+     (defineProperty-getter array-likes, sparse holes, proto-chain receivers,
+     `arguments`); a bare object-literal array-like (`{0:..,1:..,length:n}`) is the
+     only best-case shape that returns correctly, and it is not representative.
 
 **A genuine un-refuse requires a CORRECT native no-init arm** (handle
 defineProperty getters / holes / proto-chain / `arguments`) — that is the M2
@@ -708,7 +711,7 @@ runtime value gap, as the scoping doc predicted at the headline level.
 
 > ⚠️ RUNNER ARTIFACT (warn the next agent): running these 170 IN ONE in-process
 > `runTest262File` loop reports ~42/43 as `compile_error: Cannot read properties
-> of undefined (reading 'kind')` — a TS-parser (`createSourceFile` →
+of undefined (reading 'kind')` — a TS-parser (`createSourceFile` →
 > `canHaveModifiers`) crash from cross-compile state bleed in the in-process
 > runner. It is FALSE: each test in a FRESH process is a clean `fail`. The
 > sharded `compiler-fork-worker.mjs` (one fork per test, the path that records
@@ -792,14 +795,15 @@ The re-grounding said "the compiled object rep carries NO runtime `[[Prototype]]
 link." Reading the source, that is true **end-to-end** but the pieces are
 asymmetric, and naming them precisely is what makes the staging tractable:
 
-**Standalone (`--target standalone`)** — the substrate is *mostly built*:
+**Standalone (`--target standalone`)** — the substrate is _mostly built_:
+
 - `$Object` **already has** `(field $proto (mut (ref null $Object)))` at field
   index 0 (`object-runtime.ts:239`, struct def ~262).
 - `__extern_get` (`object-runtime.ts:746`, body ~761) **already walks** the
   `$proto` chain (the `o = o.$proto` loop at ~844-848, `struct.get $Object 0`),
   including the §6.2.5.5 accessor-`Get`-on-original-receiver arm.
 - `__extern_has` (`object-runtime.ts:~1932`) **already walks** the chain (mirror
-  of `__extern_get`). So the `in` operator's standalone arm is *already*
+  of `__extern_get`). So the `in` operator's standalone arm is _already_
   proto-aware once the link is populated.
 - `__object_create` (`object-runtime.ts:~2348`) and `__object_setPrototypeOf`
   (`~2394`) **already write** `$Object.$proto` correctly (with the
@@ -807,33 +811,34 @@ asymmetric, and naming them precisely is what makes the staging tractable:
 - `__getPrototypeOf` / `__object_isPrototypeOf` (`~2319`, `~2544`) already read
   the chain.
 
-So in standalone the inherited-NAMED read should *already* resolve **for objects
+So in standalone the inherited-NAMED read should _already_ resolve **for objects
 that are native `$Object`s with a populated `$proto`**. It fails because:
-  (S-a) **`{}`/object-literal alloc sets `$proto: null`** (`__new_plain_object`
-  body, `object-runtime.ts:621`; the inline `struct.new $Object` at ~1058) — so
-  `Object.create(proto)` is fine (it writes `$proto`) but the *common* literal
-  path leaves a null chain.
-  (S-b) **`new F()` (fnctor) construction does not link `instance.$proto` to
-  `F.prototype`** — standalone construction is "pure Wasm" (per the #1712 comment
-  at `new-super.ts:1110`, the host bridge is JS-host-only) and never writes the
-  instance's `$proto`.
-  (S-c) **`F.prototype = plainObj` reassignment is not modeled** — there is no
-  standalone notion of a per-constructor `.prototype` object that `new F()` reads
-  to seed `instance.$proto`.
-  (S-d) **INDEXED reads do NOT proto-walk.** `__extern_get_idx`
-  (`object-runtime.ts:3351`) array-like arm reads `obj.length` + `obj[i]` via
-  `__extern_get` on the *string* key — but its `$Object` arm only handles the
-  array-like-with-own-`length` shape; an inherited indexed element
-  (`Object.create({5:99})[5]`) needs the index→string-key read to go through the
-  proto-walking `__extern_get`, which it can once (S-a/b/c) populate `$proto`.
+(S-a) **`{}`/object-literal alloc sets `$proto: null`** (`__new_plain_object`
+body, `object-runtime.ts:621`; the inline `struct.new $Object` at ~1058) — so
+`Object.create(proto)` is fine (it writes `$proto`) but the _common_ literal
+path leaves a null chain.
+(S-b) **`new F()` (fnctor) construction does not link `instance.$proto` to
+`F.prototype`** — standalone construction is "pure Wasm" (per the #1712 comment
+at `new-super.ts:1110`, the host bridge is JS-host-only) and never writes the
+instance's `$proto`.
+(S-c) **`F.prototype = plainObj` reassignment is not modeled** — there is no
+standalone notion of a per-constructor `.prototype` object that `new F()` reads
+to seed `instance.$proto`.
+(S-d) **INDEXED reads do NOT proto-walk.** `__extern_get_idx`
+(`object-runtime.ts:3351`) array-like arm reads `obj.length` + `obj[i]` via
+`__extern_get` on the _string_ key — but its `$Object` arm only handles the
+array-like-with-own-`length` shape; an inherited indexed element
+(`Object.create({5:99})[5]`) needs the index→string-key read to go through the
+proto-walking `__extern_get`, which it can once (S-a/b/c) populate `$proto`.
 
-**Host / GC mode (`!standalone && !wasi`)** — the substrate is *three
-half-mechanisms and a stub*, and this is why the re-grounding saw host fail too:
+**Host / GC mode (`!standalone && !wasi`)** — the substrate is _three
+half-mechanisms and a stub_, and this is why the re-grounding saw host fail too:
+
 - (H-a) `new F()` instances link to their ctor via `_fnctorInstanceCtor`
   (`runtime.ts:71`), and a property MISS resolves through
   `_fnctorProtoLookup` (`runtime.ts:74`) → `_sidecarGet(ctor, "prototype")` →
   walks that vivified object. **BUT** `_fnctorProtoLookup` reads the ctor's
-  vivified-`prototype` *sidecar slot* (`_getOrVivifyFnPrototype`, `runtime.ts:96`,
+  vivified-`prototype` _sidecar slot_ (`_getOrVivifyFnPrototype`, `runtime.ts:96`,
   writes `_sidecarSet(obj,"prototype",{})`). A WHOLE-prototype reassignment
   `F.prototype = {foo:7}` only resolves IF that write lands in the SAME sidecar
   slot the vivify/read path uses — and if the `{foo:7}` literal is reachable as a
@@ -846,14 +851,14 @@ half-mechanisms and a stub*, and this is why the re-grounding saw host fail too:
   `child.x` misses.
 - (H-c) **`Object.setPrototypeOf` is a STUB in host/GC mode** (`calls.ts:5562`):
   it compiles both args, **`drop`s the proto**, and returns obj. So
-  `o={}; Object.setPrototypeOf(o,{y:99}); o.y` *cannot* work host-side — the link
+  `o={}; Object.setPrototypeOf(o,{y:99}); o.y` _cannot_ work host-side — the link
   is literally discarded at compile time. (Standalone routes to the native
   helper; host drops it.)
 - (H-d) **`in` / HasProperty is OWN-only host-side.** `_wasmStructHasOwn`
   (`runtime.ts:2900`) consults sidecar + descriptors + registered class-proto
   method-names + static struct fields — it **never calls `_fnctorProtoLookup`**,
   so `(5 in child)` and `("foo" in new Con())` return false even when `child.foo`
-  *would* resolve via the read path. The read path and the has path **disagree**.
+  _would_ resolve via the read path. The read path and the has path **disagree**.
 
 **Unified root cause (sharpened):** there is no single canonical `[[Prototype]]`
 link nor one shared walk. Standalone has ONE correct walk (`__extern_get`/
@@ -868,15 +873,16 @@ host-mirror all call, (3) populate it at all five sites, in both modes.
 a sidecar.**
 
 Rationale:
+
 - The field already exists, is already walked by `__extern_get`/`__extern_has`,
   and is already written by `__object_create`/`__object_setPrototypeOf`. A
-  sidecar map would *duplicate* a working field and force every walk to consult
+  sidecar map would _duplicate_ a working field and force every walk to consult
   two sources (the exact "N walks not one" anti-pattern the task warns against).
 - **Object identity is preserved** — `$proto` is a `(ref null $Object)`, an
   intrusive link on the object itself; no external WeakMap keyed by object
   identity, no GC-liveness coupling, no canonicalization hazard (the field was
   added when `$Object` was first defined; it does NOT reopen the closed-struct /
-  iso-recursive-canonicalization risk that #1100/#2009 flagged — we are *using* an
+  iso-recursive-canonicalization risk that #1100/#2009 flagged — we are _using_ an
   existing field, not changing the struct shape).
 - **Size**: one `ref null` slot already allocated. Zero new per-object cost.
 - **The link target is always another `$Object`** (`ref null $Object`). A
@@ -892,6 +898,7 @@ Rationale:
 vivified-`prototype`-sidecar mechanism (#1712), GENERALIZED.** Do NOT add a new
 parallel WeakMap; do NOT try to make the closed-struct literals natively
 JS-walkable. Instead:
+
 - Treat the **vivified `.prototype` sidecar object** (`runtime.ts:96-121`) as the
   canonical per-constructor prototype OBJECT, and the **`_fnctorInstanceCtor`
   WeakMap** (`runtime.ts:71`) as the canonical per-instance `[[Prototype]]` link.
@@ -908,7 +915,7 @@ JS-walkable. Instead:
 instances are **host JS objects / opaque WasmGC structs (externref)**, NOT native
 `$Object` structs (the native object runtime is standalone-only — `literals.ts`
 #1901/#2542 gate is `ctx.standalone`). There is no `$Object.$proto` field to write
-host-side. So the two modes necessarily use two link *substrates* (Wasm field vs
+host-side. So the two modes necessarily use two link _substrates_ (Wasm field vs
 WeakMap) but expose ONE walk protocol (Decision 2) so call sites are mode-agnostic.
 
 ## DECISION 2 — the SHARED walk protocol (one walk, not N)
@@ -918,6 +925,7 @@ all funnel through. **Do not write a fourth walk.**
 
 **Standalone — the walk already exists; the rule is "every dynamic op routes
 through `__extern_get` / `__extern_has`, never a bespoke own-only scan":**
+
 - Inherited NAMED read → `__extern_get(recv, key)` (walks `$proto`). ✓ exists.
 - `in` / HasProperty → `__extern_has(recv, key)` (walks `$proto`). ✓ exists.
 - Inherited INDEXED read `recv[i]` → `__extern_get_idx(recv, i)`
@@ -937,6 +945,7 @@ through `__extern_get` / `__extern_has`, never a bespoke own-only scan":**
 
 **Host — define ONE resolver `_protoChainLookup(obj, key) -> PropertyDescriptor |
 undefined` that supersedes `_fnctorProtoLookup` and is the SINGLE walk:**
+
 ```
 _protoChainLookup(obj, key):
   # canonical link 1: the new _objProto WeakMap (Object.create / setPrototypeOf)
@@ -948,6 +957,7 @@ _protoChainLookup(obj, key):
   # canonical link 2: fnctor instance → ctor vivified .prototype (#1712, reused)
   return _fnctorProtoLookup(obj, key)   # unchanged body, now the TAIL of one walk
 ```
+
 - `_safeGet` (`runtime.ts:~3817`) replaces its direct `_fnctorProtoLookup` call
   with `_protoChainLookup` (which still ends in `_fnctorProtoLookup`, so the #1712
   class/fnctor path is preserved verbatim — **no double-walk**: it is ONE call
@@ -970,13 +980,13 @@ call the ONE walk for their mode (`__extern_get`/`__extern_has` standalone;
 
 Five sites set the link. Each writes the canonical location from Decision 1.
 
-| Site | Standalone (`$Object.$proto`) | Host (`_objProto` / fnctor sidecar) |
-|---|---|---|
-| **`{}` / object literal** | leave `$proto: null` (correct — plain objects inherit `Object.prototype`, which the native runtime models as the null-terminated chain end). NO CHANGE. | host JS `{}` already inherits `Object.prototype` natively. NO CHANGE. |
-| **`Object.create(p)`** | ✓ already writes `$proto` (`__object_create`). NO CHANGE. | **CHANGE:** the host `__object_create` import (`runtime.ts:7463`) must ALSO record `_objProto.set(result, p)` when `p` is one of our opaque structs, so the shared walk can read `p`'s keys (V8's native `Object.create(opaqueStruct)` can't). Keep the real `Object.create` for the plain-JS-`p` fast path. |
-| **`new F()` (fnctor)** | **CHANGE (M3-S-new, the canary):** after constructing the instance struct, set `instance.$proto = F's prototype $Object`. Requires F's `.prototype` to be a native `$Object` (Decision: synthesize a per-fnctor prototype `$Object` global, seeded from `F.prototype = …` writes; see below). | ✓ `_fnctorInstanceCtor.set(inst, ctor)` already linked (`new-super.ts:1104-1138`, `__register_fnctor_instance`). NO new link — the canary's host fix is making the *vivified-prototype write* (next row) land where `_fnctorProtoLookup` reads. |
-| **`F.prototype = x`** | **CHANGE (M3-S-protoassign):** model a per-constructor prototype `$Object`. When `F.prototype = plainObjLiteral` is assigned, build that literal as an `$Object` and record it as F's prototype (a compile-time map `ctx.fnctorPrototypeObject` keyed by the fnctor name → its prototype `$Object` global), so `new F()` seeds `instance.$proto` from it. | **CHANGE (M3-H-protoassign):** route `F.prototype = x` to `_sidecarSet(ctorClosure, "prototype", x)` — the SAME slot `_getOrVivifyFnPrototype`/`_fnctorProtoLookup` read. Today a whole-prototype reassignment may not land there; make it land there, and make `x` (if an opaque struct) readable by `_fnctorProtoLookup` (it uses `Object.getOwnPropertyDescriptor`, which misses struct fields — so either build `x` as a host-readable object or have `_readOwn` consult the sidecar/struct getters). |
-| **`Object.setPrototypeOf(o,p)`** | ✓ already writes `$proto` (`__object_setPrototypeOf`). NO CHANGE. | **CHANGE (the host stub fix, H-c):** `calls.ts:5562` must STOP dropping the proto. Route host/GC `setPrototypeOf` to a real host import `__object_setPrototypeOf` (host impl: `_objProto.set(o, p)` with the §10.1.2.1 cycle/extensibility check) instead of `drop`. This is the single highest-leverage host change. |
+| Site                             | Standalone (`$Object.$proto`)                                                                                                                                                                                                                                                                                                                             | Host (`_objProto` / fnctor sidecar)                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`{}` / object literal**        | leave `$proto: null` (correct — plain objects inherit `Object.prototype`, which the native runtime models as the null-terminated chain end). NO CHANGE.                                                                                                                                                                                                   | host JS `{}` already inherits `Object.prototype` natively. NO CHANGE.                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| **`Object.create(p)`**           | ✓ already writes `$proto` (`__object_create`). NO CHANGE.                                                                                                                                                                                                                                                                                                 | **CHANGE:** the host `__object_create` import (`runtime.ts:7463`) must ALSO record `_objProto.set(result, p)` when `p` is one of our opaque structs, so the shared walk can read `p`'s keys (V8's native `Object.create(opaqueStruct)` can't). Keep the real `Object.create` for the plain-JS-`p` fast path.                                                                                                                                                                                              |
+| **`new F()` (fnctor)**           | **CHANGE (M3-S-new, the canary):** after constructing the instance struct, set `instance.$proto = F's prototype $Object`. Requires F's `.prototype` to be a native `$Object` (Decision: synthesize a per-fnctor prototype `$Object` global, seeded from `F.prototype = …` writes; see below).                                                             | ✓ `_fnctorInstanceCtor.set(inst, ctor)` already linked (`new-super.ts:1104-1138`, `__register_fnctor_instance`). NO new link — the canary's host fix is making the _vivified-prototype write_ (next row) land where `_fnctorProtoLookup` reads.                                                                                                                                                                                                                                                           |
+| **`F.prototype = x`**            | **CHANGE (M3-S-protoassign):** model a per-constructor prototype `$Object`. When `F.prototype = plainObjLiteral` is assigned, build that literal as an `$Object` and record it as F's prototype (a compile-time map `ctx.fnctorPrototypeObject` keyed by the fnctor name → its prototype `$Object` global), so `new F()` seeds `instance.$proto` from it. | **CHANGE (M3-H-protoassign):** route `F.prototype = x` to `_sidecarSet(ctorClosure, "prototype", x)` — the SAME slot `_getOrVivifyFnPrototype`/`_fnctorProtoLookup` read. Today a whole-prototype reassignment may not land there; make it land there, and make `x` (if an opaque struct) readable by `_fnctorProtoLookup` (it uses `Object.getOwnPropertyDescriptor`, which misses struct fields — so either build `x` as a host-readable object or have `_readOwn` consult the sidecar/struct getters). |
+| **`Object.setPrototypeOf(o,p)`** | ✓ already writes `$proto` (`__object_setPrototypeOf`). NO CHANGE.                                                                                                                                                                                                                                                                                         | **CHANGE (the host stub fix, H-c):** `calls.ts:5562` must STOP dropping the proto. Route host/GC `setPrototypeOf` to a real host import `__object_setPrototypeOf` (host impl: `_objProto.set(o, p)` with the §10.1.2.1 cycle/extensibility check) instead of `drop`. This is the single highest-leverage host change.                                                                                                                                                                                     |
 
 **Composition with #1712 (no double-walk):** the #1712 fnctor mechanism is
 **reused as the TAIL of the one host walk**, never run in addition to it.
@@ -1011,7 +1021,7 @@ scoped-sweep ejects are the precedent). Stop-the-line on any eject.
   0-delta) — the change is ensuring the `{x:99}`/`{5:99}` literal `p` is built as
   an `$Object` so its keys are present. Canaries:
   `Object.create({x:99}).x === 99`; `o={}; Object.setPrototypeOf(o,{y:99}); o.y
-  === 99`. Banks the create/setPrototypeOf reproducers.
+=== 99`. Banks the create/setPrototypeOf reproducers.
 - **Stage C — INDEXED inherited reads + `in`.** Standalone M3-S
   (`__extern_get_idx`/`__extern_has_idx` route inherited indices through the
   proto-walking `__extern_get`/`__extern_has`). Host M3-H-has (the `in` path calls
@@ -1044,6 +1054,7 @@ it.
 Drive each stage with these (all wrong on current main, host AND standalone
 identical — see the re-grounding bisection). Add as a dedicated regression suite
 `tests/issue-2580-m3-protochain.test.ts`, run BOTH modes:
+
 1. `function Con(){}; Con.prototype={foo:7}; new Con().foo` → want 7 (Stage A)
 2. `Object.create({x:99}).x` → want 99; `Object.create({5:99})[5]` → want 99
    (Stage B named / Stage C indexed)
@@ -1140,12 +1151,13 @@ value_read_substrate`); NOT dev-claimable until Stage A's gating is proven.
 ## What I verified (faithful per-process, NOT the in-process loop trap)
 
 The canary `function Con(){}; Con.prototype = {foo:7}; new Con().foo`:
+
 - **HOST** → `undefined` (spec said "NaN"; the NaN was the test262 runner's numeric
   coercion of the `undefined` miss — confirmed: the raw `.foo` value is `undefined`).
 - **STANDALONE** → numeric `0` (the inherited read misses; `typeof v === "number"`).
 
 Both wrong, both modes — consistent with the re-grounding's headline. So the
-*symptom* is real. But bisecting the *mechanism* contradicts the spec's
+_symptom_ is real. But bisecting the _mechanism_ contradicts the spec's
 link-location decision in BOTH modes:
 
 ### STANDALONE — the spec's "seed `instance.$proto`" is NOT IMPLEMENTABLE as written
@@ -1165,10 +1177,11 @@ MISSES the `$__fnctor_Con` struct and returns absent.
 So "seed `instance.$proto`" has no field to write. Closing the standalone canary
 requires one of (all object-model-substrate, NOT the ~1–2-day populate-wiring the
 spec promised, and all with the broad blast radius Stage A was meant to AVOID):
+
 1. **Add a `$proto` field to every `$__fnctor_<name>` struct** — shifts every
    fnctor own-field index, the `this.x=` write paths, and the own-field
    `struct.get`; AND teach `__extern_get`/`__extern_has`'s walk a new arm that
-   recognizes fnctor structs and reads *their* `$proto` (today it only walks
+   recognizes fnctor structs and reads _their_ `$proto` (today it only walks
    `$Object`). Two walks, the anti-pattern the spec itself warns against.
 2. **Construct fnctor instances as `$Object`s** — changes object identity for
    every `new F()` (Decision 1's explicitly-rejected option (b), "far larger
@@ -1181,20 +1194,21 @@ purely POPULATE" is the mis-attribution: the walk exists **only for `$Object`**,
 and the canary's receiver is never an `$Object`. There is no `$proto` to populate.
 
 > **Counter-evidence the spec missed (and the actually-tractable seam):** the
-> standalone `$proto` walk *does* work when the receiver IS a real `$Object` with
+> standalone `$proto` walk _does_ work when the receiver IS a real `$Object` with
 > a materialized `$Object` proto — `const p:any={foo:7}; const c:any=Object.create(p);
-> c.foo` → **7** ✓, and `const p:any={foo:7}; const o:any={}; Object.setPrototypeOf(o,p);
-> o.foo` → **7** ✓ (both verified). Only the **inline-literal** proto arg
+c.foo` → **7** ✓, and `const p:any={foo:7}; const o:any={}; Object.setPrototypeOf(o,p);
+o.foo` → **7** ✓ (both verified). Only the **inline-literal** proto arg
 > (`Object.create({foo:7})`) regresses to `0` — a literal-materialization gap, not
 > a walk gap. So the genuinely landable standalone first-canary is NOT the fnctor
 > `new Con()` (Stage A) but the **`Object.create`/`setPrototypeOf` named-proto
 > path, already green**, with a narrow inline-literal-as-`$Object` fix — i.e. the
-> spec's Stage B is *more* tractable standalone than its Stage A.
+> spec's Stage B is _more_ tractable standalone than its Stage A.
 
 ### HOST — the spec's H-a link is ABSENT for the canary's exact shape, + the write is dropped
 
 Spec H-a: "`new F()` instances link to their ctor via `_fnctorInstanceCtor`;
 a miss resolves through `_fnctorProtoLookup`." Verified FALSE for the canary:
+
 - For a **plain `function Con(){}` declaration**, there is NO closure global, so
   the `__register_fnctor_instance` emission is gated OFF (`new-super.ts:1118-1138`
   requires `ctx.moduleGlobals.get(funcName) ?? ctx.funcClosureGlobals.get(funcName)`,
@@ -1202,9 +1216,9 @@ a miss resolves through `_fnctorProtoLookup`." Verified FALSE for the canary:
   the canary module imports only `__extern_get`/`__box_number`/`__unbox_number` —
   **no `__register_fnctor_instance`** — so the instance→ctor link is never
   established. `_fnctorProtoLookup` returns `undefined` for the canary instance.
-  (The #1712 mechanism the spec leans on fires only for a *closure-valued*
+  (The #1712 mechanism the spec leans on fires only for a _closure-valued_
   `const Con = function(){}` — verified: `const Con=function(){}; Con.prototype.foo=7;
-  new Con().foo` → **7** ✓. The canary uses a declaration, which the link skips.)
+new Con().foo` → **7** ✓. The canary uses a declaration, which the link skips.)
 - The whole-object write `Con.prototype = {foo:7}` is **dropped entirely** — no
   host call is emitted for it (verified in WAT: no `__extern_set`, no sidecar
   write). Even `(Con as any).prototype.foo` reads `undefined` directly.
@@ -1230,7 +1244,8 @@ stop-the-line tripwire ("if Stage A ejects on a typed-instance case, gating is
 wrong → STOP") would almost certainly fire.
 
 **Recommended re-spec (flagged to lead):**
-1. **Re-pick the standalone canary**: the fnctor `new Con()` is the *hardest*
+
+1. **Re-pick the standalone canary**: the fnctor `new Con()` is the _hardest_
    standalone shape, not the easiest — its instance isn't an `$Object`. The
    genuinely-landable standalone first canary is the **`Object.create` /
    `setPrototypeOf` named-proto path (already green)** + a narrow
@@ -1278,7 +1293,7 @@ Rationale, weighed:
   walk arm.** REJECTED for the fnctor lap. It is the broad-blast-radius change the
   task warns against: it shifts every fnctor own-field index (the `this.x=` write
   paths + own-field `struct.get`), AND forces `__extern_get`/`__extern_has` to
-  carry a SECOND walk arm that recognizes fnctor structs and reads *their*
+  carry a SECOND walk arm that recognizes fnctor structs and reads _their_
   `$proto` (today the walk is `$Object`-only, `object-runtime.ts:844`
   `struct.get $Object 0`). Two walks is exactly the "N walks not one" anti-pattern
   the spec itself forbids. It also re-enters the iso-recursive-canonicalization
@@ -1330,12 +1345,14 @@ in `$p` → `call __object_create` on that `$Object` externref. `__object_create
 `ref.test $Object` SUCCEEDS → writes `$proto` → `c.foo` walks the chain → **7**. ✓
 
 `const c:any = Object.create({foo:7})` (INLINE literal) emits instead:
+
 ```
 f64.const 7
 struct.new 82          ;; CLOSED-shape literal struct (the literal's own type), NOT $Object
 extern.convert_any
 call __object_create    ;; proto is a closed struct → ref.test $Object FAILS → coerced to null
 ```
+
 The inline literal's TS contextual type is a CONCRETE object type (not `any`), so
 `compileObjectLiteral` picks the closed-shape struct path (`struct.new <typeIdx>`),
 which `ref.test $Object` MISSES. `__object_create` coerces a non-`$Object` proto to
@@ -1349,6 +1366,7 @@ literal silently dropped its props. The fix template already exists in-tree
 ## Stage A — THE FIX (implemented, 2-site + 1 shared helper, standalone-gated)
 
 `src/codegen/expressions/calls.ts`:
+
 - New helper `compileProtoArg(ctx, fctx, arg)` — mirrors `compileObjectAssignArg`:
   when `arg` is a plain data-property / spread object literal (the same shapes the
   `$Object` builder accepts) AND `ctx.standalone`, build it via
@@ -1370,27 +1388,29 @@ Typed `.length` / array hot paths never enter these arms.
 ## Stage A — VERIFICATION (per-process, both modes; the runner-trap avoided)
 
 Seam matrix, standalone, BEFORE → AFTER:
-- `Object.create({foo:7}).foo`            0 → **7** ✓
+
+- `Object.create({foo:7}).foo` 0 → **7** ✓
 - `Object.setPrototypeOf(o,{foo:7}); o.foo` 0 → **7** ✓
-- `Object.create({5:99})[5]` (indexed)    0 → **99** ✓ (indexed inherited read also
+- `Object.create({5:99})[5]` (indexed) 0 → **99** ✓ (indexed inherited read also
   fixed — `__extern_get_idx` routes through the now-populated `$proto` walk)
 - `Object.create({foo:7}).foo` with own shadow `c.foo=9` → **9** ✓
-- named-var proto (regression guard)      7 → **7** ✓ (unchanged)
+- named-var proto (regression guard) 7 → **7** ✓ (unchanged)
 - `Object.create(null)` absent read → undefined ✓; `Object.create(Foo.prototype)`
   class fast path ✓; `setPrototypeOf(o,null)` ✓; array `.length` → 3 ✓.
 
 Regression suite `tests/issue-2580-m3-protochain.test.ts` (11 cases) green; `tsc`
-+ `prettier` clean. Sibling 2580 suites green. `prototype-chain.test.ts` (6/11) and
-`object-create.test.ts` (missing `./helpers.js`) fail IDENTICALLY on clean
-origin/main — **pre-existing test-harness artifacts, not this change** (verified
-against `/workspace`).
+
+- `prettier` clean. Sibling 2580 suites green. `prototype-chain.test.ts` (6/11) and
+  `object-create.test.ts` (missing `./helpers.js`) fail IDENTICALLY on clean
+  origin/main — **pre-existing test-harness artifacts, not this change** (verified
+  against `/workspace`).
 
 ## KNOWN-ORTHOGONAL (NOT this slice; do not chase in Stage A)
 
 `c.a + c.b` reading TWO inherited `any`-typed props in one `+` expression returns
 0 — but so does `p.a + p.b` reading two OWN props of a plain `any` object **on
 clean origin/main** (verified). It is a pre-existing `any + any` arithmetic-add bug
-(the #2580 M1/core uniform-externref *consumer* issue, NOT the proto LINK). My
+(the #2580 M1/core uniform-externref _consumer_ issue, NOT the proto LINK). My
 slice fixes the link; single-read inherited access is fully correct. Stored-to-local
 sums (`const x=c.a; const y=c.b; return x+y`) → 30 ✓, proving the values resolve.
 Track the add-path bug with M1/core, not M3.
@@ -1421,13 +1441,13 @@ never force-push public main.
 
 ## Re-ground (per-process, both modes, current main + Stage A)
 
-| reproducer | standalone | host (gc) |
-|---|---|---|
-| `function Con(){}; Con.prototype={foo:7}; new Con().foo` (canary) | **0** ✗ | **NaN** ✗ |
-| `function Con(){}; Con.prototype.foo=7; new Con().foo` | **0** ✗ | **NaN** ✗ |
-| `const Con=function(){}; Con.prototype.foo=7; new Con().foo` | **0** ✗ | **7** ✓ |
-| `const Con=function(){}; Con.prototype={foo:7}; new Con().foo` | **0** ✗ | **0** ✗ |
-| `function Con(this:any){this.x=3;} new Con().x` (OWN field) | **3** ✓ | **3** ✓ |
+| reproducer                                                        | standalone | host (gc) |
+| ----------------------------------------------------------------- | ---------- | --------- |
+| `function Con(){}; Con.prototype={foo:7}; new Con().foo` (canary) | **0** ✗    | **NaN** ✗ |
+| `function Con(){}; Con.prototype.foo=7; new Con().foo`            | **0** ✗    | **NaN** ✗ |
+| `const Con=function(){}; Con.prototype.foo=7; new Con().foo`      | **0** ✗    | **7** ✓   |
+| `const Con=function(){}; Con.prototype={foo:7}; new Con().foo`    | **0** ✗    | **0** ✗   |
+| `function Con(this:any){this.x=3;} new Con().x` (OWN field)       | **3** ✓    | **3** ✓   |
 
 Read-path bisected from emitted WAT (standalone canary): `new Con()` →
 `call $__fnctor_Con_new` → `extern.convert_any` (box) → `c.foo` lowers to
@@ -1561,13 +1581,13 @@ The handoff (and the Stage-B brief) framed the 168-row bulk as the fnctor
 shape). **Measured against the actual test262 bodies, that shape is a MINORITY.**
 Counts over the 266 `-c-i-`/`-b-i-` files under `Array/prototype/`:
 
-| construction mechanism | files | what it needs |
-|---|---|---|
-| **`Object.defineProperty`** (own/inherited ACCESSOR props on `{length:N}`) | **181** | `$Object` accessor-`Get` arm + generic-method HasProperty-visit |
-| `.prototype =` assignment (the fnctor lap) | 51 | the fnctor `new F()` `$proto` link (ii-a) |
-| `.prototype[idx]` / `Object.prototype[i]=v` | 41 | inherited read on a plain receiver via `Object.prototype` (the built-in) |
-| `arguments` object | 27 | `arguments`-as-array-like generic-method read |
-| `new <ctor>` (incl. `new Boolean()` etc., not only user fnctors) | 71 | mixed |
+| construction mechanism                                                     | files   | what it needs                                                            |
+| -------------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------ |
+| **`Object.defineProperty`** (own/inherited ACCESSOR props on `{length:N}`) | **181** | `$Object` accessor-`Get` arm + generic-method HasProperty-visit          |
+| `.prototype =` assignment (the fnctor lap)                                 | 51      | the fnctor `new F()` `$proto` link (ii-a)                                |
+| `.prototype[idx]` / `Object.prototype[i]=v`                                | 41      | inherited read on a plain receiver via `Object.prototype` (the built-in) |
+| `arguments` object                                                         | 27      | `arguments`-as-array-like generic-method read                            |
+| `new <ctor>` (incl. `new Boolean()` etc., not only user fnctors)           | 71      | mixed                                                                    |
 
 So the dominant lever is **`Object.defineProperty` accessor reads on array-like
 `{length:N}` objects passed to `Array.prototype.X.call(obj, cb)`** — the `$Object`
@@ -1575,13 +1595,14 @@ accessor + generic-method-HasProperty path, **independent of any fnctor**. The
 fnctor lap (Decision ii-a) addresses ~51 files, not the 168 bulk.
 
 Representative bodies (verified, real test262):
+
 - `forEach/15.4.4.18-7-c-i-17`: `obj={length:2}; Object.defineProperty(obj,"1",{set:fn});
-  forEach.call(obj,cb)` — visit index 1 (accessor present, get→undefined). NO fnctor.
+forEach.call(obj,cb)` — visit index 1 (accessor present, get→undefined). NO fnctor.
 - `indexOf/15.4.4.14-9-b-i-8`: `Object.prototype[0]=true; indexOf.call({length:3},true)`
   — inherited-from-`Object.prototype` data read on a plain literal. NO fnctor.
 - `some/15.4.4.17-7-c-i-15`: `proto={}; Object.defineProperty(proto,"1",{get});
-  var Con=function(){}; Con.prototype=proto; child=new Con(); child.length=20;
-  some.call(child,cb)` — THIS is the fnctor lap (the `.prototype=` subset). Verified
+var Con=function(){}; Con.prototype=proto; child=new Con(); child.length=20;
+some.call(child,cb)` — THIS is the fnctor lap (the `.prototype=` subset). Verified
   `fail` via `runTest262File` in BOTH host AND standalone (one fresh process each).
 
 ## CORRECTION 2 — the shared standalone blocker is the generic-method host-import leak, BELOW the proto substrate
@@ -1596,7 +1617,7 @@ forEach.call({0:5,1:6,length:2}, cb)  --target standalone
 → WebAssembly.instantiate(binary, {}) → "Import #0 env: module is not an object"
 ```
 
-This is the generic-method *dispatch* not being standalone-native (the #983d /
+This is the generic-method _dispatch_ not being standalone-native (the #983d /
 `__make_callback` lane), NOT the `$proto` substrate. It blocks **even the simplest
 own-data array-like** (`{0:5,1:6,length:2}`) standalone — no inheritance, no
 accessor, no fnctor involved. So a proto-walk fix banks **zero standalone cluster
@@ -1609,6 +1630,7 @@ too: all three real files above → `fail` host AND standalone via `runTest262Fi
 
 Independently reproduced the handoff's blocker and pinned the exact mechanism from
 the WAT. For `const Con=function(){}; Con.prototype={foo:7}`:
+
 - `Con.prototype = {foo:7}` compiles to: build the proto as a real `$Object`
   (`__new_plain_object` + `__extern_set($proto,"foo",...)`), then
   `__extern_set($closure, "prototype", $proto)` where `$closure` is the
@@ -1616,7 +1638,7 @@ the WAT. For `const Con=function(){}; Con.prototype={foo:7}`:
   NOT an `$Object`. `__extern_set`'s `ref.test $Object` MISSES the `$6` closure →
   **the prototype write lands nowhere readable.**
 - Read-back `Con.prototype` → `__extern_get($closure,"prototype")` → `ref.test
-  $Object` misses `$6` → null → `RUN_FAIL`/absent. Verified: reading
+$Object` misses `$6` → null → `RUN_FAIL`/absent. Verified: reading
   `(Con as any).prototype` back standalone traps/returns non-`$Object`;
   `Object.create((Con as any).prototype).foo` → 0 (the proto arg isn't a readable
   `$Object`).
@@ -1633,13 +1655,13 @@ substrate.
 ## Why realization (ii-a) cannot land safely in one verified pass
 
 (ii-a) "reconstruct the dynamically-used instance AS an `$Object`" requires gating
-on *"this `new F()` instance is consumed dynamically AND has no typed `struct.get`
-own-field consumer"* — a whole-program escape analysis. The `$__fnctor_<Name>`
+on _"this `new F()` instance is consumed dynamically AND has no typed `struct.get`
+own-field consumer"_ — a whole-program escape analysis. The `$__fnctor_<Name>`
 struct type is woven through the new-super lowering: inheritance ancestors
 (new-super.ts:602/747), the ctor result type (:1019), and the typed own-field read
 arm (the `ref.test $23 → struct.get $23 0` the WAT shows for `new Con(){this.x=3}`,
 which makes `c.x` → 3 work). Reconstructing the instance as an `$Object`
-*unconditionally* would move own-field reads to `__extern_set`/`__extern_get` and
+_unconditionally_ would move own-field reads to `__extern_set`/`__extern_get` and
 regress every `new F()` with a typed field read (the hot path). Gating it correctly
 needs the escape-analysis infrastructure that does not exist. **A wrong gate is the
 #1888-class floor-eject — the documented stop-the-line risk.** This is why there is
@@ -1680,7 +1702,7 @@ fnctor lap and ONTO the two higher-leverage, more-tractable gaps:
   `new F()` instances as `$Object`s (or a contained alternative an architect decides).
   Broad-impact value-rep; full-gate, stop-the-line. This is the part with no
   one-pass safe slice today — it should wait until the escape-analysis (or a
-  per-fnctor prototype-`$Object` global keyed off the *closure-global*, not the
+  per-fnctor prototype-`$Object` global keyed off the _closure-global_, not the
   unreadable closure-struct slot) infrastructure is specced.
 - **B-protoextend (`Object.prototype[i]=v` inherited on plain receivers) — the
   `-b-i-` data subset.** Make a plain `{length:N}` literal's `$proto` terminate at a
@@ -1699,4 +1721,127 @@ probes MISLEAD — this session found its own reduced host probe (`forEach.call`
 accessor → 1) disagreed with the REAL `c-i-17` file (`fail`); ALWAYS confirm the
 authoritative signal with the real test262 file via `runTest262File` in a fresh
 process, and the full merge_group floor (#2097) for conformance. Issue stays
+`in-progress`; claim released.
+
+---
+
+# M3 — STAGE B-pre: the `__make_callback` leak is ALREADY CLOSED on main — VERDICT + a narrow adjacent invalid-Wasm fix (2026-06-24, sd-m3b-pre, max-reasoning)
+
+> Picked up B-pre per the re-sequenced continuation above ("standalone
+> generic-method host-import leak — DO THIS FIRST … the single highest-leverage
+> standalone unblock"). **Verify-first overturned the premise**: the leak is
+> already gone. Drove the canaries + the REAL cluster files **per-process** (fresh
+> `WebAssembly.instantiate` / `runTest262File`, the in-process-loop trap avoided)
+> AND decoded the emitted WAT, on CURRENT main. Found + fixed a _different_,
+> narrow, verified-safe standalone invalid-Wasm residual in the same lane.
+
+## VERDICT — B-pre's `__make_callback` leak is CLOSED (banked by M2.2b, `5322dab29676`)
+
+The Stage-B re-ground above reported `forEach.call({0:5,1:6,length:2}, cb)` under
+`--target standalone` emits `(import "env" "__make_callback")` and "cannot
+instantiate at all (`Import #0 env: module is not an object`)". **That is NO LONGER
+TRUE on current main.** Re-measured per-process with a WAT decode:
+
+```
+forEach.call({0:5,1:6,length:2}, cb)  --target standalone
+→ imports: 0   __make_callback: 0   →   WebAssembly.instantiate(binary, {}) OK
+```
+
+The standalone generic-method-on-arraylike path is fully Wasm-native: it lowers
+inline to `__extern_length` / `__extern_has_idx` / `__extern_get_idx` + a GC
+closure `call_ref` (NOT `__make_callback`). The leak was closed by
+**`fix(#2580 M2.2b)` (`5322dab29676`)** — it gave `map`/`filter` native `$ObjVec`
+result-builders and **emptied** `STANDALONE_UNSUPPORTED_ARRAY_LIKE_METHODS`. The
+Stage-B session measured a pre-M2.2b state (or a reduced probe that hit the old
+refusal). The only residual refusal is `reduce`/`reduceRight` **no-initial-value**
+(M2.2c WONT-FIX) — and even that is a _clean CE refusal_, NOT a `__make_callback`
+leak (verified: it routes to the working host path host-side, refuses standalone,
+emits no `env` import).
+
+**Authoritative cluster re-measure (per-process, host vs standalone, CURRENT main):**
+
+- Pure own-data array-like (`{0:11, length:-0}`, the simplest B-pre shape) →
+  `forEach/15.4.4.18-3-5` **PASS standalone** (and host). The shape the Stage-B
+  session said "cannot instantiate" passes.
+- A 100-file stratified scan of the **full** generic-method cluster
+  (forEach/map/filter/reduce/reduceRight/some/every/indexOf/lastIndexOf,
+  `-c-i`/`-b-i`, 625 files) → **0 standalone `compile_error`** on main.
+- The host-vs-standalone deltas that remain are **value-semantics `fail`s**
+  (accessor `Get`, inherited-element, `arguments`-as-arraylike, ToPrimitive throw),
+  NOT host-import leaks — every delta compiled to `imports=0, makeCb=0,
+struct=VALID` and threw a `WebAssembly.Exception` at _runtime_ (the test body's
+  accessor/throw), i.e. **B-acc / B-protoextend territory, not B-pre.** A proto/
+  accessor fix is the next lever; the leak is not the blocker.
+
+**So B-pre as scoped (close the `__make_callback` leak) is a no-op — it's done.**
+A proto-walk fix is NOT blocked below the substrate by a host-import leak (the
+Stage-B claim); it is gated by the accessor/inherited value-read (B-acc), which
+fails host AND standalone identically.
+
+## The one narrow standalone-specific residual found — and FIXED in this PR
+
+While sweeping, the full 240-file some/every/filter `-c-i*` cluster surfaced **3**
+genuine standalone `compile_error`s (one each, all `-c-iii-` = "callbackfn returns
+null / a non-boolean"): `every/15.4.4.16-7-c-iii-2`, `filter/15.4.4.20-9-c-iii-3`,
+`some/15.4.4.17-7-c-iii-2`. Reduced + WAT-decoded:
+
+```
+some.call({0:11,length:2}, (v) => null)  --target standalone
+→ invalid Wasm: "if[0] expected type i32, found call of type externref"
+```
+
+**Root cause = the #16 / #2043 funcidx-desync, applied to `__is_truthy`.** The
+native array-like generic-method arm (`compileArrayLikePrototypeCall`,
+`array-methods.ts`) captures the `__is_truthy` funcidx BEFORE compiling the
+callback. In standalone/WASI `__is_truthy` is an **in-module native defined func**
+(#1471 routes the helper name to the native body), so the callback compile — which
+registers `__closure_*` (and for filter/map the result builders) — **shifts every
+defined-func index.** The stale-low captured index then made `call __is_truthy`
+land on the WRONG function (one returning externref) → the `if expected i32, found
+externref` invalid Wasm, but ONLY for a predicate that returns an `any`/externref
+(`null`, or the boxed element) so the `toTruthy` arm routes through `__is_truthy`.
+A predicate returning a static boolean (`v > 5`) takes the i32 arm and is unaffected
+— which is why the cluster surface is small (3 files).
+
+**Fix (this PR):** re-resolve `__is_truthy` by name AFTER the callback compile —
+`const isTruthyFnNow = ctx.funcMap.get("__is_truthy") ?? isTruthyFn;` — exactly as
+the sibling `__extern_get_idx`/`__extern_has_idx` (#16) helpers already are, and
+use it in the `toTruthy` externref arm. Host mode is provably unchanged:
+`__is_truthy` is a stable _import_ there, so the `??` keeps the original index.
+
+**Measured effect (per-process, branch vs pristine-origin/main, standalone):** the
+3 files flip **`compile_error` → `fail`** — the invalid Wasm is gone, they compile +
+run; they don't reach `pass` because of a _second, orthogonal_ bug (a module-level
+`var accessed` mutated inside a `function`-declaration callback isn't visible after,
+in standalone — a closure-capture-write gap, NOT this lane). So the conformance row
+delta is **0 net pass**, but it removes **3 cases from the release-blocking
+`hard_error`/`compile_error` stability bucket** (invalid Wasm → benign `fail`), at
+**zero regression risk** (host untouched by construction; standalone re-resolves an
+index that was provably stale). Validated: `tests/issue-2580-bpre-some-every-truthy.test.ts`
+(6 cases — VALID-Wasm + JS-correct some/every truthiness for externref predicates +
+host-unchanged) green; `tsc`/`prettier` clean. (Pre-existing `issue-2036.test.ts`
+"refuse loudly" failures reproduce on pristine origin/main with my change reverted —
+stale tests asserting a refusal M2.2b/#2583 already removed; NOT in the CI quality
+gate, NOT caused by this PR.)
+
+## RE-SEQUENCED CONTINUATION (corrects "B-pre first")
+
+- **B-pre (`__make_callback` leak) — DONE (M2.2b).** No standalone rows remain
+  blocked by a host-import leak. This PR additionally closes the narrow
+  `__is_truthy`-desync invalid-Wasm (3 files out of the stability bucket).
+- **B-acc (accessor `Get` + generic-method HasProperty-visit) — the real next
+  lever, ~181-file host bulk + the standalone value-semantics deltas.** This is
+  where the remaining cluster `fail`s live (host AND standalone identically). It is
+  NOT gated by a leak; it needs the `$Object` accessor-`Get` arm + the
+  generic-method HasProperty-visit (the M3 architect spec's Decision 2/3 walk).
+- **B-protoextend / B-fnctor — as previously sequenced** (proto chain on plain
+  receivers; the fnctor `new F()` `$proto` lap, last + hardest, escape-analysis-gated).
+
+RUNNER TRAP (re-confirmed, the hard way): a hand-rolled `instance.exports.test()`
+reads `undefined` because **standalone does NOT export user functions** — only
+runtime helpers; and a crude `/*---…---*/`-strip of a test262 file changes the
+program shape enough to DODGE the very invalid-Wasm it's meant to reproduce (the
+strip compiled VALID on BOTH main and branch, hiding the bug — only the REAL
+`runTest262File` per-process showed `compile_error`). Always validate via
+`runTest262File` per-process + the merge_group floor (#2097). Issue stays
 `in-progress`; claim released.

@@ -862,6 +862,16 @@ export function compileArrayLikePrototypeCall(
   // also register __js_array_* below, a further shift source.)
   const getIdxFnNow = ctx.funcMap.get("__extern_get_idx") ?? getIdxFn;
   const hasIdxFnNow = ctx.funcMap.get("__extern_has_idx") ?? hasIdxFn;
+  // #2580 B-pre — `__is_truthy` is the SAME funcidx-desync hazard: in
+  // standalone/WASI it is an IN-MODULE native defined func (#1471 routes the
+  // helper name to the native body), so the callback compile shifts its
+  // defined-func index. A stale-low `isTruthyFn` (captured before the compile)
+  // makes `call isTruthyFn` land on the wrong function (one returning
+  // externref) → `if expected i32, found externref` invalid Wasm for an
+  // `any`/null-returning predicate (e.g. `some.call(obj, () => null)`).
+  // Re-resolve by name here, exactly as the get/has helpers above. (Host mode:
+  // `__is_truthy` is a stable import, so `??` keeps the original index.)
+  const isTruthyFnNow = ctx.funcMap.get("__is_truthy") ?? isTruthyFn;
 
   // i = 0
   const iTmp = allocLocal(fctx, `__ali_i_${fctx.locals.length}`, { kind: "i32" });
@@ -925,7 +935,7 @@ export function compileArrayLikePrototypeCall(
           ? []
           : closureInfo.returnType.kind === "externref"
             ? // Boxed value: __is_truthy unwraps JS semantics (false/0/NaN/""/null → falsy).
-              [{ op: "call", funcIdx: isTruthyFn } as Instr]
+              [{ op: "call", funcIdx: isTruthyFnNow } as Instr]
             : closureInfo.returnType.kind === "ref" || closureInfo.returnType.kind === "ref_null"
               ? // Non-externref struct/string refs: fall back to null check. JS truthiness on
                 // these uncommon shapes is not observable here (callbacks usually return any).
