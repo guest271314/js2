@@ -38,6 +38,7 @@ import { applyDefineSubstitutions, applyDefineSubstitutionsWithMap } from "./com
 import { rewriteCjsRequire, rewriteCjsRequireWithMap } from "./cjs-rewrite.js";
 import { preprocessImports } from "./import-resolver.js";
 import { PositionMap } from "./position-map.js";
+import { injectProcessStdinPrelude } from "./process-stdin-prelude.js";
 import type { CompileError, CompileOptions, CompileResult } from "./index.js";
 import { optimizeBinaryAsync } from "./optimize.js";
 import { generateWit } from "./wit-generator.js";
@@ -936,12 +937,26 @@ export function compileSourceSync(
     : { source, positionMap: PositionMap.identity() };
   const definedSource = defineResult.source;
 
+  // Step 0a.4: #2632 Phase 3 — inject the faithful `process.stdin` Node `Readable`
+  // source-prelude (string/Buffer chunks over the fd0 reactor substrate) and
+  // rewrite `process.stdin` references to the `__js2wasm_stdin()` singleton.
+  // Import-scoped + WASI-only: fires ONLY when the program references
+  // `process.stdin` under `--target wasi`, and is byte-identical (identity map,
+  // unchanged source) otherwise. The prelude is ordinary TS riding on the Phase-2
+  // intrinsics, so it flows through CJS-rewrite / preprocessImports / codegen with
+  // no special-casing (mirrors the #1501 timer-shim prepend).
+  const stdinResult =
+    options.target === "wasi"
+      ? injectProcessStdinPrelude(definedSource)
+      : { source: definedSource, positionMap: PositionMap.identity(), injected: false };
+  const stdinInjectedSource = stdinResult.source;
+
   // Step 0a.5: Rewrite CommonJS `const X = require('Y')` patterns to ESM `import`
   // declarations (#1279). This must run before preprocessImports so the resulting
   // import statements get the same declare-stub treatment as user-written imports,
   // and before `detectNodeFsImports` so `const fs = require('node:fs')` is picked
   // up as a node:fs import for WASI mode.
-  const cjsResult = rewriteCjsRequireWithMap(definedSource);
+  const cjsResult = rewriteCjsRequireWithMap(stdinInjectedSource);
   const cjsRewritten = cjsResult.source;
 
   // Step 0b: Pre-process imports (replace import * as X with declare namespace)
@@ -961,8 +976,12 @@ export function compileSourceSync(
   const preprocessed = preprocessImports(cjsRewritten2, { wasi: options.target === "wasi" });
   const processedSource = preprocessed.source;
   // Composed map: processedSource → original source. Pipeline output order is
-  // define → cjs → (eval/super, identity) → imports, so compose outermost-first.
-  const positionMap = preprocessed.positionMap.compose(cjsResult.positionMap).compose(defineResult.positionMap);
+  // define → stdin-prelude → cjs → (eval/super, identity) → imports, so compose
+  // outermost-first.
+  const positionMap = preprocessed.positionMap
+    .compose(cjsResult.positionMap)
+    .compose(stdinResult.positionMap)
+    .compose(defineResult.positionMap);
 
   // Step 1: Parse and type-check
   let isJsMode = options.allowJs === true || (options.fileName?.endsWith(".js") ?? false);

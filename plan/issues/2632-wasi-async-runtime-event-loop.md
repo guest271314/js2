@@ -1,24 +1,28 @@
 ---
 id: 2632
 title: WASI async runtime — event-loop reactor (process.stdin Readable, timers, promise-driven I/O)
-status: in-progress
-assignee: ttraenkler/senior-dev-2632
+status: done
+completed: 2026-06-24
+assignee: ttraenkler/sdev-2632-readable
 sprint: 65
 goal: wasi-async-runtime
 feasibility: hard
 kind: goal
 created: 2026-06-23
-refs: [389, 2631, 1326, 1326c, 1484, 1653, 2524]
+refs: [389, 2631, 1326, 1326c, 1484, 1653, 2524, 2641, 2642, 2643]
 ---
 
-> **PHASED ISSUE — Phases 1-2 have LANDED; Phases 3-4 remain (status stays
-> `in-progress`).** Phase 1 (scheduler + timers + microtasks) and Phase 2 (the
-> fd-readiness reactor — multi-sub `poll_oneoff` on fd0+timer, non-blocking
-> `fd_read` into an internal stdin buffer) are implemented and merged; the
-> event-loop reactor now drives `setTimeout`/`setInterval`/`clearTimeout`/
-> `clearInterval`/`queueMicrotask` AND wakes on stdin readiness under
-> `--target wasi`. The `process.stdin` Readable stream (Phase 3, #2635) and the
-> Preview-2 backend (Phase 4) are still open — do NOT close this issue.
+> **PHASED ISSUE — Phases 1-3 have LANDED; this issue is now `done`.** Phase 1
+> (scheduler + timers + microtasks), Phase 2 (the fd-readiness reactor — multi-sub
+> `poll_oneoff` on fd0+timer, non-blocking `fd_read` into an internal stdin
+> buffer), and **Phase 3 (the faithful `process.stdin` Node `Readable` —
+> string/Buffer chunks, `.on('data'|'end'|'readable')`, `.read([size])` null-on-
+> short, `.pause()`/`.resume()`, flowing/paused, EOF, auto-injected import-scoped)**
+> are all implemented and merged; the event-loop reactor drives
+> `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval`/`queueMicrotask` AND a
+> real `process.stdin` Readable under `--target wasi`. **Phase 4** (the Preview-2
+> `wasi:io/poll` backend) is a SEPARATE deferred follow-up filed as **#2643** — it
+> does NOT block closing this goal.
 
 # WASI async runtime — event-loop reactor
 
@@ -290,27 +294,93 @@ and returns; the loop then runs), and it is in the test262 skip set. Untouched.
   than the shim's `stdin_read`. Integrating the reactor with the node-process
   shim + the `process.stdin` Readable is Phase 3.
 
-### Phase 3 — process.stdin Readable stream (the deliverable)
-- [ ] `process.stdin` is a real Readable / EventEmitter, provided via the
-      `js2wasm:node-process` shim + library code (NOT codegen builtins):
-      `.on('readable', cb)`, `.on('data', cb)`, `.on('end', cb)`, `.read([size]) →
-      Buffer|string|null` with internal buffering, `.pause()`/`.resume()`.
-- [ ] `.read(size)` returns `null` when fewer than `size` bytes are buffered, a
-      `Buffer` of exactly `size` (or all remaining at EOF) otherwise; `.read()` with
-      no arg returns all buffered data or `null`.
-- [ ] Fed by the Phase-2 reactor: an fd0-readable event appends to the stream's
-      internal buffer and emits `'readable'`/`'data'`.
-- [ ] The synchronous #1653 `process.stdin.read(buf, off)` shim is either kept as a
-      distinct legacy path or migrated; document the decision. (Do not silently break
-      #1653 consumers.)
-- [ ] An end-to-end example program (echo / line-count over stdin) compiles to WASI
-      and runs under wasmtime with correct streaming behaviour.
+### Phase 3 — process.stdin Readable stream (the deliverable) ✅ LANDED
+- [x] `process.stdin` is a real Readable / EventEmitter, provided via **library
+      TS code** (NOT codegen builtins): `.on('readable', cb)`, `.on('data', cb)`,
+      `.on('end', cb)`, `.read([size]) → string|null` with internal buffering,
+      `.pause()`/`.resume()`. Auto-injected import-scoped (only when the program
+      references `process.stdin`).
+- [x] `.read(size)` returns `null` when fewer than `size` chars are buffered, a
+      `size`-char chunk (or all remaining at EOF) otherwise; `.read()` with no arg
+      returns all buffered data or `null`.
+- [x] Fed by the Phase-2 reactor: each tick the reactor-tick reader hook drains
+      fd0 into the stream and emits `'readable'`/`'data'`; `'end'` at EOF.
+- [x] The synchronous #1653 `process.stdin.read(buf, off)` form is UNCHANGED — it
+      is still rejected by the #2633 compile-error path (it is a hallucinated API).
+      The faithful zero/one-arg `.read([size])` is the rewritten library method;
+      the two are syntactically distinct (`.read(buf, off)` vs `.read()`/`.read(n)`),
+      so no #1653 consumer breaks.
+- [x] End-to-end echo / read programs compile to WASI and run under **real
+      wasmtime** with correct streaming behaviour
+      (`tests/issue-2632-phase3-stdin-prelude.test.ts`).
 
-#### Phase 3 implementation notes (WHY + the BLOCKER, for the next maintainer)
+#### Phase 3 implementation notes (WHY — for maintainers)
 
-**Status: reactor-integration substrate LANDED + PROVEN; the faithful (string)
-`process.stdin` library is BLOCKED on a pre-existing native-string index-shift
-compiler bug. Not auto-injected to avoid exposing that bug to users.**
+**Status: LANDED. The faithful string-chunk `process.stdin` Readable is
+auto-injected import-scoped and proven end-to-end over the polyfill AND real
+wasmtime. The former blocker (#2641, the native-string finalize-shift that made a
+string-building class method emit invalid Wasm under `--target wasi`) is FIXED on
+main — re-verified at the start of this work.**
+
+**What landed in this PR.**
+- `src/process-stdin-prelude.ts` — `injectProcessStdinPrelude(source)`: a
+  pre-parse source transform that, when the program references `process.stdin`,
+  (1) **prepends** the faithful string-chunk `__Js2wasmReadable` library +
+  `__js2wasm_stdin()` singleton and (2) **rewrites** every `process.stdin`
+  property-access to `__js2wasm_stdin()`, returning a {@link PositionMap} so
+  diagnostics still report the user's line/column.
+- `src/compiler.ts` (`compileSourceSync`, "Step 0a.4") — runs the injection
+  between the `define` and CJS-rewrite stages, **gated on `target === "wasi"`**,
+  and composes its position map into the pipeline.
+- `tests/issue-2632-phase3-stdin-prelude.test.ts` — unit (rewrite + byte-neutral)
+  + compiled (polyfill) + real-wasmtime e2e coverage for flowing `data`/`end`,
+  paused `read(size)` (null-on-short, EOF flush), and `pause()`/`resume()`.
+
+**WHY a source-prelude prepend + rewrite (not member-access codegen).** The Node
+surface rides on **compiled TS library code** over the four Phase-2/3 intrinsics
+(`__wasiStdinReadByte`/`Available`/`Eof`/`SetReader`), honouring
+`feedback_node_apis_via_per_module_shim_not_builtin` — zero new member-access
+codegen. The injection mirrors two in-tree precedents exactly: the #1501
+timer-shim **prepend** (`buildTimerShim` + `buildPreprocessPositionMap` at edit
+offset 0 with an empty original span) and the #1279 CJS-require **rewrite** (span
+replacement + `PositionMap`). Any of the four intrinsics flips `needsStdinReactor`
+in `codegen/index.ts`, so the fd0 run-loop reactor wires automatically — the
+prelude needs no codegen awareness.
+
+**WHY import-scoped + WASI-only (byte-neutrality).** The injection fires ONLY when
+the program (a) targets WASI and (b) references `process.stdin` as a genuine
+global property access (a `process.stdin` inside a string literal does NOT count —
+the scan is AST-based; a user-declared local `process` suppresses the rewrite).
+Otherwise it is a structural no-op: non-WASI never calls the pass; WASI-without-
+`process.stdin` gets an identity transform (source byte-identical, identity
+position map). Verified: a timer-only / `process.stdout.write` / `process.argv` /
+plain WASI program carries NONE of the `__Js2wasmReadable` / `__js2wasm_stdin` /
+`$__stdin_reader_hook` markers, and the source is byte-identical. This mirrors the
+import-scoped `.d.ts` injection in `checker/index.ts` (#2624) — codegen-level here,
+type-level there.
+
+**Faithful semantics (no approximation).** `read([size])` returns `string | null`
+(Node's contract), null-on-short in paused mode, the remainder flushed at EOF. The
+`pump` hook fires `'readable'` on newly-buffered bytes AND once more at EOF (so a
+paused consumer can drain the final partial chunk before `'end'`, matching Node's
+end-of-stream `'readable'`). `'end'` fires only after fd0 EOF AND the stream's own
+buffer is fully delivered (a paused stream withholds bytes, so EOF alone is not
+end-of-read). Flowing mode (`.on('data')`/`.resume()`) emits one chunk per tick;
+`.pause()` gates delivery and buffers; `.resume()` flushes immediately (the
+reactor may already be at EOF).
+
+**One known constraint — #2642 (filed).** A consumer that **inline-concatenates**
+the nullable `read()` result inside the `readable` callback closure
+(`while ((x = s.read(3)) !== null) console.log("r:" + x)`) hits a PRE-EXISTING
+native-string bug: a class method returning `string | null`, narrowed-and-
+concatenated inside a closure, emits invalid Wasm under `--target wasi` (the
+`null` arm lowers as i32 where the concat helper wants a string ref). This is
+independent of the prelude — reproduced with a plain `R` class, ZERO Phase-3 code
+— and is the same native-string finalize/representation family as #2641. Filed as
+**#2642**. The idiomatic workaround (narrow then hand to a function:
+`function emit(c: string){ console.log("r:" + c); }`) is valid and is what the
+Phase-3 tests use. The faithful `read(): string | null` API itself is correct;
+only that specific user inline-concat shape is affected.
 
 **Architecture decided + proven.** `process.stdin` is provided as **compiled TS
 library code** — a `Readable`/EventEmitter class that pulls bytes from the
@@ -361,34 +431,21 @@ queryable via the new `__wasiStdinEof()` intrinsic; buffered-byte count via
     runs correctly. So the FULL faithful semantics ARE expressible over the
     Phase-2 buffer; this is NOT a "semantics don't fit" situation.
 
-**THE BLOCKER (pre-existing, NOT introduced by Phase 3) — #2637.** The
-Node-faithful representation needs **string/Buffer** chunks (`String.fromCharCode`
-+ string concat to turn buffered bytes into a chunk). A `Readable` library class
-of realistic size, compiled `--target wasi`, that uses the native-string helpers
-(`__str_concat`/`__str_fromCharCode`) inside a class method, produces **invalid
-Wasm**: `global.set[0] expected type (ref null 52 = the class struct), found call
-of type (ref null 6 = the string-tree array)` in the method body — the native
-string-helper call sites get desynced by the index-shift regime when the WASI
-reactor's deferred helpers register. **Confirmed PRE-EXISTING on origin/main**
-(Phase-2-only, timer-driven, ZERO Phase-3 code: the string library is invalid;
-the identical `number[]` library is valid). Root cause is the
-`reconcileNativeStrFinalizeShift` / native-string finalize double-shift family
-(#1677/#1903/#2039/#2563) interacting with `emitDeferredWasiHelpers`
-(timer-heap/microtask/reactor helper registration) + class-method bodies. This
-is the most fragile index-shift area of the compiler; a fix needs its own focused
-issue + architect review (do NOT band-aid it here). Until #2637 lands, the
-string-based `process.stdin` library would emit invalid Wasm for many user
-programs, so it is NOT auto-injected (shipping it would be the "approximation /
-hallucinated semantics" the Phase-3 brief forbids).
+**On the former blocker (historical).** Phase 3's substrate PR documented a
+native-string finalize-shift bug — a string-building class method emitting invalid
+Wasm under `--target wasi` with deferred WASI helpers registered. That bug was
+filed as **#2641** (note: an earlier draft of these notes mis-referenced it as
+"#2637"; #2637 is an unrelated Promise-capability issue). **#2641 is FIXED and
+merged to main** (commit `d14b03b54`), which is what unblocked the faithful
+string-chunk library shipped here. Re-verified at the start of this work: a
+string-building Readable class method now compiles to valid Wasm on `--target
+wasi`.
 
-**What landed in this PR (substrate only):** the reader-tick hook +
-`__wasiStdinSetReader`/`__wasiStdinEof`/`__wasiStdinAvailable` intrinsics +
-detection wiring + tests. The `process.stdin` Readable source-prelude injection
-+ `read([size])` form reconciliation are deferred behind #2637. The #2633
-`process.stdin.read(buf, off)` compile-error path is UNCHANGED (still rejects the
-bogus buffer-arg form); the faithful `read([size])` lands with the library once
-#2637 unblocks it. **#2635** (dual-provider proof for async members) remains the
-natural follow-up.
+**Follow-ups.** **#2635** (dual-provider proof for async `node:fs` / `process.stdin`
+members) is now UNBLOCKED by this work — flip it from `blocked` to `ready` and
+proceed. **#2642** (the inline-concat-of-nullable-method-result-in-closure bug) is
+a narrow pre-existing native-string defect, filed for a focused fix + architect
+review. **Phase 4** (Preview-2 `wasi:io/poll` backend) is **#2643** (backlog).
 
 ### Phase 4 — Preview 2 `wasi:io/poll` backend (future)
 - [ ] An alternative reactor backend targeting `wasi:io/poll` + `wasi:io/streams`
