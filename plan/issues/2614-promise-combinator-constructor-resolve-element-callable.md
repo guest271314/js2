@@ -4,14 +4,14 @@ title: "Promise.{all,allSettled,any,race}: read constructor's own `resolve` + ca
 status: blocked
 assignee: ttraenkler/senior-developer
 created: 2026-06-22
-updated: 2026-06-22
+updated: 2026-06-24
 priority: medium
 feasibility: medium
 task_type: bug
 area: async, codegen, promise
 language_feature: promise
 goal: async-model
-sprint: 65
+sprint: 66
 parent: 1042
 related: [1528, 1368, 1116, 1694]
 blocked_on: [2623]

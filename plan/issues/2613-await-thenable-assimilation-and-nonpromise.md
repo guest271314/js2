@@ -3,14 +3,14 @@ id: 2613
 title: "await on a thenable/non-Promise: assimilate via host (PromiseResolve) instead of returning the raw object (~15 fails)"
 status: blocked
 created: 2026-06-22
-updated: 2026-06-22
+updated: 2026-06-24
 priority: high
 feasibility: hard
 task_type: bug
 area: async, codegen
 language_feature: async
 goal: async-model
-sprint: 65
+sprint: 66
 parent: 1042
 depends_on: 1373b
 assignee: ttraenkler/async-2612-2613

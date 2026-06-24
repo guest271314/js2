@@ -4,7 +4,7 @@ title: "spec backlog: Proxy implementation beyond JS-host fallback (235 test262 
 status: in-progress
 assignee: ttraenkler/sdev-proxy3
 created: 2026-05-08
-updated: 2026-06-17
+updated: 2026-06-24
 priority: top
 feasibility: hard
 reasoning_effort: high
@@ -12,7 +12,7 @@ task_type: feature
 area: runtime, codegen
 language_feature: proxy
 goal: spec-completeness
-sprint: 65
+sprint: 66
 parent: 1334
 depends_on: [1100]
 note: "2026-06-15: elevated to TOP priority by stakeholder (Proxy/Promise/async-to-100% epic). Remaining 10 traps + invariant checks to drive Proxy past host-fallback toward 100% (standalone). Follows #1100 Phase 1. Needs architect spec."
