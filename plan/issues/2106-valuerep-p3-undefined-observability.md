@@ -6,7 +6,7 @@ assignee: ttraenkler/sdev-undef-s1
 sprint: 66
 created: 2026-06-11
 updated: 2026-06-24
-suspend_note: "S1 substrate + strict-eq distinction DONE (S1.0 inert singleton validated; S1.1 producer/chokepoint flips tsc-clean, 3/6 repros pass). Resumed 2026-06-24 by sdev-undef-s1 to finish S1.2 (consistent singleton production across ALL undefined producers + emitIsNullish nullish-consumer sweep), then merge_group validation. Branch issue-2106-s1-undefined-singleton. Held PR #1961 supersedes when S1 lands net-positive."
+s1_note: "S1 (standalone tag-1 $undefined singleton) COMPLETE 2026-06-24 by sdev-undef-s1: S1.0 inert reservation + S1.1 producer/chokepoint flips + S1.2 equality null/undefined distinctness (scoped externref→$AnyValue eq-operand boxing in coercion-engine.ts + loose-nullish singleton arm in binary-ops.ts). #2106 standalone-nullish-strict-eq 6/6, #1021 5/5, #1776 pass, no new regressions. See '## S1.2 resolution'. Supersedes held PR #1961's strict-eq slice. REMAINING (separate slices, this issue stays open): S2 (sNaN carve-out codify), S3 (number|undefined→externref find/optional-param), S4 (flag-gated union-collapse reversal — root cause of the #2081 `const b:any=undefined` collapse), typeof-null→object follow-up. Branch issue-2106-s1-undefined-singleton."
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -509,3 +509,75 @@ FAIL (3), with root causes:
 ### Validation done so far
 tsc clean; S1.0 inert validated (36 tests green: #1776/#1021/strict+loose
 equality/#2106 S0/#2029). The 3 repro failures above are the WIP frontier.
+
+## S1.2 resolution — 2026-06-24 (sdev-undef-s1) — implemented, 6/6 + no new regressions
+
+Resumed from the WIP frontier above. The two diagnosed root causes turned out to
+funnel through a **single hot codegen seam** — the standalone `externref →
+$AnyValue` boxing of an EQUALITY operand — not a 42-site sweep. The fix is two
+scoped, representation-preserving edits; NO change to the producers (literals /
+`boxToAny` / `emitUndefined` stay as S1.1 left them).
+
+### Root cause (WAT-confirmed), and why the fix is scoped, not a 42-site sweep
+- `[undefined, undefined]` **DOES** store the singleton correctly:
+  `global.get $undefined; extern.convert_any` into the externref `any[]` (S1.1's
+  `emitUndefined` flip works). The bug was on the **READ-BACK / compare** side.
+- `a[i] === a[i+1]` routes through `emitStrictEq` → `emitAnyEqOperands`
+  (`coercion-engine.ts`), which boxes each externref operand via the generic
+  `coerceType(externref → $AnyValue)`. That arm unconditionally calls
+  `__any_box_string` (tag-5) — the deliberate **#1888** baseline for opaque
+  externrefs. It DOUBLE-WRAPS the already-`$AnyValue` singleton: the singleton
+  lands in a fresh tag-5 box's externval field, and `__any_strict_eq`'s tag-5
+  classifier then `ref.test $AnyString`-fails on that externval and returns
+  `false`. Hence `undefined === undefined` (two `any` elements) → false.
+- A NULL externref (`null` read back out of an `any` carrier) hit the same tag-5
+  arm → tag-5-with-null-payload, which sits OUTSIDE `__any_eq`'s both-nullish arm
+  (`tag < 2`), so loose `null == undefined` over two carriers → false.
+
+### The fix (2 files, scoped to the EQUALITY path — #1888 dispatch bridge untouched)
+1. **`coercion-engine.ts` — `emitAnyEqOperands` → new `boxEqOperandToAnyValue`.**
+   A 3-way classifier on a standalone externref equality operand:
+   (1) NULL externref → tag-0 `__any_box_null` (the SAME box the `null` literal
+   produces); (2) externref that IS already an `$AnyValue` (the singleton) →
+   recover it directly (`any.convert_extern; ref.cast $AnyValue`) instead of
+   re-wrapping; (3) genuine opaque string/number externref → the unchanged
+   `boxToAny` tag-5 path. Both (1) and (2) are representation-PRESERVING (never
+   re-tag a real value), and this lives ONLY in the equality operand marshalling
+   — the #1888 open-any **dispatch** bridge does not flow through `emitAnyEqOperands`,
+   so its tag-5-for-numeric-recovery contract is byte-identical.
+2. **`binary-ops.ts` — inline `noJsHost` eq cascade nullish guard.** Replaced the
+   bare per-side `ref.is_null` with `isNullishExtern(local)`: STRICT keeps bare
+   `ref.is_null` (so `null === undefined` correctly stays false); LOOSE adds the
+   tag-1 singleton arm (`is_null || (ref.test $AnyValue && tag==1)`), i.e. the
+   `emitIsNullish` the WIP notes called for, applied to the `looseNullish` arm so
+   `null == undefined` over two carriers is true. `=== null` semantics unchanged.
+
+### Verified (host-runnable + vitest)
+- `tests/issue-2106-standalone-nullish-strict-eq.test.ts`: **6/6** (was 3/6).
+  `undefined === undefined` ✓, `null === null` ✓, `undefined !== undefined` ✓,
+  strict `null !== undefined` stays distinct ✓, loose `null == undefined` (array
+  carriers) ✓, `5===5`/string identity through `any` ✓.
+- `tests/issue-1021-null-vs-undefined.test.ts` 5/5; `tests/issue-1776.test.ts`
+  (isSameValue) pass; broader any/equality cluster (61 tests across
+  #2583/#2058/#2059/#1917/#2580/#1888-s6c) all green. tsc + prettier clean.
+
+### NOT fixed by S1 (pre-existing on upstream/main — verified by a clean
+###  upstream/main worktree probe — and out of S1 scope):
+- **#2081 `const b: any = undefined; a == b`** → false. ROOT CAUSE is the
+  **union-collapse**: `const b: any = undefined` is type-mapped to an **i32 global**
+  (`T|undefined → T`), so `undefined` never reaches codegen as the singleton — it
+  is the scalar `0`. This is THIS issue's **S4** (flag-gated union-collapse reversal),
+  not S1. The S1 singleton can't help a value that was collapsed at the type layer.
+  The ARRAY/carrier form (`[null, undefined]`) DOES work post-S1.
+- **#1888 round-trip (4 cases, `o.two(2,3)` → NaN)**: already red on clean
+  upstream/main (open-any ADD dispatch); unrelated to S1, unchanged by it.
+- `equality-mixed-types.test.ts`: missing `./helpers.js` (env/harness artifact,
+  identical on upstream).
+
+### typeof null → "object" follow-up (deferred, as the WIP notes flagged)
+Not addressed here (separate small follow-up; the host-string readback can't be
+asserted in the probe harness without the export glue). The equality acceptance
+criterion — null vs undefined distinct standalone — is met by the above.
+
+Validate via merge_group (value-rep broad-impact). Supersedes held PR #1961's
+`bothNullishGuard` slice for the strict null/undefined distinction.
