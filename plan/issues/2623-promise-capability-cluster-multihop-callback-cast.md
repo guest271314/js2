@@ -664,3 +664,79 @@ Completing `all/race/any/reject/resolve/try/allSettled ctx-ctor` (asserts
     inner `resolve`).
 This overlaps #2623-A and is NOT bounded; keep deferred. The identity unification
 is its prerequisite foundation and is now landed.
+
+---
+
+## Slice 2623-E (executor-body half) — VERIFIED NOT-BOUNDED, scoped handoff (senior-dev sendev-2623a, 2026-06-24)
+
+Re-grounded the executor-body half against current `origin/main` (post-#1977
+identity + post-#1981 box-depth), faithful per-process runner + WAT decode.
+**Verdict: NOT a one-pass bounded slice — confirms both prior sessions' defer,
+now with concrete WAT/runtime evidence. Landed nothing (correct outcome).**
+
+### Current state of the ctx-ctor rows (per-process runner, current main)
+`all/race/any/allSettled/withResolvers/try ctx-ctor`: identity (`assert #1/#2`)
+**now PASSES** (#1977 landed). All now fail at **`assert #3` (`callCount === 1`)** /
+`#4` (`typeof executor === 'function'`): the synthesized `class extends Promise {}`
+never runs the user's wasm constructor body, so the executor is never invoked.
+```
+all/ctx-ctor.js   => fail | returned 4 | assert #3 at L36: assert.sameValue(callCount, 1)
+race/ctx-ctor.js  => fail | returned 4 | assert #3 at L36 (same)
+any/ctx-ctor.js   => fail | (AggregateError: All promises were rejected)
+```
+
+### WHERE the body lives, and why it never runs (WAT-decoded)
+The user constructor body **IS fully compiled** as `$SubPromise_new(externref)→externref`:
+decoded body does `__new_Promise(executor)` (the `super(a)`), then
+`global.set $executor` (`executor = a`), then `global.get $callCount; f64.const 1;
+f64.add; global.set $callCount` (`callCount += 1`), then `__set_subclass_proto`.
+So the body is correct and present. The gap is purely **invocation**: V8's
+`NewPromiseCapability(C)` does `new C(internalExecutor)` where
+`C = __promise_subclass_ctor(name)` is a **BARE** `class extends Promise {}`
+(`src/runtime.ts:10378`) whose default ctor only forwards `super(executor)` and
+**never calls `$SubPromise_new`**. The combinators
+(`Promise.all.call(C,…)`) go through this bare host `C`.
+
+### TWO coupled blockers (each verified), neither bounded
+**(B1) Even direct `new SubPromise(executor)` is broken** — pre-existing,
+independent of the combinators. Probe: `new SubPromise((res,rej)=>res(1))` →
+runtime **`Promise resolver [object Object] is not a function`**. `$SubPromise_new`
+forwards the executor to `super(Promise)` via the extern-class construction path
+(`__new_Promise`), but the executor arrives **boxed/wrapped**, not as a raw
+callable, so V8's real `Promise` ctor rejects it. Needs `_maybeWrapCallable`-style
+unwrap at the `super(<builtin Promise>)` boundary. Touches the extern-class
+`super(builtin)` path — broad-impact, and **flips 0 test262 rows alone** (every
+ctx-ctor row goes through the combinator/NewPromiseCapability path, not direct
+new), so it cannot be the "narrowest verified-safe slice" on its own.
+
+**(B2) The combinator path needs a wasm→host ctor-callback registration that does
+not exist.** To run the user body under `NewPromiseCapability(C)`, the synthesized
+`C`'s constructor must call back into `$SubPromise_new` with V8's internal
+executor AND thread V8's provided `this` (the capability promise) so `super(a)`
+binds to it (today `$SubPromise_new` builds its OWN promise via `__new_Promise`).
+The host CAN call wasm closures (`exports.__call_fn_N` via `setExports`), but
+there is no mechanism to (i) register `$SubPromise_new` as a host-callable closure
+keyed by class name, (ii) have `__promise_subclass_ctor` build a `C` whose ctor
+invokes it, (iii) re-architect `$SubPromise_new` to run as a ctor body ON a
+host-provided `this` instead of allocating its own promise. This also couples to
+#2623-A (the executor closure is a capturing closure marshalled inbound).
+
+### Why this is genuinely multi-PR (architect re-spec required)
+The three changes (executor unwrap at `super(builtin)`; wasm ctor-closure
+registration import; `<Sub>_new` "run-on-host-this" re-architecture) are
+interdependent: B2 depends on B1 (the executor must be callable before the
+registered closure can use it), and B2's `<Sub>_new` re-architecture changes the
+direct-new path too (must not regress it). None is independently floor-positive.
+A bounded slice does not exist here; this is an architectural re-spec on the
+`__promise_subclass_ctor` ↔ `<Sub>_new` ↔ `NewPromiseCapability` protocol.
+
+### Recommendation
+- **Architect re-spec** the executor-body protocol as its own issue (split from
+  #2623): define the wasm ctor-closure registration ABI + the `run-on-host-this`
+  `<Sub>_new` shape + the `super(builtin)` executor-unwrap, sequenced B1→B2.
+- Do NOT land a speculative broad-impact B1-only PR: 0 row payoff, hot
+  extern-class `super(builtin)` path, exactly the scoped-sweep-hides-regression
+  hazard (`project_broad_impact_validate_full_ci`).
+- The #2623 capability cluster's landable substrate (box-depth #1981, identity
+  #1977) is now banked; the executor-body remainder is the deep tail and should be
+  scheduled as architect-specced work, not a dev slice.
