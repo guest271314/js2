@@ -14,7 +14,13 @@ import { allocLocal, allocTempLocal, getLocalType } from "./context/locals.js";
 import { probeCompiledType } from "./context/speculative.js";
 import { emitHoleToUndefined, holeTestInstrs, holeToUndefinedInstrs } from "./array-holes.js"; // (#2001 S1)
 import type { ClosureInfo, CodegenContext, FunctionContext } from "./context/types.js";
-import { addArrayIteratorImports, addStringImports, addUnionImports, resolveWasmType } from "./index.js";
+import {
+  addArrayIteratorImports,
+  addStringImports,
+  addUnionImports,
+  resolveWasmType,
+  typedArrayPackedSignedness,
+} from "./index.js";
 import { addStringConstantGlobal, ensureExnTag, localGlobalIdx } from "./registry/imports.js";
 import { emitToBoolean } from "./coercion-engine.js";
 import { compileStringLiteral } from "./shared.js";
@@ -136,6 +142,51 @@ function throwStringInstrs(ctx: CodegenContext, message: string): Instr[] {
   addStringConstantGlobal(ctx, message);
   const tagIdx = ensureExnTag(ctx);
   return [...stringConstantExternrefInstrs(ctx, message), { op: "throw", tagIdx } as Instr];
+}
+
+/**
+ * Value-position type for a (possibly packed) array element. A packed `i8`/`i16`
+ * storage type is only valid as a struct field / array element — it MUST NOT
+ * appear in a param/result/local/global position (the binary emitter rejects it
+ * with "packed storage type … is not valid in a value position"). A packed
+ * element loaded via `array.get_s`/`array.get_u` is already widened to `i32`, so
+ * a search-value local / comparison operand for the sub-32-bit typed arrays
+ * (Int8/Uint8/Int16/Uint16) must use `i32`, not the raw packed `elemType`
+ * (#2648 — `Int8Array.prototype.{indexOf,lastIndexOf,includes}` standalone CE).
+ */
+function unpackedElemType(elemType: ValType): ValType {
+  return elemType.kind === "i8" || elemType.kind === "i16" ? { kind: "i32" } : elemType;
+}
+
+/**
+ * (#2648, mirrors #2593) Recover the packed-element load signedness ("s"/"u") of
+ * a typed-array search-method receiver from its VIEW NAME — `Int8Array`/
+ * `Int16Array` read sign-extending (`array.get_s`), `Uint8Array`/
+ * `Uint8ClampedArray`/`Uint16Array` read zero-extending (`array.get_u`). Signed
+ * and unsigned views share the same i8/i16 storage but read with opposite
+ * sign-extension, so `indexOf`/`lastIndexOf`/`includes` MUST drive the element
+ * load off the view name, not the storage kind. Returns undefined for a
+ * non-integer-view receiver (caller falls back to the storage-kind heuristic).
+ */
+function typedArraySearchSignedness(ctx: CodegenContext, receiver: ts.Expression): "s" | "u" | undefined {
+  const t = ctx.checker.getTypeAtLocation(receiver);
+  let name = t.getSymbol()?.name ?? t.aliasSymbol?.name;
+  if (!name && ts.isNewExpression(receiver) && ts.isIdentifier(receiver.expression)) {
+    name = receiver.expression.text;
+  }
+  return name ? typedArrayPackedSignedness(name) : undefined;
+}
+
+/** Pick the element-load op for a (possibly packed) typed-array element, driven
+ *  by the view-name signedness when available, else the legacy storage-kind
+ *  heuristic (i8→get_u, i16→get_s). i32/f64/ref elements use plain `array.get`. */
+function elemGetOp(elemType: ValType, signedness: "s" | "u" | undefined): "array.get" | "array.get_s" | "array.get_u" {
+  if (elemType.kind === "i8" || elemType.kind === "i16") {
+    if (signedness === "s") return "array.get_s";
+    if (signedness === "u") return "array.get_u";
+    return elemType.kind === "i8" ? "array.get_u" : "array.get_s";
+  }
+  return "array.get";
 }
 
 /**
@@ -3897,7 +3948,10 @@ function compileArrayIndexOf(
   const dataTmp = allocLocal(fctx, `__arr_iof_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const iTmp = allocLocal(fctx, `__arr_iof_i_${fctx.locals.length}`, { kind: "i32" });
   const lenTmp = allocLocal(fctx, `__arr_iof_len_${fctx.locals.length}`, { kind: "i32" });
-  const valTmp = allocLocal(fctx, `__arr_iof_val_${fctx.locals.length}`, elemType);
+  // Packed i8/i16 elements load (and compare) as i32 — never store the raw
+  // packed type in a local (#2648).
+  const valType = unpackedElemType(elemType);
+  const valTmp = allocLocal(fctx, `__arr_iof_val_${fctx.locals.length}`, valType);
 
   // Compile receiver -> vec ref
   compileExpression(ctx, fctx, propAccess.expression);
@@ -3952,7 +4006,10 @@ function compileArrayIndexOf(
   }
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
+  // (#2648) Drive the packed i8/i16 load off the VIEW NAME signedness so a
+  // signed Int8/Int16 value (`Int8Array([-1]).indexOf(-1)`) and an unsigned
+  // high Uint16 value (`Uint16Array([40000]).indexOf(40000)`) both match.
+  const getOp = elemGetOp(elemType, typedArraySearchSignedness(ctx, propAccess.expression));
 
   // For externref elements, use __host_eq (JS Strict Equality, §7.2.16) so
   // object identity, cross-type (e.g. `[false].indexOf(0)`), and string
@@ -4078,7 +4135,10 @@ function compileArrayIncludes(
   const dataTmp = allocLocal(fctx, `__arr_inc_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const iTmp = allocLocal(fctx, `__arr_inc_i_${fctx.locals.length}`, { kind: "i32" });
   const lenTmp = allocLocal(fctx, `__arr_inc_len_${fctx.locals.length}`, { kind: "i32" });
-  const valTmp = allocLocal(fctx, `__arr_inc_val_${fctx.locals.length}`, elemType);
+  // Packed i8/i16 elements load (and compare) as i32 — never store the raw
+  // packed type in a local (#2648).
+  const valType = unpackedElemType(elemType);
+  const valTmp = allocLocal(fctx, `__arr_inc_val_${fctx.locals.length}`, valType);
 
   // Compile receiver -> vec ref
   compileExpression(ctx, fctx, propAccess.expression);
@@ -4094,7 +4154,7 @@ function compileArrayIncludes(
   fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 });
   fctx.body.push({ op: "local.set", index: dataTmp });
 
-  compileExpression(ctx, fctx, callExpr.arguments[0]!, elemType);
+  compileExpression(ctx, fctx, callExpr.arguments[0]!, valType);
   fctx.body.push({ op: "local.set", index: valTmp });
 
   // fromIndex (optional 2nd arg, default 0)
@@ -4133,7 +4193,8 @@ function compileArrayIncludes(
   }
   fctx.body.push({ op: "local.set", index: iTmp });
 
-  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
+  // (#2648) View-name-driven signedness for the packed i8/i16 element load.
+  const getOp = elemGetOp(elemType, typedArraySearchSignedness(ctx, propAccess.expression));
 
   // SameValueZero comparison for includes:
   // - For f64: a === b OR (isNaN(a) AND isNaN(b))
@@ -8482,7 +8543,10 @@ function compileArrayLastIndexOf(
   const vecTmp = allocLocal(fctx, `__arr_liof_vec_${fctx.locals.length}`, { kind: "ref_null", typeIdx: vecTypeIdx });
   const dataTmp = allocLocal(fctx, `__arr_liof_data_${fctx.locals.length}`, { kind: "ref_null", typeIdx: arrTypeIdx });
   const iTmp = allocLocal(fctx, `__arr_liof_i_${fctx.locals.length}`, { kind: "i32" });
-  const valTmp = allocLocal(fctx, `__arr_liof_val_${fctx.locals.length}`, elemType);
+  // Packed i8/i16 elements load (and compare) as i32 — never store the raw
+  // packed type in a local (#2648).
+  const valType = unpackedElemType(elemType);
+  const valTmp = allocLocal(fctx, `__arr_liof_val_${fctx.locals.length}`, valType);
 
   // Compile receiver -> vec ref
   compileExpression(ctx, fctx, propAccess.expression);
@@ -8547,10 +8611,11 @@ function compileArrayLastIndexOf(
   fctx.body.push({ op: "local.set", index: dataTmp });
 
   // Compile search value
-  compileExpression(ctx, fctx, callExpr.arguments[0]!, elemType);
+  compileExpression(ctx, fctx, callExpr.arguments[0]!, valType);
   fctx.body.push({ op: "local.set", index: valTmp });
 
-  const getOp = elemType.kind === "i8" ? "array.get_u" : elemType.kind === "i16" ? "array.get_s" : "array.get";
+  // (#2648) View-name-driven signedness for the packed i8/i16 element load.
+  const getOp = elemGetOp(elemType, typedArraySearchSignedness(ctx, propAccess.expression));
 
   // For externref elements, use __host_eq (JS Strict Equality, §7.2.16) so
   // object identity, cross-type, and string comparisons follow spec. The
