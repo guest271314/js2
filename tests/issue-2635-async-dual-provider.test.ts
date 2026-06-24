@@ -34,12 +34,7 @@ import { compile } from "../src/index.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "..");
-const EDGE_STDIN_RUNNER = join(
-  REPO,
-  "examples",
-  "native-messaging",
-  "run-edge-stdin.mjs",
-);
+const EDGE_STDIN_RUNNER = join(REPO, "examples", "native-messaging", "run-edge-stdin.mjs");
 
 // js2wasm emits a WasmGC module; enable the GC/function-references/exceptions
 // proposals (mirrors the #2632 Phase-3 wasmtime arm flags).
@@ -99,10 +94,7 @@ async function compileStdin(src: string): Promise<Uint8Array> {
     target: "wasi",
     skipSemanticDiagnostics: true,
   });
-  expect(
-    r.success,
-    r.success ? "" : `compile error: ${r.errors?.[0]?.message}`,
-  ).toBe(true);
+  expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
   return r.binary!;
 }
 
@@ -142,10 +134,7 @@ describe("#2635 — process.stdin same-binary async dual-provider compatibility"
   it("provider (b): edge.js async provider line-counts off real Node stdin", () => {
     const wasmPath = join(tmp, "lc_edge.wasm");
     writeFileSync(wasmPath, lineCountBin);
-    const out = runEdge(
-      wasmPath,
-      Buffer.from("Hello\nWorld\nThird line no newline"),
-    );
+    const out = runEdge(wasmPath, Buffer.from("Hello\nWorld\nThird line no newline"));
     expect(out.toString("utf-8")).toBe("lines=2 bytes=33\n");
   });
 
@@ -157,46 +146,37 @@ describe("#2635 — process.stdin same-binary async dual-provider compatibility"
   });
 
   // The #2635 acceptance: SAME binary, BOTH providers, byte-identical output.
-  describe.skipIf(!wasmtimeBin)(
-    "same-binary byte-identical proof (wasmtime vs edge.js)",
-    () => {
-      // Frames containing high/null bytes so a UTF-8-collapsing provider on the
-      // fd_read path would diverge: 0x00, 0xff, 0x80, 0x0a embedded.
-      const FRAMES: Array<{ name: string; input: Uint8Array }> = [
-        { name: "ascii lines", input: Buffer.from("alpha\nbeta\ngamma\n") },
-        { name: "no trailing newline", input: Buffer.from("one\ntwo\nthree") },
-        {
-          name: "high/null bytes",
-          input: Uint8Array.from([0x00, 0xff, 0x80, 0x0a, 0x41, 0x0a, 0x7f]),
-        },
-        { name: "empty", input: new Uint8Array(0) },
-      ];
+  describe.skipIf(!wasmtimeBin)("same-binary byte-identical proof (wasmtime vs edge.js)", () => {
+    // Frames containing high/null bytes so a UTF-8-collapsing provider on the
+    // fd_read path would diverge: 0x00, 0xff, 0x80, 0x0a embedded.
+    const FRAMES: Array<{ name: string; input: Uint8Array }> = [
+      { name: "ascii lines", input: Buffer.from("alpha\nbeta\ngamma\n") },
+      { name: "no trailing newline", input: Buffer.from("one\ntwo\nthree") },
+      {
+        name: "high/null bytes",
+        input: Uint8Array.from([0x00, 0xff, 0x80, 0x0a, 0x41, 0x0a, 0x7f]),
+      },
+      { name: "empty", input: new Uint8Array(0) },
+    ];
 
-      it("line-count: both providers agree byte-for-byte on every frame", () => {
-        const wasmPath = join(tmp, "lc_dual.wasm");
-        writeFileSync(wasmPath, lineCountBin);
-        for (const { name, input } of FRAMES) {
-          const wt = runWasmtime(wasmPath, input);
-          const edge = runEdge(wasmPath, input);
-          expect(
-            Array.from(edge),
-            `line-count edge≠wasmtime for "${name}"`,
-          ).toEqual(Array.from(wt));
-        }
-      });
+    it("line-count: both providers agree byte-for-byte on every frame", () => {
+      const wasmPath = join(tmp, "lc_dual.wasm");
+      writeFileSync(wasmPath, lineCountBin);
+      for (const { name, input } of FRAMES) {
+        const wt = runWasmtime(wasmPath, input);
+        const edge = runEdge(wasmPath, input);
+        expect(Array.from(edge), `line-count edge≠wasmtime for "${name}"`).toEqual(Array.from(wt));
+      }
+    });
 
-      it("byte-echo: both providers agree byte-for-byte on every frame (incl. high/null bytes)", () => {
-        const wasmPath = join(tmp, "echo_dual.wasm");
-        writeFileSync(wasmPath, byteEchoBin);
-        for (const { name, input } of FRAMES) {
-          const wt = runWasmtime(wasmPath, input);
-          const edge = runEdge(wasmPath, input);
-          expect(
-            Array.from(edge),
-            `byte-echo edge≠wasmtime for "${name}"`,
-          ).toEqual(Array.from(wt));
-        }
-      });
-    },
-  );
+    it("byte-echo: both providers agree byte-for-byte on every frame (incl. high/null bytes)", () => {
+      const wasmPath = join(tmp, "echo_dual.wasm");
+      writeFileSync(wasmPath, byteEchoBin);
+      for (const { name, input } of FRAMES) {
+        const wt = runWasmtime(wasmPath, input);
+        const edge = runEdge(wasmPath, input);
+        expect(Array.from(edge), `byte-echo edge≠wasmtime for "${name}"`).toEqual(Array.from(wt));
+      }
+    });
+  });
 });
