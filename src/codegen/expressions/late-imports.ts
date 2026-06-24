@@ -297,6 +297,46 @@ export function shiftLateImportIndices(
     if (t.methodFuncIdx >= importsBefore) t.methodFuncIdx += added;
     if (t.trampolineFuncIdx >= importsBefore) t.trampolineFuncIdx += added;
   }
+  // (#2632) Same lockstep for the async-scheduler / event-loop helper func
+  // indices. They are stored as plain numbers on `ctx.asyncScheduler` and read
+  // directly when baking `call` funcIdx at timer/microtask/stdin-reactor call
+  // sites (`getRunLoopNowFuncIdx`, `emitTimerAdd`, `emitTimerCancel`,
+  // `emitMicrotaskEnqueue`). A late import landing AFTER the helper registration
+  // but BEFORE/BETWEEN a call site (e.g. `__str_concat` pulled in while
+  // compiling a `setTimeout(()=>console.log("x"+n))` callback body, which runs
+  // before the now-reader call is baked) shifts every defined function up by
+  // `added` but NOT these stored numbers — so the now-reader call landed one
+  // function too early (`__rl_now_ns` → `__timer_fire_due`), producing "expected
+  // i64 but nothing on stack" invalid Wasm (#2632 Phase 2). Mirrors the
+  // nativeStrHelpers / mapHelpers lockstep above.
+  {
+    const sched = (ctx as unknown as { asyncScheduler?: Record<string, number> }).asyncScheduler;
+    if (sched) {
+      const funcIdxKeys = [
+        "enqueueFuncIdx",
+        "drainFuncIdx",
+        "growFuncIdx",
+        "promiseFulfillFuncIdx",
+        "promiseRejectFuncIdx",
+        "identityFulfillWrapperFuncIdx",
+        "identityRejectWrapperFuncIdx",
+        "timerAddFuncIdx",
+        "timerCancelFuncIdx",
+        "timerPeekDeadlineFuncIdx",
+        "timerFireDueFuncIdx",
+        "runLoopFuncIdx",
+        "runLoopNowFuncIdx",
+        "stdinDrainFuncIdx",
+        "pollFd0OrClockFuncIdx",
+      ];
+      for (const k of funcIdxKeys) {
+        const v = sched[k];
+        if (typeof v === "number" && v >= importsBefore) {
+          sched[k] = v + added;
+        }
+      }
+    }
+  }
   // Shift export descriptors
   for (const exp of ctx.mod.exports) {
     if (exp.desc.kind === "func" && exp.desc.index >= importsBefore) {

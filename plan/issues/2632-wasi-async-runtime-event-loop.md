@@ -11,12 +11,14 @@ created: 2026-06-23
 refs: [389, 2631, 1326, 1326c, 1484, 1653, 2524]
 ---
 
-> **PHASED ISSUE — Phase 1 has LANDED; Phases 2-4 remain (status stays
-> `in-progress`).** Phase 1 (scheduler + timers + microtasks) is implemented and
-> merged; the event-loop reactor now drives `setTimeout`/`setInterval`/
-> `clearTimeout`/`clearInterval`/`queueMicrotask` under `--target wasi`. The
-> fd-readiness reactor (Phase 2), the `process.stdin` Readable stream (Phase 3),
-> and the Preview-2 backend (Phase 4) are still open — do NOT close this issue.
+> **PHASED ISSUE — Phases 1-2 have LANDED; Phases 3-4 remain (status stays
+> `in-progress`).** Phase 1 (scheduler + timers + microtasks) and Phase 2 (the
+> fd-readiness reactor — multi-sub `poll_oneoff` on fd0+timer, non-blocking
+> `fd_read` into an internal stdin buffer) are implemented and merged; the
+> event-loop reactor now drives `setTimeout`/`setInterval`/`clearTimeout`/
+> `clearInterval`/`queueMicrotask` AND wakes on stdin readiness under
+> `--target wasi`. The `process.stdin` Readable stream (Phase 3, #2635) and the
+> Preview-2 backend (Phase 4) are still open — do NOT close this issue.
 
 # WASI async runtime — event-loop reactor
 
@@ -214,15 +216,79 @@ and returns; the loop then runs), and it is in the test262 skip set. Untouched.
   distinct from a 0ms timer) is a later-phase concern; only `setImmediate` remains in
   `WASI_REJECTED_TIMER_GLOBALS`.
 
-### Phase 2 — poll_oneoff reactor + non-blocking fds
-- [ ] Set fd 0 non-blocking via `fd_fdstat_set_flags` at loop start.
-- [ ] The loop builds a **multi-subscription** `poll_oneoff` set: fd0-readable +
+### Phase 2 — poll_oneoff reactor + non-blocking fds ✅ LANDED
+- [x] Set fd 0 non-blocking via `fd_fdstat_set_flags` at loop start.
+- [x] The loop builds a **multi-subscription** `poll_oneoff` set: fd0-readable +
       nearest timer deadline (clock). Dispatch the returned `event_t`s: a readable
-      fd0 event triggers a non-blocking `fd_read` into the stdin buffer and feeds the
-      stream buffer; a clock event fires the due timer(s).
-- [ ] EOF on fd0 (`fd_read` returns 0 bytes with the FD_READ event set / `nbytes==0`)
-      ends the readable side.
-- [ ] Reactor exits when no pending timers **and** no fd subscriptions remain.
+      fd0 event triggers a non-blocking `fd_read` into the internal stdin buffer;
+      a clock event fires the due timer(s).
+- [x] EOF on fd0 (`fd_read` returns 0 bytes with the FD_READ event set / `nbytes==0`)
+      ends the readable side (drops the fd0 subscription).
+- [x] Reactor exits when no pending timers **and** no fd subscriptions remain.
+
+> **Phase 2 builds the substrate only — it does NOT expose `process.stdin`.**
+> The internal stdin buffer + the multi-sub reactor are in place; the
+> `process.stdin` Readable (`.on`/`.read([size])→Buffer|null`) is Phase 3.
+> The internal-buffer access primitive exposed for testing is the
+> `__wasiStdinReadByte()` intrinsic (next buffered byte 0..255, or -1 when
+> empty), which Phase 3's `.read()` will build on.
+
+#### Phase 2 implementation notes (WHY, for Phase 3+ maintainers)
+- **The fd-reactor is a SEPARATE run-loop body, gated on `state.stdinReactor`.**
+  `buildRunLoopBody` branches: when the stdin reactor is inactive it emits the
+  EXACT Phase-1 single-clock-sleep body; when active it emits
+  `buildRunLoopBodyWithFdReactor` (drain fd0 → fire timers → multi-sub poll). The
+  Phase-2 globals (`__stdin_nonblock_set/_fd_active/_buf_len/_buf_pos`) and the two
+  helpers (`__rl_stdin_drain`, `__rl_poll_fd0_or_clock`) register **only** when the
+  reactor is active, BETWEEN `__rl_now_ns` and `__run_event_loop`. So a timer-only
+  program keeps Phase 1's exact global table + func-index layout — verified
+  **byte-identical** (same len + SHA256) for `timer-only`/`interval-only`/
+  `microtask-only` and all non-timer programs, in a 120-file test262 batch (the
+  #1968 lesson: byte-diff must be done IN BATCH, not on a 4-program sample).
+- **Multi-sub `poll_oneoff` generalises the #1484 single-clock marshaller.**
+  `__rl_poll_fd0_or_clock(deadlineNs, nowNs)` writes `subscription_t` **sub[0]** =
+  FD_READ on fd 0 (tag=1, fd@+16), and — only when a timer is pending
+  (`deadline != I64_MAX`) — **sub[1]** = CLOCK on CLOCK_MONOTONIC (identical layout
+  to `emitWasiSleepMsHelper`, timeout = `max(0, deadline-now)`), passes `nsubs=1`
+  or `2`, then scans the returned `event_t[]` for a type-tag-1 (FD_READ) record and
+  returns 1 (fd0 readable) else 0 (clock fired). The poll scratch lives at offset
+  160+ in the page-0 bump zone, ABOVE `__wasi_sleep_ms`'s 64..147 region, so the
+  two paths never alias.
+- **Non-blocking fd0.** `__rl_stdin_drain` sets fd0 non-blocking ONCE
+  (`fd_fdstat_set_flags(0, FDFLAG_NONBLOCK=0x4)`, guarded by `__stdin_nonblock_set`),
+  then does a single `fd_read` of available bytes into the internal buffer
+  (reusing the page-1 `WASI_STDIN_BUF_START` region from #1653, appending at
+  `__stdin_buf_len`). EAGAIN (errno 6) = "no data this tick, NOT EOF"; a 0-byte
+  read at a readable fd = EOF → `__stdin_fd_active=0`; any other errno is treated
+  as EOF to avoid a spin. The buffer compacts (reset both cursors) once the read
+  cursor `__stdin_buf_pos` has consumed everything.
+- **Reactor exit.** The fd-reactor tick computes `pending = (peek != I64_MAX) ||
+  fd0_active`; it exits only when no timer is pending AND fd0 has hit EOF. So a
+  program that just reads stdin to EOF (no timers) terminates cleanly; a program
+  with a live timer keeps the loop alive for late stdin.
+- **Late-import-shift lockstep (root-cause fix, benefits Phase 1 too).** The
+  async-scheduler stores helper func indices as plain numbers on
+  `ctx.asyncScheduler` (`runLoopNowFuncIdx`, `timerAddFuncIdx`, `drainFuncIdx`, …).
+  A late import landing AFTER helper registration but BEFORE a call site bakes its
+  `call` funcIdx (e.g. `__str_concat` pulled in while compiling a
+  `setTimeout(()=>console.log("x"+n))` callback, which runs BEFORE the timer's
+  now-reader call is emitted) shifted every defined function up by `added` but NOT
+  these stored numbers — so `__rl_now_ns` baked one slot too low, hit
+  `__timer_fire_due`, and produced "expected i64 but nothing on stack" invalid
+  Wasm. Fixed by adding the scheduler func-index map to the lockstep in
+  `flushLateImportShifts` (mirrors the `nativeStrHelpers`/`mapHelpers` lockstep,
+  #1677/#2162). This was latent in Phase 1 (it dodged the window via the
+  `mod.functions` body-walk); the fix makes the stored indices consistent with
+  `ctx.funcMap` unconditionally.
+- **Polyfill.** `src/runtime.ts`'s `poll_oneoff` now decodes all `nsubs`
+  subscriptions and reports an FD_READ event when fd0 has preloaded stdin
+  remaining, else the CLOCK event — letting vitest drive the reactor without a
+  real OS poll. `fd_fdstat_set_flags` is a no-op ack (the polyfill `fd_read` is
+  already non-blocking).
+- **Scope.** Phase 2 requires the inline (non-`--link-node-shims`) fd_read path;
+  under `--link-node-shims` the reactor keeps the inline `fd_read` import rather
+  than the shim's `stdin_read`. Integrating the reactor with the node-process
+  shim + the `process.stdin` Readable is Phase 3.
 
 ### Phase 3 — process.stdin Readable stream (the deliverable)
 - [ ] `process.stdin` is a real Readable / EventEmitter, provided via the
