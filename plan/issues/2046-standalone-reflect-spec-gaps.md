@@ -4,7 +4,7 @@ title: "standalone Reflect: receiver arg silently dropped, deleteProperty ignore
 status: in-progress
 sprint: 64
 created: 2026-06-10
-updated: 2026-06-21
+updated: 2026-06-25
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -239,3 +239,60 @@ numeric-key coercion, non-object→TypeError, and the PR-D numeric-key get pin.
 - **PR-C (real receiver plumbing)** — senior/deferred, coordinates with #1888
   Slice 5 accessor invocation; the explicit-receiver get/set refusal stays correct
   meanwhile.
+
+## defineProperty slice landed — route to native applier (2026-06-25)
+
+PROBE-VERIFIED against current main HEAD (064b27657) before any change:
+`Reflect.defineProperty(o, "x", {value:42,…})` refused with
+"Codegen error: Reflect.defineProperty not supported in standalone mode
+(#1472 Phase C)".
+
+**The #2043 blocker recorded above was STALE.** The write-side native
+`__obj_define_from_desc` (#1629b) has backed standalone `Object.defineProperty`
+since that PR and is registered by `ensureObjectRuntime` / reachable end-to-end —
+no new native was needed.
+
+**Change** (`src/codegen/expressions/calls.ts`, inside the `if (ctx.standalone)`
+Reflect dispatch block; `src/codegen/object-ops.ts`): replaced the
+`Reflect.defineProperty` refusal with a route through the SAME standalone
+runtime-descriptor applier `Object.defineProperty` uses —
+`emitDefinePropertyDescRuntime` (now exported). Reusing it (rather than calling
+`__obj_define_from_desc` directly) is essential: it performs the **#2372
+descriptor-struct reify**, so an INLINE object-literal descriptor
+(`{ value: 42, … }`, which the TS checker types as a closed WasmGC struct) is
+reified into a `$Object` before the native's internal `ref.test $Object` runs —
+otherwise the native raises a spurious §10.1.6 TypeError. §28.1.3:
+- step 1 (non-object target → TypeError) — enforced with the shared
+  `emitNonObjectArgGuard` (now exported), which fires for a statically primitive /
+  null / undefined target (the test262 non-object subtests use bare primitive
+  literals). A runtime-`any` primitive still slips through — an accepted
+  imprecision shared with standalone `Object.defineProperty`.
+- step 2 (ToPropertyKey) — handled inside the native via `__to_property_key`
+  (#2042 S1); numeric keys coerce.
+- step 3 (ToPropertyDescriptor errors) — the native already throws a catchable
+  TypeError for malformed descriptors.
+- step 4 (boolean result) — the applier returns the obj (always truthy); we drop
+  it and return i32 `true`.
+
+**Known limitation** (shared with standalone `Object.defineProperty`): a rejected
+redefine of an existing non-configurable property silently no-ops in the native
+rather than surfacing failure, so the Reflect path returns `true` where spec
+wants `false`. Faithful handling needs a failure channel in
+`__defineProperty_value`; out of this slice.
+
+New tests in `tests/issue-2046.test.ts` (28/28 green): data descriptor apply,
+boolean-true return, numeric-key coercion, accessor descriptor, pre-built
+(dynamic) descriptor, enumerable:false hidden from for-in, primitive-target and
+null-target TypeError. `tests/issue-1905.test.ts` updated — `defineProperty`
+removed from the "still refuses" list (now supported), all green.
+
+Pre-existing unrelated failures (byte-identical to origin/main, untouched here):
+`tests/object-define-property.test.ts` fails to load (missing `./helpers.js`
+import); `tests/equivalence/reflect-api.test.ts` "Reflect.construct creates a new
+instance" fails identically on clean main (host-mode construct gap).
+
+**Still refused (out of this PR, issue stays `in-progress`):**
+- **`Reflect.construct`** (152 rows, the big one) — gated on standalone construct
+  machinery (coordinate with #2158).
+- **PR-C (real receiver plumbing)** — senior/deferred (#1888 Slice 5).
+- `getPrototypeOf` / `setPrototypeOf` / `apply` standalone arms.

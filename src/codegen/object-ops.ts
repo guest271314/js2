@@ -323,7 +323,7 @@ function emitDescriptorStructReify(
   fctx.body.push({ op: "local.get", index: objLocal });
 }
 
-function emitDefinePropertyDescRuntime(
+export function emitDefinePropertyDescRuntime(
   ctx: CodegenContext,
   fctx: FunctionContext,
   objArg: ts.Expression,
@@ -563,7 +563,7 @@ function maybeEmitVecLengthGrowth(
  *
  * Per ES spec (19.1.2.4 step 1): "If Type(O) is not Object, throw a TypeError."
  */
-function emitNonObjectArgGuard(
+export function emitNonObjectArgGuard(
   ctx: CodegenContext,
   fctx: FunctionContext,
   argExpr: ts.Expression,
