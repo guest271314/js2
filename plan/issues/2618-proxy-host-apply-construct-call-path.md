@@ -1,11 +1,12 @@
 ---
 id: 2618
 title: "Proxy (host): calling / constructing a Proxy whose target is callable traps (illegal cast) or ignores the construct trap result (~15 fails)"
-status: in-progress
+status: blocked
 assignee: ttraenkler/sd-2618
 sprint: 65
 created: 2026-06-22
 updated: 2026-06-24
+reconcile_status_note: "2026-06-24 (PO reconcile vs upstream/main): Slice 1 LANDED (PR #1984, commit 1cc09f72f — pure-runtime START-timing + callable-target wrap, +1 gc row). REMAINING work (externref-callee p.call(a,b) CALL dispatch + dynamic-new construct-result routing) is gated on the deep #56 dispatch substrate (blocked_on:[56] already set). NOT dev-claimable until #56 lands. → blocked (was in-progress)."
 blocked_on: [56]
 reconcile_note: "SLICE 1 MERGED #1984 (sd-2618): pure-runtime START-timing + callable-target [[ProxyTarget]] wrap; +1 gc row (apply/call-parameters), zero regr. DEFERRED slices SCOPED+HANDED OFF 2026-06-24 (sd-2618): both apply-dispatch AND construct bottom out in the SAME root cause — the inbound __call_fn_method_N dispatcher ref.cast-ing a host JS argArray to a wasm vec struct (illegal cast). == 2623-A inbound-marshalling KEYSTONE (codegen/index.ts buildArgConversion 3356/3659). Construct codegen routing (compileNewExpression Proxy guard + constructable-target wrapper) prototyped, correct, but INERT (0 rows) without the keystone. NOT shipped — broad surface for 0 rows = #1888 floor-eject hazard. See '## Deferred slices … SCOPE+HANDOFF' for WAT evidence + ordering. Architect/2623-A territory, not a standalone dev slice."
 priority: medium

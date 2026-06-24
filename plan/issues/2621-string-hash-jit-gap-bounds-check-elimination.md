@@ -1,9 +1,10 @@
 ---
 id: 2621
 title: "string-hash AOT-vs-JIT gap: GC-array bounds-check elimination in hot loops (epic)"
-status: ready
+status: backlog
 sprint: 65
 created: 2026-06-22
+updated: 2026-06-24
 priority: low
 feasibility: hard
 reasoning_effort: high
@@ -12,6 +13,7 @@ area: codegen
 related: [1580, 2619]
 goal: performance
 language_feature: strings, arrays, loops
+reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): DEFERRED EPIC, NOT dev-claimable. The title itself marks it '(epic)'; BCE on a trapping WasmGC array.get is inherently an AOT-vs-JIT gap with no tractable WasmGC slice. Sequence only after #1760 (warm-runtime bench lane, open PR/owner sdev-strback) lands AND only if JS-parity becomes a hard requirement. → backlog (was ready)."
 ---
 
 # #2621 — string-hash AOT-vs-JIT gap: GC-array bounds-check elimination (epic, deferred)

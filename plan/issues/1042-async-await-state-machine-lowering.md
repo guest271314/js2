@@ -1,9 +1,9 @@
 ---
 id: 1042
 title: "async/await state-machine lowering (AwaitExpression is currently a no-op)"
-status: in-progress
+status: backlog
 created: 2026-04-11
-updated: 2026-06-04
+updated: 2026-06-24
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -13,6 +13,7 @@ parent: 1032
 depends_on: [680]
 required_by: [1058, 1766, 1774]
 note: "Verified 2026-05-21: AwaitExpression no-op at expressions.ts:973 (drifted from cited L790). Multiple other line refs in this issue may need re-verification before dispatch."
+reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): DEFERRED EPIC, not dev-claimable this sprint. The async CPS state machine (async-cps.ts) is built+correct but gated OFF behind the synchronous-consumption-contract architecture wall (commit 3897722bf async re-measure: cluster 76.6% via legacy sync-async path). #1042 remains the CPS *acceptance owner*, not a sprint driver. Bounded slices harvested into #2612/#2613/#2614. → backlog."
 ---
 # #1042 — Real `async`/`await` state-machine lowering
 

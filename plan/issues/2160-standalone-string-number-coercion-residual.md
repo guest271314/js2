@@ -1,11 +1,12 @@
 ---
 id: 2160
 title: "Standalone String/Number method & coercion conformance residual (~635 tests)"
-status: ready
+status: done
+completed: 2026-06-24
 assignee: ttraenkler/cs-2160
 sprint: 65
 created: 2026-06-15
-updated: 2026-06-18
+updated: 2026-06-24
 priority: high
 feasibility: medium
 reasoning_effort: medium
@@ -15,6 +16,7 @@ language_feature: string-number
 goal: standalone-mode
 parent: 1470
 depends_on: [1917, 2104]
+reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): DONE as a tracker — all 4 dev-tractable child slices merged on main: #2598+#2599 (PR #1911, string search-method + concat arg ToString), #2600+#2601 (PR #1916, string index ToIntegerOrInfinity + fromCodePoint RangeError); plus Number.parseInt/parseFloat, substr, String(array). The remaining residual (new String()/new Number() wrapper boxing + Number(array) string→number) is value-rep / single-coercion-engine territory tracked under #1917 (still open), NOT this tracker. → done."
 ---
 
 # Standalone String/Number method & coercion conformance residual
