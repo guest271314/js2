@@ -1,7 +1,7 @@
 ---
 id: 2635
 title: "Async node:fs / process.stdin members over the event loop (Phase 3 of #1772)"
-status: blocked
+status: ready
 created: 2026-06-24
 updated: 2026-06-24
 priority: low
