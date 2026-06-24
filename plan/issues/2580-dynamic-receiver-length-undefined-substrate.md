@@ -2,7 +2,7 @@
 id: 2580
 title: "`.length` on an any/dynamically-mutated receiver returns numeric 0, not undefined (runtime property-presence)"
 status: in-progress
-assignee: ttraenkler/sd-m3b-pre
+assignee: ttraenkler/sd-value-rep-m3-bacc
 sprint: 66
 created: 2026-06-21
 priority: medium
@@ -1845,3 +1845,98 @@ strip compiled VALID on BOTH main and branch, hiding the bug — only the REAL
 `runTest262File` per-process showed `compile_error`). Always validate via
 `runTest262File` per-process + the merge_group floor (#2097). Issue stays
 `in-progress`; claim released.
+
+---
+
+# M3 — B-acc SLICE 1 LANDED: `Object.defineProperty` array-index accessor element visit (host) (2026-06-24, sd-value-rep-m3-bacc, max-reasoning)
+
+> Verify-first, binaryen-decoded WAT + per-process `runTest262File` (NEVER the
+> in-process loop — the runner trap). The sd-m3b cluster-composition correction
+> (181 `Object.defineProperty` files dominate the 266-file `-c-i-`/`-b-i-` bulk)
+> is **independently re-confirmed** (266 total: 181 defineProperty, 51
+> `.prototype=`, 27 `arguments`; of the 181: 136 `get:`, 56 `set:`, 47 own-obj,
+> 42 on `Array.prototype`). The sd-m3b *mechanism* hypothesis ("make the host
+> generic-method HasProperty-visit consult the accessor + the `Get` invoke it")
+> is **half-right and was sharpened by the WAT**: the host `forEach.call`/etc. is
+> an INLINED Wasm loop over `__extern_length` + `__extern_has_idx`/
+> `__extern_get_idx` (NOT `__proto_method_call` as the M3 spec assumed), and the
+> primary leak is UPSTREAM of those imports — the descriptor was being **dropped
+> at the lowering site** before the runtime ever saw it.
+
+## Root cause (3 stacked gaps, all bisected from emitted WAT, host mode)
+
+For the canonical c-i-17 shape `var obj = {length:2};
+Object.defineProperty(obj,"1",{set:fn}); forEach.call(obj,cb)`:
+
+1. **Descriptor dropped at the lowering site (the dominant leak).**
+   `compileObjectDefineProperty` (`object-ops.ts`) classifies `obj` as a
+   statically struct-typed receiver (`receiverIsStaticStruct`, TS type
+   `{length:number}` → `__anon_0`), so the accessor branch captures `"1"` into a
+   COMPILED `${structName}_1` accessor (`classAccessorSet`). But that fast path is
+   reachable ONLY from the NAMED read site (`compilePropertyAccess`); an INDEXED
+   element retrieval reads via `__extern_get_idx`/`__extern_has_idx`, which consult
+   the runtime SIDECAR (`_wasmStructProps`), never `classAccessorSet`. Since `"1"`
+   is not an own struct field (`fieldIdx < 0`), the compiled accessor is
+   unreachable from BOTH read paths → the descriptor is silently dropped (verified:
+   the emitted module has NO `__defineProperty_accessor` import; the sidecar is
+   empty at the `__extern_has_idx` call).
+2. **`__extern_has_idx` setter-only presence gap.** Even once mirrored to the
+   sidecar, a setter-only accessor stores `__set_1` + `sc["1"]=undefined`;
+   `_sidecarGet(obj,"1")` is undefined → HasProperty=0 → the loop skips the index
+   (this is the sd-m3b "HasProperty-visit" framing, confirmed as gap #2).
+3. **`__extern_get_idx` getter-invoke gap.** The accessor getter (`__get_<idx>`)
+   was not invoked from the indexed read; a present-with-undefined element wasn't
+   distinguished.
+
+## The fix (3 sites, host-scoped, hot-path byte-identical)
+
+- **`object-ops.ts` — decline the compiled-accessor branch for a canonical
+  array-index accessor key** (`_isCanonicalArrayIndexString(propName) &&
+  fieldIdx < 0`). It then falls through to `emitExternDefinePropertyNoValue` →
+  `__defineProperty_accessor`, which mirrors the descriptor into the sidecar the
+  indexed-read path consults. NAMED-key accessors (field OR non-field, e.g.
+  `obj.computed`) are UNCHANGED — they stay on the compiled fast path the named
+  read resolves (verified: `obj.computed` getter → 42 still works).
+- **`runtime.ts __extern_has_idx`** — an `__get_<idx>`/`__set_<idx>` entry in
+  `_wasmStructProps` ⇒ HasProperty=1 (§7.3.12, presence independent of value).
+- **`runtime.ts __extern_get_idx`** — route a `__get_<idx>`/`__set_<idx>` index
+  through `_safeGet` (invokes the getter §6.2.5.5; setter-only → undefined).
+
+Both runtime arms are guarded on an `__get_`/`__set_` sidecar entry existing, so
+plain-data array-likes and real arrays are byte-identical (the hot path never
+enters the new arm). The object-ops gate is canonical-array-index-only.
+
+## Measured impact (per-process, host, baseline origin/main `6d1f9b1c` vs branch)
+
+Full 181-file `Object.defineProperty` `-c-i-`/`-b-i-` cluster, one fresh process
+per file (the runner trap avoided):
+- **Baseline: pass 38 / fail 142. After: pass 73 / fail 107. NET +35 pass, 0 CE.**
+- **Per-file diff: 35 fail→pass, 0 pass→fail (zero cluster regressions).**
+- Non-cluster regression sample (50 files: non-DP `-c-i-`/`-b-i-` + hot-path
+  forEach/map/filter): **0 regressions, +1 improvement** (`15.4.4.18-7-9.js`).
+- Vitest: new `tests/issue-2580-m3-bacc-defineproperty-accessor.test.ts` (9
+  host cases) green; `array-methods`/`functional-array-methods`/`issue-2583`/
+  `accessor-side-effects` (79) green; sibling 2580 suites (25) green; `tsc` +
+  `prettier` clean. (`object-define-property*.test.ts` file-load fails on a
+  missing `./helpers.js` IDENTICALLY on origin/main — pre-existing worktree
+  test-infra artifact, not this change; its 32 in-file tests pass.)
+
+## Scope / what this slice does NOT cover (next B-acc sub-slices)
+
+The remaining ~107 cluster fails are SEPARATE sub-mechanisms (verified distinct
+shapes), each its own slice:
+- **Inherited accessor on the built-in `Array.prototype`/`Object.prototype`**
+  (`defineProperty(Array.prototype,"0",{get})` then `[, ,].indexOf(10)`, or
+  `Object.prototype[0]=true; indexOf.call({length:3},true)`) — 42 files. Needs the
+  index read to walk the built-in's prototype, NOT an own-sidecar accessor.
+- **Getter bodies that close over outer scope** (`var data=[…];
+  defineProperty(o,k,{get(){return data[k];}})`) — the #1888 S5c capture gap;
+  the compiled/bridge accessor reads captures as 0.
+- **The fnctor `.prototype=` subset (51) + `arguments` (27)** — the B-fnctor /
+  arguments laps, tracked separately.
+
+This slice is the OWN-canonical-index accessor subset — the cleanest,
+highest-density, zero-regression increment of the 181-file lever. Authoritative
+gate = merge_group standalone floor (#2097) + the test262 net-regression gate;
+stop-the-line on any eject. Files changed: `src/codegen/object-ops.ts`,
+`src/runtime.ts`, `tests/issue-2580-m3-bacc-defineproperty-accessor.test.ts`.
