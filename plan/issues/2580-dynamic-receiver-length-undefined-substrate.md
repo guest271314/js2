@@ -3,7 +3,7 @@ id: 2580
 title: "`.length` on an any/dynamically-mutated receiver returns numeric 0, not undefined (runtime property-presence)"
 status: in-progress
 assignee: ttraenkler/sd-value-rep-m3-bacc
-sprint: 66
+sprint: 65
 created: 2026-06-21
 priority: medium
 feasibility: hard
