@@ -2,10 +2,11 @@
 id: 1917
 title: "One coercion engine — four divergent coercion matrices disagree about lossiness"
 status: in-progress
+assignee: ttraenkler/sendev-eq
 sprint: 65
 model: opus
 created: 2026-06-10
-updated: 2026-06-17
+updated: 2026-06-24
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -173,6 +174,78 @@ re-enqueue #1960. The pre-existing `String(x)`-returns-bare-f64 →
 `any.convert_extern` bug in the `String()` / native-concat path is a SEPARATE
 real issue (reproduces on `c4ef3fac2`) worth its own ticket — but it is NOT
 introduced by #1917 Step 1.
+
+## Implementation — Equality finale, slice E3 (any/any) (sendev-eq, 2026-06-24)
+
+Branch `issue-1917-emit-eq` (this PR). The LAST step of the dedup series, phased:
+**E3 (any/any) first** as the cleanest byte-neutral wrapper; E5/E6
+(tag-5-sensitive externref typed-side boxing) deferred to a separate isolated PR
+with extra standalone scrutiny vs the frozen #1888 −794 contract; the deferred
+behaviour fixes #1986/#1987/#2081 stay separate (they are classifier-side, not
+dispatch-side).
+
+**New `emitStrictEq(ctx, fctx, expr, negate)` / `emitLooseEq(ctx, fctx, expr,
+negate)`** in `coercion-engine.ts` — the **dispatch layer** for `any`-operand
+equality. They select the helper (`__any_strict_eq` for `===`/`!==`; `__any_eq`
+for `==`/`!=`), marshal both operands into the boxed `(ref null $AnyValue)` shape
+via the shared `emitAnyEqOperands` helper (the verbatim #1211 boxing sequence),
+emit the `call`, and apply the `!=`/`!==` `i32.eqz` negation. They return
+`{ kind: "i32" }`, or `null` (helper unavailable / operand failed) so the caller
+falls back exactly as before.
+
+**WRAPPER, not a re-derivation (the load-bearing invariant).** The hard part —
+the §7.2.15 tag-5 field-4 3-way classifier (`tag5StringEqThen`: genuine-string
+content-eq → `__str_equals`; `$BoxedNumber` → `__any_to_f64`+`f64.eq`; both-eqref
+objects → `ref.eq`; else conservative content-eq, the unified #2040/#2585 spec) —
+lives ENTIRELY in the `__any_eq`/`__any_strict_eq` helper *bodies*
+(`any-helpers.ts`). The engine never copies that logic; it only chooses the
+helper and boxes the operands. Folding a second classifier copy here would
+reproduce the #2585/#2040 disease this issue exists to prevent.
+
+**Migrated:** the four equality arms of `compileAnyBinaryDispatch`
+(`binary-ops.ts`, the `compileAnyBinaryDispatch` tail) now early-return into
+`emitLooseEq`/`emitStrictEq`; the `__any_eq`/`__any_strict_eq` rows are removed
+from the helper-name switch (a comment marks why they never reach it). The
+non-equality arms (`+`/`-`/`*`/`/`/`%`/`<`/`>`/`<=`/`>=`) are untouched.
+
+**Byte-neutral by construction:** the extraction reproduces the SAME helper
+selection, the SAME operand-boxing sequence (`compileExpression` → `isAnyValue`
+guard → `coerceType(ref_null $AnyValue)`), and the SAME `i32.eqz` negation —
+verified identical to the prior in-worktree implementation and gated by both-lane
+(host + standalone) Wasm-byte-SHA diff over equality programs + `playground/
+examples/` vs a fresh detached `origin/main` worktree (0 status changes required).
+
+**Deferred (NOT in this slice):** E5/E6 typed-side externref boxing (tag-5
+sensitive — needs the static-class routing + extra standalone scrutiny); the
+behaviour fixes #1986 (`null===0`), #1987 (`0===-0`), #2081 (SA `'1'==1`) — those
+are classifier/widening changes, intentionally separate from this neutral
+extraction.
+
+**Validation (sendev-eq, 2026-06-24):**
+- **Byte-SHA neutrality (authoritative):** `.tmp/eq-neutrality.mjs` compiled 7
+  programs (`==`/`===`/`!=`/`!==` on several operand shapes + arithmetic +
+  relational controls) on BOTH the gc (host) and standalone lanes and SHA-256'd
+  `result.binary`, then diffed against a fresh detached `origin/main` worktree:
+  **0 byte differences across all 14 (program × lane) outputs.** This is a
+  structural proof the extraction is byte-for-byte identical — it does not depend
+  on the test262 harness.
+- **Behaviour guard:** new `tests/issue-1917-emit-eq.test.ts` — 12 cases (6 per
+  lane) via the real `compile` + `WebAssembly.instantiate`; all pass. Pins each
+  lane's established equality behaviour (incl. the pre-existing standalone
+  `3 === 3.0 → false` numeric-tag gap, verified identical on `origin/main`).
+- **tsc clean, prettier clean.** Removed a now-dead `!=`/`!==` negation block in
+  `compileAnyBinaryDispatch` that tsc correctly flagged as unreachable once the
+  equality ops early-return into the engine (the prior in-worktree draft of this
+  slice had left it in and would not have typechecked).
+- **#2108 ratcheted DOWN:** `binary-ops.ts` 38 → 34 (the four equality arms
+  migrated into the sanctioned engine); baseline committed. No unsanctioned
+  growth.
+- **Caveat — local faithful test262 disregarded:** a direct `runTest262File`
+  probe failed its KNOWN-PASS control (`charAt/S15.5.4.4_A1_T1`) on clean
+  `origin/main` on both lanes — the standard broken-local-harness signature
+  (`feedback_verify_local_repro_against_known_good_control`). Its status readings
+  are therefore non-authoritative and disregarded; the byte-SHA diff above is the
+  neutrality gate, and the CI sharded test262 (faithful) is the conformance gate.
 
 ## Implementation — Step 3 in progress (sendev-coercion, 2026-06-23)
 
