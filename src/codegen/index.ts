@@ -78,6 +78,7 @@ import {
   getOrRegisterVecType,
 } from "./registry/types.js";
 import {
+  enableStdinReactor,
   ensureTimerHeap,
   exportDrainMicrotasksIfRegistered,
   getDrainFuncIdxForWasiStart,
@@ -5890,6 +5891,11 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // ensureTimerHeap + the run-loop reactor in emitDeferredWasiHelpers, and the
   // `getRunLoopFuncIdxForWasiStart` wiring in addWasiStartExport.
   let needsTimerHeap = false;
+  // #2632 Phase 2 — source references the fd0 stdin reactor (a `__wasiStdinReadByte()`
+  // call, or `process.stdin` streaming usage). Activates the multi-subscription
+  // poll_oneoff (fd0 + timer) + internal stdin buffer; implies fd_read,
+  // fd_fdstat_set_flags, poll_oneoff, clock_time_get, and the timer heap/run loop.
+  let needsStdinReactor = false;
   // #1482: process.env.X access — register environ_get / environ_sizes_get +
   // the JS-polyfill fast-path host import.
   let needsEnviron = false;
@@ -5994,6 +6000,17 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
       ) {
         needsTimerHeap = true;
       }
+      // #2632 Phase 2 — `__wasiStdinReadByte()` is the internal-buffer primitive
+      // exposed for the fd0 reactor (Phase 3's process.stdin Readable builds on
+      // it). It activates the fd-readiness reactor + run loop. (No user shadow
+      // applies — it is a js2wasm-internal name, not a lib global.)
+      if (callee === "__wasiStdinReadByte") {
+        needsStdinReactor = true;
+        needsFdRead = true;
+        needsPollOneoff = true;
+        needsClockTimeGet = true;
+        needsTimerHeap = true;
+      }
     }
     // #1482: detect `process.env.X` (PropertyAccessExpression nested two deep)
     // and `process.env["X"]` (ElementAccessExpression). The outer node may be
@@ -6046,7 +6063,10 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // path, and drop fd_read entirely (stdin goes through the shim).
   if (ctx.linkNodeShims) {
     needsFdWrite = needsPathOpen;
-    needsFdRead = false;
+    // #2632 Phase 2 — the fd0 reactor drives `fd_read` directly from readiness
+    // (not the node-process shim's stdin_read). Keep the inline fd_read import
+    // when the reactor is active; otherwise stdin flows through the shim.
+    needsFdRead = needsStdinReactor;
   }
 
   // fd_write(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) -> i32
@@ -6078,6 +6098,21 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     );
     addImport(ctx, "wasi_snapshot_preview1", "fd_read", { kind: "func", typeIdx: fdReadType });
     ctx.wasiFdReadIdx = ctx.funcMap.get("fd_read")!;
+  }
+
+  // #2632 Phase 2 — fd_fdstat_set_flags(fd, flags) -> errno (i32). Used by the
+  // fd0 stdin reactor to put fd 0 in non-blocking mode so a post-readiness
+  // fd_read can't block. Registered BEFORE any defined helper so its late-import
+  // shift discipline matches fd_read / poll_oneoff (CLAUDE.md "addUnionImports").
+  if (needsStdinReactor) {
+    const setFlagsType = addFuncType(
+      ctx,
+      [{ kind: "i32" }, { kind: "i32" }],
+      [{ kind: "i32" }],
+      "$wasi_fd_fdstat_set_flags",
+    );
+    addImport(ctx, "wasi_snapshot_preview1", "fd_fdstat_set_flags", { kind: "func", typeIdx: setFlagsType });
+    ctx.wasiFdFdstatSetFlagsIdx = ctx.funcMap.get("fd_fdstat_set_flags")!;
   }
 
   // #1322: random_get(buf_ptr: i32, buf_len: i32) -> errno (i32)
@@ -6209,6 +6244,11 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   if (needsTimerHeap) {
     ctx.wasiPendingTimerHeap = true;
   }
+  // #2632 Phase 2 — activate the fd0 stdin reactor before timer-heap registration
+  // (so the run-loop body builds in the fd-reactor shape).
+  if (needsStdinReactor) {
+    ctx.wasiPendingStdinReactor = true;
+  }
 }
 
 /**
@@ -6239,6 +6279,14 @@ export function emitDeferredWasiHelpers(ctx: CodegenContext): void {
   // async scheduler to call this for setTimeout/await sleep().
   if (ctx.wasiPendingSleepMsHelper && !ctx.funcMap.has("__wasi_sleep_ms")) {
     emitWasiSleepMsHelper(ctx);
+  }
+
+  // #2632 Phase 2 — activate the fd0 stdin reactor BEFORE ensureTimerHeap so the
+  // run-loop body is built in the multi-sub-poll / internal-buffer shape and the
+  // Phase-2 globals + helpers (`__rl_stdin_drain`, `__rl_poll_fd0_or_clock`)
+  // register at stable func indices ahead of `__run_event_loop`.
+  if (ctx.wasiPendingStdinReactor) {
+    enableStdinReactor(ctx);
   }
 
   // #2632 Phase 1 — register the timer heap + run-loop reactor. MUST run after
