@@ -411,6 +411,91 @@ export function emitToBoolean(ctx: CodegenContext, valType: ValType | null, sink
 }
 
 /**
+ * Compile both operands of an `any`-typed equality expression, boxing each side
+ * that did not naturally produce a `$AnyValue` to `(ref null $AnyValue)` — the
+ * shared parameter shape of the `__any_eq` / `__any_strict_eq` helpers. Returns
+ * `false` (no instructions appended) if either operand fails to compile, so the
+ * caller can fall back exactly as it did before.
+ *
+ * This is the operand-marshalling half of the §7.2.13/§7.2.15 equality dispatch,
+ * lifted verbatim from `compileAnyBinaryDispatch` (binary-ops.ts) — same
+ * `compileExpression` → `isAnyValue` guard → `coerceType(ref_null $AnyValue)`
+ * sequence (#1211), so the emitted bytes are identical.
+ */
+function emitAnyEqOperands(ctx: CodegenContext, fctx: FunctionContext, expr: ts.BinaryExpression): boolean {
+  const anyValueTarget: ValType = { kind: "ref_null", typeIdx: ctx.anyValueTypeIdx };
+  const leftType = compileExpression(ctx, fctx, expr.left);
+  if (!leftType) return false;
+  if (!isAnyValue(leftType, ctx)) {
+    coerceType(ctx, fctx, leftType, anyValueTarget);
+  }
+  const rightType = compileExpression(ctx, fctx, expr.right);
+  if (!rightType) return false;
+  if (!isAnyValue(rightType, ctx)) {
+    coerceType(ctx, fctx, rightType, anyValueTarget);
+  }
+  return true;
+}
+
+/**
+ * #1917 Step E3 — `emitStrictEq` / `emitLooseEq`: the **dispatch layer** for
+ * `any`-operand equality. These decide WHICH helper to call (`__any_strict_eq`
+ * for `===`/`!==`; `__any_eq` for `==`/`!=`), marshal both operands into the
+ * boxed `$AnyValue` shape, emit the `call`, and apply the `!=`/`!==` negation.
+ *
+ * They are a WRAPPER, not a re-derivation: the tag-5 field-4 3-way classifier
+ * (boxed-number vs proto-identity vs content equality, #2040/#2585 — the
+ * `tag5StringEqThen` machinery) lives in the `__any_eq`/`__any_strict_eq` helper
+ * *bodies* in any-helpers.ts. The engine never copies that logic; it only
+ * selects the helper and boxes the operands. This is a byte-neutral extraction
+ * of the equality arms of `compileAnyBinaryDispatch`.
+ *
+ * @param negate when true, the loose/strict-equal result is i32.eqz'd (the
+ *   `!=` / `!==` half). The helper itself always computes `==`/`===`.
+ * @returns the i32 result ValType, or `null` if the helper is unavailable or an
+ *   operand failed to compile (caller falls back).
+ */
+export function emitStrictEq(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  negate: boolean,
+): ValType | null {
+  return emitAnyEquality(ctx, fctx, expr, "__any_strict_eq", negate);
+}
+
+export function emitLooseEq(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  negate: boolean,
+): ValType | null {
+  return emitAnyEquality(ctx, fctx, expr, "__any_eq", negate);
+}
+
+function emitAnyEquality(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  expr: ts.BinaryExpression,
+  helperName: "__any_eq" | "__any_strict_eq",
+  negate: boolean,
+): ValType | null {
+  ensureAnyHelpers(ctx);
+  const funcIdx = ctx.funcMap.get(helperName);
+  if (funcIdx === undefined) return null;
+
+  if (!emitAnyEqOperands(ctx, fctx, expr)) return null;
+
+  fctx.body.push({ op: "call", funcIdx });
+
+  if (negate) {
+    fctx.body.push({ op: "i32.eqz" });
+  }
+
+  return { kind: "i32" };
+}
+
+/**
  * Emit a string literal in the active mode. `compileStringLiteral` is already
  * mode-agnostic (a native `$AnyString` constant in native/standalone mode, an
  * externref string-constant in js-host mode) — exactly what every migrated
