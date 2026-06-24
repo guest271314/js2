@@ -159,9 +159,15 @@ export function emitNativeParseNumber(ctx: CodegenContext, which: Set<string>): 
     const L_SIGN = 6;
     const L_MANT = 7;
     const L_SAW = 8;
+    // index 9 = fracScale (legacy, now unused after the #2653 integer-mantissa rewrite)
     const L_EXPSIGN = 10;
     const L_EXP = 11;
     const L_RESULT = 12;
+    // (#2653) integer-mantissa scaling scratch locals.
+    const L_FRACCOUNT = 13; // i32: number of fraction digits consumed
+    const L_TEXP = 14; // i32: total decimal exponent (expSign*exp + intDrop - fracCount)
+    const L_POW = 15; // f64: 10^|totalExp|
+    const L_INTDROP = 16; // i32: integer digits dropped past the ~15-sig-digit cap
 
     const getC: Instr[] = [
       { op: "local.get", index: L_DATA },
@@ -191,7 +197,7 @@ export function emitNativeParseNumber(ctx: CodegenContext, which: Set<string>): 
       { op: "local.set", index: L_LEN },
       { op: "f64.const", value: 1 },
       { op: "local.set", index: L_SIGN },
-      { op: "f64.const", value: 0 },
+      { op: "i64.const", value: 0n },
       { op: "local.set", index: L_MANT },
       { op: "i32.const", value: 0 },
       { op: "local.set", index: L_SAW },
@@ -293,16 +299,39 @@ export function emitNativeParseNumber(ctx: CodegenContext, which: Set<string>): 
               { op: "i32.gt_s" },
               { op: "i32.or" },
               { op: "br_if", depth: 1 },
-              // mant = mant*10 + (c-'0')
+              // (#2653) Cap the i64 integer-mantissa accumulation at ~18
+              // significant digits (mant < 9e17 keeps mant*10+9 < 2^63, the i64
+              // range — and well within the ~17 digits an f64 can resolve). Past
+              // the cap an integer digit is DROPPED from the mantissa but its
+              // place value is preserved by bumping the decimal exponent
+              // (L_INTDROP), so "12345678901234567890" keeps ~18 sig digits + exp
+              // instead of overflowing and corrupting the value.
               { op: "local.get", index: L_MANT },
-              { op: "f64.const", value: 10 },
-              { op: "f64.mul" },
-              { op: "local.get", index: L_C },
-              { op: "i32.const", value: C_ZERO },
-              { op: "i32.sub" },
-              { op: "f64.convert_i32_s" },
-              { op: "f64.add" },
-              { op: "local.set", index: L_MANT },
+              { op: "i64.const", value: 900000000000000000n },
+              { op: "i64.lt_u" },
+              {
+                op: "if",
+                blockType: { kind: "empty" },
+                then: [
+                  // mant = mant*10 + (c-'0')
+                  { op: "local.get", index: L_MANT },
+                  { op: "i64.const", value: 10n },
+                  { op: "i64.mul" },
+                  { op: "local.get", index: L_C },
+                  { op: "i32.const", value: C_ZERO },
+                  { op: "i32.sub" },
+                  { op: "i64.extend_i32_s" },
+                  { op: "i64.add" },
+                  { op: "local.set", index: L_MANT },
+                ],
+                else: [
+                  // dropped integer digit → exponent += 1
+                  { op: "local.get", index: L_INTDROP },
+                  { op: "i32.const", value: 1 },
+                  { op: "i32.add" },
+                  { op: "local.set", index: L_INTDROP },
+                ],
+              },
               { op: "i32.const", value: 1 },
               { op: "local.set", index: L_SAW },
               { op: "local.get", index: L_I },
@@ -336,10 +365,6 @@ export function emitNativeParseNumber(ctx: CodegenContext, which: Set<string>): 
               { op: "i32.const", value: 1 },
               { op: "i32.add" },
               { op: "local.set", index: L_I },
-              // scale local reused: use L_EXP as f64? need separate f64 scale.
-              // Use mant accumulation with a divisor tracked in local 9 (frac scale).
-              { op: "f64.const", value: 0.1 },
-              { op: "local.set", index: 9 },
               {
                 op: "block",
                 blockType: { kind: "empty" },
@@ -361,20 +386,34 @@ export function emitNativeParseNumber(ctx: CodegenContext, which: Set<string>): 
                       { op: "i32.gt_s" },
                       { op: "i32.or" },
                       { op: "br_if", depth: 1 },
-                      // mant += (c-'0') * scale ; scale *= 0.1
+                      // (#2653) i64 integer-mantissa accumulation, capped at ~18
+                      // sig digits (mant < 9e17). Within the cap: mant = mant*10 +
+                      // digit and fracCount++ (final scaling divides by 10^count).
+                      // Past the cap a fraction digit is dropped (no visible effect
+                      // on the rounded double), NOT counted.
                       { op: "local.get", index: L_MANT },
-                      { op: "local.get", index: L_C },
-                      { op: "i32.const", value: C_ZERO },
-                      { op: "i32.sub" },
-                      { op: "f64.convert_i32_s" },
-                      { op: "local.get", index: 9 },
-                      { op: "f64.mul" },
-                      { op: "f64.add" },
-                      { op: "local.set", index: L_MANT },
-                      { op: "local.get", index: 9 },
-                      { op: "f64.const", value: 0.1 },
-                      { op: "f64.mul" },
-                      { op: "local.set", index: 9 },
+                      { op: "i64.const", value: 900000000000000000n },
+                      { op: "i64.lt_u" },
+                      {
+                        op: "if",
+                        blockType: { kind: "empty" },
+                        then: [
+                          { op: "local.get", index: L_MANT },
+                          { op: "i64.const", value: 10n },
+                          { op: "i64.mul" },
+                          { op: "local.get", index: L_C },
+                          { op: "i32.const", value: C_ZERO },
+                          { op: "i32.sub" },
+                          { op: "i64.extend_i32_s" },
+                          { op: "i64.add" },
+                          { op: "local.set", index: L_MANT },
+                          { op: "local.get", index: L_FRACCOUNT },
+                          { op: "i32.const", value: 1 },
+                          { op: "i32.add" },
+                          { op: "local.set", index: L_FRACCOUNT },
+                        ],
+                        else: [],
+                      },
                       { op: "i32.const", value: 1 },
                       { op: "local.set", index: L_SAW },
                       { op: "local.get", index: L_I },
@@ -407,14 +446,10 @@ export function emitNativeParseNumber(ctx: CodegenContext, which: Set<string>): 
       { op: "local.set", index: L_EXPSIGN },
       ...emitExponent(L_I, L_LEN, L_DATA, L_C, L_EXP, L_EXPSIGN, strDataTypeIdx, getC),
 
-      // result = sign * mant ; then apply exponent via a pow10 loop that
-      // operates on the L_RESULT local (a value cannot be carried on the
-      // operand stack across a `loop` with empty block type).
-      { op: "local.get", index: L_SIGN },
-      { op: "local.get", index: L_MANT },
-      { op: "f64.mul" },
-      { op: "local.set", index: L_RESULT },
-      ...emitApplyExp(L_EXP, L_EXPSIGN, L_RESULT),
+      // (#2653) result = sign * mant * 10^(expSign*exp + intDrop - fracCount),
+      // applied as a single correctly-rounded multiply/divide (see
+      // emitApplyDecimalExp).
+      ...emitApplyDecimalExp(L_SIGN, L_MANT, L_FRACCOUNT, L_INTDROP, L_EXP, L_EXPSIGN, L_TEXP, L_POW, L_RESULT),
       { op: "local.get", index: L_RESULT },
       { op: "return" },
     ];
@@ -429,12 +464,16 @@ export function emitNativeParseNumber(ctx: CodegenContext, which: Set<string>): 
         { name: "i", type: i32 },
         { name: "c", type: i32 },
         { name: "sign", type: f64 },
-        { name: "mant", type: f64 },
+        { name: "mant", type: { kind: "i64" } },
         { name: "sawDigit", type: i32 },
         { name: "fracScale", type: f64 },
         { name: "expSign", type: i32 },
         { name: "exp", type: i32 },
         { name: "result", type: f64 },
+        { name: "fracCount", type: i32 },
+        { name: "texp", type: i32 },
+        { name: "pow", type: f64 },
+        { name: "intDrop", type: i32 },
       ],
       body,
       exported: false,
@@ -483,12 +522,17 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
   const L_SIGN = 6;
   const L_MANT = 7;
   const L_SAW = 8;
-  const L_FRAC = 9;
+  const L_FRAC = 9; // legacy fracScale, unused after the #2653 integer-mantissa rewrite
   const L_EXPSIGN = 10;
   const L_EXP = 11;
   const L_RESULT = 12;
   const L_RADIX = 13;
   const L_DIG = 14;
+  // (#2653) integer-mantissa scaling scratch locals.
+  const L_FRACCOUNT = 15; // i32: number of fraction digits consumed
+  const L_TEXP = 16; // i32: total decimal exponent (expSign*exp + intDrop - fracCount)
+  const L_POW = 17; // f64: 10^|totalExp|
+  const L_INTDROP = 18; // i32: integer digits dropped past the ~15-sig-digit cap
 
   const getC: Instr[] = [
     { op: "local.get", index: L_DATA },
@@ -633,7 +677,7 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
     ...emitRadixPrefixParse(L_I, L_END, L_DATA, L_C, L_SIGN, L_RADIX, L_DIG, L_RESULT, L_SAW, strDataTypeIdx),
 
     // --- decimal mantissa ---
-    { op: "f64.const", value: 0 },
+    { op: "i64.const", value: 0n },
     { op: "local.set", index: L_MANT },
     { op: "i32.const", value: 0 },
     { op: "local.set", index: L_SAW },
@@ -659,15 +703,34 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
             { op: "i32.gt_s" },
             { op: "i32.or" },
             { op: "br_if", depth: 1 },
+            // (#2653) i64 integer-mantissa accumulation, capped at ~18 sig digits
+            // (mant < 9e17 keeps mant*10+9 < 2^63). Past the cap an integer digit
+            // is dropped from the mantissa and its place value preserved by
+            // bumping the exponent (L_INTDROP).
             { op: "local.get", index: L_MANT },
-            { op: "f64.const", value: 10 },
-            { op: "f64.mul" },
-            { op: "local.get", index: L_C },
-            { op: "i32.const", value: C_ZERO },
-            { op: "i32.sub" },
-            { op: "f64.convert_i32_s" },
-            { op: "f64.add" },
-            { op: "local.set", index: L_MANT },
+            { op: "i64.const", value: 900000000000000000n },
+            { op: "i64.lt_u" },
+            {
+              op: "if",
+              blockType: { kind: "empty" },
+              then: [
+                { op: "local.get", index: L_MANT },
+                { op: "i64.const", value: 10n },
+                { op: "i64.mul" },
+                { op: "local.get", index: L_C },
+                { op: "i32.const", value: C_ZERO },
+                { op: "i32.sub" },
+                { op: "i64.extend_i32_s" },
+                { op: "i64.add" },
+                { op: "local.set", index: L_MANT },
+              ],
+              else: [
+                { op: "local.get", index: L_INTDROP },
+                { op: "i32.const", value: 1 },
+                { op: "i32.add" },
+                { op: "local.set", index: L_INTDROP },
+              ],
+            },
             { op: "i32.const", value: 1 },
             { op: "local.set", index: L_SAW },
             { op: "local.get", index: L_I },
@@ -699,8 +762,6 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
             { op: "i32.const", value: 1 },
             { op: "i32.add" },
             { op: "local.set", index: L_I },
-            { op: "f64.const", value: 0.1 },
-            { op: "local.set", index: L_FRAC },
             {
               op: "block",
               blockType: { kind: "empty" },
@@ -722,19 +783,33 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
                     { op: "i32.gt_s" },
                     { op: "i32.or" },
                     { op: "br_if", depth: 1 },
+                    // (#2653) i64 integer-mantissa accumulation, capped at ~18 sig
+                    // digits (mant < 9e17). Within the cap: mant = mant*10 + digit
+                    // and fracCount++. Past the cap a fraction digit is dropped (no
+                    // visible effect on the rounded double), NOT counted.
                     { op: "local.get", index: L_MANT },
-                    { op: "local.get", index: L_C },
-                    { op: "i32.const", value: C_ZERO },
-                    { op: "i32.sub" },
-                    { op: "f64.convert_i32_s" },
-                    { op: "local.get", index: L_FRAC },
-                    { op: "f64.mul" },
-                    { op: "f64.add" },
-                    { op: "local.set", index: L_MANT },
-                    { op: "local.get", index: L_FRAC },
-                    { op: "f64.const", value: 0.1 },
-                    { op: "f64.mul" },
-                    { op: "local.set", index: L_FRAC },
+                    { op: "i64.const", value: 900000000000000000n },
+                    { op: "i64.lt_u" },
+                    {
+                      op: "if",
+                      blockType: { kind: "empty" },
+                      then: [
+                        { op: "local.get", index: L_MANT },
+                        { op: "i64.const", value: 10n },
+                        { op: "i64.mul" },
+                        { op: "local.get", index: L_C },
+                        { op: "i32.const", value: C_ZERO },
+                        { op: "i32.sub" },
+                        { op: "i64.extend_i32_s" },
+                        { op: "i64.add" },
+                        { op: "local.set", index: L_MANT },
+                        { op: "local.get", index: L_FRACCOUNT },
+                        { op: "i32.const", value: 1 },
+                        { op: "i32.add" },
+                        { op: "local.set", index: L_FRACCOUNT },
+                      ],
+                      else: [],
+                    },
                     { op: "i32.const", value: 1 },
                     { op: "local.set", index: L_SAW },
                     { op: "local.get", index: L_I },
@@ -773,12 +848,10 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
       blockType: { kind: "empty" },
       then: [{ op: "f64.const", value: NaN }, { op: "return" }],
     },
-    // result = sign * mant * 10^(expSign*exp)
-    { op: "local.get", index: L_SIGN },
-    { op: "local.get", index: L_MANT },
-    { op: "f64.mul" },
-    { op: "local.set", index: L_RESULT },
-    ...emitApplyExp(L_EXP, L_EXPSIGN, L_RESULT),
+    // (#2653) result = sign * mant * 10^(expSign*exp + intDrop - fracCount),
+    // applied as a single correctly-rounded multiply/divide (see
+    // emitApplyDecimalExp).
+    ...emitApplyDecimalExp(L_SIGN, L_MANT, L_FRACCOUNT, L_INTDROP, L_EXP, L_EXPSIGN, L_TEXP, L_POW, L_RESULT),
     { op: "local.get", index: L_RESULT },
     { op: "return" },
   ];
@@ -793,7 +866,7 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
       { name: "i", type: i32 },
       { name: "c", type: i32 },
       { name: "sign", type: f64 },
-      { name: "mant", type: f64 },
+      { name: "mant", type: { kind: "i64" } },
       { name: "sawDigit", type: i32 },
       { name: "fracScale", type: f64 },
       { name: "expSign", type: i32 },
@@ -801,6 +874,10 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
       { name: "result", type: f64 },
       { name: "radix", type: i32 },
       { name: "dig", type: i32 },
+      { name: "fracCount", type: i32 },
+      { name: "texp", type: i32 },
+      { name: "pow", type: f64 },
+      { name: "intDrop", type: i32 },
     ],
     body,
     exported: false,
@@ -1178,11 +1255,174 @@ function emitExponent(
 }
 
 /**
- * Scale the f64 in `L_RESULT` by 10^(expSign*exp) using a count-down loop that
- * reads and writes the local each iteration (an operand-stack value cannot be
- * carried across a `loop` with an empty block type).
+ * (#2653) Correctly-rounded final scaling for the integer-mantissa parse path.
+ *
+ * The integer + fraction loops accumulate ALL significant digits into `L_MANT`
+ * as a single exact integer (`mant = mant*10 + digit`, exact while ≤ 2^53) and
+ * count the fraction digits into `L_FRACCOUNT`. The decimal value is therefore
+ * `sign * mant * 10^(expSign*exp - fracCount)`. This replaces the legacy
+ * per-digit `mant += digit*0.1^k` accumulation, which compounded rounding error
+ * (`parseFloat("0.3")` → 0.30000000000000004, `Number("0.01")` → 0.0100…2).
+ *
+ *   totalExp = (expSign<0 ? -exp : exp) - fracCount          // i32, in L_TEXP
+ *
+ * Scaling strategy (best-of-both):
+ *   |totalExp| ≤ 22  → build pow = 10^|totalExp| (EXACT — 10^0..10^22 are exactly
+ *                      representable as f64) and apply ONE mul/div → correctly
+ *                      rounded by hardware. This is the overwhelmingly common
+ *                      path and the whole point of the fix.
+ *   |totalExp| > 22  → fall back to the incremental per-step `*10`/`/10` loop on
+ *                      the result (`emitApplyExpResult`). A single 10^|e| pow
+ *                      would overflow to Infinity (→ result 0 for tiny inputs) or
+ *                      lose precision near f64 max; the incremental loop reaches
+ *                      subnormals / saturates gracefully exactly as the original
+ *                      code did, so extreme-exponent inputs (`1e-310`, `5e-324`,
+ *                      `1.79e308`) are no worse than before.
+ *
+ * Locals: `L_TEXP` (i32 scratch), `L_POW` (f64 scratch). `L_EXP` is reused as the
+ * count-down scratch (its parsed value is no longer needed once `totalExp` is
+ * computed). `L_RESULT` receives the final value (sign folded in via L_SIGN).
  */
-function emitApplyExp(L_EXP: number, L_EXPSIGN: number, L_RESULT: number): Instr[] {
+function emitApplyDecimalExp(
+  L_SIGN: number,
+  L_MANT: number,
+  L_FRACCOUNT: number,
+  L_INTDROP: number,
+  L_EXP: number,
+  L_EXPSIGN: number,
+  L_TEXP: number,
+  L_POW: number,
+  L_RESULT: number,
+): Instr[] {
+  return [
+    // totalExp = (expSign<0 ? -exp : exp) + intDrop - fracCount
+    { op: "local.get", index: L_EXPSIGN },
+    { op: "i32.const", value: 0 },
+    { op: "i32.lt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: L_EXP },
+        { op: "i32.sub" },
+        { op: "local.set", index: L_TEXP },
+      ],
+      else: [
+        { op: "local.get", index: L_EXP },
+        { op: "local.set", index: L_TEXP },
+      ],
+    },
+    // + intDrop (integer digits dropped past the significant-digit cap)
+    { op: "local.get", index: L_TEXP },
+    { op: "local.get", index: L_INTDROP },
+    { op: "i32.add" },
+    { op: "local.set", index: L_TEXP },
+    // - fracCount
+    { op: "local.get", index: L_TEXP },
+    { op: "local.get", index: L_FRACCOUNT },
+    { op: "i32.sub" },
+    { op: "local.set", index: L_TEXP },
+    // result = sign * (f64)mant   (mant is a non-negative i64 exact integer
+    // ≤ ~9e17 < 2^63, so the signed convert is exact and == the unsigned value).
+    { op: "local.get", index: L_SIGN },
+    { op: "local.get", index: L_MANT },
+    { op: "f64.convert_i64_s" },
+    { op: "f64.mul" },
+    { op: "local.set", index: L_RESULT },
+    // count = |totalExp|  → into L_EXP (count-down scratch)
+    { op: "local.get", index: L_TEXP },
+    { op: "i32.const", value: 0 },
+    { op: "i32.lt_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        { op: "i32.const", value: 0 },
+        { op: "local.get", index: L_TEXP },
+        { op: "i32.sub" },
+        { op: "local.set", index: L_EXP },
+      ],
+      else: [
+        { op: "local.get", index: L_TEXP },
+        { op: "local.set", index: L_EXP },
+      ],
+    },
+    // if |totalExp| <= 22 → exact single-power path; else incremental fallback.
+    { op: "local.get", index: L_EXP },
+    { op: "i32.const", value: 22 },
+    { op: "i32.le_s" },
+    {
+      op: "if",
+      blockType: { kind: "empty" },
+      then: [
+        // pow = 10^|totalExp| (exact; |totalExp| ≤ 22)
+        { op: "f64.const", value: 1 },
+        { op: "local.set", index: L_POW },
+        {
+          op: "block",
+          blockType: { kind: "empty" },
+          body: [
+            {
+              op: "loop",
+              blockType: { kind: "empty" },
+              body: [
+                { op: "local.get", index: L_EXP },
+                { op: "i32.eqz" },
+                { op: "br_if", depth: 1 },
+                { op: "local.get", index: L_POW },
+                { op: "f64.const", value: 10 },
+                { op: "f64.mul" },
+                { op: "local.set", index: L_POW },
+                { op: "local.get", index: L_EXP },
+                { op: "i32.const", value: 1 },
+                { op: "i32.sub" },
+                { op: "local.set", index: L_EXP },
+                { op: "br", depth: 0 },
+              ],
+            },
+          ],
+        },
+        // result = (totalExp < 0) ? result / pow : result * pow  (single op)
+        { op: "local.get", index: L_TEXP },
+        { op: "i32.const", value: 0 },
+        { op: "i32.lt_s" },
+        {
+          op: "if",
+          blockType: { kind: "empty" },
+          then: [
+            { op: "local.get", index: L_RESULT },
+            { op: "local.get", index: L_POW },
+            { op: "f64.div" },
+            { op: "local.set", index: L_RESULT },
+          ],
+          else: [
+            { op: "local.get", index: L_RESULT },
+            { op: "local.get", index: L_POW },
+            { op: "f64.mul" },
+            { op: "local.set", index: L_RESULT },
+          ],
+        },
+      ],
+      else: [
+        // |totalExp| > 22 — incremental per-step scaling (graceful subnormal /
+        // saturation), preserving the original extreme-exponent behaviour.
+        // L_EXP already holds |totalExp| as the count-down; expSign is recovered
+        // from the sign of totalExp.
+        ...emitApplyExpResult(L_TEXP, L_EXP, L_RESULT),
+      ],
+    },
+  ];
+}
+
+/**
+ * Incremental `result *= 10` / `result /= 10`, `count` (in `L_COUNT`) times.
+ * Direction is taken from the sign of `L_TEXP` (the signed total exponent).
+ * Used by `emitApplyDecimalExp` only for |totalExp| > 22, where a single
+ * 10^|e| power would overflow/underflow — the per-step loop reaches subnormals
+ * and saturates to ±Infinity gracefully, matching the pre-#2653 behaviour.
+ */
+function emitApplyExpResult(L_TEXP: number, L_COUNT: number, L_RESULT: number): Instr[] {
   return [
     {
       op: "block",
@@ -1192,14 +1432,10 @@ function emitApplyExp(L_EXP: number, L_EXPSIGN: number, L_RESULT: number): Instr
           op: "loop",
           blockType: { kind: "empty" },
           body: [
-            // if exp==0 done
-            { op: "local.get", index: L_EXP },
+            { op: "local.get", index: L_COUNT },
             { op: "i32.eqz" },
             { op: "br_if", depth: 1 },
-            // result = (expSign<0) ? result/10 : result*10. Each arm reads and
-            // writes L_RESULT itself, so no operand crosses the `if` boundary
-            // (a plain `if` block has no params under the MVP block type).
-            { op: "local.get", index: L_EXPSIGN },
+            { op: "local.get", index: L_TEXP },
             { op: "i32.const", value: 0 },
             { op: "i32.lt_s" },
             {
@@ -1218,10 +1454,10 @@ function emitApplyExp(L_EXP: number, L_EXPSIGN: number, L_RESULT: number): Instr
                 { op: "local.set", index: L_RESULT },
               ],
             },
-            { op: "local.get", index: L_EXP },
+            { op: "local.get", index: L_COUNT },
             { op: "i32.const", value: 1 },
             { op: "i32.sub" },
-            { op: "local.set", index: L_EXP },
+            { op: "local.set", index: L_COUNT },
             { op: "br", depth: 0 },
           ],
         },
