@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-24T14:15:28.017Z",
-  "baseline_generated_at": "2026-06-24T14:15:28.017Z",
-  "baseline_sha": "130b57755a5284fd5472df44498449a4dcd7a87d",
+  "timestamp": "2026-06-24T14:44:52.865Z",
+  "baseline_generated_at": "2026-06-24T14:44:52.865Z",
+  "baseline_sha": "f6020d67f0e05bf621a5d83f27026f15163b4a36",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -1251,8 +1251,8 @@
           "test/built-ins/AsyncDisposableStack/prototype/use/not-a-constructor.js",
           "test/built-ins/DisposableStack/prototype/adopt/returns-value.js",
           "test/built-ins/AsyncDisposableStack/length.js",
-          "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js",
-          "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js"
+          "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js",
+          "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: AsyncDisposableStack.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
@@ -2066,8 +2066,8 @@
           "assertion_fail": 74,
           "null_deref": 6,
           "other": 1,
-          "wasm_compile": 4,
           "negative_test_fail": 4,
+          "wasm_compile": 4,
           "illegal_cast": 1
         },
         "sample_files": [
@@ -2402,8 +2402,8 @@
           "negative_test_fail:expected parse/early SyntaxError but compiled and instantiated successfully",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.convert_i32_s of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local",
           "assertion_fail:returned # — assert ## at L#: assert(foo.call(undefined));",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.sub of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.lt of type i32 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (l"
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.lt of type i32 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (l",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.sub of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) ("
         ]
       },
       {
@@ -2458,14 +2458,14 @@
           "test/built-ins/Atomics/load/expected-return-value.js",
           "test/built-ins/SharedArrayBuffer/negative-length-throws.js",
           "test/built-ins/SharedArrayBuffer/length-is-too-large-throws.js",
-          "test/built-ins/WeakRef/undefined-newtarget-throws.js"
+          "test/built-ins/WeakRef/throws-when-target-cannot-be-held-weakly.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { FinalizationRegistry(); });",
           "illegal_cast:L#:## illegal cast [in test()]",
           "assertion_fail:returned # — assert ## at L#: assert.throws(RangeError, function() { new SharedArrayBuffer(-#); });",
           "assertion_fail:returned # — assert ## at L#: assert.throws(RangeError, function() { // Math.pow(#, #) = # new SharedArrayBuffer(#); }, \"`length` parameter is too large\");",
-          "assertion_fail:returned # — assert ## at L#: assert.throws(TypeError, function() { WeakRef(); });"
+          "runtime_error:L#:## WeakRef: invalid target"
         ]
       },
       {
