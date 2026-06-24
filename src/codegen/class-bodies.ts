@@ -7,7 +7,11 @@
 import { ts } from "../ts-api.js";
 import { isVoidType, unwrapPromiseType } from "../checker/type-mapper.js";
 import type { FieldDef, Instr, StructTypeDef, ValType } from "../ir/types.js";
-import { isHostConstructibleBuiltin, isNativeCollectionBuiltin } from "./builtin-tags.js";
+import {
+  isHostConstructibleBuiltin,
+  isNativeCollectionBuiltin,
+  isPrimitiveWrapperSubclassUnsupported,
+} from "./builtin-tags.js";
 import { classMemberFuncKey } from "./class-member-keys.js"; // (#1983) collision-free class-member funcMap keys
 import { getOrAssignClassNewTargetId } from "./new-target.js"; // (#2023)
 import { popBody, pushBody } from "./context/bodies.js";
@@ -576,6 +580,39 @@ export function collectClassDeclaration(
             );
             // Skip the externref-backed marking so the host-leak/invalid-Wasm
             // path is never entered; the queued error fails the compile.
+            break;
+          }
+          // (#2029) A subclass of a primitive-wrapper builtin Number/Boolean
+          // under nativeStrings (`--target standalone`/`wasi`) cannot take the
+          // host-constructible path below either: Number/Boolean ARE in
+          // `BUILTIN_PARENTS_HOST_CONSTRUCTIBLE`, so `super()`/`new Sub()` would
+          // lower to `call $__new_Number`/`$__new_Boolean` — but those standalone
+          // internals take an **f64** arg while the synthetic `<Class>_new`
+          // forwarder passes its externref local, so the module fails to
+          // validate (`<Class>_new: call param types must match` → invalid Wasm
+          // at instantiate). No native primitive-wrapper *subclass* box exists
+          // standalone yet (a value-rep follow-up). Refuse loudly (clean compile
+          // error, never invalid Wasm — the #1888 dual-mode invariant). String
+          // is excluded: its `__new_String(externref)->externref` matches the
+          // forwarder and already works standalone. gc/host mode is unaffected
+          // (the externClass host path handles the subclass there).
+          if (
+            parentStructTypeIdx === undefined &&
+            ctx.nativeStrings &&
+            isPrimitiveWrapperSubclassUnsupported(parentClassName)
+          ) {
+            reportError(
+              ctx,
+              decl,
+              `Codegen error: 'class ${className} extends ${parentClassName}' is not yet ` +
+                `supported in --target standalone (#2029). The primitive-wrapper subclass native ` +
+                `box is not implemented yet — routing it through the host path would emit invalid ` +
+                `Wasm (the standalone __new_${parentClassName} internal takes f64, not the ` +
+                `subclass instance externref). Use ${parentClassName} directly, or recompile ` +
+                `without --target standalone.`,
+            );
+            // Skip the externref-backed marking so the invalid-Wasm path is
+            // never entered; the queued error fails the compile.
             break;
           }
           // (#1366a) Detect built-in parent that is host-constructible (Error
