@@ -1,16 +1,17 @@
 ---
 id: 1760
 title: "wasm warm-runtime benchmark lane: in-process repeated-measure (current cold−baseline subtraction is noise-dominated)"
-status: ready
+status: done
 created: 2026-05-31
-updated: 2026-05-31
+updated: 2026-06-24
+completed: 2026-06-24
+sprint: 65
 priority: medium
 feasibility: medium
 reasoning_effort: medium
 task_type: bugfix
 area: benchmarks
 goal: platform
-sprint: Backlog
 related: [1580, 1746]
 origin: surfaced while refreshing the #1746 i32-hashpath warm benchmark on #990 — the published warm number could not move because the metric's run-to-run noise exceeded the effect size
 ---
@@ -117,3 +118,18 @@ drop.
       (+ `website/public/...` copy) on **current main's** compiler with the
       new methodology.
 - [x] Stability proof recorded above (6 identical-binary samples).
+
+## Resolution (2026-06-24)
+
+Status-only correction. The implementation already landed on `main` in commit
+`7a9ba70e6` ("fix(#1760): in-process warm lane for wasm-host benchmark") — the
+warm lane (`WARM_DRIVER_SOURCE`, `timeWasmtimeWarmIter`, `--invoke warm`,
+warm-variant compile + precompile) is present in
+`scripts/generate-wasmtime-hot-runtime.mjs`, and
+`benchmarks/results/wasm-host-wasmtime-hot-runtime.json` carries the
+re-baselined `warm` scenario with `wasmStdUs` provenance. Subsequent commits
+(`e92460a68`, `e2c0aff99`) built further on it (rust host for the cold lanes).
+All three Deliverables are satisfied on `main`; only the frontmatter `status`
+was stale (`ready` → `done`). This warm in-process repeated-measure lane is the
+measurement gate that unblocks the string-hash perf work (#1762 / #2621): warm
+per-call deltas are now resolvable (string-hash spread down from ~2.3× to ~4%).
