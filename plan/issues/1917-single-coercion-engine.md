@@ -175,6 +175,59 @@ re-enqueue #1960. The pre-existing `String(x)`-returns-bare-f64 →
 real issue (reproduces on `c4ef3fac2`) worth its own ticket — but it is NOT
 introduced by #1917 Step 1.
 
+## Implementation — Equality finale, slice E6 (standalone externref loose-eq tail) (sendev-eq, 2026-06-24)
+
+Branch `issue-1917-emit-eq-e5e6`, branched from `upstream/main` (which carries the
+merged E3, #1989). The follow-up slice to E3 — the tag-5-sensitive externref
+dispatch we deferred — scoped to **pure code-motion** (the behaviour fixes
+#1986/#1987/#2081 remain separate).
+
+**What E5/E6 actually is, on current main.** After E3 migrated the four any/any
+arms of `compileAnyBinaryDispatch`, there was exactly **ONE** remaining direct
+call to a keystone equality helper (`__any_eq`/`__any_strict_eq`) left anywhere in
+`binary-ops.ts`: the **standalone externref-vs-externref loose-eq tail**
+(`compileStringBinaryOp`, the `noJsHost` arm of the not-eqref-identical branch).
+It boxes two opaque `any` externrefs to `$AnyValue` via `__any_from_extern` (tag5
+string / tag3 number / tag4 bool / tag1 null) and calls `__any_eq` — the §7.2.15
+native IsLooselyEqual (#2081). That is the tag-5-sensitive dispatch; the strict
+externref path goes through `__host_eq` + numeric-unbox (NOT the keystone), and
+its routing-to-`__any_strict_eq` is the deferred #1986 behaviour change.
+
+**New `emitAnyEqFromExternTemps(ctx, tmpLeft, tmpRight, negate): Instr[] | null`**
+in `coercion-engine.ts` — returns the `__any_from_extern`×2 → `__any_eq` →
+optional `i32.eqz` instruction SEQUENCE (the caller builds an `Instr[]` for an
+`if`-arm, not a live emit), or `null` when the helpers are unavailable so the
+caller falls through to its `__host_loose_eq` import exactly as before. WRAPPER,
+not a re-derivation: the tag-5 classifier stays in `__any_eq`'s body
+(`any-helpers.ts`). With this, the coercion engine now owns **every** keystone
+equality-helper invocation; `binary-ops.ts` no longer references `__any_eq`
+directly (its `ensureAnyFromExternHelper` import is dropped).
+
+**Byte-neutral (authoritative gate):** `.tmp/e6-neutrality.mjs` compiled 5 programs
+exercising the standalone externref loose-eq path (`"1"==1`, `!=`, mixed any/any,
+plus a strict-eq control and an object-identity control) on BOTH the gc (host) and
+standalone lanes, SHA-256'd `result.binary`, and diffed against a fresh detached
+`upstream/main` (E3-inclusive) worktree: **0 byte differences across all 10
+(program × lane) outputs** — including the `standalone` cases E6 actually rewrites.
+
+**Behaviour guard:** new `tests/issue-1917-emit-eq-e6.test.ts` — 6 cases (3/lane),
+all pass. `"1" == 1 → true`, `"1" != 1 → false`, same-identity object `==` →
+true, on both lanes.
+
+**Pre-existing failure confirmed NOT introduced by E6:** `issue-2081.test.ts`'s
+`null == undefined → true` (standalone) fails IDENTICALLY on the E3-only
+`upstream/main` control — it is the deferred standalone nullish-coercion gap
+(#2081's full behaviour fix), not a code-motion regression. Consistent with the 0
+byte-SHA diff.
+
+**#2108 ratcheted DOWN:** `binary-ops.ts` 34 → 33 (the last keystone `__any_eq`
+call moved into the sanctioned engine). tsc clean, prettier clean.
+
+**Still deferred (separate PRs):** the strict-externref routing-to-`__any_strict_eq`
+(#1986 `null===0`), `0===-0` numeric-merge (#1987), and the standalone
+nullish/full-coercion widening (#2081) — these are classifier/gate-logic
+*behaviour* changes, not dispatch motion.
+
 ## Implementation — Equality finale, slice E3 (any/any) (sendev-eq, 2026-06-24)
 
 Branch `issue-1917-emit-eq` (this PR). The LAST step of the dedup series, phased:
