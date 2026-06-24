@@ -6637,7 +6637,26 @@ function resolveImport(
           intent.className === "Number";
         const argCoercionHint: "number" | "string" | "default" =
           intent.className === "Number" ? "number" : intent.className === "Date" ? "default" : "string";
+        // (#2637 B1) The Promise constructor consumes its first argument as an
+        // executor callback (`new Promise((resolve, reject) => …)`). For a
+        // `class Sub extends Promise { constructor(a) { super(a); … } }`, the
+        // user constructor body forwards the executor to this `__new_Promise`
+        // host import as a BOXED wasm closure (an opaque struct, not a raw JS
+        // function). V8's `Promise` ctor then throws "Promise resolver
+        // [object Object] is not a function". Unwrap the executor to a
+        // host-callable here, mirroring the `Promise_new` host shim
+        // (`new Promise(_maybeWrapCallable(executor, 2, callbackState))`).
+        // `_maybeWrapCallable` is a no-op for a value already a raw function
+        // (edge case a) and for null/undefined, so genuine `new Promise(fn)` and
+        // the no-arg `super()` form are unaffected; only the `Promise` parent is
+        // touched (edge case b: `extends Array/Map/...` unchanged); the
+        // host-only construction path leaves standalone untouched (edge case c,
+        // #1941).
+        const isPromiseExecutorCtor = intent.className === "Promise";
         return (...args: any[]) => {
+          if (isPromiseExecutorCtor && args.length > 0) {
+            args[0] = _maybeWrapCallable(args[0], 2, callbackState);
+          }
           if (!isWrapperCtor) {
             let len = args.length;
             while (len > 0 && args[len - 1] == null) len--;
