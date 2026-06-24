@@ -188,6 +188,18 @@ in --target standalone (#1888 / #1907 S6-b)` signatures): `Int8Array.prototype`
 is the **incomplete per-builtin whitelist** — still the clearest standalone-mode
 lever for the next push.
 
+**Active owner of this residual = #2175** (in-progress, sprint 65 — architect
+spec "standalone builtin-prototype object representation + native-method-closure
+dispatch"). #1907 landed only the *starter* slice (`Array.isArray`/`Object.keys`/
+`getOwnPropertyDescriptor` + the closure mechanism, PR #1292); #2175 generalizes
+`ensureStandaloneBuiltinStaticMethodClosure` into a brand-keyed factory covering
+the full `Int8Array/%TypedArray%/ArrayBuffer/DataView/RegExp.prototype`
+object-read + dynamic-receiver dispatch behind this bucket (constructor-as-value
+tier is the #2651 follow-up below). **#1907 stays `done` (starter-slice scope
+met, not regressed); do not reopen** — the residual is tracked and scheduled
+under #2175, and reopening would split ownership of one bucket across two issues.
+Runtime-side coercion counterpart: the ToPrimitive bucket under #1917.
+
 > **Follow-up #2651 (s66, 2026-06-24): the TypedArray *constructor*-as-value
 > tier.** Verified (per-process WAT probe, `main` `c2847896d8`) that the bulk of
 > standalone `built-ins/TypedArray/prototype/*` rows are gated not on the method
