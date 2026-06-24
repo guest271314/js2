@@ -1,9 +1,10 @@
 ---
 id: 2647
 title: "Plumb --allow-fs into the node:fs no-provider capability gate (P2-a.0) — unhardcode allowFs:false"
-status: backlog
+status: done
 created: 2026-06-24
 updated: 2026-06-24
+completed: 2026-06-24
 priority: low
 feasibility: low
 reasoning_effort: low
@@ -52,3 +53,20 @@ the flag plumbing is missing.
 
 - A full WASI filesystem backend (preopens) — that is a separate, larger tier.
 - The capability gate itself (#1772 P2-a, landed).
+
+## Resolution (2026-06-24)
+
+The `--allow-fs` flag was already fully plumbed CLI → `compile()` options →
+`ctx.allowFs` (declared on `CodegenContext` in
+`src/codegen/context/types.ts`, set in
+`src/codegen/context/create-context.ts`). The only missing piece was the
+hardcoded `false` in the gate. Single-line change in
+`src/codegen/node-fs-api.ts::tryCompileNodeFsCall`:
+`{ wasi: ctx.wasi, allowFs: false }` → `{ wasi: ctx.wasi, allowFs: ctx.allowFs }`.
+
+With `--allow-fs` the capability map's `providersFor` yields `["js-host-fs"]`
+for path-based members → satisfiable → the #1772 gate is a no-op. Without it
+the precise "no provider under --target wasi" error still fires. fd-based
+`readSync`/`writeSync` are satisfiable regardless. Coverage in
+`tests/issue-2647.test.ts` (flag toggled both ways, byte-neutral for a non-fs
+program when unset).

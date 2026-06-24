@@ -259,7 +259,14 @@ export function tryCompileNodeFsCall(
     const importedFromNodeFs =
       ctx.wasiNodeFsFuncs.has(member) && !fctx.localMap.has(member) && !(fctx.boxedCaptures?.has(member) ?? false);
     if (importedFromNodeFs && isKnownMember("node:fs", member)) {
-      const target = { wasi: ctx.wasi, allowFs: false };
+      // #2647 — thread the real `--allow-fs` flag (was hardcoded `false` in the
+      // atomic #1772 P2-a slice, PR #2014). With `--allow-fs` under a JS host, a
+      // path-based `node:fs` member (`readFileSync(path)`) resolves through the
+      // `js-host-fs` provider and becomes satisfiable; without it the precise
+      // "no provider under --target wasi" error still fires. fd-based
+      // `readSync`/`writeSync` are satisfiable regardless (providersFor →
+      // ["wasi-fd"]), so this is a no-op for them.
+      const target = { wasi: ctx.wasi, allowFs: ctx.allowFs };
       if (isMemberSatisfiable("node:fs", member, target) === false) {
         ctx.errors.push({
           message:
