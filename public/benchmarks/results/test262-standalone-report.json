@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-24T00:01:07.152Z",
-  "baseline_generated_at": "2026-06-24T00:01:07.152Z",
-  "baseline_sha": "426e28e8b148219b8e1d23b114b8c6d71fb4e008",
+  "timestamp": "2026-06-24T00:53:44.805Z",
+  "baseline_generated_at": "2026-06-24T00:53:44.805Z",
+  "baseline_sha": "575187106593e87bdac2eb9e238bca1f3c8bece1",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -11,21 +11,21 @@
   "summary": {
     "total": 43136,
     "pass": 23769,
-    "fail": 12997,
-    "compile_error": 6346,
+    "fail": 13000,
+    "compile_error": 6343,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 36766,
+    "compilable": 36769,
     "stale": 0,
     "by_category": {
       "standard": {
         "total": 42050,
         "pass": 23253,
-        "fail": 12560,
-        "compile_error": 6213,
+        "fail": 12563,
+        "compile_error": 6210,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 35813,
+        "compilable": 35816,
         "stale": 0,
         "label": "ECMAScript current standard"
       },
@@ -54,22 +54,22 @@
       "official": {
         "total": 43136,
         "pass": 23769,
-        "fail": 12997,
-        "compile_error": 6346,
+        "fail": 13000,
+        "compile_error": 6343,
         "compile_timeout": 6,
         "skip": 18,
-        "compilable": 36766,
+        "compilable": 36769,
         "stale": 0,
         "label": "standard + annex_b (default)"
       },
       "full": {
         "total": 48118,
         "pass": 24909,
-        "fail": 14016,
-        "compile_error": 9063,
+        "fail": 14019,
+        "compile_error": 9060,
         "compile_timeout": 7,
         "skip": 123,
-        "compilable": 38925,
+        "compilable": 38928,
         "stale": 0,
         "label": "standard + annex_b + proposals"
       }
@@ -78,31 +78,31 @@
   "official_summary": {
     "total": 43136,
     "pass": 23769,
-    "fail": 12997,
-    "compile_error": 6346,
+    "fail": 13000,
+    "compile_error": 6343,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 36766,
+    "compilable": 36769,
     "stale": 0
   },
   "full_summary": {
     "total": 48118,
     "pass": 24909,
-    "fail": 14016,
-    "compile_error": 9063,
+    "fail": 14019,
+    "compile_error": 9060,
     "compile_timeout": 7,
     "skip": 123,
-    "compilable": 38925,
+    "compilable": 38928,
     "stale": 0
   },
   "strict_summary": {
     "total": 40627,
     "pass": 22629,
-    "fail": 12286,
-    "compile_error": 5688,
+    "fail": 12289,
+    "compile_error": 5685,
     "compile_timeout": 6,
     "skip": 18,
-    "compilable": 34915,
+    "compilable": 34918,
     "stale": 0
   },
   "scope_summaries": {
@@ -129,11 +129,11 @@
     "standard": {
       "total": 42050,
       "pass": 23253,
-      "fail": 12560,
-      "compile_error": 6213,
+      "fail": 12563,
+      "compile_error": 6210,
       "compile_timeout": 6,
       "skip": 18,
-      "compilable": 35813,
+      "compilable": 35816,
       "stale": 0
     }
   },
@@ -182,8 +182,8 @@
       "name": "built-ins/Array",
       "path": "built-ins/Array",
       "pass": 999,
-      "fail": 1716,
-      "compile_error": 363,
+      "fail": 1719,
+      "compile_error": 360,
       "compile_timeout": 3,
       "skip": 0,
       "total": 3081
@@ -1080,7 +1080,7 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 9677,
+    "assertion_fail": 9680,
     "illegal_cast": 1801,
     "negative_test_fail": 77,
     "null_deref": 422,
@@ -1091,7 +1091,7 @@
     "runtime_error": 6292,
     "type_error": 18,
     "unreachable": 4,
-    "wasm_compile": 1138
+    "wasm_compile": 1135
   },
   "hard_errors": {},
   "skip_reasons": {
@@ -1450,23 +1450,23 @@
           "total": 424
         },
         "error_categories": {
-          "runtime_error": 164,
           "assertion_fail": 129,
+          "runtime_error": 164,
           "other": 16,
           "illegal_cast": 50,
           "wasm_compile": 20,
           "null_deref": 45
         },
         "sample_files": [
-          "test/built-ins/RegExp/prototype/flags/coercion-ignoreCase.js",
           "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
+          "test/built-ins/RegExp/prototype/flags/coercion-ignoreCase.js",
           "test/annexB/built-ins/RegExp/legacy-accessors/leftContext/this-not-regexp-constructor.js",
           "test/language/literals/regexp/S7.8.5_A2.3_T4.js",
           "test/built-ins/Proxy/has/trap-is-missing-target-is-proxy.js"
         ],
         "sample_signatures": [
-          "runtime_error:Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
+          "runtime_error:Cannot convert object to primitive value",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "runtime_error:L#:## Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert(Reflect.has(regExpProxy, \"ignoreCase\"));"
@@ -1662,15 +1662,15 @@
         "count": 5830,
         "statuses": {
           "pass": 0,
-          "fail": 3821,
-          "compile_error": 2006,
+          "fail": 3824,
+          "compile_error": 2003,
           "compile_timeout": 3,
           "skip": 0,
           "total": 5830
         },
         "error_categories": {
-          "assertion_fail": 3085,
-          "wasm_compile": 275,
+          "assertion_fail": 3088,
+          "wasm_compile": 272,
           "other": 977,
           "illegal_cast": 171,
           "runtime_error": 1120,
@@ -1898,15 +1898,15 @@
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
           "test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-of-lhs.js",
-          "test/annexB/language/global-code/switch-case-global-update.js",
-          "test/annexB/language/comments/single-line-html-close-first-line-3.js"
+          "test/annexB/language/comments/single-line-html-close-first-line-3.js",
+          "test/annexB/language/global-code/switch-case-global-update.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( f, undefined, 'Initialized binding created prior to evaluation' );",
           "runtime_error:L#:## Invalid left-hand side in for-in/for-of",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');",
-          "other:L#:## ';' expected."
+          "other:L#:## ';' expected.",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');"
         ]
       },
       {
@@ -2066,8 +2066,8 @@
           "assertion_fail": 74,
           "null_deref": 6,
           "other": 1,
-          "negative_test_fail": 4,
           "wasm_compile": 4,
+          "negative_test_fail": 4,
           "illegal_cast": 1
         },
         "sample_files": [
@@ -2402,8 +2402,8 @@
           "negative_test_fail:expected parse/early SyntaxError but compiled and instantiated successfully",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.convert_i32_s of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local",
           "assertion_fail:returned # — assert ## at L#: assert(foo.call(undefined));",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.lt of type i32 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (l",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.sub of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) ("
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.sub of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.lt of type i32 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (l"
         ]
       },
       {
