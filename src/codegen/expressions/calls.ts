@@ -32,7 +32,10 @@ import {
   emitStandalonePromiseReject,
   emitStandalonePromiseResolve,
   emitStandalonePromiseThen,
+  emitStdinAvailable,
+  emitStdinEof,
   emitStdinReadByte,
+  emitStdinSetReader,
   emitTimerAdd,
   emitTimerCallbackWrapper,
   emitTimerCancel,
@@ -3126,6 +3129,56 @@ function tryWasiTimerCall(
     emitStdinReadByte(ctx, fctx);
     fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
     return { kind: "f64" };
+  }
+
+  // #2632 Phase 3 — internal-buffer query primitives the library `process.stdin`
+  // Readable builds on: how many bytes are buffered+unread, and whether fd0 has
+  // hit EOF with the buffer fully drained.
+  if (name === "__wasiStdinAvailable") {
+    emitStdinAvailable(ctx, fctx);
+    fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
+    return { kind: "f64" };
+  }
+  if (name === "__wasiStdinEof") {
+    emitStdinEof(ctx, fctx);
+    // boolean result (i32 0/1)
+    return { kind: "i32" };
+  }
+  // #2632 Phase 3 — `__wasiStdinSetReader(cb)` registers the Readable's pump as
+  // the reactor-tick hook (run loop call_ref's it each tick after the drain).
+  // The callback closure is compiled into a `$__mt_func_type` wrapper + captures
+  // exactly like a timer callback, then stored into the hook globals.
+  if (name === "__wasiStdinSetReader") {
+    ensureTimerHeap(ctx);
+    const cbArg = expr.arguments[0];
+    if (cbArg === undefined) return VOID_RESULT;
+    let capInstrs: Instr[];
+    let closureInfo: ClosureInfo | undefined;
+    {
+      const saved = pushBody(fctx);
+      try {
+        const type =
+          ts.isArrowFunction(cbArg) || ts.isFunctionExpression(cbArg)
+            ? compileArrowAsClosure(ctx, fctx, cbArg)
+            : compileExpression(ctx, fctx, cbArg);
+        if (type && (type.kind === "ref" || type.kind === "ref_null")) {
+          closureInfo = ctx.closureInfoByTypeIdx.get(type.typeIdx);
+        }
+        if (!closureInfo && ts.isIdentifier(cbArg)) {
+          closureInfo = ctx.closureMap.get(cbArg.text);
+        }
+        if (closureInfo && type && type.kind !== "externref") {
+          coerceType(ctx, fctx, type, { kind: "externref" });
+        }
+      } finally {
+        capInstrs = fctx.body;
+        popBody(fctx, saved);
+      }
+    }
+    if (!closureInfo) return undefined;
+    const wrapperFuncIdx = emitTimerCallbackWrapper(ctx, closureInfo);
+    emitStdinSetReader(ctx, fctx, [{ op: "ref.func", funcIdx: wrapperFuncIdx } as Instr], capInstrs);
+    return VOID_RESULT;
   }
 
   if (

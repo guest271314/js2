@@ -150,6 +150,22 @@ export interface AsyncSchedulerState {
   stdinDrainFuncIdx: number;
   /** Func idx of `__rl_poll_fd0_or_clock(deadlineNs i64, nowNs i64) -> i32` — 1 if fd0 readable, 0 if timeout/no-fd. -1 until registered. */
   pollFd0OrClockFuncIdx: number;
+
+  // ── #2632 Phase 3 — process.stdin Readable reactor-tick hook ──
+  /**
+   * Wasm global (nullable funcref, `$__mt_func_type` signature): the
+   * `process.stdin` Readable's "pump" callback. The run loop calls it once per
+   * tick AFTER `__rl_stdin_drain` fills the internal buffer (so the pump runs as
+   * loop work, not synchronously inside `poll_oneoff`). Null until the library
+   * registers a reader via `__wasiStdinSetReader(cb)`. -1 until registered.
+   */
+  stdinReaderHookGlobalIdx: number;
+  /**
+   * Wasm global (externref): the closure-captures struct for the reader hook
+   * (the bound Readable instance). The run loop passes it as the hook's first
+   * arg so the pump can reach its `this`. -1 until registered.
+   */
+  stdinReaderCapGlobalIdx: number;
 }
 
 function getOrInitState(ctx: CodegenContextWithScheduler): AsyncSchedulerState {
@@ -200,6 +216,8 @@ function getOrInitState(ctx: CodegenContextWithScheduler): AsyncSchedulerState {
       stdinBufPosGlobalIdx: -1,
       stdinDrainFuncIdx: -1,
       pollFd0OrClockFuncIdx: -1,
+      stdinReaderHookGlobalIdx: -1,
+      stdinReaderCapGlobalIdx: -1,
     };
   }
   return ctx.asyncScheduler;
@@ -1331,6 +1349,25 @@ export function ensureTimerHeap(ctx: CodegenContext): void {
       mutable: true,
       init: [{ op: "i32.const", value: 0 }],
     });
+    // #2632 Phase 3 — reactor-tick hook: the process.stdin Readable's pump
+    // callback (uniform `$__mt_func_type` funcref, nullable) + its closure
+    // captures (the bound Readable instance). The run loop call_ref's the hook
+    // each tick after the drain, passing the captures as the first arg. Null
+    // until the library calls `__wasiStdinSetReader(cb)`.
+    state.stdinReaderHookGlobalIdx = rlBase + 4;
+    ctx.mod.globals.push({
+      name: "__stdin_reader_hook",
+      type: { kind: "ref_null", typeIdx: mtFuncTypeIdx },
+      mutable: true,
+      init: [{ op: "ref.null", typeIdx: mtFuncTypeIdx } as Instr],
+    });
+    state.stdinReaderCapGlobalIdx = rlBase + 5;
+    ctx.mod.globals.push({
+      name: "__stdin_reader_cap",
+      type: { kind: "externref" },
+      mutable: true,
+      init: [{ op: "ref.null.extern" } as Instr],
+    });
   }
 
   // ── 3. Helper functions (push order = funcIdx order) ──────────────────
@@ -2134,6 +2171,31 @@ function buildRunLoopBodyWithFdReactor(state: AsyncSchedulerState): Instr[] {
       then: [{ op: "call", funcIdx: state.stdinDrainFuncIdx }, { op: "drop" }],
     },
 
+    // #2632 Phase 3 — invoke the process.stdin Readable pump hook (if any), as
+    // LOOP WORK (after the drain, NOT synchronously inside poll_oneoff). The pump
+    // moves buffered bytes into the stream and dispatches 'readable'/'data'/'end'
+    // callbacks. Skipped (byte-identical to Phase 2) when no reader is registered.
+    ...(state.stdinReaderHookGlobalIdx >= 0
+      ? [
+          { op: "global.get", index: state.stdinReaderHookGlobalIdx } as Instr,
+          { op: "ref.is_null" } as Instr,
+          {
+            op: "if",
+            blockType: { kind: "empty" } as any,
+            then: [] as Instr[],
+            else: [
+              // pump(captures=Readable instance, value=null)
+              { op: "global.get", index: state.stdinReaderCapGlobalIdx } as Instr,
+              { op: "ref.null.extern" } as Instr,
+              { op: "global.get", index: state.stdinReaderHookGlobalIdx } as Instr,
+              { op: "ref.as_non_null" } as Instr,
+              { op: "call_ref", typeIdx: state.microtaskFuncTypeIdx } as Instr,
+              { op: "drop" } as Instr,
+            ] as Instr[],
+          } as Instr,
+        ]
+      : []),
+
     // Fire due timers (callbacks may read the buffered stdin bytes), then drain.
     { op: "local.get", index: now },
     { op: "call", funcIdx: state.timerFireDueFuncIdx },
@@ -2576,6 +2638,65 @@ export function emitStdinReadByte(ctx: CodegenContext, fctx: FunctionContext): v
       else: [{ op: "i32.const", value: -1 } as Instr] as Instr[],
     } as Instr,
   );
+}
+
+/**
+ * #2632 Phase 3 — emit `__wasiStdinAvailable()` at a call site. Pushes an i32:
+ * the number of bytes currently buffered and unread (`len - pos`). The library
+ * `Readable` uses this to decide whether `.read(size)` can satisfy the request.
+ */
+export function emitStdinAvailable(ctx: CodegenContext, fctx: FunctionContext): void {
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  fctx.body.push(
+    { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
+    { op: "global.get", index: state.stdinBufPosGlobalIdx } as Instr,
+    { op: "i32.sub" } as Instr,
+  );
+}
+
+/**
+ * #2632 Phase 3 — emit `__wasiStdinEof()` at a call site. Pushes an i32: 1 when
+ * fd0's readable side has hit EOF (the reactor dropped the subscription:
+ * `__stdin_fd_active == 0`) AND every buffered byte has been consumed
+ * (`pos >= len`); else 0. The library `Readable` uses this to emit `'end'` and
+ * to make `.read()` return all-remaining at EOF rather than null-on-short.
+ */
+export function emitStdinEof(ctx: CodegenContext, fctx: FunctionContext): void {
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  // (fd_active == 0) && (pos >= len)
+  fctx.body.push(
+    { op: "global.get", index: state.stdinFdActiveGlobalIdx } as Instr,
+    { op: "i32.eqz" } as Instr,
+    { op: "global.get", index: state.stdinBufPosGlobalIdx } as Instr,
+    { op: "global.get", index: state.stdinBufLenGlobalIdx } as Instr,
+    { op: "i32.ge_s" } as Instr,
+    { op: "i32.and" } as Instr,
+  );
+}
+
+/**
+ * #2632 Phase 3 — emit `__wasiStdinSetReader(cb)` at a call site. Stores the
+ * pump funcref + its closure captures into the reactor-tick-hook globals, so the
+ * run loop invokes `cb(captures, null)` each tick after draining fd0. The
+ * caller pushes the wrapped `$__mt_func_type` funcref (`cbFuncRefInstrs`) and
+ * the closure-captures externref (`capInstrs`). Returns nothing.
+ */
+export function emitStdinSetReader(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  cbFuncRefInstrs: Instr[],
+  capInstrs: Instr[],
+): void {
+  const state = (ctx as CodegenContextWithScheduler).asyncScheduler;
+  if (!state || state.stdinReaderHookGlobalIdx < 0) {
+    throw new Error("emitStdinSetReader called before the stdin reactor registered the hook globals");
+  }
+  // __stdin_reader_cap = captures
+  for (const i of capInstrs) fctx.body.push(i);
+  fctx.body.push({ op: "global.set", index: state.stdinReaderCapGlobalIdx } as Instr);
+  // __stdin_reader_hook = (cb as $__mt_func_type)
+  for (const i of cbFuncRefInstrs) fctx.body.push(i);
+  fctx.body.push({ op: "global.set", index: state.stdinReaderHookGlobalIdx } as Instr);
 }
 
 /**
