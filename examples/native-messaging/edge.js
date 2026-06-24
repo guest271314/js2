@@ -116,3 +116,246 @@ export async function runWithEdge(userBinary, opts = {}) {
   run();
   return { instance, memory };
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// #2635 Phase 3 — async `process.stdin` provider (the ASYNC tier).
+//
+// The synchronous `node:fs` tier above (Phase 1) satisfies fd-based readSync/
+// writeSync as two closures. Node's ASYNC surface — `process.stdin` as a
+// `Readable` — has no synchronous fd primitive to lower to; instead a js2wasm
+// module compiled `--target wasi` that touches `process.stdin` wires the #2632
+// async event-loop reactor into its `_start`, which drives `poll_oneoff` /
+// `fd_read` / `fd_fdstat_set_flags` / `clock_time_get` / `fd_write` DIRECTLY as
+// `wasi_snapshot_preview1` imports (the reactor is WASI-internal, NOT a
+// swappable `node:fs` member). So the provider seam for the async path is the
+// `wasi_snapshot_preview1` import surface — not `node:fs`.
+//
+//   Host class          Provider          Satisfies the stdin reactor by
+//   ──────────────────  ────────────────  ─────────────────────────────────────
+//   Pure WASI (wasmtime) the host kernel   real poll_oneoff/fd_read on fd0 over
+//                                          the module's own exported memory.
+//   Native Node (JS)     edge.js (below)   a wasi_snapshot_preview1 shim whose
+//                                          fd_read/poll_oneoff are fed by Node's
+//                                          REAL process.stdin 'data'/'end'
+//                                          events — the JS host's event loop.
+//
+// The byte-ABI is unchanged in spirit from docs/architecture/node-fs-abi.md
+// (fd-based, pointer over shared memory); only the named import surface differs.
+//
+// Dependency choice (mirrors the Phase-1 "thin adapter, irreducible job" note):
+// this stays a ZERO-DEPENDENCY example (only `node:` imports), so the minimal
+// wasi_snapshot_preview1 subset is inlined here rather than imported from the
+// built `dist/` runtime. The semantics deliberately MIRROR `buildWasiPolyfill`
+// in `src/runtime.ts` (the canonical #2632 polyfill): fd0-readable iff bytes
+// remain or EOF, 0-byte fd_read == EOF, fd_fdstat_set_flags no-op, raw-byte
+// fd_write. Keeping it inlined makes this a genuinely INDEPENDENT provider that
+// must AGREE byte-for-byte with both wasmtime AND the in-tree polyfill — a
+// stronger proof than re-exporting the polyfill verbatim. If the semantics ever
+// drift, prefer reusing buildWasiPolyfill via a small edge-wasi.mjs helper.
+//
+// The sync/async impedance: the wasm reactor's `_start` is a SYNCHRONOUS
+// poll_oneoff-blocking loop, but Node's stdin is ASYNC (data arrives on future
+// loop ticks). We therefore CANNOT call `_start()` and let poll_oneoff block —
+// that deadlocks waiting for data that only arrives when the JS loop is free.
+// MECHANISM 2 (pre-drain, used here): `await` Node's real `process.stdin` to
+// 'end', collecting all bytes into the queue (this phase genuinely borrows the
+// JS event loop), THEN call `_start()` so every poll_oneoff finds data/EOF
+// immediately and never truly blocks — exactly the proven `setStdin(bytes)` +
+// `_start()` path #2632 validated against wasmtime.
+//   ┌─ P3-d SEAM ─────────────────────────────────────────────────────────────┐
+//   │ Mechanism 1 (true incremental loop-borrow) would asyncify `_start`'s     │
+//   │ poll_oneoff suspend points so the wasm stack yields back to Node between │
+//   │ 'data' events and resumes incrementally. That is the deferred follow-up  │
+//   │ #2635/P3-d; the pre-drain below is the first-acceptance mechanism.       │
+//   └──────────────────────────────────────────────────────────────────────────┘
+
+const __WASI_ERRNO_SUCCESS = 0;
+
+/**
+ * Build a `wasi_snapshot_preview1` import object whose fd0 (stdin) is fed by a
+ * caller-supplied byte source, satisfying the #2632 async `process.stdin`
+ * reactor. Returns `{ importObject, run }`; the module OWNS + EXPORTS its own
+ * memory (pure `--target wasi`), so the provider binds memory lazily from
+ * `instance.exports.memory` after instantiation.
+ *
+ * @param {object} [opts]
+ * @param {() => Promise<Buffer[]>} [opts.collectStdin] async producer of all
+ *   stdin chunks (pre-drained to EOF). Defaults to draining the process's REAL
+ *   `process.stdin` to 'end' — i.e. borrowing Node's event loop. Override in
+ *   tests to inject a fixed byte sequence without touching the real fd0.
+ * @returns {{ importObject: { wasi_snapshot_preview1: object }, run: (binary: BufferSource, entry?: string) => Promise<{ instance: WebAssembly.Instance, memory: WebAssembly.Memory }> }}
+ */
+export function createNodeStdinWasiProvider(opts = {}) {
+  const collectStdin = opts.collectStdin ?? drainProcessStdin;
+
+  let memory; // bound after instantiation (module exports its own memory)
+  /** @type {Buffer[]} */
+  const queue = []; // pre-drained stdin chunks
+  let qHead = 0; // index of the current chunk in `queue`
+  let qPos = 0; // byte offset within queue[qHead]
+
+  // Total unread bytes left across the queue (drives fd0 readiness + EOF).
+  const remaining = () => {
+    let n = -qPos;
+    for (let i = qHead; i < queue.length; i++) n += queue[i].length;
+    return n < 0 ? 0 : n;
+  };
+
+  // fd_read(fd0, iovs…): drain `queue` into wasm memory at each iovec base;
+  // return the byte count. A 0-byte read == EOF (queue empty), mirroring
+  // `__rl_stdin_drain`'s contract. Re-reads `memory.buffer` per call so a
+  // memory.grow between calls can't leave us writing into a detached view.
+  const fd_read = (fd, iovs, iovs_len, nread) => {
+    if (!memory) return -1;
+    const view = new DataView(memory.buffer);
+    let total = 0;
+    if (fd === 0) {
+      for (let i = 0; i < iovs_len; i++) {
+        const ptr = view.getUint32(iovs + i * 8, true);
+        const len = view.getUint32(iovs + i * 8 + 4, true);
+        if (len === 0) continue;
+        let written = 0;
+        while (written < len && qHead < queue.length) {
+          const chunk = queue[qHead];
+          if (qPos >= chunk.length) {
+            qHead++;
+            qPos = 0;
+            continue;
+          }
+          const take = Math.min(len - written, chunk.length - qPos);
+          new Uint8Array(memory.buffer, ptr + written, take).set(chunk.subarray(qPos, qPos + take));
+          qPos += take;
+          written += take;
+          total += take;
+        }
+        if (written < len) break; // drained — partial fill ends this read
+      }
+    }
+    view.setUint32(nread, total, true);
+    return __WASI_ERRNO_SUCCESS;
+  };
+
+  // fd_write(fd, iovs…): write the RAW bytes verbatim to the real fd1/fd2.
+  // Must be raw (NOT line-buffered through console.log) so the output is
+  // byte-identical to wasmtime's native fd_write from the SAME binary.
+  const fd_write = (fd, iovs, iovs_len, nwritten) => {
+    if (!memory) return -1;
+    const view = new DataView(memory.buffer);
+    const sink = fd === 2 ? process.stderr : process.stdout;
+    let total = 0;
+    for (let i = 0; i < iovs_len; i++) {
+      const ptr = view.getUint32(iovs + i * 8, true);
+      const len = view.getUint32(iovs + i * 8 + 4, true);
+      if (len > 0) sink.write(Buffer.from(new Uint8Array(memory.buffer, ptr, len))); // copy, then write
+      total += len;
+    }
+    view.setUint32(nwritten, total, true);
+    return __WASI_ERRNO_SUCCESS;
+  };
+
+  // poll_oneoff: report fd0 FD_READ as fired when bytes remain (pre-drained, so
+  // it's "remaining || EOF"); else fire the CLOCK subscription (timeout elapses
+  // instantly — there is never anything to truly wait for after pre-drain). If
+  // fd0 is subscribed with no clock and no bytes, fire fd0 anyway so the
+  // reactor's 0-byte (EOF) read ends the subscription instead of hanging.
+  // Mirrors buildWasiPolyfill().poll_oneoff exactly.
+  const poll_oneoff = (in_ptr, out_ptr, nsubs, nevents_out) => {
+    if (!memory) return -1;
+    const view = new DataView(memory.buffer);
+    const subs = [];
+    for (let s = 0; s < nsubs; s++) {
+      const off = in_ptr + s * 48;
+      const userdata = view.getBigUint64(off, true);
+      const tag = view.getUint8(off + 8); // 0=CLOCK, 1=FD_READ
+      const fd = tag === 1 ? view.getUint32(off + 16, true) : -1;
+      subs.push({ type: tag, fd, userdata });
+    }
+    const fd0Readable = remaining() > 0;
+    const fd0Sub = subs.find((x) => x.type === 1 && x.fd === 0);
+    const clockSub = subs.find((x) => x.type === 0);
+    const fired = [];
+    if (fd0Sub && fd0Readable) fired.push(fd0Sub);
+    else if (clockSub) fired.push(clockSub);
+    else if (fd0Sub) fired.push(fd0Sub);
+    else if (subs.length > 0) fired.push(subs[0]);
+    let n = 0;
+    for (const ev of fired) {
+      const eoff = out_ptr + n * 32;
+      for (let i = 0; i < 32; i++) view.setUint8(eoff + i, 0);
+      view.setBigUint64(eoff, ev.userdata, true);
+      view.setUint16(eoff + 8, 0, true); // errno = success
+      view.setUint8(eoff + 10, ev.type); // 0=CLOCK, 1=FD_READ
+      n++;
+    }
+    view.setUint32(nevents_out, n, true);
+    return __WASI_ERRNO_SUCCESS;
+  };
+
+  // The reactor calls this once to set fd0 non-blocking; our fd_read is already
+  // non-blocking against the JS queue, so it's a no-op ack (matches the polyfill).
+  const fd_fdstat_set_flags = () => __WASI_ERRNO_SUCCESS;
+
+  const monotonicStartNs = process.hrtime.bigint();
+  const clock_time_get = (clockid, _precision, out_ptr) => {
+    if (!memory) return 28; // EINVAL
+    let nowNs = clockid === 1 ? process.hrtime.bigint() - monotonicStartNs : BigInt(Date.now()) * 1_000_000n;
+    if (nowNs < 0n) nowNs = 0n;
+    new DataView(memory.buffer).setBigUint64(out_ptr, nowNs, true);
+    return __WASI_ERRNO_SUCCESS;
+  };
+
+  const proc_exit = (code) => {
+    if (code) process.exitCode = code;
+  };
+
+  const wasi = {
+    fd_read,
+    fd_write,
+    poll_oneoff,
+    fd_fdstat_set_flags,
+    clock_time_get,
+    proc_exit,
+  };
+
+  const importObject = { wasi_snapshot_preview1: wasi };
+
+  /**
+   * Pre-drain stdin (mechanism 2), instantiate, bind the module's exported
+   * memory, then run its `_start` (default). poll_oneoff thereafter finds
+   * data/EOF immediately.
+   */
+  async function run(binary, entry = "_start") {
+    const chunks = await collectStdin();
+    for (const c of chunks) queue.push(c);
+    const { instance } = await WebAssembly.instantiate(binary, { ...importObject, env: {} });
+    memory = instance.exports.memory;
+    if (!(memory instanceof WebAssembly.Memory)) {
+      throw new Error("edge.js: stdin-WASI module must EXPORT its own `memory` (compile with --target wasi).");
+    }
+    const start = instance.exports[entry] ?? instance.exports._start;
+    if (typeof start !== "function") {
+      throw new Error(`edge.js: user module exports no \`${entry}\` or \`_start\``);
+    }
+    start();
+    return { instance, memory };
+  }
+
+  return { importObject, run };
+}
+
+/**
+ * Drain the process's REAL `process.stdin` to EOF, collecting every chunk. This
+ * is where edge.js borrows Node's event loop: the 'data'/'end' events fire as
+ * JS loop work, so the bytes piped to this process's fd0 are gathered before
+ * the wasm reactor runs. Resolves with the collected chunks.
+ * @returns {Promise<Buffer[]>}
+ */
+function drainProcessStdin() {
+  return new Promise((resolve, reject) => {
+    /** @type {Buffer[]} */
+    const chunks = [];
+    process.stdin.on("data", (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
+    process.stdin.on("end", () => resolve(chunks));
+    process.stdin.on("error", (e) => reject(e));
+  });
+}
