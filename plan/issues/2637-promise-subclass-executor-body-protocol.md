@@ -282,3 +282,94 @@ green for B2 short of the whole protocol. This is `reasoning_effort: max` work
 that warrants a fresh, dedicated session (B1's prerequisite must also LAND first
 before B2 can enqueue). B1 (PR #2019) is queued; B2 should be picked up as its own
 focused session once B1 merges.
+
+## B2 IMPLEMENTATION STATE — runtime half DONE, codegen half REMAINING (sdev-definebuiltin, 2026-06-24)
+
+Branch: `issue-2637-b2-ctor-closure-registration` (stacked on B1). Held #2637 claim.
+
+### ✅ Runtime half LANDED on the branch (B2.2 + the registration import) — typechecks clean (tsc exit 0)
+
+In `src/runtime.ts`:
+1. **`InstanceState` gained two per-instance registries** (next to the #1933
+   `subclassCtors`/`userClassParents`): `promiseSubclassBodies?: Map<string,
+   Function>` and `promiseSubclassCtors?: Map<string, any>`. Per-instance (NOT
+   module-scope) to avoid cross-module retention, matching the #1933 pattern.
+   The old `__promise_subclass_ctor` cached its ctor map in a closure-local
+   `const _promiseSubclassCtors` — that worked because the handler ran once, but
+   the registry now must be SHARED between two separate import handlers
+   (`__register_*` and `__promise_subclass_ctor` are resolved by separate
+   `resolveImport` calls), so it moved to `instanceState`.
+2. **New host import `__register_promise_subclass_ctor(nameRef, ctorClosure)`**:
+   `String()`s the name, `_maybeWrapCallable(ctorClosure, 1, callbackState)` to
+   bridge the wasm closure to a host callable (arity 1 = the executor), stores it
+   in `instanceState.promiseSubclassBodies`. No-ops if `instanceState` absent or
+   the value isn't callable.
+3. **`__promise_subclass_ctor` reworked**: the synthesized `class extends Promise`
+   now has `constructor(exec){ super(exec); body?.call(this, exec); }` that, when
+   a body was registered for the class name, runs it ON `this` (V8's capability
+   promise). `body.call(this, exec)` reaches `__call_fn_method_1` so the wasm body
+   observes `this` as `__current_this`. Default-ctor subclasses (no registered
+   body, e.g. #1977 `withResolvers/ctx-ctor` identity row) keep the bare forwarder
+   — unchanged. Throwing bodies propagate verbatim.
+
+### ⚠️ Codegen half REMAINING — B2.1 + B2.3 (the deep part; NOT yet started)
+
+**B2.1 — emit the registration + materialize `$<Class>_new` as a closure.**
+- For each `class extends Promise` WITH a user constructor, emit a one-time
+  `__register_promise_subclass_ctor(<className string>, <ctor closure>)`. Use
+  `ensureLateImport` + `flushLateImportShifts` exactly like
+  `emitPromiseSubclassCtor` in `src/codegen/expressions/promise-subclass.ts`
+  (mind `project_standalone_hostimport_gate_index_shift`). Gate on
+  `!isStandalonePromiseActive(ctx)` (host-only; standalone keeps #1941 fallback).
+- The hard sub-problem: `$<Class>_new` is a TOP-LEVEL function (`ctorName =
+  `${className}_new``, `class-bodies.ts:779`), NOT a closure struct. To pass it to
+  the host as something `__call_fn_1` can dispatch, materialize a NO-CAPTURE
+  closure struct whose field 0 = `ref.func`. The closure struct shape is in
+  `closures.ts` (field 0 funcref, subtype of the shared wrapper via
+  `getOrCreateFuncRefWrapperTypes`; no-capture path at `closures.ts:1735`). A
+  closure's lifted func takes `(ref $wrapperStruct, ...params)`. Safest: build a
+  thin wrapper-closure body that calls `$<Class>_new__onhost` (B2.3), so existing
+  direct-new callers of `$<Class>_new` are untouched. The funcref must be in the
+  module's func table / declared elem so `ref.func` is legal (see how arrow
+  closures declare their funcref in `closures.ts`).
+- WHERE to emit: end of class-compilation in `class-bodies.ts` after
+  `$<Class>_new` is in `ctx.funcMap`, guarded by "Promise-parent + has user
+  ctor". `resolvePromiseSubclassName`/`classBuiltinParentMap` give the detection.
+
+**B2.3 — split `$<Class>_new` into allocate-own (B1 direct-new) vs run-on-host-`this`.**
+- THE CORRECTNESS TRAP (must solve before B2 is valid): the registered body is
+  `$<Class>_new`, which today (B1 path) calls `__new_Promise(exec)` to ALLOCATE
+  its own promise into `$__self` and returns it (`class-bodies.ts:2519-2586`
+  builtin-parent `super()` branch + `selfLocal` plumbing at 1509/1553). If the
+  runtime calls THAT body under `NewPromiseCapability` via `body.call(this,
+  exec)`, it ALLOCATES A SECOND promise (double `__new_Promise`) and runs side
+  effects on the wrong `$__self` — V8's capability promise (the real `this`) is
+  never touched. So naively wiring B2.1→B2.2 is WRONG.
+- The split: emit a SECOND function `$<Class>_new__onhost` (run-on-host-`this`):
+  `$__self` is BOUND to the host-provided `this` (reachable as `__current_this`
+  after `__call_fn_method_1`, runtime.ts:1844-1848) instead of allocating; the
+  `super(exec)` → `__new_Promise` emission (class-bodies.ts:2519 branch) is
+  SKIPPED (V8 already did `super(exec)` in the synthesized JS ctor); only the
+  side effects + `emitSetSubclassProto`/`emitSetSubclassUserBrand` run; returns
+  `this`. Register the closure over `$<Class>_new__onhost`; leave `$<Class>_new`
+  (direct-new, B1) exactly as-is so the B1 direct-new path does not regress. This
+  shape avoids any runtime mode-flag branch.
+
+### Validation (B2, when codegen half lands)
+- ONLY signal: the 6 `built-ins/Promise/{all,race,any,allSettled,withResolvers,
+  try}/ctx-ctor.js` rows reach asserts #3 (callCount===1) / #4 (typeof executor
+  === 'function') in the **merge_group test262 floor**. No isolated unit green.
+- Keep #1977 `withResolvers/ctx-ctor` + `finally/subclass-*` + the B1
+  `tests/issue-2637-b1-executor-unwrap.test.ts` direct-new cases green.
+- Re-merge B1 if it changes; enqueue B2 ONE-SHOT only AFTER B1 lands; never re-enqueue.
+
+### Resume steps for the next session
+1. Re-claim with `--force` (claim held by sdev-definebuiltin): `node
+   scripts/claim-issue.mjs 2637 ttraenkler/<agent> --branch
+   issue-2637-b2-ctor-closure-registration --force`.
+2. Enter worktree on branch `issue-2637-b2-ctor-closure-registration` (runtime
+   half already committed). `git merge origin/main` if B1 has landed.
+3. Implement B2.1 (closure materialization + registration emit) and B2.3
+   (`$<Class>_new__onhost` run-on-host-`this` variant) per above.
+4. Validate via merge_group (broad-impact, no scoped sweep). One-shot enqueue
+   after B1 lands.

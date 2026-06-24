@@ -5641,6 +5641,16 @@ interface InstanceState {
   subclassCtors?: Map<string, Function[]>;
   /** user-class name → parent class name (or null). */
   userClassParents?: Map<string, string | null>;
+  /**
+   * (#2637 B2) `class extends Promise` name → the host-bridged wasm
+   * constructor-body callable (`$<Class>_new`, registered via
+   * `__register_promise_subclass_ctor`). Consulted by `__promise_subclass_ctor`
+   * so V8's `NewPromiseCapability(C)` runs the user ctor body on the capability
+   * promise. Per-instance (not module-scope) to avoid cross-module retention.
+   */
+  promiseSubclassBodies?: Map<string, Function>;
+  /** (#2637 B2) `class extends Promise` name → synthesized JS subclass ctor (cached). */
+  promiseSubclassCtors?: Map<string, any>;
 }
 
 function makeWebStoragePolyfill(): any {
@@ -10413,22 +10423,81 @@ assert._isSameValue = isSameValue;
       // .prototype so the combinators' NewPromiseCapability + @@species
       // resolution work. Keyed on class name. Synthesized from the lexical
       // (intrinsic) `Promise`, never a user-shadowed global.
+      // (#2637 B2.1) Registry of wasm constructor-body closures, keyed by
+      // `class extends Promise` name. Codegen emits a one-time
+      // `__register_promise_subclass_ctor(name, closure)` per such class with a
+      // user constructor; `closure` materializes the `$<Class>_new` body so the
+      // host can invoke it under `NewPromiseCapability(C)`. Shared across the
+      // `__register_*` and `__promise_subclass_ctor` import handlers via this
+      // import-builder closure scope, so a single Map instance is observed by
+      // both. The body closure is a wasm closure struct (arity 1: the executor);
+      // `_maybeWrapCallable` bridges it to `__call_fn_1(closure, executor)`.
+      if (name === "__register_promise_subclass_ctor") {
+        return (classNameRef: any, ctorClosure: any): void => {
+          if (!instanceState) return;
+          const className = String(classNameRef);
+          // Bridge the wasm closure to a host-callable once at registration.
+          // `_maybeWrapCallable` is a no-op for null (defensive) and caches the
+          // wrapper per (closure, arity), so repeated registrations are cheap.
+          const body = _maybeWrapCallable(ctorClosure, 1, callbackState);
+          if (typeof body !== "function") return;
+          (instanceState.promiseSubclassBodies ??= new Map()).set(className, body);
+        };
+      }
+      // (#1116b) Synthesize (and cache) a JS subclass of Promise for a
+      // Wasm-compiled `class MyPromise extends Promise`. The instance is a real
+      // host Promise; this JS constructor carries a distinct `.prototype` so the
+      // combinators' NewPromiseCapability + @@species resolution work, keyed on
+      // class name, synthesized from the lexical (intrinsic) `Promise`.
+      //
+      // (#2637 B2.2) When a `$<Class>_new` body closure was registered (B2.1),
+      // the synthesized ctor RUNS that body after `super(exec)` — so V8's
+      // `NewPromiseCapability(C)` (`new C(internalExecutor)`) executes the user
+      // constructor's side effects (`callCount += 1`, `executor = a`, proto
+      // wiring) on V8's capability promise. Without a registered body (default
+      // ctor, e.g. the #1977 `withResolvers/ctx-ctor` identity-only row) the
+      // synthesized ctor is the bare forwarder, unchanged.
       if (name === "__promise_subclass_ctor") {
-        const _promiseSubclassCtors = new Map<string, any>();
         return (classNameRef: any): any => {
           const className = String(classNameRef);
-          let C = _promiseSubclassCtors.get(className);
+          const ctorCache: Map<string, any> = instanceState
+            ? (instanceState.promiseSubclassCtors ??= new Map())
+            : new Map();
+          let C = ctorCache.get(className);
           if (C === undefined) {
+            const bodies = instanceState?.promiseSubclassBodies;
             // Cast the base to a plain constructor: `class extends Promise {}`
             // trips TS2508 (Promise's lib.d.ts type is generic) but is valid
             // JS — the emitted runtime subclasses the intrinsic Promise.
-            C = class extends (Promise as unknown as { new (...args: any[]): any }) {};
+            C = class extends (Promise as unknown as { new (...args: any[]): any }) {
+              constructor(exec: any) {
+                super(exec);
+                // (#2637 B2.2/B2.3) Run the registered wasm ctor body on THIS
+                // (V8's capability promise) if one was registered. The body
+                // (`$<Class>_new`, run-on-host-`this` mode, B2.3) binds its
+                // `this`/`$__self` to the host-provided promise and runs only
+                // the side effects + proto wiring — it must NOT allocate its own
+                // promise via `__new_Promise`. The executor `exec` is forwarded
+                // as the body's sole arg. `__call_fn_method_1` (the method
+                // dispatch reached via `body.call(this, …)`) installs `this` as
+                // the wasm-side receiver (`__current_this`). A throwing body
+                // propagates verbatim — V8's `Construct(C, «executor»)` surfaces
+                // the user-observable throw; we do not swallow it. Without a
+                // registered body (default-ctor subclass, e.g. the #1977
+                // `withResolvers/ctx-ctor` identity-only row) this is the bare
+                // forwarder, unchanged.
+                const body = bodies?.get(className);
+                if (typeof body === "function") {
+                  body.call(this, exec);
+                }
+              }
+            };
             try {
               Object.defineProperty(C, "name", { value: className, configurable: true });
             } catch {
               /* Function.name redefinition is best-effort; non-fatal. */
             }
-            _promiseSubclassCtors.set(className, C);
+            ctorCache.set(className, C);
           }
           return C;
         };
