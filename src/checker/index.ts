@@ -321,7 +321,7 @@ const ES_EARLY_ERROR_CODES = new Set([
 // per-module runtime-shim design (one shim per imported module).
 const NODE_ENV_DTS_NAME = "__js2wasm_node_env.d.ts";
 
-// The `process` member surface that node-process-api.ts actually lowers. Shared
+// The `process` member surface that node-fs-api.ts actually lowers. Shared
 // between the bare ambient global (`declare var process`) and a `node:process`
 // default/namespace/named import.
 const PROCESS_INTERFACE_DECLS = `interface NodeJS_WritableStream {

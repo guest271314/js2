@@ -123,7 +123,7 @@ import {
   compileStringLiteral,
   emitBoolToString,
 } from "../string-ops.js";
-import { tryCompileNodeFsCall, tryCompileNodeProcessCall } from "../node-process-api.js";
+import { tryCompileNodeFsCall, tryCompileNodeProcessCall } from "../node-fs-api.js";
 import { resolvePromiseSubclassName, tryEmitPromiseSubclassReceiver } from "./promise-subclass.js";
 import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import {

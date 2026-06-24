@@ -1,11 +1,13 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * Node process API lowering for WASI.
+ * Node `node:fs` + `process` std-IO lowering for WASI (#2633).
  *
  * This keeps Node-shaped host API support out of the generic call-expression
- * compiler. User code can import `process` from `node:process`; the import
- * resolver turns that into a type-level stub, and this module compiles the
- * supported stream calls directly to WASI syscalls.
+ * compiler. It recognizes the synchronous std-IO surface — `node:fs`
+ * `readSync`/`writeSync(fd, buf, …)` and `process.stdout`/`stderr.write` — and
+ * lowers them to WASI syscalls (or, under `--link-node-shims`, to the imported
+ * `node:fs` shim). It also rejects the hallucinated `process.stdin.read(buf,
+ * offset)` with a clear pointer to `node:fs` `readSync`.
  */
 import { isStringType } from "../checker/type-mapper.js";
 import type { Instr, ValType } from "../ir/types.js";
@@ -25,16 +27,30 @@ import {
 } from "./index.js";
 import type { InnerResult } from "./shared.js";
 import { compileExpression, VOID_RESULT } from "./shared.js";
-import { getLinearU8Buffer, tryEmitLinearU8StdinRead, tryEmitLinearU8StdWrite } from "./linear-uint8-codegen.js";
+import { getLinearU8Buffer, tryEmitLinearU8StdWrite } from "./linear-uint8-codegen.js";
 
 export function tryCompileNodeProcessCall(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.CallExpression,
 ): InnerResult | undefined {
-  if (matchProcessStdinRead(ctx, fctx, expr)) {
-    const r = emitProcessStdinRead(ctx, fctx, expr);
-    if (r) return r;
+  // #2633 — `process.stdin.read(buf, offset)` is a HALLUCINATED API that matches
+  // no real Node surface: `process.stdin` is an async Duplex stream with no
+  // synchronous buffer-filling `read`. The faithful synchronous primitive is
+  // `node:fs` `readSync(0, buf, …)` (this is also what Javy uses:
+  // `Javy.IO.readSync`). Reject it with a clear compile error directing to the
+  // real API rather than silently lowering the fake shape.
+  if (ctx.wasi && matchProcessStdinRead(fctx, expr)) {
+    ctx.errors.push({
+      message:
+        "process.stdin.read(buf, offset) is not a real Node API (process.stdin is an async " +
+        "Duplex stream with no synchronous read). Use the synchronous fd-based primitive " +
+        'instead: `import { readSync } from "node:fs"; readSync(0, buf, { offset, length })`.',
+      line: 1,
+      column: 1,
+      severity: "error",
+    });
+    return VOID_RESULT;
   }
 
   // #1766: In the current WASI Preview 1 lowering, process.std*.write()
@@ -52,16 +68,17 @@ export function tryCompileNodeProcessCall(
 
   const { useStderr } = stdoutWrite;
   const argExpr = expr.arguments[0]!;
+  const fd = useStderr ? 2 : 1;
 
   // #1886 Slice B: zero-copy `process.std*.write(buf)` for a linear-backed
-  // Uint8Array — fd_write reads straight from `ptr` for `len` bytes (no
+  // Uint8Array — the write reads straight from `ptr` for `len` bytes (no
   // GC→linear staging copy). Only fires for a registered linear-safe buffer.
-  // #2524: under the node-process shim there is no fd_write idx; `tryEmitLinearU8StdWrite`
-  // routes to the imported `stdout_write`/`stderr_write` instead (the passed idx
-  // is unused on that branch).
-  const writeSinkIdx = ctx.linkNodeShims ? ctx.nodeIoStdoutWriteIdx : ctx.wasiFdWriteIdx;
+  // #2633: under the node shims there is no fd_write idx; `tryEmitLinearU8StdWrite`
+  // routes to the imported `node:fs` `writeSync(fd, ptr, len)` instead (the passed
+  // idx is unused on that branch).
+  const writeSinkIdx = ctx.linkNodeShims ? ctx.nodeFsWriteSyncIdx : ctx.wasiFdWriteIdx;
   if (writeSinkIdx !== undefined && writeSinkIdx >= 0) {
-    if (tryEmitLinearU8StdWrite(ctx, fctx, argExpr, writeSinkIdx, useStderr)) {
+    if (tryEmitLinearU8StdWrite(ctx, fctx, argExpr, writeSinkIdx, fd)) {
       // Match the GC Uint8Array write path's contract: push `1` (write
       // succeeded) and return i32, so the expression-statement wrapper drops it
       // exactly like the GC path. (#1886)
@@ -143,10 +160,10 @@ function matchProcessStdStreamWrite(
   fctx: FunctionContext,
   expr: ts.CallExpression,
 ): { useStderr: boolean } | null {
-  // #2524 — under the node-process shim there is no fd_write import; the write sink
-  // is `js2wasm:node-process::stdout_write`/`stderr_write` instead.
+  // #2633 — under the node shims the write sink is `node:fs::writeSync(fd, …)`;
+  // inline it is `wasi_snapshot_preview1.fd_write`.
   const haveWriteSink = ctx.linkNodeShims
-    ? ctx.nodeIoStdoutWriteIdx >= 0
+    ? ctx.nodeFsWriteSyncIdx >= 0
     : ctx.wasiFdWriteIdx !== undefined && ctx.wasiFdWriteIdx >= 0;
   if (!ctx.wasi || !haveWriteSink) return null;
   if (expr.questionDotToken || expr.arguments.length !== 1) return null;
@@ -174,14 +191,16 @@ function matchProcessStdStreamDrainOnce(ctx: CodegenContext, fctx: FunctionConte
   return ts.isStringLiteralLike(eventArg) && eventArg.text === "drain";
 }
 
-function matchProcessStdinRead(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): boolean {
-  // #2524 — under the node-process shim there is no fd_read import; stdin is read via
-  // `js2wasm:node-process::stdin_read` instead.
-  const haveReadSink = ctx.linkNodeShims
-    ? ctx.nodeIoStdinReadIdx >= 0
-    : ctx.wasiFdReadIdx !== undefined && ctx.wasiFdReadIdx >= 0;
-  if (!ctx.wasi || !haveReadSink) return false;
-  if (expr.questionDotToken || expr.arguments.length < 1 || expr.arguments.length > 2) return false;
+/**
+ * #2633 — recognize the (hallucinated) `process.stdin.read(buf, offset?)` shape
+ * so the caller can reject it with a compile error pointing at `node:fs`
+ * `readSync`. Unlike the retired lowering, this is decoupled from any import
+ * registration: the shape is rejected whenever it appears under `--target wasi`
+ * (any local/captured `process` shadow is left alone). Non-WASI targets keep the
+ * generic call path (it resolves through the JS host).
+ */
+function matchProcessStdinRead(fctx: FunctionContext, expr: ts.CallExpression): boolean {
+  if (expr.questionDotToken) return false;
   const readAccess = expr.expression;
   if (!ts.isPropertyAccessExpression(readAccess) || readAccess.name.text !== "read") return false;
   const streamAccess = readAccess.expression;
@@ -189,165 +208,22 @@ function matchProcessStdinRead(ctx: CodegenContext, fctx: FunctionContext, expr:
   return isUnshadowedProcessIdentifier(fctx, streamAccess.expression);
 }
 
-function emitProcessStdinRead(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult | null {
-  // #2524 — under the node-process shim there is no fd_read import; stdin is read via
-  // `js2wasm:node-process::stdin_read`. `readSinkIdx` is the func index to call
-  // (fd_read inline, or stdin_read under the shim).
-  const readSinkIdx = ctx.linkNodeShims ? ctx.nodeIoStdinReadIdx : ctx.wasiFdReadIdx;
-  if (readSinkIdx === undefined || readSinkIdx < 0) return null;
-
-  // #1886 Slice B: when the buffer arg is a linear-backed Uint8Array, read
-  // straight into `ptr+off` — no GC↔linear element-copy loop. (`readSinkIdx` is
-  // unused on the shim branch of the linear helper.)
-  const linRead = tryEmitLinearU8StdinRead(ctx, fctx, expr, readSinkIdx);
-  if (linRead !== null) return linRead;
-
-  const bufType = compileExpression(ctx, fctx, expr.arguments[0]!);
-  if (!bufType || (bufType.kind !== "ref" && bufType.kind !== "ref_null") || !("typeIdx" in bufType)) {
-    if (bufType) fctx.body.push({ op: "drop" } as Instr);
-    return null;
-  }
-  const vecTypeIdx = bufType.typeIdx;
-  const vecDef = ctx.mod.types[vecTypeIdx];
-  if (!vecDef || vecDef.kind !== "struct" || vecDef.fields.length < 2) {
-    fctx.body.push({ op: "drop" } as Instr);
-    return null;
-  }
-  const arrTypeIdx = getArrTypeIdxFromVec(ctx, vecTypeIdx);
-  if (arrTypeIdx < 0) {
-    fctx.body.push({ op: "drop" } as Instr);
-    return null;
-  }
-  const arrDef = ctx.mod.types[arrTypeIdx];
-  const elemKind = arrDef && arrDef.kind === "array" && arrDef.element.kind === "f64" ? "f64" : "i32";
-
-  if (bufType.kind === "ref_null") fctx.body.push({ op: "ref.as_non_null" } as Instr);
-  const vecLocal = allocLocal(fctx, `__stdin_vec_${fctx.locals.length}`, { kind: "ref", typeIdx: vecTypeIdx });
-  fctx.body.push({ op: "local.set", index: vecLocal });
-  const arrLocal = allocLocal(fctx, `__stdin_arr_${fctx.locals.length}`, { kind: "ref", typeIdx: arrTypeIdx });
-  fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 1 } as Instr);
-  fctx.body.push({ op: "local.set", index: arrLocal });
-
-  const offLocal = allocLocal(fctx, `__stdin_off_${fctx.locals.length}`, { kind: "i32" });
-  if (expr.arguments.length >= 2) {
-    compileExpression(ctx, fctx, expr.arguments[1]!, { kind: "f64" });
-    fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
-  } else {
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  }
-  fctx.body.push({ op: "local.set", index: offLocal });
-
-  const capLocal = allocLocal(fctx, `__stdin_cap_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "local.get", index: vecLocal } as Instr);
-  fctx.body.push({ op: "struct.get", typeIdx: vecTypeIdx, fieldIdx: 0 } as Instr);
-  fctx.body.push({ op: "local.get", index: offLocal } as Instr);
-  fctx.body.push({ op: "i32.sub" } as Instr);
-  fctx.body.push({ op: "local.set", index: capLocal });
-
-  const needPagesLocal = allocLocal(fctx, `__stdin_needPages_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
-  fctx.body.push({ op: "local.get", index: capLocal } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "i32.const", value: 65535 } as Instr);
-  fctx.body.push({ op: "i32.add" } as Instr);
-  fctx.body.push({ op: "i32.const", value: 16 } as Instr);
-  fctx.body.push({ op: "i32.shr_u" } as Instr);
-  fctx.body.push({ op: "local.set", index: needPagesLocal } as Instr);
-  fctx.body.push({ op: "local.get", index: needPagesLocal } as Instr);
-  fctx.body.push({ op: "memory.size" } as Instr);
-  fctx.body.push({ op: "i32.gt_u" } as Instr);
-  fctx.body.push({
-    op: "if",
-    blockType: { kind: "empty" },
-    then: [
-      { op: "local.get", index: needPagesLocal } as Instr,
-      { op: "memory.size" } as Instr,
-      { op: "i32.sub" } as Instr,
-      { op: "memory.grow" } as Instr,
-      { op: "drop" } as Instr,
-    ],
-  } as Instr);
-
-  const nreadLocal = allocLocal(fctx, `__stdin_nread_${fctx.locals.length}`, { kind: "i32" });
-  if (ctx.linkNodeShims) {
-    // #2524 — nread = stdin_read(WASI_STDIN_BUF_START, cap); the shim builds the
-    // iovec + calls fd_read into the shared memory and returns the byte count.
-    fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
-    fctx.body.push({ op: "local.get", index: capLocal } as Instr);
-    fctx.body.push({ op: "call", funcIdx: readSinkIdx } as Instr);
-    fctx.body.push({ op: "local.set", index: nreadLocal } as Instr);
-  } else {
-    // iovec.buf = WASI_STDIN_BUF_START (memory[0]); iovec.buf_len = cap (memory[4])
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-    fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
-    fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
-    fctx.body.push({ op: "i32.const", value: 4 } as Instr);
-    fctx.body.push({ op: "local.get", index: capLocal } as Instr);
-    fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
-    // fd_read(fd=0, iovs=0, iovs_len=1, nread=8)
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-    fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-    fctx.body.push({ op: "i32.const", value: 1 } as Instr);
-    fctx.body.push({ op: "i32.const", value: 8 } as Instr);
-    fctx.body.push({ op: "call", funcIdx: readSinkIdx } as Instr);
-    fctx.body.push({ op: "drop" } as Instr);
-    fctx.body.push({ op: "i32.const", value: 8 } as Instr);
-    fctx.body.push({ op: "i32.load", align: 2, offset: 0 } as Instr);
-    fctx.body.push({ op: "local.set", index: nreadLocal } as Instr);
-  }
-
-  const jLocal = allocLocal(fctx, `__stdin_j_${fctx.locals.length}`, { kind: "i32" });
-  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
-  fctx.body.push({ op: "local.set", index: jLocal });
-  const storeByte: Instr[] = [
-    { op: "i32.const", value: WASI_STDIN_BUF_START } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "i32.load8_u", align: 0, offset: 0 } as Instr,
-  ];
-  if (elemKind === "f64") storeByte.push({ op: "f64.convert_i32_u" } as Instr);
-  const loopBody: Instr[] = [
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "local.get", index: nreadLocal } as Instr,
-    { op: "i32.ge_s" } as Instr,
-    { op: "br_if", depth: 1 } as Instr,
-    { op: "local.get", index: arrLocal } as Instr,
-    { op: "local.get", index: offLocal } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.add" } as Instr,
-    ...storeByte,
-    { op: "array.set", typeIdx: arrTypeIdx } as Instr,
-    { op: "local.get", index: jLocal } as Instr,
-    { op: "i32.const", value: 1 } as Instr,
-    { op: "i32.add" } as Instr,
-    { op: "local.set", index: jLocal } as Instr,
-    { op: "br", depth: 0 } as Instr,
-  ];
-  fctx.body.push({
-    op: "block",
-    blockType: { kind: "empty" },
-    body: [{ op: "loop", blockType: { kind: "empty" }, body: loopBody } as Instr],
-  } as Instr);
-
-  fctx.body.push({ op: "local.get", index: nreadLocal } as Instr);
-  fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
-  return { kind: "f64" };
-}
-
 // ---------------------------------------------------------------------------
-// #2631 — node:fs fd-based readSync / writeSync via the `js2wasm:node-fs` shim.
+// #2631 / #2633 — node:fs fd-based readSync / writeSync via the `node:fs` shim.
 //
 // `readSync(fd, buf, …)` / `writeSync(fd, buf, …)` are the faithful synchronous
 // Node primitives the Native Messaging host needs (process.stdin is an async
 // Duplex with no synchronous buffer-filling read — loopdive/js2#389). They are
 // fd-based (integer fd 0/1/2), NOT path-based: they map 1:1 to fd_read/fd_write
 // with NO filesystem. The path-based `fs` family (readFileSync(path)) stays on
-// the --allow-fs path and is rejected in standalone WASI.
+// the --allow-fs path and is rejected in standalone WASI. Since #2633 these are
+// also the sole std-IO substrate under `--link-node-shims`: console.log /
+// process.std*.write lower to `writeSync(1|2, …)`, and the bespoke
+// `js2wasm:node-process` shim was retired.
 //
 // The compiler's only job is to recognize the imported `readSync`/`writeSync`
-// bindings and call the registered `js2wasm:node-fs` shim funcs with (fd, ptr,
-// len) — the syscall lives in node-fs.wat, not in codegen.
+// bindings and call the registered `node:fs` shim funcs with (fd, ptr, len) —
+// the syscall lives in node-fs.wat, not in codegen.
 // ---------------------------------------------------------------------------
 
 /**
@@ -545,7 +421,7 @@ function emitNodeFsReadSync(
   const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, gc.lenLocal);
 
   // Grow memory if the scratch read region (WASI_STDIN_BUF_START + length) would
-  // exceed current pages. Mirrors emitProcessStdinRead.
+  // exceed current pages.
   ensureScratchPages(fctx, WASI_STDIN_BUF_START, lenLocal);
 
   // nread = read_sync(fd, WASI_STDIN_BUF_START, length)
