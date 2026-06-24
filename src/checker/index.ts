@@ -1,6 +1,7 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 import { ts } from "../ts-api.js";
 import { getDefaultEnvironment } from "../env.js";
+import { buildModuleDecls } from "./node-capability-map.js";
 
 // All Node builtin access goes through the environment adapter (#1096).
 // This module no longer probes `typeof window` / `typeof process` directly
@@ -470,46 +471,23 @@ function buildNodeEnvDts(usage: NodeEmuUsage): string | undefined {
       parts.push(lines.join("\n"));
       continue;
     }
-    // #2631 — `node:fs`: give the fd-based synchronous primitives that the
-    // compiler lowers (readSync / writeSync) faithful Node signatures so they
-    // type-check precisely (both the positional and the options form), while any
-    // other imported member stays permissive `any`. The real Node signatures:
-    //   readSync(fd, buffer, offset, length, position): number          (positional)
-    //   readSync(fd, buffer, opts: {offset?,length?,position?}): number  (options)
-    //   writeSync(fd, buffer, offset?, length?, position?): number       (positional)
-    if (mod === "node:fs") {
+    // #2634 — `node:fs` (and any other capability-mapped `node:<mod>`): drive
+    // the importable surface + types from the capability map
+    // (`node-capability-map.ts`), which mirrors the REAL `@types/node`
+    // signatures — every overload, the precise `NodeJS.ArrayBufferView` buffer
+    // type — instead of the old collapsed/approximate hand-roll. Faithful
+    // OVERLOADS are bodiless `export function` declarations; those are illegal
+    // in a `.ts`/`.js` (non-declaration) file (TS8017) but LEGAL here because
+    // this synthetic surface is a `.d.ts`-typed source (NODE_ENV_DTS_NAME ends
+    // in `.d.ts`, so `isDeclarationFile` is true). The user's import site only
+    // *references* the names, so TS8017 never fires there (#2631 / #1768
+    // transpiled-host case stays green — verified by the allowJs `.js` host
+    // test). Any imported member outside the map stays permissive `any`.
+    const capLines = buildModuleDecls(mod, members);
+    if (capLines) {
       const named = [...members].filter((m) => m !== "");
       const hasDefaultOrNs = members.has("");
-      const lines: string[] = [`declare module "node:fs" {`];
-      lines.push(
-        `  interface NodeJS_FsReadSyncOptions { offset?: number; length?: number; position?: number | null; }`,
-      );
-      // Use `export const` with a callable *type* (not bodiless `export function`
-      // overload declarations) so the typing is valid even when the importing
-      // file is checked as `.js` (allowJs) — bodiless function declarations there
-      // trip TS error 8017 "Signature declarations can only be used in TypeScript
-      // files" at the import site (#2631 / #1768 transpiled-host case).
-      for (const name of named) {
-        if (name === "readSync") {
-          // A SINGLE call signature (not an overload) so the typing is valid even
-          // under allowJs/.js checking — an imported const with MULTIPLE call
-          // signatures trips TS 8017 at the import site (#1768 transpiled host).
-          // The 3rd param is `offset` (positional) OR the options object, which
-          // covers both real-Node forms the compiler lowers; trailing
-          // length/position are optional.
-          lines.push(
-            `  export const readSync: (fd: number, buffer: Uint8Array, offsetOrOptions?: number | NodeJS_FsReadSyncOptions, length?: number, position?: number | null) => number;`,
-          );
-        } else if (name === "writeSync") {
-          lines.push(
-            `  export const writeSync: (fd: number, buffer: Uint8Array, offset?: number, length?: number, position?: number | null) => number;`,
-          );
-        } else {
-          // Any other node:fs member stays permissive (path-based fs is gated /
-          // rejected in codegen, but should still type-check).
-          lines.push(`  export const ${name}: any;`);
-        }
-      }
+      const lines: string[] = [`declare module "${mod}" {`, ...capLines];
       if (hasDefaultOrNs || named.length === 0) {
         lines.push(`  const _default: any;`);
         lines.push(`  export default _default;`);
