@@ -11,7 +11,7 @@ task_type: perf
 area: codegen
 language_feature: strings
 goal: spec-completeness
-sprint: Backlog
+sprint: 65
 related: [1746, 1580, 679, 682, 1714]
 ---
 # #1762 — linear-memory string backing for the build/hash hot path
