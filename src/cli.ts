@@ -71,12 +71,13 @@ Options:
                     is ON by default; this restores the pre-#1950 behaviour.
                     (No-op when binaryen/wasm-opt is unavailable — that path
                     already degrades to a one-line note, never a failure.)
-  --link-node-shims (WASI, #2625) Emit the per-module linkable js2wasm:node-<mod>
-                    shims instead of inlining the host APIs. For node:process IO
-                    the module imports stdin_read/stdout_write/stderr_write + its
-                    memory from js2wasm:node-process (no wasi_snapshot_preview1 for
-                    stream IO) and links node-process.wasm. Off by default — the
-                    inline fd_read/fd_write path is self-contained.
+  --link-node-shims (WASI, #2625/#2633) Emit the per-module linkable node:<mod>
+                    shims instead of inlining the host APIs. Std-IO goes through
+                    node:fs: the module imports readSync/writeSync + its memory
+                    from node:fs (no wasi_snapshot_preview1 for stream IO) and
+                    links node-fs.wasm. console.log / process.std*.write lower to
+                    writeSync(1|2, …); stdin is readSync(0, …). Off by default —
+                    the inline fd_read/fd_write path is self-contained.
   --emulate <env>   Emulate a host runtime's globals so they type-check without
                     @types/node. 'node' = ambient process/etc.; 'none' = off.
                     Auto-enabled (type-level only) when the source imports a

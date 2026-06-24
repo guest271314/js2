@@ -20,7 +20,7 @@
   (import "wasi_snapshot_preview1" "fd_read"
     (func $fd_read (param i32 i32 i32 i32) (result i32)))
 
-  ;; The shim owns + exports the shared linear memory (mirrors node-process.wat).
+  ;; The shim owns + exports the single shared linear memory.
   ;; min 3 pages matches the user module's reservation; grows on demand.
   (memory (export "memory") 3)
 
