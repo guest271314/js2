@@ -1,10 +1,12 @@
 ---
 id: 2656
-title: "acorn parse() hangs in a parse-loop AFTER the switch — switch-identity root cause REFUTED (probe data inline); real cause is a loop-carried token-field advance failure (suspected #2657-family) (7th dogfood blocker)"
-status: ready
+title: "++this.field / this.field-- on an any/externref receiver silently drops the write (NaN-fallback) → acorn tokenizer nextToken() never advances (7th dogfood blocker; switch-identity REFUTED)"
+status: done
+completed: 2026-06-25
+assignee: ttraenkler/dev-2046
 sprint: 66
 created: 2026-06-24
-updated: 2026-06-24
+updated: 2026-06-25
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -164,3 +166,59 @@ localization). Full-acorn compile is ~100-180s; the fix loop runs inside it.
 
 NOTE: any struct-dispatch change is SHARED/broad-impact → validate through the
 merge_group floor, not a scoped sweep.
+
+## Resolution (2026-06-25, dev-2046)
+
+**Fixed in `src/codegen/expressions/unary-updates.ts` — `compileMemberIncDec`.**
+
+Root cause (pinned via fast isolated repro, ~3s compile): for an `any`/`externref`
+receiver (a fnctor-instance `this` inside a prototype method — acorn's tokenizer
+shape), `resolveStructName` returns undefined, so `compileMemberIncDec` hit its
+`f64.const NaN` graceful fallback and **silently dropped the write**. So
+`++this.pos` / `this.pos--` were no-ops. Decoded WAT confirmed: the closure body
+was literally `f64.const NaN; drop` — no `f64.add`, no `struct.set`/`__extern_set`.
+`this.pos = this.pos + 1` and `this.pos += 1` already worked (compound-assignment
+Path B + the #2659 symmetric struct.set dispatch); the `++`/`--` UpdateExpression
+path simply never got an externref arm.
+
+**Fix:** new helper `emitExternrefMemberIncDec` mirrors the working `+=`
+write-back exactly — read current via `__extern_get`, `__unbox_number`→f64, ±1,
+`__box_number`→externref, then write back through the SYMMETRIC
+`emitAlternateStructSetDispatch` (#2659) so a typed-WasmGC-struct receiver hits
+the same slot the member-READ fast path reads, with `__extern_set` (sidecar) as
+the terminal fallback. Prefix returns NEW, postfix returns OLD (§13.4). f64
+numeric semantics (no BigInt special-casing — the compound path has none here
+either). The statically-resolved-struct fast path is untouched.
+
+This is a GENERAL codegen correctness fix (silent NaN-drop on `++`/`--` of any
+any-typed member), not acorn-specific.
+
+**Verification:**
+- `tests/issue-2656.test.ts` — 6/6: fnctor `++this.pos` loop terminates
+  (acorn skipSpace shape); prefix returns NEW; postfix returns OLD; `--`
+  prefix/postfix; repeated `++` accumulates; class-field control still works.
+- Fast repro (10 cases incl. `++`/`--`/`-=`-controls): all correct
+  (pre-fix: `++`/`--` returned NaN + dropped write; post-fix: correct).
+- **End-to-end acorn advance CONFIRMED**: on full compiled acorn (current main),
+  `new Parser(...).nextToken(); nextToken()` previously HUNG on the 2nd call
+  (frozen `this.pos`); post-fix it returns `pos=5 end=5 label=name` — the
+  tokenizer advances across successive `nextToken()` calls. Blocker #7 cleared.
+
+**Residual (SEPARATE, downstream — NOT this issue):** full `parse("var x = 1;")`
+still does not return — with the tokenizer now advancing, `parse()` hits a
+further, distinct wall deeper in the parser (the natural 8th dogfood blocker).
+That is a new root-cause hunt (carve a follow-up issue); it is NOT a regression
+of this fix and NOT the `++this.pos` freeze, which is resolved.
+
+**The earlier "switch-on-externref identity" framing was REFUTED** (see
+Investigation section above: direct `===` identity holds RESULT=111; the
+many-case switch dispatches correctly RESULT=1001). The real cause was the
+`++`/`--` write-drop, fixed here.
+
+**Broad-impact change to shared unary-update lowering — validated through the
+FULL merge_group / test262 floor (per `project_broad_impact_validate_full_ci`),
+not a scoped sweep.** Local adjacent suites: #2659 green (4/4); the
+`prefix-postfix-increment-property` / `static-members` / `issue-incremental`
+local FAILs are PRE-EXISTING harness-wiring gaps (missing `tests/helpers.ts`,
+`result.success` in-process-state sensitivity) identical on clean main, NOT
+caused by this change.
