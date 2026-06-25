@@ -1392,6 +1392,7 @@ function compileDateMethodCall(
     "setFullYear",
     "setUTCFullYear",
     "setYear",
+    "getYear", // (#2671) Annex B §B.2.4 legacy getter
     "getTimezoneOffset",
     "getUTCFullYear",
     "getUTCMonth",
@@ -2316,6 +2317,23 @@ function compileDateMethodCall(
       emitPackedYear(fctx.body, tmp); // floor(packed/10000)
       releaseTempLocal(fctx, tmp);
       fctx.body.push({ op: "f64.convert_i64_s" } as Instr);
+    });
+  }
+
+  // (#2671) Annex B §B.2.4 `Date.prototype.getYear()` — legacy `getFullYear() -
+  // 1900`. Like getFullYear but with the −1900 offset; NaN-guarded the same way.
+  // (`setYear` already exists in the set-path below; this is the missing getter.)
+  if (methodName === "getYear") {
+    return wrapWithInvalidDateGuard(() => {
+      emitDaysToCivil(); // packed on stack
+      const tmp = allocTempLocal(fctx, { kind: "i64" });
+      emitPackedYear(fctx.body, tmp); // floor(packed/10000) → full year (i64)
+      releaseTempLocal(fctx, tmp);
+      fctx.body.push(
+        { op: "i64.const", value: 1900n } as Instr,
+        { op: "i64.sub" } as Instr, // year - 1900
+        { op: "f64.convert_i64_s" } as Instr,
+      );
     });
   }
 

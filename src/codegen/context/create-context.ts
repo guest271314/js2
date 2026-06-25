@@ -81,6 +81,8 @@ export function createCodegenContext(
     newTargetGlobalIdx: undefined, // (#2023)
     classNewTargetIds: new Map(), // (#2023) className → stable 1-based i32 id
     usesArrayHoles: false, // (#2001 S1) set by the scanForArrayHoles pre-scan
+    usesVecValue: false, // (#2083) flipped by genuine getOrRegisterVecType usage
+    suppressVecUsageFlag: false, // (#2083) true only during the two prereg calls below
     holeTypeIdx: -1, // (#2001 S1) $Hole struct type; lazily registered
     holeGlobalIdx: undefined, // (#2001 S1) $__hole singleton global
     usesDynRead: false, // (#2580 M0) set by a __dyn_has/__dyn_get call site (M1+); M0 adds none
@@ -256,8 +258,15 @@ export function createCodegenContext(
     jsxRuntime: options?.jsxRuntime,
   };
 
+  // (#2083) Pre-register the `externref` + `f64` vec struct types up front for
+  // type-index stability (every module reserves these slots regardless of
+  // whether it uses arrays). These are NOT real array usage — suppress the
+  // `usesVecValue` flag across them so arith-/string-only modules don't emit
+  // the host-glue vec exports.
+  ctx.suppressVecUsageFlag = true;
   getOrRegisterVecType(ctx, "externref", { kind: "externref" });
   getOrRegisterVecType(ctx, "f64", { kind: "f64" });
+  ctx.suppressVecUsageFlag = false;
 
   if (ctx.nativeStrings) {
     registerNativeStringTypes(ctx);

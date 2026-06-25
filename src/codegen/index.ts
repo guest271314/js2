@@ -3050,6 +3050,29 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
   const mod = ctx.mod;
   const methodSuffix = "@@toPrimitive";
   const exportName = "__call_@@toPrimitive";
+
+  // (#2083) Ensure the union imports (which register `__box_number`) are present
+  // BEFORE the entries loop below resolves `funcIdx` values and reads result
+  // signatures. A numeric (`f64`/`i32`) `[Symbol.toPrimitive]` result is boxed to
+  // externref via `__box_number` for the dispatcher's externref fallthrough; the
+  // boxing arms `ctx.funcMap.get("__box_number")` and silently skip the `call`
+  // when it is absent, leaving an `f64`/struct ref where the block result demands
+  // `externref` (invalid Wasm). This used to be masked because
+  // `emitVecAccessExports` ran earlier and unconditionally called
+  // `addUnionImports`; now that the vec exports are gated on actual array usage
+  // (#2083), an object-only program with a numeric `[Symbol.toPrimitive]` and no
+  // arrays no longer gets that side effect. `addUnionImports` adds imports and
+  // SHIFTS function indices, so it MUST run before `funcIdx`/`resultType` are
+  // captured below — doing it after would leave the captured `funcIdx` integers
+  // pointing at the wrong (pre-shift) functions. It is idempotent
+  // (`ctx.hasUnionImports` guard), so modules that already added the imports —
+  // every array-using module, and any object module that needed them elsewhere —
+  // are byte-identical. Gated on the presence of any numeric `@@toPrimitive`
+  // method so non-toPrimitive / string-only-toPrimitive modules add no import.
+  if (toPrimitiveNeedsBoxing(ctx, methodSuffix)) {
+    addUnionImports(ctx);
+  }
+
   const entries: { typeIdx: number; funcIdx: number; resultType: ValType }[] = [];
 
   for (const [structName] of ctx.structFields) {
@@ -3142,6 +3165,37 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
   } as WasmFunction);
 
   mod.exports.push({ name: exportName, desc: { kind: "func", index: funcIdx } });
+}
+
+/**
+ * (#2083) True when at least one class `[Symbol.toPrimitive]` method in the
+ * module returns a numeric (`f64`/`i32`) type — i.e. the `__call_@@toPrimitive`
+ * dispatcher will need `__box_number` to box that result to externref. Mirrors
+ * the entry-filtering in `emitToPrimitiveMethodExport` (skips Wrapper/$AnyValue/
+ * vec/arr structs) and reads the compiled method's result signature. Computed
+ * BEFORE any `addUnionImports`-induced funcIdx shift, off the same `funcMap` /
+ * `mod.functions` state, so it is shift-stable. Used to gate the pre-emit
+ * `addUnionImports` so non-numeric-toPrimitive modules add no import.
+ */
+function toPrimitiveNeedsBoxing(ctx: CodegenContext, methodSuffix: string): boolean {
+  const mod = ctx.mod;
+  for (const [structName] of ctx.structFields) {
+    if (
+      structName.startsWith("Wrapper") ||
+      structName === "$AnyValue" ||
+      structName.startsWith("__vec_") ||
+      structName.startsWith("__arr_")
+    )
+      continue;
+    const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`));
+    if (funcIdx === undefined) continue;
+    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
+    const resultType =
+      funcType && funcType.kind === "func" && funcType.results.length > 0 ? funcType.results[0] : undefined;
+    if (resultType && (resultType.kind === "f64" || resultType.kind === "i32")) return true;
+  }
+  return false;
 }
 
 /**
@@ -4351,6 +4405,16 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   //   for `vec.constructor` lookups: the constructor path calls `__vec_len`
   //   to positively distinguish vec wrappers from other null-prototype
   //   WasmGC structs.
+  // (#2083) The final disjunct was `ctx.vecTypeMap.size === 0`, which could
+  // NEVER be true: `createCodegenContext` pre-registers the `externref` + `f64`
+  // vec struct types for type-index stability, so the map always has ≥ 2
+  // entries. As a result these six host-glue vec exports leaked into EVERY
+  // module — even arith-only / string-only programs with no arrays at all (the
+  // exact case flagged in #2083). Gate on `ctx.usesVecValue` instead — set only
+  // when a genuine array-usage site asks `getOrRegisterVecType` for a type (the
+  // two prereg calls are excluded). The host runtime guards every
+  // `exports.__vec_*` access with a `typeof === "function"` check, so a module
+  // that never materialises an array is safe without them.
   if (
     !ctx.funcMap.has("__iterator") &&
     !ctx.funcMap.has("JSON_stringify") &&
@@ -4361,7 +4425,7 @@ function emitVecAccessExports(ctx: CodegenContext): void {
     !ctx.funcMap.has("Promise_any") &&
     !ctx.funcMap.has("__crypto_get_random_values") && // (#1503)
     !ctx.funcMap.has("__extern_get") &&
-    ctx.vecTypeMap.size === 0
+    !ctx.usesVecValue
   ) {
     return;
   }
