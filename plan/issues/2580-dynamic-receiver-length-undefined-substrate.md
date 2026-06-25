@@ -2031,3 +2031,65 @@ forEach / some, own-index-shadows-inherited, hot-path own-data unaffected) green
   changed: `src/runtime.ts`, `tests/issue-2580-m3-protoextend.test.ts`.
 
 Issue stays `in-progress` (B-fnctor remains).
+
+---
+
+# M3 — B-fnctor: verify-first re-ground on post-B-protoextend main — STILL escape-analysis-gated, NO safe one-pass slice (2026-06-25, sd-2580, max-reasoning)
+
+> Picked up B-fnctor (the final #2580 lap) after B-protoextend landed (#2049,
+> `_protoIndexHas`/`_protoIndexGet` Object.prototype index fallback now in main).
+> Verify-first per-process (`runTest262File`, fresh process per file; the
+> in-process / parallel pollution trap avoided) + runtime tracing. **Independently
+> re-confirms the two prior dedicated Stage-B sessions: B-fnctor has no
+> verified-safe, row-banking, one-pass increment. NO code landed.**
+
+## What I tried (the contained, #1888-SAFE host-mode slice) and why it's insufficient
+
+The hypothesis was a contained host-mode slice that does NOT touch the instance
+struct shape (so no escape-analysis, no #1888-floor eject): wire the indexed-read
+helpers `__extern_get_idx` / `__extern_has_idx` to consult `_fnctorProtoLookup`
+(the existing #1712 instance→ctor→`F.prototype` walk that the NAMED `__extern_get`
+arm at `runtime.ts:3867` already uses). Reuses the existing
+`__register_fnctor_instance` link; zero struct-shape change.
+
+Implemented + tsc-clean, then drove the REAL fnctor cluster file
+`some/15.4.4.17-7-c-i-15` (`var proto={}; defineProperty(proto,"1",{get});
+var Con=function(){}; Con.prototype=proto; var child=new Con(); child.length=20;
+some.call(child, cb)`) per-process. **Still `fail`.** A targeted trace showed
+**`__extern_get_idx` is NEVER CALLED** for `child[1]` — the `new Con()` instance
+does not route its generic-method element reads through the indexed-read helpers
+at all. (`some.call(child, cb)` even `returned 2`, not a boolean — the fnctor-struct
+receiver isn't being treated as a proper array-like by the `some.call` dispatch.)
+
+So wiring the index helpers is correct + harmless but **banks 0 rows**: the
+instance never reaches them. The blocker is upstream — the bespoke
+`$__fnctor_<Name>` instance struct (not an `$Object`, no `$proto` field) is not
+recognized by the generic-method array-like read path.
+
+## Confirmed: the only real fix is the escape-analysis-gated instance reconstruct (#1888 risk)
+
+This matches both prior sessions' WAT bisections exactly, re-verified on current
+main:
+- `new Con()` → bespoke `$__fnctor_Con` struct; its element reads do NOT go
+  through `__extern_get_idx` / the `$Object.$proto` walk.
+- Making them do so requires either (a) reconstructing the instance AS an
+  `$Object` (option ii-a) — which needs a whole-program escape analysis to avoid
+  moving every `new F(){this.x=…}` typed-own-field read (`ref.test $N →
+  struct.get $N 0`, the hot path) onto `__extern_get`, **the #1888-class
+  floor-eject**; or (b) a second walk arm recognizing fnctor structs (the
+  rejected option i — "N walks not one", shifts every fnctor own-field index,
+  re-enters the iso-recursive canonicalization hazard #1100/#2009).
+- The escape-analysis infrastructure still does not exist (the `escapeAnalysis`
+  refs in `ir/integration.ts` / `calls-closures.ts` are the IR-path closure
+  escape gate, NOT a whole-program fnctor-instance dynamic-use analysis).
+
+## VERDICT — HOLD B-fnctor; it needs an architect spec for the escape-analysis gate
+
+Per the lap guardrails ("if ANY #1888-floor eject risk: STOP, do not enqueue,
+escalate; we'd rather hold B-fnctor than regress the floor") and the senior-dev
+discipline (analyze root cause, don't force a risky one-pass change): **B-fnctor
+is genuinely blocked on escape-analysis infrastructure.** The correct next step is
+an **architect spec** for the whole-program "this `new F()` instance is consumed
+dynamically AND has no typed `struct.get` own-field consumer" analysis that gates
+the (ii-a) reconstruct — NOT a forced dev pass. NO source changed; the per-process
+harness lived in `.tmp/` (gitignored). Issue stays `in-progress`; lock released.
