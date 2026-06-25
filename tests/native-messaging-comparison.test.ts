@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * #2681 — 5-way Native Messaging comparison harness.
+ * #2683 — 5-way Native Messaging comparison harness.
  *
  * `examples/native-messaging/` carries the SAME Native Messaging echo host (read
  * a 4-byte little-endian length prefix + body off fd 0, write the framed response
@@ -9,7 +9,7 @@
  *   - `nm_wasi.ts`         RAW `wasi_snapshot_preview1` fd_read/fd_write + linear
  *                          memory (`wasm:memory`)                              (#2657)
  *   - `nm_js2wasm.ts`      synchronous `node:fs` readSync/writeSync(fd, …)     (#2655)
- *   - `nm_node_process.ts` async `process.stdin` Readable + process.stdout.write (#2681/#2632)
+ *   - `nm_node_process.ts` async `process.stdin` Readable + process.stdout.write (#2683/#2632)
  *   - `nm_deno.ts`         the Deno stdio surface (lands separately)
  *   - `nm_wasi_p3.ts`      the WASI Preview 3 spike (lands separately)
  *
@@ -160,7 +160,7 @@ async function runFdShim(binary: Uint8Array, stdin: Uint8Array): Promise<Uint8Ar
   return Uint8Array.from(out);
 }
 
-describe("#2681 Native Messaging comparison harness — every variant compiles", () => {
+describe("#2683 Native Messaging comparison harness — every variant compiles", () => {
   const variants = discoverVariants();
 
   it("discovers the baseline variants on disk", () => {
@@ -180,7 +180,7 @@ describe("#2681 Native Messaging comparison harness — every variant compiles",
   }
 });
 
-describe("#2681 Native Messaging comparison harness — byte-identical framed echo", () => {
+describe("#2683 Native Messaging comparison harness — byte-identical framed echo", () => {
   let tmpDir: string;
   beforeAll(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "nm-comparison-"));

@@ -1,5 +1,5 @@
 ---
-id: 2681
+id: 2683
 title: "Native Messaging: node:process async-stream variant + 5-way comparison harness (README table + cross-variant byte-identical test)"
 status: done
 assignee: ttraenkler/agent-ada80d
@@ -17,7 +17,7 @@ related: [389, 2655, 2657, 2632]
 sprint: 66
 ---
 
-# #2681 — Native Messaging node:process variant + 5-way comparison harness
+# #2683 — Native Messaging node:process variant + 5-way comparison harness
 
 `examples/native-messaging/` collects the **same** Native Messaging echo host
 (read a 4-byte little-endian length prefix + body off fd 0, write the framed
