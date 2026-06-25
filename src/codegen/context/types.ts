@@ -402,12 +402,27 @@ export interface FunctionContext {
    * this stack innermost-first and rewrites proven own-property bindings to
    * direct struct field access.
    */
-  withScopes?: {
-    localIdx: number;
-    structTypeIdx: number;
-    fields: FieldDef[];
-    blockedNames: Set<string>;
-  }[];
+  withScopes?: (
+    | {
+        // (#1387) Tier-1 static entry: a closed object-literal target compiled
+        // into a local; bare names matching a field route to direct struct
+        // get/set.
+        kind: "static";
+        localIdx: number;
+        structTypeIdx: number;
+        fields: FieldDef[];
+        blockedNames: Set<string>;
+      }
+    | {
+        // (#2663 Slice 1) Tier-2 dynamic entry: the `with` target is an
+        // arbitrary externref. Bare names are resolved at runtime via a
+        // HasBinding gate (`__extern_has`) + `Get` (`emitDynGet`), falling back
+        // to the outer lexical lowering when absent.
+        kind: "dynamic";
+        localIdx: number;
+        blockedNames: Set<string>;
+      }
+  )[];
   /** Map from let/const local variable name → local index of its i32 TDZ flag (0 = uninitialized) */
   tdzFlagLocals?: Map<string, number>;
   /**

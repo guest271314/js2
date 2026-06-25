@@ -333,47 +333,29 @@ end
   (rare per-name), so the common "absent ⇒ fall to lexical" path is one
   `__extern_has` call. No per-name unscopables read on the miss path.
 
-### The test262 runner blocker (MUST be fixed for acceptance)
+### The test262 runner is NOT a blocker (Slice 0 premise REFUTED — audited 2026-06-25, dev-2046)
 
-**Verified:** the runner wraps every test body inside `export function test()` in
-a `.ts` module (`tests/test262-runner.ts:2356`, `:2373`), which is **strict
-mode**. TypeScript's parser rejects `with` there:
+**CORRECTION.** This section originally claimed the runner's
+`export function test()` strict-module wrapper is the hard gate (TS1101 rejects
+`with`), making "runner de-strict" (Slice 0) the prerequisite. **That premise is
+wrong.** The runner ALREADY passes `skipSemanticDiagnostics: true` on EVERY path
+(`scripts/compiler-fork-worker.mjs:40,67`, `tests/test262-shared.ts:608`, the
+in-process runner), and `skipSemanticDiagnostics: true` **already suppresses
+TS1101** for `with` (verified: `export function test(){ …; with(o){…} }` +
+skipSemanticDiagnostics reaches codegen — no TS1101).
 
-```
-$ npx tsc --noEmit --strict   (body inside export function)
-error TS1101: 'with' statements are not allowed in strict mode.
-error TS2410: The 'with' statement is not supported...
-```
+**Audit (37 noStrict `with` tests through the actual `wrapTest` + the runner's
+exact compile opts, current main):** TS1101-blocked = **0**; codegen-#1387 = 30;
+already-compiling = 7. **Zero** `with` tests are blocked by the strict wrapper.
+The real gate is the **codegen #1387 rejection** (the dynamic-`with` path this
+issue implements), NOT the runner.
 
-So **no amount of Tier-2 codegen makes these tests pass until the runner stops
-wrapping sloppy `with` tests in a strict module.** The codegen frontend
-(`ts.createSourceFile` for compilation) tolerates `with` via TS error-recovery
-(it still yields a `WithStatement` node — that is how Tier 1 is reachable today),
-but the runner's strict-module wrapper is the hard gate.
-
-**Runner change (Slice 5):** for a test classified `strict: "no"`
-(`classifyStrictMode`, `tests/test262-runner.ts:189` — already computes this from
-`noStrict` + `SLOPPY_MODE_PATHS`), wrap the body in a **non-strict script
-context** rather than `export function test()`. Options, simplest first:
-- (a) Emit the body at top level of a **non-module** script (no `export`, no
-  implicit strict) and expose the result via a sentinel global the harness reads
-  — but the compiler's source is `.ts` (module). Cleaner:
-- (b) Keep `export function test()` but ensure the function body is **not**
-  strict. A function is strict iff the module is strict iff it contains an
-  `export`/`import` or `"use strict"`. Since the wrapper file inherently has
-  `export function test`, the file is a module ⇒ strict ⇒ `with` is rejected.
-  Therefore the sloppy-`with` wrapper must drop the `export` and run as a
-  **script** (the runner already has the TLA branch as precedent for an alternate
-  wrapper shape at `:2350`). Provide a script-mode wrapper that defines a global
-  `__test()` and have the harness call it.
-
-Implementation detail to settle in Slice 5: the compiler's entry
-(`src/resolve.ts:40`, `module: ESNext`) compiles a single source. A sloppy-mode
-wrapper must be a **script** (no top-level `import`/`export`) so neither TS nor
-the emitted Wasm forces strict. Confirm `with` survives codegen in script mode
-(it should — `createSourceFile` recovery already yields the node). This is the
-single highest-leverage step: it is what actually flips the 174 tests from
-`compile_error` (TS1101) to running, where the Tier-2 codegen is then exercised.
+**⇒ Slice 0 (runner de-strict) is MOOT and was dropped** — implementing it would
+move 0 tests (they'd still hit codegen #1387). The codegen frontend
+(`ts.createSourceFile`) already yields a `WithStatement` node and
+`skipSemanticDiagnostics` lets it through; **Tier-2 codegen (Slices 1-4) is what
+actually makes the tests run/pass.** No runner change is needed for the `with`
+corpus.
 
 ### Interaction with Tier 1 (keep the fast path)
 
@@ -413,17 +395,22 @@ single highest-leverage step: it is what actually flips the 174 tests from
 
 ### Slice breakdown (land incrementally)
 
-- **Slice 0 — runner de-strict (CAN LAND FIRST, independently):** script-mode
-  wrapper for `strict: "no"` tests in `tests/test262-runner.ts` so sloppy `with`
-  tests reach codegen instead of failing TS1101. This alone moves the 174 tests
-  from `compile_error` to `fail`/`pass` and lets every later slice be measured.
-  Acceptance: the `with` category count in the test262 report stops being
-  ~all-`compile_error`.
-- **Slice 1 — dynamic READ:** widen `withScopes` (`context/types.ts:405`),
+- **Slice 0 — runner de-strict: ~~CAN LAND FIRST~~ DROPPED (moot).** The premise
+  (TS1101 strict wrapper blocks `with`) is refuted — `skipSemanticDiagnostics`
+  already de-stricts the TS frontend (0/37 `with` tests TS1101-blocked; audit
+  above). No runner change needed; the codegen path (Slices 1-4) is the gate.
+- **Slice 1 — dynamic READ: ✅ DONE (PR, 2026-06-25).** Widened `withScopes`
+  (`context/types.ts`, discriminated `kind:"static"|"dynamic"`),
   `compileDynamicWithStatement`, `resolveWithBinding`, `emitDynamicWithGet`
-  (HasBinding via `__extern_has` + `Get` via `emitDynGet`), null/undefined-receiver
-  TypeError guard. No `@@unscopables` yet (treat HasProperty as HasBinding).
-  Lands the bulk of the read-only corpus.
+  (HasBinding via value-independent `__extern_has` + `Get` via `emitDynGet`),
+  null/undefined-receiver TypeError guard (`__extern_is_undefined`),
+  innermost-first cascade through nested/mixed `with` scopes, lexical-shadow via
+  `blockedNames`. No `@@unscopables` yet (HasProperty treated as HasBinding).
+  **Measured row-delta (174 noStrict `with` tests, in-process runner): pass
+  3→16 (+13), compile_error 162→51 (−111 now reach codegen/run). Zero
+  regression to non-`with` modules; Tier-1 static path byte-unchanged.** The
+  +91 runtime_error are WRITE-dependent tests (Slice 2) now reaching execution
+  (previously compile_error) — progress toward measurability, not a regression.
 - **Slice 2 — dynamic WRITE:** `compileDynamicWithAssignment` (plain `=`) via
   `__extern_set`; RHS-once-into-temp; result = RHS.
 - **Slice 3 — compound/inc-dec + `typeof`/`delete`:** `+=`, `++`/`--`
