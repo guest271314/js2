@@ -1,0 +1,34 @@
+// #2658 B0 spike — authoritative WASI Preview 3 stdio interfaces.
+//
+// Trimmed from wasmtime v44.0.0 crates/wasi/src/p3/wit/deps/cli.wit to just the
+// types/run/stdin/stdout interfaces the echo needs (the upstream `command`
+// world additionally pulls wasi:clocks/filesystem/sockets/random). The package
+// version string is EXACTLY the world id wasmtime 44 hosts.
+package wasi:cli@0.3.0-rc-2026-03-15;
+
+interface types {
+  enum error-code {
+    io,
+    illegal-byte-sequence,
+    pipe,
+  }
+}
+
+interface run {
+  // The command entrypoint — ASYNC in P3 (suspends/resumes via the host
+  // scheduler, the substrate #2646 interactive streaming wants).
+  run: async func() -> result;
+}
+
+interface stdin {
+  use types.{error-code};
+  // Returns the stdin readable stream PLUS a future signalling read completion.
+  read-via-stream: func() -> tuple<stream<u8>, future<result<_, error-code>>>;
+}
+
+interface stdout {
+  use types.{error-code};
+  // Hand the host a readable stream; the host drains it to stdout. The returned
+  // future resolves when the whole stream has been written (or errors).
+  write-via-stream: func(data: stream<u8>) -> future<result<_, error-code>>;
+}
