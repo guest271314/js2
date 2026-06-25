@@ -1,7 +1,8 @@
 ---
 id: 2670
 title: "ES2015: Array.prototype iteration-method semantics residual (~1017 fails — generic array-like receiver, callback/thisArg, holes, length coercion)"
-status: ready
+status: in-progress
+assignee: sd-2670
 created: 2026-06-25
 updated: 2026-06-25
 priority: high
@@ -85,3 +86,59 @@ methods route through, replacing $Vec-only fast paths when the receiver is not a
 compiled array. Coordinate with #2580 (length on dynamic receiver). Slice by
 method family (reduce/reduceRight; map/filter/forEach/every/some; index-of;
 slice/splice/concat) so each lands independently.
+
+## Verification (sd-2670, 2026-06-25) — VERIFY-FIRST, fresh main HEAD d082e1fee
+
+**Verified fail count: 1202** `built-ins/Array/prototype/*` (baseline jsonl,
+refreshed today). The ~1017 estimate is accurate-to-conservative. **NOT
+deflated** (contrast #2668, which collapsed 25x). This genuinely IS the largest
+built-in cluster.
+
+**BUT the stated root cause is largely WRONG.** The "generic array-like receiver
+dispatch is broken / need a shared generic element-access path" premise does
+**not hold on main** — #2177/#2151 already made it work for the common case.
+Confirmed WORKING on main (direct probes):
+- `Array.prototype.reduce/map/indexOf.call({0:..,1:..,length:n}, cb)` → correct
+- `Object.defineProperty(obj,"0",{get})` getter **fires** during iteration
+- `length` via `{valueOf(){return n}}` ToLength coercion → correct
+- non-callable callback → throws TypeError
+
+**Real residual root causes (probe + source-classified over all 1202):**
+| count | sub-cluster | status on main |
+|------:|-------------|----------------|
+| 446 | unclassified (mostly sparse-array + inherited-receiver combos) | mixed |
+| 278 | defineProperty getter on receiver/**prototype** + inherited indices | getter fires, but inherited-via-prototype `[[Get]]` / accessed-tracking still fail |
+| 136 | TypeError contract (non-extensible / non-configurable target on map/fill/…) | only non-callable throws; extensibility checks missing |
+| 96  | holes / HasProperty | **BROKEN** |
+| 61  | result-array descriptor (extensible/configurable/enumerable) | broken |
+| 51  | callback-args (value,index,O)/thisArg edge | mixed |
+| 38  | species / @@species | broken |
+| 38  | ToLength/ToInteger length-valueOf ordering | mostly works; ordering edges fail |
+| 21  | wasm_compile (unsupported syntax) | crash |
+| 20  | Symbol-edge | broken |
+| 17  | primitive-wrapper-object identity (`new Number()` accumulator) | broken |
+
+**Probe evidence (current main):**
+- `[1,,3].forEach` visits 3 elements (exp 2) — literal-elision hole NOT skipped by HOFs
+- `new Array(10); a[1]=1;a[2]=2; a.forEach` visits 10 (exp 2) — `new Array(N)` holes not represented as `$Hole`
+- `delete arr[1]` then `forEach` visits 3 (exp 2) — delete-holes not represented
+- `Array.prototype.lastIndexOf.call(fnObject, "b")` → -1 (exp 1) — function-object / exotic receiver element Get fails
+- `indexOf.call(child,…)` with prototype-inherited index → wrong
+
+**Hole infra status:** `src/codegen/array-holes.ts` (#2001 S1) defines a `$Hole`
+sentinel + read-boundary `$Hole→undefined` mapping for `any[]` literal elisions,
+but (a) HOFs do not gate iteration on HasProperty/`$Hole` for a compiled `$Vec`
+receiver, and (b) `new Array(N)` / `delete` do not produce `$Hole`. So holes are
+a bounded extension of #2001, not greenfield.
+
+**Recommendation: do NOT pivot** (count is real, >>200) — but **re-slice along
+the verified root causes, not the mis-stated generic-receiver axis.** Proposed
+slices: (A) holes-in-HOFs [extends #2001], (B) inherited/prototype-chain indexed
+`[[Get]]` + getter-on-receiver, (C) TypeError extensibility/configurability
+contracts, (D) @@species, (E) primitive-wrapper accumulator identity. Biggest
+tractable independent first slice = **(A) holes-in-HOFs** (~150-250 fails across
+forEach/map/every/some/filter/reduce/indexOf/lastIndexOf). Coordinate (B) with
+#2580 (length on dynamic receiver) and the #2659-family receiver-dispatch
+(sd-2674b/sd-2679) — inherited-index Get likely bottoms out in the same
+`__current_this`/receiver-threading + dynamic `[[Get]]` cluster.
+
