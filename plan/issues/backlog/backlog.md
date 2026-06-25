@@ -418,3 +418,27 @@ Full record: `plan/issues/sprints/62.md` (+ pre-staged `63.md`). Summary:
   #2110-#2117 (≡ #2118-#2125, high series canonical)
 - Stale-ready → done (fix PRs merged): #1991 #2002-#2006 #2018-#2020
   #2027 #2078
+
+## 2026-06-25 — Sprint-66 ES3/ES5/ES6 edition-gap grooming (PO)
+
+Edition-gap review off the test262 baseline jsonl (`scripts/fetch-baseline-jsonl.mjs`),
+classified by the `generate-editions.ts` rules. Gaps: ≤ES3 32, ES5 ~3415,
+ES2015 ~4280 failing. Priority ES3 > ES5 > ES6, biggest fail-count clusters
+first; eval / dynamic-code deprioritized. All added to sprint 66.
+
+New issues (uncovered/residual clusters):
+- [#2666](../2666-es3-member-ref-eval-order-compound-assign-incdec.md) — ≤ES3 `base[prop]` eval order in compound-assign + ++/-- (ToPropertyKey once) — ~100 tests across editions, **TOP**.
+- [#2667](../2667-es3-mapped-arguments-nonconfigurable-delete-residual.md) — ≤ES3 mapped arguments non-config/non-writable + delete (residual of #1511) — 12 tests.
+- [#2668](../2668-es5-object-defineproperty-descriptor-fidelity-residual.md) — ES5 Object.defineProperty/defineProperties descriptor fidelity residual — ~788, largest ES5.
+- [#2669](../2669-es6-destructuring-correctness-residual-umbrella.md) — ES2015 destructuring correctness umbrella — ~696, largest ES6.
+- [#2670](../2670-es6-array-prototype-iteration-method-semantics-residual.md) — ES2015 Array.prototype generic-receiver/holes/length residual — ~1017, largest single built-in.
+- [#2671](../2671-es6-builtin-spec-residuals-date-regexp-promise-json-super.md) — ES2015 Date/RegExp/Promise/JSON/super residual tracker — ~400.
+
+Existing covered issues pulled into sprint 66 (Backlog → 66): #1642 (for-of IteratorClose),
+#2566 (generator over-consume in dstr), #1556 (param-pattern struct mismatch),
+#1551 (SuperCall eval order). Already sprint:66: #1355 (Proxy), #1344 (generators),
+#2580 (length on dynamic receiver), #2663 (with statement).
+
+Deprioritized (eval / new Function / dynamic-import — NOT scheduled first):
+~219 ES5 + ~87 ES6 eval/dynamic-code fails; tracked by #1066, #1102, #1240,
+#1263-#1266 (eval tiers). Not added to the prioritized sprint-66 list.

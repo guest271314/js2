@@ -1,0 +1,108 @@
+---
+id: 2666
+title: "≤ES3: member-reference base[prop] evaluation order in compound-assignment and prefix/postfix ++/-- (ToPropertyKey once, left-before-right)"
+status: in-progress
+assignee: ttraenkler/dev-2046
+created: 2026-06-25
+updated: 2026-06-25
+priority: high
+feasibility: medium
+reasoning_effort: medium
+task_type: bug
+area: codegen
+es_edition: multi
+language_feature: compound-assignment, increment-decrement, evaluation-order
+goal: spec-completeness
+sprint: 66
+---
+# #2666 — ≤ES3 member-reference `base[prop]` evaluation order (compound-assign + ++/--)
+
+## Edition / impact
+
+- **Editions:** ≤ES3 (base language) + ES5 + ES2015 (same root cause spans all three).
+- **Fail count (current baseline):**
+  - ≤ES3: 11 `compound-assignment/S11.13.2_A7.*_T4.js` + 4 `prefix/postfix-(in|de)crement/*_A6_T2.js` = **15**.
+  - ES5: 77 `language/expressions/compound-assignment` + ~32 `prefix/postfix-(in|de)crement` (es5id-tagged) overlap the same root.
+  - ES2015: 22 `language/expressions/compound-assignment`.
+  - **Net addressable cluster ≈ 100+ failing tests** sharing one codegen root.
+- This is the **top ≤ES3 priority** — it is base-language semantics every edition inherits.
+
+## Problem
+
+For an assignment target of the form `base[prop]` the spec requires:
+1. Evaluate `base` (the MemberExpression's object) **once**.
+2. Evaluate `prop` and apply `ToPropertyKey` **exactly once** — left-hand side
+   before the right-hand side operand.
+3. For compound assignment `base[prop] op= expr`, read the current value using
+   the *already-evaluated* reference, compute `op`, then write back to the
+   *same* reference — without re-evaluating `base` or re-calling `ToPropertyKey(prop)`.
+4. For `++base[prop]` / `base[prop]++` (and `--`), the reference is evaluated
+   once; `base = undefined` must throw **before** the property key is evaluated
+   (GetValue on the base reference happens first).
+
+Current codegen re-evaluates the property-key expression (and/or `base`) more
+than once, so `prop.toString()` side effects fire twice and ordering asserts
+fail. The `base = undefined` cases also evaluate `prop` when they should throw
+on the base first.
+
+## Failing-test cluster (examples)
+
+```
+language/expressions/compound-assignment/S11.13.2_A7.1_T4.js   (base[prop] *= expr — ToPropertyKey once)
+language/expressions/compound-assignment/S11.13.2_A7.2_T4.js   (... and A7.3..A7.11 — one per operator)
+language/expressions/prefix-increment/S11.4.4_A6_T2.js         (++base[prop], base undefined throws before prop)
+language/expressions/postfix-increment/S11.3.1_A6_T2.js
+language/expressions/prefix-decrement/S11.4.5_A6_T2.js
+language/expressions/postfix-decrement/S11.3.2_A6_T2.js
+```
+
+Representative assertion (`S11.13.2_A7.1_T4.js`):
+```js
+var propKeyEvaluated = false;
+var prop = { toString: function() { assert(!propKeyEvaluated); propKeyEvaluated = true; return ""; } };
+base[prop] *= expr();   // toString must be called EXACTLY once
+```
+
+## Acceptance criteria
+
+- All 11 `compound-assignment/S11.13.2_A7.*_T4.js` pass.
+- All 4 `prefix/postfix-(in|de)crement/*_A6_T2.js` pass.
+- No regression in the broader compound-assignment / inc-dec test set.
+- Property-key expression with observable `toString`/`valueOf` side effects is
+  evaluated exactly once for `base[prop] op= rhs` and `++/-- base[prop]`.
+
+## Notes
+
+- Root cause is in the member-target lowering for compound-assignment and
+  update expressions — likely a "compile the target twice (once to read, once to
+  write)" pattern. Fix: evaluate `base` and the property key once into temps,
+  then read/modify/write through the temps.
+- Related (different root): #1938 (linear array element double-eval of RHS).
+
+## Resolution — COMPOUND-ASSIGN done (2026-06-25, dev-2046; inc/dec → #2675)
+
+**`base[prop] op= rhs` ToPropertyKey-ONCE: FIXED.** Root cause confirmed: the
+computed key flowed raw into BOTH `__extern_get` and `__extern_set`, each of
+which runs ToPropertyKey internally (host `_toPropertyKey`) — so a side-effecting
+`toString`/`valueOf` fired **twice** and the value came out `null`.
+
+- New **`__to_property_key(externref)->externref` host import** (`src/runtime.ts`)
+  wrapping `_toPropertyKey` (§7.1.19, Symbol-preserving). Standalone reuses the
+  existing native `__to_property_key` (`object-runtime.ts`).
+- **`compileElementCompoundAssignment`** (both externref arms,
+  `src/codegen/expressions/assignment.ts`): `emitToPropertyKeyOnce` coerces the
+  key ONCE right after it compiles to externref; the stored `keyLocal` (primitive
+  string / preserved Symbol) is reused by both the get and the set. A primitive
+  is idempotent under the host's internal ToPropertyKey → no second `toString`.
+- Verified (`tests/issue-2666.test.ts`, 7/7): ToPropertyKey once (`n===1`), value
+  correct, base-before-prop-before-rhs (`B()[K()] += R()` → "BKR"), string/array
+  keys unchanged. Adjacent #2659/#2663/delete suites green.
+
+**`++`/`--` on a computed object key — CARVED to #2675** (NOT in this PR). It is
+entangled with the **#2659-family struct-slot-vs-sidecar asymmetry** (an
+`__extern_set` to a typed-struct object updates the sidecar but `o.x` reads the
+slot) AND `obj[strKey]++` / `obj["x"]++` are **already broken on `main`**
+independent of ToPropertyKey (verified: return the old value, no update) — a
+DISTINCT pre-existing bug. #2675 tracks it; it is likely a clean win once the
+#2659 read/write asymmetry is fully resolved (connects to the acorn #2674
+read-side work). So #2666 stays `in-progress` until #2675 lands the inc/dec half.

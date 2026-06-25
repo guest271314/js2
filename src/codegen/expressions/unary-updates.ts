@@ -273,21 +273,19 @@ function emitExternrefMemberIncDec(
     [],
   );
   flushLateImportShifts(ctx, fctx);
-  const externSetFallback: Instr[] = [
-    { op: "local.get", index: objLocal } as Instr,
-    { op: "local.get", index: keyLocal } as Instr,
-    { op: "local.get", index: boxedLocal } as Instr,
-  ];
-  if (setIdx !== undefined) {
-    externSetFallback.push({ op: "call", funcIdx: setIdx } as Instr);
-  }
-  const recvAny = allocLocal(fctx, `__incdec_eany_${fctx.locals.length}`, { kind: "anyref" });
-  fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: recvAny });
-  const dispatched = emitAlternateStructSetDispatch(ctx, fctx, recvAny, boxedLocal, propName, externSetFallback);
+  // (#2664) Route through the deferred-fill member-set dispatcher (NON-strict —
+  // this is a read-modify-write `obj.x++`, the property was already read so the
+  // sidecar update never hits a getter-only-accessor throw). The dispatcher's
+  // terminal else-arm IS the `__extern_set` sidecar; its struct-candidate arms
+  // are enumerated at finalize (the full type table), fixing the compile-order
+  // candidate freeze (#2664).
+  const dispatched = emitAlternateStructSetDispatch(ctx, fctx, objLocal, boxedLocal, propName, /*strict*/ false);
   if (!dispatched) {
-    fctx.body.push(...externSetFallback);
+    // Dispatcher could not be reserved — emit the bare host write as before.
+    fctx.body.push({ op: "local.get", index: objLocal });
+    fctx.body.push({ op: "local.get", index: keyLocal });
+    fctx.body.push({ op: "local.get", index: boxedLocal });
+    if (setIdx !== undefined) fctx.body.push({ op: "call", funcIdx: setIdx });
   }
 
   // Return new (prefix) or old (postfix). §13.4 UpdateExpression semantics.
@@ -758,6 +756,14 @@ function compileMemberIncDec(
   }
 
   // Unsupported operand kind — gracefully emit NaN instead of hard error
+  // (#2666 NOTE: computed-key `obj[keyExpr]++`/`--` on an object is NOT handled
+  // here — it routes to NaN or the externref arm above. Wiring ToPropertyKey-once
+  // through the host get/set for inc/dec is entangled with the #2659-family
+  // struct-slot-vs-sidecar asymmetry (an `__extern_set` to a typed-struct object
+  // updates the sidecar but `o.x` reads the slot), and most `obj[strKey]++` cases
+  // are ALREADY broken on main independent of ToPropertyKey — so inc/dec is a
+  // scoped FOLLOW-UP. The compound-assignment path `obj[keyExpr] op= rhs` IS
+  // fixed for ToPropertyKey-once in this change.)
   reportSilentFallback(ctx, "const-fallback", "unary-updates:incdec-unsupported-operand", operand);
   fctx.body.push({ op: "f64.const", value: NaN });
   return { kind: "f64" };
