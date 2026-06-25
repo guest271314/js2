@@ -1,0 +1,176 @@
+// Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
+//
+// #2668 Slice A — Object.defineProperty data-descriptor fidelity (host mode).
+//
+// Targets the `var d = { value: 1 }; Object.defineProperty(o, k, d)` shape (a
+// descriptor in a local whose initializer is an object literal — the dominant
+// `built-ins/Object/defineProperty/15.2.3.6-3-*` ES5 pattern). Two fixes:
+//
+//  1. DYNAMIC-DESCRIPTOR ROUTING (src/codegen/object-ops.ts). The inline fast
+//     paths only fire for a *syntactic* object-literal descriptor at the call
+//     site. A descriptor supplied as a local previously fell through to
+//     `emitExternDefinePropertyNoValue`, which had no descriptor to read and
+//     silently dropped the value + every attribute. Host mode now routes a
+//     descriptor identifier whose declaration initializer is an object literal
+//     through `emitDefinePropertyDescRuntime` → `__defineProperty_desc` (full
+//     ToPropertyDescriptor + `_validatePropertyDescriptor`, §10.1.6.3).
+//
+//     SCOPE: only LITERAL-resolvable descriptor identifiers are routed.
+//     Arbitrary host-object descriptors (`Math`, a `Date` instance, an
+//     `Object.create(proto)` whose attributes live on a sidecar-backed
+//     prototype) are deliberately left on their prior path — the runtime
+//     ToPropertyDescriptor reader resolves a WasmGC-struct descriptor's
+//     attributes only on its OWN level, so routing them would drop a
+//     prototype-inherited `enumerable`/`configurable` (a deeper Object.create +
+//     proto-sidecar gap, out of Slice A scope).
+//
+//  2. TYPED-FIELD VALUE WRITEBACK (src/runtime.ts `_structFieldWriteback`). A
+//     `const o: any = {}` whose property is later defined gets a *typed* struct
+//     shape, so `o.<key>` ref-tests as that struct and lowers to a static
+//     `struct.get` that never consults the sidecar. The runtime descriptor
+//     appliers now mirror the defined VALUE into the real struct field via the
+//     compiled `__sset_<key>` export, so static reads see the defined value.
+//
+// Accessors (Slice B), array-`length` exotic (Slice C), for-in
+// enumerable-honoring (needs the proto-read fix first), and standalone
+// descriptor fidelity (gated on #2580) are out of scope for Slice A.
+
+import { describe, it, expect } from "vitest";
+import { compile } from "../src/index.js";
+import { instantiateWithRuntime } from "./equivalence/helpers.js";
+
+async function run(src: string, fn = "test"): Promise<unknown> {
+  const result = await compile(src);
+  if (!result.success) {
+    throw new Error("Compile failed: " + result.errors.map((e) => `L${e.line}: ${e.message}`).join("; "));
+  }
+  const instance = await instantiateWithRuntime(result);
+  return (instance.exports as Record<string, (...a: unknown[]) => unknown>)[fn]!();
+}
+
+describe("#2668 Slice A — literal-resolvable dynamic descriptor application", () => {
+  it("descriptor variable: value is applied and readable (15.2.3.6-3-126)", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const obj: any = {};
+          const attr: any = { value: 100 };
+          Object.defineProperty(obj, "property", attr);
+          return obj.property;
+        }
+      `),
+    ).toBe(100);
+  });
+
+  it("descriptor variable: GOPD round-trips the value", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const obj: any = {};
+          const attr: any = { value: 42 };
+          Object.defineProperty(obj, "property", attr);
+          const d: any = Object.getOwnPropertyDescriptor(obj, "property");
+          return d ? d.value : -1;
+        }
+      `),
+    ).toBe(42);
+  });
+
+  it("descriptor variable: non-boolean attribute coerces via ToBoolean", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const obj: any = {};
+          const attr: any = { value: 7, configurable: 1 };
+          Object.defineProperty(obj, "property", attr);
+          const d: any = Object.getOwnPropertyDescriptor(obj, "property");
+          return (d.value === 7 ? 1 : 0) + (d.configurable === true ? 10 : 0);
+        }
+      `),
+    ).toBe(11);
+  });
+
+  it("descriptor variable: omitted attrs default to false on a new define", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const obj: any = {};
+          const attr: any = { value: 5 };
+          Object.defineProperty(obj, "property", attr);
+          const d: any = Object.getOwnPropertyDescriptor(obj, "property");
+          let r = 0;
+          if (d.value === 5) r += 1;
+          if (d.writable === false) r += 10;
+          if (d.enumerable === false) r += 100;
+          if (d.configurable === false) r += 1000;
+          return r;
+        }
+      `),
+    ).toBe(1111);
+  });
+
+  it("descriptor variable: explicit writable/enumerable applied", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const obj: any = {};
+          const attr: any = { value: 9, writable: true, enumerable: true };
+          Object.defineProperty(obj, "property", attr);
+          const d: any = Object.getOwnPropertyDescriptor(obj, "property");
+          let r = 0;
+          if (d.value === 9) r += 1;
+          if (d.writable === true) r += 10;
+          if (d.enumerable === true) r += 100;
+          if (d.configurable === false) r += 1000;
+          return r;
+        }
+      `),
+    ).toBe(1111);
+  });
+});
+
+describe("#2668 Slice A — no regression on existing fast paths", () => {
+  it("inline value-only define still readable", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const obj: any = {};
+          Object.defineProperty(obj, "property", { value: 100 });
+          return obj.property;
+        }
+      `),
+    ).toBe(100);
+  });
+
+  it("plain assignment after value-only struct define still reads back", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const obj: any = { a: 1 };
+          Object.defineProperty(obj, "a", { value: 9 });
+          return obj.a;
+        }
+      `),
+    ).toBe(9);
+  });
+
+  it("for-in still lists a defined property whose attrs are prototype-inherited", async () => {
+    // Mirrors the 15.2.3.6-3-23..45 family: descriptor's enumerable lives on a
+    // prototype; the property must remain enumerable (Slice A must NOT regress
+    // this — it does not route this non-literal descriptor).
+    expect(
+      await run(`
+        export function test(): number {
+          const obj: any = {};
+          const proto: any = {};
+          Object.defineProperty(proto, "enumerable", { value: true });
+          const child: any = Object.create(proto);
+          Object.defineProperty(obj, "property", child);
+          let accessed = 0;
+          for (const p in obj) { if (p === "property") accessed = 1; }
+          return accessed;
+        }
+      `),
+    ).toBe(1);
+  });
+});
