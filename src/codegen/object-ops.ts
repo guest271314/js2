@@ -1025,35 +1025,37 @@ export function compileObjectDefineProperty(
 
   // (#2668 Slice A) Host-mode DYNAMIC-DESCRIPTOR route. The inline fast paths
   // below only fire when the descriptor is a *syntactic* object literal at the
-  // call site (`Object.defineProperty(o, k, { value: 1 })`). When the
-  // descriptor is any other expression — a variable (`var d = {...};
-  // defineProperty(o, k, d)`), an arbitrary object used as a descriptor
-  // (`Math`, a `Date` instance), a call result, etc. — none of the inline
-  // value/accessor/flag parsing runs, and the call previously fell through to
-  // `emitExternDefinePropertyNoValue`, which has no descriptor to read and so
-  // silently dropped the `value` (and every attribute). That is the root of
-  // the large `15.2.3.6-3-*` ES5 cluster (descriptors supplied as variables /
-  // host objects). Route those through `emitDefinePropertyDescRuntime` →
-  // `__defineProperty_desc`, the runtime applier that runs the full
-  // ToPropertyDescriptor + `_validatePropertyDescriptor` (§10.1.6.3) over the
-  // descriptor object and writes the canonical `_wasmPropDescs` sidecar that
-  // every read / for-in / write / delete path consults. For a plain JS
-  // receiver + plain JS descriptor it bottoms out in native
-  // `Object.defineProperty`, so attribute defaulting, redefine-preserves-omitted,
-  // non-configurable throws, and SameValue are all spec-correct for free.
-  // The standalone lane already has its own native route (#1629b / #2372) via
-  // `__obj_define_from_desc`; this host-mode route mirrors it. Inline object
-  // literals keep their existing zero-overhead fast paths (no behavior change).
+  // call site (`Object.defineProperty(o, k, { value: 1 })`). The common
+  // `var d = { value: 1 }; Object.defineProperty(o, k, d)` shape (descriptor in
+  // a local whose initializer is an object literal — the dominant `15.2.3.6-3-*`
+  // ES5 pattern) never reached any value/attr handling and fell through to
+  // `emitExternDefinePropertyNoValue`, silently dropping the value + attributes.
+  // Route THAT shape through `emitDefinePropertyDescRuntime` →
+  // `__defineProperty_desc`, the runtime applier that runs full
+  // ToPropertyDescriptor + `_validatePropertyDescriptor` (§10.1.6.3) and writes
+  // the canonical `_wasmPropDescs` sidecar every read / for-in / write / delete
+  // consults; for a plain JS receiver + plain JS descriptor it bottoms out in
+  // native `Object.defineProperty`, so attribute defaulting,
+  // redefine-preserves-omitted, non-configurable throws, and SameValue come for
+  // free.
+  //
+  // SCOPE — only when the descriptor identifier resolves to a *literal*
+  // initializer (`descriptorInitializerForIdentifier`). Deliberately NOT routing
+  // arbitrary host-object descriptors (`Math`, a `Date` instance, an
+  // `Object.create(proto)` whose attributes live on a sidecar-backed
+  // PROTOTYPE): `__defineProperty_desc`'s ToPropertyDescriptor reader resolves a
+  // WasmGC-struct descriptor's attributes only on its OWN level, so a
+  // prototype-inherited `enumerable`/`configurable` is dropped — which would
+  // flip those properties non-enumerable and regress the
+  // `15.2.3.6-3-23..45` for-in cluster (a deeper Object.create + proto-sidecar
+  // gap, out of Slice A scope). Those non-literal descriptors keep their prior
+  // path. The standalone lane has its own native route (#1629b / #2372). Inline
+  // object literals keep their zero-overhead fast paths (no behavior change).
   if (!ctx.standalone && !ts.isObjectLiteralExpression(descArg)) {
     const init = descriptorInitializerForIdentifier(ctx, descArg);
-    return emitDefinePropertyDescRuntime(
-      ctx,
-      fctx,
-      objArg,
-      propArg,
-      descArg,
-      init ? descriptorUndefinedFields(init) : [],
-    );
+    if (init) {
+      return emitDefinePropertyDescRuntime(ctx, fctx, objArg, propArg, descArg, descriptorUndefinedFields(init));
+    }
   }
 
   // Check if descriptor is an object literal with a `value`, `get`, or `set` property

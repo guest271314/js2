@@ -10291,23 +10291,8 @@ assert._isSameValue = isSameValue;
               // collect this level's keys first, order, then push.
               const levelKeys: string[] = [];
               const fieldNames = _getStructFieldNames(current, exports) ?? [];
-              // (#2668 Slice A) Honor a defineProperty'd non-enumerable flag on a
-              // TYPED struct field. The field-name list comes straight from the
-              // struct shape, so without consulting `_wasmPropDescs` a
-              // `Object.defineProperty(o, "x", { enumerable: false })` on a
-              // declared field `x` was still listed by for-in / Object.keys
-              // (verifyProperty's enumerability probe failed). Tombstoned
-              // (deleted) fields are already filtered by the delete tombstone
-              // checked in `__hasOwnProperty`; here we additionally drop any
-              // field whose sidecar descriptor is DEFINED and not enumerable.
-              const fieldDescs = _wasmPropDescs.get(current);
               for (const k of fieldNames) {
-                if (seen.has(k) || levelKeys.includes(k)) continue;
-                if (fieldDescs) {
-                  const flags = fieldDescs.get(_normalizeDescKey(k));
-                  if (flags !== undefined && flags & _SC_DEFINED && !(flags & _SC_ENUMERABLE)) continue;
-                }
-                levelKeys.push(k);
+                if (!seen.has(k) && !levelKeys.includes(k)) levelKeys.push(k);
               }
               // Also include enumerable sidecar properties
               const sc = _wasmStructProps.get(current);
