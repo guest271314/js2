@@ -103,7 +103,7 @@ that chain or a guard it consults. Suspects (verify):
 The `unexpected()` on `name` is because `parseExprAtom`'s
 `switch (this.type) { case types$1.name: … }` NEVER matches the `name` case, so it
 falls to `default → unexpected()`. Full end-to-end root-cause (8 instrumented
-full-acorn compiles) is banked in `plan/issues/2674-...md` ("## DECISIVE
+full-acorn compiles) is banked in the #2674 issue file ("## DECISIVE
 ROOT-CAUSE" + "## RESOLVED BY #2085"). Summary:
 
 - Acorn uses `delete` ⇒ `moduleUsesDelete=true`. `this.<field>` reads on the
