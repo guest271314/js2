@@ -936,6 +936,22 @@ export interface CodegenContext {
    */
   closedMethodDispatchVarargNames?: Set<string>;
   /**
+   * (#2664) Property names that need a deferred-fill member-WRITE dispatcher
+   * `__set_member_<name>(recv: externref, val: externref)`. The symmetric
+   * struct.set write dispatch (#2659) was emitted INLINE at each `any`-receiver
+   * `obj.<name> = v` write, freezing its struct-candidate set at the write's
+   * compile time. A field-writing closure compiled BEFORE a later struct type
+   * (e.g. acorn's `$__fnctor_Parser`, registered after the closure) only got the
+   * earlier candidate's `ref.test` arm; the real instance failed it and the
+   * write leaked to the `__extern_set` sidecar while reads used the slot —
+   * non-termination (#2664). Routing the write through a reserved dispatcher
+   * filled at FINALIZE (when the full struct-type table is known) gives every
+   * write site the COMPLETE candidate set regardless of compile order. Filled by
+   * `fillMemberSetDispatch`; populated in BOTH gc/host and standalone (the
+   * dual-struct-type compile-order hazard is mode-independent).
+   */
+  memberSetDispatchNames?: Set<string>;
+  /**
    * (#1904) True once the standalone `__extern_is_array(externref) -> i32`
    * helper placeholder has been emitted by the object runtime. Its body is
    * filled in post-processing after all Wasm array carrier types (`__vec_*`
