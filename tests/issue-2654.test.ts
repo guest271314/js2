@@ -1,4 +1,4 @@
-// #2653 — Standalone parseFloat / Number(string) / __str_to_number decimal
+// #2654 — Standalone parseFloat / Number(string) / __str_to_number decimal
 // fraction precision.
 //
 // The native parse helpers accumulated the fraction as `mant += digit*0.1^k`
@@ -51,7 +51,7 @@ const PRECISION_INPUTS = [
   "9007199254740993",
 ];
 
-describe("#2653 standalone decimal parse precision (parseFloat / Number)", () => {
+describe("#2654 standalone decimal parse precision (parseFloat / Number)", () => {
   for (const input of PRECISION_INPUTS) {
     it(`parseFloat("${input}") matches host in standalone`, async () => {
       const host = Number.parseFloat(input);
@@ -82,7 +82,7 @@ describe("#2653 standalone decimal parse precision (parseFloat / Number)", () =>
     expect(await runF64(`parseFloat("1e-310")`, "standalone")).toBe(1e-310);
     expect(await runF64(`parseFloat("5e-324")`, "standalone")).toBe(5e-324);
     // Large finite values stay finite (within 1 ULP — |exp| > 22 takes the
-    // incremental fallback whose last-ULP behaviour matches the pre-#2653 code;
+    // incremental fallback whose last-ULP behaviour matches the pre-#2654 code;
     // exact correctly-rounded extreme exponents would need full Eisel-Lemire,
     // out of scope. The point here is "no worse than before", not bit-exact).
     const big = await runF64(`parseFloat("1e300")`, "standalone");

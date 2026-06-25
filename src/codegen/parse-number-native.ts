@@ -159,11 +159,11 @@ export function emitNativeParseNumber(ctx: CodegenContext, which: Set<string>): 
     const L_SIGN = 6;
     const L_MANT = 7;
     const L_SAW = 8;
-    // index 9 = fracScale (legacy, now unused after the #2653 integer-mantissa rewrite)
+    // index 9 = fracScale (legacy, now unused after the #2654 integer-mantissa rewrite)
     const L_EXPSIGN = 10;
     const L_EXP = 11;
     const L_RESULT = 12;
-    // (#2653) integer-mantissa scaling scratch locals.
+    // (#2654) integer-mantissa scaling scratch locals.
     const L_FRACCOUNT = 13; // i32: number of fraction digits consumed
     const L_TEXP = 14; // i32: total decimal exponent (expSign*exp + intDrop - fracCount)
     const L_POW = 15; // f64: 10^|totalExp|
@@ -299,7 +299,7 @@ export function emitNativeParseNumber(ctx: CodegenContext, which: Set<string>): 
               { op: "i32.gt_s" },
               { op: "i32.or" },
               { op: "br_if", depth: 1 },
-              // (#2653) Cap the i64 integer-mantissa accumulation at ~18
+              // (#2654) Cap the i64 integer-mantissa accumulation at ~18
               // significant digits (mant < 9e17 keeps mant*10+9 < 2^63, the i64
               // range — and well within the ~17 digits an f64 can resolve). Past
               // the cap an integer digit is DROPPED from the mantissa but its
@@ -386,7 +386,7 @@ export function emitNativeParseNumber(ctx: CodegenContext, which: Set<string>): 
                       { op: "i32.gt_s" },
                       { op: "i32.or" },
                       { op: "br_if", depth: 1 },
-                      // (#2653) i64 integer-mantissa accumulation, capped at ~18
+                      // (#2654) i64 integer-mantissa accumulation, capped at ~18
                       // sig digits (mant < 9e17). Within the cap: mant = mant*10 +
                       // digit and fracCount++ (final scaling divides by 10^count).
                       // Past the cap a fraction digit is dropped (no visible effect
@@ -446,7 +446,7 @@ export function emitNativeParseNumber(ctx: CodegenContext, which: Set<string>): 
       { op: "local.set", index: L_EXPSIGN },
       ...emitExponent(L_I, L_LEN, L_DATA, L_C, L_EXP, L_EXPSIGN, strDataTypeIdx, getC),
 
-      // (#2653) result = sign * mant * 10^(expSign*exp + intDrop - fracCount),
+      // (#2654) result = sign * mant * 10^(expSign*exp + intDrop - fracCount),
       // applied as a single correctly-rounded multiply/divide (see
       // emitApplyDecimalExp).
       ...emitApplyDecimalExp(L_SIGN, L_MANT, L_FRACCOUNT, L_INTDROP, L_EXP, L_EXPSIGN, L_TEXP, L_POW, L_RESULT),
@@ -522,13 +522,13 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
   const L_SIGN = 6;
   const L_MANT = 7;
   const L_SAW = 8;
-  const L_FRAC = 9; // legacy fracScale, unused after the #2653 integer-mantissa rewrite
+  const L_FRAC = 9; // legacy fracScale, unused after the #2654 integer-mantissa rewrite
   const L_EXPSIGN = 10;
   const L_EXP = 11;
   const L_RESULT = 12;
   const L_RADIX = 13;
   const L_DIG = 14;
-  // (#2653) integer-mantissa scaling scratch locals.
+  // (#2654) integer-mantissa scaling scratch locals.
   const L_FRACCOUNT = 15; // i32: number of fraction digits consumed
   const L_TEXP = 16; // i32: total decimal exponent (expSign*exp + intDrop - fracCount)
   const L_POW = 17; // f64: 10^|totalExp|
@@ -703,7 +703,7 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
             { op: "i32.gt_s" },
             { op: "i32.or" },
             { op: "br_if", depth: 1 },
-            // (#2653) i64 integer-mantissa accumulation, capped at ~18 sig digits
+            // (#2654) i64 integer-mantissa accumulation, capped at ~18 sig digits
             // (mant < 9e17 keeps mant*10+9 < 2^63). Past the cap an integer digit
             // is dropped from the mantissa and its place value preserved by
             // bumping the exponent (L_INTDROP).
@@ -783,7 +783,7 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
                     { op: "i32.gt_s" },
                     { op: "i32.or" },
                     { op: "br_if", depth: 1 },
-                    // (#2653) i64 integer-mantissa accumulation, capped at ~18 sig
+                    // (#2654) i64 integer-mantissa accumulation, capped at ~18 sig
                     // digits (mant < 9e17). Within the cap: mant = mant*10 + digit
                     // and fracCount++. Past the cap a fraction digit is dropped (no
                     // visible effect on the rounded double), NOT counted.
@@ -848,7 +848,7 @@ function emitStrToNumber(ctx: CodegenContext, flattenIdx: number, strTypeIdx: nu
       blockType: { kind: "empty" },
       then: [{ op: "f64.const", value: NaN }, { op: "return" }],
     },
-    // (#2653) result = sign * mant * 10^(expSign*exp + intDrop - fracCount),
+    // (#2654) result = sign * mant * 10^(expSign*exp + intDrop - fracCount),
     // applied as a single correctly-rounded multiply/divide (see
     // emitApplyDecimalExp).
     ...emitApplyDecimalExp(L_SIGN, L_MANT, L_FRACCOUNT, L_INTDROP, L_EXP, L_EXPSIGN, L_TEXP, L_POW, L_RESULT),
@@ -1255,7 +1255,7 @@ function emitExponent(
 }
 
 /**
- * (#2653) Correctly-rounded final scaling for the integer-mantissa parse path.
+ * (#2654) Correctly-rounded final scaling for the integer-mantissa parse path.
  *
  * The integer + fraction loops accumulate ALL significant digits into `L_MANT`
  * as a single exact integer (`mant = mant*10 + digit`, exact while ≤ 2^53) and
@@ -1420,7 +1420,7 @@ function emitApplyDecimalExp(
  * Direction is taken from the sign of `L_TEXP` (the signed total exponent).
  * Used by `emitApplyDecimalExp` only for |totalExp| > 22, where a single
  * 10^|e| power would overflow/underflow — the per-step loop reaches subnormals
- * and saturates to ±Infinity gracefully, matching the pre-#2653 behaviour.
+ * and saturates to ±Infinity gracefully, matching the pre-#2654 behaviour.
  */
 function emitApplyExpResult(L_TEXP: number, L_COUNT: number, L_RESULT: number): Instr[] {
   return [

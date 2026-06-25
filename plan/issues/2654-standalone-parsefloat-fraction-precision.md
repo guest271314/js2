@@ -1,5 +1,5 @@
 ---
-id: 2653
+id: 2654
 title: "Standalone: parseFloat / Number(string) decimal fraction precision (1-ULP drift)"
 status: done
 completed: 2026-06-25
@@ -16,7 +16,7 @@ parent: 2160
 related: [2652, 1663, 1688]
 ---
 
-# #2653 — Standalone decimal-parse fraction precision
+# #2654 — Standalone decimal-parse fraction precision
 
 ## Problem
 
@@ -78,7 +78,7 @@ The legacy `emitApplyExp` step-loop is removed (its only callers migrated).
 - Net **+6 test262 rows**, zero regressions. (parseFloat's remaining
   `A1_T1/T3` "illegal cast" gaps are the ToString-of-primitive-arg issue fixed
   separately by #2652.)
-- `tests/issue-2653.test.ts` — 35 cases (parseFloat + Number + wasi + regression
+- `tests/issue-2654.test.ts` — 35 cases (parseFloat + Number + wasi + regression
   guards) green. Existing parse/number/template/concat suites (95 tests) green.
 
 ## Deferred (out of scope)
@@ -89,5 +89,5 @@ The legacy `emitApplyExp` step-loop is removed (its only callers migrated).
 
 ## Test Results
 
-Per-process host-vs-standalone fork scan + `tests/issue-2653.test.ts`: all
+Per-process host-vs-standalone fork scan + `tests/issue-2654.test.ts`: all
 within-precision decimal inputs now match the host parse exactly.
