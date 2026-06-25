@@ -2850,6 +2850,26 @@ function compileElementAssignment(
   const linU8Set = tryEmitLinearU8ElementSet(ctx, fctx, target, value);
   if (linU8Set !== null) return linU8Set;
 
+  // (#2667) Non-writable mapped arguments index: `arguments[i] = x` on a slot
+  // made non-writable by `Object.defineProperty(arguments,"<i>",{writable:false})`
+  // is dropped (§10.4.4 — OrdinarySet on a non-writable data property fails;
+  // sloppy mode does not throw). Detect the statically-resolvable literal-index
+  // case and emit a write-free no-op: evaluate the RHS for side effects and
+  // leave its value as the assignment-expression result.
+  if (
+    fctx.mappedArgsInfo?.nonWritableIndices &&
+    ts.isIdentifier(target.expression) &&
+    target.expression.text === "arguments"
+  ) {
+    const idxArg = target.argumentExpression;
+    const idxText = ts.isNumericLiteral(idxArg) ? idxArg.text : ts.isStringLiteral(idxArg) ? idxArg.text : undefined;
+    const argIndex = idxText !== undefined ? Number(idxText) : NaN;
+    if (Number.isInteger(argIndex) && fctx.mappedArgsInfo.nonWritableIndices.has(argIndex)) {
+      const valResult = compileExpression(ctx, fctx, value);
+      return valResult;
+    }
+  }
+
   // Handle ClassName[key] = value for static setter accessors and static properties (#848)
   if (ts.isIdentifier(target.expression)) {
     const objName = target.expression.text;

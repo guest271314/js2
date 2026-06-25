@@ -107,6 +107,16 @@ export function compileDeleteExpression(
     const idxText = ts.isNumericLiteral(idxArg) ? idxArg.text : ts.isStringLiteral(idxArg) ? idxArg.text : undefined;
     const argIndex = idxText !== undefined ? Number(idxText) : NaN;
     if (Number.isInteger(argIndex) && argIndex >= 0 && argIndex < fctx.mappedArgsInfo.paramCount) {
+      // (#2667) §10.4.4.5 + OrdinaryDelete: deleting a non-configurable mapped
+      // index FAILS — `delete arguments[i]` returns `false`, the property and
+      // its param mapping stay intact. Only a *successful* delete severs the
+      // map. Detect the statically-known non-configurable case (set earlier in
+      // this body by `Object.defineProperty(arguments,"<i>",{configurable:false})`)
+      // and emit the spec-correct `false` without touching `unmappedIndices`.
+      if (fctx.mappedArgsInfo.nonConfigurableIndices?.has(argIndex)) {
+        fctx.body.push({ op: "i32.const", value: 0 });
+        return { kind: "i32" };
+      }
       (fctx.mappedArgsInfo.unmappedIndices ??= new Set<number>()).add(argIndex);
     }
   }
