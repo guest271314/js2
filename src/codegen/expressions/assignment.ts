@@ -41,6 +41,7 @@ import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, skipTransparentExpressions, valTypesMatch } from "../shared.js";
 import { compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { findExternInfoForMember, patchStructNewForDynamicField } from "./extern.js";
+import { tryCompileFnctorPrototypeAssign } from "./fnctor-prototype.js";
 import { reserveAccessorSetDriver } from "../accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "../struct-accessor-closure.js";
 import {
@@ -2482,6 +2483,17 @@ function compilePropertyAssignment(
   value: ts.Expression,
 ): InnerResult {
   const objType = ctx.checker.getTypeAtLocation(target.expression);
+
+  // (#2660 S2) `F.prototype = rhs` whole-reassign on a user function constructor
+  // (standalone): store `rhs` (built as a native `$Object` when a plain literal)
+  // into the per-fnctor prototype global, instead of `__extern_set($closure,
+  // "prototype", …)` (which misses `ref.test $Object` and silently drops the
+  // write). Per-prop `F.prototype.p = v` is NOT here — it rides the read
+  // interception in compilePropertyAccess. Declines for classes/builtins/host.
+  {
+    const fnctorProtoWrite = tryCompileFnctorPrototypeAssign(ctx, fctx, target, value);
+    if (fnctorProtoWrite !== undefined) return fnctorProtoWrite;
+  }
 
   // #1456: Private method or getter-only accessor → TypeError on write.
   // Must run BEFORE any routing decisions because the receiver typing (e.g.

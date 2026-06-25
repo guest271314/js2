@@ -1,0 +1,3 @@
+# Build artifacts produced by run-p3-b0.sh (regenerated on demand).
+*.wasm
+.stream-echo.err

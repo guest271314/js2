@@ -2098,6 +2098,15 @@ harness lived in `.tmp/` (gitignored). Issue stays `in-progress`; lock released.
 
 # M3 — B-fnctor ARCHITECT SPEC: the escape-analysis gate for the `new F()` `$Object`-reconstruct (option ii-a) (2026-06-25, sd-protoextend, /architect-spec, max-reasoning)
 
+> ➡️ **CANONICAL HOME: #2660.** The B-fnctor escape-analysis gate + `new F()`
+> `$Object`-reconstruct is implemented under **#2660** (`plan/issues/2660-fnctor-instance-dynamic-use-escape-gate.md`),
+> which was filed in parallel as the general value-rep infra and carries the
+> authoritative spec + slice plan (S1 inert gate LANDED; S2 per-fnctor prototype
+> `$Object` LANDED; S3 reconstruct = the floor-risk slice; S4 = this B-fnctor
+> cluster lands). This section is the original (duplicated) #2580 spec, kept for
+> the WAT bisections; do the WORK under #2660. (Verified 2026-06-26: #2660 S1 ==
+> this spec's "B-f0", already merged.)
+
 > SPEC-ONLY (design deliverable — no source changed). Every file:line below was
 > **re-verified against current `main`** (`8a8e8c04a0aa`), not carried from the
 > prior sessions' bisections — this issue's defining lesson is that three earlier

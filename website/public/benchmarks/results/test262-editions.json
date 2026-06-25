@@ -1,17 +1,17 @@
 [
   {
     "edition": "≤ ES3",
-    "pass": 261,
-    "fail": 13,
+    "pass": 265,
+    "fail": 9,
     "ce": 0,
     "skip": 0,
     "total": 274,
-    "pct": 95
+    "pct": 97
   },
   {
     "edition": "ES5",
-    "pass": 9686,
-    "fail": 3267,
+    "pass": 9742,
+    "fail": 3211,
     "ce": 133,
     "skip": 0,
     "total": 13086,
@@ -19,9 +19,9 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11121,
-    "fail": 4096,
-    "ce": 180,
+    "pass": 11151,
+    "fail": 4064,
+    "ce": 182,
     "skip": 0,
     "total": 15397,
     "pct": 72
@@ -46,8 +46,8 @@
   },
   {
     "edition": "ES2018",
-    "pass": 3542,
-    "fail": 679,
+    "pass": 3543,
+    "fail": 678,
     "ce": 30,
     "skip": 0,
     "total": 4251,
@@ -73,8 +73,8 @@
   },
   {
     "edition": "ES2021",
-    "pass": 332,
-    "fail": 123,
+    "pass": 333,
+    "fail": 122,
     "ce": 8,
     "skip": 0,
     "total": 463,
@@ -83,8 +83,8 @@
   {
     "edition": "ES2022",
     "pass": 3119,
-    "fail": 1071,
-    "ce": 44,
+    "fail": 1070,
+    "ce": 45,
     "skip": 0,
     "total": 4234,
     "pct": 74

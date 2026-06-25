@@ -3,7 +3,7 @@ id: 1551
 title: "spec gap: SuperCall — argument-list evaluation order, spread getter side-effects, uninitialized-this PutValue"
 status: ready
 created: 2026-05-20
-updated: 2026-06-19
+updated: 2026-06-26
 priority: medium
 feasibility: medium
 reasoning_effort: high
@@ -17,6 +17,56 @@ related: [1455, 1456]
 note: "Verified 2026-05-21: compileSuperPropertyAccess at new-super.ts:258, compileSuperCall at class-bodies.ts:1629. No src/codegen/expressions/object.ts file exists — that ref was speculative."
 ---
 # #1551 — `super(...)` / `super[expr]` evaluation order and abrupt-completion handling
+
+## VERIFIED FINDINGS — abrupt completion root cause (2026-06-26, dev-conformance)
+
+Deep-traced sub-case (1) `call-arg-evaluation-err.js` on current `main` (probes,
+not issue text). The bug is **`super(...)` inside a `try` ESCAPES the
+try-region**, NOT an arg-eval or exception-identity problem:
+
+| scenario | result | want |
+|---|---|---|
+| plain ctor `try { throw x } catch(e){…}` (no super) | catches, `e === x` ✓ | works |
+| `super(thrower())` with **no** surrounding try | `new C()` throws OUT; code after super does NOT run ✓ | works |
+| `super(thrower())` **inside** `try { … } catch` | catch **never runs**, execution **continues past super** (`reached = 1`, `caught` unset) ✗ | catch should run with the original throw |
+
+So the wasm exception from the super-arg call is raised, but it is **not routed
+through the enclosing `try_table`** — the special-cased super-call in the
+constructor body is emitted **outside the try-region nesting** of the
+surrounding `try` statement.
+
+### Where to fix (file:line)
+
+- `compileSuperCall` — `src/codegen/class-bodies.ts:2809` (user-parent path
+  compiles args via `compileExternrefArgument` at ~:2907, then calls
+  `${parent}_init`; builtin-parent path at ~:2838 via `__new_<Parent>`).
+- Invoked from the constructor-body super handler at
+  `src/codegen/class-bodies.ts:1910` (and the sibling sites :717, :2773).
+- The fix is in how a `try` statement in the constructor body wraps the
+  super-call lowering: the super call (arg eval + parent init/`__new_`) must be
+  emitted **inside** the `try_table` body of the enclosing `try`, so a thrown
+  super-arg is caught by the user's `catch`. Today it lands outside that region.
+  Confirm against the constructor-body statement compiler's handling of the
+  implicit/explicit `super()` ExpressionStatement vs. ordinary statements inside
+  a `try`.
+
+### Secondary quirk to probe (likely a separate follow-up)
+
+A **side-effecting super-arg call's global mutation is not visible**: for
+`var calls = 0; function f(){ calls++; return 42; } class C extends P {
+constructor(){ super(f()); } }`, the parent received `42` (so `f()` ran and its
+value flowed) but the module-global `calls` read back as `0` — the `calls++`
+side effect inside the super-arg call did not persist/sync. Smells like a
+separate super-arg-call global-visibility / ordering issue distinct from the
+try-region escape; verify before bundling.
+
+### Status
+
+Verified-tractable but `reasoning_effort: high` (intricate constructor +
+exception-region codegen). Characterized + handed off (verify-first) rather than
+forcing a fragile partial. The two other sub-cases below (spread-getter
+side-effects, uninitialized-`this` PutValue) remain as originally specced.
+
 
 ## Problem
 

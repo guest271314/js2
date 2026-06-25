@@ -1,7 +1,9 @@
 ---
 id: 2678
 title: "Date.parse / new Date(str) are NaN stubs in HOST mode — native parser is standalone/WASI-only (needs js-string externref support)"
-status: ready
+status: done
+completed: 2026-06-26
+assignee: ttraenkler/dev-conformance
 created: 2026-06-25
 priority: medium
 feasibility: medium
@@ -74,3 +76,25 @@ otherwise. Two reasons it was gated off for host:
 - This is the bigger of the two #2671 Date gaps; `getYear` (Annex B §B.2.4, the
   other gap) was a quick win done separately under #2671.
 - Dual-mode rule: host-mode wiring must not disturb the standalone native path.
+
+
+## Resolution (2026-06-26)
+
+Fixed via a dual-mode HOST fast-path. `Date.parse(...)` and `new Date(<string>)`
+in host mode now delegate to the JS `Date.parse` through a new host import
+`__date_parse_host(externref) -> f64` (runtime.ts), registered **up-front** by a
+new `collectDateParseHostImports` scan in `declarations.ts` (state flag
+`dateParseHostNeeded`, scan + finalize) so the funcidx is stable and the #2043
+late-import shift the gate comment cited is avoided. The two call sites
+(`calls.ts` Date.parse, `new-super.ts` new Date(str)) gained a host branch ahead
+of the old NaN stub. Host strings are real `wasm:js-string` externrefs and the JS
+`Date.parse` is more format-complete than the native ISO parser.
+
+**Standalone/WASI unchanged** — the scan only sets the flag in host mode, so the
+native `__date_parse` (#2164) stays the only path there; verified no
+`__date_parse_host` import leaks into a `target: standalone`/`wasi` module. The
+host-only import is not in the strict allowlist (no #1524 budget growth).
+
+Guarded by `tests/issue-2678.test.ts` (9 cases: ISO + date-only parse, variable
+arg, invalid→NaN, no-arg→NaN, new Date(str), numeric construction unaffected,
+Invalid Date). The issue-2164 standalone Date suite stays green.

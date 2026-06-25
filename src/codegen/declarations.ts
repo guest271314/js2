@@ -72,6 +72,7 @@ import {
 } from "./registry/types.js";
 import { computeElidableTopLevelTdzNames } from "./expressions/identifiers.js";
 import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.js";
+import { isFnctorPrototypeAssignTarget } from "./expressions/fnctor-prototype.js";
 import { compileExpression, compileStatement } from "./shared.js";
 import { expandLinearU8ParamTypes } from "./linear-uint8-signatures.js";
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
@@ -96,6 +97,10 @@ interface UnifiedCollectorState {
   mathNeedsToUint32: boolean;
   // -- collectParseImports --
   parseNeeded: Set<string>;
+  // (#2678) HOST-mode `Date.parse(...)` / `new Date(<string>)` → host import
+  // `__date_parse_host` (delegates to JS Date.parse). Registered up-front to
+  // avoid the #2043 late-import shift; standalone/WASI use the native parser.
+  dateParseHostNeeded: boolean;
   // -- collectURIImports --
   uriNeeded: Set<string>;
   // -- collectStringStaticImports --
@@ -194,6 +199,7 @@ export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedC
     mathNeeded: new Set(),
     mathNeedsToUint32: false,
     parseNeeded: new Set(),
+    dateParseHostNeeded: false,
     uriNeeded: new Set(),
     needsFromCharCode: false,
     needsFromCodePoint: false,
@@ -520,6 +526,39 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       node.operatorToken.kind === ts.SyntaxKind.AsteriskAsteriskEqualsToken)
   ) {
     state.mathNeeded.add("pow");
+  }
+
+  // ── collectDateParseHostImports (#2678) ──
+  // HOST mode only — standalone/WASI use the native `__date_parse` emitted at
+  // the call site. `Date.parse(...)` (member call) and `new Date(<string>)`
+  // both delegate to the host JS `Date.parse` via `__date_parse_host`.
+  if (!ctx.standalone && !ctx.wasi) {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === "Date" &&
+      node.expression.name.text === "parse" &&
+      node.arguments.length >= 1
+    ) {
+      state.dateParseHostNeeded = true;
+    }
+    if (
+      ts.isNewExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "Date" &&
+      node.arguments &&
+      node.arguments.length === 1
+    ) {
+      try {
+        const argType = ctx.checker.getTypeAtLocation(node.arguments[0]!);
+        if (argType.flags & ts.TypeFlags.StringLike || isStringType(argType)) {
+          state.dateParseHostNeeded = true;
+        }
+      } catch {
+        // type resolution may fail — skip (a runtime ToString path still applies)
+      }
+    }
   }
 
   // ── collectParseImports ──
@@ -1266,6 +1305,16 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     if (parseNative.size > 0) {
       emitNativeParseNumber(ctx, parseNative);
     }
+  }
+
+  // ── collectDateParseHostImports finalize (#2678) ──
+  // HOST mode: register `__date_parse_host(externref) -> f64` up-front so the
+  // call sites (Date.parse / new Date(<string>)) get a stable funcidx without a
+  // mid-body late-import shift (#2043). Standalone/WASI never reach here (the
+  // scan only sets the flag for host mode); they keep the native `__date_parse`.
+  if (state.dateParseHostNeeded && !ctx.standalone && !ctx.wasi && !ctx.funcMap.has("__date_parse_host")) {
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }]);
+    addImport(ctx, "env", "__date_parse_host", { kind: "func", typeIdx });
   }
 
   // ── collectURIImports finalize ──
@@ -3800,6 +3849,17 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         // __module_init so the CPR write-arm (compileAssignment) captures the
         // override closure. Gated — byte-identical when no override exists.
         if (ctx.arrayIteratorMaybeOverridden && isArrayProtoIteratorAssignTarget(expr.left)) {
+          ctx.moduleInitStatements.push(stmt);
+          continue;
+        }
+        // (#2660 S2) `F.prototype = …` / `F.prototype.p = …` for a user fnctor `F`
+        // (standalone): the root identifier `F` is a function, NOT a module
+        // global, so the generic check below drops the statement and the
+        // prototype write never reaches compilePropertyAssignment (the S2
+        // interception). Keep it in __module_init so the per-fnctor prototype
+        // `$Object` is populated. Host/GC mode is byte-identical (gated, dropped
+        // as before). Mirrors the Array.prototype CPR keep-in-init above.
+        if (ctx.standalone && isFnctorPrototypeAssignTarget(ctx, expr.left)) {
           ctx.moduleInitStatements.push(stmt);
           continue;
         }
