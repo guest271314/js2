@@ -2087,8 +2087,66 @@ export function coerceType(
                 } as Instr,
               ];
             };
-            for (const instr of buildDispatch(0)) {
-              fctx.body.push(instr);
+            // (#2679) The valueOf field stores the method as an
+            // `__obj_meth_tramp_*` trampoline whose `this` is read from the
+            // `__current_this` module global (NOT param-0 — param-0 is the
+            // closure self/env). This inline ToNumber dispatch `call_ref`s that
+            // trampoline directly without installing `__current_this`, so a
+            // `valueOf(){…this…}` saw a stale receiver (`+a`/`Number(a)`/`a*1`
+            // returned the wrong `this`; only the §7.1.1.1 string-hint path,
+            // which static-dispatches the raw method with the receiver as
+            // param-0, was correct). Install `__current_this` = the receiver
+            // (§7.1.1.1 step 4.b `Call(method, O)`) around the dispatch and
+            // restore it afterward (nesting-safe). Arrow-valued `valueOf`
+            // captures `this` lexically and never reads `__current_this`, so
+            // this is a no-op for that case.
+            //
+            // The `__current_this` global is registered eagerly during setup
+            // (`ensureCurrentThisGlobal` in index.ts), so we read the cached
+            // `ctx.currentThisGlobalIdx` directly here — importing
+            // `ensureCurrentThisGlobal` from `nested-declarations.ts` would
+            // create a module-init import cycle (it imports `getVecInfo` back
+            // from this file) and a TDZ ReferenceError. If unset (-1), skip
+            // threading (no worse than the legacy behaviour).
+            if (ctx.currentThisGlobalIdx >= 0) {
+              const prevThisLocal = allocTempLocal(fctx, { kind: "externref" });
+              const tpResultLocal = allocTempLocal(fctx, { kind: "f64" });
+              // (#2679 fix) Read `ctx.currentThisGlobalIdx` FRESH at each global
+              // op — do NOT cache it across `buildDispatch(0)`. Compiling the
+              // valueOf dispatch can register a new global (verified: the
+              // `__current_this` slot shifts +1 mid-dispatch), and the
+              // late-import/global shift pass bumps BOTH `ctx.currentThisGlobalIdx`
+              // AND the already-emitted save/install instructions in `fctx.body`
+              // in lockstep — but a captured local would go stale, so the RESTORE
+              // `global.set` would target the pre-shift index (now a different,
+              // f64-typed global), storing an externref into an f64 global →
+              // invalid Wasm ("global.set expected type f64, found externref" —
+              // the 30-test regression that park-held #2078). Reading fresh keeps
+              // the restore aligned with the shifted save/install.
+              // (`project_type_index_shift_and_deadelim`: never cache a shiftable
+              // index across a sub-compilation.)
+              // save __current_this, install the receiver (struct → externref)
+              fctx.body.push({ op: "global.get", index: ctx.currentThisGlobalIdx });
+              fctx.body.push({ op: "local.set", index: prevThisLocal });
+              fctx.body.push({ op: "local.get", index: structLocal });
+              fctx.body.push({ op: "extern.convert_any" });
+              fctx.body.push({ op: "global.set", index: ctx.currentThisGlobalIdx });
+              // dispatch (leaves f64 on stack) → capture
+              for (const instr of buildDispatch(0)) {
+                fctx.body.push(instr);
+              }
+              fctx.body.push({ op: "local.set", index: tpResultLocal });
+              // restore __current_this (FRESH index — see note above), then
+              // re-push the captured result
+              fctx.body.push({ op: "local.get", index: prevThisLocal });
+              fctx.body.push({ op: "global.set", index: ctx.currentThisGlobalIdx });
+              fctx.body.push({ op: "local.get", index: tpResultLocal });
+              releaseTempLocal(fctx, prevThisLocal);
+              releaseTempLocal(fctx, tpResultLocal);
+            } else {
+              for (const instr of buildDispatch(0)) {
+                fctx.body.push(instr);
+              }
             }
             // (#1989) Restore the re-entrancy guard before returning. Without
             // this, coercing the FIRST of two struct operands (e.g. `a < b`)
