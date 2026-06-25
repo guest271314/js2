@@ -142,3 +142,39 @@ forEach/map/every/some/filter/reduce/indexOf/lastIndexOf). Coordinate (B) with
 (sd-2674b/sd-2679) — inherited-index Get likely bottoms out in the same
 `__current_this`/receiver-threading + dynamic `[[Get]]` cluster.
 
+
+## Slice A attempt + REVERT — holes-skip is NOT separable from prototype HasProperty (sd-2670, 2026-06-25)
+
+Implemented a compiled-`$Vec` HOF hole-SKIP for forEach/filter/some/every
+(`wrapHoleSkip` + a `br`-depth-rebasing `shiftEscapingBr`, gated on
+`usesArrayHoles && externref`). All local gates + 9 new equivalence cases passed,
+PR-level CI was green — **but the merge_group floor caught a REAL js-host
+regression** (run 28200774875, PR #2080): **net −3, 0 improvements, 3 regressions**:
+- `every/15.4.4.16-7-c-i-22.js`, `some/15.4.4.17-7-c-i-22.js`,
+  `filter/15.4.4.20-9-c-i-22.js`
+
+**Root cause:** all three do `Object.defineProperty(Array.prototype, "0",
+{set…})` then `[, ].<m>(cb)`. Per spec, `HasProperty(O, 0)` walks the **prototype
+chain**, so the inherited index makes the literal hole *present* → the callback
+MUST fire (with `undefined`, since the inherited accessor has no getter). A purely
+**local** `ref.test $Hole` skip ignores inherited props and wrongly skips. The
+pre-change "visit hole → undefined" (S1) behaviour coincidentally produced the
+correct observable for exactly these tests.
+
+**Why slice A cannot stand alone (the real lesson):** in the authoritative
+js-host lane the skip produced **zero** test262 improvements, because the
+test262 hole tests overwhelmingly construct holes via `new Array(N)` / `delete`
+(deferred to A2), while the *literal-elision* ones that exist are precisely the
+inherited-prototype edge where local skip regresses. So holes-skip is **net-zero
+upside / net-negative downside** until it is built on a **prototype-aware
+HasProperty over the receiver** — i.e. the slice-B machinery
+(#2674/#2679 member-get-dispatch + #2580). The standalone lane in that run was
+stale-baseline drift (a9d7be6: 9389 regress / 1046 improve), and the hole fixes
+*did* appear among its 73 Array improvements — confirming the code is correct,
+just mis-sequenced.
+
+**Disposition:** implementation reverted; this PR carries the verification +
+re-slice record only. The `wrapHoleSkip`/`shiftEscapingBr` helpers (correct and
+reusable) are recoverable from PR #2080 commit `509351a45` when holes are picked
+up AFTER slice B lands. **Re-sequenced:** fold "A — holes-skip" into / after
+slice B (prototype-chain HasProperty), not before it.
