@@ -89,3 +89,56 @@ describe("#2663 Slice 1 — dynamic with READ", () => {
     expect(exp.test()).toBe(1);
   });
 });
+
+describe("#2663 Slice 2 — dynamic with WRITE", () => {
+  it("writes a present property through the with object", async () => {
+    const exp = await run(`var o = { x: 1 }; with (o) { x = 9; } return o.x;`);
+    expect(exp.test()).toBe(9);
+  });
+
+  it("an assignment expression in a with yields the RHS value", async () => {
+    const exp = await run(`var o = { x: 1 }; var r; with (o) { r = (x = 5); } return r;`);
+    expect(exp.test()).toBe(5);
+  });
+
+  it("an absent name writes the outer binding, not the object", async () => {
+    // "x" must NOT become an own key of o (HasBinding miss → outer var write).
+    const exp = await run(`var x = 1; var o = { y: 0 }; with (o) { x = 7; } return (("x" in o) ? 0 : x);`);
+    expect(exp.test()).toBe(7);
+  });
+
+  it("nested write cascades to the outer with object", async () => {
+    const exp = await run(`var a = { p: 1 }; var b = { q: 2 }; with (a) { with (b) { p = 8; } } return a.p;`);
+    expect(exp.test()).toBe(8);
+  });
+
+  it("the RHS is evaluated exactly once", async () => {
+    const exp = await run(
+      `var n = 0; function inc() { n = n + 1; return n; } var o = { x: 0 }; with (o) { x = inc(); } return n;`,
+    );
+    expect(exp.test()).toBe(1);
+  });
+
+  it("inner-object write shadows the outer for a shared name", async () => {
+    const exp = await run(
+      `var a = { v: 1 }; var b = { v: 2 }; with (a) { with (b) { v = 9; } } return a.v * 10 + b.v;`,
+    );
+    // a.v stays 1 (inner b shadows), b.v becomes 9 → 1*10 + 9 = 19.
+    expect(exp.test()).toBe(19);
+  });
+
+  // (#2061 regression guard) §13.15.2: the LHS Reference (HasBinding) is resolved
+  // BEFORE the RHS. test262 S11.13.1_A6_T3 — "PutValue uses the initially-created
+  // Reference even if a more local binding is available". Here `x` is NOT on
+  // `scope` when the assignment's Reference is resolved, so the write goes to the
+  // OUTER `x`, even though the RHS `(scope.x = 2, 1)` adds `x` to `scope` mid-eval.
+  it("a write's binding is resolved before the RHS (PutValue pre-RHS reference)", async () => {
+    const exp = await run(
+      `var x = 0; var scope = {}; with (scope) { x = (scope.x = 2, 1); } return (scope.x === 2 ? 10 : 0) + (x === 1 ? 1 : 0);`,
+    );
+    // scope.x === 2 (set by the RHS comma-expr) AND x === 1 (outer x, the pre-RHS
+    // reference) → 10 + 1 = 11. Pre-fix: the post-RHS HasBinding saw the newly
+    // added scope.x and mis-routed → wrong/throw.
+    expect(exp.test()).toBe(11);
+  });
+});
