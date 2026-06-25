@@ -1,7 +1,8 @@
 ---
 id: 2668
 title: "ES5: Object.defineProperty/defineProperties descriptor fidelity residual (~788 fails — largest ES5 cluster)"
-status: ready
+status: in-progress
+assignee: ttraenkler/sd-2668a
 created: 2026-06-25
 updated: 2026-06-25
 priority: high
@@ -79,3 +80,74 @@ architect for an implementation spec before dispatch. Likely a focused rewrite
 of the shared `[[DefineOwnProperty]]` helper rather than per-method patches.
 Consider slicing: (a) data-descriptor matrix, (b) accessor + data<->accessor
 switch, (c) Array-exotic length/index. Each slice is independently shippable.
+
+## Slice A — landed (sd-2668a, host mode)
+
+**Status:** Slice A merged; the issue stays open for Slices B (accessors),
+C (array-`length` exotic) and D (cleanup). The full architect plan lives in
+PR #2068 (`arch-2668-spec`).
+
+### Verify-first finding — the real dominant bug differs from the spec framing
+
+The architect plan described a struct fast-path ↔ runtime-validator divergence
+for the *inline-literal* path. Verifying per-file on current main (isolated
+runs; the in-process batch driver is unreliable here — fork-state poisoning
+inflated the apparent `compile_error` bucket to ~1021/1131, but each flagged
+file PASSES in isolation) showed the inline-literal GOPD round-trip already
+works. The genuine large bucket is the **`15.2.3.6-3-*` family where the
+descriptor is supplied as a non-literal expression** — a variable
+(`var d = {value:1}; Object.defineProperty(o, k, d)`), an arbitrary host object
+(`Math`), a `Date` instance, etc.
+
+Two root causes, both fixed:
+
+1. **No host route for dynamic descriptors.** The inline fast paths in
+   `compileObjectDefineProperty` (`src/codegen/object-ops.ts`) only fire when
+   `descArg` is a *syntactic* object literal. Any other descriptor expression
+   fell through to `emitExternDefinePropertyNoValue`, which has no descriptor to
+   read and silently dropped the value + every attribute. **Fix:** in host mode,
+   route a non-object-literal `descArg` to `emitDefinePropertyDescRuntime` →
+   `__defineProperty_desc` (full ToPropertyDescriptor +
+   `_validatePropertyDescriptor`, §10.1.6.3), mirroring the standalone lane's
+   existing `__obj_define_from_desc` route.
+
+2. **Typed-field value not synced.** A `const o: any = {}` whose property is
+   later defined gets a *typed* struct shape (e.g. `(struct (field $property …))`)
+   because the checker widens it; the member read `o.property` ref-tests as that
+   struct type and lowers to a static `struct.get`, which never consults the
+   sidecar. The runtime descriptor appliers wrote only the sidecar, so the
+   static read returned the field's stale initializer. **Fix:** new
+   `_structFieldWriteback` (`src/runtime.ts`) mirrors a defined data VALUE into
+   the real struct field via the compiled `__sset_<key>` export, called from
+   `__defineProperty_desc` and `__defineProperty_value` (value case). It does
+   NOT re-run `_safeSet`'s flag enforcement — the appliers already validated.
+
+3. **For-in didn't honor `enumerable:false` on a typed field.** `__for_in_keys`
+   listed struct field names straight from the shape. **Fix:** consult
+   `_wasmPropDescs` and drop a field whose descriptor is `DEFINED && !ENUMERABLE`.
+
+### Out of scope / deferred (verified pre-existing, not regressions)
+
+- Direct read of a descriptor `value` resolved through the descriptor's
+  *prototype chain* (`Date.prototype.value`; `15.2.3.6-3-145-1`) — narrow.
+- `{ configurable: <object> }` ToBoolean + delete interaction
+  (`15.2.3.6-3-118`) — narrow.
+- `Object.keys` over a mixed typed-struct + dynamic-prop object drops the
+  dynamic prop even without defineProperty (separate `Object.keys` enumeration
+  bug; pre-existing on main).
+- `Object.defineProperty(arguments, …)` mapped-arguments rows
+  (`15.2.3.6-4-292`) — mapped-args territory (#1511/#2667).
+- The `#2130 delete-then-re-add → "in" true again` vitest fails on base main
+  too (confirmed by reverting this PR's src and re-running) — pre-existing.
+
+### Test results
+
+- New: `tests/issue-2668.test.ts` (9 cases, all green) — dynamic-descriptor
+  value application + GOPD round-trip + `Math`-as-descriptor + ToBoolean attr
+  + default-attrs + for-in enumerability honoring (inline & dynamic) + the two
+  no-regression fast-path cases.
+- Regression: all 52 existing `defineProperty` cases
+  (`issue-1460/1629*`) green; broad object suites
+  (`issue-2017/2042/1364a/1364b/2580-m3-bacc/delete-operator/...`) green.
+- Conformance row-delta: validated via the full `merge_group` floor (core
+  define/read path is broad-impact).
