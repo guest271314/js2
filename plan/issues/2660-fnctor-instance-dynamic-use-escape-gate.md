@@ -287,6 +287,39 @@ untouched). Module globals are append-only/index-stable, so minting one mid-comp
 carries no late-import funcidx-shift hazard (#2043). The closed `$__fnctor_<Name>`
 struct shape is NOT changed (no #1100/#2009 canonicalization re-entry).
 
+### Standalone-floor EJECT (PR #2087 v1) + the RECONSTRUCT-GATE fix
+
+The first S2 push (interception fired for **every** user fnctor's `.prototype`)
+ejected the merge_group standalone floor (#2097): **49 standalone pass→fail
+regressions, net −40** (tolerance −15). The global net-regression gate PASSED
+(net +1) because the host lane masked it — the standalone floor is the only gate
+that catches a standalone-specific drop. Two clusters, both an unscoped
+interception clobbering a WORKING prototype path (bisected per-process):
+
+- **5 `Array/prototype/{concat,filter,map,slice,splice}/create-proxy.js`** — the
+  READ interception. `var Ctor = function(){}` is used as a `Symbol.species`
+  constructor; `Object.getPrototypeOf(result)` must equal the runtime's
+  `Ctor.prototype`, but the interception returned a DIFFERENT object (the empty
+  per-fnctor global) → identity assertion failed.
+- **44 `Iterator/prototype/*` + `Iterator/*`** — the keep-in-init. `sta.js` has
+  `Test262Error.prototype.toString = function(){}`; keep-in-init made that
+  previously-dropped top-level statement EXECUTE, perturbing module-init for the
+  iterator-helper harness ("[object Object] is not iterable").
+
+**Root cause:** S2 fired for fnctors that already have a working prototype path
+(species `Ctor` never `new`'d in source; `Test262Error` is `keep-typed`). **Fix —
+the RECONSTRUCT-GATE:** `resolveUserFnctorName` now additionally requires the
+fnctor be in the S1 escape-gate `approvedNames` set (≥1 `reconstruct`-classified
+`new F()` site) — exactly the constructors S3 reconstructs and whose prototype
+needs to be a readable `$Object`. A `keep-typed` / `keep-static` / never-`new`'d
+function keeps its existing prototype behaviour. The narrowing is a strict subset
+of the prior firing (the 49 regressed files were ALL non-reconstruct, so
+reconstruct-firing caused none of them), so it cannot introduce new regressions.
+**Verified: all 49 previously-regressed files now pass (49/0) per-process**;
+`approvedNames` is computed at index.ts:1076 (before collectDeclarations + codegen,
+so it is always set for the read/write/keep-init gates). S2's unit tests now arm
+`Con` as a reconstruct fnctor (`new Con()` + a dynamic instance read).
+
 ### Validation
 
 New `tests/issue-2660-s2-fnctor-prototype-object.test.ts` (11 standalone cases:

@@ -57,9 +57,20 @@ export function resolveUserFnctorName(ctx: CodegenContext, expr: ts.Expression):
   // (not a class/arrow/builtin), so do NOT pre-gate on `ts.isIdentifier` —
   // `(Con as any).prototype` must still resolve to `Con`.
   const sym = resolveFnctorSymbol(ctx.checker, expr);
+  if (!sym) return undefined;
+  // RECONSTRUCT-GATE (#2660 S2): only materialize the per-fnctor prototype
+  // `$Object` for a constructor S3 will reconstruct (≥1 `reconstruct`-classified
+  // `new F()` site). A `keep-typed` / `keep-static` / never-`new`'d function keeps
+  // its existing prototype behaviour — an UNSCOPED interception clobbered working
+  // paths: the species `Ctor.prototype` IDENTITY in `Array/prototype/*/create-proxy`
+  // (Ctor is never `new`'d in source), and `Test262Error.prototype.toString` once
+  // the keep-in-init made it execute (Test262Error is `keep-typed`). Both ejected
+  // the standalone floor (−40). Gate on the S1 escape-gate result (computed at
+  // index.ts:1076, before collectDeclarations + codegen, so it is always set).
+  if (!ctx.fnctorEscapeGate?.approvedNames.has(sym.name)) return undefined;
   // Key by the stable symbol name so the WRITE site (`F.prototype = …`) and the
   // READ site (`Object.create(F.prototype)`) resolve to the SAME global.
-  return sym ? sym.name : undefined;
+  return sym.name;
 }
 
 /**

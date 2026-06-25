@@ -62,11 +62,23 @@ export interface FnctorEscapeGateResult {
   readonly sites: ReadonlyMap<ts.NewExpression, FnctorGateClass>;
   /** Sites approved for reconstruction (`reconstruct`) — the (A)∧(B) set. */
   readonly approved: ReadonlySet<ts.NewExpression>;
+  /**
+   * Fnctor symbol NAMES that have ≥1 `reconstruct`-classified `new F()` site —
+   * i.e. the constructors S3 will reconstruct as `$Object`. #2660 S2 gates its
+   * per-fnctor prototype `$Object` materialization on this set so it ONLY touches
+   * constructors whose instances need the `$proto` walk; a `keep-typed` /
+   * `keep-static` / never-`new`'d function (e.g. `Test262Error`, a species
+   * `Ctor` used only via `Object.getPrototypeOf`) keeps its existing prototype
+   * behaviour untouched (avoids the identity/harness regressions an unscoped
+   * interception caused).
+   */
+  readonly approvedNames: ReadonlySet<string>;
 }
 
 const EMPTY_RESULT: FnctorEscapeGateResult = {
   sites: new Map(),
   approved: new Set(),
+  approvedNames: new Set(),
 };
 
 /** A generic Array/Function method that, used as `m.call(recv,…)`, makes `recv` array-like-dynamic. */
@@ -242,6 +254,7 @@ function bindingOf(newExpr: ts.NewExpression): ts.Identifier | undefined {
 export function analyzeFnctorEscapeGate(checker: ts.TypeChecker, sourceFile: ts.SourceFile): FnctorEscapeGateResult {
   const sites = new Map<ts.NewExpression, FnctorGateClass>();
   const approved = new Set<ts.NewExpression>();
+  const approvedNames = new Set<string>();
 
   // 1. Collect every `new F()` whose callee is a fnctor.
   const newSites: { newExpr: ts.NewExpression; ctorSym: ts.Symbol }[] = [];
@@ -325,7 +338,10 @@ export function analyzeFnctorEscapeGate(checker: ts.TypeChecker, sourceFile: ts.
     else cls = "keep-static";
 
     sites.set(newExpr, cls);
-    if (cls === "reconstruct") approved.add(newExpr);
+    if (cls === "reconstruct") {
+      approved.add(newExpr);
+      approvedNames.add(ctorSym.name);
+    }
   }
 
   // 4. Optional inert logging (no effect on output).
@@ -339,5 +355,5 @@ export function analyzeFnctorEscapeGate(checker: ts.TypeChecker, sourceFile: ts.
     );
   }
 
-  return { sites, approved };
+  return { sites, approved, approvedNames };
 }
