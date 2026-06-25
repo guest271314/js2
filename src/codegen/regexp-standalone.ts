@@ -347,6 +347,89 @@ function staticStringValue(ctx: CodegenContext, expr: ts.Expression): string | n
   return null;
 }
 
+/**
+ * #2161 — recover a **compile-time-constant** string from a `new RegExp(...)`
+ * pattern / flags argument that `staticStringValue` is too narrow to fold.
+ *
+ * Returns the folded string, `undefined` for a statically-`undefined` operand
+ * (so the caller can apply the spec default), or `null` when the operand is not
+ * a constant we can resolve at compile time (genuinely dynamic — the caller
+ * keeps the existing refusal, which lowers to a runtime path).
+ *
+ * Folds, recursively:
+ *   - string literals / no-substitution templates (same as `staticStringValue`),
+ *   - `const`-bound identifiers initialised to a foldable constant,
+ *   - `a + b` string concatenation where both sides fold to strings, and
+ *   - parenthesised / `as` / `!` wrappers (via `stripStaticWrapper`).
+ *
+ * It intentionally does NOT fold template literals with substitutions, numeric
+ * coercions, or `let`/`var` / reassigned bindings — those stay dynamic. Bounded
+ * + behaviour-preserving: a pattern this resolves was already statically known,
+ * so routing it to the native engine cannot change a previously-correct result
+ * (the only prior behaviour for these forms was a runtime trap).
+ */
+function staticConstStringValue(
+  ctx: CodegenContext,
+  expr: ts.Expression,
+  seen: Set<ts.Node> = new Set(),
+): string | null | undefined {
+  const cur = stripStaticWrapper(expr);
+
+  // Direct literal / undefined — defer to the narrow helper first.
+  const direct = staticStringValue(ctx, cur);
+  if (direct !== null) return direct;
+
+  // `a + b` — fold when both operands fold to strings.
+  if (ts.isBinaryExpression(cur) && cur.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = staticConstStringValue(ctx, cur.left, seen);
+    if (typeof left !== "string") return null;
+    const right = staticConstStringValue(ctx, cur.right, seen);
+    if (typeof right !== "string") return null;
+    return left + right;
+  }
+
+  // `const`-bound identifier → follow its initialiser once.
+  if (ts.isIdentifier(cur)) {
+    const sym = ctx.checker.getSymbolAtLocation(cur);
+    const decl = sym?.valueDeclaration;
+    if (!decl || !ts.isVariableDeclaration(decl) || !decl.initializer) return null;
+    const list = decl.parent;
+    if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return null;
+    if (seen.has(decl.initializer)) return null;
+    seen.add(decl.initializer);
+    return staticConstStringValue(ctx, decl.initializer, seen);
+  }
+
+  return null;
+}
+
+/**
+ * #2161 — recover pattern + flags from a regex-literal first argument to
+ * `new RegExp(/…/f [, flags])` (the §22.2.3.1 copy-constructor form). When the
+ * second `flags` argument is provided it OVERRIDES the literal's own flags
+ * (step 4.b/7); when omitted (or statically `undefined`) the literal's flags
+ * are inherited (step 4.a). `flagsArg` must itself fold to a constant (or be
+ * absent/undefined); a dynamic flags argument returns `null` (stays refused).
+ */
+function staticRegExpLiteralCopy(
+  ctx: CodegenContext,
+  patternArg: ts.Expression,
+  flagsArg: ts.Expression | undefined,
+): StaticRegExpPatternFlags | null {
+  const unwrapped = stripStaticWrapper(patternArg);
+  if (unwrapped.kind !== ts.SyntaxKind.RegularExpressionLiteral) return null;
+  const text = (unwrapped as ts.RegularExpressionLiteral).text;
+  const lastSlash = text.lastIndexOf("/");
+  const litPattern = lastSlash >= 0 ? text.slice(1, lastSlash) : text;
+  const litFlags = lastSlash >= 0 ? text.slice(lastSlash + 1) : "";
+
+  if (flagsArg === undefined) return { pattern: litPattern, flags: litFlags };
+  const overrideFlags = staticConstStringValue(ctx, flagsArg);
+  if (overrideFlags === null) return null; // dynamic flags → stay refused
+  // `undefined` flags argument inherits the literal's flags (§22.2.3.1 step 4.a).
+  return { pattern: litPattern, flags: overrideFlags ?? litFlags };
+}
+
 interface StaticRegExpPatternFlags {
   pattern: string;
   flags: string;
@@ -372,8 +455,16 @@ function staticRegExpPatternFlags(ctx: CodegenContext, expr: ts.Expression): Sta
     if (!ts.isIdentifier(callee) || !isGlobalRegExpIdentifier(ctx, callee)) return null;
     const patternArg = unwrapped.arguments?.[0];
     const flagsArg = unwrapped.arguments?.[1];
-    const pattern = patternArg === undefined ? "" : staticStringValue(ctx, patternArg);
-    const flags = flagsArg === undefined ? "" : staticStringValue(ctx, flagsArg);
+    // #2161 — a regex-literal first arg is the §22.2.3.1 copy form.
+    if (patternArg !== undefined) {
+      const copy = staticRegExpLiteralCopy(ctx, patternArg, flagsArg);
+      if (copy !== null) return copy;
+    }
+    // #2161 — fold compile-time-constant pattern/flags (concat, const-bound)
+    // so a `const re = new RegExp("a"+"b","g")` binding is recognised as a
+    // backend-created receiver for downstream `re.test`/`re.exec`/etc.
+    const pattern = patternArg === undefined ? "" : staticConstStringValue(ctx, patternArg);
+    const flags = flagsArg === undefined ? "" : staticConstStringValue(ctx, flagsArg);
     if (pattern === null || flags === null) return null;
     return { pattern: pattern ?? "", flags: flags ?? "" };
   }
@@ -691,13 +782,30 @@ export function compileStandaloneRegExpConstructor(
   const patternArg = args[0];
   const flagsArg = args[1];
 
-  const pattern = patternArg === undefined ? "" : staticStringValue(ctx, patternArg);
+  // #2161 — §22.2.3.1 copy-constructor: `new RegExp(/…/f [, flags])`. The first
+  // argument is a regex literal; the pattern (and inherited-or-overridden flags)
+  // are statically known, so route to the native engine instead of refusing.
+  if (patternArg !== undefined) {
+    const copy = staticRegExpLiteralCopy(ctx, patternArg, flagsArg);
+    if (copy !== null) {
+      const syntaxMsg = hostRegExpSyntaxErrorMessage(copy.pattern, copy.flags);
+      if (syntaxMsg !== null && hasStandaloneRegExpEngine(ctx)) {
+        return emitThrowRegExpSyntaxError(ctx, fctx, syntaxMsg);
+      }
+      return compileStandaloneRegExpPattern(ctx, fctx, copy.pattern, copy.flags, node);
+    }
+  }
+
+  // #2161 — fold compile-time-constant patterns/flags (string-literal concat,
+  // `const`-bound literals) that `staticStringValue` alone is too narrow for;
+  // genuinely dynamic operands still resolve to `null` and keep the refusal.
+  const pattern = patternArg === undefined ? "" : staticConstStringValue(ctx, patternArg);
   if (pattern === null) {
     reportStandaloneRegExpUnsupported(ctx, patternArg, "dynamic constructor patterns");
     return null;
   }
 
-  const flags = flagsArg === undefined ? "" : staticStringValue(ctx, flagsArg);
+  const flags = flagsArg === undefined ? "" : staticConstStringValue(ctx, flagsArg);
   if (flags === null) {
     reportStandaloneRegExpUnsupported(ctx, flagsArg, "dynamic constructor flags");
     return null;
