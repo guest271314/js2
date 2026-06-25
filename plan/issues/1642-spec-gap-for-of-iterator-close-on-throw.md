@@ -1,12 +1,14 @@
 ---
 id: 1642
-title: "spec gap: for-of doesn't IteratorClose on body throw (portion of 389 fails)"
-status: ready
+title: "spec gap: for-of IteratorClose — RE-SCOPED to the residual 8 (return-method representation + generator-close)"
+status: in-progress
+assignee: ttraenkler/dev-conformance
 created: 2026-05-08
-updated: 2026-06-19
-priority: high
-feasibility: medium
-reasoning_effort: medium
+updated: 2026-06-26
+priority: medium
+feasibility: hard
+reasoning_effort: high
+needs_arch_spec: true
 task_type: bugfix
 area: codegen
 language_feature: iteration
@@ -14,6 +16,63 @@ goal: spec-completeness
 sprint: 66
 renumbered_from: 1348
 parent: 1328
+---
+
+## RE-SCOPE + VERIFIED FINDINGS (2026-06-26, dev-conformance)
+
+**The broad "389 fails / 48%->75%" framing is OBSOLETE.** Core IteratorClose
+landed since this issue was filed (2026-05-08). Verified on current `main`
+(re-grounded, not from issue text):
+
+- **Core close works**: close-on-throw, break, labeled-break, return-from-fn;
+  continue and normal completion correctly do NOT close. Both surviving
+  acceptance test262 files PASS via a faithful sta+assert harness:
+  `iterator-close-via-break.js`, `iterator-close-via-return.js`.
+- **Authoritative baseline** (`test262-current.jsonl`), for-of close cluster:
+  **7 pass / 8 fail.** The residual 8:
+  - 4 x `generator-close-via-{break,continue,return,throw}.js`
+  - 4 x `iterator-close-{non-throw-get-method-abrupt, non-throw-get-method-is-null,
+    return-emulates-undefined-throws-when-called, throw-get-method-abrupt}.js`
+
+### Root cause (this is why it needs an arch spec)
+
+The host `__iterator_return` (`src/runtime.ts:11143`) is itself spec-correct
+(GetMethod + IteratorClose: reads `iter.return` so a getter fires; null/undefined
+-> no-op; non-callable -> TypeError; abrupt propagates). The for-of close *call
+sites* are also wired (host-delegated path: break post-loop `loops.ts:4859`,
+throw try/catch_all `:4825`; struct path `:4436`). **The gap is that the user
+iterator's `return` method never reaches `__iterator_return` as a callable:**
+
+- An object-literal iterator `{ next(){}, return(){} }` (and a generator) lowers
+  to a **WasmGC struct**. At close time `__iterator_return` does
+  `iter.return ?? _sidecarGet(iter,"return") ?? __sget_return(iter)` -- but for
+  these structs the `return` **method field is not reachable** via `__sget_return`
+  (no such getter / methods are not readable data fields), so `ret` stays
+  undefined and close is a silent no-op. Minimal repro (closed=0, want 1):
+  `var iterable:any={}; iterable[Symbol.iterator]=function(){ return { next(){}, return(){ closed=1; } }; }; for (const _ of iterable) break;`
+  -- yet a **named** iterable-is-iterator literal
+  (`var it={[Symbol.iterator](){return this;}, next, return}`) DOES close (its
+  struct gets the field getter). So the bug is **iterator-object method-field
+  representation / `__sget_return` reachability**, not the close protocol.
+- `get return()` (accessor) cases additionally need the read to fire the getter
+  exactly once at close -- couples to the dynamic accessor read path.
+- **Generator-close** is a separate mechanism (the for-of must call the
+  generator's `.return()` so its `finally` runs); `function*` iterators do not
+  expose a struct `_return` the close path finds.
+- **Standalone**: `__iterator_return` native (`iterator-native.ts:213`) is a
+  **no-op stub** -- standalone close is entirely unimplemented (dual-mode gap).
+
+### Why arch spec (flagged to lead)
+
+The fix spans (a) iterator-object method-field representation + `__sget_return`
+emission, (b) accessor-`return` read semantics, (c) generator `.return()`
+integration with for-of close, (d) a real standalone-native `__iterator_return`,
+across the hot `loops.ts` close path + the iterator runtime, dual-mode. This
+overlaps the dynamic-object/method-representation ceiling (#2580 family).
+Recommend an architect `## Implementation Plan` (or senior-dev) before codegen.
+Slicing suggestion: (1) host-mode return-method reachability for the 4
+iterator-close edges first; (2) generator-close; (3) standalone-native.
+
 ---
 # #1348 — for-of / for-await-of: IteratorClose on abrupt completion
 
