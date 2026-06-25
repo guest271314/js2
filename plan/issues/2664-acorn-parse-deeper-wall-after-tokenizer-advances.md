@@ -1,8 +1,9 @@
 ---
 id: 2664
 title: "acorn parse() still hangs at a DEEPER wall after the tokenizer advances (#2656 fixed nextToken) — 8th dogfood blocker"
-status: in-progress
-assignee: ttraenkler/sd-2038
+status: done
+completed: 2026-06-26
+assignee: ttraenkler/dev-acorn
 sprint: 66
 created: 2026-06-25
 updated: 2026-06-25
@@ -272,3 +273,66 @@ but reads happen to compile late enough today (the `this.type` read in
 freezes an incomplete candidate set, apply the same deferred-fill treatment
 (`__get_member_<name>` dispatcher). Out of scope for #2664 (the write fix alone
 resolves the type-write asymmetry).
+
+## RESOLVED (2026-06-26, dev-acorn) — under-applied dynamic method dispatch returned null
+
+Re-probed on current main (#2664 write-fix #2064, #2674 #2072/#2075 read-fix all
+merged). `parse("")`/`parse(";")` returned a Program AST but `parse("x")`/
+`parse("var x = 1;")` still hung — a **distinct** wall past the type-write /
+read-dispatch classes (verify-first: pos advances, token identity matches —
+NOT the #2664/#2656/#2659 mechanisms).
+
+### Root cause (verify-first, instrumented acorn + WAT + host-bridge trace)
+
+The hot loop was `parseTopLevel`'s `while (this.type !== eof)` re-parsing the same
+statement forever. Numeric-coded source instrumentation pinned it: `parseStatement`
+reached `expr = this.parseExpression()` every iteration, but `parseExpression`'s
+**body never ran** — so `next()` was never called, the token never advanced, and
+the loop spun. The host method-call bridge (`__extern_method_call`) was invoked for
+`"parseExpression"` 4749×/window but **returned null**, while the SAME bridge ran
+`"parseStatement"`.
+
+The asymmetry is **arity**, not name resolution:
+- `_wrapWasmClosureUnknownArity` (src/runtime.ts) selected the wasm dispatcher by
+  the JS caller's `args.length`: `__call_fn_method_<args.length>`.
+- `__call_fn_method_N` (`emitClosureMethodCallExportN`, src/codegen/index.ts:3681)
+  **only dispatches closures of arity ≤ N** — a closure whose declared arity
+  EXCEEDS N is omitted and the dispatcher falls through to `ref.null.extern`
+  (null), passing each matched closure exactly its OWN arity (index.ts:3777).
+- `this.parseExpression()` (acorn calls it with **0 args**; declared **2 params**)
+  → `args.length=0` → `__call_fn_method_0` → the arity-2 `parseExpression`
+  closure is OMITTED → returns null → body never runs.
+- `this.parseStatement(a,b,c)` (3 args, 3 params) → `__call_fn_method_3` → matched
+  → runs. (This is why `parse("")`/`parse(";")` — which never call a method with
+  fewer args than its arity — worked, but `parse("x")` did not.)
+
+### Fix (src/runtime.ts — `_wrapWasmClosureUnknownArity`)
+
+For the METHOD path the bridge now dispatches at the **max available
+`__call_fn_method_N`** (which includes every closure of arity ≤ N), padding the
+missing args with `undefined` (JS missing-argument semantics). Each closure still
+receives exactly its own declared arity (extra padding is dropped at the wasm
+dispatch arm), so over-dispatching is safe. The free-function / extracted-method
+(`const f = o.m; f()`) path is UNCHANGED (keeps `args.length`-based dispatch so the
+low-arity-generator semantics noted at `_wrapForHost` hold). Broad-impact: this is
+general dynamic-method dispatch, validated through the full merge_group floor.
+
+### Verified
+- `tests/issue-2664-arity-dispatch.test.ts` (5/5): under-applied 2-param-via-0-arg
+  method runs (not null); deep under-applied chain; arity-matched control;
+  over-applied still gets only declared arity; parser-loop-shape terminates.
+- Reduced repro reproduces the bug: returns **null** on clean main, correct value
+  with the fix (control arity-matched case passes both ways).
+- Compiled acorn: the HANG is GONE. `parse("1")` / `parse("1;")` now return a
+  real `Program` AST (bodyLen 1) — the #1712 differential gate is runnable for
+  numeric/empty statements.
+- `issue-2664-member-set-dispatch-deferred-fill` (write-side), `issue-2659`,
+  `issue-2656`, `class-methods`, `generators` families: **no new failures** — the
+  2/17 pre-existing `string_constants` instantiation fails are IDENTICAL on clean
+  origin/main (harness limitation, not this change). tsc clean.
+
+### Remaining: 10th wall carved as #2681
+`parse("x")` / `parse("var x = 1;")` (the IDENTIFIER path, now reachable since
+`parseExpression` runs) THROW a `WebAssembly.Exception` — acorn's `unexpected()`
+fires on a valid `name` token. A DISTINCT mechanism (throw, not hang). Tracked as
+**#2681** (10th dogfood blocker) with the raise-site localization + method.
