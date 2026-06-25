@@ -18,7 +18,7 @@ import { addFuncType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
 import { compileExpression, ensureAnyHelpers, isAnyValue } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
-import { findWithBinding } from "./with-scope.js";
+import { emitDynamicWithDelete, findWithBinding, resolveWithBinding } from "./with-scope.js";
 
 // ── Delete expression ─────────────────────────────────────────────────
 
@@ -85,6 +85,34 @@ export function compileDeleteExpression(
   }
 
   if (ts.isIdentifier(inner)) {
+    // (#2663 Slice 3) `delete name` inside a dynamic `with`: if the with-object
+    // has the binding ⇒ delete the object property (configurability-aware
+    // result); else ⇒ cascade to the next-outer with, then to the bare-variable
+    // case (variables are not deletable ⇒ false). §13.5.1.2 / §8.5.2.
+    const ident = inner;
+    const emitOuterDelete = (): void => {
+      const res = resolveWithBinding(fctx, ident.text);
+      if (res?.kind === "dynamic") {
+        const scopes = fctx.withScopes!;
+        const matchedIdx = scopes.lastIndexOf(res.scope);
+        emitDynamicWithDelete(ctx, fctx, res.scope, ident.text, () => {
+          const saved = fctx.withScopes;
+          fctx.withScopes = scopes.slice(0, matchedIdx);
+          try {
+            emitOuterDelete();
+          } finally {
+            fctx.withScopes = saved;
+          }
+        });
+        return;
+      }
+      // A static with-bound name or a plain variable: not deletable ⇒ false.
+      fctx.body.push({ op: "i32.const", value: 0 });
+    };
+    if (resolveWithBinding(fctx, ident.text)?.kind === "dynamic") {
+      emitOuterDelete();
+      return { kind: "i32" };
+    }
     // Variables are not deletable — return false
     fctx.body.push({ op: "i32.const", value: 0 });
     return { kind: "i32" };
