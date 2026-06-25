@@ -130,6 +130,7 @@ import {
   emitBoolToString,
 } from "../string-ops.js";
 import { tryCompileNodeFsCall, tryCompileNodeProcessCall } from "../node-fs-api.js";
+import { tryCompileRawWasiCall } from "../raw-wasi-api.js";
 import { resolvePromiseSubclassName, tryEmitPromiseSubclassReceiver } from "./promise-subclass.js";
 import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
 import {
@@ -3359,6 +3360,12 @@ function compileCallExpression(
   // call-expression compiler does not accumulate host API special cases.
   const nodeProcessCall = tryCompileNodeProcessCall(ctx, fctx, expr);
   if (nodeProcessCall !== undefined) return nodeProcessCall;
+
+  // #2657 — raw `wasi_snapshot_preview1` fd_read/fd_write → direct WASI import
+  // call (the most honest pure-WASI-P1 path; no node:fs surface). Sits before the
+  // node:fs path; byte-neutral unless the source imports the raw WASI module.
+  const rawWasiCall = tryCompileRawWasiCall(ctx, fctx, expr);
+  if (rawWasiCall !== undefined) return rawWasiCall;
 
   // #2631 — node:fs fd-based readSync/writeSync → `node:fs` shim calls.
   const nodeFsCall = tryCompileNodeFsCall(ctx, fctx, expr);
