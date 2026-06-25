@@ -105,3 +105,19 @@ pure-WASI-P1 mode.
 - A read error (errno != 0) yields 0 bytes (the read loops in user code treat
   `r <= 0` as EOF/stop), matching the shim's behavior and the Node contract closely
   enough for the streaming use case.
+
+## Test Results
+
+`tests/issue-2655-direct-wasi-readsync-writesync.test.ts` — 6/6 pass:
+- direct compile imports ONLY `wasi_snapshot_preview1` fd_read/fd_write, no
+  `node:fs`, exports its own `memory`, no reactor machinery; module validates.
+- `--link-node-shims` still emits the node:fs shim imports (dual mode preserved).
+- wasmtime-gated: framed echo byte-for-byte incl. high/null bytes (0x00/0xff/0x80);
+  readSync `length` cap; string + DataView writeSync overloads — all byte-correct.
+
+Shim path (#2631/#2633/#2639) + broader WASI suites unchanged. A sample of
+unrelated test262 files still `pass` (node-fs-api.ts is shared codegen, byte-neutral
+for non-node:fs programs). tsc + biome + prettier clean. Pre-existing unrelated
+failure: `issue-1655` subarray "illegal cast" reproduces on clean main (not this PR).
+
+PR: loopdive/js2#2037.
