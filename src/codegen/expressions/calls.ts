@@ -8441,7 +8441,29 @@ function compileCallExpression(
       // can register __date_parse up-front (like parseInt in index.ts) to extend
       // native parsing to host mode.
       if (method === "parse") {
-        if (expr.arguments.length === 0 || !(ctx.standalone || ctx.wasi)) {
+        // Date.parse() with no args → NaN (§21.4.3.2 — ToString(undefined)).
+        if (expr.arguments.length === 0) {
+          fctx.body.push({ op: "f64.const", value: NaN } as Instr);
+          return { kind: "f64" };
+        }
+        // (#2678) HOST mode: delegate to the JS `Date.parse` host import
+        // (`__date_parse_host`, registered up-front by collectDateParseHostImports
+        // so no mid-body late-import shift / #2043). Host strings are real
+        // wasm:js-string externrefs and JS Date.parse is more format-complete than
+        // the native ISO parser. Falls back to the prior NaN stub only if the
+        // up-front scan somehow missed registering the import.
+        if (!ctx.standalone && !ctx.wasi) {
+          const hostIdx = ctx.funcMap.get("__date_parse_host");
+          if (hostIdx !== undefined) {
+            const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
+            if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+            for (let i = 1; i < expr.arguments.length; i++) {
+              const t = compileExpression(ctx, fctx, expr.arguments[i]!);
+              if (t) fctx.body.push({ op: "drop" } as Instr);
+            }
+            fctx.body.push({ op: "call", funcIdx: hostIdx } as Instr);
+            return { kind: "f64" };
+          }
           for (const arg of expr.arguments) {
             const t = compileExpression(ctx, fctx, arg);
             if (t) fctx.body.push({ op: "drop" } as Instr);
@@ -8449,7 +8471,7 @@ function compileCallExpression(
           fctx.body.push({ op: "f64.const", value: NaN } as Instr);
           return { kind: "f64" };
         }
-        // Register the native parser, then push the (sole) argument as externref.
+        // Standalone / WASI: pure-Wasm native parser (#2164).
         emitNativeDateParse(ctx);
         const dateParseIdx = ctx.funcMap.get("__date_parse")!;
         const argType = compileExpression(ctx, fctx, expr.arguments[0]!, { kind: "externref" });
