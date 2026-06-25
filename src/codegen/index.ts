@@ -3,6 +3,7 @@ import { ts, forEachChild } from "../ts-api.js";
 import { emitToBoolean } from "./coercion-engine.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
+import { analyzeFnctorEscapeGate } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
@@ -1065,6 +1066,12 @@ export function generateModule(
   // the inline struct.get fast-path (which reads the live field and ignores the
   // runtime delete tombstone). Delete-free modules keep byte-identical output.
   ctx.moduleUsesDelete = sourceContainsDelete(ast.sourceFile);
+  // (#2660 S1) Whole-program escape / dynamic-use classification of `new F()`
+  // fnctor instances. INERT: the result is stored for the future S3
+  // reconstruction lowering but is NOT yet consumed, so emitted Wasm is
+  // byte-identical. Side-effect free; safe to run unconditionally (no fnctor
+  // `new` sites ⇒ empty result ⇒ no-op).
+  ctx.fnctorEscapeGate = analyzeFnctorEscapeGate(ast.checker, ast.sourceFile);
   try {
     // WASI target: register linear memory, bump pointer global, and WASI imports
     if (ctx.wasi) {
