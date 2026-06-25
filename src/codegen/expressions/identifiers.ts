@@ -816,7 +816,20 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
   // native constructor object (with its prototype + accessor descriptors) is
   // visible. Scope strictly to these host-delegated ERM globals and only when
   // the name is not shadowed by a local/captured binding.
+  //
+  // (#2029) HOST-ONLY: this whole fast path uses the `__get_globalThis` /
+  // `__extern_get` host imports (absent in no-JS-host targets) AND pushes the
+  // ctor-name string key via a string-constant global — which under
+  // standalone/nativeStrings is the `-1` sentinel, baking `global.get -1`
+  // ("global index out of range — -1") at serialize time. It also leaks two
+  // host imports that an empty import object can't satisfy. The reflective
+  // `Object.getPrototypeOf(SuppressedError)` / `isConstructor(DisposableStack)`
+  // shapes (built-ins/{SuppressedError,DisposableStack,AsyncDisposableStack}/
+  // {proto,is-a-constructor}.js) hit this. Gate to gc/host; standalone falls
+  // through to the clean located refusal (the #1888 dual-mode invariant).
   if (
+    !ctx.standalone &&
+    !ctx.wasi &&
     (name === "DisposableStack" || name === "AsyncDisposableStack" || name === "SuppressedError") &&
     !fctx.localMap.has(name) &&
     !(fctx.boxedCaptures?.has(name) ?? false) &&
