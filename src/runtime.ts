@@ -1927,25 +1927,52 @@ function _wrapWasmClosureUnknownArity(
   }
   if (available.length === 0) return null;
   const maxArity = available[available.length - 1]!;
+  // (#2664) The highest available `__call_fn_method_N` dispatches EVERY closure
+  // of arity ≤ N and passes each closure exactly its OWN declared arity (extra
+  // args dropped at the wasm dispatch arm — emitClosureMethodCallExportN in
+  // index.ts). So for a METHOD call we must dispatch at an arity ≥ the closure's
+  // real arity, not at the JS caller's `args.length`: a method invoked with
+  // FEWER args than its declared param count (acorn's `this.parseExpression()` —
+  // 0 args, 2 params) was previously dispatched via `__call_fn_method_0`, which
+  // OMITS the arity-2 closure and returns null → the method body never ran (the
+  // acorn parse() deeper-wall hang). Pad the missing args with `undefined` (JS
+  // missing-argument semantics). Compute the max method-dispatch arity once.
+  let methodMaxArity = -1;
+  for (let a = 8; a >= 0; a--) {
+    if (typeof exports[`__call_fn_method_${a}`] === "function") {
+      methodMaxArity = a;
+      break;
+    }
+  }
   const wrapped = function wasmClosureDynamicBridge(this: any, ...args: any[]): any {
+    // METHOD call (receiver-bound `o.m(...)` → `fn.apply(wrappedObj, …)`): dispatch
+    // at the max method arity so a closure whose declared arity exceeds the caller's
+    // arg count is still matched. Each closure receives exactly its own arity.
+    if (methodMaxArity >= 0 && this !== undefined && this !== globalThis) {
+      const methodCallFn = exports[`__call_fn_method_${methodMaxArity}`];
+      if (typeof methodCallFn === "function") {
+        const padded: any[] = [];
+        for (let i = 0; i < methodMaxArity; i++) padded.push(args[i]);
+        // (#2015) Unwrap a `_wrapForHost` proxy receiver back to its raw WasmGC
+        // struct before installing it as `__current_this`. `__extern_method_call`
+        // dispatches `fn.apply(wrappedObj, …)` with `wrappedObj` being the host
+        // proxy, so without this unwrap `__call_fn_method_N` would install the
+        // opaque Proxy as `__current_this`; the object-literal method trampoline's
+        // `ref.test (ref objStruct)` then fails and the body's `this.<field>` traps.
+        // Mirrors the known-arity bridge in `_wrapWasmClosure` (#1712 / #1320).
+        const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
+        return methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...padded);
+      }
+    }
+    // Free-function / extracted-method (`const f = o.m; f()`) path: dispatch by the
+    // caller's arg count so unbound-`this` + low-arity generator semantics hold
+    // (a 0-arg generator invoked via `__call_fn_1` yields a non-iterator).
     let arity = Math.min(args.length, maxArity);
     while (arity > 0 && typeof exports[`__call_fn_${arity}`] !== "function") arity--;
     const callFn = exports[`__call_fn_${arity}`];
     if (typeof callFn !== "function") return undefined;
     const padded: any[] = [];
     for (let i = 0; i < arity; i++) padded.push(args[i]);
-    const methodCallFn = exports[`__call_fn_method_${arity}`];
-    if (typeof methodCallFn === "function" && this !== undefined && this !== globalThis) {
-      // (#2015) Unwrap a `_wrapForHost` proxy receiver back to its raw WasmGC
-      // struct before installing it as `__current_this`. `__extern_method_call`
-      // dispatches `fn.apply(wrappedObj, …)` with `wrappedObj` being the host
-      // proxy, so without this unwrap `__call_fn_method_N` would install the
-      // opaque Proxy as `__current_this`; the object-literal method trampoline's
-      // `ref.test (ref objStruct)` then fails and the body's `this.<field>` traps.
-      // Mirrors the known-arity bridge in `_wrapWasmClosure` (#1712 / #1320).
-      const rawThis = this !== null && typeof this === "object" ? _unwrapForHost(this) : this;
-      return methodCallFn(_isWasmStruct(rawThis) ? rawThis : this, closure, ...padded);
-    }
     return callFn(closure, ...padded);
   };
   try {
