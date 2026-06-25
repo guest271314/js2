@@ -1,8 +1,9 @@
 ---
 id: 2679
 title: "ToNumber/ToPrimitive invokes valueOf with the WRONG `this` (receiver identity lost) — breaks arg-*-to-number tests across builtins"
-status: in-progress
-assignee: ttraenkler/dev-2046
+status: done
+assignee: ttraenkler/sd-2679
+completed: 2026-06-25
 created: 2026-06-25
 priority: high
 feasibility: medium
@@ -124,3 +125,43 @@ unchanged. Regression-free across the runnable coercion/toPrimitive suites
 This residual bottoms out in the deep `__current_this` machinery per the
 hand-off threshold; the string-hint + @@toPrimitive half is a clean, shippable
 partial.
+
+## Residual resolved + consolidation (sd-2679, 2026-06-25)
+
+**Root cause (corrected).** The number-hint path does NOT route through the host
+`__call_valueOf` export at all — it uses an **inline ToNumber dispatch emitted by
+`coerceType` (ref→f64) in `src/codegen/type-coercion.ts`** (the `eqref` valueOf
+branch, ~L1990). For an object-literal `valueOf(){…}`, the field stores the method
+as an `__obj_meth_tramp_*` trampoline (from `emitObjectMethodAsClosure`). That
+trampoline reads `this` from the `__current_this` module global — **param-0 is the
+closure self/env, NOT the receiver** (verified by WAT-decode: the trampoline body
+is `global.get $__current_this; any.convert_extern; ref.test $Obj; …; call $rawMethod`).
+The inline dispatch `call_ref`s that trampoline but **never installed
+`__current_this`**, so `valueOf` saw a stale receiver. The string-hint path worked
+because `${a}` is **static-dispatched to the raw method with the receiver as
+param-0** (no trampoline), so it was never affected. dev-2046's pin (closure-mode
+dispatch in `emitToPrimitiveMethodExports`) was close but named the wrong site —
+the live `+a`/`Number(a)`/`a*1` path is the `coerceType` inline dispatch.
+
+**Fix.** Wrap the inline eqref valueOf dispatch with a nesting-safe
+`__current_this` save / install-receiver / restore (mirrors dev-2046's
+`__call_valueOf` shape). Receiver (`structLocal`, a `(ref null Obj)`) →
+`extern.convert_any` → `global.set $__current_this`; capture the f64 result in a
+temp; restore the previous `__current_this`; re-push the result. Arrow-valued
+`valueOf` captures `this` lexically and never reads `__current_this`, so the
+change is a no-op there. One central site fixes the whole ToNumber funnel: `+a`,
+`Number(a)`, `a*1`, `a-1`, relational `a<b` (both operands, no leakage — the
+save/restore is what makes nested `a*b` correct), binary `+`, `Math.*`, and the
+Date `set*` arg-to-number cluster (#2671).
+
+**#2078 park was baseline drift, NOT a regression.** The merged-state park cited
+exactly **1** regression — `language/statements/for-in/let-identifier-with-newline.js`
+→ compile_error — amid **+3 net pass** and a **2-commit baseline-drift warning**;
+the ratio gate (1/4 = 25% > 10%) tripped on that single unrelated ASI/parser test.
+Verified that test **compiles cleanly** on this consolidated branch, so #2078's
+`__current_this` install did not cause it. Consolidated dev-2046's partial + this
+residual into one branch/PR (#2078) rather than stacking a second #2679 PR.
+
+**Validated:** `tests/issue-2679-toprimitive-this.test.ts` 14/14 (6 string-hint +
+@@toPrimitive from #2078, 8 new number-hint residual incl. nested + Date). Broad
+coercion path → full `merge_group` floor is the authoritative gate.

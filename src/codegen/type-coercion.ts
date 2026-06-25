@@ -16,6 +16,7 @@ import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { getArrTypeIdxFromVec } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts, materializeStructAsObject, registerCoerceType } from "./shared.js";
+import { ensureCurrentThisGlobal } from "./statements/nested-declarations.js";
 
 /**
  * Emit a guarded ref.cast: use ref.test to check if the cast will succeed.
@@ -2087,8 +2088,44 @@ export function coerceType(
                 } as Instr,
               ];
             };
-            for (const instr of buildDispatch(0)) {
-              fctx.body.push(instr);
+            // (#2679) The valueOf field stores the method as an
+            // `__obj_meth_tramp_*` trampoline whose `this` is read from the
+            // `__current_this` module global (NOT param-0 — param-0 is the
+            // closure self/env). This inline ToNumber dispatch `call_ref`s that
+            // trampoline directly without installing `__current_this`, so a
+            // `valueOf(){…this…}` saw a stale receiver (`+a`/`Number(a)`/`a*1`
+            // returned the wrong `this`; only the §7.1.1.1 string-hint path,
+            // which static-dispatches the raw method with the receiver as
+            // param-0, was correct). Install `__current_this` = the receiver
+            // (§7.1.1.1 step 4.b `Call(method, O)`) around the dispatch and
+            // restore it afterward (nesting-safe). Arrow-valued `valueOf`
+            // captures `this` lexically and never reads `__current_this`, so
+            // this is a no-op for that case.
+            const currentThisGlobalIdx = ensureCurrentThisGlobal(ctx);
+            if (currentThisGlobalIdx >= 0) {
+              const prevThisLocal = allocTempLocal(fctx, { kind: "externref" });
+              const tpResultLocal = allocTempLocal(fctx, { kind: "f64" });
+              // save __current_this, install the receiver (struct → externref)
+              fctx.body.push({ op: "global.get", index: currentThisGlobalIdx });
+              fctx.body.push({ op: "local.set", index: prevThisLocal });
+              fctx.body.push({ op: "local.get", index: structLocal });
+              fctx.body.push({ op: "extern.convert_any" });
+              fctx.body.push({ op: "global.set", index: currentThisGlobalIdx });
+              // dispatch (leaves f64 on stack) → capture
+              for (const instr of buildDispatch(0)) {
+                fctx.body.push(instr);
+              }
+              fctx.body.push({ op: "local.set", index: tpResultLocal });
+              // restore __current_this, then re-push the captured result
+              fctx.body.push({ op: "local.get", index: prevThisLocal });
+              fctx.body.push({ op: "global.set", index: currentThisGlobalIdx });
+              fctx.body.push({ op: "local.get", index: tpResultLocal });
+              releaseTempLocal(fctx, prevThisLocal);
+              releaseTempLocal(fctx, tpResultLocal);
+            } else {
+              for (const instr of buildDispatch(0)) {
+                fctx.body.push(instr);
+              }
             }
             // (#1989) Restore the re-entrancy guard before returning. Without
             // this, coercing the FIRST of two struct operands (e.g. `a < b`)
