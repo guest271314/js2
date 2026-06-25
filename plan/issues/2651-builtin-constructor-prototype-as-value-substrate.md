@@ -1,8 +1,11 @@
 ---
 id: 2651
 title: "standalone: builtin constructor + prototype as a first-class VALUE (TypedArray ctor-iteration substrate)"
-status: in-progress
-assignee: ttraenkler/dev-builtin-ctor
+status: blocked
+blocked_on: 2580
+assignee: ttraenkler/sd-2651
+slices_done: "D2/M1 (PR #2043, commit 7374c34c6)"
+slices_remaining: "M3 (%TypedArray% intrinsic value-dispatch) — predecessor-stack on #2580 M3"
 sprint: 66
 created: 2026-06-24
 priority: high
@@ -671,3 +674,17 @@ materializes the proto object. The missing pieces are (a) intercept
 `Object.getPrototypeOf(<view-identifier>)` (`calls.ts:5859`) to return the
 intrinsic VALUE, (b) make that value's `.prototype` + `.prototype.<m>` resolve,
 (c) the ctor-value identity for `sample.constructor === TA`.
+
+### PARKING DECISION (lead, 2026-06-25): M3 BLOCKED on #2580 M3
+
+The remaining M3 slice is **parked behind #2580 M3** (predecessor-stack), not built
+now. Rationale: #2580 M3 (in-progress, `sd-2580`) is landing the shared
+`[[Prototype]]` / `$Object.$proto` link representation. #2651 M3's `%TypedArray%`
+intrinsic value-dispatch (`Object.getPrototypeOf(<view>)` → a branded intrinsic
+VALUE whose `.prototype.<m>` reads route through dynamic branded-externref member
+dispatch) rides the SAME substrate. Building both concurrently is the exact
+#1888-class merge_group-eject + source-conflict risk the issue's validation
+discipline warns against. **The M3 picker:** predecessor-stack on `sd-2580`'s M3
+branch after it lands, consume its `[[Prototype]]`-link field/walk (do NOT invent
+a parallel one), and use the file:line map above. Re-measure the residual on
+then-current `main` first (the lever count above is the 2026-06-25 measurement).
