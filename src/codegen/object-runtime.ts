@@ -339,6 +339,8 @@ export function ensureObjectRuntime(ctx: CodegenContext): ObjectRuntimeTypes {
       { name: "isExtensible", type: { kind: "externref" }, mutable: false },
       // (#1355 Slice D) preventExtensions — field index 9.
       { name: "preventExtensions", type: { kind: "externref" }, mutable: false },
+      // (#1355 Slice E) ownKeys — field index 10. §10.5.11 [[OwnPropertyKeys]].
+      { name: "ownKeys", type: { kind: "externref" }, mutable: false },
     ],
   });
 
@@ -5788,6 +5790,7 @@ const PROXY_CALL_GPO = "__proxy_call_gpo"; // (#1355 Slice C) getPrototypeOf
 const PROXY_CALL_SPO = "__proxy_call_spo"; // (#1355 Slice C) setPrototypeOf
 const PROXY_CALL_ISEXT = "__proxy_call_isext"; // (#1355 Slice D) isExtensible
 const PROXY_CALL_PREVEXT = "__proxy_call_prevext"; // (#1355 Slice D) preventExtensions
+const PROXY_CALL_OWNKEYS = "__proxy_call_ownkeys"; // (#1355 Slice E) ownKeys
 
 /**
  * (#1100) Standalone Proxy meta-object dispatch runtime — Phase 1.
@@ -5860,6 +5863,18 @@ function ensureProxyRuntime(
     { op: "throw", tagIdx: exnTagIdx } as Instr,
   ];
 
+  // (#1355 Slice E) §10.5.11 step 8 / CreateListFromArrayLike (§7.3.18 step 2):
+  // the `ownKeys` trap result must be an Object — otherwise a TypeError. FRESH
+  // Instr array per use, same rationale as `throwRevoked` (avoids the FINALIZE
+  // double-remap of a shared, baked `call __new_TypeError` funcIdx).
+  const notListObjectMsg = "Proxy ownKeys trap result must be an object";
+  addStringConstantGlobal(ctx, notListObjectMsg);
+  const throwNotListObject = (): Instr[] => [
+    ...stringConstantExternrefInstrs(ctx, notListObjectMsg),
+    { op: "call", funcIdx: typeErrorCtorIdx },
+    { op: "throw", tagIdx: exnTagIdx } as Instr,
+  ];
+
   // Reserve the open-`any` closure-call bridge `__apply_closure` (filled at
   // FINALIZE by `fillApplyClosure`). The proxy trap-invoke drivers
   // (`fillProxyDispatch`) call it to run the user trap closure with the handler
@@ -5884,6 +5899,7 @@ function ensureProxyRuntime(
   const TRAP_SPO = 7; // (#1355 Slice C) setPrototypeOf
   const TRAP_ISEXT = 8; // (#1355 Slice D) isExtensible
   const TRAP_PREVEXT = 9; // (#1355 Slice D) preventExtensions
+  const TRAP_OWNKEYS = 10; // (#1355 Slice E) ownKeys
 
   // ── Reserve the trap-invoke driver placeholders (filled by fillProxyDispatch) ──
   //
@@ -5933,6 +5949,10 @@ function ensureProxyRuntime(
   // `Call(trap, handler, «target»)`). Both return a booleanish externref.
   const callIsextIdx = reserveDriver(PROXY_CALL_ISEXT, [externref, externref, externref]);
   const callPrevextIdx = reserveDriver(PROXY_CALL_PREVEXT, [externref, externref, externref]);
+  // (#1355 Slice E) ownKeys driver — 1 trap arg: (handler, trap, target) →
+  // __call_fn_method_1 (§10.5.11 step 7 `Call(trap, handler, «target»)`). Returns
+  // the trap's array-like result externref.
+  const callOwnKeysIdx = reserveDriver(PROXY_CALL_OWNKEYS, [externref, externref, externref]);
   ctx.proxyDispatchReserved = true;
 
   // Builds a dispatch helper body. `trapFieldIdx` selects the trap closure;
@@ -6223,6 +6243,111 @@ function ensureProxyRuntime(
     ];
   };
 
+  // (#1355 Slice E) ownKeys dispatch builder. §10.5.11 [[OwnPropertyKeys]] takes
+  // only the target (no key, no value) and returns the trap's array-like result
+  // externref. It shares the 1-arg target-only shape of getPrototypeOf /
+  // isExtensible but differs in two ways:
+  //   1. The trap-absent forward target differs PER CALL SITE — `Object.keys`
+  //      forwards to `__object_keys` (own enumerable string keys), whereas
+  //      `Object.getOwnPropertyNames` / `Reflect.ownKeys` forward to
+  //      `__getOwnPropertyNames` (all own string keys). So `forwardName` is a
+  //      builder parameter (a separate dispatch helper is registered per forward
+  //      target, both reading the SAME `ownKeys` trap field).
+  //   2. When the trap IS present, §10.5.11 step 8 / CreateListFromArrayLike
+  //      (§7.3.18 step 2) requires the trap result to be an Object — otherwise a
+  //      TypeError. This is acceptance criterion #3 of #1355
+  //      (`ownKeys/return-not-list-object-throws.js`: `ownKeys` returning
+  //      `undefined`). We implement the top-level Object-type check here: the
+  //      result is an Object iff it is non-null and not a boxed primitive
+  //      (number / boolean / string) — exactly the complement of ToObject's
+  //      primitive cases. The PER-ELEMENT String|Symbol check (CreateListFromArrayLike
+  //      element-type step) and the §10.5.11 result-invariants (no duplicate keys;
+  //      non-extensible target → result must equal the target's exact own keys)
+  //      stay deferred to the dedicated invariant slice.
+  // params: 0=proxyExtern, 1=unused. locals: 2=p, 3=trap.
+  const buildOwnKeysDispatch = (forwardName: string): Instr[] => {
+    const forwardIdx = ctx.funcMap.get(forwardName)!;
+    const isObjectNumIdx = ctx.funcMap.get("__typeof_number")!;
+    const isObjectBoolIdx = ctx.funcMap.get("__typeof_boolean")!;
+    const isObjectStrIdx = ctx.funcMap.get("__typeof_string")!;
+    // The trap arm: invoke driver(handler, trap, target), then enforce the
+    // CreateListFromArrayLike Object-type check on the result before returning.
+    const trapArm: Instr[] = [
+      // result = driver(handler, trap, target)
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PHANDLER },
+      { op: "extern.convert_any" } as Instr,
+      { op: "local.get", index: 3 },
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+      { op: "extern.convert_any" } as Instr,
+      { op: "call", funcIdx: callOwnKeysIdx },
+      // Stash the result in the trap local (reused — its prior value is dead here)
+      // so we can both type-check and return it. trap local (3) is externref.
+      { op: "local.set", index: 3 },
+      // §7.3.18 step 2 / §10.5.11: if Type(result) is not Object → TypeError.
+      // not-Object ⇔ is_null OR __typeof_number OR __typeof_boolean OR
+      // __typeof_string. Compute (isNumber | isBoolean | isString), OR with
+      // is_null, and throw if set.
+      { op: "local.get", index: 3 },
+      { op: "ref.is_null" },
+      { op: "local.get", index: 3 },
+      { op: "call", funcIdx: isObjectNumIdx },
+      { op: "i32.or" },
+      { op: "local.get", index: 3 },
+      { op: "call", funcIdx: isObjectBoolIdx },
+      { op: "i32.or" },
+      { op: "local.get", index: 3 },
+      { op: "call", funcIdx: isObjectStrIdx },
+      { op: "i32.or" },
+      { op: "if", blockType: { kind: "empty" }, then: throwNotListObject() } as Instr,
+      // result is an Object → return it.
+      { op: "local.get", index: 3 },
+    ];
+    const forwardArm: Instr[] = [
+      // __object_keys / __getOwnPropertyNames (target) -> externref ($ObjVec)
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTARGET },
+      { op: "extern.convert_any" } as Instr,
+      { op: "call", funcIdx: forwardIdx },
+    ];
+    return [
+      // p = ref.cast $Proxy(any.convert_extern(proxyExtern))
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.cast", typeIdx: proxyTypeIdx },
+      { op: "local.set", index: 2 },
+      // if p.revoked: throw TypeError
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_REVOKED },
+      { op: "if", blockType: { kind: "empty" }, then: throwRevoked() } as Instr,
+      // trap = p.ptraps==null ? null : p.ptraps.ownKeys
+      { op: "local.get", index: 2 },
+      { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: externref },
+        then: [{ op: "ref.null.extern" } as Instr],
+        else: [
+          { op: "local.get", index: 2 },
+          { op: "struct.get", typeIdx: proxyTypeIdx, fieldIdx: F_PTRAPS },
+          { op: "ref.as_non_null" } as Instr,
+          { op: "struct.get", typeIdx: proxyTrapsTypeIdx, fieldIdx: TRAP_OWNKEYS },
+        ],
+      } as Instr,
+      { op: "local.set", index: 3 },
+      { op: "local.get", index: 3 },
+      { op: "ref.is_null" },
+      {
+        op: "if",
+        blockType: { kind: "val", type: externref },
+        then: forwardArm,
+        else: trapArm,
+      } as Instr,
+    ];
+  };
+
   // FRESH locals array + ValType objects per dispatch function. `registerNative`
   // stores `locals` by reference, and the FINALIZE dead-type-elimination pass
   // (`eliminateDeadImports`) mutates `func.locals[i]` in place when renumbering
@@ -6331,6 +6456,27 @@ function ensureProxyRuntime(
     dispatchLocals(),
     buildExt1Dispatch(TRAP_PREVEXT, "__object_preventExtensions", false),
   );
+  // (#1355 Slice E) ownKeys — TWO dispatch helpers reading the SAME `ownKeys`
+  // trap field but with different trap-absent forwards (§10.5.11 [[OwnPropertyKeys]]):
+  //   __proxy_ownkeys_keys_dispatch  — forwards __object_keys (Object.keys path)
+  //   __proxy_ownkeys_names_dispatch — forwards __getOwnPropertyNames
+  //                                    (Object.getOwnPropertyNames / Reflect.ownKeys)
+  // Both run the same trap + CreateListFromArrayLike Object-type check when the
+  // trap is present; they diverge only in the absent-trap forward target.
+  registerNative(
+    "__proxy_ownkeys_keys_dispatch",
+    [externref, externref],
+    [externref],
+    dispatchLocals(),
+    buildOwnKeysDispatch("__object_keys"),
+  );
+  registerNative(
+    "__proxy_ownkeys_names_dispatch",
+    [externref, externref],
+    [externref],
+    dispatchLocals(),
+    buildOwnKeysDispatch("__getOwnPropertyNames"),
+  );
 
   // ── __proxy_create(target, handler) -> externref ──────────────────────────
   //
@@ -6397,6 +6543,8 @@ function ensureProxyRuntime(
       { op: "local.set", index: 10 },
       ...readTrap("preventExtensions"),
       { op: "local.set", index: 11 },
+      ...readTrap("ownKeys"),
+      { op: "local.set", index: 12 },
       // proxy fields (standalone $Proxy struct):
       { op: "i32.const", value: 1 }, // ptag = PROXY_TAG (1; bare ref.test $Proxy is the real discriminator)
       { op: "local.get", index: 0 }, // ptarget (externref → anyref)
@@ -6404,7 +6552,7 @@ function ensureProxyRuntime(
       { op: "local.get", index: 1 }, // phandler (externref → anyref; trap `this`)
       { op: "any.convert_extern" } as Instr,
       // ptraps = struct.new $ProxyTraps
-      //   (getT,setT,hasT,applyT,delT,gopdT,gpoT,spoT,isextT,prevextT)
+      //   (getT,setT,hasT,applyT,delT,gopdT,gpoT,spoT,isextT,prevextT,ownKeysT)
       { op: "local.get", index: 2 },
       { op: "local.get", index: 3 },
       { op: "local.get", index: 4 },
@@ -6415,6 +6563,7 @@ function ensureProxyRuntime(
       { op: "local.get", index: 9 },
       { op: "local.get", index: 10 },
       { op: "local.get", index: 11 },
+      { op: "local.get", index: 12 },
       { op: "struct.new", typeIdx: proxyTrapsTypeIdx } as Instr,
       { op: "i32.const", value: 0 }, // revoked = 0
       { op: "struct.new", typeIdx: proxyTypeIdx } as Instr,
@@ -6435,6 +6584,7 @@ function ensureProxyRuntime(
         { name: "spoT", type: externref }, // (#1355 Slice C) setPrototypeOf
         { name: "isextT", type: externref }, // (#1355 Slice D) isExtensible
         { name: "prevextT", type: externref }, // (#1355 Slice D) preventExtensions
+        { name: "ownKeysT", type: externref }, // (#1355 Slice E) ownKeys
       ],
       proxyCreateBody,
     );
@@ -6491,6 +6641,8 @@ function ensureProxyRuntime(
   const spoDispatchIdx = ctx.funcMap.get("__proxy_spo_dispatch")!; // (#1355 Slice C)
   const isextDispatchIdx = ctx.funcMap.get("__proxy_isext_dispatch")!; // (#1355 Slice D)
   const prevextDispatchIdx = ctx.funcMap.get("__proxy_prevext_dispatch")!; // (#1355 Slice D)
+  const ownKeysKeysDispatchIdx = ctx.funcMap.get("__proxy_ownkeys_keys_dispatch")!; // (#1355 Slice E)
+  const ownKeysNamesDispatchIdx = ctx.funcMap.get("__proxy_ownkeys_names_dispatch")!; // (#1355 Slice E)
 
   const findBody = (name: string): Instr[] | undefined => ctx.mod.functions.find((f) => f.name === name)?.body;
 
@@ -6725,6 +6877,58 @@ function ensureProxyRuntime(
     prevextBody.unshift(...guard);
   }
 
+  // (#1355 Slice E) __object_keys(obj) -> externref : if proxy →
+  // ownkeys_keys_dispatch(obj). `Object.keys(p)` lowers to `__object_keys` for a
+  // dynamic receiver, so this single front-guard covers the Object.keys path. The
+  // dispatch reads the ownKeys trap, runs it (with the CreateListFromArrayLike
+  // Object-type check) or forwards to the ordinary `__object_keys` on the target;
+  // it returns the result externref ($ObjVec or the trap's array) directly.
+  const objectKeysBody = findBody("__object_keys");
+  if (objectKeysBody) {
+    const guard: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: proxyTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 0 }, // unused 2nd param placeholder
+          { op: "call", funcIdx: ownKeysKeysDispatchIdx },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    objectKeysBody.unshift(...guard);
+  }
+
+  // (#1355 Slice E) __getOwnPropertyNames(obj) -> externref : if proxy →
+  // ownkeys_names_dispatch(obj). `Object.getOwnPropertyNames(p)` /
+  // `Reflect.ownKeys(p)` route here for a dynamic receiver. Same ownKeys trap,
+  // but the trap-absent forward is `__getOwnPropertyNames` (all own string keys,
+  // no enumerable filter) rather than `__object_keys`. Returns the result
+  // externref directly.
+  const ownNamesBody = findBody("__getOwnPropertyNames");
+  if (ownNamesBody) {
+    const guard: Instr[] = [
+      { op: "local.get", index: 0 },
+      { op: "any.convert_extern" },
+      { op: "ref.test", typeIdx: proxyTypeIdx },
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [
+          { op: "local.get", index: 0 },
+          { op: "local.get", index: 0 }, // unused 2nd param placeholder
+          { op: "call", funcIdx: ownKeysNamesDispatchIdx },
+          { op: "return" },
+        ],
+      } as Instr,
+    ];
+    ownNamesBody.unshift(...guard);
+  }
+
   void objectTypeIdx;
 }
 
@@ -6806,6 +7010,7 @@ export function fillProxyDispatch(ctx: CodegenContext): void {
   fill(PROXY_CALL_SPO, 2); // (#1355 Slice C) setPrototypeOf (target, proto)
   fill(PROXY_CALL_ISEXT, 1); // (#1355 Slice D) isExtensible (target)
   fill(PROXY_CALL_PREVEXT, 1); // (#1355 Slice D) preventExtensions (target)
+  fill(PROXY_CALL_OWNKEYS, 1); // (#1355 Slice E) ownKeys (target)
 }
 
 /**
