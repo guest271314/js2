@@ -96,6 +96,10 @@ interface UnifiedCollectorState {
   mathNeedsToUint32: boolean;
   // -- collectParseImports --
   parseNeeded: Set<string>;
+  // (#2678) HOST-mode `Date.parse(...)` / `new Date(<string>)` → host import
+  // `__date_parse_host` (delegates to JS Date.parse). Registered up-front to
+  // avoid the #2043 late-import shift; standalone/WASI use the native parser.
+  dateParseHostNeeded: boolean;
   // -- collectURIImports --
   uriNeeded: Set<string>;
   // -- collectStringStaticImports --
@@ -194,6 +198,7 @@ export function createUnifiedCollectorState(sourceFile: ts.SourceFile): UnifiedC
     mathNeeded: new Set(),
     mathNeedsToUint32: false,
     parseNeeded: new Set(),
+    dateParseHostNeeded: false,
     uriNeeded: new Set(),
     needsFromCharCode: false,
     needsFromCodePoint: false,
@@ -520,6 +525,39 @@ export function unifiedVisitNode(ctx: CodegenContext, state: UnifiedCollectorSta
       node.operatorToken.kind === ts.SyntaxKind.AsteriskAsteriskEqualsToken)
   ) {
     state.mathNeeded.add("pow");
+  }
+
+  // ── collectDateParseHostImports (#2678) ──
+  // HOST mode only — standalone/WASI use the native `__date_parse` emitted at
+  // the call site. `Date.parse(...)` (member call) and `new Date(<string>)`
+  // both delegate to the host JS `Date.parse` via `__date_parse_host`.
+  if (!ctx.standalone && !ctx.wasi) {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === "Date" &&
+      node.expression.name.text === "parse" &&
+      node.arguments.length >= 1
+    ) {
+      state.dateParseHostNeeded = true;
+    }
+    if (
+      ts.isNewExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "Date" &&
+      node.arguments &&
+      node.arguments.length === 1
+    ) {
+      try {
+        const argType = ctx.checker.getTypeAtLocation(node.arguments[0]!);
+        if (argType.flags & ts.TypeFlags.StringLike || isStringType(argType)) {
+          state.dateParseHostNeeded = true;
+        }
+      } catch {
+        // type resolution may fail — skip (a runtime ToString path still applies)
+      }
+    }
   }
 
   // ── collectParseImports ──
@@ -1266,6 +1304,16 @@ export function finalizeUnifiedCollector(ctx: CodegenContext, state: UnifiedColl
     if (parseNative.size > 0) {
       emitNativeParseNumber(ctx, parseNative);
     }
+  }
+
+  // ── collectDateParseHostImports finalize (#2678) ──
+  // HOST mode: register `__date_parse_host(externref) -> f64` up-front so the
+  // call sites (Date.parse / new Date(<string>)) get a stable funcidx without a
+  // mid-body late-import shift (#2043). Standalone/WASI never reach here (the
+  // scan only sets the flag for host mode); they keep the native `__date_parse`.
+  if (state.dateParseHostNeeded && !ctx.standalone && !ctx.wasi && !ctx.funcMap.has("__date_parse_host")) {
+    const typeIdx = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }]);
+    addImport(ctx, "env", "__date_parse_host", { kind: "func", typeIdx });
   }
 
   // ── collectURIImports finalize ──
