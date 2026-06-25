@@ -31,6 +31,7 @@ import { getSubviewArrTypeIdx, isSubviewTypeIdx } from "../registry/types.js"; /
 import { buildDestructureNullThrow, patternIteratorStepCount } from "../destructuring-params.js";
 import { resolveComputedKeyExpression } from "../literals.js";
 import {
+  emitAlternateStructSetDispatch,
   emitNullGuardedStructGet,
   isProvablyNonNull,
   isSafeBoundsEliminated,
@@ -2692,21 +2693,9 @@ function compilePropertyAssignmentExternSet(
   const valLocal = allocLocal(fctx, `__paset_val_${fctx.locals.length}`, { kind: "externref" });
   fctx.body.push({ op: "local.set", index: valLocal });
 
-  // Emit __extern_set(obj, key_string, val)
-  fctx.body.push({ op: "local.get", index: objLocal });
-  addStringConstantGlobal(ctx, propName);
-  const keyResult = compileStringLiteral(ctx, fctx, propName);
-  if (keyResult && keyResult.kind !== "externref") {
-    coerceType(ctx, fctx, keyResult, { kind: "externref" });
-  }
-  fctx.body.push({ op: "local.get", index: valLocal });
-
-  // (#2017) This path is reached only when an accessor descriptor (get/set)
-  // was detected for the property at compile time, so the write is a spec
-  // [[Set]] against an accessor. ESM module code is strict, so a write to a
-  // getter-only accessor must throw a catchable TypeError (§10.1.9) rather than
-  // silently no-op. Route through the strict host setter; getter+setter pairs
-  // and writable data props behave exactly as before.
+  // (#2017) The host write is a spec [[Set]]: a write to a getter-only accessor
+  // must throw a catchable TypeError (§10.1.9) under ESM strict mode rather than
+  // silently no-op, so route through the strict host setter.
   const setIdx = ensureLateImport(
     ctx,
     "__extern_set_strict",
@@ -2714,8 +2703,33 @@ function compilePropertyAssignmentExternSet(
     [],
   );
   flushLateImportShifts(ctx, fctx);
+
+  // (#2655) Build the __extern_set_strict(obj, key, val) sequence as the terminal
+  // else-arm of a symmetric struct.set dispatch. The member-READ fast path
+  // resolves an `any`/`externref` receiver that is actually a typed WasmGC struct
+  // via `struct.get <slot>`; a bare `__extern_set` write routes through `_safeSet`
+  // to a JS-side SIDECAR and never touches the slot, so read (slot) and write
+  // (sidecar) diverge (acorn `this.pos`/`this.type` loops). Writing the SLOT when
+  // the receiver owns `propName` as a real field keeps the two in sync. The
+  // __extern_set_strict fallback still covers genuine host externrefs, accessors
+  // (no struct candidate matches an accessor, so the strict-throw path is
+  // preserved), and dynamic sidecar-only props.
+  addStringConstantGlobal(ctx, propName);
+  const externSetFallback: Instr[] = [
+    { op: "local.get", index: objLocal } as Instr,
+    ...stringConstantExternrefInstrs(ctx, propName),
+    { op: "local.get", index: valLocal } as Instr,
+  ];
   if (setIdx !== undefined) {
-    fctx.body.push({ op: "call", funcIdx: setIdx });
+    externSetFallback.push({ op: "call", funcIdx: setIdx } as Instr);
+  }
+  const recvAny = allocLocal(fctx, `__paset_any_${fctx.locals.length}`, { kind: "anyref" });
+  fctx.body.push({ op: "local.get", index: objLocal });
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: recvAny });
+  const dispatched = emitAlternateStructSetDispatch(ctx, fctx, recvAny, valLocal, propName, externSetFallback);
+  if (!dispatched) {
+    fctx.body.push(...externSetFallback);
   }
 
   // Return the assigned value
@@ -5684,10 +5698,14 @@ function compilePropertyCompoundAssignmentExternref(
   });
   fctx.body.push({ op: "local.set", index: boxedLocal });
 
-  // Write back: __extern_set(obj, key, boxed_result)
-  fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "local.get", index: keyLocal });
-  fctx.body.push({ op: "local.get", index: boxedLocal });
+  // Write back. (#2655) The member-READ fast path resolves an `any`/`externref`
+  // receiver that is actually a typed WasmGC struct via `struct.get <slot>`
+  // (property-access.ts), but a plain `__extern_set` write-back routes through
+  // `_safeSet` to a JS-side SIDECAR — it cannot write the struct slot. The two
+  // then diverge (acorn's `this.pos += 1` loop condition reads the frozen slot
+  // forever → infinite loop). Emit the SYMMETRIC struct.set dispatch first so
+  // the slot is written when the receiver owns `propName` as a real field;
+  // fall back to `__extern_set` for genuine host externrefs / sidecar-only props.
   const setIdx = ensureLateImport(
     ctx,
     "__extern_set",
@@ -5695,8 +5713,28 @@ function compilePropertyCompoundAssignmentExternref(
     [],
   );
   flushLateImportShifts(ctx, fctx);
+  const externSetFallback: Instr[] = [
+    { op: "local.get", index: objLocal } as Instr,
+    { op: "local.get", index: keyLocal } as Instr,
+    { op: "local.get", index: boxedLocal } as Instr,
+  ];
   if (setIdx !== undefined) {
-    fctx.body.push({ op: "call", funcIdx: setIdx });
+    externSetFallback.push({ op: "call", funcIdx: setIdx } as Instr);
+  }
+  const cmpdRecvAny = allocLocal(fctx, `__cmpd_pany_${fctx.locals.length}`, { kind: "anyref" });
+  fctx.body.push({ op: "local.get", index: objLocal });
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: cmpdRecvAny });
+  const cmpdDispatched = emitAlternateStructSetDispatch(
+    ctx,
+    fctx,
+    cmpdRecvAny,
+    boxedLocal,
+    propName,
+    externSetFallback,
+  );
+  if (!cmpdDispatched) {
+    fctx.body.push(...externSetFallback);
   }
 
   // Return the result as f64

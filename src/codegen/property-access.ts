@@ -1240,6 +1240,82 @@ export function emitNullCheckThrow(ctx: CodegenContext, fctx: FunctionContext, r
 }
 
 /**
+ * (#2655) Symmetric WRITE counterpart to the read-side multi-struct dispatch
+ * (`findAlternateStructsForField` + `struct.get` chain at the `__extern_get`
+ * fallback). The member-READ path resolves `any`/`externref` receivers that are
+ * actually typed WasmGC structs via `struct.get <slot>`; the member-WRITE path
+ * historically went straight to `__extern_set`, which `_safeSet` routes to a
+ * JS-side SIDECAR map — it CANNOT write the WasmGC struct slot. Result: reads
+ * see the slot, writes update the sidecar, and the two diverge (acorn's
+ * `this.pos += 1` loop never advances → infinite loop).
+ *
+ * This emits, for each struct candidate that has a field named `propName`:
+ *   local.get <recvAnyLocal>
+ *   ref.test <structTypeIdx>
+ *   (if (then  local.get recvAny; ref.cast struct; local.get <valExtLocal>;
+ *              <coerce externref -> fieldType>; struct.set struct <slot> )
+ *       (else  <next candidate, or the externSetFallback> ))
+ *
+ * `recvAnyLocal` must hold the receiver as `anyref` (caller does
+ * `local.get objExt; any.convert_extern; local.set recvAny`). `valExtLocal`
+ * holds the value as `externref` (boxed). `externSetFallback` is the terminal
+ * else-arm (the existing `__extern_set`/`__extern_set_strict` sequence) — still
+ * required for genuine host externrefs and dynamic-only (sidecar) properties.
+ *
+ * Returns `true` if at least one struct.set arm was emitted (caller must NOT
+ * also emit its own `__extern_set` — it's already the else-arm here), or `false`
+ * when there are no struct candidates (caller emits its `__extern_set` as
+ * before).
+ */
+export function emitAlternateStructSetDispatch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  recvAnyLocal: number,
+  valExtLocal: number,
+  propName: string,
+  externSetFallback: Instr[],
+): boolean {
+  // Only candidates whose matching field is MUTABLE can take a `struct.set` —
+  // `struct.set` on an immutable field is a hard Wasm validation error.
+  // Immutable-field structs (e.g. the boxed-primitive wrappers WrapperString /
+  // WrapperNumber / WrapperBoolean, whose `value` slot is `mutable: false`) must
+  // fall through to the `__extern_set` sidecar terminal arm instead — that is the
+  // correct destination for an own-property write like `(new String("x")).value = ...`
+  // (it must NOT clobber the immutable wrapper slot). (#2657 regression: those
+  // boxed-wrapper writes flipped Object.create 15.2.3.5-4-167/168/169 to
+  // compile_error because the symmetric write picked the immutable `value` slot.)
+  const candidates = findAlternateStructsForField(ctx, propName, -1).filter((c) => c.mutable);
+  if (candidates.length === 0) return false;
+
+  const buildSetDispatch = (idx: number): Instr[] => {
+    if (idx >= candidates.length) return externSetFallback;
+    const cand = candidates[idx]!;
+    // Coerce the boxed externref value into the candidate field's wasm type.
+    const coerce = coercionInstrs(ctx, { kind: "externref" }, cand.fieldType, fctx);
+    const setFieldInstrs: Instr[] = [
+      { op: "local.get", index: recvAnyLocal } as Instr,
+      { op: "ref.cast", typeIdx: cand.structTypeIdx } as Instr,
+      { op: "local.get", index: valExtLocal } as Instr,
+      ...coerce,
+      { op: "struct.set", typeIdx: cand.structTypeIdx, fieldIdx: cand.fieldIdx } as Instr,
+    ];
+    return [
+      { op: "local.get", index: recvAnyLocal } as Instr,
+      { op: "ref.test", typeIdx: cand.structTypeIdx } as Instr,
+      {
+        op: "if",
+        blockType: { kind: "empty" },
+        then: setFieldInstrs,
+        else: buildSetDispatch(idx + 1),
+      } as Instr,
+    ];
+  };
+
+  fctx.body.push(...buildSetDispatch(0));
+  return true;
+}
+
+/**
  * Find all struct types (other than excludeTypeIdx) that have a field named
  * propName.  Returns an array of {structTypeIdx, fieldIdx, fieldType} for
  * each matching struct type.  Used for multi-struct dispatch when the primary
@@ -1251,14 +1327,19 @@ export function findAlternateStructsForField(
   ctx: CodegenContext,
   propName: string,
   excludeTypeIdx: number,
-): { structTypeIdx: number; fieldIdx: number; fieldType: ValType }[] {
-  const result: { structTypeIdx: number; fieldIdx: number; fieldType: ValType }[] = [];
+): { structTypeIdx: number; fieldIdx: number; fieldType: ValType; mutable: boolean }[] {
+  const result: { structTypeIdx: number; fieldIdx: number; fieldType: ValType; mutable: boolean }[] = [];
   for (const [typeName, fields] of ctx.structFields) {
     const sIdx = ctx.structMap.get(typeName);
     if (sIdx === undefined || sIdx === excludeTypeIdx) continue;
     const fIdx = fields.findIndex((f) => f.name === propName);
     if (fIdx !== -1) {
-      result.push({ structTypeIdx: sIdx, fieldIdx: fIdx, fieldType: fields[fIdx]!.type });
+      result.push({
+        structTypeIdx: sIdx,
+        fieldIdx: fIdx,
+        fieldType: fields[fIdx]!.type,
+        mutable: fields[fIdx]!.mutable,
+      });
     }
   }
   return result;
