@@ -2,7 +2,7 @@
 id: 2674
 title: "acorn parse() 9th wall PAST tokenization (after #2664 type-write fix) — parseTopLevel/parseStatement array-push loop"
 status: in-progress
-assignee: ttraenkler/sd-2674b
+assignee: ttraenkler/sd-2674c
 sprint: 66
 created: 2026-06-25
 updated: 2026-06-25
@@ -411,3 +411,158 @@ method-dispatch bug above; (b) the `__host_eq` eqref false-positive on distinct
 empty structs. Sync with sd-2679 (#2679) before touching shared read/box/identity
 paths. STILL NOT the #1712 milestone — `parse()` does not yet return for a
 non-empty statement.
+
+## DECISIVE ROOT-CAUSE — `this.<field>` read routes through delete-aware plain `__extern_get`, breaking token-type identity (2026-06-26, sd-2674c)
+
+Worked on the fixed+merged #2075 base (re-merged `upstream/main`, which has
+#2075/#2079). `parse("x")` STILL hangs. Localized via 8 full-acorn instrumented
+compiles (~290s each on this box) + WAT dump + runtime diag exports. The prior
+"types$1 singletons read back EMPTY" framing was a HOST-MARSHALLING artifact, not
+the mechanism. The real chain is now PINNED end-to-end:
+
+### What is actually true (verified, not hypothesised)
+1. **The holder + its values are intact.** A diagnostic export appended to the
+   real acorn source (`.tmp/diag.mjs`, full scale) reads
+   `types$1.eof.label="eof"`, `types$1.name.label="name"`, and confirms identity
+   is preserved across repeated reads: `eof===eof: true`, `name===name: true`,
+   `held(name)===freshread(name): true`. So the stored token-type structs are
+   correct and the `===` OPERATOR matches them correctly **in a freshly-compiled
+   function**.
+2. **A FakeP class at full acorn scale also works** (`.tmp/diag2.mjs`, named
+   function-expression ctor): `switch=1/2 op=1/2` — both a `switch(this.type)` and
+   the `===` operator match token types correctly. So the bug is **NOT** a generic
+   switch/`===`/representation defect — it does not reproduce through a freshly
+   compiled class even at full scale.
+3. **There is now ONE Parser struct type** (`$__fnctor_Parser`, type idx 90) — the
+   #2075 dual-Parser shape is resolved. **There are NO `__get_member_<name>`
+   dispatchers in the compiled acorn WAT at all** (`grep '(func $__get_member'` →
+   none). So the #2075 read dispatcher is **never reserved** for the parser-method
+   reads — they take a different path.
+4. **`this.type` is read via `__extern_get` ~48.6k×** (the cap-throw key
+   histogram's top key is `type`; also `options`, `value`, `start`, `lastTokEnd`…
+   — all Parser instance fields). So parser-method `this.<field>` reads compile to
+   the **host sidecar `__extern_get`**, returning a host-proxy/externref value —
+   NOT `struct.get` on type 90, NOT the #2075 dispatcher.
+5. **Acorn uses `delete`** (4×, incl. `delete this.undefinedExports[name]`), so
+   `moduleUsesDelete` is TRUE.
+6. **`__host_eq` smoking gun** (`.tmp/eqtrace2*`): during the hang, the dominant
+   comparison is `{label="name" nkeys=10} === {label=U nkeys=0} -> 1` (TRUE) fired
+   ~4k× — i.e. a proper name-token compared against an empty-marshalling proxy
+   returns spurious TRUE. host_eq canonicalizes both operands through
+   `_hostEqComparableValue`→`_unwrapForHost` (the #1712 proxy-unwrap), which
+   **mis-resolves at full acorn scale** so the switch matches the WRONG case.
+
+### The mechanism (pinned)
+`tryEmitDeleteAwareDynamicGet` (property-access.ts ~2137-2197) fires for every
+`any`/`unknown`-typed receiver read **when `moduleUsesDelete`** (true for acorn).
+It emits a **plain `__extern_get(recv, "name")`** — deliberately, for
+delete-tombstone awareness — and does **NOT** try `struct.get` on the receiver's
+WasmGC struct, nor route through the #2075 `__get_member` dispatcher. The lifted
+acorn parser methods (`pp$N.parseExprAtom = function(){…}`) have a `this` that the
+compiler types as `any`/externref (NOT resolved to `$__fnctor_Parser`), so
+`this.type` takes this path → returns a **host sidecar/proxy** value that diverges
+in representation from the `struct.set`-written raw struct.
+
+Then in `parseExprAtom`'s `switch (this.type) { case types$1.name: … }`
+(strict-per-case → `emitSwitchStrictEq`, JS-host branch → `__host_eq`), both
+operands are host proxies; `__host_eq`'s `_unwrapForHost` collapses distinct
+case-label proxies onto one struct at scale → `this.type === types$1.<firstCase>`
+spuriously returns 1 → the wrong case runs → `this.next()` is never called →
+`this.type` stays `name` → `parseTopLevel`'s `while (this.type !== eof)` spins
+(~5453 iterations bounded; the `__js_array_push`/`__extern_method_call` ~160k
+signature is the per-iteration statement re-parse).
+
+### Why prior fixes / my attempt did not land it
+- #2664 (write dispatcher) + #2075 (read dispatcher) operate in
+  `emitNullGuardedStructGet`/`emitExternrefToStructGet`. The acorn parser reads
+  **bypass both** because `moduleUsesDelete` routes them to the plain
+  `__extern_get` in `tryEmitDeleteAwareDynamicGet` instead.
+- I tried adding a WasmGC `ref.eq` identity fast-path to `emitSwitchStrictEq`'s
+  JS-host branch (mirroring the `===` operator + the standalone branch). It is a
+  correct alignment (all 13 `tests/issue-2063-switch-strict-equality.test.ts`
+  pass) BUT it is **bypassed here**: the operands are host PROXIES, not WasmGC
+  eqrefs, so `ref.test eq` is false and the compare still falls to the broken
+  `__host_eq`. Reverted (symptom-patch, not root; adds `typeof_bigint` overhead to
+  every strict switch with no headline benefit). Re-confirmed: with that change
+  `parse("x")` still hangs and `__host_eq` is still called 239k× (proves the
+  ref.eq branch is never taken).
+
+### Fix direction for the next focused attempt (ranked)
+1. **(Cleanest) Resolve the lifted parser-method `this` to `$__fnctor_Parser`** so
+   `this.<field>` reads use the static `struct.get` arm (`compileInstanceMember`)
+   directly — raw struct, identity-preserving, no proxy. Touches method-lifting /
+   `this`-type resolution for prototype-assigned function expressions.
+2. **Route `tryEmitDeleteAwareDynamicGet` through `struct.get` / the #2075
+   `__get_member` dispatcher FIRST** when the receiver matches a known WasmGC
+   struct candidate (returning the raw struct), falling to the tombstone-aware
+   `__extern_get` only for genuinely dynamic/tombstoned props. Must preserve the
+   delete-tombstone semantics that path exists for (#2179) — design carefully.
+3. **Make `_unwrapForHost`/`_hostProxyReverse` collision-free at scale** (the
+   host-proxy canonicalization layer). Narrowest blast radius but addresses the
+   symptom (host_eq spurious match) rather than the representation divergence.
+
+All three are broad-impact value-representation changes → validate on the FULL
+`merge_group` floor, not a scoped sweep.
+
+### Carve-out bugs CONFIRMED live this session (own issues)
+- **(a) function-DECLARATION constructor drops prototype-method dispatch.** Hit
+  directly: a probe `function FakeP(){…}; FakeP.prototype.setName=…; new
+  FakeP().setName()` throws **"setName is not a function"** at runtime. The
+  **named function-EXPRESSION** form (`var FakeP = function FakeP(){…}`) works.
+  Acorn uses only named function expressions, so NOT on the acorn path — but a
+  real codegen gap.
+- **(b) `conf.startsExpr` not applied during inlined construction.** `name: new
+  TokenType("name", startsExpr)` (with `var startsExpr = {startsExpr:true}`) reads
+  back `startsExpr=false` (should be true) — the conf-object property read fails
+  during construction. A real read-dispatch correctness gap at scale (does not
+  itself cause the loop, but same family).
+
+### Reusable probes banked (`.tmp/`, paths point at this worktree)
+- `dump-wat.mjs` — compile acorn with `emitWat`, dump struct types + holder/
+  TokenType candidates (writes `.tmp/acorn.wat`, ~8.7MB).
+- `diag.mjs` + `diag-worker.mjs` — append a `_diag` export to real acorn,
+  read token singletons directly (field fidelity + identity).
+- `diag2.mjs` + `diag2-worker.mjs` — FakeP class at acorn scale, switch vs `===`.
+- `eqtrace2.mjs` + `eqtrace2-worker.mjs` — `__host_eq` operand histogram +
+  same-label-zero / spurious-true detector, cap-throw bounded.
+- `sw-repro.mjs` — small-scale switch-vs-`===` (passes; isolates the scale).
+- All single-compile, worker-thread + SAB, bounded. NOTE: each full-acorn compile
+  is ~290s on this box — reuse one compile, do not recompile per input.
+
+## RESOLVED BY #2085 — the 9th-wall HANG is fixed (re-verified 2026-06-26, sd-2674c)
+
+PR #2085 (`fix(#2664): dispatch under-applied dynamic method calls at max arity`)
+fixed the 9th-wall HANG via a DIFFERENT mechanism than this issue's comparison
+analysis: the host method-call bridge dispatched by the CALLER's `args.length`, so
+`this.parseExpression()` (0 args, 2 params) routed to `__call_fn_method_0` which
+omitted the arity-2 closure → null → `parseTopLevel` never advanced. Fixed by
+dispatching at max `__call_fn_method_N`.
+
+Re-verified on `upstream/main` WITH #2085 (`.tmp/diff-probe.mjs`, #1712 differential
+vs node-acorn oracle):
+
+| input | compiled result |
+|---|---|
+| `""` / `";"` | Program returned; DIVERGES only by an extra `$.sourceFile` field |
+| `"1"` / `"1;"` / `"true;"` | Program returned; DIVERGES: `$.body[0].expression` is `null` (Literal not attached¹) + extra `sourceFile` |
+| `"1 + 2 * 3;"` | THROWS `WebAssembly.Exception` (binary-expression wall) |
+| `"x"` / `"var x = 1;"` | THROWS `WebAssembly.Exception` (#2681 — `unexpected()` on `name` token) |
+
+The HANG is gone. **#1712 is NOT yet met**: numeric statements return a partial AST
+that diverges, and binary/identifier statements throw. So this issue's
+non-termination is RESOLVED; the remaining work splits into #2681 (identifier
+throw) + a binary-expression wall + the `expression:null`/`sourceFile` AST diffs.
+
+¹ `expression: null` may be a host AST-marshalling depth artifact (nested WasmGC
+node not deep-marshalled through `wrapExports` + `JSON.stringify`) rather than a
+real codegen defect — needs confirmation (read `.expression.type` via a direct
+struct walk, not host JSON).
+
+### This issue's comparison analysis directly explains #2681
+The `## DECISIVE ROOT-CAUSE` section above (the `this.<field>` read routing through
+the delete-aware plain `__extern_get` → host-proxy representation → JS-host
+`__host_eq` mis-canonicalization at scale → `switch(this.type){case types$1.name}`
+never matches) is exactly why, post-#2085, the identifier path reaches
+`unexpected()` and THROWS (#2681) instead of matching the `name` case. The 3 ranked
+fix directions + the banked `.tmp` probes apply to #2681. Recommend porting this
+analysis to #2681 and closing #2674 as resolved-by-#2085.
