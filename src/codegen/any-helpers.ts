@@ -6,7 +6,7 @@
  * Extracted from codegen/index.ts (#1013).
  */
 import type { Instr, StructTypeDef, ValType } from "../ir/types.js";
-import type { CodegenContext } from "./context/types.js";
+import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { ensureAnyToStringHelper, ensureNativeStringHelpers, nativeStringType } from "./native-strings.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
@@ -34,6 +34,72 @@ export function ensureAnyValueType(ctx: CodegenContext): void {
       { name: "externval", type: { kind: "externref" }, mutable: false },
     ],
   });
+
+  // (#2106 S1.0) Reserve the standalone `$undefined` singleton up-front, in the
+  // same call that registers `$AnyValue`. It is an immutable tag-1 `$AnyValue`
+  // global, so `undefined` is a distinct (non-null) reference while `null` stays
+  // `ref.null extern`. Reserving it HERE — alongside the type, at first-use of
+  // `any` — keeps it a GLOBAL added before any native-string finalize pass, so it
+  // never drives the #329 late func-index shift (see `late-imports.ts:581-584`).
+  //
+  // S1.0 is INERT: nothing emits `global.get $undefined` yet (emitUndefined still
+  // falls back to `ref.null.extern` in standalone). The producers + consumers flip
+  // in S1.1/S1.2. Gated on standalone/native-strings so host mode (which has a real
+  // host `undefined` via `__get_undefined`) is byte-identical and never allocates
+  // this global. The tag-1 shape mirrors `__any_from_extern`'s `nullAny`
+  // ({tag:1, i32val:0, f64val:NaN, refval:null, externval:null}).
+  if ((ctx.standalone || ctx.nativeStrings) && ctx.undefinedGlobalIdx === undefined) {
+    const EQ_HEAP_TYPE = -19; // WasmGC `eq` abstract heap type
+    const anyTypeIdx = ctx.anyValueTypeIdx;
+    const globalIdx = ctx.numImportGlobals + ctx.mod.globals.length;
+    ctx.mod.globals.push({
+      name: "__undefined",
+      type: { kind: "ref", typeIdx: anyTypeIdx },
+      mutable: false,
+      init: [
+        { op: "i32.const", value: 1 }, // tag = 1 (Undefined)
+        { op: "i32.const", value: 0 }, // i32val
+        { op: "f64.const", value: NaN }, // f64val
+        { op: "ref.null", typeIdx: EQ_HEAP_TYPE }, // refval
+        { op: "ref.null.extern" }, // externval
+        { op: "struct.new", typeIdx: anyTypeIdx },
+      ] as Instr[],
+    });
+    ctx.undefinedGlobalIdx = globalIdx;
+  }
+}
+
+/**
+ * (#2106 S1.0) Push the standalone `$undefined` singleton (a `ref $AnyValue`,
+ * tag 1) onto the stack. Returns `false` (emitting nothing) when not in
+ * standalone/native-strings mode or the singleton was not reserved — callers
+ * then fall back to their existing `ref.null.extern` / host-`__get_undefined`
+ * path. INERT until S1.1 routes `emitUndefined` here.
+ */
+export function emitUndefinedSingleton(ctx: CodegenContext, fctx: FunctionContext): boolean {
+  if (!(ctx.standalone || ctx.nativeStrings)) return false;
+  if (ctx.undefinedGlobalIdx === undefined) {
+    ensureAnyValueType(ctx);
+    if (ctx.undefinedGlobalIdx === undefined) return false;
+  }
+  fctx.body.push({ op: "global.get", index: ctx.undefinedGlobalIdx } as Instr);
+  return true;
+}
+
+/**
+ * (#2106 S1.0) Test whether the `ref $AnyValue` on top of the stack is the
+ * `$undefined` singleton (tag === 1). Consumes the ref, leaves an i32. Returns
+ * `false` (emitting nothing) when the singleton is unavailable. INERT until S1.1
+ * routes the `=== undefined` / `typeof === "undefined"` consumers here.
+ */
+export function emitIsUndefinedSingleton(ctx: CodegenContext, fctx: FunctionContext): boolean {
+  if (!(ctx.standalone || ctx.nativeStrings)) return false;
+  if (ctx.anyValueTypeIdx < 0) return false;
+  // tag === 1  (the operand is a `ref $AnyValue`; read field 0 and compare).
+  fctx.body.push({ op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 0 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "i32.eq" } as Instr);
+  return true;
 }
 
 /**
