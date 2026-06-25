@@ -264,17 +264,15 @@ function compileDynamicWithStatement(ctx: CodegenContext, fctx: FunctionContext,
     fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: throwArm } as Instr);
   }
 
-  // Body-declared LEXICAL names (let/const/class/catch) and inner-function names
-  // genuinely shadow the object environment. `var`/function-scope names do NOT
-  // (§: a var hoists to the function env but the object env is still consulted
-  // first at runtime) — but `collectBodyDeclaredNames` lumps `var` in. For the
-  // READ slice the conservative effect of blocking a var name is that it reads
-  // the outer var directly instead of HasBinding-gating — which is correct ONLY
-  // when the object lacks the name. The canary 12.10-0-1.js has an EMPTY object,
-  // so a blocked `foo` still resolves to the hoisted var (the expected result).
-  // A precise var/object precedence is refined in a later slice; Slice 1 uses
-  // the declared-name set as-is to stay conservative and byte-safe.
-  const blockedNames = collectBodyDeclaredNames(stmt.statement);
+  // Only body-declared LEXICAL names (let/const/class/catch) + inner-function
+  // names genuinely shadow the object environment. `var`/function-scope names do
+  // NOT — a `var` inside `with` hoists to the function env, but the object env is
+  // consulted FIRST at runtime, so a `var foo` must still pass the HasBinding
+  // gate (object wins if it owns `foo`; else the hoisted var). Using the lexical
+  // set (not the full declared set) is what makes `with({foo:..}){ var foo=.. }`
+  // write the OBJECT, while keeping the empty-object canary correct (gate misses
+  // ⇒ falls to the hoisted var). (#2663 Slice 2 var-precedence refinement.)
+  const blockedNames = collectBodyLexicalNames(stmt.statement);
 
   (fctx.withScopes ??= []).push({ kind: "dynamic", localIdx, blockedNames });
   try {
@@ -419,6 +417,70 @@ export function emitDynamicWithSet(
     then: thenArm,
     else: elseArm,
   } as Instr);
+}
+
+/**
+ * (#2663 Slice 3) Emit `delete name` where `name` resolved to a dynamic `with`
+ * scope, leaving an i32 result on the stack (§13.5.1.2 / §8.5.2 DeleteBinding):
+ *
+ *   if (HasBinding(recv, name)) result = __delete_property(recv, name)
+ *   else result = <outer delete>   // a bare variable is not deletable ⇒ 0,
+ *                                  // unless an outer with also binds it (cascade)
+ *
+ * `emitOuterDelete()` emits the next-outer `delete name` result as i32 (another
+ * dynamic-with gate, or the plain "variables not deletable" `i32.const 0`).
+ */
+export function emitDynamicWithDelete(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  scope: DynamicWithScope,
+  name: string,
+  emitOuterDelete: () => void,
+): ValType {
+  addStringConstantGlobal(ctx, name);
+  const hasIdx = ensureLateImport(
+    ctx,
+    "__extern_has",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "i32" }],
+  );
+  const delIdx = ensureLateImport(
+    ctx,
+    "__delete_property",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "i32" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+
+  // ELSE arm: the next-outer delete (cascade) → i32.
+  const savedElse = pushBody(fctx);
+  emitOuterDelete();
+  const elseArm = fctx.body;
+  popBody(fctx, savedElse);
+
+  if (hasIdx === undefined || delIdx === undefined) {
+    fctx.body.push(...elseArm);
+    return { kind: "i32" };
+  }
+
+  // THEN arm: __delete_property(recv, name) → i32 (configurability-aware result).
+  const savedThen = pushBody(fctx);
+  fctx.body.push({ op: "local.get", index: scope.localIdx });
+  for (const instr of stringConstantExternrefInstrs(ctx, name)) fctx.body.push(instr);
+  fctx.body.push({ op: "call", funcIdx: delIdx } as Instr);
+  const thenArm = fctx.body;
+  popBody(fctx, savedThen);
+
+  fctx.body.push({ op: "local.get", index: scope.localIdx });
+  for (const instr of stringConstantExternrefInstrs(ctx, name)) fctx.body.push(instr);
+  fctx.body.push({ op: "call", funcIdx: hasIdx } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: thenArm,
+    else: elseArm,
+  } as Instr);
+  return { kind: "i32" };
 }
 
 function compileClosedObjectLiteralTarget(
@@ -580,6 +642,47 @@ function collectBodyDeclaredNames(stmt: ts.Statement): Set<string> {
     if (ts.isVariableDeclaration(node)) {
       collectBindingNames(node.name, names);
       return;
+    }
+    if (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) {
+      if (node.name) names.add(node.name.text);
+      return;
+    }
+    if (ts.isCatchClause(node) && node.variableDeclaration) {
+      collectBindingNames(node.variableDeclaration.name, names);
+    }
+    forEachChild(node, walk);
+  };
+  walk(stmt);
+  return names;
+}
+
+/** True if a VariableDeclaration is `let`/`const` (block-scoped), not `var`. */
+function isLexicalVarDecl(node: ts.VariableDeclaration): boolean {
+  const list = node.parent;
+  if (list && ts.isVariableDeclarationList(list)) {
+    // NodeFlags.Let (0x1) | NodeFlags.Const (0x2) — `var` has neither.
+    return (list.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) !== 0;
+  }
+  return false;
+}
+
+/**
+ * (#2663 Slice 2 var-precedence) Names that GENUINELY shadow a dynamic `with`
+ * object binding: lexical declarations (`let`/`const`/class/catch) and
+ * inner-function declarations. `var`-declared (function-scoped) names are
+ * deliberately EXCLUDED — per §, a `var` inside `with` hoists to the function
+ * environment but the object environment is consulted FIRST at runtime, so a
+ * `var foo` name must still pass through the HasBinding gate (object wins if the
+ * with-object owns `foo`; otherwise it resolves to the hoisted var). Used as the
+ * dynamic scope's `blockedNames` so the gate is not bypassed for `var` names.
+ */
+function collectBodyLexicalNames(stmt: ts.Statement): Set<string> {
+  const names = new Set<string>();
+  const walk = (node: ts.Node): void => {
+    if (node !== stmt && isFunctionOrClassBoundary(node)) return;
+    if (ts.isVariableDeclaration(node)) {
+      if (isLexicalVarDecl(node)) collectBindingNames(node.name, names);
+      return; // `var` declarations are NOT blocked (object env consulted first)
     }
     if (ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) {
       if (node.name) names.add(node.name.text);

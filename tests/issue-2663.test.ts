@@ -127,3 +127,42 @@ describe("#2663 Slice 2 — dynamic with WRITE", () => {
     expect(exp.test()).toBe(19);
   });
 });
+
+describe("#2663 Slice 3 — dynamic with DELETE + var/object precedence", () => {
+  it("`delete name` on a present configurable with-binding returns true", async () => {
+    const exp = await run(`var o = { x: 1 }; var r; with (o) { r = delete x; } return r ? 1 : 0;`);
+    expect(exp.test()).toBe(1);
+  });
+
+  it("`delete name` for an absent name returns false (bare variable not deletable)", async () => {
+    const exp = await run(`var x = 1; var o = { y: 0 }; var r; with (o) { r = delete x; } return r ? 1 : 0;`);
+    expect(exp.test()).toBe(0);
+  });
+
+  it("`delete name` cascades the HasBinding gate to the outer with object", async () => {
+    // p is on the outer `a`, absent on inner `b` → inner gate misses, outer hits
+    // → delete a.p returns true.
+    const exp = await run(
+      `var a = { p: 1 }; var b = { q: 2 }; var r; with (a) { with (b) { r = delete p; } } return r ? 1 : 0;`,
+    );
+    expect(exp.test()).toBe(1);
+  });
+
+  // var/object precedence (lexical-only blockedNames, §9.1.x Object Environment
+  // Record precedence): a `var`-declared name does NOT shadow the with object —
+  // a plain assignment routes to the object when it owns the name.
+  it("a `var`-bound name + plain assign in with writes the OBJECT when it owns the name", async () => {
+    const exp = await run(`var foo; var o = { foo: "obj" }; with (o) { foo = "hi"; } return o.foo;`);
+    expect(exp.test()).toBe("hi");
+  });
+
+  it("a `let` inside with DOES shadow the with object (lexical binding wins)", async () => {
+    const exp = await run(`var o = { x: "obj" }; var r; with (o) { let x = "lex"; r = x; } return r;`);
+    expect(exp.test()).toBe("lex");
+  });
+
+  it("a `var`-bound name absent on the object falls through to the variable", async () => {
+    const exp = await run(`var foo; var o = { y: 0 }; with (o) { foo = "hi"; } return foo;`);
+    expect(exp.test()).toBe("hi");
+  });
+});
