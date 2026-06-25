@@ -2,7 +2,7 @@
 id: 2566
 title: "Eager-buffer generator over-consumes in array destructuring (capturing generators yield wrong side-effect counts; trailing elision steps too far)"
 status: ready
-sprint: Backlog
+sprint: 66
 created: 2026-06-21
 updated: 2026-06-21
 priority: medium
