@@ -437,3 +437,84 @@ F = defineProperty trap (§10.5.6) · G = §10.5 result-invariants (needs descri
 attributes) · H = construct/apply trap dispatch (the last two; needs the
 standalone dynamic-new path). Plus Stage S0/S1 from the RE-MEASURE section
 (standalone `Proxy.revocable` + missing `Reflect.*` wiring).
+
+## Implementation — Slice F: defineProperty (dev-builtin-ctor, 2026-06-25, sprint 66)
+
+Re-grounded against current upstream/main (27ef33522) before coding: probed a
+Proxy with a `defineProperty` trap — `Object.defineProperty(p, k, desc)` and
+`Reflect.defineProperty(p, k, desc)` BOTH silently forwarded to the target
+without firing the trap (returned the no-fire value), confirming the gap.
+`$ProxyTraps` had no `defineProperty` field; next free index = 11.
+
+**Bounded-check (the load-bearing gate):** the base trap DISPATCH does NOT need
+the #797/#1460/#1462 descriptor-attribute model. The trap is `(target, key,
+descriptor) → boolean`: it RECEIVES the descriptor as an opaque externref (the
+call site already has it) and RETURNS a boolean; the user trap's own body reads
+the descriptor. Only the §10.5.6 result-INVARIANTS (reconciling a returned
+definition against the target's existing non-configurable / non-extensible
+descriptor) need the descriptor model — DEFERRED to slice G, exactly as slices
+A–E deferred theirs.
+
+Wires the **defineProperty** trap (§10.5.6 [[DefineOwnProperty]]) on the proven
+#1100 dispatch substrate. `tests/issue-1355f.test.ts` (10 tests, all green).
+Slices A–E + #1100 tests stay green; #1460/#1462/#1629/#2042/#2046 descriptor
+suites unregressed (146 tests over the full proxy + descriptor regression run).
+
+### How it slots in (template = ownKeys slice E, no new machinery)
+
+1. **`$ProxyTraps`** gains a 12th field `defineProperty` (externref closure),
+   APPENDED after the base eleven — never renumbered. `__proxy_create` reads it
+   off the open handler via `__extern_get` (undefined → null → forward) into
+   local 13; the `struct.new $ProxyTraps` gains the 12th arg.
+2. **`buildDefineDispatch`** — a 3-arg trap builder (`defineProperty` is the only
+   key+descriptor trap, so it doesn't fit the key-only `buildDispatch`):
+   `__proxy_define_dispatch(proxy, key, desc)` reads the trap; null → forward
+   `__obj_define_from_desc(target, key, desc)` (the native single-descriptor
+   applier — the #2046-reused path); else invoke the trap `(target, key, desc)`
+   with the handler bound as `this`, the descriptor passed through UNCHANGED.
+3. **`__proxy_call_define`** driver (reserve-then-fill, #1719) — 3 trap args,
+   routed through `__apply_closure(trap, handler, «target,key,desc»)`, filled at
+   FINALIZE by `fillProxyDispatch` (arity 3), same bridge as get/set.
+4. **Front-guard** prepended to `__obj_define_from_desc` (a `ref.test $Proxy` on
+   param0 diverts a proxy receiver to the dispatch). The `Reflect.defineProperty`
+   call site (calls.ts) now coerces the applier's externref result via
+   `__is_truthy` instead of dropping it + returning a hard `true`, so a proxy
+   trap's `false`/`true` return is observable (a non-proxy receiver returns the
+   always-truthy obj, so the spec `true` is preserved unchanged).
+5. **Inline-literal call-site reroute** (object-ops.ts) — `Object.defineProperty`
+   with an INLINE `{...}` data descriptor on a _syntactic_ `new Proxy(...)`
+   receiver (a direct `new Proxy(...)` arg, or an identifier whose var-decl
+   initializer is `new Proxy(...)`) routes through `emitDefinePropertyDescRuntime`
+   → `__obj_define_from_desc` (where the front-guard lives), instead of the
+   inline `__defineProperty_value` fast path that would store directly on the
+   proxy externref. Gated on the SYNTACTIC proxy shape (not a bare `any`
+   receiver) to avoid swallowing the §19.1.2.4-step-1 non-object throw for
+   `const o: any = null`. Accessor descriptors keep the existing path.
+
+### Verified (per-process test262, NOT the in-process loop)
+
+6 of the 8 non-realm `built-ins/Proxy/defineProperty/*` rows flip to `pass`
+standalone: `call-parameters`, `return-boolean-and-define-target`,
+`trap-is-null-target-is-proxy`, `trap-is-undefined`, `null-handler`,
+`trap-return-is-false`. The 2 still-failing (`trap-is-missing-target-is-proxy`,
+`trap-is-undefined-target-is-proxy`) are proxy-OF-proxy + array-exotic `length`
+invariant — beyond bounded slice F. Host/gc mode is byte-identical (the dispatch
+
+- front-guard + reroute are all `ctx.standalone`-gated).
+
+### Deferred (next invariant slice G — needs the descriptor-attribute model)
+
+Per the probe, the existing slices (has/get/…) do NOT enforce these either, so
+they are consistently deferred: present-but-non-callable trap → TypeError
+(§10.5.6 step 5 GetMethod); trap-thrown abrupt-completion propagation (the shared
+closure-bridge gap, RE-MEASURE bucket #2617); the §10.5.6 result-invariants
+(reject a non-configurable/non-extensible redefine disagreeing with the target's
+descriptor — the 6 `targetdesc-*` rows). Proxy-of-proxy recursion through the
+define forward is also deferred.
+
+### Remaining standalone slices after F
+
+G = §10.5 result-invariants (needs descriptor attributes #797/#1460/#1462) ·
+H = construct/apply trap dispatch (the last two traps; needs the standalone
+dynamic-new path). Plus Stage S0/S1 from the RE-MEASURE section (standalone
+`Proxy.revocable` + missing `Reflect.*` wiring).
