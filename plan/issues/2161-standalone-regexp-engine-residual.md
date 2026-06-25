@@ -5,9 +5,9 @@ status: blocked
 assignee: ttraenkler/sd1
 sprint: 66
 created: 2026-06-15
-updated: 2026-06-24
+updated: 2026-06-25
 blocked_on: [2175]
-reconcile_note: "RECONCILED 2026-06-23 — all 4 sliced sub-issues merged (#2588/#2589 PR#1914, #2590 #1908, #2591 #1907). Remaining residual = RegExp.prototype reflection (gated on the #2175 builtin-prototype-readers substrate) + dynamic/any-typed regex receivers. No substrate-independent dev slice left; umbrella tracker blocked on #2175."
+reconcile_note: "RECONCILED 2026-06-23 — all 4 sliced sub-issues merged (#2588/#2589 PR#1914, #2590 #1908, #2591 #1907). 2026-06-25 (sdev-async-sm): Slice 9 landed one MORE bounded substrate-independent win the prior reconcile missed — const-foldable new RegExp() patterns (concat / const-bound literal / §22.2.3.1 regex-literal copy-ctor) now compile to the native engine instead of runtime-trapping (see Slice 9). Remaining residual = RegExp.prototype reflection (gated on #2175) + dynamic/any-typed receivers + truly-runtime ctor patterns (need a runtime regex compiler — future architect-spec, NOT bounded). Umbrella stays blocked on #2175 for the reflection bucket."
 priority: high
 feasibility: hard
 reasoning_effort: high
