@@ -104,6 +104,7 @@ const DATE_PROTO_METHODS = [
   "getDate",
   "getDay",
   "getFullYear",
+  "getYear", // (#2671) Annex B §B.2.4 legacy getter
   "getHours",
   "getMilliseconds",
   "getMinutes",
@@ -419,6 +420,7 @@ const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   getDate: 0,
   getDay: 0,
   getFullYear: 0,
+  getYear: 0, // (#2671) Annex B §B.2.4 legacy getter (0-arity)
   getHours: 0,
   getMilliseconds: 0,
   getMinutes: 0,
