@@ -367,13 +367,47 @@ forms (`var P = function(){…}` and named `var P = function P(){…}`) BOTH wor
 Acorn uses only named function expressions, so this is NOT the acorn wall — but
 it is a real codegen correctness gap worth its own issue.
 
+### DECISIVE finding — the singletons read back as EMPTY objects (`__host_eq` operand dump)
+Describing both `__host_eq` operands during the hang (constructor + own-keys +
+`.label`):
+```
+A{ ctor=undefined keys=[label,keyword,beforeExpr,startsExpr] label="name" }   // this.type / this.value — a PROPER TokenType
+  ===
+B{ ctor=undefined keys=[]                                   label=<none>  }   // types$1.<name> read — an EMPTY {} (NO own keys)
+  -> 0   (and one sampled -> 1 — a spurious eqref TRUE on two distinct empties)
+```
+So operand B — the **`types$1.<name>` module-level singleton read** — comes back
+as an object with **ZERO own properties** (no `label`/`keyword`/…). The
+TokenType instances stored in the `var types$1 = { eof: new TokenType("eof"), … }`
+holder are EMPTY when read at acorn scale. `this.type` (A) is a full TokenType;
+the holder-member read (B) is `{}`. They can never be `===`, so the
+`switch (this.type) { case types$1.name: … }` in `parseExprAtom` (the
+#2656 switch-on-externref class) NEVER matches `name` → the ident path that calls
+`this.next()` is never taken → `this.type` stuck on `name` → `parseTopLevel`
+spins. (The `__host_eq -> 1` on two empties is a SECONDARY eqref false-positive.)
+
+### NOT reproducible in isolation even faithfully
+`types.eof.label` + identity on a module-level object literal of `new
+TokenType(...)` (incl. the faithful 11-field TokenType + `binop()`/`kw()` helper
+constructors + num/name/eof/semi/plusMin/_in entries) returns 11 (correct) —
+the empty-object behaviour only appears at FULL acorn scale (~50 token types,
+`keywords`/`keywordTypes` loops, `Object.defineProperties(Parser.prototype,…)`,
+spreads). Strongly suggests a **struct-shape collision / wrong-candidate
+resolution at scale**: the `types$1` holder or the TokenType struct gets read
+through a DIFFERENT (empty) struct shape than the one the instances were
+constructed into — the multi-shape value-representation family of #2664/#2075,
+now for module-level class-instance singletons in an object literal.
+
 ### Next step (continue here — fixed #2075 base)
-Pin WHY the `types$1.<name>` holder-member singleton read returns a field-less /
-non-identical externref at acorn scale (vs the working minimal repros): instrument
-the `__get_member`/`__extern_get` for the `eof`/`name` reads to see whether the
-read resolves to a wrong struct candidate, an empty sidecar entry, or a re-boxed
-externref that loses identity. Likely the SAME multi-shape / value-representation
-family as #2664/#2075 but for a module-level object-literal holding
-class-instance singletons. Sync with sd-2679 (#2679 receiver-dispatch) before
-touching any shared read/box/identity path. STILL NOT the #1712 milestone —
-`parse()` does not yet return for a non-empty statement.
+Find why `types$1.<name>` resolves to an EMPTY struct at scale: (1) dump the
+struct types registered for the `types$1` object literal and the TokenType
+instances; (2) check whether the object-literal property read for `types$1.eof`
+picks a wrong/empty struct candidate (the `findAlternateStructsForField` /
+`__get_member` candidate set for `eof`/`name`/… on the holder), OR whether the
+`new TokenType()` results stored into the holder literal lose their fields
+(construction-vs-storage). Then apply the matching dispatch/representation fix
+(same family as #2664/#2075). ALSO carve: (a) the function-declaration-constructor
+method-dispatch bug above; (b) the `__host_eq` eqref false-positive on distinct
+empty structs. Sync with sd-2679 (#2679) before touching shared read/box/identity
+paths. STILL NOT the #1712 milestone — `parse()` does not yet return for a
+non-empty statement.
