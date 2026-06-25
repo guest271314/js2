@@ -36,10 +36,14 @@ export function preloadLibFiles(files: Record<string, string>): void {
       }
     }
   }
-  Reflect.deleteProperty(LIB_FILES, "lib.d.ts");
-  for (const key of Array.from(LIB_SOURCE_FILES.keys())) {
-    if (key.startsWith("lib.d.ts:")) {
-      LIB_SOURCE_FILES.delete(key);
+  // #2528 — both composites (DOM and DOM-free) are derived from the bundled
+  // sub-libs, so invalidate both when preloading replaces any sub-lib.
+  for (const composite of ["lib.d.ts", "lib.no-dom.d.ts"]) {
+    Reflect.deleteProperty(LIB_FILES, composite);
+    for (const key of Array.from(LIB_SOURCE_FILES.keys())) {
+      if (key.startsWith(`${composite}:`)) {
+        LIB_SOURCE_FILES.delete(key);
+      }
     }
   }
 }
@@ -150,83 +154,114 @@ const TS_LIB_NAMES = new Set([
  * on first access, then caches. Custom declarations (generators, es2015,
  * es2021) are always available; standard TS libs are loaded from disk.
  */
+/**
+ * #2528 — the default-lib composite file names. The DOM-bearing composite keeps
+ * the historical `lib.d.ts` name (so `--platform web` and the unset default are
+ * byte-identical to today); the DOM-free composite gets a distinct name so a
+ * single process can compile both web and node programs without the global
+ * `LIB_FILES` / `LIB_SOURCE_FILES` caches cross-contaminating.
+ */
+const DOM_LIB_NAME = "lib.d.ts";
+const DOM_FREE_LIB_NAME = "lib.no-dom.d.ts";
+
+/**
+ * The ES base sub-libs shared by BOTH the web (DOM) and node (DOM-free)
+ * composites. We list the sub-files (e.g. lib.es2015.collection.d.ts) rather
+ * than the umbrella files (lib.es2015.d.ts) because umbrella files only contain
+ * /// <reference lib="..."> directives which are NOT resolved when the content
+ * is concatenated into a single source file.
+ */
+const ES_BASE_LIB_NAMES = [
+  // ES5 base
+  "lib.es5.d.ts",
+  // ES2015 sub-libs (from lib.es2015.d.ts references)
+  "lib.es2015.core.d.ts",
+  "lib.es2015.collection.d.ts",
+  "lib.es2015.generator.d.ts",
+  "lib.es2015.iterable.d.ts",
+  "lib.es2015.promise.d.ts",
+  "lib.es2015.proxy.d.ts",
+  "lib.es2015.reflect.d.ts",
+  "lib.es2015.symbol.d.ts",
+  "lib.es2015.symbol.wellknown.d.ts",
+  // ES2016
+  "lib.es2016.array.include.d.ts",
+  "lib.es2016.intl.d.ts",
+  // ES2017
+  "lib.es2017.object.d.ts",
+  "lib.es2017.string.d.ts",
+  "lib.es2017.intl.d.ts",
+  "lib.es2017.typedarrays.d.ts",
+  "lib.es2017.date.d.ts",
+  "lib.es2017.sharedmemory.d.ts",
+  // ES2018
+  "lib.es2018.asyncgenerator.d.ts",
+  "lib.es2018.asynciterable.d.ts",
+  "lib.es2018.intl.d.ts",
+  "lib.es2018.promise.d.ts",
+  "lib.es2018.regexp.d.ts",
+  // ES2019
+  "lib.es2019.array.d.ts",
+  "lib.es2019.intl.d.ts",
+  "lib.es2019.object.d.ts",
+  "lib.es2019.string.d.ts",
+  "lib.es2019.symbol.d.ts",
+  // ES2020
+  "lib.es2020.bigint.d.ts",
+  "lib.es2020.date.d.ts",
+  "lib.es2020.intl.d.ts",
+  "lib.es2020.number.d.ts",
+  "lib.es2020.promise.d.ts",
+  "lib.es2020.sharedmemory.d.ts",
+  "lib.es2020.string.d.ts",
+  "lib.es2020.symbol.wellknown.d.ts",
+  // ES2021
+  "lib.es2021.intl.d.ts",
+  "lib.es2021.promise.d.ts",
+  "lib.es2021.string.d.ts",
+  "lib.es2021.weakref.d.ts",
+  // ES2022
+  "lib.es2022.array.d.ts",
+  "lib.es2022.error.d.ts",
+  "lib.es2022.intl.d.ts",
+  "lib.es2022.object.d.ts",
+  "lib.es2022.regexp.d.ts",
+  "lib.es2022.string.d.ts",
+  // ES2023
+  "lib.es2023.array.d.ts",
+  "lib.es2023.collection.d.ts",
+  "lib.es2023.intl.d.ts",
+  // ES2024
+  "lib.es2024.collection.d.ts",
+  // ESNext — Set methods (union, intersection, difference, etc.)
+  "lib.esnext.collection.d.ts",
+  // ESNext — DisposableStack / AsyncDisposableStack (#1036)
+  "lib.esnext.disposable.d.ts",
+];
+
 function getLibSource(name: string): string | undefined {
   if (name in LIB_FILES) return LIB_FILES[name];
 
   // Composite lib.d.ts: concatenate all needed lib files directly.
-  // We must include the sub-files (e.g. lib.es2015.collection.d.ts) rather than
-  // the umbrella files (lib.es2015.d.ts) because umbrella files only contain
-  // /// <reference lib="..."> directives which are NOT resolved when the content
-  // is concatenated into a single source file.
-  if (name === "lib.d.ts") {
+  //
+  // #2528 — there are TWO composites that share the ES base sub-libs and differ
+  // only in whether `lib.dom.d.ts` is appended:
+  //   - `lib.d.ts` (DOM_LIB_NAME)   → ES base + DOM (the historical default;
+  //                                   web/browser ambient surface — `window`,
+  //                                   `document`, … in scope).
+  //   - `lib.no-dom.d.ts`           → ES base, NO DOM (the `--platform node`
+  //     (DOM_FREE_LIB_NAME)           ambient surface — DOM-only globals are NOT
+  //                                   in scope, so `window.stop` in a node host
+  //                                   is a clear type error).
+  // The two are distinct cache keys / default-lib names so a single process can
+  // compile both web and node programs without cross-contamination.
+  if (name === DOM_LIB_NAME || name === DOM_FREE_LIB_NAME) {
+    const withDom = name === DOM_LIB_NAME;
     const libNames = [
-      // ES5 base
-      "lib.es5.d.ts",
-      // ES2015 sub-libs (from lib.es2015.d.ts references)
-      "lib.es2015.core.d.ts",
-      "lib.es2015.collection.d.ts",
-      "lib.es2015.generator.d.ts",
-      "lib.es2015.iterable.d.ts",
-      "lib.es2015.promise.d.ts",
-      "lib.es2015.proxy.d.ts",
-      "lib.es2015.reflect.d.ts",
-      "lib.es2015.symbol.d.ts",
-      "lib.es2015.symbol.wellknown.d.ts",
-      // ES2016
-      "lib.es2016.array.include.d.ts",
-      "lib.es2016.intl.d.ts",
-      // ES2017
-      "lib.es2017.object.d.ts",
-      "lib.es2017.string.d.ts",
-      "lib.es2017.intl.d.ts",
-      "lib.es2017.typedarrays.d.ts",
-      "lib.es2017.date.d.ts",
-      "lib.es2017.sharedmemory.d.ts",
-      // ES2018
-      "lib.es2018.asyncgenerator.d.ts",
-      "lib.es2018.asynciterable.d.ts",
-      "lib.es2018.intl.d.ts",
-      "lib.es2018.promise.d.ts",
-      "lib.es2018.regexp.d.ts",
-      // ES2019
-      "lib.es2019.array.d.ts",
-      "lib.es2019.intl.d.ts",
-      "lib.es2019.object.d.ts",
-      "lib.es2019.string.d.ts",
-      "lib.es2019.symbol.d.ts",
-      // ES2020
-      "lib.es2020.bigint.d.ts",
-      "lib.es2020.date.d.ts",
-      "lib.es2020.intl.d.ts",
-      "lib.es2020.number.d.ts",
-      "lib.es2020.promise.d.ts",
-      "lib.es2020.sharedmemory.d.ts",
-      "lib.es2020.string.d.ts",
-      "lib.es2020.symbol.wellknown.d.ts",
-      // ES2021
-      "lib.es2021.intl.d.ts",
-      "lib.es2021.promise.d.ts",
-      "lib.es2021.string.d.ts",
-      "lib.es2021.weakref.d.ts",
-      // ES2022
-      "lib.es2022.array.d.ts",
-      "lib.es2022.error.d.ts",
-      "lib.es2022.intl.d.ts",
-      "lib.es2022.object.d.ts",
-      "lib.es2022.regexp.d.ts",
-      "lib.es2022.string.d.ts",
-      // ES2023
-      "lib.es2023.array.d.ts",
-      "lib.es2023.collection.d.ts",
-      "lib.es2023.intl.d.ts",
-      // ES2024
-      "lib.es2024.collection.d.ts",
-      // ESNext — Set methods (union, intersection, difference, etc.)
-      "lib.esnext.collection.d.ts",
-      // ESNext — DisposableStack / AsyncDisposableStack (#1036)
-      "lib.esnext.disposable.d.ts",
-      // DOM (decorators loaded via /// <reference> in lib.es5.d.ts)
-      "lib.dom.d.ts",
+      ...ES_BASE_LIB_NAMES,
+      // DOM (decorators loaded via /// <reference> in lib.es5.d.ts).
+      // Dropped for the DOM-free (node) composite.
+      ...(withDom ? ["lib.dom.d.ts"] : []),
     ];
     const parts = libNames.map((n) => getLibSource(n) ?? "");
     const content = parts.join("\n");
@@ -249,7 +284,12 @@ function getLibSource(name: string): string | undefined {
 
 /** Check if a file name is a known lib file */
 export function isKnownLibName(name: string): boolean {
-  return name === "lib.d.ts" || TS_LIB_NAMES.has(name) || (name.startsWith("lib.") && name.endsWith(".d.ts"));
+  return (
+    name === DOM_LIB_NAME ||
+    name === DOM_FREE_LIB_NAME ||
+    TS_LIB_NAMES.has(name) ||
+    (name.startsWith("lib.") && name.endsWith(".d.ts"))
+  );
 }
 
 /** Pre-parsed lib SourceFiles — cached to avoid re-parsing on every compile */
@@ -284,6 +324,45 @@ export interface AnalyzeOptions {
    * the user already declares `process`, so it never creates a dup-identifier error.
    */
   emulateNode?: boolean;
+  /**
+   * Target host environment for the AMBIENT global surface (#2528). Orthogonal
+   * to the backend `target` (`gc`/`wasi`/…): `platform` selects which globals
+   * are in scope at type-check time.
+   *
+   *   - `"web"`  → the DOM ambient surface (`window`, `document`, DOM types).
+   *               This is byte-identical to the historical default.
+   *   - `"node"` → the DOM-free ambient surface (DOM-only globals are NOT in
+   *               scope, so `window.stop` is a clear type error) AND implies the
+   *               Node-emulation injection path (`emulateNode`), so `process` &
+   *               friends type-check without @types/node.
+   *
+   * `undefined` (unset) preserves today's behaviour exactly: the DOM composite
+   * is loaded and `emulateNode` is driven solely by its own option. This keeps
+   * the common (web/test262) path byte-neutral. See `buildNodeEnvDtsForSource`
+   * + the `emulateNode ||= platform === "node"` composition in #2645.
+   */
+  platform?: "web" | "node";
+}
+
+/**
+ * #2645 — resolve the EFFECTIVE node-emulation decision from the two composing
+ * inputs: the explicit `emulateNode` option (#2603) and the ambient `platform`
+ * (#2528). `--platform node` implies the node-emulation injection path so the
+ * ambient global surface and the importable `node:<mod>` capability gate agree
+ * on one target model. The per-member `providersFor` gate stays the authority
+ * for importable members; this only sets the ambient default.
+ */
+function resolveEmulateNode(analyzeOptions?: AnalyzeOptions): boolean {
+  return analyzeOptions?.emulateNode === true || analyzeOptions?.platform === "node";
+}
+
+/**
+ * #2528 — select the default-lib composite name for the chosen platform. Unset
+ * platform → the historical DOM composite (byte-neutral). `--platform node`
+ * drops the DOM ambient surface; `--platform web` keeps it explicitly.
+ */
+function defaultLibNameForPlatform(analyzeOptions?: AnalyzeOptions): string {
+  return analyzeOptions?.platform === "node" ? DOM_FREE_LIB_NAME : DOM_LIB_NAME;
 }
 
 /**
@@ -569,9 +648,16 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
   // the source so it declares only the Node surface the program touches (see
   // `buildNodeEnvDts`). If the program touches no Node surface, there is nothing
   // to inject and `injectNodeEnv` stays false (no empty synthetic root).
-  const nodeEnvDtsSource =
-    analyzeOptions?.emulateNode === true ? buildNodeEnvDtsForSource(source, scriptKind) : undefined;
+  // #2645 — `--platform node` implies emulation, so the ambient surface and the
+  // capability gate share one target model (see `resolveEmulateNode`).
+  const emulateNode = resolveEmulateNode(analyzeOptions);
+  const nodeEnvDtsSource = emulateNode ? buildNodeEnvDtsForSource(source, scriptKind) : undefined;
   const injectNodeEnv = nodeEnvDtsSource !== undefined;
+
+  // #2528 — pick the ambient lib composite for the chosen platform. Unset
+  // platform → the DOM composite (byte-neutral with today); `--platform node`
+  // drops the DOM ambient surface.
+  const defaultLibName = defaultLibNameForPlatform(analyzeOptions);
 
   const compilerHost: ts.CompilerHost = {
     getSourceFile(name, languageVersion) {
@@ -585,7 +671,7 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
       if (libSf) return libSf;
       return undefined;
     },
-    getDefaultLibFileName: () => "lib.d.ts",
+    getDefaultLibFileName: () => defaultLibName,
     writeFile: () => {},
     getCurrentDirectory: () => "/",
     getCanonicalFileName: (f) => f,
@@ -799,7 +885,8 @@ export function analyzeMultiSource(
       if (libSf) return libSf;
       return undefined;
     },
-    getDefaultLibFileName: () => "lib.d.ts",
+    // #2528 — select the DOM-free composite under `--platform node`.
+    getDefaultLibFileName: () => defaultLibNameForPlatform(analyzeOptions),
     writeFile: () => {},
     getCurrentDirectory: () => "",
     getCanonicalFileName: (f) => f,
