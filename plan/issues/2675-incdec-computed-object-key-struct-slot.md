@@ -1,7 +1,9 @@
 ---
 id: 2675
 title: "++/-- on a computed object key (obj[keyExpr]++) is broken: NaN/no-update + double ToPropertyKey — #2659-family struct-slot vs sidecar"
-status: ready
+status: done
+completed: 2026-06-26
+assignee: ttraenkler/dev-conformance
 created: 2026-06-25
 priority: medium
 feasibility: medium
@@ -86,3 +88,23 @@ Once the #2659 read/write asymmetry is fully resolved (connects to the acorn
   currently file-private) when implementing here.
 - Depends on / overlaps #2659 (member write struct.set dispatch) and #2674
   (acorn read-side struct dispatch).
+
+
+## Resolution (2026-06-26)
+
+Fixed in `src/codegen/expressions/unary-updates.ts`: the externref (any-typed)
+element arm of `compileMemberIncDec` no longer NaN-drops the write. New helper
+`emitExternrefElementIncDec` does a real read-modify-write mirroring the working
+compound path `o[k] += 1` (`compileElementCompoundAssignment`): `__extern_get` →
+`__unbox_number` → f64, ±1, `__box_number`, write-back via the #2659 symmetric
+`struct.set` dispatch for a STATIC string-literal key (slot-consistent, with
+`__extern_set` terminal fallback) or `__extern_set` for a DYNAMIC key. The key's
+ToPropertyKey fires ONCE (§7.1.19) via the now-exported `emitToPropertyKeyOnce`
+(re-exported from `assignment.ts`), and §13.4 prefix(new)/postfix(old) return
+semantics are honoured. The wasm-null base RequireObjectCoercible TypeError is
+preserved (shift-safe, #1720).
+
+Guarded by `tests/issue-2675.test.ts` (15 cases): variable/literal/`{toString}`
+keys update the slot, postfix returns old + prefix returns new, decrement,
+ToPropertyKey-once, ToNumber coercion, nested `o[a][b]++`, and regression guards
+for `o[k] += 1` / `arr[i]++` / `o.prop++`.
