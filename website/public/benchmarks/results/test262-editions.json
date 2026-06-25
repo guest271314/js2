@@ -109,8 +109,8 @@
   },
   {
     "edition": "ES2025",
-    "pass": 927,
-    "fail": 344,
+    "pass": 928,
+    "fail": 343,
     "ce": 4,
     "skip": 0,
     "total": 1275,
