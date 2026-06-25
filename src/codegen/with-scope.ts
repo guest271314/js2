@@ -39,6 +39,22 @@ const OBJECT_PROTOTYPE_KEYS = new Set([
   "valueOf",
 ]);
 
+/**
+ * (#2663 Slice 4) The HasBinding gate import for the dynamic `with` object
+ * environment record. HOST mode uses `__with_has_binding`, which applies the
+ * full ECMAScript §9.1.1.2.1 predicate: value-independent HasProperty filtered
+ * by the receiver's @@unscopables blocklist (a `with`-routed name shadows the
+ * outer binding only when HasBinding is true). Under `--target standalone`
+ * there is no JS host, and the dynamic-`with` path already emits `__extern_has`
+ * — which the #1472 standalone gate REFUSES (dynamic `with` is host-only). We
+ * keep that exact name in standalone so the refusal is byte-identical to Slices
+ * 1-3; `__with_has_binding` is NOT `__extern_*`-prefixed and so would NOT be
+ * refused, which must never leak into a no-JS-host build.
+ */
+function withHasBindingImport(ctx: CodegenContext): string {
+  return ctx.standalone ? "__extern_has" : "__with_has_binding";
+}
+
 /** A static (#1387 Tier-1) `with` scope entry. */
 export type StaticWithScope = Extract<NonNullable<FunctionContext["withScopes"]>[number], { kind: "static" }>;
 
@@ -309,7 +325,7 @@ export function emitDynamicWithGet(
   addStringConstantGlobal(ctx, name);
   const hasIdx = ensureLateImport(
     ctx,
-    "__extern_has",
+    withHasBindingImport(ctx),
     [{ kind: "externref" }, { kind: "externref" }],
     [{ kind: "i32" }],
   );
@@ -385,7 +401,7 @@ export function emitCaptureWithHasBinding(
   addStringConstantGlobal(ctx, name);
   const hasIdx = ensureLateImport(
     ctx,
-    "__extern_has",
+    withHasBindingImport(ctx),
     [{ kind: "externref" }, { kind: "externref" }],
     [{ kind: "i32" }],
   );
@@ -480,7 +496,7 @@ export function emitDynamicWithDelete(
   addStringConstantGlobal(ctx, name);
   const hasIdx = ensureLateImport(
     ctx,
-    "__extern_has",
+    withHasBindingImport(ctx),
     [{ kind: "externref" }, { kind: "externref" }],
     [{ kind: "i32" }],
   );
