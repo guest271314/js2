@@ -1448,6 +1448,56 @@ const _OBJECT_PROTO_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * (#2580 M3 B-protoextend) Inherited indexed property lookup via the
+ * `Object.prototype` chain.
+ *
+ * A generic Array method invoked on an array-like *plain object* receiver
+ * (`Array.prototype.indexOf.call({length:3}, v)`) reads `obj[i]` per §7.3.2
+ * `Get`, which walks the receiver's `[[Prototype]]` chain. A plain object's
+ * chain terminates at `%Object.prototype%`, so a test that writes
+ * `Object.prototype[0] = true` makes `({length:3})[0]` resolve to `true`
+ * (the `built-ins/Array/prototype/<m>/<m>-9-b-i-N` "element to be retrieved
+ * is inherited data property on an Array-like object" cluster).
+ *
+ * In this compiler an array-like plain-object receiver is an *opaque WasmGC
+ * struct* whose runtime `[[Prototype]]` is `null` — it does NOT inherit from
+ * the host `Object.prototype`, so the own-only `obj[i]` / sidecar lookups in
+ * `__extern_get_idx`/`__extern_has_idx` miss the inherited index and the
+ * generic-method loop skips it (verified per-process: `(idx in obj)=false`
+ * while `idx in Object.prototype === true`). `Object.prototype[i] = v` DOES
+ * land on the real host `Object.prototype` (member-assignment lowers to a
+ * host write), so consulting it here reads exactly what the test wrote.
+ *
+ * Scope: this is the FINAL fallback, reached only after own struct fields,
+ * the sidecar, and accessor descriptors are exhausted — so a real array, a
+ * `$Vec`, or any receiver carrying its own index never enters this arm (its
+ * own element is found earlier). Real-array receivers with an
+ * `Array.prototype[i]=v` inherited element already resolve through the native
+ * array path (verified passing), so this arm intentionally consults only
+ * `%Object.prototype%`, the single chain every object value shares — matching
+ * the architect decision to route inherited reads through the ONE shared
+ * `Object.prototype` walk rather than a per-receiver prototype field.
+ *
+ * `_protoIndexHas` answers `[[HasProperty]]` (§7.3.12 — presence is
+ * value-independent, so an inherited slot holding `undefined` is still
+ * present); `_protoIndexGet` runs `[[Get]]` (invokes an inherited accessor via
+ * native `[]`). Only canonical non-negative integer indices participate
+ * (negative / fractional keys are not array element indices).
+ */
+function _protoIndexHas(idx: number): boolean {
+  if (!Number.isInteger(idx) || idx < 0) return false;
+  // `idx in Object.prototype` walks Object.prototype's own keys; a user write
+  // `Object.prototype[i] = v` (own data prop) or `defineProperty` (accessor)
+  // both register here. `Object.create(null)`-style holes never match.
+  return idx in (Object.prototype as Record<number, unknown>);
+}
+
+function _protoIndexGet(idx: number): unknown {
+  if (!Number.isInteger(idx) || idx < 0) return undefined;
+  return (Object.prototype as Record<number, unknown>)[idx];
+}
+
+/**
  * DataView subview metadata (#1064).
  *
  * The compiler emits `new DataView(buffer, byteOffset, byteLength)` as the raw
@@ -7340,6 +7390,13 @@ assert._isSameValue = isSameValue;
           const exports = callbackState?.getExports();
           const getter = exports?.[`__sget_${strKey}`];
           if (typeof getter === "function") return getter(obj);
+          // (#2580 M3 B-protoextend) Inherited indexed data/accessor on the
+          // Object.prototype chain. Reached only after own fields + sidecar +
+          // own accessor descriptors miss — so a real array / $Vec / receiver
+          // with its own element never gets here. `Get` (§7.3.2) walks the
+          // proto chain; an array-like plain-object receiver inherits
+          // `Object.prototype[i]` written by the test (`Object.prototype[0]=v`).
+          if (_protoIndexHas(idx)) return _protoIndexGet(idx);
           return undefined;
         };
       // __extern_has_idx: HasProperty(O, ToString(idx)) for array-like callback
@@ -7404,6 +7461,13 @@ assert._isSameValue = isSameValue;
               /* getter not defined for this struct variant — fall through */
             }
           }
+          // (#2580 M3 B-protoextend) Inherited index on the Object.prototype
+          // chain. HasProperty (§7.3.12) walks `[[Prototype]]`; an array-like
+          // plain-object receiver inherits `Object.prototype[i]`. Presence is
+          // value-independent, so this also visits an inherited slot holding
+          // `undefined`. Reached only after every own / sidecar / accessor
+          // probe misses, so it cannot mask an own hole.
+          if (_protoIndexHas(idx)) return 1;
           return 0;
         };
       // __extern_has(obj, key) → i32. Runtime fallback for `key in obj` when
