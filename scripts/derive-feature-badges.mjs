@@ -13,22 +13,38 @@
 // supported" at 77%, etc.). The page prose claims the status is "derived
 // from ECMAScript Test262 pass rates" — this script makes that true.
 //
+// #2665 — EVERY feature row is now derived, not just the ~27 rows that
+// happened to carry a `data-t262-paths` attribute. Each row is matched by
+// its `.feat-name` text to a feature in `website/public/feature-examples.json`
+// — the canonical per-feature aggregation produced by
+// `website/dashboard/build-data.js`, which buckets every test262 result into
+// exactly one feature (first-match-wins on the shared
+// `scripts/feature-test-categories.json` map) and records `passCount` /
+// `totalCount` / `testCategories`. Those are the same numbers the per-feature
+// detail page and the runtime overlay use, and — unlike the depth-2
+// `test262-current.json` category totals — they resolve fine-grained features
+// (e.g. `built-ins/Array/prototype/includes`, `annexB/.../String/prototype/anchor`)
+// without double-counting shared path prefixes.
+//
+// The badge tone is rewritten and the feature's `testCategories` are injected
+// as the row's `data-t262-paths` so the runtime overlay (live `N / T` counts,
+// `NN%` chip, test262 source links) and the build-time bake agree by
+// construction. Matching by name means a newly-added catalog row is
+// auto-covered the moment its name matches a feature entry — no per-row
+// attribute upkeep, and no rows silently left on a stale hand-authored status.
+//
 // What it does
 // ------------
-// Every `.feat-row[data-t262-paths="a/b,c/d"]` declares one or more depth-2
-// test262 path prefixes. We sum pass/(total-skip) across those paths from the
-// authoritative, freshly-promoted baseline and rewrite the row's badge tone
-// using the SAME thresholds the live overlay already uses (toneFor in
-// index.html): ratio >= 0.90 -> full(✓), >= 0.50 -> partial(⚠), else none(✗).
-// Because the baked badge and the runtime overlay share thresholds, the
-// `NN%` overlay (#1583) now only ever appears on a genuinely-green badge.
-//
-// With `--refresh-data` we also rewrite the served
-// `website/public/.../test262-report.json` and `test262-categories.json` from
-// the same source (kept format-stable: 2-space pretty). This is OFF by default
-// because deploy-pages.yml already copies the fresh baseline into those served
-// files before every Pages build, so the live `N / T` counts are current
-// without it — the badge derivation is the substantive fix here.
+// Rewrite each row's badge tone using the SAME thresholds the runtime overlay
+// uses (hydrateFeatureBadges in index.html):
+//   ratio >= 0.90        -> full(✓)
+//   0 < ratio < 0.90     -> partial(⚠)
+//   ratio == 0, total>0  -> none(✗)
+//   totalCount == 0      -> NO measurable test262 data (TC39 proposal not in
+//                           the baseline, Annex B with no shard, or an unmapped
+//                           category). The hand-authored badge is left as-is so
+//                           the gap is visible rather than mis-toned. Audited
+//                           in #2665.
 //
 // Escape hatch
 // ------------
@@ -40,232 +56,186 @@
 // run summary so the set stays visible/reviewable.
 //
 // Usage
-//   node scripts/derive-feature-badges.mjs                 # bake badges into index.html
-//   node scripts/derive-feature-badges.mjs --check         # exit 1 if badges are stale (CI guard)
-//   node scripts/derive-feature-badges.mjs --refresh-data  # also rewrite served report/categories JSON
+//   node scripts/derive-feature-badges.mjs            # bake badges + paths into index.html
+//   node scripts/derive-feature-badges.mjs --check    # exit 1 if badges/paths are stale (CI guard)
 //
-// Wired into scripts/run-pages-build.mjs before scripts/build-pages.js.
+// Wired into scripts/run-pages-build.mjs AFTER build-planning-artifacts (which
+// runs build-data.js -> refreshes feature-examples.json) and BEFORE
+// build-pages.js, and run post-merge in test262-sharded.yml (which refreshes
+// feature-examples.json first) so the badges and the committed baseline land in
+// ONE atomic commit. The legacy `--refresh-data` / `--no-refresh-data` flags
+// are accepted as no-ops for backward compatibility.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dirname, "..");
 const INDEX_HTML = resolve(ROOT, "website", "index.html");
-const PUBLIC_BENCH = resolve(ROOT, "website", "public", "benchmarks", "results");
+const FEATURE_EXAMPLES = resolve(ROOT, "website", "public", "feature-examples.json");
 
 const args = new Set(process.argv.slice(2));
 const CHECK_ONLY = args.has("--check");
-// Opt-in: deploy-pages.yml already refreshes the served report before the Pages
-// build, so the served-data rewrite is off by default to avoid churning the
-// committed JSON blobs. `--no-refresh-data` is still accepted as a no-op alias.
-const REFRESH_DATA = args.has("--refresh-data") && !args.has("--no-refresh-data") && !CHECK_ONLY;
 
 // Match the page's runtime toneFor()/badge-class mapping exactly so a baked
-// badge is identical to what the live overlay would compute.
+// badge is identical to what the live overlay would compute (#2665):
+// any pass > 0 is at least "partial".
 const TONES = [
   { min: 0.9, cls: "full", glyph: "✓" },
-  { min: 0.5, cls: "partial", glyph: "⚠" },
+  { min: Number.EPSILON, cls: "partial", glyph: "⚠" },
   { min: 0, cls: "none", glyph: "✗" },
 ];
 const toneFor = (ratio) => TONES.find((t) => ratio >= t.min);
 
-// --- locate the authoritative, freshest baseline -------------------------
-// Preference: test262-current.json (promoted on every push to main, always
-// present in CI checkouts, carries .categories) -> root report -> served copy.
-const CATEGORY_SOURCES = [
-  resolve(ROOT, "benchmarks", "results", "test262-current.json"),
-  resolve(ROOT, "benchmarks", "results", "test262-report.json"),
-  resolve(PUBLIC_BENCH, "test262-report.json"),
-];
+// Normalise a name for matching: HTML-decode the entities the catalog uses and
+// collapse whitespace, so "Functions &amp; closures" === "Functions & closures".
+function normName(s) {
+  return (s || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
-function loadBaseline() {
-  for (const file of CATEGORY_SOURCES) {
-    if (!existsSync(file)) continue;
-    try {
-      const payload = JSON.parse(readFileSync(file, "utf8"));
-      const cats = payload?.categories;
-      if (Array.isArray(cats) && cats.length > 0) return { file, payload, cats };
-    } catch {
-      // try the next candidate
-    }
+function loadFeatures() {
+  if (!existsSync(FEATURE_EXAMPLES)) return null;
+  try {
+    const payload = JSON.parse(readFileSync(FEATURE_EXAMPLES, "utf8"));
+    if (Array.isArray(payload?.features) && payload.features.length > 0) return payload.features;
+  } catch {
+    /* fall through */
   }
   return null;
 }
 
-function ratioForPaths(byPath, paths) {
-  let pass = 0;
-  let total = 0;
-  let foundAny = false;
-  const missing = [];
-  for (const p of paths) {
-    const cat = byPath.get(p);
-    if (!cat) {
-      missing.push(p);
-      continue;
-    }
-    foundAny = true;
-    pass += Number(cat.pass ?? 0);
-    total += Number(cat.total ?? 0) - Number(cat.skip ?? 0);
+// Rewrite the badge span (always the first child) of each feat-row and inject
+// the feature's `testCategories` as `data-t262-paths`. The opening tag may span
+// multiple lines and already carry data-* attributes; the `.feat-name` follows
+// the badge.
+const ROW_RE =
+  /(<div class="feat-row"([^>]*)>)(\s*)<span class="feat-badge (full|partial|none)">([^<]*)<\/span>([\s\S]*?<span class="feat-name">([^<]*)<\/span>)/g;
+
+function setPathsAttr(openTag, attrs, paths) {
+  const want = paths.join(",");
+  if (/\bdata-t262-paths="/.test(attrs)) {
+    return openTag.replace(/(\bdata-t262-paths=")[^"]*(")/, `$1${want}$2`);
   }
-  return { pass, total, foundAny, missing };
+  if (!want) return openTag;
+  return openTag.replace(/(<div class="feat-row")/, `$1 data-t262-paths="${want}"`);
 }
 
-// Rewrite the badge span that immediately follows a feat-row opening tag.
-// The opening tag may span multiple lines; the badge is always the first
-// child, separated only by whitespace.
-const ROW_BADGE_RE =
-  /(<div\b[^>]*\bdata-t262-paths="([^"]+)"[^>]*>)(\s*)<span class="feat-badge (full|partial|none)">([^<]*)<\/span>/g;
-
-function deriveBadges(html, byPath) {
+function derive(html, byName) {
   const changes = [];
   const noData = [];
   const locked = [];
-  let mapped = 0;
+  const unmatched = [];
+  let derived = 0;
+  let pathsTouched = 0;
 
-  const next = html.replace(ROW_BADGE_RE, (match, openTag, pathsAttr, gap, curCls, _glyph) => {
-    mapped += 1;
-    const paths = pathsAttr
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    if (/\bdata-badge-lock\b/.test(openTag)) {
-      locked.push({ paths, cls: curCls });
-      return match; // leave hand-authored badge untouched
-    }
-
-    const { pass, total, foundAny, missing } = ratioForPaths(byPath, paths);
-    if (!foundAny || total <= 0) {
-      // Mapping resolves to no data — leave the static badge so a stale
-      // mapping is visible rather than silently mis-toned.
-      noData.push({ paths, missing });
+  const next = html.replace(ROW_RE, (match, openTag, attrs, gap, curCls, glyph, tail, rawName) => {
+    const name = normName(rawName);
+    const feature = byName.get(name);
+    if (!feature) {
+      unmatched.push(name);
       return match;
     }
 
+    const paths = Array.isArray(feature.testCategories) ? feature.testCategories.filter(Boolean) : [];
+    let newOpen = setPathsAttr(openTag, attrs, paths);
+    if (newOpen !== openTag) pathsTouched += 1;
+
+    if (/\bdata-badge-lock\b/.test(openTag)) {
+      locked.push({ name, cls: curCls });
+      return `${newOpen}${gap}<span class="feat-badge ${curCls}">${glyph}</span>${tail}`;
+    }
+
+    const pass = Number(feature.passCount ?? 0);
+    const total = Number(feature.totalCount ?? 0);
+    if (total <= 0) {
+      noData.push({ name, cats: paths.length });
+      return `${newOpen}${gap}<span class="feat-badge ${curCls}">${glyph}</span>${tail}`;
+    }
+
+    derived += 1;
     const ratio = pass / total;
     const tone = toneFor(ratio);
     if (tone.cls !== curCls) {
-      changes.push({ paths, from: curCls, to: tone.cls, pass, total, pct: Math.round(ratio * 100) });
+      changes.push({ name, from: curCls, to: tone.cls, pass, total, pct: Math.round(ratio * 100) });
     }
-    return `${openTag}${gap}<span class="feat-badge ${tone.cls}">${tone.glyph}</span>`;
+    return `${newOpen}${gap}<span class="feat-badge ${tone.cls}">${tone.glyph}</span>${tail}`;
   });
 
-  return { next, changes, noData, locked, mapped };
-}
-
-function countUnmappedRows(html) {
-  // feat-rows with a badge but no data-t262-paths (purely hand-authored).
-  const allRows = (html.match(/<div class="feat-row"/g) || []).length;
-  const mappedRows = (html.match(/data-t262-paths=/g) || []).length;
-  return Math.max(0, allRows - mappedRows);
-}
-
-// --- served-data refresh (keeps live N/T counts consistent) --------------
-function refreshServedData(baseline) {
-  const written = [];
-  const reportDest = resolve(PUBLIC_BENCH, "test262-report.json");
-  // The served report must keep the full report schema. If the chosen source
-  // already IS a report (has .summary), copy it verbatim; otherwise fall back
-  // to the root report file which shares the schema.
-  let reportPayload = null;
-  if (baseline.payload?.summary) {
-    reportPayload = baseline.payload;
-  } else {
-    const rootReport = resolve(ROOT, "benchmarks", "results", "test262-report.json");
-    if (existsSync(rootReport)) {
-      try {
-        reportPayload = JSON.parse(readFileSync(rootReport, "utf8"));
-      } catch {
-        reportPayload = null;
-      }
-    }
-  }
-  if (reportPayload?.categories?.length) {
-    const serialized = `${JSON.stringify(reportPayload, null, 2)}\n`;
-    if (!existsSync(reportDest) || readFileSync(reportDest, "utf8") !== serialized) {
-      writeFileSync(reportDest, serialized);
-      written.push("test262-report.json");
-    }
-  }
-
-  // The standalone categories fallback file: {timestamp, baseline_*, mode, categories}.
-  const catsDest = resolve(PUBLIC_BENCH, "test262-categories.json");
-  const catsPayload = {
-    timestamp: baseline.payload?.timestamp ?? null,
-    baseline_generated_at: baseline.payload?.baseline_generated_at ?? null,
-    baseline_sha: baseline.payload?.baseline_sha ?? null,
-    mode: baseline.payload?.mode ?? null,
-    categories: baseline.cats,
-  };
-  const catsSerialized = `${JSON.stringify(catsPayload, null, 2)}\n`;
-  if (!existsSync(catsDest) || readFileSync(catsDest, "utf8") !== catsSerialized) {
-    writeFileSync(catsDest, catsSerialized);
-    written.push("test262-categories.json");
-  }
-  return written;
+  return { next, changes, noData, locked, unmatched, derived, pathsTouched };
 }
 
 // --- run ------------------------------------------------------------------
-const baseline = loadBaseline();
-if (!baseline) {
-  console.warn("[derive-feature-badges] no test262 baseline with categories found — skipping (badges left as-is)");
+const features = loadFeatures();
+if (!features) {
+  console.warn(
+    "[derive-feature-badges] website/public/feature-examples.json not found or empty — skipping (badges left as-is)",
+  );
   process.exit(0);
 }
 
-const byPath = new Map();
-for (const cat of baseline.cats) {
-  const key = cat?.path ?? cat?.name;
-  if (typeof key === "string") byPath.set(key, cat);
+const byName = new Map();
+for (const f of features) {
+  if (typeof f?.name === "string") byName.set(normName(f.name), f);
 }
 
 const html = readFileSync(INDEX_HTML, "utf8");
-const { next, changes, noData, locked, mapped } = deriveBadges(html, byPath);
-const unmapped = countUnmappedRows(html);
+const { next, changes, noData, locked, unmatched, derived, pathsTouched } = derive(html, byName);
+const htmlChanged = next !== html;
 
-const rel = baseline.file.replace(`${ROOT}/`, "");
-console.log(`[derive-feature-badges] source: ${rel} (${baseline.cats.length} categories)`);
+console.log(`[derive-feature-badges] source: website/public/feature-examples.json (${features.length} features)`);
 console.log(
-  `[derive-feature-badges] rows: ${mapped} mapped · ${unmapped} unmapped (hand-authored) · ${locked.length} locked · ${noData.length} no-data`,
+  `[derive-feature-badges] rows: ${derived} derived · ${noData.length} no-data (kept static) · ${locked.length} locked · ${unmatched.length} unmatched`,
 );
 
 if (CHECK_ONLY) {
-  if (changes.length > 0) {
-    console.error(`[derive-feature-badges] --check FAILED: ${changes.length} badge(s) are stale vs real test262 data:`);
-    for (const c of changes) {
-      console.error(`  - ${c.from} -> ${c.to}  (${c.pct}%  ${c.pass}/${c.total})  [${c.paths.join(", ")}]`);
+  if (htmlChanged) {
+    if (changes.length > 0) {
+      console.error(
+        `[derive-feature-badges] --check FAILED: ${changes.length} badge(s) are stale vs real test262 data:`,
+      );
+      for (const c of changes) {
+        console.error(`  - ${c.from} -> ${c.to}  (${c.pct}%  ${c.pass}/${c.total})  [${c.name}]`);
+      }
+    }
+    if (pathsTouched > 0) {
+      console.error(
+        `[derive-feature-badges] --check FAILED: ${pathsTouched} row(s) have a stale/missing data-t262-paths`,
+      );
     }
     console.error("  Run `node scripts/derive-feature-badges.mjs` to refresh.");
     process.exit(1);
   }
-  console.log("[derive-feature-badges] --check OK: all mapped badges match real test262 pass rates");
+  console.log("[derive-feature-badges] --check OK: badges and data-t262-paths match real test262 data");
   process.exit(0);
 }
 
-if (changes.length > 0) {
+if (htmlChanged) {
   writeFileSync(INDEX_HTML, next);
-  console.log(`[derive-feature-badges] updated ${changes.length} badge(s) in website/index.html:`);
+  console.log(
+    `[derive-feature-badges] updated website/index.html: ${changes.length} badge(s), ${pathsTouched} data-t262-paths attr(s)`,
+  );
   for (const c of changes) {
-    console.log(`  - ${c.from} -> ${c.to}  (${c.pct}%  ${c.pass}/${c.total})  [${c.paths.join(", ")}]`);
+    console.log(`  - ${c.from} -> ${c.to}  (${c.pct}%  ${c.pass}/${c.total})  [${c.name}]`);
   }
 } else {
-  console.log("[derive-feature-badges] all mapped badges already match real test262 data — no changes");
+  console.log("[derive-feature-badges] badges and data-t262-paths already current — no changes");
 }
 
 if (noData.length > 0) {
-  console.warn(`[derive-feature-badges] ${noData.length} mapped row(s) had no category data (badge left as-is):`);
-  for (const n of noData)
-    console.warn(`  - [${n.paths.join(", ")}]${n.missing.length ? `  missing: ${n.missing.join(", ")}` : ""}`);
+  console.warn(`[derive-feature-badges] ${noData.length} matched row(s) had no test262 data (badge left as-is):`);
+  for (const n of noData) console.warn(`  - ${n.name}  (categories: ${n.cats})`);
 }
 if (locked.length > 0) {
   console.log(`[derive-feature-badges] ${locked.length} locked row(s) kept hand-authored badge:`);
-  for (const l of locked) console.log(`  - ${l.cls}  [${l.paths.join(", ")}]`);
+  for (const l of locked) console.log(`  - ${l.cls}  [${l.name}]`);
 }
-
-if (REFRESH_DATA) {
-  const written = refreshServedData(baseline);
-  if (written.length > 0) {
-    console.log(`[derive-feature-badges] refreshed served data: ${written.join(", ")}`);
-  } else {
-    console.log("[derive-feature-badges] served data already current");
-  }
+if (unmatched.length > 0) {
+  console.warn(`[derive-feature-badges] ${unmatched.length} catalog row(s) had no feature-examples match:`);
+  for (const n of unmatched) console.warn(`  - ${n}`);
 }
