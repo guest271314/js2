@@ -1,9 +1,9 @@
 ---
 id: 2660
 title: "Whole-program escape/dynamic-use gate for reconstructing `new F()` instances as `$Object` (value-rep infra)"
-status: ready
-assignee: ""
-sprint: Backlog
+status: in-progress
+assignee: ttraenkler/sd-protoextend
+sprint: 66
 created: 2026-06-25
 priority: medium
 feasibility: hard
@@ -211,3 +211,139 @@ Distilled from the #2580 M3 sessions (Stage A `2110d9a4`-era spec, Stage B
 bisections and per-process evidence. Three independent max-reasoning sessions
 reached option ii-a + this missing whole-program gate, so the blocker is real, not
 session-specific.
+
+---
+
+# Implementation log
+
+## S1 — inert (A∧B) escape/dynamic-use gate (LANDED, PR `9bf333da9870`)
+
+`src/codegen/fnctor-escape-gate.ts` (`analyzeFnctorEscapeGate` →
+`ctx.fnctorEscapeGate`), wired inert at `index.ts`. Per-`new F()` classification
+`reconstruct` / `keep-typed` / `keep-static`, conservative-closed (unknown ⇒
+keep). Stored, not yet consumed. Verified correct via `JS2WASM_LOG_FNCTOR_GATE=1`:
+zero-own-field-dynamic → `reconstruct`; `function C(){this.x=3}` typed-field →
+`keep-typed`; no-dynamic-use → `keep-static`; generic `.call` receiver →
+`reconstruct`. (This is the #2580 B-f0 scaffold; the duplicated #2580 architect
+spec was reconciled — see the #2580 cross-ref.)
+
+## S2 — per-fnctor prototype `$Object` (standalone) — LANDED (this PR, 2026-06-26, sd-protoextend, max-reasoning)
+
+> Verify-first, binaryen-decoded WAT + per-process probes on current main. The
+> #2660 spec §3.1/(3b) ("synthesize a per-fnctor prototype `$Object` global,
+> seeded from `F.prototype = …` writes, keyed by fnctor name →
+> `ctx.fnctorPrototypeObject`") is implemented. REUSES the one `$Object.$proto`
+> walk — no parallel `[[Prototype]]` mechanism.
+
+### Root cause (re-grounded, standalone)
+
+A user fnctor `F` is lowered to a closure trampoline struct (`$6`,
+`struct.new $6 (ref.func $__fn_tramp_F_cached)`), **NOT** an `$Object`. WAT-decoded:
+`F.prototype` reads as `__extern_get($closure, "prototype")` and writes as
+`__extern_set($closure, …)`; both `ref.test $Object`-MISS → the write is dropped,
+the read returns null. So `Object.create(F.prototype).foo` returned **0** (vs the
+named-`$Object`-var control which returns 7 — the existing `$proto` walk is
+correct, only F's prototype wasn't a readable `$Object`).
+
+A **second, separate gap**: a TOP-LEVEL `F.prototype = …` statement is dropped
+before any codegen — `declarations.ts`'s module-init collection only keeps an
+assignment whose **root identifier is a module global**, and a fnctor `F` (a
+function declaration) is NOT a module global, so the statement never reaches
+`compilePropertyAssignment`. (Verified: `compileAssignment` is never called for a
+top-level `Con.prototype = {…}` — only for the in-function form.)
+
+### The fix (standalone-gated; host byte-identical)
+
+`ctx.fnctorPrototypeObject: Map<fnctorName, globalIdx>` (a `mut externref` module
+global per fnctor, holding a native `$Object`), in `src/codegen/expressions/fnctor-prototype.ts`:
+
+- **READ `F.prototype`** (property-access.ts, early in `compilePropertyAccess`):
+  `tryEmitFnctorPrototypeRead` lazy-inits an empty `$Object` (`__new_plain_object`)
+  into the global on first access, then `global.get`. Returns externref.
+- **WRITE `F.prototype = rhs`** (assignment.ts, top of `compilePropertyAssignment`):
+  `tryCompileFnctorPrototypeAssign` builds `rhs` as a native `$Object` (plain
+  object literal, the #2580 Stage-A `compileProtoArg` precedent) or coerces it to
+  externref, then `global.set`.
+- **WRITE `F.prototype.p = v`** rides the READ interception — the inner
+  `F.prototype` read returns the global `$Object`, the existing
+  `__extern_set_strict` fallback writes `p` onto it. No extra code.
+- **Top-level statement keep-in-init** (declarations.ts module-init collection):
+  `isFnctorPrototypeAssignTarget` keeps a top-level `F.prototype = …` /
+  `F.prototype.p = …` in `__module_init` (mirrors the `Array.prototype` CPR
+  keep-in-init), so it reaches the interception. Fixes the second gap.
+
+`resolveFnctorSymbol` (exported from S1's `fnctor-escape-gate.ts`) is the SINGLE
+fnctor-recognition predicate — it unwraps `( )`/`as`/`!` and matches only an
+identifier resolving to a user `FunctionDeclaration`/`FunctionExpression`/
+`var F = function` with a body. Classes (class fast path in property-access),
+builtins (`Array.prototype`), arrows, and method receivers are all excluded.
+
+### Hot-path / non-regression (C1)
+
+Every site gates on `ctx.standalone`; host/GC mode never enters the new arms →
+**byte-identical** (confirmed: the class `.prototype` fast path, named-var
+`Object.create(p)`, typed array `.length`, and the whole host suite are
+untouched). Module globals are append-only/index-stable, so minting one mid-compile
+carries no late-import funcidx-shift hazard (#2043). The closed `$__fnctor_<Name>`
+struct shape is NOT changed (no #1100/#2009 canonicalization re-entry).
+
+### Standalone-floor EJECT (PR #2087 v1) + the RECONSTRUCT-GATE fix
+
+The first S2 push (interception fired for **every** user fnctor's `.prototype`)
+ejected the merge_group standalone floor (#2097): **49 standalone pass→fail
+regressions, net −40** (tolerance −15). The global net-regression gate PASSED
+(net +1) because the host lane masked it — the standalone floor is the only gate
+that catches a standalone-specific drop. Two clusters, both an unscoped
+interception clobbering a WORKING prototype path (bisected per-process):
+
+- **5 `Array/prototype/{concat,filter,map,slice,splice}/create-proxy.js`** — the
+  READ interception. `var Ctor = function(){}` is used as a `Symbol.species`
+  constructor; `Object.getPrototypeOf(result)` must equal the runtime's
+  `Ctor.prototype`, but the interception returned a DIFFERENT object (the empty
+  per-fnctor global) → identity assertion failed.
+- **44 `Iterator/prototype/*` + `Iterator/*`** — the keep-in-init. `sta.js` has
+  `Test262Error.prototype.toString = function(){}`; keep-in-init made that
+  previously-dropped top-level statement EXECUTE, perturbing module-init for the
+  iterator-helper harness ("[object Object] is not iterable").
+
+**Root cause:** S2 fired for fnctors that already have a working prototype path
+(species `Ctor` never `new`'d in source; `Test262Error` is `keep-typed`). **Fix —
+the RECONSTRUCT-GATE:** `resolveUserFnctorName` now additionally requires the
+fnctor be in the S1 escape-gate `approvedNames` set (≥1 `reconstruct`-classified
+`new F()` site) — exactly the constructors S3 reconstructs and whose prototype
+needs to be a readable `$Object`. A `keep-typed` / `keep-static` / never-`new`'d
+function keeps its existing prototype behaviour. The narrowing is a strict subset
+of the prior firing (the 49 regressed files were ALL non-reconstruct, so
+reconstruct-firing caused none of them), so it cannot introduce new regressions.
+**Verified: all 49 previously-regressed files now pass (49/0) per-process**;
+`approvedNames` is computed at index.ts:1076 (before collectDeclarations + codegen,
+so it is always set for the read/write/keep-init gates). S2's unit tests now arm
+`Con` as a reconstruct fnctor (`new Con()` + a dynamic instance read).
+
+### Validation
+
+New `tests/issue-2660-s2-fnctor-prototype-object.test.ts` (11 standalone cases:
+whole-reassign, bare-identifier cluster shape, per-prop accumulate, indexed key,
+function-expression fnctor, in-function write, own-shadows-inherited, + class /
+named-var / array-`.length` regression guards) — green. tsc + prettier + biome
+clean. Sibling standalone #2580 suites (m3-protochain / m3-protoextend / m3-bacc)
++ the S2 suite: **36/36 green**. `prototype-chain.test.ts` (6/5) and
+`classes.test.ts` (7 fail) are **pre-existing host-harness artifacts — identical
+on pristine origin/main** (A/B-verified; `buildImports` omits host runtime
+imports), NOT this change.
+
+Broad-impact value-rep → the authoritative gate is the **merge_group standalone
+floor (#2097) + the test262 net-regression gate** (never a scoped sweep). Files:
+`src/codegen/expressions/fnctor-prototype.ts` (new), `src/codegen/fnctor-escape-gate.ts`
+(export `resolveFnctorSymbol`), `src/codegen/context/{types,create-context}.ts`,
+`src/codegen/property-access.ts`, `src/codegen/expressions/assignment.ts`,
+`src/codegen/declarations.ts`, `tests/issue-2660-s2-fnctor-prototype-object.test.ts`.
+
+### Next (S3) — the floor-risk reconstruct
+
+S3 wires `compileNewFunctionDeclaration`/`compileNewExpression` to consult
+`ctx.fnctorEscapeGate.approved`: an approved `new F()` allocates an `$Object`
+(own props via `__extern_set`) and seeds `instance.$proto` from
+`fnctorPrototypeObject[F]` (S2's readable global). THIS is the #1888-floor
+eject-risk slice — stop-the-line + escalate on ANY floor movement. Issue stays
+`in-progress`.

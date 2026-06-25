@@ -72,6 +72,7 @@ import {
 } from "./registry/types.js";
 import { computeElidableTopLevelTdzNames } from "./expressions/identifiers.js";
 import { isArrayProtoIteratorAssignTarget } from "./expressions/proto-override.js";
+import { isFnctorPrototypeAssignTarget } from "./expressions/fnctor-prototype.js";
 import { compileExpression, compileStatement } from "./shared.js";
 import { expandLinearU8ParamTypes } from "./linear-uint8-signatures.js";
 import { inferStandaloneRegExpMatchGlobalType } from "./regexp-standalone.js";
@@ -3848,6 +3849,17 @@ export function collectDeclarations(ctx: CodegenContext, sourceFile: ts.SourceFi
         // __module_init so the CPR write-arm (compileAssignment) captures the
         // override closure. Gated — byte-identical when no override exists.
         if (ctx.arrayIteratorMaybeOverridden && isArrayProtoIteratorAssignTarget(expr.left)) {
+          ctx.moduleInitStatements.push(stmt);
+          continue;
+        }
+        // (#2660 S2) `F.prototype = …` / `F.prototype.p = …` for a user fnctor `F`
+        // (standalone): the root identifier `F` is a function, NOT a module
+        // global, so the generic check below drops the statement and the
+        // prototype write never reaches compilePropertyAssignment (the S2
+        // interception). Keep it in __module_init so the per-fnctor prototype
+        // `$Object` is populated. Host/GC mode is byte-identical (gated, dropped
+        // as before). Mirrors the Array.prototype CPR keep-in-init above.
+        if (ctx.standalone && isFnctorPrototypeAssignTarget(ctx, expr.left)) {
           ctx.moduleInitStatements.push(stmt);
           continue;
         }
