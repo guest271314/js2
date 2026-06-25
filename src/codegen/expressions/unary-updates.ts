@@ -273,21 +273,19 @@ function emitExternrefMemberIncDec(
     [],
   );
   flushLateImportShifts(ctx, fctx);
-  const externSetFallback: Instr[] = [
-    { op: "local.get", index: objLocal } as Instr,
-    { op: "local.get", index: keyLocal } as Instr,
-    { op: "local.get", index: boxedLocal } as Instr,
-  ];
-  if (setIdx !== undefined) {
-    externSetFallback.push({ op: "call", funcIdx: setIdx } as Instr);
-  }
-  const recvAny = allocLocal(fctx, `__incdec_eany_${fctx.locals.length}`, { kind: "anyref" });
-  fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: recvAny });
-  const dispatched = emitAlternateStructSetDispatch(ctx, fctx, recvAny, boxedLocal, propName, externSetFallback);
+  // (#2664) Route through the deferred-fill member-set dispatcher (NON-strict —
+  // this is a read-modify-write `obj.x++`, the property was already read so the
+  // sidecar update never hits a getter-only-accessor throw). The dispatcher's
+  // terminal else-arm IS the `__extern_set` sidecar; its struct-candidate arms
+  // are enumerated at finalize (the full type table), fixing the compile-order
+  // candidate freeze (#2664).
+  const dispatched = emitAlternateStructSetDispatch(ctx, fctx, objLocal, boxedLocal, propName, /*strict*/ false);
   if (!dispatched) {
-    fctx.body.push(...externSetFallback);
+    // Dispatcher could not be reserved — emit the bare host write as before.
+    fctx.body.push({ op: "local.get", index: objLocal });
+    fctx.body.push({ op: "local.get", index: keyLocal });
+    fctx.body.push({ op: "local.get", index: boxedLocal });
+    if (setIdx !== undefined) fctx.body.push({ op: "call", funcIdx: setIdx });
   }
 
   // Return new (prefix) or old (postfix). §13.4 UpdateExpression semantics.
