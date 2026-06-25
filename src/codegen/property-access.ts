@@ -104,6 +104,7 @@ import {
 } from "./shared.js";
 import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 import { tryEmitJsonParseElementAccess, tryEmitJsonParsePropertyAccess } from "./json-standalone.js";
+import { reserveMemberSetDispatch } from "./member-set-dispatch.js";
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
 import { tryCompileTemporalPropertyAccess } from "./temporal-native.js";
@@ -1279,48 +1280,32 @@ export function emitNullCheckThrow(ctx: CodegenContext, fctx: FunctionContext, r
 export function emitAlternateStructSetDispatch(
   ctx: CodegenContext,
   fctx: FunctionContext,
-  recvAnyLocal: number,
+  recvExtLocal: number,
   valExtLocal: number,
   propName: string,
-  externSetFallback: Instr[],
+  strict: boolean,
 ): boolean {
-  // Only candidates whose matching field is MUTABLE can take a `struct.set` —
-  // `struct.set` on an immutable field is a hard Wasm validation error.
-  // Immutable-field structs (e.g. the boxed-primitive wrappers WrapperString /
-  // WrapperNumber / WrapperBoolean, whose `value` slot is `mutable: false`) must
-  // fall through to the `__extern_set` sidecar terminal arm instead — that is the
-  // correct destination for an own-property write like `(new String("x")).value = ...`
-  // (it must NOT clobber the immutable wrapper slot). (#2657 regression: those
-  // boxed-wrapper writes flipped Object.create 15.2.3.5-4-167/168/169 to
-  // compile_error because the symmetric write picked the immutable `value` slot.)
-  const candidates = findAlternateStructsForField(ctx, propName, -1).filter((c) => c.mutable);
-  if (candidates.length === 0) return false;
-
-  const buildSetDispatch = (idx: number): Instr[] => {
-    if (idx >= candidates.length) return externSetFallback;
-    const cand = candidates[idx]!;
-    // Coerce the boxed externref value into the candidate field's wasm type.
-    const coerce = coercionInstrs(ctx, { kind: "externref" }, cand.fieldType, fctx);
-    const setFieldInstrs: Instr[] = [
-      { op: "local.get", index: recvAnyLocal } as Instr,
-      { op: "ref.cast", typeIdx: cand.structTypeIdx } as Instr,
-      { op: "local.get", index: valExtLocal } as Instr,
-      ...coerce,
-      { op: "struct.set", typeIdx: cand.structTypeIdx, fieldIdx: cand.fieldIdx } as Instr,
-    ];
-    return [
-      { op: "local.get", index: recvAnyLocal } as Instr,
-      { op: "ref.test", typeIdx: cand.structTypeIdx } as Instr,
-      {
-        op: "if",
-        blockType: { kind: "empty" },
-        then: setFieldInstrs,
-        else: buildSetDispatch(idx + 1),
-      } as Instr,
-    ];
-  };
-
-  fctx.body.push(...buildSetDispatch(0));
+  // (#2664) Route the write through a DEFERRED-FILL dispatcher
+  // `__set_member_<name>(recv, val)` instead of inlining the `ref.test`/
+  // `struct.set` candidate chain here. The inline chain froze its struct-
+  // candidate set at THIS write's compile time; a field-writing closure compiled
+  // before a later-registered struct type for the same logical object (acorn's
+  // Parser gets two struct shapes — `$__anon_5` then `$__fnctor_Parser`) only got
+  // the earlier candidate's arm, so the real instance failed every `ref.test` and
+  // the write leaked to the sidecar while reads used the slot → non-termination.
+  // The dispatcher is FILLED at finalize (`fillMemberSetDispatch`) when the full
+  // struct-type table is known, so every write site enumerates the COMPLETE
+  // candidate set regardless of compile order. The dispatcher's terminal else-arm
+  // is the `__extern_set_strict` (strict) / `__extern_set` (non-strict) sidecar —
+  // so the caller need NOT emit its own fallback. The MUTABLE-only filter and the
+  // immutable boxed-wrapper (#2657) handling live in the fill.
+  const dispIdx = reserveMemberSetDispatch(ctx, propName, strict);
+  if (dispIdx === undefined) return false;
+  // recv is externref; the dispatcher does `any.convert_extern` + `ref.test`
+  // internally and forwards the externref recv to the sidecar fallback.
+  fctx.body.push({ op: "local.get", index: recvExtLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: valExtLocal } as Instr);
+  fctx.body.push({ op: "call", funcIdx: dispIdx } as Instr);
   return true;
 }
 
