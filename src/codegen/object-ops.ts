@@ -957,6 +957,67 @@ export function compileObjectDefineProperty(
     return { kind: "externref" };
   }
 
+  // (#1355 Slice F) Standalone proxy-receiver routing. A standalone `Proxy`
+  // (`new Proxy(t, h)`) is an opaque externref typed `any` — it never resolves to
+  // a static struct, so the inline-literal fast paths below
+  // (`__defineProperty_value` / `__defineProperty_accessor`) would store the value
+  // DIRECTLY on the proxy externref and never fire the `defineProperty` trap.
+  // Route a PROVABLE-proxy receiver through `emitDefinePropertyDescRuntime` →
+  // `__obj_define_from_desc`, whose `ref.test $Proxy` front-guard diverts a proxy
+  // to `__proxy_define_dispatch(target, key, desc)` (the descriptor passed through
+  // whole). For a NON-proxy receiver this is behaviour-identical —
+  // `__obj_define_from_desc` dispatches to the SAME
+  // `__defineProperty_value`/`__defineProperty_accessor` store — but the inline
+  // fast paths below would otherwise store the value DIRECTLY on the proxy
+  // externref and never fire the `defineProperty` trap.
+  //
+  // GATE PRECISELY on a *syntactic* `new Proxy(...)` shape (a direct
+  // `new Proxy(...)` receiver, or an identifier whose variable-declaration
+  // initializer is `new Proxy(...)`), NOT merely a dynamic `any` receiver: a bare
+  // `any` reroute swallowed the §19.1.2.4-step-1 non-object throw for `const o:
+  // any = null` (the inline path's later null-guard never ran). The proxy harness
+  // rows always bind `const p = new Proxy(t, h)` then `defineProperty(p, …)`, so
+  // this shape covers them while leaving every non-proxy receiver on its existing
+  // path. Accessor/getter inline literals are NOT rerouted (the proxy
+  // defineProperty harness rows use data descriptors; an accessor reroute would
+  // lose the struct-accessor compiled-getter wiring).
+  if (ctx.standalone) {
+    const isProxyReceiver = (() => {
+      const isNewProxy = (e: ts.Expression): boolean =>
+        ts.isNewExpression(e) && ts.isIdentifier(e.expression) && e.expression.text === "Proxy";
+      if (isNewProxy(objArg)) return true;
+      if (ts.isIdentifier(objArg)) {
+        const sym = ctx.checker.getSymbolAtLocation(objArg);
+        const decl = sym?.valueDeclaration;
+        if (decl && ts.isVariableDeclaration(decl) && decl.initializer && isNewProxy(decl.initializer)) {
+          return true;
+        }
+      }
+      return false;
+    })();
+    const isAccessorLiteral =
+      ts.isObjectLiteralExpression(descArg) &&
+      descArg.properties.some(
+        (p) =>
+          (ts.isPropertyAssignment(p) || ts.isMethodDeclaration(p)) &&
+          ts.isIdentifier(p.name) &&
+          (p.name.text === "get" || p.name.text === "set"),
+      );
+    if (isProxyReceiver && !isAccessorLiteral) {
+      const init = !ts.isObjectLiteralExpression(descArg)
+        ? descriptorInitializerForIdentifier(ctx, descArg)
+        : undefined;
+      return emitDefinePropertyDescRuntime(
+        ctx,
+        fctx,
+        objArg,
+        propArg,
+        descArg,
+        init ? descriptorUndefinedFields(init) : [],
+      );
+    }
+  }
+
   // (#1130 PR-0) Array exotic objects grow `length` when a numeric-index
   // property at or beyond the current length is defined. Emit the guarded
   // bump before the descriptor is applied; no-op for non-array receivers.
