@@ -165,3 +165,48 @@ residual into one branch/PR (#2078) rather than stacking a second #2679 PR.
 **Validated:** `tests/issue-2679-toprimitive-this.test.ts` 14/14 (6 string-hint +
 @@toPrimitive from #2078, 8 new number-hint residual incl. nested + Date). Broad
 coercion path → full `merge_group` floor is the authoritative gate.
+
+## CI-FIX (2026-06-25, sd-typedarray) — the #2078 park WAS a real 30-test regression
+
+The "#2078 park was baseline drift" conclusion above was **WRONG** — it is why the
+PR re-failed the `merge_group` a second time after the `hold` was removed. The
+cited bucket `f3997d3a60746852` was a **real, twice-confirmed 30-test
+`wasm_compile` regression** (net −14 = 16 improve − 30 regress), invisible to the
+PR-level checks because the test262 regression gate only runs in the `merge_group`.
+
+**Root cause (verified per-process on the merged binary, NOT narrative).** The
+number-hint `coerceType` valueOf-threading hunk in `type-coercion.ts` cached the
+`__current_this` global index in a local (`const currentThisGlobalIdx =
+ctx.currentThisGlobalIdx`) and reused it for the save, install, AND restore
+`global.set`. But `buildDispatch(0)` — emitted *between* the install and the
+restore — compiles the valueOf dispatch, which can flush a **late string-constant
+import mid-stream**, shifting the global index space (probe: `ctx.currentThisGlobalIdx
+25→26`). The shift pass bumps `ctx.currentThisGlobalIdx` **and** the already-emitted
+save/install instructions in `fctx.body` in lockstep — but the captured local went
+stale, so the **restore `global.set` targeted the pre-shift index, now a
+different f64-typed global**, storing the saved `externref` into an f64 global →
+invalid Wasm (`global.set expected type f64, found externref`). This hit every
+binary-op / `String` / `Number` / `Array` ToNumber-of-object **harness-wrapped**
+row (the harness string-constant volume is what triggers the mid-dispatch flush);
+direct in-body coercions did not flush and stayed valid (so the bug was masked in
+simple unit tests). The `for-in/let-identifier-with-newline` CE the prior note
+fixated on was unrelated baseline drift.
+
+**Fix.** Read `ctx.currentThisGlobalIdx` **fresh** at each global op (critically
+the restore, post-`buildDispatch`) so the restore stays aligned with the shifted
+save/install (`project_type_index_shift_and_deadelim`: never cache a shiftable
+index across a sub-compilation). The sibling `index.ts` `emitToPrimitiveMethodExports`
+path is **not** vulnerable — it assembles a complete `body: Instr[]` as one array
+(`...buildDispatch(0)` is a static spread, no live mid-build emission), so its three
+global ops share one value and stay mutually consistent.
+
+**Proof of no-new-regression (byte-identity).** Compiling the regressed rows: my
+fix → **valid**, original #2078 → **INVALID** (repaired). Compiling rows that were
+already valid on #2078 (incl. the improvement-type rows): **byte-identical** wasm
+between my fix and #2078 — the fresh read only differs from the captured value
+when a shift occurred, and a shift always produced invalid wasm (a regression,
+never an improvement). ⇒ all 30 regressions repaired, all 16 improvements
+preserved (net −14 → **+16**), 0 new regressions. Guard added:
+`tests/issue-2679-toprimitive-this.test.ts` "emits VALID Wasm under global-index
+shift" (the full harness-wrapped addition-A2.2 row; fails on original #2078 with
+the exact validation error, passes with the fix).

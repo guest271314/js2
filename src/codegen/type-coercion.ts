@@ -2108,24 +2108,38 @@ export function coerceType(
             // create a module-init import cycle (it imports `getVecInfo` back
             // from this file) and a TDZ ReferenceError. If unset (-1), skip
             // threading (no worse than the legacy behaviour).
-            const currentThisGlobalIdx = ctx.currentThisGlobalIdx;
-            if (currentThisGlobalIdx >= 0) {
+            if (ctx.currentThisGlobalIdx >= 0) {
               const prevThisLocal = allocTempLocal(fctx, { kind: "externref" });
               const tpResultLocal = allocTempLocal(fctx, { kind: "f64" });
+              // (#2679 fix) Read `ctx.currentThisGlobalIdx` FRESH at each global
+              // op — do NOT cache it across `buildDispatch(0)`. Compiling the
+              // valueOf dispatch can register a new global (verified: the
+              // `__current_this` slot shifts +1 mid-dispatch), and the
+              // late-import/global shift pass bumps BOTH `ctx.currentThisGlobalIdx`
+              // AND the already-emitted save/install instructions in `fctx.body`
+              // in lockstep — but a captured local would go stale, so the RESTORE
+              // `global.set` would target the pre-shift index (now a different,
+              // f64-typed global), storing an externref into an f64 global →
+              // invalid Wasm ("global.set expected type f64, found externref" —
+              // the 30-test regression that park-held #2078). Reading fresh keeps
+              // the restore aligned with the shifted save/install.
+              // (`project_type_index_shift_and_deadelim`: never cache a shiftable
+              // index across a sub-compilation.)
               // save __current_this, install the receiver (struct → externref)
-              fctx.body.push({ op: "global.get", index: currentThisGlobalIdx });
+              fctx.body.push({ op: "global.get", index: ctx.currentThisGlobalIdx });
               fctx.body.push({ op: "local.set", index: prevThisLocal });
               fctx.body.push({ op: "local.get", index: structLocal });
               fctx.body.push({ op: "extern.convert_any" });
-              fctx.body.push({ op: "global.set", index: currentThisGlobalIdx });
+              fctx.body.push({ op: "global.set", index: ctx.currentThisGlobalIdx });
               // dispatch (leaves f64 on stack) → capture
               for (const instr of buildDispatch(0)) {
                 fctx.body.push(instr);
               }
               fctx.body.push({ op: "local.set", index: tpResultLocal });
-              // restore __current_this, then re-push the captured result
+              // restore __current_this (FRESH index — see note above), then
+              // re-push the captured result
               fctx.body.push({ op: "local.get", index: prevThisLocal });
-              fctx.body.push({ op: "global.set", index: currentThisGlobalIdx });
+              fctx.body.push({ op: "global.set", index: ctx.currentThisGlobalIdx });
               fctx.body.push({ op: "local.get", index: tpResultLocal });
               releaseTempLocal(fctx, prevThisLocal);
               releaseTempLocal(fctx, tpResultLocal);

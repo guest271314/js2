@@ -16,6 +16,7 @@
 import { describe, expect, it } from "vitest";
 import { compile } from "../src/index.js";
 import { wrapExports } from "../src/runtime.js";
+import { parseMeta, wrapTest } from "./test262-runner.js";
 
 async function run(body: string): Promise<any> {
   const src = `export function test(): any { ${body} }`;
@@ -128,5 +129,95 @@ describe("#2679 — ToNumber binds `this` to the receiver (number/default hint v
       `var tv; var a = { valueOf() { tv = this; return 30; } }; var d = new Date(2016, 6, 1); d.setSeconds(a); return tv === a ? 1 : 0;`,
     );
     expect(exp.test()).toBe(1);
+  });
+});
+
+// (#2679 CI-fix / park-hold on #2078) The number-hint valueOf coercion threads
+// `__current_this` around the valueOf dispatch by emitting a save/install before
+// and a restore after `buildDispatch(0)`. `buildDispatch(0)` compiles the valueOf
+// dispatch, which can flush a LATE string-constant import mid-stream and SHIFT the
+// global index space (`ctx.currentThisGlobalIdx` 25→26, verified). The first cut
+// cached the global index in a local and reused the STALE value for the restore,
+// so the restore `global.set` targeted the pre-shift index — a now-f64-typed
+// global — storing an externref into an f64 global → invalid Wasm
+// ("global.set expected type f64, found externref"). That park-held #2078 with a
+// 30-test merged-baseline regression (every binary-op / String / Number / Array
+// ToNumber-of-object harness row that hits the wrapped-test harness structure
+// that flushes the late import). The fix reads `ctx.currentThisGlobalIdx` FRESH at
+// each global op so the restore stays aligned with the shifted save/install.
+//
+// This guard reproduces the EXACT trigger: the harness-wrapped form (via the
+// runner's `wrapTest`, which supplies the `Test262Error` / assert string
+// constants whose late flush causes the shift) of a representative regressed
+// row (`language/expressions/addition/S11.6.1_A2.2_T1.js`). It asserts the binary
+// INSTANTIATES (validates) — the simple in-body `run(...)` shapes above do NOT
+// flush a mid-dispatch import, so only this harness-wrapped form catches the bug.
+describe("#2679 — number-hint valueOf coercion emits VALID Wasm under global-index shift", () => {
+  // The FULL test262 row (es5id 11.6.1_A2.2_T1, BSD-licensed). The complete
+  // harness string-constant volume is load-bearing: it is what makes a late
+  // string-constant import flush DURING the valueOf `buildDispatch`, shifting the
+  // global index space mid-emission. A trimmed copy does not flush mid-dispatch
+  // and so does not reproduce the bug.
+  const ADDITION_A22_T1 = `// Copyright 2009 the Sputnik authors.  All rights reserved.
+/*---
+es5id: 11.6.1_A2.2_T1
+description: If Type(value) is Object, evaluate ToPrimitive(value, Number)
+---*/
+if ({valueOf: function() {return 1}} + 1 !== 2) {
+  throw new Test262Error('#1: {valueOf: function() {return 1}} + 1 === 2. Actual: ' + ({valueOf: function() {return 1}} + 1));
+}
+if ({valueOf: function() {return 1}, toString: function() {return 0}} + 1 !== 2) {
+  throw new Test262Error('#2: {valueOf: function() {return 1}, toString: function() {return 0}} + 1 === 2. Actual: ' + ({valueOf: function() {return 1}, toString: function() {return 0}} + 1));
+}
+if ({valueOf: function() {return 1}, toString: function() {return {}}} + 1 !== 2) {
+  throw new Test262Error('#3: {valueOf: function() {return 1}, toString: function() {return {}}} + 1 === 2. Actual: ' + ({valueOf: function() {return 1}, toString: function() {return {}}} + 1));
+}
+try {
+  if ({valueOf: function() {return 1}, toString: function() {throw "error"}} + 1 !== 2) {
+    throw new Test262Error('#4.1: {valueOf: function() {return 1}, toString: function() {throw "error"}} + 1 === 2. Actual: ' + ({valueOf: function() {return 1}, toString: function() {throw "error"}} + 1));
+  }
+}
+catch (e) {
+  if (e === "error") {
+    throw new Test262Error('#4.2: {valueOf: function() {return 1}, toString: function() {throw "error"}} + 1 not throw "error"');
+  } else {
+    throw new Test262Error('#4.3: {valueOf: function() {return 1}, toString: function() {throw "error"}} + 1 not throw Error. Actual: ' + (e));
+  }
+}
+if (1 + {toString: function() {return 1}} !== 2) {
+  throw new Test262Error('#5: 1 + {toString: function() {return 1}} === 2. Actual: ' + (1 + {toString: function() {return 1}}));
+}
+if (1 + {valueOf: function() {return {}}, toString: function() {return 1}} !== 2) {
+  throw new Test262Error('#6: 1 + {valueOf: function() {return {}}, toString: function() {return 1}} === 2. Actual: ' + (1 + {valueOf: function() {return {}}, toString: function() {return 1}}));
+}
+try {
+  1 + {valueOf: function() {throw "error"}, toString: function() {return 1}};
+  throw new Test262Error('#7.1: 1 + {valueOf: function() {throw "error"}, toString: function() {return 1}} throw "error". Actual: ' + (1 + {valueOf: function() {throw "error"}, toString: function() {return 1}}));
+}
+catch (e) {
+  if (e !== "error") {
+    throw new Test262Error('#7.2: 1 + {valueOf: function() {throw "error"}, toString: function() {return 1}} throw "error". Actual: ' + (e));
+  }
+}
+try {
+  1 + {valueOf: function() {return {}}, toString: function() {return {}}};
+  throw new Test262Error('#8.1: 1 + {valueOf: function() {return {}}, toString: function() {return {}}} throw TypeError. Actual: ' + (1 + {valueOf: function() {return {}}, toString: function() {return {}}}));
+}
+catch (e) {
+  if ((e instanceof TypeError) !== true) {
+    throw new Test262Error('#8.2: 1 + {valueOf: function() {return {}}, toString: function() {return {}}} throw TypeError. Actual: ' + (e));
+  }
+}
+`;
+
+  it("compiles the harness-wrapped addition-A2.2 row to instantiable Wasm", async () => {
+    const meta = parseMeta(ADDITION_A22_T1);
+    const { source } = wrapTest(ADDITION_A22_T1, meta);
+    const result: any = await compile(source, { fileName: "test.ts", skipSemanticDiagnostics: true } as any);
+    expect(result.success).toBe(true);
+    expect(result.binary?.length).toBeGreaterThan(0);
+    // The regression manifested ONLY at instantiation (compile reported success
+    // but the binary failed Wasm validation). Assert it instantiates.
+    await expect(WebAssembly.instantiate(result.binary, result.importObject ?? {})).resolves.toBeDefined();
   });
 });
