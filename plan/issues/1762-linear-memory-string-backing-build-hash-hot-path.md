@@ -1,11 +1,12 @@
 ---
 id: 1762
 title: "perf(strings): linear-memory string backing for the build/hash hot path — drop the WasmGC (array i16) GC barrier"
-status: ready
+status: wont-fix
 needs_arch_spec: false
 created: 2026-05-31
 updated: 2026-06-26
-arch_spec_landed: "2026-06-26 (sd-typedarray): ## Implementation Plan settles representation (LinearString GC descriptor + linear char data), boundary, alloc/lifetime, host interop. Unblocks dev Slice 0 (measure-first)."
+slice0_verdict: "2026-06-26 (sd-typedarray): NO-GO. Warm wasmtime/Cranelift measurement — the (array i16) representation is ~3-10% of the hash-loop cost once the descriptor is hoisted; the dominant 1.66-1.8x is per-iter struct.get reloads + flatten call + f64 |0 emulation (all codegen on the existing rep). LinearString keeps a GC descriptor so it wouldn't fix the dominant cost. Linear approach SUPERSEDED. Redirect = codegen hoist + i32-hash-path (see ## Slice 0 — EXECUTED)."
+arch_spec_landed: "2026-06-26 (sd-typedarray): ## Implementation Plan settles representation (LinearString GC descriptor + linear char data), boundary, alloc/lifetime, host interop. KEPT as the design-exploration record (#2086); the approach it specs was then measured NO-GO in Slice 0."
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -279,6 +280,74 @@ interop needed under WASI), allocation/lifetime (bump-now/arena-later), and the
 JS-host interop story (untouched — gated to the no-host WASI lane). Slice 0
 (measure-first) is the recommended dev entry; it de-risks the whole feature before
 the type-table change lands. Dev task #3 (the prototype) can proceed from Slice 0.
+
+## Slice 0 — EXECUTED (2026-06-26, sd-typedarray) — VERDICT: NO-GO for the linear representation
+
+The measure-first gate ran. **Decision: NO-GO** — the linear-memory string
+representation is NOT the hash/build hot-path win #1746 hypothesized. The full
+read/build/consolidation impl (dev task #3) is CANCELLED. `status` set to
+`wont-fix` (linear-representation approach superseded). The redirect below is the
+real lever.
+
+### Measurement (warm, wasmtime/Cranelift 44.0 — the WASI engine #1762 targets and #1746's own engine; two-point method t(2N)−t(N) to cancel startup+compile; stable across runs)
+
+Three hand-WAT variants isolating EXACTLY the representation variable (a 1024-elem
+buffer, identical hash arithmetic, differing only in the char-read + whether the
+descriptor fields are hoisted) — `.tmp/measure.py` + `.tmp/{lin,gc_hoist,gc_reload}.wat`:
+
+| variant | char read | ns/read |
+| --- | --- | --- |
+| linear (`i32.load16_u`, hoisted base) | linear memory | **0.82–1.01** |
+| WasmGC `array.get_u`, descriptor **hoisted** into locals | (array i16) | **1.03–1.11** |
+| WasmGC `array.get_u`, struct fields **reloaded** per iter | (array i16) | **1.70–2.00** |
+
+### The decisive findings (these REFUTE the issue's central hypothesis)
+
+1. **The `(array i16)` REPRESENTATION is NOT the per-iteration floor.** Once the
+   descriptor fields are hoisted, `array.get_u` ≈ `i32.load16_u` within **~1.03–1.30x
+   (3–30%, noise-dependent; typically ~3–10%)**. Cranelift optimizes the array
+   read barrier / bounds check well. The representation is a **minor** cost.
+2. **The DOMINANT cost (1.66–1.8x) is per-iteration `struct.get` RELOADS** of
+   len/off/data. The real compiler `$hashStr` loop (`string-ops.ts:2230`) is heavier
+   still: a `call __str_flatten` PER `charCodeAt` + **4** `struct.get` reloads +
+   the f64 `|0` emulation (div/floor/mul/sub by 2³²). **All are CODEGEN issues on
+   the EXISTING representation, not the representation.**
+3. **Self-defeating:** #1762's own `LinearString` keeps a **GC descriptor**
+   {len, ptr, off}, so a linear read path would suffer the SAME reload tax unless
+   the descriptor is hoisted — i.e. it does NOT even address the dominant cost.
+4. **The build-loop "GC write barrier on every `array.set`" premise is incorrect:**
+   `array.set` of an **i16 (non-reference)** element carries no tracing write
+   barrier (barriers are reference-only). The build cost is ConsString rope alloc
+   (`__str_concat`, `native-strings.ts:1363`) + flatten, not array.set barriers.
+
+(Caveat: the compiler's own `warm` output couldn't be warm-measured directly — it
+hashes a constant literal each rep, so Cranelift LICM-hoists the whole hash and the
+two-point loop reads ~0. The verdict rests on the clean gc_hoist-vs-lin comparison,
+which is unaffected.)
+
+### Redirect — the real win is CODEGEN on the existing WasmGC rep (not a representation change)
+
+Carved/dispatched separately (the linear substrate is dead). **NB: verify-first
+revealed these are multi-part optimizations with soundness constraints — they are
+the right direction but warrant a proper spec, NOT quick one-liners:**
+
+- **(a) Hoist the per-`charCodeAt` flatten + descriptor reads out of the loop**
+  (loop-invariant-code-motion on the string-read). The `call __str_flatten` + 4
+  `struct.get` per char are the 1.66–1.8x. Non-trivial: the lowering is
+  expression-local; it needs to recognize a loop-invariant string receiver and
+  hoist.
+- **(b) Finish the i32-hash-path (#1105).** `binary-ops.ts:1578` excludes
+  `charCodeAt` from the i32-pure leaf — **soundly**, because OOB `charCodeAt`
+  returns NaN which poisons `(a + charCodeAt)|0` to 0, whereas an i32 leaf
+  returning 0 gives `a`. So (b) needs THREE coupled parts: (i) prove `charCodeAt(i)`
+  in-bounds (the for-header `i < s.length` gives it, but the bound is `s.length`,
+  not a literal — extends the #2055 relational i32 path), (ii) an i32 `charCodeAt`
+  arm (array.get_u, no NaN branch) gated on that proof, (iii) infer the hash
+  accumulator `h` as an i32 local (it's `let h = 0`/`number` → f64 today) so the
+  whole `(h*31 + c)|0` collapses to i32 and the f64 `|0` emulation disappears.
+
+Both are broad-impact string codegen → must floor-validate through merge_group (the
+#2078 regression class). Recommend routing through `/architect-spec` before code.
 
 ## Notes
 
