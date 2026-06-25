@@ -33,6 +33,7 @@ import { compileStringLiteral } from "../string-ops.js";
 import { defaultValueInstrs } from "../type-coercion.js";
 import { emitThrowString, emitThrowTypeError, getFuncParamTypes } from "./helpers.js";
 import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
+import { emitToPropertyKeyOnce } from "./assignment.js";
 import { emitMappedArgParamSync } from "./logical-ops.js";
 import { resolveStructName } from "./misc.js";
 
@@ -289,6 +290,113 @@ function emitExternrefMemberIncDec(
   }
 
   // Return new (prefix) or old (postfix). §13.4 UpdateExpression semantics.
+  fctx.body.push({ op: "local.get", index: mode === "postfix" ? oldTmp : newTmp });
+  return { kind: "f64" };
+}
+
+/**
+ * (#2675) Object element `obj[keyExpr]++` / `--obj[keyExpr]` on an externref
+ * (any-typed) receiver — a real read-modify-write instead of the historical
+ * NaN-drop. Mirrors the working compound path `compileElementCompoundAssignment`
+ * (assignment.ts; #2666 fixed it for ToPropertyKey-once) but with ±1 and §13.4
+ * UpdateExpression old/new return semantics:
+ *
+ *   read  __extern_get(base, key) -> __unbox_number -> f64 (= old)
+ *   new = old ±1
+ *   write back: a STATIC string-literal key routes through the symmetric
+ *     struct.set dispatch (#2659 `emitAlternateStructSetDispatch`) so a typed
+ *     WasmGC-struct receiver hits the same slot the member READ uses, with
+ *     `__extern_set` as the terminal sidecar fallback; a DYNAMIC key writes via
+ *     `__extern_set` (the same path `o[k] += 1` uses).
+ *
+ * The key's ToPropertyKey (§7.1.19) fires ONCE for a side-effecting `{toString}`
+ * key. `baseLocal` already holds the receiver externref. Prefix returns the NEW
+ * value, postfix the OLD. f64 numeric semantics (matching `o[k] += 1`).
+ */
+function emitExternrefElementIncDec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  baseLocal: number,
+  keyExpr: ts.Expression,
+  f64Op: "f64.add" | "f64.sub",
+  mode: "prefix" | "postfix",
+): ValType | null {
+  // §13.3.3: base already evaluated; evaluate the key expression (side effects),
+  // then ToPropertyKey ONCE (reference formation, before the null-base check).
+  const keyResult = compileExpression(ctx, fctx, keyExpr, { kind: "externref" });
+  if (!keyResult) return null;
+  emitToPropertyKeyOnce(ctx, fctx);
+  const keyLocal = allocLocal(fctx, `__incdec_ekey_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: keyLocal });
+
+  // RequireObjectCoercible: a wasm-null base throws TypeError before the update.
+  // (Shift-safe: emit the throw into the real body so emitThrowTypeError's
+  // late-import bookkeeping patches prior instrs, then splice into the if-then —
+  // #1720.)
+  fctx.body.push({ op: "local.get", index: baseLocal });
+  fctx.body.push({ op: "ref.is_null" });
+  const throwStart = fctx.body.length;
+  emitThrowTypeError(ctx, fctx, "TypeError: Cannot read properties of null (update target)");
+  const thenBody = fctx.body.splice(throwStart);
+  fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenBody });
+
+  // Read current: __extern_get(base, key) -> externref (slot-consistent via _safeGet).
+  fctx.body.push({ op: "local.get", index: baseLocal });
+  fctx.body.push({ op: "local.get", index: keyLocal });
+  const getIdx = ensureLateImport(
+    ctx,
+    "__extern_get",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (getIdx !== undefined) fctx.body.push({ op: "call", funcIdx: getIdx });
+
+  // Unbox -> f64 (ToNumber on the current value).
+  addUnionImports(ctx);
+  const unboxIdx = ctx.funcMap.get("__unbox_number");
+  if (unboxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: unboxIdx });
+
+  // Save OLD (postfix return).
+  const oldTmp = allocLocal(fctx, `__incdec_eeold_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.tee", index: oldTmp });
+
+  // NEW = old ±1.
+  fctx.body.push({ op: "f64.const", value: 1 });
+  fctx.body.push({ op: f64Op });
+  const newTmp = allocLocal(fctx, `__incdec_eenew_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: newTmp });
+
+  // Box NEW for the write-back.
+  fctx.body.push({ op: "local.get", index: newTmp });
+  const boxIdx = ctx.funcMap.get("__box_number");
+  if (boxIdx !== undefined) fctx.body.push({ op: "call", funcIdx: boxIdx });
+  const boxedLocal = allocLocal(fctx, `__incdec_eeboxed_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: boxedLocal });
+
+  // Write back. Static string-literal key → symmetric struct.set dispatch (#2659)
+  // for slot-consistency (terminal __extern_set fallback inside); dynamic key →
+  // __extern_set (same path as `o[k] += 1`).
+  const setIdx = ensureLateImport(
+    ctx,
+    "__extern_set",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [],
+  );
+  flushLateImportShifts(ctx, fctx);
+  const litName = ts.isStringLiteral(keyExpr) ? keyExpr.text : undefined;
+  let dispatched = false;
+  if (litName !== undefined) {
+    dispatched = emitAlternateStructSetDispatch(ctx, fctx, baseLocal, boxedLocal, litName, /*strict*/ false);
+  }
+  if (!dispatched) {
+    fctx.body.push({ op: "local.get", index: baseLocal });
+    fctx.body.push({ op: "local.get", index: keyLocal });
+    fctx.body.push({ op: "local.get", index: boxedLocal });
+    if (setIdx !== undefined) fctx.body.push({ op: "call", funcIdx: setIdx });
+  }
+
+  // Return NEW (prefix) / OLD (postfix). §13.4.
   fctx.body.push({ op: "local.get", index: mode === "postfix" ? oldTmp : newTmp });
   return { kind: "f64" };
 }
@@ -585,30 +693,14 @@ function compileMemberIncDec(
     // which is observable *before* ToPropertyKey would call the key's
     // `toString`. A non-null externref base still falls through to NaN.
     if (objResult.kind === "externref") {
+      // (#2675) Object element `obj[keyExpr]++` / `--` on an any-typed (externref)
+      // receiver: a real read-modify-write instead of the historical NaN-drop.
+      // The key's ToPropertyKey-once, the null-base RequireObjectCoercible
+      // TypeError, and the slot-consistent write-back are handled in the shared
+      // helper (mirrors the working compound path `o[key] += 1`).
       const elemBaseTmp = allocLocal(fctx, `__incdec_ebase_${fctx.locals.length}`, objResult);
       fctx.body.push({ op: "local.set", index: elemBaseTmp });
-      // Evaluate the property-key expression for its side effects, then discard
-      // its value (ToPropertyKey itself is skipped — GetValue throws first when
-      // the base is null/undefined).
-      const keyResult = compileExpression(ctx, fctx, operand.argumentExpression);
-      if (keyResult) fctx.body.push({ op: "drop" });
-      // RequireObjectCoercible: null base -> TypeError before the update step.
-      fctx.body.push({ op: "local.get", index: elemBaseTmp });
-      fctx.body.push({ op: "ref.is_null" });
-      // Emit the TypeError throw into the REAL body first so emitThrowTypeError's
-      // late-import-shift bookkeeping (ensureLateImport + flushLateImportShifts)
-      // patches the already-emitted instructions correctly, then splice the
-      // freshly-appended throw instrs out into the `if` then-body. Building the
-      // throw against a detached body would skip the shift on prior instrs and
-      // emit an index-corrupt module (#1720).
-      const throwStart = fctx.body.length;
-      emitThrowTypeError(ctx, fctx, "TypeError: Cannot read properties of null (update target)");
-      const thenBody = fctx.body.splice(throwStart);
-      fctx.body.push({ op: "if", blockType: { kind: "empty" }, then: thenBody });
-      // Non-null externref base: incrementing a dynamic property yields NaN.
-      reportSilentFallback(ctx, "const-fallback", "unary-updates:incdec-dynamic-property-externref", operand);
-      fctx.body.push({ op: "f64.const", value: NaN });
-      return { kind: "f64" };
+      return emitExternrefElementIncDec(ctx, fctx, elemBaseTmp, operand.argumentExpression, f64Op, mode);
     }
 
     if (objResult.kind !== "ref" && objResult.kind !== "ref_null") {
