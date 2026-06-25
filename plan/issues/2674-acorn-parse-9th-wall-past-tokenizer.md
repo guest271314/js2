@@ -161,3 +161,29 @@ identity at a deeper switch that never matches so `next()` is never called. The
 so if it IS another field-write asymmetry it may already be fixed by #2664 for that
 field too — re-probe to see WHICH field's read/write now diverges (or whether it's
 a token-identity / control-flow loop instead).
+
+## BISECT NARROWED (2026-06-25, sd-2038) — empty input PARSES; wall is in statement-parse
+
+Decisive datapoint via the harness on merged-main (with #2664): **`parse("")`
+returns `{type:"Program", bodyLen:0}` in 19ms** — a valid, EMPTY Program AST. So
+the full entry chain WORKS for empty input: `Parser.parse` → `new this(...).parse()`
+→ `parseTopLevel` correctly sees `this.type === eof` immediately and returns the
+Program. (This also means the harness end-to-end is sound and the AST marshalling
+works — the #1712 differential gate is RUNNABLE the moment a non-empty statement
+parses.)
+
+Therefore the 9th wall is **specifically in the statement-parse path**
+(`parseStatement` / `parseVarStatement` and the `next`/`eat`/`expect` it drives),
+NOT in `parseTopLevel`'s loop/eof-guard or the entry machinery — those are proven
+working by the empty-input pass. For `var x = 1;` the parser enters
+`parseStatement`, fails to consume the `var` token (the `__js_array_push` 166k
+loop = `parseTopLevel` re-appending a never-advancing statement), and spins.
+
+**Next probe (verify-first):** bisect statement shapes — `parse(";")` (empty
+statement, exercises `parseStatement`'s `semi` case → `this.next()`), `parse("1")`
+(bare expression-statement), `parse("1;")` — to pin whether `next()`/`eat()` after
+the FIRST token advances. Then WAT-decode `parseStatement`/`next` and check the
+specific field read/write (`this.start`/`this.end`/`this.lastTokStart`/
+`this.lastTokEnd`) or the token-type `switch` dispatch, the same way #2664's
+`this.type` was cracked. (A single-compile multi-input probe variant of the
+harness would avoid the per-input recompile — a worthwhile harness follow-up.)
