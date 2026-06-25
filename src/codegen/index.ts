@@ -4313,6 +4313,16 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   //   for `vec.constructor` lookups: the constructor path calls `__vec_len`
   //   to positively distinguish vec wrappers from other null-prototype
   //   WasmGC structs.
+  // (#2083) The final disjunct was `ctx.vecTypeMap.size === 0`, which could
+  // NEVER be true: `createCodegenContext` pre-registers the `externref` + `f64`
+  // vec struct types for type-index stability, so the map always has ≥ 2
+  // entries. As a result these six host-glue vec exports leaked into EVERY
+  // module — even arith-only / string-only programs with no arrays at all (the
+  // exact case flagged in #2083). Gate on `ctx.usesVecValue` instead — set only
+  // when a genuine array-usage site asks `getOrRegisterVecType` for a type (the
+  // two prereg calls are excluded). The host runtime guards every
+  // `exports.__vec_*` access with a `typeof === "function"` check, so a module
+  // that never materialises an array is safe without them.
   if (
     !ctx.funcMap.has("__iterator") &&
     !ctx.funcMap.has("JSON_stringify") &&
@@ -4323,7 +4333,7 @@ function emitVecAccessExports(ctx: CodegenContext): void {
     !ctx.funcMap.has("Promise_any") &&
     !ctx.funcMap.has("__crypto_get_random_values") && // (#1503)
     !ctx.funcMap.has("__extern_get") &&
-    ctx.vecTypeMap.size === 0
+    !ctx.usesVecValue
   ) {
     return;
   }

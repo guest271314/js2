@@ -744,6 +744,27 @@ export interface CodegenContext {
    */
   usesArrayHoles: boolean;
   /**
+   * (#2083) Set true the first time `getOrRegisterVecType` is asked for a vec
+   * type from a genuine usage site (an array literal, array method, for-of over
+   * an array, TypedArray, etc.) — i.e. the module materialises at least one
+   * array value that may cross the JS↔Wasm boundary. The two pre-registrations
+   * in `createCodegenContext` (`externref`/`f64`, baked in for type-index
+   * stability) are excluded via `suppressVecUsageFlag`, so this stays false for
+   * arith-/string-only modules with no arrays. Gates the host-glue vec exports
+   * (`__vec_len`/`__vec_get`/`__vec_push`/`__vec_pop`/`__vec_mut_supported`/
+   * `__is_vec`) so they no longer leak into every module (#2083). The host
+   * runtime guards every `exports.__vec_*` access with a `typeof === "function"`
+   * check, so their absence is safe.
+   */
+  usesVecValue: boolean;
+  /**
+   * (#2083) When true, `getOrRegisterVecType` does NOT flip `usesVecValue`.
+   * Set only for the duration of the two pre-registration calls in
+   * `createCodegenContext` (the `externref`/`f64` type-index-stability stubs),
+   * which are not real array usage.
+   */
+  suppressVecUsageFlag: boolean;
+  /**
    * (#2001 S1) Type index of the `$Hole` zero-field sentinel struct, and the
    * absolute index of the immutable `$__hole` singleton global. Registered
    * lazily + once by `ensureHoleType` during body compilation (after class
