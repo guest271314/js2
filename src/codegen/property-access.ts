@@ -105,6 +105,7 @@ import {
 import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 import { tryEmitJsonParseElementAccess, tryEmitJsonParsePropertyAccess } from "./json-standalone.js";
 import { reserveMemberSetDispatch } from "./member-set-dispatch.js";
+import { reserveMemberGetDispatch } from "./member-get-dispatch.js";
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
 import { tryCompileTemporalPropertyAccess } from "./temporal-native.js";
@@ -1406,7 +1407,27 @@ export function emitNullGuardedStructGet(
           } as Instr,
         ];
       }
-      // No more alternates — return default value
+      // No more inline alternates. (#2674) The inline `alternates` set was frozen
+      // at THIS read's compile time — a struct type registered later (acorn's
+      // `$__fnctor_Parser`) is missing, so a read of the real (later-type)
+      // instance would give up to the default here → stale `undefined` while the
+      // #2664 deferred WRITE hit the slot (read/write divergence → the acorn
+      // expression-parse non-termination). Route the terminal through the
+      // deferred-fill `__get_member_<name>` dispatcher, which enumerates the
+      // COMPLETE candidate set at finalize. Coerce its uniform externref result
+      // to `resultType`. Falls back to the default only if the dispatcher can't
+      // be reserved.
+      const getDispIdx = propName ? reserveMemberGetDispatch(ctx, propName) : undefined;
+      if (getDispIdx !== undefined) {
+        return [
+          { op: "local.get", index: srcLocal } as Instr,
+          { op: "extern.convert_any" } as Instr,
+          { op: "call", funcIdx: getDispIdx } as Instr,
+          ...coercionInstrs(ctx, { kind: "externref" }, resultType, fctx),
+          { op: "local.set", index: resultLocal } as Instr,
+        ];
+      }
+      // No dispatcher — return default value (legacy behaviour).
       return [...defaultValueInstrs(resultType), { op: "local.set", index: resultLocal } as Instr];
     };
 
@@ -1684,7 +1705,25 @@ export function emitExternrefToStructGet(
         } as Instr,
       ];
     }
-    // No more struct alternates — use __extern_get for JS objects, or default value
+    // No more INLINE struct alternates. (#2674) Route the terminal through the
+    // deferred-fill `__get_member_<name>` dispatcher (complete candidate set at
+    // finalize) so a struct type registered AFTER this read compiled (acorn's
+    // `$__fnctor_Parser`) is still resolved — the inline `alternates` froze it
+    // out, so a read of the real instance otherwise fell straight to
+    // `__extern_get` → `undefined` (the slot is a real struct field, not a
+    // sidecar prop). The dispatcher's own terminal IS `__extern_get`, so this
+    // strictly extends coverage (all struct candidates, THEN the host read).
+    const getDispIdx = propName ? reserveMemberGetDispatch(ctx, propName) : undefined;
+    if (getDispIdx !== undefined) {
+      return [
+        { op: "local.get", index: tmpAny } as Instr,
+        { op: "extern.convert_any" } as Instr,
+        { op: "call", funcIdx: getDispIdx } as Instr,
+        ...coercionInstrs(ctx, { kind: "externref" }, resultType, fctx),
+        { op: "local.set", index: resultLocal } as Instr,
+      ];
+    }
+    // No dispatcher — use __extern_get for JS objects, or default value (legacy).
     if (externGetFallback) {
       return externGetFallback;
     }
@@ -4903,10 +4942,33 @@ export function compilePropertyAccess(
           }
           externGetFallback.push({ op: "local.set", index: resultLocal } as Instr);
 
+          // (#2674) Terminal: route the un-matched case through the deferred-fill
+          // `__get_member_<name>` dispatcher (complete candidate set at finalize)
+          // instead of straight to `__extern_get`. The inline `structCandidates`
+          // here are frozen at THIS read's compile time, so a struct type
+          // registered later (acorn's `$__fnctor_Parser`) is excluded → a read of
+          // the real instance fell to `__extern_get` → `undefined` (the slot is a
+          // real field, not a sidecar prop) → the acorn expression-parse loop
+          // never terminated. The dispatcher tries ALL struct candidates THEN
+          // `__extern_get`, so it strictly extends coverage; its externref result
+          // is coerced back to `resultWasm` (which may be an f64/i32 Phase-3
+          // narrowing). Reserved here; filled by fillMemberGetDispatch.
+          const getMemberIdx = reserveMemberGetDispatch(ctx, propName);
+          const dispatchTerminal: Instr[] =
+            getMemberIdx !== undefined
+              ? [
+                  { op: "local.get", index: tmpAnyExt } as Instr,
+                  { op: "extern.convert_any" } as Instr,
+                  { op: "call", funcIdx: getMemberIdx } as Instr,
+                  ...coercionInstrs(ctx, { kind: "externref" }, resultWasm, fctx),
+                  { op: "local.set", index: resultLocal } as Instr,
+                ]
+              : externGetFallback;
+
           // Build nested if/else chain for struct candidates
           const buildStructDispatch = (idx: number): Instr[] => {
             if (idx >= structCandidates.length) {
-              return externGetFallback;
+              return dispatchTerminal;
             }
             const cand = structCandidates[idx]!;
             const getFieldInstrs: Instr[] = [

@@ -931,6 +931,20 @@ export interface CodegenContext {
    */
   memberSetDispatchNames?: Set<string>;
   /**
+   * (#2674) Property names that need a deferred-fill member-READ dispatcher
+   * `__get_member_<name>(recv: externref) -> externref` — the SYMMETRIC read-side
+   * counterpart of `memberSetDispatchNames`. The member-READ multi-struct
+   * dispatch (`findAlternateStructsForField` + `ref.test`/`struct.get` chain) was
+   * also enumerated INLINE per read site, so a reader compiled before a later
+   * struct type only got the earlier candidate's arm → stale `__extern_get`
+   * `undefined` read on the real (later-type) instance, while #2664's deferred
+   * write hit the slot → read/write divergence → non-termination (acorn 9th wall).
+   * Routing the alternates fallback through a reserved dispatcher filled at
+   * FINALIZE gives every read site the COMPLETE candidate set. Filled by
+   * `fillMemberGetDispatch`; populated in BOTH gc/host and standalone.
+   */
+  memberGetDispatchNames?: Set<string>;
+  /**
    * (#1904) True once the standalone `__extern_is_array(externref) -> i32`
    * helper placeholder has been emitted by the object runtime. Its body is
    * filled in post-processing after all Wasm array carrier types (`__vec_*`
