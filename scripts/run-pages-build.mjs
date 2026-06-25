@@ -79,4 +79,11 @@ run(process.execPath, [
   "--experimental-wasm-custom-descriptors",
   "scripts/generate-size-benchmarks.ts",
 ]);
+
+// Derive the landing-page feature-support badges from the real test262 pass
+// rates (and refresh the served report/categories the live counts read), so
+// the "Status is derived from Test262 pass rates" claim is actually true.
+// Idempotent — only writes when a badge or the served data moved.
+run("node", ["scripts/derive-feature-badges.mjs"]);
+
 run("node", ["scripts/build-pages.js"]);
