@@ -5977,7 +5977,7 @@ function compilePropertyCompoundAssignmentExternref(
  * Symbol-preserving). STANDALONE: the native `__to_property_key` helper
  * (object-runtime.ts) — ensure the object runtime so it is emitted.
  */
-function emitToPropertyKeyOnce(ctx: CodegenContext, fctx: FunctionContext): void {
+export function emitToPropertyKeyOnce(ctx: CodegenContext, fctx: FunctionContext): void {
   if (ctx.standalone) {
     ensureObjectRuntime(ctx);
     flushLateImportShifts(ctx, fctx);
