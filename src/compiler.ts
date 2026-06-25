@@ -987,6 +987,11 @@ export function compileSourceSync(
   let isJsMode = options.allowJs === true || (options.fileName?.endsWith(".js") ?? false);
   const defaultFileName = options.fileName ?? (isJsMode ? "input.js" : "input.ts");
   const effectiveFileName = options.moduleName ?? defaultFileName;
+  // #2645 — `--platform node` implies node emulation so the ambient surface and
+  // the importable `node:<mod>` capability gate share one target model. This
+  // EFFECTIVE flag drives the TS2580 message gate below too (so the node host
+  // doesn't get pointed at `--emulate node` it already has via `--platform`).
+  const effectiveEmulateNode = options.emulateNode === true || options.platform === "node";
   let ast: TypedAST;
   if (languageService) {
     // Incremental path: reuse cached lib files via the language service
@@ -994,12 +999,14 @@ export function compileSourceSync(
     ast = languageService.analyze({
       allowJs: options.allowJs,
       skipSemanticDiagnostics: options.skipSemanticDiagnostics,
+      ...(options.platform ? { platform: options.platform } : {}),
     });
   } else {
     ast = analyzeSource(processedSource, effectiveFileName, {
       allowJs: options.allowJs,
       skipSemanticDiagnostics: options.skipSemanticDiagnostics,
       emulateNode: options.emulateNode,
+      ...(options.platform ? { platform: options.platform } : {}),
     });
   }
 
@@ -1015,7 +1022,11 @@ export function compileSourceSync(
         languageService.updateSource(processedSource, jsFileName);
         ast = languageService.analyze({ allowJs: true });
       } else {
-        ast = analyzeSource(processedSource, jsFileName, { allowJs: true, emulateNode: options.emulateNode });
+        ast = analyzeSource(processedSource, jsFileName, {
+          allowJs: true,
+          emulateNode: options.emulateNode,
+          ...(options.platform ? { platform: options.platform } : {}),
+        });
       }
     }
   }
@@ -1051,7 +1062,7 @@ export function compileSourceSync(
       // definitions for node?") flags a Node global. When node-emulation is off,
       // point the user at `--emulate node` (which turns it on and silences this)
       // rather than at @types/node.
-      if (!options.emulateNode && diag.code === 2580) {
+      if (!effectiveEmulateNode && diag.code === 2580) {
         const name = message.match(/Cannot find name '([^']+)'/)?.[1] ?? "process";
         message = `Cannot find name '${name}'. Add \`--emulate node\` to enable Node API emulation (or install @types/node).`;
       }
@@ -1166,6 +1177,8 @@ export async function compileMultiSource(
   const multiAst = analyzeMultiSource(processedFiles, entryFile, undefined, {
     allowJs: options.allowJs,
     skipSemanticDiagnostics: options.skipSemanticDiagnostics,
+    // #2528 — propagate the ambient-platform selection into multi-file analysis.
+    ...(options.platform ? { platform: options.platform } : {}),
   });
 
   // When allowJs is set (e.g. compiling npm packages like lodash-es), only report

@@ -1,10 +1,12 @@
 ---
 id: 2528
 title: "Target environment model (web vs node): scope the ambient global surface so e.g. window.stop isn't in a node host's lib"
-status: backlog
+status: done
+completed: 2026-06-25
+assignee: ttraenkler/sdev-2528-2645
 sprint: Backlog
 created: 2026-06-20
-updated: 2026-06-20
+updated: 2026-06-25
 priority: low
 feasibility: medium
 reasoning_effort: medium
@@ -65,3 +67,41 @@ right globals are available without `@types/node`-style setup.
 Surfaced while investigating loopdive/js2#389 (a node/WASI Native Messaging host
 that had `window.stop` etc. in scope). Lower priority now that #2520 removed the
 warning noise; this is the correctness/ergonomics follow-up.
+
+## Resolution (2026-06-25, with #2645)
+
+Added a `--platform node|web` CLI flag + `CompileOptions.platform?: "web" | "node"`
+(threaded CLI → `compile()` opts → `analyzeSource`/`analyzeMultiSource`/the
+incremental language service). It scopes the **ambient global surface** —
+orthogonal to the backend `--target`:
+
+- The unconditional `lib.d.ts` composite (ES base + `lib.dom.d.ts`) is now built
+  from a shared `ES_BASE_LIB_NAMES` list. A second composite,
+  `lib.no-dom.d.ts` (`DOM_FREE_LIB_NAME`), is the same ES base **without**
+  `lib.dom.d.ts`. The two are distinct cache keys / default-lib names so one
+  process can compile both web and node programs without cross-contamination
+  (`src/checker/index.ts`: `getLibSource`, `isKnownLibName`, `preloadLibFiles`).
+- `getDefaultLibFileName` selects the composite per platform
+  (`defaultLibNameForPlatform`): `--platform node` → DOM-free (so `window.stop`
+  is a clear unresolved-name diagnostic), `--platform web` / unset → DOM.
+- **Default is byte-neutral**: when `platform` is unset the DOM composite loads
+  exactly as before and `emulateNode` is driven solely by its own option, so the
+  common (web / test262) path is unchanged. Verified by a sha256 byte-equality
+  test (unset == web == node for a DOM/node-free program) and a green
+  `runTest262File` run.
+
+Composition with the #1772 capability gate is #2645:
+`emulateNode ||= platform === "node"` (`resolveEmulateNode` in the checker +
+`effectiveEmulateNode` in `src/compiler.ts`), so `--platform node` implies the
+Node-emulation injection path and the TS2580 message gate agrees. The per-member
+`providersFor` gate stays the authority for importable `node:<mod>` members;
+`--platform` only sets the ambient default.
+
+Precedence vs `--target wasi`: independent axes. `--platform` wins for the
+ambient surface; `--target` still governs the backend (so a DOM-only global
+under `--target wasi` is still rejected by the existing WASI DOM-usage gate).
+When `platform` is unset, a `wasi`/`standalone` target does **not** implicitly
+drop the DOM ambient surface — that would change today's output; pass
+`--platform node` explicitly.
+
+Tests: `tests/issue-2528-2645-platform-node-web.test.ts`.

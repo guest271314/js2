@@ -300,6 +300,33 @@ export interface CompileOptions {
    */
   emulateNode?: boolean;
   /**
+   * Target host environment for the AMBIENT global surface (#2528), set via
+   * `--platform node|web`. Orthogonal to the backend `target`
+   * (`gc`/`wasi`/`standalone`/`linear`): `platform` scopes which globals are in
+   * scope at type-check time, `target` chooses the backend lowering.
+   *
+   *   - `"web"`  → DOM ambient surface (`window`, `document`, DOM types) in
+   *               scope; node-only globals are not. Byte-identical to the
+   *               historical default.
+   *   - `"node"` → DOM-only globals are NOT in scope (so `window.stop` in a node
+   *               host is a clear type error), AND the Node-emulation injection
+   *               path turns on (#2645), so `process` & friends type-check
+   *               without @types/node.
+   *
+   * `undefined` (unset) preserves today's behaviour exactly: the DOM ambient
+   * surface is loaded and `emulateNode` is driven solely by its own option /
+   * `node:`-import auto-detection. Type-level only; does not change emitted wasm.
+   *
+   * Precedence vs `--target wasi`: the two are independent axes and may disagree
+   * (e.g. `--platform web --target wasi`). `platform` wins for the *ambient
+   * surface* (web globals stay in scope); `target` still governs the backend, so
+   * actually *using* a DOM-only global under `--target wasi` is rejected by the
+   * existing WASI DOM-usage gate. When `platform` is unset, a `wasi`/`standalone`
+   * target does NOT implicitly drop the DOM ambient surface — that would change
+   * today's output; pass `--platform node` explicitly to scope it.
+   */
+  platform?: "web" | "node";
+  /**
    * Enforce dual-mode discipline (#1524): when true, codegen rejects any
    * JS-host `env` import that is not on
    * `src/codegen/host-import-allowlist.ts`. Auto-enabled under
