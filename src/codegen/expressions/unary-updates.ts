@@ -16,11 +16,23 @@ import { reportError } from "../context/errors.js";
 import { reportSilentFallback } from "../fallback-telemetry.js";
 import { allocLocal, getLocalType } from "../context/locals.js";
 import type { CodegenContext, FunctionContext } from "../context/types.js";
-import { addUnionImports, ensureStructForType, getArrTypeIdxFromVec, localGlobalIdx } from "../index.js";
-import { emitBoundsGuardedArraySet, resolveInheritedStaticProp } from "../property-access.js";
+import {
+  addStringConstantGlobal,
+  addUnionImports,
+  ensureStructForType,
+  getArrTypeIdxFromVec,
+  localGlobalIdx,
+} from "../index.js";
+import {
+  emitAlternateStructSetDispatch,
+  emitBoundsGuardedArraySet,
+  resolveInheritedStaticProp,
+} from "../property-access.js";
 import { coerceType, compileExpression, skipTransparentExpressions } from "../shared.js";
+import { compileStringLiteral } from "../string-ops.js";
 import { defaultValueInstrs } from "../type-coercion.js";
 import { emitThrowString, emitThrowTypeError, getFuncParamTypes } from "./helpers.js";
+import { ensureLateImport, flushLateImportShifts } from "./late-imports.js";
 import { emitMappedArgParamSync } from "./logical-ops.js";
 import { resolveStructName } from "./misc.js";
 
@@ -173,6 +185,117 @@ function compileStaticPropIncDec(
 }
 
 /**
+ * (#2656) `++this.prop` / `this.prop--` on an `any`/`externref`-typed receiver
+ * (e.g. a fnctor-instance `this` inside a prototype method — acorn's tokenizer
+ * shape). The statically-resolved-struct path below only fires when the receiver
+ * type resolves to a known struct; for an externref receiver it used to emit a
+ * `f64.const NaN` graceful fallback and SILENTLY DROP THE WRITE — so
+ * `++this.pos` was a no-op (acorn's `skipSpace`/`readWord1` loops never advanced
+ * → infinite loop). `this.prop = this.prop + 1` and `this.prop += 1` already
+ * worked because the compound-assignment path (assignment.ts Path B) does the
+ * read-modify-write; `++`/`--` simply never got the same externref arm.
+ *
+ * This mirrors `compilePropertyCompoundAssignmentExternref`'s write-back exactly:
+ * read current via `__extern_get`, `__unbox_number` → f64, ±1, `__box_number` →
+ * externref, then write back through the SYMMETRIC `struct.set` multi-struct
+ * dispatch (#2659 `emitAlternateStructSetDispatch`) so a typed WasmGC-struct
+ * receiver hits the same slot the member-READ fast path reads — with the
+ * `__extern_set` sidecar write as the terminal fallback for genuine host
+ * externrefs / dynamic-only props. Prefix returns the NEW value, postfix the OLD
+ * (§13.4). f64 numeric semantics, matching `x += 1` (no BigInt special-casing —
+ * the compound path has none here either).
+ */
+function emitExternrefMemberIncDec(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  objLocal: number,
+  propName: string,
+  f64Op: "f64.add" | "f64.sub",
+  mode: "prefix" | "postfix",
+): ValType {
+  // Key string for __extern_get / __extern_set.
+  addStringConstantGlobal(ctx, propName);
+  const keyResult = compileStringLiteral(ctx, fctx, propName);
+  if (keyResult && keyResult.kind !== "externref") {
+    coerceType(ctx, fctx, keyResult, { kind: "externref" });
+  }
+  const keyLocal = allocLocal(fctx, `__incdec_ekey_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: keyLocal });
+
+  // Read current value: __extern_get(obj, key) -> externref  (slot-consistent:
+  // _safeGet returns the struct slot for a typed receiver).
+  fctx.body.push({ op: "local.get", index: objLocal });
+  fctx.body.push({ op: "local.get", index: keyLocal });
+  const getIdx = ensureLateImport(
+    ctx,
+    "__extern_get",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "externref" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  if (getIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: getIdx });
+  }
+
+  // Unbox to f64 (ToNumber on the current value, matching `x += 1`).
+  addUnionImports(ctx);
+  const unboxIdx = ctx.funcMap.get("__unbox_number");
+  if (unboxIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: unboxIdx });
+  }
+
+  // Save OLD value (for postfix return).
+  const oldTmp = allocLocal(fctx, `__incdec_eold_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.tee", index: oldTmp });
+
+  // Compute NEW = old +/- 1.
+  fctx.body.push({ op: "f64.const", value: 1 });
+  fctx.body.push({ op: f64Op });
+  const newTmp = allocLocal(fctx, `__incdec_enew_${fctx.locals.length}`, { kind: "f64" });
+  fctx.body.push({ op: "local.set", index: newTmp });
+
+  // Box NEW to externref for the write-back.
+  fctx.body.push({ op: "local.get", index: newTmp });
+  const boxIdx = ctx.funcMap.get("__box_number");
+  if (boxIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: boxIdx });
+  }
+  const boxedLocal = allocLocal(fctx, `__incdec_eboxed_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: boxedLocal });
+
+  // Write back. Symmetric struct.set dispatch first (so a typed-struct receiver
+  // hits the slot the READ fast path uses); __extern_set sidecar as the terminal
+  // fallback. (#2659 pattern, mirrored from assignment.ts Path B.)
+  const setIdx = ensureLateImport(
+    ctx,
+    "__extern_set",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [],
+  );
+  flushLateImportShifts(ctx, fctx);
+  const externSetFallback: Instr[] = [
+    { op: "local.get", index: objLocal } as Instr,
+    { op: "local.get", index: keyLocal } as Instr,
+    { op: "local.get", index: boxedLocal } as Instr,
+  ];
+  if (setIdx !== undefined) {
+    externSetFallback.push({ op: "call", funcIdx: setIdx } as Instr);
+  }
+  const recvAny = allocLocal(fctx, `__incdec_eany_${fctx.locals.length}`, { kind: "anyref" });
+  fctx.body.push({ op: "local.get", index: objLocal });
+  fctx.body.push({ op: "any.convert_extern" } as Instr);
+  fctx.body.push({ op: "local.set", index: recvAny });
+  const dispatched = emitAlternateStructSetDispatch(ctx, fctx, recvAny, boxedLocal, propName, externSetFallback);
+  if (!dispatched) {
+    fctx.body.push(...externSetFallback);
+  }
+
+  // Return new (prefix) or old (postfix). §13.4 UpdateExpression semantics.
+  fctx.body.push({ op: "local.get", index: mode === "postfix" ? oldTmp : newTmp });
+  return { kind: "f64" };
+}
+
+/**
  * Compile prefix/postfix increment/decrement on member expressions:
  *   ++obj.x, obj.x++, --obj[i], obj[i]--, etc.
  *
@@ -218,8 +341,24 @@ function compileMemberIncDec(
       typeName = ctx.widenedVarStructMap.get(operand.expression.text);
     }
     if (!typeName) {
-      // Unresolvable type (e.g. this.x in module scope, new Object().prop)
-      // Gracefully emit NaN — incrementing an unresolvable property is NaN in JS
+      // (#2656) Unresolvable static struct type — typically an `any`/`externref`
+      // receiver (a fnctor-instance `this` inside a prototype method, acorn's
+      // tokenizer shape). Do NOT NaN-drop the write: route through the externref
+      // read-modify-write (mirrors the `this.prop += 1` compound path, including
+      // the symmetric struct.set dispatch so a typed-struct receiver hits the
+      // same slot the READ uses). Only kicks in when we can box the receiver to
+      // externref; otherwise fall back to the historical NaN behaviour.
+      const objResult = compileExpression(ctx, fctx, operand.expression);
+      if (objResult) {
+        const objLocal = allocLocal(fctx, `__incdec_eobj_${fctx.locals.length}`, { kind: "externref" });
+        if (objResult.kind !== "externref") {
+          coerceType(ctx, fctx, objResult, { kind: "externref" });
+        }
+        fctx.body.push({ op: "local.set", index: objLocal });
+        return emitExternrefMemberIncDec(ctx, fctx, objLocal, propName, f64Op, mode);
+      }
+      // Could not compile the receiver — graceful NaN (incrementing an
+      // unresolvable property is NaN in JS).
       reportSilentFallback(ctx, "const-fallback", "unary-updates:incdec-unresolvable-receiver-type", operand);
       fctx.body.push({ op: "f64.const", value: NaN });
       return { kind: "f64" };

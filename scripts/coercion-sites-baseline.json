@@ -14,7 +14,7 @@
   "codegen/expressions/late-imports.ts": 4,
   "codegen/expressions/logical-ops.ts": 2,
   "codegen/expressions/new-super.ts": 2,
-  "codegen/expressions/unary-updates.ts": 1,
+  "codegen/expressions/unary-updates.ts": 2,
   "codegen/expressions.ts": 1,
   "codegen/fixups.ts": 1,
   "codegen/function-body.ts": 1,
