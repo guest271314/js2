@@ -353,6 +353,114 @@ export function emitDynamicWithGet(
   return { kind: "externref" };
 }
 
+/**
+ * (#2663 Slice 2) Emit the HasBinding-gated WRITE for `name = <value in
+ * rhsLocalIdx>` where `name` resolved to a dynamic `with` scope (§9.1.1.2.4
+ * SetMutableBinding), STATEMENT form (leaves nothing on the stack):
+ *
+ *   if (HasBinding(recv, name)) __extern_set(recv, name, rhsVal) else <fallback>
+ *
+ * The RHS is pre-evaluated ONCE by the caller into the externref temp
+ * `rhsLocalIdx` (§13.15.2). `with` is sloppy-only, so the write uses
+ * `__extern_set` (silent-on-failure, not the strict variant).
+ * `emitFallbackWrite()` emits the next-outer write (another dynamic-with gate,
+ * or the lexical write) using the same temp; it must leave nothing on the stack.
+ */
+/**
+ * (#2663 Slice 2 / #2061 fix) Emit `__extern_has(recv, name) -> i32` into a fresh
+ * i32 local, returning its index. §13.15.2: for a plain `=` assignment the LHS
+ * Reference is resolved (→ HasBinding) BEFORE the RHS is evaluated. So the caller
+ * captures each candidate dynamic-with scope's HasBinding with this helper BEFORE
+ * compiling the RHS; the gated write then branches on the captured i32.
+ *
+ * (Computing HasBinding AFTER the RHS — as the original Slice 2 did — let an RHS
+ * that adds the property to the with-object change the binding decision and
+ * mis-route the write: regressed test262 `S11.13.1_A6_T3` — "PutValue uses the
+ * initially-created Reference even if a more local binding is available".)
+ */
+export function emitCaptureWithHasBinding(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  scope: DynamicWithScope,
+  name: string,
+): number {
+  addStringConstantGlobal(ctx, name);
+  const hasIdx = ensureLateImport(
+    ctx,
+    "__extern_has",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "i32" }],
+  );
+  flushLateImportShifts(ctx, fctx);
+  const hasLocal = allocLocal(fctx, `__with_has_${fctx.locals.length}`, { kind: "i32" });
+  if (hasIdx === undefined) {
+    fctx.body.push({ op: "i32.const", value: 0 });
+    fctx.body.push({ op: "local.set", index: hasLocal });
+    return hasLocal;
+  }
+  fctx.body.push({ op: "local.get", index: scope.localIdx });
+  for (const instr of stringConstantExternrefInstrs(ctx, name)) fctx.body.push(instr);
+  fctx.body.push({ op: "call", funcIdx: hasIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: hasLocal });
+  return hasLocal;
+}
+
+/**
+ * (#2663 Slice 2) Emit the WRITE for `name = <value in rhsLocalIdx>` gated on a
+ * PRE-CAPTURED HasBinding i32 (`hasLocalIdx`, from `emitCaptureWithHasBinding`,
+ * evaluated BEFORE the RHS per §13.15.2). Statement form (leaves nothing on the
+ * stack): `if (hasLocal) __extern_set(recv,name,rhs) else <fallback>`. `with` is
+ * sloppy-only ⇒ `__extern_set` (silent-on-failure).
+ */
+export function emitDynamicWithSet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  scope: DynamicWithScope,
+  name: string,
+  rhsLocalIdx: number,
+  hasLocalIdx: number,
+  emitFallbackWrite: () => void,
+): void {
+  addStringConstantGlobal(ctx, name);
+  const setIdx = ensureLateImport(
+    ctx,
+    "__extern_set",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [],
+  );
+  flushLateImportShifts(ctx, fctx);
+
+  // ELSE arm: the next-outer write (cascade), using the pre-computed RHS.
+  const savedElse = pushBody(fctx);
+  emitFallbackWrite();
+  const elseArm = fctx.body;
+  popBody(fctx, savedElse);
+
+  if (setIdx === undefined) {
+    // Setter unavailable — perform the fallback write only.
+    fctx.body.push(...elseArm);
+    return;
+  }
+
+  // THEN arm: __extern_set(recv, "name", rhsVal) → writes the object binding.
+  const savedThen = pushBody(fctx);
+  fctx.body.push({ op: "local.get", index: scope.localIdx });
+  for (const instr of stringConstantExternrefInstrs(ctx, name)) fctx.body.push(instr);
+  fctx.body.push({ op: "local.get", index: rhsLocalIdx });
+  fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+  const thenArm = fctx.body;
+  popBody(fctx, savedThen);
+
+  // Branch on the PRE-CAPTURED HasBinding (resolved before the RHS, §13.15.2).
+  fctx.body.push({ op: "local.get", index: hasLocalIdx });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: thenArm,
+    else: elseArm,
+  } as Instr);
+}
+
 function compileClosedObjectLiteralTarget(
   ctx: CodegenContext,
   fctx: FunctionContext,

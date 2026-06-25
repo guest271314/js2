@@ -411,8 +411,34 @@ corpus.
   regression to non-`with` modules; Tier-1 static path byte-unchanged.** The
   +91 runtime_error are WRITE-dependent tests (Slice 2) now reaching execution
   (previously compile_error) — progress toward measurability, not a regression.
-- **Slice 2 — dynamic WRITE:** `compileDynamicWithAssignment` (plain `=`) via
-  `__extern_set`; RHS-once-into-temp; result = RHS.
+- **Slice 2 — dynamic WRITE: ✅ DONE (PR #2061; re-fixed for #2061 merge_group
+  regression 2026-06-25).** `emitDynamicWithSet` (statement-form HasBinding-gated
+  write: present ⇒ `__extern_set(recv,name,rhs)`, absent ⇒ next-outer write) + the
+  recursive `emitDynamicWithIdentifierWrite` (cascade through nested
+  dynamic/static with scopes, then to the lexical write) and
+  `emitIdentifierWriteFromLocal` (local / captured-global / module-global /
+  undeclared, from a pre-computed externref temp). Plain `=` only. RHS evaluated
+  ONCE into an externref temp; result = RHS value. `with` is sloppy-only ⇒
+  `__extern_set` (silent-on-failure), not the strict variant.
+  **#2061 merge_group regression FIX — §13.15.2 evaluation ORDER:** the first
+  Slice-2 cut captured `HasBinding(scope,name)` AFTER evaluating the RHS, so an
+  RHS that mutates the with-object (`with(scope){ x = (scope.x = 2, 1) }`) flipped
+  the binding decision and mis-routed the write — regressed test262
+  `S11.13.1_A6_T3` ("PutValue uses the initially-created Reference even if a more
+  local binding is available"). FIX: the LHS Reference is resolved BEFORE the RHS
+  — `captureDynamicWithHasBindings` captures each cascade scope's HasBinding into
+  i32 temps *before* compiling the RHS; the gated write branches on the captured
+  i32 (`emitCaptureWithHasBinding` + `emitDynamicWithSet(…, hasLocalIdx, …)`).
+  Paired per-test diagnosis (main-vs-Slice2-merged, found via the masked net +4):
+  pre-fix +4 with-gains masked −1 assignment regression; post-fix **0
+  regressions, +4 with + 3 assignment gains** (the correct ordering also fixes 3
+  more assignment-category tests). Regression-guarded in `tests/issue-2663.test.ts`.
+  **Measured row-delta (174 noStrict `with` tests): pass 16→20 (+4; +17 over the
+  original baseline of 3), runtime_error 92→89.** The remaining ~89
+  runtime_errors are the var-hoisting/closure-capture canary class (12.10-0-1/7/8
+  — `var foo` inside `with` visible via an outer closure; needs the var/object
+  precedence refinement noted above) plus `typeof`/`delete`/`@@unscopables`
+  (Slices 3-4). Zero regression to non-`with` modules.
 - **Slice 3 — compound/inc-dec + `typeof`/`delete`:** `+=`, `++`/`--`
   (`unary-updates.ts`, `assignment.ts` compound path), `typeof`
   (`typeof-delete.ts:895/1041`), `delete name`. HasBinding-gated read-modify-write.
