@@ -1,4 +1,4 @@
-// #2657 — in-Wasm member WRITE on an `any`/`externref` fnctor receiver must
+// #2659 — in-Wasm member WRITE on an `any`/`externref` fnctor receiver must
 // land on the SAME storage the member READ uses.
 //
 // Root cause: the member-READ fast path resolves an `any`/`externref` receiver
@@ -27,7 +27,7 @@ async function run(src: string): Promise<any> {
   return wrapExports(instance.exports, { signatures: result.exportSignatures });
 }
 
-describe("#2657 — member write hits the struct slot the read uses", () => {
+describe("#2659 — member write hits the struct slot the read uses", () => {
   // acorn-faithful: a fnctor whose prototype method mutates a ctor-initialized
   // numeric field in a `while` loop and reads it back (mirrors readWord1).
   it("fnctor prototype-method `this.pos += 1` loop terminates (read/write agree)", async () => {
@@ -38,7 +38,7 @@ describe("#2657 — member write hits the struct slot the read uses", () => {
       pp.scan = function () {
         // The while-condition read of this.pos takes the struct.get fast path;
         // the this.pos += 1 write must land on the SAME slot, else this loops
-        // forever (the #2657 bug).
+        // forever (the #2659 bug).
         while (this.pos < this.input.length) { this.pos += 1; }
         return this.pos;
       };
@@ -63,6 +63,30 @@ describe("#2657 — member write hits the struct slot the read uses", () => {
       export function probe() { var p = new P(); return p.advance(); }
     `);
     expect(exp.probe()).toBe(7);
+  });
+
+  it("own-property write on a boxed primitive wrapper compiles + round-trips via the sidecar", async () => {
+    // Regression guard (#2659 merge_group): the symmetric struct.set write
+    // dispatch must NOT pick an IMMUTABLE field slot. The boxed-primitive
+    // wrappers WrapperString / WrapperNumber / WrapperBoolean expose a `value`
+    // field declared `mutable: false`; routing `(new String("x")).value = ...`
+    // to a `struct.set` on that slot is a hard Wasm validation error
+    // ("struct.set field must be mutable") that flipped Object.create
+    // 15.2.3.5-4-167/168/169 from pass→compile_error. The write must fall
+    // through to the __extern_set sidecar, which the `.value` read also uses.
+    const exp = await run(`
+      // @ts-nocheck
+      export function probe() {
+        var str = new String("abc");
+        str.value = "StrValue";
+        var booleanObj = new Boolean(false);
+        booleanObj.value = "BooleanValue";
+        var numObj = new Number(123);
+        numObj.value = "NumValue";
+        return String(str.value) + "|" + String(booleanObj.value) + "|" + String(numObj.value);
+      }
+    `);
+    expect(exp.probe()).toBe("StrValue|BooleanValue|NumValue");
   });
 
   it("dynamic (sidecar-only) property still works via the __extern_set fallback", async () => {

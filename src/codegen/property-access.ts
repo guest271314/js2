@@ -1275,7 +1275,16 @@ export function emitAlternateStructSetDispatch(
   propName: string,
   externSetFallback: Instr[],
 ): boolean {
-  const candidates = findAlternateStructsForField(ctx, propName, -1);
+  // Only candidates whose matching field is MUTABLE can take a `struct.set` —
+  // `struct.set` on an immutable field is a hard Wasm validation error.
+  // Immutable-field structs (e.g. the boxed-primitive wrappers WrapperString /
+  // WrapperNumber / WrapperBoolean, whose `value` slot is `mutable: false`) must
+  // fall through to the `__extern_set` sidecar terminal arm instead — that is the
+  // correct destination for an own-property write like `(new String("x")).value = ...`
+  // (it must NOT clobber the immutable wrapper slot). (#2657 regression: those
+  // boxed-wrapper writes flipped Object.create 15.2.3.5-4-167/168/169 to
+  // compile_error because the symmetric write picked the immutable `value` slot.)
+  const candidates = findAlternateStructsForField(ctx, propName, -1).filter((c) => c.mutable);
   if (candidates.length === 0) return false;
 
   const buildSetDispatch = (idx: number): Instr[] => {
@@ -1318,14 +1327,19 @@ export function findAlternateStructsForField(
   ctx: CodegenContext,
   propName: string,
   excludeTypeIdx: number,
-): { structTypeIdx: number; fieldIdx: number; fieldType: ValType }[] {
-  const result: { structTypeIdx: number; fieldIdx: number; fieldType: ValType }[] = [];
+): { structTypeIdx: number; fieldIdx: number; fieldType: ValType; mutable: boolean }[] {
+  const result: { structTypeIdx: number; fieldIdx: number; fieldType: ValType; mutable: boolean }[] = [];
   for (const [typeName, fields] of ctx.structFields) {
     const sIdx = ctx.structMap.get(typeName);
     if (sIdx === undefined || sIdx === excludeTypeIdx) continue;
     const fIdx = fields.findIndex((f) => f.name === propName);
     if (fIdx !== -1) {
-      result.push({ structTypeIdx: sIdx, fieldIdx: fIdx, fieldType: fields[fIdx]!.type });
+      result.push({
+        structTypeIdx: sIdx,
+        fieldIdx: fIdx,
+        fieldType: fields[fIdx]!.type,
+        mutable: fields[fIdx]!.mutable,
+      });
     }
   }
   return result;

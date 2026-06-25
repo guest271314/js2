@@ -1,5 +1,5 @@
 ---
-id: 2657
+id: 2659
 title: "compiled-acorn parse() infinite-loops: in-Wasm member WRITE on an any-typed fnctor receiver goes to __extern_set (sidecar) while the matching READ uses typed struct.get (slot) — read/write storage divergence (6th dogfood blocker)"
 status: done
 assignee: ttraenkler/sendev
@@ -12,7 +12,7 @@ task_type: fix
 area: codegen
 language_feature: closures, member-access, wasmgc-struct
 goal: self-hosting-dogfood
-origin: "2026-06-25 sd — verify-first deep-trace of the remaining acorn parse() loop on current main (after #1712 b1-3, #2582, #2608 landed). Pinned to a member read/write struct-dispatch asymmetry. Renumbered #2655→#2657 (the #2655 id was won on main by 2655-direct-wasi-p1-readsync-writesync while this PR was in flight; #2656 = the parseStatement-switch follow-on)."
+origin: "2026-06-25 sd — verify-first deep-trace of the remaining acorn parse() loop on current main (after #1712 b1-3, #2582, #2608 landed). Pinned to a member read/write struct-dispatch asymmetry. Renumbered #2655→#2657→#2659 (the #2655 id was won on main by 2655-direct-wasi-p1-readsync-writesync, and #2657 was simultaneously won by 2657-raw-wasi-p1-fd-import-variant, both while this PR was in flight; #2656 = the parseStatement-switch follow-on)."
 related: [2608, 2582, 1712, 2656, 983d, 1269]
 depends_on: []
 ---
