@@ -130,6 +130,7 @@ import {
   emitBoolToString,
 } from "../string-ops.js";
 import { tryCompileNodeFsCall, tryCompileNodeProcessCall } from "../node-fs-api.js";
+import { tryCompileDenoStdioCall } from "../deno-api.js";
 import { tryCompileRawWasiCall } from "../raw-wasi-api.js";
 import { resolvePromiseSubclassName, tryEmitPromiseSubclassReceiver } from "./promise-subclass.js";
 import { isSupportedBuiltinStaticProperty, resolveBuiltinNamespaceValueName } from "../builtin-static-globals.js";
@@ -3370,6 +3371,12 @@ function compileCallExpression(
   // #2631 — node:fs fd-based readSync/writeSync → `node:fs` shim calls.
   const nodeFsCall = tryCompileNodeFsCall(ctx, fctx, expr);
   if (nodeFsCall !== undefined) return nodeFsCall;
+
+  // #2684 — Deno synchronous stdio (`Deno.stdin.readSync` /
+  // `Deno.{stdout,stderr}.writeSync`) → direct WASI fd_read/fd_write. Ambient
+  // global, recognized by member-call shape; byte-neutral unless `Deno.` is used.
+  const denoStdioCall = tryCompileDenoStdioCall(ctx, fctx, expr);
+  if (denoStdioCall !== undefined) return denoStdioCall;
 
   // RegExp(pattern, flags) called without `new`. Extracted to calls-guards.ts (#742).
   {
