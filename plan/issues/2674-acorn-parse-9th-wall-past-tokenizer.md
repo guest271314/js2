@@ -2,7 +2,7 @@
 id: 2674
 title: "acorn parse() 9th wall PAST tokenization (after #2664 type-write fix) — parseTopLevel/parseStatement array-push loop"
 status: in-progress
-assignee: ttraenkler/sd-2038
+assignee: ttraenkler/sd-2674b
 sprint: 66
 created: 2026-06-25
 updated: 2026-06-25
@@ -298,3 +298,82 @@ regardless of which import-adding PR gets batched alongside.
 - The 2 regressed private-field tests PASS (gc + standalone).
 - 9 vitest failures in getters-setters/etc. are **identical on clean upstream/main**
   — pre-existing harness issues, not from this change.
+
+## TYPEOF-RESIDUAL ROOT-CAUSE (2026-06-25, sd-2674b) — token-type singleton identity break in `canInsertSemicolon`
+
+Worked the residual on the **fixed+merged #2075 base** (my #2043 hardening landed).
+`parse("x")` STILL hangs. Localized end-to-end with single-compile SAB cap-throw
+probes (built `.tmp/bisect-*`, `.tmp/keyhist-*`, `.tmp/methhist-*`, `.tmp/typetrace-*`,
+`.tmp/eqtrace-*` — single acorn compile, per-import histogram + cap-throw; the
+`bisect()` the prior handoff referenced was never actually landed in
+`probe-driver.mjs`, only `probe()`).
+
+### Localization chain (all verified, on merged #2075)
+1. **bisect** `["x","1","1;","var x=1;"]` → first hang `parse("x")`, signature
+   `__extern_get 114k, __typeof_number 111k, __get_undefined 94k, __host_eq 91k,
+   __js_array_push/new/__extern_method_call 61k each, __is_truthy 56k`.
+2. **`__extern_get` key histogram** (CAP 200k): `type 48600, options 43746,
+   value 24300, ecmaVersion 19447, locations/ranges/start/lastTokEnd ~9720,
+   input/startLoc/body/lastTokEndLoc ~4860`. Parser-instance fields read via the
+   sidecar.
+3. **`__extern_method_call` NAME histogram** (CAP 120k): `isContextual 21812,
+   isUsingKeyword 10906, then parseStatement / parseExpression /
+   parseExpressionStatement / semicolon / eat / insertSemicolon /
+   canInsertSemicolon / unexpected / finishNode / startNode / push ALL ~5453` =
+   ONE per top-level loop iteration. ⇒ the hot loop is `parseTopLevel`'s
+   `while (this.type !== eof) body.push(parseStatement())`, ~5453 spins.
+4. **`this.type` value trace**: reads back `"name"` every iteration (+ occasional
+   `undefined`) — STUCK on the `x` identifier token, never advances to `eof`.
+5. **`__host_eq` operand trace** (the decider): the comparisons are
+   `this.type ("name") === types$1.eof` shown as **`name === {}`** — the RHS
+   singleton `types$1.eof` reads back as a **FIELD-LESS object `{}`** (its
+   `.label` is gone). So the identity/contents of the token-type singleton read
+   via the module-global `types$1.eof` member access is broken → the comparison
+   never matches → `canInsertSemicolon` (`this.type === eof || this.type ===
+   braceR || lineBreak.test(...)`) never returns true → ASI never fires →
+   `parseStatement`→`semicolon`→`unexpected` loops without advancing.
+   - SECONDARY: ~4 of the sampled `__host_eq` calls returned **`-> 1` (true)
+     while JS `===` is FALSE** — a strict-equality correctness wrongness on these
+     externref operands (re-boxed wrapper mis-compare). Possibly intersects the
+     JS-host externref `===` path in `binary-ops.ts`.
+
+### Root cause (pinned, not yet fixed)
+Acorn's token-type singletons live in a **module-level object literal**
+`var types$1 = { eof: new TokenType("eof"), name: new TokenType("name"), … }`
+(~50 entries; `TokenType` is `var TokenType = function TokenType(label,conf){…}`
+with 11 fields). At acorn scale, reading a singleton via the `types$1.<name>`
+member access returns a field-less / non-identical object, so
+`this.type === types$1.eof` (a TokenType externref identity compare in
+`canInsertSemicolon`) never holds. `this.type` itself reads correctly ("name");
+it is the **`types$1.<name>` holder-member read** (and/or its externref identity)
+that breaks.
+
+### NOT reproducible in isolation (the hard part)
+Every minimal repro PASSES on the fixed base — all via the real probe harness
+(full import object): `types.eof.label` read; two-reads identity; round-trip
+`this.type = types.eof` then `=== types.eof`; compare-in-a-separate-method
+(`isEof()`); named-fn-expr Parser + holder singletons + `next()`/`run()` loop.
+The break needs the FULL acorn type-table scale (~50 token types ⇒ many struct
+shapes registered ⇒ the read-dispatch candidate enumeration or externref
+identity for the holder-member singleton read only diverges at scale — the
+multi-shape class #2664/#2075 addressed for `this.type`, now for the
+`types$1.<name>` SINGLETON read on the holder object).
+
+### SEPARATE bug found en route (carve to its own issue — NOT on acorn path)
+A **function-DECLARATION used as a constructor** with prototype methods drops
+method dispatch: `function P(){ this.n=0 } P.prototype.run=function(){…};
+new P().run()` → runtime **"run is not a function"**. The function-EXPRESSION
+forms (`var P = function(){…}` and named `var P = function P(){…}`) BOTH work.
+Acorn uses only named function expressions, so this is NOT the acorn wall — but
+it is a real codegen correctness gap worth its own issue.
+
+### Next step (continue here — fixed #2075 base)
+Pin WHY the `types$1.<name>` holder-member singleton read returns a field-less /
+non-identical externref at acorn scale (vs the working minimal repros): instrument
+the `__get_member`/`__extern_get` for the `eof`/`name` reads to see whether the
+read resolves to a wrong struct candidate, an empty sidecar entry, or a re-boxed
+externref that loses identity. Likely the SAME multi-shape / value-representation
+family as #2664/#2075 but for a module-level object-literal holding
+class-instance singletons. Sync with sd-2679 (#2679 receiver-dispatch) before
+touching any shared read/box/identity path. STILL NOT the #1712 milestone —
+`parse()` does not yet return for a non-empty statement.
