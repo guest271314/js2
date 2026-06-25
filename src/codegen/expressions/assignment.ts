@@ -77,7 +77,7 @@ import {
   getBuilderInfo,
   type StringBuilderInfo,
 } from "../string-builder.js";
-import { compileWithBindingAssignment, findWithBinding } from "../with-scope.js";
+import { compileWithBindingAssignment, emitDynamicWithSet, resolveWithBinding } from "../with-scope.js";
 
 /**
  * Emit a null/undefined guard for an externref-typed destructuring source.
@@ -152,9 +152,30 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
 
   if (ts.isIdentifier(expr.left)) {
     const name = expr.left.text;
-    const withBinding = findWithBinding(fctx, name);
-    if (withBinding) {
-      return compileWithBindingAssignment(ctx, fctx, withBinding, expr.right);
+    const withRes = resolveWithBinding(fctx, name);
+    if (withRes?.kind === "static") {
+      return compileWithBindingAssignment(ctx, fctx, withRes.binding, expr.right);
+    }
+    if (withRes?.kind === "dynamic") {
+      // (#2663 Slice 2) HasBinding-gated WRITE. Evaluate RHS ONCE into an
+      // externref temp (§13.15.2), then resolve through the (possibly nested)
+      // dynamic `with` scopes: each level emits `if HasBinding(obj,name)
+      // __extern_set else <next-outer>`, cascading to the lexical write when no
+      // with-scope remains. Mirrors the Slice-1 read cascade.
+      const rhsType = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
+      if (!rhsType) {
+        reportError(ctx, expr, "Failed to compile dynamic-with assignment value");
+        return null;
+      }
+      if (rhsType.kind !== "externref") {
+        coerceType(ctx, fctx, rhsType, { kind: "externref" });
+      }
+      const rhsTmp = allocLocal(fctx, `__with_rhs_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: rhsTmp });
+      emitDynamicWithIdentifierWrite(ctx, fctx, expr.left, rhsTmp);
+      // Assignment expression result is the RHS value.
+      fctx.body.push({ op: "local.get", index: rhsTmp });
+      return { kind: "externref" };
     }
     // const bindings — assignment throws TypeError at runtime
     if (fctx.constBindings?.has(name)) {
@@ -360,6 +381,140 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
 
   reportError(ctx, expr, "Unsupported assignment target");
   return null;
+}
+
+/**
+ * (#2663 Slice 2) Write a PRE-COMPUTED externref value (in `rhsLocalIdx`) to
+ * `id`, resolving through the dynamic `with` scope chain (statement form, leaves
+ * nothing on the stack). If the innermost non-shadowing scope is a dynamic
+ * `with`, emit `if HasBinding(obj,name) __extern_set else <next-outer>` and
+ * recurse for the else arm with that scope (and inner) truncated — so a name
+ * absent on the inner object cascades to the next-outer `with`, then to the
+ * lexical write. When no with-scope resolves, do the plain lexical/global write.
+ */
+function emitDynamicWithIdentifierWrite(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  id: ts.Identifier,
+  rhsLocalIdx: number,
+): void {
+  const res = resolveWithBinding(fctx, id.text);
+  if (res?.kind === "dynamic") {
+    const scopes = fctx.withScopes!;
+    const matchedIdx = scopes.lastIndexOf(res.scope);
+    emitDynamicWithSet(ctx, fctx, res.scope, id.text, rhsLocalIdx, () => {
+      const saved = fctx.withScopes;
+      fctx.withScopes = scopes.slice(0, matchedIdx);
+      try {
+        emitDynamicWithIdentifierWrite(ctx, fctx, id, rhsLocalIdx);
+      } finally {
+        fctx.withScopes = saved;
+      }
+    });
+    return;
+  }
+  if (res?.kind === "static") {
+    // A static (closed-shape) with field: struct.set the field from the temp.
+    const b = res.binding;
+    fctx.body.push({ op: "local.get", index: b.scope.localIdx });
+    fctx.body.push({ op: "local.get", index: rhsLocalIdx });
+    if (b.field.type.kind !== "externref") {
+      coerceType(ctx, fctx, { kind: "externref" }, b.field.type);
+    }
+    fctx.body.push({ op: "struct.set", typeIdx: b.scope.structTypeIdx, fieldIdx: b.fieldIdx });
+    return;
+  }
+  emitIdentifierWriteFromLocal(ctx, fctx, id, rhsLocalIdx);
+}
+
+/**
+ * (#2663 Slice 2) Write a PRE-COMPUTED externref value (held in `rhsLocalIdx`)
+ * to the outer binding of `id` — the HasBinding-MISS fallback for a dynamic
+ * `with` assignment. Mirrors the identifier-target arm of `compileAssignment`
+ * but reads the value from the temp instead of compiling an RHS expression (so
+ * the RHS is evaluated exactly once, in the caller). Leaves NOTHING on the stack
+ * (the gated-set caller pushes the RHS value as the expression result). Handles
+ * local / captured-global / module-global / undeclared (auto-local) targets,
+ * coercing externref → the target's declared type. Boxed ref-cell captures and
+ * const/read-only bindings are handled by re-reading them here too.
+ */
+function emitIdentifierWriteFromLocal(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  id: ts.Identifier,
+  rhsLocalIdx: number,
+): void {
+  const name = id.text;
+
+  // const → TypeError; read-only (named-fn-expr) → silent no-op (sloppy).
+  if (fctx.constBindings?.has(name)) {
+    emitThrowString(ctx, fctx, "TypeError: Assignment to constant variable.");
+    fctx.body.push({ op: "unreachable" });
+    return;
+  }
+  if (fctx.readOnlyBindings?.has(name)) {
+    return; // no-op
+  }
+
+  const pushRhsCoerced = (target?: ValType): void => {
+    fctx.body.push({ op: "local.get", index: rhsLocalIdx });
+    if (target && target.kind !== "externref") {
+      coerceType(ctx, fctx, { kind: "externref" }, target);
+    }
+  };
+
+  const localIdx = fctx.localMap.get(name);
+  if (localIdx !== undefined) {
+    const boxed = fctx.boxedCaptures?.get(name);
+    if (boxed) {
+      // Write through the ref cell (null-guarded), mirroring the boxed path.
+      pushRhsCoerced(boxed.valType);
+      const tmpVal = allocLocal(fctx, `__with_box_${fctx.locals.length}`, boxed.valType);
+      fctx.body.push({ op: "local.set", index: tmpVal });
+      fctx.body.push({ op: "local.get", index: localIdx });
+      fctx.body.push({ op: "ref.is_null" });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [] as Instr[],
+        else: [
+          { op: "local.get", index: localIdx } as Instr,
+          { op: "local.get", index: tmpVal } as Instr,
+          { op: "struct.set", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 } as Instr,
+        ],
+      } as Instr);
+      return;
+    }
+    const localType = getLocalType(fctx, localIdx);
+    pushRhsCoerced(localType);
+    fctx.body.push({ op: "local.set", index: localIdx });
+    return;
+  }
+
+  const capturedIdx = ctx.capturedGlobals.get(name);
+  if (capturedIdx !== undefined) {
+    const globalDef = ctx.mod.globals[localGlobalIdx(ctx, capturedIdx)];
+    pushRhsCoerced(globalDef?.type);
+    fctx.body.push({ op: "global.set", index: ctx.capturedGlobals.get(name)! });
+    return;
+  }
+
+  const moduleIdx = ctx.moduleGlobals.get(name);
+  if (moduleIdx !== undefined) {
+    const globalDef = ctx.mod.globals[localGlobalIdx(ctx, moduleIdx)];
+    const globalType = globalDef?.type;
+    fctx.body.push({ op: "local.get", index: rhsLocalIdx });
+    if (globalType && globalType.kind !== "externref") {
+      coerceType(ctx, fctx, { kind: "externref" }, globalType);
+    }
+    fctx.body.push({ op: "global.set", index: ctx.moduleGlobals.get(name)! });
+    return;
+  }
+
+  // Undeclared (sloppy implicit global): auto-allocate a local holding the value.
+  const newLocalIdx = allocLocal(fctx, name, { kind: "externref" });
+  fctx.body.push({ op: "local.get", index: rhsLocalIdx });
+  fctx.body.push({ op: "local.set", index: newLocalIdx });
 }
 
 /**

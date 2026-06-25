@@ -353,6 +353,74 @@ export function emitDynamicWithGet(
   return { kind: "externref" };
 }
 
+/**
+ * (#2663 Slice 2) Emit the HasBinding-gated WRITE for `name = <value in
+ * rhsLocalIdx>` where `name` resolved to a dynamic `with` scope (§9.1.1.2.4
+ * SetMutableBinding), STATEMENT form (leaves nothing on the stack):
+ *
+ *   if (HasBinding(recv, name)) __extern_set(recv, name, rhsVal) else <fallback>
+ *
+ * The RHS is pre-evaluated ONCE by the caller into the externref temp
+ * `rhsLocalIdx` (§13.15.2). `with` is sloppy-only, so the write uses
+ * `__extern_set` (silent-on-failure, not the strict variant).
+ * `emitFallbackWrite()` emits the next-outer write (another dynamic-with gate,
+ * or the lexical write) using the same temp; it must leave nothing on the stack.
+ */
+export function emitDynamicWithSet(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  scope: DynamicWithScope,
+  name: string,
+  rhsLocalIdx: number,
+  emitFallbackWrite: () => void,
+): void {
+  addStringConstantGlobal(ctx, name);
+  const hasIdx = ensureLateImport(
+    ctx,
+    "__extern_has",
+    [{ kind: "externref" }, { kind: "externref" }],
+    [{ kind: "i32" }],
+  );
+  const setIdx = ensureLateImport(
+    ctx,
+    "__extern_set",
+    [{ kind: "externref" }, { kind: "externref" }, { kind: "externref" }],
+    [],
+  );
+  flushLateImportShifts(ctx, fctx);
+
+  // ELSE arm: the next-outer write (cascade), using the pre-computed RHS.
+  const savedElse = pushBody(fctx);
+  emitFallbackWrite();
+  const elseArm = fctx.body;
+  popBody(fctx, savedElse);
+
+  if (hasIdx === undefined || setIdx === undefined) {
+    // Gate/setter unavailable — perform the fallback write only.
+    fctx.body.push(...elseArm);
+    return;
+  }
+
+  // THEN arm: __extern_set(recv, "name", rhsVal) → writes the object binding.
+  const savedThen = pushBody(fctx);
+  fctx.body.push({ op: "local.get", index: scope.localIdx });
+  for (const instr of stringConstantExternrefInstrs(ctx, name)) fctx.body.push(instr);
+  fctx.body.push({ op: "local.get", index: rhsLocalIdx });
+  fctx.body.push({ op: "call", funcIdx: setIdx } as Instr);
+  const thenArm = fctx.body;
+  popBody(fctx, savedThen);
+
+  fctx.body.push({ op: "local.get", index: scope.localIdx });
+  for (const instr of stringConstantExternrefInstrs(ctx, name)) fctx.body.push(instr);
+  fctx.body.push({ op: "call", funcIdx: hasIdx } as Instr);
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: thenArm,
+    else: elseArm,
+  } as Instr);
+}
+
 function compileClosedObjectLiteralTarget(
   ctx: CodegenContext,
   fctx: FunctionContext,

@@ -411,8 +411,20 @@ corpus.
   regression to non-`with` modules; Tier-1 static path byte-unchanged.** The
   +91 runtime_error are WRITE-dependent tests (Slice 2) now reaching execution
   (previously compile_error) — progress toward measurability, not a regression.
-- **Slice 2 — dynamic WRITE:** `compileDynamicWithAssignment` (plain `=`) via
-  `__extern_set`; RHS-once-into-temp; result = RHS.
+- **Slice 2 — dynamic WRITE: ✅ DONE (PR, 2026-06-25).** `emitDynamicWithSet`
+  (statement-form HasBinding-gated write: present ⇒ `__extern_set(recv,name,rhs)`,
+  absent ⇒ next-outer write) + the recursive `emitDynamicWithIdentifierWrite`
+  (cascade through nested dynamic/static with scopes, then to the lexical write)
+  and `emitIdentifierWriteFromLocal` (local / captured-global / module-global /
+  undeclared, from a pre-computed externref temp). Plain `=` only. RHS evaluated
+  ONCE into an externref temp (§13.15.2); result = RHS value. `with` is
+  sloppy-only ⇒ `__extern_set` (silent-on-failure), not the strict variant.
+  **Measured row-delta (174 noStrict `with` tests): pass 16→20 (+4; +17 over the
+  original baseline of 3), runtime_error 92→89.** The remaining ~89
+  runtime_errors are the var-hoisting/closure-capture canary class (12.10-0-1/7/8
+  — `var foo` inside `with` visible via an outer closure; needs the var/object
+  precedence refinement noted above) plus `typeof`/`delete`/`@@unscopables`
+  (Slices 3-4). Zero regression to non-`with` modules.
 - **Slice 3 — compound/inc-dec + `typeof`/`delete`:** `+=`, `++`/`--`
   (`unary-updates.ts`, `assignment.ts` compound path), `typeof`
   (`typeof-delete.ts:895/1041`), `delete name`. HasBinding-gated read-modify-write.
