@@ -1653,6 +1653,19 @@ export interface CodegenContext {
    */
   linearUint8?: import("../linear-uint8-analysis.js").LinearUint8Result;
   /**
+   * #2660 S1 — whole-program escape / dynamic-use classification for `new F()`
+   * function-constructor instances. Each site is classified `reconstruct`
+   * (dynamically consumed AND no typed own-field consumer → S3 `$Object`
+   * reconstruction candidate), `keep-typed` (has a typed own-field consumer →
+   * never reconstruct, hot-path protection), or `keep-static` (no dynamic
+   * consumer → no reconstruction needed). **INERT in S1** — produced by
+   * `analyzeFnctorEscapeGate` and stored here, but NOT yet consumed by any
+   * lowering decision (S3 wires `compileNewFunctionDeclaration` to read it). The
+   * conservative default (`keep`) means an empty/imprecise result leaves emitted
+   * Wasm byte-identical.
+   */
+  fnctorEscapeGate?: import("../fnctor-escape-gate.js").FnctorEscapeGateResult;
+  /**
    * #1886 Slice B — Func index of the lazily-emitted
    * `__lin_u8_alloc(len:i32)->i32` bump allocator for linear-backed Uint8Array
    * buffers (`undefined` = not yet emitted). Allocates from a dedicated page-4
