@@ -7548,6 +7548,14 @@ assert._isSameValue = isSameValue;
             return "[object Object]";
           }
         };
+      // (#2666) ToPropertyKey (§7.1.19) as a standalone host import so codegen
+      // can coerce a computed property key EXACTLY ONCE before a read-modify-write
+      // (`o[key] += v`, `o[key]++`). Without this the key object flows raw into
+      // both `__extern_get` and `__extern_set`, each of which runs ToPropertyKey
+      // internally → `key.toString` fires twice (eval-order bug). Coercing once
+      // here and reusing the primitive result is idempotent (ToPropertyKey of a
+      // string is the string; of a Symbol is the Symbol). Preserves Symbols.
+      if (name === "__to_property_key") return (v: any) => _toPropertyKey(v, callbackState);
       // (#2022) ToString of a `+`-concat operand. `+` applies ToPrimitive with
       // the DEFAULT hint (valueOf before toString), even when the other operand
       // is a string — unlike `String(x)` / template literals which use the
