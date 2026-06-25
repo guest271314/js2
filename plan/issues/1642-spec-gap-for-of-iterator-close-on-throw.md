@@ -102,62 +102,116 @@ A large portion of the assertion_fail failures (estimated ~150 of 304) check tha
 4. `language/statements/for-await-of/iterator-close-throw-error.js` passes.
 5. Pass-rate for `language/statements/for-of` rises from 48% to ≥75%.
 
-## Files to modify
+## Implementation Plan (2026-06-26 — re-scoped residual, dev-conformance trace)
 
-- `src/codegen/statements.ts` — `compileForOfStatement`, `compileForAwaitOfStatement`
-- `src/codegen/expressions.ts` — exception-region setup around for-of body
+> Supersedes the pre-#851 `try_table` sketch (now obsolete: core IteratorClose
+> shipped in #851/#1348 — see the historical notes below). This plan targets the
+> **residual 8** only. DO NOT implement as a single PR — slice as below; the
+> accessor/method-representation half overlaps the #2580 method-rep ceiling and
+> is senior-dev work.
 
-## Implementation Plan
+### Mechanism: the missing `__call_return` dispatcher (+ value-read for GetMethod)
 
-### Root cause
+`__iterator_next` reaches a struct iterator's `next` via the per-struct method
+dispatcher **`__call_next`**, emitted by `emitMethodDispatch("next","__call_next")`
+in `emitIteratorMethodExport` (`src/codegen/index.ts:2939-3035`): for each
+registered struct it emits `ref.test $StructN -> ref.cast -> call $StructN_next`,
+externref result, and registers the export in `ctx.funcMap`. There is
+`__call_@@iterator` + `__call_next` but **NO `__call_return`** — so the host
+`__iterator_return` (`src/runtime.ts:11143`) can only try `iter.return` (opaque on
+a struct -> undefined), `_sidecarGet(iter,"return")`, and `__sget_return(iter)` (a
+DATA-field getter; `return` is a METHOD/accessor, no such getter is emitted) -> the
+close silently no-ops. A NAMED iterable-is-iterator literal closes only when its
+struct happens to expose the field getter; an anonymous `{ next, return }` returned
+from `[Symbol.iterator]()` does not.
 
-The for-of body is currently emitted as a plain Wasm loop without a try/catch around it.
-When the body throws, control flows directly out of the loop — the iterator's `.return()` is
-never called. Spec requires the loop to be wrapped in a try-catch that catches any abrupt
-completion, calls `IteratorClose`, then re-raises.
+**Spec §7.4.6 IteratorClose + GetMethod (§7.3.10):** close must (1) `GetMethod(iter,
+"return")` — a value READ that fires an accessor `get return()` getter, (2) if the
+result is `undefined`/`null` return (no-op, no throw), (3) if not callable throw
+TypeError, (4) else Call it (binding `this=iter`), and on a throw outer-completion
+SUPPRESS any error from steps 1/3/4 (the existing nested try/catch_all at
+`loops.ts:4822` already models step-6 suppression). So the primitive needed is a
+value-producing **`GetMethod(iter,"return")`**, not just a method dispatch-call.
 
-### Approach
+### Slice 1 — host return-method reachability (the 4 `iterator-close-*` edges) [LAND FIRST]
 
-```wasm
-;; Pseudocode for compileForOfStatement
-local.set $iter
-loop $body
-  ;; Call iter.next()
-  local.get $iter
-  call $__iterator_next
-  ...
-  ;; Bind binding to value
-  ;; ─── BEGIN body try block ───
-  try_table $loop_close
-    <body>
-    br $body
-  end
-  ;; ─── END body — handler ───
-  ;; Body threw or break/return — call IteratorClose
-  local.get $iter
-  call $__iterator_close
-  rethrow $exn
-end loop
-```
+Files: `src/codegen/index.ts` (dispatcher), `src/runtime.ts` (host close).
 
-For `break`/`continue` to outer label and `return`, intercept the same way: emit a
-finally-style cleanup that runs IteratorClose before the actual jump.
+1. **Add a value-read driver `__get_return(iter) -> externref`** that yields the
+   iterator's `return` AS A VALUE (firing an accessor getter, or returning the bound
+   method closure for a plain `return(){}`), or `ref.null.extern` when absent. This
+   is the method-as-value half — model it on the existing accessor-get driver
+   `reserveAccessorGetDriver` (`src/codegen/accessor-driver.ts:72`) and the
+   `emitMethodDispatch` per-struct `ref.test/cast` shape. For a plain method `return`,
+   "get as value" must produce a callable closure bound to the struct (the
+   representation gap that overlaps #2580 — object-literal method fields are
+   currently dispatch-callable but not value-gettable as closures). If a clean
+   value-get for plain methods is not yet available, Slice 1 may add
+   `__call_return` (direct dispatch-call) for the plain-method path and use
+   `__get_return` only for the accessor path — but the GetMethod null/callable test
+   MUST run on the read result either way (do not blind-call).
+2. **Wire `__iterator_return`** (`runtime.ts:11143`): replace the
+   `iter.return ?? _sidecarGet ?? __sget_return` chain's struct arm with
+   `exports.__get_return?.(iter)` to obtain the value (fires the accessor), then apply
+   the existing GetMethod logic already present in that function (null/undefined ->
+   no-op; non-callable -> TypeError; callable -> call + result-object check). The
+   getter-side-effect (`returnGets++`), the null-skip, the abrupt-on-read propagation,
+   and step-6 suppression then all fall out of the host JS.
+   - `non-throw-get-method-is-null`: getter fires (returnGets=1) -> null -> no-op. PASS.
+   - `non-throw-get-method-abrupt`: getter read throws -> propagates (break path). PASS.
+   - `throw-get-method-abrupt`: getter read throws under a throw-completion -> suppressed
+     by the existing `:4822` nested try/catch_all -> original throw wins. PASS.
+   - `return-emulates-undefined-throws-when-called`: callable-but-throws-on-call -> the
+     call throws and propagates (break path) / is suppressed (throw path). PASS.
 
-For for-await-of: the IteratorClose must be `await`-ed; this requires inserting a yield-suspend
-point in the cleanup path.
+### Slice 2 — generator-close (the 4 `generator-close-via-*`)
 
-### Edge cases
+A `function*` used as a for-of iterator must, on abrupt completion, run the
+generator's `.return()` so its `finally` executes. Generators compile to a resume
+function + `.next()/.return()/.throw()` dispatch (`src/codegen/class-bodies.ts:2253`);
+they do NOT expose a struct `${name}_return` the close path finds. Slice 2 routes
+the for-of close to the generator's `.return()` — either by emitting a
+`${genStruct}_return` that the Slice-1 `__call_return`/`__get_return` dispatcher
+picks up, or by special-casing a generator receiver in `__iterator_return` to invoke
+the generator resume-return entry. Verify `finallyCount`/`startedCount` per the
+`generator-close-via-{break,continue,return,throw}.js` assertions.
 
-- Iterator without `.return()` — IteratorClose is a no-op.
-- `.return()` itself throws → re-raise the new error (replacing the original per spec
-  §7.4.6 IteratorClose step 6).
-- `break` to a label that's still inside the loop body — no close needed.
+### Slice 3 — standalone-native `__iterator_return` (§7.4.6)
 
-### Test262 sample
+The standalone native `__iterator_return` (`src/codegen/iterator-native.ts:213`) is a
+**no-op stub**. Implement the §7.4.6 sequence over the `$IterRec`/`$Object` runtime:
+native GetMethod(rec.userIter, "return") (own+proto, accessor-aware via the native
+object runtime), null-skip, callable-test (TypeError), call, result-object check,
+step-6 suppression. Gate behind the dual-mode contract (host import vs native) like
+the rest of the iterator runtime. Validate via the standalone floor (merge_group).
 
-- `test262/test/language/statements/for-of/iterator-close-throw-error.js`
-- `test262/test/language/statements/for-of/iterator-close-via-break.js`
-- `test262/test/language/statements/for-await-of/iterator-close-throw-error.js`
+### #2580 overlap (flagged)
+
+Slice 1's "method/accessor as a gettable value" is the same dynamic method-field
+representation gap tracked in the #2580 family (object-literal methods are
+dispatch-callable but not uniformly value-readable as bound closures). Coordinate the
+`__get_return` value-read with the #2580 substrate rather than building a parallel
+one-off; if #2580 lands a general method-as-value read first, Slice 1 consumes it.
+
+### Edge cases / invariants
+
+- Byte-identical for modules with no for-of-over-iterator (`emitMethodDispatch`
+  `entries.length===0` -> no dispatcher emitted).
+- Normal completion (`done=true`) and `continue` MUST NOT close (current behavior —
+  keep the `doneFlag` gate, `loops.ts:4854`).
+- Accessor `return` getter fires EXACTLY ONCE per close (one GetMethod read).
+- Both for-of paths (struct `loops.ts:4316` and host-delegated `:4476`) must reach the
+  new primitive; the struct path currently gates close on `returnMethodIdx!==undefined`
+  (`:4436`) and must also consult `__call_return`/`__get_return`.
+
+### Test262 acceptance (residual 8)
+
+`language/statements/for-of/`: `generator-close-via-{break,continue,return,throw}.js`,
+`iterator-close-non-throw-get-method-abrupt.js`,
+`iterator-close-non-throw-get-method-is-null.js`,
+`iterator-close-return-emulates-undefined-throws-when-called.js`,
+`iterator-close-throw-get-method-abrupt.js`. (Baseline today: for-of close cluster
+7 pass / 8 fail; Slice 1 targets the 4 `iterator-close-*`, Slice 2 the 4 generators.)
 
 ## Implementation notes (dev-1389, 2026-05-08)
 
