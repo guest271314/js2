@@ -37,7 +37,7 @@ import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error
 import { allocLocal } from "../context/locals.js";
 import { reportSilentFallback } from "../fallback-telemetry.js";
 import { emitThrowReferenceError, noJsHost } from "./helpers.js";
-import { emitWithBindingGet, findWithBinding } from "../with-scope.js";
+import { emitDynamicWithGet, emitWithBindingGet, resolveWithBinding } from "../with-scope.js";
 import { emitBuiltinNamespaceObject, isSupportedBuiltinNamespace } from "../builtin-static-globals.js";
 import { tryEmitPromiseSubclassValue } from "./promise-subclass.js";
 
@@ -483,10 +483,39 @@ export function emitStaticTdzThrow(ctx: CodegenContext, fctx: FunctionContext, n
 function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Identifier): ValType | null {
   const name = id.text;
 
-  const withBinding = findWithBinding(fctx, name);
-  if (withBinding) {
-    return emitWithBindingGet(fctx, withBinding);
+  // (#1387 / #2663) `with` scope resolution, innermost-first.
+  const withRes = resolveWithBinding(fctx, name);
+  if (withRes?.kind === "static") {
+    return emitWithBindingGet(fctx, withRes.binding);
   }
+  if (withRes?.kind === "dynamic") {
+    // (#2663 Slice 1) HasBinding-gated runtime read. The HasBinding-miss fallback
+    // must re-resolve against the OUTER scopes (a name absent on the inner `with`
+    // object cascades to the next-outer `with`, then to the lexical binding —
+    // §nested-with). Temporarily truncate `withScopes` to exclude the matched
+    // scope (and anything inner to it), re-run full identifier resolution for the
+    // else arm, then restore the stack.
+    const scopes = fctx.withScopes!;
+    const matchedIdx = scopes.lastIndexOf(withRes.scope);
+    return emitDynamicWithGet(ctx, fctx, withRes.scope, name, () => {
+      const saved = fctx.withScopes;
+      fctx.withScopes = scopes.slice(0, matchedIdx);
+      try {
+        return compileIdentifier(ctx, fctx, id);
+      } finally {
+        fctx.withScopes = saved;
+      }
+    });
+  }
+
+  return compileIdentifierCore(ctx, fctx, id);
+}
+
+/** The non-`with` identifier lowering (locals, globals, funcs, builders,
+ *  ReferenceError). Split out so the Tier-2 dynamic `with` path can invoke it as
+ *  the HasBinding-miss fallback (#2663 Slice 1). */
+function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: ts.Identifier): ValType | null {
+  const name = id.text;
 
   // #1210: string-builder bindings are stored as a (buf, len, cap, mat)
   // tuple of synthetic locals. The binding name is intentionally NOT in

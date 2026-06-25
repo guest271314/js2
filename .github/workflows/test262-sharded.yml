@@ -1768,16 +1768,18 @@ jobs:
           # baseline commit.
           node scripts/check-coercion-sites.mjs --update || \
             echo "WARN: coercion-site baseline update failed (non-fatal)"
-          # Re-derive the landing-page feature-support badges from the freshly
-          # promoted test262-current.json, so the badges and the committed
-          # baseline land in ONE atomic commit. SAME wedge-avoidance contract as
-          # sync-conformance-numbers above: the `quality` gate's
-          # generate:feature-badges:check validates the PR merged with main, so
-          # if the baseline bumps here without re-baking the badges, every
-          # in-flight PR at the merge-queue head is dropped by that gate. Badges
-          # only (--no-refresh-data); the served report/categories JSON is
-          # refreshed independently at deploy time (deploy-pages.yml).
-          node scripts/derive-feature-badges.mjs --no-refresh-data || \
+          # Re-derive the landing-page feature-support badges (#2665). The
+          # source of truth is now website/public/feature-examples.json (the
+          # canonical per-feature aggregation written by build-data.js — it
+          # resolves fine-grained features the depth-2 test262-current.json
+          # categories cannot), and the `quality` gate's
+          # generate:feature-badges:check reads the SAME committed file, so the
+          # bake and the gate are consistent by construction without needing the
+          # merged jsonl here. If feature-examples.json is unchanged the bake is
+          # a no-op; the runtime overlay (index.html) reads the freshly-deployed
+          # feature-examples.json for the live auto-updating numbers. Kept in the
+          # atomic commit alongside the other baseline derivations above.
+          node scripts/derive-feature-badges.mjs || \
             echo "WARN: feature-badge derive failed (non-fatal) — badges may drift"
           stage_files() {
             git add -f benchmarks/results/test262-current.json \

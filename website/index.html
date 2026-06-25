@@ -1515,8 +1515,11 @@
         <div class="intro">
           <h2>Mission: JavaScript, compiled.</h2>
           <p>
-            <strong>This is an early-stage research prototype and technical demo, not a production-ready compiler.</strong>
-            Expect rough edges, incomplete language and standard-library coverage, and breaking changes between versions.
+            <strong>
+              This is an early-stage research prototype and technical demo, not a production-ready compiler.
+            </strong>
+            Expect rough edges, incomplete language and standard-library coverage, and breaking changes between
+            versions.
           </p>
           <p>
             On compatibility: today, compiled modules still require a JavaScript host and rely on the host's WebAssembly
@@ -1531,8 +1534,8 @@
           </p>
           <p>
             The project is motivated by the idea that JavaScript, despite being a dynamic language, can be compiled
-            efficiently ahead of time without limiting it to an incompatible subset or shipping a full JS engine
-            inside every module. Whether that idea holds up at scale is an open question the project is testing.
+            efficiently ahead of time without limiting it to an incompatible subset or shipping a full JS engine inside
+            every module. Whether that idea holds up at scale is an open question the project is testing.
           </p>
           <p>The project is guided by the following goals:</p>
         </div>
@@ -1551,8 +1554,11 @@
             <p>
               Deploy compiled JavaScript modules in standalone WebAssembly runtimes such as Wasmtime. Code known at
               compile time is translated directly to WebAssembly — no embedded JS engine or interpreter — keeping
-              modules small and fast. Only code generated at runtime (<code>eval</code> / <code>new Function</code>)
-              falls back to a small embedded bytecode interpreter.
+              modules small and fast. Only code generated at runtime (
+              <code>eval</code>
+              /
+              <code>new Function</code>
+              ) falls back to a small embedded bytecode interpreter.
             </p>
           </article>
           <article class="feature-card">
@@ -1658,12 +1664,11 @@
           ></t262-edition-timeline>
         </div>
 
-
         <div class="feat-tables">
           <div class="feat-panel">
             <div class="feat-section">
               <div class="feat-edition">ES3 / Core</div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/types,language/literals">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Primitive types (string, number, boolean, null, undefined)</span>
                 <span class="feat-desc">All primitive value types and coercion</span>
@@ -1687,8 +1692,8 @@ const x = null;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/expressions/addition,language/expressions/subtraction,language/expressions/multiplication,language/expressions/division,language/expressions/modulus,language/expressions/bitwise-and,language/expressions/bitwise-or,language/expressions/bitwise-xor,language/expressions/bitwise-not,language/expressions/left-shift,language/expressions/right-shift,language/expressions/unsigned-right-shift,language/expressions/equals,language/expressions/does-not-equals,language/expressions/strict-equals,language/expressions/strict-does-not-equals,language/expressions/less-than,language/expressions/less-than-or-equal,language/expressions/greater-than,language/expressions/greater-than-or-equal,language/expressions/logical-and,language/expressions/logical-or,language/expressions/logical-not,language/expressions/unary-plus,language/expressions/unary-minus,language/expressions/conditional,language/expressions/grouping,language/expressions/postfix-increment,language/expressions/postfix-decrement,language/expressions/prefix-increment,language/expressions/prefix-decrement,language/expressions/in,language/expressions/void,language/expressions/concatenation,language/expressions/relational">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Operators (arithmetic, comparison, logical, bitwise)</span>
                 <span class="feat-desc">All standard operators including ternary</span>
 
@@ -1712,8 +1717,8 @@ const bits = n | 0xFF;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/expressions/typeof,language/expressions/instanceof">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">typeof / instanceof</span>
                 <span class="feat-desc">Runtime type checking operators</span>
 
@@ -1732,8 +1737,8 @@ ref.test (ref $String)
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/expressions/delete">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">delete operator</span>
                 <span class="feat-desc">Remove object properties</span>
 
@@ -1751,8 +1756,8 @@ struct.set $Obj $b</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/expressions/comma">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Comma operator</span>
                 <span class="feat-desc">Evaluate expressions left to right</span>
 
@@ -1768,8 +1773,8 @@ f64.const 3</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/statements/labeled">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Labeled statements (break / continue)</span>
                 <span class="feat-desc">Named loop targets for break and continue</span>
 
@@ -1795,7 +1800,7 @@ outer: for (let i = 0; i &lt; 3; i++) {
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="language/statements">
+              <div class="feat-row" data-t262-paths="language/statements/for-in">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">for-in</span>
                 <span class="feat-desc">Iterate over object property names</span>
@@ -1829,8 +1834,8 @@ function legacy() {
 // prefer rest params: (...args)</pre
                   >
                   <div class="feat-explain">
-                    The full arguments object is partially supported. Rest parameters (...args) are preferred and fully
-                    compiled.
+                    Rest parameters (...args) are the preferred form and are fully compiled; the legacy full arguments
+                    object is the more limited path.
                   </div>
                 </details>
               </div>
@@ -1848,21 +1853,21 @@ function legacy() {
                   </div>
                 </details>
               </div>
-              <div class="feat-row" data-sloppy>
-                <span class="feat-badge none">✗</span>
+              <div class="feat-row" data-t262-paths="language/statements/with,annexB/language/statements/with" data-sloppy>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">with statement</span>
                 <span class="feat-desc">Dynamic scope extension</span>
                 <details>
                   <summary></summary>
-                  <pre>with (obj) { x; } // not supported</pre>
+                  <pre>with (obj) { x; }</pre>
                   <div class="feat-explain">Disallowed in strict mode. All modules run strict.</div>
                 </details>
               </div>
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES5</div>
-              <div class="feat-row" data-t262-paths="language/block-scope">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/statements/let,language/statements/const,language/statements/variable,language/block-scope">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Variables (var, let, const)</span>
                 <span class="feat-desc">Block-scoped and function-scoped variable declarations</span>
                 <details>
@@ -1886,7 +1891,7 @@ var legacy = true;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="language/function-code">
+              <div class="feat-row" data-t262-paths="language/statements/function,language/function-code,built-ins/Function">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Functions &amp; closures</span>
                 <span class="feat-desc">Named functions, expressions, and lexical closures</span>
@@ -1909,8 +1914,8 @@ const add = (a, b) =&gt; a + b;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/statements/if,language/statements/switch,language/statements/while,language/statements/do-while,language/statements/for,language/statements/break,language/statements/continue,language/statements/return">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Control flow</span>
                 <span class="feat-desc">Branching, loops, and switch statements</span>
                 <details>
@@ -1938,8 +1943,8 @@ for (let i = 0; i &lt; 10; i++) {
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/statements/try">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">try / catch / finally</span>
                 <span class="feat-desc">Exception handling with optional finally block</span>
                 <details>
@@ -1964,7 +1969,7 @@ try {
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/statements/throw">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">throw</span>
                 <span class="feat-desc">Throw custom and built-in error objects</span>
@@ -1980,7 +1985,7 @@ try {
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="built-ins/Object">
+              <div class="feat-row" data-t262-paths="language/expressions/object,built-ins/Object">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Objects</span>
                 <span class="feat-desc">Literals, property access, methods, and shorthand syntax</span>
@@ -2007,7 +2012,7 @@ const obj = {
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="built-ins/String">
+              <div class="feat-row" data-t262-paths="built-ins/String,built-ins/StringIteratorPrototype">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Strings</span>
                 <span class="feat-desc">String methods, concatenation, and manipulation</span>
@@ -2030,7 +2035,7 @@ const obj = {
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="built-ins/Number">
+              <div class="feat-row" data-t262-paths="built-ins/Number,built-ins/Math">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Numbers</span>
                 <span class="feat-desc">Math operations, parseInt, Number methods</span>
@@ -2073,7 +2078,7 @@ const str = JSON.stringify({ a: 1 });</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="built-ins/Error,built-ins/NativeErrors">
+              <div class="feat-row" data-t262-paths="built-ins/Error,built-ins/NativeErrors,built-ins/AggregateError,built-ins/SuppressedError">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Error types</span>
                 <span class="feat-desc">Error, TypeError, RangeError, SyntaxError and more</span>
@@ -2092,7 +2097,7 @@ throw new RangeError("out of bounds");</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="built-ins/Array">
+              <div class="feat-row" data-t262-paths="built-ins/Array,built-ins/ArrayIteratorPrototype,language/expressions/array">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Arrays</span>
@@ -2119,8 +2124,8 @@ const found = arr.find(x =&gt; x &gt; 5);</pre
                   </div>
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="built-ins/RegExp">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="built-ins/RegExp,built-ins/RegExpStringIteratorPrototype">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Regular expressions</span>
                 <span class="feat-desc">Pattern matching and string search</span>
@@ -2136,10 +2141,10 @@ const found = arr.find(x =&gt; x &gt; 5);</pre
   string.const "Hello World"
   call $regexp_test)</pre
                   >
-                  <div class="feat-explain">Basic patterns work. Named groups and lookbehind partially supported.</div>
+                  <div class="feat-explain">Basic patterns work; named groups and lookbehind are the harder cases.</div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/expressions/property-accessors">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Property accessors (get / set)</span>
                 <span class="feat-desc">Getter and setter property definitions</span>
@@ -2164,10 +2169,12 @@ const obj = {
   local.get 1
   struct.set $obj $_v)</pre
                   >
-                  <div class="feat-explain">Basic get/set works. Object.defineProperty partially supported.</div>
+                  <div class="feat-explain">
+                    Basic get/set accessors work; Object.defineProperty covers the common descriptors.
+                  </div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Object/defineProperty">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-name">Object.defineProperty (full)</span>
                 <span class="feat-desc">Full property descriptor configuration</span>
@@ -2185,8 +2192,8 @@ Object.defineProperty(obj, "x", {
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2015</div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/expressions/arrow-function,language/expressions/async-arrow-function">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Arrow functions</span>
                 <span class="feat-desc">Concise function syntax with lexical this</span>
                 <details>
@@ -2211,8 +2218,8 @@ const greet = () =&gt; "hello";</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/expressions/template-literal,language/expressions/tagged-template">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Template literals</span>
                 <span class="feat-desc">String interpolation with backtick syntax</span>
                 <details>
@@ -2249,8 +2256,8 @@ const { a: x = 0 } = opts;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/rest-parameters">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Spread / rest operators</span>
                 <span class="feat-desc">Expand iterables and collect arguments</span>
                 <details>
@@ -2269,7 +2276,7 @@ function sum(...args) { }</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/statements/function/default-parameter">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Default parameters</span>
                 <span class="feat-desc">Fallback values for function parameters</span>
@@ -2289,8 +2296,8 @@ function sum(...args) { }</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/computed-property-names">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Computed property names</span>
                 <span class="feat-desc">Dynamic property keys in object literals</span>
                 <details>
@@ -2308,8 +2315,8 @@ const obj = { [key]: 42 };</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/statements/for-of">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">for-of</span>
                 <span class="feat-desc">Iterate over iterable objects</span>
                 <details>
@@ -2329,8 +2336,8 @@ const obj = { [key]: 42 };</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="built-ins/GeneratorFunction,built-ins/GeneratorPrototype">
-                <span class="feat-badge none">✗</span>
+              <div class="feat-row" data-t262-paths="language/statements/generators,language/expressions/generators,language/expressions/yield,built-ins/GeneratorFunction,built-ins/GeneratorPrototype">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Generators (function*, yield)</span>
                 <span class="feat-desc">Pausable functions that produce sequences</span>
                 <details>
@@ -2362,7 +2369,7 @@ function* range(n) {
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/expressions/class,language/statements/class,language/expressions/super,language/expressions/new,language/expressions/new.target">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Classes</span>
                 <span class="feat-desc">Class declarations with inheritance</span>
@@ -2479,7 +2486,7 @@ view[0] = 42;</pre
                   <div class="feat-explain">Int8 through Float64 arrays work. BigInt64Array not yet.</div>
                 </details>
               </div>
-              <div class="feat-row" data-t262-paths="language/import,language/export,language/module-code">
+              <div class="feat-row" data-t262-paths="language/module-code,language/import,language/export">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Modules (import / export)</span>
                 <span class="feat-desc">ES module system for code organization</span>
@@ -2504,11 +2511,13 @@ export function bar() { return 1; }</pre
                 <span class="feat-desc">Object behavior interception and reflection</span>
                 <details>
                   <summary></summary>
-                  <pre>Reflect.get(obj, "k");      // works
-new Proxy(t, handler);      // trap dispatch not yet</pre>
+                  <pre>
+Reflect.get(obj, "k");      // works
+new Proxy(t, handler);      // trap dispatch not yet</pre
+                  >
                   <div class="feat-explain">
-                    Reflect is largely supported. Proxy trap interception needs runtime dispatch, so handler traps
-                    don't compile ahead of time yet.
+                    Reflect is largely supported. Proxy trap interception needs runtime dispatch, so handler traps don't
+                    compile ahead of time yet.
                   </div>
                 </details>
               </div>
@@ -2521,8 +2530,8 @@ new Proxy(t, handler);      // trap dispatch not yet</pre>
                   <summary></summary>
                   <pre>Promise.resolve(1).then(v => v + 1); // callbacks need host microtasks</pre>
                   <div class="feat-explain">
-                    Promise construction and Promise.resolve/all/race work. Chained .then/.catch/.finally callbacks
-                    need the host microtask queue to run.
+                    Promise construction and Promise.resolve/all/race work. Chained .then/.catch/.finally callbacks need
+                    the host microtask queue to run.
                   </div>
                 </details>
               </div>
@@ -2539,8 +2548,10 @@ new Proxy(t, handler);      // trap dispatch not yet</pre>
                 <span class="feat-desc">Asynchronous functions with synchronous-style syntax</span>
                 <details>
                   <summary></summary>
-                  <pre>await fetchValue();          // works on a JS host
-await import("./module");    // dynamic import not yet</pre>
+                  <pre>
+await fetchValue();          // works on a JS host
+await import("./module");    // dynamic import not yet</pre
+                  >
                   <pre class="wat">
 (func $fetchData (result f64)
   f64.const 42
@@ -2550,7 +2561,7 @@ await import("./module");    // dynamic import not yet</pre>
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Object/entries,built-ins/Object/values">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Object.entries / values</span>
                 <span class="feat-desc">Extract entries or values from objects</span>
@@ -2573,20 +2584,20 @@ Object.values({ x: 10 });
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/SharedArrayBuffer,built-ins/Atomics">
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">SharedArrayBuffer / Atomics</span>
                 <span class="feat-desc">Shared memory and atomic operations</span>
                 <details>
                   <summary></summary>
-                  <pre>new SharedArrayBuffer(1024); // not supported</pre>
+                  <pre>new SharedArrayBuffer(1024);</pre>
                   <div class="feat-explain">Requires shared Wasm linear memory.</div>
                 </details>
               </div>
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2018</div>
-              <div class="feat-row" data-t262-paths="built-ins/Object">
+              <div class="feat-row" data-t262-paths="language/expressions/object/spread">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Object spread / rest</span>
                 <span class="feat-desc">Object spread in literals and rest in destructuring</span>
@@ -2607,7 +2618,7 @@ const { a, ...rest } = obj;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/AsyncGeneratorFunction,built-ins/AsyncGeneratorPrototype,built-ins/AsyncIteratorPrototype,built-ins/AsyncFromSyncIteratorPrototype,language/expressions/async-generator,language/statements/async-generator">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Async iteration (for-await-of)</span>
@@ -2632,8 +2643,8 @@ const { a, ...rest } = obj;</pre
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2020</div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/expressions/optional-chaining">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Optional chaining (?.)</span>
                 <span class="feat-desc">Safe property access on nullable values</span>
                 <details>
@@ -2651,8 +2662,8 @@ const { a, ...rest } = obj;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/expressions/coalesce">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Nullish coalescing (??)</span>
                 <span class="feat-desc">Default values for null or undefined</span>
                 <details>
@@ -2669,8 +2680,8 @@ const { a, ...rest } = obj;</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="built-ins/global,built-ins/globalThis">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">globalThis</span>
                 <span class="feat-desc">Universal global object reference</span>
@@ -2707,8 +2718,8 @@ const sum = big + 1n;</pre
                   <div class="feat-explain">Basic arithmetic works. BigInt typed arrays not yet.</div>
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge none">✗</span>
+              <div class="feat-row" data-t262-paths="language/expressions/dynamic-import">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Dynamic import()</span>
                 <span class="feat-desc">Load modules at runtime on demand</span>
@@ -2738,7 +2749,7 @@ const sum = big + 1n;</pre
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2022</div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/statements/class/fields">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Class fields (public, private, static)</span>
                 <span class="feat-desc">Declarative field syntax in classes</span>
@@ -2764,7 +2775,7 @@ class Counter {
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Error/cause">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Error.cause</span>
                 <span class="feat-desc">Chain errors with a cause property</span>
@@ -2783,7 +2794,7 @@ class Counter {
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Array/prototype/at,built-ins/String/prototype/at">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Array.at / String.at</span>
                 <span class="feat-desc">Relative indexing with negative support</span>
@@ -2804,7 +2815,7 @@ class Counter {
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/module-code/top-level-await">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-name">Top-level await</span>
                 <span class="feat-desc">Await at module scope without async wrapper</span>
@@ -2815,13 +2826,13 @@ class Counter {
 const data = await fetch(url);
 export { data };</pre
                   >
-                  <div class="feat-explain">Requires module-level async execution model. Not yet supported.</div>
+                  <div class="feat-explain">Requires a module-level async execution model.</div>
                 </details>
               </div>
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2016</div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Array/prototype/includes">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Array.prototype.includes</span>
                 <span class="feat-desc">Check if array contains a value</span>
@@ -2842,8 +2853,8 @@ struct.get $Vec $data
                   >
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/expressions/exponentiation">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Exponentiation operator (**)</span>
                 <span class="feat-desc">Power operator as infix syntax</span>
 
@@ -2860,7 +2871,7 @@ call $Math.pow</pre
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2019</div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="language/statements/try/optional-catch-binding">
                 <span class="feat-badge full">✓</span>
                 <span class="feat-name">Optional catch binding</span>
                 <span class="feat-desc">Omit the error parameter in catch</span>
@@ -2879,7 +2890,7 @@ catch { handleError(); }</pre
                   >
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Array/prototype/flat,built-ins/Array/prototype/flatMap">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Array.prototype.flat / flatMap</span>
@@ -2896,7 +2907,7 @@ catch { handleError(); }</pre
                   </div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Object/fromEntries">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Object.fromEntries</span>
@@ -2915,7 +2926,7 @@ const obj = Object.fromEntries(
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2023</div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Array/prototype/findLast,built-ins/Array/prototype/findLastIndex">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Array.findLast / findLastIndex</span>
@@ -2931,7 +2942,7 @@ const obj = Object.fromEntries(
                   <div class="feat-explain">Iterates WasmGC array from end. Callback via host import.</div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Array/prototype/toSorted,built-ins/Array/prototype/toReversed,built-ins/Array/prototype/toSpliced">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Change array by copy (toSorted, toReversed, toSpliced)</span>
@@ -2944,12 +2955,12 @@ const sorted = arr.toSorted();
 const rev = arr.toReversed();</pre
                   >
                   <div class="feat-explain">
-                    Immutable array operations not yet implemented. Requires new array allocation + copy.
+                    Immutable array operations require allocating and copying into a new array.
                   </div>
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge full">✓</span>
+              <div class="feat-row" data-t262-paths="language/comments/hashbang,language/source-text">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Hashbang (#!) comments</span>
                 <span class="feat-desc">Unix shebang line support</span>
 
@@ -2968,7 +2979,7 @@ console.log("hello");</pre
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2024</div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/Promise/withResolvers">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Promise.withResolvers</span>
@@ -2980,10 +2991,10 @@ console.log("hello");</pre
 const { promise, resolve, reject }
   = Promise.withResolvers();</pre
                   >
-                  <div class="feat-explain">Static Promise method not yet implemented. Requires host import.</div>
+                  <div class="feat-explain">Static Promise helper; the standalone path needs a host import.</div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/ArrayBuffer/prototype/resize">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Resizable ArrayBuffer</span>
@@ -2996,12 +3007,10 @@ const buf = new ArrayBuffer(8,
   { maxByteLength: 16 });
 buf.resize(16);</pre
                   >
-                  <div class="feat-explain">
-                    Growable buffers not yet supported. Requires linear memory integration.
-                  </div>
+                  <div class="feat-explain">Growable buffers require linear-memory integration.</div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/RegExp/unicodeSets">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-name">RegExp v flag</span>
                 <span class="feat-desc">Set notation in character classes</span>
@@ -3017,7 +3026,7 @@ buf.resize(16);</pre
             </div>
             <div class="feat-section">
               <div class="feat-edition">ES2025</div>
-              <div class="feat-row" data-t262-paths="built-ins/Set">
+              <div class="feat-row" data-t262-paths="built-ins/Set/prototype/union,built-ins/Set/prototype/intersection,built-ins/Set/prototype/difference,built-ins/Set/prototype/symmetricDifference,built-ins/Set/prototype/isSubsetOf,built-ins/Set/prototype/isSupersetOf,built-ins/Set/prototype/isDisjointFrom">
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Set methods (union, intersection, difference)</span>
@@ -3034,7 +3043,7 @@ a.union(b); // {1,2,3,4}</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/Iterator">
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Iterator helpers (map, filter, take)</span>
                 <span class="feat-desc">Lazy iterator transformations</span>
@@ -3050,7 +3059,7 @@ nums().filter(x =&gt; x &gt; 1)
                   <div class="feat-explain">Lazy iterator protocol. Requires iterator helper host imports.</div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="built-ins/RegExp/named-groups">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-name">RegExp duplicate named groups</span>
                 <span class="feat-desc">Same group name in alternatives</span>
@@ -3067,7 +3076,7 @@ nums().filter(x =&gt; x &gt; 1)
             </div>
             <div class="feat-section" data-sloppy>
               <div class="feat-edition">Legacy / Deprecated</div>
-              <div class="feat-row" data-sloppy>
+              <div class="feat-row" data-t262-paths="language/statements/variable,language/statements/var" data-sloppy>
                 <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">var hoisting</span>
                 <span class="feat-desc">Function-scoped variable declarations hoisted to top</span>
@@ -3088,7 +3097,7 @@ local.set $x</pre
                   >
                 </details>
               </div>
-              <div class="feat-row" data-sloppy>
+              <div class="feat-row" data-t262-paths="language/arguments-object/callee" data-sloppy>
                 <span class="feat-badge none">✗</span>
                 <span class="feat-name">arguments.callee</span>
                 <span class="feat-desc">Reference to currently executing function</span>
@@ -3102,7 +3111,7 @@ function f() {
                   <div class="feat-explain">Forbidden in strict mode. All modules run strict.</div>
                 </details>
               </div>
-              <div class="feat-row">
+              <div class="feat-row" data-t262-paths="annexB/language/expressions/object/__proto__">
                 <span class="feat-badge none">✗</span>
                 <span class="feat-name">__proto__ accessor</span>
                 <span class="feat-desc">Legacy prototype chain manipulation</span>
@@ -3110,12 +3119,12 @@ function f() {
                   <summary></summary>
                   <pre>obj.__proto__ = parent;</pre>
                   <div class="feat-explain">
-                    Dynamic prototype assignment not supported. Use Object.create() or class extends.
+                    For dynamic prototype assignment, use Object.create() or class extends.
                   </div>
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge none">✗</span>
+              <div class="feat-row" data-t262-paths="annexB/built-ins/String/prototype/substr">
+                <span class="feat-badge full">✓</span>
                 <span class="feat-name">String.prototype.substr</span>
                 <span class="feat-desc">Deprecated substring extraction</span>
                 <details>
@@ -3127,7 +3136,7 @@ function f() {
                   <div class="feat-explain">Deprecated. Use .slice() which is fully supported.</div>
                 </details>
               </div>
-              <div class="feat-row" data-sloppy>
+              <div class="feat-row" data-t262-paths="annexB/language/literals/numeric" data-sloppy>
                 <span class="feat-badge none">✗</span>
                 <span class="feat-name">Octal literals (0777)</span>
                 <span class="feat-desc">Legacy octal number syntax</span>
@@ -3140,8 +3149,8 @@ const ok = 0o777;</pre
                   <div class="feat-explain">Legacy octal forbidden in strict mode. ES2015 0o prefix works.</div>
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge none">✗</span>
+              <div class="feat-row" data-t262-paths="annexB/built-ins/escape,annexB/built-ins/unescape">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">escape() / unescape()</span>
                 <span class="feat-desc">Deprecated string encoding globals</span>
                 <details>
@@ -3153,7 +3162,7 @@ escape("hello world");
                   <div class="feat-explain">Deprecated globals. Use encodeURIComponent / decodeURIComponent.</div>
                 </details>
               </div>
-              <div class="feat-row" data-sloppy>
+              <div class="feat-row" data-t262-paths="annexB/built-ins/Function/prototype/caller" data-sloppy>
                 <span class="feat-badge none">✗</span>
                 <span class="feat-name">Function.prototype.caller</span>
                 <span class="feat-desc">Access calling function reference</span>
@@ -3167,8 +3176,8 @@ function f() {
                   <div class="feat-explain">Forbidden in strict mode. Not available in Wasm.</div>
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge none">✗</span>
+              <div class="feat-row" data-t262-paths="annexB/built-ins/String/prototype/anchor,annexB/built-ins/String/prototype/big,annexB/built-ins/String/prototype/blink,annexB/built-ins/String/prototype/bold,annexB/built-ins/String/prototype/fixed,annexB/built-ins/String/prototype/fontcolor,annexB/built-ins/String/prototype/fontsize,annexB/built-ins/String/prototype/italics,annexB/built-ins/String/prototype/link,annexB/built-ins/String/prototype/small,annexB/built-ins/String/prototype/strike,annexB/built-ins/String/prototype/sub,annexB/built-ins/String/prototype/sup">
+                <span class="feat-badge full">✓</span>
                 <span class="feat-name">HTML string methods (.bold(), .anchor())</span>
                 <span class="feat-desc">Deprecated HTML wrapper string methods</span>
                 <details>
@@ -3177,11 +3186,11 @@ function f() {
 "text".bold();   // deprecated
 "text".anchor("name");</pre
                   >
-                  <div class="feat-explain">Annex B legacy methods. Not implemented.</div>
+                  <div class="feat-explain">Deprecated Annex B legacy HTML-wrapper string methods.</div>
                 </details>
               </div>
-              <div class="feat-row">
-                <span class="feat-badge none">✗</span>
+              <div class="feat-row" data-t262-paths="annexB/built-ins/RegExp/legacy-accessors">
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">RegExp.$1 static properties</span>
                 <span class="feat-desc">Legacy RegExp match result globals</span>
                 <details>
@@ -3197,7 +3206,7 @@ RegExp.$1; // "123" — deprecated</pre
             <div class="feat-section">
               <div class="feat-edition">Proposals</div>
               <div class="feat-row" data-t262-paths="built-ins/Temporal">
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Temporal</span>
                 <span class="feat-desc">Modern date and time API</span>
 
@@ -3316,15 +3325,26 @@ match (value) {
             <strong>Interpreter</strong>
             (a per-function tiny module delegating to a preloaded embedded-interpreter plugin), and
             <strong>Engine</strong>
-            (a full JS engine bundled inside Wasm with AOT pre-init — multiple megabytes per function). Two scenarios per program:
-            fresh context or instance per request (cold) and reused context or instance (warm). Interpreter and Engine both run a JS
-            interpreter inside Wasm — the size and per-call cost tradeoff isn't free. One chart per benchmark; each
-            chart shows the available execution-model lanes for both scenarios.
+            (a full JS engine bundled inside Wasm with AOT pre-init — multiple megabytes per function). Two scenarios
+            per program: fresh context or instance per request (cold) and reused context or instance (warm). Interpreter
+            and Engine both run a JS interpreter inside Wasm — the size and per-call cost tradeoff isn't free. One chart
+            per benchmark; each chart shows the available execution-model lanes for both scenarios.
           </p>
           <div class="conformance-diagrams">
-            <h4 class="host-bench-section-title">Speed <span class="section-title-note">(higher is better)</span></h4>
+            <h4 class="host-bench-section-title">
+              Speed
+              <span class="section-title-note">(higher is better)</span>
+            </h4>
             <p class="host-bench-section-desc">
-              These lanes contrast two production edge-runtime architectures — an AOT-compiled Wasm edge runtime against a V8-isolate edge runtime — rather than any named commercial platform. <strong>Cold speed</strong> shows warm-engine per-request setup plus the first call: a Rust Wasmtime host compiles each Wasm module or component once, then creates a fresh store and instance per request; JS creates a fresh V8 context, compiles the program into it, and runs once. <strong>Warm speed</strong> shows steady-state per-call cost on a hot workload after warmup, with bars as speedup over the warm JS-in-V8 baseline.
+              These lanes contrast two production edge-runtime architectures — an AOT-compiled Wasm edge runtime against
+              a V8-isolate edge runtime — rather than any named commercial platform.
+              <strong>Cold speed</strong>
+              shows warm-engine per-request setup plus the first call: a Rust Wasmtime host compiles each Wasm module or
+              component once, then creates a fresh store and instance per request; JS creates a fresh V8 context,
+              compiles the program into it, and runs once.
+              <strong>Warm speed</strong>
+              shows steady-state per-call cost on a hot workload after warmup, with bars as speedup over the warm
+              JS-in-V8 baseline.
             </p>
             <div class="bench-test-group" data-test="fib">
               <h4 class="bench-test-title">Fibonacci loop</h4>
@@ -3581,7 +3601,10 @@ export function run(n) {
                 </div>
               </div>
             </div>
-            <h4 class="host-bench-section-title">Module size <span class="section-title-note">(smaller is better)</span></h4>
+            <h4 class="host-bench-section-title">
+              Module size
+              <span class="section-title-note">(smaller is better)</span>
+            </h4>
             <p class="host-bench-section-desc">
               Raw .wasm bytes you upload, version-control, or push to a registry per function. AOT is the user's source
               compiled to Wasm directly; Interpreter is a small per-function bytecode that delegates to a preloaded
@@ -3798,10 +3821,12 @@ console.log(instance.exports.run()); // &rarr; 55</pre
               </summary>
               <div class="approach-faq-answer">
                 <p>
-                  No. JS<sup>2</sup> is an early-stage research prototype and technical demo, not a production-ready
-                  compiler. It is under active development with incomplete language and standard-library coverage, known
-                  bugs, and breaking changes between versions. Treat it as something to explore and experiment with
-                  &mdash; not to deploy in production.
+                  No. JS
+                  <sup>2</sup>
+                  is an early-stage research prototype and technical demo, not a production-ready compiler. It is under
+                  active development with incomplete language and standard-library coverage, known bugs, and breaking
+                  changes between versions. Treat it as something to explore and experiment with &mdash; not to deploy
+                  in production.
                 </p>
               </div>
             </details>
@@ -3811,34 +3836,60 @@ console.log(instance.exports.run()); // &rarr; 55</pre
               </summary>
               <div class="approach-faq-answer">
                 <p>
-                  Production engines are highly optimized, multi-tier JIT compilers that after warmup approach native performance. JS engines have mature process sandboxes and ship with browsers. JS interpreters are more lightweight but typically 90% slower. 
+                  Production engines are highly optimized, multi-tier JIT compilers that after warmup approach native
+                  performance. JS engines have mature process sandboxes and ship with browsers. JS interpreters are more
+                  lightweight but typically 90% slower.
                 </p>
                 <p>
-                  <strong>Inside a JS host</strong> WebAssembly is no silver bullet and not always faster or even on par with a warmed up JS JIT engine, but it can be in compute heavy scenarios. Also, it adds a module sandbox for untrusted code, isolating it from the host process and other modules to run third party or AI generated code more securely.
+                  <strong>Inside a JS host</strong>
+                  WebAssembly is no silver bullet and not always faster or even on par with a warmed up JS JIT engine,
+                  but it can be in compute heavy scenarios. Also, it adds a module sandbox for untrusted code, isolating
+                  it from the host process and other modules to run third party or AI generated code more securely.
                 </p>
                 <p>
-                  <strong>Outside of a JS host</strong>, embedding a JS engine disables their JIT tier, costing about 90% of performance of a warmed up engine, effectively falling back to their interpreter mode. Shipping an engine alongside typically weights ~14 megabytes. Pure interpreters like QuickJS with ~700kb are more lightweight but 90% slower than a JIT engine. An AOT JS to Wasm approach doesn't have this ceiling and potentially can achieve near-native performance without depending on a JIT or shipping a full engine or interpreter, while start at 100 bytes.
+                  <strong>Outside of a JS host</strong>
+                  , embedding a JS engine disables their JIT tier, costing about 90% of performance of a warmed up
+                  engine, effectively falling back to their interpreter mode. Shipping an engine alongside typically
+                  weights ~14 megabytes. Pure interpreters like QuickJS with ~700kb are more lightweight but 90% slower
+                  than a JIT engine. An AOT JS to Wasm approach doesn't have this ceiling and potentially can achieve
+                  near-native performance without depending on a JIT or shipping a full engine or interpreter, while
+                  start at 100 bytes.
                 </p>
                 <h3>Runtime overhead</h3>
                 <p>
-                  In constrained environments — serverless, embedded, or multi-tenant — a JS host can be prohibitively heavy. JIT-disabled engines typically run 10× slower; bundled interpreters add megabytes of dead weight per module. On desktop, shipping a full runtime like Electron adds 100 MB+. WebAssembly modules pay none of these costs.
+                  In constrained environments — serverless, embedded, or multi-tenant — a JS host can be prohibitively
+                  heavy. JIT-disabled engines typically run 10× slower; bundled interpreters add megabytes of dead
+                  weight per module. On desktop, shipping a full runtime like Electron adds 100 MB+. WebAssembly modules
+                  pay none of these costs.
                 </p>
                 <h3>Dependency management</h3>
                 <p>
-                  NPM dependencies are fragile: upgrading one package often cascades across the project, taking weeks, breaking things loudly, or introducing silent bugs — and version conflicts can block upgrades entirely. WebAssembly modules declare explicit imports satisfied per-module, so versions don't need to stay in lockstep across the project.
+                  NPM dependencies are fragile: upgrading one package often cascades across the project, taking weeks,
+                  breaking things loudly, or introducing silent bugs — and version conflicts can block upgrades
+                  entirely. WebAssembly modules declare explicit imports satisfied per-module, so versions don't need to
+                  stay in lockstep across the project.
                 </p>
                 <h3>Supply Chain Attacks</h3>
                 <p>
-                  95% of JS code is third-party. A single malicious or buggy dependency can compromise the entire process — exfiltrating data or, in Node.js, accessing the filesystem. Isolation techniques exist but are rarely used due to overhead and complexity. High-profile incidents have hit cornerstone packages like <a href="https://github.com/axios/axios/issues/10636">axios</a> and <a
-                  href="https://semgrep.dev/blog/2025/chalk-debug-and-color-on-npm-compromised-in-new-supply-chain-attack/"
-                >
-                  chalk
-                </a>.                
-                  JS engines also present a large attack surface: despite decades of hardening, zero-days are found continuously, and AI-assisted vulnerability research is accelerating the pace (Anthropic's Glasswing found <a href="https://blog.mozilla.org/en/firefox/ai-security-zero-day-vulnerabilities/">
+                  95% of JS code is third-party. A single malicious or buggy dependency can compromise the entire
+                  process — exfiltrating data or, in Node.js, accessing the filesystem. Isolation techniques exist but
+                  are rarely used due to overhead and complexity. High-profile incidents have hit cornerstone packages
+                  like
+                  <a href="https://github.com/axios/axios/issues/10636">axios</a>
+                  and
+                  <a
+                    href="https://semgrep.dev/blog/2025/chalk-debug-and-color-on-npm-compromised-in-new-supply-chain-attack/"
+                  >
+                    chalk
+                  </a>
+                  . JS engines also present a large attack surface: despite decades of hardening, zero-days are found
+                  continuously, and AI-assisted vulnerability research is accelerating the pace (Anthropic's Glasswing
+                  found
+                  <a href="https://blog.mozilla.org/en/firefox/ai-security-zero-day-vulnerabilities/">
                     271 vulnerabilities in Firefox
-                  </a>). Electron apps must manually patch engine CVEs indefinitely.
-                
-                  WebAssembly uses a simpler, deny-by-default model: capabilities are granted explicitly, limiting blast radius significantly.
+                  </a>
+                  ). Electron apps must manually patch engine CVEs indefinitely. WebAssembly uses a simpler,
+                  deny-by-default model: capabilities are granted explicitly, limiting blast radius significantly.
                 </p>
               </div>
             </details>
@@ -3897,7 +3948,9 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             </details>
             <details>
               <summary>
-                <span class="approach-faq-question">Won't you eventually end up re-implementing a JavaScript engine?</span>
+                <span class="approach-faq-question">
+                  Won't you eventually end up re-implementing a JavaScript engine?
+                </span>
               </summary>
               <div class="approach-faq-answer">
                 <p>
@@ -3916,7 +3969,9 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             </details>
             <details>
               <summary>
-                <span class="approach-faq-question">Why not just extend an existing typed JavaScript/TypeScript subset language?</span>
+                <span class="approach-faq-question">
+                  Why not just extend an existing typed JavaScript/TypeScript subset language?
+                </span>
               </summary>
               <div class="approach-faq-answer">
                 <p>
@@ -4593,14 +4648,23 @@ console.log(instance.exports.run()); // &rarr; 55</pre
           const hostRows = Array.from(document.querySelectorAll(".feat-row")).filter((row) =>
             row.querySelector(".feat-host"),
           );
-          hostRows.forEach((row) => {
-            const badge = row.querySelector(".feat-badge");
-            if (!(badge instanceof HTMLElement)) return;
-            badge.dataset.origClass = Array.from(badge.classList)
-              .filter((name) => name !== "feat-badge")
-              .join(" ");
-            badge.dataset.origText = badge.textContent || "";
-          });
+          // Cache each host row's badge class/glyph so the "JS host" toggle can
+          // restore it. Exposed as a re-cache hook (#2665) because the live
+          // test262 badge hydration runs *after* this IIFE and may have
+          // rewritten the badge class/glyph from the static markup; the host
+          // toggle must cache the *derived* state, not the stale static one.
+          const cacheHostBadges = () => {
+            hostRows.forEach((row) => {
+              const badge = row.querySelector(".feat-badge");
+              if (!(badge instanceof HTMLElement)) return;
+              badge.dataset.origClass = Array.from(badge.classList)
+                .filter((name) => name !== "feat-badge")
+                .join(" ");
+              badge.dataset.origText = (badge.dataset.glyph ?? badge.textContent ?? "").trim();
+            });
+          };
+          cacheHostBadges();
+          window.__recacheHostBadges = cacheHostBadges;
           const sync = () => {
             if (strictToggle) tables.classList.toggle("strict-only", strictToggle.checked);
             if (hostToggle) tables.classList.toggle("host-off", !hostToggle.checked);
@@ -4646,7 +4710,9 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         if (!rateEl || !labelEl) return;
         try {
           if (window.__conformanceHeadlineHydrated) return;
-          const resp = await fetch("https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json");
+          const resp = await fetch(
+            "https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json",
+          );
           if (!resp.ok) return;
           const report = await resp.json();
           if (window.__conformanceHeadlineHydrated) return;
@@ -5134,7 +5200,9 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         };
 
         try {
-          const reportResp = await fetch("https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json");
+          const reportResp = await fetch(
+            "https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json",
+          );
           if (!reportResp.ok) throw new Error("conformance data unavailable");
 
           const report = await reportResp.json();
@@ -5518,7 +5586,9 @@ console.log(instance.exports.run()); // &rarr; 55</pre
         const labelEl = document.getElementById("feature-coverage-label");
         if (!coverageEl || !labelEl) return;
         try {
-          const resp = await fetch("https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json");
+          const resp = await fetch(
+            "https://raw.githubusercontent.com/loopdive/js2wasm-baselines/main/test262-current.json",
+          );
           if (!resp.ok) return;
           const report = await resp.json();
           const categories = report?.categories;
@@ -5550,113 +5620,142 @@ console.log(instance.exports.run()); // &rarr; 55</pre
       // #1583 — surface an explicit `NN%` badge next to the static `✓`
       // when the live pass rate is below 95%, and render direct
       // test262 GitHub source links inside the expanded body.
+      // #2665 — DERIVE the support badge (✓ full / ⚠ partial / ✗ none)
+      // itself from the live test262 pass rate instead of a hardcoded
+      // status glyph. The catalog's per-feature labels are no longer
+      // hand-maintained prose: every row matches a feature in
+      // `feature-examples.json` (by name — the same data the
+      // per-feature detail page uses) and its badge, count and
+      // percentage are computed from that feature's `passCount` /
+      // `totalCount`. Prose EXPLANATIONS (the "why / how to work around
+      // it" text) are kept; only the *status claim* is data-driven.
       //
-      // Each `.feat-row[data-t262-paths]` declares one or more depth-2
-      // test262 path prefixes (e.g. `built-ins/Array,built-ins/Map`).
-      // We sum pass/total across the listed paths and append a small
-      // `<span class="feat-row-counts">N/T</span>` next to the feature
-      // name. Falls back gracefully (no count shown) if the fetch fails
-      // or a path isn't present in the categories data — a wrong
-      // mapping is then visible as a missing count rather than a
-      // misleading number.
+      // Canonical source: `feature-examples.json` is augmented by
+      // `dashboard/build-data.js`, which buckets every test262 result
+      // into exactly one feature (first-match-wins on `testCategories`)
+      // and writes `passCount` / `totalCount` / `testCategories`. That
+      // is the authoritative per-feature aggregation — preferred over
+      // summing raw `test262-report.json` category totals, which would
+      // double-count features that share a path prefix.
       //
-      // Data source preference (#1583): `test262-report.json` is
-      // auto-refreshed on every push to main and its `categories`
-      // field is identical to the standalone `test262-categories.json`
-      // file. The standalone file is only refreshed when the CI
-      // promote step explicitly copies it (added in #1583). We try the
-      // report file first so the page is at most one CI run behind
-      // reality even when the standalone file is briefly stale.
-      (async function hydrateFeatureRowCounts() {
-        const fetchCategories = async () => {
-          try {
-            const resp = await fetch("./benchmarks/results/test262-report.json");
-            if (resp.ok) {
+      // Threshold (kept consistent with the existing landing-page
+      // `toneFor` and with scripts/generate-feature-compatibility.ts):
+      //   ratio >= 0.90        → full    (✓ green)
+      //   0 < ratio < 0.90     → partial (⚠ amber)
+      //   ratio == 0, total>0  → none    (✗ red)
+      //   totalCount == 0      → NO test262 data measurable for this
+      //                          feature (TC39 proposal not in the
+      //                          baseline, Annex B with no shard, or an
+      //                          unmapped category). The static badge is
+      //                          left untouched and the row is tagged
+      //                          `data-no-t262-data` so a missing mapping
+      //                          is visible rather than a misleading
+      //                          auto-status. See the audit in #2665.
+      (async function hydrateFeatureBadges() {
+        const decodeEntities = (s) => {
+          // The DOM already decodes textContent, but normalise whitespace
+          // so "Functions &amp; closures" → "Functions & closures" matches.
+          return (s || "").replace(/\s+/g, " ").trim();
+        };
+
+        const fetchFeatures = async () => {
+          for (const url of ["./feature-examples.json", "/feature-examples.json", "../feature-examples.json"]) {
+            try {
+              const resp = await fetch(url);
+              if (!resp.ok) continue;
               const payload = await resp.json();
-              const cats = payload?.categories;
-              if (Array.isArray(cats) && cats.length > 0) return cats;
+              if (Array.isArray(payload?.features) && payload.features.length > 0) return payload.features;
+            } catch {
+              /* try next path */
             }
-          } catch {
-            // fall through to the standalone file
           }
-          try {
-            const resp = await fetch("./benchmarks/results/test262-categories.json");
-            if (!resp.ok) return null;
-            const payload = await resp.json();
-            const cats = payload?.categories;
-            return Array.isArray(cats) && cats.length > 0 ? cats : null;
-          } catch {
-            return null;
-          }
+          return null;
         };
 
         const toneFor = (ratio) => {
           if (ratio >= 0.9) return "pass";
-          if (ratio >= 0.5) return "partial";
+          if (ratio > 0) return "partial";
           return "fail";
         };
+        // Map a tone to the badge class + glyph used by the catalog.
+        const BADGE = {
+          pass: { cls: "full", glyph: "✓" },
+          partial: { cls: "partial", glyph: "⚠" },
+          fail: { cls: "none", glyph: "✗" },
+        };
 
-        const categories = await fetchCategories();
-        if (!categories) return;
-        const byPath = new Map();
-        for (const cat of categories) {
-          const key = cat?.path ?? cat?.name;
-          if (typeof key === "string") byPath.set(key, cat);
+        const features = await fetchFeatures();
+        if (!features) return;
+        const byName = new Map();
+        for (const f of features) {
+          if (typeof f?.name === "string") byName.set(decodeEntities(f.name), f);
         }
-        const rows = document.querySelectorAll(".feat-row[data-t262-paths]");
+
+        const rows = document.querySelectorAll(".feat-row");
         for (const row of rows) {
-          const paths = (row.getAttribute("data-t262-paths") || "")
-            .split(",")
-            .map((p) => p.trim())
-            .filter(Boolean);
-          let pass = 0;
-          let total = 0;
-          for (const p of paths) {
-            const cat = byPath.get(p);
-            if (!cat) continue;
-            pass += Number(cat.pass ?? 0);
-            const skip = Number(cat.skip ?? 0);
-            total += Number(cat.total ?? 0) - skip;
-          }
-          if (total <= 0) continue;
-          // Only render the count if at least one of the listed
-          // paths was found — otherwise leave the static badge alone
-          // so a stale mapping is visible rather than misleading.
-          const ratio = pass / total;
-          const tone = toneFor(ratio);
-
-          const span = document.createElement("span");
-          span.className = "feat-row-counts feature-test-count";
-          span.textContent = `${pass} / ${total}`;
-          span.dataset.tone = tone;
-          // Append inside `.feat-name` to stay within its grid cell —
-          // the row uses a 3-col template (`30px 1fr 24px`) so any
-          // sibling span would land in column 3 (the badge column)
-          // and break alignment.
           const nameEl = row.querySelector(".feat-name");
-          if (nameEl) nameEl.appendChild(span);
+          if (!nameEl) continue;
+          const name = decodeEntities(nameEl.textContent);
+          const feature = byName.get(name);
+          if (!feature) continue;
 
-          // #1583 — surface the actual pass percentage next to a
-          // green `✓ full` badge when the live ratio is below 95%.
-          // The static badge stays green (it encodes "this compiles
-          // and the canonical case works"), but the percentage
-          // immediately tells the visitor that not every test262
-          // test for this feature passes today.
+          const paths = Array.isArray(feature.testCategories) ? feature.testCategories.filter(Boolean) : [];
+          const pass = Number(feature.passCount ?? 0);
+          const total = Number(feature.totalCount ?? 0);
           const badge = row.querySelector(".feat-badge");
-          if (badge && badge.classList.contains("full") && ratio < 0.95 && !badge.querySelector(".feat-badge-pct")) {
-            const pct = Math.round(ratio * 100);
-            const pctEl = document.createElement("span");
-            pctEl.className = "feat-badge-pct";
-            pctEl.dataset.tone = tone;
-            pctEl.textContent = `${pct}%`;
-            pctEl.title = `Live test262 pass rate for ${paths.join(", ")}: ${pass}/${total} (${pct}%)`;
-            badge.appendChild(pctEl);
+
+          if (total <= 0) {
+            // No measurable test262 data — keep the static badge but flag
+            // the row so the gap is visible (and auditable) rather than a
+            // misleading auto-derived status.
+            row.dataset.noT262Data = "";
+            if (badge && paths.length === 0) row.dataset.noT262Category = "";
+          } else {
+            const ratio = pass / total;
+            const tone = toneFor(ratio);
+            const { cls, glyph } = BADGE[tone];
+
+            // Derive the badge state from the live pass rate.
+            if (badge instanceof HTMLElement) {
+              badge.classList.remove("full", "partial", "none");
+              badge.classList.add(cls);
+              // Preserve any already-injected `.feat-badge-pct` child by
+              // setting only the leading text node (the glyph). Track the
+              // glyph in a dataset field so the host toggle restores it.
+              badge.dataset.glyph = glyph;
+              const firstChild = badge.firstChild;
+              if (firstChild && firstChild.nodeType === Node.TEXT_NODE) {
+                firstChild.textContent = glyph;
+              } else {
+                badge.insertBefore(document.createTextNode(glyph), badge.firstChild);
+              }
+              badge.title = `Live test262 pass rate: ${pass}/${total} (${Math.round(ratio * 100)}%)`;
+            }
+
+            // Pass-count chip next to the feature name (within the grid cell).
+            if (!nameEl.querySelector(".feat-row-counts")) {
+              const span = document.createElement("span");
+              span.className = "feat-row-counts feature-test-count";
+              span.textContent = `${pass} / ${total}`;
+              span.dataset.tone = tone;
+              nameEl.appendChild(span);
+            }
+
+            // Explicit `NN%` under the badge glyph when below 95% — gives an
+            // at-a-glance "not everything passes yet" signal even on green rows.
+            if (badge && ratio < 0.95 && !badge.querySelector(".feat-badge-pct")) {
+              const pct = Math.round(ratio * 100);
+              const pctEl = document.createElement("span");
+              pctEl.className = "feat-badge-pct";
+              pctEl.dataset.tone = tone;
+              pctEl.textContent = `${pct}%`;
+              pctEl.title = `Live test262 pass rate for ${name}: ${pass}/${total} (${pct}%)`;
+              badge.appendChild(pctEl);
+            }
           }
 
-          // #1327 — Inject a "View test results →" link into the
-          // expanded body. Use the first path as the `?feature=`
-          // value (the report page resolves it against
-          // testCategories in feature-examples.json).
+          // #1327 / #1583 — deep-link into the per-feature report and the
+          // test262 source for every mapped feature (regardless of total).
           const details = row.querySelector("details");
           if (details && paths.length > 0) {
             if (!details.querySelector(".feat-report-link")) {
@@ -5664,12 +5763,11 @@ console.log(instance.exports.run()); // &rarr; 55</pre
               linkWrap.className = "feat-report-link";
               const a = document.createElement("a");
               a.href = `./benchmarks/feature-report.html?feature=${encodeURIComponent(paths[0])}`;
-              a.textContent = `View test results (${pass}/${total}) →`;
+              a.textContent = total > 0 ? `View test results (${pass}/${total}) →` : "View test results →";
               a.rel = "noopener";
               linkWrap.appendChild(a);
               details.appendChild(linkWrap);
             }
-            // #1583 — Direct test262 source links per path.
             if (!details.querySelector(".feat-test262-paths")) {
               const wrap = document.createElement("div");
               wrap.className = "feat-test262-paths";
@@ -5689,6 +5787,12 @@ console.log(instance.exports.run()); // &rarr; 55</pre
             }
           }
         }
+
+        // The host-support toggle cached each host row's *static* badge
+        // class/glyph on init; re-cache now that the badges reflect the
+        // live data so toggling "JS host" off/on restores the derived
+        // state, not the stale static markup.
+        if (typeof window.__recacheHostBadges === "function") window.__recacheHostBadges();
       })();
 
       (async function updateHowItWorksSizes() {
