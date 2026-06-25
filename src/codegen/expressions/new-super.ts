@@ -3112,6 +3112,18 @@ function compileNewExpression(ctx: CodegenContext, fctx: FunctionContext, expr: 
         if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
         flushLateImportShifts(ctx, fctx);
         fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__date_parse")! } as Instr);
+      } else if (
+        !ctx.standalone &&
+        !ctx.wasi &&
+        isStringTypedArg(ctx, args[0]!) &&
+        ctx.funcMap.has("__date_parse_host")
+      ) {
+        // (#2678) HOST mode: a String arg is parsed as if by Date.parse
+        // (§21.4.2.1) — delegate to the JS `Date.parse` host import (registered
+        // up-front by collectDateParseHostImports, no #2043 late-import shift).
+        const argType = compileExpression(ctx, fctx, args[0]!, { kind: "externref" });
+        if (argType && argType.kind !== "externref") coerceType(ctx, fctx, argType, { kind: "externref" });
+        fctx.body.push({ op: "call", funcIdx: ctx.funcMap.get("__date_parse_host")! } as Instr);
       } else {
         compileExpression(ctx, fctx, args[0]!, { kind: "f64" });
       }

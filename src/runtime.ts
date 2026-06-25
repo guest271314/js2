@@ -6985,6 +6985,12 @@ function resolveImport(
       //      string → StringToBigInt (SyntaxError on malformed numeric string);
       //      Symbol → TypeError.
       // Returns the bigint as a wasm i64 (JS-BigInt-integration).
+      // (#2678) Date.parse / new Date(<string>) in HOST mode. Host strings are
+      // real `wasm:js-string` externrefs, so the JS `Date.parse` runs directly
+      // (and is more format-complete than the native ISO parser). Registered
+      // up-front by collectDateParseHostImports (declarations.ts) so its funcidx
+      // is stable. Returns f64 ms (NaN on an unparseable string).
+      if (name === "__date_parse_host") return (s: any): number => Date.parse(s);
       if (name === "__bigint_ctor") {
         return (v: any): bigint => {
           // ToPrimitive(value, number). WasmGC structs / proxies need our
