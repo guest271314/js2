@@ -1,10 +1,10 @@
 ---
 id: 1344
-title: "spec gap: Generator/AsyncIterator prototype receiver TypeErrors + return/throw (52 + 12 test262 fails)"
-status: suspended
-assignee: ttraenkler/sen-1
+title: "spec gap: Generator return/throw abrupt completion through try/catch/finally (31 GeneratorPrototype fails; receiver-checks landed in Slice 1)"
+status: in-progress
+assignee: ttraenkler/sd-2651
 created: 2026-05-08
-updated: 2026-06-24
+updated: 2026-06-25
 priority: medium
 feasibility: hard
 reasoning_effort: high
@@ -15,6 +15,8 @@ goal: spec-completeness
 sprint: 66
 parent: 1328
 depends_on: [1665]
+related: [2029]
+reground_note: "2026-06-25 (sd-2651): receiver-check framing STALE — Slice 1 (PR #1732 receiver-brand TypeError) merged 2026-06-19. Current residual = 31 GeneratorPrototype fails (NOT 52), 26 of them return/throw through try/catch/finally. AsyncGeneratorPrototype down to 2; AsyncIteratorPrototype 7 = Symbol.asyncDispose split to its own issue (S-D). Slices S-A (.throw try/finally via mode=2 + finally-override), S-B (yielding finalizers + deferred abrupt completion), S-C (try/catch state decomposition). S-B/S-C are the multi-day state-machine build the 2026-05-28 triage flagged."
 ---
 ## Triage 2026-05-28 — NOT a localized receiver-check fix
 
