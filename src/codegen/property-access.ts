@@ -47,6 +47,7 @@ import { tryCompileNativeGeneratorResultProperty } from "./generators-native.js"
 import { tryCompileNativeMapSizeGet } from "./map-runtime.js";
 import { tryCompileNativeSetSizeGet } from "./set-runtime.js";
 import { tryEmitLinearU8ElementGet, tryEmitLinearU8Length } from "./linear-uint8-codegen.js";
+import { tryEmitFnctorPrototypeRead } from "./expressions/fnctor-prototype.js";
 import { ensureNativeStringHelpers, stringConstantExternrefInstrs } from "./native-strings.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
 import {
@@ -2383,6 +2384,16 @@ export function compilePropertyAccess(
       const ctorIdn = tryEmitConstructorViaTag(ctx, fctx, expr, objType);
       if (ctorIdn !== undefined) return ctorIdn;
     }
+  }
+
+  // (#2660 S2) `F.prototype` on a user function constructor (standalone): return
+  // the per-fnctor prototype `$Object` global instead of `__extern_get($closure,
+  // "prototype")` (which misses `ref.test $Object` → null). Makes
+  // `Object.create(F.prototype)` resolve and seeds #2660 S3's `instance.$proto`.
+  // Declines (falls through) for classes/builtins/host mode.
+  {
+    const fnctorProto = tryEmitFnctorPrototypeRead(ctx, fctx, expr, propName);
+    if (fnctorProto !== undefined) return fnctorProto;
   }
 
   // (#2179) Tombstone-aware read for `any`/`unknown` receivers in delete-using

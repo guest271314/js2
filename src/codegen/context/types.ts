@@ -1807,6 +1807,14 @@ export interface CodegenContext {
   shapePropFlags: Map<number, Uint8Array>;
   /** Cache for function-constructor struct types */
   funcConstructorMap: Map<string, { structTypeIdx: number; ctorFuncName: string }>;
+  /**
+   * (#2660 S2) Per-fnctor prototype `$Object` — fnctor symbol name → module
+   * global index (`mut externref`) holding a native `$Object` for `F.prototype`.
+   * Synthesized on the first `F.prototype` read/write in standalone mode so
+   * `Object.create(F.prototype)` resolves and #2660 S3 can seed `instance.$proto`
+   * from it. Empty/unused in host/GC mode (the prototype stays on the closure).
+   */
+  fnctorPrototypeObject: Map<string, number>;
   /** Per-compilation recursion guard for ensureStructForType (prevents infinite loops on circular types) */
   ensureStructPending: Set<ts.Type>;
   /** Node builtin modules registered as externref globals (#1044) */

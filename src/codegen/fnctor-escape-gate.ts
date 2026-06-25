@@ -80,7 +80,7 @@ const GENERIC_METHOD_CALL = new Set(["call", "apply", "bind"]);
  * class. Returns the resolved constructor symbol when it is a fnctor, else
  * `undefined`.
  */
-function resolveFnctorSymbol(checker: ts.TypeChecker, calleeExpr: ts.Expression): ts.Symbol | undefined {
+export function resolveFnctorSymbol(checker: ts.TypeChecker, calleeExpr: ts.Expression): ts.Symbol | undefined {
   let e: ts.Expression = calleeExpr;
   while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e)) {
     e = (e as ts.ParenthesizedExpression | ts.AsExpression | ts.NonNullExpression).expression;

@@ -253,6 +253,7 @@ export function createCodegenContext(
     sealedVars: new Set(),
     shapePropFlags: new Map(),
     funcConstructorMap: new Map(),
+    fnctorPrototypeObject: new Map(),
     ensureStructPending: new Set(),
     nodeBuiltinGlobals: new Map(),
     jsxRuntime: options?.jsxRuntime,
