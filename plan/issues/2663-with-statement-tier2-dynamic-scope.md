@@ -439,9 +439,38 @@ corpus.
   — `var foo` inside `with` visible via an outer closure; needs the var/object
   precedence refinement noted above) plus `typeof`/`delete`/`@@unscopables`
   (Slices 3-4). Zero regression to non-`with` modules.
-- **Slice 3 — compound/inc-dec + `typeof`/`delete`:** `+=`, `++`/`--`
-  (`unary-updates.ts`, `assignment.ts` compound path), `typeof`
-  (`typeof-delete.ts:895/1041`), `delete name`. HasBinding-gated read-modify-write.
+- **Slice 3 — `delete name` + var/object precedence: ✅ DONE (PR, 2026-06-25).**
+  Data-driven scope: a feature classification of the 89 remaining
+  runtime_errors found **delete = 45** (the biggest bucket), closure-capture =
+  35, and typeof/compound/inc-dec ≈ 0 in this corpus — so Slice 3 targets
+  `delete` (and folds in the var-precedence refinement); typeof/compound/inc-dec
+  are deferred as near-nil-yield here.
+  - `emitDynamicWithDelete` (`with-scope.ts`): HasBinding-gated
+    `__delete_property(recv,name)` else cascade to the outer delete / bare-var
+    `false`; wired at the `delete identifier` site (`typeof-delete.ts`).
+  - **var/object precedence:** `blockedNames` for a dynamic scope is now
+    LEXICAL-only (`collectBodyLexicalNames` — `let`/`const`/class/catch +
+    inner-fn), EXCLUDING `var`. §: a `var` inside `with` hoists to the function
+    env but the Object Environment Record is consulted FIRST, so a `var foo` name
+    must still pass the HasBinding gate (object wins if owned). So
+    `var foo; with({foo}){ foo=… }` now writes the OBJECT; `let` still shadows.
+  - **Row-delta: pass 20→23 (+3), runtime_error 89→86.** The delete RETURN value
+    is now spec-correct; the bulk of the 45 delete tests ALSO check `in`/re-read
+    after delete, which hits a **delete-on-struct-slot observability gap** (the
+    with object is a typed WasmGC struct; `__delete_property` clears the host
+    sidecar but `in`/re-read reads the struct slot — the #2659-family struct-slot
+    vs sidecar asymmetry, for delete). Closing that needs a struct-slot-aware
+    delete on an externref receiver — deferred (see below).
+- **DEFERRED — closure-capture class (~35 tests) + delete-on-struct
+  observability:** the var-decl-initializer-in-`with` + **outer-closure capture**
+  of a function-scope var (canary `12.10-0-1/7/8`) is the remaining big bucket;
+  it touches the closure-capture machinery and is substantially harder — its own
+  sub-slice / possibly senior-dev. The delete struct-slot observability is the
+  #2659-family asymmetry for delete. Both are flagged to the lead, NOT bundled.
+- **Slice 4 — `@@unscopables`:** `emitWithHasBinding` full §9.1.1.2.1 with the
+  symbol-keyed `Get(recv,@@unscopables)` + `ToBoolean(Get(unscopables,N))` block.
+  Covers `binding-blocked-by-unscopables.js`, `unscopables-*` tests. Also handle
+  `ToObject(primitive)` wrapper-object receivers if any corpus test needs it.
 - **Slice 4 — `@@unscopables`:** `emitWithHasBinding` full §9.1.1.2.1 with the
   symbol-keyed `Get(recv,@@unscopables)` + `ToBoolean(Get(unscopables,N))` block.
   Covers `binding-blocked-by-unscopables.js`, `unscopables-*` tests. Also handle

@@ -18,7 +18,7 @@ import { addFuncType } from "./registry/types.js";
 import type { InnerResult } from "./shared.js";
 import { compileExpression, ensureAnyHelpers, isAnyValue } from "./shared.js";
 import { compileStringLiteral } from "./string-ops.js";
-import { findWithBinding } from "./with-scope.js";
+import { emitDynamicWithDelete, findWithBinding, resolveWithBinding } from "./with-scope.js";
 
 // ── Delete expression ─────────────────────────────────────────────────
 
@@ -85,6 +85,34 @@ export function compileDeleteExpression(
   }
 
   if (ts.isIdentifier(inner)) {
+    // (#2663 Slice 3) `delete name` inside a dynamic `with`: if the with-object
+    // has the binding ⇒ delete the object property (configurability-aware
+    // result); else ⇒ cascade to the next-outer with, then to the bare-variable
+    // case (variables are not deletable ⇒ false). §13.5.1.2 / §8.5.2.
+    const ident = inner;
+    const emitOuterDelete = (): void => {
+      const res = resolveWithBinding(fctx, ident.text);
+      if (res?.kind === "dynamic") {
+        const scopes = fctx.withScopes!;
+        const matchedIdx = scopes.lastIndexOf(res.scope);
+        emitDynamicWithDelete(ctx, fctx, res.scope, ident.text, () => {
+          const saved = fctx.withScopes;
+          fctx.withScopes = scopes.slice(0, matchedIdx);
+          try {
+            emitOuterDelete();
+          } finally {
+            fctx.withScopes = saved;
+          }
+        });
+        return;
+      }
+      // A static with-bound name or a plain variable: not deletable ⇒ false.
+      fctx.body.push({ op: "i32.const", value: 0 });
+    };
+    if (resolveWithBinding(fctx, ident.text)?.kind === "dynamic") {
+      emitOuterDelete();
+      return { kind: "i32" };
+    }
     // Variables are not deletable — return false
     fctx.body.push({ op: "i32.const", value: 0 });
     return { kind: "i32" };
@@ -107,6 +135,16 @@ export function compileDeleteExpression(
     const idxText = ts.isNumericLiteral(idxArg) ? idxArg.text : ts.isStringLiteral(idxArg) ? idxArg.text : undefined;
     const argIndex = idxText !== undefined ? Number(idxText) : NaN;
     if (Number.isInteger(argIndex) && argIndex >= 0 && argIndex < fctx.mappedArgsInfo.paramCount) {
+      // (#2667) §10.4.4.5 + OrdinaryDelete: deleting a non-configurable mapped
+      // index FAILS — `delete arguments[i]` returns `false`, the property and
+      // its param mapping stay intact. Only a *successful* delete severs the
+      // map. Detect the statically-known non-configurable case (set earlier in
+      // this body by `Object.defineProperty(arguments,"<i>",{configurable:false})`)
+      // and emit the spec-correct `false` without touching `unmappedIndices`.
+      if (fctx.mappedArgsInfo.nonConfigurableIndices?.has(argIndex)) {
+        fctx.body.push({ op: "i32.const", value: 0 });
+        return { kind: "i32" };
+      }
       (fctx.mappedArgsInfo.unmappedIndices ??= new Set<number>()).add(argIndex);
     }
   }

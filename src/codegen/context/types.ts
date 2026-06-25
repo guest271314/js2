@@ -537,6 +537,27 @@ export interface FunctionContext {
      * during body codegen — order matters, since the emitters read it live.
      */
     unmappedIndices?: Set<number>;
+    /**
+     * Argument indices made non-configurable via a statically-resolvable
+     * `Object.defineProperty(arguments, "<i>", { configurable: false })`
+     * (#2667). Per ECMA-262 §10.4.4.5 + OrdinaryDelete, `delete arguments[i]`
+     * on a non-configurable index must return `false` and leave the property
+     * (and its param mapping) intact. The delete emitter consults this set so
+     * the statically-known case reports the spec-correct result without a
+     * runtime descriptor-sidecar round-trip. Populated lazily during body
+     * codegen; read live, so codegen order matters.
+     */
+    nonConfigurableIndices?: Set<number>;
+    /**
+     * Argument indices made non-writable via a statically-resolvable
+     * `Object.defineProperty(arguments, "<i>", { writable: false })` (#2667).
+     * Per ECMA-262 §10.4.4.2, a non-writable data property rejects later
+     * `arguments[i] = x` writes (and the write-back into the param). The
+     * element-assignment emitter consults this set to drop such writes.
+     * (Setting `writable:false` also severs the param↔arguments map, so the
+     * index is additionally added to `unmappedIndices`.)
+     */
+    nonWritableIndices?: Set<number>;
   };
   /**
    * #1210: bindings detected as `let s = ""; for (...) s += <expr>` builders
@@ -743,6 +764,27 @@ export interface CodegenContext {
    * order. Clear — the common case — keeps every array read byte-identical.
    */
   usesArrayHoles: boolean;
+  /**
+   * (#2083) Set true the first time `getOrRegisterVecType` is asked for a vec
+   * type from a genuine usage site (an array literal, array method, for-of over
+   * an array, TypedArray, etc.) — i.e. the module materialises at least one
+   * array value that may cross the JS↔Wasm boundary. The two pre-registrations
+   * in `createCodegenContext` (`externref`/`f64`, baked in for type-index
+   * stability) are excluded via `suppressVecUsageFlag`, so this stays false for
+   * arith-/string-only modules with no arrays. Gates the host-glue vec exports
+   * (`__vec_len`/`__vec_get`/`__vec_push`/`__vec_pop`/`__vec_mut_supported`/
+   * `__is_vec`) so they no longer leak into every module (#2083). The host
+   * runtime guards every `exports.__vec_*` access with a `typeof === "function"`
+   * check, so their absence is safe.
+   */
+  usesVecValue: boolean;
+  /**
+   * (#2083) When true, `getOrRegisterVecType` does NOT flip `usesVecValue`.
+   * Set only for the duration of the two pre-registration calls in
+   * `createCodegenContext` (the `externref`/`f64` type-index-stability stubs),
+   * which are not real array usage.
+   */
+  suppressVecUsageFlag: boolean;
   /**
    * (#2001 S1) Type index of the `$Hole` zero-field sentinel struct, and the
    * absolute index of the immutable `$__hole` singleton global. Registered

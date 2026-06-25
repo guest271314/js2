@@ -18,6 +18,7 @@ import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
+import { emitMappedArgReverseSync } from "./expressions/logical-ops.js";
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, cacheStringLiterals, getOrRegisterTupleType, resolveWasmType } from "./index.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
@@ -903,6 +904,67 @@ export function emitDefinePropertyFlagCheck(
   fctx.body.push({ op: "call", funcIdx: setIdx });
 }
 
+// ── Mapped-arguments value redefine (#2667) ──────────────────────────────
+
+/**
+ * Emit `Object.defineProperty(arguments, "<i>", { value: V })` for a mapped
+ * arguments index, per ECMA-262 §10.4.4.2. The WasmGC-vec-backed arguments
+ * object carries no sidecar descriptor for its indices, so routing this through
+ * the runtime `Object.defineProperty` throws ("Cannot redefine property"). The
+ * spec-correct behaviour for a still-mapped index is to update the arguments
+ * slot AND the linked formal parameter; if the link was already severed
+ * (`unmappedIndices`), only the slot is written. Leaves the arguments object
+ * (externref) on the stack as the call result.
+ */
+function emitMappedArgValueDefine(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  info: NonNullable<FunctionContext["mappedArgsInfo"]>,
+  argIndex: number,
+  valueExpr: ts.Expression,
+): ValType {
+  // Compile the value as externref (boxing numbers/refs) for storage in the
+  // externref-backed arguments vec.
+  const valType = compileExpression(ctx, fctx, valueExpr, { kind: "externref" });
+  if (valType && valType.kind !== "externref") {
+    coerceType(ctx, fctx, valType, { kind: "externref" });
+  }
+  const valLocal = allocLocal(fctx, `__mappedarg_val_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: valLocal });
+
+  // arguments vec slot write: vec.data[argIndex] = val (null-guarded). The slot
+  // exists since argIndex < paramCount, so no grow is needed.
+  fctx.body.push({ op: "local.get", index: info.argsLocalIdx });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [] as Instr[],
+    else: [
+      { op: "local.get", index: info.argsLocalIdx } as Instr,
+      { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 1 } as Instr,
+      { op: "i32.const", value: argIndex } as Instr,
+      { op: "local.get", index: valLocal } as Instr,
+      { op: "array.set", typeIdx: info.arrTypeIdx } as Instr,
+    ],
+  });
+
+  // Param sync — reuse the canonical mapped-args reverse-sync emitter, which
+  // already skips severed (`unmappedIndices`) slots (§10.4.4.2) and owns the
+  // single value-coercion vocabulary (§7.1.x), so this site stays out of the
+  // per-file coercion-site budget (#2108). It matches on a runtime index, so
+  // pin a constant-index local to argIndex.
+  const idxLocal = allocLocal(fctx, `__mappedarg_idx_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: argIndex });
+  fctx.body.push({ op: "local.set", index: idxLocal });
+  emitMappedArgReverseSync(ctx, fctx, idxLocal, valLocal);
+
+  // Result of Object.defineProperty is the object — push arguments as externref.
+  fctx.body.push({ op: "local.get", index: info.argsLocalIdx });
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  return { kind: "externref" };
+}
+
 // ── Object.defineProperty ─────────────────────────────────────────────
 
 /**
@@ -1218,11 +1280,53 @@ export function compileObjectDefineProperty(
     const idxKey = propName ?? (ts.isNumericLiteral(propArg) ? propArg.text : undefined);
     const argIndex = idxKey !== undefined ? Number(idxKey) : NaN;
     if (Number.isInteger(argIndex) && argIndex >= 0 && argIndex < fctx.mappedArgsInfo.paramCount) {
+      const info = fctx.mappedArgsInfo;
       const isAccessor =
         getNode !== undefined || setNode !== undefined || getExpr !== undefined || setExpr !== undefined;
       const breaksLink = isAccessor || descWritable === false;
       if (breaksLink) {
-        (fctx.mappedArgsInfo.unmappedIndices ??= new Set<number>()).add(argIndex);
+        (info.unmappedIndices ??= new Set<number>()).add(argIndex);
+      }
+      // (#2667) Track non-configurable / non-writable attribute state so the
+      // delete + element-write emitters can apply §10.4.4 semantics for the
+      // statically-resolvable case (literal index on the `arguments`
+      // identifier). `configurable:false` makes `delete arguments[i]` return
+      // false (OrdinaryDelete) without severing the map; `writable:false`
+      // freezes the value (writes dropped) and severs the map.
+      if (descConfigurable === false) {
+        (info.nonConfigurableIndices ??= new Set<number>()).add(argIndex);
+      }
+      if (descWritable === false) {
+        (info.nonWritableIndices ??= new Set<number>()).add(argIndex);
+      }
+
+      // (#2667) A pure data-descriptor define carrying a literal `value`, for a
+      // mapped arguments index, writes the arguments slot and — when the slot is
+      // still mapped — the linked formal parameter (§10.4.4.2 +
+      // OrdinaryDefineOwnProperty). Routing it through the runtime
+      // `Object.defineProperty` on the WasmGC-vec-backed arguments object trips
+      // `_validatePropertyDescriptor` ("Cannot redefine property") because the
+      // vec carries no matching sidecar descriptor. Handle it inline.
+      //
+      // A value change is permitted whenever the property is still configurable
+      // (configurable ⇒ any redefinition is allowed) OR still writable. It is
+      // forbidden only once the slot is BOTH non-configurable AND non-writable
+      // (truly frozen) — that case is left to the runtime so it reports the
+      // spec-mandated TypeError. `nonWritableIndices` severs the param map (set
+      // above + via `unmappedIndices`), so the helper writes only the slot.
+      const isFrozen =
+        (info.nonConfigurableIndices?.has(argIndex) ?? false) &&
+        (info.nonWritableIndices?.has(argIndex) ?? false) &&
+        descWritable !== true; // re-enabling writable un-freezes
+      const isPureDataValueDefine =
+        !isAccessor &&
+        valueExpr !== undefined &&
+        getExpr === undefined &&
+        setExpr === undefined &&
+        descWritable !== false && // writable:false freezes — handled by the drop path below
+        !isFrozen;
+      if (isPureDataValueDefine) {
+        return emitMappedArgValueDefine(ctx, fctx, info, argIndex, valueExpr!);
       }
     }
   }
