@@ -246,3 +246,55 @@ struct-read freeze (that's fixed).
 3. Likely loci: `parseExprOp` (`this.type.binop` precedence loop), `parseMaybeUnary`
    postfix `while`, or a token-type `===` identity (the #2656-noted switch-on-
    externref class) that never matches so `next()` is never called.
+
+## #2075 RE-PARK FIX (2026-06-25, sd-2674b) — late-import index-shift hardening of the read dispatcher
+
+#2075 (the read-side `__get_member_<name>` deferred-fill dispatcher) was green at
+PR-level but **re-parked by the auto-park bot** on a REAL `merge_group` test262
+regression: net **-2** (2 js-host `pass → compile_error`), the exact failure
+```
+language/expressions/class/elements/regular-definitions-private-names.js
+language/expressions/class/elements/wrapped-in-sc-private-names.js
+  L1:1 Binary emit error: RangeError: Codegen error: local index out of range —
+  1 (valid: [0, 1)) at function '__module_init'. This is the late-import
+  index-shift class (#2043)
+```
+(report: net_per_test -2, "Regressions with wasm-hash change: 2" — deterministic,
+not drift; bucket `37609ba477f88b4a`).
+
+### Diagnosis (verify-first)
+- The failing `merge_group` ran on a **batched speculative tree** (`max_entries_to_build>1`):
+  #2075 AND #2063 shared the identical merged SHA `562d2cde`. On EVERY local tree
+  I could build — clean upstream/main, #2075-on-main, the exact #2075+#2063 merge
+  tree, and sequential-in-one-process (mimicking a shard worker) — both targets
+  **PASS** in gc and standalone. So the trigger is the **#2075 × another
+  import-adding PR interaction** in the batch, a #2043 late-import-index-shift
+  collision, NOT a #2075-alone defect.
+- **Root cause** (read against the WRITE-side sibling that does NOT regress):
+  `reserveMemberGetDispatch` calls `ensureLateImport(__extern_get)` +
+  `addUnionImportsViaRegistry`, which stage a `pendingLateImportShift`. The three
+  READ call sites (property-access.ts ~1420/1719/4961) then bake the returned
+  `funcIdx` into a **DETACHED** `buildFallback` terminal array AND immediately run
+  a `coercionInstrs(…, fctx)` (which can allocate locals + add MORE late imports)
+  — all across a still-dangling pending shift. The WRITE site (1303) survives
+  because it pushes straight into `fctx.body`, which the body-level batched flush
+  always reaches; the detached READ arrays are fragile when another import-adding
+  pass interleaves before the deferred flush.
+
+### Fix (durable, #2043 class)
+`reserveMemberGetDispatch` now takes an optional `fctx` and calls
+`flushLateImportShifts(ctx, fctx)` after registering its imports (ensure→flush
+discipline, matching `buildVecFromExternref`/`emitUndefined`). All three READ call
+sites pass their `fctx`. The dispatcher's imports settle against the current body
+BEFORE the caller bakes the funcIdx / runs the follow-on coercion — resilient
+regardless of which import-adding PR gets batched alongside.
+
+### Validation (local; merge_group is the real floor since the bug is batch-only)
+- typecheck clean; #2674 dispatcher tests 3/3; #2664 (write-side) + #2563
+  (privatefield-global-shift, the late-import-shift gate) pass.
+- 141 read-path test262 files (property-accessors / getOwnPropertyDescriptor /
+  for-in / class-elements) → **0 new compile_errors** with the fix (the 2 `let`
+  for-in CEs pre-exist on clean main).
+- The 2 regressed private-field tests PASS (gc + standalone).
+- 9 vitest failures in getters-setters/etc. are **identical on clean upstream/main**
+  — pre-existing harness issues, not from this change.

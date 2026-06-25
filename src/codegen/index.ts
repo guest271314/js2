@@ -48,6 +48,7 @@ import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
 import { fillMemberSetDispatch } from "./member-set-dispatch.js";
+import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
@@ -1806,6 +1807,16 @@ export function generateModule(
     // compile-order candidate freeze that lost finishToken's `this.type =` write
     // to the sidecar (8th acorn dogfood wall).
     fillMemberSetDispatch(ctx);
+
+    // (#2674) Fill the reserved `__get_member_<name>` member-READ dispatchers —
+    // the symmetric read-side counterpart of the write dispatch above. Each read
+    // site's frozen multi-struct alternates fallback was replaced by a call to
+    // this dispatcher, filled HERE with the COMPLETE struct-candidate set (incl.
+    // late-registered fnctor structs) so a reader compiled before a struct type
+    // registered still resolves the real instance's slot. Fixes the read-side
+    // compile-order freeze that left parser field reads (`base.end`,
+    // `this.lastTokEnd`) resolving to `__extern_get` → `undefined` (acorn 9th wall).
+    fillMemberGetDispatch(ctx);
 
     // (#1904) Fill the standalone native Array.isArray predicate after all
     // module-local array carriers have been registered.

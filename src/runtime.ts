@@ -3947,6 +3947,43 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
 }
 
 /**
+ * (#2668 Slice A) Mirror a defineProperty'd data VALUE into the real WasmGC
+ * struct field via the compiled `__sset_<key>` export, when one exists for this
+ * key. This is the value-only writeback `_safeSet` performs (runtime.ts ~4023),
+ * factored out so the `__defineProperty_desc` / `__defineProperty_value`
+ * runtime appliers can use it WITHOUT going through `_safeSet`'s
+ * writable/non-extensible flag enforcement (those appliers have ALREADY run
+ * `_validatePropertyDescriptor`). Why it is needed: a `const o: any = {}` whose
+ * field is later defined gets a *typed* struct shape (e.g.
+ * `(struct (field $property ...))`), and the member read `o.property`
+ * ref-tests as that struct type and lowers to a static `struct.get` — it never
+ * consults the sidecar. The inline-literal define fast path emits a direct
+ * `struct.set`; the runtime-descriptor path (dynamic descriptors: `var d =
+ * {...}`, `Math`, a `Date` instance) only wrote the sidecar, so the static
+ * read returned the field's stale initializer (the #2668 `15.2.3.6-3-*`
+ * cluster). Writing the field here keeps both the sidecar and the typed field
+ * in sync. No-op (silently caught) when `obj` is not a struct, the key isn't a
+ * field of this struct's concrete runtime type, or no exports are available.
+ */
+function _structFieldWriteback(
+  obj: any,
+  key: string | symbol,
+  val: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): void {
+  if (typeof key !== "string") return;
+  if (!_isWasmStruct(obj)) return;
+  const exports = callbackState?.getExports();
+  const setter = exports?.[`__sset_${key}`];
+  if (typeof setter !== "function") return;
+  try {
+    setter(obj, _unwrapForHost(val));
+  } catch {
+    /* not a field of this struct's runtime type */
+  }
+}
+
+/**
  * Safe property set: works on both JS objects and WasmGC structs.
  *
  * When `exports` is provided AND `obj` is a WasmGC struct AND `key` is a
@@ -8452,8 +8489,13 @@ assert._isSameValue = isSameValue;
           const hasValue = Object.prototype.hasOwnProperty.call(d, "value");
           const hasGet = Object.prototype.hasOwnProperty.call(d, "get");
           const hasSet = Object.prototype.hasOwnProperty.call(d, "set");
-          if (hasValue) _sidecarSet(obj, key, d.value);
-          else if (!(newFlags & _SC_ACCESSOR) && existingDesc === undefined) _sidecarSet(obj, key, undefined);
+          if (hasValue) {
+            _sidecarSet(obj, key, d.value);
+            // (#2668 Slice A) Keep the typed struct field in sync so a static
+            // `struct.get` read of `o.<key>` sees the defined value, not the
+            // field's stale initializer.
+            _structFieldWriteback(obj, key, d.value, callbackState);
+          } else if (!(newFlags & _SC_ACCESSOR) && existingDesc === undefined) _sidecarSet(obj, key, undefined);
           if (hasGet || hasSet) {
             const sc = _wasmStructProps.get(obj) ?? {};
             _wasmStructProps.set(obj, sc);
@@ -8510,8 +8552,11 @@ assert._isSameValue = isSameValue;
                 const existingVal = _sidecarGet(obj, prop);
                 const newFlags = _validatePropertyDescriptor(sDescs, nProp, desc, existingVal, existingDesc);
                 sDescs.set(nProp, newFlags);
-                if (Object.prototype.hasOwnProperty.call(desc, "value")) _sidecarSet(obj, prop, desc.value);
-                else if (!(newFlags & _SC_ACCESSOR) && existingDesc === undefined) _sidecarSet(obj, prop, undefined);
+                if (Object.prototype.hasOwnProperty.call(desc, "value")) {
+                  _sidecarSet(obj, prop, desc.value);
+                  // (#2668 Slice A) Mirror into the typed struct field for static reads.
+                  _structFieldWriteback(obj, prop, desc.value, callbackState);
+                } else if (!(newFlags & _SC_ACCESSOR) && existingDesc === undefined) _sidecarSet(obj, prop, undefined);
               } else {
                 // Spec-mandated TypeError (non-configurable redefinition on real JS objects)
                 throw e;

@@ -1,7 +1,8 @@
 ---
 id: 2668
 title: "ES5: Object.defineProperty/defineProperties descriptor fidelity residual (~788 fails — largest ES5 cluster)"
-status: ready
+status: in-progress
+assignee: ttraenkler/sd-2668a
 created: 2026-06-25
 updated: 2026-06-25
 priority: high
@@ -79,6 +80,98 @@ architect for an implementation spec before dispatch. Likely a focused rewrite
 of the shared `[[DefineOwnProperty]]` helper rather than per-method patches.
 Consider slicing: (a) data-descriptor matrix, (b) accessor + data<->accessor
 switch, (c) Array-exotic length/index. Each slice is independently shippable.
+
+## Slice A — landed (sd-2668a, host mode)
+
+**Status:** Slice A merged; the issue stays open for Slices B (accessors),
+C (array-`length` exotic) and D (cleanup). The full architect plan lives in
+PR #2068 (`arch-2668-spec`).
+
+### Verify-first finding — the real dominant bug differs from the spec framing
+
+The architect plan described a struct fast-path ↔ runtime-validator divergence
+for the *inline-literal* path. Verifying per-file on current main (isolated
+runs; the in-process batch driver is unreliable here — fork-state poisoning
+inflated the apparent `compile_error` bucket to ~1021/1131, but each flagged
+file PASSES in isolation) showed the inline-literal GOPD round-trip already
+works. The genuine bucket is the **`15.2.3.6-3-*` family where the descriptor
+is supplied as a non-literal expression** — most commonly a *local whose
+initializer is an object literal* (`var d = {value:1};
+Object.defineProperty(o, k, d)`).
+
+Two fixes (final scope after an auto-park merge_group diagnosis, below):
+
+1. **Host route for LITERAL-resolvable dynamic descriptors.** The inline fast
+   paths in `compileObjectDefineProperty` (`src/codegen/object-ops.ts`) only fire
+   for a *syntactic* object-literal descriptor at the call site. A descriptor
+   identifier whose declaration initializer is an object literal fell through to
+   `emitExternDefinePropertyNoValue`, which has no descriptor to read and
+   silently dropped the value + every attribute. **Fix:** in host mode, when
+   `descriptorInitializerForIdentifier(descArg)` resolves to a literal, route to
+   `emitDefinePropertyDescRuntime` → `__defineProperty_desc` (full
+   ToPropertyDescriptor + `_validatePropertyDescriptor`, §10.1.6.3), mirroring
+   the standalone `__obj_define_from_desc` route.
+
+2. **Typed-field value not synced.** A `const o: any = {}` whose property is
+   later defined gets a *typed* struct shape (e.g. `(struct (field $property …))`)
+   because the checker widens it; the member read `o.property` ref-tests as that
+   struct type and lowers to a static `struct.get`, which never consults the
+   sidecar. The runtime descriptor appliers wrote only the sidecar, so the
+   static read returned the field's stale initializer. **Fix:** new
+   `_structFieldWriteback` (`src/runtime.ts`) mirrors a defined data VALUE into
+   the real struct field via the compiled `__sset_<key>` export, called from
+   `__defineProperty_desc` and `__defineProperty_value` (value case). It does
+   NOT re-run `_safeSet`'s flag enforcement — the appliers already validated.
+
+### Auto-park merge_group diagnosis (#2547) — what got cut from Slice A
+
+PR #2074's first enqueue was auto-parked: the `merge_group` re-validation
+(merged state — catches what PR-level checks miss) reported **+41 improvements
+but 9 regressions** (net +32 pass), tripping the 10% regression-ratio gate
+(22%). All 9 regressions were in the same `15.2.3.6-3-23..45` for-in family.
+Localized locally (paired base-vs-fix isolated runs) to **two** over-reaching
+parts of the first cut, both removed:
+
+- A **for-in enumerability filter** (drop a typed field whose `_wasmPropDescs`
+  entry is `DEFINED && !ENUMERABLE`). It is correct for a *genuine*
+  `enumerable:false`, but these tests' descriptors carry `enumerable:true` on a
+  **prototype** that the runtime ToPropertyDescriptor reader can't see, so the
+  property was recorded non-enumerable and wrongly hidden. Reverted — the
+  for-in honoring needs the proto-read fix first (deferred).
+- The dynamic-descriptor route was **narrowed** from "any non-literal
+  descriptor" to "identifier resolving to an object **literal**". Arbitrary
+  host-object descriptors (`Math`, `Date` instance, `Object.create(proto)`) are
+  left on their prior path, because `__defineProperty_desc`'s reader resolves a
+  WasmGC-struct descriptor's attrs only on its OWN level and would drop a
+  prototype-inherited `enumerable`/`configurable`.
+
+### Out of scope / deferred
+
+- **For-in / Object.keys honoring `enumerable:false` on a typed field** — needs
+  the proto-inherited-attribute read fix first (the `Object.create(proto)` +
+  proto-sidecar gap below); deferred to a follow-up.
+- **Prototype-chain attribute reading for a WasmGC-struct descriptor** —
+  `Object.create(proto)` / `Array.prototype.<attr>` descriptors read attrs as
+  absent (own-level only). Pre-existing substrate gap.
+- Arbitrary host-object descriptors (`Math`/`Date` as descriptor;
+  `15.2.3.6-3-144/145-1`) — not routed (would need the proto fix).
+- `Object.defineProperty(arguments, …)` mapped-arguments rows
+  (`15.2.3.6-4-292`) — mapped-args territory (#1511/#2667).
+- The `#2130 delete-then-re-add → "in" true again` vitest fails on base main
+  too (confirmed by reverting this PR's src and re-running) — pre-existing.
+
+### Test results
+
+- New: `tests/issue-2668.test.ts` (8 cases, all green) — literal-resolvable
+  descriptor value application + GOPD round-trip + ToBoolean attr +
+  default-attrs + explicit w/e + 3 no-regression guards (inline define, plain
+  assign, and the proto-inherited for-in case Slice A must NOT regress).
+- Regression: all 52 existing `defineProperty` cases (`issue-1460/1629*`) green;
+  broad object suites (`issue-2017/2042/1364a/1364b/2580-m3-bacc/
+  delete-operator/...`) green; the 9 auto-parked regressions verified
+  recovered (isolated runs). `tsc --noEmit` clean.
+- Conformance: net-positive, **0 regressions** — re-validated via the
+  `merge_group` floor (core define/read path is broad-impact).
 
 ---
 
