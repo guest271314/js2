@@ -1,7 +1,8 @@
 ---
 id: 2663
 title: "feat: `with` statement Tier 2 — dynamic-scope fallback (de-skip the 294 test262 WithStatement tests; landing page shows unsupported)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-conformance
 created: 2026-06-25
 updated: 2026-06-25
 priority: medium
@@ -467,14 +468,39 @@ corpus.
   it touches the closure-capture machinery and is substantially harder — its own
   sub-slice / possibly senior-dev. The delete struct-slot observability is the
   #2659-family asymmetry for delete. Both are flagged to the lead, NOT bundled.
-- **Slice 4 — `@@unscopables`:** `emitWithHasBinding` full §9.1.1.2.1 with the
-  symbol-keyed `Get(recv,@@unscopables)` + `ToBoolean(Get(unscopables,N))` block.
-  Covers `binding-blocked-by-unscopables.js`, `unscopables-*` tests. Also handle
-  `ToObject(primitive)` wrapper-object receivers if any corpus test needs it.
-- **Slice 4 — `@@unscopables`:** `emitWithHasBinding` full §9.1.1.2.1 with the
-  symbol-keyed `Get(recv,@@unscopables)` + `ToBoolean(Get(unscopables,N))` block.
-  Covers `binding-blocked-by-unscopables.js`, `unscopables-*` tests. Also handle
-  `ToObject(primitive)` wrapper-object receivers if any corpus test needs it.
+- **Slice 4 — `@@unscopables` HasBinding: ✅ DONE (host-mode, PR 2026-06-25).**
+  Implemented as a single HOST helper `__with_has_binding(obj, key) -> i32`
+  (`src/runtime.ts`, in `resolveImport` `case "builtin"`) applying the full
+  §9.1.1.2.1 predicate: value-independent HasProperty (reuses `__extern_has`)
+  THEN the @@unscopables filter — `unsc = __extern_get(obj, Symbol.unscopables)`
+  (sidecar-aware, so a WasmGC-struct receiver resolves identically to a host
+  object); if `Type(unsc)` is Object and `ToBoolean(__extern_get(unsc, key))` is
+  true, the name is unscopable ⇒ NOT a binding. The three with-gates (READ /
+  WRITE-capture / DELETE resolution in `with-scope.ts`) route through
+  `withHasBindingImport(ctx)` — `__with_has_binding` in host mode,
+  `__extern_has` under `--target standalone` (where the dynamic-`with` path is
+  already refused by the #1472 gate, so the new host import is NEVER emitted in a
+  no-JS-host build — byte-identical standalone, no allowlist growth). Guarded by
+  `tests/issue-2663-unscopables.test.ts` (11 cases: blocking true/truthy, not
+  blocking false/empty/non-object, sibling-name unaffected, getter-not-invoked
+  for absent props, blocked read+write fall to outer, nested cascade, Slice-1
+  no-regression).
+  - **Measured:** the non-mutating blocking/not-blocking cases are now
+    spec-correct in host mode; ZERO regression to non-`with` modules.
+  - **NOT yet flipped — corpus needs the #2580 object-representation ceiling:**
+    `binding-blocked-by-unscopables.js` mutates `env[Symbol.unscopables].x` across
+    heterogeneous types (`true → 'string' → 86 → {} → Symbol`); the
+    `{ x: true }` literal lowers to a typed struct whose numeric `x` field cannot
+    hold those later values (writing `'string'`/`{}`/`Symbol` coerces to 0 → the
+    assertion-2+ rows still fail). `unscopables-inc-dec.js` needs a literal
+    `get [Symbol.unscopables]()` accessor. Both are the dynamic any-typed object
+    representation (#2580), NOT the HasBinding logic — which is landed and
+    isolated here so the representation work immediately flips the corpus. The
+    `binding-not-blocked-*` / `unscopables-not-referenced-for-undef` tests already
+    pass on `main` (HasProperty gives the same answer when unblocked), so the
+    measurable test262 delta of this slice alone is small; its value is banking
+    the correct, prerequisite HasBinding semantics. **DEFERRED to senior-dev /
+    #2580 alongside the closure-capture class.**
 - **Slice 5 — landing-page flip + de-skip confirmation:** confirm no remaining
   blanket skip for the `with` category in `shouldSkip`
   (`tests/test262-runner.ts:324`; today there is no `with`-specific skip — the
