@@ -41,12 +41,12 @@
  * hazard is mode-independent — acorn dogfoods in gc/host mode).
  */
 import type { Instr, ValType } from "../ir/types.js";
-import type { CodegenContext } from "./context/types.js";
+import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { stringConstantExternrefInstrs } from "./native-strings.js";
 import { findAlternateStructsForField } from "./property-access.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
-import { addUnionImportsViaRegistry, ensureLateImport } from "./shared.js";
+import { addUnionImportsViaRegistry, ensureLateImport, flushLateImportShifts } from "./shared.js";
 import { coercionInstrs } from "./type-coercion.js";
 
 /** Mangle a property name into the reserved member-get dispatcher name. */
@@ -67,8 +67,29 @@ function dispatcherName(propName: string): string {
  *   - the property-name string constant (the fallback's key),
  *   - `__box_number` (union import — a per-struct arm box-coerces an f64/i32
  *     field result up to externref via `coercionInstrs`).
+ *
+ * (#2674-residual / #2043 late-import index-shift hardening) The
+ * `ensureLateImport`/`addUnionImportsViaRegistry` calls below register imports
+ * that shift the function index space. The READ call sites bake the returned
+ * `funcIdx` into a DETACHED instruction array (the `buildFallback` terminal) AND
+ * immediately follow it with a `coercionInstrs(…, fctx)` that may itself allocate
+ * locals and register more late imports — both of which assume a SETTLED index
+ * space. Unlike the WRITE side (which pushes straight into `fctx.body`, so the
+ * body-level batched flush reaches it), a detached array left across a dangling
+ * `pendingLateImportShift` is fragile: when another import-adding pass runs before
+ * the body's deferred flush (the failure mode that surfaced only when #2075 was
+ * batched with another import-adding PR in the merge_group — `local index out of
+ * range at __module_init`, the #2043 class), the staged indices desync. So when a
+ * caller passes its `fctx`, FLUSH the pending shift here (ensure→flush discipline,
+ * matching `buildVecFromExternref`/`emitUndefined`) so the dispatcher's imports
+ * settle before the caller emits anything further. No-op when there is no pending
+ * shift or the helpers were already registered (idempotent reserve).
  */
-export function reserveMemberGetDispatch(ctx: CodegenContext, propName: string): number | undefined {
+export function reserveMemberGetDispatch(
+  ctx: CodegenContext,
+  propName: string,
+  fctx?: FunctionContext,
+): number | undefined {
   const name = dispatcherName(propName);
   const existing = ctx.funcMap.get(name);
   if (existing !== undefined) return existing;
@@ -94,6 +115,10 @@ export function reserveMemberGetDispatch(ctx: CodegenContext, propName: string):
   });
   ctx.funcMap.set(name, funcIdx);
   (ctx.memberGetDispatchNames ??= new Set<string>()).add(propName);
+  // Settle the index-space shift the imports above staged, against the caller's
+  // function body, BEFORE the caller bakes `funcIdx` into a detached array and
+  // runs a follow-on coercion (#2043 hardening — see the doc-comment above).
+  if (fctx) flushLateImportShifts(ctx, fctx);
   return funcIdx;
 }
 

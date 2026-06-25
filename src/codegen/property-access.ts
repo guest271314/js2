@@ -1417,7 +1417,10 @@ export function emitNullGuardedStructGet(
       // COMPLETE candidate set at finalize. Coerce its uniform externref result
       // to `resultType`. Falls back to the default only if the dispatcher can't
       // be reserved.
-      const getDispIdx = propName ? reserveMemberGetDispatch(ctx, propName) : undefined;
+      // (#2043 hardening) Pass fctx so the dispatcher's late-import additions
+      // flush against THIS body before we bake `getDispIdx` into the detached
+      // return array + run the follow-on coercion (see member-get-dispatch.ts).
+      const getDispIdx = propName ? reserveMemberGetDispatch(ctx, propName, fctx) : undefined;
       if (getDispIdx !== undefined) {
         return [
           { op: "local.get", index: srcLocal } as Instr,
@@ -1713,7 +1716,9 @@ export function emitExternrefToStructGet(
     // `__extern_get` → `undefined` (the slot is a real struct field, not a
     // sidecar prop). The dispatcher's own terminal IS `__extern_get`, so this
     // strictly extends coverage (all struct candidates, THEN the host read).
-    const getDispIdx = propName ? reserveMemberGetDispatch(ctx, propName) : undefined;
+    // (#2043 hardening) Pass fctx so the dispatcher's late-import additions flush
+    // against THIS body before baking `getDispIdx` into the detached array.
+    const getDispIdx = propName ? reserveMemberGetDispatch(ctx, propName, fctx) : undefined;
     if (getDispIdx !== undefined) {
       return [
         { op: "local.get", index: tmpAny } as Instr,
@@ -4953,7 +4958,10 @@ export function compilePropertyAccess(
           // `__extern_get`, so it strictly extends coverage; its externref result
           // is coerced back to `resultWasm` (which may be an f64/i32 Phase-3
           // narrowing). Reserved here; filled by fillMemberGetDispatch.
-          const getMemberIdx = reserveMemberGetDispatch(ctx, propName);
+          // (#2043 hardening) Pass fctx so the dispatcher's late-import additions
+          // flush against THIS body before baking `getMemberIdx` into the
+          // detached terminal array + the follow-on coercion.
+          const getMemberIdx = reserveMemberGetDispatch(ctx, propName, fctx);
           const dispatchTerminal: Instr[] =
             getMemberIdx !== undefined
               ? [
