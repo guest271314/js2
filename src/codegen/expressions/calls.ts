@@ -95,6 +95,8 @@ import {
   compileObjectDefineProperty,
   compileObjectKeysOrValues,
   compilePropertyIntrospection,
+  emitDefinePropertyDescRuntime,
+  emitNonObjectArgGuard,
 } from "../object-ops.js";
 import {
   emitArrayIsArrayExternrefPredicate,
@@ -104,7 +106,7 @@ import {
   receiverMayBeNativeStringAtRuntime,
   typeErrorThrowInstrs,
 } from "../property-access.js";
-import { emitToNumber } from "../coercion-engine.js";
+import { emitToNumber, emitToString } from "../coercion-engine.js";
 import type { InnerResult } from "../shared.js";
 import { coerceType, compileExpression, valTypesMatch, VOID_RESULT } from "../shared.js";
 // (#2193 PR-B) reflective `m.call(thisArg, …)` on a `$NativeProto` member-closure value.
@@ -7375,6 +7377,172 @@ function compileCallExpression(
           }
           return fallbackReturn(0, "extern-null");
         }
+
+        if (reflectMethod === "defineProperty" && expr.arguments.length >= 3) {
+          // (#2046) Route Reflect.defineProperty(target, key, desc) through the
+          // SAME standalone runtime-descriptor applier that backs
+          // Object.defineProperty — `emitDefinePropertyDescRuntime`
+          // (object-ops.ts). Reusing it (rather than hand-rolling a
+          // `__obj_define_from_desc` call here) is essential because that helper
+          // performs the **#2372 descriptor struct reify**: an INLINE descriptor
+          // object literal (`{ value: 42, … }`) is typed by the TS checker as a
+          // closed WasmGC struct, which the native `__obj_define_from_desc`'s
+          // internal `ref.test $Object` rejects as "not an object" → spurious
+          // §10.1.6 TypeError. The helper reifies that struct into a fresh
+          // `$Object` first, so inline-literal descriptors work. The issue file
+          // recorded this arm as blocked on a write-side native (#2043); that
+          // blocker is STALE — the native is registered by ensureObjectRuntime
+          // and reachable end-to-end (it has backed Object.defineProperty since
+          // #1629b).
+          //
+          // §28.1.3 Reflect.defineProperty(target, propertyKey, attributes):
+          //   step 1: target not an Object → throw a TypeError. The native
+          //     applier silently no-ops on a non-$Object target (matching the
+          //     pre-existing standalone Object.defineProperty gap), so enforce
+          //     the §28.1.3 step-1 throw HERE with the shared
+          //     `emitNonObjectArgGuard` — it fires for a statically primitive /
+          //     null / undefined target (the test262 non-object subtests use
+          //     bare primitive literals). A runtime-`any` primitive still slips
+          //     through, an accepted imprecision shared with Object.defineProperty.
+          //   step 2: key = ? ToPropertyKey(propertyKey) — handled inside the
+          //     native via __to_property_key (#2042 S1), so numeric keys coerce.
+          //   step 3: desc = ? ToPropertyDescriptor(attributes) — a malformed
+          //     descriptor (data+accessor conflict, non-callable get/set) throws
+          //     a catchable TypeError, which the native already raises (these
+          //     originate in ToPropertyDescriptor, BEFORE [[DefineOwnProperty]],
+          //     so they throw for Reflect too).
+          //   step 4: return the boolean [[DefineOwnProperty]] result. The native
+          //     returns the obj (always truthy) and has no failure channel, so we
+          //     drop it and return i32 `true`.
+          //
+          // KNOWN LIMITATION (shared with standalone Object.defineProperty): a
+          // *rejected* redefine of an existing non-configurable property silently
+          // no-ops in the native rather than surfacing failure, so we cannot
+          // return the spec's `false` for that case — it returns `true`. Faithful
+          // handling needs a failure channel in __defineProperty_value and is out
+          // of this slice; converting the common refusal→working path is the win.
+          const objArg = expr.arguments[0];
+          const keyArg = expr.arguments[1];
+          const descArg = expr.arguments[2];
+          if (objArg !== undefined && keyArg !== undefined && descArg !== undefined) {
+            // §28.1.3 step 1: statically-non-object target → throw TypeError.
+            if (emitNonObjectArgGuard(ctx, fctx, objArg, "Reflect.defineProperty")) {
+              fctx.body.push({ op: "i32.const", value: 0 }); // unreachable after throw
+              return { kind: "i32" };
+            }
+            // `undefinedFields` is the host-only ToPropertyDescriptor presence
+            // sidecar — unused on the standalone path, so pass empty.
+            const r = emitDefinePropertyDescRuntime(ctx, fctx, objArg, keyArg, descArg, []);
+            if (r !== null) {
+              fctx.body.push({ op: "drop" }); // applier returns the obj; Reflect wants a boolean
+              fctx.body.push({ op: "i32.const", value: 1 }); // success → true
+              return { kind: "i32" };
+            }
+          }
+          return fallbackReturn(0, "i32-false");
+        }
+
+        if (reflectMethod === "getPrototypeOf" && expr.arguments.length >= 1) {
+          // (#2046 PR-C) Route Reflect.getPrototypeOf(target) to the native
+          // __getPrototypeOf — the SAME helper backing standalone
+          // Object.getPrototypeOf (calls.ts ~5943). It returns
+          // extern.convert_any($Object.$proto) (may be null) for an $Object
+          // target. §28.1.1 Reflect.getPrototypeOf(target):
+          //   step 1: target not an Object → throw a TypeError. The native
+          //     returns null for a non-$Object receiver (correct for
+          //     Object.getPrototypeOf after its ToObject), so — exactly as the
+          //     deleteProperty / getOwnPropertyDescriptor PR-A guards — enforce
+          //     the §28.1.1 step-1 throw at the CALL SITE with the shared
+          //     emitNonObjectArgGuard (fires for a statically-primitive / null /
+          //     undefined target). The shared native is untouched.
+          //   step 2: return ? target.[[GetPrototypeOf]]() — the native read.
+          const arg0 = expr.arguments[0]!;
+          if (emitNonObjectArgGuard(ctx, fctx, arg0, "Reflect.getPrototypeOf")) {
+            fctx.body.push({ op: "ref.null.extern" }); // unreachable after throw
+            return { kind: "externref" };
+          }
+          const argType = compileExpression(ctx, fctx, arg0, externRef);
+          if (!argType) {
+            fctx.body.push({ op: "ref.null.extern" });
+            return { kind: "externref" };
+          }
+          if (argType.kind !== "externref") coerceType(ctx, fctx, argType, externRef);
+          const gpoIdx = ensureLateImport(ctx, "__getPrototypeOf", [externRef], [externRef]);
+          flushLateImportShifts(ctx, fctx);
+          if (gpoIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: gpoIdx });
+            return { kind: "externref" };
+          }
+          return fallbackReturn(0, "extern-null");
+        }
+
+        if (reflectMethod === "setPrototypeOf" && expr.arguments.length >= 2) {
+          // (#2046 PR-C) Route Reflect.setPrototypeOf(target, proto) to the
+          // native __object_setPrototypeOf — the SAME helper backing standalone
+          // Object.setPrototypeOf (calls.ts ~5829). It performs the §10.1.2.1
+          // OrdinarySetPrototypeOf extensibility + cycle checks, writes
+          // $Object.$proto (field 0) on success, and returns `obj` (NOT a
+          // boolean). §28.1.14 Reflect.setPrototypeOf(target, proto):
+          //   step 1: target not an Object → throw a TypeError. The native
+          //     silently no-ops (returns obj) on a non-$Object receiver, so
+          //     enforce the step-1 throw at the CALL SITE with the shared
+          //     emitNonObjectArgGuard (statically-primitive / null / undefined
+          //     target).
+          //   step 2: proto not Object and not null → throw a TypeError. Reuse
+          //     the same static guard on the proto arg, but `null` is a LEGAL
+          //     proto here (unlike target), so only reject a statically-
+          //     primitive NON-null proto. A `null`/`undefined`/object proto
+          //     passes; a number/string/boolean proto literal throws.
+          //   step 4: return the boolean [[SetPrototypeOf]] result. The native
+          //     has no failure channel (a refused set — non-extensible target or
+          //     a cycle — silently no-ops and still returns obj), so we drop obj
+          //     and return i32 `true`. KNOWN LIMITATION (identical to the
+          //     standalone Reflect.defineProperty arm above): a *refused* set
+          //     returns the spec's `true` instead of `false`. Faithful handling
+          //     needs a boolean failure channel in __object_setPrototypeOf and is
+          //     out of this slice; converting the common refusal→working path is
+          //     the win.
+          const targetArg = expr.arguments[0]!;
+          const protoArg = expr.arguments[1]!;
+          // §28.1.14 step 1: statically-non-object target → throw TypeError.
+          if (emitNonObjectArgGuard(ctx, fctx, targetArg, "Reflect.setPrototypeOf")) {
+            fctx.body.push({ op: "i32.const", value: 0 }); // unreachable after throw
+            return { kind: "i32" };
+          }
+          // §28.1.14 step 2: a statically-primitive proto that is NOT null/
+          // undefined is illegal. `null`/`undefined` set the prototype to null
+          // (legal), so let them through to the native (which maps a non-$Object
+          // proto to a null $proto).
+          const protoIsNullish =
+            protoArg.kind === ts.SyntaxKind.NullKeyword ||
+            (ts.isIdentifier(protoArg) && protoArg.text === "undefined") ||
+            protoArg.kind === ts.SyntaxKind.UndefinedKeyword;
+          if (!protoIsNullish && emitNonObjectArgGuard(ctx, fctx, protoArg, "Reflect.setPrototypeOf")) {
+            fctx.body.push({ op: "i32.const", value: 0 }); // unreachable after throw
+            return { kind: "i32" };
+          }
+          // obj (externref)
+          const objType = compileExpression(ctx, fctx, targetArg, externRef);
+          if (!objType) {
+            fctx.body.push({ op: "i32.const", value: 1 });
+            return { kind: "i32" };
+          }
+          if (objType.kind !== "externref") coerceType(ctx, fctx, objType, externRef);
+          // proto (externref) — compileProtoArg reifies an inline-literal proto
+          // into a native $Object so __object_setPrototypeOf's `ref.test $Object`
+          // succeeds (the same #2580 M3 Stage A handling Object.setPrototypeOf
+          // uses); keeps the ordinary externref path for non-literal / null protos.
+          compileProtoArg(ctx, fctx, protoArg);
+          const spoIdx = ensureLateImport(ctx, "__object_setPrototypeOf", [externRef, externRef], [externRef]);
+          flushLateImportShifts(ctx, fctx);
+          if (spoIdx !== undefined) {
+            fctx.body.push({ op: "call", funcIdx: spoIdx });
+            fctx.body.push({ op: "drop" }); // native returns obj; Reflect wants a boolean
+            fctx.body.push({ op: "i32.const", value: 1 }); // success → true (see KNOWN LIMITATION)
+            return { kind: "i32" };
+          }
+          return fallbackReturn(0, "i32-true");
+        }
         // Boolean-returning methods need an i32 on the stack; the rest return
         // externref. Pick the fallback shape per method so the surrounding
         // expression still type-checks even though the module is already marked
@@ -10854,9 +11022,43 @@ function compileCallExpression(
       const importFuncIdx = ctx.funcMap.get(funcName);
       if (importFuncIdx !== undefined) {
         const arg0 = expr.arguments[0]!;
+        // (#2652) §19.2.5 step 1 / §19.2.4 step 1: ToString(argument) BEFORE
+        // parsing. In standalone / WASI the native `parseInt` / `parseFloat`
+        // helpers take a string ref and immediately do `any.convert_extern;
+        // ref.cast $AnyString` on it — a NON-string primitive argument
+        // (`parseInt(true)`, `parseInt(-1)`) boxed as boolean/number tripped
+        // that cast ("illegal cast in parseInt()"). The JS-host imports do the
+        // `String(arg)` themselves, so host mode keeps its existing boxing path
+        // byte-for-byte. Here we run the SAME native ToString engine the `+` /
+        // template sites use (`emitToString`: boolean → "true"/"false", numeric
+        // → `number_toString`, void → "undefined") and hand the resulting
+        // native string ref to the helper as an externref. Only scalar
+        // (i32/f64/i64), void, and statically-`null`/`undefined` args take this
+        // path; a real string (externref / native ref) keeps the existing
+        // passthrough, and a dynamic externref wrapper object is left to the
+        // (separate, deferred) wrapper substrate.
+        const nativeParse = ctx.standalone || ctx.wasi;
+        const arg0TsType = ctx.checker.getTypeAtLocation(arg0);
         const arg0Type = compileExpression(ctx, fctx, arg0);
-        // Coerce to externref, preserving boolean identity (not boxing as number)
-        if (arg0Type && arg0Type.kind !== "externref") {
+        // A statically-typed `null`/`undefined`/`void` arg lowers to an externref
+        // but its ToString is the literal "null"/"undefined" — emitToString's
+        // externref arm handles it (it drops the ref and pushes the literal).
+        const isStaticNullish =
+          arg0Type?.kind === "externref" &&
+          !isStringType(arg0TsType) &&
+          (arg0TsType.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0 &&
+          (arg0TsType.flags & ts.TypeFlags.Any) === 0;
+        const isScalarArg = !arg0Type || arg0Type.kind === "i32" || arg0Type.kind === "f64" || arg0Type.kind === "i64";
+        if (nativeParse && (isScalarArg || isStaticNullish)) {
+          const strType = emitToString(ctx, fctx, arg0Type, arg0TsType, "string");
+          // emitToString returns a native `ref $AnyString` (native modes) — the
+          // helper wants an externref, so convert via `extern.convert_any`.
+          if (strType.kind !== "externref") {
+            coerceType(ctx, fctx, strType, { kind: "externref" });
+          }
+        } else if (arg0Type && arg0Type.kind !== "externref") {
+          // Host mode (or a native-string ref) — preserve the original boxing,
+          // which keeps boolean identity so the host `String(true)` → "true".
           if (
             arg0Type.kind === "i32" &&
             (arg0.kind === ts.SyntaxKind.TrueKeyword || arg0.kind === ts.SyntaxKind.FalseKeyword)

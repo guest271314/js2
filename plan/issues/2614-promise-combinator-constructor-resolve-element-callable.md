@@ -275,6 +275,44 @@ identity):
 `blocked_on` updated to `[2623]`. This issue stays `blocked` until #2623 lands
 the inbound-callback substrate.
 
+## Reground re-probe (2026-06-25, sdev-async-sm — post #2637/#2615/#1528)
+
+Re-probed the 9 representative tests against current `origin/main` (HEAD
+`d28fdb2c5`, after #2637 B1+B2 / #2615 / #1528 all landed) via
+`runTest262File`. **Verdict: STILL BLOCKED on #2623; NOT unblocked by the
+capability-ctor work. Did not claim.**
+
+| Test | 2026-06-22 | now | Δ |
+|---|---|---|---|
+| `all/invoke-resolve` | fail (assert#1 identity) | fail (assert#1 identity) | — |
+| `race/invoke-resolve` | fail (assert#1 identity) | fail (assert#1 identity) | — |
+| `any/invoke-resolve-…promise` | pass | pass | — |
+| `allSettled/call-resolve-element` | fail (illegal_cast) | fail (**"not callable"**) | shifted, still fail |
+| `race/resolve-from-same-thenable` | fail (illegal_cast) | fail (**"not callable"**) | shifted, still fail |
+| `all/resolve-element-function-name` | fail (not callable) | fail (assert#1) | shifted, still fail |
+| `all/invoke-resolve-error-close` | fail (getter-only) | fail (callCount=1) | shifted, still fail |
+| `all/ctx-ctor` | fail (subclass species) | **PASS** | **FLIPPED ✓** |
+| `all/species-get-error` | — | pass | — |
+
+**What #2637/#2615/#1528 banked:** the `__fn_tramp_Constructor illegal_cast`
+signature is GONE — the *outbound* subclass/capability construct path now
+works (`ctx-ctor` flipped pass). This is real progress and validates the
+coordinator's premise that the capability ctor landed.
+
+**Why #2614 is still blocked:** the dominant buckets are unmoved. The two
+`illegal_cast` rows shifted to **"Promise resolve or reject function is not
+callable"** — i.e. the construct succeeds but the **inbound host→wasm
+resolve-element callback** is still not a callable wasm value. That inbound
+multi-hop callback substrate is **exactly #2623's scope** (`status:
+in-progress`, assigned `ttraenkler/sendev-promise-subclass` — a LIVE
+senior-dev). The `invoke-resolve` assert#1 identity break is the same
+observable-resolve coupling the 2026-06-22 pass *proved net-negative* to fix
+alone. An independent #2614 runtime.ts patch would (a) re-attempt a proven
+net-negative fix and (b) collide with the live #2623 owner.
+
+`blocked_on: [2623]` stands. The remaining #2614 buckets fall out of #2623,
+not the capability ctor. Re-evaluate #2614 when #2623 lands.
+
 **Sibling consumers (2026-06-23, #1528 probe):** the same arms-B/D substrate also
 gates `.finally` (7 fails) and `Promise.try` (3 fails) — see the
 "Downstream consumers (observed gaps)" section in

@@ -6,7 +6,7 @@ sprint: 66
 created: 2026-06-10
 updated: 2026-06-24
 priority: critical
-assignee: ttraenkler/cs-2160
+assignee: ttraenkler/sdev-pwrap
 feasibility: medium
 reasoning_effort: high
 model: opus
@@ -382,3 +382,54 @@ substrates (#2620/#2622, #2358/#2158, iterator-helpers). After the
 primitive-wrapper slice lands, #2029 can close as **done** (the emit-crash class
 is gone) with a pointer to the migrated trackers, OR stay open solely as the
 umbrella for the primitive-wrapper native-box follow-up — PO/lead call.
+
+## Slice LANDED (2026-06-24, sdev-pwrap) — primitive-wrapper subclass loud refusal
+
+Applied the architect's minimum-viable slice. **Re-grounded against current main
+(`064b27657`) first:** `class N extends Number {}` / `extends Boolean {}` under
+`--target standalone` still emit invalid Wasm — confirmed the exact diagnosed
+failure: `Compiling function "N_new" failed: call[0] expected type f64, found
+local.get of type externref`. `class S extends String {}` already compiles +
+instantiates + `instanceof` works standalone (String's
+`__new_String(externref)->externref` matches the externref forwarder), so it is
+deliberately NOT refused.
+
+**WHY a refusal, not a native box:** the externref-backed forwarder passes the
+subclass instance externref to `call $__new_Number`, but the standalone
+`__new_Number`/`__new_Boolean` internals take an **f64** primitive value. There
+is no native primitive-wrapper *subclass* box (a `$Number_wrapper` struct
+carrying the primitive + class `$tag`) standalone yet — that's the value-rep
+follow-up (pairs with #1629b). Routing through the host path is the bug; gating
+it off **before** the broken `call` is emitted restores the #1888 dual-mode
+invariant (clean located CE, never invalid Wasm) with zero runtime surface.
+
+**Downstream-effect audit (no stack/index/return-type fallout):** the new arm is
+a pure compile-time `reportError` + `break` placed BEFORE the
+`isHostConstructibleBuiltin` marking — it adds no Wasm instructions, no
+late-import, no struct/type/global registration, so it cannot perturb stack
+balance, funcIdx/typeIdx shifting, or return types. It fires only when ALL of
+`parentStructTypeIdx === undefined && ctx.nativeStrings &&
+isPrimitiveWrapperSubclassUnsupported(parent)` hold — i.e. only a standalone/wasi
+subclass of `Number`/`Boolean`. gc/host mode (`!nativeStrings`) is untouched (the
+externClass host path still handles the subclass and the gc-mode control test
+proves `instanceof` still works `true`). `String` is excluded from the set, so
+the one working standalone wrapper-subclass case is preserved (asserted: empty
+`env::` imports + instantiates + `instanceof` → 1).
+
+**Files:** `src/codegen/builtin-tags.ts` (add
+`PRIMITIVE_WRAPPER_SUBCLASS_UNSUPPORTED = {Number, Boolean}` +
+`isPrimitiveWrapperSubclassUnsupported`); `src/codegen/class-bodies.ts` (refusal
+arm in `collectClassDeclaration`, mirrors the #2620 native-collection arm).
+
+**Validation.** `tests/issue-2029-primitive-wrapper-subclass-standalone.test.ts`
+(7/7): Number/Boolean refuse loudly standalone + wasi (clean CE, no invalid
+Wasm), still compile in gc mode, and String still compiles+instantiates+
+`instanceof` standalone with no env leak. Existing #2029 suites green:
+`issue-2029-subclass-builtin-standalone-emit` (8/8) +
+`issue-2029-error-subclass-get-undefined-standalone` (3/3) — no regression.
+
+**Status stays `in-progress`** pending PO/lead call on close-vs-umbrella (the
+native wrapper-box subclass is the only residual, a deferred value-rep slice).
+The 4 `subclass-{Map,Set,WeakMap,WeakSet}` rows remain on #2620/#2622; the
+`Object.create` ToPrimitive gap on #2358/#2158; iterator-helper semantics on the
+iterator-helpers lane. None are emit bugs.

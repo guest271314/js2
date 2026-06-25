@@ -25,6 +25,8 @@ import {
   ensureWasiWriteUint8ArrayHelper,
   getArrTypeIdxFromVec,
   getOrRegisterVecType,
+  WASI_READSYNC_IOV_OFFSET,
+  WASI_READSYNC_NREAD_OFFSET,
   WASI_STDIN_BUF_START,
   WASI_WRITE_SCRATCH_START,
 } from "./index.js";
@@ -259,7 +261,14 @@ export function tryCompileNodeFsCall(
     const importedFromNodeFs =
       ctx.wasiNodeFsFuncs.has(member) && !fctx.localMap.has(member) && !(fctx.boxedCaptures?.has(member) ?? false);
     if (importedFromNodeFs && isKnownMember("node:fs", member)) {
-      const target = { wasi: ctx.wasi, allowFs: false };
+      // #2647 — thread the real `--allow-fs` flag (was hardcoded `false` in the
+      // atomic #1772 P2-a slice, PR #2014). With `--allow-fs` under a JS host, a
+      // path-based `node:fs` member (`readFileSync(path)`) resolves through the
+      // `js-host-fs` provider and becomes satisfiable; without it the precise
+      // "no provider under --target wasi" error still fires. fd-based
+      // `readSync`/`writeSync` are satisfiable regardless (providersFor →
+      // ["wasi-fd"]), so this is a no-op for them.
+      const target = { wasi: ctx.wasi, allowFs: ctx.allowFs };
       if (isMemberSatisfiable("node:fs", member, target) === false) {
         ctx.errors.push({
           message:
@@ -277,7 +286,12 @@ export function tryCompileNodeFsCall(
     }
   }
 
-  if (!ctx.linkNodeShims) return undefined;
+  // #2655 — fd-based readSync/writeSync lower via EITHER the `node:fs` shim
+  // (`--link-node-shims`: the imported `(fd,ptr,len) -> i32` shim funcs) OR the
+  // DIRECT WASI Preview-1 path (`!ctx.linkNodeShims`: the
+  // `wasi_snapshot_preview1.fd_read`/`fd_write` syscalls). The direct path makes
+  // a standalone stdio program a self-contained WASI P1 command module importing
+  // ONLY `wasi_snapshot_preview1` — no shim, no Node runtime (loopdive/js2#389).
   if (expr.questionDotToken) return undefined;
   if (!ts.isIdentifier(expr.expression)) return undefined;
   const callee = expr.expression.text;
@@ -288,12 +302,123 @@ export function tryCompileNodeFsCall(
   if (fctx.localMap.has(callee) || (fctx.boxedCaptures?.has(callee) ?? false)) return undefined;
   // fd-based form requires at least (fd, buffer). A bare/path-based call is not ours.
   if (expr.arguments.length < 2) return undefined;
+
+  // Pick the sink + mode. Shim: the imported `(fd,ptr,len)->i32` func. Direct:
+  // the WASI syscall funcidx (a no-op `-1` if it somehow wasn't registered).
+  const direct = !ctx.linkNodeShims;
+  if (direct) {
+    const syscallIdx = callee === "readSync" ? ctx.wasiFdReadIdx : ctx.wasiFdWriteIdx;
+    if (syscallIdx === undefined || syscallIdx < 0) return undefined;
+    return callee === "readSync"
+      ? emitNodeFsReadSync(ctx, fctx, expr, syscallIdx, true)
+      : emitNodeFsWriteSync(ctx, fctx, expr, syscallIdx, true);
+  }
   const shimIdx = callee === "readSync" ? ctx.nodeFsReadSyncIdx : ctx.nodeFsWriteSyncIdx;
   if (shimIdx < 0) return undefined;
-
   return callee === "readSync"
-    ? emitNodeFsReadSync(ctx, fctx, expr, shimIdx)
-    : emitNodeFsWriteSync(ctx, fctx, expr, shimIdx);
+    ? emitNodeFsReadSync(ctx, fctx, expr, shimIdx, false)
+    : emitNodeFsWriteSync(ctx, fctx, expr, shimIdx, false);
+}
+
+/**
+ * #2655 — emit the per-`fd` "read `len` bytes from `fd` into linear `ptrLocal`,
+ * leaving the byte count on the stack as i32". Two modes:
+ *   - shim (`direct=false`): `read_sync(fd, ptr, len)` — the imported shim owns
+ *     the iovec + syscall over the shared memory; it returns the byte count.
+ *   - direct (`direct=true`): build a `{ base=ptr, len }` iovec at
+ *     `WASI_READSYNC_IOV_OFFSET`, call the BLOCKING
+ *     `fd_read(fd, iovs, 1, nread=WASI_READSYNC_NREAD_OFFSET)`, then load nread.
+ *     An errno != 0 yields 0 bytes (read loops treat `r <= 0` as EOF/stop).
+ *
+ * `ptrLocal`/`lenLocal` are i32 locals already holding the destination linear
+ * pointer and the requested length; `fdLocal` holds the fd.
+ */
+function emitFdReadRuntime(
+  fctx: FunctionContext,
+  fdLocal: number,
+  ptrLocal: number,
+  lenLocal: number,
+  sinkIdx: number,
+  direct: boolean,
+): void {
+  if (!direct) {
+    fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: ptrLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+    fctx.body.push({ op: "call", funcIdx: sinkIdx } as Instr);
+    return;
+  }
+  // Build the iovec { base=ptr, len } at WASI_READSYNC_IOV_OFFSET.
+  fctx.body.push({ op: "i32.const", value: WASI_READSYNC_IOV_OFFSET } as Instr);
+  fctx.body.push({ op: "local.get", index: ptrLocal } as Instr);
+  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
+  fctx.body.push({ op: "i32.const", value: WASI_READSYNC_IOV_OFFSET + 4 } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
+  // errno = fd_read(fd, iovs=IOV, iovs_len=1, nread=NREAD)
+  fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: WASI_READSYNC_IOV_OFFSET } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "i32.const", value: WASI_READSYNC_NREAD_OFFSET } as Instr);
+  fctx.body.push({ op: "call", funcIdx: sinkIdx } as Instr);
+  // errno on the stack: if non-zero, push 0 bytes; else load nread.
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "i32.const", value: 0 } as Instr],
+    else: [
+      { op: "i32.const", value: WASI_READSYNC_NREAD_OFFSET } as Instr,
+      { op: "i32.load", align: 2, offset: 0 } as Instr,
+    ],
+  } as Instr);
+}
+
+/**
+ * #2655 — emit the per-`fd` "write `len` bytes from linear `ptrLocal` to `fd`,
+ * leaving the byte count on the stack as i32". Two modes:
+ *   - shim (`direct=false`): `write_sync(fd, ptr, len)` returns the byte count.
+ *   - direct (`direct=true`): build a `{ base=ptr, len }` iovec at memory[0..7],
+ *     call `fd_write(fd, iovs=0, 1, nwritten=8)`, then load nwritten. An
+ *     errno != 0 yields 0 bytes (write loops treat `w <= 0` as stop). The
+ *     memory[0..11] iovec/nwritten scratch matches `emitWasiWriteTail`; a single
+ *     writeSync call never interleaves with another write over it.
+ */
+function emitFdWriteRuntime(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  fdLocal: number,
+  ptrLocal: number,
+  lenLocal: number,
+  sinkIdx: number,
+  direct: boolean,
+): void {
+  if (!direct) {
+    fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: ptrLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+    fctx.body.push({ op: "call", funcIdx: sinkIdx } as Instr);
+    return;
+  }
+  // iovec.base = ptr at memory[0]; iovec.len = len at memory[4].
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: ptrLocal } as Instr);
+  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 4 } as Instr);
+  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
+  fctx.body.push({ op: "i32.store", align: 2, offset: 0 } as Instr);
+  // errno = fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
+  fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 1 } as Instr);
+  fctx.body.push({ op: "i32.const", value: 8 } as Instr);
+  fctx.body.push({ op: "call", funcIdx: sinkIdx } as Instr);
+  // errno on the stack: non-zero → 0 bytes; else load nwritten at memory[8].
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "val", type: { kind: "i32" } },
+    then: [{ op: "i32.const", value: 0 } as Instr],
+    else: [{ op: "i32.const", value: 8 } as Instr, { op: "i32.load", align: 2, offset: 0 } as Instr],
+  } as Instr);
 }
 
 /**
@@ -456,7 +581,8 @@ function emitNodeFsReadSync(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.CallExpression,
-  shimIdx: number,
+  sinkIdx: number,
+  direct: boolean,
 ): InnerResult {
   const fdLocal = emitNodeFsFd(ctx, fctx, expr.arguments[0]!);
 
@@ -464,12 +590,13 @@ function emitNodeFsReadSync(
   const linBuf = getLinearU8Buffer(ctx, fctx, expr.arguments[1]!);
   if (linBuf) {
     const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, linBuf.lenLocalIdx);
-    fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+    // dst = ptr + off
+    const dstLocal = allocLocal(fctx, `__nodefs_rdst_${fctx.locals.length}`, { kind: "i32" });
     fctx.body.push({ op: "local.get", index: linBuf.ptrLocalIdx } as Instr);
     fctx.body.push({ op: "local.get", index: offLocal } as Instr);
     fctx.body.push({ op: "i32.add" } as Instr);
-    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-    fctx.body.push({ op: "call", funcIdx: shimIdx } as Instr);
+    fctx.body.push({ op: "local.set", index: dstLocal } as Instr);
+    emitFdReadRuntime(fctx, fdLocal, dstLocal, lenLocal, sinkIdx, direct);
     fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
     return { kind: "f64" };
   }
@@ -486,14 +613,14 @@ function emitNodeFsReadSync(
   // exceed current pages.
   ensureScratchPages(fctx, WASI_STDIN_BUF_START, lenLocal);
 
-  // nread = read_sync(fd, WASI_STDIN_BUF_START, length)
+  // nread = read(fd, WASI_STDIN_BUF_START, length)  [shim call or direct fd_read]
+  const scratchPtrLocal = allocLocal(fctx, `__nodefs_rscratch_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
+  fctx.body.push({ op: "local.set", index: scratchPtrLocal } as Instr);
   const nreadLocal = allocLocal(fctx, `__nodefs_nread_${fctx.locals.length}`, {
     kind: "i32",
   });
-  fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
-  fctx.body.push({ op: "i32.const", value: WASI_STDIN_BUF_START } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "call", funcIdx: shimIdx } as Instr);
+  emitFdReadRuntime(fctx, fdLocal, scratchPtrLocal, lenLocal, sinkIdx, direct);
   fctx.body.push({ op: "local.set", index: nreadLocal } as Instr);
 
   // Copy buf_dest[off + j] = scratch[j] for j in [0, nread).
@@ -516,7 +643,8 @@ function emitNodeFsWriteSync(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.CallExpression,
-  shimIdx: number,
+  sinkIdx: number,
+  direct: boolean,
 ): InnerResult {
   const arg1 = expr.arguments[1]!;
   const arg1Type = ctx.checker.getTypeAtLocation(arg1);
@@ -532,11 +660,11 @@ function emitNodeFsWriteSync(
   }
 
   // #2639 — DataView arg: resolve its i32_byte backing + byteOffset/byteLength to
-  // a (ptr, len) over the write scratch, then write via the shim. DataView is
-  // part of __NodeFsArrayBufferView but isn't a GC $Vec the offset/length path
+  // a (ptr, len) over the write scratch, then write. DataView is part of
+  // __NodeFsArrayBufferView but isn't a GC $Vec the offset/length path
   // recognizes, so handle it explicitly before the generic resolution.
   if (arg1Type.getSymbol?.()?.name === "DataView") {
-    return emitNodeFsWriteSyncDataView(ctx, fctx, expr, shimIdx);
+    return emitNodeFsWriteSyncDataView(ctx, fctx, expr, sinkIdx, direct);
   }
 
   const fdLocal = emitNodeFsFd(ctx, fctx, expr.arguments[0]!);
@@ -545,12 +673,13 @@ function emitNodeFsWriteSync(
   const linBuf = getLinearU8Buffer(ctx, fctx, expr.arguments[1]!);
   if (linBuf) {
     const { offLocal, lenLocal } = emitNodeFsOffsetLength(ctx, fctx, expr, linBuf.lenLocalIdx);
-    fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+    // src = ptr + off
+    const srcLocal = allocLocal(fctx, `__nodefs_wsrc_${fctx.locals.length}`, { kind: "i32" });
     fctx.body.push({ op: "local.get", index: linBuf.ptrLocalIdx } as Instr);
     fctx.body.push({ op: "local.get", index: offLocal } as Instr);
     fctx.body.push({ op: "i32.add" } as Instr);
-    fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-    fctx.body.push({ op: "call", funcIdx: shimIdx } as Instr);
+    fctx.body.push({ op: "local.set", index: srcLocal } as Instr);
+    emitFdWriteRuntime(ctx, fctx, fdLocal, srcLocal, lenLocal, sinkIdx, direct);
     fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
     return { kind: "f64" };
   }
@@ -568,11 +697,11 @@ function emitNodeFsWriteSync(
   // Copy scratch[j] = buf[off + j] for j in [0, length).
   emitArrayToScratchCopy(fctx, gc.arrTypeIdx, gc.arrLocal, offLocal, WASI_WRITE_SCRATCH_START, lenLocal);
 
-  // nwritten = write_sync(fd, WASI_WRITE_SCRATCH_START, length)
-  fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+  // nwritten = write(fd, WASI_WRITE_SCRATCH_START, length)  [shim or direct]
+  const scratchPtrLocal = allocLocal(fctx, `__nodefs_wscratch_${fctx.locals.length}`, { kind: "i32" });
   fctx.body.push({ op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "call", funcIdx: shimIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: scratchPtrLocal } as Instr);
+  emitFdWriteRuntime(ctx, fctx, fdLocal, scratchPtrLocal, lenLocal, sinkIdx, direct);
   fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
   return { kind: "f64" };
 }
@@ -651,7 +780,8 @@ function emitNodeFsWriteSyncDataView(
   ctx: CodegenContext,
   fctx: FunctionContext,
   expr: ts.CallExpression,
-  shimIdx: number,
+  sinkIdx: number,
+  direct: boolean,
 ): InnerResult {
   const fdLocal = emitNodeFsFd(ctx, fctx, expr.arguments[0]!);
 
@@ -668,11 +798,11 @@ function emitNodeFsWriteSyncDataView(
     return { kind: "f64" };
   }
 
-  // nwritten = write_sync(fd, WASI_WRITE_SCRATCH_START, viewLen)
-  fctx.body.push({ op: "local.get", index: fdLocal } as Instr);
+  // nwritten = write(fd, WASI_WRITE_SCRATCH_START, viewLen)  [shim or direct]
+  const scratchPtrLocal = allocLocal(fctx, `__nodefs_dvscratch_${fctx.locals.length}`, { kind: "i32" });
   fctx.body.push({ op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr);
-  fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
-  fctx.body.push({ op: "call", funcIdx: shimIdx } as Instr);
+  fctx.body.push({ op: "local.set", index: scratchPtrLocal } as Instr);
+  emitFdWriteRuntime(ctx, fctx, fdLocal, scratchPtrLocal, lenLocal, sinkIdx, direct);
   fctx.body.push({ op: "f64.convert_i32_s" } as Instr);
   return { kind: "f64" };
 }

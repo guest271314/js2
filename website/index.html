@@ -1796,7 +1796,7 @@ outer: for (let i = 0; i &lt; 3; i++) {
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="language/statements">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">for-in</span>
                 <span class="feat-desc">Iterate over object property names</span>
 
@@ -1816,7 +1816,7 @@ local.set $keys
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="language/arguments-object" data-sloppy>
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">arguments object (full)</span>
                 <span class="feat-desc">Legacy arguments — partial, rest params preferred</span>
 
@@ -1887,7 +1887,7 @@ var legacy = true;</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="language/function-code">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Functions &amp; closures</span>
                 <span class="feat-desc">Named functions, expressions, and lexical closures</span>
                 <details>
@@ -1981,7 +1981,7 @@ try {
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/Object">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Objects</span>
                 <span class="feat-desc">Literals, property access, methods, and shorthand syntax</span>
                 <details>
@@ -2008,7 +2008,7 @@ const obj = {
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/String">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Strings</span>
                 <span class="feat-desc">String methods, concatenation, and manipulation</span>
                 <details>
@@ -2055,7 +2055,7 @@ parseInt("42");
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/JSON">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">JSON</span>
                 <span class="feat-desc">Parse and stringify JSON data</span>
@@ -2074,7 +2074,7 @@ const str = JSON.stringify({ a: 1 });</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/Error,built-ins/NativeErrors">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Error types</span>
                 <span class="feat-desc">Error, TypeError, RangeError, SyntaxError and more</span>
                 <details>
@@ -2120,7 +2120,7 @@ const found = arr.find(x =&gt; x &gt; 5);</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/RegExp">
-                <span class="feat-badge partial">⚠</span>
+                <span class="feat-badge full">✓</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Regular expressions</span>
                 <span class="feat-desc">Pattern matching and string search</span>
@@ -2229,7 +2229,7 @@ const greet = () =&gt; "hello";</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="language/destructuring">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Destructuring</span>
                 <span class="feat-desc">Extract values from arrays and objects</span>
                 <details>
@@ -2330,7 +2330,7 @@ const obj = { [key]: 42 };</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/GeneratorFunction,built-ins/GeneratorPrototype">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge none">✗</span>
                 <span class="feat-name">Generators (function*, yield)</span>
                 <span class="feat-desc">Pausable functions that produce sequences</span>
                 <details>
@@ -2499,25 +2499,30 @@ export function bar() { return 1; }</pre
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/Proxy,built-ins/Reflect">
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Proxy / Reflect</span>
                 <span class="feat-desc">Object behavior interception and reflection</span>
                 <details>
                   <summary></summary>
-                  <pre>new Proxy(target, handler); // not supported</pre>
-                  <div class="feat-explain">Requires runtime trap dispatch. Not AOT-compilable.</div>
+                  <pre>Reflect.get(obj, "k");      // works
+new Proxy(t, handler);      // trap dispatch not yet</pre>
+                  <div class="feat-explain">
+                    Reflect is largely supported. Proxy trap interception needs runtime dispatch, so handler traps
+                    don't compile ahead of time yet.
+                  </div>
                 </details>
               </div>
               <div class="feat-row" data-t262-paths="built-ins/Promise">
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Promise .then / .catch / .finally</span>
                 <span class="feat-desc">Promise chaining and error handling</span>
                 <details>
                   <summary></summary>
-                  <pre>promise.then(v => v + 1); // not yet</pre>
+                  <pre>Promise.resolve(1).then(v => v + 1); // callbacks need host microtasks</pre>
                   <div class="feat-explain">
-                    Compiles but async callbacks do not execute. Promise.resolve/all/race work.
+                    Promise construction and Promise.resolve/all/race work. Chained .then/.catch/.finally callbacks
+                    need the host microtask queue to run.
                   </div>
                 </details>
               </div>
@@ -2528,13 +2533,14 @@ export function bar() { return 1; }</pre
                 class="feat-row"
                 data-t262-paths="built-ins/AsyncFunction,built-ins/AsyncGeneratorFunction,built-ins/AsyncGeneratorPrototype,built-ins/AsyncIteratorPrototype,built-ins/AsyncFromSyncIteratorPrototype"
               >
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">async / await</span>
                 <span class="feat-desc">Asynchronous functions with synchronous-style syntax</span>
                 <details>
                   <summary></summary>
-                  <pre>const mod = await import("./module"); // not yet</pre>
+                  <pre>await fetchValue();          // works on a JS host
+await import("./module");    // dynamic import not yet</pre>
                   <pre class="wat">
 (func $fetchData (result f64)
   f64.const 42
@@ -2581,7 +2587,7 @@ Object.values({ x: 10 });
             <div class="feat-section">
               <div class="feat-edition">ES2018</div>
               <div class="feat-row" data-t262-paths="built-ins/Object">
-                <span class="feat-badge full">✓</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-name">Object spread / rest</span>
                 <span class="feat-desc">Object spread in literals and rest in destructuring</span>
                 <details>
@@ -2716,14 +2722,17 @@ const sum = big + 1n;</pre
             <div class="feat-section">
               <div class="feat-edition">ES2021</div>
               <div class="feat-row" data-t262-paths="built-ins/WeakRef,built-ins/FinalizationRegistry">
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">WeakRef / FinalizationRegistry</span>
                 <span class="feat-desc">Weak references and GC callbacks</span>
                 <details>
                   <summary></summary>
-                  <pre>new WeakRef(obj); // not supported</pre>
-                  <div class="feat-explain">GC-observable. Not available in standard WasmGC today.</div>
+                  <pre>const r = new WeakRef(obj); // constructs; deref()/cleanup need host GC</pre>
+                  <div class="feat-explain">
+                    Constructors and the basic API compile. GC-observable behavior (deref timing, FinalizationRegistry
+                    callbacks) depends on host GC hooks not yet exposed by standard WasmGC.
+                  </div>
                 </details>
               </div>
             </div>
@@ -3009,7 +3018,7 @@ buf.resize(16);</pre
             <div class="feat-section">
               <div class="feat-edition">ES2025</div>
               <div class="feat-row" data-t262-paths="built-ins/Set">
-                <span class="feat-badge none">✗</span>
+                <span class="feat-badge partial">⚠</span>
                 <span class="feat-host">host</span>
                 <span class="feat-name">Set methods (union, intersection, difference)</span>
                 <span class="feat-desc">Built-in set operations</span>
