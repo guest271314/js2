@@ -1,17 +1,30 @@
 ---
 id: 1573
 title: "ESLint next-layer validation-error survey (post #1557 / #1558)"
-status: ready
+status: done
 created: 2026-05-20
-updated: 2026-05-21
+updated: 2026-06-26
+completed: 2026-06-26
+assignee: ttraenkler/sendev-eslint
 priority: high
 area: codegen
 goal: npm-library-support
-sprint: Backlog
+sprint: 66
 owner: tech-lead
-related: [1400, 1289, 1287, 1282, 1557, 1558, 1559, 1560]
+related: [1400, 1289, 1287, 1282, 1557, 1558, 1559, 1560, 2688, 2689, 2690, 2691]
 ---
 # ESLint next-layer validation-error survey
+
+> **DE-STALED 2026-06-26 (sprint 66).** The sprint-53 matrix below is STALE —
+> see `## 2026-06-26 re-scan (current main)` for the accurate frontier. ESLint
+> is now **v10.0.3** (the stale matrix scanned an older version; file layout
+> changed). On a fresh scan of 21 ESLint internal modules, **16/21 now
+> VALIDATE** — the stale #1557/#1558 blockers are GONE and the entire core
+> linting algorithm validates clean. This issue's **bug A**
+> (`LazyLoadingRuleMap_new` `f64.convert_i32_s expected i32, found externref`)
+> was root-caused and FIXED in the stack-balance pass (`inferLastType`),
+> unblocking 3 binaries. Residual blockers carved as #2688/#2689/#2690/#2691;
+> node:path (linter.js) tracked by #1791-#1794.
 
 Anticipatory survey of ESLint internal modules to enumerate the validation
 blockers that surface in the same binaries (or sibling binaries) once #1557
@@ -313,3 +326,75 @@ each fix to see what shifts.
 - Script: `/home/user/js2wasm/.tmp/scan-eslint-binaries.ts`
 - JSON output: `/home/user/js2wasm/.tmp/scan-eslint-binaries.json`
 - Re-run: `npx tsx .tmp/scan-eslint-binaries.ts`
+
+---
+
+## 2026-06-26 re-scan (current main)
+
+ESLint is now **v10.0.3** (the stale matrix above scanned an older version; the
+file layout changed — e.g. `source-code.js` moved to `languages/js/source-code/`,
+`config/config.js` is new). Re-scan of 21 internal modules on upstream/main
+(`be4736e43`), AFTER this issue's bug-A fix landed:
+
+**16/21 VALIDATE · 19/21 compile.** Stale #1557 (`__obj_meth_tramp` arity) and
+#1558 (`verifyAndFix` `f64.eq`) are GONE — `config.js` validates clean. The
+whole core linting algorithm validates: all 3 `code-path-analysis` modules,
+`source-code-traverser`, `source-code-visitor`, `esquery`, `interpolate`,
+`timing`, `vfile`, `file-context`, `file-report`, `rule-fixer`,
+`source-code-fixer`, `flat-config-array`, `default-config`.
+
+| Binary | Validate? | First error | Follow-up |
+|--------|-----------|-------------|-----------|
+| `config/config.js` | OK | — | |
+| `config/flat-config-array.js` | OK (was bug A) | — | fixed by bug A |
+| `config/default-config.js` | OK (was bug A) | — | fixed by bug A |
+| all `linter/code-path-analysis/*` (3) | OK | — | |
+| `linter/source-code-traverser.js`, `…-visitor.js`, `rule-fixer.js`, `source-code-fixer.js`, `interpolate.js`, `esquery.js`, `timing.js`, `vfile.js`, `file-context.js`, `file-report.js` | OK | — | |
+| `linter/apply-disable-directives.js` | FAIL | `applyDirectives` `array.set` `(ref null 107)` vs `call_ref (ref null 118)` — conditional-spread two struct shapes | **#2688** |
+| `languages/js/source-code/source-code.js` | FAIL | `SourceCode_new` `return_call: tail call type error` | **#2689** |
+| `rule-tester/rule-tester.js` | FAIL | `cloneDeeplyExcludesParent` `local.tee (ref null 2)` vs `i32` — polymorphic return (was bug A, now this) | **#2690** |
+| `linter/linter.js` | CE | `Cannot find module 'node:path'` | **#1791-#1794** |
+| `api.js` | CE | re-export `'ESLint' declared locally but not exported` | **#2691** |
+
+### Bug A — FIXED (this PR)
+
+`LazyLoadingRuleMap_new` `f64.convert_i32_s expected i32, found externref` (hit
+`flat-config-array.js`, `default-config.js`, `rule-tester.js`). **Root cause:**
+`inferLastType` in `src/codegen/stack-balance.ts` walked a branch arm backwards
+to find its result type but had **no case for structured control flow**
+(`if`/`block`/`loop`/`try`). For an arm shaped `[ call(→externref),
+local.get $cell, ref.is_null, i32.eqz, if(void) ]` (a host array-HOF call
+followed by a null-guarded **callback-capture writeback**), it skipped the
+trailing void `if` and misread the writeback's internal `i32.eqz` as the arm's
+result → `"i32"`. `fixBranchType` then spliced `f64.convert_i32_s +
+__box_number` to coerce that phantom i32 → externref, over the real externref
+value → invalid Wasm. **Fix:** `inferLastType` now stops at a structured
+instruction and reports its block result type (or null when void/multi-value,
+so `fixBranchType` SKIPS rather than mis-coerces). General fix (not
+eslint-specific): any `expectedExternref(cond ? arr.map(capturingCb) : x)` shape
+— and other callback-writeback-in-branch shapes — hit this. Regression test:
+`tests/issue-1573-map-capture-branch-validate.test.ts`.
+
+### Minimal-Linter.verify gate-list (the runway to "ESLint RUNS as Wasm in Node")
+
+Parse is **host-delegable**: `ParserService.parseSync` does
+`language.parse(file, {languageOptions})` — a host-provided `language` whose
+`.parse` is a host import (Node espree/acorn) makes `Linter.verify` run WITHOUT
+compiled acorn, i.e. **decoupled from acorn #2674**. The full real-eslint
+`Linter.verify` end-to-end still needs:
+
+1. **Bug A** — FIXED (this PR).
+2. **#2688** apply-disable-directives.js conditional-spread struct shape.
+3. **#2689** source-code.js `SourceCode_new` return_call tail-call type.
+4. **#2691** api.js re-export resolution.
+5. **#1791-#1794** node:path (and node:fs/url) — linter.js's only `node:` import
+   is `node:path`. On the critical path for the real Linter.
+6. **npm dep tree**: eslint-scope, @eslint/plugin-kit, @eslint/core, espree,
+   debug — each a separate package that must compile (or be host-shimmed).
+7. **#2690** rule-tester.js polymorphic return (NOT on the verify critical path
+   — rule-tester is test-authoring infra).
+
+Recommended FIRST runnable milestone: a minimal Linter-shaped program (walk AST,
+apply one rule e.g. `semi`, return messages) compiled to Wasm + instantiated in
+Node with parse as a host import (the acorn-#1712 parallel). Full real-eslint
+Linter is the end-state once the gate-list clears.
