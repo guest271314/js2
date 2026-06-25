@@ -6,21 +6,21 @@ metadata:
 ---
 
 Checking "does a file matching `<pattern>` exist on `<ref>`" with
-`git show <ref>:plan/issues/2642-*.md` is WRONG: `git show <ref>:<path>` treats
+`git show <ref>:plan/issues/<id>-*.md` is WRONG: `git show <ref>:<path>` treats
 `<path>` **literally** — no glob expansion — so it looks for a blob named
-`2642-*.md`, fails, and you wrongly conclude the file is absent. (The shell also
+`<id>-*.md`, fails, and you wrongly conclude the file is absent. (The shell also
 won't pre-expand the glob because the pattern lives in the repo at that ref, not
 the working tree.)
 
 **Use `git ls-tree` instead:**
 ```bash
-git ls-tree -r --name-only <ref> -- plan/issues/ | grep -E '/2642-'
+git ls-tree -r --name-only <ref> -- plan/issues/ | grep -E '/<id>-'
 # or to read it:
-git show <ref>:"$(git ls-tree -r --name-only <ref> -- plan/issues/ | grep -m1 '/2642-')"
+git show <ref>:"$(git ls-tree -r --name-only <ref> -- plan/issues/ | grep -m1 '/<id>-')"
 ```
 
 **Why it matters:** on 2026-06-24 this false-negative made me tell dev-2642 to
-*author* a `plan/issues/2642-*.md` that already existed on main (filed via the
+*author* an issue file (`2642-*.md`) that already existed on main (filed via the
 #2008 PR) — the dev created a duplicate, tripping the `check:issue-ids` /
 "duplicate IDs" quality gate, costing a CI round-trip. The dev recovered by
 reusing the canonical file and deleting its dup.
