@@ -16,7 +16,6 @@ import { ensureAnyToStringHelper, stringConstantExternrefInstrs } from "./native
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { getArrTypeIdxFromVec } from "./registry/types.js";
 import { ensureLateImport, flushLateImportShifts, materializeStructAsObject, registerCoerceType } from "./shared.js";
-import { ensureCurrentThisGlobal } from "./statements/nested-declarations.js";
 
 /**
  * Emit a guarded ref.cast: use ref.test to check if the cast will succeed.
@@ -2101,7 +2100,15 @@ export function coerceType(
             // restore it afterward (nesting-safe). Arrow-valued `valueOf`
             // captures `this` lexically and never reads `__current_this`, so
             // this is a no-op for that case.
-            const currentThisGlobalIdx = ensureCurrentThisGlobal(ctx);
+            //
+            // The `__current_this` global is registered eagerly during setup
+            // (`ensureCurrentThisGlobal` in index.ts), so we read the cached
+            // `ctx.currentThisGlobalIdx` directly here — importing
+            // `ensureCurrentThisGlobal` from `nested-declarations.ts` would
+            // create a module-init import cycle (it imports `getVecInfo` back
+            // from this file) and a TDZ ReferenceError. If unset (-1), skip
+            // threading (no worse than the legacy behaviour).
+            const currentThisGlobalIdx = ctx.currentThisGlobalIdx;
             if (currentThisGlobalIdx >= 0) {
               const prevThisLocal = allocTempLocal(fctx, { kind: "externref" });
               const tpResultLocal = allocTempLocal(fctx, { kind: "f64" });
