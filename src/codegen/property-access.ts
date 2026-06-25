@@ -75,6 +75,7 @@ import {
   ensureBigIntNativeProtoGlue,
   ensureWeakMapNativeProtoGlue,
   ensureWeakSetNativeProtoGlue,
+  ensureTypedArrayViewNativeProtoGlue,
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
@@ -693,6 +694,20 @@ function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): nu
   }
   if (builtinName === "WeakSet") {
     return ensureWeakSetNativeProtoGlue(ctx);
+  }
+  // (#2651 M1 / D2) Concrete TypedArray view protos — `Int8Array.prototype`,
+  // `Uint8Array.prototype`, … This is the measured Slice-0 lever: the
+  // `<View>.prototype` value read (the #1907 / #1888 S6-b `Int8Array.prototype`
+  // 460+ residual) is what gates the bulk of the ctor-iteration harness rows
+  // (`testTypedArray.js` builds `const TypedArray =
+  // Object.getPrototypeOf(Int8Array.prototype).constructor`, then `verifyProperty(
+  // TypedArray.prototype.<m>, …)`). Each view shares the `%TypedArray%.prototype`
+  // member set; the proto OBJECT is a pure value object (member CSV only — never
+  // re-emits a body that touches the view's vec/runtime state, per #2375).
+  // Returns undefined for non-wired (bigint) views → existing refusal.
+  {
+    const taBrand = ensureTypedArrayViewNativeProtoGlue(ctx, builtinName);
+    if (taBrand !== undefined) return taBrand;
   }
   // Other builtins: only resolve if some path already registered glue for them.
   const brand = getBuiltinBrand(ctx, builtinName);

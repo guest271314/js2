@@ -251,6 +251,96 @@ const SET_PROTO_METHODS = [
   "values",
 ] as const;
 
+/**
+ * (#2651 M1 / D2) The abstract `%TypedArray%.prototype` member names (ES2024
+ * §23.2.3). ALL concrete TypedArray view prototypes (`Int8Array.prototype`, …)
+ * inherit these from `%TypedArray%.prototype` — the concrete-view protos carry
+ * essentially no own members of their own (only `BYTES_PER_ELEMENT`/`constructor`
+ * which are data, not on the value-read CSV), so each concrete view shares this
+ * single member set. The four accessor getters (`buffer`, `byteLength`,
+ * `byteOffset`, `length`) are spelled as getters (`memberKind` → "getter") so the
+ * `.length`/`.name` meta-fold reports the getter's 0 arity. `@@iterator` /
+ * `@@toStringTag` are well-known-symbol members resolved by the computed-access
+ * path, so only the string members go in the CSV (same convention as
+ * `ARRAY_PROTO_METHODS`).
+ *
+ * Per the #2375 caution (TypedArray views carry vec/runtime-state entanglement),
+ * this is a PURE value-read object: `emitLazyNativeProtoGet` materializes the
+ * member CSV only and never calls `emitMemberBody`; a reflective member-closure
+ * read degrades to a catchable TypeError (`emitProtoMemberBodyRefusal`). The
+ * method *bodies* live on the existing native instance-method vec dispatch and
+ * are reached through the instance, NOT re-emitted on this proto value.
+ */
+const TYPED_ARRAY_PROTO_METHODS = [
+  "at",
+  "copyWithin",
+  "entries",
+  "every",
+  "fill",
+  "filter",
+  "find",
+  "findIndex",
+  "findLast",
+  "findLastIndex",
+  "forEach",
+  "includes",
+  "indexOf",
+  "join",
+  "keys",
+  "lastIndexOf",
+  "map",
+  "reduce",
+  "reduceRight",
+  "reverse",
+  "set",
+  "slice",
+  "some",
+  "sort",
+  "subarray",
+  "toLocaleString",
+  "toReversed",
+  "toSorted",
+  "toString",
+  "values",
+  "with",
+  // Accessor getters (ES2024 §23.2.3.{1,2,3,18}). Marked as getters below so the
+  // meta-fold reports 0 arity; kept in the CSV so a `TA.prototype.buffer` value
+  // read resolves (the descriptor exists) rather than fabricating undefined.
+  "buffer",
+  "byteLength",
+  "byteOffset",
+  "length",
+] as const;
+
+/** The `%TypedArray%.prototype` accessor-getter member names (ES2024 §23.2.3). */
+const TYPED_ARRAY_PROTO_GETTERS: ReadonlySet<string> = new Set(["buffer", "byteLength", "byteOffset", "length"]);
+
+/**
+ * (#2651 M1) `%TypedArray%.prototype` method spec arities that differ from the
+ * default 1 (ES2024 §23.2.3). Kept SEPARATE from the global `PROTO_METHOD_LENGTH`
+ * because some names collide with other builtins at a DIFFERENT arity — notably
+ * `set`: `%TypedArray%.prototype.set` is arity 1 (§23.2.3.26) but
+ * `Map.prototype.set` is arity 2. A per-family override avoids cross-contaminating
+ * the shared table.
+ */
+const TYPED_ARRAY_PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
+  copyWithin: 2,
+  set: 1,
+  subarray: 2,
+  with: 2,
+  // Zero-arity (no-arg) members.
+  entries: 0,
+  keys: 0,
+  reverse: 0,
+  toLocaleString: 0,
+  toReversed: 0,
+  toString: 0,
+  values: 0,
+  // The remaining iteration/search/accessor methods (at, every, fill, filter,
+  // find*, forEach, includes, indexOf, join, lastIndexOf, map, reduce*, slice,
+  // some, sort, toSorted) are arity 1 — the default.
+};
+
 /** Spec arity (`fn.length`) of the proto methods that differ from the default 1. */
 const PROTO_METHOD_LENGTH: Readonly<Record<string, number>> = {
   concat: 1,
@@ -464,6 +554,29 @@ function makeGlue(
 }
 
 /**
+ * (#2651 M1 / D2) Glue factory for a TypedArray-family proto (`%TypedArray%` and
+ * each concrete view). Differs from `makeGlue` only in marking the four accessor
+ * members (`buffer`/`byteLength`/`byteOffset`/`length`) as getters so the
+ * `.length`/`.name` meta-fold reports 0 arity. All concrete views share
+ * `TYPED_ARRAY_PROTO_METHODS` (they inherit from `%TypedArray%.prototype`). The
+ * proto OBJECT is a pure value object (member CSV + name; `emitLazyNativeProtoGet`
+ * never calls `emitMemberBody`). A reflective member-CLOSURE read degrades to a
+ * catchable TypeError — the method bodies live on the native instance-method vec
+ * dispatch, reached via the instance (#2375 caution: never re-emit a body that
+ * touches the view's vec/runtime state on the proto value).
+ */
+function makeTypedArrayGlue(brand: number, name: string): NativeProtoBuiltinGlue {
+  return {
+    brand,
+    name,
+    memberCsv: TYPED_ARRAY_PROTO_METHODS.join(","),
+    memberKind: (member) => (TYPED_ARRAY_PROTO_GETTERS.has(member) ? "getter" : "method"),
+    memberLength: (member) => TYPED_ARRAY_PROTO_METHOD_LENGTH[member] ?? 1,
+    emitMemberBody: (c, fctx, member) => emitProtoMemberBodyRefusal(c, fctx, name, member),
+  };
+}
+
+/**
  * Register `Array.prototype` glue (idempotent) and return its brand, or
  * `undefined` if the Array brand isn't reserved (should not happen).
  */
@@ -619,5 +732,60 @@ export function ensureWeakSetNativeProtoGlue(ctx: CodegenContext): number | unde
   if (!getNativeProtoBuiltinGlue(ctx, brand)) {
     registerNativeProtoBuiltin(ctx, makeGlue(ctx, brand, "WeakSet", WEAKSET_PROTO_METHODS));
   }
+  return brand;
+}
+
+/**
+ * (#2651 M1 / D2) The concrete non-bigint TypedArray view ctor names whose
+ * `<View>.prototype` value read this slice wires host-free. BigInt64Array /
+ * BigUint64Array are deliberately excluded (bigint views are out of scope —
+ * `TYPED_ARRAY_NAMES` in index.ts excludes them too); their `.prototype` read
+ * keeps the existing refuse-loud behaviour until a bigint slice lands.
+ */
+const WIRED_TYPED_ARRAY_VIEWS = [
+  "Int8Array",
+  "Uint8Array",
+  "Uint8ClampedArray",
+  "Int16Array",
+  "Uint16Array",
+  "Int32Array",
+  "Uint32Array",
+  "Float32Array",
+  "Float64Array",
+] as const;
+
+/**
+ * (#2651 M1 / D2) Register the abstract `%TypedArray%.prototype` glue (idempotent)
+ * and return its brand. This is the single shared member set; every concrete view
+ * proto reuses `TYPED_ARRAY_PROTO_METHODS` (they inherit from this intrinsic), so
+ * binary size stays proportional. The `%TypedArray%` brand is pre-reserved in
+ * `BUILTIN_BRAND_TABLE`.
+ */
+export function ensureTypedArrayIntrinsicNativeProtoGlue(ctx: CodegenContext): number | undefined {
+  const brand = getBuiltinBrand(ctx, "%TypedArray%");
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeTypedArrayGlue(brand, "%TypedArray%"));
+  }
+  return brand;
+}
+
+/**
+ * (#2651 M1 / D2) Register a concrete TypedArray view's `<View>.prototype` glue
+ * (idempotent) and return its brand, or `undefined` if `viewName` is not a wired
+ * non-bigint view (caller falls through to the existing refusal). Each view shares
+ * the `%TypedArray%.prototype` member set (`TYPED_ARRAY_PROTO_METHODS`). The brand
+ * is the per-view brand pre-reserved in `BUILTIN_BRAND_TABLE`.
+ */
+export function ensureTypedArrayViewNativeProtoGlue(ctx: CodegenContext, viewName: string): number | undefined {
+  if (!(WIRED_TYPED_ARRAY_VIEWS as readonly string[]).includes(viewName)) return undefined;
+  const brand = getBuiltinBrand(ctx, viewName);
+  if (brand === undefined) return undefined;
+  if (!getNativeProtoBuiltinGlue(ctx, brand)) {
+    registerNativeProtoBuiltin(ctx, makeTypedArrayGlue(brand, viewName));
+  }
+  // Also materialize the shared intrinsic glue so the parent member set exists
+  // (D4 links concrete-view protos to it in a later slice; harmless here).
+  ensureTypedArrayIntrinsicNativeProtoGlue(ctx);
   return brand;
 }
