@@ -42,6 +42,7 @@ import { findAlternateStructsForField } from "./property-access.js";
 import { addStringConstantGlobal } from "./registry/imports.js";
 import { addFuncType } from "./registry/types.js";
 import { addUnionImportsViaRegistry, ensureLateImport } from "./shared.js";
+import { coercionInstrs } from "./type-coercion.js";
 
 /**
  * Mangle a property name + fallback strictness into the reserved dispatcher name.
@@ -156,10 +157,14 @@ export function fillMemberSetDispatch(ctx: CodegenContext): void {
     const buildSetDispatch = (idx: number): Instr[] => {
       if (idx >= candidates.length) return fallback;
       const cand = candidates[idx]!;
-      // Coerce the boxed externref value into the candidate field's wasm type.
-      // For an externref field (the common acorn `type`/`value` case) this is a
-      // no-op; f64/i32 fields unbox via the reserve-time-registered __unbox_number.
-      const coerce = coerceExternrefToFieldType(ctx, cand.fieldType);
+      // Coerce the boxed externref value into the candidate field's wasm type via
+      // the SINGLE coercion engine (#1917 / #2108 — never hand-roll a fresh
+      // box/unbox matrix). For an externref field (the common acorn `type`/`value`
+      // case) this is a no-op; scalar fields unbox via the union helpers, which
+      // are registered at reserve time so the engine's idempotent addUnionImports
+      // is a no-op at fill (no funcIdx churn). No fctx is needed: externref→scalar
+      // and externref→ref coercions resolve through funcMap, not temp locals.
+      const coerce = coercionInstrs(ctx, { kind: "externref" }, cand.fieldType);
       const setFieldInstrs: Instr[] = [
         { op: "local.get", index: 2 } as Instr, // __any
         { op: "ref.cast", typeIdx: cand.structTypeIdx } as Instr,
@@ -186,48 +191,5 @@ export function fillMemberSetDispatch(ctx: CodegenContext): void {
       { op: "local.set", index: 2 } as Instr, // __any
       ...buildSetDispatch(0),
     ];
-  }
-}
-
-/**
- * Coerce the dispatcher's `val` (externref, already on the stack) into a struct
- * field's wasm type at FILL time (no fctx). Handles the field-type kinds that
- * appear on struct fields; box/unbox helpers were registered at reserve time so
- * these are pure funcMap reads (no funcIdx churn). externref→externref is a
- * no-op (the common acorn `type`/`value` case).
- */
-function coerceExternrefToFieldType(ctx: CodegenContext, fieldType: ValType): Instr[] {
-  switch (fieldType.kind) {
-    case "externref":
-      return [];
-    case "f64": {
-      const unbox = ctx.funcMap.get("__unbox_number");
-      return unbox !== undefined ? [{ op: "call", funcIdx: unbox } as Instr] : [];
-    }
-    case "i32": {
-      const unbox = ctx.funcMap.get("__unbox_number");
-      return unbox !== undefined
-        ? [{ op: "call", funcIdx: unbox } as Instr, { op: "i32.trunc_sat_f64_s" } as Instr]
-        : [];
-    }
-    case "i64": {
-      const unbox = ctx.funcMap.get("__unbox_number");
-      return unbox !== undefined
-        ? [{ op: "call", funcIdx: unbox } as Instr, { op: "i64.trunc_sat_f64_s" } as Instr]
-        : [];
-    }
-    case "ref":
-      // externref → (ref T): recover the GC ref and cast to the field type.
-      return [
-        { op: "any.convert_extern" } as Instr,
-        { op: "ref.cast", typeIdx: (fieldType as { typeIdx: number }).typeIdx } as Instr,
-      ];
-    case "ref_null":
-      return [
-        { op: "any.convert_extern" } as Instr,
-        { op: "ref.cast", typeIdx: (fieldType as { typeIdx: number }).typeIdx } as Instr,
-      ];
-    default:
-      return [];
   }
 }
