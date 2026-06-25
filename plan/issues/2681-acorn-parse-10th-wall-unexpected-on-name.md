@@ -142,13 +142,17 @@ ROOT-CAUSE" + "## RESOLVED BY #2085"). Summary:
 Reusable `.tmp` probes (worker-thread + SAB, single-compile) banked under #2674.
 Each full-acorn compile is ~290s on this box — reuse one compile per probe.
 
-### Carved sibling walls (do NOT bundle into #2681)
-- **Binary-expression throw**: `parse("1 + 2 * 3;")` THROWS (separate from the
-  identifier path) — needs its own issue.
-- **AST diffs on the simple inputs that DO parse**: `body[0].expression` is `null`
-  for `"1"`/`"1;"`/`"true;"`, plus an extra `$.sourceFile` field, vs node-acorn.
-  `expression:null` is LIKELY a host AST-marshalling-depth artifact (the
-  ExpressionStatement node exists, bodyLen=1; only the nested Literal didn't
-  serialize through `wrapExports`+`JSON.stringify`) rather than a codegen defect —
-  CONFIRM via a direct struct-walk of `.expression.type` before carving as a real
-  bug. If artifact, the #1712 gap is smaller than the diff implies.
+### Carved sibling walls (now their own issues — do NOT bundle into #2681)
+- **#2686 — Binary-expression throw**: `parse("1 + 2 * 3;")` THROWS (separate from
+  the identifier path; likely the same token-type-comparison root via parseExprOp).
+- **#2687 — ExpressionStatement.expression is null**: CONFIRMED a REAL codegen
+  defect by a direct struct-walk (`.tmp/structwalk.mjs`), NOT a marshalling
+  artifact. For `"1"`/`"1;"`/`"true;"` the ExpressionStatement node has its
+  `expression` own-key present and directly readable but its value is genuinely
+  `null` (sibling `type` field reads correctly), so the parsed Literal is not
+  attached by `parseExpressionStatement`'s `node.expression = expr`. The extra
+  `$.sourceFile`/`loc`/`range` undefined fields are benign (acorn only sets
+  loc/range with options). So even the inputs that "parse" produce an incomplete
+  AST — the #1712 differential needs #2687 fixed too. **TRUE #1712 GAP is larger
+  than "just identifiers throw": even literal expression statements return
+  `expression: null`.**
