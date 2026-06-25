@@ -187,3 +187,62 @@ specific field read/write (`this.start`/`this.end`/`this.lastTokStart`/
 `this.lastTokEnd`) or the token-type `switch` dispatch, the same way #2664's
 `this.type` was cracked. (A single-compile multi-input probe variant of the
 harness would avoid the per-input recompile — a worthwhile harness follow-up.)
+
+## HANDOFF (2026-06-25, sd-2038) — two landed fixes; residual typeof-led loop pinned
+
+Worked the 9th wall to TWO distinct, landed root causes; both are NECESSARY but
+NEITHER is SUFFICIENT alone. `parse("")` and `parse(";")` return a valid empty
+Program AST; `parse("x")`/`parse("1")` (any expression statement) STILL hang on a
+RESIDUAL cause. NOT yet the #1712 AST milestone — `parse()` does not return for a
+non-empty statement.
+
+### Probe harness (landed, #2069) — use this to continue
+- `npx tsx tests/dogfood/probe-driver.mjs '<input>' parse <watchdogMs>` — single
+  input, prints `{status: ok|hang, signature, result}`. Worker-thread watchdog +
+  SharedArrayBuffer host-call counter (the in-Wasm loop is synchronous and starves
+  same-thread timers; the SAB lets the parent read the live host-call signature
+  before terminating).
+- `bisect({source, call, inputs, perInputWatchdogMs})` (export in probe-driver) —
+  ONE compile, N inputs in one worker, per-input watchdog, first-hang wins. Use
+  for fast statement-shape bisects (`["", ";", "x", "1", "1;", "var x = 1;"]`).
+- For the EXACT field/key under a hang: wrap `io.env.__extern_get` with a
+  key-histogram + a call CAP that throws (see `.tmp/keys-probe2.mjs` pattern) —
+  names the property being hammered.
+
+### Fix 1 (LANDED, #2072 / tracked #2677) — chained this-assignment field collection
+`compileNewFunctionDeclaration.collectThisAssignments` (new-super.ts) only
+recorded the OUTERMOST LHS of a ctor `this`-assignment, dropping inner chained
+targets (`this.start = this.end = this.pos` → `end` lost). `$__fnctor_Parser` was
+missing end/endLoc/lastTokEnd/lastTokStartLoc/awaitPos/awaitIdentPos. Fixed via
+`collectAssignmentChain` (walks the full `=` chain). The struct now has the full
+35-field set.
+
+### Fix 2 (LANDED, #2075) — read-side __get_member_<name> deferred-fill dispatcher
+The member-READ multi-struct dispatch (`findAlternateStructsForField` chain at
+property-access.ts:1386/1684/4896) was frozen inline at compile time, like #2664's
+write side. A reader compiled before `$__fnctor_Parser` registered only tested the
+earlier struct type → `__extern_get` → `undefined` on the real instance.
+`src/codegen/member-get-dispatch.ts` (`__get_member_<name>(recv)->externref`,
+filled at finalize with the complete candidate set) now backs each read site's
+terminal. Frozen single-candidate read sites in compiled-acorn: **9 → 1**.
+
+### RESIDUAL (still open) — typeof-led loop, NOT a struct-slot read
+After both fixes, `parse("x")` still hangs. The signature SHIFTED from
+`__extern_get`-led to **`__typeof_number`-led**:
+`__typeof_number ≈115k, __extern_get ≈118k, __get_undefined ≈98k, __host_eq` present.
+`__typeof_number` is compiler-emitted (NOT acorn source `typeof`) — for a value
+type-tag check. Hypothesis (VERIFY, don't assume — one hypothesis was already
+disproven this session): a `typeof x === "..."` / ToNumber-or-ToPrimitive value
+classification in a loop (candidate: `parseExprOp` operator-precedence
+`this.type.binop` read + comparison, or a boxed-value `===`/`!==` that never
+satisfies the loop-break), OR the 1 remaining frozen read. It is NO LONGER the
+struct-read freeze (that's fixed). 
+
+### Next step (fresh agent, on merged #2072+#2075)
+1. Re-bisect `["x","1","1;"]` on merged main (confirm still hangs + fresh signature).
+2. Capture the dominant `__typeof_number` / `__host_eq` CALL-SITE: instrument those
+   host imports (key/arg histogram, CAP-throw) OR add a per-closure hit counter to
+   find the hot function, then WAT-decode it.
+3. Likely loci: `parseExprOp` (`this.type.binop` precedence loop), `parseMaybeUnary`
+   postfix `while`, or a token-type `===` identity (the #2656-noted switch-on-
+   externref class) that never matches so `next()` is never called.
