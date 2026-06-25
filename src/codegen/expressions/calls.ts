@@ -3372,7 +3372,7 @@ function compileCallExpression(
   const nodeFsCall = tryCompileNodeFsCall(ctx, fctx, expr);
   if (nodeFsCall !== undefined) return nodeFsCall;
 
-  // #2682 — Deno synchronous stdio (`Deno.stdin.readSync` /
+  // #2684 — Deno synchronous stdio (`Deno.stdin.readSync` /
   // `Deno.{stdout,stderr}.writeSync`) → direct WASI fd_read/fd_write. Ambient
   // global, recognized by member-call shape; byte-neutral unless `Deno.` is used.
   const denoStdioCall = tryCompileDenoStdioCall(ctx, fctx, expr);

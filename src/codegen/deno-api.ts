@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Loopdive GmbH. Licensed under Apache-2.0 WITH LLVM-exception.
 /**
- * Deno synchronous stdio lowering for WASI (#2682).
+ * Deno synchronous stdio lowering for WASI (#2684).
  *
  * Deno is the other runtime in loopdive/js2#389's "runs under the runtime + also
  * compiles to wasi" story. Its synchronous stdio is a different SURFACE from

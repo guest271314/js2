@@ -1,4 +1,4 @@
-// #2682 — Deno synchronous stdio surface → DIRECT WASI Preview-1 fd_read/fd_write.
+// #2684 — Deno synchronous stdio surface → DIRECT WASI Preview-1 fd_read/fd_write.
 //
 // loopdive/js2#389: the Native Messaging host reporter runs directly under a WASI
 // host (wasmtime) and is explicitly "not chasing Node.js". #2655 gave the Node
@@ -84,7 +84,7 @@ export function main(): void {
 }
 `;
 
-describe("#2682 — Deno stdio surface → direct WASI P1 fd_read/fd_write", () => {
+describe("#2684 — Deno stdio surface → direct WASI P1 fd_read/fd_write", () => {
   it("emits ONLY wasi_snapshot_preview1 fd_read/fd_write, no node:fs, owns memory", async () => {
     const result = await compile(FRAMED_ECHO, { fileName: "x.ts", target: "wasi" });
     expect(result.success, result.success ? "" : result.errors?.[0]?.message).toBe(true);
@@ -137,7 +137,7 @@ export function main(): void { writeSync(1, "hi\\n"); }
   describe.skipIf(!wasmtimeBin)("runs under wasmtime (pure WASI P1)", () => {
     let tmp: string;
     beforeAll(() => {
-      tmp = mkdtempSync(join(tmpdir(), "wt-2682-"));
+      tmp = mkdtempSync(join(tmpdir(), "wt-2684-"));
     });
     afterAll(() => {
       if (tmp) rmSync(tmp, { recursive: true, force: true });

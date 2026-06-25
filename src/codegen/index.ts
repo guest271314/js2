@@ -6030,7 +6030,7 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   // WASI clock_time_get under --target wasi.
   let needsClockTimeGet = false;
   let needsFdRead = false;
-  // #2682 — Deno synchronous stdio usage (`Deno.stdin.readSync` /
+  // #2684 — Deno synchronous stdio usage (`Deno.stdin.readSync` /
   // `Deno.{stdout,stderr}.writeSync`). Tracked separately from needsFdRead/Write
   // so the linkNodeShims recompute below can't drop the syscalls a Deno program
   // needs (Deno lowers to the DIRECT WASI path regardless of --link-node-shims,
@@ -6182,7 +6182,7 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     ) {
       needsFdRead = true;
     }
-    // #2682: Deno synchronous stdio → direct WASI fd_read/fd_write. Recognize the
+    // #2684: Deno synchronous stdio → direct WASI fd_read/fd_write. Recognize the
     // ambient `Deno.stdin.readSync(buf)` / `Deno.{stdout,stderr}.writeSync(buf)`
     // member-call shapes so the syscalls are registered (the actual lowering is
     // in deno-api.ts; this only wires the import). Mirrors the process.stdin.read
@@ -6252,7 +6252,7 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
   if (ctx.wasiRawImports.has("fd_read")) needsFdRead = true;
   if (ctx.wasiRawImports.has("fd_write")) needsFdWrite = true;
 
-  // #2682 — Deno synchronous stdio lowers to the DIRECT WASI fd_read/fd_write
+  // #2684 — Deno synchronous stdio lowers to the DIRECT WASI fd_read/fd_write
   // path (deno-api.ts), so its syscall imports must be registered regardless of
   // the shim/direct recompute above (mirrors the raw-wasi re-assertion). A Deno
   // program under --link-node-shims is nonsensical, but this keeps the direct

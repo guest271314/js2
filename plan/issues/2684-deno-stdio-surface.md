@@ -1,5 +1,5 @@
 ---
-id: 2682
+id: 2684
 title: Deno stdio host surface (Deno.stdin/stdout/stderr.*Sync → WASI fd) + nm_deno.ts
 area: host-interop
 language_feature: deno-api-compat
@@ -43,7 +43,7 @@ recognition.
 - `Deno.stdin.readSync` faithfully returns `number | null` (null at EOF), so
   `if (r === null) …` works in the compiled module.
 - Byte-neutral for any program that does not reference `Deno.`.
-- `tests/issue-2682-deno-stdio.test.ts` proves it (gated on `findWasmtime()`).
+- `tests/issue-2684-deno-stdio.test.ts` proves it (gated on `findWasmtime()`).
 
 ## Implementation notes (WHY, not just WHAT)
 
@@ -99,7 +99,7 @@ the byte count as f64 (`number`).
 
 ## Validation
 
-- `tests/issue-2682-deno-stdio.test.ts`: WAT-shape assertions (only
+- `tests/issue-2684-deno-stdio.test.ts`: WAT-shape assertions (only
   `wasi_snapshot_preview1`, owns memory, no node:fs) + a wasmtime framed-echo
   round-trip with high/null bytes (gated on `findWasmtime()`).
 - Byte-neutral check: a program with no `Deno.` reference is unchanged.

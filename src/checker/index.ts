@@ -622,7 +622,7 @@ function diagnosticMentionsInjectedGlobal(d: ts.Diagnostic): boolean {
   return text.includes("'process'") || text.includes("'Deno'");
 }
 
-// #2682 — ambient `Deno` namespace typing, injected import-scoped when the
+// #2684 — ambient `Deno` namespace typing, injected import-scoped when the
 // source references `Deno`. Declares ONLY the synchronous stdio surface js2wasm
 // lowers (`Deno.stdin.readSync` / `Deno.{stdout,stderr}.writeSync`), mirroring the
 // bare-`process` injection in buildNodeEnvDts. Type-level only — codegen lowers
@@ -644,7 +644,7 @@ declare namespace Deno {
 `;
 
 /**
- * #2682 — build the import-scoped ambient `Deno` `.d.ts` for `source`, or
+ * #2684 — build the import-scoped ambient `Deno` `.d.ts` for `source`, or
  * `undefined` when the program does not reference `Deno`. The reference is
  * approximated by a word-boundary regex, exactly like the bare-`process`
  * detection in `scanNodeEmuUsage`; a user that declares its own `Deno` triggers
@@ -686,7 +686,7 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
   // capability gate share one target model (see `resolveEmulateNode`).
   const emulateNode = resolveEmulateNode(analyzeOptions);
   const nodeEnvDtsSource = emulateNode ? buildNodeEnvDtsForSource(source, scriptKind) : undefined;
-  // #2682 — the ambient `Deno` typing is injected independently of `--emulate
+  // #2684 — the ambient `Deno` typing is injected independently of `--emulate
   // node` (Deno is its own runtime). Both synthetic surfaces share the single
   // NODE_ENV_DTS_NAME root; concatenate whichever the source touches.
   const denoEnvDtsSource = buildDenoEnvDtsForSource(source);
