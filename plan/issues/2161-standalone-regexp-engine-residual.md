@@ -445,3 +445,54 @@ regex-engine / result-shape work — **no value-rep / substrate dependency**.
 
 **#2161 stays open** as the umbrella tracker for the reflection (#2158-gated) and
 dynamic-receiver residuals once #2588-#2591 land.
+
+## Slice 9 (2026-06-25, sdev-async-sm) — const-foldable `new RegExp(...)` patterns
+
+**Landed.** Regrounded against current main (HEAD `7f66cc33e`, after #2588-#2591 +
+#2637 all merged): probed every residual RegExp bucket in `--target standalone`
+(empty importObject). The 4 architect slices are done; the dominant remaining
+buckets are #2175-gated reflection and the dynamic/`any`-typed receiver
+architecture — neither bounded. The **one genuinely bounded, substrate-independent
+win left** was the dynamic-constructor-pattern bucket, *narrowed to its
+compile-time-constant subset*.
+
+**Root cause (pinned):** `compileStandaloneRegExpConstructor`
+(`regexp-standalone.ts`) recovered the pattern via the narrow `staticStringValue`,
+which only accepts a bare string literal. Patterns that ARE compile-time-constant
+and CAN be compiled to native bytecode were rejected → lowered to a placeholder
+that **runtime-traps** (the documented "dynamic ctor patterns illegal-cast"):
+  - `new RegExp("a" + "b")` — string-literal concatenation,
+  - `const p = "ab"; new RegExp(p)` — `const`-bound literal,
+  - `new RegExp(/ab/g)` / `new RegExp(/ab/, "i")` — §22.2.3.1 copy-constructor.
+
+**Fix** (`regexp-standalone.ts`, +112 LoC, zero new host imports, zero substrate
+dep): new `staticConstStringValue` (recursively folds string literals, `const`-
+bound identifiers, and `a + b` concatenation; refuses template substitutions,
+numeric coercions, `let`/`var`/reassigned bindings) + `staticRegExpLiteralCopy`
+(the §22.2.3.1 copy form: flags arg OVERRIDES the literal's flags, omitted/
+`undefined` INHERITS them). Both `compileStandaloneRegExpConstructor` and
+`staticRegExpPatternFlags` (the receiver-recovery helper used by downstream
+`re.test`/`re.exec`/etc.) now route these const-foldable forms to the existing
+native `compileStandaloneRegExpPattern`. A genuinely-dynamic pattern (function
+param, `let`, reassigned) still resolves to `null` and keeps the prior dynamic
+behaviour — behaviour-preserving for every existing static form.
+
+**Validation.** New `tests/issue-2161-regex-const-ctor.test.ts` (9 cases: concat,
+const-bound, chained const+concat, copy-ctor inherit/override flags, downstream
+`re.test`, two no-regression controls, and a guard that a dynamic param is NOT
+mis-folded). All standalone, empty importObject, zero host-import leak. The
+pre-existing standalone-regex suites are unchanged by this slice (the handful of
+already-red "expects refusal" cases in `issue-1474`/`issue-1539` predate this
+slice — earlier slices (#1912) turned those static-invalid refusals into a
+runtime `throw`; not in this slice's scope and not in the CI equivalence gate).
+
+**Future architect-spec items (NOT this window — bounded budget call):**
+- **Dynamic / `any`-typed regex receivers** (`function f(re: RegExp){re.test(s)}`
+  returns wrong / `re.exec` → "Cannot convert object to primitive value"; truly-
+  runtime `new RegExp(runtimeString)` runtime-traps): needs a **runtime regex
+  compiler in wasm** (parse + compile-to-bytecode at runtime) and/or the
+  runtime-externref regex-receiver generalisation of `emitRegexExecArrayCall`.
+  Larger architectural slice — file as its own architect-spec issue.
+- **`RegExp.prototype` reflection (~126)** — still gated on **#2175** (in-progress;
+  standalone builtin-prototype-object representation). Both are the next-sprint
+  pickups for the #2161 umbrella.
