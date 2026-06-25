@@ -39,7 +39,9 @@ async function run(src: string): Promise<unknown> {
 
 describe("#2083 — host-glue vec exports gated on actual array usage", () => {
   it("arith-only program (no arrays) emits NONE of the vec exports (gc)", async () => {
-    const names = await exportNames(`export function test(): number { let s = 0; for (let i = 0; i < 10; i++) s = s + i; return s; }`);
+    const names = await exportNames(
+      `export function test(): number { let s = 0; for (let i = 0; i < 10; i++) s = s + i; return s; }`,
+    );
     for (const e of VEC_EXPORTS) expect(names, `${e} should be absent`).not.toContain(e);
   });
 
@@ -78,10 +80,16 @@ describe("#2083 — host-glue vec exports gated on actual array usage", () => {
   // not change what they compute, and array-using modules must still marshal
   // correctly through the host bridge.
   it("array-free module still runs correctly without the exports", async () => {
-    expect(await run(`export function test(): number { let s = 0; for (let i = 0; i < 10; i++) s = s + i; return s; }`)).toBe(45);
+    expect(
+      await run(`export function test(): number { let s = 0; for (let i = 0; i < 10; i++) s = s + i; return s; }`),
+    ).toBe(45);
   });
 
   it("array-using module still marshals correctly with the exports", async () => {
-    expect(await run(`export function test(): number { const a = [10, 20, 30]; let s = 0; for (const x of a) s = s + x; return s; }`)).toBe(60);
+    expect(
+      await run(
+        `export function test(): number { const a = [10, 20, 30]; let s = 0; for (const x of a) s = s + x; return s; }`,
+      ),
+    ).toBe(60);
   });
 });
