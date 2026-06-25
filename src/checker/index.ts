@@ -615,9 +615,43 @@ const DUP_IDENTIFIER_CODES = new Set([
   2451, // Cannot redeclare block-scoped variable 'X'
 ]);
 
-function diagnosticMentionsProcess(d: ts.Diagnostic): boolean {
+function diagnosticMentionsInjectedGlobal(d: ts.Diagnostic): boolean {
   const text = typeof d.messageText === "string" ? d.messageText : d.messageText.messageText;
-  return text.includes("'process'");
+  // A dup-identifier on EITHER injected ambient global (`process` or `Deno`)
+  // means the user declared it themselves — rebuild without the injection.
+  return text.includes("'process'") || text.includes("'Deno'");
+}
+
+// #2682 — ambient `Deno` namespace typing, injected import-scoped when the
+// source references `Deno`. Declares ONLY the synchronous stdio surface js2wasm
+// lowers (`Deno.stdin.readSync` / `Deno.{stdout,stderr}.writeSync`), mirroring the
+// bare-`process` injection in buildNodeEnvDts. Type-level only — codegen lowers
+// the member-call shape syntactically regardless (deno-api.ts). Faithful Deno
+// signatures: `readSync` returns `number | null` (null at EOF); `writeSync`
+// returns `number` (bytes written). Injected independently of `--emulate node`
+// (Deno is its own runtime; a Deno program should not need the Node flag).
+const DENO_STDIO_DECLS = `interface Deno_ReaderSync {
+  readSync(p: Uint8Array): number | null;
+}
+interface Deno_WriterSync {
+  writeSync(p: Uint8Array): number;
+}
+declare namespace Deno {
+  const stdin: Deno_ReaderSync;
+  const stdout: Deno_WriterSync;
+  const stderr: Deno_WriterSync;
+}
+`;
+
+/**
+ * #2682 — build the import-scoped ambient `Deno` `.d.ts` for `source`, or
+ * `undefined` when the program does not reference `Deno`. The reference is
+ * approximated by a word-boundary regex, exactly like the bare-`process`
+ * detection in `scanNodeEmuUsage`; a user that declares its own `Deno` triggers
+ * the dup-identifier rebuild-without-injection fallback.
+ */
+export function buildDenoEnvDtsForSource(source: string): string | undefined {
+  return /\bDeno\b/.test(source) ? DENO_STDIO_DECLS : undefined;
 }
 
 /**
@@ -652,7 +686,15 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
   // capability gate share one target model (see `resolveEmulateNode`).
   const emulateNode = resolveEmulateNode(analyzeOptions);
   const nodeEnvDtsSource = emulateNode ? buildNodeEnvDtsForSource(source, scriptKind) : undefined;
-  const injectNodeEnv = nodeEnvDtsSource !== undefined;
+  // #2682 — the ambient `Deno` typing is injected independently of `--emulate
+  // node` (Deno is its own runtime). Both synthetic surfaces share the single
+  // NODE_ENV_DTS_NAME root; concatenate whichever the source touches.
+  const denoEnvDtsSource = buildDenoEnvDtsForSource(source);
+  const nodeEnvDtsCombined =
+    nodeEnvDtsSource !== undefined || denoEnvDtsSource !== undefined
+      ? (nodeEnvDtsSource ?? "") + (denoEnvDtsSource ?? "")
+      : undefined;
+  const injectNodeEnv = nodeEnvDtsCombined !== undefined;
 
   // #2528 — pick the ambient lib composite for the chosen platform. Unset
   // platform → the DOM composite (byte-neutral with today); `--platform node`
@@ -665,7 +707,7 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
         return ts.createSourceFile(name, source, languageVersion, true, scriptKind);
       }
       if (injectNodeEnv && name === NODE_ENV_DTS_NAME) {
-        return ts.createSourceFile(name, nodeEnvDtsSource, languageVersion, true, ts.ScriptKind.TS);
+        return ts.createSourceFile(name, nodeEnvDtsCombined, languageVersion, true, ts.ScriptKind.TS);
       }
       const libSf = getLibSourceFile(name, languageVersion);
       if (libSf) return libSf;
@@ -707,7 +749,7 @@ export function analyzeSource(source: string, fileName = "input.ts", analyzeOpti
 
   if (
     injectNodeEnv &&
-    semanticDiagnostics.some((d) => DUP_IDENTIFIER_CODES.has(d.code) && diagnosticMentionsProcess(d))
+    semanticDiagnostics.some((d) => DUP_IDENTIFIER_CODES.has(d.code) && diagnosticMentionsInjectedGlobal(d))
   ) {
     ({ prog: program, syn: syntacticDiagnostics, sem: semanticDiagnostics } = buildProgram(false));
   }

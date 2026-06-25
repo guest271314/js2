@@ -333,7 +333,7 @@ export function tryCompileNodeFsCall(
  * `ptrLocal`/`lenLocal` are i32 locals already holding the destination linear
  * pointer and the requested length; `fdLocal` holds the fd.
  */
-function emitFdReadRuntime(
+export function emitFdReadRuntime(
   fctx: FunctionContext,
   fdLocal: number,
   ptrLocal: number,
@@ -383,7 +383,7 @@ function emitFdReadRuntime(
  *     memory[0..11] iovec/nwritten scratch matches `emitWasiWriteTail`; a single
  *     writeSync call never interleaves with another write over it.
  */
-function emitFdWriteRuntime(
+export function emitFdWriteRuntime(
   ctx: CodegenContext,
   fctx: FunctionContext,
   fdLocal: number,
@@ -554,7 +554,7 @@ function findObjectProp(obj: ts.ObjectLiteralExpression, name: string): ts.Expre
  * ref + the underlying i8 array ref + the element length into fresh i32/ref
  * locals. Returns those locals, or `null` if the arg isn't a GC Uint8Array.
  */
-function emitNodeFsResolveGcU8(
+export function emitNodeFsResolveGcU8(
   ctx: CodegenContext,
   fctx: FunctionContext,
   bufExpr: ts.Expression,
@@ -860,7 +860,7 @@ function emitNodeFsWriteSyncDataView(
 }
 
 /** Grow linear memory so [scratchStart, scratchStart + lenLocal) is addressable. */
-function ensureScratchPages(fctx: FunctionContext, scratchStart: number, lenLocal: number): void {
+export function ensureScratchPages(fctx: FunctionContext, scratchStart: number, lenLocal: number): void {
   const needPagesLocal = allocLocal(fctx, `__nodefs_pages_${fctx.locals.length}`, { kind: "i32" });
   fctx.body.push({ op: "i32.const", value: scratchStart } as Instr);
   fctx.body.push({ op: "local.get", index: lenLocal } as Instr);
@@ -887,7 +887,7 @@ function ensureScratchPages(fctx: FunctionContext, scratchStart: number, lenLoca
 }
 
 /** for j in [0, countLocal): dest[off + j] = scratch[scratchStart + j] (i8 array). */
-function emitScratchToArrayCopy(
+export function emitScratchToArrayCopy(
   fctx: FunctionContext,
   arrTypeIdx: number,
   arrLocal: number,
@@ -929,7 +929,7 @@ function emitScratchToArrayCopy(
 }
 
 /** for j in [0, countLocal): scratch[scratchStart + j] = src[off + j] (i8 array). */
-function emitArrayToScratchCopy(
+export function emitArrayToScratchCopy(
   fctx: FunctionContext,
   arrTypeIdx: number,
   arrLocal: number,
