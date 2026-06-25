@@ -2,7 +2,7 @@
 id: 2580
 title: "`.length` on an any/dynamically-mutated receiver returns numeric 0, not undefined (runtime property-presence)"
 status: in-progress
-assignee: ttraenkler/sd-value-rep-m3-bacc
+assignee: ttraenkler/sd-2580
 sprint: 66
 created: 2026-06-21
 priority: medium
@@ -1940,3 +1940,94 @@ highest-density, zero-regression increment of the 181-file lever. Authoritative
 gate = merge_group standalone floor (#2097) + the test262 net-regression gate;
 stop-the-line on any eject. Files changed: `src/codegen/object-ops.ts`,
 `src/runtime.ts`, `tests/issue-2580-m3-bacc-defineproperty-accessor.test.ts`.
+
+---
+
+# M3 — B-protoextend LANDED: inherited `Object.prototype[idx]` index read in the generic array-method loop (host) (2026-06-25, sd-2580, max-reasoning)
+
+> Verify-first, per-process (`runTest262File`, fresh process per file — the
+> in-process / parallel-scan trap avoided) + a runtime trace of the actual
+> `__extern_has_idx`/`__extern_get_idx` calls on CURRENT main. The architect
+> decision (route inherited reads through the ONE shared `%Object.prototype%`
+> walk, option ii-a, NOT a per-receiver `$proto` field) is honoured.
+
+## Confirmed mechanism (runtime-traced, host mode)
+
+The canonical `b-i-8` shape `Object.prototype[0]=true; Object.prototype[1]=false;
+Object.prototype[2]="true"; Array.prototype.indexOf.call({length:3}, true)` must
+return `0` — `obj[0]` walks the receiver's `[[Prototype]]` chain to
+`%Object.prototype%` and finds the inherited data property. On main it **fails**.
+A trace of the index-loop helpers showed exactly why:
+
+```
+[has_idx] idx=0 isWasm=true (idx in obj)=false ObjProtoHas=true
+[has_idx] idx=1 isWasm=true (idx in obj)=false ObjProtoHas=true
+[has_idx] idx=2 isWasm=true (idx in obj)=false ObjProtoHas=true
+```
+
+- The array-like plain-object receiver `{length:3}` is an **opaque WasmGC
+  struct** whose runtime `[[Prototype]]` is `null` — it does NOT inherit from the
+  host `Object.prototype`, so `(idx in obj) === false`.
+- `Object.prototype[i] = v` **DOES land on the real host `Object.prototype`**
+  (member-assignment lowers to a host write) — `idx in Object.prototype === true`.
+- The own-only `obj[i]` / sidecar lookups in `__extern_get_idx` /
+  `__extern_has_idx` never consulted that inherited slot → the generic-method
+  loop skipped every index → `indexOf`/`forEach`/`some`/… saw nothing.
+
+This is distinct from B-acc (OWN accessor descriptors via the `_wasmStructProps`
+sidecar) — B-protoextend is the **inherited-data-on-`Object.prototype`** subset.
+
+## The fix (2 runtime sites + 1 shared helper, host-scoped, hot-path byte-identical)
+
+`src/runtime.ts`: a module-level `_protoIndexHas(idx)` / `_protoIndexGet(idx)`
+pair that consults `%Object.prototype%[idx]` (canonical non-negative integer
+indices only), wired as the **FINAL fallback** in both `__extern_get_idx`
+(`Get`, §7.3.2) and `__extern_has_idx` (`HasProperty`, §7.3.12 — presence is
+value-independent, so an inherited slot holding `undefined` is still visited).
+
+Reached **only after** own struct fields + sidecar + own accessor descriptors all
+miss, so a real array / `$Vec` / any receiver carrying its own index is resolved
+earlier and never enters the arm — the hot path is byte-identical. Consults only
+`%Object.prototype%` (the single chain every object value shares); `Array.prototype[i]=v`
+inherited on REAL arrays already resolves through the native array path (verified
+passing on main), and no reachable test262 case sets `Array.prototype[i]` then
+calls a generic method on a *plain-object* receiver (that would be spec-incorrect).
+
+## Measured impact (per-process, single-process — the reliable signal)
+
+Cluster = 34 files writing `Object.prototype[<idx>]` across
+indexOf/lastIndexOf/every/some/forEach/map/filter/reduce/reduceRight + an 8-file
+hot-path own-data/real-array guard sample (42 total). Baseline `origin/main` vs
+branch, **one fresh process per file**:
+
+- **`indexOf/15.4.4.14-9-b-i-8`: fail → pass**
+- **`lastIndexOf/15.4.4.15-8-b-i-8`: fail → pass**
+- **0 regressions** in the hot-path / own-data / real-array sample (the two
+  `pass→compile_error` deltas a `-P 6` PARALLEL scan reported were **runner-trap
+  artifacts** — re-run single-process, both PASS on baseline AND branch; the
+  parallel `tsx` processes collide on the shared disk-compile-cache).
+
+The reachable confirmed flip this slice banks is the `b-i-8` inherited-data pair
+(+2). Several sibling `b-i-N` rows remain `fail`/`compile_error` for SEPARATE
+mechanisms surfaced during the scan (next laps, not this fix):
+- `lastIndexOf.call(arrayLike)` / various `.call` arms have a pre-existing codegen
+  `compile_error` (`Cannot create property 'declaredType' on boolean`) independent
+  of the proto walk — a method-support gap.
+- own-accessor-overrides-inherited on a *real array* (`b-i-11`) is B-acc
+  real-array territory.
+
+The authoritative conformance gate is the **merge_group standalone floor (#2097)
++ the test262 net-regression gate** (broad-reach, full-gate per
+`project_broad_impact_validate_full_ci`), which validates the whole `__extern_*_idx`
+blast radius — this PR rides it. New vitest:
+`tests/issue-2580-m3-protoextend.test.ts` (5 host cases: inherited indexOf /
+forEach / some, own-index-shadows-inherited, hot-path own-data unaffected) green.
+
+## What this lap does NOT touch
+
+- **B-fnctor (the `new F()` `$proto` lap, LAST + hardest, escape-analysis-gated)**
+  is explicitly out of scope — no fnctor / `new F()` / `.prototype=` code changed,
+  so this lap carries **no #1888-floor eject risk** (the B-fnctor hazard). Files
+  changed: `src/runtime.ts`, `tests/issue-2580-m3-protoextend.test.ts`.
+
+Issue stays `in-progress` (B-fnctor remains).
