@@ -1280,18 +1280,51 @@ export function hoistFunctionDeclarations(
       if (!ctx.funcMap.has(funcName) || reservedEntry) {
         // Save state so we can roll back if compilation fails
         const errorsBefore = ctx.errors.length;
-        const funcsBefore = ctx.mod.functions.length;
 
         compileNestedFunctionDeclaration(ctx, fctx, stmt, reservedEntry ? { reuseReservedEntry: reservedEntry } : {});
 
         // If new errors were added during hoisting, roll back
         if (ctx.errors.length > errorsBefore) {
           ctx.errors.length = errorsBefore;
-          ctx.mod.functions.length = funcsBefore;
+          // (#2029 function-index cluster) DO NOT truncate `ctx.mod.functions`
+          // back to `funcsBefore`. The failed nested compile pushed its OWN
+          // partially-built funcs AND — as a SIDE EFFECT — module-level runtime
+          // helpers it pulled in (`ensureObjectRuntime` registers
+          // `__extern_method_call` / `__apply_closure` / the `__proxy_*`
+          // dispatchers + their string/number/union dependencies;
+          // `ensureObjVecBuilders` / iterator-native / array-to-primitive
+          // likewise). Those helpers are recorded in `ctx.funcMap` (and gate
+          // `objectRuntimeTypes` / `ensureProxyRuntime`'s `funcMap.has(...)`),
+          // and they are perfectly VALID — content-addressed, idempotent, and
+          // potentially needed by later real code. A blanket
+          // `mod.functions.length = funcsBefore` removed them from the table while
+          // leaving their funcMap entries (and the registration latches) intact,
+          // so a later call site that re-needed the runtime found the guards
+          // already satisfied, SKIPPED re-registration, and baked the now-stale
+          // funcIdx into a dispatcher body (`fillClosedMethodDispatch` →
+          // `call 136` into a 129-func module → "function index out of range").
+          // Re-registering after a purge is fragile too: the runtime's own deps
+          // (`number_toString`, native-string helpers, union boxes) have separate
+          // latches that would also need resetting, in dependency order.
+          //
+          // Instead, keep every pushed func and neutralise ONLY the failed user
+          // function's own entry to a valid stub. The helpers stay in the table at
+          // their registered indices (funcMap consistent); the failed function
+          // becomes an unreferenced dead stub (locals are never DCE'd, so it must
+          // be a VALID body — `unreachable` satisfies any result type). Dropping
+          // its funcMap name lets `compileStatement` re-compile it at its real
+          // textual position (where captures are in scope), exactly as the
+          // pre-existing `hoistFailedFuncs` re-attempt intends.
+          const failedIdx = ctx.funcMap.get(funcName);
+          const failedEntry = failedIdx !== undefined ? ctx.mod.functions[failedIdx - ctx.numImportFuncs] : undefined;
           if (reservedEntry) {
             reservedEntry.locals = [];
-            reservedEntry.body = [];
+            reservedEntry.body = [{ op: "unreachable" } as Instr];
           } else {
+            if (failedEntry) {
+              failedEntry.locals = [];
+              failedEntry.body = [{ op: "unreachable" } as Instr];
+            }
             ctx.funcMap.delete(funcName);
             ctx.nestedFuncCaptures.delete(funcName);
             ctx.funcOptionalParams.delete(funcName);

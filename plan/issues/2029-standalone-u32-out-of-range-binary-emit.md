@@ -6,7 +6,7 @@ sprint: 66
 created: 2026-06-10
 updated: 2026-06-25
 priority: critical
-assignee: ttraenkler/sd-2038
+assignee: ttraenkler/sd-2029fn
 feasibility: medium
 reasoning_effort: high
 model: opus
@@ -553,3 +553,92 @@ replaceAll/searchValue-replacer-RegExp-*` (2, regexp-replacer string key) and
 accessor). Plus the `function index` funcIdx-shift cluster (8: TypedArray/Array
 `toLocaleString`, annexB RegExp, optional-chaining async) and 1 stray
 `for-of/iterator-next-reference` local-index — the next PR(s).
+
+## LANDED slice (2026-06-25, sd-2029fn) — function-index cluster (failed-nested-hoist strands object-runtime helpers)
+
+**Root cause — NOT dead-elimination (sd-2038's hypothesis was disproved by the
+per-process trace).** The characterized repro
+(`built-ins/Array/prototype/toLocaleString/user-provided-tolocalestring-grow.js`,
+`call 136` into a 129-func module at `__call_m_resize_1`) was traced emit-time:
+
+- At `fillClosedMethodDispatch`, `funcMap.get("__extern_method_call")` returned
+  **136 while the local table held only 132 funcs** — i.e. the funcMap entry was
+  ALREADY stale at fill time (delta exactly = the 4 dead imports? no — the delta
+  was the count of object-runtime helpers truncated below; see trace). The helper
+  named `__extern_method_call` had `actualTablePos = -1` — it was **not in
+  `mod.functions` at all** (along with `__apply_closure`, `__object_seal/freeze`,
+  and all 16 `__proxy_*` dispatchers — 30 orphaned funcMap entries pointing past
+  the table).
+- The orphan source: **`hoistFunctionDeclarations`** (`nested-declarations.ts`).
+  The test's `listToString` nested `function` declaration FAILS to hoist (its body
+  hits `__extern_toLocaleString`, standalone-unsupported → `reportError`). During
+  that failed compile it had pulled in the **entire object runtime** as a side
+  effect (86 funcs registered in `mod.functions` AND `funcMap`, plus
+  `objectRuntimeTypes` / a late import). The rollback did
+  `ctx.mod.functions.length = funcsBefore` — truncating those 86 helpers out of
+  the table — **but left their `funcMap` entries and the `objectRuntimeTypes` /
+  `ensureProxyRuntime` (`funcMap.has`) guards intact.** A later real
+  `rab.resize(...)` any-receiver call reserved `__call_m_resize_1`; its
+  `ensureObjVecBuilders` → `ensureObjectRuntime` found `objectRuntimeTypes` SET,
+  SKIPPED re-registration, and `fillClosedMethodDispatch` baked the stale funcIdx
+  (136) past the shrunken table → the encoder's "function index out of range".
+
+This is a NEW instance of `project_type_index_shift_and_deadelim`'s sibling for
+the **local function table**: `src/codegen/context/speculative.ts` (#1919) makes
+expression probes transactional over imports/funcMap, but the older
+nested-function-hoist rollback truncated `mod.functions` WITHOUT the matching
+side-table unwind.
+
+**Fix (`src/codegen/statements/nested-declarations.ts`, the failed-hoist
+rollback): do NOT truncate `ctx.mod.functions`.** The side-effect helpers are
+valid, content-addressed, idempotent, and potentially needed by later code —
+removing them is the over-reach. Instead keep every pushed func and neutralise
+ONLY the failed user function's own entry to a valid `unreachable` stub (local
+funcs are never dead-eliminated, so a leftover MUST be valid Wasm, not an empty /
+broken body), dropping its funcMap name so `compileStatement` re-compiles it at
+its real textual position (the pre-existing `hoistFailedFuncs` re-attempt). funcMap
+and the table stay in lockstep — no dispatcher can bake a stale index.
+
+**Why not "complete the truncation" (purge funcMap + reset `objectRuntimeTypes`
+→ re-register)?** Tried and REJECTED: the object runtime's own dependencies
+(`number_toString`, native-string helpers, union boxes) have separate
+registration latches that would ALSO need resetting in dependency order — a
+re-register-after-purge crashed a probe with `function index out of range —
+undefined at __to_property_key` (a purged dep baked as `undefined`). Keeping the
+helpers (no truncation) sidesteps the entire cascading-latch problem.
+
+**Downstream-effect audit:** the change is in the mode-agnostic hoist, but the
+truncation only ever stranded the standalone-only object-runtime/closed-method
+helpers (gc/host never reserves a dispatcher), so the stale-index crash was
+standalone-only and the fix is too. No stack-balance / return-type / index-shift
+fallout: the only behavioural delta is "a failed-hoist leftover func is an
+`unreachable` stub instead of being spliced out", and that func is unreferenced
+(dead) — `reservedEntry.body = []` (invalid for non-void returns) is now
+`[unreachable]` (strictly safer).
+
+**Row-delta (paired scan, my branch vs pristine, identical on the 3 touched
+files):** `built-ins/{Array,TypedArray}/prototype/toLocaleString` — **5 →
+0** `function index out of range` emit-crashes (now reach a downstream
+`__closure_5` instantiate type-mismatch / `Cannot convert object to primitive` —
+SEPARATE bugs, not emit crashes). optional-chaining: 0 funcidx crashes on both
+(`member-expression-async-this` PASSES; others runtime-fail, not emit-crash). No
+regression anywhere (annexB unchanged; see residual).
+
+**Validation:** new `tests/issue-2029-nested-hoist-funcidx-standalone.test.ts`
+(3/3) — proven to FAIL on pristine (2 standalone cases emit-crash) and PASS on
+this branch, plus a gc-mode no-regression control. tsc clean. Hoist/closure/2029
+suites: 59/59 tests pass (matches pristine; the cross-suite "failed file"
+collection noise is identical on pristine). #2151 / #2015 / #2038 / generator /
+standalone-coercion batch green. Broad emit-path change → relying on the
+merge_group test262 floor for full conformance
+(`project_broad_impact_validate_full_ci`).
+
+**Remaining function-index (separate producer, NOT this fix, PRE-EXISTING — out
+of traced scope):** `annexB/built-ins/RegExp/RegExp-{control-escape-russian-letter,
+invalid-control-escape-character-class}.js` (2) crash with `function index out of
+range — undefined at <generator fn>` — a `function* …()` native-generator funcMap
+lookup baking `undefined`, confirmed IDENTICAL on pristine (neither fixed nor
+regressed here). A distinct funcMap-returns-undefined producer in the
+generator-native lowering; route as its own slice. Plus the global-index
+regexp-replacer (2) + property-accessor (1) and the for-of/iterator-next
+local-index (1) residuals already noted above.
