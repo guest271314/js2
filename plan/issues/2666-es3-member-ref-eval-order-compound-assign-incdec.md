@@ -1,7 +1,8 @@
 ---
 id: 2666
 title: "≤ES3: member-reference base[prop] evaluation order in compound-assignment and prefix/postfix ++/-- (ToPropertyKey once, left-before-right)"
-status: ready
+status: in-progress
+assignee: ttraenkler/dev-2046
 created: 2026-06-25
 updated: 2026-06-25
 priority: high
@@ -77,3 +78,31 @@ base[prop] *= expr();   // toString must be called EXACTLY once
   write)" pattern. Fix: evaluate `base` and the property key once into temps,
   then read/modify/write through the temps.
 - Related (different root): #1938 (linear array element double-eval of RHS).
+
+## Resolution — COMPOUND-ASSIGN done (2026-06-25, dev-2046; inc/dec → #2675)
+
+**`base[prop] op= rhs` ToPropertyKey-ONCE: FIXED.** Root cause confirmed: the
+computed key flowed raw into BOTH `__extern_get` and `__extern_set`, each of
+which runs ToPropertyKey internally (host `_toPropertyKey`) — so a side-effecting
+`toString`/`valueOf` fired **twice** and the value came out `null`.
+
+- New **`__to_property_key(externref)->externref` host import** (`src/runtime.ts`)
+  wrapping `_toPropertyKey` (§7.1.19, Symbol-preserving). Standalone reuses the
+  existing native `__to_property_key` (`object-runtime.ts`).
+- **`compileElementCompoundAssignment`** (both externref arms,
+  `src/codegen/expressions/assignment.ts`): `emitToPropertyKeyOnce` coerces the
+  key ONCE right after it compiles to externref; the stored `keyLocal` (primitive
+  string / preserved Symbol) is reused by both the get and the set. A primitive
+  is idempotent under the host's internal ToPropertyKey → no second `toString`.
+- Verified (`tests/issue-2666.test.ts`, 7/7): ToPropertyKey once (`n===1`), value
+  correct, base-before-prop-before-rhs (`B()[K()] += R()` → "BKR"), string/array
+  keys unchanged. Adjacent #2659/#2663/delete suites green.
+
+**`++`/`--` on a computed object key — CARVED to #2675** (NOT in this PR). It is
+entangled with the **#2659-family struct-slot-vs-sidecar asymmetry** (an
+`__extern_set` to a typed-struct object updates the sidecar but `o.x` reads the
+slot) AND `obj[strKey]++` / `obj["x"]++` are **already broken on `main`**
+independent of ToPropertyKey (verified: return the old value, no update) — a
+DISTINCT pre-existing bug. #2675 tracks it; it is likely a clean win once the
+#2659 read/write asymmetry is fully resolved (connects to the acorn #2674
+read-side work). So #2666 stays `in-progress` until #2675 lands the inc/dec half.
