@@ -1,10 +1,11 @@
 ---
 id: 2045
 title: "linear Uint8Array (WASI): silent-corruption holes — name-keyed buffer registry, no bounds checks — plus escape-analysis demotion gaps (#1886 follow-up)"
-status: in-progress
+status: done
+completed: 2026-06-25
 sprint: 66
 created: 2026-06-10
-updated: 2026-06-24
+updated: 2026-06-25
 priority: critical
 feasibility: medium
 reasoning_effort: high
@@ -12,8 +13,9 @@ task_type: bugfix
 area: codegen, wasi
 language_feature: typed-arrays, linear-memory
 goal: standalone-mode
-assignee: ttraenkler/agent-acafb1
+assignee: ttraenkler/sd-2651
 related: [1886, 817]
+residual_note: "2026-06-25 (sd-2651): all SILENT-CORRUPTION holes closed — A.1/A.2 (landed), C.8 (landed), B.3/B.4 escape-demotion (landed #1991), and the C.7-successor readSync/writeSync explicit offset/length clamp (this PR). C.5 (loop-arena rewind) re-verified RESOLVED on current main by intervening work; C.7's process.stdin.read clamp OBSOLETED (#2633 removed that hallucinated API; errno already handled on the #2655 path). ONLY C.6 remains — a correctness-NEUTRAL doc/gating item (gate the all-target while-loop restructure on ctx.wasi OR document it), NOT a soundness bug; the issue itself rates it low priority. Closing the soundness issue; C.6 tracked as a low-pri doc follow-up."
 origin: "2026-06-10 sprint-61 code review of merged PR #1288 (#1886 Slice C): two pre-existing Slice-B silent-corruption routes were materially widened to function parameters, and the new interprocedural escape analysis has two fail-closed demotion gaps that break previously-valid WASI programs."
 reconcile_note: "2026-06-24 (PO reconcile vs upstream/main): GENUINELY OPEN — stays in-progress. Part A (A.1/A.2 silent-corruption) landed; C.8 (compound/inc-dec) landed (cs-2164); B.3/B.4 escape-demotion landed PR #1991 (commit a49198bbf). REMAINING dev-claimable residual = ONLY Part C C.5-C.7: loop-arena rewind ordering (loops.ts:70/773/1024), all-target while-loop restructure gate, process.stdin.read offset clamp + fd_read errno. Do NOT reground B.3/B.4 — they merged. Dispatch C.5-C.7."
 
@@ -398,3 +400,92 @@ origin/main, unrelated to this change.)
 
 **Still open:** C.5–C.7 (loop-arena rewind ordering, all-target while-loop gate,
 `process.stdin.read` clamp/errno). **#2045 stays in-progress.**
+
+## C.5–C.7 RE-GROUND (2026-06-25, sd-2651, `main` 6a36af19c)
+
+Re-probed all three on **current** main (per-process WASI run via the `runWasiMain`
+fd_write harness). Two of the three are already resolved/obsoleted by intervening
+work; one is a **live silent-corruption hole** that moved onto the new #2655 IO path.
+
+- **C.5 (loop-arena rewind ordering) — RESOLVED on current main.** The architect's
+  2026-06-23 probe (`fails to emit`) was on `b4ed81215`. Re-ran the exact shapes:
+  `var b = new Uint8Array(n)` declared in a loop + read after; outer buffer surviving
+  a loop that does its own linear allocs; capture-into-outer-let then read after. All
+  emit and run correctly (`linearU8ArenaResetInstrs` rewinds to the per-loop mark at
+  iteration END, and buffers allocated *before* the loop sit below the mark so the
+  rewind never clobbers them). No fix needed.
+- **C.7's `process.stdin.read(buf, off)` — OBSOLETED.** That API was a hallucinated
+  non-Node primitive; #2633 removed its lowering and replaced it with a clear compile
+  error pointing at `node:fs readSync(0, buf, { offset, length })`. The `fd_read`
+  **errno** half of C.7 is also already handled on the #2655 path
+  (`emitFdReadRuntime`: errno != 0 → 0 bytes).
+- **C.7's offset/length clamp — LIVE SILENT-CORRUPTION HOLE (the real residual).**
+  The concern migrated to the #2655 `readSync`/`writeSync(fd, buf, { offset, length })`
+  path (`node-fs-api.ts:emitNodeFsOffsetLength`, ~:434). When `length` is ABSENT it
+  defaults to `bufLen - offset` (sound — "impossible by construction"), but an
+  **explicit** `offset`/`length` is only `i32.trunc_sat_f64_s`'d with **NO clamp
+  against `bufLen`**. Verified OOB on current main:
+  - `writeSync(1, b/*len 4*/, {offset:0, length:64})` → **writes 64 bytes** (60 bytes
+    of arbitrary linear memory past the buffer — OOB read / info leak).
+  - `writeSync(1, b/*len 4*/, {offset:100, length:4})` → writes 4 bytes from `ptr+100`
+    (OOB read past the buffer).
+  - readSync is worse: an unclamped `offset`/`length` writes the syscall result OOB
+    into linear memory past the destination buffer (silent corruption, the A.2 class).
+
+  This is the same silent-corruption class as A.2 (which clamped element access);
+  the fix is the C.7 successor.
+
+### Fix (C.7 successor) — clamp offset/length in `emitNodeFsOffsetLength`
+
+Clamp centrally in `emitNodeFsOffsetLength` (one site covers all 4 paths:
+readSync/writeSync × linear/GC, since each calls it with its `bufLen` local):
+`offset = min(max(offset,0), bufLen)`; `length = min(max(length,0), bufLen - offset)`.
+This guarantees `offset + length <= bufLen` for the explicit case too, matching the
+absent-length branch's existing soundness invariant. **Clamp (fail-soft), not throw**
+— matches the surrounding code's style (the errno→0 handling, the permissive
+`trunc_sat`, the default-length branch) and the issue's acceptance criterion ("no
+silent write outside the arena allocation"); Node throws `ERR_OUT_OF_RANGE`, but a
+WASI soundness fix that must not regress valid programs clamps. Host/GC mode is
+untouched (this path is WASI-only).
+
+- **C.6 (all-target while-loop restructure gate) — DEFER.** Correctness-neutral
+  documentation/gating item (the issue itself rates it low priority); not a
+  soundness bug. Out of scope for this soundness slice.
+
+## C.7-successor — readSync/writeSync offset/length clamp (LANDED 2026-06-25, sd-2651)
+
+**Done — the last silent-corruption hole in the #2045 family is closed.** Fixed
+the missing bounds clamp on an EXPLICIT `offset`/`length` for node:fs
+`readSync`/`writeSync(fd, buf, { offset, length })` (the #2655 direct-WASI path).
+
+### Fix
+
+`src/codegen/node-fs-api.ts`:
+- New `emitClampI32(fctx, valLocal, hiLocal)` — clamps an i32 local in place to
+  `[0, hi]` via signed `select` (`val = min(max(val,0), hi)`).
+- `emitNodeFsOffsetLength` now clamps an EXPLICIT offset into `[0, bufLen]` and an
+  EXPLICIT length into `[0, bufLen - offset]` (remaining capacity computed from the
+  already-clamped offset). The absent-length default branch (`bufLen - offset`) was
+  already sound and is unchanged; the clamp only guards user-supplied values. One
+  site covers all four paths (readSync/writeSync × linear-backed/GC), since each
+  passes its own `bufLen` local. WASI-only; host/gc mode untouched.
+
+### Validation
+
+- `tests/issue-2045-readsync-writesync-clamp.test.ts` (10, WASI run via the
+  fd_read/fd_write mock): writeSync over-length / over-offset / offset+length>bufLen
+  / negative-offset / negative-length all clamp; in-range slice + no-options whole
+  buffer unchanged; readSync over-length does NOT write past the dest buffer;
+  readSync into an explicit offset places bytes correctly; readSync over-offset
+  reads 0.
+- Regression-clean: `issue-2045-*` (soundness/compound/escape-demotion), node:fs
+  `#2631`/`#2633`/`#2639` (47 total), `#2655` direct-WASI incl. wasmtime runs +
+  `#1886-slice-b` (14). tsc + prettier + biome(error) clean.
+- Before fix (verified on current main): `writeSync(1, b/*4*/, {length:64})` wrote
+  64 bytes (60 OOB); after: 4. `writeSync(1, b/*4*/, {offset:100,length:4})` wrote
+  4 OOB bytes; after: 0.
+
+**Issue closed.** All silent-corruption routes (A.1, A.2, C.8, C.7-successor) and
+both escape-demotion regressions (B.3/B.4) are fixed. C.5 resolved by intervening
+work; C.7-stdin obsoleted. Only C.6 (a correctness-neutral doc/gating item)
+remains as a low-priority follow-up — see `residual_note` in frontmatter.

@@ -1,8 +1,11 @@
 ---
 id: 2651
 title: "standalone: builtin constructor + prototype as a first-class VALUE (TypedArray ctor-iteration substrate)"
-status: in-progress
-assignee: ttraenkler/dev-builtin-ctor
+status: blocked
+blocked_on: 2580
+assignee: ttraenkler/sd-2651
+slices_done: "D2/M1 (PR #2043, commit 7374c34c6)"
+slices_remaining: "M3 (%TypedArray% intrinsic value-dispatch) — predecessor-stack on #2580 M3"
 sprint: 66
 created: 2026-06-24
 priority: high
@@ -602,3 +605,86 @@ s66 architect/senior-dev (value-rep lane). Coordinate with the #2580 M3 owner
 (`sd-value-rep-m3-…`) on the shared `[[Prototype]]` link (D4/R3) before starting
 slice M3. M1 + M2 are independent of #2580 and can start immediately after the
 Slice-0 sizing gate confirms the lever.
+
+## RE-MEASURE after M1/D2 landed (2026-06-25, sd-2651, `main` 6a36af19c)
+
+M1/D2 (`7374c34c6`, PR #2043) is **landed on main**. Per the Slice-0 verdict
+("re-measure the residual after M1 lands before committing M2/M3"), I re-ran the
+faithful per-process 3-bucket scan (`.tmp/measure-one.mjs`, one fresh process per
+file, host vs `--target standalone`) over **indexOf + at + every** (102 files,
+the descriptor-heavy + behavioral mix). The result **corrects the task-dispatch
+spec's "DEMOTE M3" guidance — M3 is now the dominant lever.**
+
+### Bucket table (indexOf+at+every, 102 files, 87 host-passing)
+
+| bucket                                                              | count | % host-pass |
+| ------------------------------------------------------------------ | ----: | ----------: |
+| host-pass (denominator)                                            |    87 |        100% |
+| pass standalone (already work — incl. M1/D2 direct-shape rows)     |    53 |         61% |
+| **def-fail = remaining lever**                                     |    34 |     **39%** |
+| — `ERR:Cannot convert object to primitive value` (**M3 keystone**) |    25 |     **29%** |
+| — `compile_error` (BigInt views + abrupt-completion — NOT #2651)   |     9 |         10% |
+
+### The keystone finding (verified per-process + per-shape probe)
+
+**`Object.getPrototypeOf(Int8Array)` returns `null` (ref.null.extern) in
+standalone.** The ctor-iteration harness opens with
+`var TypedArray = Object.getPrototypeOf(Int8Array);` (= the `%TypedArray%`
+intrinsic), then every row reads `verifyProperty(TypedArray.prototype.<m>, …)`.
+Because `Object.getPrototypeOf(Int8Array)` resolves to null, `null.prototype`
+throws "Cannot convert object to primitive value" → **25 of the 34 def-fails
+(74%) are this single gap.** M1/D2 only fixed the **direct** `Int8Array.prototype.<m>`
+static shape; the harness's dominant shape is `Object.getPrototypeOf(Int8Array)
+.prototype.<m>` (the **M3 %TypedArray% intrinsic**), which M1 did NOT touch.
+
+Verified shapes on current `main` (strict standalone, runtime values):
+- `Object.getPrototypeOf(Int8Array)` → `0`/null (should be the `%TypedArray%` intrinsic).
+- `Object.getPrototypeOf(Int8Array).prototype.indexOf.length` → TRAP.
+- `new (ctors[i])([1,2,3]).length` → `0` (M2: null view, no construct).
+- `(sample).constructor === Int8Array` → `false` (M3 identity).
+- bare `const TA: any = Int8Array; TA.name` → TRAP (D1 ctor-value).
+
+The 9 CE are out-of-scope: BigInt views (deliberately not wired by M1) +
+`return-abrupt-from-this-out-of-bounds.js` / `…tointeger-fromindex-symbol.js`
+(separate abrupt-completion / Symbol-coercion bugs, no `prototype`/`%TypedArray%`).
+
+### Corrected scope verdict
+
+- **The remaining #2651 lever is M3 (the `%TypedArray%` intrinsic singleton +
+  `Object.getPrototypeOf(<view>)` interception), NOT M2 alone.** The task-dispatch
+  note's "DEMOTE M3, enter at D2" reflected the pre-M1 state; **D2 shipped, so the
+  next bottleneck moved to M3.** ~25 rows in this 102-file sample (≈29% of host-pass)
+  flip when `Object.getPrototypeOf(<TypedArray view>)` returns a real `%TypedArray%`
+  intrinsic value whose `.prototype` resolves to `emitLazyNativeProtoGet(%TypedArray%)`
+  and whose `.prototype.<m>` member reads route through the M1 native-method-closure
+  path. Extrapolated to the ~443 host-passing ctor-iteration harness files: **~130
+  default-lane rows** (29% × 443).
+- **M3 is a substrate build, not a glue add.** `Object.getPrototypeOf(Int8Array)`
+  must yield a first-class intrinsic-constructor VALUE (D1/D4 shape) carrying a
+  `.prototype` link to the reserved `%TypedArray%` native proto (brand
+  `BUILTIN_BRAND_BASE+3`, glue already registered by `ensureTypedArrayIntrinsic-
+  NativeProtoGlue`). The reads on the harness's `TypedArray` alias are runtime-value
+  member reads (the #2580 dynamic-`any`-read family), so M3 MUST consume the #2580
+  M3 `[[Prototype]]`-walk substrate rather than invent a parallel one. This is the
+  go/no-go decision the Slice-0 verdict deferred to this re-measure.
+
+Building infra in place from M1: per-view + `%TypedArray%` brands reserved
+(`native-proto.ts:79-89`), intrinsic glue registered, `emitLazyNativeProtoGet`
+materializes the proto object. The missing pieces are (a) intercept
+`Object.getPrototypeOf(<view-identifier>)` (`calls.ts:5859`) to return the
+intrinsic VALUE, (b) make that value's `.prototype` + `.prototype.<m>` resolve,
+(c) the ctor-value identity for `sample.constructor === TA`.
+
+### PARKING DECISION (lead, 2026-06-25): M3 BLOCKED on #2580 M3
+
+The remaining M3 slice is **parked behind #2580 M3** (predecessor-stack), not built
+now. Rationale: #2580 M3 (in-progress, `sd-2580`) is landing the shared
+`[[Prototype]]` / `$Object.$proto` link representation. #2651 M3's `%TypedArray%`
+intrinsic value-dispatch (`Object.getPrototypeOf(<view>)` → a branded intrinsic
+VALUE whose `.prototype.<m>` reads route through dynamic branded-externref member
+dispatch) rides the SAME substrate. Building both concurrently is the exact
+#1888-class merge_group-eject + source-conflict risk the issue's validation
+discipline warns against. **The M3 picker:** predecessor-stack on `sd-2580`'s M3
+branch after it lands, consume its `[[Prototype]]`-link field/walk (do NOT invent
+a parallel one), and use the file:line map above. Re-measure the residual on
+then-current `main` first (the lever count above is the 2026-06-25 measurement).
