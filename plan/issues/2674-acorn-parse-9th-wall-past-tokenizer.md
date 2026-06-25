@@ -2,7 +2,7 @@
 id: 2674
 title: "acorn parse() 9th wall PAST tokenization (after #2664 type-write fix) — parseTopLevel/parseStatement array-push loop"
 status: in-progress
-assignee: ttraenkler/sd-2038
+assignee: ttraenkler/sd-2674c
 sprint: 66
 created: 2026-06-25
 updated: 2026-06-25
@@ -298,3 +298,271 @@ regardless of which import-adding PR gets batched alongside.
 - The 2 regressed private-field tests PASS (gc + standalone).
 - 9 vitest failures in getters-setters/etc. are **identical on clean upstream/main**
   — pre-existing harness issues, not from this change.
+
+## TYPEOF-RESIDUAL ROOT-CAUSE (2026-06-25, sd-2674b) — token-type singleton identity break in `canInsertSemicolon`
+
+Worked the residual on the **fixed+merged #2075 base** (my #2043 hardening landed).
+`parse("x")` STILL hangs. Localized end-to-end with single-compile SAB cap-throw
+probes (built `.tmp/bisect-*`, `.tmp/keyhist-*`, `.tmp/methhist-*`, `.tmp/typetrace-*`,
+`.tmp/eqtrace-*` — single acorn compile, per-import histogram + cap-throw; the
+`bisect()` the prior handoff referenced was never actually landed in
+`probe-driver.mjs`, only `probe()`).
+
+### Localization chain (all verified, on merged #2075)
+1. **bisect** `["x","1","1;","var x=1;"]` → first hang `parse("x")`, signature
+   `__extern_get 114k, __typeof_number 111k, __get_undefined 94k, __host_eq 91k,
+   __js_array_push/new/__extern_method_call 61k each, __is_truthy 56k`.
+2. **`__extern_get` key histogram** (CAP 200k): `type 48600, options 43746,
+   value 24300, ecmaVersion 19447, locations/ranges/start/lastTokEnd ~9720,
+   input/startLoc/body/lastTokEndLoc ~4860`. Parser-instance fields read via the
+   sidecar.
+3. **`__extern_method_call` NAME histogram** (CAP 120k): `isContextual 21812,
+   isUsingKeyword 10906, then parseStatement / parseExpression /
+   parseExpressionStatement / semicolon / eat / insertSemicolon /
+   canInsertSemicolon / unexpected / finishNode / startNode / push ALL ~5453` =
+   ONE per top-level loop iteration. ⇒ the hot loop is `parseTopLevel`'s
+   `while (this.type !== eof) body.push(parseStatement())`, ~5453 spins.
+4. **`this.type` value trace**: reads back `"name"` every iteration (+ occasional
+   `undefined`) — STUCK on the `x` identifier token, never advances to `eof`.
+5. **`__host_eq` operand trace** (the decider): the comparisons are
+   `this.type ("name") === types$1.eof` shown as **`name === {}`** — the RHS
+   singleton `types$1.eof` reads back as a **FIELD-LESS object `{}`** (its
+   `.label` is gone). So the identity/contents of the token-type singleton read
+   via the module-global `types$1.eof` member access is broken → the comparison
+   never matches → `canInsertSemicolon` (`this.type === eof || this.type ===
+   braceR || lineBreak.test(...)`) never returns true → ASI never fires →
+   `parseStatement`→`semicolon`→`unexpected` loops without advancing.
+   - SECONDARY: ~4 of the sampled `__host_eq` calls returned **`-> 1` (true)
+     while JS `===` is FALSE** — a strict-equality correctness wrongness on these
+     externref operands (re-boxed wrapper mis-compare). Possibly intersects the
+     JS-host externref `===` path in `binary-ops.ts`.
+
+### Root cause (pinned, not yet fixed)
+Acorn's token-type singletons live in a **module-level object literal**
+`var types$1 = { eof: new TokenType("eof"), name: new TokenType("name"), … }`
+(~50 entries; `TokenType` is `var TokenType = function TokenType(label,conf){…}`
+with 11 fields). At acorn scale, reading a singleton via the `types$1.<name>`
+member access returns a field-less / non-identical object, so
+`this.type === types$1.eof` (a TokenType externref identity compare in
+`canInsertSemicolon`) never holds. `this.type` itself reads correctly ("name");
+it is the **`types$1.<name>` holder-member read** (and/or its externref identity)
+that breaks.
+
+### NOT reproducible in isolation (the hard part)
+Every minimal repro PASSES on the fixed base — all via the real probe harness
+(full import object): `types.eof.label` read; two-reads identity; round-trip
+`this.type = types.eof` then `=== types.eof`; compare-in-a-separate-method
+(`isEof()`); named-fn-expr Parser + holder singletons + `next()`/`run()` loop.
+The break needs the FULL acorn type-table scale (~50 token types ⇒ many struct
+shapes registered ⇒ the read-dispatch candidate enumeration or externref
+identity for the holder-member singleton read only diverges at scale — the
+multi-shape class #2664/#2075 addressed for `this.type`, now for the
+`types$1.<name>` SINGLETON read on the holder object).
+
+### SEPARATE bug found en route (carve to its own issue — NOT on acorn path)
+A **function-DECLARATION used as a constructor** with prototype methods drops
+method dispatch: `function P(){ this.n=0 } P.prototype.run=function(){…};
+new P().run()` → runtime **"run is not a function"**. The function-EXPRESSION
+forms (`var P = function(){…}` and named `var P = function P(){…}`) BOTH work.
+Acorn uses only named function expressions, so this is NOT the acorn wall — but
+it is a real codegen correctness gap worth its own issue.
+
+### DECISIVE finding — the singletons read back as EMPTY objects (`__host_eq` operand dump)
+Describing both `__host_eq` operands during the hang (constructor + own-keys +
+`.label`):
+```
+A{ ctor=undefined keys=[label,keyword,beforeExpr,startsExpr] label="name" }   // this.type / this.value — a PROPER TokenType
+  ===
+B{ ctor=undefined keys=[]                                   label=<none>  }   // types$1.<name> read — an EMPTY {} (NO own keys)
+  -> 0   (and one sampled -> 1 — a spurious eqref TRUE on two distinct empties)
+```
+So operand B — the **`types$1.<name>` module-level singleton read** — comes back
+as an object with **ZERO own properties** (no `label`/`keyword`/…). The
+TokenType instances stored in the `var types$1 = { eof: new TokenType("eof"), … }`
+holder are EMPTY when read at acorn scale. `this.type` (A) is a full TokenType;
+the holder-member read (B) is `{}`. They can never be `===`, so the
+`switch (this.type) { case types$1.name: … }` in `parseExprAtom` (the
+#2656 switch-on-externref class) NEVER matches `name` → the ident path that calls
+`this.next()` is never taken → `this.type` stuck on `name` → `parseTopLevel`
+spins. (The `__host_eq -> 1` on two empties is a SECONDARY eqref false-positive.)
+
+### NOT reproducible in isolation even faithfully
+`types.eof.label` + identity on a module-level object literal of `new
+TokenType(...)` (incl. the faithful 11-field TokenType + `binop()`/`kw()` helper
+constructors + num/name/eof/semi/plusMin/_in entries) returns 11 (correct) —
+the empty-object behaviour only appears at FULL acorn scale (~50 token types,
+`keywords`/`keywordTypes` loops, `Object.defineProperties(Parser.prototype,…)`,
+spreads). Strongly suggests a **struct-shape collision / wrong-candidate
+resolution at scale**: the `types$1` holder or the TokenType struct gets read
+through a DIFFERENT (empty) struct shape than the one the instances were
+constructed into — the multi-shape value-representation family of #2664/#2075,
+now for module-level class-instance singletons in an object literal.
+
+### Next step (continue here — fixed #2075 base)
+Find why `types$1.<name>` resolves to an EMPTY struct at scale: (1) dump the
+struct types registered for the `types$1` object literal and the TokenType
+instances; (2) check whether the object-literal property read for `types$1.eof`
+picks a wrong/empty struct candidate (the `findAlternateStructsForField` /
+`__get_member` candidate set for `eof`/`name`/… on the holder), OR whether the
+`new TokenType()` results stored into the holder literal lose their fields
+(construction-vs-storage). Then apply the matching dispatch/representation fix
+(same family as #2664/#2075). ALSO carve: (a) the function-declaration-constructor
+method-dispatch bug above; (b) the `__host_eq` eqref false-positive on distinct
+empty structs. Sync with sd-2679 (#2679) before touching shared read/box/identity
+paths. STILL NOT the #1712 milestone — `parse()` does not yet return for a
+non-empty statement.
+
+## DECISIVE ROOT-CAUSE — `this.<field>` read routes through delete-aware plain `__extern_get`, breaking token-type identity (2026-06-26, sd-2674c)
+
+Worked on the fixed+merged #2075 base (re-merged `upstream/main`, which has
+#2075/#2079). `parse("x")` STILL hangs. Localized via 8 full-acorn instrumented
+compiles (~290s each on this box) + WAT dump + runtime diag exports. The prior
+"types$1 singletons read back EMPTY" framing was a HOST-MARSHALLING artifact, not
+the mechanism. The real chain is now PINNED end-to-end:
+
+### What is actually true (verified, not hypothesised)
+1. **The holder + its values are intact.** A diagnostic export appended to the
+   real acorn source (`.tmp/diag.mjs`, full scale) reads
+   `types$1.eof.label="eof"`, `types$1.name.label="name"`, and confirms identity
+   is preserved across repeated reads: `eof===eof: true`, `name===name: true`,
+   `held(name)===freshread(name): true`. So the stored token-type structs are
+   correct and the `===` OPERATOR matches them correctly **in a freshly-compiled
+   function**.
+2. **A FakeP class at full acorn scale also works** (`.tmp/diag2.mjs`, named
+   function-expression ctor): `switch=1/2 op=1/2` — both a `switch(this.type)` and
+   the `===` operator match token types correctly. So the bug is **NOT** a generic
+   switch/`===`/representation defect — it does not reproduce through a freshly
+   compiled class even at full scale.
+3. **There is now ONE Parser struct type** (`$__fnctor_Parser`, type idx 90) — the
+   #2075 dual-Parser shape is resolved. **There are NO `__get_member_<name>`
+   dispatchers in the compiled acorn WAT at all** (`grep '(func $__get_member'` →
+   none). So the #2075 read dispatcher is **never reserved** for the parser-method
+   reads — they take a different path.
+4. **`this.type` is read via `__extern_get` ~48.6k×** (the cap-throw key
+   histogram's top key is `type`; also `options`, `value`, `start`, `lastTokEnd`…
+   — all Parser instance fields). So parser-method `this.<field>` reads compile to
+   the **host sidecar `__extern_get`**, returning a host-proxy/externref value —
+   NOT `struct.get` on type 90, NOT the #2075 dispatcher.
+5. **Acorn uses `delete`** (4×, incl. `delete this.undefinedExports[name]`), so
+   `moduleUsesDelete` is TRUE.
+6. **`__host_eq` smoking gun** (`.tmp/eqtrace2*`): during the hang, the dominant
+   comparison is `{label="name" nkeys=10} === {label=U nkeys=0} -> 1` (TRUE) fired
+   ~4k× — i.e. a proper name-token compared against an empty-marshalling proxy
+   returns spurious TRUE. host_eq canonicalizes both operands through
+   `_hostEqComparableValue`→`_unwrapForHost` (the #1712 proxy-unwrap), which
+   **mis-resolves at full acorn scale** so the switch matches the WRONG case.
+
+### The mechanism (pinned)
+`tryEmitDeleteAwareDynamicGet` (property-access.ts ~2137-2197) fires for every
+`any`/`unknown`-typed receiver read **when `moduleUsesDelete`** (true for acorn).
+It emits a **plain `__extern_get(recv, "name")`** — deliberately, for
+delete-tombstone awareness — and does **NOT** try `struct.get` on the receiver's
+WasmGC struct, nor route through the #2075 `__get_member` dispatcher. The lifted
+acorn parser methods (`pp$N.parseExprAtom = function(){…}`) have a `this` that the
+compiler types as `any`/externref (NOT resolved to `$__fnctor_Parser`), so
+`this.type` takes this path → returns a **host sidecar/proxy** value that diverges
+in representation from the `struct.set`-written raw struct.
+
+Then in `parseExprAtom`'s `switch (this.type) { case types$1.name: … }`
+(strict-per-case → `emitSwitchStrictEq`, JS-host branch → `__host_eq`), both
+operands are host proxies; `__host_eq`'s `_unwrapForHost` collapses distinct
+case-label proxies onto one struct at scale → `this.type === types$1.<firstCase>`
+spuriously returns 1 → the wrong case runs → `this.next()` is never called →
+`this.type` stays `name` → `parseTopLevel`'s `while (this.type !== eof)` spins
+(~5453 iterations bounded; the `__js_array_push`/`__extern_method_call` ~160k
+signature is the per-iteration statement re-parse).
+
+### Why prior fixes / my attempt did not land it
+- #2664 (write dispatcher) + #2075 (read dispatcher) operate in
+  `emitNullGuardedStructGet`/`emitExternrefToStructGet`. The acorn parser reads
+  **bypass both** because `moduleUsesDelete` routes them to the plain
+  `__extern_get` in `tryEmitDeleteAwareDynamicGet` instead.
+- I tried adding a WasmGC `ref.eq` identity fast-path to `emitSwitchStrictEq`'s
+  JS-host branch (mirroring the `===` operator + the standalone branch). It is a
+  correct alignment (all 13 `tests/issue-2063-switch-strict-equality.test.ts`
+  pass) BUT it is **bypassed here**: the operands are host PROXIES, not WasmGC
+  eqrefs, so `ref.test eq` is false and the compare still falls to the broken
+  `__host_eq`. Reverted (symptom-patch, not root; adds `typeof_bigint` overhead to
+  every strict switch with no headline benefit). Re-confirmed: with that change
+  `parse("x")` still hangs and `__host_eq` is still called 239k× (proves the
+  ref.eq branch is never taken).
+
+### Fix direction for the next focused attempt (ranked)
+1. **(Cleanest) Resolve the lifted parser-method `this` to `$__fnctor_Parser`** so
+   `this.<field>` reads use the static `struct.get` arm (`compileInstanceMember`)
+   directly — raw struct, identity-preserving, no proxy. Touches method-lifting /
+   `this`-type resolution for prototype-assigned function expressions.
+2. **Route `tryEmitDeleteAwareDynamicGet` through `struct.get` / the #2075
+   `__get_member` dispatcher FIRST** when the receiver matches a known WasmGC
+   struct candidate (returning the raw struct), falling to the tombstone-aware
+   `__extern_get` only for genuinely dynamic/tombstoned props. Must preserve the
+   delete-tombstone semantics that path exists for (#2179) — design carefully.
+3. **Make `_unwrapForHost`/`_hostProxyReverse` collision-free at scale** (the
+   host-proxy canonicalization layer). Narrowest blast radius but addresses the
+   symptom (host_eq spurious match) rather than the representation divergence.
+
+All three are broad-impact value-representation changes → validate on the FULL
+`merge_group` floor, not a scoped sweep.
+
+### Carve-out bugs CONFIRMED live this session (own issues)
+- **(a) function-DECLARATION constructor drops prototype-method dispatch.** Hit
+  directly: a probe `function FakeP(){…}; FakeP.prototype.setName=…; new
+  FakeP().setName()` throws **"setName is not a function"** at runtime. The
+  **named function-EXPRESSION** form (`var FakeP = function FakeP(){…}`) works.
+  Acorn uses only named function expressions, so NOT on the acorn path — but a
+  real codegen gap.
+- **(b) `conf.startsExpr` not applied during inlined construction.** `name: new
+  TokenType("name", startsExpr)` (with `var startsExpr = {startsExpr:true}`) reads
+  back `startsExpr=false` (should be true) — the conf-object property read fails
+  during construction. A real read-dispatch correctness gap at scale (does not
+  itself cause the loop, but same family).
+
+### Reusable probes banked (`.tmp/`, paths point at this worktree)
+- `dump-wat.mjs` — compile acorn with `emitWat`, dump struct types + holder/
+  TokenType candidates (writes `.tmp/acorn.wat`, ~8.7MB).
+- `diag.mjs` + `diag-worker.mjs` — append a `_diag` export to real acorn,
+  read token singletons directly (field fidelity + identity).
+- `diag2.mjs` + `diag2-worker.mjs` — FakeP class at acorn scale, switch vs `===`.
+- `eqtrace2.mjs` + `eqtrace2-worker.mjs` — `__host_eq` operand histogram +
+  same-label-zero / spurious-true detector, cap-throw bounded.
+- `sw-repro.mjs` — small-scale switch-vs-`===` (passes; isolates the scale).
+- All single-compile, worker-thread + SAB, bounded. NOTE: each full-acorn compile
+  is ~290s on this box — reuse one compile, do not recompile per input.
+
+## RESOLVED BY #2085 — the 9th-wall HANG is fixed (re-verified 2026-06-26, sd-2674c)
+
+PR #2085 (`fix(#2664): dispatch under-applied dynamic method calls at max arity`)
+fixed the 9th-wall HANG via a DIFFERENT mechanism than this issue's comparison
+analysis: the host method-call bridge dispatched by the CALLER's `args.length`, so
+`this.parseExpression()` (0 args, 2 params) routed to `__call_fn_method_0` which
+omitted the arity-2 closure → null → `parseTopLevel` never advanced. Fixed by
+dispatching at max `__call_fn_method_N`.
+
+Re-verified on `upstream/main` WITH #2085 (`.tmp/diff-probe.mjs`, #1712 differential
+vs node-acorn oracle):
+
+| input | compiled result |
+|---|---|
+| `""` / `";"` | Program returned; DIVERGES only by an extra `$.sourceFile` field |
+| `"1"` / `"1;"` / `"true;"` | Program returned; DIVERGES: `$.body[0].expression` is `null` (Literal not attached¹) + extra `sourceFile` |
+| `"1 + 2 * 3;"` | THROWS `WebAssembly.Exception` (binary-expression wall) |
+| `"x"` / `"var x = 1;"` | THROWS `WebAssembly.Exception` (#2681 — `unexpected()` on `name` token) |
+
+The HANG is gone. **#1712 is NOT yet met**: numeric statements return a partial AST
+that diverges, and binary/identifier statements throw. So this issue's
+non-termination is RESOLVED; the remaining work splits into #2681 (identifier
+throw) + a binary-expression wall + the `expression:null`/`sourceFile` AST diffs.
+
+¹ `expression: null` may be a host AST-marshalling depth artifact (nested WasmGC
+node not deep-marshalled through `wrapExports` + `JSON.stringify`) rather than a
+real codegen defect — needs confirmation (read `.expression.type` via a direct
+struct walk, not host JSON).
+
+### This issue's comparison analysis directly explains #2681
+The `## DECISIVE ROOT-CAUSE` section above (the `this.<field>` read routing through
+the delete-aware plain `__extern_get` → host-proxy representation → JS-host
+`__host_eq` mis-canonicalization at scale → `switch(this.type){case types$1.name}`
+never matches) is exactly why, post-#2085, the identifier path reaches
+`unexpected()` and THROWS (#2681) instead of matching the `name` case. The 3 ranked
+fix directions + the banked `.tmp` probes apply to #2681. Recommend porting this
+analysis to #2681 and closing #2674 as resolved-by-#2085.

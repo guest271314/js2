@@ -97,3 +97,62 @@ that chain or a guard it consults. Suspects (verify):
 - Compiled-acorn `parse("x")` returns an ExpressionStatement / Identifier AST;
   `parse("var x = 1;")` returns a VariableDeclaration Program.
 - Full merge_group / test262 (codegen-adjacent).
+
+## ROOT CAUSE (pinned, sd-2674c 2026-06-26) — `this.<field>` read returns a host proxy that mis-compares in the parseExprAtom switch
+
+The `unexpected()` on `name` is because `parseExprAtom`'s
+`switch (this.type) { case types$1.name: … }` NEVER matches the `name` case, so it
+falls to `default → unexpected()`. Full end-to-end root-cause (8 instrumented
+full-acorn compiles) is banked in the #2674 issue file ("## DECISIVE
+ROOT-CAUSE" + "## RESOLVED BY #2085"). Summary:
+
+- Acorn uses `delete` ⇒ `moduleUsesDelete=true`. `this.<field>` reads on the
+  lifted parser methods (whose `this` the checker types `any`/externref) route
+  through `tryEmitDeleteAwareDynamicGet` (property-access.ts ~2137-2197) →
+  **plain `__extern_get`** (host sidecar/proxy), bypassing `struct.get` AND the
+  #2075 `__get_member` dispatcher (none exist in the acorn WAT). `this.type` ≈48.6k
+  reads via `__extern_get`.
+- The proxy representation diverges from the `struct.set`-written raw struct; the
+  JS-host `__host_eq` (`emitSwitchStrictEq` JS-host arm) canonicalizes both
+  operands via `_unwrapForHost`, which MIS-resolves at full acorn scale (smoking
+  gun: `name-token === empty-proxy -> 1` ~4k×). The switch matches the wrong case.
+- The `===` OPERATOR and the standalone path avoid this via Wasm-side `ref.eq`;
+  only the JS-host strict-switch + the dynamic-read path are affected.
+
+### Fix tractability (assessed, sd-2674c) — BROAD, banked per budget
+- **Ranked #1 (resolve lifted-method `this` → `$__fnctor_Parser`)**: acorn assigns
+  methods as `pp$N.method = function(){}` with NINE prototype-alias vars
+  (`var pp$2..pp$9 = Parser.prototype`). Binding the function-expression `this` to
+  the class struct requires **whole-program prototype-alias tracking** (`pp$N =
+  X.prototype`) + this-type binding across lifted function expressions. This is the
+  substrate fix (helps ALL delete-using class-method code) but is broad
+  escape-analysis work — **banked, not landed this budget** per lead guidance.
+- **Ranked #2 (route `tryEmitDeleteAwareDynamicGet` through the struct-candidate
+  dispatch first, `__extern_get` terminal)**: more localized BUT interacts with the
+  delete-tombstone semantics that path exists for (#2179) — a struct-field read that
+  IS a delete target would read stale via `struct.get`. Needs careful design to
+  keep tombstone-awareness only for genuinely-dynamic props. Medium risk.
+- **Ranked #3 (collision-free `_unwrapForHost`/`_hostProxyReverse` at scale)**:
+  narrowest blast radius but symptom-level (fixes host_eq mis-match, not the
+  representation divergence).
+- A speculative `ref.eq` fast-path in `emitSwitchStrictEq`'s JS-host arm was tried
+  + reverted (correct alignment, 13 #2063 tests pass, but BYPASSED here because the
+  operands are host proxies — not eqrefs).
+
+Reusable `.tmp` probes (worker-thread + SAB, single-compile) banked under #2674.
+Each full-acorn compile is ~290s on this box — reuse one compile per probe.
+
+### Carved sibling walls (now their own issues — do NOT bundle into #2681)
+- **#2686 — Binary-expression throw**: `parse("1 + 2 * 3;")` THROWS (separate from
+  the identifier path; likely the same token-type-comparison root via parseExprOp).
+- **#2687 — ExpressionStatement.expression is null**: CONFIRMED a REAL codegen
+  defect by a direct struct-walk (`.tmp/structwalk.mjs`), NOT a marshalling
+  artifact. For `"1"`/`"1;"`/`"true;"` the ExpressionStatement node has its
+  `expression` own-key present and directly readable but its value is genuinely
+  `null` (sibling `type` field reads correctly), so the parsed Literal is not
+  attached by `parseExpressionStatement`'s `node.expression = expr`. The extra
+  `$.sourceFile`/`loc`/`range` undefined fields are benign (acorn only sets
+  loc/range with options). So even the inputs that "parse" produce an incomplete
+  AST — the #1712 differential needs #2687 fixed too. **TRUE #1712 GAP is larger
+  than "just identifiers throw": even literal expression statements return
+  `expression: null`.**
