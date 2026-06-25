@@ -347,3 +347,96 @@ S3 wires `compileNewFunctionDeclaration`/`compileNewExpression` to consult
 `fnctorPrototypeObject[F]` (S2's readable global). THIS is the #1888-floor
 eject-risk slice — stop-the-line + escalate on ANY floor movement. Issue stays
 `in-progress`.
+
+## S3 — GROUNDING + IMPLEMENTATION PLAN + CARRY decision (2026-06-26, sd-protoextend, max-reasoning)
+
+> Verify-first grounded against current `main` (S2 landed, `351c1803`). **Decision:
+> CARRY S3 as a deliberate next slice** (per the lead's explicit offer) — it is the
+> broad `new F()`-instance representation change the issue always sized at ~3–5
+> days, NOT a one-pass safe slice, and rushing a representation change onto the
+> #1888-floor lane right after S2 demonstrated the floor's sensitivity (49-row
+> host-masked drop) is the documented eject hazard. S2 (the substrate: per-fnctor
+> prototype `$Object` + the `approvedNames`/`approved` gate) is banked and clean;
+> S3 builds on it with a precise plan below. NO S3 code landed.
+
+### The dispatch + interception point (verified)
+
+`compileNewFunctionDeclaration` (`new-super.ts:925`) is the single dispatch for
+`new F()` on a user fnctor; it has the `NewExpression` node `expr`, so the gate
+check is `ctx.fnctorEscapeGate?.approved.has(expr)` (node identity — exactly what
+S1 keys on). `compileFnctorNew` builds the `$__fnctor_<Name>` struct + ctor and at
+the call site (`:1209`) emits `call <ctor>` returning `{ kind: "ref", typeIdx:
+structTypeIdx }` (`:1210`; ctor result type set at `:1040`).
+
+### THE CRUX (why it is not a one-pass slice): the return-type / binding-type ripple
+
+Reconstructing an approved `new F()` as an `$Object` changes the call-site result
+from `(ref $__fnctor_F)` to **externref**. But the cluster's binding is NOT
+`any`-typed: `var child = new Con()` types `child` as the **Con instance type →
+`(ref $__fnctor_F)`** (TS infers the nominal instance type; only an explicit
+`const c: any` widens it). So an approved instance's binding local is a
+struct-ref, and a bare allocation swap would `local.set` an externref into a
+struct-ref local → invalid Wasm / type mismatch. **S3 must therefore RE-TYPE the
+binding local (and any param/return/field the instance flows into) to externref**,
+not just change the allocation. The S1 gate guarantees no typed `struct.get`
+own-field READ, but it does NOT guarantee the binding's static *type* is `any` —
+so the re-typing is the load-bearing, broad-radius part. (A narrower gate that
+ALSO requires an `any`-typed binding would be one-pass-safe but banks ~0 cluster
+rows, because the cluster uses untyped `var child`.)
+
+### Staged plan (each its own merge_group-floor-validated PR; stop-the-line)
+
+- **S3a — empty-body approved fnctors, `any`-binding only (the canary, ~0–few
+  rows, LOW risk).** Gate: `approved.has(expr)` AND the fnctor struct has 0 fields
+  AND the binding is `any`/`unknown`-typed (or inline `new F().x`). Emit
+  `__new_plain_object()` + seed `$proto` = `global.get(fnctorPrototypeObject[F])`
+  (snapshot at construction — spec-correct: `new F()` captures `F.prototype` at
+  construction; reuse `getOrMintFnctorProtoGlobal` from S2) + return externref. No
+  ctor body to run (empty). No binding re-typing (already `any`). This is the
+  zero-risk proof the allocation+`$proto`-seed path is sound; it does NOT bank the
+  cluster (cluster bindings aren't `any`). Validates the mechanism on the floor.
+- **S3b — binding re-typing for approved struct-typed instances (the cluster, the
+  HIGH-risk core).** When `new F()` is approved, re-type the binding local /
+  param / return that the instance flows into from `(ref $__fnctor_F)` to
+  externref, so the reconstructed `$Object` flows through the dynamic-read +
+  generic-method paths. This is the broad value-rep change; it needs a
+  flow/binding-retype pass and full-floor validation with a fix-iterate budget
+  (S2 took one). Hold behind S3a's floor result.
+- **S3c — own-field approved fnctors (`this.x=` consumed only dynamically).**
+  Reconstruct must run the ctor body with `this` bound to the `$Object` (each
+  `this.x=` → `__extern_set(instance,"x",v)`). Most cluster fnctors are empty-body
+  (CORRECTION 1), so this is a tail, not the bulk.
+- **S3d / S4 — the generic-method cluster lands** as a consequence once
+  reconstructed instances participate in the `$Object.$proto` walk + the indexed
+  read path (`forEach.call(child,cb)` visits inherited indices). Residual needs the
+  #983d method-dispatch body (track separately).
+
+### Risk register (carry-forward)
+
+- **Hot-path byte-identity (C1):** non-approved `new F()` (every typed/keep-static
+  instance) keeps the bespoke struct + ctor verbatim — the reconstruct branch is
+  the only change and fires only on `approved` (S1-conservative). Standalone-gated.
+- **Floor sensitivity:** S2's eject (an over-broad READ interception, host-masked
+  from the global gate) proves the #2097 standalone floor is the only gate that
+  catches a standalone-specific drop — S3 MUST validate through the merge_group
+  floor, stop-the-line + escalate on ANY floor movement, never a scoped sweep,
+  never re-enqueue.
+- **`$proto` snapshot ordering:** seed from `global.get(fnctorPrototypeObject[F])`
+  at the `new F()` site (construction-time snapshot) — the cluster runs
+  `F.prototype = proto` before `new F()`, so the global is populated; a later
+  `F.prototype = …` reassignment correctly does NOT retro-change existing
+  instances (spec §9.1.13).
+- **Binding re-typing blast radius (S3b):** this is the part that can ripple into
+  unrelated typed-instance handling if the retype is mis-scoped — the reason S3b is
+  staged behind the S3a canary and budgeted a fix-iterate cycle.
+
+### Files to touch (S3a first)
+
+`src/codegen/expressions/new-super.ts` — `compileNewFunctionDeclaration` (`:925`,
+add the `approved` + empty-body + any-binding gate) → a new
+`compileFnctorNewAsObject` helper (allocate `$Object`, seed `$proto`, return
+externref); reuse `getOrMintFnctorProtoGlobal` (export it from
+`src/codegen/expressions/fnctor-prototype.ts`). New
+`tests/issue-2660-s3-fnctor-reconstruct.test.ts` (standalone: `function Con(){};
+Con.prototype={foo:7}; const c:any=new Con(); c.foo === 7`). Issue stays
+`in-progress`; S2 banked, S3 carried.
