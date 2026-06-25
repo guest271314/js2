@@ -4249,17 +4249,44 @@ function emitToPrimitiveMethodExports(ctx: CodegenContext): void {
     };
 
     // Determine locals: param 0 (externref), local 1 (anyref), local 2 (eqref for closure)
+    // (#2679) locals 3/4 (__prev_this / __tp_result) thread `__current_this`.
     const hasClosureEntry = entries.some((e) => e.mode === "closure" || e.mode === "closure-extern");
     const locals: { name: string; type: ValType }[] = [{ name: "__any", type: { kind: "anyref" } }];
     if (hasClosureEntry) {
       locals.push({ name: "__closure", type: { kind: "eqref" } });
+    } else {
+      // Reserve slot 2 so the prevThis/result locals land at fixed indices 3/4
+      // regardless of the closure-entry branch.
+      locals.push({ name: "__closure_unused", type: { kind: "eqref" } });
     }
+    // (#2679) `__call_valueOf`/`__call_toString` must invoke the method with the
+    // RECEIVER as `this` (§7.1.1.1 OrdinaryToPrimitive step 4.b `Call(method, O)`).
+    // A compiled `valueOf(){…this…}` reads `this` from `__current_this`; the
+    // dispatch below `call_ref`s the closure body WITHOUT installing it, so the
+    // body saw a stale `this`. Install `__current_this` = param 0 (the receiver)
+    // around the dispatch and restore it afterward (nesting-safe).
+    const prevThisLocal2 = 3;
+    const tpResultLocal = 4;
+    locals.push({ name: "__prev_this", type: { kind: "externref" } });
+    locals.push({ name: "__tp_result", type: { kind: "externref" } });
+    const currentThisGlobalIdx2 = ensureCurrentThisGlobal(ctx);
 
     const body: Instr[] = [
       { op: "local.get", index: 0 } as Instr,
       { op: "any.convert_extern" } as Instr,
       { op: "local.set", index: anyLocal } as Instr,
+      // save __current_this, install the receiver
+      { op: "global.get", index: currentThisGlobalIdx2 } as Instr,
+      { op: "local.set", index: prevThisLocal2 } as Instr,
+      { op: "local.get", index: 0 } as Instr,
+      { op: "global.set", index: currentThisGlobalIdx2 } as Instr,
+      // dispatch (leaves result externref on stack) → capture
       ...buildDispatch(0),
+      { op: "local.set", index: tpResultLocal } as Instr,
+      // restore __current_this, return the captured result
+      { op: "local.get", index: prevThisLocal2 } as Instr,
+      { op: "global.set", index: currentThisGlobalIdx2 } as Instr,
+      { op: "local.get", index: tpResultLocal } as Instr,
     ];
 
     mod.functions.push({
