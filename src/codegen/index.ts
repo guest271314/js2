@@ -6082,6 +6082,18 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     // (not the node-process shim's stdin_read). Keep the inline fd_read import
     // when the reactor is active; otherwise stdin flows through the shim.
     needsFdRead = needsStdinReactor;
+  } else {
+    // #2655 — DIRECT WASI Preview-1 path: a standalone `--target wasi` module
+    // (no `--link-node-shims`) that imports `readSync`/`writeSync` from node:fs
+    // lowers fd-based `readSync(fd, buf, …)` / `writeSync(fd, buf, …)` straight to
+    // `wasi_snapshot_preview1.fd_read` / `fd_write` (a plain BLOCKING read — NOT
+    // the async reactor's non-blocking fd_read + poll_oneoff). `needsFdRead` is
+    // otherwise only set by the hallucinated `process.stdin.read(...)` shape or
+    // the stdin reactor; `needsFdWrite` only by console.log/process.std*.write —
+    // so a bare `import { readSync, writeSync }` would have no syscall import to
+    // call. Pull in the syscalls the imported bindings actually need.
+    if (ctx.wasiNodeFsFuncs.has("readSync")) needsFdRead = true;
+    if (ctx.wasiNodeFsFuncs.has("writeSync")) needsFdWrite = true;
   }
 
   // fd_write(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) -> i32
@@ -6508,6 +6520,23 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
  */
 export const WASI_STDIN_BUF_START = 64 * 1024;
 export const WASI_WRITE_SCRATCH_START = 128 * 1024;
+
+/**
+ * #2655 — DIRECT `readSync` iovec + nread scratch (page 0). The blocking
+ * `wasi_snapshot_preview1.fd_read(fd, iovs, iovs_len, nread)` syscall needs a
+ * `{ base, len }` iovec (8 bytes) and a `nread` out-slot (4 bytes) in linear
+ * memory. These deliberately use DEDICATED page-0 offsets — NOT the async
+ * reactor's `RL_FDREAD_IOV_OFFSET` (324) / `RL_FDREAD_NREAD_OFFSET` (332) — so a
+ * program that uses BOTH synchronous `readSync` AND the async stdin reactor
+ * never has its two iovec scratches alias. They sit above the reactor's
+ * 160–336 poll/iovec region and below the 1024 string-literal data base, so
+ * they collide with neither the iovec write scratch (0–24), the reactor, nor any
+ * string-literal segment. The read DATA lands in the page-1 stdin buffer
+ * (`WASI_STDIN_BUF_START`) for the GC-array copy path, or straight into the
+ * caller's `ptr+offset` for the linear-backed zero-copy path.
+ */
+export const WASI_READSYNC_IOV_OFFSET = 340;
+export const WASI_READSYNC_NREAD_OFFSET = 348;
 
 /**
  * #1886 Slice B — start of the linear-backed `Uint8Array` arena (page 4,
@@ -7129,20 +7158,23 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
  * #2639: Ensure `__wasi_write_any_string_fd(s: ref AnyString, fd: i32) -> i32`
  * exists and return its function index (lazy). Encodes the string to UTF-8 in
  * the shared linear scratch (the same encoder as the fixed-fd writer) and writes
- * it to the *runtime* fd via the imported `node:fs` `writeSync(fd, ptr, len)`
- * shim, returning the byte count `writeSync` reports. This backs the STRING
- * overload of `node:fs` `writeSync(fd, str, position?, encoding?)`, where the fd
- * is an arbitrary integer (not just stdout/stderr). It is gated to the
- * `linkNodeShims` path — the only path on which `writeSync(fd, …)` lowers — so
- * no inline `fd_write` tail is needed here.
+ * it to the *runtime* fd. This backs the STRING overload of `node:fs`
+ * `writeSync(fd, str, position?, encoding?)`, where the fd is an arbitrary
+ * integer (not just stdout/stderr). Two modes (#2655):
+ *   - shim (`--link-node-shims`): `writeSync(fd, ptr, len)` returns the byte count.
+ *   - direct (standalone `--target wasi`): build a `{ base=ptr, len }` iovec at
+ *     memory[0..7], call `fd_write(fd, iovs=0, 1, nwritten=8)`, load nwritten.
  */
 export function ensureWasiWriteAnyStringFdHelper(ctx: CodegenContext): number {
   const helperName = "__wasi_write_any_string_fd";
   const existing = ctx.funcMap.get(helperName);
   if (existing !== undefined) return existing;
 
-  // Runtime-fd writes only exist on the node:fs shim path.
-  if (!ctx.wasi || !ctx.linkNodeShims || ctx.nodeFsWriteSyncIdx < 0 || ctx.nativeStrTypeIdx < 0) return -1;
+  // Runtime-fd writes need either the node:fs shim funcidx (shim path) or the
+  // wasi_snapshot_preview1.fd_write import (direct path).
+  const directWrite = !ctx.linkNodeShims;
+  if (!ctx.wasi || ctx.nativeStrTypeIdx < 0) return -1;
+  if (directWrite ? ctx.wasiFdWriteIdx === undefined : ctx.nodeFsWriteSyncIdx < 0) return -1;
 
   ensureNativeStringHelpers(ctx);
   const flattenIdx = ctx.funcMap.get("__str_flatten");
@@ -7163,11 +7195,37 @@ export function ensureWasiWriteAnyStringFdHelper(ctx: CodegenContext): number {
 
   const body: Instr[] = [
     ...buildWasiStringEncodeToScratch(flattenIdx, strTypeIdx, strDataTypeIdx, layout),
-    // return writeSync(fd, WASI_WRITE_SCRATCH_START, O)  — bytes written.
-    { op: "local.get", index: FD } as Instr,
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "local.get", index: layout.O } as Instr,
-    { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
+    // return bytes-written for write(fd, WASI_WRITE_SCRATCH_START, O).
+    ...(directWrite
+      ? [
+          // iovec.base = scratch at memory[0]; iovec.len = O at memory[4].
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+          { op: "i32.store", align: 2, offset: 0 } as Instr,
+          { op: "i32.const", value: 4 } as Instr,
+          { op: "local.get", index: layout.O } as Instr,
+          { op: "i32.store", align: 2, offset: 0 } as Instr,
+          // errno = fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
+          { op: "local.get", index: FD } as Instr,
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "i32.const", value: 1 } as Instr,
+          { op: "i32.const", value: 8 } as Instr,
+          { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+          // errno != 0 → 0 bytes; else load nwritten at memory[8].
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [{ op: "i32.const", value: 0 } as Instr],
+            else: [{ op: "i32.const", value: 8 } as Instr, { op: "i32.load", align: 2, offset: 0 } as Instr],
+          } as Instr,
+        ]
+      : [
+          // writeSync(fd, WASI_WRITE_SCRATCH_START, O) — bytes written.
+          { op: "local.get", index: FD } as Instr,
+          { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+          { op: "local.get", index: layout.O } as Instr,
+          { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
+        ]),
   ];
 
   ctx.mod.functions.push({
@@ -12773,15 +12831,17 @@ function registerNodeBuiltinImports(ctx: CodegenContext, builtins: NodeBuiltinIm
       // preprocessing leaves a type-level `process` binding in the AST and
       // node-fs-api.ts lowers supported stream calls directly to WASI.
       if (builtin.moduleName === "process") continue;
-      // #2631 — `node:fs` is likewise a compile-time API surface under
-      // --link-node-shims when the program uses the fd-based synchronous
-      // primitives readSync / writeSync: those are stripped by import
-      // preprocessing and lowered to imported `node:fs` shim calls by
-      // node-fs-api.ts (tryCompileNodeFsCall). Path-based fs usage is
-      // rejected at the call site (see PATH_BASED_FS_FNS in calls.ts), not here.
+      // #2631/#2655 — `node:fs` is likewise a compile-time API surface when the
+      // program uses the fd-based synchronous primitives readSync / writeSync:
+      // those are stripped by import preprocessing and lowered by node-fs-api.ts
+      // (tryCompileNodeFsCall) to EITHER imported `node:fs` shim calls
+      // (--link-node-shims) OR direct `wasi_snapshot_preview1.fd_read`/`fd_write`
+      // syscalls (standalone --target wasi, #2655). Either way the `fs` builtin
+      // import itself is consumed at compile time and must not error here.
+      // Path-based fs usage is rejected at the call site (PATH_BASED_FS_FNS in
+      // calls.ts) / by the no-provider gate in tryCompileNodeFsCall, not here.
       if (
         builtin.moduleName === "fs" &&
-        ctx.linkNodeShims &&
         (ctx.wasiNodeFsFuncs.has("readSync") || ctx.wasiNodeFsFuncs.has("writeSync"))
       ) {
         continue;

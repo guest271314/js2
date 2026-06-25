@@ -1,20 +1,30 @@
 // Native Messaging host, compiled to standalone WASI by js2wasm.
 //
-//   npx js2wasm examples/native-messaging/nm_js2wasm.ts --target wasi --link-node-shims -o out
+//   npx js2wasm examples/native-messaging/nm_js2wasm.ts --target wasi -o out
+//
+// `--target wasi` ALONE (no `--link-node-shims`) emits a SELF-CONTAINED WASI
+// Preview-1 command module: it imports ONLY `wasi_snapshot_preview1` (fd_read /
+// fd_write), owns + exports its own `memory`, and runs directly under a WASI
+// host such as wasmtime — no node:fs shim, no Node runtime (#2655). This is the
+// loopdive/js2#389 reporter's exact use case: a host that runs under a WASI host,
+// explicitly "not chasing Node.js".
 //
 // This source uses REAL Node fd-based synchronous IO — `fs.readSync(fd, …)` /
-// `fs.writeSync(fd, …)` from `node:fs` — so the SAME file (a) compiles via
-// js2wasm to standalone WASI AND (b) runs UNMODIFIED under real `node`. The
-// earlier version used `process.stdin.read(buffer, offset)`, which matches NO
-// real Node API: `process.stdin` is an async Duplex stream with no synchronous
-// buffer-filling `read`. `fs.readSync` / `fs.writeSync` are the faithful
-// synchronous primitives (this is also what Javy uses: `Javy.IO.readSync`).
-// See loopdive/js2#389.
+// `fs.writeSync(fd, …)` from `node:fs` — so the SAME file ALSO runs UNMODIFIED
+// under real `node`. The earlier version used `process.stdin.read(buffer,
+// offset)`, which matches NO real Node API: `process.stdin` is an async Duplex
+// stream with no synchronous buffer-filling `read`. `fs.readSync` /
+// `fs.writeSync` are the faithful synchronous primitives (this is also what Javy
+// uses: `Javy.IO.readSync`).
 //
-// `readSync(0,…)` / `writeSync(1,…)` / `writeSync(2,…)` are fd-based (integer fd
-// 0=stdin, 1=stdout, 2=stderr), NOT path-based — no filesystem involved. Under
-// js2wasm they lower to imported `node:fs` shim calls (`node-fs.wat`, which maps
-// them to WASI fd_read / fd_write); under real node they call the real fs.
+//   npx js2wasm examples/native-messaging/nm_js2wasm.ts --target wasi --link-node-shims -o out
+//
+// is the VARIANT that lowers the same calls to imported `node:fs` shim calls
+// (`node-fs.wat`, which maps them to WASI fd_read / fd_write) — useful when the
+// same binary should link against an external `node:fs` provider rather than
+// owning the syscalls itself. Either way `readSync(0,…)` / `writeSync(1,…)` /
+// `writeSync(2,…)` are fd-based (integer fd 0=stdin, 1=stdout, 2=stderr), NOT
+// path-based — no filesystem involved; under real node they call the real fs.
 //
 // Native Messaging protocol frames each message as a 4-byte little-endian length
 // prefix followed by a UTF-8 **JSON** body, exchanged over the host process's
