@@ -294,7 +294,134 @@ Before any code, settle the honest row count (the scoping-correction above):
    the expected ~hundreds (whole harness family × strict), proceed M1→M3.
 - **Deliverable:** the bucket table here + a go/no-go on M2/M3.
 
+## Slice 0 — EXECUTED (sizing gate, 2026-06-24, sd-builtin-ctor-value, `main` d942ad074c)
+
+Per-process fork scan (one fresh process per test — NOT the in-process
+`runTest262File` loop, per the #2580 runner artifact), three buckets per file
+via the runner's own `wrapTest` + `buildImports` (so the harness `testTypedArray.js`
+inlining — `const constructors = [Int8Array, …]; const TypedArray =
+Object.getPrototypeOf(Int8Array.prototype).constructor` — is faithfully present):
+
+- **host** = default gc/JS-host target,
+- **def** = `--target standalone` (the lane that tolerates `env.global_<Name>`),
+- **strict** = `--target standalone` + `strictNoHostImports` (the true host-free
+  floor / #2097-class contract).
+
+Scanned **176** `built-ins/TypedArray/prototype/*` files across 12 method dirs
+(`indexOf, lastIndexOf, includes, at` = 98; `find, every, join, reduce, map,
+fill, copyWithin, keys` = 78). Skipped negative/async; the denominator is
+**host-passing** rows (the only ones where a standalone result is meaningful).
+
+### Bucket table (TypedArray prototype, n=176 files, 144 host-passing)
+
+| bucket | count | % of host-pass |
+|---|---:|---:|
+| host-pass (denominator) | **144** | 100% |
+| pass standalone (def AND strict — already work) | **88** | 61% |
+| **def-fail = THE #2651 LEVER** | **56** | **39%** |
+| — of which `Codegen error: <View>.prototype built-in static property value read … (#1907 / #1888 S6-b)` | **52** | **36%** |
+| — of which Symbol-coercion trap (`return-abrupt-tointeger-fromindex-symbol.js`, NOT #2651) | 3 | 2% |
+| — of which other CE | 1 | <1% |
+| **host-free FLOOR rows** (def-pass-via-leak BUT strict-fail) | **0** | 0% |
+
+### The three load-bearing findings (these CORRECT the spec's hypotheses)
+
+1. **The leak masks NOTHING — `floor = 0`.** Every one of the 88 def-pass rows
+   ALSO passes strict (host-free); every def-pass row that carried a
+   `global_<Name>` import passed strict too. So the spec's central hypothesis —
+   "the default lane passes via the `env.global_<Name>` leak, masking the gap" —
+   is **FALSE for this cluster**. The `global_<Name>` import is present but **not
+   load-bearing**: the rows that pass, pass host-free; the rows that need the
+   substrate **fail the DEFAULT lane too**, with a hard CE.
+
+2. **The lever is a CE, not a null/leak — and it is the `<View>.prototype`
+   value read, NOT the bare constructor.** 52 of the 56 def-fails (**92.9%**) are
+   the **`#1907 / #1888 S6-b` `<View>.prototype built-in static property value
+   read` CE**. The exact trigger (verified by compiling the wrapped form +
+   reading the failing line): the runner's `needsTypedArrayBinding` shim
+   `const TypedArray = Object.getPrototypeOf(Int8Array.prototype).constructor;`
+   combined with `propertyHelper.js`'s `verifyProperty(TypedArray.prototype.<m>,
+   …)` — i.e. reading **`<View>.prototype` (and its members) as a VALUE**. The
+   bare *constructor* value (`[Int8Array, …]`, `new TA(...)`) is NOT the blocker
+   for these rows.
+
+3. **`D5` (suppress `env.global_<Name>` under standalone) moves ZERO rows — do
+   NOT land it as a row-mover.** Confirmed directly: the def-fail CE is the
+   `<View>.prototype` `$NativeProto`-glue gap (`Int8Array.prototype built-in
+   static property value read`), which is independent of the `global_` import
+   (the message contains no `global_`). Removing the leak is pure host-free
+   hygiene (drops a non-load-bearing import) but flips 0 conformance rows and
+   risks perturbing the 88 passing rows. **D5 is demoted to optional cleanup, NOT
+   a Slice-0 deliverable, and was deliberately NOT landed.**
+
+### Cross-cluster check — the lever is TypedArray-SPECIFIC (does NOT generalize to Number/Math)
+
+Scanned **60** `built-ins/Number/prototype/{toString,toFixed,toPrecision,
+toExponential}` files (47 host-passing): **19 def-fail, but ZERO are the S6-b
+builtin-value-read CE** — they are 15 `fail` (value/precision bugs, e.g.
+`toExponential` return-values) + 4 `trap` (illegal-cast / Symbol). So the
+Number/Math standalone residual is a **method-correctness lane, not the #2651
+substrate.** The coordinator's "every remaining standalone lane is dominated by
+#2651" framing holds for the **TypedArray** family specifically (where the
+ctor-iteration harness + `%TypedArray%` intrinsic + `verifyProperty(TA.prototype,
+…)` force the `.prototype`-value read); Number/Math def-fails are a separate
+(method-body) lever. `floor = 0` in Number too.
+
+### Extrapolated row count #2651 unlocks
+
+The 12-dir TypedArray sample is representative of the **540-file ctor-iteration
+harness cluster** (the files that `include testTypedArray.js`); the lever rate is
+density-variable by dir (descriptor-heavy dirs `at`/`includes`/`name`/`length`/
+`prop-desc` ≈ 50%; behavioral dirs `find`/`every` ≈ 18%), blended **≈ 36%
+substrate-pure (S6-b CE)** of host-passing rows:
+
+- **Measured-sample rate applied to the 540 harness files:** ~0.36 ×
+  (host-passing fraction ≈ 0.82 × 540 ≈ 443) ≈ **~160 TypedArray prototype rows**
+  flip when the `<View>.prototype` `$NativeProto` value-read CE is resolved
+  (D2/M1). This aligns with the #1907 harvest's `Int8Array.prototype` 460+52
+  -record signature being the single largest unmapped builtin-value-read pair.
+- **All in the DEFAULT lane** (not the strict floor) — so they bank against the
+  committed `test262-current` standalone baseline immediately, no
+  strict-mode-only caveat.
+- **host-free-floor bonus: 0** (the leak masks nothing).
+- **identity/intrinsic rows** (`Object.getPrototypeOf(TA)===…`,
+  `sample.constructor===TA`): folded INTO the 36% — they surface as the same
+  `.prototype`/`%TypedArray%` value-read CE, not a separate passing-but-wrong
+  bucket (the CE refuses *before* any identity check runs, so no distinct
+  identity bucket exists).
+
+### VERDICT (Slice 0 go/no-go) — re-prioritize M1 onto D2, drop the bare-ctor framing, skip D5
+
+- **GO on M1, but RE-SCOPE it: the core M1 work is D2 (wire the reserved
+  TypedArray `$NativeProto` glue so `<View>.prototype.<member>` value reads
+  resolve host-free), NOT the D1 bare-constructor singleton.** The harness rows
+  are gated on `<View>.prototype`-as-value — the **#1907/#1888 S6-b
+  per-builtin-whitelist residual**, exactly the `Int8Array.prototype` 460+
+  signature the #1907 harvest flagged as the #1 standalone codegen-refusal pair.
+  M1 = add `ensure<View>NativeProtoGlue` + the `%TypedArray%` intrinsic glue (one
+  shared member CSV), mirroring the landed `ensureDateNativeProtoGlue`. Estimated
+  **~160 default-lane rows**.
+- **D1 (bare-constructor `$NativeCtor` singleton) + M2 (`new <ctorValue>`) +
+  M3 (intrinsic identity) are NOT the primary lever** for this cluster — the
+  measured def-fails do not bottleneck on them. Keep them as **follow-on slices
+  for the residual** (rows that, after D2, still read the bare ctor as a value or
+  do `new TA()` over an iterated value), but **prioritize D2/M1 first**;
+  re-measure the residual after M1 lands before committing M2/M3.
+- **D5 (`global_<Name>` suppression): DROP as a row-mover** (0 rows); optional
+  host-free-hygiene cleanup only, behind its own gate, never bundled with M1.
+
+This sizing was the deliverable. No code landed (D5 proved not worth landing as a
+row-mover). The measurement instrument (`.tmp/size-one.mjs` per-process, 3-bucket
+via `wrapTest`+`buildImports`) is the faithful path for any re-measure.
+
 ### Slice M1 — ctor-value singleton + name/BYTES_PER_ELEMENT/prototype reads (the core; depends on D1/D2/D5)
+
+> **Slice-0 re-scope (2026-06-24):** the MEASURED M1 lever is **D2** (wire the
+> reserved TypedArray `$NativeProto` glue so `<View>.prototype.<member>` value
+> reads resolve host-free) — ~160 default-lane rows, the #1907 S6-b
+> `Int8Array.prototype` residual. The D1 bare-`$NativeCtor`-singleton +
+> BYTES_PER_ELEMENT/name reads below are NOT the bottleneck for the harness
+> rows; demote them to a follow-on residual slice and build D2 first.
 
 - New `src/codegen/builtin-ctor-globals.ts` (mirror `builtin-static-globals.ts`):
   `emitBuiltinCtorValue(ctx, fctx, name)` → lazy `$__builtin_ctor_<Name>`
