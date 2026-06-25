@@ -28,20 +28,40 @@ export function allocLocal(fctx: FunctionContext, name: string, type: ValType): 
  */
 export interface LocalsSnapshot {
   readonly localsLen: number;
-  /** Names present in `localMap` at snapshot time (keys are stable strings). */
-  readonly mapNames: ReadonlySet<string>;
+  /**
+   * Full `localMap` entries (name → slot index) at snapshot time. Restoring the
+   * complete map — not just the key SET — is required because a speculative
+   * compile may **re-point an EXISTING name** to a freshly-allocated slot, not
+   * only add new names: closure-capture boxing
+   * (`fctx.localMap.set(cap.name, boxedLocalIdx)` in closures.ts) re-aims an
+   * outer variable at its boxed ref-cell. A key-set-only snapshot can delete the
+   * newly-added box slot but leaves the outer name pointing at the (now
+   * truncated) box index, so a post-rollback read of that variable emits a
+   * `local.get` past the function's local count — `local index out of range`
+   * at emit time. #2029 (tagged-template tag = a closure capturing an outer
+   * local; the tagged-template probe boxed `calls`→slot N, rolled back, and
+   * `return calls` then read the stale slot N).
+   */
+  readonly mapEntries: ReadonlyArray<readonly [string, number]>;
+  /** `boxedCaptures` names present at snapshot time (to drop added ones). */
+  readonly boxedNames: ReadonlySet<string>;
 }
 
 export function snapshotLocals(fctx: FunctionContext): LocalsSnapshot {
   return {
     localsLen: fctx.locals.length,
-    mapNames: new Set(fctx.localMap.keys()),
+    mapEntries: Array.from(fctx.localMap.entries()),
+    boxedNames: fctx.boxedCaptures ? new Set(fctx.boxedCaptures.keys()) : EMPTY_SET,
   };
 }
 
+const EMPTY_SET: ReadonlySet<string> = new Set<string>();
+
 /**
  * #1847 — undo allocations made since `snap`: truncate the locals vector and
- * delete every `localMap` name that wasn't present at snapshot time. Does NOT
+ * restore `localMap` to its EXACT snapshot state (drop added names AND reset
+ * re-pointed existing names to their snapshot slot — see {@link LocalsSnapshot}
+ * `mapEntries` for why the value, not just the key, must be restored). Does NOT
  * touch `fctx.body` — callers truncate that themselves (the body length to
  * roll back to is site-specific and often captured separately).
  *
@@ -56,9 +76,20 @@ export function restoreLocals(fctx: FunctionContext, snap: LocalsSnapshot): void
   if (fctx.locals.length > snap.localsLen) {
     fctx.locals.length = snap.localsLen;
   }
-  // Drop localMap names added after the snapshot.
-  for (const name of fctx.localMap.keys()) {
-    if (!snap.mapNames.has(name)) fctx.localMap.delete(name);
+  // Restore `localMap` to its exact snapshot state: clear and re-insert every
+  // snapshot entry. This both drops names the probe ADDED and resets names the
+  // probe RE-POINTED (e.g. closure-capture boxing) to their original slot.
+  fctx.localMap.clear();
+  for (const [name, idx] of snap.mapEntries) {
+    fctx.localMap.set(name, idx);
+  }
+  // Drop `boxedCaptures` entries the probe added — a stale box marking would
+  // make a post-rollback read of the variable dereference a ref-cell that no
+  // longer exists (its box local was truncated above).
+  if (fctx.boxedCaptures) {
+    for (const name of fctx.boxedCaptures.keys()) {
+      if (!snap.boxedNames.has(name)) fctx.boxedCaptures.delete(name);
+    }
   }
   // Prune any temp-free-list entries that now point past the truncated vector.
   if (fctx.tempFreeList) {
