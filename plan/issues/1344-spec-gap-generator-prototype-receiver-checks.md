@@ -245,3 +245,74 @@ desync → another net-53 class. This is NOT just hoisting a throw to a stub.
 5. Then (separate follow-on slices, still #1344): `.throw()` routing,
    AsyncGenerator/AsyncIterator prototype checks, GeneratorPrototype-as-object
    reification — see the remaining-parts list above.
+
+## RE-GROUND (2026-06-25, sd-2651, `main` 6a36af19c) — the receiver-check framing is STALE; residual is the try/catch/finally + `.throw()` state machine
+
+Slice 1 (PR #1732, the receiver-brand TypeError) **MERGED** on 2026-06-19 (commit
+`d154a77d8`) — the inline `emitBrandCheckTypeError` is on main at
+`generators-native.ts:1899`. The suspended note's "parked, net-53, option-A
+shared-helper refactor" describes a state that **no longer applies** (the slice
+landed; the baseline has since refreshed many times and absorbed it). So the
+option-A refactor is NOT the remaining work.
+
+### Current fail buckets (baseline jsonl, current main) — NOT 52+12 receiver checks
+
+| suite | fail | shape |
+| --- | ---: | --- |
+| `built-ins/GeneratorPrototype` | **31** | 15 `return/*`, 13 `throw/*`, 3 `next/*` — **26 are `try-*`** |
+| `built-ins/AsyncGeneratorPrototype` | 2 | sibling PRs resolved the async receiver bucket |
+| `built-ins/AsyncIteratorPrototype` | 7 | `Symbol.asyncDispose` (explicit-resource-mgmt; separate feature) |
+
+The 31 `GeneratorPrototype` fails decompose: **9 pure `try-finally`, 8 pure
+`try-catch`, 10 nested `try-finally+catch`, 2 state-guard, 2 other.** The
+receiver-brand half is DONE; the residual is the **`.throw()` / `.return()`
+abrupt-completion state machine through `try`/`catch`/`finally`.**
+
+### Verified mechanism (per-process + per-shape probe)
+
+1. **The native-generator planner BAILS on any `try` with a `catch` clause OR a
+   yielding `finally`** — `generators-native.ts:377` (`if (stmt.catchClause ||
+   !stmt.finallyBlock) return fail()`) + `:378`
+   (`statementsAreYieldFree(finallyBlock)` required). Such generators fall back to
+   the host path, which ALSO mishandles `.throw()` injection.
+2. **`.throw()` is not routed through native dispatch at all**
+   (`tryCompileNativeGeneratorMethodCall` early-returns for `throw`, `:1999`;
+   `compileDirectNativeGeneratorMethod` returns undefined for it, `:1821`).
+3. **The resume function handles mode=1 (`.return()` abrupt) but NOT mode=2
+   (`.throw()` injection)** — `:1448-1481` runs `abruptResume.finalizers` and
+   completes with `doneState`; there is no arm that injects a throw at the
+   yield-resume point and routes it through the enclosing `catch`, nor one that
+   DEFERS the throw across a yielding finally.
+4. **The hard sub-case (the actual test262 shapes):** `throw/try-finally-within-try.js`
+   has `finally { yield 3; }` — `.throw()` at `yield 2` must run the finally
+   (which yields 3, done:false, throw PENDING), and only the NEXT `.next()`
+   completes the finally and THEN propagates the deferred throw. This needs
+   yielding finalizers + deferred abrupt completions, which the
+   `statementsAreYieldFree(finally)` gate currently refuses outright.
+   (Simplified probes with a NON-yielding finally already pass — confirming the
+   gap is specifically yielding-finalizer + catch-state decomposition, not the
+   basic finally path.)
+
+### Proposed slicing (each a full-gate PR; the receiver half is NOT it)
+
+- **S-A — `.throw()` into `try/finally` (non-yielding finally) via mode=2.** Route
+  `throw` through native dispatch; add a resume-function mode=2 arm that runs
+  finalizers then RE-THROWS (vs mode=1's normal completion). Smallest
+  self-contained slice; serves part of the 9 pure-try-finally + the simple
+  throw-no-try propagation hardening. NO planner-catch changes.
+- **S-B — yielding finalizers + deferred abrupt completion.** Lift the
+  `statementsAreYieldFree(finally)` gate; the plan must model a finally as its own
+  yield-capable sub-states and carry a pending-completion (throw/return) across
+  the finally's yields. Serves the `*-within-try`/`*-within-finally` shapes.
+- **S-C — `try/catch` state decomposition.** Stop `fail()`ing on `catchClause`;
+  decompose catch into states with a per-yield-state catch-handler target so
+  mode=2 jumps to the catch instead of propagating. Serves the 8 pure-try-catch +
+  feeds the 10 nested.
+- **S-D — `AsyncIteratorPrototype Symbol.asyncDispose`** is a SEPARATE
+  explicit-resource-management feature (7 fails); split to its own issue.
+
+**Scope reality:** S-B/S-C are a multi-day generator state-machine build (the
+2026-05-28 triage's "NOT a localized fix"). S-A is the tractable first slice.
+sd-2651 has verified all of the above on current main; no code landed in this
+re-ground pass (analysis + slicing only) pending a go/no-go on committing the
+multi-day S-B/S-C build vs landing S-A first.
