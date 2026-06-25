@@ -10210,39 +10210,8 @@ function addUnionImportsAsNativeFuncs(ctx: CodegenContext): void {
     registerNative("__typeof_string", externrefToI32, [{ op: "i32.const", value: 0 }]);
   }
 
-  // 12. __typeof_undefined(externref) -> i32.
-  // (#2106 S1.1) With the tag-1 `$undefined` singleton, undefined is a NON-null
-  // box and null is `ref.null extern`. typeof undefined → "undefined" must match
-  // ONLY the singleton (null is typeof "object"). Recover anyref, `ref.test
-  // $AnyValue`, tag === 1. Falls back to the legacy `ref.is_null` when no
-  // `$AnyValue` is registered (module uses no `any` — byte-identical).
-  if (ctx.anyValueTypeIdx >= 0) {
-    registerNative(
-      "__typeof_undefined",
-      externrefToI32,
-      [
-        { op: "local.get", index: 0 },
-        { op: "any.convert_extern" },
-        { op: "local.tee", index: 1 },
-        { op: "ref.test", typeIdx: ctx.anyValueTypeIdx } as Instr,
-        {
-          op: "if",
-          blockType: { kind: "val", type: { kind: "i32" } },
-          then: [
-            { op: "local.get", index: 1 },
-            { op: "ref.cast", typeIdx: ctx.anyValueTypeIdx } as Instr,
-            { op: "struct.get", typeIdx: ctx.anyValueTypeIdx, fieldIdx: 0 } as Instr,
-            { op: "i32.const", value: 1 },
-            { op: "i32.eq" },
-          ],
-          else: [{ op: "i32.const", value: 0 }],
-        } as Instr,
-      ],
-      [{ name: "anyv", type: { kind: "anyref" } }],
-    );
-  } else {
-    registerNative("__typeof_undefined", externrefToI32, [{ op: "local.get", index: 0 }, { op: "ref.is_null" }]);
-  }
+  // 12. __typeof_undefined(externref) -> i32 — `ref.is_null`.
+  registerNative("__typeof_undefined", externrefToI32, [{ op: "local.get", index: 0 }, { op: "ref.is_null" }]);
 
   // 13. __typeof_object(externref) -> i32 — non-null AND not number AND
   //     not boolean AND not bigint AND not function. We approximate as "non-null and

@@ -443,14 +443,21 @@ collapses null/undefined. Once S1.1 gives undefined distinct bits, that same gua
 plain tag check for strict — becomes exactly right. So #1961 stays open as the
 diagnosis + repro harness and folds into S1.1/S1.2. The acceptance-criterion
 "null vs undefined distinct standalone" is met ONLY by S1, not by #1961 alone.
+## Producer/consumer site inventory for the S1 re-land (architect re-spec input)
 
-## Suspended Work — S1.0 done + S1.1 WIP (sdev-async, 2026-06-23)
+> CONTEXT (2026-06-25): S1.1 + S1.2 behavioral edits are REVERTED on this branch
+> (kept only the inert S1.0 reservation). The section below was originally the
+> "Suspended Work — S1.0 done + S1.1 WIP" note; it is RETAINED because it is the
+> most complete enumeration of the producer/consumer sites the full atomic S1
+> sweep must flip in lockstep. The architect re-spec should expand THIS into the
+> exhaustive site list. The "Landed/committed" and "repro status" lines below
+> describe the now-REVERTED S1.1 state — read them as the *plan*, not current
+> branch state.
 
 **Branch:** `issue-2106-s1-undefined-singleton`
-**Worktree:** `/workspace/.claude/worktrees/issue-2106-s1-undefined-singleton`
-**State:** tsc CLEAN. S1.0 (inert singleton reservation) is COMPLETE + validated.
-S1.1 (flip producer + chokepoints) is WIP — 3/6 repro cases pass, 3 fail with
-the precise causes diagnosed below. Resume from these failures.
+**State (HISTORICAL — now reverted):** S1.0 (inert singleton reservation) is
+COMPLETE + validated. S1.1/S1.2 (producer + chokepoint + equality flips) were
+implemented but REVERTED 2026-06-25 (incomplete subset, −1245 floor breach).
 
 ### Landed (committed)
 - **S1.0** (commit on branch): `$undefined` tag-1 global reserved at

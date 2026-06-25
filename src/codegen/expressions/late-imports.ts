@@ -13,7 +13,6 @@ import { addImport } from "../registry/imports.js";
 import { addFuncType } from "../registry/types.js";
 import { addUnionImportsViaRegistry } from "../shared.js";
 import { ensureObjectRuntime, OBJECT_RUNTIME_HELPER_NAMES } from "../object-runtime.js";
-import { ensureAnyValueType, emitUndefinedSingleton } from "../any-helpers.js";
 
 /**
  * #1471: helper names that `addUnionImports` provides Wasm-native
@@ -631,29 +630,17 @@ export function ensureGetUndefined(ctx: CodegenContext): number | undefined {
 
 /**
  * Emit instructions that push the JS `undefined` value onto the stack.
- * Uses the __get_undefined host import when available (JS-host mode); in
- * standalone/native-strings mode pushes the tag-1 `$undefined` singleton
- * (#2106 S1.1) widened to externref so `undefined` is DISTINGUISHABLE from
- * `null` (`ref.null extern`). Falls back to `ref.null.extern` only if the
- * singleton could not be reserved (defensive — `ensureAnyValueType` reserves it
- * for every standalone module that uses `any`).
+ * Uses the __get_undefined host import when available; falls back to
+ * ref.null.extern (indistinguishable from null) in standalone mode.
  */
 export function emitUndefined(ctx: CodegenContext, fctx: FunctionContext): void {
   const funcIdx = ensureGetUndefined(ctx);
   if (funcIdx !== undefined) {
     flushLateImportShifts(ctx, fctx);
     fctx.body.push({ op: "call", funcIdx });
-    return;
+  } else {
+    fctx.body.push({ op: "ref.null.extern" });
   }
-  // Standalone: push the $undefined singleton (ref $AnyValue) and widen to
-  // externref so it flows through the externref `undefined` contract callers
-  // expect, while staying distinguishable from null's ref.null.extern.
-  ensureAnyValueType(ctx);
-  if (emitUndefinedSingleton(ctx, fctx)) {
-    fctx.body.push({ op: "extern.convert_any" } as Instr);
-    return;
-  }
-  fctx.body.push({ op: "ref.null.extern" });
 }
 
 /**
