@@ -2093,3 +2093,283 @@ an **architect spec** for the whole-program "this `new F()` instance is consumed
 dynamically AND has no typed `struct.get` own-field consumer" analysis that gates
 the (ii-a) reconstruct — NOT a forced dev pass. NO source changed; the per-process
 harness lived in `.tmp/` (gitignored). Issue stays `in-progress`; lock released.
+
+---
+
+# M3 — B-fnctor ARCHITECT SPEC: the escape-analysis gate for the `new F()` `$Object`-reconstruct (option ii-a) (2026-06-25, sd-protoextend, /architect-spec, max-reasoning)
+
+> SPEC-ONLY (design deliverable — no source changed). Every file:line below was
+> **re-verified against current `main`** (`8a8e8c04a0aa`), not carried from the
+> prior sessions' bisections — this issue's defining lesson is that three earlier
+> specs mis-attributed the mechanism, so the load-bearing claims here are
+> re-grounded. The architect decision is **fixed by the brief**: route `new F()`
+> through the ONE `$Object.$proto` walk (**option ii-a**); do NOT add a per-fnctor
+> `$proto` field (option i) and do NOT fork a parallel `[[Prototype]]` mechanism.
+> This spec defines (1) the gate, (2) the analysis + where it plugs in, (3) the
+> #1888-floor non-regression contract, (4) a phased plan reusing the `$Object`
+> walk. It is the precondition the last three B-fnctor sessions all stopped at.
+
+## 0. Verified mechanism (re-grounded on current main — the facts the gate must respect)
+
+| Fact | Site (current main) | Consequence for the gate |
+| --- | --- | --- |
+| `new F()` builds a **bespoke `$__fnctor_<Name>` struct**, field-by-field from the ctor's `this.x=` assignments; empty body → `(struct )` (zero fields). | `new-super.ts:1019` (struct mint), `:1090-1113` (`struct.new structTypeIdx`), `:963-1002` (`collectThisAssignments` field collection) | The instance is **never an `$Object`** — `__extern_get`/`__extern_get_idx`'s `ref.test $Object` miss it and dead-end. |
+| `__extern_get` does `ref.test $Object` and **returns `undefined` immediately on a miss**; its proto walk reads `struct.get $Object 0` (the `$proto` field) only. | `object-runtime.ts:766-778` (test+early-return), `:849-853` (`o = o.proto`, fieldIdx 0) | Reconstruct-as-`$Object` makes the instance pass `ref.test $Object` → the existing walk resolves inherited reads **for free**. No new walk arm. |
+| `$Object` is a **closed (final) struct** with `proto` at **field index 0**; opening/altering its shape re-triggers the #1100/#2009 iso-recursive-canonicalization hazard. | `object-runtime.ts:238-266` (struct def + the inline #1100/#2009 hazard comment) | Confirms option (i) (add `$proto` to the closed `$__fnctor` struct) is hazardous; we are **using** field 0, not changing any closed struct. |
+| The host `#1712` instance→ctor link (`__register_fnctor_instance`) is gated on `ctx.moduleGlobals.get(funcName) ?? ctx.funcClosureGlobals.get(funcName)` **and** `!standalone && !wasi`. | `new-super.ts:1139-1158` | A plain **`function Con(){}` declaration** has no such global → host link not emitted (the host canary fails). The host lap (B3) must mint/route a global; **out of the standalone-first scope below.** |
+| The generic array-method loop reads via `__extern_length` / `__extern_get_idx` / `__extern_has_idx` — all `ref.test $Object`-gated. | `array-methods.ts:843-934` (`compileArrayLikePrototypeCall`) | A `$__fnctor` receiver is invisible to the loop (length 0, no elements). Reconstruct-as-`$Object` makes `forEach.call(child,cb)` etc. visit inherited indices **for free** once `$proto` is populated (Stage C/D of the architect spec). |
+| The escape-analysis infra is **IR-path-only**, env-gated (`JS2WASM_IR_ESCAPE`), explicitly **inert** (no IR mutation). | `ir/integration.ts:505,756` + the `analyzeEscape`/`analyzeOwnership` inert-oracle comment at `:500-513` | There is **no** whole-program "is this `new F()` instance used dynamically" analysis. The gate below must **build a narrow use-site classifier** — it cannot reuse `analyzeEscape`. |
+| `funcConstructorMap: Map<funcName, {structTypeIdx, ctorFuncName}>` is the compile-time fnctor registry. | `context/types.ts:1809`, set at `new-super.ts:1055`; read at `index.ts:11251`, `calls-closures.ts:478-479`, `new-super.ts:3572/3639/3714` | The classifier keys off this map; `classSet` (`:743`) excludes real `class` declarations (they keep their typed struct). |
+| `instanceof F` / identity on a fnctor instance is **brand/identity-based** (`ref.test`/static-brand tags), NOT a property read. | `identifiers.ts:1104` `tryStaticInstanceOf`, `:1211` `emitDynamicInstanceOf`, `:1332` brand-tag collect | **Critical gate exclusion:** an instance reconstructed as a plain `$Object` loses its `$__fnctor_<Name>` brand → `x instanceof F` regresses. The gate MUST treat `instanceof`/identity uses as "typed consumers" (see §1), or the reconstruct must carry a brand (§4 contract). |
+
+**One-sentence root cause (re-confirmed):** a `new F()` instance is a typed
+`$__fnctor` struct, not an `$Object`, so it never enters the one `$proto` walk;
+making it enter that walk (option ii-a) is safe **only** for instances that have
+no typed consumer (own-field `struct.get`, identity/`instanceof`, or typed-ref
+local/param/return) — identifying those is the missing analysis.
+
+## 1. DECISION — the gate (precise, decidable predicate)
+
+A fnctor `F ∈ funcConstructorMap \ classSet` is **`$Object`-reconstructable** iff,
+across the **whole program**, EVERY use of EVERY `new F()` result is *dynamic*
+(externref/`any` domain) and NONE is *typed*. Concretely, reconstruct F's
+instances as `$Object`s iff ALL of the following hold:
+
+- **(G1) No typed own-field read/write.** No `inst.x` where `x` is one of F's
+  collected `this.x=` struct fields lowers to `struct.get/$set $__fnctor_F`.
+  *Structural sufficient condition:* **F has zero own fields** (empty-body, or a
+  body with no `this.x=` — the `collectThisAssignments` set at `new-super.ts:1002`
+  is empty) ⇒ G1 holds trivially (no field exists to read). **This is the safe
+  Phase-1 subset and needs no flow analysis** (see §5 B-f1).
+- **(G2) No identity/`instanceof` use.** No `new F()` result feeds `x instanceof F`
+  (or any `ref.test $__fnctor_F` / typed-ref identity compare). Re-grounded:
+  `identifiers.ts:1104-1332` — a reconstructed `$Object` would fail the brand test.
+- **(G3) No typed-ref escape.** No `new F()` result is stored into a local / param
+  / return / field statically typed `(ref $__fnctor_F)` (which would force a
+  `struct.get` or a typed-ref consumer downstream). In practice the instance must
+  be consumed only where its static type widens to `any`/`unknown`/`object`
+  (the dynamic-read sites, the generic-method `.call` receiver).
+
+If ANY of G1–G3 fails for ANY instance of F, **keep the bespoke `$__fnctor_F`
+struct** (byte-identical hot path). The gate is **per-fnctor**, decided once at
+the top of `compileFnctorNew`, and is *conservative*: unknown ⇒ keep struct.
+
+### Why a per-fnctor (not per-instance) gate
+
+All `new F()` sites share one `$__fnctor_F` struct type and one ctor
+(`new-super.ts:1039-1058`). A *per-instance* representation split would need two
+ctor variants and a typed/untyped union at every `new F()` — far larger blast
+radius. Per-fnctor keeps one ctor: either F is reconstructable (all instances
+`$Object`) or not (all instances struct). Conservative correctness: one typed use
+anywhere ⇒ the whole fnctor stays struct.
+
+## 2. The analysis — what info, computed how, plugged in where
+
+**This is NOT `analyzeEscape` (IR-path, inert).** It is a small dedicated
+**whole-program fnctor use-site classifier**, computed in a pre-pass over the TS
+AST + the checker (which the codegen context already holds, `ctx.checker`),
+producing `ctx.fnctorReconstructable: Set<string>` (fnctor names that pass G1–G3).
+
+**Where it lives:** a new module `src/codegen/analysis/fnctor-escape.ts`, run once
+**after** the fnctor registry is populated but **before** any `compileFnctorNew`
+bakes a representation decision. The natural hook is the existing pre-scan that
+already walks the whole SourceFile to populate `funcConstructorMap`/`classSet`
+(the first codegen pass in `index.ts`); add a second light walk there, or fold
+into it. Store the result on the context (`context/types.ts`: add
+`fnctorReconstructable: Set<string>`; init `new Set()` in `create-context.ts:255`
+alongside `funcConstructorMap`).
+
+**What it computes (per fnctor `F`):**
+
+1. **Field set** — F's `this.x=` field names (reuse `collectThisAssignments`,
+   `new-super.ts:963-1002`, factored out). Empty ⇒ G1 trivially true.
+2. **Use-site scan** — for every identifier bound to a `new F()` result (and the
+   direct `new F().<...>` / `(new F())` expression), classify each use via the
+   checker's type at the use site:
+   - member read/write of an own field name → **typed** (G1 fail) unless the
+     member resolves to `any` (then it's a dynamic `__extern_get`).
+   - operand of `instanceof F` / passed where `(ref $__fnctor_F)` is required →
+     **typed** (G2/G3 fail).
+   - passed as `any`/`unknown`/`object` arg, `.call`-receiver, dynamic
+     `inst[k]` / `inst.k` (k not an own field) → **dynamic** (fine).
+   - **unknown / can't prove dynamic → typed (conservative).**
+3. F is reconstructable iff field-set ∩ typed-reads = ∅ AND no G2/G3 use.
+
+**Phase-1 shortcut (no flow analysis):** ship the classifier returning *only* the
+**zero-own-field** subset first (G1 by structure; still scan for G2 `instanceof`
+and G3 typed-ref escape, which are cheap syntactic checks). This banks the canary
++ the `var Con=function(){}; Con.prototype=proto; new Con()` cluster shape
+(empty-body fnctors are the dominant `.prototype=` subset — the 51-file lap per
+`CORRECTION 1` above) without the full own-field dataflow. The own-field-bearing
+dynamic-only case (G1 via flow, not structure) is Phase-2.
+
+## 3. Where the representation decision plugs into codegen
+
+`compileFnctorNew` (`new-super.ts`, the `function compileFnctorNew` body
+~`:940-1200`) gains a single branch at the top:
+
+```
+if (ctx.fnctorReconstructable.has(funcName)) {
+  // ii-a: build an $Object instance, seed $proto from F's prototype $Object,
+  //       set own props (the this.x= fields, if any) via __extern_set.
+  return compileFnctorNewAsObject(ctx, fctx, expr, funcName);
+}
+// else: UNCHANGED bespoke-struct path (byte-identical hot path).
+```
+
+`compileFnctorNewAsObject` (new helper) emits, **reusing existing primitives —
+no new walk, no new link substrate**:
+
+- `call __new_plain_object` → an `$Object` (the standalone object runtime,
+  `object-runtime.ts` `__new_plain_object` at ~`:621`).
+- seed `$proto`: `struct.set $Object 0` (field 0) = **F's prototype `$Object`
+  global** (see §3.1). Reuses the SAME field the walk already reads.
+- for each ctor param→field assignment in the body, `__extern_set(self, "x", v)`
+  instead of `struct.set $__fnctor_F` (only relevant for Phase-2 own-field
+  fnctors; Phase-1 empty-body emits none).
+- the in-ctor `this.x=` / `this.m()` lowering already routes through
+  `__extern_set`/`__extern_get` when `this` is an externref `$Object` — verify the
+  ctor-body compile binds `this` to the `$Object` self local (the existing
+  `ctorFctx.localMap.set("this", selfLocal)` at `:1123`, with `self` now an
+  `$Object` ref).
+
+### 3.1 The per-fnctor prototype `$Object` (the populate half — REUSES `$Object`)
+
+`new F()` must seed `$proto` from a materialized prototype object. Add
+`ctx.fnctorPrototypeObject: Map<string, globalIdx>` (`context/types.ts`;
+init in `create-context.ts`). Populate it at the **`F.prototype = …` /
+`F.prototype.p = v` write sites** (the property-write path in
+`object-ops.ts` / the assignment lowering):
+
+- `F.prototype = {literal}` → build the literal as an `$Object` via
+  `compileObjectLiteralAsExternref` (the SAME helper Stage A used for
+  `Object.create` inline-literal protos — `calls.ts compileProtoArg`), store its
+  global idx in `fnctorPrototypeObject[F]`.
+- `F.prototype.p = v` → lazily mint an empty `$Object` global for `F` (if absent)
+  and `__extern_set(protoObj, "p", v)`.
+- Gate: `F ∈ funcConstructorMap && F ∉ classSet` (fnctor, not class). Standalone
+  first (host prototype writes are the B3 lap).
+
+This is the **standalone** populate. It is **the same `$Object` + the same walk**
+B-acc/B-protoextend already use — explicitly NOT a parallel `[[Prototype]]`
+mechanism (the brief's hard constraint). `new F()` seeds `instance.$proto =
+fnctorPrototypeObject[F]` (or `ref.null $Object` if F has no prototype writes →
+inherits the null-terminated `%Object.prototype%` chain end, correct).
+
+## 4. The #1888-floor non-regression contract (the stop-the-line tripwire)
+
+The #1888 ejection (−162, dstr/generator-iterator) is the precedent: a value-rep
+change that perturbs a typed lowering regresses hundreds of rows. The contract:
+
+1. **C1 — typed fnctor byte-identity (prime directive).** For every fnctor that
+   does NOT pass the gate, `compileFnctorNew` emits **the exact current bytes**
+   (the branch in §3 is the only change on that path; `ctx.fnctorReconstructable`
+   is empty until the classifier populates it). *Validation:* a determinism/byte
+   guard — compile the typed-fnctor corpus (`new C(){this.x=…}; c.x`,
+   `new C() instanceof C`) before/after, assert identical wasm hash. Any diff on a
+   gated-OUT fnctor ⇒ STOP, gate is leaking.
+2. **C2 — the gate is conservative-closed.** The classifier defaults to *typed*
+   (keep struct) on any use it cannot prove dynamic (G1–G3). A false "dynamic"
+   (reconstruct a struct-consumed instance) is the regression vector — so unknown
+   ⇒ struct. *Validation:* unit-test the classifier on adversarial shapes
+   (instance escapes through a typed local, a typed return, an `instanceof`, a
+   typed-array field) → all must classify **typed**.
+3. **C3 — `instanceof`/identity preserved (G2).** Either the gate excludes
+   `instanceof`-used fnctors (Phase-1: simplest), OR `compileFnctorNewAsObject`
+   tags the `$Object` with an F-brand the `instanceof` path can test
+   (`identifiers.ts` brand-tag mechanism, `:1332`). **Phase-1 takes the exclusion**
+   (cheaper, zero risk); brand-carry is a Phase-2 option only if a reachable
+   cluster row needs `instanceof` on a reconstructed instance.
+4. **C4 — full-gate only, never a scoped sweep.** This is object-model value-rep:
+   per `project_broad_impact_validate_full_ci`, the **merge_group standalone floor
+   (#2097) + the test262 net-regression gate** is the ONLY authoritative signal.
+   Stop-the-line on ANY eject; fix-forward once, never re-enqueue, never
+   force-push. A scoped sweep is forbidden (the three prior #2580 ejects all
+   passed scoped sweeps then failed the full gate).
+5. **C5 — standalone-first, host deferred.** The standalone walk already exists
+   (§0); the host link needs the declaration-ctor global mint (B3, a separate,
+   riskier lap). Land standalone (B-f1/B-f2) behind the floor FIRST; do not couple
+   host into the canary PR.
+
+**Stop-the-line rule (explicit):** if the canary PR (B-f1) ejects on the floor
+with ANY typed-fnctor regression, the gate is mis-classifying — **HOLD, do not
+re-enqueue, escalate to the lead.** We hold B-fnctor rather than regress the floor
+(the standing guardrail).
+
+## 5. Phased plan (each independently floor-validatable; REUSES the `$Object` walk)
+
+Ordered smallest-risk-first; every step gated on §1 + §4. **No step adds a second
+walk or a parallel link — all reuse `$Object.$proto` + `__extern_get`/`_has`.**
+
+- **B-f0 — the classifier + `ctx.fnctorReconstructable`, returning ∅ (inert).**
+  Add `src/codegen/analysis/fnctor-escape.ts` + the context fields + the pre-pass
+  hook, but have it populate **nothing** (or gate behind `JS2WASM_FNCTOR_RECON=1`).
+  `compileFnctorNew` reads an empty set → byte-identical. Banks 0 rows; proves the
+  classifier compiles, runs, and is provably inert (the C1 guard). **0-risk, lands
+  first** (mirrors M0's inert-scaffold discipline).
+- **B-f1 — the zero-own-field reconstruct (the canary + the `.prototype=` subset),
+  STANDALONE.** Classifier admits **only** zero-own-field fnctors that also pass
+  G2 (no `instanceof`) + G3 (no typed-ref escape) — all cheap syntactic checks, no
+  dataflow. `compileFnctorNewAsObject` + `fnctorPrototypeObject` populate (§3/§3.1).
+  Canary: `function Con(){}; Con.prototype={foo:7}; new Con().foo === 7`
+  (standalone); `Con.prototype.foo=7` variant; **regression guard**
+  `function C(this:any){this.x=3} new C().x === 3` stays on the struct path
+  (gated OUT — has an own field). **The row-banking + highest-signal slice;** if it
+  ejects, gate is wrong → STOP. Banks the standalone canary + the empty-body
+  `.prototype=` cluster subset; Stage C/D indexed + generic-method reads ride free
+  (the instance is now an `$Object`, so `__extern_get_idx`/the `forEach.call` loop
+  see it).
+- **B-f2 — own-field dynamic-only reconstruct (G1 via flow), STANDALONE.** Extend
+  the classifier with the own-field use-site dataflow (§2.2) so a fnctor with
+  `this.x=` consumed **only** dynamically also reconstructs (own props via
+  `__extern_set`). Higher analysis cost + higher risk (the flow must be sound);
+  hold behind B-f1's floor result. Only pursue if a reachable cluster row needs it
+  (most `-c-i-`/`-b-i-` fnctor rows are empty-body per `CORRECTION 1`).
+- **B-f3 — HOST link parity (declaration-ctor global + prototype-write sidecar).**
+  The host lap: mint a closure/module global for **declaration** ctors so
+  `new-super.ts:1140` registers them, and route `F.prototype = x` whole-reassign
+  into the `_fnctorProtoLookup`-read sidecar (`runtime.ts`, #1712). Reuses #1712
+  verbatim as the host tail of the one walk. Separate PR, separate risk; do NOT
+  couple into B-f1.
+- **B-f4 — generic-method cluster ride (`-c-i-`/`-b-i-` fnctor subset).** With
+  B-f1/B-f2 (standalone) + B-f3 (host) populating `$proto`, the ~51-file
+  `.prototype=` subset's `forEach/some/indexOf.call(child,cb)` visit inherited
+  indices. Largely free from the substrate; residual needs the #983d
+  method-dispatch body (track separately, do NOT block B-f4 on it).
+
+**Order rationale:** B-f0 (inert scaffold, 0-risk) → B-f1 (zero-own-field canary,
+the row-banking + tripwire slice, standalone) → B-f2 (own-field flow, hold) →
+B-f3 (host parity) → B-f4 (cluster ride). Standalone before host; the floor gates
+every step; stop-the-line on any typed-fnctor eject.
+
+## 6. TDD canaries (extend `tests/issue-2580-m3-protochain.test.ts`, both modes where noted)
+
+1. `function Con(){}; Con.prototype={foo:7}; new Con().foo` → 7 (B-f1 standalone;
+   B-f3 host).
+2. `function Con(){}; Con.prototype.foo=7; new Con().foo` → 7 (B-f1/B-f3).
+3. **Regression guard (must stay struct):** `function C(this:any){this.x=3};
+   new C().x` → 3, AND `new C() instanceof C` → true (gated OUT → byte-identical).
+4. `var proto={}; Object.defineProperty(proto,"1",{get…}); var Con=function(){};
+   Con.prototype=proto; var child=new Con(); child.length=20;
+   Array.prototype.some.call(child,cb)` visits index 1 (B-f4).
+5. **Determinism/byte guard (C1):** the typed-fnctor corpus wasm-hash is identical
+   before/after on every gated-OUT fnctor.
+
+## 7. RUNNER TRAP + validation discipline (carry forward)
+
+> ⚠️ Validate **per-process** (one snippet/file · one mode · fresh
+> `WebAssembly.instantiate` / `runTest262File`), NEVER an in-process
+> `runTest262File` loop (false `compile_error: …reading 'kind'` from cross-compile
+> state bleed) and NEVER a `-P`-parallel `tsx` scan (shared disk-compile-cache
+> collisions report phantom `pass→compile_error` — the B-protoextend session hit
+> exactly this). The **merge_group standalone floor (#2097) + net-regression gate**
+> is the only authoritative conformance signal (§4 C4).
+
+## 8. Status / handoff
+
+Architect spec only — **no source changed.** This unblocks the #2580 last lap
+(B-fnctor) and **#2651 M3** (`blocked_on: 2580`). Recommended dispatch: a
+senior-dev (value-rep lane, max reasoning) takes **B-f0 → B-f1** as the first PR
+pair (inert scaffold + zero-own-field standalone canary), floor-validated,
+stop-the-line on any typed-fnctor eject. Hold B-f2/B-f3/B-f4 behind B-f1's floor
+result. Issue stays `in-progress`.
