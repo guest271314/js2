@@ -77,7 +77,12 @@ import {
   getBuilderInfo,
   type StringBuilderInfo,
 } from "../string-builder.js";
-import { compileWithBindingAssignment, emitDynamicWithSet, resolveWithBinding } from "../with-scope.js";
+import {
+  compileWithBindingAssignment,
+  emitCaptureWithHasBinding,
+  emitDynamicWithSet,
+  resolveWithBinding,
+} from "../with-scope.js";
 
 /**
  * Emit a null/undefined guard for an externref-typed destructuring source.
@@ -157,11 +162,16 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
       return compileWithBindingAssignment(ctx, fctx, withRes.binding, expr.right);
     }
     if (withRes?.kind === "dynamic") {
-      // (#2663 Slice 2) HasBinding-gated WRITE. Evaluate RHS ONCE into an
-      // externref temp (§13.15.2), then resolve through the (possibly nested)
-      // dynamic `with` scopes: each level emits `if HasBinding(obj,name)
-      // __extern_set else <next-outer>`, cascading to the lexical write when no
-      // with-scope remains. Mirrors the Slice-1 read cascade.
+      // (#2663 Slice 2, #2061 fix) HasBinding-gated WRITE with spec-correct
+      // ordering (§13.15.2): the LHS Reference is resolved — i.e. each candidate
+      // dynamic-`with` scope's HasBinding is captured — BEFORE the RHS evaluates.
+      // (Capturing it AFTER the RHS let an RHS that mutates the with-object flip
+      // the binding decision and mis-route the write: regressed S11.13.1_A6_T3.)
+      // So: (1) capture HasBinding(scope,name) into i32 temps for the cascade
+      // chain, innermost-first; (2) evaluate the RHS ONCE into an externref temp;
+      // (3) cascade-write using the pre-captured i32s, falling to the lexical
+      // write when none matched.
+      const captures = captureDynamicWithHasBindings(ctx, fctx, expr.left);
       const rhsType = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
       if (!rhsType) {
         reportError(ctx, expr, "Failed to compile dynamic-with assignment value");
@@ -172,7 +182,7 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
       }
       const rhsTmp = allocLocal(fctx, `__with_rhs_${fctx.locals.length}`, { kind: "externref" });
       fctx.body.push({ op: "local.set", index: rhsTmp });
-      emitDynamicWithIdentifierWrite(ctx, fctx, expr.left, rhsTmp);
+      emitDynamicWithIdentifierWrite(ctx, fctx, expr.left, rhsTmp, captures);
       // Assignment expression result is the RHS value.
       fctx.body.push({ op: "local.get", index: rhsTmp });
       return { kind: "externref" };
@@ -392,21 +402,68 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
  * absent on the inner object cascades to the next-outer `with`, then to the
  * lexical write. When no with-scope resolves, do the plain lexical/global write.
  */
+/**
+ * (#2061 fix) Capture `HasBinding(scope, name)` into an i32 temp for EVERY
+ * candidate dynamic-`with` scope on the cascade chain, BEFORE the RHS is
+ * evaluated (§13.15.2 — the LHS Reference is resolved before the RHS). Returns a
+ * Map keyed by the dynamic scope object → its captured i32 local index, which
+ * `emitDynamicWithIdentifierWrite` then branches on instead of recomputing
+ * HasBinding post-RHS. Walks innermost-first, truncating the matched scope each
+ * step (same cascade shape as the write itself).
+ */
+function captureDynamicWithHasBindings(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  id: ts.Identifier,
+): Map<object, number> {
+  const out = new Map<object, number>();
+  let scopes = fctx.withScopes;
+  const saved = fctx.withScopes;
+  try {
+    // Walk the cascade: resolve, capture, truncate the matched scope, repeat.
+    while (scopes && scopes.length > 0) {
+      const res = resolveWithBinding(fctx, id.text);
+      if (res?.kind !== "dynamic") break; // static hit / lexical → no more gates
+      out.set(res.scope, emitCaptureWithHasBinding(ctx, fctx, res.scope, id.text));
+      const matchedIdx = scopes.lastIndexOf(res.scope);
+      scopes = scopes.slice(0, matchedIdx);
+      fctx.withScopes = scopes;
+    }
+  } finally {
+    fctx.withScopes = saved;
+  }
+  return out;
+}
+
 function emitDynamicWithIdentifierWrite(
   ctx: CodegenContext,
   fctx: FunctionContext,
   id: ts.Identifier,
   rhsLocalIdx: number,
+  captures: Map<object, number>,
 ): void {
   const res = resolveWithBinding(fctx, id.text);
   if (res?.kind === "dynamic") {
     const scopes = fctx.withScopes!;
     const matchedIdx = scopes.lastIndexOf(res.scope);
-    emitDynamicWithSet(ctx, fctx, res.scope, id.text, rhsLocalIdx, () => {
+    const hasLocal = captures.get(res.scope);
+    // hasLocal is always present (captured pre-RHS for every cascade scope); if a
+    // capture is somehow missing, fall back to "not bound" (write the outer).
+    if (hasLocal === undefined) {
       const saved = fctx.withScopes;
       fctx.withScopes = scopes.slice(0, matchedIdx);
       try {
-        emitDynamicWithIdentifierWrite(ctx, fctx, id, rhsLocalIdx);
+        emitDynamicWithIdentifierWrite(ctx, fctx, id, rhsLocalIdx, captures);
+      } finally {
+        fctx.withScopes = saved;
+      }
+      return;
+    }
+    emitDynamicWithSet(ctx, fctx, res.scope, id.text, rhsLocalIdx, hasLocal, () => {
+      const saved = fctx.withScopes;
+      fctx.withScopes = scopes.slice(0, matchedIdx);
+      try {
+        emitDynamicWithIdentifierWrite(ctx, fctx, id, rhsLocalIdx, captures);
       } finally {
         fctx.withScopes = saved;
       }
