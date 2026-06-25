@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-25T14:03:14.033Z",
-  "baseline_generated_at": "2026-06-25T14:03:14.033Z",
-  "baseline_sha": "a06b9099aed226d78865f42f63d6d500bed94b0f",
+  "timestamp": "2026-06-25T14:47:48.470Z",
+  "baseline_generated_at": "2026-06-25T14:47:48.470Z",
+  "baseline_sha": "b50118c72ffc94b91972bb72168e7e8ee613df27",
   "oracle_version": 1,
   "mode": {
     "target": "gc",
@@ -10,8 +10,8 @@
   },
   "summary": {
     "total": 43135,
-    "pass": 31873,
-    "fail": 10546,
+    "pass": 31874,
+    "fail": 10545,
     "compile_error": 617,
     "compile_timeout": 81,
     "skip": 18,
@@ -20,8 +20,8 @@
     "by_category": {
       "standard": {
         "total": 42049,
-        "pass": 31274,
-        "fail": 10082,
+        "pass": 31275,
+        "fail": 10081,
         "compile_error": 594,
         "compile_timeout": 81,
         "skip": 18,
@@ -53,8 +53,8 @@
       },
       "official": {
         "total": 43135,
-        "pass": 31873,
-        "fail": 10546,
+        "pass": 31874,
+        "fail": 10545,
         "compile_error": 617,
         "compile_timeout": 81,
         "skip": 18,
@@ -64,8 +64,8 @@
       },
       "full": {
         "total": 48117,
-        "pass": 33364,
-        "fail": 13701,
+        "pass": 33365,
+        "fail": 13700,
         "compile_error": 847,
         "compile_timeout": 82,
         "skip": 123,
@@ -77,8 +77,8 @@
   },
   "official_summary": {
     "total": 43135,
-    "pass": 31873,
-    "fail": 10546,
+    "pass": 31874,
+    "fail": 10545,
     "compile_error": 617,
     "compile_timeout": 81,
     "skip": 18,
@@ -87,8 +87,8 @@
   },
   "full_summary": {
     "total": 48117,
-    "pass": 33364,
-    "fail": 13701,
+    "pass": 33365,
+    "fail": 13700,
     "compile_error": 847,
     "compile_timeout": 82,
     "skip": 123,
@@ -97,8 +97,8 @@
   },
   "strict_summary": {
     "total": 40626,
-    "pass": 30580,
-    "fail": 9652,
+    "pass": 30581,
+    "fail": 9651,
     "compile_error": 295,
     "compile_timeout": 81,
     "skip": 18,
@@ -128,8 +128,8 @@
     },
     "standard": {
       "total": 42049,
-      "pass": 31274,
-      "fail": 10082,
+      "pass": 31275,
+      "fail": 10081,
       "compile_error": 594,
       "compile_timeout": 81,
       "skip": 18,
@@ -691,8 +691,8 @@
     {
       "name": "built-ins/SuppressedError",
       "path": "built-ins/SuppressedError",
-      "pass": 13,
-      "fail": 7,
+      "pass": 14,
+      "fail": 6,
       "compile_error": 2,
       "compile_timeout": 0,
       "skip": 0,
@@ -1080,7 +1080,7 @@
     }
   ],
   "error_categories": {
-    "assertion_fail": 7516,
+    "assertion_fail": 7515,
     "illegal_cast": 109,
     "negative_test_fail": 77,
     "null_deref": 208,
