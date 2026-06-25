@@ -18,6 +18,7 @@ import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
+import { emitMappedArgReverseSync } from "./expressions/logical-ops.js";
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, cacheStringLiterals, getOrRegisterTupleType, resolveWasmType } from "./index.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
@@ -948,28 +949,15 @@ function emitMappedArgValueDefine(
     ],
   });
 
-  // Param sync — only when the index is still mapped (§10.4.4.2: a data
-  // descriptor with a value, on a still-mapped slot, Set()s the binding).
-  if (!info.unmappedIndices?.has(argIndex)) {
-    const paramType = info.paramTypes[argIndex]!;
-    const paramIdx = argIndex + info.paramOffset;
-    const convert: Instr[] = [{ op: "local.get", index: valLocal } as Instr];
-    if (paramType.kind === "f64") {
-      const unboxIdx = ctx.funcMap.get("__unbox_number");
-      if (unboxIdx !== undefined) convert.push({ op: "call", funcIdx: unboxIdx });
-    } else if (paramType.kind === "i32") {
-      const unboxIdx = ctx.funcMap.get("__unbox_number");
-      if (unboxIdx !== undefined) convert.push({ op: "call", funcIdx: unboxIdx });
-      convert.push({ op: "i32.trunc_sat_f64_s" });
-    } else if (paramType.kind === "ref" || paramType.kind === "ref_null") {
-      convert.push({ op: "any.convert_extern" });
-      if (paramType.kind === "ref") {
-        convert.push({ op: "ref.cast", typeIdx: (paramType as { typeIdx: number }).typeIdx });
-      }
-    }
-    fctx.body.push(...convert);
-    fctx.body.push({ op: "local.set", index: paramIdx });
-  }
+  // Param sync — reuse the canonical mapped-args reverse-sync emitter, which
+  // already skips severed (`unmappedIndices`) slots (§10.4.4.2) and owns the
+  // single value-coercion vocabulary (§7.1.x), so this site stays out of the
+  // per-file coercion-site budget (#2108). It matches on a runtime index, so
+  // pin a constant-index local to argIndex.
+  const idxLocal = allocLocal(fctx, `__mappedarg_idx_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: argIndex });
+  fctx.body.push({ op: "local.set", index: idxLocal });
+  emitMappedArgReverseSync(ctx, fctx, idxLocal, valLocal);
 
   // Result of Object.defineProperty is the object — push arguments as externref.
   fctx.body.push({ op: "local.get", index: info.argsLocalIdx });
