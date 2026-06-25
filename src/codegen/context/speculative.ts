@@ -38,8 +38,9 @@ import { type LocalsSnapshot, snapshotLocals, restoreLocals } from "./locals.js"
  * mutate. Capture with {@link snapshotSpeculative}; undo with
  * {@link rollbackSpeculative}. Discard (no-op) to commit.
  *
- * The snapshot is O(1): every field is an integer read or a reference copy
- * (`snapshotLocals` copies the localMap key set, but locals are typically tiny;
+ * The snapshot is near-O(1): every field is an integer read or a reference copy
+ * (`snapshotLocals` copies the localMap ENTRIES — name→slot — so a re-pointed
+ * existing name can be restored, not just dropped; locals are typically tiny;
  * crucially the funcMap is NOT copied — rollback derives the names to delete
  * from the popped import descriptors, which each carry their `name`). This keeps
  * the helper cheap enough to wrap even the hot `compileExpression` path.
