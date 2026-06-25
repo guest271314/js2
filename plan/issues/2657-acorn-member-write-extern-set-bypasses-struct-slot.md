@@ -1,5 +1,5 @@
 ---
-id: 2655
+id: 2657
 title: "compiled-acorn parse() infinite-loops: in-Wasm member WRITE on an any-typed fnctor receiver goes to __extern_set (sidecar) while the matching READ uses typed struct.get (slot) — read/write storage divergence (6th dogfood blocker)"
 status: done
 assignee: ttraenkler/sendev
@@ -12,12 +12,16 @@ task_type: fix
 area: codegen
 language_feature: closures, member-access, wasmgc-struct
 goal: self-hosting-dogfood
-origin: "2026-06-25 sd — verify-first deep-trace of the remaining acorn parse() loop on current main (after #1712 b1-3, #2582, #2608 landed). Pinned to a member read/write struct-dispatch asymmetry."
-related: [2608, 2582, 1712, 983d, 1269]
+origin: "2026-06-25 sd — verify-first deep-trace of the remaining acorn parse() loop on current main (after #1712 b1-3, #2582, #2608 landed). Pinned to a member read/write struct-dispatch asymmetry. Renumbered #2655→#2657 (the #2655 id was won on main by 2655-direct-wasi-p1-readsync-writesync while this PR was in flight; #2656 = the parseStatement-switch follow-on)."
+related: [2608, 2582, 1712, 2656, 983d, 1269]
 depends_on: []
 ---
 
-# #2655 — in-Wasm member WRITE bypasses the typed struct slot that the READ uses (acorn parse-loop, 6th blocker)
+# #2657 — in-Wasm member WRITE bypasses the typed struct slot that the READ uses (acorn parse-loop, 6th blocker)
+
+> Renumbered from #2655 (id collision: `2655-direct-wasi-p1-readsync-writesync`
+> landed on main first and won #2655; the parseStatement-switch follow-on this
+> surfaces is tracked as #2656). The original PR #2038 carries the #2655 slug.
 
 ## TL;DR (root cause)
 
@@ -240,7 +244,7 @@ chain. Touch points:
   Here `this.input` is correctly populated (length 10); the loss is `this.pos`'s
   write not reaching the read's slot.
 - This is the **inverse** of #983d: #983d is host-write→struct-slot-read
-  (live-mirror); #2655 is in-Wasm-write→sidecar vs in-Wasm-read→slot. The shared
+  (live-mirror); #2657 is in-Wasm-write→sidecar vs in-Wasm-read→slot. The shared
   lesson is the **read/write storage must agree**; the symmetric struct-dispatch
   on the write side closes both for the in-Wasm case.
 - Do NOT "fix" by disabling the read fast-path (forcing reads through
@@ -269,7 +273,7 @@ Wired into the two externref/any member-write fallbacks in
 after=1 / before=1 after=2 / before=2 after=3` — the increment now persists to
 the slot the loop condition reads.)
 
-Regression test: `tests/issue-2655-member-write-struct-slot.test.ts` (3/3) —
+Regression test: `tests/issue-2657-member-write-struct-slot.test.ts` (3/3) —
 the `this.pos += 1` fnctor-prototype-method loop terminates; a plain `this.x = v`
 write is visible to the struct.get fast-path read; and a dynamic sidecar-only
 property still round-trips via the `__extern_set` fallback.
@@ -292,6 +296,8 @@ compares `this.type` (an externref to the `var` TokenType singleton) against
 `types$1._var` etc. by `===` identity, and NO case matches → it never dispatches
 to `parseVarStatement` and the outer `parseTopLevel` loop spins. This is a
 **token-type singleton identity / `switch`-on-externref** blocker, the natural
-7th dogfood wall — file as a follow-up after this lands and re-probe on the new
-main (per `feedback_reground_spec_against_current_main`). It is masked until
-this issue lands because acorn never reached `parseStatement` before.
+7th dogfood wall — now tracked as **#2656**
+(`2656-acorn-parsestatement-switch-externref-token-type-identity.md`,
+`depends_on: [2655]` → effectively this PR). Re-probe on the new main once this
+lands (per `feedback_reground_spec_against_current_main`). It is masked until
+this fix lands because acorn never reached `parseStatement` before.

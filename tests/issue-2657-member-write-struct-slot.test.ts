@@ -1,4 +1,4 @@
-// #2655 — in-Wasm member WRITE on an `any`/`externref` fnctor receiver must
+// #2657 — in-Wasm member WRITE on an `any`/`externref` fnctor receiver must
 // land on the SAME storage the member READ uses.
 //
 // Root cause: the member-READ fast path resolves an `any`/`externref` receiver
@@ -27,7 +27,7 @@ async function run(src: string): Promise<any> {
   return wrapExports(instance.exports, { signatures: result.exportSignatures });
 }
 
-describe("#2655 — member write hits the struct slot the read uses", () => {
+describe("#2657 — member write hits the struct slot the read uses", () => {
   // acorn-faithful: a fnctor whose prototype method mutates a ctor-initialized
   // numeric field in a `while` loop and reads it back (mirrors readWord1).
   it("fnctor prototype-method `this.pos += 1` loop terminates (read/write agree)", async () => {
@@ -38,7 +38,7 @@ describe("#2655 — member write hits the struct slot the read uses", () => {
       pp.scan = function () {
         // The while-condition read of this.pos takes the struct.get fast path;
         // the this.pos += 1 write must land on the SAME slot, else this loops
-        // forever (the #2655 bug).
+        // forever (the #2657 bug).
         while (this.pos < this.input.length) { this.pos += 1; }
         return this.pos;
       };
