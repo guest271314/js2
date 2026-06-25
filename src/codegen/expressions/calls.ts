@@ -7441,8 +7441,22 @@ function compileCallExpression(
             // sidecar — unused on the standalone path, so pass empty.
             const r = emitDefinePropertyDescRuntime(ctx, fctx, objArg, keyArg, descArg, []);
             if (r !== null) {
-              fctx.body.push({ op: "drop" }); // applier returns the obj; Reflect wants a boolean
-              fctx.body.push({ op: "i32.const", value: 1 }); // success → true
+              // The applier returns an externref; Reflect wants a boolean.
+              // (#1355 Slice F) For a PROXY receiver the standalone
+              // `__obj_define_from_desc` front-guard returns the defineProperty
+              // trap's booleanish externref (NOT the obj) — so we must surface
+              // that result, not unconditionally return true. For a non-proxy
+              // receiver the applier returns the (always-truthy) obj, so
+              // `__is_truthy` still yields the spec `true`. This keeps the
+              // non-proxy behaviour identical while making a proxy trap's
+              // false/true return observable through Reflect.defineProperty.
+              const isTruthyIdx = ctx.funcMap.get("__is_truthy");
+              if (isTruthyIdx !== undefined) {
+                fctx.body.push({ op: "call", funcIdx: isTruthyIdx });
+              } else {
+                fctx.body.push({ op: "drop" });
+                fctx.body.push({ op: "i32.const", value: 1 });
+              }
               return { kind: "i32" };
             }
           }
