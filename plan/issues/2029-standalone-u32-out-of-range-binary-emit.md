@@ -4,9 +4,9 @@ title: "standalone: `Binary emit error: u32 out of range: -1` on builtin subclas
 status: in-progress
 sprint: 66
 created: 2026-06-10
-updated: 2026-06-24
+updated: 2026-06-25
 priority: critical
-assignee: ttraenkler/sdev-pwrap
+assignee: ttraenkler/sd-2038
 feasibility: medium
 reasoning_effort: high
 model: opus
@@ -433,3 +433,78 @@ native wrapper-box subclass is the only residual, a deferred value-rep slice).
 The 4 `subclass-{Map,Set,WeakMap,WeakSet}` rows remain on #2620/#2622; the
 `Object.create` ToPrimitive gap on #2358/#2158; iterator-helper semantics on the
 iterator-helpers lane. None are emit bugs.
+
+---
+
+## Regrounded against current main (2026-06-25, sd-2038) — bucket is 37, not 497
+
+Measured the **live** standalone baseline (`test262-standalone-current.jsonl`,
+refreshed per-push) rather than trusting the original 497/`u32 out of range`
+framing:
+
+- The headline error string **`u32 out of range: -1` now matches 0 tests.** The
+  #2043 always-on emit validation renamed it to located `… index out of range`
+  errors, and the prior LANDED slices (emitSetSubclassProto -1 guard,
+  `__get_undefined` leak, primitive-wrapper refusal — all on main, not stranded)
+  closed the original crash. The 497→**37** reduction is real.
+- **True current residual: 37 tests** with `index out of range`, confirmed by
+  running the actual runner (`runTest262File(..., "standalone")`) over all 37 —
+  every one still crashes with the FULL harness wrap (`L2:1`); naive single-file
+  probes compile because they lack the harness shape.
+
+Three independent producer sub-buckets (separate PRs, per lead):
+
+| Kind | Count | Cluster | Class |
+|---|---:|---|---|
+| `local index`    | 12 | template-literal `tv-*` (9) + tagged-template (2) + for-of iterator-next (1) | speculative-rollback localMap (THIS PR) |
+| `global index -1`| 17 | SuppressedError (12), DisposableStack/AsyncDisposableStack proto, String.replaceAll, Error.isError, property-accessors | `-1` string-global sentinel (next PR) |
+| `function index` | 8 | TypedArray/Array `toLocaleString`, annexB RegExp, optional-chaining async | funcIdx late-shift (#1809/#1839; may split to own issue) |
+
+7-line local-index repro (`local index out of range — 5 (valid:[0,2))`):
+```ts
+export function test(): number {
+  var calls = 0;
+  (function (s: any) { calls++; })`foo`;  // tagged template, tag = closure capturing outer `calls`
+  return calls;
+}
+```
+
+## LANDED slice (2026-06-25, sd-2038) — local-index cluster (11/12 of the sub-bucket)
+
+**Root cause (verified per-process, NOT the diagnostic's default #2043
+attribution).** Every `compileExpression` runs inside a speculative
+snapshot/rollback (`snapshotSpeculative`/`rollbackSpeculative`, #1919). While the
+tagged-template lowering compiles the IIFE tag, closure-capture boxing
+**re-points the captured outer local in `fctx.localMap`**
+(`localMap.set("calls", boxedSlot)`, closures.ts). When the enclosing expression
+rolled back, `restoreLocals` (#1847) snapshotted only the localMap **key set** and
+therefore only DELETED names the probe ADDED — it never RESTORED a re-pointed
+**existing** name. So `calls` kept pointing at the truncated box slot (5), and
+the later `return calls` emitted `local.get 5` past the function's 2-local count
+→ emit crash. (Traced: at the tag-template entry fctx had
+`[calls,__tt_strings_1,__tt_raw_data_2,__tt_raw_vec_3,__tt_arr_data_4]`; after
+rollback `[calls,__ng_1]`, but the body kept `local.get#5`.)
+
+**Fix (in the snapshot/restore layer, `src/codegen/context/locals.ts` — not a
+local patch in the tagged-template handler, per lead guidance):**
+`snapshotLocals` now records the full localMap **entries** (name→slot) plus the
+`boxedCaptures` key set; `restoreLocals` rebuilds `localMap` exactly (clear +
+re-insert snapshot entries — dropping added names AND resetting re-pointed ones)
+and drops probe-added `boxedCaptures` markings (a stale box marking would make a
+post-rollback read deref a truncated ref-cell). Near-O(1), hot-path-safe (locals
+are tiny). gc/host mode and all non-rollback paths are unaffected.
+
+**Validation.** `tests/issue-2029-tagged-template-capture-local-index.test.ts`
+(5/5: compiles standalone, captured local reads back `7` at runtime, +subs,
+two-tag tv-template-head shape, gc-mode control). The 37-file runner re-probe:
+**11 flipped** from `index out of range` → no longer an emit crash (the
+template-literal/tagged-template cluster). Closure/tagged-template regression
+suites (`illegal-cast-closures-585`, `issue-1712-capture-closure-dispatch`,
+`iife-tagged-templates`) show 8 pre-existing failures that are **identical on
+pristine `origin/main`** (verified in a clean baseline worktree) — not
+regressions. tsc clean. Broad emit-path change → relying on the merge_group
+test262 floor for full conformance (per `project_broad_impact_validate_full_ci`).
+
+**Remaining (separate PRs, this issue stays `in-progress`):** the `global index
+-1` sentinel cluster (17) and the `function index` funcIdx-shift cluster (8), plus
+1 stray `for-of/iterator-next-reference` local-index from a different producer.
