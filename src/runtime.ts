@@ -7557,6 +7557,70 @@ assert._isSameValue = isSameValue;
           }
           return 0;
         };
+      // (#2663 Slice 4) __with_has_binding(obj, key) -> i32. The ECMAScript
+      // Object Environment Record HasBinding (§9.1.1.2.1) used by the `with`
+      // statement: value-independent HasProperty, THEN filtered by the
+      // receiver's @@unscopables blocklist. A bare name inside `with (obj) {}`
+      // shadows the outer binding only when HasBinding is true.
+      //   1. found = HasProperty(obj, N)                (= __extern_has)
+      //   2. if not found -> 0
+      //   3. unscopables = Get(obj, @@unscopables)
+      //   4. if Type(unscopables) is Object and ToBoolean(Get(unscopables, N))
+      //        -> 0   (the @@unscopables entry hides the binding)
+      //   5. -> 1
+      // Host-mode only: the standalone with-gate emits `__extern_has` (refused
+      // under --target standalone, like Slices 1-3), so this import is never
+      // requested in a no-JS-host build.
+      if (name === "__with_has_binding") {
+        // Reuse the value-independent HasProperty (`__extern_has`) and the
+        // sidecar-aware reader (`__extern_get`, the `extern_get` intent) so a
+        // WasmGC-struct `with` receiver whose @@unscopables / properties live in
+        // the host sidecar resolve identically to a plain host object.
+        const hasProp = resolveImport(
+          { type: "builtin", name: "__extern_has" } as ImportIntent,
+          deps,
+          callbackState,
+          globalSandbox,
+          instanceState,
+        ) as (o: any, k: any) => number;
+        const getProp = resolveImport(
+          { type: "extern_get" } as ImportIntent,
+          deps,
+          callbackState,
+          globalSandbox,
+          instanceState,
+        ) as (o: any, k: any) => any;
+        const toBool = resolveImport(
+          { type: "builtin", name: "__to_boolean" } as ImportIntent,
+          deps,
+          callbackState,
+          globalSandbox,
+          instanceState,
+        ) as (v: any) => number;
+        return (obj: any, key: any): number => {
+          // (1)+(2) value-independent HasProperty.
+          if (!hasProp(obj, key)) return 0;
+          // (3) unscopables = Get(obj, @@unscopables). A throw (opaque struct
+          // with no sidecar entry) ⇒ no blocklist.
+          let unsc: any;
+          try {
+            unsc = getProp(obj, Symbol.unscopables);
+          } catch {
+            unsc = undefined;
+          }
+          // (4) If Type(unscopables) is Object: blocked = ToBoolean(Get(unsc, N)).
+          if (unsc !== null && (typeof unsc === "object" || typeof unsc === "function")) {
+            let blocked: any;
+            try {
+              blocked = getProp(unsc, key);
+            } catch {
+              blocked = undefined;
+            }
+            if (toBool(blocked)) return 0; // @@unscopables hides the binding.
+          }
+          return 1; // (5)
+        };
+      }
       if (name === "__extern_toString")
         return (v: any) => {
           if (v == null) return String(v);
