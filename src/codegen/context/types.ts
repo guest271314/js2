@@ -537,6 +537,27 @@ export interface FunctionContext {
      * during body codegen — order matters, since the emitters read it live.
      */
     unmappedIndices?: Set<number>;
+    /**
+     * Argument indices made non-configurable via a statically-resolvable
+     * `Object.defineProperty(arguments, "<i>", { configurable: false })`
+     * (#2667). Per ECMA-262 §10.4.4.5 + OrdinaryDelete, `delete arguments[i]`
+     * on a non-configurable index must return `false` and leave the property
+     * (and its param mapping) intact. The delete emitter consults this set so
+     * the statically-known case reports the spec-correct result without a
+     * runtime descriptor-sidecar round-trip. Populated lazily during body
+     * codegen; read live, so codegen order matters.
+     */
+    nonConfigurableIndices?: Set<number>;
+    /**
+     * Argument indices made non-writable via a statically-resolvable
+     * `Object.defineProperty(arguments, "<i>", { writable: false })` (#2667).
+     * Per ECMA-262 §10.4.4.2, a non-writable data property rejects later
+     * `arguments[i] = x` writes (and the write-back into the param). The
+     * element-assignment emitter consults this set to drop such writes.
+     * (Setting `writable:false` also severs the param↔arguments map, so the
+     * index is additionally added to `unmappedIndices`.)
+     */
+    nonWritableIndices?: Set<number>;
   };
   /**
    * #1210: bindings detected as `let s = ""; for (...) s += <expr>` builders
