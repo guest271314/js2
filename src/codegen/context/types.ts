@@ -101,6 +101,17 @@ export interface CodegenOptions {
   /** Set of function names imported from node:fs (detected pre-preprocessing).
    *  Used by both the WASI fs syscall path (#1035) and the JS-host fs imports (#1491). */
   wasiNodeFsFuncs?: Set<string>;
+  /** (#2657) Set of LOCAL names imported from `"wasi_snapshot_preview1"`
+   *  (detected pre-preprocessing). The raw-WASI fd_read/fd_write passthrough
+   *  binds these identifiers directly to the WASI import funcs — the most honest
+   *  pure-WASI-P1 expression, no `node:fs` surface (loopdive/js2#389). */
+  wasiRawImports?: Set<string>;
+  /** (#2657) Set of LOCAL names imported from `"wasm:memory"` — js2wasm's inline
+   *  linear-memory access intrinsics (`store32`/`load32`/`store8`/`load8`). These
+   *  lower to a single WASM memory op (NOT imports); they let a raw-WASI module
+   *  lay out its iovec + result slot without a GC roundtrip. Honestly namespaced
+   *  away from `wasi_snapshot_preview1` (no host provides them). */
+  wasiMemAccessors?: Set<string>;
   /** Allow `node:fs` JS-host imports for non-WASI targets (#1491). Default: false. */
   allowFs?: boolean;
   /**
@@ -1207,6 +1218,15 @@ export interface CodegenContext {
   refCellTypeMap: Map<string, number>;
   /** Type index of the $AnyValue boxed-any struct */
   anyValueTypeIdx: number;
+  /**
+   * (#2106 S1) Global index of the standalone `$undefined` singleton — an
+   * immutable tag-1 `$AnyValue`, reserved up-front at `ensureAnyValueType` time
+   * so `undefined` is distinguishable from `null` (`ref.null extern`) in
+   * standalone/native-strings mode. `undefined` otherwise has no host value and
+   * conflates with null. Reserved as a GLOBAL (not a late func import) to avoid
+   * the #329 native-string finalize-shift hazard. `undefined` until reserved.
+   */
+  undefinedGlobalIdx?: number;
   /** Map from any-value helper name → function index */
   anyHelpers: Map<string, number>;
   /** Whether any-value helper functions have been emitted */
@@ -1613,6 +1633,14 @@ export interface CodegenContext {
   wasiPendingStdinReactor?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
   wasiNodeFsFuncs: Set<string>;
+  /** (#2657) Local names imported from `"wasi_snapshot_preview1"` — the raw-WASI
+   *  fd_read/fd_write passthrough bindings (loopdive/js2#389). Empty for any
+   *  program that does not import the raw WASI module. */
+  wasiRawImports: Set<string>;
+  /** (#2657) Local names imported from `"wasm:memory"` — js2wasm's inline
+   *  linear-memory access intrinsics (`store32`/`load32`/`store8`/`load8`). Empty
+   *  for any program that does not import the intrinsic module. */
+  wasiMemAccessors: Set<string>;
   /**
    * #1886 — Linear-safe `Uint8Array` analysis result. Populated (WASI/standalone
    * only) by `analyzeLinearUint8` as a pre-pass; `undefined` otherwise. Symbols
