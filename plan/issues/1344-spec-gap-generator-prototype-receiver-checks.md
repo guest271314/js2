@@ -318,3 +318,61 @@ abrupt-completion state machine through `try`/`catch`/`finally`.**
 sd-2651 has verified all of the above on current main; no code landed in this
 re-ground pass (analysis + slicing only) pending a go/no-go on committing the
 multi-day S-B/S-C build vs landing S-A first.
+
+## ROOT-CAUSE CHECKPOINT (2026-06-25, sd-2651) — the host generator backend is EAGER; S-A is NOT a small slice
+
+Drilling into S-A revealed the decisive architectural fact: **#1344's
+try/catch/finally residual is a TWO-BACKEND problem, and the host (gc) backend
+is fundamentally eager-buffered**, so it cannot implement lazy
+suspension / abrupt-interruption semantics at all.
+
+### Two generator backends (the test262 fails hit both)
+
+Native generators are **standalone/wasi-only** (`generators-native.ts:849`
+`if (!noJsHostTarget(ctx)) return false`). In **default gc mode** generators use
+the **host runtime** (`src/runtime.ts`), which is an **EAGER-YIELD BUFFER**
+(`buf: any[]` filled by running the whole body up front — runtime.ts:135).
+
+**Proof (verified, current main):** a generator whose body sets a side effect
+before/between yields, observed BEFORE any `.next()`:
+```
+function* g(){ sideEffect=1; yield 1; sideEffect=2; yield 2; sideEffect=3; }
+g();                        // no .next() yet
+```
+- **gc/host: sideEffect === 3** — the ENTIRE body ran eagerly at `g()` call time.
+- **standalone: sideEffect === 0** — correctly lazy (native state machine).
+
+So every test that observes suspension timing — `.return()`/`.throw()`
+interrupting a generator suspended in a try, `finally`-on-abrupt, "statement
+following yield not executed" — **fails on the host path by construction**, and
+the native path is the correct one. (Confirmed: the failing
+`return/try-finally-within-try.js` asserts `inFinally===0` after the first
+`.next()`; gc returns 1 because the eager buffer already ran the finally;
+standalone in ISOLATION returns 0 correctly.)
+
+### Why standalone ALSO fails the full test262 file (not just gc)
+
+In isolation the native path is correct (`inFinally===0`), but the full
+test262 file fails `standalone` too (same assert). The native path is either not
+selected under the full-harness program shape, or a harness construct routes the
+generator to the host/eager path even under `--target standalone`. **Open
+sub-question to resolve before S-B/S-C** — whether the native path is actually
+exercised by the test262 runner for these files, or the harness defeats the
+candidate gate. (The isolated-vs-harness divergence is the tell.)
+
+### Revised path forward (CHECKPOINT — do NOT pre-commit)
+
+- **S-A as originally scoped (.throw into non-yielding try/finally) is NOT a
+  small, high-value slice.** The host backend can't do it (eager), and the
+  native backend already does the simple cases right; the test262 fails need
+  EITHER (a) the host eager-buffer backend made lazy (a massive rewrite, likely
+  out of scope), OR (b) the test262 lane driven through the NATIVE path +
+  extended for catch / yielding-finally (S-B/S-C).
+- The highest-leverage direction is **(b): make the native lazy backend the path
+  test262 exercises** (resolve the harness-fallback sub-question), then extend it
+  (S-B yielding finalizers + deferred abrupt completion; S-C try/catch state
+  decomposition). That IS the multi-day state-machine build.
+- **Receiver-checks (the original framing) are done; the residual is this
+  backend/state-machine work.** sd-2651 paused here per the lead's "checkpoint
+  before S-B/S-C" instruction — mechanism fully traced (above + the loci section);
+  awaiting go/no-go on solo-continue vs architect-spec pass.
