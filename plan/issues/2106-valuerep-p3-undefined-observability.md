@@ -6,7 +6,7 @@ assignee: ttraenkler/sdev-s1fix
 sprint: 66
 created: 2026-06-11
 updated: 2026-06-25
-s1_note: "S1 (standalone tag-1 $undefined singleton) NOT COMPLETE — PR #2025 was AUTO-PARKED in merge_group (2026-06-24): standalone high-water floor breached (pass 23729 vs mark 24956), NET −1245 test262 rows (1654 regressed / 409 gained). Root cause (diagnosed by sdev-s1fix 2026-06-25, see '## S1 merge_group regression — diagnosis'): S1.1 flipped the CONSUMER __extern_is_undefined to singleton-only but did NOT flip the matching PRODUCERS (notably __extern_get's missing-key return at object-runtime.ts:856, still ref.null.extern), so destructuring/param defaults stop firing. This is the architect-spec's full ~40-site producer+consumer sweep done as a partial subset — there is NO narrow floor-saving fix. RECOMMENDATION: revert S1.1/S1.2, keep inert S1.0, re-land S1 as a fully-scoped complete sweep. Branch issue-2106-s1-undefined-singleton, PR #2025 (held). S1.2 equality scoping (coercion-engine.ts eq-operand boxing + binary-ops.ts loose-nullish arm) is sound in isolation but depends on the producer flip. REMAINING slices unchanged: S2 (sNaN carve-out), S3 (number|undefined→externref), S4 (union-collapse reversal), typeof-null→object."
+s1_note: "S1 (standalone tag-1 $undefined singleton) NOT COMPLETE — PR #2025 was AUTO-PARKED in merge_group (2026-06-24): standalone high-water floor breached (pass 23729 vs mark 24956), NET −1245 test262 rows (1654 regressed / 409 gained). Root cause (diagnosed by sdev-s1fix 2026-06-25, see '## S1 merge_group regression — diagnosis'): S1.1 flipped the CONSUMER __extern_is_undefined to singleton-only but did NOT flip the matching PRODUCERS (notably __extern_get's missing-key return at object-runtime.ts:856, still ref.null.extern), so destructuring/param defaults stop firing. This is the architect-spec's full ~40-site producer+consumer sweep done as a partial subset — there is NO narrow floor-saving fix. RESOLUTION 2026-06-25: S1.1+S1.2 behavioral flips REVERTED on the branch (kept inert S1.0); PR #2025 re-targets to a floor-neutral revert. S1 to be re-landed as a fully-scoped complete sweep (architect re-spec). REMAINING slices unchanged: S2 (sNaN carve-out), S3 (number|undefined→externref), S4 (union-collapse reversal), typeof-null→object."
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -510,77 +510,12 @@ FAIL (3), with root causes:
 tsc clean; S1.0 inert validated (36 tests green: #1776/#1021/strict+loose
 equality/#2106 S0/#2029). The 3 repro failures above are the WIP frontier.
 
-## S1.2 resolution — 2026-06-24 (sdev-undef-s1) — implemented, 6/6 + no new regressions
-
-Resumed from the WIP frontier above. The two diagnosed root causes turned out to
-funnel through a **single hot codegen seam** — the standalone `externref →
-$AnyValue` boxing of an EQUALITY operand — not a 42-site sweep. The fix is two
-scoped, representation-preserving edits; NO change to the producers (literals /
-`boxToAny` / `emitUndefined` stay as S1.1 left them).
-
-### Root cause (WAT-confirmed), and why the fix is scoped, not a 42-site sweep
-- `[undefined, undefined]` **DOES** store the singleton correctly:
-  `global.get $undefined; extern.convert_any` into the externref `any[]` (S1.1's
-  `emitUndefined` flip works). The bug was on the **READ-BACK / compare** side.
-- `a[i] === a[i+1]` routes through `emitStrictEq` → `emitAnyEqOperands`
-  (`coercion-engine.ts`), which boxes each externref operand via the generic
-  `coerceType(externref → $AnyValue)`. That arm unconditionally calls
-  `__any_box_string` (tag-5) — the deliberate **#1888** baseline for opaque
-  externrefs. It DOUBLE-WRAPS the already-`$AnyValue` singleton: the singleton
-  lands in a fresh tag-5 box's externval field, and `__any_strict_eq`'s tag-5
-  classifier then `ref.test $AnyString`-fails on that externval and returns
-  `false`. Hence `undefined === undefined` (two `any` elements) → false.
-- A NULL externref (`null` read back out of an `any` carrier) hit the same tag-5
-  arm → tag-5-with-null-payload, which sits OUTSIDE `__any_eq`'s both-nullish arm
-  (`tag < 2`), so loose `null == undefined` over two carriers → false.
-
-### The fix (2 files, scoped to the EQUALITY path — #1888 dispatch bridge untouched)
-1. **`coercion-engine.ts` — `emitAnyEqOperands` → new `boxEqOperandToAnyValue`.**
-   A 3-way classifier on a standalone externref equality operand:
-   (1) NULL externref → tag-0 `__any_box_null` (the SAME box the `null` literal
-   produces); (2) externref that IS already an `$AnyValue` (the singleton) →
-   recover it directly (`any.convert_extern; ref.cast $AnyValue`) instead of
-   re-wrapping; (3) genuine opaque string/number externref → the unchanged
-   `boxToAny` tag-5 path. Both (1) and (2) are representation-PRESERVING (never
-   re-tag a real value), and this lives ONLY in the equality operand marshalling
-   — the #1888 open-any **dispatch** bridge does not flow through `emitAnyEqOperands`,
-   so its tag-5-for-numeric-recovery contract is byte-identical.
-2. **`binary-ops.ts` — inline `noJsHost` eq cascade nullish guard.** Replaced the
-   bare per-side `ref.is_null` with `isNullishExtern(local)`: STRICT keeps bare
-   `ref.is_null` (so `null === undefined` correctly stays false); LOOSE adds the
-   tag-1 singleton arm (`is_null || (ref.test $AnyValue && tag==1)`), i.e. the
-   `emitIsNullish` the WIP notes called for, applied to the `looseNullish` arm so
-   `null == undefined` over two carriers is true. `=== null` semantics unchanged.
-
-### Verified (host-runnable + vitest)
-- `tests/issue-2106-standalone-nullish-strict-eq.test.ts`: **6/6** (was 3/6).
-  `undefined === undefined` ✓, `null === null` ✓, `undefined !== undefined` ✓,
-  strict `null !== undefined` stays distinct ✓, loose `null == undefined` (array
-  carriers) ✓, `5===5`/string identity through `any` ✓.
-- `tests/issue-1021-null-vs-undefined.test.ts` 5/5; `tests/issue-1776.test.ts`
-  (isSameValue) pass; broader any/equality cluster (61 tests across
-  #2583/#2058/#2059/#1917/#2580/#1888-s6c) all green. tsc + prettier clean.
-
-### NOT fixed by S1 (pre-existing on upstream/main — verified by a clean
-###  upstream/main worktree probe — and out of S1 scope):
-- **#2081 `const b: any = undefined; a == b`** → false. ROOT CAUSE is the
-  **union-collapse**: `const b: any = undefined` is type-mapped to an **i32 global**
-  (`T|undefined → T`), so `undefined` never reaches codegen as the singleton — it
-  is the scalar `0`. This is THIS issue's **S4** (flag-gated union-collapse reversal),
-  not S1. The S1 singleton can't help a value that was collapsed at the type layer.
-  The ARRAY/carrier form (`[null, undefined]`) DOES work post-S1.
-- **#1888 round-trip (4 cases, `o.two(2,3)` → NaN)**: already red on clean
-  upstream/main (open-any ADD dispatch); unrelated to S1, unchanged by it.
-- `equality-mixed-types.test.ts`: missing `./helpers.js` (env/harness artifact,
-  identical on upstream).
-
-### typeof null → "object" follow-up (deferred, as the WIP notes flagged)
-Not addressed here (separate small follow-up; the host-string readback can't be
-asserted in the probe harness without the export glue). The equality acceptance
-criterion — null vs undefined distinct standalone — is met by the above.
-
-Validate via merge_group (value-rep broad-impact). Supersedes held PR #1961's
-`bothNullishGuard` slice for the strict null/undefined distinction.
+> NOTE (2026-06-25): the "## S1.2 resolution" section that previously claimed
+> S1.2 was "implemented, 6/6 + no new regressions" has been REMOVED — it was
+> wrong. S1.2's equality scoping was real, but the underlying S1.1 producer flip
+> was an incomplete subset that breached the standalone floor by −1245 rows in
+> the merge_group. Both S1.1 and S1.2 behavioral edits are now reverted on this
+> branch. See the diagnosis below.
 
 ## S1 merge_group regression — diagnosis (sdev-s1fix, 2026-06-25)
 

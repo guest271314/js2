@@ -2501,65 +2501,36 @@ export function compileBinaryExpression(
           ],
         } as Instr,
       ];
-      // Nullish guard (#2106 S1.1/S1.2). Under S1 `undefined` is the tag-1
-      // `$undefined` singleton (a NON-null externref) and `null` is `ref.null
-      // extern`, so the two are distinguishable. The guard differs by mode:
+      // Nullish guard, shared by both equality modes (#2106 S1.1).
+      //   - LOOSE (§7.2.15 steps 2-3): both nullish ⇒ true; nullish-vs-non-nullish
+      //     ⇒ false (never coerce against a nullish).
       //   - STRICT (§7.2.16): `null === null` ⇒ true; `null === undefined` ⇒
-      //     false. "Nullish" here means EXACTLY "is null" (bare `ref.is_null`):
-      //     a bare-null vs the singleton takes the `(lNull||rNull)?(lNull&&rNull)`
-      //     arm and yields false (correct strict `null !== undefined`); two nulls
-      //     yield true; and the non-null singleton flows into the core cascade
-      //     where the eqref-identity arm `ref.eq`s the two identical `$undefined`
-      //     globals ⇒ `undefined === undefined` true.
-      //   - LOOSE (§7.2.15 steps 2-3): `null == undefined` ⇒ true, and any two
-      //     nullish ⇒ true; nullish-vs-non-nullish ⇒ false (never coerce against a
-      //     nullish). "Nullish" here must ALSO catch the non-null `$undefined`
-      //     singleton — a bare `ref.is_null` misses it, which made `null ==
-      //     undefined` over two type-erased `any` operands wrong (`false`) after
-      //     the S1.1 producer flip. So in LOOSE mode the per-side test is
-      //     `is_null(x) || isUndefinedSingleton(x)` (#2106 S1.2 `emitIsNullish`).
-      //
-      // `isNullishExtern(local)` emits the per-side nullish predicate for the
-      // active mode: bare `ref.is_null` for strict, plus the tag-1 singleton
-      // recovery for loose. The singleton arm recovers the externref via
-      // `any.convert_extern`, `ref.test $AnyValue`, and on a hit compares field-0
-      // tag === 1 (mirrors `emitIsUndefinedSingleton`). Gated on a registered
-      // `$AnyValue` type (always present when an `$undefined` singleton exists).
-      const anyTypeIdxNullish = ctx.anyValueTypeIdx;
-      const wantSingletonArm = looseNullish && anyTypeIdxNullish >= 0;
-      const isNullishExtern = (local: number): Instr[] => {
-        const base: Instr[] = [{ op: "local.get", index: local }, { op: "ref.is_null" } as Instr];
-        if (!wantSingletonArm) return base;
-        // is_null(x) || (ref.test $AnyValue(any.convert_extern(x)) && tag==1)
-        return [
-          ...base,
-          { op: "local.get", index: local } as Instr,
-          { op: "any.convert_extern" } as Instr,
-          { op: "ref.test", typeIdx: anyTypeIdxNullish } as Instr,
-          {
-            op: "if",
-            blockType: { kind: "val", type: { kind: "i32" } },
-            then: [
-              { op: "local.get", index: local } as Instr,
-              { op: "any.convert_extern" } as Instr,
-              { op: "ref.cast", typeIdx: anyTypeIdxNullish } as Instr,
-              { op: "struct.get", typeIdx: anyTypeIdxNullish, fieldIdx: 0 } as Instr,
-              { op: "i32.const", value: 1 } as Instr,
-              { op: "i32.eq" } as Instr,
-            ],
-            else: [{ op: "i32.const", value: 0 } as Instr],
-          } as Instr,
-          { op: "i32.or" } as Instr,
-        ];
-      };
+      //     false. Under S1 `undefined` is the tag-1 `$undefined` singleton (a
+      //     NON-null externref), so `ref.is_null` here means EXACTLY "is null".
+      //     A bare-null vs the singleton therefore takes the `(lNull||rNull) ?
+      //     (lNull&&rNull)` arm and yields false (correct strict `null !==
+      //     undefined`), two nulls yield true, and the singleton flows into the
+      //     core cascade where the eqref-identity arm `ref.eq`s the two identical
+      //     `$undefined` globals ⇒ `undefined === undefined` true. So the SAME
+      //     guard is now correct for both modes (pre-S1 it would have collapsed
+      //     `null`/`undefined` because they shared `ref.null extern` — see the
+      //     held interim PR #1961, which this supersedes).
       const eqInstrs: Instr[] = [
-        ...isNullishExtern(lTmp),
-        ...isNullishExtern(rTmp),
+        { op: "local.get", index: lTmp },
+        { op: "ref.is_null" } as Instr,
+        { op: "local.get", index: rTmp },
+        { op: "ref.is_null" } as Instr,
         { op: "i32.or" } as Instr,
         {
           op: "if",
           blockType: { kind: "val", type: { kind: "i32" } },
-          then: [...isNullishExtern(lTmp), ...isNullishExtern(rTmp), { op: "i32.and" } as Instr],
+          then: [
+            { op: "local.get", index: lTmp },
+            { op: "ref.is_null" } as Instr,
+            { op: "local.get", index: rTmp },
+            { op: "ref.is_null" } as Instr,
+            { op: "i32.and" } as Instr,
+          ],
           else: coreEqInstrs,
         } as Instr,
       ];

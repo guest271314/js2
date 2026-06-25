@@ -38,9 +38,7 @@ import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { noJsHost } from "./expressions/helpers.js";
 import { addUnionImports, nativeStringType } from "./index.js";
 import { ensureAnyFromExternHelper } from "./any-helpers.js";
-import { allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import { ensureAnyToStringHelper } from "./native-strings.js";
-import { boxToAny } from "./value-tags.js";
 import {
   compileExpression,
   compileStringLiteral,
@@ -430,93 +428,14 @@ function emitAnyEqOperands(ctx: CodegenContext, fctx: FunctionContext, expr: ts.
   const leftType = compileExpression(ctx, fctx, expr.left);
   if (!leftType) return false;
   if (!isAnyValue(leftType, ctx)) {
-    boxEqOperandToAnyValue(ctx, fctx, leftType, anyValueTarget);
+    coerceType(ctx, fctx, leftType, anyValueTarget);
   }
   const rightType = compileExpression(ctx, fctx, expr.right);
   if (!rightType) return false;
   if (!isAnyValue(rightType, ctx)) {
-    boxEqOperandToAnyValue(ctx, fctx, rightType, anyValueTarget);
+    coerceType(ctx, fctx, rightType, anyValueTarget);
   }
   return true;
-}
-
-/**
- * (#2106 S1.2) Box an EQUALITY operand to `(ref null $AnyValue)`. For most
- * operand types this is the historical `coerceType(from → $AnyValue)`. The one
- * specialisation is the standalone **externref** operand (an `any` value read
- * back out of a carrier — array element, local, field — as a bare externref):
- * the generic `coerceType` boxes EVERY externref through the #1888 tag-5-string
- * arm, which is wrong for two S1 nullish shapes that this restores:
- *
- *   (1) a NULL externref (`ref.null extern` = JS `null`) → tag-0 NULL `$AnyValue`
- *       (`__any_box_null`). The tag-5-with-null-payload wrap put `null` outside
- *       `__any_eq`'s both-nullish arm (`tag < 2`), so `(null == undefined)` over
- *       two `any` carriers was `false` after the S1.1 producer flip.
- *   (2) an externref that IS ITSELF an `$AnyValue` (the tag-1 `$undefined`
- *       singleton widened by `emitUndefined`) → recover the inner `$AnyValue`
- *       directly instead of DOUBLE-WRAPPING it in a fresh tag-5 box (whose
- *       externval then `ref.test $AnyString`-fails inside the helper, making
- *       `undefined === undefined` over two `any` elements `false`).
- *
- * Both are representation-PRESERVING (canonicalise null to the box the `null`
- * literal already produces; only ever unwrap a value that already IS an
- * `$AnyValue`). Scoped to the equality operand marshalling so the #1888 open-any
- * **dispatch** bridge (which depends on the tag-5 externref wrap for downstream
- * numeric recovery) is untouched — that path does not flow through here.
- */
-function boxEqOperandToAnyValue(
-  ctx: CodegenContext,
-  fctx: FunctionContext,
-  from: ValType,
-  anyValueTarget: ValType,
-): void {
-  const anyTypeIdx = ctx.anyValueTypeIdx;
-  if (from.kind === "externref" && (ctx.standalone || ctx.wasi) && anyTypeIdx >= 0) {
-    if (from.kind === "externref" && (ctx.standalone || ctx.wasi)) {
-      addUnionImports(ctx);
-    }
-    ensureAnyHelpers(ctx);
-    const boxNullIdx = ctx.funcMap.get("__any_box_null");
-    const tmpExt = allocTempLocal(fctx, { kind: "externref" });
-    // Build the genuine-opaque (tag-5) else-arm into a scratch body so it nests
-    // inside the `if` without emitting live.
-    const savedBody = fctx.body;
-    const tag5Body: Instr[] = [{ op: "local.get", index: tmpExt } as Instr];
-    fctx.body = tag5Body;
-    const boxed = boxToAny(ctx, fctx, from, "unknown");
-    fctx.body = savedBody;
-    if (boxed && boxNullIdx !== undefined) {
-      fctx.body.push({ op: "local.tee", index: tmpExt } as Instr);
-      fctx.body.push({ op: "ref.is_null" } as Instr);
-      fctx.body.push({
-        op: "if",
-        blockType: { kind: "val", type: { kind: "ref_null", typeIdx: anyTypeIdx } },
-        then: [{ op: "call", funcIdx: boxNullIdx } as Instr], // (1) tag-0 null
-        else: [
-          { op: "local.get", index: tmpExt } as Instr,
-          { op: "any.convert_extern" } as Instr,
-          { op: "ref.test", typeIdx: anyTypeIdx } as Instr,
-          {
-            op: "if",
-            blockType: { kind: "val", type: { kind: "ref_null", typeIdx: anyTypeIdx } },
-            then: [
-              // (2) recover the inner $AnyValue directly
-              { op: "local.get", index: tmpExt } as Instr,
-              { op: "any.convert_extern" } as Instr,
-              { op: "ref.cast", typeIdx: anyTypeIdx } as Instr,
-            ],
-            else: tag5Body, // (3) genuine opaque externref → tag-5
-          } as Instr,
-        ],
-      } as Instr);
-      releaseTempLocal(fctx, tmpExt);
-      return;
-    }
-    // Defensive: a helper was unavailable. Nothing emitted live yet (scratch body
-    // only) — fall through to the plain coerceType with the externref intact.
-    releaseTempLocal(fctx, tmpExt);
-  }
-  coerceType(ctx, fctx, from, anyValueTarget);
 }
 
 /**
