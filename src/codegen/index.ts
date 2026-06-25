@@ -47,6 +47,7 @@ import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 
 import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
+import { fillMemberSetDispatch } from "./member-set-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
@@ -1795,6 +1796,16 @@ export function generateModule(
     // at reserve time), so no funcIdx churn. No-op when no any-receiver call site
     // reserved a dispatcher (standalone/wasi only).
     fillClosedMethodDispatch(ctx);
+
+    // (#2664) Fill the reserved `__set_member_<name>` member-WRITE dispatchers now
+    // that EVERY struct type (incl. late-registered fnctor structs like acorn's
+    // `$__fnctor_Parser`) is known — so each `any`-receiver `obj.<name> = v` write
+    // enumerates the COMPLETE struct-candidate set regardless of which function
+    // compiled first. Read-only over funcMap (all deps registered at reserve
+    // time). No-op when no write site reserved a dispatcher. Fixes the
+    // compile-order candidate freeze that lost finishToken's `this.type =` write
+    // to the sidecar (8th acorn dogfood wall).
+    fillMemberSetDispatch(ctx);
 
     // (#1904) Fill the standalone native Array.isArray predicate after all
     // module-local array carriers have been registered.

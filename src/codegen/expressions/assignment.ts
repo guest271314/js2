@@ -2869,22 +2869,20 @@ function compilePropertyAssignmentExternSet(
   // __extern_set_strict fallback still covers genuine host externrefs, accessors
   // (no struct candidate matches an accessor, so the strict-throw path is
   // preserved), and dynamic sidecar-only props.
-  addStringConstantGlobal(ctx, propName);
-  const externSetFallback: Instr[] = [
-    { op: "local.get", index: objLocal } as Instr,
-    ...stringConstantExternrefInstrs(ctx, propName),
-    { op: "local.get", index: valLocal } as Instr,
-  ];
-  if (setIdx !== undefined) {
-    externSetFallback.push({ op: "call", funcIdx: setIdx } as Instr);
-  }
-  const recvAny = allocLocal(fctx, `__paset_any_${fctx.locals.length}`, { kind: "anyref" });
-  fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: recvAny });
-  const dispatched = emitAlternateStructSetDispatch(ctx, fctx, recvAny, valLocal, propName, externSetFallback);
+  // (#2664) Route through the deferred-fill member-set dispatcher (strict — this
+  // is a plain `obj.x = v` [[Set]], so a getter-only accessor must throw). The
+  // dispatcher's terminal else-arm IS the `__extern_set_strict` sidecar, so no
+  // inline fallback is needed; its struct-candidate arms are enumerated at
+  // finalize (the full type table), fixing the compile-order candidate freeze.
+  const dispatched = emitAlternateStructSetDispatch(ctx, fctx, objLocal, valLocal, propName, /*strict*/ true);
   if (!dispatched) {
-    fctx.body.push(...externSetFallback);
+    // Dispatcher could not be reserved (no __extern_set_strict) — emit the bare
+    // strict host write as before.
+    addStringConstantGlobal(ctx, propName);
+    fctx.body.push({ op: "local.get", index: objLocal });
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+    fctx.body.push({ op: "local.get", index: valLocal });
+    if (setIdx !== undefined) fctx.body.push({ op: "call", funcIdx: setIdx });
   }
 
   // Return the assigned value
@@ -5868,28 +5866,18 @@ function compilePropertyCompoundAssignmentExternref(
     [],
   );
   flushLateImportShifts(ctx, fctx);
-  const externSetFallback: Instr[] = [
-    { op: "local.get", index: objLocal } as Instr,
-    { op: "local.get", index: keyLocal } as Instr,
-    { op: "local.get", index: boxedLocal } as Instr,
-  ];
-  if (setIdx !== undefined) {
-    externSetFallback.push({ op: "call", funcIdx: setIdx } as Instr);
-  }
-  const cmpdRecvAny = allocLocal(fctx, `__cmpd_pany_${fctx.locals.length}`, { kind: "anyref" });
-  fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: cmpdRecvAny });
-  const cmpdDispatched = emitAlternateStructSetDispatch(
-    ctx,
-    fctx,
-    cmpdRecvAny,
-    boxedLocal,
-    propName,
-    externSetFallback,
-  );
+  // (#2664) Route through the deferred-fill member-set dispatcher (NON-strict —
+  // `obj.x += v` already read the property, so the sidecar update never hits a
+  // getter-only-accessor throw). The dispatcher's terminal else-arm IS the
+  // `__extern_set` sidecar; its struct-candidate arms are enumerated at finalize
+  // (the full type table), fixing the compile-order candidate freeze (#2664).
+  const cmpdDispatched = emitAlternateStructSetDispatch(ctx, fctx, objLocal, boxedLocal, propName, /*strict*/ false);
   if (!cmpdDispatched) {
-    fctx.body.push(...externSetFallback);
+    // Dispatcher could not be reserved — emit the bare host write as before.
+    fctx.body.push({ op: "local.get", index: objLocal });
+    fctx.body.push({ op: "local.get", index: keyLocal });
+    fctx.body.push({ op: "local.get", index: boxedLocal });
+    if (setIdx !== undefined) fctx.body.push({ op: "call", funcIdx: setIdx });
   }
 
   // Return the result as f64
