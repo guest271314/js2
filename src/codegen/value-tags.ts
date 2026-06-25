@@ -162,14 +162,8 @@ export function boxToAny(ctx: CodegenContext, fctx: FunctionContext, from: ValTy
       if (from.kind === "i64") return emit("__any_box_f64", [{ op: "f64.convert_i64_s" }]);
       break;
     case "null":
-      // (#2106 S1.2) A statically-known JS `null` reference carrier boxes to the
-      // tag-0 `$AnyValue` (`__any_box_null`), so the null/undefined distinction
-      // survives (tag 0 vs the tag-1 `$undefined` singleton). The payload ref
-      // carries no information for `null`, so DROP it. Only honor for a reference
-      // carrier (a non-ref "null" hint shouldn't drop a live scalar).
-      if (from.kind === "externref" || from.kind === "ref" || from.kind === "ref_null") {
-        return emit("__any_box_null", [{ op: "drop" } as Instr]);
-      }
+      // Only honor when the value is a discardable reference carrier; otherwise
+      // fall through (a non-ref "null" hint shouldn't drop a live scalar).
       break;
     case "undefined":
       break;

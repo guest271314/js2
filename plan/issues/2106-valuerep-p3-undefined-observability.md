@@ -2,11 +2,11 @@
 id: 2106
 title: "value-rep P3: undefined observability — UNDEF_F64 sentinel, union-collapse reversal (flagged), standalone $undefined singleton"
 status: in-progress
-assignee: ttraenkler/sdev-undef-s1
+assignee: ttraenkler/sdev-s1fix
 sprint: 66
 created: 2026-06-11
-updated: 2026-06-24
-s1_note: "S1 (standalone tag-1 $undefined singleton) COMPLETE 2026-06-24 by sdev-undef-s1: S1.0 inert reservation + S1.1 producer/chokepoint flips + S1.2 equality null/undefined distinctness (scoped externref→$AnyValue eq-operand boxing in coercion-engine.ts + loose-nullish singleton arm in binary-ops.ts). #2106 standalone-nullish-strict-eq 6/6, #1021 5/5, #1776 pass, no new regressions. See '## S1.2 resolution'. Supersedes held PR #1961's strict-eq slice. REMAINING (separate slices, this issue stays open): S2 (sNaN carve-out codify), S3 (number|undefined→externref find/optional-param), S4 (flag-gated union-collapse reversal — root cause of the #2081 `const b:any=undefined` collapse), typeof-null→object follow-up. Branch issue-2106-s1-undefined-singleton."
+updated: 2026-06-25
+s1_note: "S1 (standalone tag-1 $undefined singleton) NOT COMPLETE — PR #2025 was AUTO-PARKED in merge_group (2026-06-24): standalone high-water floor breached (pass 23729 vs mark 24956), NET −1245 test262 rows (1654 regressed / 409 gained). Root cause (diagnosed by sdev-s1fix 2026-06-25, see '## S1 merge_group regression — diagnosis'): S1.1 flipped the CONSUMER __extern_is_undefined to singleton-only but did NOT flip the matching PRODUCERS (notably __extern_get's missing-key return at object-runtime.ts:856, still ref.null.extern), so destructuring/param defaults stop firing. This is the architect-spec's full ~40-site producer+consumer sweep done as a partial subset — there is NO narrow floor-saving fix. RECOMMENDATION: revert S1.1/S1.2, keep inert S1.0, re-land S1 as a fully-scoped complete sweep. Branch issue-2106-s1-undefined-singleton, PR #2025 (held). S1.2 equality scoping (coercion-engine.ts eq-operand boxing + binary-ops.ts loose-nullish arm) is sound in isolation but depends on the producer flip. REMAINING slices unchanged: S2 (sNaN carve-out), S3 (number|undefined→externref), S4 (union-collapse reversal), typeof-null→object."
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -581,3 +581,61 @@ criterion — null vs undefined distinct standalone — is met by the above.
 
 Validate via merge_group (value-rep broad-impact). Supersedes held PR #1961's
 `bothNullishGuard` slice for the strict null/undefined distinction.
+
+## S1 merge_group regression — diagnosis (sdev-s1fix, 2026-06-25)
+
+PR #2025 (HEAD ffb0dbba8) was **auto-parked** by github-actions[bot]: it passed
+all PR-level checks but FAILED the `merge shard reports` gate in the merge_group
+(run 28134749722, branch gh-readonly-queue/main/pr-2025-…). The failing step is
+`scripts/check-standalone-highwater.mjs`:
+
+```
+[standalone-highwater] current pass=23729, mark=24956 (floor=24906, tolerance=50, delta=-1227).
+##[error]STANDALONE pass-count floor breached
+```
+
+**Per-row delta** (merged standalone report jsonl vs
+`loopdive/js2wasm-baselines/test262-standalone-current.jsonl`):
+- 1654 rows REGRESSED (962 pass→compile_error, 688 pass→fail, 4 pass→timeout),
+  409 gained, **NET −1245**.
+- 1150/1654 (70%) are destructuring / default-param / binding-pattern
+  (`/dstr/`, `dflt`, `ptrn`). The rest (504) are spread across
+  expressions/class, Object.defineProperty(ies), eval-code, RegExp, super, and
+  the verifyProperty/assert harness — all "is-undefined"-classifier consumers.
+- 948 of the 962 compile-errors carry the message "Cannot convert object to
+  primitive value" (the singleton reaching a to-primitive path that doesn't
+  recognize it); 212 of the fails are "illegal cast" in the same dstr cluster.
+
+**Root cause — partial sweep (producer/consumer inconsistency).**
+S1.1 flipped `emitUndefined` to produce the tag-1 `$undefined` SINGLETON
+(non-null externref) and flipped the CONSUMER `__extern_is_undefined`
+(object-runtime.ts ~5681) to a singleton-ONLY tag-1 test, but did NOT flip the
+matching PRODUCERS. The decisive one: **`__extern_get` (object-runtime.ts:856)
+still returns `ref.null.extern` for a MISSING key**. So a missing-property read
+is null, `__extern_is_undefined(null)` now returns 0, and destructuring / param
+defaults never fire.
+
+Validated repros on the branch (standalone, probes since removed):
+- `const {a=7} = {}` → returns 0, should be 7  ← REGRESSION (the bulk).
+- `const {a=7} = {a:null}` → correctly does NOT fire default  ← the S1 GAIN
+  (null/undefined distinctness) working as intended.
+- `"v="+undefined` (→"v=undefined") and `+undefined` (→NaN) still work — those
+  go through `__any_to_string` / `__unbox_number`, which already have tag-1 arms.
+
+**Why there is NO narrow floor-saving fix.** Producer and consumer are now in an
+inconsistent intermediate state. Reconciling them = the architect spec's full
+~40-site sweep (memory `project_2106_undefined_singleton_s1_atomic`): flip EVERY
+undefined producer to the singleton (`__extern_get` miss, omitted-arg/element
+padding, literal element stores) AND convert EVERY `ref.is_null`-based
+absence/nullish consumer to also recognize the singleton, in lockstep.
+`__extern_get` alone has 111 callers; its null return doubles as `__extern_has`'s
+absence signal and the prototype-walk loop terminator — flipping it ripples
+through the whole object runtime. The branch shipped a partial subset, which is
+net −1245.
+
+**Recommendation:** revert the S1.1/S1.2 producer+consumer flips to restore the
+green floor (keep the inert S1.0 reservation + spec/docs), and re-land S1 as a
+complete, properly-sequenced sweep in a fresh PR with the full producer+consumer
+site set flipped together, validated via merge_group BEFORE enqueue (route to
+architect to enumerate the full producer/consumer site list first). The hold on
+#2025 must stay until this is resolved.

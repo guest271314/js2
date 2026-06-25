@@ -476,27 +476,22 @@ function boxEqOperandToAnyValue(
       addUnionImports(ctx);
     }
     ensureAnyHelpers(ctx);
+    const boxNullIdx = ctx.funcMap.get("__any_box_null");
     const tmpExt = allocTempLocal(fctx, { kind: "externref" });
-    // Build the tag-0 null arm AND the genuine-opaque (tag-5) else-arm into
-    // scratch bodies so they nest inside the `if`s without emitting live. Both
-    // route boxing through `boxToAny` (the #2104 single boxing home — the
-    // `"null"` hint drops the null ref and emits `__any_box_null`).
+    // Build the genuine-opaque (tag-5) else-arm into a scratch body so it nests
+    // inside the `if` without emitting live.
     const savedBody = fctx.body;
-    const nullBody: Instr[] = [{ op: "local.get", index: tmpExt } as Instr];
-    fctx.body = nullBody;
-    const boxedNull = boxToAny(ctx, fctx, { kind: "externref" }, "null");
-    fctx.body = savedBody;
     const tag5Body: Instr[] = [{ op: "local.get", index: tmpExt } as Instr];
     fctx.body = tag5Body;
     const boxed = boxToAny(ctx, fctx, from, "unknown");
     fctx.body = savedBody;
-    if (boxed && boxedNull) {
+    if (boxed && boxNullIdx !== undefined) {
       fctx.body.push({ op: "local.tee", index: tmpExt } as Instr);
       fctx.body.push({ op: "ref.is_null" } as Instr);
       fctx.body.push({
         op: "if",
         blockType: { kind: "val", type: { kind: "ref_null", typeIdx: anyTypeIdx } },
-        then: nullBody, // (1) tag-0 null via boxToAny("null")
+        then: [{ op: "call", funcIdx: boxNullIdx } as Instr], // (1) tag-0 null
         else: [
           { op: "local.get", index: tmpExt } as Instr,
           { op: "any.convert_extern" } as Instr,
