@@ -174,3 +174,100 @@ describe("#2668 Slice A — no regression on existing fast paths", () => {
     ).toBe(1);
   });
 });
+
+// #2668 Slice B — own-property ACCESSOR descriptor identity (host mode).
+//
+// Root cause: `Object.defineProperty(o, k, { get: fnRef })` (an identifier-
+// reference accessor half) re-synthesized a FRESH closure from `fnRef`'s
+// *declaration* (`resolveExprToFuncNode` + `emitAccessorFn`) instead of using
+// the value `fnRef` already denotes. The descriptor therefore stored a getter
+// that was a DIFFERENT object than the one the user holds, so
+// `Object.getOwnPropertyDescriptor(o, k).get === fnRef` failed (the largest
+// residual accessor-descriptor bucket) even though the getter *worked*. Host
+// mode now compiles the reference expression directly (`emitAccessorRefValue`);
+// the runtime's `_wrapWasmClosure` bridge memoizes per source closure and
+// `_hostEqComparableValue` unwraps it on `===`, so identity round-trips while
+// the descriptor's get/set stay invocable JS functions.
+//
+// NOTE: these mirror the test262 regime where descriptor function values are
+// `any`-typed (the harness is untyped JS) — `desc.get === fnRef` lowers to the
+// JS-host `__host_eq` path. A *statically function-typed* `fnRef` compared
+// against an `any` GOPD result lowers to WasmGC `ref.eq` across two
+// representations (closure-ref vs the host bridge externref) and is a separate,
+// deeper representation-canonicalization gap, out of this slice's scope.
+// Proto-inherited accessor attribute reads remain deferred to #2680.
+describe("#2668 Slice B — own-property accessor descriptor identity", () => {
+  it("get/set identity round-trips through getOwnPropertyDescriptor", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const obj: any = {};
+          const getter: any = function () { return 1; };
+          const setter: any = function (v: any) {};
+          Object.defineProperty(obj, "prop", { get: getter, set: setter, enumerable: true, configurable: true });
+          const d: any = Object.getOwnPropertyDescriptor(obj, "prop");
+          if (d.get !== getter) return 10;
+          if (d.set !== setter) return 11;
+          if (typeof d.get !== "function") return 12;
+          if (d.enumerable !== true) return 13;
+          if (d.configurable !== true) return 14;
+          return 1;
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("redefining one half preserves the other (get redefined, set kept)", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const obj: any = {};
+          const getter: any = function () { return 1; };
+          const setter: any = function (v: any) {};
+          Object.defineProperty(obj, "prop", { get: getter, set: setter, configurable: true });
+          const getter2: any = function () { return 2; };
+          Object.defineProperty(obj, "prop", { get: getter2 });
+          const d: any = Object.getOwnPropertyDescriptor(obj, "prop");
+          if (d.get !== getter2) return 20;
+          if (d.set !== setter) return 21;
+          return 1;
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("accessor getter stays invocable and identity-preserving after define", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const obj: any = {};
+          const getter: any = function () { return 42; };
+          Object.defineProperty(obj, "p", { get: getter, configurable: true });
+          if (obj.p !== 42) return 30;
+          const d: any = Object.getOwnPropertyDescriptor(obj, "p");
+          if (d.get !== getter) return 31;
+          if (d.get() !== 42) return 32;
+          return 1;
+        }
+      `),
+    ).toBe(1);
+  });
+
+  it("data-property function value identity is NOT regressed (Slice A guard)", async () => {
+    expect(
+      await run(`
+        export function test(): number {
+          const obj: any = {};
+          const f: any = function () { return 1; };
+          obj.f = f;
+          if (obj.f !== f) return 40;
+          Object.defineProperty(obj, "g", { value: f });
+          if (obj.g !== f) return 41;
+          const d: any = Object.getOwnPropertyDescriptor(obj, "g");
+          if (d.value !== f) return 42;
+          return 1;
+        }
+      `),
+    ).toBe(1);
+  });
+});

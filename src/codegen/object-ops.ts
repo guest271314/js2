@@ -2445,6 +2445,49 @@ function emitAccessorFn(
 }
 
 /**
+ * (#2668 Slice B) Emit the externref operand for an *identifier-reference*
+ * accessor half (`{ get: fnRef }` / `{ set: fnRef }`) so the value stored in the
+ * descriptor preserves the user's ORIGINAL function identity.
+ *
+ * The legacy path resolved `fnRef` back to its function *declaration* and
+ * re-synthesized a FRESH closure via {@link emitAccessorFn}. That fresh closure
+ * is a different object than the value the user holds, so
+ * `Object.getOwnPropertyDescriptor(o, k).get === fnRef` failed (the largest
+ * remaining accessor-descriptor bucket) — even though the getter *worked*.
+ *
+ * Instead, compile the reference expression directly to push the user's actual
+ * function value (a stable closure — function-reference identity is preserved
+ * across multiple references in this compiler). The runtime
+ * `__defineProperty_accessor` wraps it for native invocation, and
+ * `_hostEqComparableValue` unwraps that wrapper back to this same closure on the
+ * `===`/`!==` compare — so identity round-trips. Invocation is unaffected: the
+ * wrapper dispatches through `__call_fn_method_0/1`, threading the receiver as
+ * `this` (a strict improvement over the captureless re-synthesized fn).
+ *
+ * Host mode only. Under `ctx.standalone` the descriptor stores a host-free
+ * closure that the native accessor arms dispatch through, so keep the existing
+ * {@link emitAccessorFn} path there (byte-identical standalone output).
+ *
+ * Returns `true` when a value was pushed; `false` when the caller should push
+ * `ref.null.extern`.
+ */
+function emitAccessorRefValue(ctx: CodegenContext, fctx: FunctionContext, expr: ts.Expression): boolean {
+  if (ctx.standalone) {
+    const funcNode = resolveExprToFuncNode(ctx, expr);
+    if (!funcNode) return false;
+    return emitAccessorFn(ctx, fctx, funcNode as unknown as ts.FunctionExpression);
+  }
+  const t = compileExpression(ctx, fctx, expr, { kind: "externref" });
+  if (!t) return false;
+  if (t.kind === "ref" || t.kind === "ref_null") {
+    fctx.body.push({ op: "extern.convert_any" } as Instr);
+  } else if (t.kind !== "externref") {
+    coerceType(ctx, fctx, t, { kind: "externref" });
+  }
+  return true;
+}
+
+/**
  * Emit __defineProperty_value(obj, prop, null, flags) for descriptors without a value property.
  * For externref objects, this delegates to the JS host which can handle flag-only descriptors.
  * For struct-typed objects, this is a no-op (struct fields are always writable).
@@ -2596,14 +2639,9 @@ function emitExternDefinePropertyNoValue(
         if (!emitAccessorFn(ctx, fctx, getNode as unknown as ts.FunctionExpression))
           fctx.body.push({ op: "ref.null.extern" });
       } else if (getExpr) {
-        // get: identifierRef — resolve to function declaration and compile
-        const getFuncNode = resolveExprToFuncNode(ctx, getExpr);
-        if (getFuncNode) {
-          if (!emitAccessorFn(ctx, fctx, getFuncNode as unknown as ts.FunctionExpression))
-            fctx.body.push({ op: "ref.null.extern" });
-        } else {
-          fctx.body.push({ op: "ref.null.extern" });
-        }
+        // get: identifierRef — compile the reference directly (host) so the
+        // descriptor preserves the user's original function identity (#2668 B).
+        if (!emitAccessorRefValue(ctx, fctx, getExpr)) fctx.body.push({ op: "ref.null.extern" });
       } else {
         fctx.body.push({ op: "ref.null.extern" });
       }
@@ -2614,14 +2652,9 @@ function emitExternDefinePropertyNoValue(
         if (!emitAccessorFn(ctx, fctx, setNode as unknown as ts.FunctionExpression))
           fctx.body.push({ op: "ref.null.extern" });
       } else if (setExpr) {
-        // set: identifierRef — resolve to function declaration and compile
-        const setFuncNode = resolveExprToFuncNode(ctx, setExpr);
-        if (setFuncNode) {
-          if (!emitAccessorFn(ctx, fctx, setFuncNode as unknown as ts.FunctionExpression))
-            fctx.body.push({ op: "ref.null.extern" });
-        } else {
-          fctx.body.push({ op: "ref.null.extern" });
-        }
+        // set: identifierRef — compile the reference directly (host) so the
+        // descriptor preserves the user's original function identity (#2668 B).
+        if (!emitAccessorRefValue(ctx, fctx, setExpr)) fctx.body.push({ op: "ref.null.extern" });
       } else {
         fctx.body.push({ op: "ref.null.extern" });
       }

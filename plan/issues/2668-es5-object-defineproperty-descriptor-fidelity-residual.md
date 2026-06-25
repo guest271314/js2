@@ -2,7 +2,7 @@
 id: 2668
 title: "ES5: Object.defineProperty/defineProperties descriptor fidelity residual (~788 fails — largest ES5 cluster)"
 status: in-progress
-assignee: ttraenkler/sd-2668a
+assignee: ttraenkler/sd-2668b
 created: 2026-06-25
 updated: 2026-06-25
 priority: high
@@ -172,6 +172,81 @@ parts of the first cut, both removed:
   recovered (isolated runs). `tsc --noEmit` clean.
 - Conformance: net-positive, **0 regressions** — re-validated via the
   `merge_group` floor (core define/read path is broad-impact).
+
+## Slice B — landed (sd-2668b, host mode)
+
+**Status:** Slice B merged; issue stays open for Slice C (array-`length`
+exotic) and D (cleanup). Slice B targets **own-property accessor descriptor
+identity**: `Object.getOwnPropertyDescriptor(o, k).get/.set` returning the same
+function the user passed, and redefine-preserves-the-other-half.
+
+### Verify-first finding — the real bug is accessor re-synthesis, not read-back
+
+The box was quiet, so the per-file signal sd-2668a couldn't get earlier was
+reliable here (fresh single-process `runTest262File`, not the in-process batch).
+Repro (host/JS): `Object.defineProperty(o, "p", { get: getter, set: setter });
+Object.getOwnPropertyDescriptor(o, "p").get === getter` → **false** on main, even
+though `o.p` invokes the getter correctly.
+
+Root cause is in **codegen**, not the runtime read-back. For an
+*identifier-reference* accessor half (`{ get: fnRef }`), the
+`emitExternDefinePropertyNoValue` getExpr/setExpr branches
+(`src/codegen/object-ops.ts`) resolved `fnRef` back to its function
+*declaration* (`resolveExprToFuncNode`) and **re-synthesized a FRESH closure**
+via `emitAccessorFn`. That fresh closure is a different object than the value the
+user holds, so the descriptor's get/set never matched `=== fnRef`. (The runtime
+already memoizes the `_wrapWasmClosure` invocation bridge per source closure and
+`_hostEqComparableValue` unwraps it on `===`, so once the *stored* value derives
+from the user's actual closure, identity round-trips for free.)
+
+### The fix (one change, host mode)
+
+`emitAccessorRefValue` (`src/codegen/object-ops.ts`): in **host mode**, compile
+the `get`/`set` reference expression *directly* to push the user's actual
+function value (function-reference identity is stable in this compiler), instead
+of re-synthesizing from the declaration. Standalone keeps `emitAccessorFn`
+(host-free closure the native accessor arms dispatch through) — byte-identical
+standalone output. Invocation is unaffected (the runtime bridge dispatches via
+`__call_fn_method_0/1`, which also threads the receiver as `this` — a strict
+improvement over the captureless re-synthesized fn).
+
+### Discarded approach — runtime GOPD unwrap (documented to save the next dev)
+
+An earlier cut ALSO unwrapped the accessor bridge back to the raw closure at the
+`__getOwnPropertyDescriptor(s)` boundary. It produced the same +33 on the
+accessor batch but was **reverted** — it returns the raw WasmGC closure, which
+is `typeof "object"` (violates "accessor get is a function") and is **not
+dynamically invocable** (`desc.get()` → `NaN` in TS mode; broke the existing
+`issue-1629` "preserves referenced getter identity" vitest). The codegen-only
+fix avoids this entirely: the descriptor keeps the invocable JS-function bridge,
+and identity is recovered by the existing `__host_eq` unwrap.
+
+### Scope / two comparison regimes (why some shapes still differ)
+
+- **Regime 1 — `any === any` (the test262 regime).** test262's harness is
+  untyped JS, so `desc.get === origGetter` lowers to the JS-host `__host_eq`
+  path, which unwraps the bridge → identity matches. **This is what Slice B
+  fixes.**
+- **Regime 2 — statically function-typed `fnRef === any GOPD result`.** Lowers
+  to WasmGC `ref.eq` across two representations (a closure-ref vs the host bridge
+  externref) and does not match. This is a deeper representation-canonicalization
+  gap (out of Slice B scope) — the Slice B vitest cases use `any`-typed function
+  values to reflect the regime that is actually fixed.
+- Proto-inherited accessor attribute reads remain deferred to **#2680**.
+- Inline-method (`get(){}`) `this`-binding capture (`issue-929` "accessor
+  descriptor" case) fails on base too — pre-existing, untouched, separate.
+
+### Test results
+
+- New: 4 `#2668 Slice B` cases in `tests/issue-2668.test.ts` (get/set identity
+  round-trip + typeof, redefine-preserves-other-half, invocable-after-define,
+  data-value identity no-regression guard). Full file green (12 cases).
+- Per-file accessor batch (734 `defineProperty`/`defineProperties`/
+  `getOwnPropertyDescriptor` files touching get/set, fresh single-process):
+  **+33 pass (342→375), 0 regressions** (pass→fail).
+- Regression: `issue-1460/1629*/1364a/1364b/2017/2580-m3-bacc/2042-s3` +
+  `accessor-side-effects` green (119 passed; the lone fail is the pre-existing
+  `issue-929` inline-capture case, fails on base). `tsc --noEmit` clean.
 
 ---
 
