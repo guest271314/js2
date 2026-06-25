@@ -508,3 +508,48 @@ test262 floor for full conformance (per `project_broad_impact_validate_full_ci`)
 **Remaining (separate PRs, this issue stays `in-progress`):** the `global index
 -1` sentinel cluster (17) and the `function index` funcIdx-shift cluster (8), plus
 1 stray `for-of/iterator-next-reference` local-index from a different producer.
+
+## LANDED slice (2026-06-25, sd-2038) — global-index `-1` sentinel cluster (14 off the emit-crash)
+
+Two distinct producers in the global-index `-1` sentinel sub-bucket, both the
+documented `-1` string-global-sentinel class (a string constant un-materialized
+standalone records `-1` in `stringGlobalMap`; a raw `global.get` of it crashes
+the encoder):
+
+1. **`SuppressedError.prototype.<member>`** — `SuppressedError` was missing from
+   `BUILTIN_CTOR_NAMES` (`property-access.ts`), so the read fell through both the
+   standalone native-proto path and the host `__get_builtin` fallback into a
+   generic member path that pushed a raw `global.get <stringGlobalMap.get>`.
+   **Fix:** list `SuppressedError` in `BUILTIN_CTOR_NAMES` — identical to the
+   DisposableStack/AsyncDisposableStack precedent already there. Routes the read
+   to the dual-mode handler (clean located refusal standalone, `__get_builtin`
+   under gc/host). Flips the 7 `built-ins/SuppressedError/prototype/*` rows off
+   the emit-crash (now clean CE).
+
+2. **ERM ctors read as bare VALUES** (`Object.getPrototypeOf(SuppressedError)`,
+   `isConstructor(DisposableStack)` — `proto.js` / `is-a-constructor.js` for all
+   three ERM ctors, 6 rows) — `identifiers.ts` had a HOST-ONLY fast path for
+   `DisposableStack`/`AsyncDisposableStack`/`SuppressedError`-as-value that called
+   `__get_globalThis` + `__extern_get` and pushed the ctor-name key via the `-1`
+   string-global sentinel → `global.get -1`. It was NOT standalone-gated, so it
+   both baked the bad index AND leaked two host imports an empty import object
+   can't satisfy. **Fix:** gate the fast path to gc/host (`!standalone && !wasi`);
+   standalone falls through to the clean path. (This is why the already-listed
+   DisposableStack pair STILL had a `proto`/`is-a-constructor` residual — listing
+   in `BUILTIN_CTOR_NAMES` covers `.prototype.*` but not the bare-value path.)
+
+**Row-delta:** the 37-file runner re-probe (post-#2052 baseline 26 still-crashing)
+→ **12 still-crashing**: 14 flipped off the emit-crash, 1 now PASSES outright.
+gc/host mode unchanged (the value fast-path still fires in gc; verified
+`Object.getPrototypeOf(SuppressedError)` compiles gc). Files:
+`src/codegen/property-access.ts` (+SuppressedError in BUILTIN_CTOR_NAMES),
+`src/codegen/expressions/identifiers.ts` (host-gate the ERM-ctor value fast-path).
+Test: `tests/issue-2029-suppressederror-builtin-global-sentinel.test.ts` (6/6).
+Existing #2029 suites green (23/23). Broad emit-path change → merge_group floor.
+
+**Remaining global-index (3, separate/deferred producers):** `String.prototype.
+replaceAll/searchValue-replacer-RegExp-*` (2, regexp-replacer string key) and
+`language/expressions/property-accessors/S11.2.1_A3_T2.js` (1, getter/setter
+accessor). Plus the `function index` funcIdx-shift cluster (8: TypedArray/Array
+`toLocaleString`, annexB RegExp, optional-chaining async) and 1 stray
+`for-of/iterator-next-reference` local-index — the next PR(s).
