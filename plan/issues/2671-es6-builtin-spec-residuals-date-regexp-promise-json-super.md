@@ -43,6 +43,20 @@ built-ins/Date/prototype/setSeconds/arg-ms-to-number.js
 annexB/built-ins/Date/prototype/getYear/not-a-constructor.js
 ```
 
+**Progress (dev-2046, 2026-06-25):**
+- ✅ **`getYear` (Annex B §B.2.4)** — was MISSING entirely (returned
+  undefined/null; `setYear` existed but not the getter). Added to `DATE_METHODS`
+  / `DATE_PROTO_METHODS` + a `getFullYear()-1900` codegen arm (NaN-guarded).
+  `annexB/.../getYear/` test262: 6/7 pass (the 1 fail is `not-a-constructor.js`,
+  the general #930-family "method is not a constructor" gap shared by ALL Date
+  methods — not getYear-specific). `tests/issue-2671-getyear.test.ts` 6/6.
+- 📋 **`Date.parse` / `new Date(str)` NaN in HOST mode** — carved to **#2678**.
+  The native parser (`__date_parse`, #2164) works but is gated standalone/WASI-
+  only; host wiring needs js-string-externref support (dual-mode change), too big
+  to fold into the `getYear` quick win.
+- ⏳ Remaining Date: `set*` ToNumber-coercion side-effect ordering,
+  `proto-from-ctor-realm-*`, not-a-constructor (#930-family).
+
 ### RegExp (95)
 `Symbol.split` / `Symbol.match` / `Symbol.replace` / `Symbol.search` protocol
 edge cases: `lastIndex` get/coerce errors, species constructor validation,

@@ -1,17 +1,17 @@
 [
   {
     "edition": "≤ ES3",
-    "pass": 242,
-    "fail": 32,
+    "pass": 261,
+    "fail": 13,
     "ce": 0,
     "skip": 0,
     "total": 274,
-    "pct": 88
+    "pct": 95
   },
   {
     "edition": "ES5",
-    "pass": 9671,
-    "fail": 3282,
+    "pass": 9686,
+    "fail": 3267,
     "ce": 133,
     "skip": 0,
     "total": 13086,
@@ -19,8 +19,8 @@
   },
   {
     "edition": "ES2015",
-    "pass": 11117,
-    "fail": 4100,
+    "pass": 11121,
+    "fail": 4096,
     "ce": 180,
     "skip": 0,
     "total": 15397,
@@ -128,9 +128,9 @@
   {
     "edition": "Proposals",
     "pass": 1491,
-    "fail": 3164,
+    "fail": 3155,
     "ce": 231,
-    "skip": 96,
+    "skip": 105,
     "total": 4982,
     "pct": 30
   }
