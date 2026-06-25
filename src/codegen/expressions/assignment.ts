@@ -77,7 +77,12 @@ import {
   getBuilderInfo,
   type StringBuilderInfo,
 } from "../string-builder.js";
-import { compileWithBindingAssignment, findWithBinding } from "../with-scope.js";
+import {
+  compileWithBindingAssignment,
+  emitCaptureWithHasBinding,
+  emitDynamicWithSet,
+  resolveWithBinding,
+} from "../with-scope.js";
 
 /**
  * Emit a null/undefined guard for an externref-typed destructuring source.
@@ -152,9 +157,35 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
 
   if (ts.isIdentifier(expr.left)) {
     const name = expr.left.text;
-    const withBinding = findWithBinding(fctx, name);
-    if (withBinding) {
-      return compileWithBindingAssignment(ctx, fctx, withBinding, expr.right);
+    const withRes = resolveWithBinding(fctx, name);
+    if (withRes?.kind === "static") {
+      return compileWithBindingAssignment(ctx, fctx, withRes.binding, expr.right);
+    }
+    if (withRes?.kind === "dynamic") {
+      // (#2663 Slice 2, #2061 fix) HasBinding-gated WRITE with spec-correct
+      // ordering (§13.15.2): the LHS Reference is resolved — i.e. each candidate
+      // dynamic-`with` scope's HasBinding is captured — BEFORE the RHS evaluates.
+      // (Capturing it AFTER the RHS let an RHS that mutates the with-object flip
+      // the binding decision and mis-route the write: regressed S11.13.1_A6_T3.)
+      // So: (1) capture HasBinding(scope,name) into i32 temps for the cascade
+      // chain, innermost-first; (2) evaluate the RHS ONCE into an externref temp;
+      // (3) cascade-write using the pre-captured i32s, falling to the lexical
+      // write when none matched.
+      const captures = captureDynamicWithHasBindings(ctx, fctx, expr.left);
+      const rhsType = compileExpression(ctx, fctx, expr.right, { kind: "externref" });
+      if (!rhsType) {
+        reportError(ctx, expr, "Failed to compile dynamic-with assignment value");
+        return null;
+      }
+      if (rhsType.kind !== "externref") {
+        coerceType(ctx, fctx, rhsType, { kind: "externref" });
+      }
+      const rhsTmp = allocLocal(fctx, `__with_rhs_${fctx.locals.length}`, { kind: "externref" });
+      fctx.body.push({ op: "local.set", index: rhsTmp });
+      emitDynamicWithIdentifierWrite(ctx, fctx, expr.left, rhsTmp, captures);
+      // Assignment expression result is the RHS value.
+      fctx.body.push({ op: "local.get", index: rhsTmp });
+      return { kind: "externref" };
     }
     // const bindings — assignment throws TypeError at runtime
     if (fctx.constBindings?.has(name)) {
@@ -360,6 +391,187 @@ export function compileAssignment(ctx: CodegenContext, fctx: FunctionContext, ex
 
   reportError(ctx, expr, "Unsupported assignment target");
   return null;
+}
+
+/**
+ * (#2663 Slice 2) Write a PRE-COMPUTED externref value (in `rhsLocalIdx`) to
+ * `id`, resolving through the dynamic `with` scope chain (statement form, leaves
+ * nothing on the stack). If the innermost non-shadowing scope is a dynamic
+ * `with`, emit `if HasBinding(obj,name) __extern_set else <next-outer>` and
+ * recurse for the else arm with that scope (and inner) truncated — so a name
+ * absent on the inner object cascades to the next-outer `with`, then to the
+ * lexical write. When no with-scope resolves, do the plain lexical/global write.
+ */
+/**
+ * (#2061 fix) Capture `HasBinding(scope, name)` into an i32 temp for EVERY
+ * candidate dynamic-`with` scope on the cascade chain, BEFORE the RHS is
+ * evaluated (§13.15.2 — the LHS Reference is resolved before the RHS). Returns a
+ * Map keyed by the dynamic scope object → its captured i32 local index, which
+ * `emitDynamicWithIdentifierWrite` then branches on instead of recomputing
+ * HasBinding post-RHS. Walks innermost-first, truncating the matched scope each
+ * step (same cascade shape as the write itself).
+ */
+function captureDynamicWithHasBindings(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  id: ts.Identifier,
+): Map<object, number> {
+  const out = new Map<object, number>();
+  let scopes = fctx.withScopes;
+  const saved = fctx.withScopes;
+  try {
+    // Walk the cascade: resolve, capture, truncate the matched scope, repeat.
+    while (scopes && scopes.length > 0) {
+      const res = resolveWithBinding(fctx, id.text);
+      if (res?.kind !== "dynamic") break; // static hit / lexical → no more gates
+      out.set(res.scope, emitCaptureWithHasBinding(ctx, fctx, res.scope, id.text));
+      const matchedIdx = scopes.lastIndexOf(res.scope);
+      scopes = scopes.slice(0, matchedIdx);
+      fctx.withScopes = scopes;
+    }
+  } finally {
+    fctx.withScopes = saved;
+  }
+  return out;
+}
+
+function emitDynamicWithIdentifierWrite(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  id: ts.Identifier,
+  rhsLocalIdx: number,
+  captures: Map<object, number>,
+): void {
+  const res = resolveWithBinding(fctx, id.text);
+  if (res?.kind === "dynamic") {
+    const scopes = fctx.withScopes!;
+    const matchedIdx = scopes.lastIndexOf(res.scope);
+    const hasLocal = captures.get(res.scope);
+    // hasLocal is always present (captured pre-RHS for every cascade scope); if a
+    // capture is somehow missing, fall back to "not bound" (write the outer).
+    if (hasLocal === undefined) {
+      const saved = fctx.withScopes;
+      fctx.withScopes = scopes.slice(0, matchedIdx);
+      try {
+        emitDynamicWithIdentifierWrite(ctx, fctx, id, rhsLocalIdx, captures);
+      } finally {
+        fctx.withScopes = saved;
+      }
+      return;
+    }
+    emitDynamicWithSet(ctx, fctx, res.scope, id.text, rhsLocalIdx, hasLocal, () => {
+      const saved = fctx.withScopes;
+      fctx.withScopes = scopes.slice(0, matchedIdx);
+      try {
+        emitDynamicWithIdentifierWrite(ctx, fctx, id, rhsLocalIdx, captures);
+      } finally {
+        fctx.withScopes = saved;
+      }
+    });
+    return;
+  }
+  if (res?.kind === "static") {
+    // A static (closed-shape) with field: struct.set the field from the temp.
+    const b = res.binding;
+    fctx.body.push({ op: "local.get", index: b.scope.localIdx });
+    fctx.body.push({ op: "local.get", index: rhsLocalIdx });
+    if (b.field.type.kind !== "externref") {
+      coerceType(ctx, fctx, { kind: "externref" }, b.field.type);
+    }
+    fctx.body.push({ op: "struct.set", typeIdx: b.scope.structTypeIdx, fieldIdx: b.fieldIdx });
+    return;
+  }
+  emitIdentifierWriteFromLocal(ctx, fctx, id, rhsLocalIdx);
+}
+
+/**
+ * (#2663 Slice 2) Write a PRE-COMPUTED externref value (held in `rhsLocalIdx`)
+ * to the outer binding of `id` — the HasBinding-MISS fallback for a dynamic
+ * `with` assignment. Mirrors the identifier-target arm of `compileAssignment`
+ * but reads the value from the temp instead of compiling an RHS expression (so
+ * the RHS is evaluated exactly once, in the caller). Leaves NOTHING on the stack
+ * (the gated-set caller pushes the RHS value as the expression result). Handles
+ * local / captured-global / module-global / undeclared (auto-local) targets,
+ * coercing externref → the target's declared type. Boxed ref-cell captures and
+ * const/read-only bindings are handled by re-reading them here too.
+ */
+function emitIdentifierWriteFromLocal(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  id: ts.Identifier,
+  rhsLocalIdx: number,
+): void {
+  const name = id.text;
+
+  // const → TypeError; read-only (named-fn-expr) → silent no-op (sloppy).
+  if (fctx.constBindings?.has(name)) {
+    emitThrowString(ctx, fctx, "TypeError: Assignment to constant variable.");
+    fctx.body.push({ op: "unreachable" });
+    return;
+  }
+  if (fctx.readOnlyBindings?.has(name)) {
+    return; // no-op
+  }
+
+  const pushRhsCoerced = (target?: ValType): void => {
+    fctx.body.push({ op: "local.get", index: rhsLocalIdx });
+    if (target && target.kind !== "externref") {
+      coerceType(ctx, fctx, { kind: "externref" }, target);
+    }
+  };
+
+  const localIdx = fctx.localMap.get(name);
+  if (localIdx !== undefined) {
+    const boxed = fctx.boxedCaptures?.get(name);
+    if (boxed) {
+      // Write through the ref cell (null-guarded), mirroring the boxed path.
+      pushRhsCoerced(boxed.valType);
+      const tmpVal = allocLocal(fctx, `__with_box_${fctx.locals.length}`, boxed.valType);
+      fctx.body.push({ op: "local.set", index: tmpVal });
+      fctx.body.push({ op: "local.get", index: localIdx });
+      fctx.body.push({ op: "ref.is_null" });
+      fctx.body.push({
+        op: "if",
+        blockType: { kind: "empty" },
+        then: [] as Instr[],
+        else: [
+          { op: "local.get", index: localIdx } as Instr,
+          { op: "local.get", index: tmpVal } as Instr,
+          { op: "struct.set", typeIdx: boxed.refCellTypeIdx, fieldIdx: 0 } as Instr,
+        ],
+      } as Instr);
+      return;
+    }
+    const localType = getLocalType(fctx, localIdx);
+    pushRhsCoerced(localType);
+    fctx.body.push({ op: "local.set", index: localIdx });
+    return;
+  }
+
+  const capturedIdx = ctx.capturedGlobals.get(name);
+  if (capturedIdx !== undefined) {
+    const globalDef = ctx.mod.globals[localGlobalIdx(ctx, capturedIdx)];
+    pushRhsCoerced(globalDef?.type);
+    fctx.body.push({ op: "global.set", index: ctx.capturedGlobals.get(name)! });
+    return;
+  }
+
+  const moduleIdx = ctx.moduleGlobals.get(name);
+  if (moduleIdx !== undefined) {
+    const globalDef = ctx.mod.globals[localGlobalIdx(ctx, moduleIdx)];
+    const globalType = globalDef?.type;
+    fctx.body.push({ op: "local.get", index: rhsLocalIdx });
+    if (globalType && globalType.kind !== "externref") {
+      coerceType(ctx, fctx, { kind: "externref" }, globalType);
+    }
+    fctx.body.push({ op: "global.set", index: ctx.moduleGlobals.get(name)! });
+    return;
+  }
+
+  // Undeclared (sloppy implicit global): auto-allocate a local holding the value.
+  const newLocalIdx = allocLocal(fctx, name, { kind: "externref" });
+  fctx.body.push({ op: "local.get", index: rhsLocalIdx });
+  fctx.body.push({ op: "local.set", index: newLocalIdx });
 }
 
 /**
@@ -2714,22 +2926,20 @@ function compilePropertyAssignmentExternSet(
   // __extern_set_strict fallback still covers genuine host externrefs, accessors
   // (no struct candidate matches an accessor, so the strict-throw path is
   // preserved), and dynamic sidecar-only props.
-  addStringConstantGlobal(ctx, propName);
-  const externSetFallback: Instr[] = [
-    { op: "local.get", index: objLocal } as Instr,
-    ...stringConstantExternrefInstrs(ctx, propName),
-    { op: "local.get", index: valLocal } as Instr,
-  ];
-  if (setIdx !== undefined) {
-    externSetFallback.push({ op: "call", funcIdx: setIdx } as Instr);
-  }
-  const recvAny = allocLocal(fctx, `__paset_any_${fctx.locals.length}`, { kind: "anyref" });
-  fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: recvAny });
-  const dispatched = emitAlternateStructSetDispatch(ctx, fctx, recvAny, valLocal, propName, externSetFallback);
+  // (#2664) Route through the deferred-fill member-set dispatcher (strict — this
+  // is a plain `obj.x = v` [[Set]], so a getter-only accessor must throw). The
+  // dispatcher's terminal else-arm IS the `__extern_set_strict` sidecar, so no
+  // inline fallback is needed; its struct-candidate arms are enumerated at
+  // finalize (the full type table), fixing the compile-order candidate freeze.
+  const dispatched = emitAlternateStructSetDispatch(ctx, fctx, objLocal, valLocal, propName, /*strict*/ true);
   if (!dispatched) {
-    fctx.body.push(...externSetFallback);
+    // Dispatcher could not be reserved (no __extern_set_strict) — emit the bare
+    // strict host write as before.
+    addStringConstantGlobal(ctx, propName);
+    fctx.body.push({ op: "local.get", index: objLocal });
+    fctx.body.push(...stringConstantExternrefInstrs(ctx, propName));
+    fctx.body.push({ op: "local.get", index: valLocal });
+    if (setIdx !== undefined) fctx.body.push({ op: "call", funcIdx: setIdx });
   }
 
   // Return the assigned value
@@ -5713,33 +5923,55 @@ function compilePropertyCompoundAssignmentExternref(
     [],
   );
   flushLateImportShifts(ctx, fctx);
-  const externSetFallback: Instr[] = [
-    { op: "local.get", index: objLocal } as Instr,
-    { op: "local.get", index: keyLocal } as Instr,
-    { op: "local.get", index: boxedLocal } as Instr,
-  ];
-  if (setIdx !== undefined) {
-    externSetFallback.push({ op: "call", funcIdx: setIdx } as Instr);
-  }
-  const cmpdRecvAny = allocLocal(fctx, `__cmpd_pany_${fctx.locals.length}`, { kind: "anyref" });
-  fctx.body.push({ op: "local.get", index: objLocal });
-  fctx.body.push({ op: "any.convert_extern" } as Instr);
-  fctx.body.push({ op: "local.set", index: cmpdRecvAny });
-  const cmpdDispatched = emitAlternateStructSetDispatch(
-    ctx,
-    fctx,
-    cmpdRecvAny,
-    boxedLocal,
-    propName,
-    externSetFallback,
-  );
+  // (#2664) Route through the deferred-fill member-set dispatcher (NON-strict —
+  // `obj.x += v` already read the property, so the sidecar update never hits a
+  // getter-only-accessor throw). The dispatcher's terminal else-arm IS the
+  // `__extern_set` sidecar; its struct-candidate arms are enumerated at finalize
+  // (the full type table), fixing the compile-order candidate freeze (#2664).
+  const cmpdDispatched = emitAlternateStructSetDispatch(ctx, fctx, objLocal, boxedLocal, propName, /*strict*/ false);
   if (!cmpdDispatched) {
-    fctx.body.push(...externSetFallback);
+    // Dispatcher could not be reserved — emit the bare host write as before.
+    fctx.body.push({ op: "local.get", index: objLocal });
+    fctx.body.push({ op: "local.get", index: keyLocal });
+    fctx.body.push({ op: "local.get", index: boxedLocal });
+    if (setIdx !== undefined) fctx.body.push({ op: "call", funcIdx: setIdx });
   }
 
   // Return the result as f64
   fctx.body.push({ op: "local.get", index: resultLocal });
   return { kind: "f64" };
+}
+
+/**
+ * (#2666) ToPropertyKey §7.1.19, applied EXACTLY ONCE to the key externref on
+ * the stack, leaving the coerced key externref on the stack. For a member
+ * read-modify-write (`o[key] op= rhs`, `o[key]++`) the LHS Reference is
+ * evaluated once (§13.15.2 / §13.4), so the key's ToPropertyKey must fire once —
+ * but the raw key flows to both `__extern_get` and `__extern_set`, each of which
+ * ToPropertyKeys internally, double-firing a side-effecting `toString`/`valueOf`.
+ * Coercing here once yields a primitive (string) or a preserved Symbol, which is
+ * idempotent under the host's internal ToPropertyKey (string→string,
+ * symbol→symbol) so the subsequent get/set do not re-coerce.
+ *
+ * HOST mode: the `__to_property_key` JS import wraps `_toPropertyKey` (§7.1.19,
+ * Symbol-preserving). STANDALONE: the native `__to_property_key` helper
+ * (object-runtime.ts) — ensure the object runtime so it is emitted.
+ */
+function emitToPropertyKeyOnce(ctx: CodegenContext, fctx: FunctionContext): void {
+  if (ctx.standalone) {
+    ensureObjectRuntime(ctx);
+    flushLateImportShifts(ctx, fctx);
+    const tpkIdx = ctx.funcMap.get("__to_property_key");
+    if (tpkIdx !== undefined) {
+      fctx.body.push({ op: "call", funcIdx: tpkIdx } as Instr);
+    }
+    return;
+  }
+  const tpkIdx = ensureLateImport(ctx, "__to_property_key", [{ kind: "externref" }], [{ kind: "externref" }]);
+  flushLateImportShifts(ctx, fctx);
+  if (tpkIdx !== undefined) {
+    fctx.body.push({ op: "call", funcIdx: tpkIdx } as Instr);
+  }
 }
 
 /**
@@ -5783,6 +6015,14 @@ function compileElementCompoundAssignment(
       kind: "externref",
     });
     if (!keyResult) return null;
+    // (#2666) ToPropertyKey ONCE (§7.1.19): a read-modify-write
+    // (`o[key] op= rhs`) evaluates the LHS Reference once (§13.15.2), so the
+    // key's ToPropertyKey must fire once. The raw key flows to BOTH
+    // __extern_get and __extern_set, each of which ToPropertyKeys internally —
+    // coercing a side-effecting key object twice. Coerce here once; the stored
+    // primitive (string / preserved Symbol) is idempotent under the host's
+    // internal ToPropertyKey, so no second `toString`.
+    emitToPropertyKeyOnce(ctx, fctx);
     const keyLocal = allocLocal(fctx, `__cmpd_ekey_${fctx.locals.length}`, {
       kind: "externref",
     });
@@ -5873,6 +6113,14 @@ function compileElementCompoundAssignment(
       kind: "externref",
     });
     if (!keyResult) return null;
+    // (#2666) ToPropertyKey ONCE (§7.1.19): a read-modify-write
+    // (`o[key] op= rhs`) evaluates the LHS Reference once (§13.15.2), so the
+    // key's ToPropertyKey must fire once. The raw key flows to BOTH
+    // __extern_get and __extern_set, each of which ToPropertyKeys internally —
+    // coercing a side-effecting key object twice. Coerce here once; the stored
+    // primitive (string / preserved Symbol) is idempotent under the host's
+    // internal ToPropertyKey, so no second `toString`.
+    emitToPropertyKeyOnce(ctx, fctx);
     const keyLocal = allocLocal(fctx, `__cmpd_ekey_${fctx.locals.length}`, {
       kind: "externref",
     });

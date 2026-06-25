@@ -626,3 +626,20 @@ A1(#1917 amendment) → #1917 Step0 → Steps 1-3 → symptom closures;
 #2009 → #1989(eqref); A2(#1916+#1899) → #1899 impl → #1983; #1923 → #1922
 → #1924+#2134 → #1804 → STRICT ratchet flips; #1921 → #1927; #1917 Step0 →
 #2140; #2139 → #1854 → #2144(63); #2141 spec → 63 impl.
+
+## 2026-06-25 — Sprint-66 ES3/ES5/ES6 edition-gap clusters (PO grooming)
+
+Edition-gap issues with their sub-dependencies (umbrella → concrete slices):
+
+- **≤ES3 (top priority, base language)**
+  - #2666 member-ref `base[prop]` eval order (compound-assign + ++/--) — standalone.
+  - #2667 mapped-arguments non-config/delete — residual of #1511 (done).
+- **ES5 (largest: descriptor fidelity)**
+  - #2668 Object.defineProperty/defineProperties fidelity — residual of #1460/#1462/#929 (done); JSON reviver (#2671) sequences AFTER this.
+- **ES2015 (largest clusters)**
+  - #2669 destructuring umbrella → slices #1642 (IteratorClose), #2566 (generator over-consume), #1556 (param struct mismatch). Prior: #1454/#2203/#2032/#796/#2587 (done).
+  - #2670 Array.prototype generic-receiver/holes/length → coordinates with #2580 (length on dynamic receiver, in-progress). Residual of #2177/#2151/#473 (done).
+  - #2671 Date/RegExp/Promise/JSON/super tracker → reopen-or-child #1343/#1440 (Date), #1444/#1439 (RegExp), #1465/#1368 (Promise), #1551 (super eval order). JSON deps #2668.
+
+Edges: #2668 → #2671(JSON); #2580 ↔ #2670(length); #1642+#2566+#1556 ⊂ #2669.
+Deprioritized (eval/dynamic-code): #1066 #1102 #1240 #1263-#1266 — not scheduled.
