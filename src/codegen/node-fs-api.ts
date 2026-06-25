@@ -431,6 +431,32 @@ function emitFdWriteRuntime(
  *
  * `bufLenLocal` is an i32 local already holding the buffer's element length.
  */
+/**
+ * #2045 C.7 — clamp the i32 in `valLocal` into `[0, hiLocal]` in place:
+ * `val = min(max(val, 0), hi)`. Uses signed `select` so a negative trunc_sat
+ * result (from a negative JS offset/length) maps to 0, and an over-large value
+ * caps at `hi`. `hiLocal` is assumed non-negative (bufLen, or bufLen-offset
+ * after offset was already clamped to <= bufLen).
+ */
+function emitClampI32(fctx: FunctionContext, valLocal: number, hiLocal: number): void {
+  // val = max(val, 0)  ==  select(val, 0, val > 0)
+  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+  fctx.body.push({ op: "i32.const", value: 0 } as Instr);
+  fctx.body.push({ op: "i32.gt_s" } as Instr);
+  fctx.body.push({ op: "select" } as Instr);
+  fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+  // val = min(val, hi)  ==  select(val, hi, val < hi)
+  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: hiLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: valLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: hiLocal } as Instr);
+  fctx.body.push({ op: "i32.lt_s" } as Instr);
+  fctx.body.push({ op: "select" } as Instr);
+  fctx.body.push({ op: "local.set", index: valLocal } as Instr);
+}
+
 function emitNodeFsOffsetLength(
   ctx: CodegenContext,
   fctx: FunctionContext,
@@ -454,6 +480,7 @@ function emitNodeFsOffsetLength(
   } else {
     offsetExpr = arg2;
   }
+  const explicitOffset = offsetExpr !== undefined;
   if (offsetExpr) {
     compileExpression(ctx, fctx, offsetExpr, { kind: "f64" });
     fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
@@ -462,6 +489,14 @@ function emitNodeFsOffsetLength(
   }
   fctx.body.push({ op: "local.set", index: offLocal } as Instr);
 
+  // #2045 C.7 — clamp an EXPLICIT offset into [0, bufLen] so a too-large or
+  // negative offset can never address past the buffer. The default (absent)
+  // offset is 0 and needs no clamp. Negative truncs to a negative i32; the
+  // `max(.,0)` (signed-lt select) maps it to 0, and `min(.,bufLen)` caps it.
+  if (explicitOffset) {
+    emitClampI32(fctx, offLocal, bufLenLocal);
+  }
+
   // ---- length ----  (default: buf.length - offset)
   let lengthExpr: ts.Expression | undefined;
   if (optionsObj) {
@@ -469,6 +504,7 @@ function emitNodeFsOffsetLength(
   } else {
     lengthExpr = expr.arguments[3];
   }
+  const explicitLength = lengthExpr !== undefined;
   if (lengthExpr) {
     compileExpression(ctx, fctx, lengthExpr, { kind: "f64" });
     fctx.body.push({ op: "i32.trunc_sat_f64_s" } as Instr);
@@ -478,6 +514,22 @@ function emitNodeFsOffsetLength(
     fctx.body.push({ op: "i32.sub" } as Instr);
   }
   fctx.body.push({ op: "local.set", index: lenLocal } as Instr);
+
+  // #2045 C.7 — clamp an EXPLICIT length into [0, bufLen - offset] so
+  // `offset + length` can never exceed the buffer (the same soundness invariant
+  // the absent-length branch satisfies by construction). Without this, an
+  // explicit `length` > buf.length silently read/wrote arbitrary linear memory
+  // past the buffer (OOB read on writeSync = info leak; OOB write on readSync =
+  // the A.2 silent-corruption class). The remaining-capacity bound is computed
+  // from the already-clamped offset (offset <= bufLen ⇒ bufLen - offset >= 0).
+  if (explicitLength) {
+    const capLocal = allocLocal(fctx, `__nodefs_cap_${fctx.locals.length}`, { kind: "i32" });
+    fctx.body.push({ op: "local.get", index: bufLenLocal } as Instr);
+    fctx.body.push({ op: "local.get", index: offLocal } as Instr);
+    fctx.body.push({ op: "i32.sub" } as Instr);
+    fctx.body.push({ op: "local.set", index: capLocal } as Instr);
+    emitClampI32(fctx, lenLocal, capLocal);
+  }
 
   return { offLocal, lenLocal };
 }
