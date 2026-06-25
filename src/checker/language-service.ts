@@ -23,6 +23,10 @@ export class IncrementalLanguageService {
   private fileName: string;
   private compilerOptions: ts.CompilerOptions;
   private host: ts.CompilerHost;
+  // #2528 — the default-lib composite name for the current `analyze` call.
+  // `lib.d.ts` (DOM) by default; `lib.no-dom.d.ts` under `--platform node`.
+  // Read by the host's `getDefaultLibFileName` closure at `createProgram` time.
+  private defaultLibName = "lib.d.ts";
 
   constructor(fileName = "input.ts") {
     this.fileName = fileName;
@@ -42,7 +46,7 @@ export class IncrementalLanguageService {
         if (name === this.fileName) return this.currentSourceFile;
         return getLibSourceFile(name, languageVersion);
       },
-      getDefaultLibFileName: () => "lib.d.ts",
+      getDefaultLibFileName: () => this.defaultLibName,
       writeFile: () => {},
       getCurrentDirectory: () => "/",
       getCanonicalFileName: (f: string) => f,
@@ -79,6 +83,10 @@ export class IncrementalLanguageService {
       options.allowJs = true;
       options.checkJs = true;
     }
+    // #2528 — select the DOM-free composite under `--platform node` so DOM-only
+    // globals are not in scope on the incremental path either. The host closure
+    // reads `this.defaultLibName` at `createProgram` time below.
+    this.defaultLibName = analyzeOptions?.platform === "node" ? "lib.no-dom.d.ts" : "lib.d.ts";
 
     // Fresh program each time — no oldProgram reuse. (#973)
     const program = ts.createProgram([this.fileName], options, this.host);

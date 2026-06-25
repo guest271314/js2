@@ -2,9 +2,10 @@
 id: 2046
 title: "standalone Reflect: receiver arg silently dropped, deleteProperty ignores freeze/configurable, no ToPropertyKey (#1905 follow-up)"
 status: in-progress
+assignee: ttraenkler/dev-reflect-c
 sprint: 64
 created: 2026-06-10
-updated: 2026-06-21
+updated: 2026-06-25
 priority: high
 feasibility: medium
 reasoning_effort: high
@@ -239,3 +240,122 @@ numeric-key coercion, non-object→TypeError, and the PR-D numeric-key get pin.
 - **PR-C (real receiver plumbing)** — senior/deferred, coordinates with #1888
   Slice 5 accessor invocation; the explicit-receiver get/set refusal stays correct
   meanwhile.
+
+## defineProperty slice landed — route to native applier (2026-06-25)
+
+PROBE-VERIFIED against current main HEAD (064b27657) before any change:
+`Reflect.defineProperty(o, "x", {value:42,…})` refused with
+"Codegen error: Reflect.defineProperty not supported in standalone mode
+(#1472 Phase C)".
+
+**The #2043 blocker recorded above was STALE.** The write-side native
+`__obj_define_from_desc` (#1629b) has backed standalone `Object.defineProperty`
+since that PR and is registered by `ensureObjectRuntime` / reachable end-to-end —
+no new native was needed.
+
+**Change** (`src/codegen/expressions/calls.ts`, inside the `if (ctx.standalone)`
+Reflect dispatch block; `src/codegen/object-ops.ts`): replaced the
+`Reflect.defineProperty` refusal with a route through the SAME standalone
+runtime-descriptor applier `Object.defineProperty` uses —
+`emitDefinePropertyDescRuntime` (now exported). Reusing it (rather than calling
+`__obj_define_from_desc` directly) is essential: it performs the **#2372
+descriptor-struct reify**, so an INLINE object-literal descriptor
+(`{ value: 42, … }`, which the TS checker types as a closed WasmGC struct) is
+reified into a `$Object` before the native's internal `ref.test $Object` runs —
+otherwise the native raises a spurious §10.1.6 TypeError. §28.1.3:
+- step 1 (non-object target → TypeError) — enforced with the shared
+  `emitNonObjectArgGuard` (now exported), which fires for a statically primitive /
+  null / undefined target (the test262 non-object subtests use bare primitive
+  literals). A runtime-`any` primitive still slips through — an accepted
+  imprecision shared with standalone `Object.defineProperty`.
+- step 2 (ToPropertyKey) — handled inside the native via `__to_property_key`
+  (#2042 S1); numeric keys coerce.
+- step 3 (ToPropertyDescriptor errors) — the native already throws a catchable
+  TypeError for malformed descriptors.
+- step 4 (boolean result) — the applier returns the obj (always truthy); we drop
+  it and return i32 `true`.
+
+**Known limitation** (shared with standalone `Object.defineProperty`): a rejected
+redefine of an existing non-configurable property silently no-ops in the native
+rather than surfacing failure, so the Reflect path returns `true` where spec
+wants `false`. Faithful handling needs a failure channel in
+`__defineProperty_value`; out of this slice.
+
+New tests in `tests/issue-2046.test.ts` (28/28 green): data descriptor apply,
+boolean-true return, numeric-key coercion, accessor descriptor, pre-built
+(dynamic) descriptor, enumerable:false hidden from for-in, primitive-target and
+null-target TypeError. `tests/issue-1905.test.ts` updated — `defineProperty`
+removed from the "still refuses" list (now supported), all green.
+
+Pre-existing unrelated failures (byte-identical to origin/main, untouched here):
+`tests/object-define-property.test.ts` fails to load (missing `./helpers.js`
+import); `tests/equivalence/reflect-api.test.ts` "Reflect.construct creates a new
+instance" fails identically on clean main (host-mode construct gap).
+
+**Still refused (out of this PR, issue stays `in-progress`):**
+- **`Reflect.construct`** (152 rows, the big one) — gated on standalone construct
+  machinery (coordinate with #2158).
+- **PR-C (real receiver plumbing)** — senior/deferred (#1888 Slice 5).
+- `getPrototypeOf` / `setPrototypeOf` / `apply` standalone arms.
+
+## PR-C slice — getPrototypeOf + setPrototypeOf routed (2026-06-25)
+
+REGROUND against current main HEAD (669600612) before any change confirmed all
+three §26.1 prototype/apply methods still refused in standalone (`Codegen error:
+Reflect.{getPrototypeOf,setPrototypeOf,apply} not supported … #1472 Phase C`).
+
+**Change** (`src/codegen/expressions/calls.ts`, inside the `if (ctx.standalone)`
+Reflect dispatch block, after the `defineProperty` arm):
+
+- **`Reflect.getPrototypeOf(target)` → native `__getPrototypeOf`** — the SAME
+  helper backing standalone `Object.getPrototypeOf` (calls.ts ~5943). Returns
+  `extern.convert_any($Object.$proto)` (may be null). §26.1.8 step 1 (non-object
+  target → TypeError) enforced at the CALL SITE with the shared
+  `emitNonObjectArgGuard` (the same static-type / bare-literal guard the
+  `defineProperty` arm uses); the shared native is untouched.
+- **`Reflect.setPrototypeOf(target, proto)` → native `__object_setPrototypeOf`**
+  — the SAME helper backing standalone `Object.setPrototypeOf` (calls.ts ~5829),
+  which performs the §10.1.2.1 OrdinarySetPrototypeOf extensibility + cycle
+  checks and writes `$Object.$proto`. §26.1.14 step 1 (non-object target →
+  TypeError) and step 2 (non-null primitive proto → TypeError) enforced at the
+  CALL SITE; `null`/`undefined` proto is legal (passes through to the native,
+  which maps a non-`$Object` proto to a null `$proto`). The proto arg goes
+  through `compileProtoArg` (the #2580 M3 Stage A inline-literal reify) just like
+  `Object.setPrototypeOf`. Returns i32 `true` on success.
+  - **KNOWN LIMITATION** (identical to the `Reflect.defineProperty` arm above):
+    `__object_setPrototypeOf` has no boolean failure channel — a *refused* set
+    (non-extensible target or a proto cycle) silently no-ops and still returns
+    `obj`, so the Reflect path returns the spec's `true` instead of `false` for
+    those cases. Faithful handling needs a failure channel in the native; out of
+    this slice (converting the common refusal→working path is the win).
+
+**Verified** (probe + tests, both against the test262 compile path
+`skipSemanticDiagnostics: true`): setProto→getProto round-trips by identity for
+dynamic (`any`-typed / `Object.create`) objects; getProto of a plain object is
+null; getProto identity is stable; non-object target throws (getProto and
+setProto); non-null primitive proto throws; null proto is legal.
+
+**Verified subtlety** — the setProto→getProto round-trip is only OBSERVABLE for
+dynamic `$Object`s (`any`-typed / `Object.create`). Closed-struct object literals
+(`var o = {}` with no `any` annotation) do NOT round-trip — but this is the
+**pre-existing #2580 M3 closed-struct-vs-`$Object` substrate gap shared with
+`Object.setPrototypeOf`** (the `Object.*` control shows the identical var-typed
+0), NOT introduced by this routing. The test262 Reflect prototype rows use the
+dynamic shape, which works.
+
+**`Reflect.apply` stays refused** — needs CreateListFromArrayLike + a call/spread
+analog with no native helper in this slice; kept its loud refusal (pinned by a
+test). Out of PR-C scope.
+
+New tests in `tests/issue-2046.test.ts` (35/35 green): getProto/setProto
+round-trip identity, setProto-returns-true, getProto-via-Object.create,
+plain-object-null-proto, stable-identity, null-proto-legal, four non-object /
+primitive-proto TypeError guards, and the apply-still-refused pin.
+`tests/issue-1905.test.ts` updated (4/4 green) — `getPrototypeOf` removed from the
+"still refuses" list.
+
+**Still refused after PR-C (issue stays `in-progress`):**
+- **`Reflect.construct`** — gated on standalone construct machinery (#2158).
+- **`Reflect.apply`** — needs a call/spread native analog.
+- **Real receiver plumbing** (explicit-receiver get/set) — senior/deferred,
+  #1888 Slice 5.

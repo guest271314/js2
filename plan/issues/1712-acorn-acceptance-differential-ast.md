@@ -3,7 +3,7 @@ id: 1712
 title: "acceptance: compiled acorn parses a representative .js with AST structurally equal to node-acorn"
 status: in-progress
 created: 2026-05-29
-updated: 2026-06-21
+updated: 2026-06-24
 priority: high
 feasibility: hard
 reasoning_effort: high
@@ -11,7 +11,7 @@ task_type: test
 area: test-infrastructure, codegen
 language_feature: multi
 goal: self-hosting-dogfood
-sprint: 64
+sprint: 66
 model: opus
 depends_on: [1710, 1711]
 es_edition: multi

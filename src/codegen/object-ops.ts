@@ -18,6 +18,7 @@ import { reportError } from "./context/errors.js";
 import { allocLocal, allocTempLocal, releaseTempLocal } from "./context/locals.js";
 import type { CodegenContext, FunctionContext } from "./context/types.js";
 import { emitThrowTypeError } from "./expressions/helpers.js";
+import { emitMappedArgReverseSync } from "./expressions/logical-ops.js";
 import { resolveStructName } from "./expressions/misc.js";
 import { addUnionImports, cacheStringLiterals, getOrRegisterTupleType, resolveWasmType } from "./index.js";
 import { ensureObjectRuntime } from "./object-runtime.js";
@@ -323,7 +324,7 @@ function emitDescriptorStructReify(
   fctx.body.push({ op: "local.get", index: objLocal });
 }
 
-function emitDefinePropertyDescRuntime(
+export function emitDefinePropertyDescRuntime(
   ctx: CodegenContext,
   fctx: FunctionContext,
   objArg: ts.Expression,
@@ -563,7 +564,7 @@ function maybeEmitVecLengthGrowth(
  *
  * Per ES spec (19.1.2.4 step 1): "If Type(O) is not Object, throw a TypeError."
  */
-function emitNonObjectArgGuard(
+export function emitNonObjectArgGuard(
   ctx: CodegenContext,
   fctx: FunctionContext,
   argExpr: ts.Expression,
@@ -903,6 +904,67 @@ export function emitDefinePropertyFlagCheck(
   fctx.body.push({ op: "call", funcIdx: setIdx });
 }
 
+// ── Mapped-arguments value redefine (#2667) ──────────────────────────────
+
+/**
+ * Emit `Object.defineProperty(arguments, "<i>", { value: V })` for a mapped
+ * arguments index, per ECMA-262 §10.4.4.2. The WasmGC-vec-backed arguments
+ * object carries no sidecar descriptor for its indices, so routing this through
+ * the runtime `Object.defineProperty` throws ("Cannot redefine property"). The
+ * spec-correct behaviour for a still-mapped index is to update the arguments
+ * slot AND the linked formal parameter; if the link was already severed
+ * (`unmappedIndices`), only the slot is written. Leaves the arguments object
+ * (externref) on the stack as the call result.
+ */
+function emitMappedArgValueDefine(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  info: NonNullable<FunctionContext["mappedArgsInfo"]>,
+  argIndex: number,
+  valueExpr: ts.Expression,
+): ValType {
+  // Compile the value as externref (boxing numbers/refs) for storage in the
+  // externref-backed arguments vec.
+  const valType = compileExpression(ctx, fctx, valueExpr, { kind: "externref" });
+  if (valType && valType.kind !== "externref") {
+    coerceType(ctx, fctx, valType, { kind: "externref" });
+  }
+  const valLocal = allocLocal(fctx, `__mappedarg_val_${fctx.locals.length}`, { kind: "externref" });
+  fctx.body.push({ op: "local.set", index: valLocal });
+
+  // arguments vec slot write: vec.data[argIndex] = val (null-guarded). The slot
+  // exists since argIndex < paramCount, so no grow is needed.
+  fctx.body.push({ op: "local.get", index: info.argsLocalIdx });
+  fctx.body.push({ op: "ref.is_null" });
+  fctx.body.push({
+    op: "if",
+    blockType: { kind: "empty" },
+    then: [] as Instr[],
+    else: [
+      { op: "local.get", index: info.argsLocalIdx } as Instr,
+      { op: "struct.get", typeIdx: info.vecTypeIdx, fieldIdx: 1 } as Instr,
+      { op: "i32.const", value: argIndex } as Instr,
+      { op: "local.get", index: valLocal } as Instr,
+      { op: "array.set", typeIdx: info.arrTypeIdx } as Instr,
+    ],
+  });
+
+  // Param sync — reuse the canonical mapped-args reverse-sync emitter, which
+  // already skips severed (`unmappedIndices`) slots (§10.4.4.2) and owns the
+  // single value-coercion vocabulary (§7.1.x), so this site stays out of the
+  // per-file coercion-site budget (#2108). It matches on a runtime index, so
+  // pin a constant-index local to argIndex.
+  const idxLocal = allocLocal(fctx, `__mappedarg_idx_${fctx.locals.length}`, { kind: "i32" });
+  fctx.body.push({ op: "i32.const", value: argIndex });
+  fctx.body.push({ op: "local.set", index: idxLocal });
+  emitMappedArgReverseSync(ctx, fctx, idxLocal, valLocal);
+
+  // Result of Object.defineProperty is the object — push arguments as externref.
+  fctx.body.push({ op: "local.get", index: info.argsLocalIdx });
+  fctx.body.push({ op: "extern.convert_any" } as Instr);
+  return { kind: "externref" };
+}
+
 // ── Object.defineProperty ─────────────────────────────────────────────
 
 /**
@@ -957,10 +1019,106 @@ export function compileObjectDefineProperty(
     return { kind: "externref" };
   }
 
+  // (#1355 Slice F) Standalone proxy-receiver routing. A standalone `Proxy`
+  // (`new Proxy(t, h)`) is an opaque externref typed `any` — it never resolves to
+  // a static struct, so the inline-literal fast paths below
+  // (`__defineProperty_value` / `__defineProperty_accessor`) would store the value
+  // DIRECTLY on the proxy externref and never fire the `defineProperty` trap.
+  // Route a PROVABLE-proxy receiver through `emitDefinePropertyDescRuntime` →
+  // `__obj_define_from_desc`, whose `ref.test $Proxy` front-guard diverts a proxy
+  // to `__proxy_define_dispatch(target, key, desc)` (the descriptor passed through
+  // whole). For a NON-proxy receiver this is behaviour-identical —
+  // `__obj_define_from_desc` dispatches to the SAME
+  // `__defineProperty_value`/`__defineProperty_accessor` store — but the inline
+  // fast paths below would otherwise store the value DIRECTLY on the proxy
+  // externref and never fire the `defineProperty` trap.
+  //
+  // GATE PRECISELY on a *syntactic* `new Proxy(...)` shape (a direct
+  // `new Proxy(...)` receiver, or an identifier whose variable-declaration
+  // initializer is `new Proxy(...)`), NOT merely a dynamic `any` receiver: a bare
+  // `any` reroute swallowed the §19.1.2.4-step-1 non-object throw for `const o:
+  // any = null` (the inline path's later null-guard never ran). The proxy harness
+  // rows always bind `const p = new Proxy(t, h)` then `defineProperty(p, …)`, so
+  // this shape covers them while leaving every non-proxy receiver on its existing
+  // path. Accessor/getter inline literals are NOT rerouted (the proxy
+  // defineProperty harness rows use data descriptors; an accessor reroute would
+  // lose the struct-accessor compiled-getter wiring).
+  if (ctx.standalone) {
+    const isProxyReceiver = (() => {
+      const isNewProxy = (e: ts.Expression): boolean =>
+        ts.isNewExpression(e) && ts.isIdentifier(e.expression) && e.expression.text === "Proxy";
+      if (isNewProxy(objArg)) return true;
+      if (ts.isIdentifier(objArg)) {
+        const sym = ctx.checker.getSymbolAtLocation(objArg);
+        const decl = sym?.valueDeclaration;
+        if (decl && ts.isVariableDeclaration(decl) && decl.initializer && isNewProxy(decl.initializer)) {
+          return true;
+        }
+      }
+      return false;
+    })();
+    const isAccessorLiteral =
+      ts.isObjectLiteralExpression(descArg) &&
+      descArg.properties.some(
+        (p) =>
+          (ts.isPropertyAssignment(p) || ts.isMethodDeclaration(p)) &&
+          ts.isIdentifier(p.name) &&
+          (p.name.text === "get" || p.name.text === "set"),
+      );
+    if (isProxyReceiver && !isAccessorLiteral) {
+      const init = !ts.isObjectLiteralExpression(descArg)
+        ? descriptorInitializerForIdentifier(ctx, descArg)
+        : undefined;
+      return emitDefinePropertyDescRuntime(
+        ctx,
+        fctx,
+        objArg,
+        propArg,
+        descArg,
+        init ? descriptorUndefinedFields(init) : [],
+      );
+    }
+  }
+
   // (#1130 PR-0) Array exotic objects grow `length` when a numeric-index
   // property at or beyond the current length is defined. Emit the guarded
   // bump before the descriptor is applied; no-op for non-array receivers.
   maybeEmitVecLengthGrowth(ctx, fctx, objArg, propArg);
+
+  // (#2668 Slice A) Host-mode DYNAMIC-DESCRIPTOR route. The inline fast paths
+  // below only fire when the descriptor is a *syntactic* object literal at the
+  // call site (`Object.defineProperty(o, k, { value: 1 })`). The common
+  // `var d = { value: 1 }; Object.defineProperty(o, k, d)` shape (descriptor in
+  // a local whose initializer is an object literal — the dominant `15.2.3.6-3-*`
+  // ES5 pattern) never reached any value/attr handling and fell through to
+  // `emitExternDefinePropertyNoValue`, silently dropping the value + attributes.
+  // Route THAT shape through `emitDefinePropertyDescRuntime` →
+  // `__defineProperty_desc`, the runtime applier that runs full
+  // ToPropertyDescriptor + `_validatePropertyDescriptor` (§10.1.6.3) and writes
+  // the canonical `_wasmPropDescs` sidecar every read / for-in / write / delete
+  // consults; for a plain JS receiver + plain JS descriptor it bottoms out in
+  // native `Object.defineProperty`, so attribute defaulting,
+  // redefine-preserves-omitted, non-configurable throws, and SameValue come for
+  // free.
+  //
+  // SCOPE — only when the descriptor identifier resolves to a *literal*
+  // initializer (`descriptorInitializerForIdentifier`). Deliberately NOT routing
+  // arbitrary host-object descriptors (`Math`, a `Date` instance, an
+  // `Object.create(proto)` whose attributes live on a sidecar-backed
+  // PROTOTYPE): `__defineProperty_desc`'s ToPropertyDescriptor reader resolves a
+  // WasmGC-struct descriptor's attributes only on its OWN level, so a
+  // prototype-inherited `enumerable`/`configurable` is dropped — which would
+  // flip those properties non-enumerable and regress the
+  // `15.2.3.6-3-23..45` for-in cluster (a deeper Object.create + proto-sidecar
+  // gap, out of Slice A scope). Those non-literal descriptors keep their prior
+  // path. The standalone lane has its own native route (#1629b / #2372). Inline
+  // object literals keep their zero-overhead fast paths (no behavior change).
+  if (!ctx.standalone && !ts.isObjectLiteralExpression(descArg)) {
+    const init = descriptorInitializerForIdentifier(ctx, descArg);
+    if (init) {
+      return emitDefinePropertyDescRuntime(ctx, fctx, objArg, propArg, descArg, descriptorUndefinedFields(init));
+    }
+  }
 
   // Check if descriptor is an object literal with a `value`, `get`, or `set` property
   let valueExpr: ts.Expression | undefined;
@@ -1122,11 +1280,53 @@ export function compileObjectDefineProperty(
     const idxKey = propName ?? (ts.isNumericLiteral(propArg) ? propArg.text : undefined);
     const argIndex = idxKey !== undefined ? Number(idxKey) : NaN;
     if (Number.isInteger(argIndex) && argIndex >= 0 && argIndex < fctx.mappedArgsInfo.paramCount) {
+      const info = fctx.mappedArgsInfo;
       const isAccessor =
         getNode !== undefined || setNode !== undefined || getExpr !== undefined || setExpr !== undefined;
       const breaksLink = isAccessor || descWritable === false;
       if (breaksLink) {
-        (fctx.mappedArgsInfo.unmappedIndices ??= new Set<number>()).add(argIndex);
+        (info.unmappedIndices ??= new Set<number>()).add(argIndex);
+      }
+      // (#2667) Track non-configurable / non-writable attribute state so the
+      // delete + element-write emitters can apply §10.4.4 semantics for the
+      // statically-resolvable case (literal index on the `arguments`
+      // identifier). `configurable:false` makes `delete arguments[i]` return
+      // false (OrdinaryDelete) without severing the map; `writable:false`
+      // freezes the value (writes dropped) and severs the map.
+      if (descConfigurable === false) {
+        (info.nonConfigurableIndices ??= new Set<number>()).add(argIndex);
+      }
+      if (descWritable === false) {
+        (info.nonWritableIndices ??= new Set<number>()).add(argIndex);
+      }
+
+      // (#2667) A pure data-descriptor define carrying a literal `value`, for a
+      // mapped arguments index, writes the arguments slot and — when the slot is
+      // still mapped — the linked formal parameter (§10.4.4.2 +
+      // OrdinaryDefineOwnProperty). Routing it through the runtime
+      // `Object.defineProperty` on the WasmGC-vec-backed arguments object trips
+      // `_validatePropertyDescriptor` ("Cannot redefine property") because the
+      // vec carries no matching sidecar descriptor. Handle it inline.
+      //
+      // A value change is permitted whenever the property is still configurable
+      // (configurable ⇒ any redefinition is allowed) OR still writable. It is
+      // forbidden only once the slot is BOTH non-configurable AND non-writable
+      // (truly frozen) — that case is left to the runtime so it reports the
+      // spec-mandated TypeError. `nonWritableIndices` severs the param map (set
+      // above + via `unmappedIndices`), so the helper writes only the slot.
+      const isFrozen =
+        (info.nonConfigurableIndices?.has(argIndex) ?? false) &&
+        (info.nonWritableIndices?.has(argIndex) ?? false) &&
+        descWritable !== true; // re-enabling writable un-freezes
+      const isPureDataValueDefine =
+        !isAccessor &&
+        valueExpr !== undefined &&
+        getExpr === undefined &&
+        setExpr === undefined &&
+        descWritable !== false && // writable:false freezes — handled by the drop path below
+        !isFrozen;
+      if (isPureDataValueDefine) {
+        return emitMappedArgValueDefine(ctx, fctx, info, argIndex, valueExpr!);
       }
     }
   }

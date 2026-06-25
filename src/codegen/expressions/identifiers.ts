@@ -37,7 +37,7 @@ import { getOrRegisterErrorStructType, isWasiErrorName } from "../registry/error
 import { allocLocal } from "../context/locals.js";
 import { reportSilentFallback } from "../fallback-telemetry.js";
 import { emitThrowReferenceError, noJsHost } from "./helpers.js";
-import { emitWithBindingGet, findWithBinding } from "../with-scope.js";
+import { emitDynamicWithGet, emitWithBindingGet, resolveWithBinding } from "../with-scope.js";
 import { emitBuiltinNamespaceObject, isSupportedBuiltinNamespace } from "../builtin-static-globals.js";
 import { tryEmitPromiseSubclassValue } from "./promise-subclass.js";
 
@@ -483,10 +483,39 @@ export function emitStaticTdzThrow(ctx: CodegenContext, fctx: FunctionContext, n
 function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Identifier): ValType | null {
   const name = id.text;
 
-  const withBinding = findWithBinding(fctx, name);
-  if (withBinding) {
-    return emitWithBindingGet(fctx, withBinding);
+  // (#1387 / #2663) `with` scope resolution, innermost-first.
+  const withRes = resolveWithBinding(fctx, name);
+  if (withRes?.kind === "static") {
+    return emitWithBindingGet(fctx, withRes.binding);
   }
+  if (withRes?.kind === "dynamic") {
+    // (#2663 Slice 1) HasBinding-gated runtime read. The HasBinding-miss fallback
+    // must re-resolve against the OUTER scopes (a name absent on the inner `with`
+    // object cascades to the next-outer `with`, then to the lexical binding —
+    // §nested-with). Temporarily truncate `withScopes` to exclude the matched
+    // scope (and anything inner to it), re-run full identifier resolution for the
+    // else arm, then restore the stack.
+    const scopes = fctx.withScopes!;
+    const matchedIdx = scopes.lastIndexOf(withRes.scope);
+    return emitDynamicWithGet(ctx, fctx, withRes.scope, name, () => {
+      const saved = fctx.withScopes;
+      fctx.withScopes = scopes.slice(0, matchedIdx);
+      try {
+        return compileIdentifier(ctx, fctx, id);
+      } finally {
+        fctx.withScopes = saved;
+      }
+    });
+  }
+
+  return compileIdentifierCore(ctx, fctx, id);
+}
+
+/** The non-`with` identifier lowering (locals, globals, funcs, builders,
+ *  ReferenceError). Split out so the Tier-2 dynamic `with` path can invoke it as
+ *  the HasBinding-miss fallback (#2663 Slice 1). */
+function compileIdentifierCore(ctx: CodegenContext, fctx: FunctionContext, id: ts.Identifier): ValType | null {
+  const name = id.text;
 
   // #1210: string-builder bindings are stored as a (buf, len, cap, mat)
   // tuple of synthetic locals. The binding name is intentionally NOT in
@@ -816,7 +845,20 @@ function compileIdentifier(ctx: CodegenContext, fctx: FunctionContext, id: ts.Id
   // native constructor object (with its prototype + accessor descriptors) is
   // visible. Scope strictly to these host-delegated ERM globals and only when
   // the name is not shadowed by a local/captured binding.
+  //
+  // (#2029) HOST-ONLY: this whole fast path uses the `__get_globalThis` /
+  // `__extern_get` host imports (absent in no-JS-host targets) AND pushes the
+  // ctor-name string key via a string-constant global — which under
+  // standalone/nativeStrings is the `-1` sentinel, baking `global.get -1`
+  // ("global index out of range — -1") at serialize time. It also leaks two
+  // host imports that an empty import object can't satisfy. The reflective
+  // `Object.getPrototypeOf(SuppressedError)` / `isConstructor(DisposableStack)`
+  // shapes (built-ins/{SuppressedError,DisposableStack,AsyncDisposableStack}/
+  // {proto,is-a-constructor}.js) hit this. Gate to gc/host; standalone falls
+  // through to the clean located refusal (the #1888 dual-mode invariant).
   if (
+    !ctx.standalone &&
+    !ctx.wasi &&
     (name === "DisposableStack" || name === "AsyncDisposableStack" || name === "SuppressedError") &&
     !fctx.localMap.has(name) &&
     !(fctx.boxedCaptures?.has(name) ?? false) &&

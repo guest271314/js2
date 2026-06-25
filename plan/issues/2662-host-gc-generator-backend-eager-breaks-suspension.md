@@ -1,0 +1,209 @@
+---
+id: 2662
+title: "host (gc) generator backend is EAGER-buffered — breaks lazy/suspension semantics on the default path (architecture)"
+status: ready
+created: 2026-06-25
+priority: high
+feasibility: hard
+reasoning_effort: max
+task_type: bugfix
+area: codegen, runtime, architecture
+language_feature: generators
+goal: spec-completeness
+related: [1344, 1665, 2157]
+test262_bucket: built-ins/GeneratorPrototype
+---
+
+# #2662 — host (gc) generator backend is eager-buffered (architectural correctness gap)
+
+Split out of **#1344** (2026-06-25, sd-2651) because it is **bigger than #1344**
+and gates whether #1344's state-machine slices (S-B/S-C) move the conformance
+dashboard at all.
+
+## The gap
+
+There are **two** generator backends:
+
+- **Native lazy state machine** (`src/codegen/generators-native.ts`) — correct
+  suspension semantics, but **standalone/wasi-ONLY** (`generators-native.ts:849`
+  `if (!noJsHostTarget(ctx)) return false`).
+- **Host runtime** (`src/runtime.ts`) — used in **default gc mode** — is an
+  **EAGER-YIELD BUFFER**: it runs the **entire** generator body up front into a
+  `buf: any[]` (runtime.ts:135), then `.next()` just drains the buffer.
+
+The eager backend **cannot** implement lazy suspension, so it is wrong for every
+observable that depends on when the body runs:
+
+- side-effect timing (statement after a `yield` must not run until resumed);
+- `.return()` / `.throw()` **interrupting** a generator suspended in a `try`;
+- `finally` running on abrupt completion at the right time;
+- infinite generators (eager buffer never terminates).
+
+### Proof (verified, current `main`)
+
+```ts
+let se = 0;
+function* g() { se = 1; yield 1; se = 2; yield 2; se = 3; }
+g();            // create, NO .next() yet
+// gc/host:    se === 3   (whole body ran eagerly — WRONG)
+// standalone: se === 0   (correctly lazy)
+```
+
+## Why this gates #1344 (and any generator-conformance work)
+
+The test262 conformance runner wraps every test in `export function test() { … }`
+(`tests/test262-runner.ts:2370`, `wrapTest`). A test's top-level `function* g()`
+therefore becomes a **generator nested inside `test()`**, and (for the
+GeneratorPrototype tests, which have no class so their `var`s are NOT hoisted to
+module scope) it **captures** the `test()`-local vars. A capturing nested
+generator hits `generatorCapturesOuterScope` (`generators-native.ts:901`) →
+**bail to the host EAGER path even under `--target standalone`.**
+
+Verified: the wrapped `return/try-finally-within-try.js` keeps `var inTry`,
+`var inFinally`, and `function* g()` all INSIDE `test()` (capturing), so it runs
+on the eager host path in BOTH lanes. The conformance dashboard's
+`runTest262File` defaults to gc/host (`scripts/runner-bundle.mjs:64253` — no
+`target` arg). **So test262 generators are measured on the eager host path.**
+
+⇒ Building the native state machine for catch / yielding-finally (#1344 S-B/S-C)
+would move the dashboard by **ZERO** until this gap is closed, because the
+measured path never reaches the native backend for these tests.
+
+## Options (architecture decision — needs the lead / an architect)
+
+1. **Make the native lazy path handle CAPTURES** (so a nested/capturing generator
+   goes native instead of bailing to eager host). This re-routes the wrapped
+   test262 generators onto the correct backend and is likely the highest-leverage
+   single change — it may flip a large swath of generator tests at once AND
+   unblock #1344 S-B/S-C. Scope: the native state struct currently has slots for
+   `this` + own params only, not captures (`generators-native.ts:899-902`);
+   capture support means materializing captured bindings as ref-cell fields in the
+   state struct (the closure-capture pattern already used elsewhere).
+2. **Make the host gc backend lazy** (a proper resumable coroutine in
+   `src/runtime.ts` instead of the eager buffer). Large rewrite; the eager buffer
+   was a deliberate simplification. Likely out of scope / lower leverage than (1).
+3. **Measure conformance on the standalone lane for generators** — does not fix
+   the gc correctness gap, and captured generators still bail to eager even under
+   standalone, so this alone is insufficient.
+
+**DECISION (lead, 2026-06-25): Option (ii)** — native-struct→JS-callable boundary
+wrapper + in-module-only native selection + capture-materialization. The PoC
+revealed the JS-host boundary blocker that makes a plain "Option 1" insufficient
+on its own (a captured generator can still escape to JS). See the full
+**ARCHITECTURE WRITEUP** section below for the verdict, the option (i)/(ii)/(iii)
+reasoning, and the 3-lever cost model. Build DEFERRED (multi-session epic).
+
+## Acceptance
+
+- A capturing nested generator runs LAZILY (the side-effect-timing proof above
+  returns 0 in gc mode, or the wrapped test262 generators are routed to the
+  native lazy path), without regressing the existing generator suites.
+- Re-measure the GeneratorPrototype `return`/`throw` buckets afterward; #1344
+  S-B/S-C then have a measurable target.
+
+## Routing
+
+Architecture decision first (lead/architect): option 1 vs 2 vs 3. Then a
+senior-dev build. Blocks #1344 S-B/S-C from moving the dashboard.
+
+---
+
+# ARCHITECTURE WRITEUP (2026-06-25, sd-2651) — DECISION + PoC verdict + cost model
+
+> This section is the durable spec a future session builds from. The build is
+> **DEFERRED** (multi-session epic); the design is settled here. **DECISION
+> (lead): Option (ii)** — native-struct→JS-callable boundary wrapper +
+> in-module-only native selection + capture-materialization. Reasoning below.
+
+## PoC verdict (env-gated probe `JS2WASM_POC_GC_NATIVE_GEN`, reverted — no commit)
+
+Flipping `noJsHostTarget` (`generators-native.ts:110`) to also return true for gc
+routed gc-mode generators to the native lazy backend. Three findings, in order of
+how they reshape the design:
+
+1. **Routing gc→native is trivial to ENABLE and works for the simple case.** A
+   non-capturing top-level generator in gc mode became lazy
+   (`function* g(){ se=1; yield 1; … }; g()` → `se===0`, was `3` eager) and
+   emitted the native resume function (`__gen_resume_`). So the gate is the only
+   thing standing between gc and the native path *for the simple shape*.
+
+2. **Capturing generators still bail** (`generatorCapturesOuterScope`,
+   `generators-native.ts:~901`) → eager host. The wrapped test262 shape (a
+   `function* g()` nested in `export function test()` capturing the test-locals)
+   needs capture-materialization (Lever A) OR runner-side hoist (Lever B) to reach
+   native at all.
+
+3. **THE BLOCKER — routing gc→native breaks the JS-HOST BOUNDARY.** The native
+   path returns an **opaque Wasm state struct**, not a JS-callable generator
+   object. Existing gc generator unit tests fail with **`gen.next is not a
+   function`** (5 failures across `generators`/`generator-methods`/
+   `generator-nested`/`for-of-generator`) the moment a native generator is handed
+   **back to JS** (`const gen = exports.count(); gen.next()`). The native `.next`/
+   `.return`/`.throw` are reached only via **in-module dispatch** (the
+   `tryCompileNativeGeneratorMethodCall` path), never as JS methods on the struct.
+
+### The decisive distinction (drives the whole design)
+
+- **In-module generator use** (the wrapped test262 `test()` calls `it.next()`
+  *inside* Wasm; standalone programs) → native lazy backend is CORRECT and is what
+  we want everywhere.
+- **JS-escaping generator use** (a gc program returns a generator to a JS caller,
+  or host-side `for…of` drives it) → needs a **JS-callable object**, which today
+  only the eager host runtime provides.
+
+A global gc→native flip is therefore WRONG: it silently breaks every escaping
+generator. Native must be selected only when the generator provably stays
+in-module, **or** the native struct must be wrapped in a JS-callable object at the
+Wasm↔JS boundary.
+
+## Why Option (ii), not (i) or (iii) (lead decision)
+
+- **(i) Keep gc eager; measure generators on the standalone+native lane.** Only
+  moves the STANDALONE report, not the headline gc dashboard; leaves real gc-mode
+  generators broken; and introduces a measurement-integrity wrinkle (generators
+  scored on a different lane than the rest of the dashboard). Rejected.
+- **(iii) Make the host gc runtime lazy** (resumable coroutine in `src/runtime.ts`
+  instead of the eager `buf`). A large rewrite duplicating the state-machine the
+  native backend already has. Rejected (lower leverage; two lazy engines).
+- **(ii) native-struct→JS-callable wrapper + in-module-only native selection +
+  capture-materialization.** Fixes the gc correctness gap broadly (escaping AND
+  in-module), moves the headline dashboard, and reuses the one correct lazy engine
+  (native). **CHOSEN.** Multi-session epic; build deferred, design captured here.
+
+## 3-lever cost model (build order for the epic)
+
+| Lever | What | Cost | Notes / prerequisite |
+| --- | --- | --- | --- |
+| **JS-boundary wrapper** (PREREQUISITE) | Wrap the native state struct in a JS-callable object exposing `.next/.return/.throw/[Symbol.iterator]` that forward into the in-module native dispatch helpers; emit it at the Wasm↔JS boundary when a native generator value escapes to JS (return value, export, host `for…of`). Equivalently/additionally: an **in-module-only native selection** gate so a generator that never escapes JS takes native, while an escaping one either gets the wrapper or stays host. | **High (architectural)** | The genuinely new design piece. Decides escape analysis (which generators escape to JS) + the externref wrapper object shape. Reuses `tryCompileNativeGeneratorMethodCall` dispatch as the wrapper's forwarding target. Without it, gc→native breaks escaping generators (PoC finding 3). |
+| **Lever A — capture-materialization** | Make `generatorCapturesOuterScope` NOT bail; materialize captured bindings as **ref-cell fields** (`struct (field $value (mut T))`) in the native state struct, shared with the enclosing scope's locals (the existing closure-capture pattern). Thread the ref-cells into the generator factory call; read/write through them in the resume function. | **High (multi-day)** | Bounded by the existing closure-capture machinery, but touches the state-struct layout (`registerNativeGenerator` ~:1094-1135), the factory call, and the resume emitter. Required because the wrapped test262 generators all capture. Needs the boundary wrapper first (a captured generator can still escape). |
+| **Lever B — runner-side hoist** | In `tests/test262-runner.ts` `wrapTest`, hoist a test's top-level `function* g` + the `var`s it references to **module scope** (outside `export function test()`), so it is not captured → with gc→native it goes native. | **Low** | CHEAPER but: (a) still needs the gc→native routing + boundary-wrapper decision; (b) changes WHAT is measured — must preserve test semantics (hoist order, TDZ); (c) only helps the conformance lane, not real gc-mode generator correctness. A measurement convenience, NOT a substitute for Levers A + wrapper. Use only to *accelerate dashboard signal* once the core lands. |
+
+**Build order:** JS-boundary wrapper (+ in-module-only selection) → Lever A
+(captures) → re-measure GeneratorPrototype buckets → unblock #1344 S-B/S-C
+(yielding finalizers, try/catch state decomposition). Lever B optionally bolted on
+to speed the conformance signal, with semantics-preservation review.
+
+## Loci (current `main`, for the builder)
+
+- `src/codegen/generators-native.ts:110` `noJsHostTarget` — the gc/standalone gate.
+- `:~839` `isNativeGeneratorCandidate` (gates on `noJsHostTarget`) +
+  `:~901` `generatorCapturesOuterScope` (the capture bail — Lever A).
+- `:~1094-1135` `registerNativeGenerator` state-struct field layout (add capture
+  ref-cell fields here).
+- `:~1448-1481` resume-function mode handling (mode 1 = `.return` abrupt;
+  #1344 S-B adds mode 2 = `.throw` + deferred-throw-through-yielding-finally).
+- `tryCompileNativeGeneratorMethodCall` (`:~1992`) — the in-module dispatch the
+  JS-boundary wrapper must forward into.
+- Call-site double-gates that also block gc→native:
+  `declarations.ts:~848`, `class-bodies.ts:~1073`, `literals.ts:~2409`,
+  `nested-declarations.ts:~377` (each `(ctx.standalone || ctx.wasi) && …`).
+- `src/runtime.ts:~135` — the eager host generator `buf` (option (iii)'s target;
+  NOT chosen, listed for completeness).
+- `tests/test262-runner.ts:~2370` `wrapTest` — wraps every test in
+  `export function test()` (the capture source); Lever B edits here.
+
+## Status
+
+Design settled (Option ii). Build DEFERRED — multi-session epic, to be prioritized
+against s66 work with this spec in hand. **#1344 stays parked behind this epic**
+(`#1344 depends_on [1665, 2662]`).

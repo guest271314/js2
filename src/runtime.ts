@@ -1448,6 +1448,56 @@ const _OBJECT_PROTO_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * (#2580 M3 B-protoextend) Inherited indexed property lookup via the
+ * `Object.prototype` chain.
+ *
+ * A generic Array method invoked on an array-like *plain object* receiver
+ * (`Array.prototype.indexOf.call({length:3}, v)`) reads `obj[i]` per §7.3.2
+ * `Get`, which walks the receiver's `[[Prototype]]` chain. A plain object's
+ * chain terminates at `%Object.prototype%`, so a test that writes
+ * `Object.prototype[0] = true` makes `({length:3})[0]` resolve to `true`
+ * (the `built-ins/Array/prototype/<m>/<m>-9-b-i-N` "element to be retrieved
+ * is inherited data property on an Array-like object" cluster).
+ *
+ * In this compiler an array-like plain-object receiver is an *opaque WasmGC
+ * struct* whose runtime `[[Prototype]]` is `null` — it does NOT inherit from
+ * the host `Object.prototype`, so the own-only `obj[i]` / sidecar lookups in
+ * `__extern_get_idx`/`__extern_has_idx` miss the inherited index and the
+ * generic-method loop skips it (verified per-process: `(idx in obj)=false`
+ * while `idx in Object.prototype === true`). `Object.prototype[i] = v` DOES
+ * land on the real host `Object.prototype` (member-assignment lowers to a
+ * host write), so consulting it here reads exactly what the test wrote.
+ *
+ * Scope: this is the FINAL fallback, reached only after own struct fields,
+ * the sidecar, and accessor descriptors are exhausted — so a real array, a
+ * `$Vec`, or any receiver carrying its own index never enters this arm (its
+ * own element is found earlier). Real-array receivers with an
+ * `Array.prototype[i]=v` inherited element already resolve through the native
+ * array path (verified passing), so this arm intentionally consults only
+ * `%Object.prototype%`, the single chain every object value shares — matching
+ * the architect decision to route inherited reads through the ONE shared
+ * `Object.prototype` walk rather than a per-receiver prototype field.
+ *
+ * `_protoIndexHas` answers `[[HasProperty]]` (§7.3.12 — presence is
+ * value-independent, so an inherited slot holding `undefined` is still
+ * present); `_protoIndexGet` runs `[[Get]]` (invokes an inherited accessor via
+ * native `[]`). Only canonical non-negative integer indices participate
+ * (negative / fractional keys are not array element indices).
+ */
+function _protoIndexHas(idx: number): boolean {
+  if (!Number.isInteger(idx) || idx < 0) return false;
+  // `idx in Object.prototype` walks Object.prototype's own keys; a user write
+  // `Object.prototype[i] = v` (own data prop) or `defineProperty` (accessor)
+  // both register here. `Object.create(null)`-style holes never match.
+  return idx in (Object.prototype as Record<number, unknown>);
+}
+
+function _protoIndexGet(idx: number): unknown {
+  if (!Number.isInteger(idx) || idx < 0) return undefined;
+  return (Object.prototype as Record<number, unknown>)[idx];
+}
+
+/**
  * DataView subview metadata (#1064).
  *
  * The compiler emits `new DataView(buffer, byteOffset, byteLength)` as the raw
@@ -3836,6 +3886,43 @@ function _safeGet(obj: any, key: any, callbackState?: { getExports: () => Record
 }
 
 /**
+ * (#2668 Slice A) Mirror a defineProperty'd data VALUE into the real WasmGC
+ * struct field via the compiled `__sset_<key>` export, when one exists for this
+ * key. This is the value-only writeback `_safeSet` performs (runtime.ts ~4023),
+ * factored out so the `__defineProperty_desc` / `__defineProperty_value`
+ * runtime appliers can use it WITHOUT going through `_safeSet`'s
+ * writable/non-extensible flag enforcement (those appliers have ALREADY run
+ * `_validatePropertyDescriptor`). Why it is needed: a `const o: any = {}` whose
+ * field is later defined gets a *typed* struct shape (e.g.
+ * `(struct (field $property ...))`), and the member read `o.property`
+ * ref-tests as that struct type and lowers to a static `struct.get` — it never
+ * consults the sidecar. The inline-literal define fast path emits a direct
+ * `struct.set`; the runtime-descriptor path (dynamic descriptors: `var d =
+ * {...}`, `Math`, a `Date` instance) only wrote the sidecar, so the static
+ * read returned the field's stale initializer (the #2668 `15.2.3.6-3-*`
+ * cluster). Writing the field here keeps both the sidecar and the typed field
+ * in sync. No-op (silently caught) when `obj` is not a struct, the key isn't a
+ * field of this struct's concrete runtime type, or no exports are available.
+ */
+function _structFieldWriteback(
+  obj: any,
+  key: string | symbol,
+  val: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): void {
+  if (typeof key !== "string") return;
+  if (!_isWasmStruct(obj)) return;
+  const exports = callbackState?.getExports();
+  const setter = exports?.[`__sset_${key}`];
+  if (typeof setter !== "function") return;
+  try {
+    setter(obj, _unwrapForHost(val));
+  } catch {
+    /* not a field of this struct's runtime type */
+  }
+}
+
+/**
  * Safe property set: works on both JS objects and WasmGC structs.
  *
  * When `exports` is provided AND `obj` is a WasmGC struct AND `key` is a
@@ -5641,6 +5728,16 @@ interface InstanceState {
   subclassCtors?: Map<string, Function[]>;
   /** user-class name → parent class name (or null). */
   userClassParents?: Map<string, string | null>;
+  /**
+   * (#2637 B2) `class extends Promise` name → the host-bridged wasm
+   * constructor-body callable (`$<Class>_new`, registered via
+   * `__register_promise_subclass_ctor`). Consulted by `__promise_subclass_ctor`
+   * so V8's `NewPromiseCapability(C)` runs the user ctor body on the capability
+   * promise. Per-instance (not module-scope) to avoid cross-module retention.
+   */
+  promiseSubclassBodies?: Map<string, Function>;
+  /** (#2637 B2) `class extends Promise` name → synthesized JS subclass ctor (cached). */
+  promiseSubclassCtors?: Map<string, any>;
 }
 
 function makeWebStoragePolyfill(): any {
@@ -7330,6 +7427,13 @@ assert._isSameValue = isSameValue;
           const exports = callbackState?.getExports();
           const getter = exports?.[`__sget_${strKey}`];
           if (typeof getter === "function") return getter(obj);
+          // (#2580 M3 B-protoextend) Inherited indexed data/accessor on the
+          // Object.prototype chain. Reached only after own fields + sidecar +
+          // own accessor descriptors miss — so a real array / $Vec / receiver
+          // with its own element never gets here. `Get` (§7.3.2) walks the
+          // proto chain; an array-like plain-object receiver inherits
+          // `Object.prototype[i]` written by the test (`Object.prototype[0]=v`).
+          if (_protoIndexHas(idx)) return _protoIndexGet(idx);
           return undefined;
         };
       // __extern_has_idx: HasProperty(O, ToString(idx)) for array-like callback
@@ -7394,6 +7498,13 @@ assert._isSameValue = isSameValue;
               /* getter not defined for this struct variant — fall through */
             }
           }
+          // (#2580 M3 B-protoextend) Inherited index on the Object.prototype
+          // chain. HasProperty (§7.3.12) walks `[[Prototype]]`; an array-like
+          // plain-object receiver inherits `Object.prototype[i]`. Presence is
+          // value-independent, so this also visits an inherited slot holding
+          // `undefined`. Reached only after every own / sidecar / accessor
+          // probe misses, so it cannot mask an own hole.
+          if (_protoIndexHas(idx)) return 1;
           return 0;
         };
       // __extern_has(obj, key) → i32. Runtime fallback for `key in obj` when
@@ -7474,6 +7585,14 @@ assert._isSameValue = isSameValue;
             return "[object Object]";
           }
         };
+      // (#2666) ToPropertyKey (§7.1.19) as a standalone host import so codegen
+      // can coerce a computed property key EXACTLY ONCE before a read-modify-write
+      // (`o[key] += v`, `o[key]++`). Without this the key object flows raw into
+      // both `__extern_get` and `__extern_set`, each of which runs ToPropertyKey
+      // internally → `key.toString` fires twice (eval-order bug). Coercing once
+      // here and reusing the primitive result is idempotent (ToPropertyKey of a
+      // string is the string; of a Symbol is the Symbol). Preserves Symbols.
+      if (name === "__to_property_key") return (v: any) => _toPropertyKey(v, callbackState);
       // (#2022) ToString of a `+`-concat operand. `+` applies ToPrimitive with
       // the DEFAULT hint (valueOf before toString), even when the other operand
       // is a string — unlike `String(x)` / template literals which use the
@@ -8309,8 +8428,13 @@ assert._isSameValue = isSameValue;
           const hasValue = Object.prototype.hasOwnProperty.call(d, "value");
           const hasGet = Object.prototype.hasOwnProperty.call(d, "get");
           const hasSet = Object.prototype.hasOwnProperty.call(d, "set");
-          if (hasValue) _sidecarSet(obj, key, d.value);
-          else if (!(newFlags & _SC_ACCESSOR) && existingDesc === undefined) _sidecarSet(obj, key, undefined);
+          if (hasValue) {
+            _sidecarSet(obj, key, d.value);
+            // (#2668 Slice A) Keep the typed struct field in sync so a static
+            // `struct.get` read of `o.<key>` sees the defined value, not the
+            // field's stale initializer.
+            _structFieldWriteback(obj, key, d.value, callbackState);
+          } else if (!(newFlags & _SC_ACCESSOR) && existingDesc === undefined) _sidecarSet(obj, key, undefined);
           if (hasGet || hasSet) {
             const sc = _wasmStructProps.get(obj) ?? {};
             _wasmStructProps.set(obj, sc);
@@ -8367,8 +8491,11 @@ assert._isSameValue = isSameValue;
                 const existingVal = _sidecarGet(obj, prop);
                 const newFlags = _validatePropertyDescriptor(sDescs, nProp, desc, existingVal, existingDesc);
                 sDescs.set(nProp, newFlags);
-                if (Object.prototype.hasOwnProperty.call(desc, "value")) _sidecarSet(obj, prop, desc.value);
-                else if (!(newFlags & _SC_ACCESSOR) && existingDesc === undefined) _sidecarSet(obj, prop, undefined);
+                if (Object.prototype.hasOwnProperty.call(desc, "value")) {
+                  _sidecarSet(obj, prop, desc.value);
+                  // (#2668 Slice A) Mirror into the typed struct field for static reads.
+                  _structFieldWriteback(obj, prop, desc.value, callbackState);
+                } else if (!(newFlags & _SC_ACCESSOR) && existingDesc === undefined) _sidecarSet(obj, prop, undefined);
               } else {
                 // Spec-mandated TypeError (non-configurable redefinition on real JS objects)
                 throw e;
@@ -10413,22 +10540,81 @@ assert._isSameValue = isSameValue;
       // .prototype so the combinators' NewPromiseCapability + @@species
       // resolution work. Keyed on class name. Synthesized from the lexical
       // (intrinsic) `Promise`, never a user-shadowed global.
+      // (#2637 B2.1) Registry of wasm constructor-body closures, keyed by
+      // `class extends Promise` name. Codegen emits a one-time
+      // `__register_promise_subclass_ctor(name, closure)` per such class with a
+      // user constructor; `closure` materializes the `$<Class>_new` body so the
+      // host can invoke it under `NewPromiseCapability(C)`. Shared across the
+      // `__register_*` and `__promise_subclass_ctor` import handlers via this
+      // import-builder closure scope, so a single Map instance is observed by
+      // both. The body closure is a wasm closure struct (arity 1: the executor);
+      // `_maybeWrapCallable` bridges it to `__call_fn_1(closure, executor)`.
+      if (name === "__register_promise_subclass_ctor") {
+        return (classNameRef: any, ctorClosure: any): void => {
+          if (!instanceState) return;
+          const className = String(classNameRef);
+          // Bridge the wasm closure to a host-callable once at registration.
+          // `_maybeWrapCallable` is a no-op for null (defensive) and caches the
+          // wrapper per (closure, arity), so repeated registrations are cheap.
+          const body = _maybeWrapCallable(ctorClosure, 1, callbackState);
+          if (typeof body !== "function") return;
+          (instanceState.promiseSubclassBodies ??= new Map()).set(className, body);
+        };
+      }
+      // (#1116b) Synthesize (and cache) a JS subclass of Promise for a
+      // Wasm-compiled `class MyPromise extends Promise`. The instance is a real
+      // host Promise; this JS constructor carries a distinct `.prototype` so the
+      // combinators' NewPromiseCapability + @@species resolution work, keyed on
+      // class name, synthesized from the lexical (intrinsic) `Promise`.
+      //
+      // (#2637 B2.2) When a `$<Class>_new` body closure was registered (B2.1),
+      // the synthesized ctor RUNS that body after `super(exec)` — so V8's
+      // `NewPromiseCapability(C)` (`new C(internalExecutor)`) executes the user
+      // constructor's side effects (`callCount += 1`, `executor = a`, proto
+      // wiring) on V8's capability promise. Without a registered body (default
+      // ctor, e.g. the #1977 `withResolvers/ctx-ctor` identity-only row) the
+      // synthesized ctor is the bare forwarder, unchanged.
       if (name === "__promise_subclass_ctor") {
-        const _promiseSubclassCtors = new Map<string, any>();
         return (classNameRef: any): any => {
           const className = String(classNameRef);
-          let C = _promiseSubclassCtors.get(className);
+          const ctorCache: Map<string, any> = instanceState
+            ? (instanceState.promiseSubclassCtors ??= new Map())
+            : new Map();
+          let C = ctorCache.get(className);
           if (C === undefined) {
+            const bodies = instanceState?.promiseSubclassBodies;
             // Cast the base to a plain constructor: `class extends Promise {}`
             // trips TS2508 (Promise's lib.d.ts type is generic) but is valid
             // JS — the emitted runtime subclasses the intrinsic Promise.
-            C = class extends (Promise as unknown as { new (...args: any[]): any }) {};
+            C = class extends (Promise as unknown as { new (...args: any[]): any }) {
+              constructor(exec: any) {
+                super(exec);
+                // (#2637 B2.2/B2.3) Run the registered wasm ctor body on THIS
+                // (V8's capability promise) if one was registered. The body
+                // (`$<Class>_new`, run-on-host-`this` mode, B2.3) binds its
+                // `this`/`$__self` to the host-provided promise and runs only
+                // the side effects + proto wiring — it must NOT allocate its own
+                // promise via `__new_Promise`. The executor `exec` is forwarded
+                // as the body's sole arg. `__call_fn_method_1` (the method
+                // dispatch reached via `body.call(this, …)`) installs `this` as
+                // the wasm-side receiver (`__current_this`). A throwing body
+                // propagates verbatim — V8's `Construct(C, «executor»)` surfaces
+                // the user-observable throw; we do not swallow it. Without a
+                // registered body (default-ctor subclass, e.g. the #1977
+                // `withResolvers/ctx-ctor` identity-only row) this is the bare
+                // forwarder, unchanged.
+                const body = bodies?.get(className);
+                if (typeof body === "function") {
+                  body.call(this, exec);
+                }
+              }
+            };
             try {
               Object.defineProperty(C, "name", { value: className, configurable: true });
             } catch {
               /* Function.name redefinition is best-effort; non-fatal. */
             }
-            _promiseSubclassCtors.set(className, C);
+            ctorCache.set(className, C);
           }
           return C;
         };

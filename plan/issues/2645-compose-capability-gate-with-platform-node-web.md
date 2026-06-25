@@ -1,9 +1,11 @@
 ---
 id: 2645
 title: "Compose the node:<mod> capability gate (#1772 P2) with --platform node|web (#2528) — ambient surface ⊕ importable surface"
-status: backlog
+status: done
+completed: 2026-06-25
+assignee: ttraenkler/sdev-2528-2645
 created: 2026-06-24
-updated: 2026-06-24
+updated: 2026-06-25
 priority: low
 feasibility: medium
 reasoning_effort: medium
@@ -63,3 +65,33 @@ injection path, while `--platform web` should do the opposite.
 - #2528 itself (the `--platform` flag + ambient lib scoping) — that is the
   prerequisite this composes with.
 - The importable `node:<mod>` capability map (landed: #2634, #1772 P2-a/P2-b).
+
+## Resolution (2026-06-25, shipped with #2528 in one PR)
+
+The single composition point is `emulateNode`. Implemented as an OR at two
+mirrored sites so the ambient surface (#2528) and the importable capability gate
+(#1772 P2) agree on one target model:
+
+- `src/checker/index.ts` — `resolveEmulateNode(opts)` returns
+  `opts.emulateNode === true || opts.platform === "node"`. It drives the
+  `buildNodeEnvDtsForSource` injection in `analyzeSource`, so `--platform node`
+  implies the node-emulation injection path. The DOM-free ambient lib is
+  selected by the same `platform` (`defaultLibNameForPlatform`).
+- `src/compiler.ts` — `effectiveEmulateNode = options.emulateNode === true ||
+  options.platform === "node"` drives the TS2580 "add `--emulate node`" message
+  gate, so a `--platform node` host isn't told to add a flag it already implies.
+
+No double-gating / contradiction: the per-member `providersFor` /
+`isMemberSatisfiable` gate (landed #1772 P2-a/P2-b, #2634) stays the **authority**
+for importable `node:<mod>` members — `--platform` only sets the **ambient
+default**. A `--platform node` + `emulateNode: false` program still emulates
+(platform wins via OR), confirming the two axes can't disagree.
+
+Precedence with `--target wasi`: independent axes — `--platform` governs the
+ambient surface, `--target` the backend; documented on `CompileOptions.platform`
+in `src/index.ts`. Validated byte-neutral (sha256 + `runTest262File`) for
+programs not setting `--platform`. Tests:
+`tests/issue-2528-2645-platform-node-web.test.ts`.
+
+**#1772 stays `in-progress`** — its other children (#2646/#2647) are separate
+PRs; this only closes P2-c.

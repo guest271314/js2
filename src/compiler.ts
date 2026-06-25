@@ -511,6 +511,54 @@ function detectNodeFsImports(source: string): Set<string> {
   return result;
 }
 
+/**
+ * #2657 — the source-import module string for js2wasm's raw linear-memory access
+ * intrinsics (`store32`/`load32`/`store8`/`load8`). These are NOT WASI host
+ * functions — they lower to inline `i32.store`/`i32.load`/`i32.store8`/
+ * `i32.load8_u` ops over the module's own exported `memory`. They are honestly
+ * named under a `wasm:` intrinsic namespace (mirroring `wasm:js-string`) so the
+ * source never mislabels a compiler intrinsic as a WASI host import: only
+ * `fd_read`/`fd_write` come from `"wasi_snapshot_preview1"`, the real WASI core
+ * module. (No host provides a `wasi_snapshot_preview1.store32`.)
+ */
+export const WASM_MEMORY_INTRINSIC_MODULE = "wasm:memory";
+
+/**
+ * #2657 — detect the LOCAL names of the raw-WASI source imports BEFORE import
+ * preprocessing strips them (preprocessing rewrites them to bare `declare
+ * function` stubs, losing the module origin). Two honestly-separated surfaces:
+ *
+ *  - `rawWasi`: named imports from `"wasi_snapshot_preview1"` — the real WASI
+ *    Preview-1 fd syscalls (`fd_read`/`fd_write`). The most honest pure-WASI-P1
+ *    path for fd-based IO, with no `node:fs` surface (loopdive/js2#389). These
+ *    bind directly to the WASI import funcs.
+ *  - `memAccessors`: named imports from `"wasm:memory"` — js2wasm's inline
+ *    linear-memory access intrinsics (`store32`/`load32`/`store8`/`load8`). These
+ *    are NOT imports; they lower to a single WASM memory op.
+ *
+ * The returned LOCAL names (honoring `as` aliases) drive `tryCompileRawWasiCall`.
+ * Both sets are empty for any program that doesn't import the respective module,
+ * so the rest of the compiler is unaffected.
+ */
+function detectRawWasiImports(source: string): { rawWasi: Set<string>; memAccessors: Set<string> } {
+  const rawWasi = new Set<string>();
+  const memAccessors = new Set<string>();
+  const sf = ts.createSourceFile("__detect_raw_wasi__.ts", source, ts.ScriptTarget.Latest, true);
+  for (const stmt of sf.statements) {
+    if (!ts.isImportDeclaration(stmt) || !stmt.moduleSpecifier || !ts.isStringLiteral(stmt.moduleSpecifier)) continue;
+    const mod = stmt.moduleSpecifier.text;
+    const target =
+      mod === "wasi_snapshot_preview1" ? rawWasi : mod === WASM_MEMORY_INTRINSIC_MODULE ? memAccessors : undefined;
+    if (!target) continue;
+    const clause = stmt.importClause;
+    if (clause?.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+      // `el.name` is the LOCAL binding (after any `as` alias) the call sites use.
+      for (const el of clause.namedBindings.elements) target.add(el.name.text);
+    }
+  }
+  return { rawWasi, memAccessors };
+}
+
 /** The canonical empty failure result. #1927 — replaces the inline copies. */
 function failResult(errors: CompileError[]): CompileResult {
   return {
@@ -573,6 +621,8 @@ function buildCodegenOptions(
   prep?: {
     nodeBuiltins?: import("./import-resolver.js").NodeBuiltinImport[];
     wasiNodeFsFuncs?: Set<string>;
+    wasiRawImports?: Set<string>;
+    wasiMemAccessors?: Set<string>;
     jsxRuntime?: import("./import-resolver.js").JsxRuntimeImport;
   },
 ): CodegenOptions {
@@ -601,6 +651,8 @@ function buildCodegenOptions(
     // separate change (tracked alongside #2138).
     nodeBuiltins: prep?.nodeBuiltins,
     wasiNodeFsFuncs: prep?.wasiNodeFsFuncs,
+    wasiRawImports: prep?.wasiRawImports,
+    wasiMemAccessors: prep?.wasiMemAccessors,
     allowFs: options.allowFs ?? false,
     jsxRuntime: prep?.jsxRuntime,
   };
@@ -973,6 +1025,11 @@ export function compileSourceSync(
   // it contributes an identity map and is omitted from the composition.
   const cjsRewritten2 = rewriteEvalSuperCall(cjsRewritten);
   const wasiNodeFsFuncs = detectNodeFsImports(cjsRewritten);
+  // #2657 — raw `wasi_snapshot_preview1` fd_read/fd_write imports + the
+  // `wasm:memory` inline linear-memory accessors (detected pre-preprocessing,
+  // like node:fs above). Both empty for every program that doesn't import the
+  // respective module, so it's byte-neutral elsewhere.
+  const { rawWasi: wasiRawImports, memAccessors: wasiMemAccessors } = detectRawWasiImports(cjsRewritten);
   const preprocessed = preprocessImports(cjsRewritten2, { wasi: options.target === "wasi" });
   const processedSource = preprocessed.source;
   // Composed map: processedSource → original source. Pipeline output order is
@@ -987,6 +1044,11 @@ export function compileSourceSync(
   let isJsMode = options.allowJs === true || (options.fileName?.endsWith(".js") ?? false);
   const defaultFileName = options.fileName ?? (isJsMode ? "input.js" : "input.ts");
   const effectiveFileName = options.moduleName ?? defaultFileName;
+  // #2645 — `--platform node` implies node emulation so the ambient surface and
+  // the importable `node:<mod>` capability gate share one target model. This
+  // EFFECTIVE flag drives the TS2580 message gate below too (so the node host
+  // doesn't get pointed at `--emulate node` it already has via `--platform`).
+  const effectiveEmulateNode = options.emulateNode === true || options.platform === "node";
   let ast: TypedAST;
   if (languageService) {
     // Incremental path: reuse cached lib files via the language service
@@ -994,12 +1056,14 @@ export function compileSourceSync(
     ast = languageService.analyze({
       allowJs: options.allowJs,
       skipSemanticDiagnostics: options.skipSemanticDiagnostics,
+      ...(options.platform ? { platform: options.platform } : {}),
     });
   } else {
     ast = analyzeSource(processedSource, effectiveFileName, {
       allowJs: options.allowJs,
       skipSemanticDiagnostics: options.skipSemanticDiagnostics,
       emulateNode: options.emulateNode,
+      ...(options.platform ? { platform: options.platform } : {}),
     });
   }
 
@@ -1015,7 +1079,11 @@ export function compileSourceSync(
         languageService.updateSource(processedSource, jsFileName);
         ast = languageService.analyze({ allowJs: true });
       } else {
-        ast = analyzeSource(processedSource, jsFileName, { allowJs: true, emulateNode: options.emulateNode });
+        ast = analyzeSource(processedSource, jsFileName, {
+          allowJs: true,
+          emulateNode: options.emulateNode,
+          ...(options.platform ? { platform: options.platform } : {}),
+        });
       }
     }
   }
@@ -1051,7 +1119,7 @@ export function compileSourceSync(
       // definitions for node?") flags a Node global. When node-emulation is off,
       // point the user at `--emulate node` (which turns it on and silences this)
       // rather than at @types/node.
-      if (!options.emulateNode && diag.code === 2580) {
+      if (!effectiveEmulateNode && diag.code === 2580) {
         const name = message.match(/Cannot find name '([^']+)'/)?.[1] ?? "process";
         message = `Cannot find name '${name}'. Add \`--emulate node\` to enable Node API emulation (or install @types/node).`;
       }
@@ -1130,6 +1198,8 @@ export function compileSourceSync(
     codegenOptions: buildCodegenOptions(options, emitSourceMap, {
       nodeBuiltins: preprocessed.nodeBuiltins,
       wasiNodeFsFuncs,
+      wasiRawImports,
+      wasiMemAccessors,
       jsxRuntime: preprocessed.jsxRuntime,
     }),
     sourcesContent,
@@ -1166,6 +1236,8 @@ export async function compileMultiSource(
   const multiAst = analyzeMultiSource(processedFiles, entryFile, undefined, {
     allowJs: options.allowJs,
     skipSemanticDiagnostics: options.skipSemanticDiagnostics,
+    // #2528 — propagate the ambient-platform selection into multi-file analysis.
+    ...(options.platform ? { platform: options.platform } : {}),
   });
 
   // When allowJs is set (e.g. compiling npm packages like lodash-es), only report

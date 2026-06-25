@@ -4,9 +4,9 @@ title: "standalone: `Binary emit error: u32 out of range: -1` on builtin subclas
 status: in-progress
 sprint: 66
 created: 2026-06-10
-updated: 2026-06-24
+updated: 2026-06-25
 priority: critical
-assignee: ttraenkler/sdev-pwrap
+assignee: ttraenkler/sd-2029fn
 feasibility: medium
 reasoning_effort: high
 model: opus
@@ -433,3 +433,212 @@ native wrapper-box subclass is the only residual, a deferred value-rep slice).
 The 4 `subclass-{Map,Set,WeakMap,WeakSet}` rows remain on #2620/#2622; the
 `Object.create` ToPrimitive gap on #2358/#2158; iterator-helper semantics on the
 iterator-helpers lane. None are emit bugs.
+
+---
+
+## Regrounded against current main (2026-06-25, sd-2038) — bucket is 37, not 497
+
+Measured the **live** standalone baseline (`test262-standalone-current.jsonl`,
+refreshed per-push) rather than trusting the original 497/`u32 out of range`
+framing:
+
+- The headline error string **`u32 out of range: -1` now matches 0 tests.** The
+  #2043 always-on emit validation renamed it to located `… index out of range`
+  errors, and the prior LANDED slices (emitSetSubclassProto -1 guard,
+  `__get_undefined` leak, primitive-wrapper refusal — all on main, not stranded)
+  closed the original crash. The 497→**37** reduction is real.
+- **True current residual: 37 tests** with `index out of range`, confirmed by
+  running the actual runner (`runTest262File(..., "standalone")`) over all 37 —
+  every one still crashes with the FULL harness wrap (`L2:1`); naive single-file
+  probes compile because they lack the harness shape.
+
+Three independent producer sub-buckets (separate PRs, per lead):
+
+| Kind | Count | Cluster | Class |
+|---|---:|---|---|
+| `local index`    | 12 | template-literal `tv-*` (9) + tagged-template (2) + for-of iterator-next (1) | speculative-rollback localMap (THIS PR) |
+| `global index -1`| 17 | SuppressedError (12), DisposableStack/AsyncDisposableStack proto, String.replaceAll, Error.isError, property-accessors | `-1` string-global sentinel (next PR) |
+| `function index` | 8 | TypedArray/Array `toLocaleString`, annexB RegExp, optional-chaining async | funcIdx late-shift (#1809/#1839; may split to own issue) |
+
+7-line local-index repro (`local index out of range — 5 (valid:[0,2))`):
+```ts
+export function test(): number {
+  var calls = 0;
+  (function (s: any) { calls++; })`foo`;  // tagged template, tag = closure capturing outer `calls`
+  return calls;
+}
+```
+
+## LANDED slice (2026-06-25, sd-2038) — local-index cluster (11/12 of the sub-bucket)
+
+**Root cause (verified per-process, NOT the diagnostic's default #2043
+attribution).** Every `compileExpression` runs inside a speculative
+snapshot/rollback (`snapshotSpeculative`/`rollbackSpeculative`, #1919). While the
+tagged-template lowering compiles the IIFE tag, closure-capture boxing
+**re-points the captured outer local in `fctx.localMap`**
+(`localMap.set("calls", boxedSlot)`, closures.ts). When the enclosing expression
+rolled back, `restoreLocals` (#1847) snapshotted only the localMap **key set** and
+therefore only DELETED names the probe ADDED — it never RESTORED a re-pointed
+**existing** name. So `calls` kept pointing at the truncated box slot (5), and
+the later `return calls` emitted `local.get 5` past the function's 2-local count
+→ emit crash. (Traced: at the tag-template entry fctx had
+`[calls,__tt_strings_1,__tt_raw_data_2,__tt_raw_vec_3,__tt_arr_data_4]`; after
+rollback `[calls,__ng_1]`, but the body kept `local.get#5`.)
+
+**Fix (in the snapshot/restore layer, `src/codegen/context/locals.ts` — not a
+local patch in the tagged-template handler, per lead guidance):**
+`snapshotLocals` now records the full localMap **entries** (name→slot) plus the
+`boxedCaptures` key set; `restoreLocals` rebuilds `localMap` exactly (clear +
+re-insert snapshot entries — dropping added names AND resetting re-pointed ones)
+and drops probe-added `boxedCaptures` markings (a stale box marking would make a
+post-rollback read deref a truncated ref-cell). Near-O(1), hot-path-safe (locals
+are tiny). gc/host mode and all non-rollback paths are unaffected.
+
+**Validation.** `tests/issue-2029-tagged-template-capture-local-index.test.ts`
+(5/5: compiles standalone, captured local reads back `7` at runtime, +subs,
+two-tag tv-template-head shape, gc-mode control). The 37-file runner re-probe:
+**11 flipped** from `index out of range` → no longer an emit crash (the
+template-literal/tagged-template cluster). Closure/tagged-template regression
+suites (`illegal-cast-closures-585`, `issue-1712-capture-closure-dispatch`,
+`iife-tagged-templates`) show 8 pre-existing failures that are **identical on
+pristine `origin/main`** (verified in a clean baseline worktree) — not
+regressions. tsc clean. Broad emit-path change → relying on the merge_group
+test262 floor for full conformance (per `project_broad_impact_validate_full_ci`).
+
+**Remaining (separate PRs, this issue stays `in-progress`):** the `global index
+-1` sentinel cluster (17) and the `function index` funcIdx-shift cluster (8), plus
+1 stray `for-of/iterator-next-reference` local-index from a different producer.
+
+## LANDED slice (2026-06-25, sd-2038) — global-index `-1` sentinel cluster (14 off the emit-crash)
+
+Two distinct producers in the global-index `-1` sentinel sub-bucket, both the
+documented `-1` string-global-sentinel class (a string constant un-materialized
+standalone records `-1` in `stringGlobalMap`; a raw `global.get` of it crashes
+the encoder):
+
+1. **`SuppressedError.prototype.<member>`** — `SuppressedError` was missing from
+   `BUILTIN_CTOR_NAMES` (`property-access.ts`), so the read fell through both the
+   standalone native-proto path and the host `__get_builtin` fallback into a
+   generic member path that pushed a raw `global.get <stringGlobalMap.get>`.
+   **Fix:** list `SuppressedError` in `BUILTIN_CTOR_NAMES` — identical to the
+   DisposableStack/AsyncDisposableStack precedent already there. Routes the read
+   to the dual-mode handler (clean located refusal standalone, `__get_builtin`
+   under gc/host). Flips the 7 `built-ins/SuppressedError/prototype/*` rows off
+   the emit-crash (now clean CE).
+
+2. **ERM ctors read as bare VALUES** (`Object.getPrototypeOf(SuppressedError)`,
+   `isConstructor(DisposableStack)` — `proto.js` / `is-a-constructor.js` for all
+   three ERM ctors, 6 rows) — `identifiers.ts` had a HOST-ONLY fast path for
+   `DisposableStack`/`AsyncDisposableStack`/`SuppressedError`-as-value that called
+   `__get_globalThis` + `__extern_get` and pushed the ctor-name key via the `-1`
+   string-global sentinel → `global.get -1`. It was NOT standalone-gated, so it
+   both baked the bad index AND leaked two host imports an empty import object
+   can't satisfy. **Fix:** gate the fast path to gc/host (`!standalone && !wasi`);
+   standalone falls through to the clean path. (This is why the already-listed
+   DisposableStack pair STILL had a `proto`/`is-a-constructor` residual — listing
+   in `BUILTIN_CTOR_NAMES` covers `.prototype.*` but not the bare-value path.)
+
+**Row-delta:** the 37-file runner re-probe (post-#2052 baseline 26 still-crashing)
+→ **12 still-crashing**: 14 flipped off the emit-crash, 1 now PASSES outright.
+gc/host mode unchanged (the value fast-path still fires in gc; verified
+`Object.getPrototypeOf(SuppressedError)` compiles gc). Files:
+`src/codegen/property-access.ts` (+SuppressedError in BUILTIN_CTOR_NAMES),
+`src/codegen/expressions/identifiers.ts` (host-gate the ERM-ctor value fast-path).
+Test: `tests/issue-2029-suppressederror-builtin-global-sentinel.test.ts` (6/6).
+Existing #2029 suites green (23/23). Broad emit-path change → merge_group floor.
+
+**Remaining global-index (3, separate/deferred producers):** `String.prototype.
+replaceAll/searchValue-replacer-RegExp-*` (2, regexp-replacer string key) and
+`language/expressions/property-accessors/S11.2.1_A3_T2.js` (1, getter/setter
+accessor). Plus the `function index` funcIdx-shift cluster (8: TypedArray/Array
+`toLocaleString`, annexB RegExp, optional-chaining async) and 1 stray
+`for-of/iterator-next-reference` local-index — the next PR(s).
+
+## LANDED slice (2026-06-25, sd-2029fn) — function-index cluster (failed-nested-hoist strands object-runtime helpers)
+
+**Root cause — NOT dead-elimination (sd-2038's hypothesis was disproved by the
+per-process trace).** The characterized repro
+(`built-ins/Array/prototype/toLocaleString/user-provided-tolocalestring-grow.js`,
+`call 136` into a 129-func module at `__call_m_resize_1`) was traced emit-time:
+
+- At `fillClosedMethodDispatch`, `funcMap.get("__extern_method_call")` returned
+  **136 while the local table held only 132 funcs** — i.e. the funcMap entry was
+  ALREADY stale at fill time (delta exactly = the 4 dead imports? no — the delta
+  was the count of object-runtime helpers truncated below; see trace). The helper
+  named `__extern_method_call` had `actualTablePos = -1` — it was **not in
+  `mod.functions` at all** (along with `__apply_closure`, `__object_seal/freeze`,
+  and all 16 `__proxy_*` dispatchers — 30 orphaned funcMap entries pointing past
+  the table).
+- The orphan source: **`hoistFunctionDeclarations`** (`nested-declarations.ts`).
+  The test's `listToString` nested `function` declaration FAILS to hoist (its body
+  hits `__extern_toLocaleString`, standalone-unsupported → `reportError`). During
+  that failed compile it had pulled in the **entire object runtime** as a side
+  effect (86 funcs registered in `mod.functions` AND `funcMap`, plus
+  `objectRuntimeTypes` / a late import). The rollback did
+  `ctx.mod.functions.length = funcsBefore` — truncating those 86 helpers out of
+  the table — **but left their `funcMap` entries and the `objectRuntimeTypes` /
+  `ensureProxyRuntime` (`funcMap.has`) guards intact.** A later real
+  `rab.resize(...)` any-receiver call reserved `__call_m_resize_1`; its
+  `ensureObjVecBuilders` → `ensureObjectRuntime` found `objectRuntimeTypes` SET,
+  SKIPPED re-registration, and `fillClosedMethodDispatch` baked the stale funcIdx
+  (136) past the shrunken table → the encoder's "function index out of range".
+
+This is a NEW instance of `project_type_index_shift_and_deadelim`'s sibling for
+the **local function table**: `src/codegen/context/speculative.ts` (#1919) makes
+expression probes transactional over imports/funcMap, but the older
+nested-function-hoist rollback truncated `mod.functions` WITHOUT the matching
+side-table unwind.
+
+**Fix (`src/codegen/statements/nested-declarations.ts`, the failed-hoist
+rollback): do NOT truncate `ctx.mod.functions`.** The side-effect helpers are
+valid, content-addressed, idempotent, and potentially needed by later code —
+removing them is the over-reach. Instead keep every pushed func and neutralise
+ONLY the failed user function's own entry to a valid `unreachable` stub (local
+funcs are never dead-eliminated, so a leftover MUST be valid Wasm, not an empty /
+broken body), dropping its funcMap name so `compileStatement` re-compiles it at
+its real textual position (the pre-existing `hoistFailedFuncs` re-attempt). funcMap
+and the table stay in lockstep — no dispatcher can bake a stale index.
+
+**Why not "complete the truncation" (purge funcMap + reset `objectRuntimeTypes`
+→ re-register)?** Tried and REJECTED: the object runtime's own dependencies
+(`number_toString`, native-string helpers, union boxes) have separate
+registration latches that would ALSO need resetting in dependency order — a
+re-register-after-purge crashed a probe with `function index out of range —
+undefined at __to_property_key` (a purged dep baked as `undefined`). Keeping the
+helpers (no truncation) sidesteps the entire cascading-latch problem.
+
+**Downstream-effect audit:** the change is in the mode-agnostic hoist, but the
+truncation only ever stranded the standalone-only object-runtime/closed-method
+helpers (gc/host never reserves a dispatcher), so the stale-index crash was
+standalone-only and the fix is too. No stack-balance / return-type / index-shift
+fallout: the only behavioural delta is "a failed-hoist leftover func is an
+`unreachable` stub instead of being spliced out", and that func is unreferenced
+(dead) — `reservedEntry.body = []` (invalid for non-void returns) is now
+`[unreachable]` (strictly safer).
+
+**Row-delta (paired scan, my branch vs pristine, identical on the 3 touched
+files):** `built-ins/{Array,TypedArray}/prototype/toLocaleString` — **5 →
+0** `function index out of range` emit-crashes (now reach a downstream
+`__closure_5` instantiate type-mismatch / `Cannot convert object to primitive` —
+SEPARATE bugs, not emit crashes). optional-chaining: 0 funcidx crashes on both
+(`member-expression-async-this` PASSES; others runtime-fail, not emit-crash). No
+regression anywhere (annexB unchanged; see residual).
+
+**Validation:** new `tests/issue-2029-nested-hoist-funcidx-standalone.test.ts`
+(3/3) — proven to FAIL on pristine (2 standalone cases emit-crash) and PASS on
+this branch, plus a gc-mode no-regression control. tsc clean. Hoist/closure/2029
+suites: 59/59 tests pass (matches pristine; the cross-suite "failed file"
+collection noise is identical on pristine). #2151 / #2015 / #2038 / generator /
+standalone-coercion batch green. Broad emit-path change → relying on the
+merge_group test262 floor for full conformance
+(`project_broad_impact_validate_full_ci`).
+
+**Remaining function-index (separate producer, NOT this fix, PRE-EXISTING — out
+of traced scope):** `annexB/built-ins/RegExp/RegExp-{control-escape-russian-letter,
+invalid-control-escape-character-class}.js` (2) crash with `function index out of
+range — undefined at <generator fn>` — a `function* …()` native-generator funcMap
+lookup baking `undefined`, confirmed IDENTICAL on pristine (neither fixed nor
+regressed here). A distinct funcMap-returns-undefined producer in the
+generator-native lowering; route as its own slice. Plus the global-index
+regexp-replacer (2) + property-accessor (1) and the for-of/iterator-next
+local-index (1) residuals already noted above.

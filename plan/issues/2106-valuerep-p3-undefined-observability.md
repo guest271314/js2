@@ -1,11 +1,12 @@
 ---
 id: 2106
 title: "value-rep P3: undefined observability — UNDEF_F64 sentinel, union-collapse reversal (flagged), standalone $undefined singleton"
-status: backlog
-assignee: ttraenkler/sdev7
+status: in-progress
+assignee: ttraenkler/sdev-s1fix
 sprint: 66
 created: 2026-06-11
-updated: 2026-06-24
+updated: 2026-06-25
+s1_note: "S1 (standalone tag-1 $undefined singleton) NOT COMPLETE — PR #2025 was AUTO-PARKED in merge_group (2026-06-24): standalone high-water floor breached (pass 23729 vs mark 24956), NET −1245 test262 rows (1654 regressed / 409 gained). Root cause (diagnosed by sdev-s1fix 2026-06-25, see '## S1 merge_group regression — diagnosis'): S1.1 flipped the CONSUMER __extern_is_undefined to singleton-only but did NOT flip the matching PRODUCERS (notably __extern_get's missing-key return at object-runtime.ts:856, still ref.null.extern), so destructuring/param defaults stop firing. This is the architect-spec's full ~40-site producer+consumer sweep done as a partial subset — there is NO narrow floor-saving fix. RESOLUTION 2026-06-25: S1.1+S1.2 behavioral flips REVERTED on the branch (kept inert S1.0); PR #2025 re-targets to a floor-neutral revert. S1 to be re-landed as a fully-scoped complete sweep (architect re-spec). REMAINING slices unchanged: S2 (sNaN carve-out), S3 (number|undefined→externref), S4 (union-collapse reversal), typeof-null→object."
 priority: high
 feasibility: hard
 reasoning_effort: max
@@ -333,3 +334,250 @@ measured test262 run, as the plan already says). Reverted the attempt cleanly
 (no code landed). Next agent: investigate why `__unbox_number(__box_number(x))`
 null-derefs in the find-HIT consuming context before re-widening — that
 box-protocol fix is the real prerequisite, not the find emit site itself.
+
+## S1 — Architect spec: standalone tag-1 `$undefined` singleton (sdev-async, 2026-06-23)
+
+Promoted from "fix direction" to a concrete, ripple-mapped implementation plan
+after the **S1a hold** (PR #1961) proved no inline strict-eq fix can split
+null/undefined while they share the `ref.null extern` bit pattern. S1 gives
+`undefined` a **distinct representation** so all four nullish strict-eq cases —
+and `typeof`, `Object.is`, `in`-vs-undefined — resolve correctly. Verified
+against `origin/main` @ `c8cd5ba8f`; re-grep anchors if drifted.
+
+### The core decision: undefined = a tag-1 `$AnyValue` singleton; null = `ref.null extern`
+
+In standalone (`ctx.nativeStrings`/`ctx.standalone`) there is no host `undefined`.
+Today `emitUndefined` (`late-imports.ts:596`) falls back to `ref.null.extern` —
+**identical to `null`**. The fix: a single immutable module global
+`$undefined : (ref $AnyValue)` holding a **tag-1** box
+(`{tag:1, i32val:0, f64val:NaN, refval:null, externval:null}` — the exact shape
+`__any_from_extern`'s `nullAny` already synthesises at `any-helpers.ts:186-193`).
+`null` stays `ref.null extern`. The two are then distinguishable everywhere a
+value flows as an externref/anyref because undefined is a *non-null* ref to the
+singleton, while null is a true null.
+
+### HARD CONSTRAINT — the null-vs-undefined RIPPLE is the whole difficulty
+
+This is NOT a localised change. The blast radius (measured on `origin/main`):
+- **33** `emitUndefined(...)` call sites (the producers).
+- **35** `__extern_is_undefined` emit sites + its native impl (`index.ts`
+  registers it as bare `ref.is_null` in standalone — `index.ts:4300` comments
+  the convention).
+- **42** `ref.is_null` uses across `src/codegen/`, of which **~13** are
+  *undefined-specific* checks and the rest are genuine null / generic-nullish
+  checks.
+
+The danger: making undefined a non-null singleton **breaks every `ref.is_null`
+site that currently relies on "undefined IS null"** to detect undefined. Those
+fall into three classes that MUST be triaged individually:
+
+1. **Genuine nullish checks (`== null`, `?.`, `??`, default-value fill,
+   array-hole, `Object.is` SameValueZero on nullish)** — these want BOTH null and
+   undefined to count. After S1 a bare `ref.is_null` no longer catches the
+   undefined singleton, so each must become `is_null(x) || is_undefined_singleton(x)`.
+   **This is the dominant ripple and the #1 regression source.** Centralise it:
+   add `emitIsNullish(ctx, fctx)` (= `ref.is_null` OR ref.eq-against-`$undefined`)
+   and route every nullish consumer through it.
+2. **Undefined-specific checks (`=== undefined`, `typeof x === "undefined"`,
+   `void`-result, optional-param absence)** — these want ONLY undefined. After S1
+   they become `is_undefined_singleton(x)` (ref.eq vs `$undefined` / tag==1),
+   NOT `ref.is_null`. The `__extern_is_undefined` native impl flips from
+   `ref.is_null` to the tag-1 check.
+3. **Null-specific checks (`=== null`, `typeof x === "object" && !x`)** — want ONLY
+   null. These STAY `ref.is_null` AND must additionally EXCLUDE the undefined
+   singleton (a non-null ref) — which they already do, since the singleton is
+   non-null. Low risk; audit only.
+
+### HAZARD — #329 native-string finalize shift (documented at late-imports.ts:581-584)
+
+A standalone undefined value that is NOT `ref.null extern` must NOT be introduced
+via a **late func import added AFTER the native-string helpers are emitted** — that
+re-drives `reconcileNativeStrFinalizeShift` and off-by-ones the baked
+`__str_flatten`→`__str_copy_tree` call (#329 repro: `let g: any; g = function(){…};
+g()` → invalid wasm). Mitigation: `$undefined` is a **GLOBAL**, not a func import,
+and is reserved **up-front at `ensureAnyValueType` time** (`any-helpers.ts:23`) so
+no late func-index shift occurs. The global's init (a `struct.new $AnyValue`) is a
+constant expression — emit it in the module's global-init, never lazily mid-body.
+
+### Staged plan (each stage independently green-mergeable; gate every change on `ctx.standalone`/`nativeStrings`; host mode byte-identical)
+
+- **S1.0 — reserve the singleton (INERT).** At `ensureAnyValueType`, also register
+  the `$undefined` global (tag-1 `$AnyValue`, constant init). Add
+  `ctx.undefinedGlobalIdx?: number`. Add two emit helpers in `late-imports.ts`:
+  `emitUndefinedSingleton(ctx, fctx)` (`global.get $undefined`) and
+  `emitIsUndefinedSingleton(ctx, fctx)` (recover tag, `i32.eq 1` — or `ref.eq`
+  against the singleton when the operand is already a `ref $AnyValue`). Nothing
+  calls them yet. *Acceptance: existing standalone tests byte-identical; the global
+  appears but is unreferenced.*
+- **S1.1 — flip the producers + the undefined-specific consumers TOGETHER.**
+  Standalone `emitUndefined` → `emitUndefinedSingleton`; `__extern_is_undefined`
+  native impl → tag-1 check; the `=== undefined` / `typeof === "undefined"`
+  consumers → `emitIsUndefinedSingleton`. These MUST land in one PR (a producer
+  flip without the matching undefined-consumer flip, or vice-versa, is a
+  half-state that regresses). *Acceptance: `undefined === undefined` true,
+  `null === null` true, `null === undefined` FALSE, `typeof undefined` →
+  "undefined" vs `typeof null` → "object" — all standalone, the issue's S1 test
+  gate. PLUS the strict-eq cascade in `binary-ops.ts` now distinguishes them with
+  NO `bothNullishGuard` collapse (this is where #1961's held guard becomes correct
+  — re-key it on the singleton, not bare `ref.is_null`).*
+- **S1.2 — sweep the nullish consumers (the ripple).** Route every `== null` /
+  `?.` / `??` / default-fill / array-hole / SameValueZero-nullish site through the
+  new `emitIsNullish` so they still catch the undefined singleton. This is the
+  largest, most regression-prone stage — do it last, with a full `merge_group`
+  baseline (value-rep broad-impact protocol — NEVER a scoped sweep, per
+  `project_broad_impact_validate_full_ci`). *Acceptance: `undefined == null` true,
+  `x ?? y` fires for undefined, `a?.b` short-circuits on undefined, destructuring
+  default fires for undefined, no test262 regression.*
+
+### #329 + funcIdx-authority cross-check (#1899)
+S1 lands after #1899's funcIdx-authority contract (task #36, done) — verify the
+`$undefined` global reservation composes with the finalize-shift accounting; the
+global path avoids the func-shift entirely but confirm the global-index
+accounting (`ctx.numImportGlobals + ctx.mod.globals.length`) is taken at
+reservation time, not lazily.
+
+### Why this is the real fix (and #1961 is held, not abandoned)
+#1961's `bothNullishGuard` is correct in shape but, keyed on bare `ref.is_null`,
+collapses null/undefined. Once S1.1 gives undefined distinct bits, that same guard
+— re-keyed on `is_null(x) || is_undefined_singleton(x)` for the loose arm and the
+plain tag check for strict — becomes exactly right. So #1961 stays open as the
+diagnosis + repro harness and folds into S1.1/S1.2. The acceptance-criterion
+"null vs undefined distinct standalone" is met ONLY by S1, not by #1961 alone.
+## Producer/consumer site inventory for the S1 re-land (architect re-spec input)
+
+> CONTEXT (2026-06-25): S1.1 + S1.2 behavioral edits are REVERTED on this branch
+> (kept only the inert S1.0 reservation). The section below was originally the
+> "Suspended Work — S1.0 done + S1.1 WIP" note; it is RETAINED because it is the
+> most complete enumeration of the producer/consumer sites the full atomic S1
+> sweep must flip in lockstep. The architect re-spec should expand THIS into the
+> exhaustive site list. The "Landed/committed" and "repro status" lines below
+> describe the now-REVERTED S1.1 state — read them as the *plan*, not current
+> branch state.
+
+**Branch:** `issue-2106-s1-undefined-singleton`
+**State (HISTORICAL — now reverted):** S1.0 (inert singleton reservation) is
+COMPLETE + validated. S1.1/S1.2 (producer + chokepoint + equality flips) were
+implemented but REVERTED 2026-06-25 (incomplete subset, −1245 floor breach).
+
+### Landed (committed)
+- **S1.0** (commit on branch): `$undefined` tag-1 global reserved at
+  `ensureAnyValueType` (`any-helpers.ts`), `ctx.undefinedGlobalIdx`,
+  `emitUndefinedSingleton` / `emitIsUndefinedSingleton` helpers. Inert, validated.
+- **S1.1 WIP** (this checkpoint):
+  - `emitUndefined` (`late-imports.ts`): standalone → `global.get $undefined` +
+    `extern.convert_any` (was `ref.null.extern`).
+  - `__extern_is_undefined` (`object-runtime.ts`): singleton-only (recover anyref,
+    `ref.test $AnyValue`, tag==1); legacy `ref.is_null` fallback when no `$AnyValue`.
+  - `__typeof_undefined` (`index.ts`): singleton-only (same tag-1 test).
+  - strict-eq cascade (`binary-ops.ts`): the loose-only nullish guard is now
+    applied to BOTH modes (`(lNull||rNull)?(lNull&&rNull):core`) — correct under S1
+    because undefined is the non-null singleton.
+
+### Repro status (`tests/issue-2106-standalone-nullish-strict-eq.test.ts`)
+PASS: `null===null`, `nullish!==non-nullish`, `5===5`.
+FAIL (3), with root causes:
+
+1. **`undefined === undefined` → false (want true)** AND **`undefined !== undefined`
+   → true (want false).** ROOT CAUSE: array/object literals push **raw
+   `ref.null.extern`** for `undefined`-like values (`literals.ts:575/605/646/657/685`
+   etc.), NOT `emitUndefined`. So `[undefined, undefined]` stores TWO NULLS, read
+   back as null — but then `null===null`-via-the-guard should give true... it gives
+   false, so the stored value is NOT plain null either (likely the S0 contextual-`any`
+   boxing path tags the literal `undefined` as a tag-1 `$AnyValue` element via
+   `boxToAny(jsStaticType=undefined)` — but `boxToAny`'s "undefined" case currently
+   `break`s at `value-tags.ts:168`, so it falls to the Wasm-kind dispatch and boxes
+   as... INVESTIGATE: dump the WAT of `[undefined,undefined]` element store).
+   **NEXT:** make the literal-`undefined` producers (and `boxToAny`'s undefined arm)
+   emit the singleton consistently so a stored `undefined` IS the singleton; then
+   two reads `ref.eq` true. Either route literal undefined through `emitUndefined`,
+   or implement `boxToAny`'s tag-1 arm to push the `$undefined` global.
+
+2. **loose `null == undefined` → false (want true).** ROOT CAUSE: the loose nullish
+   guard uses bare `ref.is_null`, which no longer catches the undefined singleton
+   (non-null). **NEXT (the S1.2 ripple):** add `emitIsNullish(ctx,fctx)` =
+   `is_null(x) || is_undefined_singleton(x)` and route the LOOSE `==`/`!=` nullish
+   arm (binary-ops `looseNullish` guard) + `??` + `?.` + default-fill +
+   array-hole + SameValueZero-nullish through it. ~42 `ref.is_null` sites to triage
+   (nullish-intent → `emitIsNullish`; null-specific `=== null` → stays `ref.is_null`).
+
+### Remaining work to finish S1 (atomic PR)
+- Fix (1): consistent singleton production for ALL `undefined` producers
+  (literals, `boxToAny` tag-1 arm, omitted-arg padding that uses raw
+  `ref.null.extern` e.g. `calls.ts:1352/1700` thisArg — verify those are
+  this-arg-only and not default-param relevant).
+- Fix (2): `emitIsNullish` + the nullish-consumer sweep (S1.2).
+- `typeof null` → "object": `__typeof_object` currently returns 0 for
+  `ref.is_null`; flip null→"object" (return 1) so typeof null is correct (separate
+  small follow-up, not strictly blocking the strict-eq fix).
+- Validate via merge_group (value-rep broad-impact). Report net delta to
+  sdev-coercion-impl / lead for the land decision. Supersede/close held PR #1961
+  if S1 lands net-positive.
+
+### Validation done so far
+tsc clean; S1.0 inert validated (36 tests green: #1776/#1021/strict+loose
+equality/#2106 S0/#2029). The 3 repro failures above are the WIP frontier.
+
+> NOTE (2026-06-25): the "## S1.2 resolution" section that previously claimed
+> S1.2 was "implemented, 6/6 + no new regressions" has been REMOVED — it was
+> wrong. S1.2's equality scoping was real, but the underlying S1.1 producer flip
+> was an incomplete subset that breached the standalone floor by −1245 rows in
+> the merge_group. Both S1.1 and S1.2 behavioral edits are now reverted on this
+> branch. See the diagnosis below.
+
+## S1 merge_group regression — diagnosis (sdev-s1fix, 2026-06-25)
+
+PR #2025 (HEAD ffb0dbba8) was **auto-parked** by github-actions[bot]: it passed
+all PR-level checks but FAILED the `merge shard reports` gate in the merge_group
+(run 28134749722, branch gh-readonly-queue/main/pr-2025-…). The failing step is
+`scripts/check-standalone-highwater.mjs`:
+
+```
+[standalone-highwater] current pass=23729, mark=24956 (floor=24906, tolerance=50, delta=-1227).
+##[error]STANDALONE pass-count floor breached
+```
+
+**Per-row delta** (merged standalone report jsonl vs
+`loopdive/js2wasm-baselines/test262-standalone-current.jsonl`):
+- 1654 rows REGRESSED (962 pass→compile_error, 688 pass→fail, 4 pass→timeout),
+  409 gained, **NET −1245**.
+- 1150/1654 (70%) are destructuring / default-param / binding-pattern
+  (`/dstr/`, `dflt`, `ptrn`). The rest (504) are spread across
+  expressions/class, Object.defineProperty(ies), eval-code, RegExp, super, and
+  the verifyProperty/assert harness — all "is-undefined"-classifier consumers.
+- 948 of the 962 compile-errors carry the message "Cannot convert object to
+  primitive value" (the singleton reaching a to-primitive path that doesn't
+  recognize it); 212 of the fails are "illegal cast" in the same dstr cluster.
+
+**Root cause — partial sweep (producer/consumer inconsistency).**
+S1.1 flipped `emitUndefined` to produce the tag-1 `$undefined` SINGLETON
+(non-null externref) and flipped the CONSUMER `__extern_is_undefined`
+(object-runtime.ts ~5681) to a singleton-ONLY tag-1 test, but did NOT flip the
+matching PRODUCERS. The decisive one: **`__extern_get` (object-runtime.ts:856)
+still returns `ref.null.extern` for a MISSING key**. So a missing-property read
+is null, `__extern_is_undefined(null)` now returns 0, and destructuring / param
+defaults never fire.
+
+Validated repros on the branch (standalone, probes since removed):
+- `const {a=7} = {}` → returns 0, should be 7  ← REGRESSION (the bulk).
+- `const {a=7} = {a:null}` → correctly does NOT fire default  ← the S1 GAIN
+  (null/undefined distinctness) working as intended.
+- `"v="+undefined` (→"v=undefined") and `+undefined` (→NaN) still work — those
+  go through `__any_to_string` / `__unbox_number`, which already have tag-1 arms.
+
+**Why there is NO narrow floor-saving fix.** Producer and consumer are now in an
+inconsistent intermediate state. Reconciling them = the architect spec's full
+~40-site sweep (memory `project_2106_undefined_singleton_s1_atomic`): flip EVERY
+undefined producer to the singleton (`__extern_get` miss, omitted-arg/element
+padding, literal element stores) AND convert EVERY `ref.is_null`-based
+absence/nullish consumer to also recognize the singleton, in lockstep.
+`__extern_get` alone has 111 callers; its null return doubles as `__extern_has`'s
+absence signal and the prototype-walk loop terminator — flipping it ripples
+through the whole object runtime. The branch shipped a partial subset, which is
+net −1245.
+
+**Recommendation:** revert the S1.1/S1.2 producer+consumer flips to restore the
+green floor (keep the inert S1.0 reservation + spec/docs), and re-land S1 as a
+complete, properly-sequenced sweep in a fresh PR with the full producer+consumer
+site set flipped together, validated via merge_group BEFORE enqueue (route to
+architect to enumerate the full producer/consumer site list first). The hold on
+#2025 must stay until this is resolved.

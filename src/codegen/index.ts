@@ -3,6 +3,7 @@ import { ts, forEachChild } from "../ts-api.js";
 import { emitToBoolean } from "./coercion-engine.js";
 import { emitWasiErrorConstructor } from "./registry/error-types.js";
 import { analyzeLinearUint8 } from "./linear-uint8-analysis.js";
+import { analyzeFnctorEscapeGate } from "./fnctor-escape-gate.js";
 import { isLinearU8RepresentableNew } from "./linear-uint8-signatures.js";
 import type { MultiTypedAST, TypedAST } from "../checker/index.js";
 import {
@@ -46,6 +47,8 @@ import { scanForArrayHoles, ensureHoleType } from "./array-holes.js"; // (#2001 
 import { ensureDynReadHelpers } from "./dyn-read.js"; // (#2580 M0)
 import { ensureNativeIteratorRuntime, fillNativeIteratorUserArms } from "./iterator-native.js";
 import { fillClosedMethodDispatch } from "./closed-method-dispatch.js";
+import { fillMemberSetDispatch } from "./member-set-dispatch.js";
+import { fillMemberGetDispatch } from "./member-get-dispatch.js";
 import { emitUndefined, ensureGetUndefined, reconcileNativeStrFinalizeShift } from "./expressions/late-imports.js";
 import { fillProtoIteratorDriver } from "./expressions/proto-override.js";
 import { fillAccessorDrivers } from "./accessor-driver.js";
@@ -1065,6 +1068,12 @@ export function generateModule(
   // the inline struct.get fast-path (which reads the live field and ignores the
   // runtime delete tombstone). Delete-free modules keep byte-identical output.
   ctx.moduleUsesDelete = sourceContainsDelete(ast.sourceFile);
+  // (#2660 S1) Whole-program escape / dynamic-use classification of `new F()`
+  // fnctor instances. INERT: the result is stored for the future S3
+  // reconstruction lowering but is NOT yet consumed, so emitted Wasm is
+  // byte-identical. Side-effect free; safe to run unconditionally (no fnctor
+  // `new` sites ⇒ empty result ⇒ no-op).
+  ctx.fnctorEscapeGate = analyzeFnctorEscapeGate(ast.checker, ast.sourceFile);
   try {
     // WASI target: register linear memory, bump pointer global, and WASI imports
     if (ctx.wasi) {
@@ -1788,6 +1797,26 @@ export function generateModule(
     // at reserve time), so no funcIdx churn. No-op when no any-receiver call site
     // reserved a dispatcher (standalone/wasi only).
     fillClosedMethodDispatch(ctx);
+
+    // (#2664) Fill the reserved `__set_member_<name>` member-WRITE dispatchers now
+    // that EVERY struct type (incl. late-registered fnctor structs like acorn's
+    // `$__fnctor_Parser`) is known — so each `any`-receiver `obj.<name> = v` write
+    // enumerates the COMPLETE struct-candidate set regardless of which function
+    // compiled first. Read-only over funcMap (all deps registered at reserve
+    // time). No-op when no write site reserved a dispatcher. Fixes the
+    // compile-order candidate freeze that lost finishToken's `this.type =` write
+    // to the sidecar (8th acorn dogfood wall).
+    fillMemberSetDispatch(ctx);
+
+    // (#2674) Fill the reserved `__get_member_<name>` member-READ dispatchers —
+    // the symmetric read-side counterpart of the write dispatch above. Each read
+    // site's frozen multi-struct alternates fallback was replaced by a call to
+    // this dispatcher, filled HERE with the COMPLETE struct-candidate set (incl.
+    // late-registered fnctor structs) so a reader compiled before a struct type
+    // registered still resolves the real instance's slot. Fixes the read-side
+    // compile-order freeze that left parser field reads (`base.end`,
+    // `this.lastTokEnd`) resolving to `__extern_get` → `undefined` (acorn 9th wall).
+    fillMemberGetDispatch(ctx);
 
     // (#1904) Fill the standalone native Array.isArray predicate after all
     // module-local array carriers have been registered.
@@ -3032,6 +3061,29 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
   const mod = ctx.mod;
   const methodSuffix = "@@toPrimitive";
   const exportName = "__call_@@toPrimitive";
+
+  // (#2083) Ensure the union imports (which register `__box_number`) are present
+  // BEFORE the entries loop below resolves `funcIdx` values and reads result
+  // signatures. A numeric (`f64`/`i32`) `[Symbol.toPrimitive]` result is boxed to
+  // externref via `__box_number` for the dispatcher's externref fallthrough; the
+  // boxing arms `ctx.funcMap.get("__box_number")` and silently skip the `call`
+  // when it is absent, leaving an `f64`/struct ref where the block result demands
+  // `externref` (invalid Wasm). This used to be masked because
+  // `emitVecAccessExports` ran earlier and unconditionally called
+  // `addUnionImports`; now that the vec exports are gated on actual array usage
+  // (#2083), an object-only program with a numeric `[Symbol.toPrimitive]` and no
+  // arrays no longer gets that side effect. `addUnionImports` adds imports and
+  // SHIFTS function indices, so it MUST run before `funcIdx`/`resultType` are
+  // captured below — doing it after would leave the captured `funcIdx` integers
+  // pointing at the wrong (pre-shift) functions. It is idempotent
+  // (`ctx.hasUnionImports` guard), so modules that already added the imports —
+  // every array-using module, and any object module that needed them elsewhere —
+  // are byte-identical. Gated on the presence of any numeric `@@toPrimitive`
+  // method so non-toPrimitive / string-only-toPrimitive modules add no import.
+  if (toPrimitiveNeedsBoxing(ctx, methodSuffix)) {
+    addUnionImports(ctx);
+  }
+
   const entries: { typeIdx: number; funcIdx: number; resultType: ValType }[] = [];
 
   for (const [structName] of ctx.structFields) {
@@ -3124,6 +3176,37 @@ function emitToPrimitiveMethodExport(ctx: CodegenContext): void {
   } as WasmFunction);
 
   mod.exports.push({ name: exportName, desc: { kind: "func", index: funcIdx } });
+}
+
+/**
+ * (#2083) True when at least one class `[Symbol.toPrimitive]` method in the
+ * module returns a numeric (`f64`/`i32`) type — i.e. the `__call_@@toPrimitive`
+ * dispatcher will need `__box_number` to box that result to externref. Mirrors
+ * the entry-filtering in `emitToPrimitiveMethodExport` (skips Wrapper/$AnyValue/
+ * vec/arr structs) and reads the compiled method's result signature. Computed
+ * BEFORE any `addUnionImports`-induced funcIdx shift, off the same `funcMap` /
+ * `mod.functions` state, so it is shift-stable. Used to gate the pre-emit
+ * `addUnionImports` so non-numeric-toPrimitive modules add no import.
+ */
+function toPrimitiveNeedsBoxing(ctx: CodegenContext, methodSuffix: string): boolean {
+  const mod = ctx.mod;
+  for (const [structName] of ctx.structFields) {
+    if (
+      structName.startsWith("Wrapper") ||
+      structName === "$AnyValue" ||
+      structName.startsWith("__vec_") ||
+      structName.startsWith("__arr_")
+    )
+      continue;
+    const funcIdx = ctx.funcMap.get(classMemberFuncKey(ctx, `${structName}_${methodSuffix}`));
+    if (funcIdx === undefined) continue;
+    const funcDef = mod.functions[funcIdx - ctx.numImportFuncs];
+    const funcType = funcDef ? mod.types[funcDef.typeIdx] : undefined;
+    const resultType =
+      funcType && funcType.kind === "func" && funcType.results.length > 0 ? funcType.results[0] : undefined;
+    if (resultType && (resultType.kind === "f64" || resultType.kind === "i32")) return true;
+  }
+  return false;
 }
 
 /**
@@ -4306,6 +4389,16 @@ function emitVecAccessExports(ctx: CodegenContext): void {
   //   for `vec.constructor` lookups: the constructor path calls `__vec_len`
   //   to positively distinguish vec wrappers from other null-prototype
   //   WasmGC structs.
+  // (#2083) The final disjunct was `ctx.vecTypeMap.size === 0`, which could
+  // NEVER be true: `createCodegenContext` pre-registers the `externref` + `f64`
+  // vec struct types for type-index stability, so the map always has ≥ 2
+  // entries. As a result these six host-glue vec exports leaked into EVERY
+  // module — even arith-only / string-only programs with no arrays at all (the
+  // exact case flagged in #2083). Gate on `ctx.usesVecValue` instead — set only
+  // when a genuine array-usage site asks `getOrRegisterVecType` for a type (the
+  // two prereg calls are excluded). The host runtime guards every
+  // `exports.__vec_*` access with a `typeof === "function"` check, so a module
+  // that never materialises an array is safe without them.
   if (
     !ctx.funcMap.has("__iterator") &&
     !ctx.funcMap.has("JSON_stringify") &&
@@ -4316,7 +4409,7 @@ function emitVecAccessExports(ctx: CodegenContext): void {
     !ctx.funcMap.has("Promise_any") &&
     !ctx.funcMap.has("__crypto_get_random_values") && // (#1503)
     !ctx.funcMap.has("__extern_get") &&
-    ctx.vecTypeMap.size === 0
+    !ctx.usesVecValue
   ) {
     return;
   }
@@ -6082,7 +6175,29 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     // (not the node-process shim's stdin_read). Keep the inline fd_read import
     // when the reactor is active; otherwise stdin flows through the shim.
     needsFdRead = needsStdinReactor;
+  } else {
+    // #2655 — DIRECT WASI Preview-1 path: a standalone `--target wasi` module
+    // (no `--link-node-shims`) that imports `readSync`/`writeSync` from node:fs
+    // lowers fd-based `readSync(fd, buf, …)` / `writeSync(fd, buf, …)` straight to
+    // `wasi_snapshot_preview1.fd_read` / `fd_write` (a plain BLOCKING read — NOT
+    // the async reactor's non-blocking fd_read + poll_oneoff). `needsFdRead` is
+    // otherwise only set by the hallucinated `process.stdin.read(...)` shape or
+    // the stdin reactor; `needsFdWrite` only by console.log/process.std*.write —
+    // so a bare `import { readSync, writeSync }` would have no syscall import to
+    // call. Pull in the syscalls the imported bindings actually need.
+    if (ctx.wasiNodeFsFuncs.has("readSync")) needsFdRead = true;
+    if (ctx.wasiNodeFsFuncs.has("writeSync")) needsFdWrite = true;
   }
+
+  // #2657 — RAW `wasi_snapshot_preview1` fd_read/fd_write import. When the source
+  // imports the syscall by name (`import { fd_read, fd_write } from
+  // "wasi_snapshot_preview1"`), the binding maps 1:1 to the import func, so the
+  // import MUST be registered regardless of the shim/direct branch above (the
+  // user wrote the syscall call explicitly). Routes the user binding to the same
+  // `ctx.wasiFdReadIdx`/`wasiFdWriteIdx` — no duplicate import. This sits after
+  // the linkNodeShims recompute so a raw `fd_read` import is never dropped.
+  if (ctx.wasiRawImports.has("fd_read")) needsFdRead = true;
+  if (ctx.wasiRawImports.has("fd_write")) needsFdWrite = true;
 
   // fd_write(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) -> i32
   if (needsFdWrite) {
@@ -6508,6 +6623,23 @@ function emitWasiWriteStringStderrHelper(ctx: CodegenContext): void {
  */
 export const WASI_STDIN_BUF_START = 64 * 1024;
 export const WASI_WRITE_SCRATCH_START = 128 * 1024;
+
+/**
+ * #2655 — DIRECT `readSync` iovec + nread scratch (page 0). The blocking
+ * `wasi_snapshot_preview1.fd_read(fd, iovs, iovs_len, nread)` syscall needs a
+ * `{ base, len }` iovec (8 bytes) and a `nread` out-slot (4 bytes) in linear
+ * memory. These deliberately use DEDICATED page-0 offsets — NOT the async
+ * reactor's `RL_FDREAD_IOV_OFFSET` (324) / `RL_FDREAD_NREAD_OFFSET` (332) — so a
+ * program that uses BOTH synchronous `readSync` AND the async stdin reactor
+ * never has its two iovec scratches alias. They sit above the reactor's
+ * 160–336 poll/iovec region and below the 1024 string-literal data base, so
+ * they collide with neither the iovec write scratch (0–24), the reactor, nor any
+ * string-literal segment. The read DATA lands in the page-1 stdin buffer
+ * (`WASI_STDIN_BUF_START`) for the GC-array copy path, or straight into the
+ * caller's `ptr+offset` for the linear-backed zero-copy path.
+ */
+export const WASI_READSYNC_IOV_OFFSET = 340;
+export const WASI_READSYNC_NREAD_OFFSET = 348;
 
 /**
  * #1886 Slice B — start of the linear-backed `Uint8Array` arena (page 4,
@@ -7129,20 +7261,23 @@ export function ensureWasiWriteAnyStringHelper(ctx: CodegenContext, useStderr: b
  * #2639: Ensure `__wasi_write_any_string_fd(s: ref AnyString, fd: i32) -> i32`
  * exists and return its function index (lazy). Encodes the string to UTF-8 in
  * the shared linear scratch (the same encoder as the fixed-fd writer) and writes
- * it to the *runtime* fd via the imported `node:fs` `writeSync(fd, ptr, len)`
- * shim, returning the byte count `writeSync` reports. This backs the STRING
- * overload of `node:fs` `writeSync(fd, str, position?, encoding?)`, where the fd
- * is an arbitrary integer (not just stdout/stderr). It is gated to the
- * `linkNodeShims` path — the only path on which `writeSync(fd, …)` lowers — so
- * no inline `fd_write` tail is needed here.
+ * it to the *runtime* fd. This backs the STRING overload of `node:fs`
+ * `writeSync(fd, str, position?, encoding?)`, where the fd is an arbitrary
+ * integer (not just stdout/stderr). Two modes (#2655):
+ *   - shim (`--link-node-shims`): `writeSync(fd, ptr, len)` returns the byte count.
+ *   - direct (standalone `--target wasi`): build a `{ base=ptr, len }` iovec at
+ *     memory[0..7], call `fd_write(fd, iovs=0, 1, nwritten=8)`, load nwritten.
  */
 export function ensureWasiWriteAnyStringFdHelper(ctx: CodegenContext): number {
   const helperName = "__wasi_write_any_string_fd";
   const existing = ctx.funcMap.get(helperName);
   if (existing !== undefined) return existing;
 
-  // Runtime-fd writes only exist on the node:fs shim path.
-  if (!ctx.wasi || !ctx.linkNodeShims || ctx.nodeFsWriteSyncIdx < 0 || ctx.nativeStrTypeIdx < 0) return -1;
+  // Runtime-fd writes need either the node:fs shim funcidx (shim path) or the
+  // wasi_snapshot_preview1.fd_write import (direct path).
+  const directWrite = !ctx.linkNodeShims;
+  if (!ctx.wasi || ctx.nativeStrTypeIdx < 0) return -1;
+  if (directWrite ? ctx.wasiFdWriteIdx === undefined : ctx.nodeFsWriteSyncIdx < 0) return -1;
 
   ensureNativeStringHelpers(ctx);
   const flattenIdx = ctx.funcMap.get("__str_flatten");
@@ -7163,11 +7298,37 @@ export function ensureWasiWriteAnyStringFdHelper(ctx: CodegenContext): number {
 
   const body: Instr[] = [
     ...buildWasiStringEncodeToScratch(flattenIdx, strTypeIdx, strDataTypeIdx, layout),
-    // return writeSync(fd, WASI_WRITE_SCRATCH_START, O)  — bytes written.
-    { op: "local.get", index: FD } as Instr,
-    { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
-    { op: "local.get", index: layout.O } as Instr,
-    { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
+    // return bytes-written for write(fd, WASI_WRITE_SCRATCH_START, O).
+    ...(directWrite
+      ? [
+          // iovec.base = scratch at memory[0]; iovec.len = O at memory[4].
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+          { op: "i32.store", align: 2, offset: 0 } as Instr,
+          { op: "i32.const", value: 4 } as Instr,
+          { op: "local.get", index: layout.O } as Instr,
+          { op: "i32.store", align: 2, offset: 0 } as Instr,
+          // errno = fd_write(fd, iovs=0, iovs_len=1, nwritten=8)
+          { op: "local.get", index: FD } as Instr,
+          { op: "i32.const", value: 0 } as Instr,
+          { op: "i32.const", value: 1 } as Instr,
+          { op: "i32.const", value: 8 } as Instr,
+          { op: "call", funcIdx: ctx.wasiFdWriteIdx } as Instr,
+          // errno != 0 → 0 bytes; else load nwritten at memory[8].
+          {
+            op: "if",
+            blockType: { kind: "val", type: { kind: "i32" } },
+            then: [{ op: "i32.const", value: 0 } as Instr],
+            else: [{ op: "i32.const", value: 8 } as Instr, { op: "i32.load", align: 2, offset: 0 } as Instr],
+          } as Instr,
+        ]
+      : [
+          // writeSync(fd, WASI_WRITE_SCRATCH_START, O) — bytes written.
+          { op: "local.get", index: FD } as Instr,
+          { op: "i32.const", value: WASI_WRITE_SCRATCH_START } as Instr,
+          { op: "local.get", index: layout.O } as Instr,
+          { op: "call", funcIdx: ctx.nodeFsWriteSyncIdx } as Instr,
+        ]),
   ];
 
   ctx.mod.functions.push({
@@ -12773,15 +12934,17 @@ function registerNodeBuiltinImports(ctx: CodegenContext, builtins: NodeBuiltinIm
       // preprocessing leaves a type-level `process` binding in the AST and
       // node-fs-api.ts lowers supported stream calls directly to WASI.
       if (builtin.moduleName === "process") continue;
-      // #2631 — `node:fs` is likewise a compile-time API surface under
-      // --link-node-shims when the program uses the fd-based synchronous
-      // primitives readSync / writeSync: those are stripped by import
-      // preprocessing and lowered to imported `node:fs` shim calls by
-      // node-fs-api.ts (tryCompileNodeFsCall). Path-based fs usage is
-      // rejected at the call site (see PATH_BASED_FS_FNS in calls.ts), not here.
+      // #2631/#2655 — `node:fs` is likewise a compile-time API surface when the
+      // program uses the fd-based synchronous primitives readSync / writeSync:
+      // those are stripped by import preprocessing and lowered by node-fs-api.ts
+      // (tryCompileNodeFsCall) to EITHER imported `node:fs` shim calls
+      // (--link-node-shims) OR direct `wasi_snapshot_preview1.fd_read`/`fd_write`
+      // syscalls (standalone --target wasi, #2655). Either way the `fs` builtin
+      // import itself is consumed at compile time and must not error here.
+      // Path-based fs usage is rejected at the call site (PATH_BASED_FS_FNS in
+      // calls.ts) / by the no-provider gate in tryCompileNodeFsCall, not here.
       if (
         builtin.moduleName === "fs" &&
-        ctx.linkNodeShims &&
         (ctx.wasiNodeFsFuncs.has("readSync") || ctx.wasiNodeFsFuncs.has("writeSync"))
       ) {
         continue;

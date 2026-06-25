@@ -75,6 +75,7 @@ import {
   ensureBigIntNativeProtoGlue,
   ensureWeakMapNativeProtoGlue,
   ensureWeakSetNativeProtoGlue,
+  ensureTypedArrayViewNativeProtoGlue,
 } from "./array-object-proto.js";
 import { isBuiltinSubtype, isBuiltinTypeName } from "./builtin-tags.js";
 import { getOrRegisterErrorStructType, isWasiErrorName } from "./registry/error-types.js";
@@ -103,6 +104,8 @@ import {
 } from "./shared.js";
 import { coercionInstrs, defaultValueInstrs } from "./type-coercion.js";
 import { tryEmitJsonParseElementAccess, tryEmitJsonParsePropertyAccess } from "./json-standalone.js";
+import { reserveMemberSetDispatch } from "./member-set-dispatch.js";
+import { reserveMemberGetDispatch } from "./member-get-dispatch.js";
 import { reserveAccessorGetDriver } from "./accessor-driver.js";
 import { S5C_STRUCT_ACCESSOR_CLOSURE } from "./struct-accessor-closure.js";
 import { tryCompileTemporalPropertyAccess } from "./temporal-native.js";
@@ -164,6 +167,15 @@ const BUILTIN_CTOR_NAMES = new Set([
   // standalone).
   "DisposableStack",
   "AsyncDisposableStack",
+  // (#2029) `SuppressedError` (ES2025 error aggregation) — same class as the
+  // DisposableStack pair above: not listed here, a `SuppressedError.prototype.*`
+  // read fell through both the standalone native-proto path and the host
+  // `__get_builtin` fallback into a generic member path that emitted
+  // `global.get -1` (the -1 string-global sentinel) → `global index out of
+  // range — -1` encoder crash standalone (whole file lost; 9 test262 rows under
+  // built-ins/SuppressedError/*). Listing it routes the read to the dual-mode
+  // handler (loud located refusal standalone, `__get_builtin` under gc/host).
+  "SuppressedError",
 ]);
 
 // Well-known Symbol IDs (inlined from literals.ts to avoid circular deps)
@@ -693,6 +705,20 @@ function tryEnsureNativeProtoBrand(ctx: CodegenContext, builtinName: string): nu
   }
   if (builtinName === "WeakSet") {
     return ensureWeakSetNativeProtoGlue(ctx);
+  }
+  // (#2651 M1 / D2) Concrete TypedArray view protos — `Int8Array.prototype`,
+  // `Uint8Array.prototype`, … This is the measured Slice-0 lever: the
+  // `<View>.prototype` value read (the #1907 / #1888 S6-b `Int8Array.prototype`
+  // 460+ residual) is what gates the bulk of the ctor-iteration harness rows
+  // (`testTypedArray.js` builds `const TypedArray =
+  // Object.getPrototypeOf(Int8Array.prototype).constructor`, then `verifyProperty(
+  // TypedArray.prototype.<m>, …)`). Each view shares the `%TypedArray%.prototype`
+  // member set; the proto OBJECT is a pure value object (member CSV only — never
+  // re-emits a body that touches the view's vec/runtime state, per #2375).
+  // Returns undefined for non-wired (bigint) views → existing refusal.
+  {
+    const taBrand = ensureTypedArrayViewNativeProtoGlue(ctx, builtinName);
+    if (taBrand !== undefined) return taBrand;
   }
   // Other builtins: only resolve if some path already registered glue for them.
   const brand = getBuiltinBrand(ctx, builtinName);
@@ -1225,6 +1251,66 @@ export function emitNullCheckThrow(ctx: CodegenContext, fctx: FunctionContext, r
 }
 
 /**
+ * (#2655) Symmetric WRITE counterpart to the read-side multi-struct dispatch
+ * (`findAlternateStructsForField` + `struct.get` chain at the `__extern_get`
+ * fallback). The member-READ path resolves `any`/`externref` receivers that are
+ * actually typed WasmGC structs via `struct.get <slot>`; the member-WRITE path
+ * historically went straight to `__extern_set`, which `_safeSet` routes to a
+ * JS-side SIDECAR map — it CANNOT write the WasmGC struct slot. Result: reads
+ * see the slot, writes update the sidecar, and the two diverge (acorn's
+ * `this.pos += 1` loop never advances → infinite loop).
+ *
+ * This emits, for each struct candidate that has a field named `propName`:
+ *   local.get <recvAnyLocal>
+ *   ref.test <structTypeIdx>
+ *   (if (then  local.get recvAny; ref.cast struct; local.get <valExtLocal>;
+ *              <coerce externref -> fieldType>; struct.set struct <slot> )
+ *       (else  <next candidate, or the externSetFallback> ))
+ *
+ * `recvAnyLocal` must hold the receiver as `anyref` (caller does
+ * `local.get objExt; any.convert_extern; local.set recvAny`). `valExtLocal`
+ * holds the value as `externref` (boxed). `externSetFallback` is the terminal
+ * else-arm (the existing `__extern_set`/`__extern_set_strict` sequence) — still
+ * required for genuine host externrefs and dynamic-only (sidecar) properties.
+ *
+ * Returns `true` if at least one struct.set arm was emitted (caller must NOT
+ * also emit its own `__extern_set` — it's already the else-arm here), or `false`
+ * when there are no struct candidates (caller emits its `__extern_set` as
+ * before).
+ */
+export function emitAlternateStructSetDispatch(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  recvExtLocal: number,
+  valExtLocal: number,
+  propName: string,
+  strict: boolean,
+): boolean {
+  // (#2664) Route the write through a DEFERRED-FILL dispatcher
+  // `__set_member_<name>(recv, val)` instead of inlining the `ref.test`/
+  // `struct.set` candidate chain here. The inline chain froze its struct-
+  // candidate set at THIS write's compile time; a field-writing closure compiled
+  // before a later-registered struct type for the same logical object (acorn's
+  // Parser gets two struct shapes — `$__anon_5` then `$__fnctor_Parser`) only got
+  // the earlier candidate's arm, so the real instance failed every `ref.test` and
+  // the write leaked to the sidecar while reads used the slot → non-termination.
+  // The dispatcher is FILLED at finalize (`fillMemberSetDispatch`) when the full
+  // struct-type table is known, so every write site enumerates the COMPLETE
+  // candidate set regardless of compile order. The dispatcher's terminal else-arm
+  // is the `__extern_set_strict` (strict) / `__extern_set` (non-strict) sidecar —
+  // so the caller need NOT emit its own fallback. The MUTABLE-only filter and the
+  // immutable boxed-wrapper (#2657) handling live in the fill.
+  const dispIdx = reserveMemberSetDispatch(ctx, propName, strict);
+  if (dispIdx === undefined) return false;
+  // recv is externref; the dispatcher does `any.convert_extern` + `ref.test`
+  // internally and forwards the externref recv to the sidecar fallback.
+  fctx.body.push({ op: "local.get", index: recvExtLocal } as Instr);
+  fctx.body.push({ op: "local.get", index: valExtLocal } as Instr);
+  fctx.body.push({ op: "call", funcIdx: dispIdx } as Instr);
+  return true;
+}
+
+/**
  * Find all struct types (other than excludeTypeIdx) that have a field named
  * propName.  Returns an array of {structTypeIdx, fieldIdx, fieldType} for
  * each matching struct type.  Used for multi-struct dispatch when the primary
@@ -1236,14 +1322,19 @@ export function findAlternateStructsForField(
   ctx: CodegenContext,
   propName: string,
   excludeTypeIdx: number,
-): { structTypeIdx: number; fieldIdx: number; fieldType: ValType }[] {
-  const result: { structTypeIdx: number; fieldIdx: number; fieldType: ValType }[] = [];
+): { structTypeIdx: number; fieldIdx: number; fieldType: ValType; mutable: boolean }[] {
+  const result: { structTypeIdx: number; fieldIdx: number; fieldType: ValType; mutable: boolean }[] = [];
   for (const [typeName, fields] of ctx.structFields) {
     const sIdx = ctx.structMap.get(typeName);
     if (sIdx === undefined || sIdx === excludeTypeIdx) continue;
     const fIdx = fields.findIndex((f) => f.name === propName);
     if (fIdx !== -1) {
-      result.push({ structTypeIdx: sIdx, fieldIdx: fIdx, fieldType: fields[fIdx]!.type });
+      result.push({
+        structTypeIdx: sIdx,
+        fieldIdx: fIdx,
+        fieldType: fields[fIdx]!.type,
+        mutable: fields[fIdx]!.mutable,
+      });
     }
   }
   return result;
@@ -1316,7 +1407,30 @@ export function emitNullGuardedStructGet(
           } as Instr,
         ];
       }
-      // No more alternates — return default value
+      // No more inline alternates. (#2674) The inline `alternates` set was frozen
+      // at THIS read's compile time — a struct type registered later (acorn's
+      // `$__fnctor_Parser`) is missing, so a read of the real (later-type)
+      // instance would give up to the default here → stale `undefined` while the
+      // #2664 deferred WRITE hit the slot (read/write divergence → the acorn
+      // expression-parse non-termination). Route the terminal through the
+      // deferred-fill `__get_member_<name>` dispatcher, which enumerates the
+      // COMPLETE candidate set at finalize. Coerce its uniform externref result
+      // to `resultType`. Falls back to the default only if the dispatcher can't
+      // be reserved.
+      // (#2043 hardening) Pass fctx so the dispatcher's late-import additions
+      // flush against THIS body before we bake `getDispIdx` into the detached
+      // return array + run the follow-on coercion (see member-get-dispatch.ts).
+      const getDispIdx = propName ? reserveMemberGetDispatch(ctx, propName, fctx) : undefined;
+      if (getDispIdx !== undefined) {
+        return [
+          { op: "local.get", index: srcLocal } as Instr,
+          { op: "extern.convert_any" } as Instr,
+          { op: "call", funcIdx: getDispIdx } as Instr,
+          ...coercionInstrs(ctx, { kind: "externref" }, resultType, fctx),
+          { op: "local.set", index: resultLocal } as Instr,
+        ];
+      }
+      // No dispatcher — return default value (legacy behaviour).
       return [...defaultValueInstrs(resultType), { op: "local.set", index: resultLocal } as Instr];
     };
 
@@ -1594,7 +1708,27 @@ export function emitExternrefToStructGet(
         } as Instr,
       ];
     }
-    // No more struct alternates — use __extern_get for JS objects, or default value
+    // No more INLINE struct alternates. (#2674) Route the terminal through the
+    // deferred-fill `__get_member_<name>` dispatcher (complete candidate set at
+    // finalize) so a struct type registered AFTER this read compiled (acorn's
+    // `$__fnctor_Parser`) is still resolved — the inline `alternates` froze it
+    // out, so a read of the real instance otherwise fell straight to
+    // `__extern_get` → `undefined` (the slot is a real struct field, not a
+    // sidecar prop). The dispatcher's own terminal IS `__extern_get`, so this
+    // strictly extends coverage (all struct candidates, THEN the host read).
+    // (#2043 hardening) Pass fctx so the dispatcher's late-import additions flush
+    // against THIS body before baking `getDispIdx` into the detached array.
+    const getDispIdx = propName ? reserveMemberGetDispatch(ctx, propName, fctx) : undefined;
+    if (getDispIdx !== undefined) {
+      return [
+        { op: "local.get", index: tmpAny } as Instr,
+        { op: "extern.convert_any" } as Instr,
+        { op: "call", funcIdx: getDispIdx } as Instr,
+        ...coercionInstrs(ctx, { kind: "externref" }, resultType, fctx),
+        { op: "local.set", index: resultLocal } as Instr,
+      ];
+    }
+    // No dispatcher — use __extern_get for JS objects, or default value (legacy).
     if (externGetFallback) {
       return externGetFallback;
     }
@@ -4813,10 +4947,36 @@ export function compilePropertyAccess(
           }
           externGetFallback.push({ op: "local.set", index: resultLocal } as Instr);
 
+          // (#2674) Terminal: route the un-matched case through the deferred-fill
+          // `__get_member_<name>` dispatcher (complete candidate set at finalize)
+          // instead of straight to `__extern_get`. The inline `structCandidates`
+          // here are frozen at THIS read's compile time, so a struct type
+          // registered later (acorn's `$__fnctor_Parser`) is excluded → a read of
+          // the real instance fell to `__extern_get` → `undefined` (the slot is a
+          // real field, not a sidecar prop) → the acorn expression-parse loop
+          // never terminated. The dispatcher tries ALL struct candidates THEN
+          // `__extern_get`, so it strictly extends coverage; its externref result
+          // is coerced back to `resultWasm` (which may be an f64/i32 Phase-3
+          // narrowing). Reserved here; filled by fillMemberGetDispatch.
+          // (#2043 hardening) Pass fctx so the dispatcher's late-import additions
+          // flush against THIS body before baking `getMemberIdx` into the
+          // detached terminal array + the follow-on coercion.
+          const getMemberIdx = reserveMemberGetDispatch(ctx, propName, fctx);
+          const dispatchTerminal: Instr[] =
+            getMemberIdx !== undefined
+              ? [
+                  { op: "local.get", index: tmpAnyExt } as Instr,
+                  { op: "extern.convert_any" } as Instr,
+                  { op: "call", funcIdx: getMemberIdx } as Instr,
+                  ...coercionInstrs(ctx, { kind: "externref" }, resultWasm, fctx),
+                  { op: "local.set", index: resultLocal } as Instr,
+                ]
+              : externGetFallback;
+
           // Build nested if/else chain for struct candidates
           const buildStructDispatch = (idx: number): Instr[] => {
             if (idx >= structCandidates.length) {
-              return externGetFallback;
+              return dispatchTerminal;
             }
             const cand = structCandidates[idx]!;
             const getFieldInstrs: Instr[] = [

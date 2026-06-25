@@ -934,27 +934,48 @@ function compileNewFunctionDeclaration(
 
   // 1. Analyze the function body for `this.prop = value` assignments
   const fields: FieldDef[] = [];
+  // Record one `this.<field>` slot from an assignment whose LHS is `this.<field>`.
+  // `valueExpr` is the value being assigned to THAT field (for type inference) —
+  // for a chained `this.a = this.b = expr`, the value flowing into `this.a` is the
+  // whole `this.b = expr` sub-assignment (whose result type === expr's type).
+  function recordThisField(lhs: ts.PropertyAccessExpression, valueExpr: ts.Expression): void {
+    const fieldName = lhs.name.text;
+    if (fields.some((f) => f.name === fieldName)) return;
+    // Prefer the RHS type — when `this` is `any`, the LHS type is also `any`
+    // (externref), but the RHS has concrete type info (e.g., number → f64).
+    const lhsType = ctx.checker.getTypeAtLocation(lhs);
+    const rhsType = ctx.checker.getTypeAtLocation(valueExpr);
+    const lhsWasm = resolveWasmType(ctx, lhsType);
+    const rhsWasm = resolveWasmType(ctx, rhsType);
+    const fieldType = lhsWasm.kind === "externref" ? rhsWasm : lhsWasm;
+    fields.push({ name: fieldName, type: fieldType, mutable: true });
+  }
+  // Walk an assignment EXPRESSION, collecting EVERY `this.<field>` LHS in a
+  // (possibly CHAINED) assignment. acorn's Parser ctor uses chained assignments
+  // heavily — `this.start = this.end = this.pos`,
+  // `this.lastTokEndLoc = this.lastTokStartLoc = null`,
+  // `this.yieldPos = this.awaitPos = this.awaitIdentPos = 0` — so the inner
+  // targets (`end`, `lastTokStartLoc`, `awaitPos`, `awaitIdentPos`, …) MUST be
+  // collected too. Missing them gave `$__fnctor_Parser` a SHORTER field set than
+  // the fields the parser later READS (`base.end`, `this.lastTokEnd`), so reads
+  // resolved to the wrong slot / fell through to `__extern_get` → `undefined` and
+  // `parseSubscripts`/expression-parse looped forever (the 9th acorn wall, #2674).
+  function collectAssignmentChain(expr: ts.Expression): void {
+    if (
+      ts.isBinaryExpression(expr) &&
+      expr.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(expr.left) &&
+      expr.left.expression.kind === ts.SyntaxKind.ThisKeyword
+    ) {
+      recordThisField(expr.left, expr.right);
+      // The RHS may itself be `this.<field> = …` (chained) — recurse to collect it.
+      collectAssignmentChain(expr.right);
+    }
+  }
   function collectThisAssignments(stmts: ts.NodeArray<ts.Statement> | readonly ts.Statement[]): void {
     for (const stmt of stmts) {
-      if (
-        ts.isExpressionStatement(stmt) &&
-        ts.isBinaryExpression(stmt.expression) &&
-        stmt.expression.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-        ts.isPropertyAccessExpression(stmt.expression.left) &&
-        stmt.expression.left.expression.kind === ts.SyntaxKind.ThisKeyword
-      ) {
-        const fieldName = stmt.expression.left.name.text;
-        if (!fields.some((f) => f.name === fieldName)) {
-          // Prefer the RHS type — when `this` is `any`, the LHS type is also `any`
-          // (externref), but the RHS has concrete type info (e.g., number → f64).
-          const lhsType = ctx.checker.getTypeAtLocation(stmt.expression.left);
-          const rhsType = ctx.checker.getTypeAtLocation(stmt.expression.right);
-          const lhsWasm = resolveWasmType(ctx, lhsType);
-          const rhsWasm = resolveWasmType(ctx, rhsType);
-          // Use RHS type if LHS resolved to externref (i.e., `any`)
-          const fieldType = lhsWasm.kind === "externref" ? rhsWasm : lhsWasm;
-          fields.push({ name: fieldName, type: fieldType, mutable: true });
-        }
+      if (ts.isExpressionStatement(stmt) && ts.isBinaryExpression(stmt.expression)) {
+        collectAssignmentChain(stmt.expression);
       }
       // Recurse into if/else blocks
       if (ts.isIfStatement(stmt)) {

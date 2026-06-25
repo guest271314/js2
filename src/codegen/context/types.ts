@@ -101,6 +101,17 @@ export interface CodegenOptions {
   /** Set of function names imported from node:fs (detected pre-preprocessing).
    *  Used by both the WASI fs syscall path (#1035) and the JS-host fs imports (#1491). */
   wasiNodeFsFuncs?: Set<string>;
+  /** (#2657) Set of LOCAL names imported from `"wasi_snapshot_preview1"`
+   *  (detected pre-preprocessing). The raw-WASI fd_read/fd_write passthrough
+   *  binds these identifiers directly to the WASI import funcs — the most honest
+   *  pure-WASI-P1 expression, no `node:fs` surface (loopdive/js2#389). */
+  wasiRawImports?: Set<string>;
+  /** (#2657) Set of LOCAL names imported from `"wasm:memory"` — js2wasm's inline
+   *  linear-memory access intrinsics (`store32`/`load32`/`store8`/`load8`). These
+   *  lower to a single WASM memory op (NOT imports); they let a raw-WASI module
+   *  lay out its iovec + result slot without a GC roundtrip. Honestly namespaced
+   *  away from `wasi_snapshot_preview1` (no host provides them). */
+  wasiMemAccessors?: Set<string>;
   /** Allow `node:fs` JS-host imports for non-WASI targets (#1491). Default: false. */
   allowFs?: boolean;
   /**
@@ -391,12 +402,27 @@ export interface FunctionContext {
    * this stack innermost-first and rewrites proven own-property bindings to
    * direct struct field access.
    */
-  withScopes?: {
-    localIdx: number;
-    structTypeIdx: number;
-    fields: FieldDef[];
-    blockedNames: Set<string>;
-  }[];
+  withScopes?: (
+    | {
+        // (#1387) Tier-1 static entry: a closed object-literal target compiled
+        // into a local; bare names matching a field route to direct struct
+        // get/set.
+        kind: "static";
+        localIdx: number;
+        structTypeIdx: number;
+        fields: FieldDef[];
+        blockedNames: Set<string>;
+      }
+    | {
+        // (#2663 Slice 1) Tier-2 dynamic entry: the `with` target is an
+        // arbitrary externref. Bare names are resolved at runtime via a
+        // HasBinding gate (`__extern_has`) + `Get` (`emitDynGet`), falling back
+        // to the outer lexical lowering when absent.
+        kind: "dynamic";
+        localIdx: number;
+        blockedNames: Set<string>;
+      }
+  )[];
   /** Map from let/const local variable name → local index of its i32 TDZ flag (0 = uninitialized) */
   tdzFlagLocals?: Map<string, number>;
   /**
@@ -511,6 +537,27 @@ export interface FunctionContext {
      * during body codegen — order matters, since the emitters read it live.
      */
     unmappedIndices?: Set<number>;
+    /**
+     * Argument indices made non-configurable via a statically-resolvable
+     * `Object.defineProperty(arguments, "<i>", { configurable: false })`
+     * (#2667). Per ECMA-262 §10.4.4.5 + OrdinaryDelete, `delete arguments[i]`
+     * on a non-configurable index must return `false` and leave the property
+     * (and its param mapping) intact. The delete emitter consults this set so
+     * the statically-known case reports the spec-correct result without a
+     * runtime descriptor-sidecar round-trip. Populated lazily during body
+     * codegen; read live, so codegen order matters.
+     */
+    nonConfigurableIndices?: Set<number>;
+    /**
+     * Argument indices made non-writable via a statically-resolvable
+     * `Object.defineProperty(arguments, "<i>", { writable: false })` (#2667).
+     * Per ECMA-262 §10.4.4.2, a non-writable data property rejects later
+     * `arguments[i] = x` writes (and the write-back into the param). The
+     * element-assignment emitter consults this set to drop such writes.
+     * (Setting `writable:false` also severs the param↔arguments map, so the
+     * index is additionally added to `unmappedIndices`.)
+     */
+    nonWritableIndices?: Set<number>;
   };
   /**
    * #1210: bindings detected as `let s = ""; for (...) s += <expr>` builders
@@ -718,6 +765,27 @@ export interface CodegenContext {
    */
   usesArrayHoles: boolean;
   /**
+   * (#2083) Set true the first time `getOrRegisterVecType` is asked for a vec
+   * type from a genuine usage site (an array literal, array method, for-of over
+   * an array, TypedArray, etc.) — i.e. the module materialises at least one
+   * array value that may cross the JS↔Wasm boundary. The two pre-registrations
+   * in `createCodegenContext` (`externref`/`f64`, baked in for type-index
+   * stability) are excluded via `suppressVecUsageFlag`, so this stays false for
+   * arith-/string-only modules with no arrays. Gates the host-glue vec exports
+   * (`__vec_len`/`__vec_get`/`__vec_push`/`__vec_pop`/`__vec_mut_supported`/
+   * `__is_vec`) so they no longer leak into every module (#2083). The host
+   * runtime guards every `exports.__vec_*` access with a `typeof === "function"`
+   * check, so their absence is safe.
+   */
+  usesVecValue: boolean;
+  /**
+   * (#2083) When true, `getOrRegisterVecType` does NOT flip `usesVecValue`.
+   * Set only for the duration of the two pre-registration calls in
+   * `createCodegenContext` (the `externref`/`f64` type-index-stability stubs),
+   * which are not real array usage.
+   */
+  suppressVecUsageFlag: boolean;
+  /**
    * (#2001 S1) Type index of the `$Hole` zero-field sentinel struct, and the
    * absolute index of the immutable `$__hole` singleton global. Registered
    * lazily + once by `ensureHoleType` during body compilation (after class
@@ -888,6 +956,36 @@ export interface CodegenContext {
    * from `__extern_get_idx(args, i)` instead of fixed dispatcher params.
    */
   closedMethodDispatchVarargNames?: Set<string>;
+  /**
+   * (#2664) Property names that need a deferred-fill member-WRITE dispatcher
+   * `__set_member_<name>(recv: externref, val: externref)`. The symmetric
+   * struct.set write dispatch (#2659) was emitted INLINE at each `any`-receiver
+   * `obj.<name> = v` write, freezing its struct-candidate set at the write's
+   * compile time. A field-writing closure compiled BEFORE a later struct type
+   * (e.g. acorn's `$__fnctor_Parser`, registered after the closure) only got the
+   * earlier candidate's `ref.test` arm; the real instance failed it and the
+   * write leaked to the `__extern_set` sidecar while reads used the slot —
+   * non-termination (#2664). Routing the write through a reserved dispatcher
+   * filled at FINALIZE (when the full struct-type table is known) gives every
+   * write site the COMPLETE candidate set regardless of compile order. Filled by
+   * `fillMemberSetDispatch`; populated in BOTH gc/host and standalone (the
+   * dual-struct-type compile-order hazard is mode-independent).
+   */
+  memberSetDispatchNames?: Set<string>;
+  /**
+   * (#2674) Property names that need a deferred-fill member-READ dispatcher
+   * `__get_member_<name>(recv: externref) -> externref` — the SYMMETRIC read-side
+   * counterpart of `memberSetDispatchNames`. The member-READ multi-struct
+   * dispatch (`findAlternateStructsForField` + `ref.test`/`struct.get` chain) was
+   * also enumerated INLINE per read site, so a reader compiled before a later
+   * struct type only got the earlier candidate's arm → stale `__extern_get`
+   * `undefined` read on the real (later-type) instance, while #2664's deferred
+   * write hit the slot → read/write divergence → non-termination (acorn 9th wall).
+   * Routing the alternates fallback through a reserved dispatcher filled at
+   * FINALIZE gives every read site the COMPLETE candidate set. Filled by
+   * `fillMemberGetDispatch`; populated in BOTH gc/host and standalone.
+   */
+  memberGetDispatchNames?: Set<string>;
   /**
    * (#1904) True once the standalone `__extern_is_array(externref) -> i32`
    * helper placeholder has been emitted by the object runtime. Its body is
@@ -1207,6 +1305,15 @@ export interface CodegenContext {
   refCellTypeMap: Map<string, number>;
   /** Type index of the $AnyValue boxed-any struct */
   anyValueTypeIdx: number;
+  /**
+   * (#2106 S1) Global index of the standalone `$undefined` singleton — an
+   * immutable tag-1 `$AnyValue`, reserved up-front at `ensureAnyValueType` time
+   * so `undefined` is distinguishable from `null` (`ref.null extern`) in
+   * standalone/native-strings mode. `undefined` otherwise has no host value and
+   * conflates with null. Reserved as a GLOBAL (not a late func import) to avoid
+   * the #329 native-string finalize-shift hazard. `undefined` until reserved.
+   */
+  undefinedGlobalIdx?: number;
   /** Map from any-value helper name → function index */
   anyHelpers: Map<string, number>;
   /** Whether any-value helper functions have been emitted */
@@ -1613,6 +1720,14 @@ export interface CodegenContext {
   wasiPendingStdinReactor?: boolean;
   /** Set of node:fs functions used in this compilation unit (both WASI and JS-host fs paths). */
   wasiNodeFsFuncs: Set<string>;
+  /** (#2657) Local names imported from `"wasi_snapshot_preview1"` — the raw-WASI
+   *  fd_read/fd_write passthrough bindings (loopdive/js2#389). Empty for any
+   *  program that does not import the raw WASI module. */
+  wasiRawImports: Set<string>;
+  /** (#2657) Local names imported from `"wasm:memory"` — js2wasm's inline
+   *  linear-memory access intrinsics (`store32`/`load32`/`store8`/`load8`). Empty
+   *  for any program that does not import the intrinsic module. */
+  wasiMemAccessors: Set<string>;
   /**
    * #1886 — Linear-safe `Uint8Array` analysis result. Populated (WASI/standalone
    * only) by `analyzeLinearUint8` as a pre-pass; `undefined` otherwise. Symbols
@@ -1624,6 +1739,19 @@ export interface CodegenContext {
    * side-effect free and safe to run unconditionally behind the WASI gate.)
    */
   linearUint8?: import("../linear-uint8-analysis.js").LinearUint8Result;
+  /**
+   * #2660 S1 — whole-program escape / dynamic-use classification for `new F()`
+   * function-constructor instances. Each site is classified `reconstruct`
+   * (dynamically consumed AND no typed own-field consumer → S3 `$Object`
+   * reconstruction candidate), `keep-typed` (has a typed own-field consumer →
+   * never reconstruct, hot-path protection), or `keep-static` (no dynamic
+   * consumer → no reconstruction needed). **INERT in S1** — produced by
+   * `analyzeFnctorEscapeGate` and stored here, but NOT yet consumed by any
+   * lowering decision (S3 wires `compileNewFunctionDeclaration` to read it). The
+   * conservative default (`keep`) means an empty/imprecise result leaves emitted
+   * Wasm byte-identical.
+   */
+  fnctorEscapeGate?: import("../fnctor-escape-gate.js").FnctorEscapeGateResult;
   /**
    * #1886 Slice B — Func index of the lazily-emitted
    * `__lin_u8_alloc(len:i32)->i32` bump allocator for linear-backed Uint8Array

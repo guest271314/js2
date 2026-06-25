@@ -115,6 +115,8 @@
     "lint": "biome lint src tests scripts --diagnostic-level=error",
     "typecheck": "tsc --noEmit",
     "generate:editions": "npx tsx scripts/generate-editions.ts",
+    "generate:feature-badges": "node scripts/derive-feature-badges.mjs",
+    "generate:feature-badges:check": "node scripts/derive-feature-badges.mjs --check",
     "generate:feature-examples": "npx tsx scripts/generate-feature-examples.ts",
     "generate:size-benchmarks": "npx tsx --experimental-wasm-stringref --experimental-wasm-custom-descriptors scripts/generate-size-benchmarks.ts",
     "generate:browser-runtime-benchmarks": "node scripts/generate-browser-runtime-benchmarks.mjs",

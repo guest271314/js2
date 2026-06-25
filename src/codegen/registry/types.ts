@@ -114,6 +114,17 @@ export function getOrRegisterVecBaseType(ctx: CodegenContext): number {
  * The vec struct has {length: i32, data: (ref $__arr_<elemKind>)}.
  */
 export function getOrRegisterVecType(ctx: CodegenContext, elemKind: string, elemTypeOverride?: ValType): number {
+  // (#2083) Any request for a vec type — whether it allocates a new struct or
+  // reuses a pre-registered one (`externref`/`f64`, baked into every context for
+  // type-index stability) — means the module genuinely materialises an array
+  // value. Record that so the host-glue vec exports (`__vec_len`/`__vec_get`/
+  // `__vec_push`/`__vec_pop`/`__vec_mut_supported`/`__is_vec`) are emitted only
+  // for modules that actually use arrays, instead of unconditionally (the two
+  // pre-registrations otherwise make `vecTypeMap.size === 0` unreachable, so the
+  // exports leaked into every arith-/string-only module). The pre-registration
+  // calls in `createCodegenContext` set `ctx.suppressVecUsageFlag` so they do
+  // NOT count as usage.
+  if (!ctx.suppressVecUsageFlag) ctx.usesVecValue = true;
   const existing = ctx.vecTypeMap.get(elemKind);
   if (existing !== undefined) return existing;
 

@@ -175,6 +175,14 @@ jobs:
       - name: Conformance numbers in sync (#1522)
         run: pnpm run sync:conformance:check
 
+      - name: Feature-support badges in sync with test262
+        # Landing-page feature badges (#2665) must match the committed
+        # website/public/feature-examples.json per-feature pass rates. The bake
+        # and this check read the SAME committed file, so they are consistent by
+        # construction; re-derived + staged atomically by promote-baseline
+        # post-merge (test262-sharded.yml), so this never wedges in-flight PRs.
+        run: pnpm run generate:feature-badges:check
+
       - name: Fetch runs/index.json from baselines repo
         if: github.event_name == 'push'
         continue-on-error: true

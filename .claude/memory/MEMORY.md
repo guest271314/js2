@@ -48,6 +48,7 @@
 - [feedback_issue_completion.md](feedback_issue_completion.md) — completion procedure · [feedback_unblock_on_completion.md](feedback_unblock_on_completion.md) — flip depends_on→ready · [feedback_document_findings.md](feedback_document_findings.md) — document before closing · [feedback_update_backlog.md](feedback_update_backlog.md) — update backlog.md
 - [feedback_po_boundary.md](feedback_po_boundary.md) — PO writes only plan/ · [feedback_bare_numbers_are_plan_tasks.md](feedback_bare_numbers_are_plan_tasks.md) — bare #N = local plan issue
 - [feedback_verify_fix_in_git_not_narrative.md](feedback_verify_fix_in_git_not_narrative.md) + [feedback_reground_spec_against_current_main.md](feedback_reground_spec_against_current_main.md) — verify/re-probe against CURRENT main, not session narrative
+- [feedback_verify_first_beats_architect_spec.md](feedback_verify_first_beats_architect_spec.md) — verify mechanism per-process (binaryen WAT) on current main before implementing; deep-tracing devs beat architect-specs
 
 ### Testing
 - [feedback_test262_worktree.md](feedback_test262_worktree.md) — test262 in worktree · [feedback_worktree_symlink_dependencies.md](feedback_worktree_symlink_dependencies.md) — symlink test262+node_modules · [feedback_test262_recheck.md](feedback_test262_recheck.md) — default --recheck · [feedback_test262_skip_issues.md](feedback_test262_skip_issues.md) — every skip needs an issue
