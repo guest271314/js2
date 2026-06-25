@@ -6096,6 +6096,16 @@ function registerWasiImports(ctx: CodegenContext, sourceFile: ts.SourceFile): vo
     if (ctx.wasiNodeFsFuncs.has("writeSync")) needsFdWrite = true;
   }
 
+  // #2657 — RAW `wasi_snapshot_preview1` fd_read/fd_write import. When the source
+  // imports the syscall by name (`import { fd_read, fd_write } from
+  // "wasi_snapshot_preview1"`), the binding maps 1:1 to the import func, so the
+  // import MUST be registered regardless of the shim/direct branch above (the
+  // user wrote the syscall call explicitly). Routes the user binding to the same
+  // `ctx.wasiFdReadIdx`/`wasiFdWriteIdx` — no duplicate import. This sits after
+  // the linkNodeShims recompute so a raw `fd_read` import is never dropped.
+  if (ctx.wasiRawImports.has("fd_read")) needsFdRead = true;
+  if (ctx.wasiRawImports.has("fd_write")) needsFdWrite = true;
+
   // fd_write(fd: i32, iovs: i32, iovs_len: i32, nwritten: i32) -> i32
   if (needsFdWrite) {
     const fdWriteType = addFuncType(

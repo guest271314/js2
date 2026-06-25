@@ -238,6 +238,8 @@ export function createCodegenContext(
     wasiEnvironGetIdx: -1,
     wasiEnvGetStrIdx: -1,
     wasiNodeFsFuncs: options?.wasiNodeFsFuncs ?? new Set(),
+    wasiRawImports: options?.wasiRawImports ?? new Set(),
+    wasiMemAccessors: options?.wasiMemAccessors ?? new Set(),
     allowFs: options?.allowFs ?? false,
     strictNoHostImports,
     tdzGlobals: new Map(),
