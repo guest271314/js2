@@ -2446,10 +2446,23 @@ function _toPrimitive(
       if (prim == null || typeof prim !== "object") return prim;
       throw new TypeError("Cannot convert object to primitive value");
     }
-    // WasmGC closure struct — dispatch via __call_fn_1 (Symbol.toPrimitive takes hint arg) (#1090)
+    // WasmGC closure struct — dispatch via __call_fn_1 (Symbol.toPrimitive takes hint arg) (#1090).
+    // (#2679) `@@toPrimitive` is called as a method on the receiver (§7.1.1 step
+    // 2: `Call(exoticToPrim, input, «hint»)`), so thread `raw` as `this` via the
+    // `__call_fn_method_*` callers; fall back to the receiver-less callers.
     if (typeof scToPrim === "object" && _isWasmStruct(scToPrim)) {
       const exps = callbackState?.getExports();
-      // Try 1-arg caller first (toPrimitive(hint))
+      // Try 1-arg method caller first (toPrimitive(hint) with `this`=raw)
+      const callFnM1 = exps?.["__call_fn_method_1"];
+      if (typeof callFnM1 === "function") {
+        try {
+          const prim = callFnM1(raw, scToPrim, hint);
+          if (prim == null || typeof prim !== "object") return prim;
+          throw new TypeError("Cannot convert object to primitive value");
+        } catch (e: any) {
+          if (!(e instanceof WebAssembly.RuntimeError)) throw e;
+        }
+      }
       const callFn1 = exps?.["__call_fn_1"];
       if (typeof callFn1 === "function") {
         try {
@@ -2460,7 +2473,17 @@ function _toPrimitive(
           if (!(e instanceof WebAssembly.RuntimeError)) throw e;
         }
       }
-      // Try 0-arg caller (closure might ignore hint)
+      // Try 0-arg method caller (closure might ignore hint; `this`=raw)
+      const callFnM0 = exps?.["__call_fn_method_0"];
+      if (typeof callFnM0 === "function") {
+        try {
+          const prim = callFnM0(raw, scToPrim);
+          if (prim == null || typeof prim !== "object") return prim;
+          throw new TypeError("Cannot convert object to primitive value");
+        } catch (e: any) {
+          if (!(e instanceof WebAssembly.RuntimeError)) throw e;
+        }
+      }
       const callFn0 = exps?.["__call_fn_0"];
       if (typeof callFn0 === "function") {
         try {
@@ -2506,8 +2529,20 @@ function _toPrimitive(
       // Returned an object — not a valid primitive, try next method
       return _PRIM_ABSENT;
     }
-    // Sidecar value is a WasmGC closure struct — dispatch via generic callers (#1090)
+    // Sidecar value is a WasmGC closure struct — dispatch via generic callers (#1090).
+    // (#2679) Thread the RECEIVER as `this` (`__call_fn_method_0`), so a compiled
+    // `valueOf(){…this…}` sees the original object, not a stale __current_this.
     if (scFn != null && typeof scFn === "object" && _isWasmStruct(scFn) && exports) {
+      const callFnM0 = exports["__call_fn_method_0"];
+      if (typeof callFnM0 === "function") {
+        try {
+          const prim = callFnM0(raw, scFn);
+          if (prim == null || typeof prim !== "object") return prim;
+          return _PRIM_ABSENT; // returned an object — not valid
+        } catch (e: any) {
+          if (!(e instanceof WebAssembly.RuntimeError)) throw e;
+        }
+      }
       // Try zero-arg caller (valueOf/toString are typically zero-arg)
       const callFn0 = exports["__call_fn_0"];
       if (typeof callFn0 === "function") {
@@ -2562,7 +2597,17 @@ function _toPrimitive(
               /* ref.test/call dispatch failed — try generic caller */
             }
           }
-          // Generic closure caller fallback (#1090) — handles any WasmGC closure struct
+          // Generic closure caller fallback (#1090) — handles any WasmGC closure
+          // struct. (#2679) Thread `raw` as `this` via `__call_fn_method_0`.
+          const callFnM0 = exports["__call_fn_method_0"];
+          if (typeof callFnM0 === "function") {
+            try {
+              const prim = callFnM0(raw, field);
+              if (prim == null || typeof prim !== "object") return prim;
+            } catch (e: any) {
+              if (!(e instanceof WebAssembly.RuntimeError)) throw e;
+            }
+          }
           const callFn0 = exports["__call_fn_0"];
           if (typeof callFn0 === "function") {
             try {
@@ -2799,11 +2844,27 @@ function _hostToPrimitive(
       methodInvokedReturnedObject = true;
       continue;
     }
-    // WasmGC closure struct for valueOf/toString — dispatch via __call_fn_0 (#1090)
+    // WasmGC closure struct for valueOf/toString — dispatch via __call_fn_0 (#1090).
+    // (#2679) Thread the RECEIVER as `this`: a compiled `valueOf(){…this…}` reads
+    // `this` from `__current_this`, which `__call_fn_0` does NOT install — so the
+    // method body saw the wrong `this`. `__call_fn_method_0(thisVal, closure)`
+    // installs `thisVal` into `__current_this` before the call (and restores it),
+    // matching §7.1.1.1 OrdinaryToPrimitive step 4.b `Call(method, O)`.
     if (fn != null && typeof fn === "object" && _isWasmStruct(fn) && callbackState) {
       const exports = callbackState.getExports();
       if (exports) {
+        const callFnM0 = exports["__call_fn_method_0"];
         const callFn0 = exports["__call_fn_0"];
+        if (typeof callFnM0 === "function") {
+          try {
+            const result = callFnM0(obj, fn);
+            if (result == null || typeof result !== "object") return result;
+            methodInvokedReturnedObject = true;
+          } catch (e: any) {
+            if (!(e instanceof WebAssembly.RuntimeError)) throw e;
+          }
+          continue;
+        }
         if (typeof callFn0 === "function") {
           try {
             const result = callFn0(fn);
@@ -7557,6 +7618,70 @@ assert._isSameValue = isSameValue;
           }
           return 0;
         };
+      // (#2663 Slice 4) __with_has_binding(obj, key) -> i32. The ECMAScript
+      // Object Environment Record HasBinding (§9.1.1.2.1) used by the `with`
+      // statement: value-independent HasProperty, THEN filtered by the
+      // receiver's @@unscopables blocklist. A bare name inside `with (obj) {}`
+      // shadows the outer binding only when HasBinding is true.
+      //   1. found = HasProperty(obj, N)                (= __extern_has)
+      //   2. if not found -> 0
+      //   3. unscopables = Get(obj, @@unscopables)
+      //   4. if Type(unscopables) is Object and ToBoolean(Get(unscopables, N))
+      //        -> 0   (the @@unscopables entry hides the binding)
+      //   5. -> 1
+      // Host-mode only: the standalone with-gate emits `__extern_has` (refused
+      // under --target standalone, like Slices 1-3), so this import is never
+      // requested in a no-JS-host build.
+      if (name === "__with_has_binding") {
+        // Reuse the value-independent HasProperty (`__extern_has`) and the
+        // sidecar-aware reader (`__extern_get`, the `extern_get` intent) so a
+        // WasmGC-struct `with` receiver whose @@unscopables / properties live in
+        // the host sidecar resolve identically to a plain host object.
+        const hasProp = resolveImport(
+          { type: "builtin", name: "__extern_has" } as ImportIntent,
+          deps,
+          callbackState,
+          globalSandbox,
+          instanceState,
+        ) as (o: any, k: any) => number;
+        const getProp = resolveImport(
+          { type: "extern_get" } as ImportIntent,
+          deps,
+          callbackState,
+          globalSandbox,
+          instanceState,
+        ) as (o: any, k: any) => any;
+        const toBool = resolveImport(
+          { type: "builtin", name: "__to_boolean" } as ImportIntent,
+          deps,
+          callbackState,
+          globalSandbox,
+          instanceState,
+        ) as (v: any) => number;
+        return (obj: any, key: any): number => {
+          // (1)+(2) value-independent HasProperty.
+          if (!hasProp(obj, key)) return 0;
+          // (3) unscopables = Get(obj, @@unscopables). A throw (opaque struct
+          // with no sidecar entry) ⇒ no blocklist.
+          let unsc: any;
+          try {
+            unsc = getProp(obj, Symbol.unscopables);
+          } catch {
+            unsc = undefined;
+          }
+          // (4) If Type(unscopables) is Object: blocked = ToBoolean(Get(unsc, N)).
+          if (unsc !== null && (typeof unsc === "object" || typeof unsc === "function")) {
+            let blocked: any;
+            try {
+              blocked = getProp(unsc, key);
+            } catch {
+              blocked = undefined;
+            }
+            if (toBool(blocked)) return 0; // @@unscopables hides the binding.
+          }
+          return 1; // (5)
+        };
+      }
       if (name === "__extern_toString")
         return (v: any) => {
           if (v == null) return String(v);
