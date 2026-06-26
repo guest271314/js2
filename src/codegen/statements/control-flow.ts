@@ -346,38 +346,89 @@ function emitReturnTail(ctx: CodegenContext, fctx: FunctionContext, hasPendingFi
   // caller frame, so a throw from the callee would unwind past the enclosing
   // catch and escape to the host (#1972).
   const inTryWithHandler = (fctx.tryCatchDepth ?? 0) > 0;
-  const lastInstr = fctx.body[fctx.body.length - 1];
   const resetBeforeReturn = emitLinearU8ArenaResetBeforeReturn(ctx, fctx);
-  if (!resetBeforeReturn && !inTryWithHandler && lastInstr && lastInstr.op === "call") {
-    const calleeIdx = (lastInstr as any).funcIdx as number;
-    if (canTailCall(ctx, fctx, calleeIdx)) {
-      (lastInstr as any).op = "return_call";
-      return; // return_call implicitly returns — no need for explicit return
-    }
-  }
-  if (!resetBeforeReturn && !inTryWithHandler && lastInstr && lastInstr.op === "call_ref") {
-    const typeIdx = (lastInstr as any).typeIdx as number | undefined;
-    if (typeIdx !== undefined && canTailCallRef(ctx, fctx, typeIdx)) {
-      (lastInstr as any).op = "return_call_ref";
-      return;
-    }
-  }
 
-  // (#2707c) Tail calls buried inside a `return <conditional>` / `return
-  // <logical>` are not the *last* emitted instruction — the value-producing
-  // expression lowers to an `(if (result T) …)` whose tail call lives inside an
-  // arm (e.g. `return n===0 ? 0 : f(n-1)` → `(if (then 0) (else … call $f …))`;
-  // `&&`/`||` nest a second `if`). Recurse into the arms and rewrite each arm's
-  // trailing call to `return_call`, so `?:` / `&&` / `||` tail recursion no
-  // longer grows the stack (§14.9.2 tail-position calls in Conditional/Logical
-  // expressions). The `if` block itself still produces a value for any arm that
-  // is NOT a tail call, so the trailing `return` below stays correct.
-  if (!resetBeforeReturn && !inTryWithHandler && lastInstr && lastInstr.op === "if") {
-    rewriteArmTailCalls(ctx, fctx, (lastInstr as any).then as Instr[] | undefined);
-    rewriteArmTailCalls(ctx, fctx, (lastInstr as any).else as Instr[] | undefined);
+  // (#2707c) Peel the value-producing tail of the return down to the underlying
+  // `call` / `call_ref` / nested `if`, looking through the materialization
+  // (`local.set X` / `local.get X` / `local.tee X`) and the #1511 `__argc` /
+  // `__extras_argv` reset a closure/host call emits AFTER itself. Both hide the
+  // tail call from a naive "is the last instruction a call?" check:
+  //   - a constant-folded conditional / comma leaves `call; local.set X;
+  //     <reset>; local.get X` at the TOP level, and
+  //   - a `?:` / `&&` / `||` leaves an `(if (result T) …)` whose tail call lives
+  //     inside an arm (handled via rewriteArmTailCalls).
+  // The reset is dead in tail position (`return_call` replaces the caller frame
+  // and the callee sets up its own `__argc` before reading `arguments`), so on a
+  // successful promotion the buffer is truncated at the terminator, dropping the
+  // dead materialization + reset. Promote only when the callee signature matches
+  // (return_call type guards #822/#839) and never inside a try-with-handler
+  // (#1972) — both already gated by the conditions above.
+  if (!resetBeforeReturn && !inTryWithHandler) {
+    const tIdx = peelToTailCallIdx(ctx, fctx.body);
+    if (tIdx >= 0) {
+      const target = fctx.body[tIdx]!;
+      if (target.op === "call" && canTailCall(ctx, fctx, (target as any).funcIdx as number)) {
+        (target as any).op = "return_call";
+        fctx.body.length = tIdx + 1; // drop dead materialization + reset
+        return; // return_call implicitly returns
+      }
+      if (target.op === "call_ref") {
+        const typeIdx = (target as any).typeIdx as number | undefined;
+        if (typeIdx !== undefined && canTailCallRef(ctx, fctx, typeIdx)) {
+          (target as any).op = "return_call_ref";
+          fctx.body.length = tIdx + 1; // drop dead materialization + reset
+          return;
+        }
+      }
+      if (target.op === "if") {
+        // `?:` / `&&` / `||`: each arm's value flows into this return, so each is
+        // a tail position. The `if` itself still produces a value for any arm
+        // that is NOT a tail call, so the trailing `return` below stays correct.
+        rewriteArmTailCalls(ctx, fctx, (target as any).then as Instr[] | undefined);
+        rewriteArmTailCalls(ctx, fctx, (target as any).else as Instr[] | undefined);
+      }
+    }
   }
 
   fctx.body.push({ op: "return" });
+}
+
+/**
+ * (#2707c) Walk back from the end of `buf` through the call-result
+ * materialization (`local.set X` / `local.get X` / `local.tee X`) and a trailing
+ * #1511 `__argc`/`__extras_argv` reset to find the index of the underlying
+ * value-producing `call` / `call_ref` / `if`. Returns -1 when the tail is not a
+ * recognised call-materialization shape. PURE — never mutates `buf`.
+ *
+ * Recognised tails (call C, materialization local X, optional reset R):
+ *   `C`                         · `C; local.tee X`        · `C; local.set X`
+ *   `C; local.set X; local.get X`            (IR store/reload, same local)
+ *   `C; local.set X; R; local.get X`         (closure: reset between store/load)
+ * plus a bare trailing `if` (a `?:`/`&&`/`||` value).
+ */
+function peelToTailCallIdx(ctx: CodegenContext, buf: Instr[]): number {
+  let idx = buf.length - 1;
+  if (idx < 0) return -1;
+  let loadLocal: number | undefined;
+  const lastIns = buf[idx];
+  if (lastIns && lastIns.op === "local.get") {
+    loadLocal = (lastIns as { index?: number }).index;
+    idx -= 1;
+  }
+  // A #1511 reset sitting between the materialization store and the trailing load.
+  idx -= trailingArgcResetLen(ctx, buf.slice(0, idx + 1));
+  if (idx < 0) return -1;
+  const store = buf[idx];
+  if (loadLocal !== undefined) {
+    // The trailing `local.get X` is only a materialized call result if matched by
+    // a `local.set X` store; otherwise it is an unrelated value.
+    if (store && store.op === "local.set" && (store as { index?: number }).index === loadLocal) idx -= 1;
+    else return -1;
+  } else if (store && (store.op === "local.tee" || store.op === "local.set")) {
+    idx -= 1;
+  }
+  if (idx < 0) return -1;
+  return idx;
 }
 
 /**
@@ -397,21 +448,71 @@ function emitReturnTail(ctx: CodegenContext, fctx: FunctionContext, hasPendingFi
  * `return_call` is a stack-polymorphic terminator, so any instruction left after
  * it in the arm is valid unreachable code.
  */
+/**
+ * (#2707c) Length of a trailing `__argc` / `__extras_argv` reset sequence at the
+ * end of `buf` (4 with the extras reset, 2 for the argc-only variant), or 0 if
+ * none. Mirrors `buildArgcExtrasReset` / `buildArgcResetNoLazyExtras` in
+ * `expressions/calls.ts`:
+ *   [ref.null $extrasVec, global.set $extras,] i32.const -1, global.set $argc
+ * Identified by the module's known `__argc` / `__extras_argv` global indices, so
+ * it never mis-matches an unrelated `global.set`.
+ */
+function trailingArgcResetLen(ctx: CodegenContext, buf: Instr[]): number {
+  const n = buf.length;
+  const argcIdx = ctx.argcGlobalIdx;
+  if (argcIdx < 0 || n < 2) return 0;
+  const d = buf[n - 1];
+  const c = buf[n - 2];
+  const argcReset =
+    d !== undefined &&
+    d.op === "global.set" &&
+    (d as { index?: number }).index === argcIdx &&
+    c !== undefined &&
+    c.op === "i32.const" &&
+    (c as { value?: number }).value === -1;
+  if (!argcReset) return 0;
+  const extrasIdx = ctx.extrasArgvGlobalIdx;
+  if (extrasIdx >= 0 && n >= 4) {
+    const b = buf[n - 3];
+    const a = buf[n - 4];
+    if (
+      b !== undefined &&
+      b.op === "global.set" &&
+      (b as { index?: number }).index === extrasIdx &&
+      a !== undefined &&
+      a.op === "ref.null"
+    ) {
+      return 4;
+    }
+  }
+  return 2;
+}
+
 function rewriteArmTailCalls(ctx: CodegenContext, fctx: FunctionContext, arm: Instr[] | undefined): void {
   if (!arm || arm.length === 0) return;
-  let idx = arm.length - 1;
-  // Skip a single trailing materialization tee/set the IR inserts after the
-  // value-producing instruction.
-  const trailing = arm[idx];
-  if (trailing && (trailing.op === "local.tee" || trailing.op === "local.set")) idx -= 1;
+  // The arm's value flows straight into the enclosing `return`, so its tail call
+  // (peeled through materialization + the #1511 reset, same as the top level) is
+  // in tail position. PEEK first — the reset is dropped only on a confirmed
+  // promotion, since stripping it without promoting reintroduces the stale-arg-
+  // count leak it guards (#1511).
+  const idx = peelToTailCallIdx(ctx, arm);
   if (idx < 0) return;
   const target = arm[idx];
   if (!target) return;
+  // After promotion, `return_call` is a terminator, so every instruction after
+  // `idx` (the materialization tee/set and the now-dead #1511 reset) is dead and
+  // is dropped by truncating the arm to end at the terminator.
   if (target.op === "call") {
-    if (canTailCall(ctx, fctx, (target as any).funcIdx as number)) (target as any).op = "return_call";
+    if (canTailCall(ctx, fctx, (target as any).funcIdx as number)) {
+      (target as any).op = "return_call";
+      arm.length = idx + 1;
+    }
   } else if (target.op === "call_ref") {
     const typeIdx = (target as any).typeIdx as number | undefined;
-    if (typeIdx !== undefined && canTailCallRef(ctx, fctx, typeIdx)) (target as any).op = "return_call_ref";
+    if (typeIdx !== undefined && canTailCallRef(ctx, fctx, typeIdx)) {
+      (target as any).op = "return_call_ref";
+      arm.length = idx + 1;
+    }
   } else if (target.op === "if") {
     rewriteArmTailCalls(ctx, fctx, (target as any).then as Instr[] | undefined);
     rewriteArmTailCalls(ctx, fctx, (target as any).else as Instr[] | undefined);

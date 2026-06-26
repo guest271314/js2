@@ -2105,6 +2105,39 @@ function flattenCallArgs(args: readonly ts.Expression[]): ts.Expression[] | null
   return result;
 }
 
+/**
+ * (#2707c) Does a named function expression's body reference its OWN name? Used
+ * to decide whether a `(function f(){ … })()` IIFE is *recursive* and therefore
+ * cannot be inlined (the inlined body would have no callable to bind `f` to).
+ *
+ * Conservative — returns true on ANY identifier occurrence of the own name
+ * inside the body, without resolving shadowing. That is safe because the only
+ * consequence is compiling the IIFE as a closure instead of inlining it, which
+ * is always semantically correct; a false positive merely forgoes the inline
+ * optimization. We do NOT descend into nested function/class scopes that
+ * re-declare the name as their own (those are separate bindings), to keep the
+ * conservative over-approximation from being needlessly broad.
+ */
+function functionExprBodyReferencesOwnName(fn: ts.FunctionExpression): boolean {
+  if (!fn.name) return false;
+  const ownName = fn.name.text;
+  let found = false;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    // A nested function/method that declares a parameter or its own name equal
+    // to ownName shadows it — but to stay conservative+simple we still descend;
+    // a self-call to a shadowing inner binding only ever causes a (correct)
+    // closure compile. Identifier match = treat as self-reference.
+    if (ts.isIdentifier(node) && node.text === ownName) {
+      found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  if (fn.body) visit(fn.body);
+  return found;
+}
+
 function compileOptionalDirectCall(ctx: CodegenContext, fctx: FunctionContext, expr: ts.CallExpression): InnerResult {
   const callee = expr.expression as ts.Identifier;
   const calleeType = compileExpression(ctx, fctx, callee);
@@ -12717,16 +12750,32 @@ function compileCallExpression(
       // because their body contains `yield` which requires a generator context.
       // Let them fall through to the normal closure compilation path (#657).
       const isGeneratorIIFE = ts.isFunctionExpression(callee) && callee.asteriskToken !== undefined;
-      if (isGeneratorIIFE) {
-        // Generator function expressions can't be inlined (yield requires generator context).
-        // Compile as closure, store in temp local, and invoke via call_ref.
+      // (#2707c) A *recursive* named function expression IIFE —
+      // `(function f(n){ … f(n-1) … })(N)` — must NOT be inlined either: the
+      // inlined body has no real callable to bind its own name `f` to, so the
+      // self-call silently fails to recurse (the base case is never reached, so
+      // e.g. a test262 TCO counter stays 0). Compile it as a closure instead —
+      // the closure path binds the function-expression's own name via `__self`
+      // (the lifted param-0 self-reference), exactly as it already does for
+      // `var g = function f(n){ … f(n-1) … }`. Conservative: ANY reference to
+      // the own name inside the body routes here (compile-as-closure is always
+      // semantically correct, just unInlined), so a shadowed reference can never
+      // be mis-inlined.
+      const isRecursiveNamedFnExprIIFE =
+        ts.isFunctionExpression(callee) && callee.name !== undefined && functionExprBodyReferencesOwnName(callee);
+      if (isGeneratorIIFE || isRecursiveNamedFnExprIIFE) {
+        // Cannot inline: a generator IIFE needs a generator context for `yield`,
+        // and a recursive named-fn-expr IIFE needs a real callable to bind its
+        // own name to. Compile as closure, store in temp local, invoke via
+        // call_ref — the closure path binds `function*`'s context and a named
+        // expression's own name (self-reference) correctly.
         const closureType = compileArrowFunction(ctx, fctx, callee as ts.FunctionExpression);
         if (closureType && (closureType.kind === "ref" || closureType.kind === "ref_null")) {
           const typeIdx = (closureType as { typeIdx: number }).typeIdx;
           const closureInfo = ctx.closureInfoByTypeIdx.get(typeIdx);
           if (closureInfo) {
             // Store closure ref in a temp local
-            const tmpName = `__gen_iife_${fctx.locals.length}`;
+            const tmpName = `__iife_closure_${fctx.locals.length}`;
             const tmpLocal = allocLocal(fctx, tmpName, closureType);
             fctx.body.push({ op: "local.set", index: tmpLocal });
             // Register the temp local so compileClosureCall can find it
