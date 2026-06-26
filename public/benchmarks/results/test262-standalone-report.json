@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-06-26T10:42:19.964Z",
-  "baseline_generated_at": "2026-06-26T10:42:19.964Z",
-  "baseline_sha": "f7bc0ca2c1b0165fa9198ec16ffbc42524d975ba",
+  "timestamp": "2026-06-26T10:55:21.334Z",
+  "baseline_generated_at": "2026-06-26T10:55:21.334Z",
+  "baseline_sha": "3c6ae14a77a3e1b93b216aafd554bf8b5ccd7bde",
   "oracle_version": 1,
   "mode": {
     "target": "standalone",
@@ -1180,8 +1180,8 @@
         },
         "error_categories": {
           "runtime_error": 2463,
-          "illegal_cast": 14,
           "wasm_compile": 82,
+          "illegal_cast": 14,
           "null_deref": 51,
           "other": 184,
           "assertion_fail": 773,
@@ -1193,12 +1193,12 @@
           "test/built-ins/Temporal/PlainDateTime/subclass.js",
           "test/built-ins/Temporal/ZonedDateTime/prototype/eraYear/prop-desc.js",
           "test/built-ins/Temporal/PlainDateTime/prototype/month/prop-desc.js",
-          "test/built-ins/Temporal/PlainMonthDay/refisoyear-undefined.js"
+          "test/built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js"
         ],
         "sample_signatures": [
           "runtime_error:Cannot convert object to primitive value",
-          "illegal_cast:illegal cast [in __str_to_number() ← test]",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: extern.convert_any[#] expected type shared anyref, found array.get of type i64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $instance",
+          "illegal_cast:illegal cast [in __str_to_number() ← test]",
           "null_deref:L#:## dereferencing a null pointer [in test()]",
           "other:L#:## Temporal.PlainDate argument must be a string or property bag, not object"
         ]
@@ -1227,8 +1227,8 @@
           "test/built-ins/AsyncDisposableStack/prototype/use/not-a-constructor.js",
           "test/built-ins/DisposableStack/prototype/adopt/returns-value.js",
           "test/built-ins/AsyncDisposableStack/length.js",
-          "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js",
-          "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js"
+          "test/built-ins/DisposableStack/prototype/use/throws-if-value-Symbol.dispose-property-is-null.js",
+          "test/built-ins/DisposableStack/prototype/use/throws-if-value-missing-Symbol.dispose.js"
         ],
         "sample_signatures": [
           "other:L#:## Codegen error: AsyncDisposableStack.prototype built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
@@ -1336,8 +1336,8 @@
           "test/built-ins/JSON/parse/15.12.2-2-2.js",
           "test/built-ins/JSON/stringify/space-wrong-type.js",
           "test/built-ins/JSON/parse/reviver-array-define-prop-err.js",
-          "test/built-ins/JSON/stringify/replacer-array-empty.js",
-          "test/built-ins/JSON/parse/15.12.2-2-6.js"
+          "test/built-ins/JSON/parse/15.12.2-2-6.js",
+          "test/built-ins/JSON/stringify/replacer-array-empty.js"
         ],
         "sample_signatures": [
           "illegal_cast:L#:## illegal cast [in test()]",
@@ -1426,23 +1426,23 @@
           "total": 425
         },
         "error_categories": {
-          "assertion_fail": 129,
           "runtime_error": 166,
+          "assertion_fail": 129,
           "other": 16,
           "illegal_cast": 49,
           "wasm_compile": 20,
           "null_deref": 45
         },
         "sample_files": [
-          "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
           "test/built-ins/RegExp/prototype/flags/coercion-ignoreCase.js",
+          "test/built-ins/RegExp/from-regexp-like-get-ctor-err.js",
           "test/annexB/built-ins/RegExp/legacy-accessors/leftContext/this-not-regexp-constructor.js",
           "test/language/literals/regexp/S7.8.5_A2.3_T4.js",
           "test/built-ins/Proxy/has/trap-is-missing-target-is-proxy.js"
         ],
         "sample_signatures": [
-          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "runtime_error:Cannot convert object to primitive value",
+          "assertion_fail:returned # — assert ## at L#: throw new Test262Error();",
           "other:L#:## Codegen error: '__get_builtin' (dynamic-shape object/property operation) is not yet supported in --target standalone (## Phase B). Use a typed object literal or class instance for fast-path codegen, which compiles to struct.get/struct",
           "runtime_error:L#:## Cannot convert object to primitive value",
           "assertion_fail:returned # — assert ## at L#: assert(Reflect.has(regExpProxy, \"ignoreCase\"));"
@@ -1542,15 +1542,15 @@
           "test/built-ins/Reflect/has/return-boolean.js",
           "test/built-ins/Reflect/enumerate/undefined.js",
           "test/built-ins/DataView/custom-proto-access-throws.js",
-          "test/built-ins/Reflect/getOwnPropertyDescriptor/not-a-constructor.js",
-          "test/built-ins/Reflect/set/not-a-constructor.js"
+          "test/built-ins/Reflect/set/not-a-constructor.js",
+          "test/built-ins/Reflect/get/return-value.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.sameValue(Reflect.has(o1, 'p'), true, 'true from own property');",
           "other:L#:## Codegen error: Reflect.hasOwnProperty not supported in standalone mode (## Phase C).",
           "other:L#:## Codegen error: Reflect.construct not supported in standalone mode (## Phase C).",
-          "other:L#:## Codegen error: Reflect.getOwnPropertyDescriptor built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
-          "other:L#:## Codegen error: Reflect.set built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair."
+          "other:L#:## Codegen error: Reflect.set built-in static property value read is not supported in --target standalone (## / ## S6-b). Add a native built-in method closure for this pair.",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue( Reflect.get(o, 'p1'), 'value #', 'Return value from data descriptor' );"
         ]
       },
       {
@@ -1874,15 +1874,15 @@
           "test/annexB/language/global-code/if-decl-no-else-global-skip-early-err-try.js",
           "test/annexB/language/global-code/switch-case-global-no-skip-try.js",
           "test/annexB/language/expressions/assignmenttargettype/callexpression-as-for-of-lhs.js",
-          "test/annexB/language/global-code/switch-case-global-update.js",
-          "test/annexB/language/comments/single-line-html-close-first-line-3.js"
+          "test/annexB/language/comments/single-line-html-close-first-line-3.js",
+          "test/annexB/language/global-code/switch-case-global-update.js"
         ],
         "sample_signatures": [
           "assertion_fail:returned # — assert ## at L#: assert.throws(ReferenceError, function() { f; }, 'An initialized binding is not created following evaluation');",
           "assertion_fail:returned # — assert ## at L#: assert.sameValue( f, undefined, 'Initialized binding created prior to evaluation' );",
           "runtime_error:L#:## Invalid left-hand side in for-in/for-of",
-          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');",
-          "other:L#:## ';' expected."
+          "other:L#:## ';' expected.",
+          "assertion_fail:returned # — assert ## at L#: assert.sameValue(typeof f, 'function');"
         ]
       },
       {
@@ -2378,8 +2378,8 @@
           "negative_test_fail:expected parse/early SyntaxError but compiled and instantiated successfully",
           "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.convert_i32_s of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local",
           "assertion_fail:returned # — assert ## at L#: assert(foo.call(undefined));",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.lt of type i32 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (l",
-          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.sub of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) ("
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.sub of type f64 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (",
+          "wasm_compile:L#:## invalid Wasm binary (WebAssembly.instantiate(): Compiling function ##:\"test\" failed: local.tee[#] expected type externref, found f64.lt of type i32 @+#) [in test()] [@+#] [wat: (func $test (result f64) (local $y f64) (local $z f64) (l"
         ]
       },
       {
