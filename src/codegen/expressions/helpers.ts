@@ -241,6 +241,81 @@ export function emitThrowRangeError(ctx: CodegenContext, fctx: FunctionContext, 
 }
 
 /**
+ * (#2709) True when `node` syntactically contains a `super(...)` call that would
+ * be evaluated in the SAME `this`/`super` binding scope — i.e. without descending
+ * into a nested function / method / class that introduces its own binding. Mirrors
+ * the descent rules of `constructorBodyHasSuperCall` (class-bodies.ts). Used to
+ * recognise the `super[super()]` SuperProperty-key shape.
+ */
+function expressionContainsSuperCall(node: ts.Node): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.SuperKeyword) {
+      found = true;
+      return;
+    }
+    // Do not descend into constructs that introduce a fresh `this`/`super`.
+    // Arrow functions inherit the enclosing `this`, so they ARE descended into.
+    if (
+      ts.isFunctionDeclaration(n) ||
+      ts.isFunctionExpression(n) ||
+      ts.isMethodDeclaration(n) ||
+      ts.isConstructorDeclaration(n) ||
+      ts.isGetAccessorDeclaration(n) ||
+      ts.isSetAccessorDeclaration(n) ||
+      ts.isClassDeclaration(n) ||
+      ts.isClassExpression(n)
+    ) {
+      return;
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(node);
+  return found;
+}
+
+/**
+ * (#2709) Uninitialized-`this` guard for a `super[key]` SuperProperty WRITE /
+ * UPDATE (`super[key] = v`, `super[key]++`) in a *derived* constructor whose
+ * `key` itself contains a `super(...)` call — i.e. the `super[super()] = 0` /
+ * `super[super()]++` shape.
+ *
+ * Per ECMA-262 §13.3.7.1 (Evaluation of SuperProperty), reference resolution
+ * performs `GetThisBinding()` FIRST (step 2), BEFORE the key Expression (step 3)
+ * and the RHS. In a derived class `this` is *uninitialized* until `super(...)`
+ * returns, so `GetThisBinding()` throws a `ReferenceError`. For the
+ * `super[super()]` shape this is provably the outcome in EVERY execution:
+ *   - if `super()` has not yet run, `this` is uninitialized → GetThisBinding
+ *     throws ReferenceError before the key is evaluated;
+ *   - if `super()` HAS already run, the key's inner `super()` is a second
+ *     SuperCall → "Super constructor may only be called once" ReferenceError.
+ * Either way the statement throws a ReferenceError and never completes, so
+ * emitting an unconditional ReferenceError here is spec-correct. The shape
+ * `super[super()] = …` never appears in valid programs, so this is ZERO
+ * regression risk (no currently-passing path reaches it).
+ *
+ * Call at the TOP of the super-element write / update path, before any key/RHS
+ * is emitted. Returns `true` when it emitted the throw (the caller should stop —
+ * the inner `super()` and RHS must NOT be evaluated). Returns `false` (a no-op)
+ * for every other shape, leaving existing behavior byte-identical.
+ */
+export function emitSuperUninitializedThisGuard(
+  ctx: CodegenContext,
+  fctx: FunctionContext,
+  keyExpr: ts.Expression | undefined,
+): boolean {
+  if (!fctx.isDerivedConstructor) return false;
+  if (!keyExpr || !expressionContainsSuperCall(keyExpr)) return false;
+  emitThrowReferenceError(
+    ctx,
+    fctx,
+    "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
+  );
+  return true;
+}
+
+/**
  * #1456 — Classify a private property reference for assignment/compound-assignment.
  *
  * Per ES2022 §7.3.18 (PrivateElementSet) and §13.15.2

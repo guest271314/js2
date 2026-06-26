@@ -38,7 +38,7 @@ import {
   typeErrorThrowInstrs,
 } from "../property-access.js";
 import type { InnerResult } from "../shared.js";
-import { coerceType, compileExpression, skipTransparentExpressions, valTypesMatch } from "../shared.js";
+import { coerceType, compileExpression, skipTransparentExpressions, valTypesMatch, VOID_RESULT } from "../shared.js";
 import { compileStringLiteral, emitBoolToString } from "../string-ops.js";
 import { findExternInfoForMember, patchStructNewForDynamicField } from "./extern.js";
 import { tryCompileFnctorPrototypeAssign } from "./fnctor-prototype.js";
@@ -52,6 +52,7 @@ import {
 import {
   classifyPrivateMember,
   emitCoercedLocalSet,
+  emitSuperUninitializedThisGuard,
   emitThrowReferenceError,
   emitThrowString,
   emitThrowTypeError,
@@ -3066,6 +3067,19 @@ function compileElementAssignment(
   target: ts.ElementAccessExpression,
   value: ts.Expression,
 ): InnerResult {
+  // (#2709) `super[super()] = value` PutValue: SuperProperty reference resolution
+  // runs GetThisBinding() FIRST (§13.3.7.1 step 2), throwing ReferenceError before
+  // the inner super() (in the key) or the RHS is evaluated. Emit that throw here,
+  // ahead of any index/value emission, and stop — so the inner super() and RHS are
+  // never evaluated and we don't reach the null-`this` illegal-cast trap. No-op for
+  // every other shape (see emitSuperUninitializedThisGuard).
+  if (
+    target.expression.kind === ts.SyntaxKind.SuperKeyword &&
+    emitSuperUninitializedThisGuard(ctx, fctx, target.argumentExpression)
+  ) {
+    return VOID_RESULT;
+  }
+
   // #1886 Slice B: linear-backed Uint8Array write `buf[i] = v` →
   // i32.store8(ptr+i, trunc(v)). Only fires for a registered linear-safe
   // buffer; any other target falls through to the GC element-assign path.
@@ -5159,6 +5173,16 @@ export function compileCompoundAssignment(
 
   // Handle element access compound assignment: arr[i] += value
   if (ts.isElementAccessExpression(expr.left)) {
+    // (#2709) `super[super()] += v` — SuperProperty compound assignment whose key
+    // contains super(). §13.3.7.1 resolves the reference (GetThisBinding) BEFORE
+    // the key, so this always throws a ReferenceError; emit it and stop, before the
+    // inner super() / RHS run. No-op for every other shape.
+    if (
+      expr.left.expression.kind === ts.SyntaxKind.SuperKeyword &&
+      emitSuperUninitializedThisGuard(ctx, fctx, expr.left.argumentExpression)
+    ) {
+      return { kind: "f64" };
+    }
     return compileElementCompoundAssignment(ctx, fctx, expr.left, expr.right, op);
   }
 
