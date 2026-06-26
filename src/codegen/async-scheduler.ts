@@ -2675,6 +2675,39 @@ export function emitStdinEof(ctx: CodegenContext, fctx: FunctionContext): void {
 }
 
 /**
+ * #2735 — emit `__wasiStdinStop()` at a call site: a NON-EOF reactor exit
+ * trigger. Drops the fd0 subscription by clearing `__stdin_fd_active` (mirrors
+ * the EOF clear in `buildStdinDrainBody`), so the run loop's next `pending`
+ * test — `(next != I64_MAX) | fd0_active` — falls through and `_start` returns
+ * cleanly EVEN THOUGH stdin never reached EOF. Without this the fd-readiness
+ * reactor's ONLY termination path is stdin EOF, which hangs the real
+ * Native-Messaging case (the peer keeps the pipe open and signals shutdown
+ * in-band). Backs `process.stdin.destroy()` and the `process.exit()` pre-exit
+ * drop. Stack-neutral; a no-op (and safe to call unconditionally) when the
+ * reactor isn't active for this module (the global was never registered).
+ */
+export function emitStdinStop(ctx: CodegenContext, fctx: FunctionContext): void {
+  const state = getOrInitState(ctx as CodegenContextWithScheduler);
+  if (state.stdinFdActiveGlobalIdx < 0) return;
+  fctx.body.push(
+    { op: "i32.const", value: 0 } as Instr,
+    { op: "global.set", index: state.stdinFdActiveGlobalIdx } as Instr,
+  );
+}
+
+/**
+ * #2735 — true when the fd0 stdin reactor is active for this module (the
+ * Phase-2 globals were registered). Lets the WASI `process.exit` lowering
+ * decide whether to drop the fd0 subscription before `proc_exit` WITHOUT
+ * forcing the reactor onto a program that only calls `process.exit` and never
+ * touches stdin.
+ */
+export function isStdinReactorActive(ctx: CodegenContext): boolean {
+  const state = (ctx as CodegenContextWithScheduler).asyncScheduler;
+  return !!state && state.stdinReactor && state.stdinFdActiveGlobalIdx >= 0;
+}
+
+/**
  * #2632 Phase 3 — emit `__wasiStdinSetReader(cb)` at a call site. Stores the
  * pump funcref + its closure captures into the reactor-tick-hook globals, so the
  * run loop invokes `cb(captures, null)` each tick after draining fd0. The
