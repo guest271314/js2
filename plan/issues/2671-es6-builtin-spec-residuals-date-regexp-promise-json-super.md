@@ -113,29 +113,42 @@ number), failing `assert.sameValue(r.lastIndex, counter)`; on the dynamic-receiv
 path the eager coerce of an opaque WasmGC struct threw "Cannot convert object to
 primitive value".
 
-Two host-mode-scoped fixes:
+Host-mode-scoped fix in three parts:
 - **`src/codegen/index.ts`** (`collectInterfaceMembers`): carry
   `RegExp.lastIndex` as `externref` (not `number`) in **host mode only**
   (`!ctx.standalone && !ctx.wasi`) so the raw value round-trips through the native
   RegExp; numeric uses coerce at the use site, the exec-time ToLength runs in
   native code. Standalone/WASI keep their native struct-field RegExp path
   untouched (the `RegExp_*_lastIndex` extern import is never emitted there).
-- **`src/runtime.ts`** (`resolveImport`, RegExp `lastIndex` get/set): on WRITE
-  wrap a WasmGC struct as a host-coercibility `_wrapForHost` proxy (native exec
-  can then `ToLength` it; a *throwing* `valueOf` surfaces as the program's own
-  error); on READ `_unwrapForHost` back to the raw struct so an explicit
-  `r.lastIndex` read sees the SAME object the program stored. Primitive numbers
-  pass through untouched, and the global/sticky numeric write-back path is
-  unchanged.
-- Flips `built-ins/RegExp/prototype/exec/success-lastindex-access.js`
-  (identity-preserved + `gets === 1` exec-time read). Guard:
-  `tests/issue-2671-regexp.test.ts` (6/6 — core identity scenario, exec-time
-  valueOf-once, global numeric write-back, default-0 read, numeric round-trip,
-  sticky start-anchor). No regression: 212/212 host-mode regex tests pass
-  (`regexp`, `issue-2175-proto-readers`, `issue-2161-symbol-protocol`/`-string-coercion`,
-  `issue-2588-2589-groups-indices`, `issue-1911`/`-1912`); the 6 standalone-refusal
-  failures (`issue-1474`/`issue-1539-*`) pre-exist on pristine main (unrelated —
-  standalone is gated out).
+- **`src/runtime.ts`** (`resolveImport`, RegExp `lastIndex` get/set): the
+  **default (deferred)** representation stores a struct behind a small coercion
+  shim (`_makeLastIndexShim`) whose ToPrimitive bridges to `_hostToPrimitive`, so
+  native exec / the protocol ToLength fire the struct's `valueOf` once (a throw
+  surfaces as the program's own error); the get-import unwraps the shim back to
+  the raw struct so an explicit `r.lastIndex` read keeps object identity. Numbers
+  pass through verbatim; the global/sticky numeric write-back is unchanged.
+- **`src/runtime.ts`** (`__regex_symbol_call` protocol-depth carve-out): the one
+  case the deferred shim cannot cover — a `lastIndex` set performed by a
+  user-overridden `exec` *invoked from* `RegExp.prototype[@@replace]` — because
+  native V8 @@replace does **not** ToLength the JS-visible `lastIndex` in its
+  empty-match advance (verified: `execCalls=2`, `valueOf` count `0`). A
+  `_regexProtocolDepth` counter (inc/dec around the protocol dispatch, `finally`)
+  marks sets that happen *during* a protocol call; those coerce eagerly so a
+  throwing `valueOf` surfaces at the assignment (§22.2.5.8 "abrupt completion
+  during coercion of lastIndex"). Sets outside any protocol stay deferred.
+- Flips **8** `built-ins/RegExp` files: `exec/success-lastindex-access`,
+  `exec/failure-lastindex-access`, `exec/failure-g-lastindex-reset`,
+  `exec/S15.10.6.2_A4_T11`/`_T12`, `Symbol.match/builtin-y-coerce-lastindex-err`,
+  `Symbol.matchAll/this-tolength-lastindex-throws`, and keeps
+  `Symbol.replace/coerce-lastindex-err` green (the proxy-only first cut regressed
+  this one; the protocol-depth carve-out fixes it). Guard:
+  `tests/issue-2671-regexp.test.ts` (8/8). **Differential vs pristine main: +7
+  pass, 0 regressions** across 340 protocol/exec/test files and all 64
+  `lastIndex`-named `built-ins/RegExp` tests (sequential `runTest262File`); 228/228
+  broad host-mode regex vitest tests pass; String.prototype.replace/split/match
+  (which route through the same protocol path) verified correct. The
+  standalone-refusal failures (`issue-1474`/`issue-1539-*`/`issue-2161-matchall`)
+  pre-exist on pristine main (unrelated — standalone is gated out).
 - ⏳ Remaining RegExp: `Symbol.split`/`Symbol.replace` protocol (species ctor
   validation + dynamic `exec`/`lastIndex` dispatch on arbitrary objects), dotAll
   lone-surrogate string-rep (deep string-backend), `str-get-lastindex-err`

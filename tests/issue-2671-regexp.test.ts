@@ -98,4 +98,44 @@ describe("#2671 — RegExp lastIndex value-preserving slot", () => {
     `);
     expect(exp.test()).toBe("ok");
   });
+
+  // Mirrors built-ins/RegExp/prototype/Symbol.replace/coerce-lastindex-err.js.
+  // A lastIndex set with a throwing `valueOf` performed INSIDE a user-overridden
+  // `exec` (invoked by RegExp.prototype[@@replace]'s empty-match advance) must
+  // surface the abrupt completion. Native @@replace does not ToLength the
+  // JS-visible lastIndex, so this set is coerced eagerly (protocol-depth > 0) and
+  // the throw propagates out of @@replace.
+  it("propagates a throwing lastIndex valueOf set during @@replace (overridden exec)", async () => {
+    const exp = await run(`
+      const r = /./g;
+      let execWasCalled = false;
+      const coercibleIndex = { valueOf: function(): number { throw new Error('T262'); } };
+      const result: any = { length: 1, 0: '', index: 0 };
+      (r as any).exec = function(): any {
+        if (execWasCalled) { return null; }
+        r.lastIndex = coercibleIndex as any;
+        execWasCalled = true;
+        return result;
+      };
+      let threw = 'no';
+      try { (r as any)[Symbol.replace]('', ''); } catch (e: any) { threw = 'yes'; }
+      return threw;
+    `);
+    expect(exp.test()).toBe("yes");
+  });
+
+  // A lastIndex struct set OUTSIDE any protocol still defers (verbatim/identity),
+  // so a numeric valueOf is NOT fired at assignment — the protocol-depth carve-out
+  // only changes the inside-protocol case above.
+  it("defers a lastIndex struct assignment outside any protocol (identity kept, no eager valueOf)", async () => {
+    const exp = await run(`
+      let gets = 0;
+      const counter = { valueOf: function() { gets++; return 3; } };
+      const r = /a/;
+      r.lastIndex = counter as any;
+      const same = (r.lastIndex as any) === counter;
+      return same && gets === 0 ? 'ok' : 'same=' + same + ' gets=' + gets;
+    `);
+    expect(exp.test()).toBe("ok");
+  });
 });

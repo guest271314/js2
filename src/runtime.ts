@@ -4322,6 +4322,49 @@ function _safeSet(
  */
 const _hostProxyCache = new WeakMap<object, any>();
 const _hostProxyReverse = new WeakMap<object, any>();
+
+// (#2671) RegExp.lastIndex value-preserving slot. §22.2.7.2 RegExpBuiltinExec
+// reads lastIndex as `ToLength(? Get(R, "lastIndex"))`; the setter stores the
+// value verbatim. When a WasmGC struct is assigned (`r.lastIndex =
+// {valueOf(){…}}`) the eventual ToLength must fire the struct's `valueOf`
+// exactly once and propagate a throwing `valueOf` as the program's own error.
+//
+// Default (deferred) representation: store the struct behind a coercion shim
+// whose ToPrimitive bridges to `_hostToPrimitive`. The wasm/builtin read paths
+// (native exec, the protocol methods' RegExpExec) coerce it through the
+// get-import (unwrap → raw struct → wasm ToNumber) or via the shim's
+// ToPrimitive, firing valueOf once and propagating a throw; the get-import
+// unwraps the shim to the raw struct so an explicit `r.lastIndex` read keeps
+// object identity (`assert.sameValue(r.lastIndex, obj)`).
+//
+// Exception — a set that happens DURING a regex protocol call (`_regexProtocolDepth
+// > 0`), i.e. inside a user-overridden `exec` invoked by
+// RegExp.prototype[@@replace/@@split/…]: the native protocol then does NOT coerce
+// the JS-visible `lastIndex` (V8's @@replace skips the empty-match ToLength of
+// the property), so a deferred shim would never fire valueOf. Coerce eagerly
+// here so a throwing `valueOf` surfaces at the assignment (matching the spec's
+// "abrupt completion during coercion of lastIndex"), storing the resulting
+// number. Primitive numbers are always stored verbatim.
+const _lastIndexShimRaw = new WeakMap<object, any>();
+let _regexProtocolDepth = 0;
+function _makeLastIndexShim(
+  struct: any,
+  callbackState?: { getExports: () => Record<string, Function> | undefined },
+): any {
+  const shim = {
+    [Symbol.toPrimitive](hint: "number" | "string" | "default"): any {
+      return _hostToPrimitive(struct, hint === "default" ? "number" : hint, callbackState);
+    },
+    valueOf(): any {
+      return _hostToPrimitive(struct, "number", callbackState);
+    },
+    toString(): string {
+      return String(_hostToPrimitive(struct, "string", callbackState));
+    },
+  };
+  _lastIndexShimRaw.set(shim, struct);
+  return shim;
+}
 // (#1694 A.i / #1632b-1) Per-closure cache of the callable+constructible
 // host wrapper produced by `_wrapCallableForHost`, so repeated wraps of the
 // same closure return the same Proxy (constructor identity / @@species stays
@@ -6941,21 +6984,35 @@ function resolveImport(
       // read it as `ToLength(? Get(R, "lastIndex"))` at exec time — the spec
       // stores whatever was assigned verbatim. A WasmGC-struct value
       // (`r.lastIndex = {valueOf(){…}}`) is opaque to V8's ToNumber ("Cannot
-      // convert object to primitive value"), so on WRITE wrap a struct as a
-      // host-coercibility proxy whose `valueOf` bridges back to the struct —
-      // native exec / @@replace can then ToLength it (and a *throwing* `valueOf`
-      // surfaces as the program's own error, not a generic TypeError). On READ
-      // unwrap the proxy back to the raw struct so an explicit `r.lastIndex` read
-      // sees the SAME object the program stored (`assert.sameValue(r.lastIndex,
-      // obj)`). Primitive numbers pass through untouched.
+      // convert object to primitive value"), so on WRITE store a struct behind a
+      // lastIndex coercion shim (`_makeLastIndexShim`) whose ToPrimitive bridges
+      // to the struct via `_hostToPrimitive` — native exec / @@replace can then
+      // ToLength it, firing valueOf once and surfacing a *throwing* valueOf as
+      // the program's own error. On READ unwrap the shim back to the raw struct
+      // so an explicit `r.lastIndex` read sees the SAME object the program stored
+      // (`assert.sameValue(r.lastIndex, obj)`). Primitive numbers pass through
+      // untouched.
       if (intent.className === "RegExp" && intent.member === "lastIndex") {
         if (intent.action === "get") {
-          return (self: any) => _unwrapForHost(_safeGet(self, "lastIndex"));
+          return (self: any) => {
+            const stored = _safeGet(self, "lastIndex");
+            const raw = stored != null && typeof stored === "object" ? _lastIndexShimRaw.get(stored) : undefined;
+            return raw !== undefined ? raw : stored;
+          };
         }
         if (intent.action === "set") {
           return (self: any, v: any) => {
-            const liExports = callbackState?.getExports();
-            _safeSet(self, "lastIndex", _isWasmStruct(v) ? _wrapForHost(v, liExports) : v);
+            if (!_isWasmStruct(v)) {
+              _safeSet(self, "lastIndex", v);
+            } else if (_regexProtocolDepth > 0) {
+              // Set during a regex protocol method (overridden exec): the native
+              // protocol won't coerce the JS-visible lastIndex, so fire valueOf
+              // eagerly (a throw surfaces as the program's own error) and store
+              // the number.
+              _safeSet(self, "lastIndex", Number(_hostToPrimitive(v, "number", callbackState)));
+            } else {
+              _safeSet(self, "lastIndex", _makeLastIndexShim(v, callbackState));
+            }
           };
         }
       }
@@ -9542,33 +9599,44 @@ assert._isSameValue = isSameValue;
           // ToString(arg) coercion finds the struct's toString/valueOf
           // closures via the host proxy.
           const wrappedArg0 = _isWasmStruct(arg0) ? _wrapForHost(arg0, exports) : arg0;
-          // @@match/@@matchAll/@@search are 1-arg (string).
-          // @@replace is 2-arg: (string, replaceValue) — replaceValue may
-          //   be a function or a string.
-          // @@split is 2-arg: (string, limit) — limit is a number.
-          if (symbolId === 7 || symbolId === 9 || symbolId === 15) {
-            return fn.call(regex, wrappedArg0);
-          }
-          if (symbolId === 8) {
-            // Treat missing arg1 (null from ref.null.extern padding) as
-            // undefined → ToString gives "undefined" per spec, matching
-            // `regex[Symbol.replace](str)` with no replaceValue.
-            if (arg1 == null) return fn.call(regex, wrappedArg0, undefined);
-            return fn.call(regex, wrappedArg0, wrapCallable(arg1));
-          }
-          if (symbolId === 10) {
-            // split: missing limit (null padding) → call without second arg
-            // so the spec default 2^32-1 applies. JS `splitter.call(rx, S, null)`
-            // would coerce null to 0 and return [] — wrong.
+          // (#2671) Track regex-protocol nesting so a `lastIndex` set performed
+          // by a user-overridden `exec` invoked from here coerces eagerly (the
+          // native protocol won't ToLength the JS-visible property). A counter,
+          // not a flag, so nested protocol calls (a replace callback that calls
+          // .match) restore the depth correctly; `finally` covers every return
+          // and any thrown abrupt completion.
+          _regexProtocolDepth++;
+          try {
+            // @@match/@@matchAll/@@search are 1-arg (string).
+            // @@replace is 2-arg: (string, replaceValue) — replaceValue may
+            //   be a function or a string.
+            // @@split is 2-arg: (string, limit) — limit is a number.
+            if (symbolId === 7 || symbolId === 9 || symbolId === 15) {
+              return fn.call(regex, wrappedArg0);
+            }
+            if (symbolId === 8) {
+              // Treat missing arg1 (null from ref.null.extern padding) as
+              // undefined → ToString gives "undefined" per spec, matching
+              // `regex[Symbol.replace](str)` with no replaceValue.
+              if (arg1 == null) return fn.call(regex, wrappedArg0, undefined);
+              return fn.call(regex, wrappedArg0, wrapCallable(arg1));
+            }
+            if (symbolId === 10) {
+              // split: missing limit (null padding) → call without second arg
+              // so the spec default 2^32-1 applies. JS `splitter.call(rx, S, null)`
+              // would coerce null to 0 and return [] — wrong.
+              if (arg1 == null) return fn.call(regex, wrappedArg0);
+              // The limit goes through ToUint32 → ToNumber → ToPrimitive; when
+              // it's a wasmGC struct (e.g. `{valueOf(){…}}`), wrap it so the
+              // host proxy exposes the struct's valueOf/toString closure (#1331).
+              return fn.call(regex, wrappedArg0, wrapCallable(arg1));
+            }
+            // Generic fallback
             if (arg1 == null) return fn.call(regex, wrappedArg0);
-            // The limit goes through ToUint32 → ToNumber → ToPrimitive; when
-            // it's a wasmGC struct (e.g. `{valueOf(){…}}`), wrap it so the
-            // host proxy exposes the struct's valueOf/toString closure (#1331).
-            return fn.call(regex, wrappedArg0, wrapCallable(arg1));
+            return fn.call(regex, wrappedArg0, arg1);
+          } finally {
+            _regexProtocolDepth--;
           }
-          // Generic fallback
-          if (arg1 == null) return fn.call(regex, wrappedArg0);
-          return fn.call(regex, wrappedArg0, arg1);
         };
       // Type.prototype.method.call(receiver, ...args) dispatch for built-in types.
       // Used when e.g. Array.prototype.every.call(functionObj, fn) — the receiver
