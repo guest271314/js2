@@ -87,7 +87,7 @@ module imports ONLY `wasi_snapshot_preview1` and owns its own memory (#2655). Th
 is the runnable standalone path the loopdive/js2#389 reporter wanted.
 
 `--link-node-shims` is a **separate modular-linking variant**, NOT a
-run-directly-under-bare-wasmtime flag: it makes the module *import* a stable
+run-directly-under-bare-wasmtime flag: it makes the module _import_ a stable
 `node:fs` interface (`readSync`/`writeSync` + its `memory`) that you then **link**
 against [`node-fs.wat`](./node-fs.wat) (which maps them to WASI `fd_read`/
 `fd_write`) — or satisfy from a JS host's real `node:fs`. A `--link-node-shims`
@@ -168,7 +168,7 @@ module: the `node:fs` `readSync`/`writeSync` calls lower **inline** to
 `wasmtime` with no link step (#2655).
 
 **Optional modular-linking variant — `--link-node-shims`.** Adding
-`--link-node-shims` instead makes the module *import* a stable `node:fs` interface
+`--link-node-shims` instead makes the module _import_ a stable `node:fs` interface
 (`readSync`/`writeSync` + the shared linear `memory`) rather than inlining the
 syscalls:
 

@@ -20,23 +20,27 @@ bugs from npm-staleness / bun-transpile artifacts), fixes them, and adds the rep
 cases as regression unit tests.
 
 ### Bug 1 — `wasm:memory` host-import leak (`nm_wasi.ts`)
+
 `Host import "env.store32"/"env.load32"/"env.store8"/"env.load8" … not on the dual-mode
 allowlist`. These are the `import { store32, load32, store8, load8 } from "wasm:memory"`
 intrinsics (#2657) which MUST lower to inline `i32.store`/`i32.load`/`i32.store8`/
 `i32.load8_u` — NOT `(import "env" …)`.
 
 ### Bug 2 — node:fs / node:process flags (`nm_js2wasm.ts`, `nm_node_process.ts`)
+
 `--target wasi --link-node-shims --emulate node` → `unknown import: node:fs::readSync`/
 `writeSync`. `nm_node_process.ts` additionally leaked `env.__wasiStdinReadByte/Available/
 Eof/SetReader` + `env.global_String`.
 
 ### Bug 3 — `__str_to_number` externref/f64 invalid Wasm (`nm_wasi_p3.ts`)
+
 `--target wasi` → INVALID Wasm: `call $__str_to_number (f64.convert_i32_s …)` /
 wasmtime `type mismatch: expected externref, found f64`.
 
 ## Reproduction outcomes (current origin/main @ f32b2cf78)
 
 ### Bug 1 — REPRODUCED (direct + bun-transpile)
+
 `npx tsx src/cli.ts examples/native-messaging/nm_wasi.ts --target wasi -o .tmp/` emits
 `warning: 4 host import(s) not on the dual-mode allowlist were dropped` for
 `env.store32/load32/store8/load8`. On the direct path the call sites are still inlined
@@ -61,12 +65,13 @@ the existing node:fs skip. After the fix both the direct `.ts` and a tsc/bun-tra
 `wasi_snapshot_preview1` — and echo a framed message byte-exactly under wasmtime.
 
 ### Bug 2 — node:fs / node:process flags
+
 **Point 1 (#2655 direct path) — CONFIRMED working, not a bug.** `nm_js2wasm.ts
 --target wasi` ALONE already emits a self-contained module importing only
 `wasi_snapshot_preview1` (the `node:fs` readSync/writeSync lower inline) and echoes
 byte-exactly under wasmtime. The reporter's `unknown import: node:fs::readSync`
 came from adding `--link-node-shims`, which is the **modular-linking variant**: it
-makes the module *import* a stable `node:fs` interface that must be linked against
+makes the module _import_ a stable `node:fs` interface that must be linked against
 `node-fs.wasm` (or a JS host) BEFORE running. Running it under bare wasmtime with
 no link step is expected to fail — not a compiler bug. **Fix:** corrected the
 README to lead with `--target wasi` alone as the runnable standalone build, and
@@ -80,6 +85,7 @@ emitted dropped `env.*` imports: the four #2632 fd0 stdin-reactor intrinsics
 the warnings the module ALREADY echoed correctly under wasmtime — the #2632 reactor
 drives `poll_oneoff`/`fd_read` natively, so `process.stdin` Readable IS standalone
 WASI, NOT host-dependent. The leaks were spurious:
+
 - The four `__wasiStdin*` are js2wasm intrinsics declared as `declare function`
   stubs by the injected `src/process-stdin-prelude.ts`; every call site is
   inline-lowered by `tryWasiTimerCall` (calls.ts) under `ctx.wasi`, but
@@ -99,6 +105,7 @@ imports only `wasi_snapshot_preview1`, and echoes byte-exactly under wasmtime �
 genuine standalone-WASI async-stream variant.
 
 ### Bug 3 — `__str_to_number` externref/f64 invalid Wasm — REPRODUCED, fixed
+
 `nm_wasi_p3.ts --target wasi` emitted a module that fails Wasm validation:
 `call $__str_to_number` is fed an f64 where its `(externref)->f64` signature wants
 an externref (`wasm-validator`/wasmtime: `type mismatch: expected externref, found
@@ -126,7 +133,9 @@ shifted out from under a later registration. After the fix the loop emits `call
 $__box_number` (f64→externref) and the module passes wasmtime validation; tsc clean.
 
 ## Unit tests (regression suite)
+
 Folded into `tests/native-messaging-comparison.test.ts` (`#2696` describe block):
+
 - Each working variant (`nm_wasi`, `nm_js2wasm`, `nm_deno`, `nm_node_process`)
   asserts its import section is EXACTLY `{wasi_snapshot_preview1}` — the bug-1 +
   bug-2 gate, runs with NO external runtime so it always executes in CI.
@@ -144,10 +153,12 @@ Folded into `tests/native-messaging-comparison.test.ts` (`#2696` describe block)
 All 4 working-variant tests pass; nm_wasi_p3 stays skipped (32 passed, 1 skipped).
 
 ## Validation
+
 - tsc `--noEmit` clean; biome/prettier clean (lint-staged on each commit).
 - `tests/native-messaging-comparison.test.ts`: 32 passed, 1 skipped.
 - Touches shared raw-wasi / coercion / host-import codegen → full batch +
   `runTest262File` zero-regression sweep (#1968) before PR.
 
 ## Status
+
 status: done — see PR.
