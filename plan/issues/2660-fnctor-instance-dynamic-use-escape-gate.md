@@ -2,7 +2,7 @@
 id: 2660
 title: "Whole-program escape/dynamic-use gate for reconstructing `new F()` instances as `$Object` (value-rep infra)"
 status: in-progress
-assignee: ttraenkler/sd-protoextend
+assignee: ttraenkler/sd-s3a
 sprint: 66
 created: 2026-06-25
 priority: medium
@@ -440,3 +440,149 @@ externref); reuse `getOrMintFnctorProtoGlobal` (export it from
 `tests/issue-2660-s3-fnctor-reconstruct.test.ts` (standalone: `function Con(){};
 Con.prototype={foo:7}; const c:any=new Con(); c.foo === 7`). Issue stays
 `in-progress`; S2 banked, S3 carried.
+
+## S3a — LANDED (the value-rep CANARY, 2026-06-26, sd-s3a, max-reasoning)
+
+> Verify-first grounded against current `main` (S1+S2 landed, `6c5049b1`).
+> Decoded the dispatch, the escape-gate result shape, the variable-binding
+> local-typing path, and the late-import shift mechanism on current main before
+> writing a line. **Verdict: S3a IS a clean one-pass low-risk slice** — the
+> alloc + `$proto`-seed primitive already exists (`__object_create`), is a
+> DEFINED function in standalone (no funcidx-shift hazard), and a real-local-type
+> safety check makes the floor regression structurally impossible. No re-grounding
+> surprises; no broad ripple entered.
+
+### The fix (standalone-gated; host/WASI byte-identical)
+
+`compileNewFunctionDeclaration` (`new-super.ts`) gates at the cache-MISS entry on
+`ctx.standalone ∧ fnctorEscapeGate.approved.has(expr) ∧ empty-body ∧ no-args ∧
+result-consumed-as-externref`, then calls the new `compileFnctorNewAsObject` →
+`emitFnctorProtoGet(F)` (S2's lazy `$Object` global, now `export`ed) +
+`__object_create(proto)` (ES §20.1.2.2: fresh `$Object` with `$proto` seeded in
+ONE call) → returns externref. ONE `$Object.$proto` walk, ONE prototype identity;
+no parallel `[[Prototype]]` mechanism. The bespoke `$__fnctor_<Name>` struct, its
+ctor, and the cache are LEFT UNTOUCHED for every non-reconstructed site (no
+#1100/#2009 canonicalization re-entry).
+
+### The load-bearing safety check (why the floor can't move)
+
+The cluster's binding is the nominal `(ref $__fnctor_F)` instance type, so a bare
+alloc-swap (return externref) would `local.set` externref into a struct-ref local
+→ invalid Wasm / `ref.cast` trap. S3a sidesteps that ripple (S3b's job) by reading
+the **REAL allocated local type** (`getLocalType(fctx, localMap.get(name))`, not
+the TS annotation — verified the `noLib` checker conflates `any` and inferred
+`Con`) and reconstructing ONLY when that slot is already externref (the
+`any`/`unknown` case) or the use is an inline `new F().x`/`[i]` receiver. Every
+other shape (struct-typed local, module-global, call-arg, return) falls through to
+status quo. The failure mode is bounded to a 0-row MISS, never a typed-field
+regression — confirmed: `function C(){this.x=3}; const c=new C(); c.x` stays the
+`struct.get` hot path (returns 3), and `const c = new Con()` (nominal struct
+binding) safely declines (returns 0, no trap).
+
+### Cache-order safe-miss (documented, not a bug)
+
+The gate sits at the cache-miss entry. If a NON-approved sibling `new F()`
+compiled first, it populated `funcConstructorMap[F]`; a later approved site then
+hits that cache in `compileNewExpression` and keeps status quo WITHOUT reaching
+the gate — a safe MISS (the struct ref coerces cleanly into the approved site's
+externref binding), never a trap. S3b's binding-retype removes the miss.
+
+### Validation
+
+New `tests/issue-2660-s3-fnctor-reconstruct.test.ts` (11 standalone cases: canary
+`c.foo`=7, bare-identifier reassign, inline `new Con().foo`, per-prop multi-key,
+indexed proto key, function-expression fnctor, two-approved-sites, + 3 regression
+guards: typed own-field stays struct/3, struct-binding declines/no-trap,
+no-`F.prototype` empty proto) — **11/11 green**; S2 suite **10/10 green**. tsc +
+`prettier --check` + `biome lint --diagnostic-level=error` clean. The
+prototype-chain / classes / inheritance / #1888 vitest "failures" are
+**pre-existing host-harness artifacts — A/B-verified BYTE-IDENTICAL on pristine
+`origin/main`** (host-import LinkErrors / `string_constants` / `any+any`
+arithmetic — none involve `new F()`), NOT this change. Host/WASI never enter the
+reconstruct arm (gated on `ctx.standalone`) → byte-identical.
+
+Broad-impact value-rep → the authoritative gate is the **merge_group standalone
+floor (#2097) + test262 net-regression gate** (never a scoped sweep);
+stop-the-line on ANY floor movement. Files: `src/codegen/expressions/new-super.ts`
+(gate + `fnctorNewResultConsumedAsExternref` + `compileFnctorNewAsObject`),
+`src/codegen/expressions/fnctor-prototype.ts` (export `emitFnctorProtoGet`),
+`tests/issue-2660-s3-fnctor-reconstruct.test.ts`.
+
+### Next (S3b) — the HIGH-risk binding-retype core
+
+S3b re-types the binding local / param / return that an approved struct-typed
+`new F()` instance flows into (from `(ref $__fnctor_F)` to externref), so the
+reconstructed `$Object` flows through the dynamic-read + generic-method paths and
+the test262 cluster lands. Held behind S3a's floor result; budget a fix-iterate
+cycle (S2 took one). Issue stays `in-progress`.
+
+## HANDOFF (2026-06-26, sd-2674c) — acorn #1712 endgame needs this keystone; validated READ-half component ready
+
+The acorn dogfood (#1712) endgame converges on THIS issue. After #2085 fixed the
+9th-wall hang, `parse()` returns Programs for empty/numeric statements but the
+remaining walls are all ONE family: an **`any`/`unknown`-typed receiver that at
+runtime IS a known WasmGC struct**, where the dynamic read path
+(`__extern_get` → host proxy / sidecar) diverges in representation from the
+struct-slot write (`#2664`/`#2659` `emitAlternateStructSetDispatch`). Identity
+breaks (`this.type === types$1.X` → false) and read/write desync (numeric-field
+loops).
+
+### Bounded-vs-escape-analysis verdict (cheap TS-checker probe — conclusive)
+`.tmp/checker-probe.mjs` (mirrors the compiler's `createProgram`+allowJs) shows
+the compiler's checker types the local receivers as **`any`**:
+- `var node = this.startNode(...)` → **any** (43/43 samples)
+- `scope.flags` where `scope = this.currentVarScope()` → receiver **any**;
+  `currentVarScope()` / `enterScope()` return types → **any**
+- `this` in the lifted parser methods → the polymorphic `this`-type (no struct)
+
+So receiver-resolution splits in two:
+- **`this` receiver = BOUNDED** — recoverable SYNTACTICALLY from the
+  `Class.prototype.m = function(){}` (or aliased `var pp = Class.prototype; pp.m
+  = …`) assignment. No flow needed. **Already implemented + validated** (below).
+- **local receivers (`node`, `scope`) = NEEDS #2660** — they are bound from
+  METHOD-CALL RETURNS (`this.startNode()`, `this.currentVarScope()`) the checker
+  leaves `any` (the callees are aliased-prototype methods — same root). Recovering
+  `Node`/`Scope` requires inter-procedural return-type + field-element-type
+  inference (follow callee `return new Node()` / `return this.scopeStack[i]`
+  chains). That is the whole-program flow THIS issue builds.
+
+### Per-wall map (all the same family)
+| wall | receiver | resolution |
+|---|---|---|
+| #2681 `this.type` (parseExprAtom switch `unexpected()`) | `this` | BOUNDED — FIXED + validated (read-half below) |
+| #2694 `Scope.flags` (11th wall, tight loop) | `this.currentVarScope()` (local) | needs #2660 flow |
+| #2687 `node.expression` null | `node = this.startNode()` (local) | needs #2660 flow |
+| #2686 binary-expr throw | parseExprOp token compares / node builds | almost certainly same family → needs #2660 |
+
+### Validated READ-half component to REUSE (don't rebuild)
+Branch `issue-2681-acorn-lifted-method-this` @ `c83216fe2` (WIP, NOT PR'd —
+preserved for folding in). It is the symmetric READ counterpart to #2664's
+`emitAlternateStructSetDispatch` WRITE half:
+- `FunctionContext.thisStructName` (context/types.ts) — the struct a lifted
+  method's `this` resolves to.
+- `resolveLiftedMethodThisStruct` (closures.ts) — the SYNTACTIC prototype-alias
+  resolver (set on `liftedFctx`).
+- `tryEmitThisStructMemberRead` (property-access.ts) — guarded
+  `emitExternrefToStructGet` (`ref.test $struct → struct.get → __extern_get`
+  fallback) for `this.<field>`.
+Validated: on compiled acorn, `parse("x")` `__host_eq` dropped **30k → 163** — the
+parseExprAtom switch now matches and the #2681 `unexpected()` throw is gone.
+
+### How the unified substrate should generalize it
+Keep this exact symmetric read+write+**compound** dispatch; only generalize the
+RECEIVER-RESOLUTION step from "syntactic `this`" to "any receiver whose struct
+type #2660's flow proves". I.e. `thisStructName` becomes a general
+`receiverStructName(expr)` backed by the #2660 escape/flow result; the
+read/write/compound emitters are unchanged.
+
+### CRITICAL hazard — symmetry is mandatory
+A READ-only slot fix WITHOUT the matching write+compound caused a **35.9M-iter
+`__extern_get`/box/unbox loop** in `parse("x")` (read=slot, `this.field++`
+write-back=sidecar → desync). The substrate MUST cover **read + write + compound**
+(`recv.field++`, `recv.field op= v`) consistently, or numeric-field loops appear.
+
+### Probes banked (`.tmp/`, single-compile worker+SAB; ~290s/acorn-compile)
+`checker-probe.mjs` (the verdict gate, no Wasm compile), `keyhist2.mjs`
+(`__extern_get` key histogram — named the Scope.flags wall), `this-bind-repro.mjs`
+(small-scale fix verification), `structwalk.mjs`, `diff-probe.mjs` +
+`tests/dogfood/probe-driver.mjs`.

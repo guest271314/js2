@@ -13,8 +13,8 @@ task_type: bugfix
 area: codegen
 language_feature: unknown
 goal: acorn-dogfood
-related: [1712, 2681, 2674, 2664, 2659]
-depends_on: []
+related: [1712, 2681, 2674, 2664, 2659, 2660]
+depends_on: [2660]
 origin: "Surfaced re-verifying the acorn dogfood after #2085 fixed the 9th-wall hang (sd-2674c, #2674). The numeric/empty statements that DO parse return an ExpressionStatement whose `.expression` is null — the parsed Literal is not attached to the statement node. CONFIRMED a real codegen defect (not a host-marshalling artifact) by a direct struct-walk."
 ---
 

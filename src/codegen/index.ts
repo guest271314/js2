@@ -88,7 +88,12 @@ import {
   getDrainFuncIdxForWasiStart,
   getRunLoopFuncIdxForWasiStart,
 } from "./async-scheduler.js";
-import { flushLateImportShifts, registerAddStringImports, registerAddUnionImports } from "./shared.js";
+import {
+  ensureLateImport,
+  flushLateImportShifts,
+  registerAddStringImports,
+  registerAddUnionImports,
+} from "./shared.js";
 import { stackBalance, getFixupEvents, summarizeFixups, strictBalanceDiagnostics } from "./stack-balance.js";
 import { emitNativeParseNumber } from "./parse-number-native.js";
 import { ensureRegexMatchVecType } from "./native-regex.js";
@@ -10754,45 +10759,50 @@ export function addIteratorImports(ctx: CodegenContext): void {
   // Guard: only register once
   if (ctx.funcMap.has("__iterator")) return;
 
+  // (#2689) Add via the late-import batch (`ensureLateImport`) + an IMMEDIATE
+  // `flushLateImportShifts`. This helper has TWO call contexts: the EARLY
+  // collect-finalize (declarations.ts, before any function is registered) and
+  // the LATE lazy fallback (compileForOfStatement, after functions already
+  // baked `call`/`return_call` funcIdx values). Raw `addImport` bumps
+  // `numImportFuncs` WITHOUT shifting already-baked defined-function indices, so
+  // the LATE context silently desynced every earlier function's funcIdx — the
+  // ESLint `SourceCode_new` tail call ended up pointing at `__iterator_next`
+  // ("return_call: tail call type error"). The flushed batch shift fixes the
+  // late context AND is a clean no-op early (no functions to shift, and the
+  // immediate flush leaves NO lingering pending shift that would later
+  // over-shift functions registered after these imports).
+  const ER: ValType = { kind: "externref" };
   // __iterator: (externref) → externref — calls obj[Symbol.iterator]()
-  const extToExt = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
-  addImport(ctx, "env", "__iterator", { kind: "func", typeIdx: extToExt });
-
+  ensureLateImport(ctx, "__iterator", [ER], [ER]);
   // __iterator_next: (externref) → (i32 done, externref value) — calls iter.next()
   // Multi-value result avoids the $IteratorResult struct: a freshly-built WasmGC
   // struct cannot survive the JS import hop (it surfaces as undefined in V8/Node;
   // see #1620 BLOCKED). The two primitives (i32 + externref) cross the JS↔Wasm
   // multi-value ABI cleanly, eliminating __iterator_done / __iterator_value.
-  const extToDoneValue = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }, { kind: "externref" }]);
-  addImport(ctx, "env", "__iterator_next", {
-    kind: "func",
-    typeIdx: extToDoneValue,
-  });
-
+  ensureLateImport(ctx, "__iterator_next", [ER], [{ kind: "i32" }, ER]);
   // __iterator_return: (externref) → void — calls iter.return() if it exists
-  const extToVoid = addFuncType(ctx, [{ kind: "externref" }], []);
-  addImport(ctx, "env", "__iterator_return", {
-    kind: "func",
-    typeIdx: extToVoid,
-  });
-
+  ensureLateImport(ctx, "__iterator_return", [ER], []);
   // __iterator_rest: (externref) → externref — drains a partially-consumed
   // iterator into a real JS Array for the `[...rest]` binding pattern (#1052).
-  addImport(ctx, "env", "__iterator_rest", {
-    kind: "func",
-    typeIdx: extToExt,
-  });
+  ensureLateImport(ctx, "__iterator_rest", [ER], [ER]);
+  // Apply the batch's index shift NOW so a late call repairs already-baked
+  // funcIdx immediately and no deferred shift lingers (the #2689 fix).
+  flushLateImportShifts(ctx, ctx.currentFunc);
 }
 
 /** Register array iterator host imports (entries/keys/values) if not already registered */
 export function addArrayIteratorImports(ctx: CodegenContext): void {
   if (ctx.funcMap.has("__array_entries")) return;
 
+  // (#2689) Batch + immediate flush — see addIteratorImports for the rationale.
+  // Lazily called during body compilation (array-methods.ts), raw addImport
+  // would desync already-baked defined-function funcIdx values.
+  const ER: ValType = { kind: "externref" };
   // All three: (externref) → externref — take a vec struct, return a JS iterator
-  const extToExt = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
-  addImport(ctx, "env", "__array_entries", { kind: "func", typeIdx: extToExt });
-  addImport(ctx, "env", "__array_keys", { kind: "func", typeIdx: extToExt });
-  addImport(ctx, "env", "__array_values", { kind: "func", typeIdx: extToExt });
+  ensureLateImport(ctx, "__array_entries", [ER], [ER]);
+  ensureLateImport(ctx, "__array_keys", [ER], [ER]);
+  ensureLateImport(ctx, "__array_values", [ER], [ER]);
+  flushLateImportShifts(ctx, ctx.currentFunc);
 }
 
 /**
@@ -10828,59 +10838,38 @@ export function addGeneratorImports(ctx: CodegenContext, options?: { allowNoJsHo
   // Guard: only register once
   if (ctx.funcMap.has("__gen_create_buffer")) return;
 
-  const bufType = addFuncType(ctx, [], [{ kind: "externref" }]);
-  addImport(ctx, "env", "__gen_create_buffer", { kind: "func", typeIdx: bufType });
-
-  const pushF64Type = addFuncType(ctx, [{ kind: "externref" }, { kind: "f64" }], []);
-  addImport(ctx, "env", "__gen_push_f64", { kind: "func", typeIdx: pushF64Type });
-
-  const pushI32Type = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], []);
-  addImport(ctx, "env", "__gen_push_i32", { kind: "func", typeIdx: pushI32Type });
-
-  const pushRefType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], []);
-  addImport(ctx, "env", "__gen_push_ref", { kind: "func", typeIdx: pushRefType });
-
+  // (#2689) Batch + immediate flush — see addIteratorImports for the rationale.
+  // Can be registered lazily (IR-path generator claim / body compilation) after
+  // other functions baked their funcIdx; raw addImport would desync them. The
+  // `__gen_*` / `__create_*` / `__get_caught_exception` names are not in any
+  // standalone-refusal / native-helper set, so the `allowNoJsHost` fallback
+  // behaves exactly as the previous raw additions did.
+  const ER: ValType = { kind: "externref" };
+  ensureLateImport(ctx, "__gen_create_buffer", [], [ER]);
+  ensureLateImport(ctx, "__gen_push_f64", [ER, { kind: "f64" }], []);
+  ensureLateImport(ctx, "__gen_push_i32", [ER, { kind: "i32" }], []);
+  ensureLateImport(ctx, "__gen_push_ref", [ER, ER], []);
   // __gen_yield_star: (externref, externref) → void  (iterates inner iterable, pushes all values into outer buffer)
-  addImport(ctx, "env", "__gen_yield_star", {
-    kind: "func",
-    typeIdx: pushRefType, // same signature as push_ref: (buf, iterable) → void
-  });
-
+  ensureLateImport(ctx, "__gen_yield_star", [ER, ER], []);
   // __gen_set_return: (externref, externref) → void  (#2035 — stashes the
   // generator's `return` value on the buffer instead of pushing it as a yield)
-  addImport(ctx, "env", "__gen_set_return", {
-    kind: "func",
-    typeIdx: pushRefType, // same signature as push_ref: (buf, value) → void
-  });
-
+  ensureLateImport(ctx, "__gen_set_return", [ER, ER], []);
   // __create_generator: (buf: externref, pendingThrow: externref) -> externref
   // Takes a buffer of yielded values and an optional pending exception,
   // returns a Generator-like object that defers the throw to the first next() call.
-  const createGenType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-  addImport(ctx, "env", "__create_generator", { kind: "func", typeIdx: createGenType });
+  ensureLateImport(ctx, "__create_generator", [ER, ER], [ER]);
   // __create_async_generator: same Wasm signature as __create_generator, but .next()/.return()/.throw()
   // return Promise-wrapped results as required by the ES spec for async generators.
-  addImport(ctx, "env", "__create_async_generator", { kind: "func", typeIdx: createGenType });
-  const genType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
-  addImport(ctx, "env", "__gen_next", { kind: "func", typeIdx: genType });
-
-  const genReturnType = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "externref" }]);
-  addImport(ctx, "env", "__gen_return", { kind: "func", typeIdx: genReturnType });
-  addImport(ctx, "env", "__gen_throw", { kind: "func", typeIdx: genReturnType });
-
-  addImport(ctx, "env", "__gen_result_value", { kind: "func", typeIdx: genType });
-
-  const resultValF64Type = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "f64" }]);
-  addImport(ctx, "env", "__gen_result_value_f64", { kind: "func", typeIdx: resultValF64Type });
-
-  const resultDoneType = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }]);
-  addImport(ctx, "env", "__gen_result_done", { kind: "func", typeIdx: resultDoneType });
-
+  ensureLateImport(ctx, "__create_async_generator", [ER, ER], [ER]);
+  ensureLateImport(ctx, "__gen_next", [ER], [ER]);
+  ensureLateImport(ctx, "__gen_return", [ER, ER], [ER]);
+  ensureLateImport(ctx, "__gen_throw", [ER, ER], [ER]);
+  ensureLateImport(ctx, "__gen_result_value", [ER], [ER]);
+  ensureLateImport(ctx, "__gen_result_value_f64", [ER], [{ kind: "f64" }]);
+  ensureLateImport(ctx, "__gen_result_done", [ER], [{ kind: "i32" }]);
   // Ensure __get_caught_exception is available for generator body try/catch wrappers
-  if (!ctx.funcMap.has("__get_caught_exception")) {
-    const getCaughtType = addFuncType(ctx, [], [{ kind: "externref" }]);
-    addImport(ctx, "env", "__get_caught_exception", { kind: "func", typeIdx: getCaughtType });
-  }
+  ensureLateImport(ctx, "__get_caught_exception", [], [ER]);
+  flushLateImportShifts(ctx, ctx.currentFunc);
 }
 
 /** Register for-in key enumeration host imports if not already registered */
@@ -10888,22 +10877,21 @@ export function addForInImports(ctx: CodegenContext): void {
   // Guard: only register once
   if (ctx.funcMap.has("__for_in_keys")) return;
 
+  // (#2689) Batch + immediate flush — see addIteratorImports for the rationale.
+  // Only registered in JS-host mode (caller-guarded `!standalone && !wasi`), so
+  // the standalone `__for_in_*` refusal inside ensureLateImport never triggers
+  // here. Raw addImport on this lazy path would desync already-baked funcIdx.
+  const ER: ValType = { kind: "externref" };
   // __for_in_keys: (externref) -> externref — returns JS array of enumerable string keys
-  const extToExt = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "externref" }]);
-  addImport(ctx, "env", "__for_in_keys", { kind: "func", typeIdx: extToExt });
-
+  ensureLateImport(ctx, "__for_in_keys", [ER], [ER]);
   // __for_in_len: (externref) -> i32 — returns keys.length
-  const extToI32 = addFuncType(ctx, [{ kind: "externref" }], [{ kind: "i32" }]);
-  addImport(ctx, "env", "__for_in_len", { kind: "func", typeIdx: extToI32 });
-
+  ensureLateImport(ctx, "__for_in_len", [ER], [{ kind: "i32" }]);
   // __for_in_get: (externref, i32) -> externref — returns keys[i]
-  const extI32ToExt = addFuncType(ctx, [{ kind: "externref" }, { kind: "i32" }], [{ kind: "externref" }]);
-  addImport(ctx, "env", "__for_in_get", { kind: "func", typeIdx: extI32ToExt });
-
+  ensureLateImport(ctx, "__for_in_get", [ER, { kind: "i32" }], [ER]);
   // __for_in_has: (externref obj, externref key) -> i32 — per-visit liveness
   // check so a property deleted mid-enumeration is skipped (#2066).
-  const extExtToI32 = addFuncType(ctx, [{ kind: "externref" }, { kind: "externref" }], [{ kind: "i32" }]);
-  addImport(ctx, "env", "__for_in_has", { kind: "func", typeIdx: extExtToI32 });
+  ensureLateImport(ctx, "__for_in_has", [ER, ER], [{ kind: "i32" }]);
+  flushLateImportShifts(ctx, ctx.currentFunc);
 }
 
 /**

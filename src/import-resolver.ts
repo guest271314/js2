@@ -76,6 +76,337 @@ const NODE_BUILTIN_FN_TYPED_STUBS: Record<
   },
 };
 
+/**
+ * #1791 — `node:path` posix surface implemented as a pure-TS shim compiled into
+ * the module. `path` is pure string compute (no I/O), so a single TS port serves
+ * BOTH the JS-host and standalone (WASI/browser) targets — no host import, no
+ * standalone trap. This is the highest-leverage Node builtin (blocks ESLint,
+ * prettier, TypeScript). win32 semantics + `path.posix`/`path.win32`/`parse`/
+ * `format` namespaces are deferred (posix-only Tier 0).
+ *
+ * The methods covered are exactly the surface ESLint + its deps call
+ * (resolve/sep/join/dirname/relative/isAbsolute/extname/normalize) plus
+ * `basename` (Tier 0 acceptance).
+ */
+const PATH_SHIM_METHODS = [
+  "join",
+  "resolve",
+  "normalize",
+  "dirname",
+  "basename",
+  "extname",
+  "isAbsolute",
+  "relative",
+] as const;
+/** Recognised data properties on the `path` module object (posix). */
+const PATH_SHIM_PROPS: Record<string, string> = { sep: '"/"', delimiter: '":"' };
+
+/**
+ * The prepended prelude: top-level posix path functions (`__js2wasm_path_*`).
+ * Variadic (`join`/`resolve`) are top-level functions — variadic dispatch
+ * through an object field is currently miscompiled (#1791 dev note), so the
+ * default-import object's methods are FIXED-arity wrappers that forward here
+ * (the wrappers pad unused slots with `""`, which `join`/`resolve` skip).
+ * Faithful port of Node's `lib/path.js` posix subset.
+ */
+function buildPathShim(): string {
+  return `// #1791 node:path posix shim (pure string compute; host + standalone)
+function __js2wasm_path_normStr(path: string, allowAboveRoot: boolean): string {
+  let res = "";
+  let lastSegmentLength = 0;
+  let lastSlash = -1;
+  let dots = 0;
+  let code = 0;
+  for (let i = 0; i <= path.length; i++) {
+    if (i < path.length) code = path.charCodeAt(i);
+    else if (code === 47) break;
+    else code = 47;
+    if (code === 47) {
+      if (lastSlash === i - 1 || dots === 1) {
+        // empty segment or "."
+      } else if (dots === 2) {
+        if (res.length < 2 || lastSegmentLength !== 2 ||
+            res.charCodeAt(res.length - 1) !== 46 ||
+            res.charCodeAt(res.length - 2) !== 46) {
+          if (res.length > 2) {
+            const lsi = res.lastIndexOf("/");
+            if (lsi === -1) { res = ""; lastSegmentLength = 0; }
+            else { res = res.slice(0, lsi); lastSegmentLength = res.length - 1 - res.lastIndexOf("/"); }
+            lastSlash = i; dots = 0; continue;
+          } else if (res.length !== 0) {
+            res = ""; lastSegmentLength = 0; lastSlash = i; dots = 0; continue;
+          }
+        }
+        if (allowAboveRoot) {
+          if (res.length > 0) res = res + "/.."; else res = "..";
+          lastSegmentLength = 2;
+        }
+      } else {
+        if (res.length > 0) res = res + "/" + path.slice(lastSlash + 1, i);
+        else res = path.slice(lastSlash + 1, i);
+        lastSegmentLength = i - lastSlash - 1;
+      }
+      lastSlash = i; dots = 0;
+    } else if (code === 46 && dots !== -1) {
+      dots = dots + 1;
+    } else {
+      dots = -1;
+    }
+  }
+  return res;
+}
+function __js2wasm_path_normalize(path: string): string {
+  if (path.length === 0) return ".";
+  const isAbs = path.charCodeAt(0) === 47;
+  const trail = path.charCodeAt(path.length - 1) === 47;
+  let p = __js2wasm_path_normStr(path, !isAbs);
+  if (p.length === 0) {
+    if (isAbs) return "/";
+    return trail ? "./" : ".";
+  }
+  if (trail) p = p + "/";
+  return isAbs ? "/" + p : p;
+}
+function __js2wasm_path_isAbsolute(path: string): boolean {
+  return path.length > 0 && path.charCodeAt(0) === 47;
+}
+function __js2wasm_path_join(...args: string[]): string {
+  let joined = "";
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg.length > 0) {
+      if (joined.length === 0) joined = arg;
+      else joined = joined + "/" + arg;
+    }
+  }
+  if (joined.length === 0) return ".";
+  return __js2wasm_path_normalize(joined);
+}
+function __js2wasm_path_resolve(...args: string[]): string {
+  let resolvedPath = "";
+  let resolvedAbsolute = false;
+  for (let i = args.length - 1; i >= 0; i--) {
+    if (resolvedAbsolute) break;
+    const seg = args[i];
+    if (seg.length === 0) continue;
+    resolvedPath = seg + "/" + resolvedPath;
+    resolvedAbsolute = seg.charCodeAt(0) === 47;
+  }
+  // No absolute segment found → prepend the (standalone) cwd root "/". Keeping
+  // the literal in a concat (not a reassigned \`let\`) avoids a string-constant /
+  // array-element WasmGC type merge under nativeStrings.
+  if (!resolvedAbsolute) {
+    resolvedPath = "/" + resolvedPath;
+    resolvedAbsolute = true;
+  }
+  resolvedPath = __js2wasm_path_normStr(resolvedPath, !resolvedAbsolute);
+  if (resolvedAbsolute) {
+    if (resolvedPath.length > 0) return "/" + resolvedPath;
+    return "/";
+  }
+  if (resolvedPath.length > 0) return resolvedPath;
+  return ".";
+}
+function __js2wasm_path_dirname(path: string): string {
+  if (path.length === 0) return ".";
+  const hasRoot = path.charCodeAt(0) === 47;
+  let end = -1;
+  let matchedSlash = true;
+  for (let i = path.length - 1; i >= 1; i--) {
+    if (path.charCodeAt(i) === 47) {
+      if (!matchedSlash) { end = i; break; }
+    } else {
+      matchedSlash = false;
+    }
+  }
+  if (end === -1) return hasRoot ? "/" : ".";
+  if (hasRoot && end === 1) return "//";
+  return path.slice(0, end);
+}
+function __js2wasm_path_basename(path: string, ext: string = ""): string {
+  let start = 0;
+  let end = -1;
+  let matchedSlash = true;
+  if (ext.length > 0 && ext.length <= path.length) {
+    if (ext === path) return "";
+    let extIdx = ext.length - 1;
+    let firstNonSlashEnd = -1;
+    for (let i = path.length - 1; i >= 0; i--) {
+      const code = path.charCodeAt(i);
+      if (code === 47) {
+        if (!matchedSlash) { start = i + 1; break; }
+      } else {
+        if (firstNonSlashEnd === -1) { matchedSlash = false; firstNonSlashEnd = i + 1; }
+        if (extIdx >= 0) {
+          if (code === ext.charCodeAt(extIdx)) {
+            extIdx = extIdx - 1;
+            if (extIdx === -1) end = i;
+          } else {
+            extIdx = -1;
+            end = firstNonSlashEnd;
+          }
+        }
+      }
+    }
+    if (start === end) end = firstNonSlashEnd;
+    else if (end === -1) end = path.length;
+    return path.slice(start, end);
+  }
+  for (let i = path.length - 1; i >= 0; i--) {
+    if (path.charCodeAt(i) === 47) {
+      if (!matchedSlash) { start = i + 1; break; }
+    } else if (end === -1) {
+      matchedSlash = false;
+      end = i + 1;
+    }
+  }
+  if (end === -1) return "";
+  return path.slice(start, end);
+}
+function __js2wasm_path_extname(path: string): string {
+  let startDot = -1;
+  let startPart = 0;
+  let end = -1;
+  let matchedSlash = true;
+  let preDotState = 0;
+  for (let i = path.length - 1; i >= 0; i--) {
+    const code = path.charCodeAt(i);
+    if (code === 47) {
+      if (!matchedSlash) { startPart = i + 1; break; }
+      continue;
+    }
+    if (end === -1) { matchedSlash = false; end = i + 1; }
+    if (code === 46) {
+      if (startDot === -1) startDot = i;
+      else if (preDotState !== 1) preDotState = 1;
+    } else if (startDot !== -1) {
+      preDotState = -1;
+    }
+  }
+  if (startDot === -1 || end === -1 || preDotState === 0 ||
+      (preDotState === 1 && startDot === end - 1 && startDot === startPart + 1)) {
+    return "";
+  }
+  return path.slice(startDot, end);
+}
+function __js2wasm_path_relative(from: string, to: string): string {
+  if (from === to) return "";
+  const f = __js2wasm_path_resolve(from);
+  const t = __js2wasm_path_resolve(to);
+  if (f === t) return "";
+  const fromStart = 1;
+  const fromEnd = f.length;
+  const fromLen = fromEnd - fromStart;
+  const toStart = 1;
+  const toLen = t.length - toStart;
+  const length = fromLen < toLen ? fromLen : toLen;
+  let lastCommonSep = -1;
+  let i = 0;
+  for (; i < length; i++) {
+    const fromCode = f.charCodeAt(fromStart + i);
+    if (fromCode !== t.charCodeAt(toStart + i)) break;
+    else if (fromCode === 47) lastCommonSep = i;
+  }
+  if (i === length) {
+    if (toLen > length) {
+      if (t.charCodeAt(toStart + i) === 47) return t.slice(toStart + i + 1);
+      if (i === 0) return t.slice(toStart + i);
+    } else if (fromLen > length) {
+      if (f.charCodeAt(fromStart + i) === 47) lastCommonSep = i;
+      else if (i === 0) lastCommonSep = 0;
+    }
+  }
+  let out = "";
+  for (i = fromStart + lastCommonSep + 1; i <= fromEnd; i++) {
+    if (i === fromEnd || f.charCodeAt(i) === 47) {
+      if (out.length === 0) out = ".."; else out = out + "/..";
+    }
+  }
+  return out + t.slice(toStart + lastCommonSep);
+}
+`;
+}
+
+/** Fixed-arity (optional-param) object-method wrapper text for a path method. */
+function pathObjectMethod(name: string): string {
+  // Variadic methods → fixed 8-slot wrappers padded with "" (join/resolve skip
+  // empty args, so padding is semantically inert).
+  if (name === "join" || name === "resolve") {
+    return `  ${name}(a: string = "", b: string = "", c: string = "", d: string = "", e: string = "", f: string = "", g: string = "", h: string = ""): string { return __js2wasm_path_${name}(a, b, c, d, e, f, g, h); }`;
+  }
+  if (name === "basename") {
+    return `  basename(p: string, ext: string = ""): string { return __js2wasm_path_basename(p, ext); }`;
+  }
+  if (name === "isAbsolute") {
+    return `  isAbsolute(p: string): boolean { return __js2wasm_path_isAbsolute(p); }`;
+  }
+  if (name === "relative") {
+    return `  relative(from: string, to: string): string { return __js2wasm_path_relative(from, to); }`;
+  }
+  // single-string-arg methods: normalize / dirname / extname
+  return `  ${name}(p: string): string { return __js2wasm_path_${name}(p); }`;
+}
+
+/** Build the default/namespace `const <local> = { ...methods..., sep: "/" }` object. */
+function buildPathDefaultObject(localName: string): string {
+  const methods = PATH_SHIM_METHODS.map(pathObjectMethod);
+  for (const [prop, val] of Object.entries(PATH_SHIM_PROPS)) {
+    methods.push(`  ${prop}: ${val}`);
+  }
+  return `const ${localName} = {\n${methods.join(",\n")}\n};`;
+}
+
+/**
+ * Forwarding binding for a named import (`import { join } from "node:path"`).
+ * Returns null for an unrecognised name (caller falls through to the generic
+ * stub so unsupported names don't regress).
+ */
+function buildPathNamedBinding(name: string): string | null {
+  if (name === "join" || name === "resolve") {
+    return `function ${name}(...a: string[]): string { return __js2wasm_path_${name}(...a); }`;
+  }
+  if (name === "basename") {
+    return `function basename(p: string, ext: string = ""): string { return __js2wasm_path_basename(p, ext); }`;
+  }
+  if (name === "isAbsolute") {
+    return `function isAbsolute(p: string): boolean { return __js2wasm_path_isAbsolute(p); }`;
+  }
+  if (name === "relative") {
+    return `function relative(from: string, to: string): string { return __js2wasm_path_relative(from, to); }`;
+  }
+  if (name === "normalize" || name === "dirname" || name === "extname") {
+    return `function ${name}(p: string): string { return __js2wasm_path_${name}(p); }`;
+  }
+  if (name in PATH_SHIM_PROPS) {
+    return `const ${name} = ${PATH_SHIM_PROPS[name]};`;
+  }
+  return null;
+}
+
+/**
+ * #1791 — true when every `<local>.<member>` access in the source is within the
+ * shim's supported posix surface. A default `import path from "node:path"` is
+ * only shimmed when fully supported; otherwise it stays on the legacy
+ * `__node_path` host path so programs using `path.parse`/`path.win32`/etc. (out
+ * of Tier 0 scope) don't regress in JS-host mode.
+ */
+function pathDefaultFullySupported(sf: ts.SourceFile, localName: string): boolean {
+  const supported = new Set<string>([...PATH_SHIM_METHODS, ...Object.keys(PATH_SHIM_PROPS)]);
+  let allOk = true;
+  let sawAny = false;
+  const walk = (node: ts.Node): void => {
+    if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === localName) {
+      sawAny = true;
+      if (!supported.has(node.name.text)) allOk = false;
+    }
+    forEachChild(node, walk);
+  };
+  walk(sf);
+  // If the binding is imported but never accessed via member, shimming is still
+  // safe (the object is inert) — treat as supported.
+  return sawAny ? allOk : true;
+}
+
 /** Returns true if `spec` is a recognized Node.js builtin (with or without `node:` prefix). */
 export function isNodeBuiltin(spec: string): boolean {
   return NODE_BUILTIN_MODULES.has(spec.replace(/^node:/, ""));
@@ -282,8 +613,13 @@ export function preprocessImports(source: string, opts?: { wasi?: boolean }): Pr
     defaultName?: string;
     namedBindings?: string[];
     moduleSpec: string;
+    /** #1791 — when set, emit the pure-TS `node:path` shim instead of a stub. */
+    shimPath?: boolean;
   }[] = [];
   const nodeBuiltins: NodeBuiltinImport[] = [];
+  // #1791 — set when any import binds the node:path shim, so the prelude is
+  // prepended exactly once.
+  let usesPathShim = false;
   // (#1540) Per-source JSX runtime import — we only support one
   // `jsxImportSource` per compile unit (matches the TypeScript model).
   // If multiple JSX runtime imports appear, the last one wins.
@@ -368,14 +704,27 @@ export function preprocessImports(source: string, opts?: { wasi?: boolean }): Pr
       // declare signatures.
       continue;
     }
+    // #1791 — decide whether to bind `node:path` to the pure-TS posix shim
+    // (works in BOTH host + standalone). A NAMED-only path import always shims
+    // (the legacy named-path stub is broken anyway); a DEFAULT import shims only
+    // when every `path.<member>` access is in the supported surface (else keep
+    // legacy host `__node_path`, so `path.parse`/win32 don't regress).
+    let shimPath = false;
+    if (isNodeBuiltin(moduleSpec) && normalizeNodeBuiltin(moduleSpec) === "path") {
+      if (defaultName) shimPath = pathDefaultFullySupported(sf, defaultName);
+      else if (namedBindings.length > 0) shimPath = true;
+    }
     otherImports.push({
       start: stmt.getStart(sf),
       end: stmt.end,
       defaultName,
       namedBindings: namedBindings.length > 0 ? namedBindings : undefined,
       moduleSpec,
+      shimPath,
     });
-    if (isNodeBuiltin(moduleSpec)) {
+    // A shimmed path import must NOT also register the `__node_path` host import
+    // (it would create a conflicting global for the same local name).
+    if (isNodeBuiltin(moduleSpec) && !shimPath) {
       nodeBuiltins.push({
         localName: defaultName || namedBindings[0] || normalizeNodeBuiltin(moduleSpec),
         moduleName: normalizeNodeBuiltin(moduleSpec),
@@ -634,6 +983,37 @@ export function preprocessImports(source: string, opts?: { wasi?: boolean }): Pr
   // Default and named imports → declare stubs
   for (const imp of otherImports) {
     const lines: string[] = [];
+
+    // #1791 — bind `node:path` to the pure-TS posix shim (default object +
+    // named forwarding functions). The shim function prelude itself is
+    // prepended once (see `usesPathShim`).
+    if (imp.shimPath) {
+      if (imp.defaultName && !definedNames.has(imp.defaultName)) {
+        lines.push(buildPathDefaultObject(imp.defaultName));
+        usesPathShim = true;
+      }
+      if (imp.namedBindings) {
+        for (const name of imp.namedBindings) {
+          if (definedNames.has(name)) continue;
+          const binding = buildPathNamedBinding(name);
+          if (binding) {
+            lines.push(binding);
+            usesPathShim = true;
+          } else {
+            // Unsupported named path export (e.g. parse) — fall back to the
+            // generic stub so it doesn't regress.
+            lines.push(`declare const ${name}: any;`);
+          }
+        }
+      }
+      replacements.push({
+        start: imp.start,
+        end: imp.end,
+        text: lines.length > 0 ? lines.join("\n") : `/* node:path shim import removed */`,
+      });
+      continue;
+    }
+
     // #1492 — when a Node builtin is imported by named bindings (e.g.
     // `import { randomBytes, randomUUID } from "node:crypto"`), emit a typed
     // host-import stub for each known function instead of a plain
@@ -729,10 +1109,17 @@ export function preprocessImports(source: string, opts?: { wasi?: boolean }): Pr
     }
   }
 
+  // #1791 — the path-shim function prelude is prepended once, alongside the
+  // timer shim. Both are top-level declarations (hoisted), so the relative
+  // order is irrelevant; the position map only needs the combined prepend
+  // length.
+  const pathShim = usesPathShim ? buildPathShim() : "";
+  const prelude = pathShim + timerShim;
+
   // #1928 — capture the import-stub edits (in INPUT coordinates) for the
   // position map BEFORE the reverse-order apply mutates `result`. The map
   // constructor re-sorts ascending, so the apply order here is irrelevant to it.
-  const positionMap = buildPreprocessPositionMap(replacements, timerShim.length);
+  const positionMap = buildPreprocessPositionMap(replacements, prelude.length);
 
   // Apply replacements in reverse order to preserve positions
   let result = source;
@@ -741,5 +1128,5 @@ export function preprocessImports(source: string, opts?: { wasi?: boolean }): Pr
     result = result.substring(0, r.start) + r.text + result.substring(r.end);
   }
 
-  return { source: timerShim ? timerShim + result : result, nodeBuiltins, jsxRuntime, positionMap };
+  return { source: prelude ? prelude + result : result, nodeBuiltins, jsxRuntime, positionMap };
 }

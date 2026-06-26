@@ -129,8 +129,15 @@ function getOrMintFnctorProtoGlobal(ctx: CodegenContext, fnctorName: string): nu
  * __new_plain_object(); return g`. Leaves an externref (`$Object`) on the stack.
  * Returns false (emitting nothing) when `__new_plain_object` is unavailable, so
  * the caller declines and falls through to the legacy path.
+ *
+ * Exported for #2660 S3: the `new F()` reconstruct lowering (new-super.ts) seeds
+ * the instance's `$proto` from this SAME per-fnctor prototype `$Object`, so the
+ * inherited-read walk and the `F.prototype` read/write share ONE link location
+ * (`$Object.$proto`) and ONE object identity (`Object.getPrototypeOf(new F()) ===
+ * F.prototype`). The lazy-init guarantees the proto is always a real `$Object`
+ * even when `F.prototype` was never explicitly assigned.
  */
-function emitFnctorProtoGet(ctx: CodegenContext, fctx: FunctionContext, fnctorName: string): boolean {
+export function emitFnctorProtoGet(ctx: CodegenContext, fctx: FunctionContext, fnctorName: string): boolean {
   const newObjIdx = ensureLateImport(ctx, "__new_plain_object", [], [{ kind: "externref" }]);
   flushLateImportShifts(ctx, fctx);
   if (newObjIdx === undefined) return false;
