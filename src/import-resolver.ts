@@ -34,6 +34,7 @@ export const NODE_BUILTIN_MODULES = new Set([
   "crypto",
   "os",
   "module",
+  "fs/promises",
   "child_process",
   "assert",
   "dns",
@@ -90,12 +91,18 @@ const NODE_BUILTIN_FN_TYPED_STUBS: Record<
   module: {
     createRequire: { params: "filename: any", returns: "any", passthrough: "filename" },
   },
-  // NOTE: `node:fs/promises` is deferred — the `/` in the module name breaks the
-  // `__nodefn__<module>__<fn>` identifier scheme (would emit an invalid
-  // `__nodefn__fs/promises__readFile` declaration). Sanitising the slash needs
-  // coordinated changes in the import-manifest classifier + runtime resolver;
-  // tracked as a follow-up. ESLint's `fs/promises` use is in the CLI/config
-  // layers, not the Linter.verify hot path.
+  // #2701 — `node:fs/promises` function surface ESLint's CLI/config layers
+  // import (`const { mkdir, stat, writeFile } = require("node:fs/promises")`).
+  // These return Promises; the host adapter passes the Promise through. The `/`
+  // in the module name is encoded `/`→`$` in the `__nodefn__` host name (see
+  // `nodeBuiltinFnTypedStub`) and decoded back in the import-manifest classifier.
+  "fs/promises": {
+    readFile: { params: "a0: any, a1: any", returns: "any", passthrough: "a0, a1" },
+    writeFile: { params: "a0: any, a1: any, a2: any", returns: "any", passthrough: "a0, a1, a2" },
+    unlink: { params: "a0: any", returns: "any", passthrough: "a0" },
+    stat: { params: "a0: any, a1: any", returns: "any", passthrough: "a0, a1" },
+    mkdir: { params: "a0: any, a1: any", returns: "any", passthrough: "a0, a1" },
+  },
   // #2699 — `node:os` destructured function surface (`const { platform } =
   // require("node:os")`). The namespace form (`os.platform()`) already worked
   // via `__node_os`; this covers the destructured form ESLint's deps use.
@@ -1057,7 +1064,12 @@ export function preprocessImports(source: string, opts?: { wasi?: boolean }): Pr
       if (!isBuiltin) return null;
       const stub = NODE_BUILTIN_FN_TYPED_STUBS[moduleName]?.[name];
       if (!stub) return null;
-      const hostName = `__nodefn__${moduleName}__${name}`;
+      // #2701 — a `/` in the module name (e.g. `fs/promises`) is not a valid TS
+      // identifier char, which would make `__nodefn__fs/promises__readFile` a
+      // syntax error. Encode `/` → `$` (a valid identifier char that never
+      // appears in a Node module/fn name); the import-manifest classifier
+      // decodes `$` → `/` so the runtime resolves `require("fs/promises")`.
+      const hostName = `__nodefn__${moduleName.replace(/\//g, "$")}__${name}`;
       return (
         `declare function ${hostName}(${stub.params}): ${stub.returns};\n` +
         `function ${name}(${stub.params}): ${stub.returns} { return ${hostName}(${stub.passthrough}); }`
