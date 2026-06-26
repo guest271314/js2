@@ -1,7 +1,9 @@
 ---
 id: 2705
 title: "for-in: head let/const TDZ, lexical scope open/close, LHS non-simple targets, var-head visibility"
-status: ready
+status: done
+assignee: ttraenkler/esch
+completed: 2026-06-26
 sprint: 67
 goal: test262-conformance
 feasibility: hard
@@ -375,3 +377,99 @@ Re-target the acceptance criteria to **"≥10 of the 11 Slice A+B tests"** (the
 - **`continue` depth math.** If Slice B nests the per-iteration cell-clone in a
   new block, the `breakStack`/`continueStack` `+= 3`/`-= 3` deltas (lines
   5566–5614) must be updated in lockstep or `continue` lands on the wrong label.
+
+## Implementation Notes (esch, 2026-06-26)
+
+**Result: 10 / 11 closeable tests pass** (Slice A: 4, Slice B: 6). The single
+miss is `head-lhs-let.js`, whose second assertion (`for ([let][1] in obj)`)
+requires invoking an `Array.prototype['1']` numeric-index **setter** installed
+via `Object.defineProperty` when assigning past the end of a freshly-built
+array literal `[let]`. js2wasm lowers `[let]` to a WasmGC vec, not a host JS
+array with a live prototype-accessor chain, so a PutValue through the inherited
+numeric setter is a host-array exotic that is out of scope for for-in scoping.
+The IdentifierReference half (`for (let in obj)`) **does** pass; only the
+MemberExpression half is unreachable. This is the 1 allowed miss.
+
+### What changed and WHY (not just what)
+
+The architect's "Slice B = per-iteration ref-cell rebuild" turned out to be
+**more than these tests need** — the existing externref-destructuring path
+(`compileExternrefArrayDestructuringDecl`) already gives per-iteration-correct
+captures for a 1-iteration receiver (confirmed: `scope-body-lex-close`'s
+`probeDecl()`/`probeBody()` already returned `'i'` before any Slice B work).
+The two genuinely-missing mechanisms were the **head TDZ environment** and the
+**post-loop restore**. Implemented as a tightly-scoped change gated on
+`isLexicalHead` (a `let`/`const` head with ≥1 declaration) so `var` and bare
+identifier for-in — the overwhelming common case — are byte-identical.
+
+1. **`src/codegen/statements/loops.ts` — LHS dispatch (Slice A).**
+   - Paren-unwrap (`head = init; while isParenthesizedExpression …`) routes
+     `for ((x) in …)` to the bare-identifier branch (`head-lhs-cover`).
+   - Empty-`declarations` VariableDeclarationList ⇒ the non-strict `let`
+     *identifier* (`for (let in …)`); TS drops the identifier text, so before
+     this the code deref'd `declarations[0].name` on `undefined`
+     (`head-lhs-let`, `identifier-let-allowed`).
+   - `var`-head reuses the hoisted function-scope slot instead of `allocLocal`
+     (a fresh slot shadowed the hoisted one, so writes never reached the body's
+     view of `x`) (`head-var-bound-names-in-stmt`).
+   - Static-nullish receiver (`isStaticNullishReceiver`) ⇒ emit no loop (zero
+     iterations, §14.7.5.6 step 7) — fixes `let-identifier-with-newline` whose
+     `null` receiver previously produced invalid Wasm.
+
+2. **`src/codegen/statements/variables.ts` — `var x;` redeclaration is a
+   runtime no-op (root cause of `head-var-bound-names-in-stmt`).** A no-init
+   `var x;` whose slot was already hoisted re-emitted `__get_undefined → x`,
+   **clobbering** the value the slot held (the enumerated key). Per §14.3.2.1 a
+   bare `var x;` is a no-op; the hoister already initialized the slot to
+   `undefined` at function entry. Now skipped when the var reused a hoisted
+   local (`isVar && existingIdx >= params.length`). This is a general
+   correctness fix, not for-in-specific.
+
+3. **`src/codegen/statements/loops.ts` — head TDZ env + post-loop restore
+   (Slice B).** For a `let`/`const` head: before compiling the receiver, install
+   a TDZ environment for the head's bound names (§14.7.5.6 step 2) — boxed
+   ref-cell + boxed TDZ flag for names captured by a closure (so the closure
+   captures the never-initialized binding by reference), plain local + i32 TDZ
+   flag otherwise; both uninitialized. Compile the receiver (reads of head names
+   now throw / `typeof` throws). Tear the env down (step 4); the per-iteration
+   body binds the names afresh (binding-pattern via the existing destructuring,
+   plain identifier via `keyLocal`). After the loop, restore the saved outer
+   `localMap`/`tdzFlagLocals`/`boxedCaptures`/`boxedTdzFlags`/`constBindings`
+   entries so head names do not leak (`scope-body-lex-close`'s
+   `x === 'outside'`). Scoped to the host enumeration path; array/closed-shape
+   receivers are unchanged. Ref-cell types are fetched via the shared
+   `getOrRegisterRefCellType` (externref + i32 cells already exist, so no late
+   type-index shift).
+
+4. **`src/codegen/typeof-delete.ts` — `typeof x` of a boxed-TDZ binding must
+   throw, not static-fold.** `compileTypeofExpression` folded `typeof x` to a
+   type string via `staticTypeofForType` BEFORE compiling the operand, bypassing
+   the TDZ check. Now, when the operand is an identifier with a boxed TDZ flag
+   (`fctx.boxedTdzFlags`), force the runtime path so `compileExpression` emits
+   the boxed TDZ check (throws when the flag is 0). Narrow gate — only
+   closure-captured TDZ bindings — so ordinary `typeof letVar` is unchanged
+   (verified: `language/expressions/typeof` 11/16 on branch == baseline).
+
+5. **`src/codegen/closures.ts` — receiver closures are a TDZ risk
+   (`closureProvablyAfterLetDecl`).** A closure built inside a `for (let x in
+   RECEIVER)` head's receiver was wrongly deemed "provably after the decl /
+   per-iteration, no TDZ" because the for-in wraps both. Per §14.7.5.6 the
+   receiver is evaluated in the head TDZ env (distinct from the per-iteration
+   env), so such a closure captures a binding that stays in its TDZ forever and
+   its read/`typeof` must throw. Added: when the wrapping loop is for-in/for-of,
+   the closure is in `cur.expression` (receiver) and the decl is the head
+   (`cur.initializer`), return `false` (TDZ risk). Without this the closure
+   never carried the TDZ flag, so `typeof x` could not throw
+   (`scope-head-lex-open/close`, `scope-body-lex-open`).
+
+### Regression validation (scoped, host mode, fresh process per test)
+
+- 10/11 target tests pass; the eval-routed `S12.6.4_A3/A3.1/A4/A4.1`,
+  `scope-head/body-var-none`, `cptn-*` remain deferred (Slice D / eval-inline)
+  as specced.
+- `language/statements/for-in`: the only fresh-process fails are pre-existing
+  **enumeration-order** cases (`S12.6.4_A6/A6.1`, `order-simple-object`,
+  `order-property-on-prototype`, `order-after-define-property` — #2706) — all
+  confirmed already failing on `origin/main`. No scoping regressions.
+- `language/expressions/typeof`: 11/16 branch == 11/16 baseline.
+- CI runs full test262 for the authoritative regression check.
