@@ -169,7 +169,18 @@ async function runFdShim(binary: Uint8Array, stdin: Uint8Array): Promise<Uint8Ar
  * the run.
  */
 function isRunnableStandalone(r: Awaited<ReturnType<typeof compile>>): boolean {
-  return !!r.success && !!r.binary && WebAssembly.validate(r.binary) && isStandaloneWasi(importModules(r.wat!));
+  if (!r.success || !r.binary || !WebAssembly.validate(r.binary)) return false;
+  const imports = importModules(r.wat!);
+  // #2696 — a runnable NM host MUST import `wasi_snapshot_preview1` (it does fd
+  // 0/1 IO). The WASI Preview-3 source-reference arm `nm_wasi_p3.ts` imports only
+  // `env` P3-component placeholder stubs and never touches a fd, so it is NOT a
+  // runnable command module even though its standalone binary now VALIDATES (the
+  // #2696 bug-3 coercion fix removed the invalid `__str_to_number` Wasm that
+  // previously made it fail `WebAssembly.validate`, which is what used to gate it
+  // out). Requiring the WASI core import keeps it — and any future component-only
+  // arm — excluded principally, without hard-coding a filename.
+  if (!imports.has("wasi_snapshot_preview1")) return false;
+  return isStandaloneWasi(imports);
 }
 
 describe("#2683 Native Messaging comparison harness — every variant compiles", () => {
@@ -278,5 +289,180 @@ describe("#2683 Native Messaging comparison harness — byte-identical framed ec
     for (const { file, out, via } of ran) {
       expect(out, `${file} (via ${via}) did not echo the frame byte-identically`).toEqual(Array.from(requestFrame));
     }
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// #2696 — loopdive/js2#389 reporter payload regression suite.
+//
+// guest271314 ran these hosts (npm `@loopdive/js2` + `bun build`) and hit three
+// compile bugs: (1) `wasm:memory` store32/load32/store8/load8 leaked as dropped
+// `env.*` host imports (nm_wasi.ts); (2) node:fs/node:process flags + the #2632
+// stdin-reactor / `String.fromCharCode` leaked `env.__wasiStdin*` / `env.global_
+// String` (nm_node_process.ts); (3) a stale late-import funcIdx mis-called
+// `__str_to_number` with an f64, producing invalid Wasm (nm_wasi_p3.ts). After
+// the fixes, pin the reporter's exact payloads:
+//
+//   • the import section of every WORKING variant is EXACTLY {wasi_snapshot_
+//     preview1} — ZERO `env.*` leaks (this is the bug-1 + bug-2 gate; it runs
+//     WITHOUT any external runtime, so it always executes in CI).
+//   • each framed request echoes back byte-for-byte; an empty "" frame (declared
+//     length 0) is the protocol's clean-shutdown signal → no echo. (Runs under
+//     real wasmtime when on PATH; synchronous variants also run in-process under
+//     the fd shim, so the small-payload echo executes even without wasmtime.)
+//   • nm_wasi_p3.ts stays skipped — the P3 async component backend is not done
+//     (#2658); it MUST NOT gate CI.
+// ────────────────────────────────────────────────────────────────────────────
+describe("#2696 — Native Messaging #389 reporter payloads", () => {
+  let tmpDir: string;
+  beforeAll(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "nm-389-"));
+  });
+  afterAll(() => {
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // Compile each variant at most once (vitest re-runs `it` bodies serially).
+  const compileCache = new Map<string, Awaited<ReturnType<typeof compile>>>();
+  async function getCompiled(file: string): Promise<Awaited<ReturnType<typeof compile>>> {
+    let r = compileCache.get(file);
+    if (!r) {
+      r = await compileVariant(file);
+      compileCache.set(file, r);
+    }
+    return r;
+  }
+
+  function runUnderWasmtime(binary: Uint8Array, name: string, input: Uint8Array): Uint8Array {
+    const path = join(tmpDir, `${name}.wasm`);
+    writeFileSync(path, binary);
+    const out = execFileSync(wasmtimeBin!, [...WASMTIME_FLAGS, path], {
+      input: Buffer.from(input),
+      stdio: ["pipe", "pipe", "ignore"], // drop fd 2 diagnostics
+      maxBuffer: 1 << 27,
+    });
+    return Uint8Array.from(out);
+  }
+
+  // Echo one framed input through a compiled variant, choosing the driver:
+  //   - reactor-driven variants (process.stdin event loop, marked by
+  //     `$__run_event_loop`) require REAL wasmtime — return null (graceful skip)
+  //     when it is not on PATH.
+  //   - pure-synchronous variants run under real wasmtime when available, else
+  //     in-process under the fd shim, so their echo executes even in a
+  //     wasmtime-less CI shard.
+  async function echoOnce(
+    r: Awaited<ReturnType<typeof compile>>,
+    name: string,
+    input: Uint8Array,
+  ): Promise<Uint8Array | null> {
+    const needsReactor = r.wat!.includes("$__run_event_loop");
+    if (needsReactor) {
+      return wasmtimeBin ? runUnderWasmtime(r.binary!, name, input) : null;
+    }
+    return wasmtimeBin ? runUnderWasmtime(r.binary!, name, input) : runFdShim(r.binary!, input);
+  }
+
+  const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
+  // The reporter's small framed payloads — each must come back byte-for-byte.
+  const SMALL_PAYLOADS: Record<string, Uint8Array> = {
+    '"test"': enc("test"),
+    "a 1-byte body": Uint8Array.of(97),
+    'JSON object {"0":97}': enc('{"0":97}'),
+  };
+
+  // Every working variant present on disk. nm_wasi_p3.ts is intentionally absent
+  // (skipped below). nm_deno.ts is included; it is skipped per-test if it has not
+  // landed / is not a runnable standalone module.
+  const WORKING = ["nm_wasi.ts", "nm_js2wasm.ts", "nm_deno.ts", "nm_node_process.ts"];
+
+  for (const file of WORKING) {
+    describe(file, () => {
+      // Bug-1 + bug-2 gate: a runnable standalone module whose import section is
+      // EXACTLY {wasi_snapshot_preview1} — no `env.store32` / `env.__wasiStdin*` /
+      // `env.global_String` leak. Runs with no external runtime.
+      it("compiles to a standalone module importing ONLY wasi_snapshot_preview1", async () => {
+        const r = await getCompiled(file);
+        expect(r.success, r.success ? "" : `compile error: ${r.errors?.[0]?.message}`).toBe(true);
+        expect(WebAssembly.validate(r.binary!), `${file} binary must validate`).toBe(true);
+        const imports = [...importModules(r.wat!)];
+        expect(imports, `${file} must import ONLY wasi_snapshot_preview1 (no env.* leak)`).toEqual([
+          "wasi_snapshot_preview1",
+        ]);
+      });
+
+      for (const [label, body] of Object.entries(SMALL_PAYLOADS)) {
+        it(`echoes ${label} byte-for-byte`, async () => {
+          const r = await getCompiled(file);
+          if (!isRunnableStandalone(r)) return; // unlanded/non-runnable arm — skip
+          const frameIn = frame(body);
+          const out = await echoOnce(r, file.replace(/\.ts$/, "-small"), frameIn);
+          if (out === null) return; // reactor variant without wasmtime — skip
+          expect(Array.from(out), `${file} did not echo ${label} byte-for-byte`).toEqual(Array.from(frameIn));
+        });
+      }
+
+      it('treats an empty "" frame as clean shutdown (no echo)', async () => {
+        const r = await getCompiled(file);
+        if (!isRunnableStandalone(r)) return;
+        // A 4-byte prefix declaring length 0 and no body — every variant stops.
+        const out = await echoOnce(r, file.replace(/\.ts$/, "-empty"), frame(new Uint8Array(0)));
+        if (out === null) return;
+        expect(out.length, `${file} must not echo a zero-length (shutdown) frame`).toBe(0);
+      });
+    });
+  }
+
+  // The 1 MiB browser-message-cap payload — a complete single Native Messaging
+  // frame echoed verbatim. Restricted to the SYNCHRONOUS variants (raw WASI / Deno
+  // / node:fs): the nm_node_process async reactor rebuilds the body via per-byte
+  // `String.fromCharCode` + string concat, which is not CI-feasible at 1 MiB (its
+  // wire protocol is already covered by the synchronous variants + the small
+  // payloads above). 1 MiB is exactly at the cap, so even nm_js2wasm (which
+  // re-chunks bodies LARGER than 1 MiB, per its README) echoes it as one frame.
+  for (const file of ["nm_wasi.ts", "nm_js2wasm.ts", "nm_deno.ts"]) {
+    it(`${file} echoes a 1 MiB frame verbatim`, { timeout: 60_000 }, async () => {
+      const r = await getCompiled(file);
+      if (!isRunnableStandalone(r)) return;
+      const frameIn = frame(new Uint8Array(1024 * 1024).fill(0x61));
+      const out = await echoOnce(r, file.replace(/\.ts$/, "-1mib"), frameIn);
+      if (out === null) return;
+      expect(out.length, `${file} 1 MiB echo length`).toBe(frameIn.length);
+      expect(Buffer.compare(Buffer.from(out), Buffer.from(frameIn)), `${file} 1 MiB echo must be byte-identical`).toBe(
+        0,
+      );
+    });
+  }
+
+  // A LARGE multi-MiB single frame echoed verbatim. Restricted to the RAW
+  // byte-streaming variants (nm_wasi / nm_deno), which stream any frame through a
+  // fixed window byte-for-byte regardless of size. nm_js2wasm deliberately
+  // re-chunks bodies > 1 MiB into <=1 MiB JSON response frames (browser cap), so a
+  // single >1 MiB frame does NOT come back byte-identical from it — that is its
+  // documented design, exercised separately. The reporter verified a 64 MiB body
+  // manually; 3 MiB is the CI-feasible stand-in for the same streaming path.
+  for (const file of ["nm_wasi.ts", "nm_deno.ts"]) {
+    it(`${file} echoes a 3 MiB frame verbatim (reporter verified 64 MiB manually)`, { timeout: 120_000 }, async () => {
+      const r = await getCompiled(file);
+      if (!isRunnableStandalone(r)) return;
+      const frameIn = frame(new Uint8Array(3 * 1024 * 1024).fill(0x62));
+      const out = await echoOnce(r, file.replace(/\.ts$/, "-large"), frameIn);
+      if (out === null) return;
+      expect(out.length, `${file} 3 MiB echo length`).toBe(frameIn.length);
+      expect(Buffer.compare(Buffer.from(out), Buffer.from(frameIn)), `${file} 3 MiB echo must be byte-identical`).toBe(
+        0,
+      );
+    });
+  }
+
+  // nm_wasi_p3.ts is the WASI Preview 3 async-component source-reference arm. The
+  // js2wasm P3 producer backend is NOT done (async-lifted `run`, `stream<u8>` /
+  // `future<T>` canonical-ABI lowering) — tracked by #2658. The #2696 bug-3 fix
+  // made its standalone binary VALID Wasm (it no longer mis-calls __str_to_number),
+  // but it still imports only `env` P3 placeholder stubs and does not echo, so it
+  // is NOT runnable here. It MUST NOT gate CI — keep it skipped until the P3
+  // backend lands.
+  it.skip("nm_wasi_p3.ts — P3 async component backend not done (tracked by #2658)", () => {
+    /* intentionally skipped — see #2658 */
   });
 });

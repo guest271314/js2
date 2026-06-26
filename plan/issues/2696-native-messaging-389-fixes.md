@@ -4,7 +4,8 @@ title: Native-messaging #389 fixes — wasm:memory inline, node:fs/process direc
 area: host-interop
 related: [389, 2655, 2657, 2632, 2683]
 feasibility: hard
-status: in-progress
+status: done
+completed: 2026-06-26
 assignee: ttraenkler/sendev-nm389
 sprint: Backlog
 ---
@@ -123,3 +124,30 @@ expects an externref. This is the exact late-import index-shift hazard that
 ONCE, THEN read every funcIdx from `ctx.funcMap` — so no captured index can be
 shifted out from under a later registration. After the fix the loop emits `call
 $__box_number` (f64→externref) and the module passes wasmtime validation; tsc clean.
+
+## Unit tests (regression suite)
+Folded into `tests/native-messaging-comparison.test.ts` (`#2696` describe block):
+- Each working variant (`nm_wasi`, `nm_js2wasm`, `nm_deno`, `nm_node_process`)
+  asserts its import section is EXACTLY `{wasi_snapshot_preview1}` — the bug-1 +
+  bug-2 gate, runs with NO external runtime so it always executes in CI.
+- Reporter payloads echo byte-for-byte: `"test"`, 1-byte, `{"0":97}` (all 4
+  variants), empty `""` = clean-shutdown / no echo (all 4), 1 MiB (the
+  synchronous variants — the async reactor is not CI-feasible at 1 MiB), and a
+  3 MiB LARGE frame on the raw-streaming variants (`nm_wasi`/`nm_deno`; reporter
+  verified 64 MiB manually). nm_js2wasm re-chunks >1 MiB by design, so the large
+  verbatim case excludes it.
+- Echo tests run under real `wasmtime` when on PATH; synchronous variants also run
+  in-process under the existing fd shim. `nm_wasi_p3` → `it.skip` (P3 backend not
+  done; #2658) and `isRunnableStandalone` now requires a `wasi_snapshot_preview1`
+  import so the now-VALID-but-not-runnable P3 binary is excluded principally.
+
+All 4 working-variant tests pass; nm_wasi_p3 stays skipped (32 passed, 1 skipped).
+
+## Validation
+- tsc `--noEmit` clean; biome/prettier clean (lint-staged on each commit).
+- `tests/native-messaging-comparison.test.ts`: 32 passed, 1 skipped.
+- Touches shared raw-wasi / coercion / host-import codegen → full batch +
+  `runTest262File` zero-regression sweep (#1968) before PR.
+
+## Status
+status: done — see PR.
